@@ -12,7 +12,7 @@ describe('Query Composer', () => {
       // Should have access to snippet-specific columns
       const snippetQuery = db
         .select('snippet')
-        .columns('reference', 'next_review')
+        .columns('reference', 'due')
         .where('reference')
         .eq('test.md')
         .and('dismissed')
@@ -20,14 +20,14 @@ describe('Query Composer', () => {
       const result = snippetQuery.build();
       console.log(result);
       expect(result.query).toContain(
-        'SELECT (reference, next_review) FROM snippet WHERE reference = $1 AND dismissed = $2'
+        'SELECT (reference, due) FROM snippet WHERE reference = $1 AND dismissed = $2'
       );
       expect(result.queryParams).toEqual(['test.md', false]);
 
       const otherQuery = db // TODO: test OR query
         .select('snippet')
-        .columns('reference', 'next_review')
-        .where('next_review')
+        .columns('reference', 'due')
+        .where('due')
         .gte(Date.now())
         .or('dismissed')
         .eq(true);
@@ -39,28 +39,28 @@ describe('Query Composer', () => {
       const insertValues = [
         {
           reference: `increading/snippets/example-snippet-name`,
-          next_review: Date.now() + MS_PER_DAY,
+          due: Date.now() + MS_PER_DAY,
         },
         {
           reference: `increading/snippets/incremental-learning`,
-          next_review: Date.now() + MS_PER_DAY * 2,
+          due: Date.now() + MS_PER_DAY * 2,
         },
       ];
       const insertQuery = db
         .insert('snippet')
-        .columns('reference', 'next_review')
+        .columns('reference', 'due')
         .values(...insertValues);
 
       const { query, queryParams } = insertQuery.build();
       expect(query).toContain(
-        'INSERT INTO snippet (reference, next_review) VALUES (?, ?), (?, ?)'
+        'INSERT INTO snippet (reference, due) VALUES (?, ?), (?, ?)'
       );
       // query params
       expect(queryParams).toEqual([
         insertValues[0].reference,
-        insertValues[0].next_review,
+        insertValues[0].due,
         insertValues[1].reference,
-        insertValues[1].next_review,
+        insertValues[1].due,
       ]);
     });
   });

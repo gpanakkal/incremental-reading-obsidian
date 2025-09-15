@@ -9,7 +9,7 @@ describe('Query Composer', () => {
       // Should have access to snippet-specific columns
       const snippetQuery = db
         .select('snippet')
-        .columns('reference', 'next_review', 'dismissed')
+        .columns('reference', 'due', 'dismissed')
         .where('reference')
         .eq('test.md')
         .and('dismissed')
@@ -28,7 +28,7 @@ describe('Query Composer', () => {
         .select('snippet')
         .where('dismissed')
         .eq(false)
-        .sort([['next_review', 'ASC']])
+        .sort([['due', 'ASC']])
         .limit(10);
 
       expect(query).toBeDefined();
@@ -43,9 +43,7 @@ describe('Query Composer', () => {
 
   describe('INSERT', () => {
     it('should provide type-safe column specification', () => {
-      const insertQuery = db
-        .insert('snippet')
-        .columns('reference', 'next_review');
+      const insertQuery = db.insert('snippet').columns('reference', 'due');
 
       expect(insertQuery).toBeDefined();
     });

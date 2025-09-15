@@ -10,13 +10,14 @@ import type {
   Conjunction,
   DeleteQueryFactory,
   InsertQueryFactory,
-  MutationProps,
+  UpdateProps,
   QueryComparator,
   QueryCondition,
   Row,
   SelectQueryFactory,
   UpdateQueryFactory,
   WhereConditions,
+  InsertProps,
 } from './QueryComposer.types';
 import { selectQueryFactory } from './selectQueryFactory';
 
@@ -241,6 +242,7 @@ function queryFactory<
       // TODO: query and param validation
       try {
         const result = await repo.execSql(query, queryParams);
+        await repo.save();
         return result[0];
       } catch (error) {
         console.error(error);
@@ -256,7 +258,7 @@ function queryFactory<
     return selectQueryFactory(tableName, createConditions, baseFactory, repo);
   } else if (operation === 'INSERT') {
     const rowIds = null;
-    let insertCols: Exclude<C, 'id'>[] | null = null;
+    let insertCols: C[] | null = null;
     let insertValues:
       | NullishToOptional<R>[keyof NullishToOptional<R>][][]
       | null = null;
@@ -294,7 +296,7 @@ function queryFactory<
       return built;
     };
 
-    const insertValuesFunc = (...values: MutationProps<T, R, C>[]) => {
+    const insertValuesFunc = (...values: InsertProps<T, R, C>[]) => {
       if (!insertCols) {
         throw new Error(`Columns must be specified before inserting values`);
       }
@@ -309,7 +311,7 @@ function queryFactory<
       };
     };
     factory = {
-      columns(...columns: Exclude<C, 'id'>[]) {
+      columns(...columns: C[]) {
         if (!columns.length) {
           throw new Error(
             `At least one column must be specified if calling .columns()`

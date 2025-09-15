@@ -11,9 +11,18 @@ export type QueryComparator = '=' | '<>' | '>' | '>=' | '<' | '<=' | 'IN';
 export type Row<T extends TableName> = Resolve<TableNameToRowType[T]>;
 
 /**
+ * Make nullish props optional
+ */
+export type InsertProps<
+  T extends TableName,
+  R extends Row<T> = Row<T>,
+  C extends StringKeys<R> = StringKeys<R>,
+> = NullishToOptional<Pick<R, C>>;
+
+/**
  * Make nullish props optional and exclude `id`
  */
-export type MutationProps<
+export type UpdateProps<
   T extends TableName,
   R extends Row<T> = Row<T>,
   C extends StringKeys<R> = StringKeys<R>,
@@ -66,9 +75,9 @@ export interface InsertQueryFactory<
   C extends StringKeys<R> = StringKeys<R>,
 > extends BaseQueryFactory<T, R> {
   // INSERT doesn't have where clause
-  columns: (...columns: Exclude<C, 'id'>[]) => this;
+  columns: (...columns: C[]) => this;
   values: (
-    ...values: MutationProps<T, R, C>[]
+    ...values: InsertProps<T, R, C>[]
   ) => SafeOmit<InsertQueryFactory<T, R>, 'values'>;
   execute: () => Promise<R[]>;
 }

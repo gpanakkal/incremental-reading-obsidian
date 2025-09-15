@@ -5,7 +5,7 @@ import { createConditions } from './QueryComposer';
 import type {
   Row,
   UpdateQueryFactory,
-  MutationProps,
+  UpdateProps,
   Conjunction,
 } from './QueryComposer.types';
 
@@ -15,13 +15,13 @@ function updateQueryFactory<
   C extends StringKeys<R> = StringKeys<R>,
 >(tableName: T, repo?: SQLiteRepository): UpdateQueryFactory<T, R> {
   // const cols: C[] | null = null;
-  let update: MutationProps<T, R, C> | null = null;
+  let update: UpdateProps<T, R, C> | null = null;
   const conditions: [string, ...[Conjunction, string][]] | null = null;
   const params: R[keyof R][] = [];
   const built: { query: string; queryParams: typeof params } | null = null;
 
   const factory = {
-    set(partialRow: MutationProps<T, R, C>) {
+    set(partialRow: UpdateProps<T, R, C>) {
       update = partialRow;
 
       return {
