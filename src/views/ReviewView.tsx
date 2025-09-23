@@ -1,11 +1,13 @@
-import type { WorkspaceLeaf, TFile, IconName } from 'obsidian';
-import { ItemView, MarkdownRenderer } from 'obsidian';
+import type IncrementalReadingPlugin from '#/main';
+import type { IconName } from 'obsidian';
+import type { WorkspaceLeaf } from 'obsidian';
+import { Notice, MarkdownView, TextFileView } from 'obsidian';
 import type {
   ISnippet,
   ISRSCard,
   ISRSCardDisplay,
   ReviewItem,
-} from 'src/db/types';
+} from '#/db/types';
 import {
   CLOZE_DELIMITERS,
   clozeDelimiterPattern,
@@ -14,22 +16,30 @@ import {
   SNIPPET_BASE_REVIEW_INTERVAL,
   SNIPPET_REVIEW_INTERVALS,
   SUCCESS_NOTICE_DURATION_MS,
-} from 'src/lib/constants';
-import type ReviewManager from 'src/lib/ReviewManager';
-import { searchAll } from 'src/lib/utils';
+} from '#/lib/constants';
+import type ReviewManager from '#/lib/ReviewManager';
 import type { Grade } from 'ts-fsrs';
 import { Rating } from 'ts-fsrs';
+import ReviewInterface from '#/components/ReviewInterface';
+import { render } from 'preact';
 
-export default class ReviewView extends ItemView {
+export default class ReviewView extends TextFileView {
   static #viewType = 'incremental-reading-review';
   #reviewManager: ReviewManager;
   private reviewQueue: ReviewItem[] | null = null;
   private currentItem: ReviewItem | null = null;
   private markdownContainer: HTMLElement | null = null;
   private buttonContainer: HTMLElement | null = null;
+  plugin: IncrementalReadingPlugin;
+  activeEditor: any;
 
-  constructor(leaf: WorkspaceLeaf, reviewManager: ReviewManager) {
+  constructor(
+    leaf: WorkspaceLeaf,
+    plugin: IncrementalReadingPlugin,
+    reviewManager: ReviewManager
+  ) {
     super(leaf);
+    this.plugin = plugin;
     this.#reviewManager = reviewManager;
   }
 
@@ -49,7 +59,13 @@ export default class ReviewView extends ItemView {
     return PLACEHOLDER_PLUGIN_ICON;
   }
 
-  get file() {
+  getViewData(): string {}
+
+  setViewData(data: string, clear: boolean): void {}
+
+  clear(): void {}
+
+  get currentFile() {
     return this.currentItem?.file ?? null;
   }
 
@@ -80,6 +96,16 @@ export default class ReviewView extends ItemView {
 
   async onClose() {
     // Cleanup if needed
+  }
+
+  onload(): void {
+    this.containerEl.empty();
+    render(ReviewInterface, this.containerEl);
+  }
+
+  onunload(): void {
+    super.onunload();
+    this.activeEditor = null;
   }
 
   async refreshQueue() {
@@ -125,10 +151,14 @@ export default class ReviewView extends ItemView {
 
     // Obsidian classes to apply note styling to the review interface
     this.markdownContainer.addClasses([
-      'markdown-preview-view',
+      'markdown-source-view',
+      'is-live-preview',
       'markdown-rendered',
+      'cm-s-obsidian',
+      'mod-cm6',
       'node-insert-event',
       'is-readable-line-width',
+      'is-folding',
       'allow-fold-headings',
       'allow-fold-lists',
       'show-indentation-guide',
@@ -164,35 +194,54 @@ export default class ReviewView extends ItemView {
     this.markdownContainer.empty();
 
     try {
-      const content = await this.app.vault.read(item.file);
-
-      // Create a content div for the rendered markdown
-      const contentDiv = this.markdownContainer.createDiv({
-        cls: 'ir-review-content',
-      });
-      let formattedContent = content;
-      if ('state' in item.data && !revealAnswer) {
-        const match = searchAll(content, clozeDelimiterPattern)[0];
-        if (!match) {
-          throw new Error(`Valid cloze delimiters not found in ${content}`);
-        }
-
-        const pre = content.slice(0, match.index);
-        const answer = `${CLOZE_DELIMITERS[0]}__${CLOZE_DELIMITERS[1]}`;
-        const post = content.slice(match.index + match.match.length);
-        formattedContent = pre + answer + post;
-      }
-      // Render the markdown content
-      await MarkdownRenderer.render(
-        this.app,
-        formattedContent,
-        contentDiv,
-        item.file.path,
-        this
-      );
+      // const leaf = this.app.workspace.createLeafInParent(this.leaf.parent, -1);
+      // // TODO: create the leaf directly in the view
+      // // const leaf = new WorkspaceLeaf();
+      // await leaf.openFile(item.file, { state: { mode: 'preview' } });
+      // if (!(leaf.view instanceof MarkdownView)) {
+      //   throw new TypeError(`Leaf view isn't a MarkdownView`);
+      // }
+      // await this.leaf.openFile(item.file);
+      // const markdownView = new MarkdownView(this.leaf);
+      // await markdownView.open(this.markdownContainer);
+      // const editView = new MarkdownEditView(markdownView);
+      // if (markdownView.containerEl) {
+      //   const viewContent =
+      //     markdownView.containerEl.querySelector('.view-content');
+      //   if (viewContent) {
+      //     this.markdownContainer.appendChild(viewContent);
+      //   }
+      // }
+      // leaf.detach();
+      // const content = await this.app.vault.read(item.file);
+      // // Create a content div for the rendered markdown
+      // const contentDiv = this.markdownContainer.createDiv({
+      //   cls: 'ir-review-content markdown-source-view cm-s-obsidian mod-cm6 node-insert-event is-readable-line-width is-live-preview is-folding show-properties',
+      // });
+      // let formattedContent = content;
+      // if ('state' in item.data && !revealAnswer) {
+      //   const match = searchAll(content, clozeDelimiterPattern)[0];
+      //   if (!match) {
+      //     throw new Error(`Valid cloze delimiters not found in ${content}`);
+      //   }
+      //   const pre = content.slice(0, match.index);
+      //   const answer = `${CLOZE_DELIMITERS[0]}__${CLOZE_DELIMITERS[1]}`;
+      //   const post = content.slice(match.index + match.match.length);
+      //   formattedContent = pre + answer + post;
+      // }
+      // // Render the markdown content
+      // await MarkdownRenderer.render(
+      //   this.app,
+      //   formattedContent,
+      //   contentDiv,
+      //   item.file.path,
+      //   this
+      // );
     } catch (error) {
+      const message =
+        error instanceof Error ? error.message : '(no error message)';
       this.markdownContainer.createDiv({
-        text: `Error loading file: ${error.message}`,
+        text: `Error loading file: ${message}`,
         cls: 'ir-review-error',
       });
     }

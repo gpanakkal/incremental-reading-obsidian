@@ -58,3 +58,4 @@ export const clozeDelimiterPattern = new RegExp(
 );
 
 export const TRANSCLUSION_HIDE_TITLE_ALIAS = 'ir-hide-title';
+export const CSS_CLASS_PREFIX = 'ir';

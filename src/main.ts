@@ -21,6 +21,7 @@ import ReviewManager from './lib/ReviewManager';
 import ReviewView from './views/ReviewView';
 import type { ISnippet, SRSCardRow } from './db/types';
 import SRSCard from './lib/SRSCard';
+import { getEditorClass } from './lib/utils';
 
 // Remember to rename these classes and interfaces!
 
@@ -35,9 +36,11 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
 export default class IncrementalReadingPlugin extends Plugin {
   settings: MyPluginSettings;
   #reviewManager: ReviewManager;
+  MarkdownEditor: any;
 
   async onload() {
     await this.loadSettings();
+    this.MarkdownEditor = getEditorClass(this.app);
 
     // This creates an icon in the left ribbon.
     // TODO: replace the placeholder
@@ -243,7 +246,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       this.#reviewManager = new ReviewManager(this.app, repo);
       this.registerView(
         ReviewView.viewType,
-        (leaf) => new ReviewView(leaf, this.#reviewManager)
+        (leaf) => new ReviewView(leaf, this, this.#reviewManager)
       );
 
       // listen for snippet creations. TODO: handle race condition
@@ -272,7 +275,9 @@ export default class IncrementalReadingPlugin extends Plugin {
     });
   }
 
-  onunload() {}
+  onunload() {
+    this.MarkdownEditor = null; // is this necessary?
+  }
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());

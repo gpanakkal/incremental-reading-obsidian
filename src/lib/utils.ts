@@ -152,3 +152,27 @@ export function searchAll(text: string, pattern: RegExp) {
 
   return results;
 }
+
+/** Get Obsidian's internal MarkdownEditor */
+export function getEditorClass(app: any) {
+  const md = app.embedRegistry.embedByExtension.md(
+    {
+      app,
+      containerEl: createDiv(),
+      state: {},
+    },
+    null,
+    ''
+  );
+
+  md.load();
+  md.editable = true;
+  md.showEditor();
+
+  const MarkdownEditor = Object.getPrototypeOf(
+    Object.getPrototypeOf(md.editMode)
+  ).constructor;
+
+  md.unload();
+  return MarkdownEditor;
+}
