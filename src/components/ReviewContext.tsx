@@ -8,6 +8,7 @@ import type { WorkspaceLeaf } from 'obsidian';
 import type IncrementalReadingPlugin from '#/main';
 
 interface ReviewContextProps {
+  plugin: IncrementalReadingPlugin;
   reviewView: ReviewView;
   reviewManager: ReviewManager;
   reviewQueue: ReviewItem[] | null;
@@ -34,6 +35,7 @@ export function ReviewContextProvider({
 
   const reviewQueue = data?.all ?? null;
   const value = {
+    plugin,
     reviewView: new ReviewView(leaf, plugin, reviewManager),
     reviewManager,
     reviewQueue,

@@ -270,7 +270,21 @@ export function IREditor({
     };
   }, []);
 
-  const cls = ['cm-table-widget'];
+  const cls = [
+    'markdown-source-view',
+    'is-live-preview',
+    'markdown-rendered',
+    'cm-s-obsidian',
+    'mod-cm6',
+    'node-insert-event',
+    'is-readable-line-width',
+    'is-folding',
+    'allow-fold-headings',
+    'allow-fold-lists',
+    'show-indentation-guide',
+    // 'show-properties',
+    'cm-sizer',
+  ];
   if (className) cls.push(className);
 
   const currentInternalRef = internalRef.current;
@@ -278,6 +292,7 @@ export function IREditor({
     <>
       <div className={classcat(cls)} ref={elRef}></div>
       {Platform.isMobile && currentInternalRef && (
+        // TODO: mobile support
         <button
           onClick={() => onSubmit(currentInternalRef)}
           className={classcat([

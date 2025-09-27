@@ -1,7 +1,7 @@
 import type IncrementalReadingPlugin from '#/main';
 import type { IconName } from 'obsidian';
 import type { WorkspaceLeaf } from 'obsidian';
-import { Notice, MarkdownView, TextFileView } from 'obsidian';
+import { Notice, MarkdownView, TextFileView, ItemView } from 'obsidian';
 import type {
   ISnippet,
   ISRSCard,
@@ -20,10 +20,10 @@ import {
 import type ReviewManager from '#/lib/ReviewManager';
 import type { Grade } from 'ts-fsrs';
 import { Rating } from 'ts-fsrs';
-import ReviewInterface from '#/components/ReviewInterface';
+import { createReviewInterface } from '#/components/ReviewInterface';
 import { render } from 'preact';
 
-export default class ReviewView extends TextFileView {
+export default class ReviewView extends ItemView {
   static #viewType = 'incremental-reading-review';
   #reviewManager: ReviewManager;
   private reviewQueue: ReviewItem[] | null = null;
@@ -59,7 +59,7 @@ export default class ReviewView extends TextFileView {
     return PLACEHOLDER_PLUGIN_ICON;
   }
 
-  getViewData(): string {}
+  // getViewData(): string {}
 
   setViewData(data: string, clear: boolean): void {}
 
@@ -89,19 +89,38 @@ export default class ReviewView extends TextFileView {
   }
 
   async onOpen() {
-    const due = await this.#reviewManager.getDue({ dueBy: this.getDueTime() });
-    this.reviewQueue = [...due.all].reverse();
-    await this.showNextDue();
+    this.containerEl.empty();
+    render(
+      createReviewInterface({
+        plugin: this.plugin,
+        leaf: this.leaf,
+        reviewManager: this.#reviewManager,
+      }),
+      this.containerEl
+    );
+
+    // const due = await this.#reviewManager.getDue({ dueBy: this.getDueTime() });
+    // this.reviewQueue = [...due.all].reverse();
+    // await this.showNextDue();
   }
 
   async onClose() {
     // Cleanup if needed
+    render(null, this.containerEl);
   }
 
-  onload(): void {
-    this.containerEl.empty();
-    render(ReviewInterface, this.containerEl);
-  }
+  // onload(): void {
+  //   super.onload();
+  //   this.contentEl.empty();
+  //   render(
+  //     createReviewInterface({
+  //       plugin: this.plugin,
+  //       leaf: this.leaf,
+  //       reviewManager: this.#reviewManager,
+  //     }),
+  //     this.contentEl
+  //   );
+  // }
 
   onunload(): void {
     super.onunload();
