@@ -1,13 +1,16 @@
-import type IncrementalReadingPlugin from '#/main';
 import type { WorkspaceLeaf } from 'obsidian';
-import { ReviewContextProvider, UseReviewContext } from './ReviewContext';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type IncrementalReadingPlugin from '#/main';
+import { ReviewContextProvider, useReviewContext } from './ReviewContext';
 import ReviewItem from './ReviewItem';
 import type ReviewManager from '#/lib/ReviewManager';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type ReviewView from '#/views/ReviewView';
+import { ActionBar } from './ActionBar';
 
 const client = new QueryClient();
 
 export function createReviewInterface(props: {
+  reviewView: ReviewView;
   plugin: IncrementalReadingPlugin;
   leaf: WorkspaceLeaf;
   reviewManager: ReviewManager;
@@ -21,14 +24,23 @@ export function createReviewInterface(props: {
   );
 }
 
+/**
+ * TODO: disable editing of cards when answer is hidden
+ */
 function ReviewInterface() {
-  const reviewContext = UseReviewContext();
-  reviewContext.currentItem = reviewContext.reviewQueue?.[0] ?? null;
-  const nextItem = reviewContext.reviewQueue?.[0];
-  console.log({ reviewContext });
+  const reviewContext = useReviewContext();
+  const currentItem = reviewContext.currentItem ?? reviewContext.getNext();
+
+  console.log('currentItem:', currentItem?.data);
+  console.log('currentFile:', currentItem?.file);
   return (
     <div className={'ir-review-interface'}>
-      {nextItem && <ReviewItem item={nextItem} />}
+      <ActionBar />
+      {currentItem ? (
+        <ReviewItem item={currentItem} />
+      ) : (
+        <div className="ir-review-placeholder">Nothing due for review.</div>
+      )}
     </div>
   );
 }

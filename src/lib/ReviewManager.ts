@@ -359,7 +359,6 @@ export default class ReviewManager {
       query += ` LIMIT $${params.length}`;
     }
 
-    console.log({ query, params });
     return ((await this.#repo.query(query, params)) ?? []) as SRSCardRow[];
   }
 
@@ -445,6 +444,17 @@ export default class ReviewManager {
         reviewRow.state,
       ];
       await this.#repo.mutate(insertQuery, insertParams);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  async dismissCard(card: ISRSCard | ISRSCardDisplay) {
+    try {
+      await this.#repo.mutate(
+        'UPDATE srs_card SET dismissed = 1 WHERE id = $1',
+        [card.id]
+      );
     } catch (error) {
       console.error(error);
     }
@@ -565,7 +575,6 @@ export default class ReviewManager {
       query += ` LIMIT $${params.length}`;
     }
 
-    console.log({ query, params });
     return ((await this.#repo.query(query, params)) ?? []) as ISnippet[];
   }
 

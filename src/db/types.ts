@@ -70,7 +70,26 @@ export interface TableNameToRowType extends Record<TableName, RowTypes> {
   srs_card_review: ISRSCardReview;
 }
 
-export type ReviewItem = {
-  data: ISRSCardDisplay | ISnippet;
+export type ReviewCard = {
+  data: ISRSCardDisplay;
   file: TFile;
 };
+
+export type ReviewSnippet = {
+  data: ISnippet;
+  file: TFile;
+};
+
+export type ReviewItem = ReviewCard | ReviewSnippet;
+
+export function isSnippet(value: ISnippet | ISRSCard): value is ISnippet {
+  return 'dismissed' in value;
+}
+
+export function isSRSCard(value: ISnippet | ISRSCard): value is ISRSCard {
+  return 'state' in value;
+}
+
+export function isReviewCard(value: ReviewItem): value is ReviewCard {
+  return 'state' in value.data;
+}

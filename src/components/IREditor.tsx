@@ -11,14 +11,17 @@ import classcat from 'classcat';
 import type { EditorPosition, Editor as ObsidianEditor } from 'obsidian';
 import { Platform } from 'obsidian';
 import type { MutableRefObject } from 'react';
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import type ReviewView from '../views/ReviewView';
 import { prefixedClasses, isEditing } from './helpers';
 import type { EditState } from './types';
-import { UseReviewContext } from './ReviewContext';
+import { useReviewContext } from './ReviewContext';
+import { getBaseMarkdownExtensions } from '../lib/utils';
+import type { ReviewItem } from '#/db/types';
 
 // TODO: attribution and license update to GPL
 interface IREditorProps {
+  item: ReviewItem;
   editorRef?: MutableRefObject<EditorView | null>;
   editState?: EditState;
   onEnter: (cm: EditorView, mod: boolean, shift: boolean) => boolean;
@@ -71,30 +74,6 @@ function getEditorAppProxy(view: ReviewView) {
   });
 }
 
-function getMarkdownController(
-  view: ReviewView,
-  getEditor: () => ObsidianEditor
-): Record<any, any> {
-  return {
-    app: view.app,
-    showSearch: () => {},
-    toggleMode: () => {},
-    onMarkdownScroll: () => {},
-    getMode: () => 'source',
-    scroll: 0,
-    editMode: null,
-    get editor() {
-      return getEditor();
-    },
-    get file() {
-      return view.file;
-    },
-    get path() {
-      return view.file?.path;
-    },
-  };
-}
-
 function setInsertMode(cm: EditorView) {
   const vim = getVimPlugin(cm);
   if (vim) {
@@ -110,6 +89,7 @@ function getVimPlugin(cm: EditorView): string {
 }
 
 export function IREditor({
+  item,
   editorRef,
   onEnter,
   onEscape,
@@ -121,19 +101,81 @@ export function IREditor({
   value,
   placeholder,
 }: IREditorProps) {
-  const { reviewView } = UseReviewContext();
+  const { reviewView } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
+  const getMarkdownController = useCallback(
+    (
+      view: ReviewView,
+      getEditor: () => ObsidianEditor,
+      currentItem: ReviewItem
+    ) => {
+      return {
+        app: view.app,
+        showSearch: () => {},
+        toggleMode: () => {},
+        onMarkdownScroll: () => {},
+        getMode: () => 'source',
+        scroll: 0,
+        editMode: null,
+        // Add getSelection method to provide context for properties extension
+        getSelection: () => {
+          // TODO: replace placeholder implementation
+          console.log('getting selection');
+          return window.getSelection();
+        },
+        get editor() {
+          return getEditor();
+        },
+        get file() {
+          return currentItem?.file;
+        },
+        get path() {
+          return currentItem?.file.path;
+        },
+      };
+    },
+    []
+  );
 
   useEffect(() => {
     class Editor extends reviewView.plugin.MarkdownEditor {
       isIncrementalReadingEditor = true;
+
+      // // Override getSelection to provide proper context
+      // getSelection() {
+      //   return window.getSelection();
+      // }
+
       onUpdate(update: ViewUpdate, changed: boolean) {
         super.onUpdate(update, changed);
         onChange && onChange(update);
       }
       buildLocalExtensions(): Extension[] {
         const extensions = super.buildLocalExtensions();
+
+        // Try to add base markdown extensions for properties rendering
+        try {
+          const baseExtensions = getBaseMarkdownExtensions(reviewView.app);
+          // console.log('Base markdown extensions found:', baseExtensions.length);
+          if (baseExtensions.length > 0) {
+            // Debug: Check what context is available before adding extensions
+            // console.log('Window:', typeof window);
+            // console.log('Document:', typeof document);
+            // console.log(
+            //   'Document.getSelection:',
+            //   typeof document?.getSelection
+            // );
+            // console.log('Window.getSelection:', typeof window?.getSelection);
+            // console.log('Editor element:', !!elRef.current);
+
+            extensions.push(...baseExtensions);
+            console.log('Added base markdown extensions to IREditor');
+          }
+        } catch (error) {
+          console.warn('Could not load base markdown extensions:', error);
+          console.error('Extension loading error details:', error);
+        }
 
         // extensions.push(stateManagerField.init(() => stateManager));
         // extensions.push(datePlugins);
@@ -219,12 +261,27 @@ export function IREditor({
       }
     }
 
-    const controller = getMarkdownController(reviewView, () => editor.editor);
-    const app = getEditorAppProxy(reviewView);
-    const editor = reviewView.plugin.addChild(
-      new (Editor as any)(app, elRef.current, controller)
+    const controller = getMarkdownController(
+      reviewView,
+      () => editor.editor,
+      item
     );
-    const cm: EditorView = editor.cm;
+    const app = getEditorAppProxy(reviewView);
+
+    let editor: any;
+    let cm: EditorView;
+
+    try {
+      editor = reviewView.plugin.addChild(
+        new (Editor as any)(app, elRef.current, controller)
+      );
+      cm = editor.cm;
+      console.log('Editor created successfully');
+    } catch (error) {
+      console.error('Error creating editor:', error);
+      console.error('Error stack:', error.stack);
+      throw error;
+    }
 
     internalRef.current = cm;
     if (editorRef) editorRef.current = cm;
@@ -282,7 +339,7 @@ export function IREditor({
     'allow-fold-headings',
     'allow-fold-lists',
     'show-indentation-guide',
-    // 'show-properties',
+    'show-properties',
     'cm-sizer',
   ];
   if (className) cls.push(className);

@@ -81,6 +81,11 @@ If your plugin does not need CSS, delete this file.
   align-items: center;
   gap: 8px;
 }
+
 .ir-priority-input {
   max-width: 40px;
+}
+
+.ir-review-interface .cm-scroller {
+  padding: var(--file-margins);
 }

@@ -165,14 +165,91 @@ export function getEditorClass(app: any) {
     ''
   );
 
-  md.load();
-  md.editable = true;
-  md.showEditor();
+  try {
+    md.load();
+    md.editable = true;
+    md.showEditor();
 
-  const MarkdownEditor = Object.getPrototypeOf(
-    Object.getPrototypeOf(md.editMode)
-  ).constructor;
+    const MarkdownEditor = Object.getPrototypeOf(
+      Object.getPrototypeOf(md.editMode)
+    ).constructor;
 
-  md.unload();
-  return MarkdownEditor;
+    // Store reference to original buildExtensions method to copy extensions
+    const originalBuildExtensions = MarkdownEditor.prototype.buildExtensions;
+
+    return MarkdownEditor;
+  } finally {
+    md.unload();
+  }
+}
+
+/**
+ * Get base extensions that would be used in a standard MarkdownEditor
+ */
+export function getBaseMarkdownExtensions(app: App) {
+  // Create a temporary editor instance similar to how getEditorClass does
+  const md = app.embedRegistry.embedByExtension.md(
+    {
+      app,
+      containerEl: createDiv(),
+      state: {},
+    },
+    null,
+    ''
+  );
+
+  try {
+    md.load();
+    md.editable = true;
+    md.showEditor();
+
+    // Try to get extensions from the edit mode
+    const editMode = md.editMode;
+    let extensions = [];
+
+    if (editMode) {
+      // Get local extensions and properties extension specifically
+      // if (editMode.localExtensions) {
+      //   extensions.push(...editMode.localExtensions);
+      //   console.log('Added localExtensions:', editMode.localExtensions.length);
+      // }
+
+      if (editMode.propertiesExtension) {
+        try {
+          // Since it's an array of extensions, let's examine each one
+          // editMode.propertiesExtension.forEach((ext, index) => {
+          //   console.log(`Extension ${index}:`, ext);
+          //   console.log(
+          //     `Extension ${index} constructor:`,
+          //     ext.constructor?.name
+          //   );
+          //   if (ext.extension) {
+          //     console.log(
+          //       `Extension ${index} has nested extension:`,
+          //       ext.extension
+          //     );
+          //   }
+          // });
+
+          // For now, let's skip the propertiesExtension to avoid the error
+          // We can add it back once we understand how to fix the context issue
+          extensions.push(editMode.propertiesExtension);
+          // console.log(
+          //   'Skipping propertiesExtension to avoid getSelection error'
+          // );
+        } catch (error) {
+          console.error('Error examining propertiesExtension:', error);
+        }
+      }
+
+      console.log('Total extensions found:', extensions.length);
+    }
+
+    return extensions;
+  } catch (error) {
+    console.warn('Could not extract base markdown extensions:', error);
+    return [];
+  } finally {
+    md.unload();
+  }
 }
