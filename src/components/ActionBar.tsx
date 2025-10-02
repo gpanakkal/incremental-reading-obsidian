@@ -98,7 +98,6 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
     const priority = transformPriority(display.priority);
     try {
       await reviewManager.reprioritizeSnippet(snippet.data, priority);
-      // snippet.data.priority = priority;
       new Notice(
         `Priority set to ${priority / 10}`,
         SUCCESS_NOTICE_DURATION_MS
@@ -111,9 +110,6 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
     }
   }, [display]);
 
-  useEffect(() => {
-    console.log({ displayPriority: display });
-  }, [display]);
   return (
     <>
       <Button

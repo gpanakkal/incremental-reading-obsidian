@@ -14,7 +14,7 @@ export class SQLiteRepository {
   #pluginDir: string;
 
   /**
-   * Use .start to initialize instead
+   * Use .start to instantiate
    */
   private constructor(
     app: App,
@@ -54,8 +54,6 @@ export class SQLiteRepository {
     } else {
       await repo.initDb();
     }
-    // (await repo.loadDb()) ?? (await repo.initDb()); // TODO: uncomment to persist data between starts
-    // await repo.initDb(); // TODO: remove for production
     return repo;
   }
 
@@ -99,7 +97,7 @@ export class SQLiteRepository {
           return null;
         case 'string':
         case 'number':
-        case 'object':
+        case 'object': // typeof null
           return param;
       }
     });
@@ -107,10 +105,9 @@ export class SQLiteRepository {
 
   /**
    * Execute one or more queries and return an array of objects corresponding to table rows.
-   * Use `query` or `mutation` methods above instead where possible.
+   * Use `query` or `mutate` methods above instead where possible.
    *
    *  TODO:
-   * - verify this works on all tables, with inner and outer JOINs, etc
    * - handle errors better?
    * @param query
    * @returns an array where each top-level element is the result of a query
@@ -126,7 +123,7 @@ export class SQLiteRepository {
 
   /**
    * Format the result of a single query
-   * TODO: convert snake_case properties to camelCase
+   * TODO: convert snake_case properties to camelCase?
    */
   formatResult<T extends RowTypes>(result: QueryExecResult): T[] {
     const { columns, values } = result;
@@ -181,7 +178,7 @@ export class SQLiteRepository {
     }
   }
 
-  async getSchema(tableName: string) {
+  async _getSchema(tableName: string) {
     if (!this.db) throw new Error('Database was not initialized on repository');
     const result = this.db.exec(
       'SELECT sql from sqlite_schema WHERE name = $1',
@@ -227,10 +224,6 @@ export class SQLiteRepository {
   private async loadDb() {
     try {
       const sql = await this.loadWasm();
-      // const dataDir = this.app.vault.getFolderByPath(DATA_DIRECTORY);
-      // if (!dataDir) {
-      //   await this.app.vault.createFolder(DATA_DIRECTORY);
-      // }
       const dbArrayBuffer = await this.app.vault.adapter.readBinary(
         normalizePath(this.#dbFilePath)
       );

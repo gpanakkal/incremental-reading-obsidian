@@ -31,8 +31,6 @@ function ReviewInterface() {
   const reviewContext = useReviewContext();
   const currentItem = reviewContext.currentItem ?? reviewContext.getNext();
 
-  console.log('currentItem:', currentItem?.data);
-  console.log('currentFile:', currentItem?.file);
   return (
     <div className={'ir-review-interface'}>
       <ActionBar />

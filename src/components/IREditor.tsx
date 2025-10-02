@@ -121,7 +121,6 @@ export function IREditor({
         // Add getSelection method to provide context for properties extension
         getSelection: () => {
           // TODO: replace placeholder implementation
-          console.log('getting selection');
           return window.getSelection();
         },
         get editor() {
@@ -153,25 +152,9 @@ export function IREditor({
       }
       buildLocalExtensions(): Extension[] {
         const extensions = super.buildLocalExtensions();
-
-        // Try to add base markdown extensions for properties rendering
         try {
           const baseExtensions = getBaseMarkdownExtensions(reviewView.app);
-          // console.log('Base markdown extensions found:', baseExtensions.length);
-          if (baseExtensions.length > 0) {
-            // Debug: Check what context is available before adding extensions
-            // console.log('Window:', typeof window);
-            // console.log('Document:', typeof document);
-            // console.log(
-            //   'Document.getSelection:',
-            //   typeof document?.getSelection
-            // );
-            // console.log('Window.getSelection:', typeof window?.getSelection);
-            // console.log('Editor element:', !!elRef.current);
-
-            extensions.push(...baseExtensions);
-            console.log('Added base markdown extensions to IREditor');
-          }
+          extensions.push(...baseExtensions);
         } catch (error) {
           console.warn('Could not load base markdown extensions:', error);
           console.error('Extension loading error details:', error);
@@ -274,7 +257,6 @@ export function IREditor({
     try {
       editor = new (Editor as any)(app, elRef.current, controller);
       cm = editor.cm;
-      console.log('Editor created successfully');
     } catch (error) {
       console.error('Error creating editor:', error);
       console.error('Error stack:', error.stack);

@@ -11,16 +11,6 @@ import { clozeDelimiterPattern, CLOZE_DELIMITERS } from '#/lib/constants';
 import type { EditState } from './types';
 import { EditingState } from './types';
 
-// TODO: either use this or the component below
-class ReviewItemView extends TextFileView {
-  plugin: IncrementalReadingPlugin;
-
-  constructor(leaf: WorkspaceLeaf, plugin: IncrementalReadingPlugin) {
-    super(leaf);
-    this.plugin = plugin;
-  }
-}
-
 const hideAnswer = (cardContent: string) => {
   const match = searchAll(cardContent, clozeDelimiterPattern)[0];
   if (!match) {
@@ -39,12 +29,9 @@ const hideAnswer = (cardContent: string) => {
  * - If card, hide answer
  */
 export default function ReviewItem({ item }: { item: ReviewItem }) {
-  console.log('re-rendering ReviewItem');
   const { plugin } = useReviewContext();
   const [fileText, setFileText] = useState<string>();
   const [editState, setEditState] = useState<EditState>(EditingState.cancel);
-  console.log(item);
-  console.log(fileText);
 
   useEffect(() => {
     const readNote = async () => {

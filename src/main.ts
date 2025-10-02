@@ -23,18 +23,16 @@ import type { ISnippet, SRSCardRow } from './db/types';
 import SRSCard from './lib/SRSCard';
 import { getEditorClass } from './lib/utils';
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
+interface IRPluginSettings {
   mySetting: string;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
+const DEFAULT_SETTINGS: IRPluginSettings = {
   mySetting: 'default',
 };
 
 export default class IncrementalReadingPlugin extends Plugin {
-  settings: MyPluginSettings;
+  settings: IRPluginSettings;
   #reviewManager: ReviewManager;
   MarkdownEditor: any;
 
@@ -116,13 +114,6 @@ export default class IncrementalReadingPlugin extends Plugin {
           return this.#reviewManager.createCard(editor, markdownView);
         }
       },
-      // editorCallback: (editor: Editor, view: MarkdownView) => {
-      //   if (!this.#reviewManager) {
-      //     new Notice(`Plugin still loading`);
-      //     return;
-      //   }
-      //   return this.#reviewManager.createCard(editor, view);
-      // },
     });
 
     this.addCommand({
@@ -311,7 +302,7 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 }
 
-class SampleSettingTab extends PluginSettingTab {
+class IRSettingTab extends PluginSettingTab {
   plugin: IncrementalReadingPlugin;
 
   constructor(app: App, plugin: IncrementalReadingPlugin) {
