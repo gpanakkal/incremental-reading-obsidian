@@ -154,7 +154,7 @@ function CardActions({ card }: { card: ReviewCard }) {
   const [answerVisible, setAnswerVisible] = useState<boolean>();
   const { gradeCard } = useReviewContext();
   return (
-    <div className="ir-review-button-container">
+    <>
       {answerVisible ? (
         <>
           <Button
@@ -184,7 +184,7 @@ function CardActions({ card }: { card: ReviewCard }) {
           />
         </>
       )}
-    </div>
+    </>
   );
 }
 
