@@ -272,9 +272,7 @@ export function IREditor({
     let cm: EditorView;
 
     try {
-      editor = reviewView.plugin.addChild(
-        new (Editor as any)(app, elRef.current, controller)
-      );
+      editor = new (Editor as any)(app, elRef.current, controller);
       cm = editor.cm;
       console.log('Editor created successfully');
     } catch (error) {
@@ -287,7 +285,7 @@ export function IREditor({
     if (editorRef) editorRef.current = cm;
 
     controller.editMode = editor;
-    editor.set(value || '');
+    editor.set(value ?? '');
     if (isEditing(editState)) {
       cm.dispatch({
         userEvent: 'select.pointer',
@@ -321,11 +319,11 @@ export function IREditor({
           reviewView.contentEl.removeClass('is-mobile-editing');
         }
       }
-      reviewView.plugin.removeChild(editor);
+      elRef.current?.removeChild(elRef.current?.children[0]);
       internalRef.current = null;
       if (editorRef) editorRef.current = null;
     };
-  }, []);
+  }, [value, item]);
 
   const cls = [
     'markdown-source-view',

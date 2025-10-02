@@ -8,6 +8,8 @@ import { useReviewContext } from './ReviewContext';
 import type { EditorView, ViewUpdate } from '@codemirror/view';
 import { searchAll } from '#/lib/utils';
 import { clozeDelimiterPattern, CLOZE_DELIMITERS } from '#/lib/constants';
+import type { EditState } from './types';
+import { EditingState } from './types';
 
 // TODO: either use this or the component below
 class ReviewItemView extends TextFileView {
@@ -40,6 +42,7 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
   console.log('re-rendering ReviewItem');
   const { plugin } = useReviewContext();
   const [fileText, setFileText] = useState<string>();
+  const [editState, setEditState] = useState<EditState>(EditingState.cancel);
   console.log(item);
   console.log(fileText);
 
@@ -47,34 +50,41 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
     const readNote = async () => {
       const fileText = await plugin.app.vault.read(item.file);
       setFileText(fileText);
+      setEditState(EditingState.cancel);
     };
 
     readNote();
   }, [item]);
 
-  const saveNote = async (update: ViewUpdate) => {
-    // TODO
+  const saveNote = async (newContent: string) => {
+    await plugin.app.vault.process(item.file, (data) => {
+      return newContent;
+    });
+    setEditState(EditingState.complete);
+  };
+
+  const handleChange = async (update: ViewUpdate) => {
     if (!update.docChanged) {
       return;
     }
 
     const docText = update.state.doc.toString();
-    await plugin.app.vault.process(item.file, (data) => {
-      return docText;
-    });
-    setFileText(docText);
+    saveNote(docText);
   };
+
   return (
     <>
       {fileText && (
         <IREditor
           value={fileText}
-          onChange={(update) => saveNote(update)}
+          onChange={(update) => handleChange(update)}
+          editState={editState}
           className="ir-editor"
           onEnter={(cm: EditorView, mod: boolean, shift: boolean) => false}
           onEscape={() => {}}
           onSubmit={() => {}}
-        ></IREditor>
+          item={item}
+        />
       )}
     </>
   );
