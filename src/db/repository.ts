@@ -1,7 +1,7 @@
 import { normalizePath, type App, type DataAdapter } from 'obsidian';
 import type { BindParams, Database, QueryExecResult } from 'sql.js';
 import initSqlJs from 'sql.js';
-import { DATA_DIRECTORY, PLUGIN_ID, WASM_FILE_NAME } from '../lib/constants';
+import { DATA_DIRECTORY, WASM_FILE_NAME } from '../lib/constants';
 import type { Primitive } from '../lib/utility-types';
 import type { RowTypes } from './types';
 
@@ -11,28 +11,42 @@ export class SQLiteRepository {
   db: Database;
   #dbFilePath: string;
   #schemaFilePath: string;
+  #pluginDir: string;
 
   /**
    * Use .start to initialize instead
    */
-  private constructor(app: App, dbFilePath: string, schemaFilePath: string) {
+  private constructor(
+    app: App,
+    dbFilePath: string,
+    schemaFilePath: string,
+    pluginDir: string
+  ) {
     this.app = app;
     this.adapter = app.vault.adapter;
     this.#dbFilePath = dbFilePath;
     this.#schemaFilePath = schemaFilePath;
+    this.#pluginDir = pluginDir;
   }
 
   /**
    * Asynchronous factory function
    * @param dbFilePath the path of the database file relative to the plugin root
    * @param schemaFilePath the path of the schema.sql file relative to the plugin root
+   * @param pluginDir the plugin's installation directory (from this.manifest.dir)
    */
   static async start(
     app: App,
     dbFilePath: string,
-    schemaFilePath: string
+    schemaFilePath: string,
+    pluginDir: string
   ): Promise<SQLiteRepository> {
-    const repo = new SQLiteRepository(app, dbFilePath, schemaFilePath);
+    const repo = new SQLiteRepository(
+      app,
+      dbFilePath,
+      schemaFilePath,
+      pluginDir
+    );
     // load the database file or create it if loading fails
     // TODO: handle failed loads when the file exists
     if (repo.dbExists()) {
@@ -156,9 +170,7 @@ export class SQLiteRepository {
     try {
       const sql = await this.loadWasm();
       this.db = new sql.Database();
-      const schema = await this.adapter.read(
-        this.getSchemaPath(this.#schemaFilePath)
-      );
+      const schema = await this.adapter.read(this.getSchemaPath());
       this.db.exec(schema);
       await this.save();
       console.log('Incremental Reading database initialized');
@@ -233,15 +245,8 @@ export class SQLiteRepository {
   }
 
   private async loadWasm() {
-    const pathSegments = [
-      this.app.vault.adapter.basePath, // remove?
-      this.app.vault.configDir,
-      'plugins',
-      PLUGIN_ID,
-      WASM_FILE_NAME,
-    ];
-    const basePath = pathSegments.join('/');
-    const wasmPath = normalizePath(basePath);
+    const relativePath = normalizePath(`${this.#pluginDir}/${WASM_FILE_NAME}`);
+    const wasmPath = this.adapter.getFullRealPath(relativePath);
 
     const sql = await initSqlJs({
       // TODO: handle throws
@@ -251,43 +256,7 @@ export class SQLiteRepository {
     return sql;
   }
 
-  // private getWasmPath(fileName: string, absolute = false) {
-  //   const pathSegments = [
-  //     this.app.vault.configDir,
-  //     'plugins',
-  //     PLUGIN_ID,
-  //     fileName,
-  //   ];
-
-  //   if (absolute) {
-  //     pathSegments.unshift(this.app.vault.adapter.basePath);
-  //   }
-
-  //   const basePath = pathSegments.join('/');
-  //   return normalizePath(basePath);
-  // }
-
-  private getSchemaPath(fileName: string) {
-    const pathSegments = [
-      this.app.vault.configDir,
-      'plugins',
-      PLUGIN_ID,
-      fileName,
-    ];
-
-    const basePath = pathSegments.join('/');
-    return normalizePath(basePath);
+  private getSchemaPath() {
+    return normalizePath(`${this.#pluginDir}/${this.#schemaFilePath}`);
   }
-
-  // private getDbFilePath(fileName: string) {
-  //   const pathSegments = [
-  //     // this.app.vault.configDir,
-  //     // 'plugins',
-  //     // PLUGIN_ID,
-  //     fileName,
-  //   ];
-
-  //   const basePath = pathSegments.join('/');
-  //   return normalizePath(basePath);
-  // }
 }

@@ -238,10 +238,18 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(async () => {
       // expensive startup operations should go here
+      if (!this.manifest.dir) {
+        new Notice(
+          'Failed to initialize plugin: manifest.dir is undefined',
+          ERROR_NOTICE_DURATION_MS
+        );
+        return;
+      }
       const repo = await SQLiteRepository.start(
         this.app,
         DATABASE_FILE_PATH,
-        SCHEMA_FILE_PATH
+        SCHEMA_FILE_PATH,
+        this.manifest.dir
       );
       this.#reviewManager = new ReviewManager(this.app, repo);
       this.registerView(
