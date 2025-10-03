@@ -22,7 +22,6 @@ export default class SRSCardReview implements ISRSCardReview {
   constructor(cardId: string, reviewLog: ReviewLog) {
     this.id = randomUUID();
     this.card_id = cardId;
-    // this.review = reviewLog.review ?? new Date();
     Object.assign(this, reviewLog);
   }
 

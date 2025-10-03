@@ -1,7 +1,7 @@
 {
 	"id": "incremental-reading",
 	"name": "Incremental Reading",
-	"version": "0.0.1",
+	"version": "0.1.0",
 	"minAppVersion": "1.6.0",
 	"description": "Leverage spaced repetition to incrementally build understanding and retain knowledge.",
 	"author": "Gautam Panakkal",

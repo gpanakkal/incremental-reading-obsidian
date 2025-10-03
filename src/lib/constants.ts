@@ -1,6 +1,3 @@
-import * as manifestData from 'src/../manifest.json';
-
-export const PLUGIN_ID = manifestData.id;
 export const PLACEHOLDER_PLUGIN_ICON = 'book-open-text';
 
 // TODO: move to settings

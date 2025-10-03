@@ -13,13 +13,26 @@ import { Platform } from 'obsidian';
 import type { MutableRefObject } from 'react';
 import { useCallback, useEffect, useRef } from 'react';
 import type ReviewView from '../views/ReviewView';
-import { prefixedClasses, isEditing } from './helpers';
+import {
+  prefixedClasses,
+  isEditing,
+  getEditorAppProxy,
+  setInsertMode,
+} from './helpers';
 import type { EditState } from './types';
 import { useReviewContext } from './ReviewContext';
 import { getBaseMarkdownExtensions } from '../lib/utils';
 import type { ReviewItem } from '#/db/types';
 
-// TODO: attribution and license update to GPL
+/**
+ * Credit goes to mgmeyers for figuring out how to get the editor prototype. See the original code here: https://github.com/mgmeyers/obsidian-kanban/blob/main/src/components/Editor/MarkdownEditor.tsx
+ *
+ * Changes made to the original implementation:
+ * - all codemirror extensions loaded by Obsidian are now added
+ * - enabled all editor commands to work
+ * - fixed a bug causing the editor to not be cleaned up on component unmount
+ * - added classes to make styling more consistent with Obsidian's note interface
+ */
 interface IREditorProps {
   item: ReviewItem;
   editorRef?: MutableRefObject<EditorView | null>;
@@ -32,60 +45,6 @@ interface IREditorProps {
   value?: string;
   className: string;
   placeholder?: string;
-}
-
-// export function allowNewLine(
-//   stateManager: StateManager,
-//   mod: boolean,
-//   shift: boolean
-// ) {
-//   if (Platform.isMobile) return !(mod || shift);
-//   return stateManager.getSetting('new-line-trigger') === 'enter'
-//     ? !(mod || shift)
-//     : mod || shift;
-// }
-
-function getEditorAppProxy(view: ReviewView) {
-  return new Proxy(view.app, {
-    get(target, prop, reveiver) {
-      if (prop === 'vault') {
-        return new Proxy(view.app.vault, {
-          get(target, prop, reveiver) {
-            if (prop === 'config') {
-              return new Proxy((view.app.vault as any).config, {
-                get(target, prop, reveiver) {
-                  if (
-                    ['showLineNumber', 'foldHeading', 'foldIndent'].includes(
-                      prop as string
-                    )
-                  ) {
-                    return false;
-                  }
-                  return Reflect.get(target, prop, reveiver);
-                },
-              });
-            }
-            return Reflect.get(target, prop, reveiver);
-          },
-        });
-      }
-      return Reflect.get(target, prop, reveiver);
-    },
-  });
-}
-
-function setInsertMode(cm: EditorView) {
-  const vim = getVimPlugin(cm);
-  if (vim) {
-    (window as any).CodeMirrorAdapter?.Vim?.enterInsertMode(vim);
-  }
-}
-
-function getVimPlugin(cm: EditorView): string {
-  return (cm as any)?.plugins?.find((p: any) => {
-    if (!p?.value) return false;
-    return 'useNextTextInput' in p.value && 'waitForCopy' in p.value;
-  })?.value?.cm;
 }
 
 export function IREditor({
