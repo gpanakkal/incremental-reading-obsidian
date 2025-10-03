@@ -58,7 +58,6 @@ export function ReviewContextProvider({
   const [currentIndex, setCurrentIndex] = useState<number>(0);
 
   const queryClient = useQueryClient();
-  const dueTime = Date.now() + 7 * SNIPPET_BASE_REVIEW_INTERVAL;
   const {
     isPending,
     isError,
@@ -66,7 +65,7 @@ export function ReviewContextProvider({
   } = useQuery({
     queryKey: ['review-queue'],
     queryFn: async () =>
-      await reviewManager.getDue({ dueBy: dueTime, limit: REVIEW_FETCH_COUNT }),
+      await reviewManager.getDue({ limit: REVIEW_FETCH_COUNT }),
   });
 
   // reset the index when the review queue is updated
@@ -94,6 +93,7 @@ export function ReviewContextProvider({
     } else if (currentIndex === reviewQueue.all.length - 1) {
       // at end of stored queue, so refresh
       queryClient.invalidateQueries({ queryKey: ['review-queue'] });
+      setCurrentIndex(0);
       return reviewQueue?.all[0] ?? null; // TODO: verify this correctly refers to the newly fetched queue
     } else {
       setCurrentIndex((prev: number) => prev + 1);
