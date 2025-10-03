@@ -1,7 +1,7 @@
 import { normalizePath, type App, type DataAdapter } from 'obsidian';
 import type { BindParams, Database, QueryExecResult } from 'sql.js';
 import initSqlJs from 'sql.js';
-import { DATA_DIRECTORY, WASM_FILE_NAME } from '../lib/constants';
+import { DATA_DIRECTORY, WASM_FILE_PATH } from '../lib/constants';
 import type { Primitive } from '../lib/utility-types';
 import type { RowTypes } from './types';
 
@@ -238,7 +238,7 @@ export class SQLiteRepository {
   }
 
   private async loadWasm() {
-    const relativePath = normalizePath(`${this.#pluginDir}/${WASM_FILE_NAME}`);
+    const relativePath = normalizePath(`${this.#pluginDir}/${WASM_FILE_PATH}`);
     const wasmPath = this.adapter.getFullRealPath(relativePath);
 
     const sql = await initSqlJs({

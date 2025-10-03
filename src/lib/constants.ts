@@ -4,7 +4,7 @@ export const PLUGIN_ID = manifestData.id;
 export const PLACEHOLDER_PLUGIN_ICON = 'book-open-text';
 
 // TODO: move to settings
-export const WASM_FILE_NAME = 'sql-wasm.wasm';
+export const WASM_FILE_PATH = 'src/db/sql-wasm.wasm';
 export const SCHEMA_FILE_PATH = 'src/db/schema.sql';
 export const DATA_DIRECTORY = 'incremental-reading';
 export const DATABASE_FILE_PATH = `${DATA_DIRECTORY}/ir-user-data.sqlite`;
