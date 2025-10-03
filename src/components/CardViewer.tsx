@@ -19,7 +19,6 @@ export function CardViewer({ cardText }: { cardText: string }) {
     'allow-fold-headings',
     'allow-fold-lists',
     'show-indentation-guide',
-    'show-properties',
   ];
 
   useEffect(() => {
@@ -48,5 +47,12 @@ export function CardViewer({ cardText }: { cardText: string }) {
     };
   }, [cardText, reviewView.app]);
 
-  return <div ref={containerRef} className={classcat(cls)} />;
+  return (
+    <div className={classcat(cls)}>
+      <div
+        ref={containerRef}
+        className={'markdown-preview-sizer ir-card-viewer'}
+      />
+    </div>
+  );
 }

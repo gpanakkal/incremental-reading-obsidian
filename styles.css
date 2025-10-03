@@ -1,32 +1,6 @@
-/*
-
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
-
-If your plugin does not need CSS, delete this file.
-
-*/
+/* Hide titles for transcluded snippets/cards */
 .internal-embed[alt*='ir-hide-title'] .markdown-embed-title {
   display: none;
-}
-
-.ir-review-view-container {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.ir-review-markdown-container {
-  overflow: auto;
-  padding: 16px;
-  margin-left: auto;
-  margin-right: auto;
-  background: var(--background-primary);
-  max-width: var(--file-line-width);
-}
-
-.ir-review-content {
-  height: auto;
 }
 
 .ir-review-placeholder {
@@ -94,4 +68,8 @@ If your plugin does not need CSS, delete this file.
   background-color: yellow;
   padding: 2px 4px;
   border-radius: 2px;
+}
+
+.ir-card-viewer > :first-child {
+  margin-top: 0 !important;
 }
