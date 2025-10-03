@@ -14,8 +14,6 @@ import { useQuery } from '@tanstack/react-query';
  * - loading spinner and error element
  */
 export default function ReviewItem({ item }: { item: ReviewItem }) {
-  console.log('rendering review item');
-  console.log(item.data);
   const { plugin, showAnswer } = useReviewContext();
   const {
     isPending,

@@ -254,11 +254,11 @@ export function IREditor({
           reviewView.activeEditor = null;
         }
 
-        if (app.workspace.activeEditor === controller) {
-          app.workspace.activeEditor = null;
-          (app as any).mobileToolbar.update();
-          reviewView.contentEl.removeClass('is-mobile-editing');
-        }
+        // if (app.workspace.activeEditor === controller) {
+        //   app.workspace.activeEditor = null;
+        //   (app as any).mobileToolbar.update();
+        //   reviewView.contentEl.removeClass('is-mobile-editing');
+        // }
       }
       elRef.current?.removeChild(elRef.current?.children[0]);
       internalRef.current = null;
