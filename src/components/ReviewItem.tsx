@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { isReviewCard type ReviewItem } from '#/db/types';
+import { isReviewCard, type ReviewItem } from '#/db/types';
 import { IREditor } from './IREditor';
 import { useReviewContext } from './ReviewContext';
 import type { EditorView, ViewUpdate } from '@codemirror/view';
