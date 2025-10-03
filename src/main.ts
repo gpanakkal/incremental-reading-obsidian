@@ -59,14 +59,14 @@ export default class IncrementalReadingPlugin extends Plugin {
     // statusBarItemEl.setText('Status Bar Text');
 
     this.addCommand({
-      id: 'retain-selection',
-      name: 'retain selection',
+      id: 'extract-selection',
+      name: 'Extract selection',
       hotkeys: [
-        {
-          modifiers: ['Alt'],
-          key: 'X',
-        },
-      ], // TODO: add setting to customize hotkey
+        // {
+        //   modifiers: ['Alt'],
+        //   key: 'X',
+        // },
+      ],
       callback: async () => {
         if (!this.#reviewManager) {
           new Notice(`Plugin still loading`);
@@ -87,12 +87,12 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     this.addCommand({
       id: 'create-card',
-      name: 'Create SRS card from selection or current block',
+      name: 'Create SRS card',
       hotkeys: [
-        {
-          modifiers: ['Alt', 'Shift'],
-          key: 'C',
-        },
+        // {
+        //   modifiers: ['Alt', 'Shift'],
+        //   key: 'C',
+        // },
       ],
       callback: () => {
         if (!this.#reviewManager) {
