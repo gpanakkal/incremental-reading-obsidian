@@ -406,10 +406,10 @@ export default class ReviewManager {
 
       const insertQuery =
         `INSERT INTO srs_card_review ` +
-        `(id, card_id, due, stability, difficulty, ` +
+        `(id, card_id, due, review, stability, difficulty, ` +
         `elapsed_days, last_elapsed_days, scheduled_days, ` +
         `rating, state) VALUES ` +
-        `($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`;
+        `($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`;
 
       const reviewRow = SRSCardReview.displayToRow(
         new SRSCardReview(card.id, reviewLog)
@@ -418,6 +418,7 @@ export default class ReviewManager {
         reviewRow.id,
         reviewRow.card_id,
         reviewRow.due,
+        reviewRow.review,
         reviewRow.stability,
         reviewRow.difficulty,
         reviewRow.elapsed_days,
@@ -453,7 +454,11 @@ export default class ReviewManager {
    * - selections from web viewer
    * - selections from native PDF viewer
    */
-  async createSnippet(view: MarkdownView | ReviewView, firstReview?: number) {
+  async createSnippet(
+    editor: Editor,
+    view: MarkdownView | ReviewView,
+    firstReview?: number
+  ) {
     const reviewTime =
       firstReview || Date.now() + SNIPPET_REVIEW_INTERVALS.TOMORROW;
     if (!view.file) {
@@ -463,7 +468,7 @@ export default class ReviewManager {
       );
       return;
     }
-    const selection = view.getSelection();
+    const selection = editor.getSelection();
     if (!selection) {
       new Notice('Text must be selected', ERROR_NOTICE_DURATION_MS);
       return;
@@ -484,7 +489,13 @@ export default class ReviewManager {
     const currentFileEntry = await this.findSnippet(currentFile);
     const priority = currentFileEntry?.priority ?? SNIPPET_DEFAULT_PRIORITY;
 
-    // TODO: transclude the snippet into its source location
+    // Transclude the snippet into its source location
+    const linkToSnippet = this.generateMarkdownLink(
+      snippetFile,
+      currentFile,
+      TRANSCLUSION_HIDE_TITLE_ALIAS
+    );
+    editor.replaceSelection(`!${linkToSnippet}`);
 
     return this.createSnippetEntry(
       snippetFile,

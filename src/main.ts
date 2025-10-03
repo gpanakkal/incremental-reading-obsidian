@@ -72,15 +72,19 @@ export default class IncrementalReadingPlugin extends Plugin {
           new Notice(`Plugin still loading`);
           return;
         }
+        const editor = this.app.workspace.activeEditor?.editor;
+        if (!editor) {
+          return;
+        }
         const reviewView = this.app.workspace.getActiveViewOfType(ReviewView);
         if (reviewView) {
-          return this.#reviewManager.createSnippet(reviewView);
+          return this.#reviewManager.createSnippet(editor, reviewView);
         }
 
         const markdownView =
           this.app.workspace.getActiveViewOfType(MarkdownView);
         if (markdownView) {
-          return this.#reviewManager.createSnippet(markdownView);
+          return this.#reviewManager.createSnippet(editor, markdownView);
         }
       },
     });
