@@ -29,7 +29,7 @@ import {
   SNIPPET_REVIEW_MULTIPLIER_STEP,
   SNIPPET_DEFAULT_PRIORITY,
   CLOZE_DELIMITERS,
-  clozeDelimiterPattern,
+  CLOZE_DELIMITER_PATTERN,
   TRANSCLUSION_HIDE_TITLE_ALIAS,
   MS_PER_MINUTE,
   MS_PER_DAY,
@@ -197,7 +197,7 @@ export default class ReviewManager {
     } else {
       // find the first pair of valid delimiters and remove others
       // TODO: create multiple cards
-      const matches = searchAll(text, clozeDelimiterPattern);
+      const matches = searchAll(text, CLOZE_DELIMITER_PATTERN);
       if (!matches.length) {
         throw new Error(`No valid delimiters found in text:` + `\n\n${text}`);
       }

@@ -89,3 +89,9 @@ If your plugin does not need CSS, delete this file.
 .ir-review-interface .cm-scroller {
   padding: var(--file-margins);
 }
+
+.ir-hidden-answer {
+  background-color: yellow;
+  padding: 2px 4px;
+  border-radius: 2px;
+}

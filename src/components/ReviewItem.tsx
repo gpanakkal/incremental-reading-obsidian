@@ -1,47 +1,31 @@
-import { useState, useEffect } from 'react';
-import type { ReviewItem } from '#/db/types';
-import type IncrementalReadingPlugin from '#/main';
-import type { WorkspaceLeaf } from 'obsidian';
-import { TextFileView } from 'obsidian';
+import { useState } from 'react';
+import { isReviewCard type ReviewItem } from '#/db/types';
 import { IREditor } from './IREditor';
 import { useReviewContext } from './ReviewContext';
 import type { EditorView, ViewUpdate } from '@codemirror/view';
-import { searchAll } from '#/lib/utils';
-import { clozeDelimiterPattern, CLOZE_DELIMITERS } from '#/lib/constants';
 import type { EditState } from './types';
 import { EditingState } from './types';
-
-const hideAnswer = (cardContent: string) => {
-  const match = searchAll(cardContent, clozeDelimiterPattern)[0];
-  if (!match) {
-    throw new Error(`Valid cloze delimiters not found in ${cardContent}`);
-  }
-  const pre = cardContent.slice(0, match.index);
-  const answer = `${CLOZE_DELIMITERS[0]}__${CLOZE_DELIMITERS[1]}`;
-  const post = cardContent.slice(match.index + match.match.length);
-  const formattedContent = pre + answer + post;
-  return formattedContent;
-};
+import { CardViewer } from './CardViewer';
+import { useQuery } from '@tanstack/react-query';
 
 /**
  * TODO:
  * - indicate if the item is a snippet, card, or article
- * - If card, hide answer
+ * - loading spinner and error element
  */
 export default function ReviewItem({ item }: { item: ReviewItem }) {
-  const { plugin } = useReviewContext();
-  const [fileText, setFileText] = useState<string>();
+  console.log('rendering review item');
+  console.log(item.data);
+  const { plugin, showAnswer } = useReviewContext();
+  const {
+    isPending,
+    isError,
+    data: fileText,
+  } = useQuery({
+    queryKey: [`${item.data.reference}`],
+    queryFn: async () => await plugin.app.vault.read(item.file),
+  });
   const [editState, setEditState] = useState<EditState>(EditingState.cancel);
-
-  useEffect(() => {
-    const readNote = async () => {
-      const fileText = await plugin.app.vault.read(item.file);
-      setFileText(fileText);
-      setEditState(EditingState.cancel);
-    };
-
-    readNote();
-  }, [item]);
 
   const saveNote = async (newContent: string) => {
     await plugin.app.vault.process(item.file, (data) => {
@@ -59,9 +43,12 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
     saveNote(docText);
   };
 
+  if (!fileText) return <></>;
   return (
     <>
-      {fileText && (
+      {isReviewCard(item) && !showAnswer ? (
+        <CardViewer cardText={fileText} />
+      ) : (
         <IREditor
           value={fileText}
           onChange={(update) => handleChange(update)}

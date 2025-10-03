@@ -1,5 +1,6 @@
 import type { App, Editor, TFile } from 'obsidian';
 import { CONTENT_TITLE_SLICE_LENGTH, FORBIDDEN_TITLE_CHARS } from './constants';
+import { FRONTMATTER_PATTERN } from './constants.js';
 
 export async function createFile(
   app: App,
@@ -152,7 +153,13 @@ export function searchAll(text: string, pattern: RegExp) {
 
   return results;
 }
-
+export function splitFrontMatter(
+  noteText: string
+): { frontMatter: string; body: string } | null {
+  const matches = noteText.match(FRONTMATTER_PATTERN);
+  if (!matches) return null;
+  return { frontMatter: matches[1], body: matches[2] };
+}
 /** Get Obsidian's internal MarkdownEditor */
 export function getEditorClass(app: any) {
   // Create a temporary editor instance

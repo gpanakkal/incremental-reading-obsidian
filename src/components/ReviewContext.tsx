@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import type { Dispatch } from 'react';
 import {
   type PropsWithChildren,
   createContext,
@@ -16,7 +17,6 @@ import {
 import {
   MS_PER_DAY,
   REVIEW_FETCH_COUNT,
-  SNIPPET_BASE_REVIEW_INTERVAL,
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
@@ -24,6 +24,7 @@ import type ReviewView from '#/views/ReviewView';
 import type { WorkspaceLeaf } from 'obsidian';
 import type IncrementalReadingPlugin from '#/main';
 import type { Grade } from 'ts-fsrs';
+import type { StateUpdater } from 'preact/hooks';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
@@ -39,6 +40,8 @@ interface ReviewContextProps {
   reviewSnippet: (snippet: ISnippet, nextInterval?: number) => Promise<void>;
   gradeCard: (card: ISRSCardDisplay, grade: Grade) => Promise<void>;
   dismissItem: (item: ReviewItem) => Promise<void>;
+  showAnswer: boolean;
+  setShowAnswer: Dispatch<StateUpdater<boolean>>;
 }
 
 const ReviewContext = createContext<ReviewContextProps | null>(null);
@@ -56,6 +59,7 @@ export function ReviewContextProvider({
   reviewManager: ReviewManager;
 }>) {
   const [currentIndex, setCurrentIndex] = useState<number>(0);
+  const [showAnswer, setShowAnswer] = useState(false);
 
   const queryClient = useQueryClient();
   const {
@@ -65,13 +69,20 @@ export function ReviewContextProvider({
   } = useQuery({
     queryKey: ['review-queue'],
     queryFn: async () =>
-      await reviewManager.getDue({ limit: REVIEW_FETCH_COUNT }),
+      await reviewManager.getDue({
+        dueBy: Date.now() + 7 * MS_PER_DAY, // remove for production
+        limit: REVIEW_FETCH_COUNT,
+      }),
   });
 
   // reset the index when the review queue is updated
   useEffect(() => {
     setCurrentIndex(0);
   }, [reviewQueue]);
+
+  useEffect(() => {
+    setShowAnswer(false);
+  }, [currentIndex]);
 
   const currentItem = useMemo((): ReviewItem | null => {
     if (!reviewQueue || !reviewQueue.all.length) return null;
@@ -96,6 +107,7 @@ export function ReviewContextProvider({
       setCurrentIndex(0);
       return reviewQueue?.all[0] ?? null; // TODO: verify this correctly refers to the newly fetched queue
     } else {
+      // setShowAnswer(false);
       setCurrentIndex((prev: number) => prev + 1);
       return reviewQueue.all[currentIndex]; // TODO: fix so this uses the updated value
     }
@@ -141,6 +153,8 @@ export function ReviewContextProvider({
     reviewSnippet,
     gradeCard,
     dismissItem,
+    showAnswer,
+    setShowAnswer,
   };
   return (
     <ReviewContext.Provider value={value}>{children}</ReviewContext.Provider>

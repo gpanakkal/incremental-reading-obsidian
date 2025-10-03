@@ -147,11 +147,10 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
 }
 
 function CardActions({ card }: { card: ReviewCard }) {
-  const [answerVisible, setAnswerVisible] = useState<boolean>();
-  const { gradeCard } = useReviewContext();
+  const { gradeCard, showAnswer, setShowAnswer } = useReviewContext();
   return (
     <>
-      {answerVisible ? (
+      {showAnswer ? (
         <>
           <Button
             label="🔁 Again"
@@ -175,11 +174,12 @@ function CardActions({ card }: { card: ReviewCard }) {
           <Button
             label="Show Answer"
             handleClick={() => {
-              setAnswerVisible(true);
+              setShowAnswer(true);
             }}
           />
         </>
       )}
+      {/* <Button label="Edit" handleClick={() => setShowAnswer(true)} /> */}
     </>
   );
 }

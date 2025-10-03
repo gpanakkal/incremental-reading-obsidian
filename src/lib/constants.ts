@@ -49,10 +49,13 @@ export const REVIEW_FETCH_COUNT = 50;
 
 export const CLOZE_DELIMITERS = ['{{', '}}'];
 
-export const clozeDelimiterPattern = new RegExp(
-  `${CLOZE_DELIMITERS[0]}(.*?)${CLOZE_DELIMITERS[1]}`,
+export const CLOZE_DELIMITER_PATTERN = new RegExp(
+  `${CLOZE_DELIMITERS[0]}([\\s\\S]*?)${CLOZE_DELIMITERS[1]}`,
   'g'
 );
 
+export const CARD_ANSWER_REPLACEMENT = `<mark class="ir-hidden-answer">\\\_\\\_\\\_\\\_\\\_\\\_</mark>`;
+
+export const FRONTMATTER_PATTERN = /^(---\n[\s\S]*?\n---\n)([\s\S]*)$/;
 export const TRANSCLUSION_HIDE_TITLE_ALIAS = 'ir-hide-title';
 export const CSS_CLASS_PREFIX = 'ir';
