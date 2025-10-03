@@ -29,7 +29,7 @@ function ReviewInterface() {
   const currentItem = reviewContext.currentItem ?? reviewContext.getNext();
 
   return (
-    <div className={'ir-review-interface'}>
+    <div className={'ir-review-interface view-content'}>
       <ActionBar />
       {currentItem ? (
         <ReviewItem item={currentItem} />

@@ -61,8 +61,22 @@
   max-width: 40px;
 }
 
+.ir-review-interface {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ir-review-interface .ir-editor {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .ir-review-interface .cm-scroller {
   padding: var(--file-margins);
+  max-height: 100%;
 }
 
 .ir-hidden-answer {

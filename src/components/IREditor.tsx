@@ -6,6 +6,7 @@ import {
   keymap,
   placeholder as placeholderExt,
   EditorView,
+  scrollPastEnd,
 } from '@codemirror/view';
 import classcat from 'classcat';
 import type { EditorPosition, Editor as ObsidianEditor } from 'obsidian';
@@ -74,6 +75,7 @@ export function IREditor({
         showSearch: () => {},
         toggleMode: () => {},
         onMarkdownScroll: () => {},
+        syncScroll: () => {}, // Prevent "syncScroll is not a function" error
         getMode: () => 'source',
         scroll: 0,
         editMode: null,
@@ -122,6 +124,14 @@ export function IREditor({
         // extensions.push(stateManagerField.init(() => stateManager));
         // extensions.push(datePlugins);
         extensions.push(
+          Prec.highest(scrollPastEnd()),
+          Prec.highest(
+            EditorView.theme({
+              '.cm-scroller': {
+                overflow: 'auto',
+              },
+            })
+          ),
           Prec.highest(
             EditorView.domEventHandlers({
               focus: (evt) => {
