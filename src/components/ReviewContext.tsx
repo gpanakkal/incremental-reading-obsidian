@@ -15,8 +15,10 @@ import {
   type ReviewItem,
 } from '#/db/types';
 import {
+  CONTENT_TITLE_SLICE_LENGTH,
   MS_PER_DAY,
   REVIEW_FETCH_COUNT,
+  SNIPPET_DIRECTORY,
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
@@ -25,6 +27,7 @@ import type { WorkspaceLeaf } from 'obsidian';
 import type IncrementalReadingPlugin from '#/main';
 import type { Grade } from 'ts-fsrs';
 import type { StateUpdater } from 'preact/hooks';
+import { getContentSlice } from '#/lib/utils';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
@@ -141,6 +144,15 @@ export function ReviewContextProvider({
     } else {
       await reviewManager.dismissSnippet(item.data);
     }
+
+    const { reference } = item.data;
+    const [parentDir, folder, subRef] = reference.split('/');
+    const type =
+      `${parentDir}/${folder}` === SNIPPET_DIRECTORY ? 'snippet' : 'card';
+    new Notice(
+      `Dismissed ${type} "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH)}"`
+    );
+    getNext();
   };
 
   const value = {
