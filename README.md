@@ -1,94 +1,53 @@
-# Obsidian Sample Plugin
+# Incremental Reading
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+This is a plugin for [Obsidian](https://obsidian.md) that enables incremental reading, a powerful, low-friction workflow for learning from texts. It combines spaced repetition (using [FSRS](https://github.com/open-spaced-repetition/free-spaced-repetition-scheduler)) and a priority-based queuing system to allow users to:
+- Easily build understanding through a divide-and-conquer approach that provides repeated exposures to learning material.
+- Learn on several parallel tracks without having to keep track of everything manually.
+- Retain what they've learned indefinitely.
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+Additionally, since this is integrated directly into Obsidian, your learning materials, snippets, and flash cards live alongside or even within your notes, making it much more convenient to work with all kinds of information.
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open Sample Modal" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and output 'click' to the console.
-- Registers a global interval which logs 'setInterval' to the console.
+## Setup
+1. [Install via BRAT](https://tfthacker.com/brat-quick-guide#Adding+a+beta+plugin).
+2. (Optional but recommended) Create hotkeys for the `Extract selection` and `Create SRS card` commands.
 
-## First time developing plugins?
+## Using the plugin
+1. Import some learning material into an Obsidian note
+2. If you already know what specific information you want to learn, highlight those sections and extract them using `Extract selection`. Otherwise, select the entire note and extract it.
+3. Set aside some time for a study session each day, depending on how much you want to learn. Even 10 minutes is fine!
 
-Quick starting guide for new plugin devs:
+### Study Sessions
+1. Begin a study session by clicking the `Incremental Reading` button in the left ribbon, or by running `Learn` from the command palette.
+2. Full texts and snippets that you have previously extracted will be presented to you. Read as much as you like, extracting interesting snippets as you go. 
+    - These snippets also enter your review queue and will be shown to you in the future.
+3. Press `Continue` when you want to move on to the next item in the queue - don't worry about losing track of the current text/snippet; it will be shown to you again in the future
+    - If you're done with an item and don't want to see it again, press `Dismiss` instead.
+4. As you build understanding, you may find the phrasing of a snippet can be improved by revising wording, removing fluff, etc. This is a key step in incremental reading, so feel free to do this.
+    - The review interface supports editing just like a regular note.
+    - Don't force this, however. It's generally best to limit yourself to one revision per repetition.
+5. Once a snippet has been sufficiently trimmed down and revised, it's ready to be turned into one or more spaced repetition cards. Currently, all cards are created as fill-in-the-blank questions from text blocks - just select the part of the text that you want to be the answer, and run `Create SRS card`.
+    - The entire paragraph or bullet point containing the selected text will be extracted to the card. Add newlines and split bullets up as needed to avoid including extra text.
+    - Cards will also be shown to you in future study sessions, interleaved with snippets.
+    - Ideally, each card will be one or two brief sentences, with only one correct answer. The shorter the better, as long as it remains unambiguous how to answer the question.
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `main.ts` to `main.js`.
-- Make changes to `main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
+### Other Workflows
+Snippets and cards can be created from any note, so don't feel limited to only doing this during incremental reading sessions. This is especially handy for notes that are already well-structured for conversion into cards, such as bullet lists of atomic information. The card's content will be [embedded](https://help.obsidian.md/embeds) into its original location, so it can perform double duty.
 
-## Releasing new releases
+### Priorities
+Snippets have priorities ranging from `1` to `5`, where `1` is the highest. Priorities are used to determine how often material is shown to you; a snippet with priority `1` will be shown daily with very little growth in the time interval between reviews, while at priority `5`, each review interval will be ~1.6 times longer than the last.
 
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
+For more fine-grained control of priorities, a single decimal place is allowed.
 
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
+### More Guides
+- [A short guide to incremental reading](https://www.supermemo.wiki/en/learning/incremental-reading)
+- [20 rules of knowledge formulation](https://supermemo.guru/wiki/20_rules_of_knowledge_formulation) (for making good cards)
+- [The complete (and long) guide to incremental reading in SuperMemo](https://help.supermemo.org/wiki/Incremental_reading)
 
-## Adding your plugin to the community plugin list
-
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
-
-## How to use
-
-- Clone this repo.
-- Make sure your NodeJS is at least v16 (`node --version`).
-- `npm i` or `yarn` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
-
-## Manually installing the plugin
-
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
-
-## Improve code quality with eslint (optional)
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code. 
-- To use eslint with this project, make sure to install eslint from terminal:
-  - `npm install -g eslint`
-- To use eslint to analyze this project use this command:
-  - `eslint main.ts`
-  - eslint will then create a report with suggestions for code improvement by file and line number.
-- If your source code is in a folder, such as `src`, you can use eslint with this command to analyze all files in that folder:
-  - `eslint .\src\`
-
-## Funding URL
-
-You can include funding URLs where people who use your plugin can financially support it.
-
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
-
-```json
-{
-    "fundingUrl": "https://buymeacoffee.com"
-}
-```
-
-If you have multiple URLs, you can also do:
-
-```json
-{
-    "fundingUrl": {
-        "Buy Me a Coffee": "https://buymeacoffee.com",
-        "GitHub Sponsor": "https://github.com/sponsors",
-        "Patreon": "https://www.patreon.com/"
-    }
-}
-```
-
-## API Documentation
-
-See https://github.com/obsidianmd/obsidian-api
+## Known Limitations and Issues
+- Texts cannot yet be imported as articles. For now, work around this by selecting the entire text and making a snippet.
+- Extracting snippets only works on markdown notes. Web page and PDF importing is planned; in the meantime, there are many tools that convert these to markdown:
+  - [Obsidian Web Clipper](https://obsidian.md/clipper) (this is also built into Obsidian's web viewer - just click the overflow menu in the top right and select `Save to vault`)
+  - [MarkDownload browser extension](https://github.com/deathau/markdownload)
+  - [Marker](https://github.com/datalab-to/marker) for PDFs
+- When opening a snippet or card and directly editing the note, the changes will not be reflected in the review interface if that snippet/card is currently open in it. I recommend making edits directly from the review interface to avoid this issue.
+- Manual scheduling of text/snippet reviews is planned. For now, set priority to `1` if you wish to keep review intervals steady.
