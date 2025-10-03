@@ -170,23 +170,6 @@ export default class ReviewManager {
     }
   }
 
-  // /**
-  //  * Get the data and file for the next due review item, or null if none are due
-  //  */
-  // async getNextDue(dueBy?: number) {
-  //   try {
-  //     const allDue = await this.getDue({ dueBy, limit: 1 });
-  //     if (!allDue || !allDue.all.length) return null;
-
-  //     const dueItem = allDue.all[0];
-
-  //     return { data: dueItem, file: dueFile };
-  //   } catch (error) {
-  //     console.error(error);
-  //     return null;
-  //   }
-  // }
-
   /**
    * If text is selected, adds cloze deletion delimiters around the selection
    * and removes them elsewhere.
@@ -472,7 +455,7 @@ export default class ReviewManager {
    */
   async createSnippet(view: MarkdownView | ReviewView, firstReview?: number) {
     const reviewTime =
-      firstReview || Date.now() + SNIPPET_REVIEW_INTERVALS.AGAIN; // TODO: change to tomorrow
+      firstReview || Date.now() + SNIPPET_REVIEW_INTERVALS.TOMORROW;
     if (!view.file) {
       new Notice(
         `Snipping not supported from ${view.getViewType()}`,
