@@ -14,7 +14,7 @@ export const CARD_TAG = 'ir-card';
 export const SOURCE_PROPERTY_NAME = 'ir-source';
 
 export const ERROR_NOTICE_DURATION_MS = 8000;
-export const SUCCESS_NOTICE_DURATION_MS = 4000;
+export const SUCCESS_NOTICE_DURATION_MS = 5000;
 
 /** characters that should never be permitted in note titles */
 export const FORBIDDEN_TITLE_CHARS = new Set(`#^[]|*"\\/<>:?\n`.split(''));

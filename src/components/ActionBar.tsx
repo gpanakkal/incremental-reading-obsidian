@@ -11,7 +11,7 @@ import {
 export function ActionBar() {
   const { currentItem } = useReviewContext();
   return (
-    <div className="ir-review-button-container">
+    <div className="ir-action-bar">
       {currentItem && (
         <>
           {isReviewCard(currentItem) ? (
