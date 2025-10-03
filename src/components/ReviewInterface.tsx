@@ -24,9 +24,6 @@ export function createReviewInterface(props: {
   );
 }
 
-/**
- * TODO: disable editing of cards when answer is hidden
- */
 function ReviewInterface() {
   const reviewContext = useReviewContext();
   const currentItem = reviewContext.currentItem ?? reviewContext.getNext();
