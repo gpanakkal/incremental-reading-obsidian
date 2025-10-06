@@ -233,6 +233,8 @@ export class SQLiteRepository {
         normalizePath(this.#dbFilePath)
       );
       this.db = new sql.Database(Buffer.from(dbArrayBuffer));
+      this.db.exec(this.#schema);
+      await this.save();
       console.log('Incremental Reading database loaded');
       return this.db;
     } catch (e) {
