@@ -19,6 +19,7 @@ import SRSCard from './lib/SRSCard';
 import { getEditorClass } from './lib/utils';
 import Snippet from './lib/Snippet';
 import Article from './lib/Article';
+import { QueryModal } from './views/QueryModal';
 
 interface IRPluginSettings {
   mySetting: string;
@@ -176,6 +177,19 @@ export default class IncrementalReadingPlugin extends Plugin {
         console.table(articles.map(Article.rowToDisplay));
         console.table(snippets.map(Snippet.rowToDisplay));
         console.table(cards.map(SRSCard.rowToDisplay));
+      },
+    });
+
+    this.addCommand({
+      // TODO: remove after done testing
+      id: 'query-db',
+      name: 'Query the database',
+      callback: async () => {
+        if (!this.#reviewManager) {
+          new Notice(`Plugin still loading`);
+          return;
+        }
+        new QueryModal(this.app, this.#reviewManager).open();
       },
     });
 

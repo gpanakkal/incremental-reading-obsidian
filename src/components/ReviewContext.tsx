@@ -7,8 +7,10 @@ import {
   useEffect,
   useState,
 } from 'react';
+import type { IArticleActive } from '#/lib/types';
 import {
   isReviewCard,
+  isReviewSnippet,
   type ISnippetActive,
   type ISRSCardDisplay,
   type ReviewItem,
@@ -35,6 +37,10 @@ interface ReviewContextProps {
   reviewManager: ReviewManager;
   currentItem: ReviewItem | undefined;
   getNext: () => void;
+  reviewArticle: (
+    article: IArticleActive,
+    nextInterval?: number
+  ) => Promise<void>;
   reviewSnippet: (
     snippet: ISnippetActive,
     nextInterval?: number
@@ -71,7 +77,6 @@ export function ReviewContextProvider({
     queryKey: ['current-review-item'],
     queryFn: async () => {
       const result = await reviewManager.getDue({
-        dueBy: Date.now() + 2 * MS_PER_DAY, // remove for production
         limit: REVIEW_FETCH_COUNT,
       });
       return (
@@ -90,6 +95,26 @@ export function ReviewContextProvider({
 
   const getNext = () => {
     queryClient.invalidateQueries({ queryKey: ['current-review-item'] });
+  };
+
+  const reviewArticle = async (
+    article: IArticleActive,
+    nextInterval?: number
+  ) => {
+    try {
+      await reviewManager.reviewArticle(article, Date.now(), nextInterval);
+      reviewView.seenIds.add(article.id);
+      if (nextInterval) {
+        new Notice(
+          `Next article review manually scheduled for ` +
+            `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`,
+          SUCCESS_NOTICE_DURATION_MS
+        );
+      }
+      getNext();
+    } catch (error) {
+      console.error(error);
+    }
   };
 
   const reviewSnippet = async (
@@ -122,8 +147,10 @@ export function ReviewContextProvider({
   const dismissItem = async (item: ReviewItem) => {
     if (isReviewCard(item)) {
       await reviewManager.dismissCard(item.data);
-    } else {
+    } else if (isReviewSnippet(item)) {
       await reviewManager.dismissSnippet(item.data);
+    } else {
+      await reviewManager.dismissArticle(item.data);
     }
     reviewView.seenIds.add(item.data.id);
 
@@ -154,6 +181,7 @@ export function ReviewContextProvider({
     reviewManager,
     currentItem,
     getNext,
+    reviewArticle,
     reviewSnippet,
     gradeCard,
     dismissItem,

@@ -7,19 +7,21 @@ import {
   type MarkdownView,
 } from 'obsidian';
 import type { SQLiteRepository } from './repository';
-import type {
-  ISnippetActive,
-  ISnippetReview,
-  ISRSCard,
-  ISRSCardDisplay,
-  SRSCardRow,
-  IArticle,
-  SnippetRow,
-  ArticleRow,
+import type { IArticleReview } from '#/lib/types';
+import {
+  type ISnippetActive,
+  type ISnippetReview,
+  type ISRSCard,
+  type ISRSCardDisplay,
+  type SRSCardRow,
+  type IArticleActive,
+  type SnippetRow,
+  type ArticleRow,
+  isArticle,
 } from '#/lib/types';
 import {
   SNIPPET_DIRECTORY,
-  SNIPPET_BASE_REVIEW_INTERVAL,
+  TEXT_BASE_REVIEW_INTERVAL,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
   ERROR_NOTICE_DURATION_MS,
@@ -27,9 +29,9 @@ import {
   CARD_DIRECTORY,
   CARD_TAG,
   REVIEW_FETCH_COUNT,
-  SNIPPET_REVIEW_INTERVALS,
-  SNIPPET_REVIEW_MULTIPLIER_BASE,
-  SNIPPET_REVIEW_MULTIPLIER_STEP,
+  TEXT_REVIEW_INTERVALS,
+  TEXT_REVIEW_MULTIPLIER_BASE,
+  TEXT_REVIEW_MULTIPLIER_STEP,
   DEFAULT_PRIORITY,
   CLOZE_DELIMITERS,
   CLOZE_DELIMITER_PATTERN,
@@ -476,7 +478,7 @@ export default class ReviewManager {
     firstReview?: number
   ) {
     const reviewTime =
-      firstReview || Date.now() + SNIPPET_REVIEW_INTERVALS.TOMORROW;
+      firstReview || Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
     if (!view.file) {
       new Notice(
         `Snipping not supported from ${view.getViewType()}`,
@@ -596,6 +598,16 @@ export default class ReviewManager {
 
     return (results[0] as SnippetRow) ?? null;
   }
+
+  protected async getLastSnippetReview(snippet: ISnippetActive) {
+    const lastReview = (await this.#repo.query(
+      `SELECT review_time FROM snippet_review WHERE snippet_id = $1 ` +
+        `ORDER BY review_time DESC LIMIT 1`,
+      [snippet.id]
+    )) as ISnippetReview[];
+    return lastReview;
+  }
+
   /**
    * Add a SnippetReview and set the next review date
    */
@@ -607,40 +619,20 @@ export default class ReviewManager {
     const reviewed = reviewTime || Date.now();
     const nextReview =
       reviewed +
-      (nextReviewInterval ??
-        (await this.calcNextSnippetReviewInterval(snippet)));
+      (nextReviewInterval ?? (await this.nextTextReviewInterval(snippet)));
     try {
       const insertReviewResult = await this.#repo.mutate(
         'INSERT INTO snippet_review (id, snippet_id, review_time) VALUES ($1, $2, $3)',
         [randomUUID(), snippet.id, reviewed]
       );
 
-      const updateSnippetResult = await this.#repo.mutate(
+      const updateResult = await this.#repo.mutate(
         `UPDATE snippet SET due = $1 WHERE id = $2`,
         [nextReview, snippet.id]
       );
     } catch (error) {
       console.error(error);
     }
-  }
-
-  protected async calcNextSnippetReviewInterval(snippet: ISnippetActive) {
-    const intervalMultiplier =
-      SNIPPET_REVIEW_MULTIPLIER_BASE +
-      (snippet.priority - 10) * SNIPPET_REVIEW_MULTIPLIER_STEP;
-
-    const lastReview = (await this.#repo.query(
-      `SELECT review_time FROM snippet_review WHERE snippet_id = $1 ` +
-        `ORDER BY review_time DESC LIMIT 1`,
-      [snippet.id]
-    )) as ISnippetReview[];
-
-    const lastInterval = lastReview[0]
-      ? snippet.due - lastReview[0].review_time
-      : SNIPPET_BASE_REVIEW_INTERVAL;
-
-    const nextInterval = Math.round(lastInterval * intervalMultiplier);
-    return nextInterval;
   }
 
   /**
@@ -653,7 +645,7 @@ export default class ReviewManager {
       );
     }
     const { priority: _, ...rest } = snippet;
-    const newInterval = await this.calcNextSnippetReviewInterval({
+    const newInterval = await this.nextTextReviewInterval({
       ...rest,
       priority: newPriority,
     });
@@ -759,7 +751,7 @@ export default class ReviewManager {
   async getArticlesDue(
     dueBy?: number,
     limit?: number
-  ): Promise<{ data: IArticle; file: TFile }[]> {
+  ): Promise<{ data: IArticleActive; file: TFile }[]> {
     const dueTime = dueBy ?? this.getEndOfToday();
     try {
       const articlesDue = (
@@ -773,7 +765,7 @@ export default class ReviewManager {
       );
       const result = await Promise.all(articlesDue);
       return result.filter(
-        (article): article is { data: IArticle; file: TFile } =>
+        (article): article is { data: IArticleActive; file: TFile } =>
           article.file !== null
       );
     } catch (error) {
@@ -811,8 +803,93 @@ export default class ReviewManager {
 
     return ((await this.#repo.query(query, params)) ?? []) as ArticleRow[];
   }
+
+  protected async getLastArticleReview(snippet: IArticleActive) {
+    const lastReview = (await this.#repo.query(
+      `SELECT review_time FROM article_review WHERE article_id = $1 ` +
+        `ORDER BY review_time DESC LIMIT 1`,
+      [snippet.id]
+    )) as IArticleReview[];
+    return lastReview;
+  }
+
+  async reviewArticle(
+    article: IArticleActive,
+    reviewTime?: number,
+    nextReviewInterval?: number
+  ) {
+    const reviewed = reviewTime || Date.now();
+    const nextReview =
+      reviewed +
+      (nextReviewInterval ?? (await this.nextTextReviewInterval(article)));
+    try {
+      const insertReviewResult = await this.#repo.mutate(
+        'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
+        [randomUUID(), article.id, reviewed]
+      );
+
+      const updateResult = await this.#repo.mutate(
+        `UPDATE article SET due = $1 WHERE id = $2`,
+        [nextReview, article.id]
+      );
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  /**
+   * Change the priority of an article, automatically adjusting the next due date
+   */
+  async reprioritizeArticle(article: IArticleActive, newPriority: number) {
+    if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
+      throw new TypeError(
+        `Priority must be an integer between 10 and 50 inclusive; received ${newPriority}`
+      );
+    }
+    const { priority: _, ...rest } = article;
+    const newInterval = await this.nextTextReviewInterval({
+      ...rest,
+      priority: newPriority,
+    });
+    const newDueTime = Date.now() + newInterval;
+
+    await this.#repo.mutate(
+      `UPDATE article SET priority = $1, due = $2 WHERE id = $3`,
+      [newPriority, newDueTime, article.id]
+    );
+  }
+
+  async dismissArticle(article: IArticleActive) {
+    try {
+      await this.#repo.mutate(
+        'UPDATE article SET dismissed = 1 WHERE id = $1',
+        [article.id]
+      );
+    } catch (error) {
+      console.error(error);
+    }
+  }
   // #endregion
   // #region HELPERS
+  protected async nextTextReviewInterval(
+    text: IArticleActive | ISnippetActive
+  ) {
+    const intervalMultiplier =
+      TEXT_REVIEW_MULTIPLIER_BASE +
+      (text.priority - 10) * TEXT_REVIEW_MULTIPLIER_STEP;
+
+    const lastReview = await (isArticle(text)
+      ? this.getLastArticleReview(text)
+      : this.getLastSnippetReview(text));
+
+    const lastInterval = lastReview[0]
+      ? text.due - lastReview[0].review_time
+      : TEXT_BASE_REVIEW_INTERVAL;
+
+    const nextInterval = Math.round(lastInterval * intervalMultiplier);
+    return nextInterval;
+  }
+
   async getNote(reference: string): Promise<TFile | null> {
     return this.app.vault.getFileByPath(normalizePath(reference));
   }

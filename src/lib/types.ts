@@ -20,15 +20,12 @@ export interface ArticleDisplay extends SafeOmit<IArticleBase, 'due'> {
   due: Date | null;
 }
 
-export interface IArticle extends IArticleBase {
-  id: string;
-  reference: string;
+export interface IArticleActive extends IArticleBase {
   due: number;
   dismissed: false;
-  priority: number;
 }
 
-export interface IDismissedArticle extends IArticleBase {
+export interface IArticleDismissed extends IArticleBase {
   due: null;
   dismissed: true;
 }
@@ -45,7 +42,7 @@ export interface ISnippetBase {
   due: number | null;
   dismissed: boolean;
   priority: number;
-  parent?: string;
+  parent: string | null;
 }
 
 export interface SnippetRow extends SafeOmit<ISnippetBase, 'dismissed'> {
@@ -57,12 +54,8 @@ export interface ISnippetDisplay extends SafeOmit<ISnippetBase, 'due'> {
 }
 
 export interface ISnippetActive extends ISnippetBase {
-  id: string;
-  reference: string;
   due: number;
   dismissed: false;
-  priority: number;
-  parent?: string;
 }
 
 export interface ISnippetDismissed extends ISnippetBase {
@@ -112,6 +105,7 @@ export type RowTypes =
   | ISnippetReview
   | SRSCardRow
   | ISRSCardReview;
+
 export interface TableNameToRowType extends Record<TableName, RowTypes> {
   article: ArticleRow;
   article_review: IArticleReview;
@@ -122,7 +116,7 @@ export interface TableNameToRowType extends Record<TableName, RowTypes> {
 }
 
 export type ReviewArticle = {
-  data: IArticle;
+  data: IArticleActive;
   file: TFile;
 };
 
@@ -139,8 +133,8 @@ export type ReviewCard = {
 export type ReviewItem = ReviewArticle | ReviewSnippet | ReviewCard;
 
 export function isArticle(
-  value: IArticle | ISnippetActive | ISRSCard
-): value is IArticle {
+  value: IArticleActive | ISnippetActive | ISRSCard
+): value is IArticleActive {
   return 'dismissed' in value && !('parent' in value);
 }
 
@@ -156,6 +150,10 @@ export function isSnippet(
   value: ISnippetActive | ISRSCard
 ): value is ISnippetActive {
   return 'dismissed' in value;
+}
+
+export function isReviewSnippet(value: ReviewItem): value is ReviewSnippet {
+  return !isReviewCard(value) && 'parent' in value.data;
 }
 
 export function isSRSCard(value: ISnippetActive | ISRSCard): value is ISRSCard {

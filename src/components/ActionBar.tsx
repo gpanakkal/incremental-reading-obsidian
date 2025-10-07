@@ -1,5 +1,12 @@
 import type { ReviewItem } from '#/lib/types';
-import { isReviewCard, type ReviewCard, type ReviewSnippet } from '#/lib/types';
+import {
+  isReviewCard,
+  type ReviewCard,
+  type ReviewSnippet,
+  type ReviewArticle,
+  isReviewArticle,
+  isReviewSnippet,
+} from '#/lib/types';
 import { Rating } from 'ts-fsrs';
 import { useReviewContext } from './ReviewContext';
 import { useCallback, useEffect, useState } from 'preact/hooks';
@@ -15,9 +22,11 @@ export function ActionBar() {
     <div className="ir-action-bar">
       {currentItem && (
         <>
-          {isReviewCard(currentItem) ? (
-            <CardActions card={currentItem} />
-          ) : (
+          {isReviewCard(currentItem) && <CardActions card={currentItem} />}
+          {isReviewArticle(currentItem) && (
+            <ArticleActions article={currentItem} />
+          )}
+          {isReviewSnippet(currentItem) && (
             <SnippetActions snippet={currentItem} />
           )}
           <ItemActions reviewItem={currentItem} />
@@ -56,6 +65,72 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
           skipItem(reviewItem);
         }}
       />
+    </>
+  );
+}
+
+/**
+ * TODO:
+ * - manual scheduling
+ */
+function ArticleActions({ article: article }: { article: ReviewArticle }) {
+  const [display, setDisplay] = useState({
+    priority: article.data.priority / 10,
+  });
+  const { reviewArticle, reviewManager } = useReviewContext();
+
+  const updateDisplay = (updates: Partial<typeof display>) => {
+    setDisplay((prev) => ({ ...prev, ...updates }));
+  };
+
+  const updatePriority = useCallback(async () => {
+    const priority = transformPriority(display.priority);
+    try {
+      await reviewManager.reprioritizeArticle(article.data, priority);
+      new Notice(
+        `Priority set to ${priority / 10}`,
+        SUCCESS_NOTICE_DURATION_MS
+      );
+    } catch (error) {
+      new Notice(
+        `Failed to update priority for snippet ${article.data.id} at ${article.data.reference}`,
+        ERROR_NOTICE_DURATION_MS
+      );
+    }
+  }, [display]);
+
+  return (
+    <>
+      <Button
+        label="Continue"
+        handleClick={async () => await reviewArticle(article.data)}
+      />
+      <div className="ir-priority-container">
+        <label className={'ir-priority-label'}>
+          Priority
+          <input
+            id={'ir-priority-input'}
+            value={display.priority}
+            className={'ir-priority-input'}
+            type="text"
+            inputMode="decimal"
+            onChange={(e) => {
+              const transformed = transformPriority(e.currentTarget.value);
+              updateDisplay({ priority: transformed / 10 });
+            }}
+            onBlur={async (e) => await updatePriority()}
+            onKeyDown={async (e) => {
+              if (e.key === 'Enter') {
+                await updatePriority();
+              } else if (e.key === 'Escape') {
+                updateDisplay({ priority: article.data.priority });
+                e.currentTarget.select();
+              }
+            }}
+            onFocusIn={(e) => e.currentTarget.select()}
+          />
+        </label>
+      </div>
     </>
   );
 }
