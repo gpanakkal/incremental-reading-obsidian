@@ -7,6 +7,7 @@ import {
   ERROR_NOTICE_DURATION_MS,
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
+import { transformPriority } from '#/lib/utils';
 
 export function ActionBar() {
   const { currentItem } = useReviewContext();
@@ -58,22 +59,6 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
     </>
   );
 }
-
-/** Clamp display value and convert to integer */
-const transformPriority = (rawPriority: string | number) => {
-  const priorityNum = Number(rawPriority);
-  if (Number.isNaN(priorityNum)) {
-    throw new TypeError(`Priority cannot be NaN`);
-  }
-
-  let withDecimal = Number(priorityNum.toString().slice(0, 3));
-  while (withDecimal >= 10) {
-    withDecimal = withDecimal / 10;
-  }
-  const clamped = Math.min(5, Math.max(1, withDecimal));
-  const rounded = Math.round(clamped * 10);
-  return rounded;
-};
 
 /**
  * TODO:

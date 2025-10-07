@@ -13,6 +13,12 @@ CREATE INDEX IF NOT EXISTS article_uuid ON article(id);
 CREATE INDEX IF NOT EXISTS article_reference ON article(reference);
 CREATE INDEX IF NOT EXISTS article_due ON article(due);
 
+CREATE TABLE IF NOT EXISTS article_review (
+  id TEXT NOT NULL, -- UUID
+  article_id TEXT NOT NULL REFERENCES article(id),
+  review_time INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS snippet (
   id TEXT NOT NULL, -- UUID
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
@@ -29,10 +35,9 @@ CREATE INDEX IF NOT EXISTS snippet_uuid ON snippet(id);
 CREATE INDEX IF NOT EXISTS snippet_reference ON snippet(reference);
 CREATE INDEX IF NOT EXISTS snippet_due ON snippet(due);
 
--- Log of all snippet reviews
 CREATE TABLE IF NOT EXISTS snippet_review (
   id TEXT NOT NULL, -- UUID
-  snippet_id TEXT REFERENCES snippet(id),
+  snippet_id TEXT NOT NULL REFERENCES snippet(id),
   review_time INTEGER NOT NULL
 );
 
@@ -61,7 +66,7 @@ CREATE INDEX IF NOT EXISTS srs_card_due ON srs_card(due);
 
 CREATE TABLE IF NOT EXISTS srs_card_review (
   id TEXT NOT NULL, -- UUID
-  card_id TEXT REFERENCES srs_card(id),
+  card_id TEXT NOT NULL REFERENCES srs_card(id),
   due INTEGER NOT NULL,
   review INTEGER NOT NULL,
   stability REAL NOT NULL,

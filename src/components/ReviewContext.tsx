@@ -9,7 +9,7 @@ import {
 } from 'react';
 import {
   isReviewCard,
-  type ISnippet,
+  type ISnippetActive,
   type ISRSCardDisplay,
   type ReviewItem,
 } from '#/lib/types';
@@ -35,7 +35,10 @@ interface ReviewContextProps {
   reviewManager: ReviewManager;
   currentItem: ReviewItem | undefined;
   getNext: () => void;
-  reviewSnippet: (snippet: ISnippet, nextInterval?: number) => Promise<void>;
+  reviewSnippet: (
+    snippet: ISnippetActive,
+    nextInterval?: number
+  ) => Promise<void>;
   gradeCard: (card: ISRSCardDisplay, grade: Grade) => Promise<void>;
   dismissItem: (item: ReviewItem) => Promise<void>;
   skipItem: (item: ReviewItem) => void;
@@ -89,7 +92,10 @@ export function ReviewContextProvider({
     queryClient.invalidateQueries({ queryKey: ['current-review-item'] });
   };
 
-  const reviewSnippet = async (snippet: ISnippet, nextInterval?: number) => {
+  const reviewSnippet = async (
+    snippet: ISnippetActive,
+    nextInterval?: number
+  ) => {
     try {
       await reviewManager.reviewSnippet(snippet, Date.now(), nextInterval);
       reviewView.seenIds.add(snippet.id);
@@ -135,11 +141,9 @@ export function ReviewContextProvider({
     reviewView.seenIds.add(item.data.id);
 
     const { reference } = item.data;
-    const [parentDir, folder, subRef] = reference.split('/');
-    const type =
-      `${parentDir}/${folder}` === SNIPPET_DIRECTORY ? 'snippet' : 'card';
+    const [_parentDir, folder, subRef] = reference.split('/');
     new Notice(
-      `Skipping ${type} "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}" until next session`
+      `Skipping ${folder}/${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH + 5, true)} until next session`
     );
     getNext();
   };

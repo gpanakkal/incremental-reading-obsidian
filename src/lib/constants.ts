@@ -6,9 +6,11 @@ export const DATABASE_FILE_PATH = `${DATA_DIRECTORY}/ir-user-data.sqlite`;
 export const TEST_DATABASE_FILE_PATH = './ir-test-data.sqlite';
 export const SNIPPET_DIRECTORY = `${DATA_DIRECTORY}/snippets`;
 export const CARD_DIRECTORY = `${DATA_DIRECTORY}/cards`;
+export const ARTICLE_DIRECTORY = `${DATA_DIRECTORY}/articles`;
 
 export const SNIPPET_TAG = 'ir-text-snippet';
 export const CARD_TAG = 'ir-card';
+export const ARTICLE_TAG = 'ir-article';
 export const SOURCE_PROPERTY_NAME = 'ir-source';
 
 export const ERROR_NOTICE_DURATION_MS = 8000;
@@ -25,16 +27,19 @@ export const MS_PER_DAY = 1000 * 86_400;
 export const DAY_ROLLOVER_OFFSET_HOURS = 4;
 
 export const TABLE_NAMES = Object.freeze([
+  'article',
+  'article_review',
   'snippet',
   'snippet_review',
   'srs_card',
   'srs_card_review',
 ] as const);
 
+export const DEFAULT_PRIORITY = 25;
+
 export const SNIPPET_BASE_REVIEW_INTERVAL = MS_PER_DAY * 1;
 export const SNIPPET_REVIEW_MULTIPLIER_BASE = 1.01;
 export const SNIPPET_REVIEW_MULTIPLIER_STEP = 0.015;
-export const SNIPPET_DEFAULT_PRIORITY = 25;
 export const SNIPPET_REVIEW_INTERVALS = {
   AGAIN: 1,
   TOMORROW: MS_PER_DAY,
