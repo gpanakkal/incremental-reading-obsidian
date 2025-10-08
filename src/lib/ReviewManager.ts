@@ -97,10 +97,7 @@ export default class ReviewManager {
       // add a full day since we're past the rollover point
       endOfDayLocal += MS_PER_DAY;
     }
-    // convert to UTC
-    const timezoneDiff = date.getTimezoneOffset() * MS_PER_MINUTE;
-    const endOfDayUtc = endOfDayLocal + timezoneDiff;
-    return endOfDayUtc;
+    return endOfDayLocal;
   }
 
   async getCardsDue(
