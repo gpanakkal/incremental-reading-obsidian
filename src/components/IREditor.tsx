@@ -46,6 +46,7 @@ interface IREditorProps {
   value?: string;
   className: string;
   placeholder?: string;
+  titleRef?: MutableRefObject<HTMLDivElement | null>;
 }
 
 export function IREditor({
@@ -60,6 +61,7 @@ export function IREditor({
   editState,
   value,
   placeholder,
+  titleRef,
 }: IREditorProps) {
   const { reviewView } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
@@ -237,6 +239,16 @@ export function IREditor({
 
     controller.editMode = editor;
     editor.set(value ?? '');
+
+    // Inject title element into CodeMirror's DOM structure
+    if (titleRef?.current) {
+      const cmSizer = cm.dom.querySelector('.cm-sizer');
+      const cmContentContainer = cm.dom.querySelector('.cm-contentContainer');
+      if (cmSizer && cmContentContainer) {
+        cmSizer.insertBefore(titleRef.current, cmContentContainer);
+      }
+    }
+
     if (isEditing(editState)) {
       cm.dispatch({
         userEvent: 'select.pointer',
@@ -249,7 +261,7 @@ export function IREditor({
     }
 
     const onShow = () => {
-      elRef.current?.scrollIntoView({ block: 'end' });
+      // elRef.current?.scrollIntoView({ block: 'end' });
     };
 
     if (Platform.isMobile) {

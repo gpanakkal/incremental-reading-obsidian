@@ -7,7 +7,7 @@ import {
   type MarkdownView,
 } from 'obsidian';
 import type { SQLiteRepository } from './repository';
-import type { IArticleReview } from '#/lib/types';
+import type { IArticleReview, ReviewArticle } from '#/lib/types';
 import {
   type ISnippetActive,
   type ISnippetReview,
@@ -43,6 +43,7 @@ import {
   ARTICLE_TAG,
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
+  INVALID_TITLE_MESSAGE,
 } from './constants';
 import type { FSRS, FSRSParameters, Grade } from 'ts-fsrs';
 import { fsrs, generatorParameters } from 'ts-fsrs';
@@ -52,6 +53,7 @@ import {
   createTitle,
   getContentSlice,
   getSelectionWithBounds,
+  sanitizeForTitle,
   searchAll,
 } from './utils';
 import SRSCard from './SRSCard';
@@ -832,6 +834,48 @@ export default class ReviewManager {
     } catch (error) {
       console.error(error);
     }
+  }
+
+  async renameArticle(article: ReviewArticle, newName: string) {
+    const sanitized = sanitizeForTitle(newName, true);
+    if (sanitized !== newName) {
+      new Notice(INVALID_TITLE_MESSAGE, ERROR_NOTICE_DURATION_MS);
+      return;
+    }
+
+    try {
+      const currentName = article.file.basename;
+      await this.renameFile(article.file, newName);
+      const newReference = `${ARTICLE_DIRECTORY}/${article.file.basename}.md`;
+      await this.#repo
+        .mutate(`UPDATE article SET reference = $1 WHERE id = $2`, [
+          newReference,
+          article.data.id,
+        ])
+        .catch(async () => {
+          await this.renameFile(article.file, currentName);
+        });
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  /**
+   * Rename a file without moving it
+   * @throws if the title contains invalid characters
+   * or if the rename operation fails
+   */
+  async renameFile(file: TFile, newName: string) {
+    const sanitized = sanitizeForTitle(newName, true);
+    if (sanitized !== newName) {
+      throw new Error(`${INVALID_TITLE_MESSAGE}. Title was ${newName}`);
+    }
+
+    const newPath = file.parent
+      ? `${file.parent.path}/${newName}.${file.extension}`
+      : `${newName}.${file.extension}`;
+
+    await this.app.fileManager.renameFile(file, newPath);
   }
 
   /**
