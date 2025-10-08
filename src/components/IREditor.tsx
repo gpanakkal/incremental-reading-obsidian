@@ -239,8 +239,10 @@ export function IREditor({
 
     // Set up scroll tracking
     const scroller = cm.scrollDOM;
+    let isLoadingScrollPos = true;
 
     const handleScroll = async () => {
+      if (isLoadingScrollPos) return;
       lastScrollPosition.current = {
         top: scroller.scrollTop,
         left: scroller.scrollLeft,
@@ -251,19 +253,15 @@ export function IREditor({
     const scrollInfo = reviewManager.loadScrollPosition(item.file);
     if (scrollInfo) {
       scroller.scrollTo({
-        ...scrollInfo,
-        behavior: 'instant',
+        top: scrollInfo.top,
+        left: scrollInfo.left,
+        behavior: 'smooth',
       });
       lastScrollPosition.current = scrollInfo;
-
-      // Allow scroll tracking after a short delay to avoid capturing restoration events
-      setTimeout(() => {
-        scroller.addEventListener('scroll', handleScroll);
-      }, 100);
-    } else {
-      // No saved position, enable tracking immediately
-      scroller.addEventListener('scroll', handleScroll);
     }
+
+    isLoadingScrollPos = false;
+    scroller.addEventListener('scroll', handleScroll);
 
     const cleanupEffect = async () => {
       // Save the last tracked scroll position to frontmatter before unmounting
