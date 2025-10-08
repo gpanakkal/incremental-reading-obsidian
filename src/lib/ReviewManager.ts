@@ -735,7 +735,7 @@ export default class ReviewManager {
         true
       );
       new Notice(
-        `Article imported with priority ${priority / 10}: ${titleSlice}`,
+        `Imported "${titleSlice}" with priority ${priority / 10}`,
         SUCCESS_NOTICE_DURATION_MS
       );
       return result;
