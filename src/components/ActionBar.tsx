@@ -106,30 +106,30 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
         handleClick={async () => await reviewArticle(article.data)}
       />
       <div className="ir-priority-container">
-        <label className={'ir-priority-label'}>
+        <label className={'ir-priority-label'} for="ir-priority-input">
           Priority
-          <input
-            id={'ir-priority-input'}
-            value={display.priority}
-            className={'ir-priority-input'}
-            type="text"
-            inputMode="decimal"
-            onChange={(e) => {
-              const transformed = transformPriority(e.currentTarget.value);
-              updateDisplay({ priority: transformed / 10 });
-            }}
-            onBlur={async (e) => await updatePriority()}
-            onKeyDown={async (e) => {
-              if (e.key === 'Enter') {
-                await updatePriority();
-              } else if (e.key === 'Escape') {
-                updateDisplay({ priority: article.data.priority });
-                e.currentTarget.select();
-              }
-            }}
-            onFocusIn={(e) => e.currentTarget.select()}
-          />
         </label>
+        <input
+          id={'ir-priority-input'}
+          value={display.priority}
+          className={'ir-priority-input'}
+          type="text"
+          inputMode="decimal"
+          onChange={(e) => {
+            const transformed = transformPriority(e.currentTarget.value);
+            updateDisplay({ priority: transformed / 10 });
+          }}
+          onBlur={async (e) => await updatePriority()}
+          onKeyDown={async (e) => {
+            if (e.key === 'Enter') {
+              await updatePriority();
+            } else if (e.key === 'Escape') {
+              updateDisplay({ priority: article.data.priority });
+              e.currentTarget.select();
+            }
+          }}
+          onFocusIn={(e) => e.currentTarget.select()}
+        />
       </div>
     </>
   );
