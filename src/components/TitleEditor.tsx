@@ -30,13 +30,6 @@ export const TitleEditor = forwardRef<HTMLDivElement, TitleEditorProps>(
         }
         return;
       }
-
-      // // Rename the file
-      // const newPath = item.file.parent
-      //   ? `${item.file.parent.path}/${newTitle}.${item.file.extension}`
-      //   : `${newTitle}.${item.file.extension}`;
-
-      // console.log({ newPath });
       try {
         await reviewManager.renameArticle(item, newTitle);
       } catch (error) {

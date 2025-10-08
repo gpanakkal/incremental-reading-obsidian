@@ -1,7 +1,9 @@
+import type { Editor as ObsidianEditor } from 'obsidian';
+import type { EditorView } from '@codemirror/view';
 import { CSS_CLASS_PREFIX } from '#/lib/constants';
 import type ReviewView from '#/views/ReviewView';
-import type { EditorView } from '@codemirror/view';
 import type { EditCoordinates, EditState } from './types';
+import type { ReviewItem } from '#/lib/types';
 
 /** Adds the plugin prefix to each of a space-separated list of classes */
 export const prefixedClasses = (classes: string) =>
@@ -69,3 +71,34 @@ export function getVimPlugin(cm: EditorView): string {
     return 'useNextTextInput' in p.value && 'waitForCopy' in p.value;
   })?.value?.cm;
 }
+
+export const getMarkdownController = (
+  view: ReviewView,
+  getEditor: () => ObsidianEditor,
+  currentItem: ReviewItem
+) => {
+  return {
+    app: view.app,
+    showSearch: () => {},
+    toggleMode: () => {},
+    onMarkdownScroll: () => {},
+    syncScroll: () => {}, // Prevent "syncScroll is not a function" error
+    getMode: () => 'source',
+    scroll: 1,
+    editMode: null,
+    // Add getSelection method to provide context for properties extension
+    getSelection: () => {
+      // TODO: replace placeholder implementation
+      return window.getSelection();
+    },
+    get editor() {
+      return getEditor();
+    },
+    get file() {
+      return currentItem?.file;
+    },
+    get path() {
+      return currentItem?.file.path;
+    },
+  };
+};

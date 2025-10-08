@@ -12,6 +12,8 @@ export const SNIPPET_TAG = 'ir-text-snippet';
 export const CARD_TAG = 'ir-card';
 export const ARTICLE_TAG = 'ir-article';
 export const SOURCE_PROPERTY_NAME = 'ir-source';
+export const SCROLL_TOP_PROPERTY_NAME = 'ir-scroll-top';
+export const SCROLL_LEFT_PROPERTY_NAME = 'ir-scroll-left';
 
 export const ERROR_NOTICE_DURATION_MS = 8000;
 export const SUCCESS_NOTICE_DURATION_MS = 5000;

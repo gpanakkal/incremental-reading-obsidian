@@ -44,6 +44,8 @@ import {
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
   INVALID_TITLE_MESSAGE,
+  SCROLL_TOP_PROPERTY_NAME,
+  SCROLL_LEFT_PROPERTY_NAME,
 } from './constants';
 import type { FSRS, FSRSParameters, Grade } from 'ts-fsrs';
 import { fsrs, generatorParameters } from 'ts-fsrs';
@@ -1029,6 +1031,38 @@ export default class ReviewManager {
         tags: combinedTags,
       });
     });
+  }
+
+  /**
+   * Save scroll position to file frontmatter
+   */
+  async saveScrollPosition(
+    file: TFile,
+    scrollInfo: { top: number; left: number }
+  ) {
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      frontmatter[SCROLL_TOP_PROPERTY_NAME] = scrollInfo.top;
+      frontmatter[SCROLL_LEFT_PROPERTY_NAME] = scrollInfo.left;
+    });
+  }
+
+  /**
+   * Load scroll position from file frontmatter
+   */
+  loadScrollPosition(file: TFile): { top: number; left: number } | null {
+    const cache = this.app.metadataCache.getFileCache(file);
+    const frontmatter = cache?.frontmatter;
+
+    if (!frontmatter) return null;
+
+    const top = frontmatter[SCROLL_TOP_PROPERTY_NAME];
+    const left = frontmatter[SCROLL_LEFT_PROPERTY_NAME];
+
+    if (typeof top === 'number' && typeof left === 'number') {
+      return { top, left };
+    }
+
+    return null;
   }
   /**
    * Get the content of the markdown block/section where the cursor is currently positioned
