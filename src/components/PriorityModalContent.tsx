@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'preact/hooks';
-import type { MarkdownView } from 'obsidian';
+import type { FileView, MarkdownView } from 'obsidian';
 import type ReviewManager from '#/lib/ReviewManager';
 import {
   DEFAULT_PRIORITY,
@@ -10,7 +10,7 @@ import { transformPriority } from '#/lib/utils';
 
 interface PriorityModalProps {
   reviewManager: ReviewManager;
-  view: MarkdownView;
+  view: MarkdownView | FileView;
   onClose: () => void;
 }
 

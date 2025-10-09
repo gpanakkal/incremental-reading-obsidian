@@ -11,7 +11,7 @@ export const ARTICLE_DIRECTORY = `articles`;
 export const SNIPPET_TAG = 'ir-text-snippet';
 export const CARD_TAG = 'ir-card';
 export const ARTICLE_TAG = 'ir-article';
-export const SOURCE_PROPERTY_NAME = 'ir-source';
+export const SOURCE_PROPERTY_NAME = 'source';
 export const SCROLL_TOP_PROPERTY_NAME = 'ir-scroll-top';
 export const SCROLL_LEFT_PROPERTY_NAME = 'ir-scroll-left';
 

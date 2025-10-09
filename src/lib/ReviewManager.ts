@@ -1,4 +1,4 @@
-import type { TFile, TAbstractFile } from 'obsidian';
+import type { TFile, TAbstractFile, FileView } from 'obsidian';
 import {
   normalizePath,
   Notice,
@@ -53,6 +53,7 @@ import {
   compareDates,
   createFile,
   createTitle,
+  generateId,
   getContentSlice,
   getSelectionWithBounds,
   sanitizeForTitle,
@@ -680,7 +681,7 @@ export default class ReviewManager {
   /**
    * Import the currently opened note as an article
    */
-  async importArticle(view: MarkdownView, priority: number) {
+  async importArticle(view: MarkdownView | FileView, priority: number) {
     const currentFile = view.file;
     if (!currentFile) {
       new Notice(`A markdown file must be active`, ERROR_NOTICE_DURATION_MS);
@@ -688,42 +689,70 @@ export default class ReviewManager {
     }
 
     try {
-      // Read the content of the current file
-      const content = await this.app.vault.cachedRead(currentFile);
-
-      // check if an article with this name already exists
-      const duplicate = await this.getNote(
-        `${ARTICLE_DIRECTORY}/${currentFile.name}`
-      );
-
-      if (duplicate) {
+      // check if the file is inside the plugin's data directory
+      const inDataDir = currentFile.path.startsWith(DATA_DIRECTORY);
+      if (currentFile.path.startsWith(DATA_DIRECTORY)) {
         new Notice(
-          `Article "${currentFile.name}" already exists`,
+          `Note is already in the plugin data folder; canceling import`,
           ERROR_NOTICE_DURATION_MS
         );
         return;
+      }
+      // Read the content of the current file
+      const content = await this.app.vault.cachedRead(currentFile);
+      const frontmatter =
+        this.app.metadataCache.getFileCache(currentFile)?.frontmatter;
+      if (frontmatter?.tags?.length) {
+        const tags: string[] = frontmatter.tags;
+        if (tags.some((tag) => new Set([SNIPPET_TAG, CARD_TAG]).has(tag))) {
+          new Notice(
+            `Note contains a snippet or card tag; canceling import`,
+            ERROR_NOTICE_DURATION_MS
+          );
+          return;
+        }
+      }
+
+      // check if an article with this name already exists
+      const getTargetPath = (fileName: string) =>
+        normalizePath(`${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/${fileName}`);
+      const isDuplicate = (fileName: string) =>
+        this.app.vault.getAbstractFileByPath(getTargetPath(fileName));
+
+      if (isDuplicate(currentFile.name)) {
+        new Notice(
+          `Warning: article with name already exists "${currentFile.name}"`,
+          ERROR_NOTICE_DURATION_MS
+        );
+      }
+
+      let importFileName = currentFile.name;
+      while (isDuplicate(importFileName)) {
+        importFileName = `${currentFile.basename} - ${generateId()}.${currentFile.extension}`;
       }
 
       // Create a copy in the articles directory
       const articleFile = await this.createNote({
         content,
-        fileName: currentFile.name,
+        fileName: importFileName,
         directory: this.getDirectory('article'),
       });
 
       if (!articleFile) {
-        const targetPath = normalizePath(
-          `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/${currentFile.name}`
+        throw new Error(
+          `Failed to create note ${getTargetPath(importFileName)}`
         );
-        throw new Error(`Failed to create note ${targetPath}`);
       }
 
-      // Tag it and link to the source file
-      const sourceLink = this.generateMarkdownLink(currentFile, articleFile);
-      await this.updateFrontMatter(articleFile, {
+      // Tag it and create a link to the source if it doesn't exist
+      const frontmatterUpdates: Record<string, any> = {
         tags: ARTICLE_TAG,
-        [`${SOURCE_PROPERTY_NAME}`]: sourceLink,
-      });
+      };
+      if (!frontmatter?.source) {
+        const sourceLink = this.generateMarkdownLink(currentFile, articleFile);
+        frontmatterUpdates[`${SOURCE_PROPERTY_NAME}`] = sourceLink;
+      }
+      await this.updateFrontMatter(articleFile, frontmatterUpdates);
 
       // Insert into database with immediate due time
       const dueTime = Date.now();
@@ -941,7 +970,7 @@ export default class ReviewManager {
   }
 
   /** Retrieves notes from the data directory given a row's reference */
-  async getNote(reference: string): Promise<TFile | null> {
+  getNote(reference: string): TFile | null {
     return this.app.vault.getFileByPath(
       normalizePath(`${DATA_DIRECTORY}/${reference}`)
     );
@@ -1049,7 +1078,9 @@ export default class ReviewManager {
       const updateTags = Array.isArray(updates.tags)
         ? updates.tags
         : [updates.tags];
-      const combinedTags = tags ? [...tags, ...updateTags] : updateTags;
+      const combinedTags = tags
+        ? [...new Set([...tags, ...updateTags])]
+        : updateTags;
       Object.assign(frontmatter, {
         ...updates,
         tags: combinedTags,

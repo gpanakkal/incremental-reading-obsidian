@@ -130,13 +130,12 @@ export default class IncrementalReadingPlugin extends Plugin {
           return;
         }
 
-        const markdownView =
-          this.app.workspace.getActiveViewOfType(MarkdownView);
+        const markdownView = this.app.workspace.getActiveFileView();
         if (markdownView) {
           new PriorityModal(this.app, this.#reviewManager, markdownView).open();
         } else {
           new Notice(
-            'A markdown file must be active',
+            'A markdown view must be active',
             ERROR_NOTICE_DURATION_MS
           );
         }
