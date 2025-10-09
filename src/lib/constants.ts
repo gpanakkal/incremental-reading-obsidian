@@ -4,9 +4,9 @@ export const PLACEHOLDER_PLUGIN_ICON = 'book-open-text';
 export const DATA_DIRECTORY = 'incremental-reading';
 export const DATABASE_FILE_PATH = `${DATA_DIRECTORY}/ir-user-data.sqlite`;
 export const TEST_DATABASE_FILE_PATH = './ir-test-data.sqlite';
-export const SNIPPET_DIRECTORY = `${DATA_DIRECTORY}/snippets`;
-export const CARD_DIRECTORY = `${DATA_DIRECTORY}/cards`;
-export const ARTICLE_DIRECTORY = `${DATA_DIRECTORY}/articles`;
+export const SNIPPET_DIRECTORY = `snippets`;
+export const CARD_DIRECTORY = `cards`;
+export const ARTICLE_DIRECTORY = `articles`;
 
 export const SNIPPET_TAG = 'ir-text-snippet';
 export const CARD_TAG = 'ir-card';

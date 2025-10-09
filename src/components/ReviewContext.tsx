@@ -19,7 +19,6 @@ import {
   CONTENT_TITLE_SLICE_LENGTH,
   MS_PER_DAY,
   REVIEW_FETCH_COUNT,
-  SNIPPET_DIRECTORY,
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
@@ -155,9 +154,8 @@ export function ReviewContextProvider({
     reviewView.seenIds.add(item.data.id);
 
     const { reference } = item.data;
-    const [parentDir, folder, subRef] = reference.split('/');
-    const type =
-      `${parentDir}/${folder}` === SNIPPET_DIRECTORY ? 'snippet' : 'card';
+    const [folder, subRef] = reference.split('/');
+    const type = folder.slice(0, -1);
     new Notice(
       `Dismissed ${type} "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}"`
     );
@@ -168,7 +166,7 @@ export function ReviewContextProvider({
     reviewView.seenIds.add(item.data.id);
 
     const { reference } = item.data;
-    const [_parentDir, folder, subRef] = reference.split('/');
+    const [folder, subRef] = reference.split('/');
     new Notice(
       `Skipping ${folder}/${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH + 5, true)} until next session`
     );

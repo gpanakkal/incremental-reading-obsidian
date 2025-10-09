@@ -2,11 +2,9 @@ import type { App, WorkspaceLeaf } from 'obsidian';
 import { MarkdownView } from 'obsidian';
 import { addIcon, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import {
-  CARD_DIRECTORY,
   DATABASE_FILE_PATH,
   ERROR_NOTICE_DURATION_MS,
   PLACEHOLDER_PLUGIN_ICON,
-  SNIPPET_DIRECTORY,
 } from './lib/constants';
 import { SQLiteRepository } from './lib/repository';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
@@ -209,7 +207,9 @@ export default class IncrementalReadingPlugin extends Plugin {
         )) as SnippetRow[];
 
         if (!rows.length) {
-          const snippetDir = this.app.vault.getFolderByPath(SNIPPET_DIRECTORY);
+          const snippetDir = this.app.vault.getFolderByPath(
+            this.#reviewManager.getDirectory('snippet')
+          );
           snippetDir && this.app.vault.trash(snippetDir, true);
         } else {
           new Notice(
@@ -243,7 +243,9 @@ export default class IncrementalReadingPlugin extends Plugin {
         )) as SRSCardRow[];
 
         if (!rows.length) {
-          const cardDir = this.app.vault.getFolderByPath(CARD_DIRECTORY);
+          const cardDir = this.app.vault.getFolderByPath(
+            this.#reviewManager.getDirectory('card')
+          );
           cardDir && this.app.vault.trash(cardDir, true);
         } else {
           new Notice(

@@ -288,7 +288,10 @@ export default class ReviewManager {
   ) {
     try {
       // Create the card from the content
-      const cardFile = await this.createFromText(delimitedText, CARD_DIRECTORY);
+      const cardFile = await this.createFromText(
+        delimitedText,
+        this.getDirectory('card')
+      );
       const linkToSource = this.generateMarkdownLink(sourceFile, cardFile);
       await this.updateFrontMatter(cardFile, {
         tags: CARD_TAG,
@@ -298,7 +301,8 @@ export default class ReviewManager {
       // parse question/answer formatting
 
       // create the database entry as FSRS card + reference
-      const card = new SRSCard(cardFile.path);
+      const reference = `${CARD_DIRECTORY}/${cardFile.basename}.md`;
+      const card = new SRSCard(reference);
       const params = [
         card.id,
         card.reference,
@@ -494,7 +498,10 @@ export default class ReviewManager {
     }
 
     const currentFile = view.file;
-    const snippetFile = await this.createFromText(selection, SNIPPET_DIRECTORY);
+    const snippetFile = await this.createFromText(
+      selection,
+      this.getDirectory('snippet')
+    );
 
     // Tag it and link to the source file
     const sourceLink = this.generateMarkdownLink(currentFile, snippetFile);
@@ -701,7 +708,7 @@ export default class ReviewManager {
       const articleFile = await this.createNote({
         content,
         fileName: currentFile.name,
-        directory: ARTICLE_DIRECTORY,
+        directory: this.getDirectory('article'),
       });
 
       if (!articleFile) {
@@ -933,10 +940,17 @@ export default class ReviewManager {
     return nextInterval;
   }
 
+  /** Retrieves notes from the data directory given a row's reference */
   async getNote(reference: string): Promise<TFile | null> {
-    return this.app.vault.getFileByPath(normalizePath(reference));
+    return this.app.vault.getFileByPath(
+      normalizePath(`${DATA_DIRECTORY}/${reference}`)
+    );
   }
 
+  /**
+   *
+   * @param directory path relative to the vault root
+   */
   protected async createNote({
     content,
     frontmatterObj,
@@ -1000,6 +1014,16 @@ export default class ReviewManager {
     }
 
     return newNote;
+  }
+
+  /** Get the vault absolute directory for a type of review item */
+  getDirectory(type: 'article' | 'snippet' | 'card') {
+    let subDirectory;
+    if (type === 'article') subDirectory = ARTICLE_DIRECTORY;
+    else if (type === 'snippet') subDirectory = SNIPPET_DIRECTORY;
+    else if (type === 'card') subDirectory = CARD_DIRECTORY;
+    else throw new TypeError(`Type "${type}" is invalid`);
+    return normalizePath(`${DATA_DIRECTORY}/${subDirectory}`);
   }
 
   /**
