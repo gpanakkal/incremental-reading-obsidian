@@ -492,7 +492,7 @@ export default class ReviewManager {
       );
       return;
     }
-    const selection = editor.getSelection();
+    const selection = editor.getSelection() || view.getSelection();
     if (!selection) {
       new Notice('Text must be selected', ERROR_NOTICE_DURATION_MS);
       return;
