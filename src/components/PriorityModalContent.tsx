@@ -58,7 +58,6 @@ export function PriorityModalContent({
                 onClose();
               }
             }}
-            autoFocus
             onFocus={(e) => e.currentTarget.select()}
           />
         </label>
