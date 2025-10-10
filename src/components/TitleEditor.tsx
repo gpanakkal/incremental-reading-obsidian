@@ -18,11 +18,9 @@ export const TitleEditor = forwardRef<HTMLDivElement, TitleEditorProps>(
     }, [item.file.basename]);
 
     const handleBlur = async () => {
-      console.log('handling blur');
       if (!titleRef.current) return;
 
       const newTitle = titleRef.current.textContent?.trim() || '';
-      console.log({ newTitle });
       if (!newTitle || newTitle === title) {
         // Revert to previous title if empty or unchanged
         if (titleRef.current) {
@@ -67,7 +65,6 @@ export const TitleEditor = forwardRef<HTMLDivElement, TitleEditorProps>(
         }}
         className="ir-title inline-title"
         contentEditable
-        // onInput={handleInput}
         onBlur={handleBlur}
         onKeyDown={handleKeyDown}
       >
