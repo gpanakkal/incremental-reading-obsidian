@@ -7,7 +7,7 @@ import {
   type MarkdownView,
 } from 'obsidian';
 import type { SQLiteRepository } from './repository';
-import type { IArticleReview, ReviewArticle } from '#/lib/types';
+import type { IArticleReview, NoteType, ReviewArticle } from '#/lib/types';
 import {
   type ISnippetActive,
   type ISnippetReview,
@@ -116,7 +116,7 @@ export default class ReviewManager {
       ).map(
         async (item) => ({
           data: SRSCard.rowToDisplay(item),
-          file: await this.getNote(item.reference),
+          file: this.getNote(item.reference),
         }),
         this
       );
@@ -142,7 +142,7 @@ export default class ReviewManager {
       ).map(
         async (item) => ({
           data: Snippet.rowToBase(item),
-          file: await this.getNote(item.reference),
+          file: this.getNote(item.reference),
         }),
         this
       );
@@ -299,14 +299,21 @@ export default class ReviewManager {
         [`${SOURCE_PROPERTY_NAME}`]: linkToSource,
       });
 
-      // parse question/answer formatting
-
+      const parentType = this.getNoteType(sourceFile);
+      let currentFileEntry;
+      if (parentType === 'article') {
+        currentFileEntry = await this.findArticle(sourceFile);
+      } else if (parentType === 'snippet') {
+        currentFileEntry = await this.findSnippet(sourceFile);
+      }
+      const parent = currentFileEntry ? currentFileEntry.id : null;
       // create the database entry as FSRS card + reference
       const reference = `${CARD_DIRECTORY}/${cardFile.basename}.md`;
       const card = new SRSCard(reference);
       const params = [
         card.id,
         card.reference,
+        parent,
         card.created_at.getTime(),
         card.due.getTime(),
         card.last_review?.getTime() ?? null,
@@ -319,9 +326,9 @@ export default class ReviewManager {
         card.state,
       ];
       const insertResult = await this.#repo.mutate(
-        `INSERT INTO srs_card (id, reference, created_at, due, last_review, ` +
+        `INSERT INTO srs_card (id, reference, parent, created_at, due, last_review, ` +
           `stability, difficulty, elapsed_days, scheduled_days, reps, lapses, state) ` +
-          `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
         params
       );
 
@@ -513,7 +520,13 @@ export default class ReviewManager {
     });
 
     // inherit priority from the source file if it has one, or assign default priority
-    const currentFileEntry = await this.findSnippet(currentFile);
+    const parentType = this.getNoteType(currentFile);
+    let currentFileEntry;
+    if (parentType === 'article') {
+      currentFileEntry = await this.findArticle(currentFile);
+    } else if (parentType === 'snippet') {
+      currentFileEntry = await this.findSnippet(currentFile);
+    }
     const priority = currentFileEntry?.priority ?? DEFAULT_PRIORITY;
 
     // Transclude the snippet into its source location
@@ -602,7 +615,7 @@ export default class ReviewManager {
   async findSnippet(snippetFile: TAbstractFile): Promise<SnippetRow | null> {
     const results = await this.#repo.query(
       'SELECT * FROM snippet WHERE reference = $1',
-      [snippetFile.path]
+      [this.getReferenceFromPath(snippetFile.path)]
     );
 
     return (results[0] as SnippetRow) ?? null;
@@ -796,7 +809,7 @@ export default class ReviewManager {
       ).map(
         async (item) => ({
           data: Article.rowToBase(item),
-          file: await this.getNote(item.reference),
+          file: this.getNote(item.reference),
         }),
         this
       );
@@ -839,6 +852,20 @@ export default class ReviewManager {
     }
 
     return ((await this.#repo.query(query, params)) ?? []) as ArticleRow[];
+  }
+
+  getReferenceFromPath(vaultPath: string): string {
+    const reference = vaultPath.split(`${DATA_DIRECTORY}/`)[1];
+    return reference;
+  }
+
+  async findArticle(articleFile: TAbstractFile): Promise<ArticleRow | null> {
+    const results = await this.#repo.query(
+      'SELECT * FROM article WHERE reference = $1',
+      [this.getReferenceFromPath(articleFile.path)]
+    );
+
+    return (results[0] as ArticleRow) ?? null;
   }
 
   protected async getLastArticleReview(snippet: IArticleActive) {
@@ -1045,8 +1072,20 @@ export default class ReviewManager {
     return newNote;
   }
 
+  protected getNoteType(note: TFile): NoteType | null {
+    // get tags
+    const tags = this.app.metadataCache.getFileCache(note)?.frontmatter?.tags;
+    if (!tags) return null;
+
+    const tagSet: Set<string> = new Set(Array.isArray(tags) ? tags : [tags]);
+    if (tagSet.has(ARTICLE_TAG)) return 'article';
+    else if (tagSet.has(SNIPPET_TAG)) return 'snippet';
+    else if (tagSet.has(CARD_TAG)) return 'card';
+    else return null;
+  }
+
   /** Get the vault absolute directory for a type of review item */
-  getDirectory(type: 'article' | 'snippet' | 'card') {
+  getDirectory(type: NoteType) {
     let subDirectory;
     if (type === 'article') subDirectory = ARTICLE_DIRECTORY;
     else if (type === 'snippet') subDirectory = SNIPPET_DIRECTORY;

@@ -22,9 +22,9 @@ CREATE TABLE IF NOT EXISTS article_review (
 CREATE TABLE IF NOT EXISTS snippet (
   id TEXT NOT NULL, -- UUID
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
+  parent TEXT DEFAULT NULL,
   due INTEGER, -- unix timestamp
   priority INTEGER NOT NULL,
-  parent TEXT REFERENCES snippet(id) DEFAULT NULL,
   dismissed INTEGER DEFAULT 0,
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS srs_card (
   id TEXT NOT NULL, -- UUID
   -- source TEXT NOT NULL, -- use source property in the card instead so Obsidian updates it properly
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
+  parent TEXT DEFAULT NULL,
   created_at INTEGER NOT NULL, -- unix timestamp
   due INTEGER NOT NULL,
   dismissed INTEGER DEFAULT 0,

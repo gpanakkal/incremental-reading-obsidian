@@ -163,3 +163,5 @@ export function isSRSCard(value: ISnippetActive | ISRSCard): value is ISRSCard {
 export function isReviewCard(value: ReviewItem): value is ReviewCard {
   return 'state' in value.data;
 }
+
+export type NoteType = 'article' | 'snippet' | 'card';
