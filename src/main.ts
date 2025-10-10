@@ -1,28 +1,23 @@
-import type { App, Editor, WorkspaceLeaf } from 'obsidian';
-import { MarkdownView, View } from 'obsidian';
+import type { App, WorkspaceLeaf } from 'obsidian';
+import { MarkdownView } from 'obsidian';
+import { addIcon, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import {
-  addIcon,
-  Modal,
-  Notice,
-  Plugin,
-  PluginSettingTab,
-  Setting,
-} from 'obsidian';
-import {
-  CARD_DIRECTORY,
   DATABASE_FILE_PATH,
   ERROR_NOTICE_DURATION_MS,
   PLACEHOLDER_PLUGIN_ICON,
-  SNIPPET_DIRECTORY,
 } from './lib/constants';
 import { SQLiteRepository } from './lib/repository';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
 import databaseSchema from './db/schema.sql';
 import ReviewManager from './lib/ReviewManager';
 import ReviewView from './views/ReviewView';
-import type { ISnippet, SRSCardRow } from './lib/types';
+import { PriorityModal } from './views/PriorityModal';
+import type { SnippetRow, SRSCardRow } from './lib/types';
 import SRSCard from './lib/SRSCard';
 import { getEditorClass } from './lib/utils';
+import Snippet from './lib/Snippet';
+import Article from './lib/Article';
+import { QueryModal } from './views/QueryModal';
 
 interface IRPluginSettings {
   mySetting: string;
@@ -54,7 +49,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     // Perform additional things with the ribbon
     ribbonIconEl.addClass('incremental-reading-ribbon');
 
-    // TODO: show counts of cards and snippets in queue?
+    // TODO: show counts of items in queue?
     // // This adds a status bar item to the bottom of the app. Does not work on mobile apps.
     // const statusBarItemEl = this.addStatusBarItem();
     // statusBarItemEl.setText('Status Bar Text');
@@ -122,6 +117,32 @@ export default class IncrementalReadingPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: 'import-article',
+      name: 'Import article',
+      callback: () => {
+        if (!this.#reviewManager) {
+          new Notice(`Plugin still loading`);
+          return;
+        }
+        const reviewView = this.app.workspace.getActiveViewOfType(ReviewView);
+        if (reviewView) {
+          new Notice('Cannot import articles from review view', 0);
+          return;
+        }
+
+        const markdownView = this.app.workspace.getActiveFileView();
+        if (markdownView) {
+          new PriorityModal(this.app, this.#reviewManager, markdownView).open();
+        } else {
+          new Notice(
+            'A markdown view must be active',
+            ERROR_NOTICE_DURATION_MS
+          );
+        }
+      },
+    });
+
+    this.addCommand({
       id: 'learn',
       name: 'Learn',
       callback: () => this.learn.call(this),
@@ -129,13 +150,16 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     this.addCommand({
       // TODO: remove after done testing
-      id: 'list-snippets-and-cards',
-      name: 'List snippets and cards',
+      id: 'list-entries',
+      name: 'List articles, snippets and cards',
       callback: async () => {
         if (!this.#reviewManager) {
           new Notice(`Plugin still loading`);
           return;
         }
+        const articles = await this.#reviewManager._fetchArticleData({
+          includeDismissed: true,
+        });
         const snippets = await this.#reviewManager._fetchSnippetData({
           includeDismissed: true,
         });
@@ -143,20 +167,26 @@ export default class IncrementalReadingPlugin extends Plugin {
           includeDismissed: true,
         });
 
-        // await this.repo?.query('SELECT rowid, * FROM snippet');
-        if (!snippets && !cards) {
-          console.log('No snippets or cards found');
+        if (!articles && !snippets && !cards) {
+          new Notice('No entries found');
           return;
         }
-        snippets &&
-          console.table(
-            snippets.map((snippet) => ({
-              ...snippet,
-              due: snippet.due ? new Date(snippet.due).toString() : null,
-              dismissed: Boolean(snippet.dismissed),
-            }))
-          );
-        cards && console.table(cards.map(SRSCard.rowToDisplay));
+        console.table(articles.map(Article.rowToDisplay));
+        console.table(snippets.map(Snippet.rowToDisplay));
+        console.table(cards.map(SRSCard.rowToDisplay));
+      },
+    });
+
+    this.addCommand({
+      // TODO: remove after done testing
+      id: 'query-db',
+      name: 'Query the database',
+      callback: async () => {
+        if (!this.#reviewManager) {
+          new Notice(`Plugin still loading`);
+          return;
+        }
+        new QueryModal(this.app, this.#reviewManager).open();
       },
     });
 
@@ -171,10 +201,14 @@ export default class IncrementalReadingPlugin extends Plugin {
         }
         const repo = this.#reviewManager.repo;
         await repo.mutate(`DELETE FROM snippet`);
-        const rows = (await repo.query(`SELECT * FROM snippet`)) as ISnippet[];
+        const rows = (await repo.query(
+          `SELECT * FROM snippet`
+        )) as SnippetRow[];
 
         if (!rows.length) {
-          const snippetDir = this.app.vault.getFolderByPath(SNIPPET_DIRECTORY);
+          const snippetDir = this.app.vault.getFolderByPath(
+            this.#reviewManager.getDirectory('snippet')
+          );
           snippetDir && this.app.vault.trash(snippetDir, true);
         } else {
           new Notice(
@@ -208,7 +242,9 @@ export default class IncrementalReadingPlugin extends Plugin {
         )) as SRSCardRow[];
 
         if (!rows.length) {
-          const cardDir = this.app.vault.getFolderByPath(CARD_DIRECTORY);
+          const cardDir = this.app.vault.getFolderByPath(
+            this.#reviewManager.getDirectory('card')
+          );
           cardDir && this.app.vault.trash(cardDir, true);
         } else {
           new Notice(

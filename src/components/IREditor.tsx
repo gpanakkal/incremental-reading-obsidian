@@ -9,16 +9,15 @@ import {
   scrollPastEnd,
 } from '@codemirror/view';
 import classcat from 'classcat';
-import type { EditorPosition, Editor as ObsidianEditor } from 'obsidian';
 import { Platform } from 'obsidian';
 import type { MutableRefObject } from 'react';
-import { useCallback, useEffect, useRef } from 'react';
-import type ReviewView from '../views/ReviewView';
+import { useEffect, useRef } from 'react';
 import {
   prefixedClasses,
   isEditing,
   getEditorAppProxy,
   setInsertMode,
+  getMarkdownController,
 } from './helpers';
 import type { EditState } from './types';
 import { useReviewContext } from './ReviewContext';
@@ -46,6 +45,7 @@ interface IREditorProps {
   value?: string;
   className: string;
   placeholder?: string;
+  titleRef?: MutableRefObject<HTMLDivElement | null>;
 }
 
 export function IREditor({
@@ -60,44 +60,14 @@ export function IREditor({
   editState,
   value,
   placeholder,
+  titleRef,
 }: IREditorProps) {
-  const { reviewView } = useReviewContext();
+  const { reviewView, reviewManager } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
-  const getMarkdownController = useCallback(
-    (
-      view: ReviewView,
-      getEditor: () => ObsidianEditor,
-      currentItem: ReviewItem
-    ) => {
-      return {
-        app: view.app,
-        showSearch: () => {},
-        toggleMode: () => {},
-        onMarkdownScroll: () => {},
-        syncScroll: () => {}, // Prevent "syncScroll is not a function" error
-        getMode: () => 'source',
-        scroll: 0,
-        editMode: null,
-        // Add getSelection method to provide context for properties extension
-        getSelection: () => {
-          // TODO: replace placeholder implementation
-          return window.getSelection();
-        },
-        get editor() {
-          return getEditor();
-        },
-        get file() {
-          return currentItem?.file;
-        },
-        get path() {
-          return currentItem?.file.path;
-        },
-      };
-    },
-    []
-  );
+  const lastScrollPosition = useRef<{ top: number; left: number }>();
 
+  // extend the MarkdownEditor extracted from Obsidian
   useEffect(() => {
     class Editor extends reviewView.plugin.MarkdownEditor {
       isIncrementalReadingEditor = true;
@@ -111,6 +81,7 @@ export function IREditor({
         super.onUpdate(update, changed);
         onChange && onChange(update);
       }
+
       buildLocalExtensions(): Extension[] {
         const extensions = super.buildLocalExtensions();
         try {
@@ -237,6 +208,16 @@ export function IREditor({
 
     controller.editMode = editor;
     editor.set(value ?? '');
+
+    // Inject title element into CodeMirror's DOM structure
+    if (titleRef?.current) {
+      const cmSizer = cm.dom.querySelector('.cm-sizer');
+      const cmContentContainer = cm.dom.querySelector('.cm-contentContainer');
+      if (cmSizer && cmContentContainer) {
+        cmSizer.insertBefore(titleRef.current, cmContentContainer);
+      }
+    }
+
     if (isEditing(editState)) {
       cm.dispatch({
         userEvent: 'select.pointer',
@@ -249,14 +230,54 @@ export function IREditor({
     }
 
     const onShow = () => {
-      elRef.current?.scrollIntoView({ block: 'end' });
+      // elRef.current?.scrollIntoView({ block: 'end' });
     };
 
     if (Platform.isMobile) {
       cm.dom.win.addEventListener('keyboardDidShow', onShow);
     }
 
-    return () => {
+    // Set up scroll tracking
+    const scroller = cm.scrollDOM;
+    let isLoadingScrollPos = true;
+
+    const handleScroll = async () => {
+      if (isLoadingScrollPos) return;
+      lastScrollPosition.current = {
+        top: scroller.scrollTop,
+        left: scroller.scrollLeft,
+      };
+    };
+
+    // Restore scroll position from frontmatter
+    const scrollInfo = reviewManager.loadScrollPosition(item.file);
+    if (scrollInfo) {
+      scroller.scrollTo({
+        top: scrollInfo.top,
+        left: scrollInfo.left,
+        behavior: 'smooth',
+      });
+      lastScrollPosition.current = scrollInfo;
+    }
+
+    isLoadingScrollPos = false;
+    scroller.addEventListener('scroll', handleScroll);
+
+    const cleanupEffect = async () => {
+      // Save the last tracked scroll position to frontmatter before unmounting
+      let saveScroll;
+      if (lastScrollPosition.current) {
+        saveScroll = reviewManager.saveScrollPosition(
+          item.file,
+          lastScrollPosition.current
+        );
+      }
+
+      // Clean up scroll listener
+      if (scroller) {
+        scroller.removeEventListener('scroll', handleScroll);
+      }
+
       if (Platform.isMobile) {
         cm.dom.win.removeEventListener('keyboardDidShow', onShow);
 
@@ -264,15 +285,20 @@ export function IREditor({
           reviewView.activeEditor = null;
         }
 
-        // if (app.workspace.activeEditor === controller) {
-        //   app.workspace.activeEditor = null;
-        //   (app as any).mobileToolbar.update();
-        //   reviewView.contentEl.removeClass('is-mobile-editing');
-        // }
+        if ((app.workspace.activeEditor as unknown) === controller) {
+          app.workspace.activeEditor = null;
+          (app as any).mobileToolbar.update();
+          reviewView.contentEl.removeClass('is-mobile-editing');
+        }
       }
       elRef.current?.removeChild(elRef.current?.children[0]);
       internalRef.current = null;
       if (editorRef) editorRef.current = null;
+      await saveScroll;
+    };
+
+    return () => {
+      cleanupEffect();
     };
   }, [value, item]);
 

@@ -7,9 +7,11 @@ import {
   useEffect,
   useState,
 } from 'react';
+import type { IArticleActive } from '#/lib/types';
 import {
   isReviewCard,
-  type ISnippet,
+  isReviewSnippet,
+  type ISnippetActive,
   type ISRSCardDisplay,
   type ReviewItem,
 } from '#/lib/types';
@@ -17,7 +19,6 @@ import {
   CONTENT_TITLE_SLICE_LENGTH,
   MS_PER_DAY,
   REVIEW_FETCH_COUNT,
-  SNIPPET_DIRECTORY,
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
@@ -35,7 +36,14 @@ interface ReviewContextProps {
   reviewManager: ReviewManager;
   currentItem: ReviewItem | undefined;
   getNext: () => void;
-  reviewSnippet: (snippet: ISnippet, nextInterval?: number) => Promise<void>;
+  reviewArticle: (
+    article: IArticleActive,
+    nextInterval?: number
+  ) => Promise<void>;
+  reviewSnippet: (
+    snippet: ISnippetActive,
+    nextInterval?: number
+  ) => Promise<void>;
   gradeCard: (card: ISRSCardDisplay, grade: Grade) => Promise<void>;
   dismissItem: (item: ReviewItem) => Promise<void>;
   skipItem: (item: ReviewItem) => void;
@@ -68,7 +76,6 @@ export function ReviewContextProvider({
     queryKey: ['current-review-item'],
     queryFn: async () => {
       const result = await reviewManager.getDue({
-        dueBy: Date.now() + 2 * MS_PER_DAY, // remove for production
         limit: REVIEW_FETCH_COUNT,
       });
       return (
@@ -89,7 +96,30 @@ export function ReviewContextProvider({
     queryClient.invalidateQueries({ queryKey: ['current-review-item'] });
   };
 
-  const reviewSnippet = async (snippet: ISnippet, nextInterval?: number) => {
+  const reviewArticle = async (
+    article: IArticleActive,
+    nextInterval?: number
+  ) => {
+    try {
+      await reviewManager.reviewArticle(article, Date.now(), nextInterval);
+      reviewView.seenIds.add(article.id);
+      if (nextInterval) {
+        new Notice(
+          `Next article review manually scheduled for ` +
+            `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`,
+          SUCCESS_NOTICE_DURATION_MS
+        );
+      }
+      getNext();
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const reviewSnippet = async (
+    snippet: ISnippetActive,
+    nextInterval?: number
+  ) => {
     try {
       await reviewManager.reviewSnippet(snippet, Date.now(), nextInterval);
       reviewView.seenIds.add(snippet.id);
@@ -116,15 +146,16 @@ export function ReviewContextProvider({
   const dismissItem = async (item: ReviewItem) => {
     if (isReviewCard(item)) {
       await reviewManager.dismissCard(item.data);
-    } else {
+    } else if (isReviewSnippet(item)) {
       await reviewManager.dismissSnippet(item.data);
+    } else {
+      await reviewManager.dismissArticle(item.data);
     }
     reviewView.seenIds.add(item.data.id);
 
     const { reference } = item.data;
-    const [parentDir, folder, subRef] = reference.split('/');
-    const type =
-      `${parentDir}/${folder}` === SNIPPET_DIRECTORY ? 'snippet' : 'card';
+    const [folder, subRef] = reference.split('/');
+    const type = folder.slice(0, -1);
     new Notice(
       `Dismissed ${type} "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}"`
     );
@@ -135,11 +166,9 @@ export function ReviewContextProvider({
     reviewView.seenIds.add(item.data.id);
 
     const { reference } = item.data;
-    const [parentDir, folder, subRef] = reference.split('/');
-    const type =
-      `${parentDir}/${folder}` === SNIPPET_DIRECTORY ? 'snippet' : 'card';
+    const [folder, subRef] = reference.split('/');
     new Notice(
-      `Skipping ${type} "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}" until next session`
+      `Skipping ${folder}/${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH + 5, true)} until next session`
     );
     getNext();
   };
@@ -150,6 +179,7 @@ export function ReviewContextProvider({
     reviewManager,
     currentItem,
     getNext,
+    reviewArticle,
     reviewSnippet,
     gradeCard,
     dismissItem,

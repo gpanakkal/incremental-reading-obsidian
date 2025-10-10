@@ -1,4 +1,4 @@
-import type { TFile, TAbstractFile } from 'obsidian';
+import type { TFile, TAbstractFile, FileView } from 'obsidian';
 import {
   normalizePath,
   Notice,
@@ -7,16 +7,21 @@ import {
   type MarkdownView,
 } from 'obsidian';
 import type { SQLiteRepository } from './repository';
-import type {
-  ISnippet,
-  ISnippetReview,
-  ISRSCard,
-  ISRSCardDisplay,
-  SRSCardRow,
+import type { IArticleReview, NoteType, ReviewArticle } from '#/lib/types';
+import {
+  type ISnippetActive,
+  type ISnippetReview,
+  type ISRSCard,
+  type ISRSCardDisplay,
+  type SRSCardRow,
+  type IArticleActive,
+  type SnippetRow,
+  type ArticleRow,
+  isArticle,
 } from '#/lib/types';
 import {
   SNIPPET_DIRECTORY,
-  SNIPPET_BASE_REVIEW_INTERVAL,
+  TEXT_BASE_REVIEW_INTERVAL,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
   ERROR_NOTICE_DURATION_MS,
@@ -24,16 +29,23 @@ import {
   CARD_DIRECTORY,
   CARD_TAG,
   REVIEW_FETCH_COUNT,
-  SNIPPET_REVIEW_INTERVALS,
-  SNIPPET_REVIEW_MULTIPLIER_BASE,
-  SNIPPET_REVIEW_MULTIPLIER_STEP,
-  SNIPPET_DEFAULT_PRIORITY,
+  TEXT_REVIEW_INTERVALS,
+  TEXT_REVIEW_MULTIPLIER_BASE,
+  TEXT_REVIEW_MULTIPLIER_STEP,
+  DEFAULT_PRIORITY,
   CLOZE_DELIMITERS,
   CLOZE_DELIMITER_PATTERN,
   TRANSCLUSION_HIDE_TITLE_ALIAS,
   MS_PER_MINUTE,
   MS_PER_DAY,
   DAY_ROLLOVER_OFFSET_HOURS,
+  ARTICLE_DIRECTORY,
+  ARTICLE_TAG,
+  CONTENT_TITLE_SLICE_LENGTH,
+  DATA_DIRECTORY,
+  INVALID_TITLE_MESSAGE,
+  SCROLL_TOP_PROPERTY_NAME,
+  SCROLL_LEFT_PROPERTY_NAME,
 } from './constants';
 import type { FSRS, FSRSParameters, Grade } from 'ts-fsrs';
 import { fsrs, generatorParameters } from 'ts-fsrs';
@@ -41,13 +53,18 @@ import {
   compareDates,
   createFile,
   createTitle,
+  generateId,
+  getContentSlice,
   getSelectionWithBounds,
+  sanitizeForTitle,
   searchAll,
 } from './utils';
 import SRSCard from './SRSCard';
 import { randomUUID } from 'crypto';
 import type ReviewView from 'src/views/ReviewView';
 import SRSCardReview from './SRSCardReview';
+import Article from './Article';
+import Snippet from './Snippet';
 
 const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
   enable_fuzz: false,
@@ -85,10 +102,7 @@ export default class ReviewManager {
       // add a full day since we're past the rollover point
       endOfDayLocal += MS_PER_DAY;
     }
-    // convert to UTC
-    const timezoneDiff = date.getTimezoneOffset() * MS_PER_MINUTE;
-    const endOfDayUtc = endOfDayLocal + timezoneDiff;
-    return endOfDayUtc;
+    return endOfDayLocal;
   }
 
   async getCardsDue(
@@ -102,7 +116,7 @@ export default class ReviewManager {
       ).map(
         async (item) => ({
           data: SRSCard.rowToDisplay(item),
-          file: await this.getNote(item.reference),
+          file: this.getNote(item.reference),
         }),
         this
       );
@@ -120,21 +134,21 @@ export default class ReviewManager {
   async getSnippetsDue(
     dueBy?: number,
     limit?: number
-  ): Promise<{ data: ISnippet; file: TFile }[]> {
+  ): Promise<{ data: ISnippetActive; file: TFile }[]> {
     const dueTime = dueBy ?? this.getEndOfToday();
     try {
       const snippetsDue = (
         await this._fetchSnippetData({ dueBy: dueTime, limit })
       ).map(
         async (item) => ({
-          data: item,
-          file: await this.getNote(item.reference),
+          data: Snippet.rowToBase(item),
+          file: this.getNote(item.reference),
         }),
         this
       );
       const result = await Promise.all(snippetsDue);
       return result.filter(
-        (snippet): snippet is { data: ISnippet; file: TFile } =>
+        (snippet): snippet is { data: ISnippetActive; file: TFile } =>
           snippet.file !== null
       );
     } catch (error) {
@@ -144,7 +158,7 @@ export default class ReviewManager {
   }
 
   /**
-   * Fetch all snippets and cards ready for review, then order by due ASC
+   * Fetch all snippets, cards, and articles ready for review, then order by due ASC
    * TODO:
    * - paginate
    * - invalidate after some time (e.g., the configured minimum review interval)
@@ -160,13 +174,19 @@ export default class ReviewManager {
     try {
       const cardsDue = await this.getCardsDue(dueBy, limit);
       const snippetsDue = await this.getSnippetsDue(dueBy, limit);
-      const allDue = [...cardsDue, ...snippetsDue].sort((a, b) =>
-        compareDates(a.data.due, b.data.due)
+      const articlesDue = await this.getArticlesDue(dueBy, limit);
+      const allDue = [...cardsDue, ...snippetsDue, ...articlesDue].sort(
+        (a, b) => compareDates(a.data.due, b.data.due)
       );
-      return { all: allDue, cards: cardsDue, snippets: snippetsDue };
+      return {
+        all: allDue,
+        cards: cardsDue,
+        snippets: snippetsDue,
+        articles: articlesDue,
+      };
     } catch (error) {
       console.error(error);
-      return { all: [], cards: [], snippets: [] };
+      return { all: [], cards: [], snippets: [], articles: [] };
     }
   }
 
@@ -269,20 +289,31 @@ export default class ReviewManager {
   ) {
     try {
       // Create the card from the content
-      const cardFile = await this.createFromText(delimitedText, CARD_DIRECTORY);
+      const cardFile = await this.createFromText(
+        delimitedText,
+        this.getDirectory('card')
+      );
       const linkToSource = this.generateMarkdownLink(sourceFile, cardFile);
       await this.updateFrontMatter(cardFile, {
         tags: CARD_TAG,
         [`${SOURCE_PROPERTY_NAME}`]: linkToSource,
       });
 
-      // parse question/answer formatting
-
+      const parentType = this.getNoteType(sourceFile);
+      let currentFileEntry;
+      if (parentType === 'article') {
+        currentFileEntry = await this.findArticle(sourceFile);
+      } else if (parentType === 'snippet') {
+        currentFileEntry = await this.findSnippet(sourceFile);
+      }
+      const parent = currentFileEntry ? currentFileEntry.id : null;
       // create the database entry as FSRS card + reference
-      const card = new SRSCard(cardFile.path);
+      const reference = `${CARD_DIRECTORY}/${cardFile.basename}.md`;
+      const card = new SRSCard(reference);
       const params = [
         card.id,
         card.reference,
+        parent,
         card.created_at.getTime(),
         card.due.getTime(),
         card.last_review?.getTime() ?? null,
@@ -295,9 +326,9 @@ export default class ReviewManager {
         card.state,
       ];
       const insertResult = await this.#repo.mutate(
-        `INSERT INTO srs_card (id, reference, created_at, due, last_review, ` +
+        `INSERT INTO srs_card (id, reference, parent, created_at, due, last_review, ` +
           `stability, difficulty, elapsed_days, scheduled_days, reps, lapses, state) ` +
-          `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
         params
       );
 
@@ -460,7 +491,7 @@ export default class ReviewManager {
     firstReview?: number
   ) {
     const reviewTime =
-      firstReview || Date.now() + SNIPPET_REVIEW_INTERVALS.TOMORROW;
+      firstReview || Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
     if (!view.file) {
       new Notice(
         `Snipping not supported from ${view.getViewType()}`,
@@ -468,14 +499,17 @@ export default class ReviewManager {
       );
       return;
     }
-    const selection = editor.getSelection();
+    const selection = editor.getSelection() || view.getSelection();
     if (!selection) {
       new Notice('Text must be selected', ERROR_NOTICE_DURATION_MS);
       return;
     }
 
     const currentFile = view.file;
-    const snippetFile = await this.createFromText(selection, SNIPPET_DIRECTORY);
+    const snippetFile = await this.createFromText(
+      selection,
+      this.getDirectory('snippet')
+    );
 
     // Tag it and link to the source file
     const sourceLink = this.generateMarkdownLink(currentFile, snippetFile);
@@ -486,8 +520,14 @@ export default class ReviewManager {
     });
 
     // inherit priority from the source file if it has one, or assign default priority
-    const currentFileEntry = await this.findSnippet(currentFile);
-    const priority = currentFileEntry?.priority ?? SNIPPET_DEFAULT_PRIORITY;
+    const parentType = this.getNoteType(currentFile);
+    let currentFileEntry;
+    if (parentType === 'article') {
+      currentFileEntry = await this.findArticle(currentFile);
+    } else if (parentType === 'snippet') {
+      currentFileEntry = await this.findSnippet(currentFile);
+    }
+    const priority = currentFileEntry?.priority ?? DEFAULT_PRIORITY;
 
     // Transclude the snippet into its source location
     const linkToSnippet = this.generateMarkdownLink(
@@ -535,7 +575,7 @@ export default class ReviewManager {
       return result;
     } catch (error) {
       new Notice(
-        `Failed to save snippet to database: ${snippetFile.basename}`,
+        `Failed to save snippet to db: ${snippetFile.basename}`,
         ERROR_NOTICE_DURATION_MS
       );
       console.error(error);
@@ -569,37 +609,46 @@ export default class ReviewManager {
       query += ` LIMIT $${params.length}`;
     }
 
-    return ((await this.#repo.query(query, params)) ?? []) as ISnippet[];
+    return ((await this.#repo.query(query, params)) ?? []) as SnippetRow[];
   }
 
-  async findSnippet(snippetFile: TAbstractFile): Promise<ISnippet | null> {
+  async findSnippet(snippetFile: TAbstractFile): Promise<SnippetRow | null> {
     const results = await this.#repo.query(
       'SELECT * FROM snippet WHERE reference = $1',
-      [snippetFile.path]
+      [this.getReferenceFromPath(snippetFile.path)]
     );
 
-    return (results[0] as ISnippet) ?? null;
+    return (results[0] as SnippetRow) ?? null;
   }
+
+  protected async getLastSnippetReview(snippet: ISnippetActive) {
+    const lastReview = (await this.#repo.query(
+      `SELECT review_time FROM snippet_review WHERE snippet_id = $1 ` +
+        `ORDER BY review_time DESC LIMIT 1`,
+      [snippet.id]
+    )) as ISnippetReview[];
+    return lastReview;
+  }
+
   /**
    * Add a SnippetReview and set the next review date
    */
   async reviewSnippet(
-    snippet: ISnippet,
+    snippet: ISnippetActive,
     reviewTime?: number,
     nextReviewInterval?: number
   ) {
     const reviewed = reviewTime || Date.now();
     const nextReview =
       reviewed +
-      (nextReviewInterval ??
-        (await this.calcNextSnippetReviewInterval(snippet)));
+      (nextReviewInterval ?? (await this.nextTextReviewInterval(snippet)));
     try {
       const insertReviewResult = await this.#repo.mutate(
         'INSERT INTO snippet_review (id, snippet_id, review_time) VALUES ($1, $2, $3)',
         [randomUUID(), snippet.id, reviewed]
       );
 
-      const updateSnippetResult = await this.#repo.mutate(
+      const updateResult = await this.#repo.mutate(
         `UPDATE snippet SET due = $1 WHERE id = $2`,
         [nextReview, snippet.id]
       );
@@ -608,36 +657,17 @@ export default class ReviewManager {
     }
   }
 
-  protected async calcNextSnippetReviewInterval(snippet: ISnippet) {
-    const intervalMultiplier =
-      SNIPPET_REVIEW_MULTIPLIER_BASE +
-      (snippet.priority - 10) * SNIPPET_REVIEW_MULTIPLIER_STEP;
-
-    const lastReview = (await this.#repo.query(
-      `SELECT review_time FROM snippet_review WHERE snippet_id = $1 ` +
-        `ORDER BY review_time DESC LIMIT 1`,
-      [snippet.id]
-    )) as ISnippetReview[];
-
-    const lastInterval = lastReview[0]
-      ? snippet.due - lastReview[0].review_time
-      : SNIPPET_BASE_REVIEW_INTERVAL;
-
-    const nextInterval = Math.round(lastInterval * intervalMultiplier);
-    return nextInterval;
-  }
-
   /**
    * Change the priority of a snippet, automatically adjusting the next due date
    */
-  async reprioritizeSnippet(snippet: ISnippet, newPriority: number) {
+  async reprioritizeSnippet(snippet: ISnippetActive, newPriority: number) {
     if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
       throw new TypeError(
         `Priority must be an integer between 10 and 50 inclusive; received ${newPriority}`
       );
     }
     const { priority: _, ...rest } = snippet;
-    const newInterval = await this.calcNextSnippetReviewInterval({
+    const newInterval = await this.nextTextReviewInterval({
       ...rest,
       priority: newPriority,
     });
@@ -649,7 +679,7 @@ export default class ReviewManager {
     );
   }
 
-  async dismissSnippet(snippet: ISnippet) {
+  async dismissSnippet(snippet: ISnippetActive) {
     try {
       await this.#repo.mutate(
         'UPDATE snippet SET dismissed = 1 WHERE id = $1',
@@ -660,11 +690,323 @@ export default class ReviewManager {
     }
   }
   // #endregion
-  // #region HELPERS
-  async getNote(reference: string): Promise<TFile | null> {
-    return this.app.vault.getFileByPath(normalizePath(reference));
+  // #region ARTICLES
+  /**
+   * Import the currently opened note as an article
+   */
+  async importArticle(view: MarkdownView | FileView, priority: number) {
+    const currentFile = view.file;
+    if (!currentFile) {
+      new Notice(`A markdown file must be active`, ERROR_NOTICE_DURATION_MS);
+      return;
+    }
+
+    try {
+      // check if the file is inside the plugin's data directory
+      const inDataDir = currentFile.path.startsWith(DATA_DIRECTORY);
+      if (currentFile.path.startsWith(DATA_DIRECTORY)) {
+        new Notice(
+          `Note is already in the plugin data folder; canceling import`,
+          ERROR_NOTICE_DURATION_MS
+        );
+        return;
+      }
+      // Read the content of the current file
+      const content = await this.app.vault.cachedRead(currentFile);
+      const frontmatter =
+        this.app.metadataCache.getFileCache(currentFile)?.frontmatter;
+      if (frontmatter?.tags?.length) {
+        const tags: string[] = frontmatter.tags;
+        if (tags.some((tag) => new Set([SNIPPET_TAG, CARD_TAG]).has(tag))) {
+          new Notice(
+            `Note contains a snippet or card tag; canceling import`,
+            ERROR_NOTICE_DURATION_MS
+          );
+          return;
+        }
+      }
+
+      // check if an article with this name already exists
+      const getTargetPath = (fileName: string) =>
+        normalizePath(`${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/${fileName}`);
+      const isDuplicate = (fileName: string) =>
+        this.app.vault.getAbstractFileByPath(getTargetPath(fileName));
+
+      if (isDuplicate(currentFile.name)) {
+        new Notice(
+          `Warning: article with name already exists "${currentFile.name}"`,
+          ERROR_NOTICE_DURATION_MS
+        );
+      }
+
+      let importFileName = currentFile.name;
+      while (isDuplicate(importFileName)) {
+        importFileName = `${currentFile.basename} - ${generateId()}.${currentFile.extension}`;
+      }
+
+      // Create a copy in the articles directory
+      const articleFile = await this.createNote({
+        content,
+        fileName: importFileName,
+        directory: this.getDirectory('article'),
+      });
+
+      if (!articleFile) {
+        throw new Error(
+          `Failed to create note ${getTargetPath(importFileName)}`
+        );
+      }
+
+      // Tag it and create a link to the source if it doesn't exist
+      const frontmatterUpdates: Record<string, any> = {
+        tags: ARTICLE_TAG,
+      };
+      if (!frontmatter?.source) {
+        const sourceLink = this.generateMarkdownLink(currentFile, articleFile);
+        frontmatterUpdates[`${SOURCE_PROPERTY_NAME}`] = sourceLink;
+      }
+      await this.updateFrontMatter(articleFile, frontmatterUpdates);
+
+      // Insert into database with immediate due time
+      const dueTime = Date.now();
+      const result = await this.#repo.mutate(
+        'INSERT INTO article (id, reference, due, priority) VALUES ($1, $2, $3, $4)',
+        [
+          randomUUID(),
+          `${ARTICLE_DIRECTORY}/${articleFile.name}`,
+          dueTime,
+          priority,
+        ]
+      );
+
+      const titleSlice = getContentSlice(
+        articleFile.basename,
+        CONTENT_TITLE_SLICE_LENGTH,
+        true
+      );
+      new Notice(
+        `Imported "${titleSlice}" with priority ${priority / 10}`,
+        SUCCESS_NOTICE_DURATION_MS
+      );
+      return result;
+    } catch (error) {
+      new Notice(
+        `Failed to import article "${currentFile.name}"`,
+        ERROR_NOTICE_DURATION_MS
+      );
+      console.error(error);
+    }
   }
 
+  async getArticlesDue(
+    dueBy?: number,
+    limit?: number
+  ): Promise<{ data: IArticleActive; file: TFile }[]> {
+    const dueTime = dueBy ?? this.getEndOfToday();
+    try {
+      const articlesDue = (
+        await this._fetchArticleData({ dueBy: dueTime, limit })
+      ).map(
+        async (item) => ({
+          data: Article.rowToBase(item),
+          file: this.getNote(item.reference),
+        }),
+        this
+      );
+      const result = await Promise.all(articlesDue);
+      return result.filter(
+        (article): article is { data: IArticleActive; file: TFile } =>
+          article.file !== null
+      );
+    } catch (error) {
+      console.error(error);
+      return [];
+    }
+  }
+
+  async _fetchArticleData(opts?: {
+    dueBy?: number;
+    limit?: number;
+    includeDismissed?: boolean;
+  }) {
+    let query = 'SELECT * FROM article';
+    const conditions = [];
+    const params = [];
+    if (opts?.dueBy) {
+      params.push(opts?.dueBy);
+      conditions.push(`due <= $${params.length}`);
+    }
+    if (!opts?.includeDismissed) {
+      conditions.push('dismissed = 0');
+    }
+
+    if (conditions.length) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    query += ' ORDER BY priority DESC';
+
+    if (opts?.limit) {
+      params.push(opts?.limit);
+      query += ` LIMIT $${params.length}`;
+    }
+
+    return ((await this.#repo.query(query, params)) ?? []) as ArticleRow[];
+  }
+
+  getReferenceFromPath(vaultPath: string): string {
+    const reference = vaultPath.split(`${DATA_DIRECTORY}/`)[1];
+    return reference;
+  }
+
+  async findArticle(articleFile: TAbstractFile): Promise<ArticleRow | null> {
+    const results = await this.#repo.query(
+      'SELECT * FROM article WHERE reference = $1',
+      [this.getReferenceFromPath(articleFile.path)]
+    );
+
+    return (results[0] as ArticleRow) ?? null;
+  }
+
+  protected async getLastArticleReview(snippet: IArticleActive) {
+    const lastReview = (await this.#repo.query(
+      `SELECT review_time FROM article_review WHERE article_id = $1 ` +
+        `ORDER BY review_time DESC LIMIT 1`,
+      [snippet.id]
+    )) as IArticleReview[];
+    return lastReview;
+  }
+
+  async reviewArticle(
+    article: IArticleActive,
+    reviewTime?: number,
+    nextReviewInterval?: number
+  ) {
+    const reviewed = reviewTime || Date.now();
+    const nextReview =
+      reviewed +
+      (nextReviewInterval ?? (await this.nextTextReviewInterval(article)));
+    try {
+      const insertReviewResult = await this.#repo.mutate(
+        'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
+        [randomUUID(), article.id, reviewed]
+      );
+
+      const updateResult = await this.#repo.mutate(
+        `UPDATE article SET due = $1 WHERE id = $2`,
+        [nextReview, article.id]
+      );
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  async renameArticle(article: ReviewArticle, newName: string) {
+    const sanitized = sanitizeForTitle(newName, true);
+    if (sanitized !== newName) {
+      new Notice(INVALID_TITLE_MESSAGE, ERROR_NOTICE_DURATION_MS);
+      return;
+    }
+
+    try {
+      const currentName = article.file.basename;
+      await this.renameFile(article.file, newName);
+      const newReference = `${ARTICLE_DIRECTORY}/${article.file.basename}.md`;
+      await this.#repo
+        .mutate(`UPDATE article SET reference = $1 WHERE id = $2`, [
+          newReference,
+          article.data.id,
+        ])
+        .catch(async () => {
+          await this.renameFile(article.file, currentName);
+        });
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  /**
+   * Rename a file without moving it
+   * @throws if the title contains invalid characters
+   * or if the rename operation fails
+   */
+  async renameFile(file: TFile, newName: string) {
+    const sanitized = sanitizeForTitle(newName, true);
+    if (sanitized !== newName) {
+      throw new Error(`${INVALID_TITLE_MESSAGE}. Title was ${newName}`);
+    }
+
+    const newPath = file.parent
+      ? `${file.parent.path}/${newName}.${file.extension}`
+      : `${newName}.${file.extension}`;
+
+    await this.app.fileManager.renameFile(file, newPath);
+  }
+
+  /**
+   * Change the priority of an article, automatically adjusting the next due date
+   */
+  async reprioritizeArticle(article: IArticleActive, newPriority: number) {
+    if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
+      throw new TypeError(
+        `Priority must be an integer between 10 and 50 inclusive; received ${newPriority}`
+      );
+    }
+    const { priority: _, ...rest } = article;
+    const newInterval = await this.nextTextReviewInterval({
+      ...rest,
+      priority: newPriority,
+    });
+    const newDueTime = Date.now() + newInterval;
+
+    await this.#repo.mutate(
+      `UPDATE article SET priority = $1, due = $2 WHERE id = $3`,
+      [newPriority, newDueTime, article.id]
+    );
+  }
+
+  async dismissArticle(article: IArticleActive) {
+    try {
+      await this.#repo.mutate(
+        'UPDATE article SET dismissed = 1 WHERE id = $1',
+        [article.id]
+      );
+    } catch (error) {
+      console.error(error);
+    }
+  }
+  // #endregion
+  // #region HELPERS
+  protected async nextTextReviewInterval(
+    text: IArticleActive | ISnippetActive
+  ) {
+    const intervalMultiplier =
+      TEXT_REVIEW_MULTIPLIER_BASE +
+      (text.priority - 10) * TEXT_REVIEW_MULTIPLIER_STEP;
+
+    const lastReview = await (isArticle(text)
+      ? this.getLastArticleReview(text)
+      : this.getLastSnippetReview(text));
+
+    const lastInterval = lastReview[0]
+      ? text.due - lastReview[0].review_time
+      : TEXT_BASE_REVIEW_INTERVAL;
+
+    const nextInterval = Math.round(lastInterval * intervalMultiplier);
+    return nextInterval;
+  }
+
+  /** Retrieves notes from the data directory given a row's reference */
+  getNote(reference: string): TFile | null {
+    return this.app.vault.getFileByPath(
+      normalizePath(`${DATA_DIRECTORY}/${reference}`)
+    );
+  }
+
+  /**
+   *
+   * @param directory path relative to the vault root
+   */
   protected async createNote({
     content,
     frontmatterObj,
@@ -730,6 +1072,28 @@ export default class ReviewManager {
     return newNote;
   }
 
+  protected getNoteType(note: TFile): NoteType | null {
+    // get tags
+    const tags = this.app.metadataCache.getFileCache(note)?.frontmatter?.tags;
+    if (!tags) return null;
+
+    const tagSet: Set<string> = new Set(Array.isArray(tags) ? tags : [tags]);
+    if (tagSet.has(ARTICLE_TAG)) return 'article';
+    else if (tagSet.has(SNIPPET_TAG)) return 'snippet';
+    else if (tagSet.has(CARD_TAG)) return 'card';
+    else return null;
+  }
+
+  /** Get the vault absolute directory for a type of review item */
+  getDirectory(type: NoteType) {
+    let subDirectory;
+    if (type === 'article') subDirectory = ARTICLE_DIRECTORY;
+    else if (type === 'snippet') subDirectory = SNIPPET_DIRECTORY;
+    else if (type === 'card') subDirectory = CARD_DIRECTORY;
+    else throw new TypeError(`Type "${type}" is invalid`);
+    return normalizePath(`${DATA_DIRECTORY}/${subDirectory}`);
+  }
+
   /**
    * Generates a link with an absolute path and the file name as alias
    */
@@ -749,8 +1113,50 @@ export default class ReviewManager {
 
   protected async updateFrontMatter(file: TFile, updates: Record<string, any>) {
     await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-      Object.assign(frontmatter, updates);
+      const { tags } = frontmatter;
+      const updateTags = Array.isArray(updates.tags)
+        ? updates.tags
+        : [updates.tags];
+      const combinedTags = tags
+        ? [...new Set([...tags, ...updateTags])]
+        : updateTags;
+      Object.assign(frontmatter, {
+        ...updates,
+        tags: combinedTags,
+      });
     });
+  }
+
+  /**
+   * Save scroll position to file frontmatter
+   */
+  async saveScrollPosition(
+    file: TFile,
+    scrollInfo: { top: number; left: number }
+  ) {
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      frontmatter[SCROLL_TOP_PROPERTY_NAME] = scrollInfo.top;
+      frontmatter[SCROLL_LEFT_PROPERTY_NAME] = scrollInfo.left;
+    });
+  }
+
+  /**
+   * Load scroll position from file frontmatter
+   */
+  loadScrollPosition(file: TFile): { top: number; left: number } | null {
+    const cache = this.app.metadataCache.getFileCache(file);
+    const frontmatter = cache?.frontmatter;
+
+    if (!frontmatter) return null;
+
+    const top = frontmatter[SCROLL_TOP_PROPERTY_NAME];
+    const left = frontmatter[SCROLL_LEFT_PROPERTY_NAME];
+
+    if (typeof top === 'number' && typeof left === 'number') {
+      return { top, left };
+    }
+
+    return null;
   }
   /**
    * Get the content of the markdown block/section where the cursor is currently positioned
