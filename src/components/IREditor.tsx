@@ -22,6 +22,8 @@ import type { EditState } from './types';
 import { useReviewContext } from './ReviewContext';
 import { getBaseMarkdownExtensions } from '../lib/utils';
 import type { ReviewItem } from '#/lib/types';
+import { createSnippetHighlightExtension } from '../lib/extensions/SnippetHighlightExtension';
+import { useQuery } from '@tanstack/react-query';
 
 /**
  * Credit goes to mgmeyers for figuring out how to get the editor prototype. See the original code here: https://github.com/mgmeyers/obsidian-kanban/blob/main/src/components/Editor/MarkdownEditor.tsx
@@ -66,173 +68,232 @@ export function IREditor({
   const internalRef = useRef<EditorView | null>(null);
   const lastScrollPosition = useRef<{ top: number; left: number }>();
 
+  // Fetch highlights using React Query
+  const { isPending, data: highlights = [] } = useQuery({
+    queryKey: [item.data.reference, 'highlights'],
+    queryFn: async () => {
+      if (!item.file) return [];
+      return await reviewManager.getSnippetHighlights(item.file);
+    },
+    enabled: !!item.file,
+  });
+
+  console.log(
+    `[IREditor] Rendering with ${highlights.length} highlights for ${item.file?.path}`
+  );
+
   // extend the MarkdownEditor extracted from Obsidian
   useEffect(() => {
-    class Editor extends reviewView.plugin.MarkdownEditor {
-      isIncrementalReadingEditor = true;
+    // Wait for highlights to load before creating editor
+    if (isPending) return;
 
-      // // Override getSelection to provide proper context
-      // getSelection() {
-      //   return window.getSelection();
-      // }
+    const setupEditor = () => {
+      class Editor extends reviewView.plugin.MarkdownEditor {
+        isIncrementalReadingEditor = true;
 
-      onUpdate(update: ViewUpdate, changed: boolean) {
-        super.onUpdate(update, changed);
-        onChange && onChange(update);
-      }
+        // // Override getSelection to provide proper context
+        // getSelection() {
+        //   return window.getSelection();
+        // }
 
-      buildLocalExtensions(): Extension[] {
-        const extensions = super.buildLocalExtensions();
-        try {
-          const baseExtensions = getBaseMarkdownExtensions(reviewView.app);
-          extensions.push(...baseExtensions);
-        } catch (error) {
-          console.warn('Could not load base markdown extensions:', error);
-          console.error('Extension loading error details:', error);
+        onUpdate(update: ViewUpdate, changed: boolean) {
+          super.onUpdate(update, changed);
+          onChange && onChange(update);
         }
 
-        // extensions.push(stateManagerField.init(() => stateManager));
-        // extensions.push(datePlugins);
-        extensions.push(
-          Prec.highest(scrollPastEnd()),
-          Prec.highest(
-            EditorView.theme({
-              '.cm-scroller': {
-                overflow: 'auto',
-              },
-            })
-          ),
-          Prec.highest(
-            EditorView.domEventHandlers({
-              focus: (evt) => {
-                reviewView.activeEditor = this.owner;
-                if (Platform.isMobile) {
-                  reviewView.contentEl.addClass('is-mobile-editing');
-                }
+        buildLocalExtensions(): Extension[] {
+          const extensions = super.buildLocalExtensions();
+          try {
+            const baseExtensions = getBaseMarkdownExtensions(reviewView.app);
+            extensions.push(...baseExtensions);
+          } catch (error) {
+            console.warn('Could not load base markdown extensions:', error);
+            console.error('Extension loading error details:', error);
+          }
 
-                evt.win.setTimeout(() => {
-                  this.app.workspace.activeEditor = this.owner;
-                  if (Platform.isMobile && this.app.mobileToolbar) {
-                    this.app.mobileToolbar.update();
-                  }
-                });
-                return true;
-              },
-              blur: () => {
-                if (Platform.isMobile) {
-                  reviewView.contentEl.removeClass('is-mobile-editing');
-                  if (this.app.mobileToolbar) {
-                    this.app.mobileToolbar.update();
-                  }
-                }
-                return true;
-              },
-            })
-          )
-        );
-
-        if (placeholder) extensions.push(placeholderExt(placeholder));
-        if (onPaste) {
+          // extensions.push(stateManagerField.init(() => stateManager));
+          // extensions.push(datePlugins);
           extensions.push(
-            Prec.high(
+            Prec.highest(scrollPastEnd()),
+            Prec.highest(
+              EditorView.theme({
+                '.cm-scroller': {
+                  overflow: 'auto',
+                },
+              })
+            ),
+            Prec.highest(
               EditorView.domEventHandlers({
-                paste: onPaste,
+                focus: (evt) => {
+                  reviewView.activeEditor = this.owner;
+                  if (Platform.isMobile) {
+                    reviewView.contentEl.addClass('is-mobile-editing');
+                  }
+
+                  evt.win.setTimeout(() => {
+                    this.app.workspace.activeEditor = this.owner;
+                    if (Platform.isMobile && this.app.mobileToolbar) {
+                      this.app.mobileToolbar.update();
+                    }
+                  });
+                  return true;
+                },
+                blur: () => {
+                  if (Platform.isMobile) {
+                    reviewView.contentEl.removeClass('is-mobile-editing');
+                    this.app.mobileToolbar?.update();
+                  }
+                  return true;
+                },
               })
             )
           );
-        }
 
-        const makeEnterHandler =
-          (mod: boolean, shift: boolean) => (cm: EditorView) => {
-            const didRun = onEnter(cm, mod, shift);
-            if (didRun) return true;
-            if (this.app.vault.getConfig('smartIndentList')) {
-              this.editor.newlineAndIndentContinueMarkdownList();
-            } else {
-              insertBlankLine(cm as any);
-            }
-            return true;
-          };
+          // Add snippet highlight extension if this is a parent file
+          if (item.file) {
+            try {
+              const highlightExtension = createSnippetHighlightExtension({
+                app: reviewView.app,
+                file: item.file,
+                tracker: reviewManager.snippetTracker,
+                onHighlightClick: async (snippetId, snippetRef) => {
+                  console.log(
+                    `[IREditor] Highlight clicked - snippetId: ${snippetId}, snippetRef: ${snippetRef}`
+                  );
 
-        extensions.push(
-          Prec.highest(
-            keymap.of([
-              {
-                key: 'Enter',
-                run: makeEnterHandler(false, false),
-                shift: makeEnterHandler(false, true),
-                preventDefault: true,
-              },
-              {
-                key: 'Mod-Enter',
-                run: makeEnterHandler(true, false),
-                shift: makeEnterHandler(true, true),
-                preventDefault: true,
-              },
-              {
-                key: 'Escape',
-                run: (cm) => {
-                  onEscape(cm);
-                  return false;
+                  const snippetFile = reviewManager.getNote(snippetRef);
+
+                  if (snippetFile) {
+                    // Open the file in a new leaf
+                    const leaf = reviewView.app.workspace.getLeaf('tab');
+                    await leaf.openFile(snippetFile);
+                    console.log(`[IREditor] Opened snippet file`);
+                  } else {
+                    console.warn(
+                      `[IREditor] Could not find file at ${snippetRef}`
+                    );
+                  }
                 },
-                preventDefault: true,
-              },
-            ])
-          )
-        );
+              });
+              extensions.push(highlightExtension);
+            } catch (error) {
+              console.warn(
+                'Could not load snippet highlight extension:',
+                error
+              );
+            }
+          }
 
-        return extensions;
+          if (placeholder) extensions.push(placeholderExt(placeholder));
+          if (onPaste) {
+            extensions.push(
+              Prec.high(
+                EditorView.domEventHandlers({
+                  paste: onPaste,
+                })
+              )
+            );
+          }
+
+          const makeEnterHandler =
+            (mod: boolean, shift: boolean) => (cm: EditorView) => {
+              const didRun = onEnter(cm, mod, shift);
+              if (didRun) return true;
+              if (this.app.vault.getConfig('smartIndentList')) {
+                this.editor.newlineAndIndentContinueMarkdownList();
+              } else {
+                insertBlankLine(cm as any);
+              }
+              return true;
+            };
+
+          extensions.push(
+            Prec.highest(
+              keymap.of([
+                {
+                  key: 'Enter',
+                  run: makeEnterHandler(false, false),
+                  shift: makeEnterHandler(false, true),
+                  preventDefault: true,
+                },
+                {
+                  key: 'Mod-Enter',
+                  run: makeEnterHandler(true, false),
+                  shift: makeEnterHandler(true, true),
+                  preventDefault: true,
+                },
+                {
+                  key: 'Escape',
+                  run: (cm) => {
+                    onEscape(cm);
+                    return false;
+                  },
+                  preventDefault: true,
+                },
+              ])
+            )
+          );
+
+          return extensions;
+        }
       }
-    }
 
-    const controller = getMarkdownController(
-      reviewView,
-      () => editor.editor,
-      item
-    );
-    const app = getEditorAppProxy(reviewView);
+      const controller = getMarkdownController(
+        reviewView,
+        () => editor.editor,
+        item
+      );
+      const app = getEditorAppProxy(reviewView);
 
-    let editor: any;
-    let cm: EditorView;
+      let editor: any;
+      let cm: EditorView;
 
-    try {
-      editor = new (Editor as any)(app, elRef.current, controller);
-      cm = editor.cm;
-    } catch (error) {
-      console.error('Error creating editor:', error);
-      console.error('Error stack:', error.stack);
-      throw error;
-    }
-
-    internalRef.current = cm;
-    if (editorRef) editorRef.current = cm;
-
-    controller.editMode = editor;
-    editor.set(value ?? '');
-
-    // Inject title element into CodeMirror's DOM structure
-    if (titleRef?.current) {
-      const cmSizer = cm.dom.querySelector('.cm-sizer');
-      const cmContentContainer = cm.dom.querySelector('.cm-contentContainer');
-      if (cmSizer && cmContentContainer) {
-        cmSizer.insertBefore(titleRef.current, cmContentContainer);
+      try {
+        editor = new (Editor as any)(app, elRef.current, controller);
+        cm = editor.cm;
+      } catch (error) {
+        console.error('Error creating editor:', error);
+        console.error('Error stack:', error.stack);
+        throw error;
       }
-    }
 
-    if (isEditing(editState)) {
-      cm.dispatch({
-        userEvent: 'select.pointer',
-        selection: EditorSelection.single(cm.posAtCoords(editState, false)),
-      });
+      internalRef.current = cm;
+      if (editorRef) editorRef.current = cm;
 
-      cm.dom.win.setTimeout(() => {
-        setInsertMode(cm);
-      });
-    }
+      // Store editor view reference in ReviewManager for highlight refresh
+      if (item.file) {
+        reviewManager.currentEditorView = {
+          view: cm,
+          file: item.file,
+        };
+      }
 
-    const onShow = () => {
-      // elRef.current?.scrollIntoView({ block: 'end' });
-    };
+      controller.editMode = editor;
+      editor.set(value ?? '');
+
+      // Inject title element into CodeMirror's DOM structure
+      if (titleRef?.current) {
+        const cmSizer = cm.dom.querySelector('.cm-sizer');
+        const cmContentContainer = cm.dom.querySelector('.cm-contentContainer');
+        if (cmSizer && cmContentContainer) {
+          cmSizer.insertBefore(titleRef.current, cmContentContainer);
+        }
+      }
+
+      if (isEditing(editState)) {
+        cm.dispatch({
+          userEvent: 'select.pointer',
+          selection: EditorSelection.single(cm.posAtCoords(editState, false)),
+        });
+
+        cm.dom.win.setTimeout(() => {
+          setInsertMode(cm);
+        });
+      }
+
+      const onShow = () => {
+        // elRef.current?.scrollIntoView({ block: 'end' });
+      };
 
     // Add iOS keyboard event listener with defensive check
     if (Platform.isMobile) {
@@ -243,46 +304,46 @@ export function IREditor({
       }
     }
 
-    // Set up scroll tracking
-    const scroller = cm.scrollDOM;
-    let isLoadingScrollPos = true;
+      // Set up scroll tracking
+      const scroller = cm.scrollDOM;
+      let isLoadingScrollPos = true;
 
-    const handleScroll = async () => {
-      if (isLoadingScrollPos) return;
-      lastScrollPosition.current = {
-        top: scroller.scrollTop,
-        left: scroller.scrollLeft,
+      const handleScroll = async () => {
+        if (isLoadingScrollPos) return;
+        lastScrollPosition.current = {
+          top: scroller.scrollTop,
+          left: scroller.scrollLeft,
+        };
       };
-    };
 
-    // Restore scroll position from frontmatter
-    const scrollInfo = reviewManager.loadScrollPosition(item.file);
-    if (scrollInfo) {
-      scroller.scrollTo({
-        top: scrollInfo.top,
-        left: scrollInfo.left,
-        behavior: 'smooth',
-      });
-      lastScrollPosition.current = scrollInfo;
-    }
-
-    isLoadingScrollPos = false;
-    scroller.addEventListener('scroll', handleScroll);
-
-    const cleanupEffect = async () => {
-      // Save the last tracked scroll position to frontmatter before unmounting
-      let saveScroll;
-      if (lastScrollPosition.current) {
-        saveScroll = reviewManager.saveScrollPosition(
-          item.file,
-          lastScrollPosition.current
-        );
+      // Restore scroll position from frontmatter
+      const scrollInfo = reviewManager.loadScrollPosition(item.file);
+      if (scrollInfo) {
+        scroller.scrollTo({
+          top: scrollInfo.top,
+          left: scrollInfo.left,
+          behavior: 'smooth',
+        });
+        lastScrollPosition.current = scrollInfo;
       }
 
-      // Clean up scroll listener
-      if (scroller) {
-        scroller.removeEventListener('scroll', handleScroll);
-      }
+      isLoadingScrollPos = false;
+      scroller.addEventListener('scroll', handleScroll);
+
+      const cleanupEffect = async () => {
+        // Save the last tracked scroll position to frontmatter before unmounting
+        let saveScroll;
+        if (lastScrollPosition.current) {
+          saveScroll = reviewManager.saveScrollPosition(
+            item.file,
+            lastScrollPosition.current
+          );
+        }
+
+        // Clean up scroll listener
+        if (scroller) {
+          scroller.removeEventListener('scroll', handleScroll);
+        }
 
       if (Platform.isMobile) {
         try {
@@ -298,25 +359,31 @@ export function IREditor({
 
           if ((app.workspace.activeEditor as unknown) === controller) {
             app.workspace.activeEditor = null;
-            if ((app as any).mobileToolbar) {
-              (app as any).mobileToolbar.update();
-            }
+            (app as any).mobileToolbar?.update();
             reviewView.contentEl.removeClass('is-mobile-editing');
           }
         } catch (error) {
           console.warn('Incremental Reading - Error during mobile cleanup:', error);
         }
-      }
-      elRef.current?.removeChild(elRef.current?.children[0]);
-      internalRef.current = null;
-      if (editorRef) editorRef.current = null;
-      await saveScroll;
-    };
+        elRef.current?.removeChild(elRef.current?.children[0]);
+        internalRef.current = null;
+        if (editorRef) editorRef.current = null;
+        // Clear editor view reference from ReviewManager if it matches this file
+        if (reviewManager.currentEditorView?.file === item.file) {
+          reviewManager.currentEditorView = null;
+        }
 
-    return () => {
-      cleanupEffect();
-    };
-  }, [value, item]);
+        await saveScroll;
+      };
+
+      return () => {
+        cleanupEffect();
+      };
+    }; // End of setupEditor async function
+
+    // Call the async setup function
+    setupEditor();
+  }, [value, item, isPending]); // Re-create editor when highlights change
 
   const cls = [
     'markdown-source-view',

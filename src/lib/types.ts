@@ -43,6 +43,8 @@ export interface ISnippetBase {
   dismissed: boolean;
   priority: number;
   parent: string | null;
+  start_offset: number | null;
+  end_offset: number | null;
 }
 
 export interface SnippetRow extends SafeOmit<ISnippetBase, 'dismissed'> {

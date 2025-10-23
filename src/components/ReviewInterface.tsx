@@ -7,7 +7,7 @@ import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
 import { ActionBar } from './ActionBar';
 
-const client = new QueryClient();
+export const queryClient = new QueryClient();
 
 export function createReviewInterface(props: {
   reviewView: ReviewView;
@@ -16,7 +16,7 @@ export function createReviewInterface(props: {
   reviewManager: ReviewManager;
 }) {
   return (
-    <QueryClientProvider client={client}>
+    <QueryClientProvider client={queryClient}>
       <ReviewContextProvider {...props}>
         <ReviewInterface />
       </ReviewContextProvider>

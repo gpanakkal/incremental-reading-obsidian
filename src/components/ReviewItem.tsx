@@ -15,13 +15,16 @@ import { TitleEditor } from './TitleEditor';
  * - loading spinner and error element
  */
 export default function ReviewItem({ item }: { item: ReviewItem }) {
+  console.log(
+    `[ReviewItem] Rendering item: ${item.data.reference} (id: ${item.data.id})`
+  );
   const { plugin, showAnswer, reviewManager } = useReviewContext();
   const {
     isPending,
     isError,
     data: fileText,
   } = useQuery({
-    queryKey: [`${item.data.reference}`],
+    queryKey: [item.data.reference],
     queryFn: async () => await plugin.app.vault.read(item.file),
   });
   const [editState, setEditState] = useState<EditState>(EditingState.cancel);
@@ -47,7 +50,7 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
   return (
     <>
       {isReviewArticle(item) && (
-        <div style={{ display: 'none' }}>
+        <div>
           <TitleEditor
             item={item}
             reviewManager={reviewManager}
@@ -56,9 +59,10 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
         </div>
       )}
       {isReviewCard(item) && !showAnswer ? (
-        <CardViewer cardText={fileText} />
+        <CardViewer cardText={fileText} key={item.data.id} />
       ) : (
         <IREditor
+          key={item.data.id}
           value={fileText}
           onChange={(update) => handleChange(update)}
           editState={editState}

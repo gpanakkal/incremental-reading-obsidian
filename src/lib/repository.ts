@@ -1,16 +1,17 @@
-import type { TAbstractFile } from 'obsidian';
 import {
   normalizePath,
   Platform,
   type App,
   type DataAdapter,
   type Plugin,
+  type TAbstractFile,
 } from 'obsidian';
 import type { BindParams, Database, QueryExecResult } from 'sql.js';
 import initSqlJs from 'sql.js';
 import { DATA_DIRECTORY } from '../lib/constants';
 import type { Primitive } from '../lib/utility-types';
 import type { RowTypes } from '../lib/types';
+import { applyMigrations } from '../db/migrations';
 // @ts-ignore - WASM imported as base64 string via custom esbuild plugin
 import wasmBase64 from '../db/sql-wasm.wasm';
 
@@ -38,8 +39,8 @@ export class SQLiteRepository {
   /**
    * Asynchronous factory function
    * @param plugin the plugin instance (used for registering and cleaning up event handlers)
-   * @param dbFilePath the path of the database file relative to the vault root
    * @param schema the SQL schema as a string
+   * @param pluginDir the plugin's installation directory (from this.manifest.dir)
    */
   static async start(
     plugin: Plugin,
@@ -47,7 +48,8 @@ export class SQLiteRepository {
     schema: string
   ): Promise<SQLiteRepository> {
     const repo = new SQLiteRepository(plugin.app, dbFilePath, schema);
-    // load the database file, or create it if it doesn't exist
+    // load the database file or create it if loading fails
+    // TODO: handle failed loads when the file exists
     if (repo.dbExists()) {
       const result = await repo.loadDb();
       if (result === null) {
@@ -134,6 +136,7 @@ export class SQLiteRepository {
    * @returns an array where each top-level element is the result of a query
    */
   async execSql(query: string, params: Primitive[] = []) {
+    // console.log({ query, params });
     try {
       const results = this.db.exec(query, this.coerceParams(params));
       if (!results || !results.length) return [[]];
@@ -184,14 +187,14 @@ export class SQLiteRepository {
       if (!dataDir) {
         await this.app.vault.createFolder(DATA_DIRECTORY);
       }
-      return this.app.vault.adapter.writeBinary(
+      return await this.app.vault.adapter.writeBinary(
         normalizePath(this.#dbFilePath),
         data as ArrayBuffer
       );
     } catch (error) {
       console.error('Incremental Reading - Failed to save database:', {
-        error: error?.message || error,
-        platform: Platform.isMobile ? 'mobile' : 'desktop',
+        error: 'message' in error ? error.message : error,
+        platform: Platform,
         dbPath: this.#dbFilePath,
       });
       throw error; // Re-throw to surface critical save failures
@@ -237,11 +240,6 @@ export class SQLiteRepository {
     segments.forEach(console.log);
   }
 
-  private async updateSchema() {
-    this.db.exec(this.#schema);
-    await this.save();
-  }
-
   /**
    * Check if the database file exists
    */
@@ -261,8 +259,10 @@ export class SQLiteRepository {
   private async loadDb() {
     try {
       const result = await this.reloadDb();
-      if (!result) return null;
-      await this.updateSchema();
+      if (!result) {
+        console.error('Incremental Reading - Failed to load database');
+        return null;
+      }
       console.log('Incremental Reading database loaded');
       return result;
     } catch (error) {
@@ -283,6 +283,9 @@ export class SQLiteRepository {
       );
       // Use browser-compatible Uint8Array instead of Node.js Buffer for mobile compatibility
       this.db = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
+      this.db.exec(this.#schema);
+      // Apply any pending migrations
+      applyMigrations(this.db);
       return this.db;
     } catch (error) {
       console.error('Incremental Reading - Failed to reload database:', {

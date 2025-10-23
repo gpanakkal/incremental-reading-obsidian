@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS snippet (
   due INTEGER, -- unix timestamp
   priority INTEGER NOT NULL,
   dismissed INTEGER DEFAULT 0,
+  start_offset INTEGER DEFAULT NULL, -- character offset from parent file start
+  end_offset INTEGER DEFAULT NULL, -- character offset from parent file start
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
   CHECK(due IS NOT NULL OR dismissed = TRUE)
@@ -80,3 +82,5 @@ CREATE TABLE IF NOT EXISTS srs_card_review (
   CHECK(state >= 0 AND state <= 3),
   CHECK(rating >= 0 AND rating <= 4)
 );
+
+PRAGMA user_version = 1;

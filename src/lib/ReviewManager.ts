@@ -65,6 +65,7 @@ import type ReviewView from 'src/views/ReviewView';
 import SRSCardReview from './SRSCardReview';
 import Article from './Article';
 import Snippet from './Snippet';
+import { SnippetOffsetTracker } from './SnippetOffsetTracker';
 
 const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
   enable_fuzz: false,
@@ -75,6 +76,8 @@ export default class ReviewManager {
   app: App;
   #repo: SQLiteRepository;
   #fsrs: FSRS;
+  snippetTracker: SnippetOffsetTracker;
+  currentEditorView: { view: any; file: TFile } | null = null;
 
   constructor(app: App, repo: SQLiteRepository) {
     this.app = app;
@@ -82,6 +85,7 @@ export default class ReviewManager {
     const params = generatorParameters(FSRS_PARAMETER_DEFAULTS);
 
     this.#fsrs = fsrs(params);
+    this.snippetTracker = new SnippetOffsetTracker();
   }
 
   // TODO: remove for production
@@ -506,20 +510,28 @@ export default class ReviewManager {
   ) {
     const reviewTime =
       firstReview || Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
-    if (!view.file) {
+
+    // IMPORTANT: Capture the current file BEFORE any async operations
+    // to avoid race conditions where view.file changes during processing
+    const currentFile = view.file;
+
+    if (!currentFile) {
       new Notice(
         `Snipping not supported from ${view.getViewType()}`,
         ERROR_NOTICE_DURATION_MS
       );
       return;
     }
+
+    console.log(
+      `[createSnippet] Creating snippet from file: ${currentFile.path}`
+    );
+
     const selection = editor.getSelection() || view.getSelection();
     if (!selection) {
       new Notice('Text must be selected', ERROR_NOTICE_DURATION_MS);
       return;
     }
-
-    const currentFile = view.file;
     const snippetFile = await this.createFromText(
       selection,
       this.getDirectory('snippet')
@@ -541,22 +553,94 @@ export default class ReviewManager {
     } else if (parentType === 'snippet') {
       currentFileEntry = await this.findSnippet(currentFile);
     }
+
+    console.log(
+      `[createSnippet] Parent type: ${parentType}, entry:`,
+      currentFileEntry
+    );
+
     const priority = currentFileEntry?.priority ?? DEFAULT_PRIORITY;
 
-    // Transclude the snippet into its source location
-    const linkToSnippet = this.generateMarkdownLink(
-      snippetFile,
-      currentFile,
-      TRANSCLUSION_HIDE_TITLE_ALIAS
-    );
-    editor.replaceSelection(`!${linkToSnippet}`);
+    // Calculate character offsets for highlighting (instead of embedding)
+    let offsets: { start: number; end: number } | null = null;
 
-    return this.createSnippetEntry(
+    // Try to get offsets from CodeMirror
+    const cm = (editor as any).cm;
+    if (cm && cm.state && cm.state.selection) {
+      const range = cm.state.selection.ranges[0];
+      if (range) {
+        offsets = {
+          start: range.from,
+          end: range.to,
+        };
+        console.log(
+          `[createSnippet] Calculated offsets from CodeMirror:`,
+          offsets
+        );
+      } else {
+        console.warn(`[createSnippet] CodeMirror selection has no ranges`);
+      }
+    } else {
+      console.warn(
+        `[createSnippet] Could not access CodeMirror instance or selection:`,
+        {
+          hasCm: !!cm,
+          hasState: !!cm?.state,
+          hasSelection: !!cm?.state?.selection,
+        }
+      );
+    }
+
+    console.log(
+      `[createSnippet] Final data - parentId: ${currentFileEntry?.id}, offsets:`,
+      offsets
+    );
+
+    // Validate parent ID
+    if (!currentFileEntry) {
+      console.error(
+        `[createSnippet] CRITICAL: Could not find parent entry for file ${currentFile.path}`
+      );
+      new Notice(
+        `Warning: Could not link snippet to parent file. The snippet was created but highlighting may not work.`,
+        ERROR_NOTICE_DURATION_MS
+      );
+    }
+
+    // Create the snippet entry
+    const result = await this.createSnippetEntry(
       snippetFile,
       reviewTime,
       priority,
-      currentFileEntry?.id
+      currentFileEntry?.id,
+      offsets ?? undefined
     );
+
+    // Refresh highlights immediately if we have editor view reference
+    if (
+      offsets &&
+      currentFileEntry &&
+      this.currentEditorView?.file === currentFile
+    ) {
+      console.log(
+        `[createSnippet] Refreshing highlights for ${currentFile.path}`
+      );
+
+      // Reload highlights into tracker
+      await this.getSnippetHighlights(currentFile);
+
+      // Import and call refreshHighlights
+      const { refreshHighlights } = await import(
+        './extensions/SnippetHighlightExtension'
+      );
+      refreshHighlights(
+        this.currentEditorView.view,
+        this.snippetTracker,
+        currentFile
+      );
+    }
+
+    return result;
   }
 
   /**
@@ -566,18 +650,21 @@ export default class ReviewManager {
     snippetFile: TFile,
     reviewTime: number,
     priority: number,
-    parentId?: string
+    parentId?: string,
+    offsets?: { start: number; end: number }
   ) {
     try {
       // save the snippet to the database
       const result = await this.#repo.mutate(
-        'INSERT INTO snippet (id, reference, due, priority, parent) VALUES ($1, $2, $3, $4, $5)',
+        'INSERT INTO snippet (id, reference, due, priority, parent, start_offset, end_offset) VALUES ($1, $2, $3, $4, $5, $6, $7)',
         [
           crypto.randomUUID(),
           `${SNIPPET_DIRECTORY}/${snippetFile.name}`,
           reviewTime,
           priority,
           parentId,
+          offsets?.start ?? null,
+          offsets?.end ?? null,
         ]
       );
 
@@ -633,6 +720,67 @@ export default class ReviewManager {
     );
 
     return (results[0] as SnippetRow) ?? null;
+  }
+
+  /**
+   * Get all snippet highlights for a parent article or snippet
+   * Returns only snippets that have offsets (for highlighting)
+   * @param parentFile The parent file to query highlights for
+   * @returns Array of snippet highlights
+   */
+  async getSnippetHighlights(parentFile: TAbstractFile) {
+    // First find the parent's ID
+    const parentType = this.getNoteType(parentFile);
+    let parentEntry;
+
+    if (parentType === 'article') {
+      parentEntry = await this.findArticle(parentFile);
+    } else if (parentType === 'snippet') {
+      parentEntry = await this.findSnippet(parentFile);
+    }
+
+    console.log(
+      `[getSnippetHighlights] Parent file: ${parentFile.path}, type: ${parentType}, entry:`,
+      parentEntry
+    );
+
+    if (!parentEntry) {
+      console.log(
+        `[getSnippetHighlights] No parent entry found, returning empty array`
+      );
+      return [];
+    }
+
+    // Query for snippets with this parent that have offsets
+    const results = (await this.#repo.query(
+      'SELECT * FROM snippet WHERE parent = $1 AND start_offset IS NOT NULL AND end_offset IS NOT NULL',
+      [parentEntry.id]
+    )) as SnippetRow[];
+
+    console.log(
+      `[getSnippetHighlights] Query returned ${results.length} snippets with offsets for parent ${parentEntry.id}`
+    );
+
+    // Convert to SnippetHighlight format and load into tracker
+    const highlights = results
+      .filter((r) => r.start_offset !== null && r.end_offset !== null)
+      .map((r) => ({
+        ...r,
+        dismissed: Boolean(r.dismissed),
+        start_offset: r.start_offset!,
+        end_offset: r.end_offset!,
+        parent: r.parent!,
+      }));
+
+    console.log(
+      `[getSnippetHighlights] Converted to ${highlights.length} highlights:`,
+      highlights
+    );
+
+    // Load into tracker cache
+    this.snippetTracker.loadHighlights(parentFile.path, highlights);
+
+    return highlights;
   }
 
   protected async getLastSnippetReview(snippet: ISnippetActive) {

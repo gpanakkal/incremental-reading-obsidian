@@ -94,3 +94,47 @@
 .ir-card-viewer > :first-child {
   margin-top: 0 !important;
 }
+
+/* Snippet highlight styles */
+.ir-snippet-highlight {
+  cursor: pointer;
+  border-bottom: 1px dashed var(--text-accent);
+  transition: all 0.2s ease;
+  text-decoration: none;
+  background-color: rgba(255, 235, 59, 0.3);
+}
+
+/* Apply highlight to all descendants */
+.ir-snippet-highlight * {
+  background-color: rgba(255, 235, 59, 0.3);
+}
+
+/* Exception: keep external link icons transparent */
+.ir-snippet-highlight .external-link {
+  background-color: transparent !important;
+}
+
+.ir-snippet-highlight:hover {
+  background-color: rgba(255, 235, 59, 0.5);
+  border-bottom-color: var(--text-accent-hover);
+}
+
+/* Apply hover to all descendants */
+.ir-snippet-highlight:hover * {
+  background-color: rgba(255, 235, 59, 0.5);
+}
+
+/* Keep external links transparent on hover */
+.ir-snippet-highlight:hover .external-link {
+  background-color: transparent !important;
+}
+
+/* Style for potentially corrupted highlights (overlapping edits) */
+.ir-snippet-highlight.ir-corrupted {
+  background-color: rgba(255, 82, 82, 0.3); /* Red for corrupted */
+  border-bottom: 1px dashed var(--text-error);
+}
+
+.ir-snippet-highlight.ir-corrupted:hover {
+  background-color: rgba(255, 82, 82, 0.5);
+}
