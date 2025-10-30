@@ -270,26 +270,36 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(async () => {
       // expensive startup operations should go here
-      if (!this.manifest.dir) {
+      try {
+        if (!this.manifest.dir) {
+          throw new Error('manifest.dir is undefined');
+        }
+
+        const repo = await SQLiteRepository.start(
+          this,
+          DATABASE_FILE_PATH,
+          databaseSchema
+        );
+
+        this.#reviewManager = new ReviewManager(this.app, repo);
+        this.registerView(
+          ReviewView.viewType,
+          (leaf) => new ReviewView(leaf, this, this.#reviewManager)
+        );
+      } catch (error) {
+        console.error(error);
         new Notice(
-          'Failed to initialize plugin: manifest.dir is undefined',
+          `Failed to initialize plugin. See the console for details.`,
           ERROR_NOTICE_DURATION_MS
         );
-        return;
+        this.unload();
       }
-      const repo = await SQLiteRepository.start(
-        this.app,
-        DATABASE_FILE_PATH,
-        databaseSchema,
-        this.manifest.dir
-      );
-      this.#reviewManager = new ReviewManager(this.app, repo);
-      this.registerView(
-        ReviewView.viewType,
-        (leaf) => new ReviewView(leaf, this, this.#reviewManager)
-      );
 
-      // listen for snippet creations. TODO: handle race condition
+      // listen for snippet creations.
+      // TODO:
+      // - handle race condition
+      // - wrap in plugin.registerEvent
+
       // this.app.vault.on('create', async (file) => {
       //   // check if the snippet is in the database already
       //   const results = await this.#reviewManager.findSnippet(file);

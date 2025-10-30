@@ -1,4 +1,10 @@
-import { normalizePath, type App, type DataAdapter } from 'obsidian';
+import type { TAbstractFile } from 'obsidian';
+import {
+  normalizePath,
+  type App,
+  type DataAdapter,
+  type Plugin,
+} from 'obsidian';
 import type { BindParams, Database, QueryExecResult } from 'sql.js';
 import initSqlJs from 'sql.js';
 import { DATA_DIRECTORY } from '../lib/constants';
@@ -13,45 +19,64 @@ export class SQLiteRepository {
   db: Database;
   #dbFilePath: string;
   #schema: string;
-  #pluginDir: string;
+  /**  */
+  #sql: initSqlJs.SqlJsStatic;
+  #isSaving: boolean = false;
 
   /**
    * Use .start to instantiate
    */
-  private constructor(
-    app: App,
-    dbFilePath: string,
-    schema: string,
-    pluginDir: string
-  ) {
+  private constructor(app: App, dbFilePath: string, schema: string) {
     this.app = app;
     this.adapter = app.vault.adapter;
-    this.#dbFilePath = dbFilePath;
+    this.#dbFilePath = normalizePath(dbFilePath);
     this.#schema = schema;
-    this.#pluginDir = pluginDir;
+    this.handleFileChange = this.handleFileChange.bind(this);
   }
 
   /**
    * Asynchronous factory function
+   * @param plugin the plugin instance (used for registering and cleaning up event handlers)
    * @param dbFilePath the path of the database file relative to the vault root
    * @param schema the SQL schema as a string
-   * @param pluginDir the plugin's installation directory (from this.manifest.dir)
    */
   static async start(
-    app: App,
+    plugin: Plugin,
     dbFilePath: string,
-    schema: string,
-    pluginDir: string
+    schema: string
   ): Promise<SQLiteRepository> {
-    const repo = new SQLiteRepository(app, dbFilePath, schema, pluginDir);
-    // load the database file or create it if loading fails
-    // TODO: handle failed loads when the file exists
+    const repo = new SQLiteRepository(plugin.app, dbFilePath, schema);
+    // load the database file, or create it if it doesn't exist
     if (repo.dbExists()) {
-      await repo.loadDb();
+      const result = await repo.loadDb();
+      if (result === null) {
+        const msg = `Database file found, but failed to load`;
+        console.error(msg);
+        throw new Error(msg);
+      }
     } else {
       await repo.initDb();
     }
+    // listen for sync updates to the database and re-read the file
+    plugin.registerEvent(repo.app.vault.on('modify', repo.handleFileChange));
     return repo;
+  }
+
+  get dbFilePath() {
+    return this.#dbFilePath;
+  }
+
+  async handleFileChange(file: TAbstractFile) {
+    if (file.path !== this.dbFilePath || file.deleted) {
+      return;
+    }
+    // skip reload if the changes occurred locally
+    if (this.#isSaving) {
+      this.#isSaving = false;
+      return;
+    }
+
+    await this.reloadDb();
   }
 
   /**
@@ -146,8 +171,9 @@ export class SQLiteRepository {
    */
   async save(creating: boolean = false) {
     if (!this.db) throw new Error('Database was not initialized on repository');
-    const data = this.db.export().buffer;
     try {
+      this.#isSaving = true;
+      const data = this.db.export().buffer;
       if (!creating && !this.dbExists()) {
         await this.initDb();
       }
@@ -203,23 +229,21 @@ export class SQLiteRepository {
     segments.forEach(console.log);
   }
 
+  private async updateSchema() {
+    this.db.exec(this.#schema);
+    await this.save();
+  }
+
   /**
    * Check if the database file exists
    */
   private dbExists() {
-    try {
-      const dataDir = this.app.vault.getFolderByPath(DATA_DIRECTORY);
-      if (!dataDir) {
-        return false;
-      }
-      return !!this.app.vault.getAbstractFileByPath(
-        normalizePath(this.#dbFilePath)
-      );
-    } catch (e) {
-      // TODO: properly handle errors
-      console.error(e);
-      return false;
-    }
+    const dataDir = this.app.vault.getFolderByPath(DATA_DIRECTORY);
+    if (!dataDir) return false;
+
+    return !!this.app.vault.getAbstractFileByPath(
+      normalizePath(this.#dbFilePath)
+    );
   }
 
   /**
@@ -228,14 +252,29 @@ export class SQLiteRepository {
    */
   private async loadDb() {
     try {
-      const sql = await this.loadWasm();
+      const result = await this.reloadDb();
+      if (!result) return null;
+      await this.updateSchema();
+      console.log('Incremental Reading database loaded');
+      return result;
+    } catch (e) {
+      // TODO: properly handle errors
+      // console.error(e);
+      return null;
+    }
+  }
+
+  /**
+   * Attempt to reload a pre-existing database from disk
+   * @returns a Database, or `null` if the file is invalid or not found
+   */
+  private async reloadDb() {
+    try {
+      this.#sql ||= await this.loadWasm();
       const dbArrayBuffer = await this.app.vault.adapter.readBinary(
         normalizePath(this.#dbFilePath)
       );
-      this.db = new sql.Database(Buffer.from(dbArrayBuffer));
-      this.db.exec(this.#schema);
-      await this.save();
-      console.log('Incremental Reading database loaded');
+      this.db = new this.#sql.Database(Buffer.from(dbArrayBuffer));
       return this.db;
     } catch (e) {
       // TODO: properly handle errors
