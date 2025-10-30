@@ -1009,12 +1009,12 @@ export default class ReviewManager {
    */
   protected async createNote({
     content,
-    frontmatterObj,
+    frontmatter,
     fileName,
     directory,
   }: {
     content: string;
-    frontmatterObj?: Record<string, any>;
+    frontmatter?: Record<string, any>;
     fileName: string;
     directory: string;
   }) {
@@ -1022,7 +1022,7 @@ export default class ReviewManager {
       const fullPath = normalizePath(`${directory}/${fileName}`);
       const file = await createFile(this.app, fullPath);
       await this.app.vault.append(file, content);
-      frontmatterObj && (await this.updateFrontMatter(file, frontmatterObj));
+      frontmatter && (await this.updateFrontMatter(file, frontmatter));
       return file;
     } catch (error) {
       console.error(error);
@@ -1058,6 +1058,9 @@ export default class ReviewManager {
     const newNoteName = createTitle(textContent);
     const newNote = await this.createNote({
       content: textContent,
+      frontmatter: {
+        created: new Date().toISOString(),
+      },
       fileName: `${newNoteName}.md`,
       directory,
     });

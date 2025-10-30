@@ -51,22 +51,28 @@ export function getDateTimeString(date?: Date) {
 }
 
 /**
- * Replace characters that cannot be used for file names
- * or Obsidian note titles with spaces
+ * Remove characters that cannot be used for file names
+ * or Obsidian note titles
  */
-export function sanitizeForTitle(text: string, checkFinalChar: boolean) {
-  return text
+export function sanitizeForTitle(
+  text: string,
+  checkFinalChar: boolean,
+  maxLength?: number
+) {
+  const cleaned = text
     .trim()
     .split('')
     .map((char, i) => {
-      if (
-        !FORBIDDEN_TITLE_CHARS.has(char) &&
-        (!checkFinalChar || i !== text.length - 1 || !' .'.includes(char))
-      )
-        return char;
-      return ' ';
+      if (checkFinalChar && i === text.length - 1) {
+        if (' .'.includes(char)) return '';
+      }
+      if (FORBIDDEN_TITLE_CHARS.has(char)) {
+        return ' ';
+      } else return char;
     })
     .join('');
+
+  return maxLength ? cleaned.slice(0, maxLength) : cleaned;
 }
 
 /**
@@ -87,20 +93,21 @@ export function getContentSlice(
 }
 
 /**
- * Creates a title with an ISO timestamp and a slice of the content,
- * or a random ID if no content is passed
+ * Creates a title from a slice of the content and a random ID
  * TODO: handle file system name length limitations?
  */
 export function createTitle(content?: string) {
-  const time = getDateTimeString();
   const TITLE_SEGMENT_SEPARATOR = ' - ';
   const segments = [];
   if (content) {
-    const contentSlice = content.trim().slice(0, CONTENT_TITLE_SLICE_LENGTH);
-    const sanitized = sanitizeForTitle(contentSlice, false).trim();
+    const sanitized = sanitizeForTitle(
+      content,
+      false,
+      CONTENT_TITLE_SLICE_LENGTH
+    );
     if (sanitized.length > 0) segments.push(sanitized);
   }
-  segments.push(time, generateId());
+  segments.push(generateId());
   return segments.join(TITLE_SEGMENT_SEPARATOR);
 }
 
