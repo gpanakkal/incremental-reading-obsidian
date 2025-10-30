@@ -60,7 +60,6 @@ import {
   searchAll,
 } from './utils';
 import SRSCard from './SRSCard';
-import { randomUUID } from 'crypto';
 import type ReviewView from 'src/views/ReviewView';
 import SRSCardReview from './SRSCardReview';
 import Article from './Article';
@@ -559,7 +558,7 @@ export default class ReviewManager {
       const result = await this.#repo.mutate(
         'INSERT INTO snippet (id, reference, due, priority, parent) VALUES ($1, $2, $3, $4, $5)',
         [
-          randomUUID(),
+          crypto.randomUUID(),
           `${SNIPPET_DIRECTORY}/${snippetFile.name}`,
           reviewTime,
           priority,
@@ -645,7 +644,7 @@ export default class ReviewManager {
     try {
       const insertReviewResult = await this.#repo.mutate(
         'INSERT INTO snippet_review (id, snippet_id, review_time) VALUES ($1, $2, $3)',
-        [randomUUID(), snippet.id, reviewed]
+        [crypto.randomUUID(), snippet.id, reviewed]
       );
 
       const updateResult = await this.#repo.mutate(
@@ -772,7 +771,7 @@ export default class ReviewManager {
       const result = await this.#repo.mutate(
         'INSERT INTO article (id, reference, due, priority) VALUES ($1, $2, $3, $4)',
         [
-          randomUUID(),
+          crypto.randomUUID(),
           `${ARTICLE_DIRECTORY}/${articleFile.name}`,
           dueTime,
           priority,
@@ -889,7 +888,7 @@ export default class ReviewManager {
     try {
       const insertReviewResult = await this.#repo.mutate(
         'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
-        [randomUUID(), article.id, reviewed]
+        [crypto.randomUUID(), article.id, reviewed]
       );
 
       const updateResult = await this.#repo.mutate(
