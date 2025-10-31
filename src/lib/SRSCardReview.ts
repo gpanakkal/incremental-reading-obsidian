@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto';
 import type { ISRSCardReview, SRSCardReviewRow } from '#/lib/types';
 import type { ReviewLog } from 'ts-fsrs';
 import type { State } from 'ts-fsrs';
@@ -20,7 +19,7 @@ export default class SRSCardReview implements ISRSCardReview {
   state: State;
 
   constructor(cardId: string, reviewLog: ReviewLog) {
-    this.id = randomUUID();
+    this.id = crypto.randomUUID();
     this.card_id = cardId;
     Object.assign(this, reviewLog);
   }

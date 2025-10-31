@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto';
 import type { ISRSCard, ISRSCardDisplay, SRSCardRow } from '#/lib/types';
 import type { StateType } from 'ts-fsrs';
 import { createEmptyCard, State } from 'ts-fsrs';
@@ -22,7 +21,7 @@ export default class SRSCard implements ISRSCard {
   state: State;
 
   constructor(reference: string, creationTime?: Date) {
-    this.id = randomUUID();
+    this.id = crypto.randomUUID();
     this.reference = reference;
     this.created_at = creationTime || new Date();
     const card = createEmptyCard(this.created_at);

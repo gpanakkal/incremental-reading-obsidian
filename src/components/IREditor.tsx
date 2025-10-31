@@ -319,22 +319,5 @@ export function IREditor({
   ];
   if (className) cls.push(className);
 
-  const currentInternalRef = internalRef.current;
-  return (
-    <>
-      <div className={classcat(cls)} ref={elRef}></div>
-      {Platform.isMobile && currentInternalRef && (
-        // TODO: mobile support
-        <button
-          onClick={() => onSubmit(currentInternalRef)}
-          className={classcat([
-            prefixedClasses('item-submit-button'),
-            'mod-cta',
-          ])}
-        >
-          Submit
-        </button>
-      )}
-    </>
-  );
+  return <div className={classcat(cls)} ref={elRef}></div>;
 }
