@@ -50,9 +50,7 @@ export class SQLiteRepository {
     if (repo.dbExists()) {
       const result = await repo.loadDb();
       if (result === null) {
-        const msg = `Database file found, but failed to load`;
-        console.error(msg);
-        throw new Error(msg);
+        throw new Error(`Db file found at ${dbFilePath}, but failed to load`);
       }
     } else {
       await repo.initDb();
@@ -257,9 +255,8 @@ export class SQLiteRepository {
       await this.updateSchema();
       console.log('Incremental Reading database loaded');
       return result;
-    } catch (e) {
-      // TODO: properly handle errors
-      // console.error(e);
+    } catch (error) {
+      console.error(error);
       return null;
     }
   }
@@ -276,9 +273,8 @@ export class SQLiteRepository {
       );
       this.db = new this.#sql.Database(Buffer.from(dbArrayBuffer));
       return this.db;
-    } catch (e) {
-      // TODO: properly handle errors
-      // console.error(e);
+    } catch (error) {
+      console.error(error);
       return null;
     }
   }
