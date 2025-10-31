@@ -1,22 +1,18 @@
-import { useCallback, useState } from 'preact/hooks';
-import type { FileView, MarkdownView } from 'obsidian';
+import { useState } from 'preact/hooks';
+import type { TFile } from 'obsidian';
 import type ReviewManager from '#/lib/ReviewManager';
-import {
-  DEFAULT_PRIORITY,
-  ERROR_NOTICE_DURATION_MS,
-  SUCCESS_NOTICE_DURATION_MS,
-} from '#/lib/constants';
+import { DEFAULT_PRIORITY } from '#/lib/constants';
 import { transformPriority } from '#/lib/utils';
 
 interface PriorityModalProps {
   reviewManager: ReviewManager;
-  view: MarkdownView | FileView;
+  file: TFile;
   onClose: () => void;
 }
 
 export function PriorityModalContent({
   reviewManager,
-  view,
+  file,
   onClose,
 }: PriorityModalProps) {
   const [display, setDisplay] = useState({
@@ -29,7 +25,7 @@ export function PriorityModalContent({
 
   const handleSubmit = async () => {
     const priority = transformPriority(display.priority);
-    await reviewManager.importArticle(view, priority);
+    await reviewManager.importArticle(file, priority);
     onClose();
   };
 

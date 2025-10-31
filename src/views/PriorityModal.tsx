@@ -1,4 +1,4 @@
-import type { App, FileView, MarkdownView } from 'obsidian';
+import type { App, TFile } from 'obsidian';
 import { Modal } from 'obsidian';
 import { render } from 'preact';
 import { PriorityModalContent } from '../components/PriorityModalContent';
@@ -6,16 +6,12 @@ import type ReviewManager from '#/lib/ReviewManager';
 
 export class PriorityModal extends Modal {
   reviewManager: ReviewManager;
-  view: MarkdownView | FileView;
+  file: TFile;
 
-  constructor(
-    app: App,
-    reviewManager: ReviewManager,
-    view: MarkdownView | FileView
-  ) {
+  constructor(app: App, reviewManager: ReviewManager, file: TFile) {
     super(app);
     this.reviewManager = reviewManager;
-    this.view = view;
+    this.file = file;
   }
 
   onOpen() {
@@ -23,7 +19,7 @@ export class PriorityModal extends Modal {
     render(
       <PriorityModalContent
         reviewManager={this.reviewManager}
-        view={this.view}
+        file={this.file}
         onClose={() => this.close()}
       />,
       contentEl

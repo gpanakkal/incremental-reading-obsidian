@@ -1,6 +1,12 @@
-import type { App, WorkspaceLeaf } from 'obsidian';
-import { MarkdownView } from 'obsidian';
-import { addIcon, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import type { App, TAbstractFile, WorkspaceLeaf } from 'obsidian';
+import {
+  MarkdownView,
+  Notice,
+  Plugin,
+  PluginSettingTab,
+  Setting,
+  TFile,
+} from 'obsidian';
 import {
   DATABASE_FILE_PATH,
   ERROR_NOTICE_DURATION_MS,
@@ -116,14 +122,14 @@ export default class IncrementalReadingPlugin extends Plugin {
       },
     });
 
-    this.addCommand({
-      id: 'import-article',
-      name: 'Import article',
-      callback: () => {
-        if (!this.#reviewManager) {
-          new Notice(`Plugin still loading`);
-          return;
-        }
+    const importArticle = (file?: TAbstractFile) => {
+      if (!this.#reviewManager) {
+        new Notice(`Plugin still loading`);
+        return;
+      }
+      if (file instanceof TFile) {
+        new PriorityModal(this.app, this.#reviewManager, file).open();
+      } else {
         const reviewView = this.app.workspace.getActiveViewOfType(ReviewView);
         if (reviewView) {
           new Notice('Cannot import articles from review view', 0);
@@ -131,15 +137,25 @@ export default class IncrementalReadingPlugin extends Plugin {
         }
 
         const markdownView = this.app.workspace.getActiveFileView();
-        if (markdownView) {
-          new PriorityModal(this.app, this.#reviewManager, markdownView).open();
+        if (markdownView?.file) {
+          new PriorityModal(
+            this.app,
+            this.#reviewManager,
+            markdownView.file
+          ).open();
         } else {
           new Notice(
-            'A markdown view must be active',
+            'A markdown note must be active',
             ERROR_NOTICE_DURATION_MS
           );
         }
-      },
+      }
+    };
+
+    this.addCommand({
+      id: 'import-article',
+      name: 'Import article',
+      callback: importArticle,
     });
 
     this.addCommand({
@@ -255,6 +271,17 @@ export default class IncrementalReadingPlugin extends Plugin {
         }
       },
     });
+
+    this.registerEvent(
+      this.app.workspace.on('file-menu', (menu, file) => {
+        menu.addItem((item) => {
+          item
+            .setTitle('Import article')
+            .setIcon(PLACEHOLDER_PLUGIN_ICON)
+            .onClick(async () => importArticle(file));
+        });
+      })
+    );
 
     // This adds a settings tab so the user can configure various aspects of the plugin
     // this.addSettingTab(new SampleSettingTab(this.app, this)); // TODO: set up settings

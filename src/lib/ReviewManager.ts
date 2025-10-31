@@ -1,4 +1,4 @@
-import type { TFile, TAbstractFile, FileView } from 'obsidian';
+import type { TFile, TAbstractFile } from 'obsidian';
 import {
   normalizePath,
   Notice,
@@ -708,17 +708,10 @@ export default class ReviewManager {
   /**
    * Import the currently opened note as an article
    */
-  async importArticle(view: MarkdownView | FileView, priority: number) {
-    const currentFile = view.file;
-    if (!currentFile) {
-      new Notice(`A markdown file must be active`, ERROR_NOTICE_DURATION_MS);
-      return;
-    }
-
+  async importArticle(file: TFile, priority: number) {
     try {
       // check if the file is inside the plugin's data directory
-      const inDataDir = currentFile.path.startsWith(DATA_DIRECTORY);
-      if (currentFile.path.startsWith(DATA_DIRECTORY)) {
+      if (file.path.startsWith(DATA_DIRECTORY)) {
         new Notice(
           `Note is already in the plugin data folder; canceling import`,
           ERROR_NOTICE_DURATION_MS
@@ -726,9 +719,9 @@ export default class ReviewManager {
         return;
       }
       // Read the content of the current file
-      const content = await this.app.vault.cachedRead(currentFile);
+      const content = await this.app.vault.cachedRead(file);
       const frontmatter =
-        this.app.metadataCache.getFileCache(currentFile)?.frontmatter;
+        this.app.metadataCache.getFileCache(file)?.frontmatter;
       if (frontmatter?.tags?.length) {
         const tags: string[] = frontmatter.tags;
         if (tags.some((tag) => new Set([SNIPPET_TAG, CARD_TAG]).has(tag))) {
@@ -746,16 +739,16 @@ export default class ReviewManager {
       const isDuplicate = (fileName: string) =>
         this.app.vault.getAbstractFileByPath(getTargetPath(fileName));
 
-      if (isDuplicate(currentFile.name)) {
+      if (isDuplicate(file.name)) {
         new Notice(
-          `Warning: article with name already exists "${currentFile.name}"`,
+          `Warning: article with name already exists "${file.name}"`,
           ERROR_NOTICE_DURATION_MS
         );
       }
 
-      let importFileName = currentFile.name;
+      let importFileName = file.name;
       while (isDuplicate(importFileName)) {
-        importFileName = `${currentFile.basename} - ${generateId()}.${currentFile.extension}`;
+        importFileName = `${file.basename} - ${generateId()}.${file.extension}`;
       }
 
       // Create a copy in the articles directory
@@ -776,7 +769,7 @@ export default class ReviewManager {
         tags: ARTICLE_TAG,
       };
       if (!frontmatter?.source) {
-        const sourceLink = this.generateMarkdownLink(currentFile, articleFile);
+        const sourceLink = this.generateMarkdownLink(file, articleFile);
         frontmatterUpdates[`${SOURCE_PROPERTY_NAME}`] = sourceLink;
       }
       await this.updateFrontMatter(articleFile, frontmatterUpdates);
@@ -805,7 +798,7 @@ export default class ReviewManager {
       return result;
     } catch (error) {
       new Notice(
-        `Failed to import article "${currentFile.name}"`,
+        `Failed to import article "${file.name}"`,
         ERROR_NOTICE_DURATION_MS
       );
       console.error(error);
