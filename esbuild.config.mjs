@@ -42,6 +42,7 @@ const context = await esbuild.context({
   },
   entryPoints: ['src/main.ts'],
   bundle: true,
+  platform: 'browser',
   plugins: [inlineFilesPlugin],
   external: [
     'obsidian',
@@ -66,6 +67,9 @@ const context = await esbuild.context({
   treeShaking: true,
   outfile: 'main.js',
   minify: prod,
+  define: {
+    'process.versions.node': 'undefined',
+  },
   alias: {
     react: 'preact/compat',
     'react-dom/test-utils': 'preact/test-utils',
