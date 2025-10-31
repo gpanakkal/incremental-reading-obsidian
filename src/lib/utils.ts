@@ -1,5 +1,9 @@
 import type { App, Editor, TFile } from 'obsidian';
-import { CONTENT_TITLE_SLICE_LENGTH, FORBIDDEN_TITLE_CHARS } from './constants';
+import {
+  CONTENT_TITLE_SLICE_LENGTH,
+  FORBIDDEN_TITLE_CHARS,
+  literal,
+} from './constants';
 import { FRONTMATTER_PATTERN } from './constants.js';
 
 export async function createFile(
@@ -257,3 +261,13 @@ export const transformPriority = (rawPriority: string | number) => {
   const rounded = Math.round(clamped * 10);
   return rounded;
 };
+
+export function getClozeGroupsPattern(delimiters: [string, string]) {
+  return new RegExp(
+    `([\\s\\S]*)` +
+      `${literal(delimiters[0])}` +
+      `([\\s\\S]*?)` +
+      `${literal(delimiters[1])}` +
+      `([\\s\\S]*)`
+  );
+}

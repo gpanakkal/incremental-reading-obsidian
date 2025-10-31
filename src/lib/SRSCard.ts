@@ -2,8 +2,7 @@ import { randomUUID } from 'crypto';
 import type { ISRSCard, ISRSCardDisplay, SRSCardRow } from '#/lib/types';
 import type { StateType } from 'ts-fsrs';
 import { createEmptyCard, State } from 'ts-fsrs';
-import { CLOZE_DELIMITER_PATTERN, CARD_ANSWER_REPLACEMENT } from './constants';
-import { searchAll } from './utils';
+import { CARD_ANSWER_REPLACEMENT, CLOZE_GROUPS_PATTERN } from './constants';
 
 /**
  *
@@ -66,12 +65,11 @@ export default class SRSCard implements ISRSCard {
 
   /** Format a card's text, replacing the answer with a placeholder */
   static hideAnswer(cardContent: string): string {
-    const match = searchAll(cardContent, CLOZE_DELIMITER_PATTERN)[0];
+    const match = cardContent.match(CLOZE_GROUPS_PATTERN);
     if (!match) {
       throw new Error(`Valid cloze delimiters not found in: ${cardContent}`);
     }
-    const pre = cardContent.slice(0, match.index);
-    const post = cardContent.slice(match.index + match.match.length);
+    const [_, pre, _answer, post] = match;
     const formattedContent = pre + CARD_ANSWER_REPLACEMENT + post;
     return formattedContent;
   }

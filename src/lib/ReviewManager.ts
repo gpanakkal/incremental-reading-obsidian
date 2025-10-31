@@ -47,6 +47,7 @@ import {
   SCROLL_TOP_PROPERTY_NAME,
   SCROLL_LEFT_PROPERTY_NAME,
 } from './constants';
+import { getClozeGroupsPattern } from './utils';
 import type { FSRS, FSRSParameters, Grade } from 'ts-fsrs';
 import { fsrs, generatorParameters } from 'ts-fsrs';
 import {
@@ -189,55 +190,6 @@ export default class ReviewManager {
     }
   }
 
-  /**
-   * If text is selected, adds cloze deletion delimiters around the selection
-   * and removes them elsewhere.
-   * If no text is selected, searches for preexisting delimiters.
-   * @param selectionOffsets the character positions of the selection relative
-   * to the start of the passed text
-   * @throws if no text is selected and no preexisting delimiters are found
-   */
-  protected delimitCardTexts(
-    text: string,
-    selectionOffsets: readonly [number, number] | null
-  ): string[] {
-    const removeDelimiters = (text: string) =>
-      text
-        .replaceAll(CLOZE_DELIMITERS[0], '')
-        .replaceAll(CLOZE_DELIMITERS[1], '');
-    if (selectionOffsets) {
-      // remove preexisting delimiters
-      const pre = removeDelimiters(text.slice(0, selectionOffsets[0]));
-      const answer = text.slice(selectionOffsets[0], selectionOffsets[1]);
-      const post = removeDelimiters(text.slice(selectionOffsets[1]));
-      const result =
-        pre + `${CLOZE_DELIMITERS[0]} ${answer} ${CLOZE_DELIMITERS[1]}` + post;
-      return [result];
-    } else {
-      // find the first pair of valid delimiters and remove others
-      // TODO: create multiple cards
-      const matches = searchAll(text, CLOZE_DELIMITER_PATTERN);
-      if (!matches.length) {
-        throw new Error(`No valid delimiters found in text:` + `\n\n${text}`);
-      }
-      // remove all other delimiters for each match
-      return matches.map(({ match, index }) => {
-        const pre = removeDelimiters(text.slice(0, index));
-        const post = removeDelimiters(text.slice(match.length + index));
-        return pre + match + post;
-      });
-    }
-  }
-
-  transcludeLink(editor: Editor, link: string, blockLine: number) {
-    const line = editor.getLine(blockLine);
-    editor.replaceRange(
-      `!${link}`,
-      { line: blockLine, ch: 0 },
-      { line: blockLine, ch: line.length }
-    );
-  }
-
   // #region CARDS
   /**
    * Create an SRS item
@@ -296,6 +248,7 @@ export default class ReviewManager {
       await this.updateFrontMatter(cardFile, {
         tags: CARD_TAG,
         [`${SOURCE_PROPERTY_NAME}`]: linkToSource,
+        delimiters: CLOZE_DELIMITERS,
       });
 
       const parentType = this.getNoteType(sourceFile);
@@ -343,6 +296,61 @@ export default class ReviewManager {
       // TODO: error handling
       throw error;
     }
+  }
+
+  /**
+   * If text is selected, adds cloze deletion delimiters around the selection
+   * and removes them elsewhere.
+   * If no text is selected, searches for preexisting delimiters.
+   * @param selectionOffsets the character positions of the selection relative
+   * to the start of the passed text
+   * @throws if no text is selected and no preexisting delimiters are found
+   */
+  protected delimitCardTexts(
+    text: string,
+    selectionOffsets: readonly [number, number] | null
+  ): string[] {
+    const removeDelimiters = (text: string) =>
+      text
+        .replaceAll(CLOZE_DELIMITERS[0], '')
+        .replaceAll(CLOZE_DELIMITERS[1], '');
+    if (selectionOffsets) {
+      // remove preexisting delimiters
+      const pre = removeDelimiters(text.slice(0, selectionOffsets[0]));
+      const answer = text.slice(selectionOffsets[0], selectionOffsets[1]);
+      const post = removeDelimiters(text.slice(selectionOffsets[1]));
+      const result =
+        pre + `${CLOZE_DELIMITERS[0]} ${answer} ${CLOZE_DELIMITERS[1]}` + post;
+      return [result];
+    } else {
+      // find the first pair of valid delimiters and remove others
+      // TODO: create multiple cards
+      const matches = searchAll(text, CLOZE_DELIMITER_PATTERN);
+      if (!matches.length) {
+        throw new Error(`No valid delimiters found in text:` + `\n\n${text}`);
+      }
+      // remove all other delimiters for each match
+      return matches.map(({ match, index }) => {
+        const pre = removeDelimiters(text.slice(0, index));
+        const post = removeDelimiters(text.slice(match.length + index));
+        return pre + match + post;
+      });
+    }
+  }
+
+  parseCloze(
+    text: string,
+    delimiters: [string, string]
+  ): { start: string; answer: string; end: string } {
+    const currentGroupsPattern = getClozeGroupsPattern(delimiters);
+    console.log({ pattern: currentGroupsPattern.toString() });
+    const match = text.match(currentGroupsPattern);
+    if (!match)
+      throw new Error(
+        `Failed to find delimiters ${delimiters.toString()} in the note body`
+      );
+    const [_, start, answer, end] = match;
+    return { start, answer, end };
   }
 
   async _fetchCardData(opts?: {
@@ -473,6 +481,16 @@ export default class ReviewManager {
       console.error(error);
     }
   }
+
+  protected transcludeLink(editor: Editor, link: string, blockLine: number) {
+    const line = editor.getLine(blockLine);
+    editor.replaceRange(
+      `!${link}`,
+      { line: blockLine, ch: 0 },
+      { line: blockLine, ch: line.length }
+    );
+  }
+
   // #endregion
 
   // #region SNIPPETS

@@ -49,7 +49,7 @@ export default class ReviewView extends FileView {
 
   clear(): void {}
 
-  set currentItem(item: ReviewItem) {
+  set currentItem(item: ReviewItem | null) {
     this.#currentItem = item;
     // Update the file property to notify FileView of the change
     // This makes sidebar panels (backlinks, outline, etc.) update
