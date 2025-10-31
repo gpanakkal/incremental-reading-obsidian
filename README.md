@@ -9,8 +9,13 @@ This is a plugin for [Obsidian](https://obsidian.md) that enables incremental re
 Since this is integrated directly into Obsidian, your learning materials, snippets, and flash cards live alongside or even within your notes, making it convenient to work with all kinds of information.
 
 ## Setup
-1. [Install via BRAT](https://tfthacker.com/brat-quick-guide#Adding+a+beta+plugin).
-2. (Optional but recommended) Create hotkeys for the `Extract selection` and `Create SRS card` commands.
+[Install via BRAT](https://tfthacker.com/brat-quick-guide#Adding+a+beta+plugin).
+
+### Optional, but recommended
+- Create hotkeys for the `Extract selection` and `Create SRS card` commands.
+- If using Obsidian Sync, enable "sync all other types". 
+    - You can still use sync if you don't want to enable this, but you'll have to reload the vault to see new changes made on another device.
+
 
 ## Using the plugin
 1. Import some learning material into an Obsidian note. See [Third Party Tools](#third-party-tools) for HTML/PDF conversion.
