@@ -86,7 +86,6 @@ export function ReviewContextProvider({
       if (isReviewCard(nextItem)) await updateDelimiters(nextItem);
       setShowAnswer(false);
       reviewView.currentItem = nextItem ?? null;
-      console.log({ nextItem });
       return nextItem;
     },
   });
