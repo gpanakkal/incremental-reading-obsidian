@@ -4,10 +4,9 @@ import {
   type PropsWithChildren,
   createContext,
   useContext,
-  useEffect,
   useState,
 } from 'react';
-import type { IArticleActive } from '#/lib/types';
+import type { IArticleActive, ReviewCard } from '#/lib/types';
 import {
   isReviewCard,
   isReviewSnippet,
@@ -16,7 +15,9 @@ import {
   type ReviewItem,
 } from '#/lib/types';
 import {
+  CLOZE_DELIMITERS,
   CONTENT_TITLE_SLICE_LENGTH,
+  LEGACY_CLOZE_DELIMITERS,
   MS_PER_DAY,
   REVIEW_FETCH_COUNT,
   SUCCESS_NOTICE_DURATION_MS,
@@ -28,7 +29,7 @@ import type IncrementalReadingPlugin from '#/main';
 import type { Grade } from 'ts-fsrs';
 import { Rating } from 'ts-fsrs';
 import type { StateUpdater } from 'preact/hooks';
-import { getContentSlice } from '#/lib/utils';
+import { getContentSlice, splitFrontMatter } from '#/lib/utils';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
@@ -76,21 +77,65 @@ export function ReviewContextProvider({
     queryKey: ['current-review-item'],
     queryFn: async () => {
       const result = await reviewManager.getDue({
+        dueBy: Date.now() + MS_PER_DAY * 2,
         limit: REVIEW_FETCH_COUNT,
       });
-      return (
+      const nextItem =
         result.all.filter(({ data }) => !reviewView.seenIds.has(data.id))[0] ??
-        null
-      );
+        null;
+      if (isReviewCard(nextItem)) await updateDelimiters(nextItem);
+      setShowAnswer(false);
+      reviewView.currentItem = nextItem ?? null;
+      console.log({ nextItem });
+      return nextItem;
     },
   });
 
-  useEffect(() => {
-    setShowAnswer(false);
-    if (currentItem) {
-      reviewView.currentItem = currentItem;
+  const updateDelimiters = async (reviewCard: ReviewCard) => {
+    try {
+      let currentDelimiters = LEGACY_CLOZE_DELIMITERS;
+      let delimitersChanged = true;
+      const [left, right] = CLOZE_DELIMITERS;
+
+      await plugin.app.fileManager.processFrontMatter(
+        reviewCard.file,
+        (frontmatter: Record<string, any>) => {
+          if ('delimiters' in frontmatter) {
+            currentDelimiters = frontmatter.delimiters as [string, string];
+          }
+          if (!Array.isArray(currentDelimiters)) {
+            throw new TypeError(
+              `Delimiters stored on note "${reviewCard.data.reference}" were not a list`
+            );
+          }
+          if (currentDelimiters[0] === left && currentDelimiters[1] === right) {
+            delimitersChanged = false;
+          } else {
+            frontmatter.delimiters = CLOZE_DELIMITERS;
+          }
+        }
+      );
+      if (!delimitersChanged) return;
+
+      await plugin.app.vault.process(reviewCard.file, (fileText) => {
+        const split = splitFrontMatter(fileText);
+        if (!split)
+          throw new Error(
+            `Failed to parse frontmatter from note "${reviewCard.data.reference}, but note has frontmatter`
+          );
+        const { start, answer, end } = reviewManager.parseCloze(
+          split.body,
+          currentDelimiters
+        );
+        return split.frontMatter + start + `${left}${answer}${right}` + end;
+      });
+    } catch (error) {
+      if (error instanceof Error) {
+        const refMessage = `\nThis error occurred in "${reviewCard.data.reference}"`;
+        throw new Error(error.message + refMessage);
+      }
     }
-  }, [currentItem]);
+  };
 
   const getNext = () => {
     queryClient.invalidateQueries({ queryKey: ['current-review-item'] });

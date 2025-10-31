@@ -53,11 +53,20 @@ export const TEXT_REVIEW_INTERVALS = {
 /** Number of rows to fetch at a time when reviewing */
 export const REVIEW_FETCH_COUNT = 50;
 
-export const CLOZE_DELIMITERS = ['{{', '}}'];
+export const LEGACY_CLOZE_DELIMITERS: [string, string] = ['{{', '}}'];
 
-export const CLOZE_DELIMITER_PATTERN = new RegExp(
-  `${CLOZE_DELIMITERS[0]}([\\s\\S]*?)${CLOZE_DELIMITERS[1]}`,
-  'g'
+export const CLOZE_DELIMITERS: [string, string] = ['(}', '{)'];
+
+/** Escapes characters in the input for literal regex interpretation */
+export const literal = (pattern: string) =>
+  pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const CLOZE_PATTERN_BASE = `${literal(CLOZE_DELIMITERS[0])}([\\s\\S]*?)${literal(CLOZE_DELIMITERS[1])}`;
+
+export const CLOZE_DELIMITER_PATTERN = new RegExp(CLOZE_PATTERN_BASE, 'g');
+
+export const CLOZE_GROUPS_PATTERN = new RegExp(
+  `([\\s\\S]*)` + CLOZE_PATTERN_BASE + `([\\s\\S]*)`
 );
 
 export const CARD_ANSWER_REPLACEMENT = `<mark class="ir-hidden-answer">\\\_\\\_\\\_\\\_\\\_\\\_</mark>`;
