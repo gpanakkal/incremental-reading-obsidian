@@ -13,7 +13,6 @@ import { Platform } from 'obsidian';
 import type { MutableRefObject } from 'react';
 import { useEffect, useRef } from 'react';
 import {
-  prefixedClasses,
   isEditing,
   getEditorAppProxy,
   setInsertMode,
