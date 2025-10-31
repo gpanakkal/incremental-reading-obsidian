@@ -31,6 +31,11 @@
   flex-shrink: 0;
 }
 
+/* Mobile: Move action bar to bottom using flex order */
+.is-mobile .ir-action-bar {
+  order: 1;
+}
+
 .ir-review-button {
   padding: 8px 16px;
   border: 1px solid var(--background-modifier-border);
