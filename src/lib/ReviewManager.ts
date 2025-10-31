@@ -267,7 +267,7 @@ export default class ReviewManager {
         card.reference,
         parent,
         card.created_at.getTime(),
-        card.due.getTime(),
+        card.due.getTime() + MS_PER_DAY, // new cards due the next day
         card.last_review?.getTime() ?? null,
         card.stability,
         card.difficulty,
