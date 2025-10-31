@@ -203,7 +203,6 @@ export default class ReviewManager {
 
     const block = this.getCurrentContent(editor, currentFile);
     // TODO: ensure block content is correct for bullet lists (should only use the current bullet) and code blocks (get the whole code block)
-    // console.log('blockContent:', block);
     if (!block) {
       new Notice('No block content found', ERROR_NOTICE_DURATION_MS);
       return;
@@ -343,7 +342,6 @@ export default class ReviewManager {
     delimiters: [string, string]
   ): { start: string; answer: string; end: string } {
     const currentGroupsPattern = getClozeGroupsPattern(delimiters);
-    console.log({ pattern: currentGroupsPattern.toString() });
     const match = text.match(currentGroupsPattern);
     if (!match)
       throw new Error(
@@ -392,7 +390,6 @@ export default class ReviewManager {
       reviewTime || new Date(),
       (recordLog) => {
         const recordLogItem = recordLog[grade];
-        // console.log({ card, recordLog, recordLogItem });
         const result = {
           nextCard: {
             ...card,

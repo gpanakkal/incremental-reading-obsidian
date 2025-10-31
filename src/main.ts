@@ -151,7 +151,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       // TODO: remove after done testing
       id: 'list-entries',
-      name: 'List articles, snippets and cards',
+      name: '(dev) List articles, snippets and cards',
       callback: async () => {
         if (!this.#reviewManager) {
           new Notice(`Plugin still loading`);
@@ -180,7 +180,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       // TODO: remove after done testing
       id: 'query-db',
-      name: 'Query the database',
+      name: '(dev) Query the database',
       callback: async () => {
         if (!this.#reviewManager) {
           new Notice(`Plugin still loading`);
@@ -193,7 +193,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       // TODO: remove after done testing
       id: 'delete-all-snippets',
-      name: 'DELETE all snippets',
+      name: '(dev) delete all snippets',
       callback: async () => {
         if (!this.#reviewManager) {
           new Notice(`SQLite database still loading`);
@@ -229,7 +229,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       // TODO: remove after done testing
       id: 'delete-all-cards',
-      name: 'DELETE all cards',
+      name: '(dev) delete all cards',
       callback: async () => {
         if (!this.#reviewManager) {
           new Notice(`SQLite database still loading`);
