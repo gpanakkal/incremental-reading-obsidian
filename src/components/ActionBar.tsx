@@ -105,10 +105,8 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
         label="Continue"
         handleClick={async () => await reviewArticle(article.data)}
       />
-      <div className="ir-priority-container">
-        <label className={'ir-priority-label'} for="ir-priority-input">
-          Priority
-        </label>
+      <label className={'ir-priority-label'}>
+        Priority
         <input
           id={'ir-priority-input'}
           value={display.priority}
@@ -130,7 +128,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
           }}
           onFocusIn={(e) => e.currentTarget.select()}
         />
-      </div>
+      </label>
     </>
   );
 }
