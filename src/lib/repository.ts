@@ -1,6 +1,7 @@
 import type { TAbstractFile } from 'obsidian';
 import {
   normalizePath,
+  Platform,
   type App,
   type DataAdapter,
   type Plugin,
@@ -141,7 +142,11 @@ export class SQLiteRepository {
       const formatted = results.map(this.formatResult);
       return formatted;
     } catch (error) {
-      console.error(error);
+      console.error('Incremental Reading - Database query failed:', {
+        error: error?.message || error,
+        query: query.slice(0, 100) + (query.length > 100 ? '...' : ''),
+        platform: Platform.isMobile ? 'mobile' : 'desktop',
+      });
       return [[]];
     }
   }
@@ -184,7 +189,12 @@ export class SQLiteRepository {
         data as ArrayBuffer
       );
     } catch (error) {
-      console.error('Failed to save database to disk:' + error);
+      console.error('Incremental Reading - Failed to save database:', {
+        error: error?.message || error,
+        platform: Platform.isMobile ? 'mobile' : 'desktop',
+        dbPath: this.#dbFilePath,
+      });
+      throw error; // Re-throw to surface critical save failures
     }
   }
 
@@ -271,29 +281,54 @@ export class SQLiteRepository {
       const dbArrayBuffer = await this.app.vault.adapter.readBinary(
         normalizePath(this.#dbFilePath)
       );
-      this.db = new this.#sql.Database(Buffer.from(dbArrayBuffer));
+      // Use browser-compatible Uint8Array instead of Node.js Buffer for mobile compatibility
+      this.db = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
       return this.db;
     } catch (error) {
-      console.error(error);
+      console.error('Incremental Reading - Failed to reload database:', {
+        error: error?.message || error,
+        platform: Platform.isMobile ? 'mobile' : 'desktop',
+        dbPath: this.#dbFilePath,
+      });
       return null;
     }
   }
 
   private async loadWasm() {
-    // Decode base64 WASM to binary
-    const buffer = Buffer.from(wasmBase64, 'base64');
+    // Log environment info for debugging mobile issues
+    // console.log('Incremental Reading - Environment check:', {
+    //   platform: Platform.isMobile ? 'mobile' : 'desktop',
+    //   hasBuffer: typeof Buffer !== 'undefined',
+    //   hasAtob: typeof atob !== 'undefined',
+    //   userAgent: navigator.userAgent,
+    // });
 
-    // Convert Buffer to Uint8Array for better compatibility with Emscripten
-    const wasmBinary = new Uint8Array(buffer);
+    // Decode base64 WASM to binary using browser-compatible API (instead of Node.js Buffer)
+    // This ensures compatibility with mobile devices (iOS/Android WebView)
+    const binaryString = atob(wasmBase64);
+    const wasmBinary = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      wasmBinary[i] = binaryString.charCodeAt(i);
+    }
 
     try {
+      // console.log(
+      //   'Incremental Reading - Initializing WASM, size:',
+      //   wasmBinary.length,
+      //   'bytes'
+      // );
       const sql = await initSqlJs({
         wasmBinary: wasmBinary as unknown as ArrayBuffer,
       });
-
+      // console.log('Incremental Reading - WASM initialized successfully');
       return sql;
     } catch (error) {
-      console.error('Failed to initialize WASM:', error);
+      console.error('Incremental Reading - Failed to initialize WASM:', error);
+      console.error('Error details:', {
+        name: error?.name,
+        message: error?.message,
+        stack: error?.stack,
+      });
       throw error;
     }
   }

@@ -112,7 +112,7 @@ export function IREditor({
 
                 evt.win.setTimeout(() => {
                   this.app.workspace.activeEditor = this.owner;
-                  if (Platform.isMobile) {
+                  if (Platform.isMobile && this.app.mobileToolbar) {
                     this.app.mobileToolbar.update();
                   }
                 });
@@ -121,7 +121,9 @@ export function IREditor({
               blur: () => {
                 if (Platform.isMobile) {
                   reviewView.contentEl.removeClass('is-mobile-editing');
-                  this.app.mobileToolbar.update();
+                  if (this.app.mobileToolbar) {
+                    this.app.mobileToolbar.update();
+                  }
                 }
                 return true;
               },
@@ -232,8 +234,13 @@ export function IREditor({
       // elRef.current?.scrollIntoView({ block: 'end' });
     };
 
+    // Add iOS keyboard event listener with defensive check
     if (Platform.isMobile) {
-      cm.dom.win.addEventListener('keyboardDidShow', onShow);
+      try {
+        cm.dom.win.addEventListener('keyboardDidShow', onShow);
+      } catch (error) {
+        console.warn('Incremental Reading - Failed to add keyboardDidShow listener:', error);
+      }
     }
 
     // Set up scroll tracking
@@ -278,16 +285,26 @@ export function IREditor({
       }
 
       if (Platform.isMobile) {
-        cm.dom.win.removeEventListener('keyboardDidShow', onShow);
-
-        if (reviewView.activeEditor === controller) {
-          reviewView.activeEditor = null;
+        try {
+          cm.dom.win.removeEventListener('keyboardDidShow', onShow);
+        } catch (error) {
+          console.warn('Incremental Reading - Failed to remove keyboardDidShow listener:', error);
         }
 
-        if ((app.workspace.activeEditor as unknown) === controller) {
-          app.workspace.activeEditor = null;
-          (app as any).mobileToolbar.update();
-          reviewView.contentEl.removeClass('is-mobile-editing');
+        try {
+          if (reviewView.activeEditor === controller) {
+            reviewView.activeEditor = null;
+          }
+
+          if ((app.workspace.activeEditor as unknown) === controller) {
+            app.workspace.activeEditor = null;
+            if ((app as any).mobileToolbar) {
+              (app as any).mobileToolbar.update();
+            }
+            reviewView.contentEl.removeClass('is-mobile-editing');
+          }
+        } catch (error) {
+          console.warn('Incremental Reading - Error during mobile cleanup:', error);
         }
       }
       elRef.current?.removeChild(elRef.current?.children[0]);
