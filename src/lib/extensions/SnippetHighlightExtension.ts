@@ -128,19 +128,19 @@ export function createSnippetHighlightExtension(
 
   // Load highlights for the current file
   const highlights = tracker.getHighlights(file.path);
-  console.log(
-    `[SnippetHighlightExtension] Creating extension with ${highlights.length} highlights for ${file.path}`,
-    highlights
-  );
+  // console.log(
+  //   `[SnippetHighlightExtension] Creating extension with ${highlights.length} highlights for ${file.path}`,
+  //   highlights
+  // );
 
   return [
     // Add the StateField
     snippetHighlightField.init((state) => {
       const docLength = state.doc.length;
       const decorations = createDecorations(highlights, docLength);
-      console.log(
-        `[SnippetHighlightExtension] Created decorations for ${highlights.length} highlights (doc length: ${docLength})`
-      );
+      // console.log(
+      //   `[SnippetHighlightExtension] Created decorations for ${highlights.length} highlights (doc length: ${docLength})`
+      // );
       return decorations;
     }),
 
@@ -179,28 +179,28 @@ export function createSnippetHighlightExtension(
         private handleClick = (event: MouseEvent) => {
           event.preventDefault();
           const target = event.target as HTMLElement;
-          console.log(`[SnippetHighlight] Click detected on:`, target);
+          // console.log(`[SnippetHighlight] Click detected on:`, target);
 
           // Check if click is on a highlight
           const highlight = target.closest('.ir-snippet-highlight');
-          console.log(
-            `[SnippetHighlight] Closest highlight element:`,
-            highlight
-          );
+          // console.log(
+          //   `[SnippetHighlight] Closest highlight element:`,
+          //   highlight
+          // );
 
           if (!highlight) {
-            console.log(`[SnippetHighlight] Not a highlight click, ignoring`);
+            // console.log(`[SnippetHighlight] Not a highlight click, ignoring`);
             return;
           }
 
           const snippetId = highlight.getAttribute('data-snippet-id');
           const snippetRef = highlight.getAttribute('data-snippet-ref');
-          console.log(
-            `[SnippetHighlight] Highlight attributes - id: ${snippetId}, ref: ${snippetRef}`
-          );
+          // console.log(
+          //   `[SnippetHighlight] Highlight attributes - id: ${snippetId}, ref: ${snippetRef}`
+          // );
 
           if (snippetId && snippetRef && onHighlightClick) {
-            console.log(`[SnippetHighlight] Calling onHighlightClick callback`);
+            // console.log(`[SnippetHighlight] Calling onHighlightClick callback`);
             event.preventDefault();
             event.stopPropagation();
             onHighlightClick(snippetId, snippetRef);
@@ -241,7 +241,7 @@ export function refreshHighlights(
   file: TFile
 ) {
   const highlights = tracker.getHighlights(file.path);
-  console.log(`[refreshHighlights] Refreshing ${highlights.length} highlights for ${file.path}`);
+  // console.log(`[refreshHighlights] Refreshing ${highlights.length} highlights for ${file.path}`);
   view.dispatch({
     effects: updateHighlightsEffect.of(highlights),
   });

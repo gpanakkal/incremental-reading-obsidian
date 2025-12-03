@@ -523,9 +523,9 @@ export default class ReviewManager {
       return;
     }
 
-    console.log(
-      `[createSnippet] Creating snippet from file: ${currentFile.path}`
-    );
+    // console.log(
+    //   `[createSnippet] Creating snippet from file: ${currentFile.path}`
+    // );
 
     const selection = editor.getSelection() || view.getSelection();
     if (!selection) {
@@ -554,10 +554,10 @@ export default class ReviewManager {
       currentFileEntry = await this.findSnippet(currentFile);
     }
 
-    console.log(
-      `[createSnippet] Parent type: ${parentType}, entry:`,
-      currentFileEntry
-    );
+    // console.log(
+    //   `[createSnippet] Parent type: ${parentType}, entry:`,
+    //   currentFileEntry
+    // );
 
     const priority = currentFileEntry?.priority ?? DEFAULT_PRIORITY;
 
@@ -573,10 +573,10 @@ export default class ReviewManager {
           start: range.from,
           end: range.to,
         };
-        console.log(
-          `[createSnippet] Calculated offsets from CodeMirror:`,
-          offsets
-        );
+        // console.log(
+        //   `[createSnippet] Calculated offsets from CodeMirror:`,
+        //   offsets
+        // );
       } else {
         console.warn(`[createSnippet] CodeMirror selection has no ranges`);
       }
@@ -591,10 +591,10 @@ export default class ReviewManager {
       );
     }
 
-    console.log(
-      `[createSnippet] Final data - parentId: ${currentFileEntry?.id}, offsets:`,
-      offsets
-    );
+    // console.log(
+    //   `[createSnippet] Final data - parentId: ${currentFileEntry?.id}, offsets:`,
+    //   offsets
+    // );
 
     // Validate parent ID
     if (!currentFileEntry) {
@@ -622,9 +622,9 @@ export default class ReviewManager {
       currentFileEntry &&
       this.currentEditorView?.file === currentFile
     ) {
-      console.log(
-        `[createSnippet] Refreshing highlights for ${currentFile.path}`
-      );
+      // console.log(
+      //   `[createSnippet] Refreshing highlights for ${currentFile.path}`
+      // );
 
       // Reload highlights into tracker
       await this.getSnippetHighlights(currentFile);
@@ -728,7 +728,7 @@ export default class ReviewManager {
    * @param parentFile The parent file to query highlights for
    * @returns Array of snippet highlights
    */
-  async getSnippetHighlights(parentFile: TAbstractFile) {
+  async getSnippetHighlights(parentFile: TFile) {
     // First find the parent's ID
     const parentType = this.getNoteType(parentFile);
     let parentEntry;
@@ -739,15 +739,15 @@ export default class ReviewManager {
       parentEntry = await this.findSnippet(parentFile);
     }
 
-    console.log(
-      `[getSnippetHighlights] Parent file: ${parentFile.path}, type: ${parentType}, entry:`,
-      parentEntry
-    );
+    // console.log(
+    //   `[getSnippetHighlights] Parent file: ${parentFile.path}, type: ${parentType}, entry:`,
+    //   parentEntry
+    // );
 
     if (!parentEntry) {
-      console.log(
-        `[getSnippetHighlights] No parent entry found, returning empty array`
-      );
+      // console.log(
+      //   `[getSnippetHighlights] No parent entry found, returning empty array`
+      // );
       return [];
     }
 
@@ -757,9 +757,9 @@ export default class ReviewManager {
       [parentEntry.id]
     )) as SnippetRow[];
 
-    console.log(
-      `[getSnippetHighlights] Query returned ${results.length} snippets with offsets for parent ${parentEntry.id}`
-    );
+    // console.log(
+    //   `[getSnippetHighlights] Query returned ${results.length} snippets with offsets for parent ${parentEntry.id}`
+    // );
 
     // Convert to SnippetHighlight format and load into tracker
     const highlights = results
@@ -772,10 +772,10 @@ export default class ReviewManager {
         parent: r.parent!,
       }));
 
-    console.log(
-      `[getSnippetHighlights] Converted to ${highlights.length} highlights:`,
-      highlights
-    );
+    // console.log(
+    //   `[getSnippetHighlights] Converted to ${highlights.length} highlights:`,
+    //   highlights
+    // );
 
     // Load into tracker cache
     this.snippetTracker.loadHighlights(parentFile.path, highlights);

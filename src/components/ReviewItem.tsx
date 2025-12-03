@@ -15,9 +15,9 @@ import { TitleEditor } from './TitleEditor';
  * - loading spinner and error element
  */
 export default function ReviewItem({ item }: { item: ReviewItem }) {
-  console.log(
-    `[ReviewItem] Rendering item: ${item.data.reference} (id: ${item.data.id})`
-  );
+  // console.log(
+  //   `[ReviewItem] Rendering item: ${item.data.reference} (id: ${item.data.id})`
+  // );
   const { plugin, showAnswer, reviewManager } = useReviewContext();
   const {
     isPending,

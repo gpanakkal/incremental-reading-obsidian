@@ -78,9 +78,9 @@ export function IREditor({
     enabled: !!item.file,
   });
 
-  console.log(
-    `[IREditor] Rendering with ${highlights.length} highlights for ${item.file?.path}`
-  );
+  // console.log(
+  //   `[IREditor] Rendering with ${highlights.length} highlights for ${item.file?.path}`
+  // );
 
   // extend the MarkdownEditor extracted from Obsidian
   useEffect(() => {
@@ -157,9 +157,9 @@ export function IREditor({
                 file: item.file,
                 tracker: reviewManager.snippetTracker,
                 onHighlightClick: async (snippetId, snippetRef) => {
-                  console.log(
-                    `[IREditor] Highlight clicked - snippetId: ${snippetId}, snippetRef: ${snippetRef}`
-                  );
+                  // console.log(
+                  //   `[IREditor] Highlight clicked - snippetId: ${snippetId}, snippetRef: ${snippetRef}`
+                  // );
 
                   const snippetFile = reviewManager.getNote(snippetRef);
 
@@ -167,7 +167,7 @@ export function IREditor({
                     // Open the file in a new leaf
                     const leaf = reviewView.app.workspace.getLeaf('tab');
                     await leaf.openFile(snippetFile);
-                    console.log(`[IREditor] Opened snippet file`);
+                    // console.log(`[IREditor] Opened snippet file`);
                   } else {
                     console.warn(
                       `[IREditor] Could not find file at ${snippetRef}`
@@ -295,14 +295,17 @@ export function IREditor({
         // elRef.current?.scrollIntoView({ block: 'end' });
       };
 
-    // Add iOS keyboard event listener with defensive check
-    if (Platform.isMobile) {
-      try {
-        cm.dom.win.addEventListener('keyboardDidShow', onShow);
-      } catch (error) {
-        console.warn('Incremental Reading - Failed to add keyboardDidShow listener:', error);
+      // Add iOS keyboard event listener with defensive check
+      if (Platform.isMobile) {
+        try {
+          cm.dom.win.addEventListener('keyboardDidShow', onShow);
+        } catch (error) {
+          console.warn(
+            'Incremental Reading - Failed to add keyboardDidShow listener:',
+            error
+          );
+        }
       }
-    }
 
       // Set up scroll tracking
       const scroller = cm.scrollDOM;
@@ -345,44 +348,54 @@ export function IREditor({
           scroller.removeEventListener('scroll', handleScroll);
         }
 
-      if (Platform.isMobile) {
-        try {
-          cm.dom.win.removeEventListener('keyboardDidShow', onShow);
-        } catch (error) {
-          console.warn('Incremental Reading - Failed to remove keyboardDidShow listener:', error);
-        }
-
-        try {
-          if (reviewView.activeEditor === controller) {
-            reviewView.activeEditor = null;
+        if (Platform.isMobile) {
+          try {
+            cm.dom.win.removeEventListener('keyboardDidShow', onShow);
+          } catch (error) {
+            console.warn(
+              'Incremental Reading - Failed to remove keyboardDidShow listener:',
+              error
+            );
           }
 
-          if ((app.workspace.activeEditor as unknown) === controller) {
-            app.workspace.activeEditor = null;
-            (app as any).mobileToolbar?.update();
-            reviewView.contentEl.removeClass('is-mobile-editing');
+          try {
+            if (reviewView.activeEditor === controller) {
+              reviewView.activeEditor = null;
+            }
+
+            if ((app.workspace.activeEditor as unknown) === controller) {
+              app.workspace.activeEditor = null;
+              (app as any).mobileToolbar?.update();
+              reviewView.contentEl.removeClass('is-mobile-editing');
+            }
+          } catch (error) {
+            console.warn(
+              'Incremental Reading - Error during mobile cleanup:',
+              error
+            );
           }
-        } catch (error) {
-          console.warn('Incremental Reading - Error during mobile cleanup:', error);
-        }
-        elRef.current?.removeChild(elRef.current?.children[0]);
-        internalRef.current = null;
-        if (editorRef) editorRef.current = null;
-        // Clear editor view reference from ReviewManager if it matches this file
-        if (reviewManager.currentEditorView?.file === item.file) {
-          reviewManager.currentEditorView = null;
+          elRef.current?.removeChild(elRef.current?.children[0]);
+          internalRef.current = null;
+          if (editorRef) editorRef.current = null;
+          // Clear editor view reference from ReviewManager if it matches this file
+          if (reviewManager.currentEditorView?.file === item.file) {
+            reviewManager.currentEditorView = null;
+          }
         }
 
-        await saveScroll;
+        // Wait for scroll save to complete (both mobile and desktop)
+        if (pendingScrollSave.current) {
+          await pendingScrollSave.current;
+          pendingScrollSave.current = null;
+        }
       };
+      return cleanupEffect;
+    };
 
-      return () => {
-        cleanupEffect();
-      };
-    }; // End of setupEditor async function
-
-    // Call the async setup function
-    setupEditor();
+    const cleanup = setupEditor();
+    return () => {
+      cleanup(); // Fire and forget the async cleanup
+    };
   }, [value, item, isPending]); // Re-create editor when highlights change
 
   const cls = [

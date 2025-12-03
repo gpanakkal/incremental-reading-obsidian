@@ -83,9 +83,9 @@ export function ReviewContextProvider({
       const nextItem =
         result.all.filter(({ data }) => !reviewView.seenIds.has(data.id))[0] ??
         null;
-      if (isReviewCard(nextItem)) await updateDelimiters(nextItem);
+      if (nextItem && isReviewCard(nextItem)) await updateDelimiters(nextItem);
       setShowAnswer(false);
-      reviewView.currentItem = nextItem ?? null;
+      reviewView.currentItem = nextItem;
       return nextItem;
     },
   });
