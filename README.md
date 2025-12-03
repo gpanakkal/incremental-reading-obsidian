@@ -9,13 +9,11 @@ This is a plugin for [Obsidian](https://obsidian.md) that enables incremental re
 Since this is integrated directly into Obsidian, your learning materials, snippets, and flash cards live alongside or even within your notes, making it convenient to work with all kinds of information.
 
 ## Setup
-[Install via BRAT](https://tfthacker.com/brat-quick-guide#Adding+a+beta+plugin).
+- If using Obsidian Sync: enable "sync all other types". This is required for syncing the database.
+- [Install via BRAT](https://tfthacker.com/brat-quick-guide#Adding+a+beta+plugin).
 
 ### Optional, but recommended
 - Create hotkeys for the `Extract selection` and `Create SRS card` commands.
-- If using Obsidian Sync, enable "sync all other types". 
-    - You can still use sync if you don't want to enable this, but you'll have to reload the vault to see new changes made on another device.
-
 
 ## Using the plugin
 1. Import some learning material into an Obsidian note. See [Third Party Tools](#third-party-tools) for HTML/PDF conversion.
@@ -52,8 +50,8 @@ Use decimal values for more fine-grained control of priorities (these are limite
 
 ## Known Limitations and Issues
 - Extracting snippets only works on markdown notes. Web page and PDF importing are planned features; in the meantime, there are third-party tools to convert these into markdown - see [Third-Party Tools](#third-party-tools).
-- If you open the note for an article, snippet, or card in another tab while it's also open in the review interface, edits made to the note will not be reflected in the review interface until the next time it's loaded. I recommend making edits directly from the review interface to avoid this issue.
-- Manual scheduling of reviews will be implemented in the future. For now, set priority to `1` if you wish to keep review intervals steady.
+- If you have a note open in the review interface, and then edit the note from elsewhere, those edits will not be reflected in the review interface until it's reloaded. I recommend making edits directly from the review interface to avoid this issue.
+- Manual scheduling of reviews will be implemented in the future. For now, set priority to `1` if you wish to keep the time between reviews from increasing.
 
 ## Third-Party Tools
 - [Obsidian Web Clipper](https://obsidian.md/clipper) (this is also built into Obsidian's web viewer; just click the overflow menu in the top right and select `Save to vault`)
