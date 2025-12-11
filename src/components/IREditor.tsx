@@ -66,6 +66,7 @@ export function IREditor({
   const { reviewView, reviewManager } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
+  const isLoadingScrollPosRef = useRef(false);
 
   // Fetch highlights using React Query
   const { isPending, data: highlights } = useQuery({
@@ -307,52 +308,7 @@ export function IREditor({
         }
       }
 
-      // Set up scroll tracking
-      const scroller = cm.scrollDOM;
-      let isLoadingScrollPos = false;
-      let scrollPosTimeout: number;
-      const abortController = new AbortController();
-
-      const handleScroll = async () => {
-        if (isLoadingScrollPos) return;
-        const currentPos = {
-          top: scroller.scrollTop,
-          left: scroller.scrollLeft,
-        };
-        await reviewManager.saveScrollPosition(item.file, currentPos);
-      };
-
-      // Restore scroll position from frontmatter
-      const storedScrollPos = reviewManager.loadScrollPosition(item.file);
-      if (storedScrollPos) {
-        isLoadingScrollPos = true;
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            scroller.scrollTo({
-              top: storedScrollPos.top,
-              left: storedScrollPos.left,
-              behavior: 'auto',
-            });
-            scrollPosTimeout = window.setTimeout(() => {
-              // lastScrollPosition.current = {
-              //   top: scroller.scrollTop,
-              //   left: scroller.scrollLeft,
-              // };
-              isLoadingScrollPos = false;
-            }, 200); // TODO: more robust solution for slower machines
-          });
-        });
-      }
-
-      // Add scroll listener with AbortController for clean lifecycle management
-      scroller.addEventListener('scrollend', handleScroll, {
-        signal: abortController.signal,
-      });
-
       const cleanupEffect = () => {
-        // Synchronously abort the scroll listener (automatically removes it)
-        abortController.abort();
-        clearTimeout(scrollPosTimeout);
 
         if (Platform.isMobile) {
           try {
@@ -423,6 +379,57 @@ export function IREditor({
       }, 0);
     }
   }, [value, isPending]);
+
+  // Separate effect for scroll position restoration and tracking
+  // This runs after text rendering is complete
+  useEffect(() => {
+    if (!internalRef.current || isPending) return;
+
+    const cm = internalRef.current;
+    const scroller = cm.scrollDOM;
+    const abortController = new AbortController();
+    let scrollPosTimeout: number;
+
+    const handleScroll = async () => {
+      if (isLoadingScrollPosRef.current) return;
+      const currentPos = {
+        top: scroller.scrollTop,
+        left: scroller.scrollLeft,
+      };
+      await reviewManager.saveScrollPosition(item.file, currentPos);
+    };
+
+    // Wait for text to render before restoring scroll position
+    // Double requestAnimationFrame ensures DOM is fully updated
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        // Restore scroll position from frontmatter
+        const storedScrollPos = reviewManager.loadScrollPosition(item.file);
+        if (storedScrollPos) {
+          isLoadingScrollPosRef.current = true;
+          scroller.scrollTo({
+            top: storedScrollPos.top,
+            left: storedScrollPos.left,
+            behavior: 'auto',
+          });
+          scrollPosTimeout = window.setTimeout(() => {
+            isLoadingScrollPosRef.current = false;
+          }, 200); // TODO: more robust solution for slower machines
+        }
+
+        // Add scroll listener with AbortController for clean lifecycle management
+        scroller.addEventListener('scrollend', handleScroll, {
+          signal: abortController.signal,
+        });
+      });
+    });
+
+    return () => {
+      // Synchronously abort the scroll listener (automatically removes it)
+      abortController.abort();
+      clearTimeout(scrollPosTimeout);
+    };
+  }, [item.data.reference, isPending, reviewManager, item.file, value]);
 
   const cls = [
     'markdown-source-view',
