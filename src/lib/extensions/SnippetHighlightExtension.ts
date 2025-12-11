@@ -155,11 +155,16 @@ export function createSnippetHighlightExtension(
         update(update: ViewUpdate) {
           // If document changed, update offsets in tracker
           if (update.docChanged) {
-            const changes = update.changes.desc.map((desc) => ({
-              from: desc.from,
-              to: desc.to,
-              insert: update.state.doc.sliceString(desc.from, desc.to),
-            }));
+            const changes: Array<{ from: number; to: number; insert: string }> = [];
+
+            // Use iterChanges to properly iterate over the ChangeSet
+            update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+              changes.push({
+                from: fromA,
+                to: toA,
+                insert: inserted.toString(),
+              });
+            });
 
             tracker.updateOffsetsForChanges(file.path, changes as any);
 

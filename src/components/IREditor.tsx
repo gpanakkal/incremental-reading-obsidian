@@ -66,10 +66,10 @@ export function IREditor({
   const { reviewView, reviewManager } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
-  const lastScrollPosition = useRef<{ top: number; left: number }>();
 
   // Fetch highlights using React Query
-  const { isPending, data: highlights = [] } = useQuery({
+  const { isPending, data: highlights } = useQuery({
+    placeholderData: [],
     queryKey: [item.data.reference, 'highlights'],
     queryFn: async () => {
       if (!item.file) return [];
@@ -309,44 +309,50 @@ export function IREditor({
 
       // Set up scroll tracking
       const scroller = cm.scrollDOM;
-      let isLoadingScrollPos = true;
+      let isLoadingScrollPos = false;
+      let scrollPosTimeout: number;
+      const abortController = new AbortController();
 
       const handleScroll = async () => {
         if (isLoadingScrollPos) return;
-        lastScrollPosition.current = {
+        const currentPos = {
           top: scroller.scrollTop,
           left: scroller.scrollLeft,
         };
+        await reviewManager.saveScrollPosition(item.file, currentPos);
       };
 
       // Restore scroll position from frontmatter
-      const scrollInfo = reviewManager.loadScrollPosition(item.file);
-      if (scrollInfo) {
-        scroller.scrollTo({
-          top: scrollInfo.top,
-          left: scrollInfo.left,
-          behavior: 'smooth',
+      const storedScrollPos = reviewManager.loadScrollPosition(item.file);
+      if (storedScrollPos) {
+        isLoadingScrollPos = true;
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            scroller.scrollTo({
+              top: storedScrollPos.top,
+              left: storedScrollPos.left,
+              behavior: 'auto',
+            });
+            scrollPosTimeout = window.setTimeout(() => {
+              // lastScrollPosition.current = {
+              //   top: scroller.scrollTop,
+              //   left: scroller.scrollLeft,
+              // };
+              isLoadingScrollPos = false;
+            }, 200); // TODO: more robust solution for slower machines
+          });
         });
-        lastScrollPosition.current = scrollInfo;
       }
 
-      isLoadingScrollPos = false;
-      scroller.addEventListener('scroll', handleScroll);
+      // Add scroll listener with AbortController for clean lifecycle management
+      scroller.addEventListener('scrollend', handleScroll, {
+        signal: abortController.signal,
+      });
 
-      const cleanupEffect = async () => {
-        // Save the last tracked scroll position to frontmatter before unmounting
-        let saveScroll;
-        if (lastScrollPosition.current) {
-          saveScroll = reviewManager.saveScrollPosition(
-            item.file,
-            lastScrollPosition.current
-          );
-        }
-
-        // Clean up scroll listener
-        if (scroller) {
-          scroller.removeEventListener('scroll', handleScroll);
-        }
+      const cleanupEffect = () => {
+        // Synchronously abort the scroll listener (automatically removes it)
+        abortController.abort();
+        clearTimeout(scrollPosTimeout);
 
         if (Platform.isMobile) {
           try {
@@ -382,21 +388,41 @@ export function IREditor({
             reviewManager.currentEditorView = null;
           }
         }
-
-        // Wait for scroll save to complete (both mobile and desktop)
-        if (pendingScrollSave.current) {
-          await pendingScrollSave.current;
-          pendingScrollSave.current = null;
-        }
       };
       return cleanupEffect;
     };
 
     const cleanup = setupEditor();
     return () => {
-      cleanup(); // Fire and forget the async cleanup
+      cleanup();
     };
-  }, [value, item, isPending]); // Re-create editor when highlights change
+  }, [item.data.reference, isPending, reviewView, reviewManager]); // Re-create editor only when item changes or highlights finish loading
+
+  // Separate effect to update editor content when value changes (without recreating the editor)
+  useEffect(() => {
+    if (!internalRef.current || isPending) return;
+
+    const view = internalRef.current;
+    const currentContent = view.state.doc.toString();
+    const newValue = value ?? '';
+
+    // Only update if the content actually changed
+    if (currentContent !== newValue) {
+      // Defer the dispatch to avoid "update in progress" errors
+      setTimeout(() => {
+        // Check if the view is still valid
+        if (internalRef.current === view) {
+          view.state.update({
+            changes: {
+              from: 0,
+              to: currentContent.length,
+              insert: newValue,
+            },
+          });
+        }
+      }, 0);
+    }
+  }, [value, isPending]);
 
   const cls = [
     'markdown-source-view',
