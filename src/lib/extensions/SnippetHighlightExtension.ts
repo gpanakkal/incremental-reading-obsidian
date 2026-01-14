@@ -1,253 +1,202 @@
-import { StateField, StateEffect, type Extension } from '@codemirror/state';
-import type { DecorationSet } from '@codemirror/view';
 import {
-  Decoration,
-  EditorView,
   ViewPlugin,
-  type ViewUpdate,
+  Decoration,
+  DecorationSet,
+  EditorView,
 } from '@codemirror/view';
-import type {
-  SnippetHighlight,
-  SnippetOffsetTracker,
-} from '../SnippetOffsetTracker';
-import type { App, TFile } from 'obsidian';
+import type { ViewUpdate } from '@codemirror/view';
+import { RangeSetBuilder } from '@codemirror/state';
+import type { TFile } from 'obsidian';
+import { irPluginFacet } from './irPluginFacet';
+import { getFileFromState, getAppFromState, getIRNoteType } from './utils';
+import type { SnippetOffsetTracker, SnippetHighlight } from '../SnippetOffsetTracker';
 
 /**
- * CodeMirror 6 extension for rendering snippet highlights
- * Uses decorations to overlay highlights without modifying the document
+ * CodeMirror extension that renders snippet highlights as decorations.
+ *
+ * Features:
+ * - Renders yellow highlights on text ranges where snippets were extracted
+ * - Highlights are clickable - clicking navigates to the snippet note
+ * - Automatically updates highlight positions when document is edited
+ * - Shows "corrupted" styling when edits overlap highlight regions
  */
+export const snippetHighlightExtension = ViewPlugin.fromClass(
+  class SnippetHighlightPlugin {
+    decorations: DecorationSet;
+    private file: TFile | null;
+    private highlightsLoaded: boolean = false;
 
-// Effect for adding highlights to the editor
-const addHighlightsEffect = StateEffect.define<SnippetHighlight[]>();
+    constructor(view: EditorView) {
+      this.file = getFileFromState(view.state);
+      this.decorations = Decoration.none;
 
-// Effect for updating highlights after document changes
-const updateHighlightsEffect = StateEffect.define<SnippetHighlight[]>();
+      // Load highlights asynchronously
+      this.loadHighlights(view);
+    }
 
-/**
- * StateField that manages highlight decorations
- */
-export const snippetHighlightField = StateField.define<DecorationSet>({
-  create() {
-    return Decoration.none;
-  },
+    private async loadHighlights(view: EditorView) {
+      const plugin = view.state.facet(irPluginFacet);
+      const app = getAppFromState(view.state);
 
-  update(decorations, tr) {
-    // Map existing decorations to new document positions
-    decorations = decorations.map(tr.changes);
+      if (!plugin || !app || !this.file) {
+        return;
+      }
 
-    // Handle effects
-    for (const effect of tr.effects) {
-      if (effect.is(addHighlightsEffect)) {
-        // Add new highlights
-        decorations = createDecorations(effect.value);
-      } else if (effect.is(updateHighlightsEffect)) {
-        // Replace all highlights with updated ones
-        decorations = createDecorations(effect.value);
+      const noteType = getIRNoteType(app, this.file);
+      // Only articles and snippets can have child snippets
+      if (noteType !== 'article' && noteType !== 'snippet') {
+        return;
+      }
+
+      const reviewManager = plugin.reviewManager;
+      if (!reviewManager) {
+        return;
+      }
+
+      // Load highlights from database into tracker
+      await reviewManager.getSnippetHighlights(this.file);
+      this.highlightsLoaded = true;
+
+      // Build decorations from tracker
+      this.decorations = this.buildDecorations(view, reviewManager.snippetTracker);
+
+      // Force a view update to show the decorations
+      view.dispatch({});
+    }
+
+    update(update: ViewUpdate) {
+      const plugin = update.state.facet(irPluginFacet);
+      const reviewManager = plugin?.reviewManager;
+
+      if (!reviewManager || !this.file || !this.highlightsLoaded) {
+        return;
+      }
+
+      // If document changed, update offsets in tracker
+      if (update.docChanged) {
+        // Convert CM6 changes to ChangeSpec format
+        const changes: Array<{ from: number; to: number; insert?: string }> = [];
+        update.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
+          changes.push({
+            from: fromA,
+            to: toA,
+            insert: inserted.toString(),
+          });
+        });
+
+        reviewManager.snippetTracker.updateOffsetsForChanges(
+          this.file.path,
+          changes
+        );
+      }
+
+      // Rebuild decorations if document changed or viewport changed
+      if (update.docChanged || update.viewportChanged) {
+        this.decorations = this.buildDecorations(
+          update.view,
+          reviewManager.snippetTracker
+        );
       }
     }
 
-    return decorations;
+    private buildDecorations(
+      view: EditorView,
+      tracker: SnippetOffsetTracker
+    ): DecorationSet {
+      if (!this.file) {
+        return Decoration.none;
+      }
+
+      const highlights = tracker.getHighlights(this.file.path);
+      if (highlights.length === 0) {
+        return Decoration.none;
+      }
+
+      const isCorrupted = tracker.isCorrupted(this.file.path);
+      const docLength = view.state.doc.length;
+      const builder = new RangeSetBuilder<Decoration>();
+
+      // Sort highlights by start offset for RangeSetBuilder
+      const sortedHighlights = [...highlights].sort(
+        (a, b) => a.start_offset - b.start_offset
+      );
+
+      for (const highlight of sortedHighlights) {
+        // Validate offsets are within document bounds
+        if (
+          highlight.start_offset < 0 ||
+          highlight.end_offset > docLength ||
+          highlight.start_offset >= highlight.end_offset
+        ) {
+          continue;
+        }
+
+        const classes = ['ir-snippet-highlight'];
+        if (isCorrupted) {
+          classes.push('ir-corrupted');
+        }
+
+        const decoration = Decoration.mark({
+          class: classes.join(' '),
+          attributes: {
+            'data-snippet-id': highlight.id,
+            'data-snippet-ref': highlight.reference,
+          },
+        });
+
+        builder.add(highlight.start_offset, highlight.end_offset, decoration);
+      }
+
+      return builder.finish();
+    }
+
+    destroy() {
+      // Cleanup if needed
+    }
   },
+  {
+    decorations: (v) => v.decorations,
 
-  provide: (f) => EditorView.decorations.from(f),
-});
+    eventHandlers: {
+      click: (event: MouseEvent, view: EditorView) => {
+        const target = event.target as HTMLElement;
+        const highlight = target.closest('.ir-snippet-highlight');
 
-/**
- * Create decoration set from highlights
- * Filters out invalid offsets to prevent crashes
- */
-function createDecorations(
-  highlights: SnippetHighlight[],
-  docLength?: number
-): DecorationSet {
-  const decorations = highlights
-    .filter((highlight) => {
-      const start = highlight.start_offset;
-      const end = highlight.end_offset;
-
-      // Validate offsets
-      if (start < 0 || end < 0) {
-        console.warn(
-          `[SnippetHighlight] Skipping highlight with negative offsets:`,
-          highlight
-        );
-        return false;
-      }
-      if (start > end) {
-        console.warn(
-          `[SnippetHighlight] Skipping highlight with start > end:`,
-          highlight
-        );
-        return false;
-      }
-      if (docLength !== undefined && (start >= docLength || end > docLength)) {
-        console.warn(
-          `[SnippetHighlight] Skipping highlight out of range (doc length: ${docLength}):`,
-          highlight
-        );
-        return false;
-      }
-
-      return true;
-    })
-    .map((highlight) => {
-      const start = highlight.start_offset;
-      const end = highlight.end_offset;
-
-      return Decoration.mark({
-        class: 'ir-snippet-highlight',
-        attributes: {
-          'data-snippet-id': highlight.id,
-          'data-snippet-ref': highlight.reference,
-        },
-      }).range(start, end);
-    });
-
-  return Decoration.set(decorations, true);
-}
-
-/**
- * Configuration for the highlight extension
- */
-export interface SnippetHighlightConfig {
-  app: App;
-  file: TFile;
-  tracker: SnippetOffsetTracker;
-  onHighlightClick?: (snippetId: string, snippetRef: string) => void;
-}
-
-/**
- * Create the complete snippet highlight extension
- * @param config Configuration object
- * @returns CodeMirror extension
- */
-export function createSnippetHighlightExtension(
-  config: SnippetHighlightConfig
-): Extension {
-  const { tracker, file, onHighlightClick } = config;
-
-  // Load highlights for the current file
-  const highlights = tracker.getHighlights(file.path);
-  // console.log(
-  //   `[SnippetHighlightExtension] Creating extension with ${highlights.length} highlights for ${file.path}`,
-  //   highlights
-  // );
-
-  return [
-    // Add the StateField
-    snippetHighlightField.init((state) => {
-      const docLength = state.doc.length;
-      const decorations = createDecorations(highlights, docLength);
-      // console.log(
-      //   `[SnippetHighlightExtension] Created decorations for ${highlights.length} highlights (doc length: ${docLength})`
-      // );
-      return decorations;
-    }),
-
-    // Add ViewPlugin for handling clicks and document changes
-    ViewPlugin.fromClass(
-      class {
-        constructor(private view: EditorView) {
-          // Add click listener
-          this.view.dom.addEventListener('click', this.handleClick);
+        if (!highlight) {
+          return false;
         }
 
-        update(update: ViewUpdate) {
-          // If document changed, update offsets in tracker
-          if (update.docChanged) {
-            const changes: Array<{ from: number; to: number; insert: string }> = [];
-
-            // Use iterChanges to properly iterate over the ChangeSet
-            update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-              changes.push({
-                from: fromA,
-                to: toA,
-                insert: inserted.toString(),
-              });
-            });
-
-            tracker.updateOffsetsForChanges(file.path, changes as any);
-
-            // Get updated highlights and dispatch effect
-            const updatedHighlights = tracker.getHighlights(file.path);
-            this.view.dispatch({
-              effects: updateHighlightsEffect.of(updatedHighlights),
-            });
-          }
+        const snippetRef = highlight.getAttribute('data-snippet-ref');
+        if (!snippetRef) {
+          return false;
         }
 
-        destroy() {
-          // Clean up click listener
-          this.view.dom.removeEventListener('click', this.handleClick);
-        }
-
-        private handleClick = (event: MouseEvent) => {
+        // Navigate to the snippet note
+        const plugin = view.state.facet(irPluginFacet);
+        if (plugin) {
           event.preventDefault();
-          const target = event.target as HTMLElement;
-          // console.log(`[SnippetHighlight] Click detected on:`, target);
+          event.stopPropagation();
 
-          // Check if click is on a highlight
-          const highlight = target.closest('.ir-snippet-highlight');
-          // console.log(
-          //   `[SnippetHighlight] Closest highlight element:`,
-          //   highlight
-          // );
+          plugin.app.workspace.openLinkText(snippetRef, '', true);
+          return true;
+        }
 
-          if (!highlight) {
-            // console.log(`[SnippetHighlight] Not a highlight click, ignoring`);
-            return;
-          }
-
-          const snippetId = highlight.getAttribute('data-snippet-id');
-          const snippetRef = highlight.getAttribute('data-snippet-ref');
-          // console.log(
-          //   `[SnippetHighlight] Highlight attributes - id: ${snippetId}, ref: ${snippetRef}`
-          // );
-
-          if (snippetId && snippetRef && onHighlightClick) {
-            // console.log(`[SnippetHighlight] Calling onHighlightClick callback`);
-            event.preventDefault();
-            event.stopPropagation();
-            onHighlightClick(snippetId, snippetRef);
-          } else {
-            console.warn(
-              `[SnippetHighlight] Missing data or callback - id: ${snippetId}, ref: ${snippetRef}, callback: ${!!onHighlightClick}`
-            );
-          }
-        };
-      }
-    ),
-  ];
-}
+        return false;
+      },
+    },
+  }
+);
 
 /**
- * Helper to dispatch highlights to an existing editor
- * @param view The editor view
- * @param highlights The highlights to add
- */
-export function setHighlights(
-  view: EditorView,
-  highlights: SnippetHighlight[]
-) {
-  view.dispatch({
-    effects: addHighlightsEffect.of(highlights),
-  });
-}
-
-/**
- * Refresh highlights for a file after creating a new snippet
- * @param view The editor view
- * @param tracker The offset tracker
- * @param file The file to refresh highlights for
+ * Refresh highlights for a file after snippet creation.
+ * Called by ReviewManager when a new snippet is created.
  */
 export function refreshHighlights(
   view: EditorView,
   tracker: SnippetOffsetTracker,
   file: TFile
 ) {
-  const highlights = tracker.getHighlights(file.path);
-  // console.log(`[refreshHighlights] Refreshing ${highlights.length} highlights for ${file.path}`);
-  view.dispatch({
-    effects: updateHighlightsEffect.of(highlights),
-  });
+  // Dispatch an empty transaction to trigger plugin update
+  // The plugin will rebuild decorations from the updated tracker
+  view.dispatch({});
 }

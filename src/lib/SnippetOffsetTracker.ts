@@ -80,7 +80,7 @@ export class SnippetOffsetTracker {
       }
 
       const changeStart = change.from;
-      const changeEnd = 'to' in change ? change.to : changeStart;
+      const changeEnd = 'to' in change && change.to !== undefined ? change.to : changeStart;
       const insertedLength = 'insert' in change
         ? change.insert?.toString().length || 0
         : 0;

@@ -22,8 +22,12 @@ import type { EditState } from './types';
 import { useReviewContext } from './ReviewContext';
 import { getBaseMarkdownExtensions } from '../lib/utils';
 import type { ReviewItem } from '#/lib/types';
-import { createSnippetHighlightExtension } from '../lib/extensions/SnippetHighlightExtension';
-import { useQuery } from '@tanstack/react-query';
+import {
+  setReviewMode,
+  setShowAnswer as setShowAnswerEffect,
+  setReviewCallbacks,
+  type ReviewCallbacks,
+} from '#/lib/extensions';
 
 /**
  * Credit goes to mgmeyers for figuring out how to get the editor prototype. See the original code here: https://github.com/mgmeyers/obsidian-kanban/blob/main/src/components/Editor/MarkdownEditor.tsx
@@ -63,30 +67,26 @@ export function IREditor({
   placeholder,
   titleRef,
 }: IREditorProps) {
-  const { reviewView, reviewManager } = useReviewContext();
+  const {
+    reviewView,
+    reviewManager,
+    reviewArticle,
+    reviewSnippet,
+    gradeCard,
+    dismissItem,
+    skipItem,
+    showAnswer,
+    setShowAnswer: setShowAnswerContext,
+    currentItem,
+  } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
-  const isLoadingScrollPosRef = useRef(false);
 
-  // Fetch highlights using React Query
-  const { isPending, data: highlights } = useQuery({
-    placeholderData: [],
-    queryKey: [item.data.reference, 'highlights'],
-    queryFn: async () => {
-      if (!item.file) return [];
-      return await reviewManager.getSnippetHighlights(item.file);
-    },
-    enabled: !!item.file,
-  });
-
-  // console.log(
-  //   `[IREditor] Rendering with ${highlights.length} highlights for ${item.file?.path}`
-  // );
+  // Note: Highlights and scroll position are now handled by global CodeMirror extensions
+  // (SnippetHighlightExtension and ScrollPositionExtension)
 
   // extend the MarkdownEditor extracted from Obsidian
   useEffect(() => {
-    // Wait for highlights to load before creating editor
-    if (isPending) return;
 
     const setupEditor = () => {
       class Editor extends reviewView.plugin.MarkdownEditor {
@@ -149,41 +149,6 @@ export function IREditor({
               })
             )
           );
-
-          // Add snippet highlight extension if this is a parent file
-          if (item.file) {
-            try {
-              const highlightExtension = createSnippetHighlightExtension({
-                app: reviewView.app,
-                file: item.file,
-                tracker: reviewManager.snippetTracker,
-                onHighlightClick: async (snippetId, snippetRef) => {
-                  // console.log(
-                  //   `[IREditor] Highlight clicked - snippetId: ${snippetId}, snippetRef: ${snippetRef}`
-                  // );
-
-                  const snippetFile = reviewManager.getNote(snippetRef);
-
-                  if (snippetFile) {
-                    // Open the file in a new leaf
-                    const leaf = reviewView.app.workspace.getLeaf('tab');
-                    await leaf.openFile(snippetFile);
-                    // console.log(`[IREditor] Opened snippet file`);
-                  } else {
-                    console.warn(
-                      `[IREditor] Could not find file at ${snippetRef}`
-                    );
-                  }
-                },
-              });
-              extensions.push(highlightExtension);
-            } catch (error) {
-              console.warn(
-                'Could not load snippet highlight extension:',
-                error
-              );
-            }
-          }
 
           if (placeholder) extensions.push(placeholderExt(placeholder));
           if (onPaste) {
@@ -272,6 +237,25 @@ export function IREditor({
       controller.editMode = editor;
       editor.set(value ?? '');
 
+      // Enable review mode in the action bar extension
+      // This tells the extension we're in the review interface context
+      const reviewCallbacks: ReviewCallbacks = {
+        reviewArticle: async (data) => reviewArticle(data),
+        reviewSnippet: async (data) => reviewSnippet(data),
+        gradeCard: async (data, grade) => gradeCard(data, grade),
+        dismissItem: async (reviewItem) => dismissItem(reviewItem),
+        skipItem: (reviewItem) => skipItem(reviewItem),
+        setShowAnswer: (show) => setShowAnswerContext(show),
+        getCurrentItem: () => currentItem,
+      };
+
+      cm.dispatch({
+        effects: [
+          setReviewMode.of(true),
+          setReviewCallbacks.of(reviewCallbacks),
+        ],
+      });
+
       // Inject title element into CodeMirror's DOM structure
       if (titleRef?.current) {
         const cmSizer = cm.dom.querySelector('.cm-sizer');
@@ -309,7 +293,6 @@ export function IREditor({
       }
 
       const cleanupEffect = () => {
-
         if (Platform.isMobile) {
           try {
             cm.dom.win.removeEventListener('keyboardDidShow', onShow);
@@ -352,11 +335,11 @@ export function IREditor({
     return () => {
       cleanup();
     };
-  }, [item.data.reference, isPending, reviewView, reviewManager]); // Re-create editor only when item changes or highlights finish loading
+  }, [item.data.reference, reviewView, reviewManager]); // Re-create editor only when item changes
 
   // Separate effect to update editor content when value changes (without recreating the editor)
   useEffect(() => {
-    if (!internalRef.current || isPending) return;
+    if (!internalRef.current) return;
 
     const view = internalRef.current;
     const currentContent = view.state.doc.toString();
@@ -378,58 +361,17 @@ export function IREditor({
         }
       }, 0);
     }
-  }, [value, isPending]);
+  }, [value]);
 
-  // Separate effect for scroll position restoration and tracking
-  // This runs after text rendering is complete
+  // Sync showAnswer state from ReviewContext to the action bar extension
   useEffect(() => {
-    if (!internalRef.current || isPending) return;
-
-    const cm = internalRef.current;
-    const scroller = cm.scrollDOM;
-    const abortController = new AbortController();
-    let scrollPosTimeout: number;
-
-    const handleScroll = async () => {
-      if (isLoadingScrollPosRef.current) return;
-      const currentPos = {
-        top: scroller.scrollTop,
-        left: scroller.scrollLeft,
-      };
-      await reviewManager.saveScrollPosition(item.file, currentPos);
-    };
-
-    // Wait for text to render before restoring scroll position
-    // Double requestAnimationFrame ensures DOM is fully updated
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        // Restore scroll position from frontmatter
-        const storedScrollPos = reviewManager.loadScrollPosition(item.file);
-        if (storedScrollPos) {
-          isLoadingScrollPosRef.current = true;
-          scroller.scrollTo({
-            top: storedScrollPos.top,
-            left: storedScrollPos.left,
-            behavior: 'auto',
-          });
-          scrollPosTimeout = window.setTimeout(() => {
-            isLoadingScrollPosRef.current = false;
-          }, 200); // TODO: more robust solution for slower machines
-        }
-
-        // Add scroll listener with AbortController for clean lifecycle management
-        scroller.addEventListener('scrollend', handleScroll, {
-          signal: abortController.signal,
-        });
-      });
+    if (!internalRef.current) return;
+    internalRef.current.dispatch({
+      effects: setShowAnswerEffect.of(showAnswer),
     });
+  }, [showAnswer]);
 
-    return () => {
-      // Synchronously abort the scroll listener (automatically removes it)
-      abortController.abort();
-      clearTimeout(scrollPosTimeout);
-    };
-  }, [item.data.reference, isPending, reviewManager, item.file, value]);
+  // Note: Scroll position is now handled by ScrollPositionExtension
 
   const cls = [
     'markdown-source-view',

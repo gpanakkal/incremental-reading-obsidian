@@ -18,12 +18,14 @@ import databaseSchema from './db/schema.sql';
 import ReviewManager from './lib/ReviewManager';
 import ReviewView from './views/ReviewView';
 import { PriorityModal } from './views/PriorityModal';
-import type { SnippetRow, SRSCardRow } from './lib/types';
+import type { ReviewItem, SnippetRow, SRSCardRow } from './lib/types';
 import SRSCard from './lib/SRSCard';
 import { getEditorClass } from './lib/utils';
 import Snippet from './lib/Snippet';
 import Article from './lib/Article';
 import { QueryModal } from './views/QueryModal';
+import { createIRExtensions } from './lib/extensions';
+import { queryClient } from './components/ReviewInterface';
 
 interface IRPluginSettings {
   mySetting: string;
@@ -37,6 +39,14 @@ export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;
   #reviewManager: ReviewManager;
   MarkdownEditor: any;
+
+  /**
+   * Get the ReviewManager instance.
+   * May be null if called before onLayoutReady completes.
+   */
+  get reviewManager(): ReviewManager | null {
+    return this.#reviewManager ?? null;
+  }
 
   async onload() {
     await this.loadSettings();
@@ -313,6 +323,9 @@ export default class IncrementalReadingPlugin extends Plugin {
           ReviewView.viewType,
           (leaf) => new ReviewView(leaf, this, this.#reviewManager)
         );
+
+        // Register global CodeMirror extensions for IR notes
+        this.registerEditorExtension(createIRExtensions(this));
       } catch (error) {
         console.error(error);
         new Notice(
@@ -364,16 +377,28 @@ export default class IncrementalReadingPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  async learn() {
+  async learn(initialItem?: ReviewItem) {
     let leaf: WorkspaceLeaf | null = null;
     const leaves = this.app.workspace.getLeavesOfType(ReviewView.viewType);
+    const viewAlreadyOpen = leaves.length > 0;
 
-    if (leaves.length > 0) {
+    if (viewAlreadyOpen) {
       leaf = leaves[0];
     } else {
       leaf = this.app.workspace.getLeaf('tab');
       await leaf.setViewState({ type: ReviewView.viewType, active: true });
-      // await leaf.open(new ReviewView(leaf, this.#reviewManager));
+    }
+
+    // Set the initial item on the view if provided
+    if (initialItem) {
+      const view = leaf.view as ReviewView;
+      view.initialItem = initialItem;
+
+      // If the view was already open, invalidate the query to trigger a refetch
+      // This ensures the new initial item is displayed immediately
+      if (viewAlreadyOpen) {
+        queryClient.invalidateQueries({ queryKey: ['current-review-item'] });
+      }
     }
 
     await this.app.workspace.revealLeaf(leaf);

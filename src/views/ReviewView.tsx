@@ -16,6 +16,11 @@ export default class ReviewView extends FileView {
   plugin: IncrementalReadingPlugin;
   activeEditor: any;
   allowNoFile: boolean = true;
+  /**
+   * Optional initial item to display first instead of the top of the queue.
+   * Set this before opening the view to jump to a specific item.
+   */
+  initialItem: ReviewItem | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,

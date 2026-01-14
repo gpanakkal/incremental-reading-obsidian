@@ -7,7 +7,14 @@ import {
   type MarkdownView,
 } from 'obsidian';
 import type { SQLiteRepository } from './repository';
-import type { IArticleReview, NoteType, ReviewArticle } from '#/lib/types';
+import type {
+  IArticleReview,
+  NoteType,
+  ReviewArticle,
+  ReviewCard,
+  ReviewItem,
+  ReviewSnippet,
+} from '#/lib/types';
 import {
   type ISnippetActive,
   type ISnippetReview,
@@ -630,9 +637,7 @@ export default class ReviewManager {
       await this.getSnippetHighlights(currentFile);
 
       // Import and call refreshHighlights
-      const { refreshHighlights } = await import(
-        './extensions/SnippetHighlightExtension'
-      );
+      const { refreshHighlights } = await import('./extensions');
       refreshHighlights(
         this.currentEditorView.view,
         this.snippetTracker,
@@ -720,6 +725,59 @@ export default class ReviewManager {
     );
 
     return (results[0] as SnippetRow) ?? null;
+  }
+
+  async findCard(cardFile: TAbstractFile): Promise<SRSCardRow | null> {
+    const results = await this.#repo.query(
+      'SELECT * FROM srs_card WHERE reference = $1',
+      [this.getReferenceFromPath(cardFile.path)]
+    );
+
+    return (results[0] as SRSCardRow) ?? null;
+  }
+
+  /**
+   * Creates a ReviewItem from a file and its note type.
+   * Returns null if the item is not found in the database.
+   */
+  async getReviewItemFromFile(
+    file: TFile,
+    noteType: NoteType
+  ): Promise<ReviewItem | null> {
+    if (noteType === 'article') {
+      const row = await this.findArticle(file);
+      if (!row) return null;
+      return { data: Article.rowToBase(row), file } as ReviewArticle;
+    } else if (noteType === 'snippet') {
+      const row = await this.findSnippet(file);
+      if (!row) return null;
+      return { data: Snippet.rowToBase(row), file } as ReviewSnippet;
+    } else if (noteType === 'card') {
+      const row = await this.findCard(file);
+      if (!row) return null;
+      return { data: SRSCard.rowToDisplay(row), file } as ReviewCard;
+    }
+    return null;
+  }
+
+  /**
+   * Dismiss an item by type and ID
+   */
+  async dismissItem(type: NoteType, id: string): Promise<void> {
+    const table = type === 'card' ? 'srs_card' : type;
+    await this.#repo.mutate(`UPDATE ${table} SET dismissed = 1 WHERE id = $1`, [
+      id,
+    ]);
+  }
+
+  /**
+   * Un-dismiss an item by type and ID
+   */
+  async undismissItem(type: NoteType, id: string): Promise<void> {
+    const table = type === 'card' ? 'srs_card' : type;
+    await this.#repo.mutate(`UPDATE ${table} SET dismissed = 0 WHERE id = $1`, [
+      id,
+    ]);
   }
 
   /**

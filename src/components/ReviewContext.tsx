@@ -24,7 +24,7 @@ import {
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
-import type { WorkspaceLeaf } from 'obsidian';
+import { Notice, type WorkspaceLeaf } from 'obsidian';
 import type IncrementalReadingPlugin from '#/main';
 import type { Grade } from 'ts-fsrs';
 import { Rating } from 'ts-fsrs';
@@ -76,6 +76,16 @@ export function ReviewContextProvider({
   } = useQuery({
     queryKey: ['current-review-item'],
     queryFn: async () => {
+      // Check if there's an initial item to display first
+      if (reviewView.initialItem) {
+        const initialItem = reviewView.initialItem;
+        reviewView.initialItem = null; // Clear so next call uses normal queue
+        if (isReviewCard(initialItem)) await updateDelimiters(initialItem);
+        setShowAnswer(false);
+        reviewView.currentItem = initialItem;
+        return initialItem;
+      }
+
       const result = await reviewManager.getDue({
         dueBy: Date.now() + MS_PER_DAY * 2,
         limit: REVIEW_FETCH_COUNT,

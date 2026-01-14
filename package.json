@@ -23,9 +23,9 @@
 		"ts-fsrs": "~4.6.1"
 	},
 	"devDependencies": {
-		"@codemirror/commands": "6.8.1",
-		"@codemirror/state": "6.5.2",
-		"@codemirror/view": "6.38.3",
+		"@codemirror/commands": "^6.8.1",
+		"@codemirror/state": "^6.5.0",
+		"@codemirror/view": "^6.38.3",
 		"@types/node": "~24.3.0",
 		"@types/sql.js": "~1.4.9",
 		"@typescript-eslint/eslint-plugin": "5.29.0",
@@ -33,8 +33,8 @@
 		"builtin-modules": "~3.3.0",
 		"esbuild": "~0.25.9",
 		"esbuild-plugin-wasm": "~1.1.0",
-		"obsidian": "latest",
-		"obsidian-typings": "~2.37.0",
+		"obsidian": "^1.11.0",
+		"obsidian-typings": "~4.88.0",
 		"prettier": "~3.6.2",
 		"prettier-eslint": "~16.4.2",
 		"tslib": "2.4.0",

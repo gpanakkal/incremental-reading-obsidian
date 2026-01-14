@@ -5,7 +5,6 @@ import { ReviewContextProvider, useReviewContext } from './ReviewContext';
 import ReviewItem from './ReviewItem';
 import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
-import { ActionBar } from './ActionBar';
 
 export const queryClient = new QueryClient();
 
@@ -30,7 +29,6 @@ function ReviewInterface() {
 
   return (
     <div className={'ir-review-interface view-content'}>
-      <ActionBar />
       {currentItem ? (
         <ReviewItem item={currentItem} />
       ) : (
