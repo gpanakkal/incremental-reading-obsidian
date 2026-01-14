@@ -6,7 +6,7 @@ import type { EditorView, ViewUpdate } from '@codemirror/view';
 import type { EditState } from './types';
 import { EditingState } from './types';
 import { CardViewer } from './CardViewer';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { TitleEditor } from './TitleEditor';
 
 /**
@@ -19,6 +19,7 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
   //   `[ReviewItem] Rendering item: ${item.data.reference} (id: ${item.data.id})`
   // );
   const { plugin, showAnswer, reviewManager } = useReviewContext();
+  const queryClient = useQueryClient();
   const {
     isPending,
     isError,
@@ -31,9 +32,20 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
   const titleRef = useRef<HTMLDivElement | null>(null);
 
   const saveNote = async (newContent: string) => {
-    await plugin.app.vault.process(item.file, (data) => {
-      return newContent;
-    });
+    // Save document content and highlight offsets together to avoid race conditions
+    const highlights = reviewManager.snippetTracker.getHighlights(item.file.path);
+
+    // Save document content
+    await plugin.app.vault.process(item.file, () => newContent);
+
+    // Save highlight offsets (they're already body-relative in the tracker)
+    for (const h of highlights) {
+      await reviewManager.updateSnippetOffsets(h.id, h.start_offset, h.end_offset);
+    }
+
+    // Invalidate the file content cache so reopening shows fresh content
+    queryClient.setQueryData([item.data.reference], newContent);
+
     setEditState(EditingState.complete);
   };
 
@@ -43,7 +55,7 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
     }
 
     const docText = update.state.doc.toString();
-    saveNote(docText);
+    await saveNote(docText);
   };
 
   if (!fileText) return <></>;

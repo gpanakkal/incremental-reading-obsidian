@@ -19,6 +19,10 @@ import type { SnippetOffsetTracker, SnippetHighlight } from '../SnippetOffsetTra
  * - Highlights are clickable - clicking navigates to the snippet note
  * - Automatically updates highlight positions when document is edited
  * - Shows "corrupted" styling when edits overlap highlight regions
+ * - Persists offset changes to the database with debouncing
+ *
+ * Note: All offsets in the tracker are body-relative (excluding frontmatter).
+ * Conversion to absolute positions happens only at render time.
  */
 export const snippetHighlightExtension = ViewPlugin.fromClass(
   class SnippetHighlightPlugin {
@@ -53,12 +57,16 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         return;
       }
 
-      // Load highlights from database into tracker
+      // Load highlights from database into tracker (offsets are body-relative)
       await reviewManager.getSnippetHighlights(this.file);
       this.highlightsLoaded = true;
 
       // Build decorations from tracker
-      this.decorations = this.buildDecorations(view, reviewManager.snippetTracker);
+      this.decorations = this.buildDecorations(
+        view,
+        reviewManager.snippetTracker,
+        reviewManager
+      );
 
       // Force a view update to show the decorations
       view.dispatch({});
@@ -74,34 +82,47 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
       // If document changed, update offsets in tracker
       if (update.docChanged) {
-        // Convert CM6 changes to ChangeSpec format
+        // IMPORTANT: fromA/toA are positions in the OLD document,
+        // so we need the OLD document's body start for conversion
+        const oldDocContent = update.startState.doc.toString();
+        const oldBodyStart = reviewManager.getBodyStartOffset(oldDocContent);
+
+        // Convert CM6 changes to body-relative offsets
         const changes: Array<{ from: number; to: number; insert?: string }> = [];
-        update.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
-          changes.push({
-            from: fromA,
-            to: toA,
-            insert: inserted.toString(),
-          });
+        update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+          // Only track changes that affect the body (after frontmatter)
+          // Changes entirely within frontmatter don't affect body-relative offsets
+          if (toA > oldBodyStart || fromA >= oldBodyStart) {
+            changes.push({
+              from: Math.max(0, fromA - oldBodyStart),
+              to: Math.max(0, toA - oldBodyStart),
+              insert: inserted.toString(),
+            });
+          }
         });
 
-        reviewManager.snippetTracker.updateOffsetsForChanges(
-          this.file.path,
-          changes
-        );
+        if (changes.length > 0) {
+          reviewManager.snippetTracker.updateOffsetsForChanges(
+            this.file.path,
+            changes
+          );
+          // Note: Persistence is handled by ReviewItem.saveNote() to avoid race conditions
+        }
       }
 
-      // Rebuild decorations if document changed or viewport changed
-      if (update.docChanged || update.viewportChanged) {
-        this.decorations = this.buildDecorations(
-          update.view,
-          reviewManager.snippetTracker
-        );
-      }
+      // Always rebuild decorations - the tracker data may have changed
+      // (either from document edits above, or from external refresh after snippet creation)
+      this.decorations = this.buildDecorations(
+        update.view,
+        reviewManager.snippetTracker,
+        reviewManager
+      );
     }
 
     private buildDecorations(
       view: EditorView,
-      tracker: SnippetOffsetTracker
+      tracker: SnippetOffsetTracker,
+      reviewManager: any
     ): DecorationSet {
       if (!this.file) {
         return Decoration.none;
@@ -112,21 +133,30 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         return Decoration.none;
       }
 
+      // Calculate body start offset for converting body-relative to absolute
+      const docContent = view.state.doc.toString();
+      const bodyStart = reviewManager.getBodyStartOffset(docContent);
+
       const isCorrupted = tracker.isCorrupted(this.file.path);
       const docLength = view.state.doc.length;
       const builder = new RangeSetBuilder<Decoration>();
 
       // Sort highlights by start offset for RangeSetBuilder
+      // (sort by absolute position for proper ordering)
       const sortedHighlights = [...highlights].sort(
         (a, b) => a.start_offset - b.start_offset
       );
 
       for (const highlight of sortedHighlights) {
+        // Convert body-relative to absolute offsets for decoration
+        const absoluteStart = highlight.start_offset + bodyStart;
+        const absoluteEnd = highlight.end_offset + bodyStart;
+
         // Validate offsets are within document bounds
         if (
-          highlight.start_offset < 0 ||
-          highlight.end_offset > docLength ||
-          highlight.start_offset >= highlight.end_offset
+          absoluteStart < 0 ||
+          absoluteEnd > docLength ||
+          absoluteStart >= absoluteEnd
         ) {
           continue;
         }
@@ -144,7 +174,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           },
         });
 
-        builder.add(highlight.start_offset, highlight.end_offset, decoration);
+        builder.add(absoluteStart, absoluteEnd, decoration);
       }
 
       return builder.finish();
@@ -152,6 +182,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
     destroy() {
       // Cleanup if needed
+      // Note: Persistence is handled by ReviewItem.saveNote()
     }
   },
   {

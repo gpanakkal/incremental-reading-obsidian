@@ -59,11 +59,11 @@ export class SnippetOffsetTracker {
   }
 
   /**
-   * Update highlight offsets based on a document change
-   * Uses LSP-style offset adjustment algorithm
+   * Update highlight offsets based on a document change.
+   * Offsets are body-relative (excluding frontmatter).
    *
    * @param filePath The file being edited
-   * @param changes Array of changes made to the document
+   * @param changes Array of changes made to the document (body-relative positions)
    */
   updateOffsetsForChanges(filePath: string, changes: ChangeSpec[]) {
     const highlights = this.highlightCache.get(filePath);
@@ -80,40 +80,39 @@ export class SnippetOffsetTracker {
       }
 
       const changeStart = change.from;
-      const changeEnd = 'to' in change && change.to !== undefined ? change.to : changeStart;
-      const insertedLength = 'insert' in change
-        ? change.insert?.toString().length || 0
-        : 0;
+      const changeEnd =
+        'to' in change && change.to !== undefined ? change.to : changeStart;
+      const insertedLength =
+        'insert' in change ? change.insert?.toString().length || 0 : 0;
 
       const deletedLength = changeEnd - changeStart;
       const lengthDelta = insertedLength - deletedLength;
 
       // Update each highlight based on change position
       for (const highlight of highlights) {
+        // A change affects a highlight if it occurs before the highlight ends
+        if (changeStart >= highlight.end_offset) {
+          // Change is completely after this highlight - no adjustment needed
+          continue;
+        }
+
         if (changeEnd <= highlight.start_offset) {
           // Change is completely before this highlight - shift both offsets
           highlight.start_offset += lengthDelta;
           highlight.end_offset += lengthDelta;
-        } else if (changeStart >= highlight.end_offset) {
-          // Change is completely after this highlight - no adjustment needed
-          continue;
-        } else {
-          // Change overlaps or is inside the highlight - mark as potentially corrupted
+        } else if (changeStart <= highlight.start_offset) {
+          // Change overlaps the start of the highlight - this is destructive
+          // (deleting or replacing text at the beginning of the highlighted region)
           hasCorruption = true;
-
-          // Still try to adjust offsets reasonably
-          if (changeStart < highlight.start_offset) {
-            highlight.start_offset = Math.max(
-              changeStart,
-              highlight.start_offset + lengthDelta
-            );
-          }
-
-          if (changeEnd < highlight.end_offset) {
-            highlight.end_offset += lengthDelta;
-          } else if (changeStart < highlight.end_offset) {
-            highlight.end_offset = changeStart + insertedLength;
-          }
+          highlight.start_offset = Math.max(
+            changeStart,
+            highlight.start_offset + lengthDelta
+          );
+          highlight.end_offset += lengthDelta;
+        } else {
+          // Change is inside the highlight (changeStart > highlight.start_offset)
+          // This is normal editing within highlighted text - just adjust end offset
+          highlight.end_offset += lengthDelta;
         }
 
         // Ensure offsets stay valid

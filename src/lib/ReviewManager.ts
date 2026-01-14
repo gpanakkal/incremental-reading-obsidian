@@ -66,6 +66,7 @@ import {
   getSelectionWithBounds,
   sanitizeForTitle,
   searchAll,
+  splitFrontMatter,
 } from './utils';
 import SRSCard from './SRSCard';
 import type ReviewView from 'src/views/ReviewView';
@@ -98,6 +99,37 @@ export default class ReviewManager {
   // TODO: remove for production
   get repo() {
     return this.#repo;
+  }
+
+  /**
+   * Calculate the character offset where the body starts (after frontmatter).
+   * Returns 0 if no frontmatter is present.
+   * @param fileContent The full file content
+   */
+  getBodyStartOffset(fileContent: string): number {
+    const result = splitFrontMatter(fileContent);
+    if (result) {
+      return fileContent.length - result.body.length;
+    }
+    return 0;
+  }
+
+  /**
+   * Update snippet offsets in the database.
+   * Used to persist offset changes after document edits.
+   * @param snippetId The snippet ID
+   * @param startOffset Body-relative start offset
+   * @param endOffset Body-relative end offset
+   */
+  async updateSnippetOffsets(
+    snippetId: string,
+    startOffset: number,
+    endOffset: number
+  ): Promise<void> {
+    await this.#repo.mutate(
+      `UPDATE snippet SET start_offset = $1, end_offset = $2 WHERE id = $3`,
+      [startOffset, endOffset, snippetId]
+    );
   }
 
   /**
@@ -568,7 +600,7 @@ export default class ReviewManager {
 
     const priority = currentFileEntry?.priority ?? DEFAULT_PRIORITY;
 
-    // Calculate character offsets for highlighting (instead of embedding)
+    // Calculate body-relative character offsets for highlighting
     let offsets: { start: number; end: number } | null = null;
 
     // Try to get offsets from CodeMirror
@@ -576,14 +608,14 @@ export default class ReviewManager {
     if (cm && cm.state && cm.state.selection) {
       const range = cm.state.selection.ranges[0];
       if (range) {
+        // Get body start to convert to body-relative offsets
+        const docContent = cm.state.doc.toString();
+        const bodyStart = this.getBodyStartOffset(docContent);
+
         offsets = {
-          start: range.from,
-          end: range.to,
+          start: range.from - bodyStart, // body-relative
+          end: range.to - bodyStart, // body-relative
         };
-        // console.log(
-        //   `[createSnippet] Calculated offsets from CodeMirror:`,
-        //   offsets
-        // );
       } else {
         console.warn(`[createSnippet] CodeMirror selection has no ranges`);
       }
