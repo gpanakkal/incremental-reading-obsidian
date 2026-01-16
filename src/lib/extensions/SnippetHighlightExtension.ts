@@ -84,37 +84,37 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
       // If document changed, update offsets in tracker
       if (update.docChanged) {
-        // IMPORTANT: fromA/toA are positions in the OLD document,
-        // so we need the OLD document's body start for conversion
-        const oldDocContent = update.startState.doc.toString();
-        const oldBodyStart = reviewManager.getBodyStartOffset(oldDocContent);
+        // Detect if this is an undo or redo transaction
+        const isUndo = update.transactions.some((tr) => tr.isUserEvent('undo'));
+        const isRedo = update.transactions.some((tr) => tr.isUserEvent('redo'));
 
-        // Convert CM6 changes to body-relative offsets
-        const changes: Array<{ from: number; to: number; insert?: string }> =
-          [];
-        update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-          // Only track changes that affect the body (after frontmatter)
-          // Changes entirely within frontmatter don't affect body-relative offsets
-          if (toA > oldBodyStart || fromA >= oldBodyStart) {
-            changes.push({
-              from: Math.max(0, fromA - oldBodyStart),
-              to: Math.max(0, toA - oldBodyStart),
-              insert: inserted.toString(),
-            });
-          }
-        });
+        if (isUndo) {
+          // Restore offsets from undo history (fully restores previous state)
+          reviewManager.snippetTracker.restoreFromUndo(this.file.path);
+        } else if (isRedo) {
+          // Restore offsets from redo history
+          reviewManager.snippetTracker.restoreFromRedo(this.file.path);
+        } else {
+          // Normal edit: save state before applying changes, then map positions
+          reviewManager.snippetTracker.pushUndoState(this.file.path);
 
-        if (changes.length > 0) {
-          reviewManager.snippetTracker.updateOffsetsForChanges(
+          const oldDocContent = update.startState.doc.toString();
+          const oldBodyStart = reviewManager.getBodyStartOffset(oldDocContent);
+          const newDocContent = update.state.doc.toString();
+          const newBodyStart = reviewManager.getBodyStartOffset(newDocContent);
+
+          reviewManager.snippetTracker.updateOffsetsWithMapping(
             this.file.path,
-            changes
+            update.changes,
+            oldBodyStart,
+            newBodyStart
           );
+        }
 
-          // In regular Obsidian editor, we handle persistence here with debouncing.
-          // In the review interface, ReviewItem.saveNote() handles persistence.
-          if (!this.isReviewInterface) {
-            this.schedulePersist(reviewManager);
-          }
+        // In regular Obsidian editor, we handle persistence here with debouncing.
+        // In the review interface, ReviewItem.saveNote() handles persistence.
+        if (!this.isReviewInterface) {
+          this.schedulePersist(reviewManager);
         }
       }
 
