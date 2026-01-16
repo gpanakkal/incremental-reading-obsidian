@@ -18,9 +18,6 @@ export class SnippetOffsetTracker {
   // Maps file path -> array of snippet highlights
   private highlightCache: Map<string, SnippetHighlight[]> = new Map();
 
-  // Track if a file's highlights might be corrupted
-  private corruptedHighlights: Set<string> = new Set();
-
   /**
    * Load highlights for a file into the cache
    * @param filePath The file path
@@ -28,7 +25,6 @@ export class SnippetOffsetTracker {
    */
   loadHighlights(filePath: string, highlights: SnippetHighlight[]) {
     this.highlightCache.set(filePath, highlights);
-    this.corruptedHighlights.delete(filePath);
   }
 
   /**
@@ -41,21 +37,11 @@ export class SnippetOffsetTracker {
   }
 
   /**
-   * Check if a file's highlights might be corrupted
-   * @param filePath The file path
-   */
-  isCorrupted(filePath: string): boolean {
-    return this.corruptedHighlights.has(filePath);
-  }
-
-  /**
    * Clear all cached highlights for a file
-   * Called when file is modified outside Obsidian
    * @param filePath The file path
    */
   invalidateCache(filePath: string) {
     this.highlightCache.delete(filePath);
-    this.corruptedHighlights.delete(filePath);
   }
 
   /**
@@ -70,8 +56,6 @@ export class SnippetOffsetTracker {
     if (!highlights || highlights.length === 0) {
       return;
     }
-
-    let hasCorruption = false;
 
     // Process each change
     for (const change of changes) {
@@ -101,9 +85,7 @@ export class SnippetOffsetTracker {
           highlight.start_offset += lengthDelta;
           highlight.end_offset += lengthDelta;
         } else if (changeStart <= highlight.start_offset) {
-          // Change overlaps the start of the highlight - this is destructive
-          // (deleting or replacing text at the beginning of the highlighted region)
-          hasCorruption = true;
+          // Change overlaps the start of the highlight
           highlight.start_offset = Math.max(
             changeStart,
             highlight.start_offset + lengthDelta
@@ -111,20 +93,15 @@ export class SnippetOffsetTracker {
           highlight.end_offset += lengthDelta;
         } else {
           // Change is inside the highlight (changeStart > highlight.start_offset)
-          // This is normal editing within highlighted text - just adjust end offset
+          // Just adjust end offset
           highlight.end_offset += lengthDelta;
         }
 
         // Ensure offsets stay valid
         if (highlight.end_offset < highlight.start_offset) {
           highlight.end_offset = highlight.start_offset;
-          hasCorruption = true;
         }
       }
-    }
-
-    if (hasCorruption) {
-      this.corruptedHighlights.add(filePath);
     }
 
     // Update cache
@@ -171,6 +148,5 @@ export class SnippetOffsetTracker {
    */
   clearAll() {
     this.highlightCache.clear();
-    this.corruptedHighlights.clear();
   }
 }

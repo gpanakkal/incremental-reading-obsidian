@@ -1,25 +1,20 @@
-import {
-  ViewPlugin,
-  Decoration,
-  DecorationSet,
-  EditorView,
-} from '@codemirror/view';
-import type { ViewUpdate } from '@codemirror/view';
+import { ViewPlugin, Decoration } from '@codemirror/view';
+import type { ViewUpdate, DecorationSet, EditorView } from '@codemirror/view';
 import { RangeSetBuilder } from '@codemirror/state';
 import type { TFile } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
 import { getFileFromState, getAppFromState, getIRNoteType } from './utils';
-import type { SnippetOffsetTracker, SnippetHighlight } from '../SnippetOffsetTracker';
+import type {
+  SnippetOffsetTracker,
+  SnippetHighlight,
+} from '../SnippetOffsetTracker';
 
 /**
  * CodeMirror extension that renders snippet highlights as decorations.
  *
  * Features:
- * - Renders yellow highlights on text ranges where snippets were extracted
- * - Highlights are clickable - clicking navigates to the snippet note
- * - Automatically updates highlight positions when document is edited
- * - Shows "corrupted" styling when edits overlap highlight regions
- * - Persists offset changes to the database with debouncing
+ * - Renders highlights on text ranges from which snippets were extracted
+ * - Highlights are clickable - clicking navigates to the snippet note in another tab
  *
  * Note: All offsets in the tracker are body-relative (excluding frontmatter).
  * Conversion to absolute positions happens only at render time.
@@ -29,10 +24,17 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     decorations: DecorationSet;
     private file: TFile | null;
     private highlightsLoaded: boolean = false;
+    private persistTimeout: ReturnType<typeof setTimeout> | null = null;
+    private isReviewInterface: boolean = false;
 
     constructor(view: EditorView) {
       this.file = getFileFromState(view.state);
       this.decorations = Decoration.none;
+
+      // Check if we're in the review interface (IREditor sets this marker)
+      this.isReviewInterface = !!(view as any).dom?.closest?.(
+        '.incremental-reading-review-view'
+      );
 
       // Load highlights asynchronously
       this.loadHighlights(view);
@@ -88,7 +90,8 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         const oldBodyStart = reviewManager.getBodyStartOffset(oldDocContent);
 
         // Convert CM6 changes to body-relative offsets
-        const changes: Array<{ from: number; to: number; insert?: string }> = [];
+        const changes: Array<{ from: number; to: number; insert?: string }> =
+          [];
         update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
           // Only track changes that affect the body (after frontmatter)
           // Changes entirely within frontmatter don't affect body-relative offsets
@@ -106,7 +109,12 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
             this.file.path,
             changes
           );
-          // Note: Persistence is handled by ReviewItem.saveNote() to avoid race conditions
+
+          // In regular Obsidian editor, we handle persistence here with debouncing.
+          // In the review interface, ReviewItem.saveNote() handles persistence.
+          if (!this.isReviewInterface) {
+            this.schedulePersist(reviewManager);
+          }
         }
       }
 
@@ -117,6 +125,30 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         reviewManager.snippetTracker,
         reviewManager
       );
+    }
+
+    private schedulePersist(reviewManager: any) {
+      if (this.persistTimeout) {
+        clearTimeout(this.persistTimeout);
+      }
+      this.persistTimeout = setTimeout(() => {
+        this.persistHighlights(reviewManager);
+      }, 2000); // 2 second debounce
+    }
+
+    private async persistHighlights(reviewManager: any) {
+      if (!this.file) return;
+
+      const highlights = reviewManager.snippetTracker.getHighlights(
+        this.file.path
+      );
+      for (const h of highlights) {
+        await reviewManager.updateSnippetOffsets(
+          h.id,
+          h.start_offset,
+          h.end_offset
+        );
+      }
     }
 
     private buildDecorations(
@@ -137,7 +169,6 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       const docContent = view.state.doc.toString();
       const bodyStart = reviewManager.getBodyStartOffset(docContent);
 
-      const isCorrupted = tracker.isCorrupted(this.file.path);
       const docLength = view.state.doc.length;
       const builder = new RangeSetBuilder<Decoration>();
 
@@ -161,13 +192,8 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           continue;
         }
 
-        const classes = ['ir-snippet-highlight'];
-        if (isCorrupted) {
-          classes.push('ir-corrupted');
-        }
-
         const decoration = Decoration.mark({
-          class: classes.join(' '),
+          class: 'ir-snippet-highlight',
           attributes: {
             'data-snippet-id': highlight.id,
             'data-snippet-ref': highlight.reference,
@@ -181,8 +207,11 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     }
 
     destroy() {
-      // Cleanup if needed
-      // Note: Persistence is handled by ReviewItem.saveNote()
+      // Clear any pending persist timeout
+      if (this.persistTimeout) {
+        clearTimeout(this.persistTimeout);
+        this.persistTimeout = null;
+      }
     }
   },
   {
