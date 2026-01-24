@@ -87,7 +87,6 @@ export function ReviewContextProvider({
       }
 
       const result = await reviewManager.getDue({
-        dueBy: Date.now() + MS_PER_DAY * 2,
         limit: REVIEW_FETCH_COUNT,
       });
       const nextItem =

@@ -263,7 +263,7 @@ export class SQLiteRepository {
         console.error('Incremental Reading - Failed to load database');
         return null;
       }
-      console.log('Incremental Reading database loaded');
+      // console.log('Incremental Reading database loaded');
       return result;
     } catch (error) {
       console.error(error);

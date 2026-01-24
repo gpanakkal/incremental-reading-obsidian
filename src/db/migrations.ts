@@ -32,15 +32,17 @@ export const migrations: Migration[] = [
 export function applyMigrations(db: Database): number {
   // Get current schema version
   const result = db.exec('PRAGMA user_version');
-  const currentVersion = result[0]?.values[0]?.[0] as number || 0;
+  const currentVersion = (result[0]?.values[0]?.[0] as number) || 0;
 
-  console.log(`Current database schema version: ${currentVersion}`);
+  // console.log(`Current database schema version: ${currentVersion}`);
 
   // Apply migrations that haven't been applied yet
-  const pendingMigrations = migrations.filter(m => m.version > currentVersion);
+  const pendingMigrations = migrations.filter(
+    (m) => m.version > currentVersion
+  );
 
   if (pendingMigrations.length === 0) {
-    console.log('Database schema is up to date');
+    // console.log('Database schema is up to date');
     return currentVersion;
   }
 
@@ -48,7 +50,9 @@ export function applyMigrations(db: Database): number {
 
   for (const migration of pendingMigrations) {
     try {
-      console.log(`Applying migration ${migration.version}: ${migration.description}`);
+      console.log(
+        `Applying migration ${migration.version}: ${migration.description}`
+      );
       db.exec(migration.up);
       db.exec(`PRAGMA user_version = ${migration.version}`);
       console.log(`✓ Migration ${migration.version} applied successfully`);
@@ -58,7 +62,8 @@ export function applyMigrations(db: Database): number {
     }
   }
 
-  const newVersion = db.exec('PRAGMA user_version')[0]?.values[0]?.[0] as number;
+  const newVersion = db.exec('PRAGMA user_version')[0]
+    ?.values[0]?.[0] as number;
   console.log(`Database schema updated to version ${newVersion}`);
 
   return newVersion;

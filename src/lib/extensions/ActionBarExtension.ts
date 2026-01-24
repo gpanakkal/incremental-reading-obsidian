@@ -455,9 +455,16 @@ function createPriorityInput(
 
 /**
  * Facet for conditionally showing the action bar panel.
- * Only shows for files with IR tags.
+ * Only shows for files with IR tags when NOT in review mode.
+ * In review mode, the React ActionBar component handles the UI instead.
  */
 const actionBarPanelFacet = showPanel.compute([actionBarStateField], (state) => {
+  // Don't show the CM panel when in review mode - the React ActionBar handles that
+  const actionBarState = state.field(actionBarStateField);
+  if (actionBarState.isReviewMode) {
+    return null;
+  }
+
   const file = getFileFromState(state);
   const app = getAppFromState(state);
 
