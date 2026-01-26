@@ -77,11 +77,21 @@ else
   version="${OBSIDIAN_VERSION:-latest}"
 
   if [[ "$PLATFORM" == "macos" ]]; then
+    # macOS: universal DMG works for both Intel and Apple Silicon
     pattern="Obsidian-*.dmg"
     echo "⏬ Downloading Obsidian ($version) dmg via gh CLI"
   else
-    pattern="Obsidian-*.AppImage"
-    echo "⏬ Downloading Obsidian ($version) AppImage via gh CLI"
+    # Linux: select architecture-specific AppImage
+    arch="$(uname -m)"
+    if [[ "$arch" == "aarch64" || "$arch" == "arm64" ]]; then
+      pattern="Obsidian-*-arm64.AppImage"
+    elif [[ "$arch" == "x86_64" ]]; then
+      # x86_64: download both then delete arm64 (gh doesn't support exclusion patterns)
+      pattern="Obsidian-*.AppImage"
+    else
+      echo "❌ Unsupported architecture: $arch" >&2; exit 1
+    fi
+    echo "⏬ Downloading Obsidian ($version) AppImage for $arch via gh CLI"
   fi
 
   if [[ "$version" == "latest" ]]; then
@@ -90,6 +100,11 @@ else
   else
     gh release download -R obsidianmd/obsidian-releases \
       --pattern "$pattern" --dir "$tmp_dir" --tag "v${version}"
+  fi
+
+  # On x86_64, remove the arm64 AppImage if both were downloaded
+  if [[ "$PLATFORM" == "linux" && "$arch" == "x86_64" ]]; then
+    rm -f "$tmp_dir"/*-arm64.AppImage
   fi
 
   if [[ "$PLATFORM" == "macos" ]]; then
