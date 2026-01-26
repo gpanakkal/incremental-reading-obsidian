@@ -6,6 +6,10 @@ import test, {
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
+/**
+ * Tests of core plugin functionality
+ */
+
 const appPath = path.resolve('./src/.obsidian-unpacked/main.js');
 const vaultPath = path.resolve('./src/tests/test-vault');
 
@@ -30,20 +34,17 @@ test.afterEach(async () => {
   await app?.close();
 });
 
-test('Can open the modal by executing the command', async () => {
+test('Can open the review interface by executing the command', async () => {
   const window = await app.firstWindow();
 
-  // Execute command "open-sample-modal-simple"
   {
-    // Open command palette
     await window.getByLabel('Open command palette', { exact: true }).click();
-
-    // Fill the command palette
     const commandPalette = window.locator(':focus');
-    await commandPalette.fill('sample plugin modal');
+    await commandPalette.fill('Incremental Reading: Learn');
     await commandPalette.press('Enter');
   }
 
-  // Expect that the modal is open
-  await expect(window.getByText('Woah!', { exact: true })).toBeVisible();
+  await expect(
+    window.getByText('Incremental Reading', { exact: true })
+  ).toBeVisible();
 });

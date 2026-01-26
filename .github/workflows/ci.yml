@@ -20,7 +20,11 @@ jobs:
       - run: npm run build
 
   e2e:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -28,14 +32,31 @@ jobs:
           node-version-file: .node-version
           cache-dependency-path: package-lock.json
       - run: npm install
-      - run: ./scripts/setup-obsidian.sh --ci
+
+      # macOS and Linux setup
+      - name: Setup Obsidian (macOS/Linux)
+        if: runner.os != 'Windows'
+        run: ./src/scripts/setup-obsidian.sh --ci
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Windows setup
+      - name: Setup Obsidian (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./src/scripts/setup-obsidian.ps1 -CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - run: npm run e2e:setup
       - run: npm run e2e
 
   test-e2e-tools:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,8 +64,21 @@ jobs:
           node-version-file: .node-version
           cache-dependency-path: package-lock.json
       - run: npm install
-      - run: ./scripts/setup-obsidian.sh --ci
+
+      # macOS and Linux setup
+      - name: Setup Obsidian (macOS/Linux)
+        if: runner.os != 'Windows'
+        run: ./src/scripts/setup-obsidian.sh --ci
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Windows setup
+      - name: Setup Obsidian (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./src/scripts/setup-obsidian.ps1 -CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - run: npm run e2e:setup
       - run: npm run e2e:cleanup
