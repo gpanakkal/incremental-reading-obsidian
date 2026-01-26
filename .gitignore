@@ -23,4 +23,9 @@ data.json
 
 *.sqlite
 
-.*/
+# for e2e
+.obsidian-unpacked
+test-results
+src/tests/test-vault/.obsidian/plugins/
+src/tests/test-vault/.obsidian/workspace.json
+src/tests/test-vault/.obsidian/workspace-mobile.json

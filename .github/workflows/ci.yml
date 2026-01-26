@@ -1,0 +1,50 @@
+name: ci
+on:
+  workflow_dispatch:
+#  pull_request:
+#  push:
+#    branches: ["main"]
+#  schedule:
+#    - cron: "0 18 * * *" # JST 3:00（UTC 18:00）
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache-dependency-path: package-lock.json
+      - run: npm install
+      - run: npm run build
+
+  e2e:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache-dependency-path: package-lock.json
+      - run: npm install
+      - run: ./scripts/setup-obsidian.sh --ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm run e2e:setup
+      - run: npm run e2e
+
+  test-e2e-tools:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache-dependency-path: package-lock.json
+      - run: npm install
+      - run: ./scripts/setup-obsidian.sh --ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm run e2e:setup
+      - run: npm run e2e:cleanup
