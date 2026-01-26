@@ -13,6 +13,10 @@ import * as path from 'node:path';
 const appPath = path.resolve('./src/.obsidian-unpacked/main.js');
 const vaultPath = path.resolve('./src/tests/test-vault');
 
+// Disable Chromium sandbox on Linux CI (required for GitHub Actions)
+const extraArgs =
+  process.platform === 'linux' && process.env.CI ? ['--no-sandbox'] : [];
+
 let app: ElectronApplication;
 
 test.beforeEach(async () => {
@@ -23,6 +27,7 @@ test.beforeEach(async () => {
 
   app = await electron.launch({
     args: [
+      ...extraArgs,
       appPath,
       'open',
       `obsidian://open?path=${encodeURIComponent(vaultPath)}`,
