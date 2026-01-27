@@ -13,6 +13,7 @@ import * as path from 'node:path';
 
 const appPath = path.resolve('./src/.obsidian-unpacked/main.js');
 const vaultPath = path.resolve('./src/tests/test-vault');
+const userDataDir = path.resolve('./src/tests/e2e-user-data');
 
 // Disable Chromium sandbox on Linux CI (required for GitHub Actions)
 const extraArgs =
@@ -26,8 +27,17 @@ test.beforeEach(async () => {
     force: true,
   });
 
+  await fs.rm(path.join(vaultPath, '.obsidian', 'workspace-mobile.json'), {
+    recursive: true,
+    force: true,
+  });
+
+  // Clear the user data directory to reset trusted vaults and other settings
+  await fs.rm(userDataDir, { recursive: true, force: true });
+  await fs.mkdir(userDataDir, { recursive: true });
+
   app = await electron.launch({
-    args: [...extraArgs, appPath, 'open'],
+    args: [...extraArgs, `--user-data-dir=${userDataDir}`, appPath, 'open'],
   });
 });
 
@@ -51,16 +61,23 @@ test('Set up test vault to make plugin ready to use when Obsidian opens', async 
   const openButton = window.getByRole('button', { name: 'Open' });
   await openButton.click();
 
-  // Reload the window
+  // Wait for the new window to open after selecting vault
   window = await app.waitForEvent('window');
 
+  // Wait for the window content to load before checking for dialogs
+  await window.waitForLoadState('domcontentloaded');
+
   // Trust the author of the vault (if dialog appears)
+  // The dialog shows when opening a vault with community plugins for the first time
   const trustButton = window.getByRole('button', {
     name: 'Trust author and enable plugins',
   });
-  // Use a short timeout - the dialog may not appear if vault was previously trusted
-  if (await trustButton.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await trustButton.click();
+  try {
+    await trustButton.waitFor({ state: 'visible', timeout: 5000 });
+    // Use evaluate to click via DOM API directly - more reliable in Electron
+    await trustButton.evaluate((el: HTMLElement) => el.click());
+  } catch {
+    // Dialog didn't appear - vault was previously trusted, continue
   }
 
   // Close a modal for community plugins (if it appears)

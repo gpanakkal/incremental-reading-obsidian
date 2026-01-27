@@ -26,6 +26,5 @@ data.json
 # for e2e
 .obsidian-unpacked
 test-results
-src/tests/test-vault/.obsidian/plugins/
-src/tests/test-vault/.obsidian/workspace.json
-src/tests/test-vault/.obsidian/workspace-mobile.json
+src/tests/test-vault/
+src/tests/e2e-user-data/

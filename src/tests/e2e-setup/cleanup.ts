@@ -8,6 +8,7 @@ import * as path from 'node:path';
 
 const appPath = path.resolve('./src/.obsidian-unpacked/main.js');
 const vaultPath = path.resolve('./src/tests/test-vault');
+const userDataDir = path.resolve('./src/tests/e2e-user-data');
 
 // Disable Chromium sandbox on Linux CI (required for GitHub Actions)
 const extraArgs =
@@ -21,14 +22,24 @@ test.beforeEach(async () => {
     force: true,
   });
 
+  await fs.rm(path.join(vaultPath, '.obsidian', 'workspace-mobile.json'), {
+    recursive: true,
+    force: true,
+  });
+
   app = await electron.launch({
     args: [
       ...extraArgs,
+      `--user-data-dir=${userDataDir}`,
       appPath,
       'open',
       `obsidian://open?path=${encodeURIComponent(vaultPath)}`,
     ],
   });
+
+  // Clear the user data directory to reset trusted vaults and other settings
+  await fs.rm(userDataDir, { recursive: true, force: true });
+  await fs.mkdir(userDataDir, { recursive: true });
 });
 
 test.afterEach(async () => {
