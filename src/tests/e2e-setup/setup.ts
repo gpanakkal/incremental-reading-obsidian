@@ -54,11 +54,15 @@ test('Set up test vault to make plugin ready to use when Obsidian opens', async 
   // Reload the window
   window = await app.waitForEvent('window');
 
-  // Trust the author of the vault
-  await window
-    .getByRole('button', { name: 'Trust author and enable plugins' })
-    .click();
+  // Trust the author of the vault (if dialog appears)
+  const trustButton = window.getByRole('button', {
+    name: 'Trust author and enable plugins',
+  });
+  // Use a short timeout - the dialog may not appear if vault was previously trusted
+  if (await trustButton.isVisible({ timeout: 5000 }).catch(() => false)) {
+    await trustButton.click();
+  }
 
-  // Close a modal for community plugins
+  // Close a modal for community plugins (if it appears)
   await window.keyboard.press('Escape');
 });
