@@ -49,7 +49,8 @@ test('Can open the review interface by executing the command', async () => {
     await commandPalette.press('Enter');
   }
 
+  // Verify the tab header for the Incremental Reading view is visible
   await expect(
-    window.getByText('Incremental Reading', { exact: true })
+    window.locator('div.workspace-tab-header[aria-label="Incremental Reading"]')
   ).toBeVisible();
 });
