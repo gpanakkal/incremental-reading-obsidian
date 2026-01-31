@@ -1,35 +1,15 @@
-import { _electron, type ElectronApplication } from 'playwright';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-
-const appPath = path.resolve('./src/.obsidian-unpacked/main.js');
-const vaultPath = path.resolve('./src/tests/test-vault');
-const userDataDir = path.resolve('./src/tests/e2e-user-data');
-
-// Disable Chromium sandbox on Linux CI (required for GitHub Actions)
-const extraArgs =
-  process.platform === 'linux' && process.env.CI ? ['--no-sandbox'] : [];
-
-let app: ElectronApplication;
+import {
+  cleanTestVaultsDir,
+  createVaultCopy,
+  launchElectron,
+  resetUserDataDir,
+} from './setup';
 
 (async () => {
-  await fs.rm(path.join(vaultPath, '.obsidian', 'workspace.json'), {
-    recursive: true,
-    force: true,
-  });
-
-  await fs.rm(path.join(vaultPath, '.obsidian', 'workspace-mobile.json'), {
-    recursive: true,
-    force: true,
-  });
-
-  // Clear the user data directory to reset trusted vaults and other settings
-  await fs.rm(userDataDir, { recursive: true, force: true });
-  await fs.mkdir(userDataDir, { recursive: true });
-
-  app = await _electron.launch({
-    args: [...extraArgs, `--user-data-dir=${userDataDir}`, appPath, 'open'],
-  });
+  await cleanTestVaultsDir();
+  const vaultPath = await createVaultCopy('codegen');
+  await resetUserDataDir();
+  const app = await launchElectron();
 
   const context = app.context();
   await context.route('**/*', (route) => route.continue());

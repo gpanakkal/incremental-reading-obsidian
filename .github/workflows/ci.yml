@@ -18,6 +18,7 @@ jobs:
       - run: npm run build
 
   e2e:
+    needs: test-e2e-tools
     strategy:
       fail-fast: false
       matrix:

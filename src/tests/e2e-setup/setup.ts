@@ -8,37 +8,70 @@ import * as path from 'node:path';
 
 /**
  * Thanks to qawatake for providing an example testing setup
- * Code can be found at https://github.com/qawatake/obsidian-e2e-sample
+ * Original code can be found at https://github.com/qawatake/obsidian-e2e-sample
  */
 
-const appPath = path.resolve('./src/.obsidian-unpacked/main.js');
-const vaultPath = path.resolve('./src/tests/test-vault');
-const userDataDir = path.resolve('./src/tests/e2e-user-data');
+export const appPath = path.resolve('./src/.obsidian-unpacked/main.js');
+export const sourceVaultPath = path.resolve('./src/tests/test-vault');
+export const testVaultsDir = path.resolve('./src/tests/e2e-test-vaults');
+export const userDataDir = path.resolve('./src/tests/e2e-user-data');
 
 // Disable Chromium sandbox on Linux CI (required for GitHub Actions)
-const extraArgs =
+export const sandboxArg =
   process.platform === 'linux' && process.env.CI ? ['--no-sandbox'] : [];
 
-let app: ElectronApplication;
+export async function cleanTestVaultsDir() {
+  await fs.rm(testVaultsDir, { recursive: true, force: true });
+  await fs.mkdir(testVaultsDir, { recursive: true });
+}
 
-test.beforeEach(async () => {
-  await fs.rm(path.join(vaultPath, '.obsidian', 'workspace.json'), {
-    recursive: true,
-    force: true,
-  });
+export async function createVaultCopy(prefix: string) {
+  let vaultPath = path.join(testVaultsDir, `${prefix}-${Date.now()}`);
+  while (
+    await fs.access(vaultPath).then(
+      () => true,
+      () => false
+    )
+  ) {
+    vaultPath = path.join(testVaultsDir, `${prefix}-${Date.now()}`);
+  }
+  await fs.cp(sourceVaultPath, vaultPath, { recursive: true });
 
-  await fs.rm(path.join(vaultPath, '.obsidian', 'workspace-mobile.json'), {
-    recursive: true,
-    force: true,
-  });
+  return vaultPath;
+}
 
-  // Clear the user data directory to reset trusted vaults and other settings
+export async function resetUserDataDir() {
   await fs.rm(userDataDir, { recursive: true, force: true });
   await fs.mkdir(userDataDir, { recursive: true });
+}
 
-  app = await electron.launch({
-    args: [...extraArgs, `--user-data-dir=${userDataDir}`, appPath, 'open'],
+export async function launchElectron(vaultPath?: string) {
+  const vaultArg = vaultPath
+    ? [`obsidian://open?path=${encodeURIComponent(vaultPath)}`]
+    : [];
+
+  return electron.launch({
+    args: [
+      ...sandboxArg,
+      `--user-data-dir=${userDataDir}`,
+      appPath,
+      'open',
+      ...vaultArg,
+    ],
   });
+}
+
+let app: ElectronApplication;
+let vaultPath: string;
+
+test.beforeAll(async () => {
+  await cleanTestVaultsDir();
+});
+
+test.beforeEach(async () => {
+  vaultPath = await createVaultCopy('setup');
+  await resetUserDataDir();
+  app = await launchElectron();
 });
 
 test.afterEach(async () => {
