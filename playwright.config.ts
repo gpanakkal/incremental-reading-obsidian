@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 // See https://playwright.dev/docs/test-configuration.
 export default defineConfig({
+  outputDir: './src/tests/e2e-test-results',
   fullyParallel: false,
   forbidOnly: !!process.env['CI'],
   use: {
@@ -15,7 +16,7 @@ export default defineConfig({
     {
       name: 'e2e-setup',
       testDir: './src/tests/e2e-setup',
-      testMatch: '**/*.ts',
+      testMatch: 'setup.ts',
     },
   ],
   timeout: 300 * 1000,
