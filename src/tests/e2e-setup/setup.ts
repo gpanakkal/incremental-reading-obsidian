@@ -1,9 +1,7 @@
 import test, { type ElectronApplication } from '@playwright/test';
 import * as fs from 'node:fs/promises';
 import {
-  cleanTestVaultsDir,
   createVaultCopy,
-  resetUserDataDir,
   launchElectron,
   closeElectron,
   shouldCleanup,
@@ -13,14 +11,9 @@ import {
 let app: ElectronApplication;
 let vaultPath: string;
 
-test.beforeAll(async () => {
-  await cleanTestVaultsDir();
-});
-
 test.beforeEach(async () => {
   vaultPath = await createVaultCopy('setup');
-  await resetUserDataDir();
-  app = await launchElectron();
+  app = await launchElectron(vaultPath);
 });
 
 test.afterEach(async () => {

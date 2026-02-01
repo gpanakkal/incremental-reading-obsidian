@@ -5,12 +5,10 @@ import test, {
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
 import {
-  cleanTestVaultsDir,
   closeElectron,
   createVaultCopy,
   launchElectron,
   openVault,
-  resetUserDataDir,
   shouldCleanup,
 } from '../e2e-setup/helpers';
 
@@ -22,14 +20,9 @@ let app: ElectronApplication;
 let window: Page;
 let vaultPath: string;
 
-test.beforeAll(async () => {
-  await cleanTestVaultsDir();
-});
-
 test.beforeEach(async () => {
   vaultPath = await createVaultCopy('core');
-  await resetUserDataDir();
-  app = await launchElectron();
+  app = await launchElectron(vaultPath);
   window = await openVault(app, vaultPath);
 });
 
@@ -46,7 +39,15 @@ test('Can open the review interface by executing the command', async () => {
   await commandPalette.fill('Incremental Reading: Learn');
   await commandPalette.press('Enter');
 
-  // Verify the tab header for the Incremental Reading view is visible
+  // Verify the tab header for the review interface is visible
+  await expect(
+    window.locator('div.workspace-tab-header[aria-label="Incremental Reading"]')
+  ).toBeVisible();
+});
+
+test('Can open the review interface from the ribbon button', async () => {
+  await window.getByLabel('Incremental Reading').click();
+  // Verify the tab header for the review interface is visible
   await expect(
     window.locator('div.workspace-tab-header[aria-label="Incremental Reading"]')
   ).toBeVisible();
@@ -58,13 +59,48 @@ test('can import articles from the file explorer context menu', async () => {
     .filter({ hasText: /^sources$/ })
     .nth(1)
     .click();
-  await window.getByText('Curse of dimensionality -').click({
+
+  await window.getByText('Curse of dimensionality - Wikipedia').click({
     button: 'right',
   });
   await window.getByText('Import article').click();
   await window.getByRole('button', { name: 'Import' }).click();
   await window.getByLabel('Incremental Reading').click();
-  await expect(window.locator('body')).toContainText(
-    'The effect complicates nearest neighbor search in high dimensional space. It is not possible to quickly reject candidates by using the difference in one coordinate as a lower bound for a distance based on all the dimensions.[^17] [^18]'
-  );
+
+  // ensure the action bar is visible
+  await expect(window.getByRole('button', { name: 'Continue' })).toBeVisible();
+  await expect(
+    window.getByText('Curse of dimensionality - Wikipedia').nth(1)
+  ).toBeVisible();
+});
+
+test('can import articles from the note hamburger menu', async () => {
+  await window
+    .locator('div')
+    .filter({ hasText: /^sources$/ })
+    .nth(1)
+    .click();
+
+  await window
+    .locator('div')
+    .filter({
+      hasText:
+        /^Memorizing a programming language using spaced repetition software$/,
+    })
+    .nth(1)
+    .click();
+  await window.getByRole('button', { name: 'More options' }).click();
+  await window.getByText('Import article').click();
+  await window.getByRole('button', { name: 'Import' }).click();
+  await window.getByLabel('Incremental Reading').click();
+
+  // ensure the action bar is visible
+  await expect(window.getByRole('button', { name: 'Continue' })).toBeVisible();
+  await expect(
+    window
+      .getByText(
+        'Memorizing a programming language using spaced repetition software'
+      )
+      .nth(1)
+  ).toBeVisible();
 });
