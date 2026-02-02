@@ -265,8 +265,10 @@ if (-not (Test-Path $pluginPath)) {
 # For CI, copying is fine. For local dev, we could use junctions or just copy.
 $manifestSource = Join-Path $rootPath "..\manifest.json"
 $mainSource = Join-Path $rootPath "..\main.js"
+$stylesSource = Join-Path $rootPath "..\styles.css"
 
 Copy-Item -Path $manifestSource -Destination (Join-Path $pluginPath "manifest.json") -Force
 Copy-Item -Path $mainSource -Destination (Join-Path $pluginPath "main.js") -Force
+Copy-Item -Path $stylesSource -Destination (Join-Path $pluginPath "styles.css") -Force
 
 Write-Host "setup-obsidian.ps1 finished!" -ForegroundColor Green

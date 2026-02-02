@@ -1,0 +1,42 @@
+FROM node:22-bookworm
+
+# Electron/Chromium runtime dependencies + xvfb for headless display + gh CLI
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgtk-3-0 \
+    libgbm1 \
+    libxss1 \
+    libasound2 \
+    libatspi2.0-0 \
+    libnss3 \
+    libxcomposite1 \
+    libxrandr2 \
+    libxdamage1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libcups2 \
+    libdrm2 \
+    libdbus-1-3 \
+    libsecret-1-0 \
+    xvfb \
+    xauth \
+    file \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install dependencies (cached unless package files change)
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Copy project source
+COPY . .
+
+# CI=true triggers --no-sandbox in helpers.ts and 2-worker mode in Playwright
+ENV CI=true
+
+CMD ["bash", "-c", "bash ./src/scripts/setup-obsidian.sh --ci && xvfb-run --auto-servernum npm run e2e:setup && xvfb-run --auto-servernum npm run e2e"]

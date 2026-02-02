@@ -14,6 +14,7 @@ import * as path from 'path';
 export const appPath = path.resolve('./src/.obsidian-unpacked/main.js');
 export const sourceVaultPath = path.resolve('./src/tests/test-vault');
 export const testVaultsDir = path.resolve('./src/tests/e2e-test-vaults');
+export const projectRoot = path.resolve('.');
 
 // Disable Chromium sandbox on Linux CI (required for GitHub Actions)
 export const sandboxArg =
@@ -26,6 +27,23 @@ export async function createVaultCopy(prefix: string) {
   const id = crypto.randomBytes(4).toString('hex');
   const vaultPath = path.join(testVaultsDir, `${prefix}-${id}`);
   await fs.cp(sourceVaultPath, vaultPath, { recursive: true });
+
+  // On Unix, the source vault contains symlinks to the project root's main.js
+  // and manifest.json. fs.cp preserves symlinks as-is, so the copied symlinks
+  // break because their relative targets no longer resolve from the new location.
+  // Fix this by replacing them with fresh symlinks to the absolute paths.
+  if (process.platform !== 'win32') {
+    const pluginDir = path.join(
+      vaultPath,
+      '.obsidian/plugins/incremental-reading',
+    );
+    for (const file of ['main.js', 'manifest.json', 'styles.css']) {
+      const target = path.join(pluginDir, file);
+      await fs.rm(target, { force: true });
+      await fs.symlink(path.join(projectRoot, file), target);
+    }
+  }
+
   return vaultPath;
 }
 

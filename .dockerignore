@@ -1,0 +1,5 @@
+node_modules
+.git
+src/.obsidian-unpacked
+src/tests/e2e-test-vaults
+src/tests/e2e-test-results

@@ -28,3 +28,5 @@ data.json
 e2e-test-results/
 src/tests/test-vault/
 src/tests/e2e-test-vaults/
+
+.env

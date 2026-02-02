@@ -188,5 +188,6 @@ echo "🔗 Linking plugin → $plugin_path"
 mkdir -p "$plugin_path"
 ln -fs "$root_path/manifest.json" "$plugin_path/manifest.json"
 ln -fs "$root_path/main.js"       "$plugin_path/main.js"
+ln -fs "$root_path/styles.css"    "$plugin_path/styles.css"
 
 echo "🎉 setup-obsidian.sh finished!"
