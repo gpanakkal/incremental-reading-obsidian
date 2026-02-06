@@ -28,18 +28,23 @@ export async function createVaultCopy(prefix: string) {
   const vaultPath = path.join(testVaultsDir, `${prefix}-${id}`);
   await fs.cp(sourceVaultPath, vaultPath, { recursive: true });
 
-  // On Unix, the source vault contains symlinks to the project root's main.js
-  // and manifest.json. fs.cp preserves symlinks as-is, so the copied symlinks
-  // break because their relative targets no longer resolve from the new location.
-  // Fix this by replacing them with fresh symlinks to the absolute paths.
-  if (process.platform !== 'win32') {
-    const pluginDir = path.join(
-      vaultPath,
-      '.obsidian/plugins/incremental-reading',
-    );
-    for (const file of ['main.js', 'manifest.json', 'styles.css']) {
-      const target = path.join(pluginDir, file);
-      await fs.rm(target, { force: true });
+  // Ensure plugin files in the copied vault point to the freshly built plugin.
+  // On Unix, the source vault contains symlinks which break after copying
+  // (their relative targets no longer resolve). On Windows, setup-obsidian.ps1
+  // copies files which become stale after rebuilding. Either way, we need to
+  // refresh the plugin files from the project root.
+  const pluginDir = path.join(
+    vaultPath,
+    '.obsidian/plugins/incremental-reading',
+  );
+  for (const file of ['main.js', 'manifest.json', 'styles.css']) {
+    const target = path.join(pluginDir, file);
+    await fs.rm(target, { force: true });
+    if (process.platform === 'win32') {
+      // Windows: copy files (symlinks require admin rights)
+      await fs.copyFile(path.join(projectRoot, file), target);
+    } else {
+      // Unix: use symlinks for faster iteration during development
       await fs.symlink(path.join(projectRoot, file), target);
     }
   }

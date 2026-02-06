@@ -12,7 +12,7 @@
 		"e2e": "npm run build && cross-env E2E_CLEANUP=1 npx playwright test --project e2e",
 		"e2e:ui": "npm run build && cross-env E2E_CLEANUP=1 npx playwright test --ui --project e2e",
 		"e2e:keep-vaults": "npm run build && cross-env E2E_CLEANUP=0 npx playwright test --project e2e",
-		"e2e:codegen": "npx tsx src/tests/e2e-setup/codegen.ts",
+		"e2e:codegen": "npm run build && npx tsx src/tests/e2e-setup/codegen.ts",
 		"e2e:docker": "node src/scripts/docker-e2e.mjs",
 		"e2e:repeat": "npm run build && cross-env E2E_CLEANUP=1 npx playwright test --project e2e --repeat-each 10",
 		"version": "node version-bump.mjs && git add manifest.json versions.json"

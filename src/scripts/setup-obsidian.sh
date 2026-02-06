@@ -25,9 +25,7 @@ case "$(uname -s)" in
 esac
 
 root_path="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-vault_path="$root_path/tests/test-vault"
 unpacked_path="$root_path/.obsidian-unpacked"
-plugin_path="$vault_path/.obsidian/plugins/incremental-reading"
 
 # ------------------------------------------------------------------------------
 # 1. Parse arguments
@@ -177,17 +175,7 @@ cp "$obsidian_asar_path" "$unpacked_path/obsidian.asar"
 
 echo "✅ Obsidian unpacked"
 
-# ------------------------------------------------------------------------------
-# 4. Build plugin and link to Vault
-# ------------------------------------------------------------------------------
-echo "🔧 Building plugin…"
-npm run build --silent
-echo "✅ Build done."
-
-echo "🔗 Linking plugin → $plugin_path"
-mkdir -p "$plugin_path"
-ln -fs "$root_path/manifest.json" "$plugin_path/manifest.json"
-ln -fs "$root_path/main.js"       "$plugin_path/main.js"
-ln -fs "$root_path/styles.css"    "$plugin_path/styles.css"
+# NOTE: Plugin files are symlinked to test vaults by createVaultCopy() in helpers.ts
+# This allows each test run to use freshly built plugin files without re-running setup.
 
 echo "🎉 setup-obsidian.sh finished!"

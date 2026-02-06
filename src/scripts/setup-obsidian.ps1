@@ -36,9 +36,7 @@ $ErrorActionPreference = "Stop"
 # ------------------------------------------------------------------------------
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootPath = Resolve-Path (Join-Path $scriptPath "..")
-$vaultPath = Join-Path $rootPath "tests\test-vault"
 $unpackedPath = Join-Path $rootPath ".obsidian-unpacked"
-$pluginPath = Join-Path $vaultPath ".obsidian\plugins\incremental-reading"
 
 Write-Host "Root path: $rootPath" -ForegroundColor Cyan
 
@@ -235,40 +233,7 @@ Copy-Item -Path $obsidianAsarPath -Destination (Join-Path $unpackedPath "obsidia
 
 Write-Host "Obsidian unpacked" -ForegroundColor Green
 
-# ------------------------------------------------------------------------------
-# 3. Build plugin and link to Vault
-# ------------------------------------------------------------------------------
-Write-Host "Building plugin..." -ForegroundColor Yellow
-
-Push-Location $rootPath
-try {
-    & npm run build --silent
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Build failed"
-        exit 1
-    }
-}
-finally {
-    Pop-Location
-}
-
-Write-Host "Build done." -ForegroundColor Green
-
-Write-Host "Linking plugin to $pluginPath" -ForegroundColor Yellow
-
-# Create plugin directory
-if (-not (Test-Path $pluginPath)) {
-    New-Item -ItemType Directory -Path $pluginPath -Force | Out-Null
-}
-
-# On Windows, we copy files instead of symlinks (symlinks require admin rights)
-# For CI, copying is fine. For local dev, we could use junctions or just copy.
-$manifestSource = Join-Path $rootPath "..\manifest.json"
-$mainSource = Join-Path $rootPath "..\main.js"
-$stylesSource = Join-Path $rootPath "..\styles.css"
-
-Copy-Item -Path $manifestSource -Destination (Join-Path $pluginPath "manifest.json") -Force
-Copy-Item -Path $mainSource -Destination (Join-Path $pluginPath "main.js") -Force
-Copy-Item -Path $stylesSource -Destination (Join-Path $pluginPath "styles.css") -Force
+# NOTE: Plugin files are copied to test vaults by createVaultCopy() in helpers.ts
+# This allows each test run to use freshly built plugin files without re-running setup.
 
 Write-Host "setup-obsidian.ps1 finished!" -ForegroundColor Green
