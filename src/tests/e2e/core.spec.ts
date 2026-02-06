@@ -10,6 +10,7 @@ import {
   launchElectron,
   openVault,
   shouldCleanup,
+  wait,
 } from '../e2e-setup/helpers';
 import { openNote, useCommandPalette } from './helpers';
 
@@ -271,15 +272,143 @@ test.describe('Action Bar', () => {
   test.skip('Can change priority from the review pane', async () => {});
 });
 
-test.describe.skip('Extracting snippets', () => {
+test.describe('Extracting snippets', () => {
   test('Can extract from Markdown notes', async () => {
     await openNote(
       window,
       'sources/Memorizing a programming language using spaced repetition'
     );
+
+    // select a paragraph
+    await window.getByText('I’m an intermediate').click({ clickCount: 3 });
+    await useCommandPalette(
+      window,
+      'Incremental Reading: Extract selection to snippet'
+    );
+
+    await openNote(
+      window,
+      `incremental-reading/snippets/I’m an intermediate programmer\. I didn’t go to sch`
+    );
+    await window.getByRole('button', { name: 'Open in Review' }).click();
+    await expect(
+      window.getByRole('button', { name: 'Continue' })
+    ).toBeVisible();
   });
 
-  test('Can extract from articles in review interface', async () => {});
+  test('Can extract from articles in review interface', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
 
-  test('Can extract from snippets in review interface', async () => {});
+    await useCommandPalette(window, 'Incremental Reading: Import Article');
+    await window.getByRole('button', { name: 'Import' }).click();
+    await useCommandPalette(window, 'Incremental Reading: Learn');
+
+    // look for the action bar to confirm we're in review
+    await expect(
+      window.getByRole('button', { name: 'Continue' })
+    ).toBeVisible();
+
+    // select a paragraph
+    await window
+      .getByText('I’m an intermediate')
+      .nth(1)
+      .click({ clickCount: 3 });
+    await useCommandPalette(
+      window,
+      'Incremental Reading: Extract selection to snippet'
+    );
+
+    await openNote(
+      window,
+      `incremental-reading/snippets/I’m an intermediate programmer\. I didn’t go to sch`
+    );
+    await window.getByRole('button', { name: 'Open in Review' }).click();
+
+    // look for the action bar to confirm we're in review
+    await expect(
+      window.getByRole('button', { name: 'Continue' })
+    ).toBeInViewport();
+    await expect(
+      window.getByRole('textbox').filter({ hasText: 'I’m an intermediate' })
+    ).toBeVisible();
+  });
+
+  test('Can extract from snippets in review interface', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+
+    await useCommandPalette(window, 'Incremental Reading: Import Article');
+    await window.getByRole('button', { name: 'Import' }).click();
+    await useCommandPalette(window, 'Incremental Reading: Learn');
+
+    // look for the action bar to confirm we're in review
+    await expect(
+      window.getByRole('button', { name: 'Continue' })
+    ).toBeInViewport();
+
+    // select a paragraph
+    await window
+      .getByText('I’m an intermediate')
+      .nth(1)
+      .click({ clickCount: 3 });
+    await useCommandPalette(
+      window,
+      'Incremental Reading: Extract selection to snippet'
+    );
+
+    await openNote(
+      window,
+      `incremental-reading/snippets/I’m an intermediate programmer\. I didn’t go to sch`
+    );
+    await window.getByRole('button', { name: 'Open in Review' }).click();
+
+    // look for the action bar to confirm we're in review
+    await expect(
+      window.getByRole('button', { name: 'Continue' })
+    ).toBeInViewport();
+
+    // split this snippet into two paragraphs and extract the second
+    const snippetText = window.getByRole('textbox').filter({
+      hasText: /^I’m an intermediate programmer\. I didn’t go to school for it/,
+      visible: true,
+    });
+    await expect(snippetText).toBeVisible();
+    await snippetText.click();
+    await wait(300);
+    await snippetText.press('ControlOrMeta+Home');
+    // insert a new line
+    await snippetText.press('ArrowDown');
+    await snippetText.press('ArrowDown');
+    await snippetText.press('Enter');
+    await snippetText.press('Enter');
+    await window
+      .getByText('so I picked up a few books on PHP, SQL, Linux')
+      .filter({ visible: true })
+      .click({ clickCount: 3 });
+    await useCommandPalette(
+      window,
+      'Incremental Reading: Extract selection to snippet'
+    );
+
+    await window
+      .locator('span')
+      .filter({ hasText: 'so I picked up a few books on' })
+      .click();
+    await window.getByRole('button', { name: 'Open in Review' }).click();
+
+    // look for the action bar to confirm we're in review
+    await expect(
+      window.getByRole('button', { name: 'Continue' })
+    ).toBeInViewport();
+    await expect(
+      window
+        .getByText('so I picked up a few books on PHP, SQL, Linux, and Apache')
+        .filter({ visible: true })
+    ).toBeInViewport();
+  });
 });
