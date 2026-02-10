@@ -351,7 +351,7 @@ export function IREditor({
       setTimeout(() => {
         // Check if the view is still valid
         if (internalRef.current === view) {
-          view.state.update({
+          view.dispatch({
             changes: {
               from: 0,
               to: currentContent.length,

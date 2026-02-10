@@ -1,5 +1,5 @@
 import type IncrementalReadingPlugin from '#/main';
-import type { IconName, TFile } from 'obsidian';
+import type { IconName } from 'obsidian';
 import type { WorkspaceLeaf } from 'obsidian';
 import { FileView } from 'obsidian';
 import type { ReviewItem } from '#/lib/types';
@@ -53,6 +53,10 @@ export default class ReviewView extends FileView {
   // setViewData(data: string, clear: boolean): void {}
 
   clear(): void {}
+
+  get currentItem(): ReviewItem | null {
+    return this.#currentItem;
+  }
 
   set currentItem(item: ReviewItem | null) {
     this.#currentItem = item;

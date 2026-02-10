@@ -293,6 +293,28 @@ export default class IncrementalReadingPlugin extends Plugin {
       })
     );
 
+    // Invalidate review item cache when the current item's file is modified
+    this.registerEvent(
+      this.app.vault.on('modify', (file) => {
+        const reviewView = this.app.workspace
+          .getLeavesOfType(ReviewView.viewType)
+          .find((leaf) => leaf.view instanceof ReviewView)?.view as
+          | ReviewView
+          | undefined;
+        const currentItem = reviewView?.currentItem;
+        if (currentItem?.file.path === file.path) {
+          // Invalidate both the current-review-item query and the file content query
+          // The file content query uses the item's reference as its key
+          queryClient.invalidateQueries({
+            queryKey: ['current-review-item'],
+          });
+          queryClient.invalidateQueries({
+            queryKey: [currentItem.data.reference],
+          });
+        }
+      })
+    );
+
     // This adds a settings tab so the user can configure various aspects of the plugin
     // this.addSettingTab(new SampleSettingTab(this.app, this)); // TODO: set up settings
 
@@ -334,34 +356,6 @@ export default class IncrementalReadingPlugin extends Plugin {
         );
         this.unload();
       }
-
-      // listen for snippet creations.
-      // TODO:
-      // - handle race condition
-      // - wrap in plugin.registerEvent
-
-      // this.app.vault.on('create', async (file) => {
-      //   // check if the snippet is in the database already
-      //   const results = await this.#reviewManager.findSnippet(file);
-      //   // await repo.query(
-      //   //   `SELECT (id) FROM snippet WHERE reference = $1`,
-      //   //   [file.name]
-      //   // );
-      //   // TODO: handle failed fetches differently from no results
-      //   if (!results) {
-      //     new Notice(`Failed to fetch rows`, ERROR_NOTICE_DURATION_MS);
-      //     return;
-      //   } else if (results.length === 0) {
-      //     // insert a new snippet row
-      //     const snippetFile = this.app.vault.getFileByPath(file.path);
-      //     if (!snippetFile) {
-      //       return; // TODO: handle
-      //     }
-      //     await this.#reviewManager.createSnippetFromFile(snippetFile);
-      //   } else {
-      //     // if so, set dismissed to 0
-      //   }
-      // });
     });
   }
 
