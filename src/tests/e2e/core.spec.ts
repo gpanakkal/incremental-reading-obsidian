@@ -10,7 +10,6 @@ import {
   launchElectron,
   openVault,
   shouldCleanup,
-  wait,
 } from '../e2e-setup/helpers';
 import { openNote, useCommandPalette } from './helpers';
 
@@ -286,6 +285,8 @@ test.describe('Extracting snippets', () => {
       'Incremental Reading: Extract selection to snippet'
     );
 
+    // TODO: replace with wait for file creation
+    await window.waitForTimeout(200);
     await openNote(
       window,
       `incremental-reading/snippets/I’m an intermediate programmer\. I didn’t go to sch`
@@ -321,6 +322,8 @@ test.describe('Extracting snippets', () => {
       'Incremental Reading: Extract selection to snippet'
     );
 
+    // TODO: replace with wait for file creation
+    await window.waitForTimeout(200);
     await openNote(
       window,
       `incremental-reading/snippets/I’m an intermediate programmer\. I didn’t go to sch`
@@ -361,6 +364,9 @@ test.describe('Extracting snippets', () => {
       'Incremental Reading: Extract selection to snippet'
     );
 
+    // TODO: replace with wait for file creation
+    await window.waitForTimeout(200);
+
     await openNote(
       window,
       `incremental-reading/snippets/I’m an intermediate programmer\. I didn’t go to sch`
@@ -379,7 +385,8 @@ test.describe('Extracting snippets', () => {
     });
     await expect(snippetText).toBeVisible();
     await snippetText.click();
-    await wait(300);
+    // wait for Obsidian interface to catch up
+    await window.waitForTimeout(200);
     await snippetText.press('ControlOrMeta+Home');
     // insert a new line
     await snippetText.press('ArrowDown');
