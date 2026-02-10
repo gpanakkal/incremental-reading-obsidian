@@ -105,37 +105,40 @@ export function ReviewContextProvider({
       let delimitersChanged = true;
       const [left, right] = CLOZE_DELIMITERS;
 
-      await plugin.app.fileManager.processFrontMatter(
-        reviewCard.file,
-        (frontmatter: Record<string, any>) => {
-          if ('delimiters' in frontmatter) {
-            currentDelimiters = frontmatter.delimiters as [string, string];
+      // Wrap file modifications in withReviewViewSave to prevent external modification detection
+      await plugin.withReviewViewSave(async () => {
+        await plugin.app.fileManager.processFrontMatter(
+          reviewCard.file,
+          (frontmatter: Record<string, any>) => {
+            if ('delimiters' in frontmatter) {
+              currentDelimiters = frontmatter.delimiters as [string, string];
+            }
+            if (!Array.isArray(currentDelimiters)) {
+              throw new TypeError(
+                `Delimiters stored on note "${reviewCard.data.reference}" were not a list`
+              );
+            }
+            if (currentDelimiters[0] === left && currentDelimiters[1] === right) {
+              delimitersChanged = false;
+            } else {
+              frontmatter.delimiters = CLOZE_DELIMITERS;
+            }
           }
-          if (!Array.isArray(currentDelimiters)) {
-            throw new TypeError(
-              `Delimiters stored on note "${reviewCard.data.reference}" were not a list`
-            );
-          }
-          if (currentDelimiters[0] === left && currentDelimiters[1] === right) {
-            delimitersChanged = false;
-          } else {
-            frontmatter.delimiters = CLOZE_DELIMITERS;
-          }
-        }
-      );
-      if (!delimitersChanged) return;
-
-      await plugin.app.vault.process(reviewCard.file, (fileText) => {
-        const split = splitFrontMatter(fileText);
-        if (!split)
-          throw new Error(
-            `Failed to parse frontmatter from note "${reviewCard.data.reference}, but note has frontmatter`
-          );
-        const { start, answer, end } = reviewManager.parseCloze(
-          split.body,
-          currentDelimiters
         );
-        return split.frontMatter + start + `${left}${answer}${right}` + end;
+        if (!delimitersChanged) return;
+
+        await plugin.app.vault.process(reviewCard.file, (fileText) => {
+          const split = splitFrontMatter(fileText);
+          if (!split)
+            throw new Error(
+              `Failed to parse frontmatter from note "${reviewCard.data.reference}, but note has frontmatter`
+            );
+          const { start, answer, end } = reviewManager.parseCloze(
+            split.body,
+            currentDelimiters
+          );
+          return split.frontMatter + start + `${left}${answer}${right}` + end;
+        });
       });
     } catch (error) {
       if (error instanceof Error) {

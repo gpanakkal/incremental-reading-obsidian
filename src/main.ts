@@ -41,11 +41,30 @@ export default class IncrementalReadingPlugin extends Plugin {
   MarkdownEditor: any;
 
   /**
+   * Flag to track when the review view is saving a file.
+   * Used to prevent cache invalidation for internal modifications.
+   */
+  #isReviewViewSaving = false;
+
+  /**
    * Get the ReviewManager instance.
    * May be null if called before onLayoutReady completes.
    */
   get reviewManager(): ReviewManager | null {
     return this.#reviewManager ?? null;
+  }
+
+  /**
+   * Wrap a file-modifying operation to prevent external modification detection.
+   * The vault 'modify' event handler will ignore changes while this is active.
+   */
+  async withReviewViewSave<T>(operation: () => Promise<T>): Promise<T> {
+    this.#isReviewViewSaving = true;
+    try {
+      return await operation();
+    } finally {
+      this.#isReviewViewSaving = false;
+    }
   }
 
   async onload() {
@@ -293,9 +312,14 @@ export default class IncrementalReadingPlugin extends Plugin {
       })
     );
 
-    // Invalidate review item cache when the current item's file is modified
+    // Invalidate review item cache when the current item's file is modified externally
     this.registerEvent(
       this.app.vault.on('modify', (file) => {
+        // Skip cache invalidation if the modification came from the review view itself
+        if (this.#isReviewViewSaving) {
+          return;
+        }
+
         const reviewView = this.app.workspace
           .getLeavesOfType(ReviewView.viewType)
           .find((leaf) => leaf.view instanceof ReviewView)?.view as

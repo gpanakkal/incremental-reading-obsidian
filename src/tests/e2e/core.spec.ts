@@ -99,8 +99,8 @@ test.describe('Article Importing', () => {
         .getByText(
           'Memorizing a programming language using spaced repetition software'
         )
-        .nth(1)
-    ).toBeVisible();
+        .nth(3)
+    ).toBeInViewport();
   });
 
   test('can import Markdown from the command palette', async () => {

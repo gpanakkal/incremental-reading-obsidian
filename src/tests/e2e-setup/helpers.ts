@@ -35,7 +35,7 @@ export async function createVaultCopy(prefix: string) {
   // refresh the plugin files from the project root.
   const pluginDir = path.join(
     vaultPath,
-    '.obsidian/plugins/incremental-reading',
+    '.obsidian/plugins/incremental-reading'
   );
   for (const file of ['main.js', 'manifest.json', 'styles.css']) {
     const target = path.join(pluginDir, file);
@@ -144,5 +144,11 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
 
   // brief pause so Obsidian is ready to take input
   await wait(200);
+
+  // maximize the window
+  const maximizeButton = window.getByLabel('Maximize');
+  try {
+    await maximizeButton.click();
+  } catch {}
   return window;
 }
