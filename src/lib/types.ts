@@ -10,6 +10,7 @@ export interface IArticleBase {
   due: number | null;
   dismissed: boolean;
   priority: number;
+  scroll_top: number;
 }
 
 export interface ArticleRow extends SafeOmit<IArticleBase, 'dismissed'> {
@@ -45,6 +46,7 @@ export interface ISnippetBase {
   parent: string | null;
   start_offset: number | null;
   end_offset: number | null;
+  scroll_top: number;
 }
 
 export interface SnippetRow extends SafeOmit<ISnippetBase, 'dismissed'> {

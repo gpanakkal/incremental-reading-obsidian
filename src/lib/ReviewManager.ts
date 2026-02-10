@@ -51,8 +51,6 @@ import {
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
   INVALID_TITLE_MESSAGE,
-  SCROLL_TOP_PROPERTY_NAME,
-  SCROLL_LEFT_PROPERTY_NAME,
 } from './constants';
 import { getClozeGroupsPattern } from './utils';
 import type { FSRS, FSRSParameters, Grade } from 'ts-fsrs';
@@ -1376,32 +1374,40 @@ export default class ReviewManager {
   }
 
   /**
-   * Save scroll position to file frontmatter
+   * Save scroll position to database for the article or snippet
    */
   async saveScrollPosition(
     file: TFile,
     scrollInfo: { top: number; left: number }
   ) {
-    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-      frontmatter[SCROLL_TOP_PROPERTY_NAME] = scrollInfo.top;
-      frontmatter[SCROLL_LEFT_PROPERTY_NAME] = scrollInfo.left;
-    });
+    const noteType = this.getNoteType(file);
+    if (!noteType || noteType === 'card') return;
+
+    const table = noteType === 'article' ? 'article' : 'snippet';
+    const reference = this.getReferenceFromPath(file.path);
+
+    await this.#repo.mutate(
+      `UPDATE ${table} SET scroll_top = $1 WHERE reference = $2`,
+      [Math.round(scrollInfo.top), reference]
+    );
   }
 
   /**
-   * Load scroll position from file frontmatter
+   * Load scroll position from database for the article or snippet
    */
-  loadScrollPosition(file: TFile): { top: number; left: number } | null {
-    const cache = this.app.metadataCache.getFileCache(file);
-    const frontmatter = cache?.frontmatter;
+  async loadScrollPosition(file: TFile): Promise<{ top: number; left: number } | null> {
+    const noteType = this.getNoteType(file);
+    if (!noteType || noteType === 'card') return null;
 
-    if (!frontmatter) return null;
+    let row: ArticleRow | SnippetRow | null = null;
+    if (noteType === 'article') {
+      row = await this.findArticle(file);
+    } else if (noteType === 'snippet') {
+      row = await this.findSnippet(file);
+    }
 
-    const top = frontmatter[SCROLL_TOP_PROPERTY_NAME];
-    const left = frontmatter[SCROLL_LEFT_PROPERTY_NAME];
-
-    if (typeof top === 'number' && typeof left === 'number') {
-      return { top, left };
+    if (row && typeof row.scroll_top === 'number' && row.scroll_top > 0) {
+      return { top: row.scroll_top, left: 0 };
     }
 
     return null;

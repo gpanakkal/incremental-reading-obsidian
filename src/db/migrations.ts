@@ -5,8 +5,6 @@ import type { Database } from 'sql.js';
  * Each migration is applied in order and tracked via PRAGMA user_version
  */
 
-export const CURRENT_SCHEMA_VERSION = 1;
-
 export interface Migration {
   version: number;
   up: string; // SQL to apply
@@ -20,6 +18,14 @@ export const migrations: Migration[] = [
     up: `
       ALTER TABLE snippet ADD COLUMN start_offset INTEGER DEFAULT NULL;
       ALTER TABLE snippet ADD COLUMN end_offset INTEGER DEFAULT NULL;
+    `,
+  },
+  {
+    version: 2,
+    description: 'Add scroll position column to article and snippet tables',
+    up: `
+      ALTER TABLE article ADD COLUMN scroll_top INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE snippet ADD COLUMN scroll_top INTEGER NOT NULL DEFAULT 0;
     `,
   },
 ];
