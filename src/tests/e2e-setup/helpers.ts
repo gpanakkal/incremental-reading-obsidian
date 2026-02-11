@@ -37,6 +37,7 @@ export async function createVaultCopy(prefix: string) {
     vaultPath,
     '.obsidian/plugins/incremental-reading'
   );
+  await fs.mkdir(pluginDir, { recursive: true });
   for (const file of ['main.js', 'manifest.json', 'styles.css']) {
     const target = path.join(pluginDir, file);
     await fs.rm(target, { force: true });
