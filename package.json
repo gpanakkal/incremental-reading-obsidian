@@ -8,7 +8,7 @@
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
 		"test": "vitest run",
-		"e2e:setup": "npx playwright test src/tests/e2e-setup/setup.ts --project e2e-setup",
+		"e2e:setup": "npm run build && npx playwright test --project e2e-setup",
 		"e2e": "npm run build && cross-env E2E_CLEANUP=1 npx playwright test --project e2e",
 		"e2e:ui": "npm run build && cross-env E2E_CLEANUP=1 npx playwright test --ui --project e2e",
 		"e2e:keep-vaults": "npm run build && cross-env E2E_CLEANUP=0 npx playwright test --project e2e",
