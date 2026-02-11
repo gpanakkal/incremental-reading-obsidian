@@ -7,6 +7,9 @@ export async function useCommandPalette(window: Page, command: string) {
   const commandPalette = window.getByRole('textbox', {
     name: 'Select a command...',
   });
+  // Wait for the command palette to be visible before interacting
+  // This prevents timeouts in CI where rendering may be slower
+  await commandPalette.waitFor({ state: 'visible' });
   await commandPalette.fill(command);
   await commandPalette.press('Enter');
 }
@@ -17,9 +20,11 @@ export async function useCommandPalette(window: Page, command: string) {
  */
 export async function openNote(window: Page, path: string) {
   await useCommandPalette(window, 'Quick switcher: Open quick switcher');
-  await window
-    .getByRole('textbox', { name: 'Find or create a note...' })
-    .fill(path);
+  const quickSwitcher = window.getByRole('textbox', {
+    name: 'Find or create a note...',
+  });
+  await quickSwitcher.waitFor({ state: 'visible' });
+  await quickSwitcher.fill(path);
   await window
     .locator('div')
     .filter({
