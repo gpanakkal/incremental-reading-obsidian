@@ -628,22 +628,6 @@ export default class ReviewManager {
       );
     }
 
-    // console.log(
-    //   `[createSnippet] Final data - parentId: ${currentFileEntry?.id}, offsets:`,
-    //   offsets
-    // );
-
-    // Validate parent ID
-    if (!currentFileEntry) {
-      console.error(
-        `[createSnippet] CRITICAL: Could not find parent entry for file ${currentFile.path}`
-      );
-      new Notice(
-        `Warning: Could not link snippet to parent file. The snippet was created but highlighting may not work.`,
-        ERROR_NOTICE_DURATION_MS
-      );
-    }
-
     // Create the snippet entry
     const result = await this.createSnippetEntry(
       snippetFile,
@@ -845,20 +829,14 @@ export default class ReviewManager {
       [parentEntry.id]
     )) as SnippetRow[];
 
-    // console.log(
-    //   `[getSnippetHighlights] Query returned ${results.length} snippets with offsets for parent ${parentEntry.id}`
-    // );
-
     // Convert to SnippetHighlight format and load into tracker
-    const highlights = results
-      .filter((r) => r.start_offset !== null && r.end_offset !== null)
-      .map((r) => ({
-        ...r,
-        dismissed: Boolean(r.dismissed),
-        start_offset: r.start_offset!,
-        end_offset: r.end_offset!,
-        parent: r.parent!,
-      }));
+    const highlights = results.map((r) => ({
+      ...r,
+      dismissed: Boolean(r.dismissed),
+      start_offset: r.start_offset!,
+      end_offset: r.end_offset!,
+      parent: r.parent!,
+    }));
 
     // console.log(
     //   `[getSnippetHighlights] Converted to ${highlights.length} highlights:`,
@@ -1395,7 +1373,9 @@ export default class ReviewManager {
   /**
    * Load scroll position from database for the article or snippet
    */
-  async loadScrollPosition(file: TFile): Promise<{ top: number; left: number } | null> {
+  async loadScrollPosition(
+    file: TFile
+  ): Promise<{ top: number; left: number } | null> {
     const noteType = this.getNoteType(file);
     if (!noteType || noteType === 'card') return null;
 

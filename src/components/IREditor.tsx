@@ -26,6 +26,7 @@ import {
   setReviewMode,
   setShowAnswer as setShowAnswerEffect,
   setReviewCallbacks,
+  isExternalSync,
   type ReviewCallbacks,
 } from '#/lib/extensions';
 
@@ -87,7 +88,6 @@ export function IREditor({
 
   // extend the MarkdownEditor extracted from Obsidian
   useEffect(() => {
-
     const setupEditor = () => {
       class Editor extends reviewView.plugin.MarkdownEditor {
         isIncrementalReadingEditor = true;
@@ -337,7 +337,7 @@ export function IREditor({
     };
   }, [item.data.reference, reviewView, reviewManager]); // Re-create editor only when item changes
 
-  // Separate effect to update editor content when value changes (without recreating the editor)
+  // Update editor content when value changes
   useEffect(() => {
     if (!internalRef.current) return;
 
@@ -357,6 +357,7 @@ export function IREditor({
               to: currentContent.length,
               insert: newValue,
             },
+            annotations: isExternalSync.of(true),
           });
         }
       }, 0);

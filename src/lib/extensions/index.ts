@@ -7,7 +7,7 @@ import type IncrementalReadingPlugin from '#/main';
 
 // Re-export for convenience
 export { irPluginFacet } from './irPluginFacet';
-export { refreshHighlights } from './SnippetHighlightExtension';
+export { refreshHighlights, isExternalSync } from './SnippetHighlightExtension';
 export {
   setReviewMode,
   setShowAnswer,

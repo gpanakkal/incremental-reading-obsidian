@@ -1,6 +1,6 @@
 import { ViewPlugin, Decoration } from '@codemirror/view';
 import type { ViewUpdate, DecorationSet, EditorView } from '@codemirror/view';
-import { RangeSetBuilder } from '@codemirror/state';
+import { Annotation, RangeSetBuilder } from '@codemirror/state';
 import type { TFile } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
 import { getFileFromState, getAppFromState, getIRNoteType } from './utils';
@@ -8,6 +8,15 @@ import type {
   SnippetOffsetTracker,
   SnippetHighlight,
 } from '../SnippetOffsetTracker';
+import type ReviewManager from '../ReviewManager';
+import ReviewView from '#/views/ReviewView';
+
+/**
+ * Annotation to mark transactions from external value sync (e.g., when IREditor
+ * receives updated content from React Query after the standard editor modified the file).
+ * SnippetHighlightExtension reloads from DB for these instead of mapping positions.
+ */
+export const isExternalSync = Annotation.define<boolean>();
 
 /**
  * CodeMirror extension that renders snippet highlights as decorations.
@@ -31,10 +40,11 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       this.file = getFileFromState(view.state);
       this.decorations = Decoration.none;
 
-      // Check if we're in the review interface (IREditor sets this marker)
-      this.isReviewInterface = !!(view as any).dom?.closest?.(
-        '.incremental-reading-review-view'
-      );
+      // Check if we're in the review interface
+      const app = getAppFromState(view.state);
+      if (!app) throw new Error(`Couldn't retrieve app from view state`);
+      const activeView = app.workspace.getActiveViewOfType(ReviewView);
+      this.isReviewInterface = activeView !== null;
 
       // Load highlights asynchronously
       this.loadHighlights(view);
@@ -84,32 +94,76 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
       // If document changed, update offsets in tracker
       if (update.docChanged) {
-        // Detect if this is an undo or redo transaction
-        const isUndo = update.transactions.some((tr) => tr.isUserEvent('undo'));
-        const isRedo = update.transactions.some((tr) => tr.isUserEvent('redo'));
+        // Detect if this is a full document replacement (external sync).
+        // This happens when the review interface receives updated content from
+        // the standard editor via query invalidation. In this case, the standard
+        // editor has already updated and persisted the offsets correctly, so we
+        // should reload from the database rather than trying to map positions
+        // (which would double-apply the transformation).
+        const isFullReplacement = this.isFullDocumentReplacement(update);
 
-        if (isUndo) {
-          // Restore offsets from undo history (fully restores previous state)
-          reviewManager.snippetTracker.restoreFromUndo(this.file.path);
-        } else if (isRedo) {
-          // Restore offsets from redo history
-          reviewManager.snippetTracker.restoreFromRedo(this.file.path);
-        } else {
-          // Normal edit: save state before applying changes, then map positions
-          reviewManager.snippetTracker.pushUndoState(this.file.path);
-
-          const oldDocContent = update.startState.doc.toString();
-          const oldBodyStart = reviewManager.getBodyStartOffset(oldDocContent);
-          const newDocContent = update.state.doc.toString();
-          const newBodyStart = reviewManager.getBodyStartOffset(newDocContent);
-
-          reviewManager.snippetTracker.updateOffsetsWithMapping(
-            this.file.path,
-            update.changes,
-            oldBodyStart,
-            newBodyStart
+        if (isFullReplacement && this.isReviewInterface) {
+          // Reload highlights from database - the standard editor already
+          // persisted the correct offsets
+          console.log(
+            `[SnippetHighlightExtension] Full document replacement detected in review interface, reloading from DB`
           );
+          this.reloadHighlightsFromDB(update.view, reviewManager);
+          return;
         }
+
+        // Check if this is an external sync transaction (from IREditor's value prop update).
+        // This happens when the same note is open in both review and standard editor panes:
+        // the standard editor's changes trigger query invalidation, which causes IREditor
+        // to dispatch a replacement transaction. We must reload from DB for these since
+        // the ChangeSet doesn't represent the actual user edit.
+        const isExtSync = update.transactions.some(
+          (tr) => tr.annotation(isExternalSync)
+        );
+
+        if (isExtSync && this.isReviewInterface) {
+          console.log(
+            `[SnippetHighlightExtension] External sync detected in review interface, reloading from DB`
+          );
+          this.reloadHighlightsFromDB(update.view, reviewManager);
+          return;
+        }
+
+        // For standard editor panes: only update offsets if this is a direct user edit.
+        // When the same file is open in multiple panes, Obsidian syncs changes to unfocused
+        // panes, but these syncs produce ChangeSets that don't represent the actual edit.
+        // We detect user edits via the Transaction.userEvent annotation.
+        if (!this.isReviewInterface) {
+          const hasUserEvent = update.transactions.some(
+            (tr) => tr.isUserEvent('input') || tr.isUserEvent('delete') ||
+                    tr.isUserEvent('undo') || tr.isUserEvent('redo')
+          );
+
+          if (!hasUserEvent) {
+            // This is a sync from another pane, not a direct edit - reload from DB
+            console.log(
+              `[SnippetHighlightExtension] External file sync in standard editor, reloading from DB`
+            );
+            this.reloadHighlightsFromDB(update.view, reviewManager);
+            return;
+          }
+        }
+
+        // Use CodeMirror's ChangeSet for ALL document changes, including undo/redo.
+        // The ChangeSet correctly represents the transformation (or its inverse for undo),
+        // so mapPos() handles everything - even when Obsidian groups multiple edits
+        // into a single undo action.
+        const oldDocContent = update.startState.doc.toString();
+        const oldBodyStart = reviewManager.getBodyStartOffset(oldDocContent);
+        const newDocContent = update.state.doc.toString();
+        const newBodyStart = reviewManager.getBodyStartOffset(newDocContent);
+
+        reviewManager.snippetTracker.updateOffsetsWithMapping(
+          this.file.path,
+          update.changes,
+          oldBodyStart,
+          newBodyStart
+        );
 
         // In regular Obsidian editor, we handle persistence here with debouncing.
         // In the review interface, ReviewItem.saveNote() handles persistence.
@@ -127,7 +181,70 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       );
     }
 
-    private schedulePersist(reviewManager: any) {
+    /**
+     * Detect if this update is a full document replacement (external sync).
+     * This happens when content is replaced wholesale, like when the review
+     * interface receives updated content from another editor.
+     */
+    private isFullDocumentReplacement(update: ViewUpdate): boolean {
+      // Check if there's a single change that replaces the entire old document
+      let isFullReplace = false;
+      const oldDocLength = update.startState.doc.length;
+      const changes: Array<{
+        fromA: number;
+        toA: number;
+        fromB: number;
+        toB: number;
+      }> = [];
+
+      update.changes.iterChanges((fromA, toA, fromB, toB) => {
+        changes.push({ fromA, toA, fromB, toB });
+        // If the change starts at 0 and covers the entire old document length,
+        // it's a full replacement
+        if (fromA === 0 && toA === oldDocLength) {
+          isFullReplace = true;
+        }
+      });
+
+      console.log(
+        `[SnippetHighlightExtension] isFullDocumentReplacement check:`,
+        {
+          isFullReplace,
+          oldDocLength,
+          newDocLength: update.state.doc.length,
+          isReviewInterface: this.isReviewInterface,
+          changes,
+        }
+      );
+
+      return isFullReplace;
+    }
+
+    /**
+     * Reload highlights from the database.
+     * Used when external changes are detected to avoid double-applying transformations.
+     */
+    private async reloadHighlightsFromDB(
+      view: EditorView,
+      reviewManager: ReviewManager
+    ) {
+      if (!this.file) return;
+
+      // Reload from database
+      await reviewManager.getSnippetHighlights(this.file);
+
+      // Rebuild decorations
+      this.decorations = this.buildDecorations(
+        view,
+        reviewManager.snippetTracker,
+        reviewManager
+      );
+
+      // Force view update
+      view.dispatch({});
+    }
+
+    private schedulePersist(reviewManager: ReviewManager) {
       if (this.persistTimeout) {
         clearTimeout(this.persistTimeout);
       }
@@ -136,11 +253,19 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       }, 2000); // 2 second debounce
     }
 
-    private async persistHighlights(reviewManager: any) {
+    private async persistHighlights(reviewManager: ReviewManager) {
       if (!this.file) return;
 
       const highlights = reviewManager.snippetTracker.getHighlights(
         this.file.path
+      );
+      console.log(
+        `[SnippetHighlightExtension] Persisting ${highlights.length} highlights to database`,
+        highlights.map((h: SnippetHighlight) => ({
+          id: h.id.slice(0, 8),
+          start: h.start_offset,
+          end: h.end_offset,
+        }))
       );
       for (const h of highlights) {
         await reviewManager.updateSnippetOffsets(
@@ -149,12 +274,13 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           h.end_offset
         );
       }
+      console.log(`[SnippetHighlightExtension] Persistence complete`);
     }
 
     private buildDecorations(
       view: EditorView,
       tracker: SnippetOffsetTracker,
-      reviewManager: any
+      reviewManager: ReviewManager
     ): DecorationSet {
       if (!this.file) {
         return Decoration.none;

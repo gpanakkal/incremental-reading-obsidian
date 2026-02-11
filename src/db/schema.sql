@@ -28,8 +28,8 @@ CREATE TABLE IF NOT EXISTS snippet (
   priority INTEGER NOT NULL,
   dismissed INTEGER DEFAULT 0,
   scroll_top INTEGER NOT NULL DEFAULT 0,
-  start_offset INTEGER DEFAULT NULL, -- character offset from parent file start
-  end_offset INTEGER DEFAULT NULL, -- character offset from parent file start
+  start_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
+  end_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
   CHECK(due IS NOT NULL OR dismissed = TRUE)

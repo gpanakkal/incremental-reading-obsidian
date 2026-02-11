@@ -1,10 +1,14 @@
-import type { TFile } from 'obsidian';
 import type { ChangeSet } from '@codemirror/state';
 import type { ISnippetBase } from './types';
 
 /**
  * Service for tracking snippet highlights and updating their offsets in real-time
- * as documents are edited
+ * as documents are edited.
+ *
+ * When the user undoes an action, CodeMirror provides a ChangeSet representing
+ * the inverse transformation, which we apply via mapPos() just like any other edit.
+ * This correctly handles cases where Obsidian groups multiple edits into a single
+ * undo action.
  */
 
 export interface SnippetHighlight extends ISnippetBase {
@@ -14,20 +18,9 @@ export interface SnippetHighlight extends ISnippetBase {
   parent: string;
 }
 
-/** Snapshot of highlight offsets for undo/redo restoration */
-interface OffsetSnapshot {
-  offsets: Map<string, { start: number; end: number }>;
-}
-
-const MAX_HISTORY_SIZE = 50;
-
 export class SnippetOffsetTracker {
   // Maps file path -> array of snippet highlights
   private highlightCache: Map<string, SnippetHighlight[]> = new Map();
-
-  // Per-file undo/redo history stacks
-  private undoHistory: Map<string, OffsetSnapshot[]> = new Map();
-  private redoHistory: Map<string, OffsetSnapshot[]> = new Map();
 
   /**
    * Load highlights for a file into the cache
@@ -35,6 +28,14 @@ export class SnippetOffsetTracker {
    * @param highlights The snippet highlights for this file
    */
   loadHighlights(filePath: string, highlights: SnippetHighlight[]) {
+    console.log(
+      `[SnippetOffsetTracker] Loading ${highlights.length} highlights for ${filePath}`,
+      highlights.map((h) => ({
+        id: h.id.slice(0, 8),
+        start: h.start_offset,
+        end: h.end_offset,
+      }))
+    );
     this.highlightCache.set(filePath, highlights);
   }
 
@@ -56,103 +57,6 @@ export class SnippetOffsetTracker {
   }
 
   /**
-   * Save current offset state to undo history before applying changes.
-   * Called before normal edits (not undo/redo).
-   */
-  pushUndoState(filePath: string) {
-    const highlights = this.highlightCache.get(filePath);
-    if (!highlights || highlights.length === 0) return;
-
-    // Create snapshot of current offsets
-    const snapshot: OffsetSnapshot = {
-      offsets: new Map(
-        highlights.map((h) => [h.id, { start: h.start_offset, end: h.end_offset }])
-      ),
-    };
-
-    // Push to undo stack
-    const undoStack = this.undoHistory.get(filePath) || [];
-    undoStack.push(snapshot);
-
-    // Limit stack size to prevent memory bloat
-    if (undoStack.length > MAX_HISTORY_SIZE) {
-      undoStack.shift();
-    }
-    this.undoHistory.set(filePath, undoStack);
-
-    // Clear redo stack on new edit (standard undo/redo behavior)
-    this.redoHistory.delete(filePath);
-  }
-
-  /**
-   * Restore highlight offsets from undo history.
-   * Called when an undo transaction is detected.
-   */
-  restoreFromUndo(filePath: string) {
-    const undoStack = this.undoHistory.get(filePath);
-    if (!undoStack || undoStack.length === 0) return;
-
-    const highlights = this.highlightCache.get(filePath);
-    if (!highlights) return;
-
-    // Save current state to redo stack before restoring
-    const currentSnapshot: OffsetSnapshot = {
-      offsets: new Map(
-        highlights.map((h) => [h.id, { start: h.start_offset, end: h.end_offset }])
-      ),
-    };
-    const redoStack = this.redoHistory.get(filePath) || [];
-    redoStack.push(currentSnapshot);
-    this.redoHistory.set(filePath, redoStack);
-
-    // Pop and apply undo state
-    const undoSnapshot = undoStack.pop()!;
-    this.applySnapshot(filePath, undoSnapshot);
-  }
-
-  /**
-   * Restore highlight offsets from redo history.
-   * Called when a redo transaction is detected.
-   */
-  restoreFromRedo(filePath: string) {
-    const redoStack = this.redoHistory.get(filePath);
-    if (!redoStack || redoStack.length === 0) return;
-
-    const highlights = this.highlightCache.get(filePath);
-    if (!highlights) return;
-
-    // Save current state back to undo stack before restoring
-    const currentSnapshot: OffsetSnapshot = {
-      offsets: new Map(
-        highlights.map((h) => [h.id, { start: h.start_offset, end: h.end_offset }])
-      ),
-    };
-    const undoStack = this.undoHistory.get(filePath) || [];
-    undoStack.push(currentSnapshot);
-    this.undoHistory.set(filePath, undoStack);
-
-    // Pop and apply redo state
-    const redoSnapshot = redoStack.pop()!;
-    this.applySnapshot(filePath, redoSnapshot);
-  }
-
-  /**
-   * Apply a snapshot of offsets to the current highlights.
-   */
-  private applySnapshot(filePath: string, snapshot: OffsetSnapshot) {
-    const highlights = this.highlightCache.get(filePath);
-    if (!highlights) return;
-
-    for (const h of highlights) {
-      const offsets = snapshot.offsets.get(h.id);
-      if (offsets) {
-        h.start_offset = offsets.start;
-        h.end_offset = offsets.end;
-      }
-    }
-  }
-
-  /**
    * Update highlight offsets using CodeMirror's position mapping.
    * This correctly handles multiple changes in a single transaction (e.g., undo).
    *
@@ -169,8 +73,16 @@ export class SnippetOffsetTracker {
   ) {
     const highlights = this.highlightCache.get(filePath);
     if (!highlights || highlights.length === 0) {
+      console.log(
+        `[SnippetOffsetTracker] No highlights cached for ${filePath}, skipping offset update`
+      );
       return;
     }
+
+    console.log(
+      `[SnippetOffsetTracker] Updating ${highlights.length} highlights for ${filePath}`,
+      { oldBodyStart, newBodyStart }
+    );
 
     for (const highlight of highlights) {
       // Convert body-relative to absolute positions in old document
@@ -182,13 +94,20 @@ export class SnippetOffsetTracker {
       // assoc=-1 means "stay with content to the left"
       const newAbsoluteStart = changes.mapPos(absoluteStart, 1);
       const newAbsoluteEnd = changes.mapPos(absoluteEnd, -1);
+      console.log({ newAbsoluteStart, newAbsoluteEnd });
 
       // Convert back to body-relative offsets in new document
-      highlight.start_offset = Math.max(0, newAbsoluteStart - newBodyStart);
-      highlight.end_offset = Math.max(
-        highlight.start_offset,
-        newAbsoluteEnd - newBodyStart
+      const newStart = Math.max(0, newAbsoluteStart - newBodyStart);
+      // Ensure end is always at least start + 1 to prevent zero-width highlights
+      // (which become invisible and effectively destroy the snippet highlight)
+      const newEnd = Math.max(newStart + 1, newAbsoluteEnd - newBodyStart);
+
+      console.log(
+        `[SnippetOffsetTracker] Highlight update: (${highlight.start_offset}, ${highlight.end_offset}) -> (${newStart}, ${newEnd})`
       );
+
+      highlight.start_offset = newStart;
+      highlight.end_offset = newEnd;
     }
 
     this.highlightCache.set(filePath, highlights);

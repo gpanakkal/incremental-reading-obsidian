@@ -33,20 +33,24 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
 
   const saveNote = async (newContent: string) => {
     // Save document content and highlight offsets together to avoid race conditions
-    const highlights = reviewManager.snippetTracker.getHighlights(item.file.path);
+    const highlights = reviewManager.snippetTracker.getHighlights(
+      item.file.path
+    );
 
-    // Wrap in withReviewViewSave to prevent external modification detection
+    // Wrap in withReviewViewSave so it's recognized as an internal change
     await plugin.withReviewViewSave(async () => {
-      // Save document content
       await plugin.app.vault.process(item.file, () => newContent);
 
-      // Save highlight offsets (they're already body-relative in the tracker)
+      // Save body-relative highlight offsets
       for (const h of highlights) {
-        await reviewManager.updateSnippetOffsets(h.id, h.start_offset, h.end_offset);
+        await reviewManager.updateSnippetOffsets(
+          h.id,
+          h.start_offset,
+          h.end_offset
+        );
       }
     });
 
-    // Invalidate the file content cache so reopening shows fresh content
     queryClient.setQueryData([item.data.reference], newContent);
 
     setEditState(EditingState.complete);
