@@ -8,6 +8,8 @@ export default defineConfig({
   workers: process.env['CI'] ? 2 : 8,
   use: {
     trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
+    video: 'retain-on-failure',
   },
   projects: [
     {
