@@ -31,14 +31,12 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm install
 
-      # macOS and Linux setup
       - name: Setup Obsidian (macOS/Linux)
         if: runner.os != 'Windows'
         run: bash ./src/scripts/setup-obsidian.sh --ci
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Windows setup
       - name: Setup Obsidian (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

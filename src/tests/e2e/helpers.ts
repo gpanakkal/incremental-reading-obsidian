@@ -36,11 +36,26 @@ export async function openNote(window: Page, path: string) {
   await executeCommand(window, 'switcher:open');
   const quickSwitcher = window.getByPlaceholder('Find or create a note...');
   await quickSwitcher.fill(path);
-  await window
-    .locator('div')
-    .filter({
-      hasText: path,
-    })
-    .nth(1)
-    .click();
+
+  // Register file-open listener beforehand so we don't miss the event.
+  const fileOpenPromise = window.evaluate(() => {
+    return new Promise<void>((resolve) => {
+      const NOTE_OPEN_TIMEOUT_MS = 10_000;
+      const workspace = (window as any).app.workspace;
+      const ref = workspace.on('file-open', () => {
+        workspace.offref(ref);
+        resolve();
+      });
+      // Safety: clean up listener if event never fires
+      setTimeout(() => workspace.offref(ref), NOTE_OPEN_TIMEOUT_MS);
+    });
+  });
+
+  await window.locator('div').filter({ hasText: path }).nth(1).click();
+
+  // Wait for Obsidian to confirm the file is open
+  await fileOpenPromise;
+
+  // Wait for the quick switcher modal to fully close
+  await window.locator('.modal-bg').waitFor({ state: 'hidden' });
 }
