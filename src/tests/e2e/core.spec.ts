@@ -11,7 +11,7 @@ import {
   openVault,
   shouldCleanup,
 } from '../e2e-setup/helpers';
-import { openNote, useCommandPalette } from './helpers';
+import { executeCommand, importArticle, openNote } from './helpers';
 
 /**
  * Tests of core plugin functionality:
@@ -38,7 +38,7 @@ test.afterEach(async () => {
 });
 
 test('Can open the review interface by executing the command', async () => {
-  await useCommandPalette(window, 'Incremental Reading: Learn');
+  await executeCommand(window, 'incremental-reading:learn');
 
   // Verify the tab header for the review interface is visible
   await expect(
@@ -66,7 +66,7 @@ test.describe('Article Importing', () => {
       button: 'right',
     });
     await window.getByText('Import article').click();
-    await window.getByRole('button', { name: 'Import' }).click();
+    await importArticle(window);
     await window.getByLabel('Incremental Reading').click();
 
     // look for the action bar to confirm we're in review
@@ -86,8 +86,8 @@ test.describe('Article Importing', () => {
 
     await window.getByRole('button', { name: 'More options' }).click();
     await window.getByText('Import article').click();
-    await window.getByRole('button', { name: 'Import' }).click();
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await importArticle(window);
+    await executeCommand(window, 'incremental-reading:learn');
 
     // look for the action bar to confirm we're in review
     await expect(
@@ -108,9 +108,9 @@ test.describe('Article Importing', () => {
       'sources/Memorizing a programming language using spaced repetition'
     );
 
-    await useCommandPalette(window, 'Incremental Reading: Import Article');
-    await window.getByRole('button', { name: 'Import' }).click();
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:import-article');
+    await importArticle(window);
+    await executeCommand(window, 'incremental-reading:learn');
 
     // look for the action bar to confirm we're in review
     await expect(
@@ -133,14 +133,14 @@ test.describe('Action Bar', () => {
       'sources/Memorizing a programming language using spaced repetition'
     );
 
-    await useCommandPalette(window, 'Incremental Reading: Import Article');
-    await window.getByRole('button', { name: 'Import' }).click();
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:import-article');
+    await importArticle(window);
+    await executeCommand(window, 'incremental-reading:learn');
     await window.getByRole('button', { name: 'Continue' }).click();
 
-    await useCommandPalette(window, 'Close current tab');
+    await executeCommand(window, 'workspace:close');
 
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:learn');
     await expect(
       window
         .getByText(
@@ -156,18 +156,18 @@ test.describe('Action Bar', () => {
       'sources/Memorizing a programming language using spaced repetition'
     );
 
-    await useCommandPalette(window, 'Incremental Reading: Import Article');
-    await window.getByRole('button', { name: 'Import' }).click();
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:import-article');
+    await importArticle(window);
+    await executeCommand(window, 'incremental-reading:learn');
 
     const skipButton = window.getByRole('button', { name: 'Skip' });
     await expect(skipButton).toBeInViewport();
     await skipButton.click();
 
     await expect(window.getByText('Nothing due for review.')).toBeVisible();
-    await useCommandPalette(window, 'Close current tab');
+    await executeCommand(window, 'workspace:close');
 
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:learn');
     await expect(
       window
         .getByText(
@@ -183,17 +183,17 @@ test.describe('Action Bar', () => {
       'sources/Memorizing a programming language using spaced repetition'
     );
 
-    await useCommandPalette(window, 'Incremental Reading: Import Article');
-    await window.getByRole('button', { name: 'Import' }).click();
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:import-article');
+    await importArticle(window);
+    await executeCommand(window, 'incremental-reading:learn');
 
     const dismissButton = window.getByRole('button', { name: 'Dismiss' });
     await expect(dismissButton).toBeInViewport();
     await dismissButton.click();
 
-    await useCommandPalette(window, 'Close current tab');
+    await executeCommand(window, 'workspace:close');
 
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:learn');
     await expect(
       window
         .getByText(
@@ -209,8 +209,8 @@ test.describe('Action Bar', () => {
       'sources/Memorizing a programming language using spaced repetition'
     );
 
-    await useCommandPalette(window, 'Incremental Reading: Import Article');
-    await window.getByRole('button', { name: 'Import' }).click();
+    await executeCommand(window, 'incremental-reading:import-article');
+    await importArticle(window);
 
     await openNote(
       window,
@@ -221,7 +221,7 @@ test.describe('Action Bar', () => {
     await expect(dismissButton).toBeInViewport();
     await dismissButton.click();
 
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:learn');
     await expect(
       window
         .getByText(
@@ -237,8 +237,8 @@ test.describe('Action Bar', () => {
       'sources/Memorizing a programming language using spaced repetition'
     );
 
-    await useCommandPalette(window, 'Incremental Reading: Import Article');
-    await window.getByRole('button', { name: 'Import' }).click();
+    await executeCommand(window, 'incremental-reading:import-article');
+    await importArticle(window);
 
     await openNote(
       window,
@@ -249,7 +249,7 @@ test.describe('Action Bar', () => {
     await expect(dismissButton).toBeInViewport();
     await dismissButton.click();
 
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:learn');
     await expect(
       window
         .getByText(
@@ -258,13 +258,13 @@ test.describe('Action Bar', () => {
         .nth(3)
     ).not.toBeVisible();
 
-    await useCommandPalette(window, 'Close current tab');
+    await executeCommand(window, 'workspace:close');
 
     const unDismissButton = window.getByRole('button', { name: 'Un-dismiss' });
     await expect(unDismissButton).toBeInViewport();
     await unDismissButton.click();
 
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:learn');
     await expect(window.locator('.ir-title')).toBeInViewport();
   });
 
@@ -280,10 +280,7 @@ test.describe('Extracting snippets', () => {
 
     // select a paragraph
     await window.getByText('I’m an intermediate').click({ clickCount: 3 });
-    await useCommandPalette(
-      window,
-      'Incremental Reading: Extract selection to snippet'
-    );
+    await executeCommand(window, 'incremental-reading:extract-selection');
 
     // TODO: replace with wait for file creation
     await window.waitForTimeout(200);
@@ -303,9 +300,9 @@ test.describe('Extracting snippets', () => {
       'sources/Memorizing a programming language using spaced repetition'
     );
 
-    await useCommandPalette(window, 'Incremental Reading: Import Article');
-    await window.getByRole('button', { name: 'Import' }).click();
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:import-article');
+    await importArticle(window);
+    await executeCommand(window, 'incremental-reading:learn');
 
     // look for the action bar to confirm we're in review
     await expect(
@@ -317,10 +314,7 @@ test.describe('Extracting snippets', () => {
       .getByText('I’m an intermediate')
       .nth(1)
       .click({ clickCount: 3 });
-    await useCommandPalette(
-      window,
-      'Incremental Reading: Extract selection to snippet'
-    );
+    await executeCommand(window, 'incremental-reading:extract-selection');
 
     // TODO: replace with wait for file creation
     await window.waitForTimeout(200);
@@ -345,9 +339,9 @@ test.describe('Extracting snippets', () => {
       'sources/Memorizing a programming language using spaced repetition'
     );
 
-    await useCommandPalette(window, 'Incremental Reading: Import Article');
-    await window.getByRole('button', { name: 'Import' }).click();
-    await useCommandPalette(window, 'Incremental Reading: Learn');
+    await executeCommand(window, 'incremental-reading:import-article');
+    await importArticle(window);
+    await executeCommand(window, 'incremental-reading:learn');
 
     // look for the action bar to confirm we're in review
     await expect(
@@ -359,10 +353,8 @@ test.describe('Extracting snippets', () => {
       .getByText('I’m an intermediate')
       .nth(1)
       .click({ clickCount: 3 });
-    await useCommandPalette(
-      window,
-      'Incremental Reading: Extract selection to snippet'
-    );
+    await window.waitForTimeout(200);
+    await executeCommand(window, 'incremental-reading:extract-selection');
 
     // TODO: replace with wait for file creation
     await window.waitForTimeout(200);
@@ -397,10 +389,7 @@ test.describe('Extracting snippets', () => {
       .getByText('so I picked up a few books on PHP, SQL, Linux')
       .filter({ visible: true })
       .click({ clickCount: 3 });
-    await useCommandPalette(
-      window,
-      'Incremental Reading: Extract selection to snippet'
-    );
+    await executeCommand(window, 'incremental-reading:extract-selection');
 
     await window
       .locator('span')

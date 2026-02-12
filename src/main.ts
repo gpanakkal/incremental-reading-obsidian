@@ -190,7 +190,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       id: 'learn',
       name: 'Learn',
-      callback: () => this.learn.call(this),
+      callback: async () => await this.learn.call(this),
     });
 
     this.addCommand({
