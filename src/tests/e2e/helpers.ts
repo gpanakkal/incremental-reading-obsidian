@@ -4,12 +4,7 @@ import type { Page } from '@playwright/test';
 
 export async function useCommandPalette(window: Page, command: string) {
   await window.getByLabel('Open command palette', { exact: true }).click();
-  const commandPalette = window.getByRole('textbox', {
-    name: 'Select a command...',
-  });
-  // Wait for the command palette to be visible before interacting
-  // This prevents timeouts in CI where rendering may be slower
-  await commandPalette.waitFor({ state: 'visible' });
+  const commandPalette = window.getByPlaceholder('Select a command...');
   await commandPalette.fill(command);
   await commandPalette.press('Enter');
 }
@@ -20,10 +15,7 @@ export async function useCommandPalette(window: Page, command: string) {
  */
 export async function openNote(window: Page, path: string) {
   await useCommandPalette(window, 'Quick switcher: Open quick switcher');
-  const quickSwitcher = window.getByRole('textbox', {
-    name: 'Find or create a note...',
-  });
-  await quickSwitcher.waitFor({ state: 'visible' });
+  const quickSwitcher = window.getByPlaceholder('Find or create a note...');
   await quickSwitcher.fill(path);
   await window
     .locator('div')
