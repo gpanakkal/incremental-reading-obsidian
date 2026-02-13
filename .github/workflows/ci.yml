@@ -33,14 +33,14 @@ jobs:
 
       - name: Setup Obsidian (macOS/Linux)
         if: runner.os != 'Windows'
-        run: bash ./src/scripts/setup-obsidian.sh --ci
+        run: bash ./scripts/setup-obsidian.sh --ci
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Obsidian (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./src/scripts/setup-obsidian.ps1 -CI
+        run: ./scripts/setup-obsidian.ps1 -CI
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -65,7 +65,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: e2e-results-${{ matrix.os }}
-          path: src/tests/e2e-test-results/
+          path: e2e-tests/test-results/
           retention-days: 7
 
   test-e2e-tools:
@@ -86,7 +86,7 @@ jobs:
       # macOS and Linux setup
       - name: Setup Obsidian (macOS/Linux)
         if: runner.os != 'Windows'
-        run: bash ./src/scripts/setup-obsidian.sh --ci
+        run: bash ./scripts/setup-obsidian.sh --ci
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -94,7 +94,7 @@ jobs:
       - name: Setup Obsidian (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./src/scripts/setup-obsidian.ps1 -CI
+        run: ./scripts/setup-obsidian.ps1 -CI
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

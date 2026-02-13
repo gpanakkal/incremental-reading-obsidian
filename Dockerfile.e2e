@@ -39,4 +39,4 @@ COPY . .
 # CI=true triggers --no-sandbox in helpers.ts and 2-worker mode in Playwright
 ENV CI=true
 
-CMD ["bash", "-c", "bash ./src/scripts/setup-obsidian.sh --ci && xvfb-run --auto-servernum npm run e2e:setup && xvfb-run --auto-servernum npm run e2e"]
+CMD ["bash", "-c", "bash ./scripts/setup-obsidian.sh --ci && xvfb-run --auto-servernum npm run e2e:setup && xvfb-run --auto-servernum npm run e2e"]

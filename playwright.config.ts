@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 // See https://playwright.dev/docs/test-configuration.
 export default defineConfig({
-  outputDir: './src/tests/e2e-test-results',
+  outputDir: './e2e-tests/test-results',
   fullyParallel: false,
   forbidOnly: !!process.env['CI'],
   workers: process.env['CI'] ? 2 : 8,
@@ -14,11 +14,12 @@ export default defineConfig({
   projects: [
     {
       name: 'e2e',
-      testDir: './src/tests/e2e',
+      testDir: './e2e-tests',
+      testMatch: '*.spec.ts',
     },
     {
       name: 'e2e-setup',
-      testDir: './src/tests/e2e-setup',
+      testDir: './e2e-tests/setup',
       testMatch: 'setup.ts',
     },
   ],

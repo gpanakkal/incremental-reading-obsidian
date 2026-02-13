@@ -10,7 +10,7 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const projectRoot = resolve(import.meta.dirname, '../..');
-const resultsDir = resolve(projectRoot, 'src/tests/e2e-test-results');
+const resultsDir = resolve(projectRoot, 'e2e-tests/test-results');
 const imageName = 'incremental-reading-e2e';
 
 // Resolve GH_TOKEN: environment variable > .env file
@@ -45,11 +45,14 @@ run('docker', ['build', '-t', imageName, '-f', 'Dockerfile.e2e', '.']);
 
 console.log('\n🧪 Running e2e tests in Docker...');
 run('docker', [
-  'run', '--rm',
+  'run',
+  '--rm',
   '--shm-size=1g',
-  '-e', `GH_TOKEN=${ghToken}`,
-  '-v', `${resultsDir}:/app/src/tests/e2e-test-results`,
+  '-e',
+  `GH_TOKEN=${ghToken}`,
+  '-v',
+  `${resultsDir}:/app/e2e-tests/test-results`,
   imageName,
 ]);
 
-console.log('\n✅ Done. Test results available at src/tests/e2e-test-results/');
+console.log('\n✅ Done. Test results available at e2e-tests/test-results/');

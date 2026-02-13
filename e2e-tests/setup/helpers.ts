@@ -11,9 +11,9 @@ import * as path from 'path';
  * Thanks to qawatake for providing an example testing setup
  * at https://github.com/qawatake/obsidian-e2e-sample
  */
-export const appPath = path.resolve('./src/.obsidian-unpacked/main.js');
-export const sourceVaultPath = path.resolve('./src/tests/test-vault');
-export const testVaultsDir = path.resolve('./src/tests/e2e-test-vaults');
+export const appPath = path.resolve('./.obsidian-unpacked/main.js');
+export const sourceVaultPath = path.resolve('./e2e-tests/setup/test-vault');
+export const testVaultsDir = path.resolve('./e2e-tests/test-vaults');
 export const projectRoot = path.resolve('.');
 
 // Disable Chromium sandbox on Linux CI (required for GitHub Actions)

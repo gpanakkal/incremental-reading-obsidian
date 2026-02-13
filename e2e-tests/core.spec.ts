@@ -10,7 +10,7 @@ import {
   launchElectron,
   openVault,
   shouldCleanup,
-} from '../e2e-setup/helpers';
+} from './setup/helpers';
 import { executeCommand, finalizeArticleImport, openNote } from './helpers';
 
 /**
