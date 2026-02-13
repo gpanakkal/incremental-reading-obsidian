@@ -56,6 +56,9 @@ test('Can open the review interface from the ribbon button', async () => {
 
 test.describe('Article Importing', () => {
   test('can import Markdown from the file explorer context menu', async () => {
+    // macOS uses native context menus which are invisible to Playwright
+    test.skip(process.platform === 'darwin', 'Native context menus on macOS');
+
     await window
       .locator('div')
       .filter({ hasText: /^sources$/ })
@@ -79,6 +82,9 @@ test.describe('Article Importing', () => {
   });
 
   test('can import Markdown from the note hamburger menu', async () => {
+    // macOS uses native context menus which are invisible to Playwright
+    test.skip(process.platform === 'darwin', 'Native context menus on macOS');
+
     await openNote(
       window,
       'sources/Memorizing a programming language using spaced repetition'
