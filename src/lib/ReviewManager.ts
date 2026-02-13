@@ -637,26 +637,19 @@ export default class ReviewManager {
       offsets ?? undefined
     );
 
-    // Refresh highlights immediately if we have editor view reference
-    if (
-      offsets &&
-      currentFileEntry &&
-      this.currentEditorView?.file === currentFile
-    ) {
-      // console.log(
-      //   `[createSnippet] Refreshing highlights for ${currentFile.path}`
-      // );
-
+    // Refresh highlights immediately after snippet creation.
+    // Always use `cm` (the CodeMirror EditorView from the active editor) rather
+    // than `currentEditorView`, which may point to a different view (e.g. the
+    // review interface's editor) even when the snippet was created from the
+    // standard note view.
+    if (offsets && currentFileEntry && cm) {
       // Reload highlights into tracker
       await this.getSnippetHighlights(currentFile);
 
-      // Import and call refreshHighlights
-      const { refreshHighlights } = await import('./extensions');
-      refreshHighlights(
-        this.currentEditorView.view,
-        this.snippetTracker,
-        currentFile
-      );
+      // Dispatch a transaction with an effect to trigger the SnippetHighlightPlugin's
+      // update() method, which rebuilds decorations from the updated tracker.
+      const { refreshHighlightsEffect } = await import('./extensions');
+      cm.dispatch({ effects: refreshHighlightsEffect.of(null) });
     }
 
     return result;
