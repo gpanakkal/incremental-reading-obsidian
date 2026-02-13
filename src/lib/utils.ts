@@ -57,6 +57,7 @@ export function getDateTimeString(date?: Date) {
 /**
  * Remove characters that cannot be used for file names
  * or Obsidian note titles
+ * @param checkFinalChar if true, removes spaces and periods from the end
  */
 export function sanitizeForTitle(
   text: string,
@@ -64,7 +65,6 @@ export function sanitizeForTitle(
   maxLength?: number
 ) {
   const cleaned = text
-    .trim()
     .split('')
     .map((char, i) => {
       if (checkFinalChar && i === text.length - 1) {
@@ -74,7 +74,8 @@ export function sanitizeForTitle(
         return ' ';
       } else return char;
     })
-    .join('');
+    .join('')
+    .trim();
 
   return maxLength ? cleaned.slice(0, maxLength) : cleaned;
 }

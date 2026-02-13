@@ -22,7 +22,7 @@ export async function executeCommand(window: Page, commandId: string) {
  * import to complete. The modal closes itself after the import finishes,
  * so we wait for it to disappear.
  */
-export async function importArticle(window: Page) {
+export async function finalizeArticleImport(window: Page) {
   await window.getByRole('button', { name: 'Import' }).click();
   await window.locator('.modal-bg').waitFor({ state: 'hidden' });
 }

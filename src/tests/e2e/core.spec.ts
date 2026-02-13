@@ -11,7 +11,7 @@ import {
   openVault,
   shouldCleanup,
 } from '../e2e-setup/helpers';
-import { executeCommand, importArticle, openNote } from './helpers';
+import { executeCommand, finalizeArticleImport, openNote } from './helpers';
 
 /**
  * Tests of core plugin functionality:
@@ -69,7 +69,7 @@ test.describe('Article Importing', () => {
       button: 'right',
     });
     await window.getByText('Import article').click();
-    await importArticle(window);
+    await finalizeArticleImport(window);
     await window.getByLabel('Incremental Reading').click();
 
     // look for the action bar to confirm we're in review
@@ -92,7 +92,7 @@ test.describe('Article Importing', () => {
 
     await window.getByRole('button', { name: 'More options' }).click();
     await window.getByText('Import article').click();
-    await importArticle(window);
+    await finalizeArticleImport(window);
     await executeCommand(window, 'incremental-reading:learn');
 
     // look for the action bar to confirm we're in review
@@ -115,7 +115,7 @@ test.describe('Article Importing', () => {
     );
 
     await executeCommand(window, 'incremental-reading:import-article');
-    await importArticle(window);
+    await finalizeArticleImport(window);
     await executeCommand(window, 'incremental-reading:learn');
 
     // look for the action bar to confirm we're in review
@@ -140,7 +140,7 @@ test.describe('Action Bar', () => {
     );
 
     await executeCommand(window, 'incremental-reading:import-article');
-    await importArticle(window);
+    await finalizeArticleImport(window);
     await executeCommand(window, 'incremental-reading:learn');
     await window.getByRole('button', { name: 'Continue' }).click();
 
@@ -163,7 +163,7 @@ test.describe('Action Bar', () => {
     );
 
     await executeCommand(window, 'incremental-reading:import-article');
-    await importArticle(window);
+    await finalizeArticleImport(window);
     await executeCommand(window, 'incremental-reading:learn');
 
     const skipButton = window.getByRole('button', { name: 'Skip' });
@@ -190,7 +190,7 @@ test.describe('Action Bar', () => {
     );
 
     await executeCommand(window, 'incremental-reading:import-article');
-    await importArticle(window);
+    await finalizeArticleImport(window);
     await executeCommand(window, 'incremental-reading:learn');
 
     const dismissButton = window.getByRole('button', { name: 'Dismiss' });
@@ -216,7 +216,7 @@ test.describe('Action Bar', () => {
     );
 
     await executeCommand(window, 'incremental-reading:import-article');
-    await importArticle(window);
+    await finalizeArticleImport(window);
 
     await openNote(
       window,
@@ -244,7 +244,7 @@ test.describe('Action Bar', () => {
     );
 
     await executeCommand(window, 'incremental-reading:import-article');
-    await importArticle(window);
+    await finalizeArticleImport(window);
 
     await openNote(
       window,
@@ -307,7 +307,7 @@ test.describe('Extracting snippets', () => {
     );
 
     await executeCommand(window, 'incremental-reading:import-article');
-    await importArticle(window);
+    await finalizeArticleImport(window);
     await executeCommand(window, 'incremental-reading:learn');
 
     // look for the action bar to confirm we're in review
@@ -346,7 +346,7 @@ test.describe('Extracting snippets', () => {
     );
 
     await executeCommand(window, 'incremental-reading:import-article');
-    await importArticle(window);
+    await finalizeArticleImport(window);
     await executeCommand(window, 'incremental-reading:learn');
 
     // look for the action bar to confirm we're in review
@@ -411,6 +411,29 @@ test.describe('Extracting snippets', () => {
       window
         .getByText('so I picked up a few books on PHP, SQL, Linux, and Apache')
         .filter({ visible: true })
+    ).toBeInViewport();
+  });
+
+  test('file name has no leading spaces when first char is "["', async () => {
+    await openNote(window, 'sources/Curse of dimensionality - Wikipedia');
+    // replace with command
+    await window.getByRole('button', { name: 'More options' }).click();
+    await window.getByText('Source mode').click();
+
+    // select the first opening bracket '['
+    await window.locator('.cm-formatting.cm-formatting-link').first().click();
+    // highlight the rest of the paragraph
+    await window.getByText('---title: "Curse of').press('Shift+End');
+    await window.getByText('---title: "Curse of').press('Shift+End');
+
+    await executeCommand(window, 'incremental-reading:extract-selection');
+    await openNote(
+      window,
+      'incremental-reading/snippets/high-dimensional spaces'
+    );
+
+    await expect(
+      window.getByRole('button', { name: 'Open in Review' })
     ).toBeInViewport();
   });
 });
