@@ -1,11 +1,11 @@
 import test, { type ElectronApplication } from '@playwright/test';
-import * as fs from 'node:fs/promises';
 import {
   createVaultCopy,
   launchElectron,
   closeElectron,
   shouldCleanup,
   openVault,
+  deleteVaultCopy,
 } from './helpers';
 
 let app: ElectronApplication;
@@ -19,7 +19,7 @@ test.beforeEach(async () => {
 test.afterEach(async () => {
   if (app) await closeElectron(app);
   if (shouldCleanup) {
-    await fs.rm(vaultPath, { recursive: true, force: true });
+    await deleteVaultCopy(vaultPath);
   }
 });
 

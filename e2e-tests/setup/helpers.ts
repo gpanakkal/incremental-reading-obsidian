@@ -22,10 +22,13 @@ export const sandboxArg =
 
 export const shouldCleanup = process.env.E2E_CLEANUP === '1';
 
-export async function createVaultCopy(prefix: string) {
+export async function createVaultCopy(prefix: string, subDirectory?: string) {
   await fs.mkdir(testVaultsDir, { recursive: true });
   const id = crypto.randomBytes(4).toString('hex');
-  const vaultPath = path.join(testVaultsDir, `${prefix}-${id}`);
+  const pathSegments = [testVaultsDir];
+  if (subDirectory) pathSegments.push(subDirectory);
+  const name = prefix ? `${prefix}-${id}` : id;
+  const vaultPath = path.join(...pathSegments, name);
   await fs.cp(sourceVaultPath, vaultPath, { recursive: true });
 
   // Ensure plugin files in the copied vault point to the freshly built plugin.
@@ -52,6 +55,9 @@ export async function createVaultCopy(prefix: string) {
 
   return vaultPath;
 }
+
+export const deleteVaultCopy = async (vaultPath: string) =>
+  await fs.rm(vaultPath, { recursive: true, force: true });
 
 export function userDataDir(vaultPath: string) {
   return path.join(vaultPath, '.user-data');
@@ -113,7 +119,11 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
   }, vaultPath);
 
   const openButton = window.getByRole('button', { name: 'Open' });
-  await openButton.click();
+  try {
+    await openButton.click();
+  } catch {
+    // vault selection dialog was not shown; continue
+  }
 
   // Wait for the new window to open after selecting vault
   window = await app.waitForEvent('window');
