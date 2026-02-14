@@ -25,7 +25,7 @@ import Snippet from './lib/Snippet';
 import Article from './lib/Article';
 import { QueryModal } from './views/QueryModal';
 import { createIRExtensions } from './lib/extensions';
-import { queryClient } from './components/ReviewInterface';
+import { queryClient } from './lib/queryClient';
 
 interface IRPluginSettings {
   mySetting: string;
@@ -312,32 +312,20 @@ export default class IncrementalReadingPlugin extends Plugin {
       })
     );
 
-    // Invalidate review item cache when the current item's file is modified externally
+    // listen for file renames to update references in db
     this.registerEvent(
-      this.app.vault.on('modify', (file) => {
-        // Skip cache invalidation if the modification came from the review view itself
-        if (this.#isReviewViewSaving) {
+      this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
+        if (!this.#reviewManager) {
+          console.log('Review manager not ready; returning');
           return;
         }
-
-        const reviewView = this.app.workspace
-          .getLeavesOfType(ReviewView.viewType)
-          .find((leaf) => leaf.view instanceof ReviewView)?.view as
-          | ReviewView
-          | undefined;
-        const currentItem = reviewView?.currentItem;
-        if (currentItem?.file.path === file.path) {
-          // Invalidate both the current-review-item query and the file content query
-          // The file content query uses the item's reference as its key
-          queryClient.invalidateQueries({
-            queryKey: ['current-review-item'],
-          });
-          queryClient.invalidateQueries({
-            queryKey: [currentItem.data.reference],
-          });
-        }
+        this.#reviewManager.handleExternalRename(file, oldPath);
       })
     );
+
+    const invalidateCache = this.invalidateCurrentItemCache.bind(this);
+    // Invalidate review item cache when the current item's file is modified externally
+    this.registerEvent(this.app.vault.on('modify', invalidateCache));
 
     // This adds a settings tab so the user can configure various aspects of the plugin
     // this.addSettingTab(new SampleSettingTab(this.app, this)); // TODO: set up settings
@@ -420,6 +408,40 @@ export default class IncrementalReadingPlugin extends Plugin {
     }
 
     await this.app.workspace.revealLeaf(leaf);
+  }
+
+  /**
+   * Invalidates the React Query cache when the passed file is also
+   * open in review. Used to keep review in sync with other editor panes.
+   */
+  async invalidateCurrentItemCache(file: TAbstractFile) {
+    // Skip cache invalidation if the modification came from the review view itself
+    if (this.#isReviewViewSaving) {
+      console.log('review view is saving; skipping invalidation');
+      return;
+    }
+
+    const reviewView = this.app.workspace
+      .getLeavesOfType(ReviewView.viewType)
+      .find((leaf) => leaf.view instanceof ReviewView)?.view as
+      | ReviewView
+      | undefined;
+    const currentItem = reviewView?.currentItem;
+    if (currentItem?.file.path !== file.path) {
+      console.log(
+        `modified file doesn't match current item; skipping invalidation`
+      );
+      return;
+    }
+    console.log('invalidating current item cache');
+    // Invalidate both the current-review-item query and the file content query
+    // The file content query uses the item's reference as its key
+    queryClient.invalidateQueries({
+      queryKey: ['current-review-item'],
+    });
+    queryClient.invalidateQueries({
+      queryKey: [currentItem.data.reference],
+    });
   }
 }
 

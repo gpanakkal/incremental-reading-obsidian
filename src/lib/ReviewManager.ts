@@ -8,7 +8,9 @@ import {
 } from 'obsidian';
 import type { SQLiteRepository } from './repository';
 import type {
+  IArticleBase,
   IArticleReview,
+  ISnippetBase,
   NoteType,
   ReviewArticle,
   ReviewCard,
@@ -422,9 +424,6 @@ export default class ReviewManager {
     return ((await this.#repo.query(query, params)) ?? []) as SRSCardRow[];
   }
 
-  /**
-   * TODO: store the updates in db
-   */
   async reviewCard(card: ISRSCardDisplay, grade: Grade, reviewTime?: Date) {
     const recordLog = this.#fsrs.repeat(
       card,
@@ -462,7 +461,7 @@ export default class ReviewManager {
         `elapsed_days = $5`,
         `scheduled_days = $6`,
         `reps = $7, lapses = $8`,
-        `state = $9`,
+        `state = $9, dismissed = 0`,
       ];
       updateQuery += columnUpdateSegments.join(', ');
       updateQuery += ` WHERE id = $10`;
@@ -509,17 +508,6 @@ export default class ReviewManager {
     }
   }
 
-  async dismissCard(card: ISRSCard | ISRSCardDisplay) {
-    try {
-      await this.#repo.mutate(
-        'UPDATE srs_card SET dismissed = 1 WHERE id = $1',
-        [card.id]
-      );
-    } catch (error) {
-      console.error(error);
-    }
-  }
-
   protected transcludeLink(editor: Editor, link: string, blockLine: number) {
     const line = editor.getLine(blockLine);
     editor.replaceRange(
@@ -548,7 +536,7 @@ export default class ReviewManager {
     const reviewTime =
       firstReview || Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
 
-    // IMPORTANT: Capture the current file BEFORE any async operations
+    // capture the current file BEFORE any async operations
     // to avoid race conditions where view.file changes during processing
     const currentFile = view.file;
 
@@ -780,7 +768,7 @@ export default class ReviewManager {
   /**
    * Un-dismiss an item by type and ID
    */
-  async undismissItem(type: NoteType, id: string): Promise<void> {
+  async unDismissItem(type: NoteType, id: string): Promise<void> {
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 0 WHERE id = $1`, [
       id,
@@ -842,7 +830,7 @@ export default class ReviewManager {
     return highlights;
   }
 
-  protected async getLastSnippetReview(snippet: ISnippetActive) {
+  protected async getLastSnippetReview(snippet: ISnippetBase) {
     const lastReview = (await this.#repo.query(
       `SELECT review_time FROM snippet_review WHERE snippet_id = $1 ` +
         `ORDER BY review_time DESC LIMIT 1`,
@@ -855,7 +843,7 @@ export default class ReviewManager {
    * Add a SnippetReview and set the next review date
    */
   async reviewSnippet(
-    snippet: ISnippetActive,
+    snippet: ISnippetBase,
     reviewTime?: number,
     nextReviewInterval?: number
   ) {
@@ -870,7 +858,7 @@ export default class ReviewManager {
       );
 
       const updateResult = await this.#repo.mutate(
-        `UPDATE snippet SET due = $1 WHERE id = $2`,
+        `UPDATE snippet SET dismissed = 0, due = $1 WHERE id = $2`,
         [nextReview, snippet.id]
       );
     } catch (error) {
@@ -881,7 +869,7 @@ export default class ReviewManager {
   /**
    * Change the priority of a snippet, automatically adjusting the next due date
    */
-  async reprioritizeSnippet(snippet: ISnippetActive, newPriority: number) {
+  async reprioritizeSnippet(snippet: ISnippetBase, newPriority: number) {
     if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
       throw new TypeError(
         `Priority must be an integer between 10 and 50 inclusive; received ${newPriority}`
@@ -900,16 +888,6 @@ export default class ReviewManager {
     );
   }
 
-  async dismissSnippet(snippet: ISnippetActive) {
-    try {
-      await this.#repo.mutate(
-        'UPDATE snippet SET dismissed = 1 WHERE id = $1',
-        [snippet.id]
-      );
-    } catch (error) {
-      console.error(error);
-    }
-  }
   // #endregion
   // #region ARTICLES
   /**
@@ -1082,7 +1060,7 @@ export default class ReviewManager {
     return (results[0] as ArticleRow) ?? null;
   }
 
-  protected async getLastArticleReview(snippet: IArticleActive) {
+  protected async getLastArticleReview(snippet: IArticleBase) {
     const lastReview = (await this.#repo.query(
       `SELECT review_time FROM article_review WHERE article_id = $1 ` +
         `ORDER BY review_time DESC LIMIT 1`,
@@ -1092,7 +1070,7 @@ export default class ReviewManager {
   }
 
   async reviewArticle(
-    article: IArticleActive,
+    article: IArticleBase,
     reviewTime?: number,
     nextReviewInterval?: number
   ) {
@@ -1107,7 +1085,7 @@ export default class ReviewManager {
       );
 
       const updateResult = await this.#repo.mutate(
-        `UPDATE article SET due = $1 WHERE id = $2`,
+        `UPDATE article SET dismissed = 0, due = $1 WHERE id = $2`,
         [nextReview, article.id]
       );
     } catch (error) {
@@ -1158,9 +1136,50 @@ export default class ReviewManager {
   }
 
   /**
+   * Update database references in response to Obsidian rename events
+   * @param oldPath The vault-relative path the file had before it was moved
+   */
+  async handleExternalRename(file: TAbstractFile, oldPath: string) {
+    // TODO: handle files being moved into or out of the IR folder
+    const newPath = file.path;
+    console.log(`file rename detected: ${oldPath} -> ${newPath}`);
+    const concreteFile = this.app.vault.getFileByPath(newPath);
+    if (!concreteFile) {
+      throw new Error(`Failed to find a file at ${newPath}`);
+    }
+    const type = this.getNoteType(concreteFile);
+    if (!type) {
+      console.log(`Found no matching IR tags; ignoring`);
+      return;
+    }
+    if (!oldPath.startsWith(DATA_DIRECTORY)) {
+      console.log('File was not previously in IR directory; ignoring');
+      return;
+    }
+    if (!newPath.startsWith(DATA_DIRECTORY)) {
+      console.log('File is no longer in IR directory; ignoring');
+      return;
+    }
+
+    const oldReference = this.getReferenceFromPath(oldPath);
+    const newReference = this.getReferenceFromPath(newPath);
+    if (oldReference === newReference) {
+      console.log('File reference did not change; ignoring');
+      return;
+    }
+
+    const table = type === 'card' ? 'srs_card' : type;
+    await this.#repo.mutate(
+      `UPDATE ${table} SET reference = $1 WHERE reference = $2`,
+      [newReference, oldReference]
+    );
+    console.log(`Reference updated to ${newReference}`);
+  }
+
+  /**
    * Change the priority of an article, automatically adjusting the next due date
    */
-  async reprioritizeArticle(article: IArticleActive, newPriority: number) {
+  async reprioritizeArticle(article: IArticleBase, newPriority: number) {
     if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
       throw new TypeError(
         `Priority must be an integer between 10 and 50 inclusive; received ${newPriority}`
@@ -1179,21 +1198,9 @@ export default class ReviewManager {
     );
   }
 
-  async dismissArticle(article: IArticleActive) {
-    try {
-      await this.#repo.mutate(
-        'UPDATE article SET dismissed = 1 WHERE id = $1',
-        [article.id]
-      );
-    } catch (error) {
-      console.error(error);
-    }
-  }
   // #endregion
   // #region HELPERS
-  protected async nextTextReviewInterval(
-    text: IArticleActive | ISnippetActive
-  ) {
+  protected async nextTextReviewInterval(text: IArticleBase | ISnippetBase) {
     const intervalMultiplier =
       TEXT_REVIEW_MULTIPLIER_BASE +
       (text.priority - 10) * TEXT_REVIEW_MULTIPLIER_STEP;
@@ -1202,9 +1209,10 @@ export default class ReviewManager {
       ? this.getLastArticleReview(text)
       : this.getLastSnippetReview(text));
 
-    const lastInterval = lastReview[0]
-      ? text.due - lastReview[0].review_time
-      : TEXT_BASE_REVIEW_INTERVAL;
+    const lastInterval =
+      lastReview[0] && text.due
+        ? text.due - lastReview[0].review_time
+        : TEXT_BASE_REVIEW_INTERVAL;
 
     const nextInterval = Math.round(lastInterval * intervalMultiplier);
     return nextInterval;
@@ -1281,16 +1289,13 @@ export default class ReviewManager {
 
     if (!newNote) {
       const errorMsg = `Failed to create note "${newNoteName}"`;
-      // new Notice(errorMsg);
-      // return;
       throw new Error(errorMsg);
     }
 
     return newNote;
   }
 
-  protected getNoteType(note: TFile): NoteType | null {
-    // get tags
+  getNoteType(note: TFile): NoteType | null {
     const tags = this.app.metadataCache.getFileCache(note)?.frontmatter?.tags;
     if (!tags) return null;
 

@@ -272,3 +272,17 @@ export function getClozeGroupsPattern(delimiters: [string, string]) {
       `([\\s\\S]*)`
   );
 }
+
+/**
+ * Make a deep copy of an object
+ * TODO: handle loops
+ */
+export const deepCopy = <T extends unknown>(value: T): T => {
+  if (value === null || typeof value !== 'object') return value;
+
+  let clone = {};
+  for (const key in value) {
+    Object.assign(clone, { [key]: deepCopy(value[key]) });
+  }
+  return clone as T;
+};

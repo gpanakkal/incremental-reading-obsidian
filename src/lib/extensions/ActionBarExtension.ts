@@ -1,5 +1,11 @@
-import { showPanel, Panel, EditorView } from '@codemirror/view';
-import { StateField, StateEffect, Facet, type Extension } from '@codemirror/state';
+import type { Panel, EditorView } from '@codemirror/view';
+import { showPanel } from '@codemirror/view';
+import {
+  StateField,
+  StateEffect,
+  Facet,
+  type Extension,
+} from '@codemirror/state';
 import { Notice } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
 import {
@@ -14,7 +20,7 @@ import {
 } from '#/lib/constants';
 import { transformPriority } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
-import type { ReviewArticle, ReviewSnippet } from '#/lib/types';
+import type { ReviewArticle, ReviewItem, ReviewSnippet } from '#/lib/types';
 
 /**
  * State effect to toggle review mode on/off.
@@ -76,9 +82,12 @@ export const actionBarStateField = StateField.define<ActionBarState>({
 
 /**
  * Creates the action bar panel for IR notes.
- * The noteType is pre-validated by the compute function, so we can assume it's valid.
+ * The noteType is pre-validated by the compute function,
+ * so we can assume it's valid.
  */
-function createActionBarPanel(noteType: IRNoteType): (view: EditorView) => Panel {
+function createActionBarPanel(
+  noteType: IRNoteType
+): (view: EditorView) => Panel {
   return (view: EditorView): Panel => {
     const dom = document.createElement('div');
     dom.className = 'ir-action-bar ir-action-bar-panel';
@@ -212,10 +221,7 @@ function renderReviewModeActions(
                 SUCCESS_NOTICE_DURATION_MS
               );
             } catch (error) {
-              new Notice(
-                `Failed to update priority`,
-                ERROR_NOTICE_DURATION_MS
-              );
+              new Notice(`Failed to update priority`, ERROR_NOTICE_DURATION_MS);
             }
           },
           item.data.priority / 10, // Reset value on Escape
@@ -229,13 +235,21 @@ function renderReviewModeActions(
   // Common actions for all types
   // Check if item is already dismissed to show appropriate label
   const currentItem = callbacks.getCurrentItem?.();
-  const isDismissed = currentItem?.data?.dismissed ?? false;
-  const dismissBtn = createButton(isDismissed ? 'Un-dismiss' : 'Dismiss', async () => {
-    const item = callbacks.getCurrentItem?.();
-    if (item && callbacks.dismissItem) {
-      await callbacks.dismissItem(item);
+  const isDismissed = currentItem?.data?.dismissed ?? null;
+  if (isDismissed === null) {
+    const error = `Above item has no data.dismissed property`;
+    console.error(currentItem);
+    throw new Error(error);
+  }
+  const dismissBtn = createButton(
+    isDismissed ? 'Un-dismiss' : 'Dismiss',
+    async () => {
+      const item = callbacks.getCurrentItem?.();
+      if (item && callbacks.dismissItem) {
+        await callbacks.dismissItem(item);
+      }
     }
-  });
+  );
   container.appendChild(dismissBtn);
 
   const skipBtn = createButton('Skip', () => {
@@ -308,30 +322,26 @@ function renderStandaloneModeActions(
 
         try {
           // Re-fetch to get current status (may have changed)
-          let currentItem: any = null;
-          if (noteType === 'article') {
-            currentItem = await reviewManager.findArticle(file);
-          } else if (noteType === 'snippet') {
-            currentItem = await reviewManager.findSnippet(file);
-          } else if (noteType === 'card') {
-            currentItem = await reviewManager.findCard(file);
-          }
+          const currentItem: ReviewItem | null =
+            await reviewManager.getReviewItemFromFile(file, noteType);
 
           if (!currentItem) {
             new Notice('Item not found in database', ERROR_NOTICE_DURATION_MS);
             return;
           }
 
-          const isDismissed = currentItem.dismissed;
+          const isDismissed = currentItem.data.dismissed;
           if (isDismissed) {
-            await reviewManager.undismissItem(noteType, currentItem.id);
+            await reviewManager.unDismissItem(noteType, currentItem.data.id);
             new Notice('Item restored to queue', SUCCESS_NOTICE_DURATION_MS);
             updateButtonLabel(false);
           } else {
-            await reviewManager.dismissItem(noteType, currentItem.id);
+            await reviewManager.dismissItem(noteType, currentItem.data.id);
             new Notice('Item dismissed', SUCCESS_NOTICE_DURATION_MS);
             updateButtonLabel(true);
           }
+
+          await plugin.invalidateCurrentItemCache(currentItem.file);
         } catch (error) {
           console.error('Failed to toggle dismiss status:', error);
           new Notice('Failed to update item', ERROR_NOTICE_DURATION_MS);
@@ -346,7 +356,10 @@ function renderStandaloneModeActions(
   // Open in review button
   const openInReviewBtn = createButton('Open in Review', async () => {
     // Build a ReviewItem from this file to pass to the review interface
-    const reviewItem = await reviewManager.getReviewItemFromFile(file, noteType);
+    const reviewItem = await reviewManager.getReviewItemFromFile(
+      file,
+      noteType
+    );
     if (reviewItem) {
       await plugin.learn(reviewItem);
     } else {
@@ -458,28 +471,31 @@ function createPriorityInput(
  * Only shows for files with IR tags when NOT in review mode.
  * In review mode, the React ActionBar component handles the UI instead.
  */
-const actionBarPanelFacet = showPanel.compute([actionBarStateField], (state) => {
-  // Don't show the CM panel when in review mode - the React ActionBar handles that
-  const actionBarState = state.field(actionBarStateField);
-  if (actionBarState.isReviewMode) {
-    return null;
+const actionBarPanelFacet = showPanel.compute(
+  [actionBarStateField],
+  (state) => {
+    // Don't show the CM panel when in review mode - the React ActionBar handles that
+    const actionBarState = state.field(actionBarStateField);
+    if (actionBarState.isReviewMode) {
+      return null;
+    }
+
+    const file = getFileFromState(state);
+    const app = getAppFromState(state);
+
+    if (!file || !app) {
+      return null;
+    }
+
+    const noteType = getIRNoteType(app, file);
+    if (!noteType) {
+      return null;
+    }
+
+    // Return the panel constructor with the noteType pre-bound
+    return createActionBarPanel(noteType);
   }
-
-  const file = getFileFromState(state);
-  const app = getAppFromState(state);
-
-  if (!file || !app) {
-    return null;
-  }
-
-  const noteType = getIRNoteType(app, file);
-  if (!noteType) {
-    return null;
-  }
-
-  // Return the panel constructor with the noteType pre-bound
-  return createActionBarPanel(noteType);
-});
+);
 
 /**
  * The action bar extension bundle.
