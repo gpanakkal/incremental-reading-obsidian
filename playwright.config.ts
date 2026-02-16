@@ -5,7 +5,7 @@ export default defineConfig({
   outputDir: './e2e-tests/test-results',
   fullyParallel: false,
   forbidOnly: !!process.env['CI'],
-  workers: process.env['CI'] ? 2 : 8,
+  workers: process.env['CI'] ? 1 : 8,
   use: {
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
