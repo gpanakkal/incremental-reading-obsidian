@@ -59,3 +59,22 @@ export async function openNote(window: Page, path: string) {
   // Wait for the quick switcher modal to fully close
   await window.locator('.modal-bg').waitFor({ state: 'hidden' });
 }
+
+/**
+ * Select a paragraph by text match and wait for Obsidian to catch up
+ * TODO: see if Obsidian emits an event we can listen for instead
+ * @param window
+ * @param text a sequence uniquely identifying the target paragraph
+ */
+export async function selectParagraph(
+  window: Page,
+  text: string,
+  waitMs = 300
+) {
+  await window
+    .getByText(text)
+    .filter({ visible: true })
+    .click({ clickCount: 3 });
+  // wait for Obsidian
+  await window.waitForTimeout(waitMs);
+}

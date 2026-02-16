@@ -11,7 +11,12 @@ import {
   openVault,
   shouldCleanup,
 } from './setup/helpers';
-import { executeCommand, finalizeArticleImport, openNote } from './helpers';
+import {
+  executeCommand,
+  finalizeArticleImport,
+  openNote,
+  selectParagraph,
+} from './helpers';
 
 /**
  * Tests of core plugin functionality:
@@ -282,11 +287,10 @@ test.describe('Extracting snippets', () => {
     await openNote(window, 'sources/Security Principles');
 
     // select a paragraph
-    await window
-      .getByText('Before we start discussing the different security principles')
-      .filter({ visible: true })
-      .click({ clickCount: 3 });
-    await window.waitForTimeout(200);
+    await selectParagraph(
+      window,
+      'Before we start discussing the different security principles'
+    );
     await executeCommand(window, 'incremental-reading:extract-selection');
 
     await openNote(
@@ -310,11 +314,10 @@ test.describe('Extracting snippets', () => {
       window.getByRole('button', { name: 'Continue' })
     ).toBeVisible();
 
-    await window
-      .getByText('Before we start discussing the different security principles')
-      .filter({ visible: true })
-      .click({ clickCount: 3 });
-    await window.waitForTimeout(300);
+    await selectParagraph(
+      window,
+      'Before we start discussing the different security principles'
+    );
     await executeCommand(window, 'incremental-reading:extract-selection');
 
     await openNote(
@@ -357,10 +360,7 @@ test.describe('Extracting snippets', () => {
     ).toBeInViewport();
 
     // Extract the second paragraph
-    const snippetText = window.getByText('Before we start discussing').filter({
-      visible: true,
-    });
-    await snippetText.click({ clickCount: 3 });
+    await selectParagraph(window, 'Before we start discussing');
     await executeCommand(window, 'incremental-reading:extract-selection');
 
     await openNote(
