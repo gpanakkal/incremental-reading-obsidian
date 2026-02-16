@@ -28,14 +28,14 @@ export class SnippetOffsetTracker {
    * @param highlights The snippet highlights for this file
    */
   loadHighlights(filePath: string, highlights: SnippetHighlight[]) {
-    console.log(
-      `[SnippetOffsetTracker] Loading ${highlights.length} highlights for ${filePath}`,
-      highlights.map((h) => ({
-        id: h.id.slice(0, 8),
-        start: h.start_offset,
-        end: h.end_offset,
-      }))
-    );
+    // console.log(
+    //   `[SnippetOffsetTracker] Loading ${highlights.length} highlights for ${filePath}`,
+    //   highlights.map((h) => ({
+    //     id: h.id.slice(0, 8),
+    //     start: h.start_offset,
+    //     end: h.end_offset,
+    //   }))
+    // );
     this.highlightCache.set(filePath, highlights);
   }
 
@@ -73,16 +73,16 @@ export class SnippetOffsetTracker {
   ) {
     const highlights = this.highlightCache.get(filePath);
     if (!highlights || highlights.length === 0) {
-      console.log(
-        `[SnippetOffsetTracker] No highlights cached for ${filePath}, skipping offset update`
-      );
+      // console.log(
+      //   `[SnippetOffsetTracker] No highlights cached for ${filePath}, skipping offset update`
+      // );
       return;
     }
 
-    console.log(
-      `[SnippetOffsetTracker] Updating ${highlights.length} highlights for ${filePath}`,
-      { oldBodyStart, newBodyStart }
-    );
+    // console.log(
+    //   `[SnippetOffsetTracker] Updating ${highlights.length} highlights for ${filePath}`,
+    //   { oldBodyStart, newBodyStart }
+    // );
 
     for (const highlight of highlights) {
       // Convert body-relative to absolute positions in old document
@@ -94,7 +94,6 @@ export class SnippetOffsetTracker {
       // assoc=-1 means "stay with content to the left"
       const newAbsoluteStart = changes.mapPos(absoluteStart, 1);
       const newAbsoluteEnd = changes.mapPos(absoluteEnd, -1);
-      console.log({ newAbsoluteStart, newAbsoluteEnd });
 
       // Convert back to body-relative offsets in new document
       const newStart = Math.max(0, newAbsoluteStart - newBodyStart);
@@ -102,9 +101,9 @@ export class SnippetOffsetTracker {
       // (which become invisible and effectively destroy the snippet highlight)
       const newEnd = Math.max(newStart + 1, newAbsoluteEnd - newBodyStart);
 
-      console.log(
-        `[SnippetOffsetTracker] Highlight update: (${highlight.start_offset}, ${highlight.end_offset}) -> (${newStart}, ${newEnd})`
-      );
+      // console.log(
+      //   `[SnippetOffsetTracker] Highlight update: (${highlight.start_offset}, ${highlight.end_offset}) -> (${newStart}, ${newEnd})`
+      // );
 
       highlight.start_offset = newStart;
       highlight.end_offset = newEnd;

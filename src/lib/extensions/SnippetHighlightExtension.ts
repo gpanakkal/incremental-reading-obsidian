@@ -119,9 +119,9 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           if (!this.isReviewInterface) {
             // Standard editor: cross-pane sync → reload from DB.
             // The other pane (which owns the edit) has already persisted.
-            console.log(
-              `[SnippetHighlightExtension] External file sync in standard editor, reloading from DB`
-            );
+            // console.log(
+            //   `[SnippetHighlightExtension] External file sync in standard editor, reloading from DB`
+            // );
             this.reloadHighlightsFromDB(update.view, reviewManager);
           }
           // Review interface: the shared snippetTracker already has correct
@@ -212,14 +212,14 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       // const highlights = reviewManager.snippetTracker.getHighlights(
       //   this.file.path
       // );
-      console.log(
-        `[SnippetHighlightExtension] Persisting ${highlights.length} highlights to database`,
-        highlights.map((h: SnippetHighlight) => ({
-          id: h.id.slice(0, 8),
-          start: h.start_offset,
-          end: h.end_offset,
-        }))
-      );
+      // console.log(
+      //   `[SnippetHighlightExtension] Persisting ${highlights.length} highlights to database`,
+      //   highlights.map((h: SnippetHighlight) => ({
+      //     id: h.id.slice(0, 8),
+      //     start: h.start_offset,
+      //     end: h.end_offset,
+      //   }))
+      // );
       for (const h of highlights) {
         await reviewManager.updateSnippetOffsets(
           h.id,
@@ -227,7 +227,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           h.end_offset
         );
       }
-      console.log(`[SnippetHighlightExtension] Persistence complete`);
+      // console.log(`[SnippetHighlightExtension] Persistence complete`);
     }
 
     private buildDecorations(

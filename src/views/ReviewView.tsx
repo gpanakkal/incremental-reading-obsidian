@@ -1,5 +1,5 @@
 import type IncrementalReadingPlugin from '#/main';
-import type { IconName } from 'obsidian';
+import type { IconName, TFile } from 'obsidian';
 import type { WorkspaceLeaf } from 'obsidian';
 import { FileView } from 'obsidian';
 import type { ReviewItem } from '#/lib/types';

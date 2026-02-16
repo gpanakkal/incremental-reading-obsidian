@@ -316,7 +316,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
         if (!this.#reviewManager) {
-          console.log('Review manager not ready; returning');
+          // console.log('Review manager not ready; returning');
           return;
         }
         this.#reviewManager.handleExternalRename(file, oldPath);
@@ -417,7 +417,7 @@ export default class IncrementalReadingPlugin extends Plugin {
   async invalidateCurrentItemCache(file: TAbstractFile) {
     // Skip cache invalidation if the modification came from the review view itself
     if (this.#isReviewViewSaving) {
-      console.log('review view is saving; skipping invalidation');
+      // console.log('review view is saving; skipping invalidation');
       return;
     }
 
@@ -428,12 +428,12 @@ export default class IncrementalReadingPlugin extends Plugin {
       | undefined;
     const currentItem = reviewView?.currentItem;
     if (currentItem?.file.path !== file.path) {
-      console.log(
-        `modified file doesn't match current item; skipping invalidation`
-      );
+      // console.log(
+      //   `modified file doesn't match current item; skipping invalidation`
+      // );
       return;
     }
-    console.log('invalidating current item cache');
+    // console.log('invalidating current item cache');
     // Invalidate both the current-review-item query and the file content query
     // The file content query uses the item's reference as its key
     queryClient.invalidateQueries({

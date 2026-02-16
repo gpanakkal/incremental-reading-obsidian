@@ -211,7 +211,7 @@ export class SQLiteRepository {
       this.db = new sql.Database();
       this.db.exec(this.#schema);
       await this.save(true);
-      console.log('Incremental Reading database initialized');
+      console.info('Incremental Reading database initialized');
       return this.db;
     } catch (error) {
       console.error(error);
@@ -237,7 +237,7 @@ export class SQLiteRepository {
       return;
     }
     const segments = schemaString.toString().split('\n');
-    segments.forEach(console.log);
+    segments.forEach(console.info);
   }
 
   /**
