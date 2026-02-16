@@ -434,11 +434,10 @@ export default class IncrementalReadingPlugin extends Plugin {
       return;
     }
     // console.log('invalidating current item cache');
-    // Invalidate both the current-review-item query and the file content query
-    // The file content query uses the item's reference as its key
-    queryClient.invalidateQueries({
-      queryKey: ['current-review-item'],
-    });
+    // Only invalidate the file content query, not the current-review-item query.
+    // Invalidating current-review-item would re-fetch the queue via getDue(),
+    // which may return a different item than the one currently being reviewed.
+    // The file content query uses the item's reference as its key.
     queryClient.invalidateQueries({
       queryKey: [currentItem.data.reference],
     });
