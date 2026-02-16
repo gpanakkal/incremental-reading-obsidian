@@ -340,35 +340,28 @@ test.describe('Extracting snippets', () => {
   });
 
   test('Can extract from snippets in review interface', async () => {
-    await openNote(
-      window,
-      'sources/Memorizing a programming language using spaced repetition'
-    );
+    await openNote(window, 'sources/Security Principles');
 
-    await executeCommand(window, 'incremental-reading:import-article');
-    await finalizeArticleImport(window);
-    await executeCommand(window, 'incremental-reading:learn');
-
-    // look for the action bar to confirm we're in review
-    await expect(
-      window.getByRole('button', { name: 'Continue' })
-    ).toBeInViewport();
-
-    // select a paragraph
+    // go to the first paragraph
     await window
-      .getByText('I’m an intermediate')
-      .nth(1)
-      .click({ clickCount: 3 });
-    await window.waitForTimeout(200);
+      .getByText(
+        'Security has become a buzzword; every company wants to claim its product or service is secure.'
+      )
+      .click();
+    // go to the end of the second paragraph
+    await window.getByRole('textbox').press('ControlOrMeta+ArrowDown');
+    await window.getByRole('textbox').press('ControlOrMeta+ArrowDown');
+    await window.getByRole('textbox').press('ControlOrMeta+ArrowDown');
+    await window.waitForTimeout(300);
+    await window.getByRole('textbox').press('ControlOrMeta+Shift+Home');
+    await window.waitForTimeout(300);
     await executeCommand(window, 'incremental-reading:extract-selection');
 
-    // TODO: replace with wait for file creation
-    await window.waitForTimeout(200);
-
     await openNote(
       window,
-      `incremental-reading/snippets/I’m an intermediate programmer\. I didn’t go to sch`
+      `incremental-reading/snippets/Security has become a buzzword`
     );
+    // open the first snippet in review
     await window.getByRole('button', { name: 'Open in Review' }).click();
 
     // look for the action bar to confirm we're in review
@@ -376,40 +369,40 @@ test.describe('Extracting snippets', () => {
       window.getByRole('button', { name: 'Continue' })
     ).toBeInViewport();
 
-    // split this snippet into two paragraphs and extract the second
-    const snippetText = window.getByRole('textbox').filter({
-      hasText: /^I’m an intermediate programmer\. I didn’t go to school for it/,
+    // Extract the second paragraph
+    const snippetText = window.getByText('Before we start discussing').filter({
       visible: true,
     });
-    await expect(snippetText).toBeVisible();
-    await snippetText.click();
-    // wait for Obsidian interface to catch up
-    await window.waitForTimeout(200);
-    await snippetText.press('ControlOrMeta+Home');
-    // insert a new line
-    await snippetText.press('ArrowDown');
-    await snippetText.press('ArrowDown');
-    await snippetText.press('Enter');
-    await snippetText.press('Enter');
-    await window
-      .getByText('so I picked up a few books on PHP, SQL, Linux')
-      .filter({ visible: true })
-      .click({ clickCount: 3 });
+    await snippetText.click({ clickCount: 3 });
     await executeCommand(window, 'incremental-reading:extract-selection');
 
-    await window
-      .locator('span')
-      .filter({ hasText: 'so I picked up a few books on' })
-      .click();
+    await openNote(
+      window,
+      `incremental-reading/snippets/Before we start discussing`
+    );
     await window.getByRole('button', { name: 'Open in Review' }).click();
 
     // look for the action bar to confirm we're in review
     await expect(
       window.getByRole('button', { name: 'Continue' })
     ).toBeInViewport();
+
+    // Make sure the first line is absent so we know we're looking at the new snippet
+    expect(
+      await window
+        .getByText(
+          `Security has become a buzzword; every company wants to claim its ` +
+            `product or service is secure.`
+        )
+        .filter({ visible: true })
+        .count()
+    ).toBe(0);
     await expect(
       window
-        .getByText('so I picked up a few books on PHP, SQL, Linux, and Apache')
+        .getByText(
+          `Before we start discussing the different security principles, it is ` +
+            `vital to know the adversary against whom we are protecting our assets.`
+        )
         .filter({ visible: true })
     ).toBeInViewport();
   });
