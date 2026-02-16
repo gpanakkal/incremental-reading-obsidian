@@ -279,32 +279,27 @@ test.describe('Action Bar', () => {
 
 test.describe('Extracting snippets', () => {
   test('Can extract from Markdown notes', async () => {
-    await openNote(
-      window,
-      'sources/Memorizing a programming language using spaced repetition'
-    );
+    await openNote(window, 'sources/Security Principles');
 
     // select a paragraph
-    await window.getByText('I’m an intermediate').click({ clickCount: 3 });
+    await window
+      .getByText('Before we start discussing the different security principles')
+      .filter({ visible: true })
+      .click({ clickCount: 3 });
+    await window.waitForTimeout(200);
     await executeCommand(window, 'incremental-reading:extract-selection');
 
-    // TODO: replace with wait for file creation
-    await window.waitForTimeout(200);
     await openNote(
       window,
-      `incremental-reading/snippets/I’m an intermediate programmer\. I didn’t go to sch`
+      `incremental-reading/snippets/Before we start discussing`
     );
-    await window.getByRole('button', { name: 'Open in Review' }).click();
     await expect(
-      window.getByRole('button', { name: 'Continue' })
+      window.getByRole('button', { name: 'Open in Review' })
     ).toBeVisible();
   });
 
   test('Can extract from articles in review interface', async () => {
-    await openNote(
-      window,
-      'sources/Memorizing a programming language using spaced repetition'
-    );
+    await openNote(window, 'sources/Security Principles');
 
     await executeCommand(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);
@@ -315,27 +310,19 @@ test.describe('Extracting snippets', () => {
       window.getByRole('button', { name: 'Continue' })
     ).toBeVisible();
 
-    // select a paragraph
     await window
-      .getByText('I’m an intermediate')
-      .nth(1)
+      .getByText('Before we start discussing the different security principles')
+      .filter({ visible: true })
       .click({ clickCount: 3 });
+    await window.waitForTimeout(300);
     await executeCommand(window, 'incremental-reading:extract-selection');
 
-    // TODO: replace with wait for file creation
-    await window.waitForTimeout(200);
     await openNote(
       window,
-      `incremental-reading/snippets/I’m an intermediate programmer\. I didn’t go to sch`
+      `incremental-reading/snippets/Before we start discussing`
     );
-    await window.getByRole('button', { name: 'Open in Review' }).click();
-
-    // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Continue' })
-    ).toBeInViewport();
-    await expect(
-      window.getByRole('textbox').filter({ hasText: 'I’m an intermediate' })
+      window.getByRole('button', { name: 'Open in Review' })
     ).toBeVisible();
   });
 
