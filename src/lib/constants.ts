@@ -11,6 +11,7 @@ export const ARTICLE_DIRECTORY = `articles`;
 export const SNIPPET_TAG = 'ir-text-snippet';
 export const CARD_TAG = 'ir-card';
 export const ARTICLE_TAG = 'ir-article';
+export const SOURCE_TAG = 'ir-source';
 export const SOURCE_PROPERTY_NAME = 'source';
 
 export const ERROR_NOTICE_DURATION_MS = 8000;

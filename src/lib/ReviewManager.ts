@@ -1,5 +1,6 @@
-import type { TFile, TAbstractFile } from 'obsidian';
+import type { TAbstractFile } from 'obsidian';
 import {
+  TFile,
   normalizePath,
   Notice,
   type App,
@@ -32,6 +33,7 @@ import {
   SNIPPET_DIRECTORY,
   TEXT_BASE_REVIEW_INTERVAL,
   SNIPPET_TAG,
+  SOURCE_TAG,
   SOURCE_PROPERTY_NAME,
   ERROR_NOTICE_DURATION_MS,
   SUCCESS_NOTICE_DURATION_MS,
@@ -73,7 +75,7 @@ import type ReviewView from 'src/views/ReviewView';
 import SRSCardReview from './SRSCardReview';
 import Article from './Article';
 import Snippet from './Snippet';
-import { SnippetOffsetTracker } from './SnippetOffsetTracker';
+import { SnippetOffsetTracker, type SnippetHighlight } from './SnippetOffsetTracker';
 
 const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
   enable_fuzz: false,
@@ -570,8 +572,13 @@ export default class ReviewManager {
       [`${SOURCE_PROPERTY_NAME}`]: sourceLink,
     });
 
-    // inherit priority from the source file if it has one, or assign default priority
+    // Tag the source note as ir-source if it doesn't have any IR tag yet
     const parentType = this.getNoteType(currentFile);
+    if (!parentType) {
+      await this.updateFrontMatter(currentFile, { tags: SOURCE_TAG });
+    }
+
+    // inherit priority from the source file if it has one, or assign default priority
     let currentFileEntry;
     if (parentType === 'article') {
       currentFileEntry = await this.findArticle(currentFile);
@@ -630,14 +637,13 @@ export default class ReviewManager {
     // than `currentEditorView`, which may point to a different view (e.g. the
     // review interface's editor) even when the snippet was created from the
     // standard note view.
-    if (offsets && currentFileEntry && cm) {
-      // Reload highlights into tracker
-      await this.getSnippetHighlights(currentFile);
-
-      // Dispatch a transaction with an effect to trigger the SnippetHighlightPlugin's
-      // update() method, which rebuilds decorations from the updated tracker.
-      const { refreshHighlightsEffect } = await import('./extensions');
-      cm.dispatch({ effects: refreshHighlightsEffect.of(null) });
+    if (offsets && cm) {
+      await this.refreshHighlightsAfterSnippetCreation(
+        currentFile,
+        snippetFile,
+        currentFileEntry,
+        cm
+      );
     }
 
     return result;
@@ -792,40 +798,111 @@ export default class ReviewManager {
       parentEntry = await this.findSnippet(parentFile);
     }
 
-    // console.log(
-    //   `[getSnippetHighlights] Parent file: ${parentFile.path}, type: ${parentType}, entry:`,
-    //   parentEntry
-    // );
+    // For articles/snippets with a DB entry, use the existing parent ID query
+    if (parentEntry) {
+      const results = (await this.#repo.query(
+        'SELECT * FROM snippet WHERE parent = $1 AND start_offset IS NOT NULL AND end_offset IS NOT NULL',
+        [parentEntry.id]
+      )) as SnippetRow[];
 
-    if (!parentEntry) {
-      // console.log(
-      //   `[getSnippetHighlights] No parent entry found, returning empty array`
-      // );
-      return [];
+      const highlights = results.map((r) => ({
+        ...r,
+        dismissed: Boolean(r.dismissed),
+        start_offset: r.start_offset!,
+        end_offset: r.end_offset!,
+        parent: r.parent!,
+      }));
+
+      this.snippetTracker.loadHighlights(parentFile.path, highlights);
+      return highlights;
     }
 
-    // Query for snippets with this parent that have offsets
-    const results = (await this.#repo.query(
-      'SELECT * FROM snippet WHERE parent = $1 AND start_offset IS NOT NULL AND end_offset IS NOT NULL',
-      [parentEntry.id]
-    )) as SnippetRow[];
+    // For source notes (or any note without a DB entry), find snippets via backlinks
+    if (this.isSourceNote(parentFile)) {
+      const highlights = await this.getSnippetHighlightsViaBacklinks(parentFile);
+      this.snippetTracker.loadHighlights(parentFile.path, highlights);
+      return highlights;
+    }
 
-    // Convert to SnippetHighlight format and load into tracker
-    const highlights = results.map((r) => ({
-      ...r,
-      dismissed: Boolean(r.dismissed),
-      start_offset: r.start_offset!,
-      end_offset: r.end_offset!,
-      parent: r.parent!,
-    }));
+    return [];
+  }
 
-    // console.log(
-    //   `[getSnippetHighlights] Converted to ${highlights.length} highlights:`,
-    //   highlights
-    // );
+  /**
+   * Reload or append snippet highlights into the tracker after a new snippet
+   * is created, then dispatch a refresh effect so the CodeMirror extension
+   * rebuilds decorations.
+   *
+   * For articles/snippets (which have a DB entry), we reload all highlights
+   * via the parent ID query. For source notes, Obsidian's resolvedLinks may
+   * not have indexed the new snippet file yet, so we look up the just-inserted
+   * row directly and append it to the tracker.
+   */
+  private async refreshHighlightsAfterSnippetCreation(
+    parentFile: TFile,
+    snippetFile: TFile,
+    parentEntry: ArticleRow | SnippetRow | null | undefined,
+    cm: { dispatch: (spec: any) => void }
+  ) {
+    if (parentEntry) {
+      await this.getSnippetHighlights(parentFile);
+    } else {
+      const snippetRow = await this.findSnippet(snippetFile);
+      if (snippetRow && snippetRow.start_offset != null && snippetRow.end_offset != null) {
+        const existing = this.snippetTracker.getHighlights(parentFile.path);
+        this.snippetTracker.loadHighlights(parentFile.path, [
+          ...existing,
+          {
+            ...snippetRow,
+            dismissed: Boolean(snippetRow.dismissed),
+            start_offset: snippetRow.start_offset,
+            end_offset: snippetRow.end_offset,
+            parent: snippetRow.parent ?? '',
+          },
+        ]);
+      }
+    }
 
-    // Load into tracker cache
-    this.snippetTracker.loadHighlights(parentFile.path, highlights);
+    const { refreshHighlightsEffect } = await import('./extensions');
+    cm.dispatch({ effects: refreshHighlightsEffect.of(null) });
+  }
+
+  /**
+   * Check if a file has the ir-source tag
+   */
+  private isSourceNote(file: TFile): boolean {
+    const tags = this.app.metadataCache.getFileCache(file)?.frontmatter?.tags;
+    if (!tags) return false;
+    const tagSet: Set<string> = new Set(Array.isArray(tags) ? tags : [tags]);
+    return tagSet.has(SOURCE_TAG);
+  }
+
+  /**
+   * Find snippet highlights for a source note by scanning Obsidian's resolved backlinks.
+   * For each file that links to the source and is tagged as a snippet, look up its
+   * offsets in the DB.
+   */
+  private async getSnippetHighlightsViaBacklinks(sourceFile: TFile): Promise<SnippetHighlight[]> {
+    const resolvedLinks = this.app.metadataCache.resolvedLinks;
+    const highlights: SnippetHighlight[] = [];
+
+    for (const [linkingFilePath, links] of Object.entries(resolvedLinks)) {
+      if (!(sourceFile.path in links)) continue;
+
+      const linkingFile = this.app.vault.getAbstractFileByPath(linkingFilePath);
+      if (!linkingFile || !(linkingFile instanceof TFile)) continue;
+      if (this.getNoteType(linkingFile) !== 'snippet') continue;
+
+      const snippetRow = await this.findSnippet(linkingFile);
+      if (!snippetRow || snippetRow.start_offset == null || snippetRow.end_offset == null) continue;
+
+      highlights.push({
+        ...snippetRow,
+        dismissed: Boolean(snippetRow.dismissed),
+        start_offset: snippetRow.start_offset,
+        end_offset: snippetRow.end_offset,
+        parent: snippetRow.parent ?? '',
+      });
+    }
 
     return highlights;
   }

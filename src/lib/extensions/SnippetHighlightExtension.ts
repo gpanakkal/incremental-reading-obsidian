@@ -3,7 +3,12 @@ import type { ViewUpdate, DecorationSet, EditorView } from '@codemirror/view';
 import { Annotation, RangeSetBuilder, StateEffect } from '@codemirror/state';
 import type { TFile } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
-import { getFileFromState, getAppFromState, getIRNoteType } from './utils';
+import {
+  getFileFromState,
+  getAppFromState,
+  getIRNoteType,
+  isIRSource,
+} from './utils';
 import type {
   SnippetOffsetTracker,
   SnippetHighlight,
@@ -65,9 +70,10 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         return;
       }
 
+      const isSource = isIRSource(app, this.file);
       const noteType = getIRNoteType(app, this.file);
-      // Only articles and snippets can have child snippets
-      if (noteType !== 'article' && noteType !== 'snippet') {
+      // Only sources, articles, and snippets can have child snippets
+      if (!(isSource || noteType === 'article' || noteType === 'snippet')) {
         return;
       }
 
@@ -95,7 +101,30 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       const plugin = update.state.facet(irPluginFacet);
       const reviewManager = plugin?.reviewManager;
 
-      if (!reviewManager || !this.file || !this.highlightsLoaded) {
+      if (!reviewManager || !this.file) {
+        return;
+      }
+
+      // If highlights haven't been loaded yet but we received a refresh effect
+      // (e.g. a snippet was just created from this note, which tagged it as
+      // ir-source mid-session), mark as loaded and build decorations directly
+      // from the tracker, which was already populated by the caller.
+      // We intentionally skip loadHighlights() here because it would call
+      // getSnippetHighlights() which relies on resolvedLinks — those may not
+      // have indexed the new snippet file yet, overwriting the tracker with
+      // an empty result.
+      if (!this.highlightsLoaded) {
+        const hasRefresh = update.transactions.some((tr) =>
+          tr.effects.some((e) => e.is(refreshHighlightsEffect))
+        );
+        if (hasRefresh) {
+          this.highlightsLoaded = true;
+          this.decorations = this.buildDecorations(
+            update.view,
+            reviewManager.snippetTracker,
+            reviewManager
+          );
+        }
         return;
       }
 

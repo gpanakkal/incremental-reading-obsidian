@@ -1,7 +1,12 @@
 import { editorInfoField } from 'obsidian';
 import type { EditorState } from '@codemirror/state';
 import type { App, TFile } from 'obsidian';
-import { ARTICLE_TAG, SNIPPET_TAG, CARD_TAG } from '#/lib/constants';
+import {
+  ARTICLE_TAG,
+  SNIPPET_TAG,
+  CARD_TAG,
+  SOURCE_TAG,
+} from '#/lib/constants';
 
 export type IRNoteType = 'article' | 'snippet' | 'card';
 
@@ -39,6 +44,18 @@ export function getIRNoteType(app: App, file: TFile): IRNoteType | null {
   if (tagSet.has(CARD_TAG)) return 'card';
 
   return null;
+}
+
+/**
+ * Determine the note is a source for IR notes
+ */
+export function isIRSource(app: App, file: TFile): boolean {
+  const cache = app.metadataCache.getFileCache(file);
+  const tags = cache?.frontmatter?.tags;
+  if (!tags) return false;
+
+  const tagSet = new Set(Array.isArray(tags) ? tags : [tags]);
+  return tagSet.has(SOURCE_TAG);
 }
 
 /**
