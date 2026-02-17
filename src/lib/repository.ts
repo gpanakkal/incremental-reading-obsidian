@@ -281,10 +281,9 @@ export class SQLiteRepository {
       const dbArrayBuffer = await this.app.vault.adapter.readBinary(
         normalizePath(this.#dbFilePath)
       );
-      // Use browser-compatible Uint8Array instead of Node.js Buffer for mobile compatibility
+      // Use browser-compatible Uint8Array instead of Node.js Buffer
+      // for mobile compatibility
       this.db = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
-      this.db.exec(this.#schema);
-      // Apply any pending migrations
       applyMigrations(this.db);
       return this.db;
     } catch (error) {
