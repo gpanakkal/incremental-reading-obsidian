@@ -35,9 +35,9 @@ export async function finalizeArticleImport(window: Page) {
 export async function openNote(window: Page, path: string) {
   await executeCommand(window, 'switcher:open');
   const quickSwitcher = window.getByPlaceholder('Find or create a note...');
-  await quickSwitcher.fill(path);
 
-  // Register file-open listener beforehand so we don't miss the event.
+  // Register file-open listener before fill(), because filling the quick
+  // switcher can cause Obsidian to navigate (destroying the execution context).
   const fileOpenPromise = window.evaluate(() => {
     return new Promise<void>((resolve) => {
       const NOTE_OPEN_TIMEOUT_MS = 10_000;
@@ -51,6 +51,7 @@ export async function openNote(window: Page, path: string) {
     });
   });
 
+  await quickSwitcher.fill(path);
   await window.locator('div').filter({ hasText: path }).nth(1).click();
 
   // Wait for Obsidian to confirm the file is open
