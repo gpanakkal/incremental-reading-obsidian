@@ -3,6 +3,8 @@ export const PLACEHOLDER_PLUGIN_ICON = 'book-open-text';
 // TODO: move to settings
 export const DATA_DIRECTORY = 'incremental-reading';
 export const DATABASE_FILE_PATH = `${DATA_DIRECTORY}/ir-user-data.sqlite`;
+export const BACKUP_DIRECTORY = `${DATA_DIRECTORY}/.backups`;
+export const LOG_DIRECTORY = `${DATA_DIRECTORY}/.logs`;
 export const TEST_DATABASE_FILE_PATH = './ir-test-data.sqlite';
 export const SNIPPET_DIRECTORY = `snippets`;
 export const CARD_DIRECTORY = `cards`;

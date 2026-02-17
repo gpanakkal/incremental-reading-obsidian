@@ -349,7 +349,18 @@ export default class IncrementalReadingPlugin extends Plugin {
         const repo = await SQLiteRepository.start(
           this,
           DATABASE_FILE_PATH,
-          databaseSchema
+          databaseSchema,
+          (error) => {
+            console.error(
+              'Incremental Reading - Migration verification failed:',
+              error.errors
+            );
+            new Notice(
+              `Incremental Reading: Database migration failed. Check the console for details.`,
+              0
+            );
+            this.unload();
+          }
         );
 
         this.#reviewManager = new ReviewManager(this.app, repo);
@@ -364,7 +375,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         console.error(error);
         new Notice(
           `Failed to initialize plugin. See the console for details.`,
-          ERROR_NOTICE_DURATION_MS
+          0
         );
         this.unload();
       }
