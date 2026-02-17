@@ -15,6 +15,7 @@ import {
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
 import { transformPriority } from '#/lib/utils';
+import { Notice } from 'obsidian';
 
 export function ActionBar() {
   const { currentItem } = useReviewContext();
@@ -52,13 +53,21 @@ function GlobalActions() {
  * - go to parent
  */
 function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
-  const { dismissItem, skipItem } = useReviewContext();
+  const { dismissItem, unDismissItem, skipItem } = useReviewContext();
+  const isDismissed = reviewItem.data.dismissed;
   return (
     <>
-      <Button
-        label="Dismiss"
-        handleClick={async () => await dismissItem(reviewItem)}
-      />
+      {isDismissed ? (
+        <Button
+          label="Un-dismiss"
+          handleClick={async () => await unDismissItem(reviewItem)}
+        />
+      ) : (
+        <Button
+          label="Dismiss"
+          handleClick={async () => await dismissItem(reviewItem)}
+        />
+      )}
       <Button
         label={'Skip'}
         handleClick={() => {
@@ -103,7 +112,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
     <>
       <Button
         label="Continue"
-        handleClick={async () => await reviewArticle(article.data)}
+        handleClick={async () => await reviewArticle(article)}
       />
       <label className={'ir-priority-label'}>
         Priority
@@ -167,7 +176,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
     <>
       <Button
         label="Continue"
-        handleClick={async () => await reviewSnippet(snippet.data)}
+        handleClick={async () => await reviewSnippet(snippet)}
       />
       <div className="ir-priority-container">
         <label className={'ir-priority-label'}>
@@ -207,19 +216,19 @@ function CardActions({ card }: { card: ReviewCard }) {
         <>
           <Button
             label="🔁 Again"
-            handleClick={async () => await gradeCard(card.data, Rating.Again)}
+            handleClick={async () => await gradeCard(card, Rating.Again)}
           />
           <Button
             label="👎 Hard"
-            handleClick={async () => await gradeCard(card.data, Rating.Hard)}
+            handleClick={async () => await gradeCard(card, Rating.Hard)}
           />
           <Button
             label="👍 Good"
-            handleClick={async () => await gradeCard(card.data, Rating.Good)}
+            handleClick={async () => await gradeCard(card, Rating.Good)}
           />
           <Button
             label="✅ Easy"
-            handleClick={async () => await gradeCard(card.data, Rating.Easy)}
+            handleClick={async () => await gradeCard(card, Rating.Easy)}
           />
         </>
       ) : (

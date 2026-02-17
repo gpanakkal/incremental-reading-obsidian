@@ -57,6 +57,7 @@ export function getDateTimeString(date?: Date) {
 /**
  * Remove characters that cannot be used for file names
  * or Obsidian note titles
+ * @param checkFinalChar if true, removes spaces and periods from the end
  */
 export function sanitizeForTitle(
   text: string,
@@ -64,7 +65,6 @@ export function sanitizeForTitle(
   maxLength?: number
 ) {
   const cleaned = text
-    .trim()
     .split('')
     .map((char, i) => {
       if (checkFinalChar && i === text.length - 1) {
@@ -74,7 +74,8 @@ export function sanitizeForTitle(
         return ' ';
       } else return char;
     })
-    .join('');
+    .join('')
+    .trim();
 
   return maxLength ? cleaned.slice(0, maxLength) : cleaned;
 }
@@ -271,3 +272,17 @@ export function getClozeGroupsPattern(delimiters: [string, string]) {
       `([\\s\\S]*)`
   );
 }
+
+/**
+ * Make a deep copy of an object
+ * TODO: handle loops
+ */
+export const deepCopy = <T extends unknown>(value: T): T => {
+  if (value === null || typeof value !== 'object') return value;
+
+  let clone = {};
+  for (const key in value) {
+    Object.assign(clone, { [key]: deepCopy(value[key]) });
+  }
+  return clone as T;
+};

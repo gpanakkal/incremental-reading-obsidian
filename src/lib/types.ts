@@ -10,6 +10,7 @@ export interface IArticleBase {
   due: number | null;
   dismissed: boolean;
   priority: number;
+  scroll_top: number;
 }
 
 export interface ArticleRow extends SafeOmit<IArticleBase, 'dismissed'> {
@@ -43,6 +44,9 @@ export interface ISnippetBase {
   dismissed: boolean;
   priority: number;
   parent: string | null;
+  start_offset: number | null;
+  end_offset: number | null;
+  scroll_top: number;
 }
 
 export interface SnippetRow extends SafeOmit<ISnippetBase, 'dismissed'> {
@@ -73,6 +77,7 @@ export interface ISRSCard extends Card {
   id: string;
   reference: string;
   created_at: Date;
+  dismissed: boolean;
 }
 
 export interface ISRSCardDisplay extends SafeOmit<ISRSCard, 'state'> {
@@ -80,10 +85,14 @@ export interface ISRSCardDisplay extends SafeOmit<ISRSCard, 'state'> {
 }
 
 export interface SRSCardRow
-  extends SafeOmit<ISRSCard, 'created_at' | 'due' | 'last_review'> {
+  extends SafeOmit<
+    ISRSCard,
+    'created_at' | 'due' | 'last_review' | 'dismissed'
+  > {
   created_at: number;
   due: number;
   last_review: number | null;
+  dismissed: number;
 }
 export interface ISRSCardReview extends ReviewLog {
   id: string;
@@ -116,12 +125,12 @@ export interface TableNameToRowType extends Record<TableName, RowTypes> {
 }
 
 export type ReviewArticle = {
-  data: IArticleActive;
+  data: IArticleBase;
   file: TFile;
 };
 
 export type ReviewSnippet = {
-  data: ISnippetActive;
+  data: ISnippetBase;
   file: TFile;
 };
 
@@ -133,8 +142,8 @@ export type ReviewCard = {
 export type ReviewItem = ReviewArticle | ReviewSnippet | ReviewCard;
 
 export function isArticle(
-  value: IArticleActive | ISnippetActive | ISRSCard
-): value is IArticleActive {
+  value: IArticleBase | ISnippetBase | ISRSCard
+): value is IArticleBase {
   return 'dismissed' in value && !('parent' in value);
 }
 
@@ -147,8 +156,8 @@ export function isReviewArticle(value: ReviewItem): value is ReviewArticle {
 }
 
 export function isSnippet(
-  value: ISnippetActive | ISRSCard
-): value is ISnippetActive {
+  value: ISnippetBase | ISRSCard
+): value is ISnippetBase {
   return 'dismissed' in value;
 }
 
@@ -156,7 +165,7 @@ export function isReviewSnippet(value: ReviewItem): value is ReviewSnippet {
   return !isReviewCard(value) && 'parent' in value.data;
 }
 
-export function isSRSCard(value: ISnippetActive | ISRSCard): value is ISRSCard {
+export function isSRSCard(value: ISnippetBase | ISRSCard): value is ISRSCard {
   return 'state' in value;
 }
 

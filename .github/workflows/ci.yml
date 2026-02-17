@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
   pull_request:
     types: [opened, reopened]
+  push:
 
 jobs:
   build:
@@ -30,52 +31,39 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm install
 
-      # macOS and Linux setup
       - name: Setup Obsidian (macOS/Linux)
         if: runner.os != 'Windows'
-        run: ./src/scripts/setup-obsidian.sh --ci
+        run: bash ./scripts/setup-obsidian.sh --ci
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Windows setup
       - name: Setup Obsidian (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./src/scripts/setup-obsidian.ps1 -CI
+        run: ./scripts/setup-obsidian.ps1 -CI
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - run: npm run e2e:setup
-      - run: npm run e2e
+      # Linux: run with virtual display (Xvfb)
+      - name: Run e2e:setup (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npm run e2e:setup
+      - name: Run e2e (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npm run e2e
 
-  test-e2e-tools:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # macOS and Windows: run directly
+      - name: Run e2e:setup
+        if: runner.os != 'Linux'
+        run: npm run e2e:setup
+      - name: Run e2e
+        if: runner.os != 'Linux'
+        run: npm run e2e
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          node-version-file: .node-version
-          cache-dependency-path: package-lock.json
-      - run: npm install
-
-      # macOS and Linux setup
-      - name: Setup Obsidian (macOS/Linux)
-        if: runner.os != 'Windows'
-        run: ./src/scripts/setup-obsidian.sh --ci
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Windows setup
-      - name: Setup Obsidian (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./src/scripts/setup-obsidian.ps1 -CI
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - run: npm run e2e:setup
-      - run: npm run e2e:cleanup
+          name: e2e-results-${{ matrix.os }}
+          path: e2e-tests/test-results/
+          retention-days: 7

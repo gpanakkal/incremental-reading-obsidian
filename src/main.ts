@@ -18,12 +18,14 @@ import databaseSchema from './db/schema.sql';
 import ReviewManager from './lib/ReviewManager';
 import ReviewView from './views/ReviewView';
 import { PriorityModal } from './views/PriorityModal';
-import type { SnippetRow, SRSCardRow } from './lib/types';
+import type { ReviewItem, SnippetRow, SRSCardRow } from './lib/types';
 import SRSCard from './lib/SRSCard';
 import { getEditorClass } from './lib/utils';
 import Snippet from './lib/Snippet';
 import Article from './lib/Article';
 import { QueryModal } from './views/QueryModal';
+import { createIRExtensions } from './lib/extensions';
+import { queryClient } from './lib/queryClient';
 
 interface IRPluginSettings {
   mySetting: string;
@@ -37,6 +39,33 @@ export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;
   #reviewManager: ReviewManager;
   MarkdownEditor: any;
+
+  /**
+   * Flag to track when the review view is saving a file.
+   * Used to prevent cache invalidation for internal modifications.
+   */
+  #isReviewViewSaving = false;
+
+  /**
+   * Get the ReviewManager instance.
+   * May be null if called before onLayoutReady completes.
+   */
+  get reviewManager(): ReviewManager | null {
+    return this.#reviewManager ?? null;
+  }
+
+  /**
+   * Wrap a file-modifying operation to prevent external modification detection.
+   * The vault 'modify' event handler will ignore changes while this is active.
+   */
+  async withReviewViewSave<T>(operation: () => Promise<T>): Promise<T> {
+    this.#isReviewViewSaving = true;
+    try {
+      return await operation();
+    } finally {
+      this.#isReviewViewSaving = false;
+    }
+  }
 
   async onload() {
     await this.loadSettings();
@@ -161,7 +190,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       id: 'learn',
       name: 'Learn',
-      callback: () => this.learn.call(this),
+      callback: async () => await this.learn.call(this),
     });
 
     this.addCommand({
@@ -283,6 +312,21 @@ export default class IncrementalReadingPlugin extends Plugin {
       })
     );
 
+    // listen for file renames to update references in db
+    this.registerEvent(
+      this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
+        if (!this.#reviewManager) {
+          // console.log('Review manager not ready; returning');
+          return;
+        }
+        this.#reviewManager.handleExternalRename(file, oldPath);
+      })
+    );
+
+    const invalidateCache = this.invalidateCurrentItemCache.bind(this);
+    // Invalidate review item cache when the current item's file is modified externally
+    this.registerEvent(this.app.vault.on('modify', invalidateCache));
+
     // This adds a settings tab so the user can configure various aspects of the plugin
     // this.addSettingTab(new SampleSettingTab(this.app, this)); // TODO: set up settings
 
@@ -305,7 +349,18 @@ export default class IncrementalReadingPlugin extends Plugin {
         const repo = await SQLiteRepository.start(
           this,
           DATABASE_FILE_PATH,
-          databaseSchema
+          databaseSchema,
+          (error) => {
+            console.error(
+              'Incremental Reading - Migration verification failed:',
+              error.errors
+            );
+            new Notice(
+              `Incremental Reading: Database migration failed. Check the console for details.`,
+              0
+            );
+            this.unload();
+          }
         );
 
         this.#reviewManager = new ReviewManager(this.app, repo);
@@ -313,42 +368,17 @@ export default class IncrementalReadingPlugin extends Plugin {
           ReviewView.viewType,
           (leaf) => new ReviewView(leaf, this, this.#reviewManager)
         );
+
+        // Register global CodeMirror extensions for IR notes
+        this.registerEditorExtension(createIRExtensions(this));
       } catch (error) {
         console.error(error);
         new Notice(
           `Failed to initialize plugin. See the console for details.`,
-          ERROR_NOTICE_DURATION_MS
+          0
         );
         this.unload();
       }
-
-      // listen for snippet creations.
-      // TODO:
-      // - handle race condition
-      // - wrap in plugin.registerEvent
-
-      // this.app.vault.on('create', async (file) => {
-      //   // check if the snippet is in the database already
-      //   const results = await this.#reviewManager.findSnippet(file);
-      //   // await repo.query(
-      //   //   `SELECT (id) FROM snippet WHERE reference = $1`,
-      //   //   [file.name]
-      //   // );
-      //   // TODO: handle failed fetches differently from no results
-      //   if (!results) {
-      //     new Notice(`Failed to fetch rows`, ERROR_NOTICE_DURATION_MS);
-      //     return;
-      //   } else if (results.length === 0) {
-      //     // insert a new snippet row
-      //     const snippetFile = this.app.vault.getFileByPath(file.path);
-      //     if (!snippetFile) {
-      //       return; // TODO: handle
-      //     }
-      //     await this.#reviewManager.createSnippetFromFile(snippetFile);
-      //   } else {
-      //     // if so, set dismissed to 0
-      //   }
-      // });
     });
   }
 
@@ -364,19 +394,64 @@ export default class IncrementalReadingPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  async learn() {
+  async learn(initialItem?: ReviewItem) {
     let leaf: WorkspaceLeaf | null = null;
     const leaves = this.app.workspace.getLeavesOfType(ReviewView.viewType);
+    const viewAlreadyOpen = leaves.length > 0;
 
-    if (leaves.length > 0) {
+    if (viewAlreadyOpen) {
       leaf = leaves[0];
     } else {
       leaf = this.app.workspace.getLeaf('tab');
       await leaf.setViewState({ type: ReviewView.viewType, active: true });
-      // await leaf.open(new ReviewView(leaf, this.#reviewManager));
+    }
+
+    // Set the initial item on the view if provided
+    if (initialItem) {
+      const view = leaf.view as ReviewView;
+      view.initialItem = initialItem;
+
+      // If the view was already open, invalidate the query to trigger a refetch
+      // This ensures the new initial item is displayed immediately
+      if (viewAlreadyOpen) {
+        queryClient.invalidateQueries({ queryKey: ['current-review-item'] });
+      }
     }
 
     await this.app.workspace.revealLeaf(leaf);
+  }
+
+  /**
+   * Invalidates the React Query cache when the passed file is also
+   * open in review. Used to keep review in sync with other editor panes.
+   */
+  async invalidateCurrentItemCache(file: TAbstractFile) {
+    // Skip cache invalidation if the modification came from the review view itself
+    if (this.#isReviewViewSaving) {
+      // console.log('review view is saving; skipping invalidation');
+      return;
+    }
+
+    const reviewView = this.app.workspace
+      .getLeavesOfType(ReviewView.viewType)
+      .find((leaf) => leaf.view instanceof ReviewView)?.view as
+      | ReviewView
+      | undefined;
+    const currentItem = reviewView?.currentItem;
+    if (currentItem?.file.path !== file.path) {
+      // console.log(
+      //   `modified file doesn't match current item; skipping invalidation`
+      // );
+      return;
+    }
+    // console.log('invalidating current item cache');
+    // Only invalidate the file content query, not the current-review-item query.
+    // Invalidating current-review-item would re-fetch the queue via getDue(),
+    // which may return a different item than the one currently being reviewed.
+    // The file content query uses the item's reference as its key.
+    queryClient.invalidateQueries({
+      queryKey: [currentItem.data.reference],
+    });
   }
 }
 

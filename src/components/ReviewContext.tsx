@@ -6,14 +6,8 @@ import {
   useContext,
   useState,
 } from 'react';
-import type { IArticleActive, ReviewCard } from '#/lib/types';
-import {
-  isReviewCard,
-  isReviewSnippet,
-  type ISnippetActive,
-  type ISRSCardDisplay,
-  type ReviewItem,
-} from '#/lib/types';
+import type { ReviewArticle, ReviewCard, ReviewSnippet } from '#/lib/types';
+import { isReviewCard, type ReviewItem } from '#/lib/types';
 import {
   CLOZE_DELIMITERS,
   CONTENT_TITLE_SLICE_LENGTH,
@@ -24,12 +18,12 @@ import {
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
-import type { WorkspaceLeaf } from 'obsidian';
+import { Notice, type WorkspaceLeaf } from 'obsidian';
 import type IncrementalReadingPlugin from '#/main';
 import type { Grade } from 'ts-fsrs';
 import { Rating } from 'ts-fsrs';
 import type { StateUpdater } from 'preact/hooks';
-import { getContentSlice, splitFrontMatter } from '#/lib/utils';
+import { deepCopy, getContentSlice, splitFrontMatter } from '#/lib/utils';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
@@ -38,15 +32,16 @@ interface ReviewContextProps {
   currentItem: ReviewItem | undefined;
   getNext: () => void;
   reviewArticle: (
-    article: IArticleActive,
+    article: ReviewArticle,
     nextInterval?: number
   ) => Promise<void>;
   reviewSnippet: (
-    snippet: ISnippetActive,
+    snippet: ReviewSnippet,
     nextInterval?: number
   ) => Promise<void>;
-  gradeCard: (card: ISRSCardDisplay, grade: Grade) => Promise<void>;
+  gradeCard: (card: ReviewCard, grade: Grade) => Promise<void>;
   dismissItem: (item: ReviewItem) => Promise<void>;
+  unDismissItem: (item: ReviewItem) => Promise<void>;
   skipItem: (item: ReviewItem) => void;
   showAnswer: boolean;
   setShowAnswer: Dispatch<StateUpdater<boolean>>;
@@ -76,16 +71,25 @@ export function ReviewContextProvider({
   } = useQuery({
     queryKey: ['current-review-item'],
     queryFn: async () => {
+      // Check if there's an initial item to display first
+      if (reviewView.initialItem) {
+        const initialItem = reviewView.initialItem;
+        reviewView.initialItem = null; // Clear so next call uses normal queue
+        if (isReviewCard(initialItem)) await updateDelimiters(initialItem);
+        setShowAnswer(false);
+        reviewView.currentItem = initialItem;
+        return initialItem;
+      }
+
       const result = await reviewManager.getDue({
-        dueBy: Date.now() + MS_PER_DAY * 2,
         limit: REVIEW_FETCH_COUNT,
       });
       const nextItem =
         result.all.filter(({ data }) => !reviewView.seenIds.has(data.id))[0] ??
         null;
-      if (isReviewCard(nextItem)) await updateDelimiters(nextItem);
+      if (nextItem && isReviewCard(nextItem)) await updateDelimiters(nextItem);
       setShowAnswer(false);
-      reviewView.currentItem = nextItem ?? null;
+      reviewView.currentItem = nextItem;
       return nextItem;
     },
   });
@@ -96,37 +100,43 @@ export function ReviewContextProvider({
       let delimitersChanged = true;
       const [left, right] = CLOZE_DELIMITERS;
 
-      await plugin.app.fileManager.processFrontMatter(
-        reviewCard.file,
-        (frontmatter: Record<string, any>) => {
-          if ('delimiters' in frontmatter) {
-            currentDelimiters = frontmatter.delimiters as [string, string];
+      // Wrap file modifications in withReviewViewSave to prevent external modification detection
+      await plugin.withReviewViewSave(async () => {
+        await plugin.app.fileManager.processFrontMatter(
+          reviewCard.file,
+          (frontmatter: Record<string, any>) => {
+            if ('delimiters' in frontmatter) {
+              currentDelimiters = frontmatter.delimiters as [string, string];
+            }
+            if (!Array.isArray(currentDelimiters)) {
+              throw new TypeError(
+                `Delimiters stored on note "${reviewCard.data.reference}" were not a list`
+              );
+            }
+            if (
+              currentDelimiters[0] === left &&
+              currentDelimiters[1] === right
+            ) {
+              delimitersChanged = false;
+            } else {
+              frontmatter.delimiters = CLOZE_DELIMITERS;
+            }
           }
-          if (!Array.isArray(currentDelimiters)) {
-            throw new TypeError(
-              `Delimiters stored on note "${reviewCard.data.reference}" were not a list`
-            );
-          }
-          if (currentDelimiters[0] === left && currentDelimiters[1] === right) {
-            delimitersChanged = false;
-          } else {
-            frontmatter.delimiters = CLOZE_DELIMITERS;
-          }
-        }
-      );
-      if (!delimitersChanged) return;
-
-      await plugin.app.vault.process(reviewCard.file, (fileText) => {
-        const split = splitFrontMatter(fileText);
-        if (!split)
-          throw new Error(
-            `Failed to parse frontmatter from note "${reviewCard.data.reference}, but note has frontmatter`
-          );
-        const { start, answer, end } = reviewManager.parseCloze(
-          split.body,
-          currentDelimiters
         );
-        return split.frontMatter + start + `${left}${answer}${right}` + end;
+        if (!delimitersChanged) return;
+
+        await plugin.app.vault.process(reviewCard.file, (fileText) => {
+          const split = splitFrontMatter(fileText);
+          if (!split)
+            throw new Error(
+              `Failed to parse frontmatter from note "${reviewCard.data.reference}, but note has frontmatter`
+            );
+          const { start, answer, end } = reviewManager.parseCloze(
+            split.body,
+            currentDelimiters
+          );
+          return split.frontMatter + start + `${left}${answer}${right}` + end;
+        });
       });
     } catch (error) {
       if (error instanceof Error) {
@@ -141,12 +151,15 @@ export function ReviewContextProvider({
   };
 
   const reviewArticle = async (
-    article: IArticleActive,
+    article: ReviewArticle,
     nextInterval?: number
   ) => {
     try {
-      await reviewManager.reviewArticle(article, Date.now(), nextInterval);
-      reviewView.seenIds.add(article.id);
+      await reviewManager.reviewArticle(article.data, Date.now(), nextInterval);
+      reviewView.seenIds.add(article.data.id);
+      if (article.data.dismissed) {
+        await unDismissItem(article);
+      }
       if (nextInterval) {
         new Notice(
           `Next article review manually scheduled for ` +
@@ -161,12 +174,15 @@ export function ReviewContextProvider({
   };
 
   const reviewSnippet = async (
-    snippet: ISnippetActive,
+    snippet: ReviewSnippet,
     nextInterval?: number
   ) => {
     try {
-      await reviewManager.reviewSnippet(snippet, Date.now(), nextInterval);
-      reviewView.seenIds.add(snippet.id);
+      await reviewManager.reviewSnippet(snippet.data, Date.now(), nextInterval);
+      reviewView.seenIds.add(snippet.data.id);
+      if (snippet.data.dismissed) {
+        await unDismissItem(snippet);
+      }
       if (nextInterval) {
         new Notice(
           `Next snippet review manually scheduled for ` +
@@ -180,30 +196,61 @@ export function ReviewContextProvider({
     }
   };
 
-  const gradeCard = async (card: ISRSCardDisplay, grade: Grade) => {
-    await reviewManager.reviewCard(card, grade);
-    reviewView.seenIds.add(card.id);
+  const gradeCard = async (card: ReviewCard, grade: Grade) => {
+    await reviewManager.reviewCard(card.data, grade);
+    reviewView.seenIds.add(card.data.id);
     new Notice(`Graded as: ${Rating[grade]}`);
+    if (card.data.dismissed) {
+      await unDismissItem(card);
+    }
     getNext();
   };
 
   const dismissItem = async (item: ReviewItem) => {
-    if (isReviewCard(item)) {
-      await reviewManager.dismissCard(item.data);
-    } else if (isReviewSnippet(item)) {
-      await reviewManager.dismissSnippet(item.data);
-    } else {
-      await reviewManager.dismissArticle(item.data);
+    const type = reviewManager.getNoteType(item.file);
+    if (!type) {
+      console.error(item);
+      throw new TypeError(`Item type not recognized`);
     }
+    await reviewManager.dismissItem(type, item.data.id);
     reviewView.seenIds.add(item.data.id);
 
-    const { reference } = item.data;
-    const [folder, subRef] = reference.split('/');
-    const type = folder.slice(0, -1);
+    const [_folder, subRef] = item.data.reference.split('/');
     new Notice(
       `Dismissed ${type} "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}"`
     );
     getNext();
+  };
+
+  const unDismissItem = async (item: ReviewItem) => {
+    const type = reviewManager.getNoteType(item.file);
+    if (!type) {
+      console.error(item);
+      throw new TypeError(`Item type not recognized`);
+    }
+    await reviewManager.unDismissItem(type, item.data.id);
+
+    const [_folder, subRef] = item.data.reference.split('/');
+    new Notice(
+      `Restored ${type} "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}" to queue`
+    );
+
+    // update the local cache instead of invalidating it so it remains open in review
+    queryClient.setQueryData(
+      ['current-review-item'],
+      (currentItem: ReviewItem) => {
+        if (!currentItem) return;
+
+        const updated = {
+          file: currentItem.file,
+          data: {
+            ...deepCopy(currentItem.data),
+            dismissed: false,
+          },
+        };
+        return updated;
+      }
+    );
   };
 
   const skipItem = (item: ReviewItem) => {
@@ -227,6 +274,7 @@ export function ReviewContextProvider({
     reviewSnippet,
     gradeCard,
     dismissItem,
+    unDismissItem,
     skipItem,
     showAnswer,
     setShowAnswer,

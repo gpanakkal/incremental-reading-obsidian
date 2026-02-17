@@ -1,13 +1,12 @@
 import type { WorkspaceLeaf } from 'obsidian';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import type IncrementalReadingPlugin from '#/main';
 import { ReviewContextProvider, useReviewContext } from './ReviewContext';
 import ReviewItem from './ReviewItem';
 import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
 import { ActionBar } from './ActionBar';
-
-const client = new QueryClient();
+import { queryClient } from '#/lib/queryClient';
 
 export function createReviewInterface(props: {
   reviewView: ReviewView;
@@ -16,7 +15,7 @@ export function createReviewInterface(props: {
   reviewManager: ReviewManager;
 }) {
   return (
-    <QueryClientProvider client={client}>
+    <QueryClientProvider client={queryClient}>
       <ReviewContextProvider {...props}>
         <ReviewInterface />
       </ReviewContextProvider>

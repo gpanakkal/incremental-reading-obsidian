@@ -3,6 +3,8 @@ export const PLACEHOLDER_PLUGIN_ICON = 'book-open-text';
 // TODO: move to settings
 export const DATA_DIRECTORY = 'incremental-reading';
 export const DATABASE_FILE_PATH = `${DATA_DIRECTORY}/ir-user-data.sqlite`;
+export const BACKUP_DIRECTORY = `${DATA_DIRECTORY}/.backups`;
+export const LOG_DIRECTORY = `${DATA_DIRECTORY}/.logs`;
 export const TEST_DATABASE_FILE_PATH = './ir-test-data.sqlite';
 export const SNIPPET_DIRECTORY = `snippets`;
 export const CARD_DIRECTORY = `cards`;
@@ -11,9 +13,8 @@ export const ARTICLE_DIRECTORY = `articles`;
 export const SNIPPET_TAG = 'ir-text-snippet';
 export const CARD_TAG = 'ir-card';
 export const ARTICLE_TAG = 'ir-article';
+export const SOURCE_TAG = 'ir-source';
 export const SOURCE_PROPERTY_NAME = 'source';
-export const SCROLL_TOP_PROPERTY_NAME = 'ir-scroll-top';
-export const SCROLL_LEFT_PROPERTY_NAME = 'ir-scroll-left';
 
 export const ERROR_NOTICE_DURATION_MS = 8000;
 export const SUCCESS_NOTICE_DURATION_MS = 5000;

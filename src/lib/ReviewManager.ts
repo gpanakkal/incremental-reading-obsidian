@@ -1,5 +1,6 @@
-import type { TFile, TAbstractFile } from 'obsidian';
+import type { TAbstractFile } from 'obsidian';
 import {
+  TFile,
   normalizePath,
   Notice,
   type App,
@@ -7,7 +8,16 @@ import {
   type MarkdownView,
 } from 'obsidian';
 import type { SQLiteRepository } from './repository';
-import type { IArticleReview, NoteType, ReviewArticle } from '#/lib/types';
+import type {
+  IArticleBase,
+  IArticleReview,
+  ISnippetBase,
+  NoteType,
+  ReviewArticle,
+  ReviewCard,
+  ReviewItem,
+  ReviewSnippet,
+} from '#/lib/types';
 import {
   type ISnippetActive,
   type ISnippetReview,
@@ -23,6 +33,7 @@ import {
   SNIPPET_DIRECTORY,
   TEXT_BASE_REVIEW_INTERVAL,
   SNIPPET_TAG,
+  SOURCE_TAG,
   SOURCE_PROPERTY_NAME,
   ERROR_NOTICE_DURATION_MS,
   SUCCESS_NOTICE_DURATION_MS,
@@ -44,8 +55,6 @@ import {
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
   INVALID_TITLE_MESSAGE,
-  SCROLL_TOP_PROPERTY_NAME,
-  SCROLL_LEFT_PROPERTY_NAME,
 } from './constants';
 import { getClozeGroupsPattern } from './utils';
 import type { FSRS, FSRSParameters, Grade } from 'ts-fsrs';
@@ -59,12 +68,14 @@ import {
   getSelectionWithBounds,
   sanitizeForTitle,
   searchAll,
+  splitFrontMatter,
 } from './utils';
 import SRSCard from './SRSCard';
 import type ReviewView from 'src/views/ReviewView';
 import SRSCardReview from './SRSCardReview';
 import Article from './Article';
 import Snippet from './Snippet';
+import { SnippetOffsetTracker, type SnippetHighlight } from './SnippetOffsetTracker';
 
 const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
   enable_fuzz: false,
@@ -75,6 +86,8 @@ export default class ReviewManager {
   app: App;
   #repo: SQLiteRepository;
   #fsrs: FSRS;
+  snippetTracker: SnippetOffsetTracker;
+  currentEditorView: { view: any; file: TFile } | null = null;
 
   constructor(app: App, repo: SQLiteRepository) {
     this.app = app;
@@ -82,11 +95,43 @@ export default class ReviewManager {
     const params = generatorParameters(FSRS_PARAMETER_DEFAULTS);
 
     this.#fsrs = fsrs(params);
+    this.snippetTracker = new SnippetOffsetTracker();
   }
 
   // TODO: remove for production
   get repo() {
     return this.#repo;
+  }
+
+  /**
+   * Calculate the character offset where the body starts (after frontmatter).
+   * Returns 0 if no frontmatter is present.
+   * @param fileContent The full file content
+   */
+  getBodyStartOffset(fileContent: string): number {
+    const result = splitFrontMatter(fileContent);
+    if (result) {
+      return fileContent.length - result.body.length;
+    }
+    return 0;
+  }
+
+  /**
+   * Update snippet offsets in the database.
+   * Used to persist offset changes after document edits.
+   * @param snippetId The snippet ID
+   * @param startOffset Body-relative start offset
+   * @param endOffset Body-relative end offset
+   */
+  async updateSnippetOffsets(
+    snippetId: string,
+    startOffset: number,
+    endOffset: number
+  ): Promise<void> {
+    await this.#repo.mutate(
+      `UPDATE snippet SET start_offset = $1, end_offset = $2 WHERE id = $3`,
+      [startOffset, endOffset, snippetId]
+    );
   }
 
   /**
@@ -381,9 +426,6 @@ export default class ReviewManager {
     return ((await this.#repo.query(query, params)) ?? []) as SRSCardRow[];
   }
 
-  /**
-   * TODO: store the updates in db
-   */
   async reviewCard(card: ISRSCardDisplay, grade: Grade, reviewTime?: Date) {
     const recordLog = this.#fsrs.repeat(
       card,
@@ -421,7 +463,7 @@ export default class ReviewManager {
         `elapsed_days = $5`,
         `scheduled_days = $6`,
         `reps = $7, lapses = $8`,
-        `state = $9`,
+        `state = $9, dismissed = 0`,
       ];
       updateQuery += columnUpdateSegments.join(', ');
       updateQuery += ` WHERE id = $10`;
@@ -468,17 +510,6 @@ export default class ReviewManager {
     }
   }
 
-  async dismissCard(card: ISRSCard | ISRSCardDisplay) {
-    try {
-      await this.#repo.mutate(
-        'UPDATE srs_card SET dismissed = 1 WHERE id = $1',
-        [card.id]
-      );
-    } catch (error) {
-      console.error(error);
-    }
-  }
-
   protected transcludeLink(editor: Editor, link: string, blockLine: number) {
     const line = editor.getLine(blockLine);
     editor.replaceRange(
@@ -506,20 +537,28 @@ export default class ReviewManager {
   ) {
     const reviewTime =
       firstReview || Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
-    if (!view.file) {
+
+    // capture the current file BEFORE any async operations
+    // to avoid race conditions where view.file changes during processing
+    const currentFile = view.file;
+
+    if (!currentFile) {
       new Notice(
         `Snipping not supported from ${view.getViewType()}`,
         ERROR_NOTICE_DURATION_MS
       );
       return;
     }
+
+    // console.log(
+    //   `[createSnippet] Creating snippet from file: ${currentFile.path}`
+    // );
+
     const selection = editor.getSelection() || view.getSelection();
     if (!selection) {
       new Notice('Text must be selected', ERROR_NOTICE_DURATION_MS);
       return;
     }
-
-    const currentFile = view.file;
     const snippetFile = await this.createFromText(
       selection,
       this.getDirectory('snippet')
@@ -533,30 +572,81 @@ export default class ReviewManager {
       [`${SOURCE_PROPERTY_NAME}`]: sourceLink,
     });
 
-    // inherit priority from the source file if it has one, or assign default priority
+    // Tag the source note as ir-source if it doesn't have any IR tag yet
     const parentType = this.getNoteType(currentFile);
+    if (!parentType) {
+      await this.updateFrontMatter(currentFile, { tags: SOURCE_TAG });
+    }
+
+    // inherit priority from the source file if it has one, or assign default priority
     let currentFileEntry;
     if (parentType === 'article') {
       currentFileEntry = await this.findArticle(currentFile);
     } else if (parentType === 'snippet') {
       currentFileEntry = await this.findSnippet(currentFile);
     }
+
+    // console.log(
+    //   `[createSnippet] Parent type: ${parentType}, entry:`,
+    //   currentFileEntry
+    // );
+
     const priority = currentFileEntry?.priority ?? DEFAULT_PRIORITY;
 
-    // Transclude the snippet into its source location
-    const linkToSnippet = this.generateMarkdownLink(
-      snippetFile,
-      currentFile,
-      TRANSCLUSION_HIDE_TITLE_ALIAS
-    );
-    editor.replaceSelection(`!${linkToSnippet}`);
+    // Calculate body-relative character offsets for highlighting
+    let offsets: { start: number; end: number } | null = null;
 
-    return this.createSnippetEntry(
+    // Try to get offsets from CodeMirror
+    const cm = (editor as any).cm;
+    if (cm && cm.state && cm.state.selection) {
+      const range = cm.state.selection.ranges[0];
+      if (range) {
+        // Get body start to convert to body-relative offsets
+        const docContent = cm.state.doc.toString();
+        const bodyStart = this.getBodyStartOffset(docContent);
+
+        offsets = {
+          start: range.from - bodyStart, // body-relative
+          end: range.to - bodyStart, // body-relative
+        };
+      } else {
+        console.warn(`[createSnippet] CodeMirror selection has no ranges`);
+      }
+    } else {
+      console.warn(
+        `[createSnippet] Could not access CodeMirror instance or selection:`,
+        {
+          hasCm: !!cm,
+          hasState: !!cm?.state,
+          hasSelection: !!cm?.state?.selection,
+        }
+      );
+    }
+
+    // Create the snippet entry
+    const result = await this.createSnippetEntry(
       snippetFile,
       reviewTime,
       priority,
-      currentFileEntry?.id
+      currentFileEntry?.id,
+      offsets ?? undefined
     );
+
+    // Refresh highlights immediately after snippet creation.
+    // Always use `cm` (the CodeMirror EditorView from the active editor) rather
+    // than `currentEditorView`, which may point to a different view (e.g. the
+    // review interface's editor) even when the snippet was created from the
+    // standard note view.
+    if (offsets && cm) {
+      await this.refreshHighlightsAfterSnippetCreation(
+        currentFile,
+        snippetFile,
+        currentFileEntry,
+        cm
+      );
+    }
+
+    return result;
   }
 
   /**
@@ -566,18 +656,21 @@ export default class ReviewManager {
     snippetFile: TFile,
     reviewTime: number,
     priority: number,
-    parentId?: string
+    parentId?: string,
+    offsets?: { start: number; end: number }
   ) {
     try {
       // save the snippet to the database
       const result = await this.#repo.mutate(
-        'INSERT INTO snippet (id, reference, due, priority, parent) VALUES ($1, $2, $3, $4, $5)',
+        'INSERT INTO snippet (id, reference, due, priority, parent, start_offset, end_offset) VALUES ($1, $2, $3, $4, $5, $6, $7)',
         [
           crypto.randomUUID(),
           `${SNIPPET_DIRECTORY}/${snippetFile.name}`,
           reviewTime,
           priority,
           parentId,
+          offsets?.start ?? null,
+          offsets?.end ?? null,
         ]
       );
 
@@ -635,7 +728,186 @@ export default class ReviewManager {
     return (results[0] as SnippetRow) ?? null;
   }
 
-  protected async getLastSnippetReview(snippet: ISnippetActive) {
+  async findCard(cardFile: TAbstractFile): Promise<SRSCardRow | null> {
+    const results = await this.#repo.query(
+      'SELECT * FROM srs_card WHERE reference = $1',
+      [this.getReferenceFromPath(cardFile.path)]
+    );
+
+    return (results[0] as SRSCardRow) ?? null;
+  }
+
+  /**
+   * Creates a ReviewItem from a file and its note type.
+   * Returns null if the item is not found in the database.
+   */
+  async getReviewItemFromFile(
+    file: TFile,
+    noteType: NoteType
+  ): Promise<ReviewItem | null> {
+    if (noteType === 'article') {
+      const row = await this.findArticle(file);
+      if (!row) return null;
+      return { data: Article.rowToBase(row), file } as ReviewArticle;
+    } else if (noteType === 'snippet') {
+      const row = await this.findSnippet(file);
+      if (!row) return null;
+      return { data: Snippet.rowToBase(row), file } as ReviewSnippet;
+    } else if (noteType === 'card') {
+      const row = await this.findCard(file);
+      if (!row) return null;
+      return { data: SRSCard.rowToDisplay(row), file } as ReviewCard;
+    }
+    return null;
+  }
+
+  /**
+   * Dismiss an item by type and ID
+   */
+  async dismissItem(type: NoteType, id: string): Promise<void> {
+    const table = type === 'card' ? 'srs_card' : type;
+    await this.#repo.mutate(`UPDATE ${table} SET dismissed = 1 WHERE id = $1`, [
+      id,
+    ]);
+  }
+
+  /**
+   * Un-dismiss an item by type and ID
+   */
+  async unDismissItem(type: NoteType, id: string): Promise<void> {
+    const table = type === 'card' ? 'srs_card' : type;
+    await this.#repo.mutate(`UPDATE ${table} SET dismissed = 0 WHERE id = $1`, [
+      id,
+    ]);
+  }
+
+  /**
+   * Get all snippet highlights for a parent article or snippet
+   * Returns only snippets that have offsets (for highlighting)
+   * @param parentFile The parent file to query highlights for
+   * @returns Array of snippet highlights
+   */
+  async getSnippetHighlights(parentFile: TFile) {
+    // First find the parent's ID
+    const parentType = this.getNoteType(parentFile);
+    let parentEntry;
+
+    if (parentType === 'article') {
+      parentEntry = await this.findArticle(parentFile);
+    } else if (parentType === 'snippet') {
+      parentEntry = await this.findSnippet(parentFile);
+    }
+
+    // For articles/snippets with a DB entry, use the existing parent ID query
+    if (parentEntry) {
+      const results = (await this.#repo.query(
+        'SELECT * FROM snippet WHERE parent = $1 AND start_offset IS NOT NULL AND end_offset IS NOT NULL',
+        [parentEntry.id]
+      )) as SnippetRow[];
+
+      const highlights = results.map((r) => ({
+        ...r,
+        dismissed: Boolean(r.dismissed),
+        start_offset: r.start_offset!,
+        end_offset: r.end_offset!,
+        parent: r.parent!,
+      }));
+
+      this.snippetTracker.loadHighlights(parentFile.path, highlights);
+      return highlights;
+    }
+
+    // For source notes (or any note without a DB entry), find snippets via backlinks
+    if (this.isSourceNote(parentFile)) {
+      const highlights = await this.getSnippetHighlightsViaBacklinks(parentFile);
+      this.snippetTracker.loadHighlights(parentFile.path, highlights);
+      return highlights;
+    }
+
+    return [];
+  }
+
+  /**
+   * Reload or append snippet highlights into the tracker after a new snippet
+   * is created, then dispatch a refresh effect so the CodeMirror extension
+   * rebuilds decorations.
+   *
+   * For articles/snippets (which have a DB entry), we reload all highlights
+   * via the parent ID query. For source notes, Obsidian's resolvedLinks may
+   * not have indexed the new snippet file yet, so we look up the just-inserted
+   * row directly and append it to the tracker.
+   */
+  private async refreshHighlightsAfterSnippetCreation(
+    parentFile: TFile,
+    snippetFile: TFile,
+    parentEntry: ArticleRow | SnippetRow | null | undefined,
+    cm: { dispatch: (spec: any) => void }
+  ) {
+    if (parentEntry) {
+      await this.getSnippetHighlights(parentFile);
+    } else {
+      const snippetRow = await this.findSnippet(snippetFile);
+      if (snippetRow && snippetRow.start_offset != null && snippetRow.end_offset != null) {
+        const existing = this.snippetTracker.getHighlights(parentFile.path);
+        this.snippetTracker.loadHighlights(parentFile.path, [
+          ...existing,
+          {
+            ...snippetRow,
+            dismissed: Boolean(snippetRow.dismissed),
+            start_offset: snippetRow.start_offset,
+            end_offset: snippetRow.end_offset,
+            parent: snippetRow.parent ?? '',
+          },
+        ]);
+      }
+    }
+
+    const { refreshHighlightsEffect } = await import('./extensions');
+    cm.dispatch({ effects: refreshHighlightsEffect.of(null) });
+  }
+
+  /**
+   * Check if a file has the ir-source tag
+   */
+  private isSourceNote(file: TFile): boolean {
+    const tags = this.app.metadataCache.getFileCache(file)?.frontmatter?.tags;
+    if (!tags) return false;
+    const tagSet: Set<string> = new Set(Array.isArray(tags) ? tags : [tags]);
+    return tagSet.has(SOURCE_TAG);
+  }
+
+  /**
+   * Find snippet highlights for a source note by scanning Obsidian's resolved backlinks.
+   * For each file that links to the source and is tagged as a snippet, look up its
+   * offsets in the DB.
+   */
+  private async getSnippetHighlightsViaBacklinks(sourceFile: TFile): Promise<SnippetHighlight[]> {
+    const resolvedLinks = this.app.metadataCache.resolvedLinks;
+    const highlights: SnippetHighlight[] = [];
+
+    for (const [linkingFilePath, links] of Object.entries(resolvedLinks)) {
+      if (!(sourceFile.path in links)) continue;
+
+      const linkingFile = this.app.vault.getAbstractFileByPath(linkingFilePath);
+      if (!linkingFile || !(linkingFile instanceof TFile)) continue;
+      if (this.getNoteType(linkingFile) !== 'snippet') continue;
+
+      const snippetRow = await this.findSnippet(linkingFile);
+      if (!snippetRow || snippetRow.start_offset == null || snippetRow.end_offset == null) continue;
+
+      highlights.push({
+        ...snippetRow,
+        dismissed: Boolean(snippetRow.dismissed),
+        start_offset: snippetRow.start_offset,
+        end_offset: snippetRow.end_offset,
+        parent: snippetRow.parent ?? '',
+      });
+    }
+
+    return highlights;
+  }
+
+  protected async getLastSnippetReview(snippet: ISnippetBase) {
     const lastReview = (await this.#repo.query(
       `SELECT review_time FROM snippet_review WHERE snippet_id = $1 ` +
         `ORDER BY review_time DESC LIMIT 1`,
@@ -648,7 +920,7 @@ export default class ReviewManager {
    * Add a SnippetReview and set the next review date
    */
   async reviewSnippet(
-    snippet: ISnippetActive,
+    snippet: ISnippetBase,
     reviewTime?: number,
     nextReviewInterval?: number
   ) {
@@ -663,7 +935,7 @@ export default class ReviewManager {
       );
 
       const updateResult = await this.#repo.mutate(
-        `UPDATE snippet SET due = $1 WHERE id = $2`,
+        `UPDATE snippet SET dismissed = 0, due = $1 WHERE id = $2`,
         [nextReview, snippet.id]
       );
     } catch (error) {
@@ -674,7 +946,7 @@ export default class ReviewManager {
   /**
    * Change the priority of a snippet, automatically adjusting the next due date
    */
-  async reprioritizeSnippet(snippet: ISnippetActive, newPriority: number) {
+  async reprioritizeSnippet(snippet: ISnippetBase, newPriority: number) {
     if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
       throw new TypeError(
         `Priority must be an integer between 10 and 50 inclusive; received ${newPriority}`
@@ -693,16 +965,6 @@ export default class ReviewManager {
     );
   }
 
-  async dismissSnippet(snippet: ISnippetActive) {
-    try {
-      await this.#repo.mutate(
-        'UPDATE snippet SET dismissed = 1 WHERE id = $1',
-        [snippet.id]
-      );
-    } catch (error) {
-      console.error(error);
-    }
-  }
   // #endregion
   // #region ARTICLES
   /**
@@ -875,7 +1137,7 @@ export default class ReviewManager {
     return (results[0] as ArticleRow) ?? null;
   }
 
-  protected async getLastArticleReview(snippet: IArticleActive) {
+  protected async getLastArticleReview(snippet: IArticleBase) {
     const lastReview = (await this.#repo.query(
       `SELECT review_time FROM article_review WHERE article_id = $1 ` +
         `ORDER BY review_time DESC LIMIT 1`,
@@ -885,7 +1147,7 @@ export default class ReviewManager {
   }
 
   async reviewArticle(
-    article: IArticleActive,
+    article: IArticleBase,
     reviewTime?: number,
     nextReviewInterval?: number
   ) {
@@ -900,7 +1162,7 @@ export default class ReviewManager {
       );
 
       const updateResult = await this.#repo.mutate(
-        `UPDATE article SET due = $1 WHERE id = $2`,
+        `UPDATE article SET dismissed = 0, due = $1 WHERE id = $2`,
         [nextReview, article.id]
       );
     } catch (error) {
@@ -951,9 +1213,50 @@ export default class ReviewManager {
   }
 
   /**
+   * Update database references in response to Obsidian rename events
+   * @param oldPath The vault-relative path the file had before it was moved
+   */
+  async handleExternalRename(file: TAbstractFile, oldPath: string) {
+    // TODO: handle files being moved into or out of the IR folder
+    const newPath = file.path;
+    console.log(`file rename detected: ${oldPath} -> ${newPath}`);
+    const concreteFile = this.app.vault.getFileByPath(newPath);
+    if (!concreteFile) {
+      throw new Error(`Failed to find a file at ${newPath}`);
+    }
+    const type = this.getNoteType(concreteFile);
+    if (!type) {
+      console.log(`Found no matching IR tags; ignoring`);
+      return;
+    }
+    if (!oldPath.startsWith(DATA_DIRECTORY)) {
+      console.log('File was not previously in IR directory; ignoring');
+      return;
+    }
+    if (!newPath.startsWith(DATA_DIRECTORY)) {
+      console.log('File is no longer in IR directory; ignoring');
+      return;
+    }
+
+    const oldReference = this.getReferenceFromPath(oldPath);
+    const newReference = this.getReferenceFromPath(newPath);
+    if (oldReference === newReference) {
+      console.log('File reference did not change; ignoring');
+      return;
+    }
+
+    const table = type === 'card' ? 'srs_card' : type;
+    await this.#repo.mutate(
+      `UPDATE ${table} SET reference = $1 WHERE reference = $2`,
+      [newReference, oldReference]
+    );
+    console.log(`Reference updated to ${newReference}`);
+  }
+
+  /**
    * Change the priority of an article, automatically adjusting the next due date
    */
-  async reprioritizeArticle(article: IArticleActive, newPriority: number) {
+  async reprioritizeArticle(article: IArticleBase, newPriority: number) {
     if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
       throw new TypeError(
         `Priority must be an integer between 10 and 50 inclusive; received ${newPriority}`
@@ -972,21 +1275,9 @@ export default class ReviewManager {
     );
   }
 
-  async dismissArticle(article: IArticleActive) {
-    try {
-      await this.#repo.mutate(
-        'UPDATE article SET dismissed = 1 WHERE id = $1',
-        [article.id]
-      );
-    } catch (error) {
-      console.error(error);
-    }
-  }
   // #endregion
   // #region HELPERS
-  protected async nextTextReviewInterval(
-    text: IArticleActive | ISnippetActive
-  ) {
+  protected async nextTextReviewInterval(text: IArticleBase | ISnippetBase) {
     const intervalMultiplier =
       TEXT_REVIEW_MULTIPLIER_BASE +
       (text.priority - 10) * TEXT_REVIEW_MULTIPLIER_STEP;
@@ -995,9 +1286,10 @@ export default class ReviewManager {
       ? this.getLastArticleReview(text)
       : this.getLastSnippetReview(text));
 
-    const lastInterval = lastReview[0]
-      ? text.due - lastReview[0].review_time
-      : TEXT_BASE_REVIEW_INTERVAL;
+    const lastInterval =
+      lastReview[0] && text.due
+        ? text.due - lastReview[0].review_time
+        : TEXT_BASE_REVIEW_INTERVAL;
 
     const nextInterval = Math.round(lastInterval * intervalMultiplier);
     return nextInterval;
@@ -1074,16 +1366,13 @@ export default class ReviewManager {
 
     if (!newNote) {
       const errorMsg = `Failed to create note "${newNoteName}"`;
-      // new Notice(errorMsg);
-      // return;
       throw new Error(errorMsg);
     }
 
     return newNote;
   }
 
-  protected getNoteType(note: TFile): NoteType | null {
-    // get tags
+  getNoteType(note: TFile): NoteType | null {
     const tags = this.app.metadataCache.getFileCache(note)?.frontmatter?.tags;
     if (!tags) return null;
 
@@ -1138,32 +1427,42 @@ export default class ReviewManager {
   }
 
   /**
-   * Save scroll position to file frontmatter
+   * Save scroll position to database for the article or snippet
    */
   async saveScrollPosition(
     file: TFile,
     scrollInfo: { top: number; left: number }
   ) {
-    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-      frontmatter[SCROLL_TOP_PROPERTY_NAME] = scrollInfo.top;
-      frontmatter[SCROLL_LEFT_PROPERTY_NAME] = scrollInfo.left;
-    });
+    const noteType = this.getNoteType(file);
+    if (!noteType || noteType === 'card') return;
+
+    const table = noteType === 'article' ? 'article' : 'snippet';
+    const reference = this.getReferenceFromPath(file.path);
+
+    await this.#repo.mutate(
+      `UPDATE ${table} SET scroll_top = $1 WHERE reference = $2`,
+      [Math.round(scrollInfo.top), reference]
+    );
   }
 
   /**
-   * Load scroll position from file frontmatter
+   * Load scroll position from database for the article or snippet
    */
-  loadScrollPosition(file: TFile): { top: number; left: number } | null {
-    const cache = this.app.metadataCache.getFileCache(file);
-    const frontmatter = cache?.frontmatter;
+  async loadScrollPosition(
+    file: TFile
+  ): Promise<{ top: number; left: number } | null> {
+    const noteType = this.getNoteType(file);
+    if (!noteType || noteType === 'card') return null;
 
-    if (!frontmatter) return null;
+    let row: ArticleRow | SnippetRow | null = null;
+    if (noteType === 'article') {
+      row = await this.findArticle(file);
+    } else if (noteType === 'snippet') {
+      row = await this.findSnippet(file);
+    }
 
-    const top = frontmatter[SCROLL_TOP_PROPERTY_NAME];
-    const left = frontmatter[SCROLL_LEFT_PROPERTY_NAME];
-
-    if (typeof top === 'number' && typeof left === 'number') {
-      return { top, left };
+    if (row && typeof row.scroll_top === 'number' && row.scroll_top > 0) {
+      return { top: row.scroll_top, left: 0 };
     }
 
     return null;

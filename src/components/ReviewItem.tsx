@@ -6,7 +6,7 @@ import type { EditorView, ViewUpdate } from '@codemirror/view';
 import type { EditState } from './types';
 import { EditingState } from './types';
 import { CardViewer } from './CardViewer';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { TitleEditor } from './TitleEditor';
 
 /**
@@ -15,22 +15,44 @@ import { TitleEditor } from './TitleEditor';
  * - loading spinner and error element
  */
 export default function ReviewItem({ item }: { item: ReviewItem }) {
+  // console.log(
+  //   `[ReviewItem] Rendering item: ${item.data.reference} (id: ${item.data.id})`
+  // );
   const { plugin, showAnswer, reviewManager } = useReviewContext();
+  const queryClient = useQueryClient();
   const {
     isPending,
     isError,
     data: fileText,
   } = useQuery({
-    queryKey: [`${item.data.reference}`],
+    queryKey: [item.data.reference],
     queryFn: async () => await plugin.app.vault.read(item.file),
   });
   const [editState, setEditState] = useState<EditState>(EditingState.cancel);
   const titleRef = useRef<HTMLDivElement | null>(null);
 
   const saveNote = async (newContent: string) => {
-    await plugin.app.vault.process(item.file, (data) => {
-      return newContent;
+    // Save document content and highlight offsets together to avoid race conditions
+    const highlights = reviewManager.snippetTracker.getHighlights(
+      item.file.path
+    );
+
+    // Wrap in withReviewViewSave so it's recognized as an internal change
+    await plugin.withReviewViewSave(async () => {
+      await plugin.app.vault.process(item.file, () => newContent);
+
+      // Save body-relative highlight offsets
+      for (const h of highlights) {
+        await reviewManager.updateSnippetOffsets(
+          h.id,
+          h.start_offset,
+          h.end_offset
+        );
+      }
     });
+
+    queryClient.setQueryData([item.data.reference], newContent);
+
     setEditState(EditingState.complete);
   };
 
@@ -40,14 +62,14 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
     }
 
     const docText = update.state.doc.toString();
-    saveNote(docText);
+    await saveNote(docText);
   };
 
   if (!fileText) return <></>;
   return (
     <>
       {isReviewArticle(item) && (
-        <div style={{ display: 'none' }}>
+        <div>
           <TitleEditor
             item={item}
             reviewManager={reviewManager}
@@ -56,9 +78,10 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
         </div>
       )}
       {isReviewCard(item) && !showAnswer ? (
-        <CardViewer cardText={fileText} />
+        <CardViewer cardText={fileText} key={item.data.id} />
       ) : (
         <IREditor
+          key={item.data.id}
           value={fileText}
           onChange={(update) => handleChange(update)}
           editState={editState}

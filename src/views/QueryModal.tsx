@@ -39,14 +39,14 @@ export class QueryModal extends Modal {
     executeBtn.addEventListener('click', async () => {
       const query = textarea.value.trim();
       if (!query) {
-        console.log('No query entered');
+        console.info('No query entered');
         return;
       }
 
       try {
-        console.log('Executing query:', query);
+        console.info('Executing query:', query);
         const result = await this.reviewManager.repo.query(query);
-        console.log('Query result:');
+        console.info('Query result:');
         console.table(result);
       } catch (error) {
         console.error('Query error:', error);
