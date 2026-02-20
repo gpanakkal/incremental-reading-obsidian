@@ -16,7 +16,6 @@ import {
 } from '#/lib/constants';
 import { transformPriority } from '#/lib/utils';
 import { Notice } from 'obsidian';
-import type { EditorView } from '@codemirror/view';
 
 export function ActionBar() {
   const { currentItem } = useReviewContext();
@@ -59,7 +58,6 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
     unDismissItem,
     skipItem,
     reviewView,
-    reviewManager,
     registerActionBarHotkey,
   } = useReviewContext();
   const [isDismissed, setIsDismissed] = useState(reviewItem.data.dismissed);
@@ -83,25 +81,28 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
     }
   };
 
-  useEffect(function initHotkeys() {
-    const handlers = [
-      reviewView.scope.register(null, 'Escape', (evt) => {
-        stopEditing(evt);
-      }),
-      registerActionBarHotkey(['Alt'], 'd', async () => {
-        isDismissed
-          ? await unDismissItem(reviewItem)
-          : await dismissItem(reviewItem);
-      }),
-      registerActionBarHotkey(['Alt'], 's', () => {
-        skipItem(reviewItem);
-      }),
-    ];
+  useEffect(
+    function initHotkeys() {
+      const handlers = [
+        reviewView.scope.register(null, 'Escape', (evt) => {
+          stopEditing(evt);
+        }),
+        registerActionBarHotkey(['Alt'], 'd', async () => {
+          isDismissed
+            ? await unDismissItem(reviewItem)
+            : await dismissItem(reviewItem);
+        }),
+        registerActionBarHotkey(['Alt'], 's', () => {
+          skipItem(reviewItem);
+        }),
+      ];
 
-    return () => {
-      handlers.forEach((handler) => reviewView.scope.unregister(handler));
-    };
-  }, []);
+      return () => {
+        handlers.forEach((handler) => reviewView.scope.unregister(handler));
+      };
+    },
+    [reviewItem]
+  );
 
   useEffect(() => {
     setIsDismissed(reviewItem.data.dismissed);
@@ -333,7 +334,7 @@ function CardActions({ card }: { card: ReviewCard }) {
         handlers.forEach((handler) => reviewView.scope.unregister(handler));
       };
     },
-    [showAnswer]
+    [card, showAnswer]
   );
 
   return (
@@ -371,7 +372,6 @@ function CardActions({ card }: { card: ReviewCard }) {
           />
         </>
       )}
-      {/* <Button label="Edit" handleClick={() => setShowAnswer(true)} /> */}
     </>
   );
 }
