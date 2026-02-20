@@ -42,12 +42,9 @@ import {
 interface IREditorProps {
   item: ReviewItem;
   editorRef?: MutableRefObject<EditorView | null>;
-  editState?: EditState;
   onEnter: (cm: EditorView, mod: boolean, shift: boolean) => boolean;
   onEscape: (cm: EditorView) => void;
-  onSubmit: (cm: EditorView) => void;
   onPaste?: (e: ClipboardEvent, cm: EditorView) => void;
-  onChange?: (update: ViewUpdate) => void;
   value?: string;
   className: string;
   placeholder?: string;
@@ -59,11 +56,8 @@ export function IREditor({
   editorRef,
   onEnter,
   onEscape,
-  onChange,
   onPaste,
   className,
-  onSubmit,
-  editState,
   value,
   placeholder,
   titleRef,
@@ -82,9 +76,14 @@ export function IREditor({
   } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
+  const { editState, saveNote } = useReviewContext();
 
-  // Note: Highlights and scroll position are now handled by global CodeMirror extensions
-  // (SnippetHighlightExtension and ScrollPositionExtension)
+  const handleChange = async (update: ViewUpdate) => {
+    if (!update.docChanged) return;
+
+    const docText = update.state.doc.toString();
+    await saveNote(item, docText);
+  };
 
   // extend the MarkdownEditor extracted from Obsidian
   useEffect(() => {
@@ -99,7 +98,7 @@ export function IREditor({
 
         onUpdate(update: ViewUpdate, changed: boolean) {
           super.onUpdate(update, changed);
-          onChange && onChange(update);
+          handleChange(update);
         }
 
         buildLocalExtensions(): Extension[] {
@@ -371,8 +370,6 @@ export function IREditor({
       effects: setShowAnswerEffect.of(showAnswer),
     });
   }, [showAnswer]);
-
-  // Note: Scroll position is now handled by ScrollPositionExtension
 
   const cls = [
     'markdown-source-view',

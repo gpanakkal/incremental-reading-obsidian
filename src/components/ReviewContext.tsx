@@ -18,11 +18,14 @@ import {
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
+import type { Scope } from 'obsidian';
 import { Notice, type WorkspaceLeaf } from 'obsidian';
 import type IncrementalReadingPlugin from '#/main';
 import type { Grade } from 'ts-fsrs';
 import { Rating } from 'ts-fsrs';
 import type { StateUpdater } from 'preact/hooks';
+import type { EditState } from './types';
+import { EditingState } from './types';
 import { deepCopy, getContentSlice, splitFrontMatter } from '#/lib/utils';
 
 interface ReviewContextProps {
@@ -45,6 +48,10 @@ interface ReviewContextProps {
   skipItem: (item: ReviewItem) => void;
   showAnswer: boolean;
   setShowAnswer: Dispatch<StateUpdater<boolean>>;
+  editState: EditState;
+  setEditState: Dispatch<StateUpdater<EditState>>;
+  saveNote: (item: ReviewItem, newContent: string) => Promise<void>;
+  registerActionBarHotkey: Scope['register'];
 }
 
 const ReviewContext = createContext<ReviewContextProps | null>(null);
@@ -62,6 +69,7 @@ export function ReviewContextProvider({
   reviewManager: ReviewManager;
 }>) {
   const [showAnswer, setShowAnswer] = useState(false);
+  const [editState, setEditState] = useState<EditState>(EditingState.cancel);
 
   const queryClient = useQueryClient();
   const {
@@ -71,6 +79,7 @@ export function ReviewContextProvider({
   } = useQuery({
     queryKey: ['current-review-item'],
     queryFn: async () => {
+      setEditState(EditingState.cancel);
       // Check if there's an initial item to display first
       if (reviewView.initialItem) {
         const initialItem = reviewView.initialItem;
@@ -264,6 +273,57 @@ export function ReviewContextProvider({
     getNext();
   };
 
+  const saveNote = async (item: ReviewItem, newContent: string) => {
+    // Save document content and highlight offsets together to avoid race conditions
+    const highlights = reviewManager.snippetTracker.getHighlights(
+      item.file.path
+    );
+
+    // Wrap in withReviewViewSave so it's recognized as an internal change
+    await plugin.withReviewViewSave(async () => {
+      await plugin.app.vault.process(item.file, () => newContent);
+
+      // Save body-relative highlight offsets
+      for (const h of highlights) {
+        await reviewManager.updateSnippetOffsets(
+          h.id,
+          h.start_offset,
+          h.end_offset
+        );
+      }
+    });
+
+    queryClient.setQueryData([item.data.reference], newContent);
+
+    setEditState(EditingState.complete);
+  };
+
+  const inEditMode = () => {
+    const el = document.activeElement as HTMLElement | null;
+    return (
+      el &&
+      (el.isContentEditable ||
+        el.tagName === 'INPUT' ||
+        el.tagName === 'TEXTAREA')
+    );
+  };
+  /**
+   * Create a keybind that verifies we're not editing text
+   */
+  const registerActionBarHotkey: Scope['register'] = (modifiers, key, func) => {
+    return reviewView.scope.register(modifiers, key, async (evt, ctx) => {
+      // prevent other keybinds listeners from firing
+      evt.stopImmediatePropagation();
+      const hotkeyStr = `${modifiers ? modifiers.join(' + ') + ' + ' : ''}${key}`;
+      if (inEditMode()) {
+        // console.log(`Ignoring keybind "${hotkeyStr}" since we're in edit mode`);
+        return;
+      }
+      // console.log(`Triggered hotkey "${hotkeyStr}"`);
+      await func(evt, ctx);
+    });
+  };
+
   const value = {
     plugin,
     reviewView,
@@ -278,6 +338,10 @@ export function ReviewContextProvider({
     skipItem,
     showAnswer,
     setShowAnswer,
+    editState,
+    setEditState,
+    saveNote,
+    registerActionBarHotkey,
   };
   return (
     <ReviewContext.Provider value={value}>{children}</ReviewContext.Provider>
