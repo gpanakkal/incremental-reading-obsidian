@@ -341,19 +341,23 @@ function CardActions({ card }: { card: ReviewCard }) {
       {showAnswer ? (
         <>
           <Button
-            label="🔁 Again (1)"
+            label="🔁 Again"
+            tooltip="1"
             handleClick={async () => await gradeCard(card, Rating.Again)}
           />
           <Button
-            label="👎 Hard (2)"
+            label="👎 Hard"
+            tooltip="2"
             handleClick={async () => await gradeCard(card, Rating.Hard)}
           />
           <Button
-            label="👍 Good (3)"
+            label="👍 Good"
+            tooltip="3"
             handleClick={async () => await gradeCard(card, Rating.Good)}
           />
           <Button
-            label="✅ Easy (4)"
+            label="✅ Easy"
+            tooltip="4"
             handleClick={async () => await gradeCard(card, Rating.Easy)}
           />
         </>
