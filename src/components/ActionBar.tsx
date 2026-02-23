@@ -310,7 +310,7 @@ function CardActions({ card }: { card: ReviewCard }) {
 
   useEffect(
     function initShowAnswerHotkey() {
-      const handler = registerActionBarHotkey(null, ' ', () => {
+      const handler = registerActionBarHotkey(['Alt'], 'C', () => {
         setShowAnswer(true);
       });
       return () => {
