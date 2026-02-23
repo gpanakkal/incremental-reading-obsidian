@@ -149,6 +149,10 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
     setDisplay((prev) => ({ ...prev, ...updates }));
   };
 
+  useEffect(() => {
+    setDisplay({ priority: article.data.priority / 10 });
+  }, [article]);
+
   const updatePriority = useCallback(async () => {
     const priority = transformPriority(display.priority);
     try {
@@ -163,7 +167,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
         ERROR_NOTICE_DURATION_MS
       );
     }
-  }, [display]);
+  }, [article.data.priority]);
 
   useEffect(
     function initHotkeys() {
@@ -227,6 +231,10 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
     setDisplay((prev) => ({ ...prev, ...updates }));
   };
 
+  useEffect(() => {
+    setDisplay({ priority: snippet.data.priority / 10 });
+  }, [snippet]);
+
   useEffect(
     function initHotkeys() {
       const handler = registerActionBarHotkey(null, ' ', async () => {
@@ -253,7 +261,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
         ERROR_NOTICE_DURATION_MS
       );
     }
-  }, [display]);
+  }, [snippet.data.priority]);
 
   return (
     <>
