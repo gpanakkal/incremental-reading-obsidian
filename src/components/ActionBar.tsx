@@ -74,7 +74,6 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
       return;
     }
     if (editor.contains(document.activeElement)) {
-      console.log('exiting edit mode');
       (actionBar as HTMLElement).focus();
       // intercept other keybinds
       evt.stopImmediatePropagation();
@@ -171,7 +170,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
 
   useEffect(
     function initHotkeys() {
-      const handler = registerActionBarHotkey(null, ' ', async () => {
+      const handler = registerActionBarHotkey(['Alt'], 'c', async () => {
         await reviewArticle(article);
       });
       return () => {
@@ -185,7 +184,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
     <>
       <Button
         label="Continue"
-        tooltip="Spacebar"
+        tooltip="Alt + C"
         handleClick={async () => await reviewArticle(article)}
       />
       <label className={'ir-priority-label'}>
@@ -237,7 +236,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
 
   useEffect(
     function initHotkeys() {
-      const handler = registerActionBarHotkey(null, ' ', async () => {
+      const handler = registerActionBarHotkey(['Alt'], 'c', async () => {
         await reviewSnippet(snippet);
       });
       return () => {
@@ -267,6 +266,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
     <>
       <Button
         label="Continue"
+        tooltip="Alt + C"
         handleClick={async () => await reviewSnippet(snippet)}
       />
       <div className="ir-priority-container">
@@ -310,7 +310,7 @@ function CardActions({ card }: { card: ReviewCard }) {
 
   useEffect(
     function initShowAnswerHotkey() {
-      const handler = registerActionBarHotkey(['Alt'], 'C', () => {
+      const handler = registerActionBarHotkey(['Alt'], 'c', () => {
         setShowAnswer(true);
       });
       return () => {
@@ -374,6 +374,7 @@ function CardActions({ card }: { card: ReviewCard }) {
         <>
           <Button
             label="Show Answer"
+            tooltip="Alt + C"
             handleClick={() => {
               setShowAnswer(true);
             }}
