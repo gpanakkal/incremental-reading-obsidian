@@ -33,11 +33,9 @@ export async function finalizeArticleImport(window: Page) {
  * @param path relative path using forward slashes. Do not enquote segments.
  */
 export async function openNote(window: Page, path: string) {
-  await executeCommand(window, 'switcher:open');
-  const quickSwitcher = window.getByPlaceholder('Find or create a note...');
-
-  // Register file-open listener before fill(), because filling the quick
-  // switcher can cause Obsidian to navigate (destroying the execution context).
+  // Register file-open listener before opening the quick switcher, because
+  // the switcher can trigger navigation (destroying the execution context)
+  // before evaluate() completes its round-trip — especially on macOS.
   const fileOpenPromise = window.evaluate(() => {
     return new Promise<void>((resolve) => {
       const NOTE_OPEN_TIMEOUT_MS = 10_000;
@@ -50,6 +48,9 @@ export async function openNote(window: Page, path: string) {
       setTimeout(() => workspace.offref(ref), NOTE_OPEN_TIMEOUT_MS);
     });
   });
+
+  await executeCommand(window, 'switcher:open');
+  const quickSwitcher = window.getByPlaceholder('Find or create a note...');
 
   await quickSwitcher.fill(path);
   await window.locator('div').filter({ hasText: path }).nth(1).click();
