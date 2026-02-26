@@ -18,7 +18,7 @@ import databaseSchema from './db/schema.sql';
 import ReviewManager from './lib/ReviewManager';
 import ReviewView from './views/ReviewView';
 import { PriorityModal } from './views/PriorityModal';
-import type { ReviewItem, SnippetRow, SRSCardRow } from './lib/types';
+import type { ReviewItem } from './lib/types';
 import SRSCard from './lib/SRSCard';
 import { getEditorClass } from './lib/utils';
 import Snippet from './lib/Snippet';
@@ -123,12 +123,6 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       id: 'create-card',
       name: 'Create SRS card',
-      // hotkeys: [
-      //   {
-      //     modifiers: ['Alt', 'Shift'],
-      //     key: 'C',
-      //   },
-      // ],
       callback: () => {
         if (!this.#reviewManager) {
           new Notice(`Plugin still loading`);
