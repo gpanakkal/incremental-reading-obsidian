@@ -166,7 +166,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
         ERROR_NOTICE_DURATION_MS
       );
     }
-  }, [article.data.priority]);
+  }, [article.data, display.priority]);
 
   useEffect(
     function initHotkeys() {
@@ -260,7 +260,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
         ERROR_NOTICE_DURATION_MS
       );
     }
-  }, [snippet.data.priority]);
+  }, [snippet.data, display.priority]);
 
   return (
     <>
