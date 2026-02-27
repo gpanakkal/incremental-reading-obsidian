@@ -280,6 +280,36 @@ export default class IncrementalReadingPlugin extends Plugin {
           throw new Error('manifest.dir is undefined');
         }
 
+        if (this.app.isMobile) {
+          // TODO: remove 'as' assertion once mobileNavbar type is added
+          const navbarBox = (this.app.mobileNavbar as any)?.containerEl as
+            | HTMLElement
+            | undefined;
+          if (navbarBox) {
+            const setNavbarHeightProp = (height?: number) => {
+              let calculatedHeight: number =
+                height ?? navbarBox.getBoundingClientRect().height;
+              const marginBottom =
+                parseFloat(getComputedStyle(navbarBox).marginBottom) || 0;
+              calculatedHeight += marginBottom;
+
+              document.body.style.setProperty(
+                '--ir-mobile-toolbar-height',
+                `${calculatedHeight}px`
+              );
+            };
+
+            const observer = new ResizeObserver(() => setNavbarHeightProp());
+
+            observer.observe(navbarBox);
+            setNavbarHeightProp();
+            this.register(function cleanupNavbarObserver() {
+              observer.disconnect();
+              document.body.style.removeProperty('--ir-mobile-toolbar-height');
+            });
+          }
+        }
+
         const repo = await SQLiteRepository.start(
           this,
           DATABASE_FILE_PATH,

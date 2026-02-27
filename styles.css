@@ -26,7 +26,6 @@
   justify-content: center;
   gap: 8px;
   padding: 12px;
-  border-top: 1px solid var(--background-modifier-border);
   background: var(--background-secondary);
   flex-shrink: 0;
 }
@@ -34,6 +33,23 @@
 /* Mobile: Move action bar to bottom using flex order */
 .is-mobile .ir-action-bar {
   order: 1;
+  margin-bottom: calc(
+    var(--ir-mobile-toolbar-height, 0px) - var(--safe-area-inset-bottom, 0px)
+  );
+}
+
+.is-mobile .ir-review-interface {
+  --view-top-spacing: 0;
+}
+
+/* Margin works differently in review since there's no div.cm-panels-bottom */
+.is-mobile .ir-review-interface .ir-action-bar {
+  margin-bottom: calc(var(--ir-mobile-toolbar-height, 0px));
+}
+
+.is-mobile .ir-review-interface {
+  padding-top: 0 !important;
+  margin-top: 0 !important;
 }
 
 .ir-review-button {

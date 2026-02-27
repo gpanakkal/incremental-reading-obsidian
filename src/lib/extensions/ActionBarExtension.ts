@@ -97,7 +97,6 @@ function createActionBarPanel(
 
     return {
       dom,
-      top: true,
       update(update) {
         // Re-render if state changed
         const prevState = update.startState.field(actionBarStateField);
