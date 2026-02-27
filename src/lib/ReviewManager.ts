@@ -75,7 +75,10 @@ import type ReviewView from 'src/views/ReviewView';
 import SRSCardReview from './SRSCardReview';
 import Article from './Article';
 import Snippet from './Snippet';
-import { SnippetOffsetTracker, type SnippetHighlight } from './SnippetOffsetTracker';
+import {
+  SnippetOffsetTracker,
+  type SnippetHighlight,
+} from './SnippetOffsetTracker';
 
 const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
   enable_fuzz: false,
@@ -819,7 +822,8 @@ export default class ReviewManager {
 
     // For source notes (or any note without a DB entry), find snippets via backlinks
     if (this.isSourceNote(parentFile)) {
-      const highlights = await this.getSnippetHighlightsViaBacklinks(parentFile);
+      const highlights =
+        await this.getSnippetHighlightsViaBacklinks(parentFile);
       this.snippetTracker.loadHighlights(parentFile.path, highlights);
       return highlights;
     }
@@ -847,7 +851,11 @@ export default class ReviewManager {
       await this.getSnippetHighlights(parentFile);
     } else {
       const snippetRow = await this.findSnippet(snippetFile);
-      if (snippetRow && snippetRow.start_offset != null && snippetRow.end_offset != null) {
+      if (
+        snippetRow &&
+        snippetRow.start_offset != null &&
+        snippetRow.end_offset != null
+      ) {
         const existing = this.snippetTracker.getHighlights(parentFile.path);
         this.snippetTracker.loadHighlights(parentFile.path, [
           ...existing,
@@ -881,7 +889,9 @@ export default class ReviewManager {
    * For each file that links to the source and is tagged as a snippet, look up its
    * offsets in the DB.
    */
-  private async getSnippetHighlightsViaBacklinks(sourceFile: TFile): Promise<SnippetHighlight[]> {
+  private async getSnippetHighlightsViaBacklinks(
+    sourceFile: TFile
+  ): Promise<SnippetHighlight[]> {
     const resolvedLinks = this.app.metadataCache.resolvedLinks;
     const highlights: SnippetHighlight[] = [];
 
@@ -893,7 +903,12 @@ export default class ReviewManager {
       if (this.getNoteType(linkingFile) !== 'snippet') continue;
 
       const snippetRow = await this.findSnippet(linkingFile);
-      if (!snippetRow || snippetRow.start_offset == null || snippetRow.end_offset == null) continue;
+      if (
+        !snippetRow ||
+        snippetRow.start_offset == null ||
+        snippetRow.end_offset == null
+      )
+        continue;
 
       highlights.push({
         ...snippetRow,
@@ -1325,27 +1340,6 @@ export default class ReviewManager {
       return file;
     } catch (error) {
       console.error(error);
-    }
-  }
-
-  /**
-   * Given a file's path, append to the end of the file, or
-   * if passed a callback, modify the file's contents
-   */
-  protected async updateFile(
-    filePath: string,
-    update: string | ((currentText: string) => string | Promise<string>)
-  ) {
-    const file = this.app.vault.getFileByPath(normalizePath(filePath));
-    if (!file) {
-      throw new Error(`Failed to open file at ${filePath}`);
-    }
-
-    if (typeof update === 'function') {
-      const currentText = await this.app.vault.read(file);
-      await update(currentText);
-    } else {
-      await this.app.vault.append(file, update);
     }
   }
 
