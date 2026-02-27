@@ -47,6 +47,11 @@
   margin-bottom: calc(var(--ir-mobile-toolbar-height, 0px));
 }
 
+/* Override Obsidian's cm-panels-top border when it contains our action bar */
+.cm-panels-top:has(.ir-action-bar) {
+  border-bottom: none;
+}
+
 .is-mobile .ir-review-interface {
   padding-top: 0 !important;
   margin-top: 0 !important;
