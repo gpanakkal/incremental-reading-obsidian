@@ -1,6 +1,6 @@
 {
 	"name": "incremental-reading-obsidian",
-	"version": "0.4.2",
+	"version": "0.4.3",
 	"description": "Leverage spaced repetition to incrementally build understanding and retain knowledge.",
 	"main": "main.js",
 	"type": "module",

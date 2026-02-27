@@ -97,7 +97,7 @@ function createActionBarPanel(
 
     return {
       dom,
-      top: true,
+      top: !this.app.isMobile,
       update(update) {
         // Re-render if state changed
         const prevState = update.startState.field(actionBarStateField);
