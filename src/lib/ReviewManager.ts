@@ -923,11 +923,13 @@ export default class ReviewManager {
   }
 
   protected async getLastSnippetReview(snippet: ISnippetBase) {
-    const lastReview = (await this.#repo.query(
-      `SELECT review_time FROM snippet_review WHERE snippet_id = $1 ` +
-        `ORDER BY review_time DESC LIMIT 1`,
-      [snippet.id]
-    )) as ISnippetReview[];
+    const lastReview = (
+      await this.#repo.query(
+        `SELECT * FROM snippet_review WHERE snippet_id = $1 ` +
+          `ORDER BY review_time DESC LIMIT 1`,
+        [snippet.id]
+      )
+    )[0] as ISnippetReview | undefined;
     return lastReview;
   }
 
@@ -959,7 +961,7 @@ export default class ReviewManager {
   }
 
   /**
-   * Change the priority of a snippet, automatically adjusting the next due date
+   * Change the priority of a snippet and recalculate its next due date
    */
   async reprioritizeSnippet(snippet: ISnippetBase, newPriority: number) {
     if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
@@ -968,11 +970,14 @@ export default class ReviewManager {
       );
     }
     const { priority: _, ...rest } = snippet;
+    const lastReview = await this.getLastSnippetReview(snippet);
     const newInterval = await this.nextTextReviewInterval({
       ...rest,
       priority: newPriority,
     });
-    const newDueTime = Date.now() + newInterval;
+    const newDueTime = lastReview
+      ? lastReview.review_time + newInterval
+      : snippet.due;
 
     await this.#repo.mutate(
       `UPDATE snippet SET priority = $1, due = $2 WHERE id = $3`,
@@ -1153,11 +1158,13 @@ export default class ReviewManager {
   }
 
   protected async getLastArticleReview(snippet: IArticleBase) {
-    const lastReview = (await this.#repo.query(
-      `SELECT review_time FROM article_review WHERE article_id = $1 ` +
-        `ORDER BY review_time DESC LIMIT 1`,
-      [snippet.id]
-    )) as IArticleReview[];
+    const lastReview = (
+      await this.#repo.query(
+        `SELECT * FROM article_review WHERE article_id = $1 ` +
+          `ORDER BY review_time DESC LIMIT 1`,
+        [snippet.id]
+      )
+    )[0] as IArticleReview | undefined;
     return lastReview;
   }
 
@@ -1269,7 +1276,7 @@ export default class ReviewManager {
   }
 
   /**
-   * Change the priority of an article, automatically adjusting the next due date
+   * Change the priority of an article and recalculate its next due date
    */
   async reprioritizeArticle(article: IArticleBase, newPriority: number) {
     if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
@@ -1278,11 +1285,14 @@ export default class ReviewManager {
       );
     }
     const { priority: _, ...rest } = article;
+    const lastReview = await this.getLastArticleReview(article);
     const newInterval = await this.nextTextReviewInterval({
       ...rest,
       priority: newPriority,
     });
-    const newDueTime = Date.now() + newInterval;
+    const newDueTime = lastReview
+      ? lastReview.review_time + newInterval
+      : article.due;
 
     await this.#repo.mutate(
       `UPDATE article SET priority = $1, due = $2 WHERE id = $3`,
@@ -1302,8 +1312,8 @@ export default class ReviewManager {
       : this.getLastSnippetReview(text));
 
     const lastInterval =
-      lastReview[0] && text.due
-        ? text.due - lastReview[0].review_time
+      lastReview && text.due
+        ? text.due - lastReview.review_time
         : TEXT_BASE_REVIEW_INTERVAL;
 
     const nextInterval = Math.round(lastInterval * intervalMultiplier);
