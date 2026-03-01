@@ -40,11 +40,20 @@ export default class SRSCard implements ISRSCard {
       }),
       dismissed: !!dismissed,
       state: State[cardRow.state] as StateType,
+      showAnswer: false,
     };
   }
 
   static displayToRow(card: ISRSCardDisplay): SRSCardRow {
-    const { created_at, due, dismissed, last_review, state, ...rest } = card;
+    const {
+      created_at,
+      due,
+      dismissed,
+      last_review,
+      state,
+      showAnswer,
+      ...rest
+    } = card;
     return {
       ...rest,
       created_at: Date.parse(created_at.toISOString()),

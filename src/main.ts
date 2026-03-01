@@ -19,12 +19,14 @@ import Article from './lib/Article';
 import { QueryModal } from './views/QueryModal';
 import { createIRExtensions } from './lib/extensions';
 import { queryClient } from './lib/queryClient';
+import { store } from './lib/store';
 import type { IRPluginSettings } from './lib/settings';
 import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
 
 export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;
   #reviewManager: ReviewManager;
+  store: typeof store;
   MarkdownEditor: any;
 
   /**
@@ -290,6 +292,7 @@ export default class IncrementalReadingPlugin extends Plugin {
           }
         }
 
+        this.store = store;
         const repo = await SQLiteRepository.start(
           this,
           DATABASE_FILE_PATH,
@@ -376,12 +379,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       return;
     }
 
-    const reviewView = this.app.workspace
-      .getLeavesOfType(ReviewView.viewType)
-      .find((leaf) => leaf.view instanceof ReviewView)?.view as
-      | ReviewView
-      | undefined;
-    const currentItem = reviewView?.currentItem;
+    const { currentItem } = this.store.getState();
     if (currentItem?.file.path !== file.path) {
       // console.log(
       //   `modified file doesn't match current item; skipping invalidation`
