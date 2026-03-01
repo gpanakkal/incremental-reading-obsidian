@@ -1,13 +1,18 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Dispatch } from 'react';
-import {
-  type PropsWithChildren,
-  createContext,
-  useContext,
-  useState,
-} from 'react';
-import type { ReviewArticle, ReviewCard, ReviewSnippet } from '#/lib/types';
-import { isReviewCard, type ReviewItem } from '#/lib/types';
+import { createContext, useContext, useState } from 'react';
+import type { Dispatch, PropsWithChildren } from 'react';
+import { useDispatch } from 'react-redux';
+import { Notice } from 'obsidian';
+import type { Scope, WorkspaceLeaf } from 'obsidian';
+import type { Grade } from 'ts-fsrs';
+import { Rating } from 'ts-fsrs';
+import type {
+  ReviewArticle,
+  ReviewCard,
+  ReviewSnippet,
+  ReviewItem,
+} from '#/lib/types';
+import { isReviewCard } from '#/lib/types';
 import {
   CLOZE_DELIMITERS,
   CONTENT_TITLE_SLICE_LENGTH,
@@ -18,21 +23,17 @@ import {
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
-import type { Scope } from 'obsidian';
-import { Notice, type WorkspaceLeaf } from 'obsidian';
 import type IncrementalReadingPlugin from '#/main';
-import type { Grade } from 'ts-fsrs';
-import { Rating } from 'ts-fsrs';
 import type { StateUpdater } from 'preact/hooks';
 import type { EditState } from './types';
 import { EditingState } from './types';
-import { deepCopy, getContentSlice, splitFrontMatter } from '#/lib/utils';
+import { getContentSlice, splitFrontMatter } from '#/lib/utils';
+import { setCurrentItem, setDismissed } from '#/lib/store';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
   reviewView: ReviewView;
   reviewManager: ReviewManager;
-  currentItem: ReviewItem | undefined;
   getNext: () => void;
   reviewArticle: (
     article: ReviewArticle,
@@ -46,8 +47,6 @@ interface ReviewContextProps {
   dismissItem: (item: ReviewItem) => Promise<void>;
   unDismissItem: (item: ReviewItem) => Promise<void>;
   skipItem: (item: ReviewItem) => void;
-  showAnswer: boolean;
-  setShowAnswer: Dispatch<StateUpdater<boolean>>;
   editState: EditState;
   setEditState: Dispatch<StateUpdater<EditState>>;
   saveNote: (item: ReviewItem, newContent: string) => Promise<void>;
@@ -68,15 +67,12 @@ export function ReviewContextProvider({
   leaf: WorkspaceLeaf;
   reviewManager: ReviewManager;
 }>) {
-  const [showAnswer, setShowAnswer] = useState(false);
   const [editState, setEditState] = useState<EditState>(EditingState.cancel);
 
   const queryClient = useQueryClient();
-  const {
-    isPending,
-    isError,
-    data: currentItem,
-  } = useQuery({
+  const dispatch = useDispatch();
+
+  const { isPending, isError, data } = useQuery({
     queryKey: ['current-review-item'],
     queryFn: async () => {
       setEditState(EditingState.cancel);
@@ -85,8 +81,7 @@ export function ReviewContextProvider({
         const initialItem = reviewView.initialItem;
         reviewView.initialItem = null; // Clear so next call uses normal queue
         if (isReviewCard(initialItem)) await updateDelimiters(initialItem);
-        setShowAnswer(false);
-        reviewView.currentItem = initialItem;
+        dispatch(setCurrentItem(initialItem));
         return initialItem;
       }
 
@@ -97,8 +92,7 @@ export function ReviewContextProvider({
         result.all.filter(({ data }) => !reviewView.seenIds.has(data.id))[0] ??
         null;
       if (nextItem && isReviewCard(nextItem)) await updateDelimiters(nextItem);
-      setShowAnswer(false);
-      reviewView.currentItem = nextItem;
+      dispatch(setCurrentItem(nextItem));
       return nextItem;
     },
   });
@@ -244,22 +238,8 @@ export function ReviewContextProvider({
       `Restored ${type} "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}" to queue`
     );
 
-    // update the local cache instead of invalidating it so it remains open in review
-    queryClient.setQueryData(
-      ['current-review-item'],
-      (currentItem: ReviewItem) => {
-        if (!currentItem) return;
-
-        const updated = {
-          file: currentItem.file,
-          data: {
-            ...deepCopy(currentItem.data),
-            dismissed: false,
-          },
-        };
-        return updated;
-      }
-    );
+    // update item in Redux store
+    dispatch(setDismissed(false));
   };
 
   const skipItem = (item: ReviewItem) => {
@@ -326,7 +306,6 @@ export function ReviewContextProvider({
     plugin,
     reviewView,
     reviewManager,
-    currentItem,
     getNext,
     reviewArticle,
     reviewSnippet,
@@ -334,8 +313,6 @@ export function ReviewContextProvider({
     dismissItem,
     unDismissItem,
     skipItem,
-    showAnswer,
-    setShowAnswer,
     editState,
     setEditState,
     saveNote,

@@ -18,17 +18,19 @@ import {
   setInsertMode,
   getMarkdownController,
 } from './helpers';
-import type { EditState } from './types';
 import { useReviewContext } from './ReviewContext';
 import { getBaseMarkdownExtensions } from '../lib/utils';
 import type { ReviewItem } from '#/lib/types';
 import {
-  setReviewMode,
-  setShowAnswer as setShowAnswerEffect,
+  setReviewModeEffect,
+  setShowAnswerEffect,
   setReviewCallbacks,
   isExternalSync,
   type ReviewCallbacks,
 } from '#/lib/extensions';
+import { useDispatch } from 'react-redux';
+import { setShowAnswer } from '#/lib/store';
+import { useReduxStore } from '#/hooks/useStore';
 
 /**
  * Credit goes to mgmeyers for figuring out how to get the editor prototype. See the original code here: https://github.com/mgmeyers/obsidian-kanban/blob/main/src/components/Editor/MarkdownEditor.tsx
@@ -62,6 +64,9 @@ export function IREditor({
   placeholder,
   titleRef,
 }: IREditorProps) {
+  const { currentItem } = useReduxStore();
+  const dispatch = useDispatch();
+
   const {
     reviewView,
     reviewManager,
@@ -70,9 +75,6 @@ export function IREditor({
     gradeCard,
     dismissItem,
     skipItem,
-    showAnswer,
-    setShowAnswer: setShowAnswerContext,
-    currentItem,
   } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
@@ -244,13 +246,13 @@ export function IREditor({
         gradeCard: async (data, grade) => gradeCard(data, grade),
         dismissItem: async (reviewItem) => dismissItem(reviewItem),
         skipItem: (reviewItem) => skipItem(reviewItem),
-        setShowAnswer: (show) => setShowAnswerContext(show),
+        setShowAnswer: (show) => dispatch(setShowAnswer(show)),
         getCurrentItem: () => currentItem,
       };
 
       cm.dispatch({
         effects: [
-          setReviewMode.of(true),
+          setReviewModeEffect.of(true),
           setReviewCallbacks.of(reviewCallbacks),
         ],
       });
@@ -364,13 +366,14 @@ export function IREditor({
     }
   }, [value]);
 
-  // Sync showAnswer state from ReviewContext to the action bar extension
+  // Sync showAnswer state to the action bar extension
   useEffect(() => {
     if (!internalRef.current) return;
+    const update = 'showAnswer' in item.data ? item.data.showAnswer : false;
     internalRef.current.dispatch({
-      effects: setShowAnswerEffect.of(showAnswer),
+      effects: setShowAnswerEffect.of(update),
     });
-  }, [showAnswer]);
+  }, [item, 'showAnswer' in item.data ? item.data.showAnswer : false]);
 
   const cls = [
     'markdown-source-view',

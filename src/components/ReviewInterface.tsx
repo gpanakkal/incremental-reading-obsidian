@@ -1,4 +1,5 @@
 import type { WorkspaceLeaf } from 'obsidian';
+import { Provider as ReduxProvider } from 'react-redux';
 import { QueryClientProvider } from '@tanstack/react-query';
 import type IncrementalReadingPlugin from '#/main';
 import { ReviewContextProvider, useReviewContext } from './ReviewContext';
@@ -7,6 +8,7 @@ import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
 import { ActionBar } from './ActionBar';
 import { queryClient } from '#/lib/queryClient';
+import { useReduxStore } from '#/hooks/useStore';
 
 export function createReviewInterface(props: {
   reviewView: ReviewView;
@@ -15,16 +17,19 @@ export function createReviewInterface(props: {
   reviewManager: ReviewManager;
 }) {
   return (
-    <QueryClientProvider client={queryClient}>
-      <ReviewContextProvider {...props}>
-        <ReviewInterface />
-      </ReviewContextProvider>
-    </QueryClientProvider>
+    <ReduxProvider store={props.plugin.store}>
+      <QueryClientProvider client={queryClient}>
+        <ReviewContextProvider {...props}>
+          <ReviewInterface />
+        </ReviewContextProvider>
+      </QueryClientProvider>
+    </ReduxProvider>
   );
 }
 
 function ReviewInterface() {
-  const { currentItem, getNext } = useReviewContext();
+  const { currentItem } = useReduxStore();
+  const { getNext } = useReviewContext();
   if (!currentItem) getNext();
 
   return (

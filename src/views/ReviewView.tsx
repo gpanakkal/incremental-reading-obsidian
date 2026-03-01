@@ -2,19 +2,21 @@ import type IncrementalReadingPlugin from '#/main';
 import type { IconName, TFile } from 'obsidian';
 import type { WorkspaceLeaf } from 'obsidian';
 import { FileView, Scope } from 'obsidian';
+import { render } from 'preact';
+import type { Unsubscribe } from '@reduxjs/toolkit';
 import type { ReviewItem } from '#/lib/types';
 import { PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
 import { createReviewInterface } from '#/components/ReviewInterface';
-import { render } from 'preact';
 
 export default class ReviewView extends FileView {
   static #viewType = 'incremental-reading-review';
   #reviewManager: ReviewManager;
   seenIds: Set<string> = new Set();
-  #currentItem: ReviewItem | null = null;
+  // #currentItem: ReviewItem | null = null;
   plugin: IncrementalReadingPlugin;
   activeEditor: any;
+  /* required for review view to open */
   allowNoFile: boolean = true;
   /**
    * Optional initial item to display first instead of the top of the queue.
@@ -22,6 +24,7 @@ export default class ReviewView extends FileView {
    */
   initialItem: ReviewItem | null = null;
   scope: Scope;
+  #unsubscribe: Unsubscribe;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -32,6 +35,10 @@ export default class ReviewView extends FileView {
     this.plugin = plugin;
     this.#reviewManager = reviewManager;
     this.scope = new Scope(this.plugin.app.scope);
+    this.#unsubscribe = plugin.store.subscribe(() => {
+      const { currentItem } = plugin.store.getState();
+      this.file = currentItem?.file ?? null;
+    });
   }
 
   static get viewType() {
@@ -55,17 +62,6 @@ export default class ReviewView extends FileView {
   // setViewData(data: string, clear: boolean): void {}
 
   clear(): void {}
-
-  get currentItem(): ReviewItem | null {
-    return this.#currentItem;
-  }
-
-  set currentItem(item: ReviewItem | null) {
-    this.#currentItem = item;
-    // Update the file property to notify FileView of the change
-    // This makes sidebar panels (backlinks, outline, etc.) update
-    this.file = item?.file ?? null;
-  }
 
   /**
    * Get selected text from the rendered markdown content.
@@ -96,6 +92,7 @@ export default class ReviewView extends FileView {
   async onClose() {
     render(null, this.containerEl);
     this.activeEditor = null;
+    this.#unsubscribe();
   }
 
   async onLoadFile(file: unknown): Promise<void> {}

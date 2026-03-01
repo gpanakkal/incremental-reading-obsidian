@@ -1,6 +1,6 @@
 {
 	"name": "incremental-reading-obsidian",
-	"version": "0.4.5",
+	"version": "0.5.0",
 	"description": "Leverage spaced repetition to incrementally build understanding and retain knowledge.",
 	"main": "main.js",
 	"type": "module",
@@ -21,11 +21,13 @@
 	"author": "Gautam Panakkal <gautampanakkal@gmail.com>",
 	"license": "AGPL-3.0-only",
 	"dependencies": {
+		"@reduxjs/toolkit": "2.11.2",
 		"@tanstack/react-query": "5.90.2",
 		"classcat": "5.0.5",
 		"preact": "10.28.3",
 		"react": "npm:@preact/compat",
 		"react-dom": "npm:@preact/compat",
+		"react-redux": "9.2.0",
 		"sql.js": "~1.11.0",
 		"ts-fsrs": "~4.6.1"
 	},
