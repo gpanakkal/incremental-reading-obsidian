@@ -16,9 +16,13 @@ import {
 } from '#/lib/constants';
 import { transformPriority } from '#/lib/utils';
 import { Notice } from 'obsidian';
+import { useReduxStore } from '#/hooks/useStore';
+import { setShowAnswer } from '#/lib/store';
+import { useDispatch } from 'react-redux';
 
 export function ActionBar() {
-  const { currentItem } = useReviewContext();
+  const { currentItem } = useReduxStore();
+
   return (
     <div className="ir-action-bar" tabIndex={-1}>
       {/* setting a tabIndex makes the action bar focusable */}
@@ -300,18 +304,13 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
 }
 
 function CardActions({ card }: { card: ReviewCard }) {
-  const {
-    gradeCard,
-    showAnswer,
-    setShowAnswer,
-    reviewView,
-    registerActionBarHotkey,
-  } = useReviewContext();
+  const dispatch = useDispatch();
+  const { gradeCard, reviewView, registerActionBarHotkey } = useReviewContext();
 
   useEffect(
     function initShowAnswerHotkey() {
       const handler = registerActionBarHotkey(['Alt'], 'c', () => {
-        setShowAnswer(true);
+        dispatch(setShowAnswer(true));
       });
       return () => {
         reviewView.scope.unregister(handler);
@@ -322,7 +321,7 @@ function CardActions({ card }: { card: ReviewCard }) {
 
   useEffect(
     function initGradingHotkeys() {
-      if (!showAnswer) return;
+      if (!card.data.showAnswer) return;
 
       const handlers = [
         registerActionBarHotkey(null, '1', async () => {
@@ -342,12 +341,12 @@ function CardActions({ card }: { card: ReviewCard }) {
         handlers.forEach((handler) => reviewView.scope.unregister(handler));
       };
     },
-    [card, showAnswer]
+    [card, card.data.showAnswer]
   );
 
   return (
     <>
-      {showAnswer ? (
+      {card.data.showAnswer ? (
         <>
           <Button
             label="🔁 Again"
@@ -376,7 +375,7 @@ function CardActions({ card }: { card: ReviewCard }) {
             label="Show Answer"
             tooltip="Alt + C"
             handleClick={() => {
-              setShowAnswer(true);
+              dispatch(setShowAnswer(true));
             }}
           />
         </>

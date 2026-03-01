@@ -27,12 +27,12 @@ import type { ReviewArticle, ReviewItem, ReviewSnippet } from '#/lib/types';
  * When in review mode, the action bar shows review-specific buttons.
  * When not in review mode (standalone), shows simpler actions like dismiss/un-dismiss.
  */
-export const setReviewMode = StateEffect.define<boolean>();
+export const setReviewModeEffect = StateEffect.define<boolean>();
 
 /**
  * State effect to set whether the answer is shown (for cards).
  */
-export const setShowAnswer = StateEffect.define<boolean>();
+export const setShowAnswerEffect = StateEffect.define<boolean>();
 
 /**
  * State effect to provide review context callbacks.
@@ -68,9 +68,9 @@ export const actionBarStateField = StateField.define<ActionBarState>({
   update(value, tr) {
     let newValue = value;
     for (const effect of tr.effects) {
-      if (effect.is(setReviewMode)) {
+      if (effect.is(setReviewModeEffect)) {
         newValue = { ...newValue, isReviewMode: effect.value };
-      } else if (effect.is(setShowAnswer)) {
+      } else if (effect.is(setShowAnswerEffect)) {
         newValue = { ...newValue, showAnswer: effect.value };
       } else if (effect.is(setReviewCallbacks)) {
         newValue = { ...newValue, callbacks: effect.value };
@@ -177,7 +177,7 @@ function renderReviewModeActions(
       // Show answer button
       const btn = createButton('Show Answer', () => {
         callbacks.setShowAnswer?.(true);
-        view.dispatch({ effects: setShowAnswer.of(true) });
+        view.dispatch({ effects: setShowAnswerEffect.of(true) });
       });
       container.appendChild(btn);
     }

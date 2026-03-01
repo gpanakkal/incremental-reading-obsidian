@@ -7,10 +7,13 @@ import type IncrementalReadingPlugin from '#/main';
 
 // Re-export for convenience
 export { irPluginFacet } from './irPluginFacet';
-export { isExternalSync, refreshHighlightsEffect } from './SnippetHighlightExtension';
 export {
-  setReviewMode,
-  setShowAnswer,
+  isExternalSync,
+  refreshHighlightsEffect,
+} from './SnippetHighlightExtension';
+export {
+  setReviewModeEffect,
+  setShowAnswerEffect,
   setReviewCallbacks,
   actionBarStateField,
   type ReviewCallbacks,
@@ -25,7 +28,9 @@ export * from './utils';
  * this.registerEditorExtension(createIRExtensions(this));
  * ```
  */
-export function createIRExtensions(plugin: IncrementalReadingPlugin): Extension {
+export function createIRExtensions(
+  plugin: IncrementalReadingPlugin
+): Extension {
   const extensions: Extension[] = [
     // Plugin access facet - must be first so other extensions can use it
     irPluginFacet.of(plugin),

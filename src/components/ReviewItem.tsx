@@ -1,10 +1,10 @@
-import { useState, useRef } from 'react';
+import { useRef } from 'react';
 import { isReviewCard, isReviewArticle, type ReviewItem } from '#/lib/types';
 import { IREditor } from './IREditor';
 import { useReviewContext } from './ReviewContext';
-import type { EditorView, ViewUpdate } from '@codemirror/view';
+import type { EditorView } from '@codemirror/view';
 import { CardViewer } from './CardViewer';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { TitleEditor } from './TitleEditor';
 
 /**
@@ -13,11 +13,8 @@ import { TitleEditor } from './TitleEditor';
  * - loading spinner and error element
  */
 export default function ReviewItem({ item }: { item: ReviewItem }) {
-  // console.log(
-  //   `[ReviewItem] Rendering item: ${item.data.reference} (id: ${item.data.id})`
-  // );
-  const { plugin, showAnswer, reviewManager } = useReviewContext();
-  const queryClient = useQueryClient();
+  const { plugin, reviewManager } = useReviewContext();
+
   const {
     isPending,
     isError,
@@ -40,7 +37,7 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
           />
         </div>
       )}
-      {isReviewCard(item) && !showAnswer ? (
+      {isReviewCard(item) && !item.data.showAnswer ? (
         <CardViewer cardText={fileText} key={item.data.id} />
       ) : (
         <IREditor
