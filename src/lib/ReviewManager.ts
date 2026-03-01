@@ -13,10 +13,7 @@ import type {
   IArticleReview,
   ISnippetBase,
   NoteType,
-  ReviewArticle,
-  ReviewCard,
   ReviewItem,
-  ReviewSnippet,
 } from '#/lib/types';
 import {
   type ISnippetActive,
@@ -28,6 +25,9 @@ import {
   type SnippetRow,
   type ArticleRow,
   isArticle,
+  ReviewCard,
+  ReviewArticle,
+  ReviewSnippet,
 } from '#/lib/types';
 import {
   SNIPPET_DIRECTORY,
@@ -153,10 +153,7 @@ export default class ReviewManager {
     return endOfDayLocal;
   }
 
-  async getCardsDue(
-    dueBy?: number,
-    limit?: number
-  ): Promise<{ data: ISRSCardDisplay; file: TFile }[]> {
+  async getCardsDue(dueBy?: number, limit?: number): Promise<ReviewCard[]> {
     const dueTime = dueBy ?? this.getEndOfToday();
     try {
       const cardsDue = (
@@ -751,15 +748,15 @@ export default class ReviewManager {
     if (noteType === 'article') {
       const row = await this.findArticle(file);
       if (!row) return null;
-      return { data: Article.rowToBase(row), file } as ReviewArticle;
+      return { data: Article.rowToBase(row), file } satisfies ReviewArticle;
     } else if (noteType === 'snippet') {
       const row = await this.findSnippet(file);
       if (!row) return null;
-      return { data: Snippet.rowToBase(row), file } as ReviewSnippet;
+      return { data: Snippet.rowToBase(row), file } satisfies ReviewSnippet;
     } else if (noteType === 'card') {
       const row = await this.findCard(file);
       if (!row) return null;
-      return { data: SRSCard.rowToDisplay(row), file } as ReviewCard;
+      return { data: SRSCard.rowToDisplay(row), file } satisfies ReviewCard;
     }
     return null;
   }
