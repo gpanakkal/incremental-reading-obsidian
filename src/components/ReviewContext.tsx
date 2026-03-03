@@ -28,7 +28,7 @@ import type { StateUpdater } from 'preact/hooks';
 import type { EditState } from './types';
 import { EditingState } from './types';
 import { getContentSlice, splitFrontMatter } from '#/lib/utils';
-import { setCurrentItem, setDismissed } from '#/lib/store';
+import { addSeenId, setCurrentItem, setDismissed } from '#/lib/store';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
@@ -88,9 +88,9 @@ export function ReviewContextProvider({
       const result = await reviewManager.getDue({
         limit: REVIEW_FETCH_COUNT,
       });
+      const { seenIds } = plugin.store.getState();
       const nextItem =
-        result.all.filter(({ data }) => !reviewView.seenIds.has(data.id))[0] ??
-        null;
+        result.all.filter(({ data }) => !seenIds.has(data.id))[0] ?? null;
       if (nextItem && isReviewCard(nextItem)) await updateDelimiters(nextItem);
       dispatch(setCurrentItem(nextItem));
       return nextItem;
@@ -159,7 +159,6 @@ export function ReviewContextProvider({
   ) => {
     try {
       await reviewManager.reviewArticle(article.data, Date.now(), nextInterval);
-      reviewView.seenIds.add(article.data.id);
       if (article.data.dismissed) {
         await unDismissItem(article);
       }
@@ -182,7 +181,6 @@ export function ReviewContextProvider({
   ) => {
     try {
       await reviewManager.reviewSnippet(snippet.data, Date.now(), nextInterval);
-      reviewView.seenIds.add(snippet.data.id);
       if (snippet.data.dismissed) {
         await unDismissItem(snippet);
       }
@@ -201,7 +199,6 @@ export function ReviewContextProvider({
 
   const gradeCard = async (card: ReviewCard, grade: Grade) => {
     await reviewManager.reviewCard(card.data, grade);
-    reviewView.seenIds.add(card.data.id);
     new Notice(`Graded as: ${Rating[grade]}`);
     if (card.data.dismissed) {
       await unDismissItem(card);
@@ -216,7 +213,6 @@ export function ReviewContextProvider({
       throw new TypeError(`Item type not recognized`);
     }
     await reviewManager.dismissItem(type, item.data.id);
-    reviewView.seenIds.add(item.data.id);
 
     const [_folder, subRef] = item.data.reference.split('/');
     new Notice(
@@ -243,7 +239,7 @@ export function ReviewContextProvider({
   };
 
   const skipItem = (item: ReviewItem) => {
-    reviewView.seenIds.add(item.data.id);
+    dispatch(addSeenId(item.data.id));
 
     const { reference } = item.data;
     const [folder, subRef] = reference.split('/');

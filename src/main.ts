@@ -26,7 +26,7 @@ import Article from './lib/Article';
 import { QueryModal } from './views/QueryModal';
 import { createIRExtensions } from './lib/extensions';
 import { queryClient } from './lib/queryClient';
-import { store } from './lib/store';
+import { setReviewViewSaving, store } from './lib/store';
 
 interface IRPluginSettings {
   mySetting: string;
@@ -43,12 +43,6 @@ export default class IncrementalReadingPlugin extends Plugin {
   MarkdownEditor: any;
 
   /**
-   * Flag to track when the review view is saving a file.
-   * Used to prevent cache invalidation for internal modifications.
-   */
-  #isReviewViewSaving = false;
-
-  /**
    * Get the ReviewManager instance.
    * May be null if called before onLayoutReady completes.
    */
@@ -61,11 +55,11 @@ export default class IncrementalReadingPlugin extends Plugin {
    * The vault 'modify' event handler will ignore changes while this is active.
    */
   async withReviewViewSave<T>(operation: () => Promise<T>): Promise<T> {
-    this.#isReviewViewSaving = true;
+    store.dispatch(setReviewViewSaving(true));
     try {
       return await operation();
     } finally {
-      this.#isReviewViewSaving = false;
+      store.dispatch(setReviewViewSaving(false));
     }
   }
 
@@ -388,7 +382,7 @@ export default class IncrementalReadingPlugin extends Plugin {
    */
   async invalidateCurrentItemCache(file: TAbstractFile) {
     // Skip cache invalidation if the modification came from the review view itself
-    if (this.#isReviewViewSaving) {
+    if (store.getState().isReviewViewSaving) {
       // console.log('review view is saving; skipping invalidation');
       return;
     }
