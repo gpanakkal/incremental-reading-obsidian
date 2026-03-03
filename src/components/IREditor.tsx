@@ -10,8 +10,8 @@ import {
 } from '@codemirror/view';
 import classcat from 'classcat';
 import { Platform } from 'obsidian';
-import type { MutableRefObject } from 'react';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, type MutableRefObject } from 'react';
+import { createPortal } from 'react-dom';
 import {
   isEditing,
   getEditorAppProxy,
@@ -20,7 +20,9 @@ import {
 } from './helpers';
 import { useReviewContext } from './ReviewContext';
 import { getBaseMarkdownExtensions } from '../lib/utils';
-import type { ReviewItem } from '#/lib/types';
+import type { ReviewItem, ReviewArticle } from '#/lib/types';
+import { isReviewArticle } from '#/lib/types';
+import { TitleEditor } from './TitleEditor';
 import {
   setReviewModeEffect,
   setShowAnswerEffect,
@@ -50,7 +52,6 @@ interface IREditorProps {
   value?: string;
   className: string;
   placeholder?: string;
-  titleRef?: MutableRefObject<HTMLDivElement | null>;
 }
 
 export function IREditor({
@@ -62,7 +63,6 @@ export function IREditor({
   className,
   value,
   placeholder,
-  titleRef,
 }: IREditorProps) {
   const { currentItem } = useReduxStore();
   const dispatch = useDispatch();
@@ -79,6 +79,7 @@ export function IREditor({
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
   const { editState, saveNote } = useReviewContext();
+  const [titlePortalEl, setTitlePortalEl] = useState<Element | null>(null);
 
   const handleChange = async (update: ViewUpdate) => {
     if (!update.docChanged) return;
@@ -214,6 +215,7 @@ export function IREditor({
 
       let editor: any;
       let cm: EditorView;
+      let titleContainer: HTMLDivElement | null = null;
 
       try {
         editor = new (Editor as any)(app, elRef.current, controller);
@@ -257,12 +259,15 @@ export function IREditor({
         ],
       });
 
-      // Inject title element into CodeMirror's DOM structure
-      if (titleRef?.current) {
+      // Render TitleEditor via React portal into a container prepended to
+      // .cm-sizer, so it appears above the note body. .cm-sizer is created
+      // synchronously by CodeMirror's constructor, so it's always present here.
+      if (isReviewArticle(item)) {
         const cmSizer = cm.dom.querySelector('.cm-sizer');
-        const cmContentContainer = cm.dom.querySelector('.cm-contentContainer');
-        if (cmSizer && cmContentContainer) {
-          cmSizer.insertBefore(titleRef.current, cmContentContainer);
+        if (cmSizer) {
+          titleContainer = document.createElement('div');
+          cmSizer.prepend(titleContainer);
+          setTitlePortalEl(titleContainer);
         }
       }
 
@@ -294,6 +299,9 @@ export function IREditor({
       }
 
       const cleanupEffect = () => {
+        titleContainer?.remove();
+        setTitlePortalEl(null);
+
         if (Platform.isMobile) {
           try {
             cm.dom.win.removeEventListener('keyboardDidShow', onShow);
@@ -392,5 +400,14 @@ export function IREditor({
   ];
   if (className) cls.push(className);
 
-  return <div className={classcat(cls)} ref={elRef}></div>;
+  return (
+    <>
+      <div className={classcat(cls)} ref={elRef}></div>
+      {titlePortalEl &&
+        createPortal(
+          <TitleEditor item={item as ReviewArticle} reviewManager={reviewManager} />,
+          titlePortalEl
+        )}
+    </>
+  );
 }
