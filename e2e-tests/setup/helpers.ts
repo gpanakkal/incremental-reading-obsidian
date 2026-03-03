@@ -76,20 +76,40 @@ export async function launchElectron(vaultPath: string) {
 
 /**
  * Close the Electron app and wait for the process to fully exit.
- * On Windows, app.close() can resolve before Chromium child processes
- * release their file locks, causing EBUSY errors on cleanup.
+ * On Windows/Linux CI, app.close() can resolve before the Node ChildProcess
+ * 'exit' event fires (Playwright may terminate the process at the OS level in
+ * a way that bypasses Node's event machinery). A polling fallback ensures we
+ * always escape the wait, preventing afterEach timeouts in CI.
  */
 export async function closeElectron(app: ElectronApplication) {
   const proc = app.process();
+
+  // Register 'exit' listener before calling close() so we don't miss the event.
   const exited = new Promise<void>((resolve) => {
-    if (!proc.connected && proc.exitCode !== null) {
+    if (proc.exitCode !== null) {
       resolve();
     } else {
-      proc.on('exit', () => resolve());
+      proc.on('exit', resolve);
     }
   });
+
   await app.close();
-  await exited;
+
+  // After close() resolves, the process may have already exited without firing
+  // the 'exit' event (observed in CI on Windows/Linux). Race the event listener
+  // against a polling fallback to avoid hanging indefinitely.
+  await Promise.race([
+    exited,
+    new Promise<void>((resolve) => {
+      if (proc.exitCode !== null) return resolve();
+      const id = setInterval(() => {
+        if (proc.exitCode !== null) {
+          clearInterval(id);
+          resolve();
+        }
+      }, 100);
+    }),
+  ]);
 }
 /**
  * Uses `Locator.evaluate` to click via DOM API directly.
