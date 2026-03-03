@@ -44,7 +44,7 @@ const seenIdsSlice = createSlice({
   name: 'seenIds',
   initialState: new Set<string>(),
   reducers: {
-    addId: (state, action: PayloadAction<string>) => {
+    addSeenId: (state, action: PayloadAction<string>) => {
       state.add(action.payload);
     },
   },
@@ -53,7 +53,25 @@ const seenIdsSlice = createSlice({
   },
 });
 
-export const { addId } = seenIdsSlice.actions;
+export const { addSeenId } = seenIdsSlice.actions;
+
+/**
+ * Flag to track when the review view is saving a file.
+ * Used to prevent cache invalidation for internal modifications.
+ */
+const isReviewViewSavingSlice = createSlice({
+  name: 'isReviewViewSaving',
+  initialState: false,
+  reducers: {
+    setReviewViewSaving: (_state, action: PayloadAction<boolean>) =>
+      action.payload,
+  },
+  extraReducers: (builder) => {
+    builder.addCase(resetSession, () => false);
+  },
+});
+
+export const { setReviewViewSaving } = isReviewViewSavingSlice.actions;
 
 const editStateSlice = createSlice({
   name: 'editState',
@@ -69,6 +87,7 @@ export const store = configureStore({
   reducer: {
     currentItem: currentItemSlice.reducer,
     seenIds: seenIdsSlice.reducer,
+    isReviewViewSaving: isReviewViewSavingSlice.reducer,
     editState: editStateSlice.reducer,
   },
 });

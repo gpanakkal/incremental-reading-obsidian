@@ -8,12 +8,11 @@ import type { ReviewItem } from '#/lib/types';
 import { PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
 import { createReviewInterface } from '#/components/ReviewInterface';
+import { resetSession } from '#/lib/store';
 
 export default class ReviewView extends FileView {
   static #viewType = 'incremental-reading-review';
   #reviewManager: ReviewManager;
-  seenIds: Set<string> = new Set();
-  // #currentItem: ReviewItem | null = null;
   plugin: IncrementalReadingPlugin;
   activeEditor: any;
   /* required for review view to open */
@@ -93,6 +92,7 @@ export default class ReviewView extends FileView {
     render(null, this.containerEl);
     this.activeEditor = null;
     this.#unsubscribe();
+    this.plugin.store.dispatch(resetSession());
   }
 
   async onLoadFile(file: unknown): Promise<void> {}
