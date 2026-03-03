@@ -341,19 +341,20 @@ export function IREditor({
     if (!internalRef.current) return;
 
     const view = internalRef.current;
-    const currentContent = view.state.doc.toString();
     const newValue = value ?? '';
 
     // Only update if the content actually changed
-    if (currentContent !== newValue) {
-      // Defer the dispatch to avoid "update in progress" errors
+    if (view.state.doc.toString() !== newValue) {
+      // Defer the dispatch to avoid "update in progress" errors.
+      // Re-read doc length inside the callback to avoid stale closure bugs
+      // where the doc has changed between capturing length and dispatching.
       setTimeout(() => {
         // Check if the view is still valid
         if (internalRef.current === view) {
           view.dispatch({
             changes: {
               from: 0,
-              to: currentContent.length,
+              to: view.state.doc.length,
               insert: newValue,
             },
             annotations: isExternalSync.of(true),

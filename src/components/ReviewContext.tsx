@@ -293,8 +293,6 @@ export function ReviewContextProvider({
       }
     });
 
-    queryClient.setQueryData([item.data.reference], newContent);
-
     setEditState(EditingState.complete);
   };
 
