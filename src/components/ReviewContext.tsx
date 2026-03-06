@@ -94,10 +94,7 @@ export function ReviewContextProvider({
       if (nextItem && isReviewCard(nextItem)) await updateDelimiters(nextItem);
 
       dispatch(setCurrentItem(nextItem));
-      queryClient.setQueryData<ReviewItem>(
-        [nextItem.data.id, 'data'],
-        () => nextItem
-      );
+      queryClient.setQueryData<ReviewItem>([nextItem.data.id], () => nextItem);
       return nextItem;
     },
   });

@@ -25,7 +25,7 @@ export function ActionBar() {
   const storeCurrentItem = useAppSelector((state) => state.currentItem);
   const { reviewManager } = useReviewContext();
   const { data: currentItem } = useQuery({
-    queryKey: [storeCurrentItem?.data.id, 'data'],
+    queryKey: [storeCurrentItem?.data.id],
     queryFn: async () => {
       if (!storeCurrentItem) return;
       const item = await reviewManager.getReviewItemFromFile(
