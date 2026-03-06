@@ -24,11 +24,14 @@ import {
 import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
 import type IncrementalReadingPlugin from '#/main';
-import type { StateUpdater } from 'preact/hooks';
-import type { EditState } from './types';
 import { EditingState } from './types';
 import { getContentSlice, splitFrontMatter } from '#/lib/utils';
-import { addSeenId, setCurrentItem, setDismissed } from '#/lib/store';
+import {
+  addSeenId,
+  setCurrentItem,
+  setDismissed,
+  setEditState,
+} from '#/lib/store';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
@@ -47,8 +50,6 @@ interface ReviewContextProps {
   dismissItem: (item: ReviewItem) => Promise<void>;
   unDismissItem: (item: ReviewItem) => Promise<void>;
   skipItem: (item: ReviewItem) => void;
-  editState: EditState;
-  setEditState: Dispatch<StateUpdater<EditState>>;
   saveNote: (item: ReviewItem, newContent: string) => Promise<void>;
   registerActionBarHotkey: Scope['register'];
 }
@@ -67,15 +68,13 @@ export function ReviewContextProvider({
   leaf: WorkspaceLeaf;
   reviewManager: ReviewManager;
 }>) {
-  const [editState, setEditState] = useState<EditState>(EditingState.cancel);
-
   const queryClient = useQueryClient();
   const dispatch = useDispatch();
 
   const { isPending, isError, data } = useQuery({
     queryKey: ['current-review-item'],
     queryFn: async () => {
-      setEditState(EditingState.cancel);
+      dispatch(setEditState(EditingState.cancel));
       // Check if there's an initial item to display first
       if (reviewView.initialItem) {
         const initialItem = reviewView.initialItem;
@@ -269,7 +268,7 @@ export function ReviewContextProvider({
       }
     });
 
-    setEditState(EditingState.complete);
+    dispatch(setEditState(EditingState.complete));
   };
 
   const inEditMode = () => {
@@ -309,8 +308,6 @@ export function ReviewContextProvider({
     dismissItem,
     unDismissItem,
     skipItem,
-    editState,
-    setEditState,
     saveNote,
     registerActionBarHotkey,
   };

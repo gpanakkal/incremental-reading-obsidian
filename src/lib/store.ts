@@ -1,7 +1,7 @@
 import { createSlice, configureStore, createAction } from '@reduxjs/toolkit';
 import type { PayloadAction } from '@reduxjs/toolkit';
 import { isReviewCard, type ReviewItem } from './types';
-import type { EditState } from '#/components/types';
+import type { EditCoordinates, EditState } from '#/components/types';
 import { EditingState } from '#/components/types';
 import { enableMapSet } from 'immer';
 
@@ -79,9 +79,17 @@ const editStateSlice = createSlice({
   reducers: {
     setEditState: (_state, action: PayloadAction<EditState>) => action.payload,
   },
+  selectors: {
+    isEditing: (editState): editState is EditCoordinates => {
+      if (!editState) return false;
+      if (typeof editState === 'number') return false;
+      return true;
+    },
+  },
 });
 
 export const { setEditState } = editStateSlice.actions;
+export const { isEditing } = editStateSlice.selectors;
 
 export const store = configureStore({
   reducer: {
