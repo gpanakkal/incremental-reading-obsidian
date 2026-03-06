@@ -13,7 +13,6 @@ import { Platform } from 'obsidian';
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  isEditing,
   getEditorAppProxy,
   setInsertMode,
   getMarkdownController,
@@ -31,15 +30,18 @@ import {
   type ReviewCallbacks,
 } from '#/lib/extensions';
 import { useDispatch } from 'react-redux';
-import { setShowAnswer } from '#/lib/store';
-import { useAppSelector } from '#/hooks/useAppSelector';
+import { isEditing, setShowAnswer } from '#/lib/store';
+import { useAppStore } from '#/hooks/useAppSelector';
+import type { EditCoordinates } from './types';
 
 /**
- * Credit goes to mgmeyers for figuring out how to get the editor prototype. See the original code here: https://github.com/mgmeyers/obsidian-kanban/blob/main/src/components/Editor/MarkdownEditor.tsx
+ * Credit goes to mgmeyers for figuring out how to get the editor prototype.
+ * See the original code here:
+ * https://github.com/mgmeyers/obsidian-kanban/blob/main/src/components/Editor/MarkdownEditor.tsx
  *
  * Changes made to the original implementation:
- * - all codemirror extensions loaded by Obsidian are now added
- * - enabled all editor commands to work
+ * - all CodeMirror extensions loaded by Obsidian are now added
+ * - enabled editor commands
  * - fixed a bug causing the editor to not be cleaned up on component unmount
  * - added classes to make styling more consistent with Obsidian's note interface
  */
@@ -64,7 +66,6 @@ export function IREditor({
   value,
   placeholder,
 }: IREditorProps) {
-  const currentItem = useAppSelector((state) => state.currentItem);
   const dispatch = useDispatch();
 
   const {
@@ -78,7 +79,8 @@ export function IREditor({
   } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
-  const { editState, saveNote } = useReviewContext();
+  const { saveNote } = useReviewContext();
+  const store = useAppStore();
   const [titlePortalEl, setTitlePortalEl] = useState<Element | null>(null);
 
   const handleChange = async (update: ViewUpdate) => {
@@ -249,7 +251,7 @@ export function IREditor({
         dismissItem: async (reviewItem) => dismissItem(reviewItem),
         skipItem: (reviewItem) => skipItem(reviewItem),
         setShowAnswer: (show) => dispatch(setShowAnswer(show)),
-        getCurrentItem: () => currentItem,
+        getCurrentItem: () => item,
       };
 
       cm.dispatch({
@@ -271,10 +273,13 @@ export function IREditor({
         }
       }
 
-      if (isEditing(editState)) {
+      const { editState } = store.getState();
+      if (isEditing({ editState })) {
         cm.dispatch({
           userEvent: 'select.pointer',
-          selection: EditorSelection.single(cm.posAtCoords(editState, false)),
+          selection: EditorSelection.single(
+            cm.posAtCoords(editState as EditCoordinates, false)
+          ),
         });
 
         cm.dom.win.setTimeout(() => {
@@ -344,7 +349,7 @@ export function IREditor({
     return () => {
       cleanup();
     };
-  }, [item.data.reference, reviewView, reviewManager]); // Re-create editor only when item changes
+  }, [item.data.reference, reviewView, reviewManager, store]);
 
   // Update editor content when value changes
   useEffect(() => {
