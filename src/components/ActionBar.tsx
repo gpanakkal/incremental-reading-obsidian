@@ -16,12 +16,12 @@ import {
 } from '#/lib/constants';
 import { transformPriority } from '#/lib/utils';
 import { Notice } from 'obsidian';
-import { useReduxStore } from '#/hooks/useStore';
+import { useAppSelector } from '#/hooks/useAppSelector';
 import { setShowAnswer } from '#/lib/store';
 import { useDispatch } from 'react-redux';
 
 export function ActionBar() {
-  const { currentItem } = useReduxStore();
+  const currentItem = useAppSelector((state) => state.currentItem);
 
   return (
     <div className="ir-action-bar" tabIndex={-1}>
