@@ -8,7 +8,7 @@ import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
 import { ActionBar } from './ActionBar';
 import { queryClient } from '#/lib/queryClient';
-import { useReduxStore } from '#/hooks/useStore';
+import { useAppSelector } from '#/hooks/useAppSelector';
 
 export function createReviewInterface(props: {
   reviewView: ReviewView;
@@ -28,7 +28,7 @@ export function createReviewInterface(props: {
 }
 
 function ReviewInterface() {
-  const { currentItem } = useReduxStore();
+  const currentItem = useAppSelector((state) => state.currentItem);
   const { getNext } = useReviewContext();
   if (!currentItem) getNext();
 
