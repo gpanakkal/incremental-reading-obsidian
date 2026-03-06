@@ -10,8 +10,7 @@ import {
 } from '@codemirror/view';
 import classcat from 'classcat';
 import { Platform } from 'obsidian';
-import { useEffect, useRef, useState, type MutableRefObject } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useRef, type MutableRefObject } from 'react';
 import {
   getEditorAppProxy,
   setInsertMode,
@@ -19,7 +18,7 @@ import {
 } from './helpers';
 import { useReviewContext } from './ReviewContext';
 import { getBaseMarkdownExtensions } from '../lib/utils';
-import type { ReviewItem, ReviewArticle } from '#/lib/types';
+import type { ReviewItem } from '#/lib/types';
 import { isReviewArticle } from '#/lib/types';
 import { TitleEditor } from './TitleEditor';
 import {
@@ -81,7 +80,6 @@ export function IREditor({
   const internalRef = useRef<EditorView | null>(null);
   const { saveNote } = useReviewContext();
   const store = useAppStore();
-  const [titlePortalEl, setTitlePortalEl] = useState<Element | null>(null);
 
   const handleChange = async (update: ViewUpdate) => {
     if (!update.docChanged) return;
@@ -261,18 +259,6 @@ export function IREditor({
         ],
       });
 
-      // Render TitleEditor via React portal into a container prepended to
-      // .cm-sizer, so it appears above the note body. .cm-sizer is created
-      // synchronously by CodeMirror's constructor, so it's always present here.
-      if (isReviewArticle(item)) {
-        const cmSizer = cm.dom.querySelector('.cm-sizer');
-        if (cmSizer) {
-          titleContainer = document.createElement('div');
-          cmSizer.prepend(titleContainer);
-          setTitlePortalEl(titleContainer);
-        }
-      }
-
       const { editState } = store.getState();
       if (isEditing({ editState })) {
         cm.dispatch({
@@ -304,9 +290,6 @@ export function IREditor({
       }
 
       const cleanupEffect = () => {
-        titleContainer?.remove();
-        setTitlePortalEl(null);
-
         if (Platform.isMobile) {
           try {
             cm.dom.win.removeEventListener('keyboardDidShow', onShow);
@@ -407,15 +390,8 @@ export function IREditor({
 
   return (
     <>
+      {isReviewArticle(item) && <TitleEditor item={item} />}
       <div className={classcat(cls)} ref={elRef}></div>
-      {titlePortalEl &&
-        createPortal(
-          <TitleEditor
-            item={item as ReviewArticle}
-            reviewManager={reviewManager}
-          />,
-          titlePortalEl
-        )}
     </>
   );
 }

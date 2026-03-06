@@ -223,20 +223,25 @@ export default class IncrementalReadingPlugin extends Plugin {
       })
     );
 
-    // listen for file renames to update references in db
-    this.registerEvent(
-      this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
-        if (!this.#reviewManager) {
-          // console.log('Review manager not ready; returning');
-          return;
-        }
-        this.#reviewManager.handleExternalRename(file, oldPath);
-      })
-    );
-
-    const invalidateCache = this.invalidateCurrentItemCache.bind(this);
+    const invalidateCache: (file: TAbstractFile) => Promise<void> =
+      this.invalidateCurrentItemCache.bind(this);
     // Invalidate review item cache when the current item's file is modified externally
     this.registerEvent(this.app.vault.on('modify', invalidateCache));
+
+    // listen for file renames to update references in db
+    this.registerEvent(
+      this.app.vault.on(
+        'rename',
+        async (file: TAbstractFile, oldPath: string) => {
+          if (!this.#reviewManager) {
+            // console.log('Review manager not ready; returning');
+            return;
+          }
+          await this.#reviewManager.handleExternalRename(file, oldPath);
+          await invalidateCache(file);
+        }
+      )
+    );
 
     this.addSettingTab(new IRSettingTab(this.app, this));
 
@@ -380,12 +385,13 @@ export default class IncrementalReadingPlugin extends Plugin {
       // );
       return;
     }
-    // console.log('invalidating current item cache');
-    // Don't invalidate the 'current-review-item' query, since this would
-    // re-fetch the queue via getDue(), which may return a different item than
-    // the one currently being reviewed.
-    queryClient.invalidateQueries({
+    // console.log('invalidating item cache');
+
+    await queryClient.invalidateQueries({
       queryKey: [currentItem.data.id],
+    });
+    await queryClient.invalidateQueries({
+      queryKey: [currentItem.data.id, 'file-text'],
     });
   }
 }
