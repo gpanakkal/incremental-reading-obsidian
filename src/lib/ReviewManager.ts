@@ -738,13 +738,11 @@ export default class ReviewManager {
   }
 
   /**
-   * Creates a ReviewItem from a file and its note type.
+   * Fetches a ReviewItem given a file.
    * Returns null if the item is not found in the database.
    */
-  async getReviewItemFromFile(
-    file: TFile,
-    noteType: NoteType
-  ): Promise<ReviewItem | null> {
+  async getReviewItemFromFile(file: TFile): Promise<ReviewItem | null> {
+    const noteType = this.getNoteType(file);
     if (noteType === 'article') {
       const row = await this.findArticle(file);
       if (!row) return null;
