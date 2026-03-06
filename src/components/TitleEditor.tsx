@@ -1,29 +1,26 @@
-import { useRef, useState, useEffect } from 'preact/compat';
+import { useRef, useEffect } from 'preact/compat';
 import type { ReviewArticle } from '#/lib/types';
-import type ReviewManager from '#/lib/ReviewManager';
+import { useReviewContext } from './ReviewContext';
 
-interface TitleEditorProps {
-  item: ReviewArticle;
-  reviewManager: ReviewManager;
-}
 /** For editing article titles in review */
-export function TitleEditor({ item, reviewManager }: TitleEditorProps) {
+export function TitleEditor({ item }: { item: ReviewArticle }) {
   const titleRef = useRef<HTMLDivElement>(null);
-  const [title, setTitle] = useState(item.file.basename);
+  const { reviewManager } = useReviewContext();
 
   // TODO: replace with a listener to handle external rename events
   useEffect(() => {
-    setTitle(item.file.basename);
-  }, [item.file.basename]);
+    if (!titleRef.current) return;
+    titleRef.current.textContent = item.file.basename;
+  }, [titleRef.current, item.file.basename]);
 
   const handleBlur = async () => {
     if (!titleRef.current) return;
 
     const newTitle = titleRef.current.textContent?.trim() || '';
-    if (!newTitle || newTitle === title) {
+    if (!newTitle || newTitle === item.file.basename) {
       // Revert to previous title if empty or unchanged
       if (titleRef.current) {
-        titleRef.current.textContent = title;
+        titleRef.current.textContent = item.file.basename;
       }
       return;
     }
@@ -33,7 +30,7 @@ export function TitleEditor({ item, reviewManager }: TitleEditorProps) {
       console.error('Failed to rename file:', error);
       // Revert on error
       if (titleRef.current) {
-        titleRef.current.textContent = title;
+        titleRef.current.textContent = item.file.basename;
       }
     }
   };
@@ -46,7 +43,7 @@ export function TitleEditor({ item, reviewManager }: TitleEditorProps) {
       e.preventDefault();
       // Revert to original title
       if (titleRef.current) {
-        titleRef.current.textContent = title;
+        titleRef.current.textContent = item.file.basename;
       }
       titleRef.current?.blur();
     }
@@ -60,7 +57,7 @@ export function TitleEditor({ item, reviewManager }: TitleEditorProps) {
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}
     >
-      {title}
+      {item.file.basename}
     </div>
   );
 }
