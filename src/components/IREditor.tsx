@@ -32,7 +32,7 @@ import {
 } from '#/lib/extensions';
 import { useDispatch } from 'react-redux';
 import { setShowAnswer } from '#/lib/store';
-import { useReduxStore } from '#/hooks/useStore';
+import { useAppSelector } from '#/hooks/useAppSelector';
 
 /**
  * Credit goes to mgmeyers for figuring out how to get the editor prototype. See the original code here: https://github.com/mgmeyers/obsidian-kanban/blob/main/src/components/Editor/MarkdownEditor.tsx
@@ -64,7 +64,7 @@ export function IREditor({
   value,
   placeholder,
 }: IREditorProps) {
-  const { currentItem } = useReduxStore();
+  const currentItem = useAppSelector((state) => state.currentItem);
   const dispatch = useDispatch();
 
   const {
@@ -405,7 +405,10 @@ export function IREditor({
       <div className={classcat(cls)} ref={elRef}></div>
       {titlePortalEl &&
         createPortal(
-          <TitleEditor item={item as ReviewArticle} reviewManager={reviewManager} />,
+          <TitleEditor
+            item={item as ReviewArticle}
+            reviewManager={reviewManager}
+          />,
           titlePortalEl
         )}
     </>
