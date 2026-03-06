@@ -377,8 +377,8 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   /**
-   * Invalidates the React Query cache when the passed file is also
-   * open in review. Used to keep review in sync with other editor panes.
+   * Invalidates the React Query cache when the passed file is also open in
+   * review. Used to keep review in sync with other editor panes.
    */
   async invalidateCurrentItemCache(file: TAbstractFile) {
     // Skip cache invalidation if the modification came from the review view itself
@@ -395,12 +395,11 @@ export default class IncrementalReadingPlugin extends Plugin {
       return;
     }
     // console.log('invalidating current item cache');
-    // Only invalidate the file content query, not the current-review-item query.
-    // Invalidating current-review-item would re-fetch the queue via getDue(),
-    // which may return a different item than the one currently being reviewed.
-    // The file content query uses the item's reference as its key.
+    // Don't invalidate the 'current-review-item' query, since this would
+    // re-fetch the queue via getDue(), which may return a different item than
+    // the one currently being reviewed.
     queryClient.invalidateQueries({
-      queryKey: [currentItem.data.reference],
+      queryKey: [currentItem.data.id],
     });
   }
 }

@@ -270,15 +270,11 @@ function renderStandaloneModeActions(
   noteType: IRNoteType,
   plugin: IncrementalReadingPlugin | null
 ) {
-  if (!plugin) {
+  if (!plugin || !plugin.reviewManager) {
     return;
   }
 
-  const reviewManager = plugin.reviewManager;
-  if (!reviewManager) {
-    return;
-  }
-
+  const { reviewManager } = plugin;
   const file = getFileFromState(view.state);
   if (!file) {
     return;
@@ -292,15 +288,7 @@ function renderStandaloneModeActions(
   // Fetch dismissed status and update button
   (async () => {
     try {
-      let item: any = null;
-
-      if (noteType === 'article') {
-        item = await reviewManager.findArticle(file);
-      } else if (noteType === 'snippet') {
-        item = await reviewManager.findSnippet(file);
-      } else if (noteType === 'card') {
-        item = await reviewManager.findCard(file);
-      }
+      const item = await reviewManager.getReviewItemFromFile(file);
 
       if (!item) {
         dismissToggleBtn.textContent = 'Not in database';
@@ -312,7 +300,7 @@ function renderStandaloneModeActions(
         dismissToggleBtn.textContent = isDismissed ? 'Un-dismiss' : 'Dismiss';
       };
 
-      updateButtonLabel(item.dismissed);
+      updateButtonLabel(item.data.dismissed);
       dismissToggleBtn.disabled = false;
 
       // Set up click handler with current item reference
@@ -322,26 +310,26 @@ function renderStandaloneModeActions(
 
         try {
           // Re-fetch to get current status (may have changed)
-          const currentItem: ReviewItem | null =
-            await reviewManager.getReviewItemFromFile(file, noteType);
+          const item: ReviewItem | null =
+            await reviewManager.getReviewItemFromFile(file);
 
-          if (!currentItem) {
+          if (!item) {
             new Notice('Item not found in database', ERROR_NOTICE_DURATION_MS);
             return;
           }
 
-          const isDismissed = currentItem.data.dismissed;
+          const isDismissed = item.data.dismissed;
           if (isDismissed) {
-            await reviewManager.unDismissItem(noteType, currentItem.data.id);
+            await reviewManager.unDismissItem(noteType, item.data.id);
             new Notice('Item restored to queue', SUCCESS_NOTICE_DURATION_MS);
             updateButtonLabel(false);
           } else {
-            await reviewManager.dismissItem(noteType, currentItem.data.id);
+            await reviewManager.dismissItem(noteType, item.data.id);
             new Notice('Item dismissed', SUCCESS_NOTICE_DURATION_MS);
             updateButtonLabel(true);
           }
 
-          await plugin.invalidateCurrentItemCache(currentItem.file);
+          await plugin.invalidateCurrentItemCache(item.file);
         } catch (error) {
           console.error('Failed to toggle dismiss status:', error);
           new Notice('Failed to update item', ERROR_NOTICE_DURATION_MS);
@@ -356,10 +344,7 @@ function renderStandaloneModeActions(
   // Open in review button
   const openInReviewBtn = createButton('Open in Review', async () => {
     // Build a ReviewItem from this file to pass to the review interface
-    const reviewItem = await reviewManager.getReviewItemFromFile(
-      file,
-      noteType
-    );
+    const reviewItem = await reviewManager.getReviewItemFromFile(file);
     if (reviewItem) {
       await plugin.learn(reviewItem);
     } else {

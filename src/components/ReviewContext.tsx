@@ -88,10 +88,16 @@ export function ReviewContextProvider({
         limit: REVIEW_FETCH_COUNT,
       });
       const { seenIds } = plugin.store.getState();
-      const nextItem =
+      const nextItem: ReviewItem | null =
         result.all.filter(({ data }) => !seenIds.has(data.id))[0] ?? null;
+
       if (nextItem && isReviewCard(nextItem)) await updateDelimiters(nextItem);
+
       dispatch(setCurrentItem(nextItem));
+      queryClient.setQueryData<ReviewItem>(
+        [nextItem.data.id, 'data'],
+        () => nextItem
+      );
       return nextItem;
     },
   });
