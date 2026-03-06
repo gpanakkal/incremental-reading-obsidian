@@ -18,7 +18,7 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
     isError,
     data: fileText,
   } = useQuery({
-    queryKey: [item.data.reference],
+    queryKey: [item.data.id, 'file-text'],
     queryFn: async () => await plugin.app.vault.read(item.file),
   });
 

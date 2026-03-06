@@ -19,9 +19,21 @@ import { Notice } from 'obsidian';
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { setShowAnswer } from '#/lib/store';
 import { useDispatch } from 'react-redux';
+import { useQuery } from '@tanstack/react-query';
 
 export function ActionBar() {
-  const currentItem = useAppSelector((state) => state.currentItem);
+  const storeCurrentItem = useAppSelector((state) => state.currentItem);
+  const { reviewManager } = useReviewContext();
+  const { data: currentItem } = useQuery({
+    queryKey: [storeCurrentItem?.data.id, 'data'],
+    queryFn: async () => {
+      if (!storeCurrentItem) return;
+      const item = await reviewManager.getReviewItemFromFile(
+        storeCurrentItem.file
+      );
+      return item ?? undefined;
+    },
+  });
 
   return (
     <div className="ir-action-bar" tabIndex={-1}>
@@ -65,7 +77,7 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
     registerActionBarHotkey,
     plugin,
   } = useReviewContext();
-  const [isDismissed, setIsDismissed] = useState(reviewItem.data.dismissed);
+  const isDismissed = reviewItem.data.dismissed;
 
   const stopEditing = (evt: KeyboardEvent) => {
     const editor = document.querySelector(
@@ -108,10 +120,6 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
     },
     [reviewItem]
   );
-
-  useEffect(() => {
-    setIsDismissed(reviewItem.data.dismissed);
-  }, [reviewItem.data.dismissed]);
 
   return (
     <>
