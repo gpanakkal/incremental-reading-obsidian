@@ -4,6 +4,7 @@ import { useReviewContext } from './ReviewContext';
 import type { EditorView } from '@codemirror/view';
 import { CardViewer } from './CardViewer';
 import { useQuery } from '@tanstack/react-query';
+import { useAppSelector } from '#/hooks/useAppSelector';
 
 /**
  * TODO:
@@ -12,6 +13,7 @@ import { useQuery } from '@tanstack/react-query';
  */
 export default function ReviewItem({ item }: { item: ReviewItem }) {
   const { plugin } = useReviewContext();
+  const showAnswer = useAppSelector((state) => state.showAnswer);
 
   const {
     isPending,
@@ -25,7 +27,7 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
   if (!fileText) return <></>;
   return (
     <>
-      {isReviewCard(item) && !item.data.showAnswer ? (
+      {isReviewCard(item) && !showAnswer ? (
         <CardViewer cardText={fileText} key={item.data.id} />
       ) : (
         <IREditor
