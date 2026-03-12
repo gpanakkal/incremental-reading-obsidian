@@ -16,21 +16,20 @@ import {
 } from '#/lib/constants';
 import { transformPriority } from '#/lib/utils';
 import { Notice } from 'obsidian';
-import { useAppSelector } from '#/hooks/useAppSelector';
+import { useAppSelector, useAppStore } from '#/hooks/useAppSelector';
 import { setShowAnswer } from '#/lib/store';
 import { useDispatch } from 'react-redux';
 import { useQuery } from '@tanstack/react-query';
 
 export function ActionBar() {
-  const storeCurrentItem = useAppSelector((state) => state.currentItem);
+  const store = useAppStore();
   const { reviewManager } = useReviewContext();
   const { data: currentItem } = useQuery({
-    queryKey: [storeCurrentItem?.data.id],
+    queryKey: [store.getState().currentItem?.data.id],
     queryFn: async () => {
-      if (!storeCurrentItem) return;
-      const item = await reviewManager.getReviewItemFromFile(
-        storeCurrentItem.file
-      );
+      const currentItem = store.getState().currentItem;
+      if (!currentItem) return;
+      const item = await reviewManager.getReviewItemFromFile(currentItem.file);
       return item ?? undefined;
     },
   });
@@ -315,6 +314,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
 
 function CardActions({ card }: { card: ReviewCard }) {
   const dispatch = useDispatch();
+  const showAnswer = useAppSelector((state) => state.showAnswer);
   const { gradeCard, reviewView, registerActionBarHotkey } = useReviewContext();
 
   useEffect(
@@ -326,12 +326,12 @@ function CardActions({ card }: { card: ReviewCard }) {
         reviewView.scope.unregister(handler);
       };
     },
-    [reviewView, card, setShowAnswer]
+    [reviewView, card]
   );
 
   useEffect(
     function initGradingHotkeys() {
-      if (!card.data.showAnswer) return;
+      if (!showAnswer) return;
 
       const handlers = [
         registerActionBarHotkey(null, '1', async () => {
@@ -351,12 +351,12 @@ function CardActions({ card }: { card: ReviewCard }) {
         handlers.forEach((handler) => reviewView.scope.unregister(handler));
       };
     },
-    [card, card.data.showAnswer]
+    [card, showAnswer]
   );
 
   return (
     <>
-      {card.data.showAnswer ? (
+      {showAnswer ? (
         <>
           <Button
             label="🔁 Again"

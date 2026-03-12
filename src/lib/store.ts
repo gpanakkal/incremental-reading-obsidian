@@ -1,6 +1,6 @@
 import { createSlice, configureStore, createAction } from '@reduxjs/toolkit';
 import type { PayloadAction } from '@reduxjs/toolkit';
-import { isReviewCard, type ReviewItem } from './types';
+import { type ReviewItem } from './types';
 import type { EditCoordinates, EditState } from '#/components/types';
 import { EditingState } from '#/components/types';
 import { enableMapSet } from 'immer';
@@ -23,21 +23,23 @@ const currentItemSlice = createSlice({
       }
       state.data.dismissed = action.payload;
     },
-    setShowAnswer: (state, action: PayloadAction<boolean>) => {
-      if (state === null || !isReviewCard(state)) {
-        console.error(`Current item "${state?.data.reference}" is not a card`);
-        return;
-      }
-      state.data.showAnswer = action.payload;
-    },
   },
   extraReducers: (builder) => {
     builder.addCase(resetSession, () => null);
   },
 });
 
-export const { setCurrentItem, setDismissed, setShowAnswer } =
-  currentItemSlice.actions;
+export const { setCurrentItem, setDismissed } = currentItemSlice.actions;
+
+export const showAnswerSlice = createSlice({
+  name: 'showAnswer',
+  initialState: false,
+  reducers: {
+    setShowAnswer: (_, action: PayloadAction<boolean>) => action.payload,
+  },
+});
+
+export const { setShowAnswer } = showAnswerSlice.actions;
 
 // TODO: use instead of ReviewView.seenIds
 const seenIdsSlice = createSlice({
@@ -94,6 +96,7 @@ export const { isEditing } = editStateSlice.selectors;
 export const store = configureStore({
   reducer: {
     currentItem: currentItemSlice.reducer,
+    showAnswer: showAnswerSlice.reducer,
     seenIds: seenIdsSlice.reducer,
     isReviewViewSaving: isReviewViewSavingSlice.reducer,
     editState: editStateSlice.reducer,

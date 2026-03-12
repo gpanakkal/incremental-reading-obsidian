@@ -25,13 +25,15 @@ import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
 import type IncrementalReadingPlugin from '#/main';
 import { EditingState } from './types';
-import { getContentSlice, splitFrontMatter } from '#/lib/utils';
+import { deepCopy, getContentSlice, splitFrontMatter } from '#/lib/utils';
 import {
   addSeenId,
   setCurrentItem,
   setDismissed,
   setEditState,
+  setShowAnswer,
 } from '#/lib/store';
+import { useAppStore } from '#/hooks/useAppSelector';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
@@ -70,11 +72,13 @@ export function ReviewContextProvider({
 }>) {
   const queryClient = useQueryClient();
   const dispatch = useDispatch();
+  const store = useAppStore();
 
   const { isPending, isError, data } = useQuery({
     queryKey: ['current-review-item'],
     queryFn: async () => {
       dispatch(setEditState(EditingState.cancel));
+      dispatch(setShowAnswer(false));
       // Check if there's an initial item to display first
       if (reviewView.initialItem) {
         const initialItem = reviewView.initialItem;
@@ -215,6 +219,20 @@ export function ReviewContextProvider({
       throw new TypeError(`Item type not recognized`);
     }
     await reviewManager.dismissItem(type, item.data.id);
+    if (store.getState().currentItem?.data.id === item.data.id) {
+      // update item in Redux store
+      dispatch(setDismissed(true));
+    }
+    queryClient.setQueryData([item.data.id], (prev: ReviewItem) => {
+      const updatedData = deepCopy(prev.data);
+      return {
+        data: {
+          ...updatedData,
+          dismissed: true,
+        },
+        file: prev.file,
+      };
+    });
 
     const [_folder, subRef] = item.data.reference.split('/');
     new Notice(
@@ -230,14 +248,25 @@ export function ReviewContextProvider({
       throw new TypeError(`Item type not recognized`);
     }
     await reviewManager.unDismissItem(type, item.data.id);
+    if (store.getState().currentItem?.data.id === item.data.id) {
+      // update item in Redux store
+      dispatch(setDismissed(false));
+    }
+    queryClient.setQueryData([item.data.id], (prev: ReviewItem) => {
+      const updatedData = deepCopy(prev.data);
+      return {
+        data: {
+          ...updatedData,
+          dismissed: false,
+        },
+        file: prev.file,
+      };
+    });
 
     const [_folder, subRef] = item.data.reference.split('/');
     new Notice(
       `Restored ${type} "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}" to queue`
     );
-
-    // update item in Redux store
-    dispatch(setDismissed(false));
   };
 
   const skipItem = (item: ReviewItem) => {

@@ -30,7 +30,7 @@ import {
 } from '#/lib/extensions';
 import { useDispatch } from 'react-redux';
 import { isEditing, setShowAnswer } from '#/lib/store';
-import { useAppStore } from '#/hooks/useAppSelector';
+import { useAppSelector, useAppStore } from '#/hooks/useAppSelector';
 import type { EditCoordinates } from './types';
 
 /**
@@ -80,6 +80,7 @@ export function IREditor({
   const internalRef = useRef<EditorView | null>(null);
   const { saveNote } = useReviewContext();
   const store = useAppStore();
+  const showAnswer = useAppSelector((state) => state.showAnswer);
 
   const handleChange = async (update: ViewUpdate) => {
     if (!update.docChanged) return;
@@ -249,7 +250,7 @@ export function IREditor({
         dismissItem: async (reviewItem) => dismissItem(reviewItem),
         skipItem: (reviewItem) => skipItem(reviewItem),
         setShowAnswer: (show) => dispatch(setShowAnswer(show)),
-        getCurrentItem: () => item,
+        getCurrentItem: () => store.getState().currentItem,
       };
 
       cm.dispatch({
@@ -365,11 +366,10 @@ export function IREditor({
   // Sync showAnswer state to the action bar extension
   useEffect(() => {
     if (!internalRef.current) return;
-    const update = 'showAnswer' in item.data ? item.data.showAnswer : false;
     internalRef.current.dispatch({
-      effects: setShowAnswerEffect.of(update),
+      effects: setShowAnswerEffect.of(showAnswer),
     });
-  }, [item, 'showAnswer' in item.data ? item.data.showAnswer : false]);
+  }, [item, showAnswer]);
 
   const cls = [
     'markdown-source-view',
