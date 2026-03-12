@@ -82,7 +82,6 @@ export interface ISRSCard extends Card {
 
 export interface ISRSCardDisplay extends SafeOmit<ISRSCard, 'state'> {
   state: StateType;
-  showAnswer: boolean;
 }
 
 export interface SRSCardRow
