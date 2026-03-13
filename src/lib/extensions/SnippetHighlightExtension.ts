@@ -2,7 +2,7 @@ import { ViewPlugin, Decoration } from '@codemirror/view';
 import type { ViewUpdate, DecorationSet, EditorView } from '@codemirror/view';
 import { Annotation, RangeSetBuilder, StateEffect } from '@codemirror/state';
 import type { TFile } from 'obsidian';
-import { irPluginFacet } from './irPluginFacet';
+import { irPluginFacet, isReviewInterfaceFacet } from './irPluginFacet';
 import {
   getFileFromState,
   getAppFromState,
@@ -14,7 +14,6 @@ import type {
   SnippetHighlight,
 } from '../SnippetOffsetTracker';
 import type ReviewManager from '../ReviewManager';
-import ReviewView from '#/views/ReviewView';
 
 /**
  * Annotation to mark transactions from external value sync (e.g., when IREditor
@@ -52,11 +51,10 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       this.file = getFileFromState(view.state);
       this.decorations = Decoration.none;
 
-      // Check if we're in the review interface
-      const app = getAppFromState(view.state);
-      if (!app) throw new Error(`Couldn't retrieve app from view state`);
-      const activeView = app.workspace.getActiveViewOfType(ReviewView);
-      this.isReviewInterface = activeView !== null;
+      // Determined via facet provided by IREditor's buildLocalExtensions().
+      // More reliable than getActiveViewOfType, which reflects focus at a point
+      // in time and can be wrong when the editor is rebuilt by a React effect.
+      this.isReviewInterface = view.state.facet(isReviewInterfaceFacet);
 
       // Load highlights asynchronously
       this.loadHighlights(view);

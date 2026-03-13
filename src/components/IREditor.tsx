@@ -26,6 +26,7 @@ import {
   setShowAnswerEffect,
   setReviewCallbacks,
   isExternalSync,
+  isReviewInterfaceFacet,
   type ReviewCallbacks,
 } from '#/lib/extensions';
 import { useDispatch } from 'react-redux';
@@ -114,6 +115,8 @@ export function IREditor({
             console.warn('Could not load base markdown extensions:', error);
             console.error('Extension loading error details:', error);
           }
+
+          extensions.push(isReviewInterfaceFacet.of(true));
 
           // extensions.push(stateManagerField.init(() => stateManager));
           // extensions.push(datePlugins);
@@ -333,35 +336,30 @@ export function IREditor({
     return () => {
       cleanup();
     };
-  }, [item.data.reference, reviewView, reviewManager, store]);
+  }, [reviewView, reviewManager, store]);
 
-  // Update editor content when value changes
-  useEffect(() => {
-    if (!internalRef.current) return;
-
-    const view = internalRef.current;
-    const newValue = value ?? '';
-
-    // Only update if the content actually changed
-    if (view.state.doc.toString() !== newValue) {
-      // Defer the dispatch to avoid "update in progress" errors.
-      // Re-read doc length inside the callback to avoid stale closure bugs
-      // where the doc has changed between capturing length and dispatching.
+  useEffect(
+    function updateEditorContent() {
+      // Defer the dispatch to avoid "update in progress" errors
       setTimeout(() => {
-        // Check if the view is still valid
-        if (internalRef.current === view) {
+        if (!internalRef.current) return;
+
+        const view = internalRef.current;
+        // Only update if the content actually changed
+        if (view.state.doc.toString() !== (value ?? '')) {
           view.dispatch({
             changes: {
               from: 0,
               to: view.state.doc.length,
-              insert: newValue,
+              insert: value ?? '',
             },
             annotations: isExternalSync.of(true),
           });
         }
       }, 0);
-    }
-  }, [value]);
+    },
+    [internalRef.current, value]
+  );
 
   // Sync showAnswer state to the action bar extension
   useEffect(() => {
