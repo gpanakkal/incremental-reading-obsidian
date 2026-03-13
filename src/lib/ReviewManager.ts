@@ -56,20 +56,10 @@ import {
   DATA_DIRECTORY,
   INVALID_TITLE_MESSAGE,
 } from './constants';
-import { getClozeGroupsPattern } from './utils';
+import { getClozeGroupsPattern, getEndOfToday } from './utils';
 import type { FSRS, FSRSParameters, Grade } from 'ts-fsrs';
 import { fsrs, generatorParameters } from 'ts-fsrs';
-import {
-  compareDates,
-  createFile,
-  createTitle,
-  generateId,
-  getContentSlice,
-  getSelectionWithBounds,
-  sanitizeForTitle,
-  searchAll,
-  splitFrontMatter,
-} from './utils';
+import { compareDates, generateId, getContentSlice, searchAll } from './utils';
 import SRSCard from './SRSCard';
 import type ReviewView from 'src/views/ReviewView';
 import SRSCardReview from './SRSCardReview';
@@ -79,6 +69,7 @@ import {
   SnippetOffsetTracker,
   type SnippetHighlight,
 } from './SnippetOffsetTracker';
+import { ObsidianHelpers } from './ObsidianHelpers';
 
 const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
   enable_fuzz: false,
@@ -107,19 +98,6 @@ export default class ReviewManager {
   }
 
   /**
-   * Calculate the character offset where the body starts (after frontmatter).
-   * Returns 0 if no frontmatter is present.
-   * @param fileContent The full file content
-   */
-  getBodyStartOffset(fileContent: string): number {
-    const result = splitFrontMatter(fileContent);
-    if (result) {
-      return fileContent.length - result.body.length;
-    }
-    return 0;
-  }
-
-  /**
    * Update snippet offsets in the database.
    * Used to persist offset changes after document edits.
    * @param snippetId The snippet ID
@@ -137,24 +115,8 @@ export default class ReviewManager {
     );
   }
 
-  /**
-   * Get the rollover-adjusted end of day as a Unix timestamp.
-   */
-  protected getEndOfToday() {
-    const date = new Date();
-    // get start of day in local time zone
-    const startOfToday = Date.parse(date.toDateString());
-    const rolloverOffsetMs = DAY_ROLLOVER_OFFSET_HOURS * 60 * MS_PER_MINUTE;
-    let endOfDayLocal = startOfToday + rolloverOffsetMs;
-    if (Date.parse(date.toUTCString()) - startOfToday >= rolloverOffsetMs) {
-      // add a full day since we're past the rollover point
-      endOfDayLocal += MS_PER_DAY;
-    }
-    return endOfDayLocal;
-  }
-
   async getCardsDue(dueBy?: number, limit?: number): Promise<ReviewCard[]> {
-    const dueTime = dueBy ?? this.getEndOfToday();
+    const dueTime = dueBy ?? getEndOfToday();
     try {
       const cardsDue = (
         await this._fetchCardData({ dueBy: dueTime, limit })
@@ -180,7 +142,7 @@ export default class ReviewManager {
     dueBy?: number,
     limit?: number
   ): Promise<{ data: ISnippetActive; file: TFile }[]> {
-    const dueTime = dueBy ?? this.getEndOfToday();
+    const dueTime = dueBy ?? getEndOfToday();
     try {
       const snippetsDue = (
         await this._fetchSnippetData({ dueBy: dueTime, limit })
@@ -254,7 +216,7 @@ export default class ReviewManager {
     }
     const { content, line: blockLine } = block;
 
-    const selectionBounds = getSelectionWithBounds(editor);
+    const selectionBounds = ObsidianHelpers.getSelectionWithBounds(editor);
     const bounds = selectionBounds
       ? ([selectionBounds.start.ch, selectionBounds.end.ch] as const)
       : null;
@@ -270,7 +232,7 @@ export default class ReviewManager {
         currentFile,
         TRANSCLUSION_HIDE_TITLE_ALIAS
       );
-      this.transcludeLink(editor, linkToCard, blockLine);
+      ObsidianHelpers.transcludeLink(editor, linkToCard, blockLine);
       // move the cursor to the next block
       editor.setSelection({ line: blockLine + 1, ch: 0 });
     } catch (error) {
@@ -510,15 +472,6 @@ export default class ReviewManager {
     }
   }
 
-  protected transcludeLink(editor: Editor, link: string, blockLine: number) {
-    const line = editor.getLine(blockLine);
-    editor.replaceRange(
-      `!${link}`,
-      { line: blockLine, ch: 0 },
-      { line: blockLine, ch: line.length }
-    );
-  }
-
   // #endregion
 
   // #region SNIPPETS
@@ -603,7 +556,7 @@ export default class ReviewManager {
       if (range) {
         // Get body start to convert to body-relative offsets
         const docContent = cm.state.doc.toString();
-        const bodyStart = this.getBodyStartOffset(docContent);
+        const bodyStart = ObsidianHelpers.getBodyStartOffset(docContent);
 
         offsets = {
           start: range.from - bodyStart, // body-relative
@@ -870,16 +823,6 @@ export default class ReviewManager {
   }
 
   /**
-   * Check if a file has the ir-source tag
-   */
-  private isSourceNote(file: TFile): boolean {
-    const tags = this.app.metadataCache.getFileCache(file)?.frontmatter?.tags;
-    if (!tags) return false;
-    const tagSet: Set<string> = new Set(Array.isArray(tags) ? tags : [tags]);
-    return tagSet.has(SOURCE_TAG);
-  }
-
-  /**
    * Find snippet highlights for a source note by scanning Obsidian's resolved backlinks.
    * For each file that links to the source and is tagged as a snippet, look up its
    * offsets in the DB.
@@ -1086,7 +1029,7 @@ export default class ReviewManager {
     dueBy?: number,
     limit?: number
   ): Promise<{ data: IArticleActive; file: TFile }[]> {
-    const dueTime = dueBy ?? this.getEndOfToday();
+    const dueTime = dueBy ?? getEndOfToday();
     try {
       const articlesDue = (
         await this._fetchArticleData({ dueBy: dueTime, limit })
@@ -1138,11 +1081,6 @@ export default class ReviewManager {
     return ((await this.#repo.query(query, params)) ?? []) as ArticleRow[];
   }
 
-  getReferenceFromPath(vaultPath: string): string {
-    const reference = vaultPath.split(`${DATA_DIRECTORY}/`)[1];
-    return reference;
-  }
-
   async findArticle(articleFile: TAbstractFile): Promise<ArticleRow | null> {
     const results = await this.#repo.query(
       'SELECT * FROM article WHERE reference = $1',
@@ -1188,7 +1126,7 @@ export default class ReviewManager {
   }
 
   async renameArticle(article: ReviewArticle, newName: string) {
-    const sanitized = sanitizeForTitle(newName, true);
+    const sanitized = ObsidianHelpers.sanitizeForTitle(newName, true);
     if (sanitized !== newName) {
       new Notice(INVALID_TITLE_MESSAGE, ERROR_NOTICE_DURATION_MS);
       return;
@@ -1217,7 +1155,7 @@ export default class ReviewManager {
    * or if the rename operation fails
    */
   async renameFile(file: TFile, newName: string) {
-    const sanitized = sanitizeForTitle(newName, true);
+    const sanitized = ObsidianHelpers.sanitizeForTitle(newName, true);
     if (sanitized !== newName) {
       throw new Error(`${INVALID_TITLE_MESSAGE}. Title was ${newName}`);
     }
@@ -1227,6 +1165,169 @@ export default class ReviewManager {
       : `${newName}.${file.extension}`;
 
     await this.app.fileManager.renameFile(file, newPath);
+  }
+
+  /**
+   * Change the priority of an article and recalculate its next due date
+   */
+  async reprioritizeArticle(article: IArticleBase, newPriority: number) {
+    if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
+      throw new TypeError(
+        `Priority must be an integer between 10 and 50 inclusive; received ${newPriority}`
+      );
+    }
+    const { priority: _, ...rest } = article;
+    const lastReview = await this.getLastArticleReview(article);
+    const newInterval = await this.nextTextReviewInterval({
+      ...rest,
+      priority: newPriority,
+    });
+    const newDueTime = lastReview
+      ? lastReview.review_time + newInterval
+      : article.due;
+
+    await this.#repo.mutate(
+      `UPDATE article SET priority = $1, due = $2 WHERE id = $3`,
+      [newPriority, newDueTime, article.id]
+    );
+  }
+
+  // #endregion
+
+  // #region HELPERS
+  getReferenceFromPath(vaultPath: string): string {
+    const reference = vaultPath.split(`${DATA_DIRECTORY}/`)[1];
+    return reference;
+  }
+
+  protected async nextTextReviewInterval(text: IArticleBase | ISnippetBase) {
+    const intervalMultiplier =
+      TEXT_REVIEW_MULTIPLIER_BASE +
+      (text.priority - 10) * TEXT_REVIEW_MULTIPLIER_STEP;
+
+    const lastReview = await (isArticle(text)
+      ? this.getLastArticleReview(text)
+      : this.getLastSnippetReview(text));
+
+    const lastInterval =
+      lastReview && text.due
+        ? text.due - lastReview.review_time
+        : TEXT_BASE_REVIEW_INTERVAL;
+
+    const nextInterval = Math.round(lastInterval * intervalMultiplier);
+    return nextInterval;
+  }
+
+  /** Retrieves notes from the data directory given a row's reference */
+  getNote(reference: string): TFile | null {
+    return this.app.vault.getFileByPath(
+      normalizePath(`${DATA_DIRECTORY}/${reference}`)
+    );
+  }
+
+  /**
+   * Gets the type of a note based on its tags. Can return a false negative
+   * if performed too soon after note creation.
+   * TODO: use more robust approach to getting tags
+   */
+  getNoteType(note: TFile): NoteType | null {
+    const tags = this.getTags(note);
+    if (!tags) return null;
+    if (tags.includes(ARTICLE_TAG)) return 'article';
+    else if (tags.includes(SNIPPET_TAG)) return 'snippet';
+    else if (tags.includes(CARD_TAG)) return 'card';
+    else return null;
+  }
+
+  /**
+   * Check if a file has the ir-source tag
+   */
+  private isSourceNote(file: TFile): boolean {
+    const tags = this.getTags(file);
+    if (!tags) return false;
+    return tags.includes(SOURCE_TAG);
+  }
+
+  getTags(note: TFile): string[] {
+    const rawTags =
+      this.app.metadataCache.getFileCache(note)?.frontmatter?.tags;
+    return Array.isArray(rawTags) ? rawTags : [rawTags];
+  }
+
+  /**
+   *
+   * @param directory path relative to the vault root
+   */
+  protected async createNote({
+    content,
+    frontmatter,
+    fileName,
+    directory,
+  }: {
+    content: string;
+    frontmatter?: Record<string, any>;
+    fileName: string;
+    directory: string;
+  }) {
+    try {
+      const fullPath = normalizePath(`${directory}/${fileName}`);
+      const file = await ObsidianHelpers.createFile(this.app, fullPath);
+      await this.app.vault.append(file, content);
+      frontmatter && (await this.updateFrontMatter(file, frontmatter));
+      return file;
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  /**
+   * Shared logic for creating snippets and cards.
+   * Throws if it fails to create the file.
+   */
+  protected async createFromText(textContent: string, directory: string) {
+    const newNoteName = ObsidianHelpers.createTitle(textContent);
+    const newNote = await this.createNote({
+      content: textContent,
+      frontmatter: {
+        created: new Date().toISOString(),
+      },
+      fileName: `${newNoteName}.md`,
+      directory,
+    });
+
+    if (!newNote) {
+      const errorMsg = `Failed to create note "${newNoteName}"`;
+      throw new Error(errorMsg);
+    }
+
+    return newNote;
+  }
+
+  /** Get the vault absolute directory for a type of review item */
+  getDirectory(type: NoteType) {
+    let subDirectory;
+    if (type === 'article') subDirectory = ARTICLE_DIRECTORY;
+    else if (type === 'snippet') subDirectory = SNIPPET_DIRECTORY;
+    else if (type === 'card') subDirectory = CARD_DIRECTORY;
+    else throw new TypeError(`Type "${type}" is invalid`);
+    return normalizePath(`${DATA_DIRECTORY}/${subDirectory}`);
+  }
+
+  /**
+   * Generates a link with an absolute path and the file name as alias
+   */
+  generateMarkdownLink(
+    fileLinkedTo: TFile,
+    fileContainingLink: TFile,
+    alias?: string,
+    subpath?: string
+  ) {
+    return this.app.fileManager.generateMarkdownLink(
+      fileLinkedTo,
+      fileContainingLink.path,
+      subpath,
+      alias || fileLinkedTo.basename
+    );
   }
 
   /**
@@ -1268,154 +1369,6 @@ export default class ReviewManager {
       [newReference, oldReference]
     );
     console.log(`Reference updated to ${newReference}`);
-  }
-
-  /**
-   * Change the priority of an article and recalculate its next due date
-   */
-  async reprioritizeArticle(article: IArticleBase, newPriority: number) {
-    if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
-      throw new TypeError(
-        `Priority must be an integer between 10 and 50 inclusive; received ${newPriority}`
-      );
-    }
-    const { priority: _, ...rest } = article;
-    const lastReview = await this.getLastArticleReview(article);
-    const newInterval = await this.nextTextReviewInterval({
-      ...rest,
-      priority: newPriority,
-    });
-    const newDueTime = lastReview
-      ? lastReview.review_time + newInterval
-      : article.due;
-
-    await this.#repo.mutate(
-      `UPDATE article SET priority = $1, due = $2 WHERE id = $3`,
-      [newPriority, newDueTime, article.id]
-    );
-  }
-
-  // #endregion
-  // #region HELPERS
-  protected async nextTextReviewInterval(text: IArticleBase | ISnippetBase) {
-    const intervalMultiplier =
-      TEXT_REVIEW_MULTIPLIER_BASE +
-      (text.priority - 10) * TEXT_REVIEW_MULTIPLIER_STEP;
-
-    const lastReview = await (isArticle(text)
-      ? this.getLastArticleReview(text)
-      : this.getLastSnippetReview(text));
-
-    const lastInterval =
-      lastReview && text.due
-        ? text.due - lastReview.review_time
-        : TEXT_BASE_REVIEW_INTERVAL;
-
-    const nextInterval = Math.round(lastInterval * intervalMultiplier);
-    return nextInterval;
-  }
-
-  /** Retrieves notes from the data directory given a row's reference */
-  getNote(reference: string): TFile | null {
-    return this.app.vault.getFileByPath(
-      normalizePath(`${DATA_DIRECTORY}/${reference}`)
-    );
-  }
-
-  /**
-   *
-   * @param directory path relative to the vault root
-   */
-  protected async createNote({
-    content,
-    frontmatter,
-    fileName,
-    directory,
-  }: {
-    content: string;
-    frontmatter?: Record<string, any>;
-    fileName: string;
-    directory: string;
-  }) {
-    try {
-      const fullPath = normalizePath(`${directory}/${fileName}`);
-      const file = await createFile(this.app, fullPath);
-      await this.app.vault.append(file, content);
-      frontmatter && (await this.updateFrontMatter(file, frontmatter));
-      return file;
-    } catch (error) {
-      console.error(error);
-    }
-  }
-
-  /**
-   * Shared logic for creating snippets and cards.
-   * Throws if it fails to create the file.
-   */
-  protected async createFromText(textContent: string, directory: string) {
-    const newNoteName = createTitle(textContent);
-    const newNote = await this.createNote({
-      content: textContent,
-      frontmatter: {
-        created: new Date().toISOString(),
-      },
-      fileName: `${newNoteName}.md`,
-      directory,
-    });
-
-    if (!newNote) {
-      const errorMsg = `Failed to create note "${newNoteName}"`;
-      throw new Error(errorMsg);
-    }
-
-    return newNote;
-  }
-
-  /**
-   * Gets the type of a note based on its tags. Can return a false negative
-   * if performed too soon after note creation.
-   * TODO: use more robust approach to getting tags
-   */
-  getNoteType(note: TFile): NoteType | null {
-    const tags = this.getTags(note);
-    if (!tags) return null;
-    if (tags.includes(ARTICLE_TAG)) return 'article';
-    else if (tags.includes(SNIPPET_TAG)) return 'snippet';
-    else if (tags.includes(CARD_TAG)) return 'card';
-    else return null;
-  }
-
-  getTags(note: TFile): string[] {
-    const rawTags =
-      this.app.metadataCache.getFileCache(note)?.frontmatter?.tags;
-    return Array.isArray(rawTags) ? rawTags : [rawTags];
-  }
-
-  /** Get the vault absolute directory for a type of review item */
-  getDirectory(type: NoteType) {
-    let subDirectory;
-    if (type === 'article') subDirectory = ARTICLE_DIRECTORY;
-    else if (type === 'snippet') subDirectory = SNIPPET_DIRECTORY;
-    else if (type === 'card') subDirectory = CARD_DIRECTORY;
-    else throw new TypeError(`Type "${type}" is invalid`);
-    return normalizePath(`${DATA_DIRECTORY}/${subDirectory}`);
-  }
-
-  /**
-   * Generates a link with an absolute path and the file name as alias
-   */
-  generateMarkdownLink(
-    fileLinkedTo: TFile,
-    fileContainingLink: TFile,
-    alias?: string,
-    subpath?: string
-  ) {
-    return this.app.fileManager.generateMarkdownLink(
-      fileLinkedTo,
-      fileContainingLink.path,
-      subpath,
-      alias || fileLinkedTo.basename
-    );
   }
 
   protected async updateFrontMatter(file: TFile, updates: Record<string, any>) {
@@ -1476,44 +1429,13 @@ export default class ReviewManager {
     return null;
   }
   /**
-   * Get the content of the markdown block/section where the cursor is currently positioned
-   * Uses Obsidian's metadata cache for accurate block detection
-   */
-  getCurrentBlockContent(editor: Editor, file: TFile): string | null {
-    const cursor = editor.getCursor();
-    const cursorOffset = editor.posToOffset(cursor);
-
-    // Get the cached metadata for the current file
-    const cache = this.app.metadataCache.getFileCache(file);
-    if (!cache?.sections) {
-      return null;
-    }
-
-    // Find the section that contains the cursor position
-    const currentSection = cache.sections.find((section) => {
-      return (
-        cursorOffset >= section.position.start.offset &&
-        cursorOffset <= section.position.end.offset
-      );
-    });
-
-    if (!currentSection) {
-      return null;
-    }
-
-    // Get the content of the section
-    const sectionStart = currentSection.position.start.offset;
-    const sectionEnd = currentSection.position.end.offset;
-    const fullContent = editor.getValue();
-
-    return fullContent.slice(sectionStart, sectionEnd);
-  }
-  /**
    * (WIP) Get the block, bullet list item, or code block the cursor is currently within
    */
   getCurrentContent(editor: Editor, file: TFile) {
     const cursor = editor.getCursor();
     const block = editor.getLine(cursor.line);
+    const parsed = this.app.metadataCache.getFileCache(file);
+    console.log({ parsed });
 
     return { content: block, line: cursor.line };
   }
