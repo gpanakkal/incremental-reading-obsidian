@@ -18,7 +18,6 @@ export {
   actionBarStateField,
   type ReviewCallbacks,
 } from './ActionBarExtension';
-export * from './utils';
 
 /**
  * Creates the complete set of IR extensions for registration with Obsidian.

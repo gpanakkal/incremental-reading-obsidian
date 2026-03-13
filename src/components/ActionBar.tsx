@@ -154,7 +154,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
   const [display, setDisplay] = useState({
     priority: article.data.priority / 10,
   });
-  const { reviewArticle, reviewManager, reviewView, registerActionBarHotkey } =
+  const { reviewArticle, reviewView, reprioritize, registerActionBarHotkey } =
     useReviewContext();
 
   const updateDisplay = (updates: Partial<typeof display>) => {
@@ -164,22 +164,6 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
   useEffect(() => {
     setDisplay({ priority: article.data.priority / 10 });
   }, [article]);
-
-  const updatePriority = useCallback(async () => {
-    const priority = transformPriority(display.priority);
-    try {
-      await reviewManager.reprioritizeArticle(article.data, priority);
-      new Notice(
-        `Priority set to ${priority / 10}`,
-        SUCCESS_NOTICE_DURATION_MS
-      );
-    } catch (error) {
-      new Notice(
-        `Failed to update priority for snippet ${article.data.id} at ${article.data.reference}`,
-        ERROR_NOTICE_DURATION_MS
-      );
-    }
-  }, [article.data, display.priority]);
 
   useEffect(
     function initHotkeys() {
@@ -212,10 +196,10 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
             const transformed = transformPriority(e.currentTarget.value);
             updateDisplay({ priority: transformed / 10 });
           }}
-          onBlur={async (e) => await updatePriority()}
+          onBlur={async (e) => await reprioritize(article, display.priority)}
           onKeyDown={async (e) => {
             if (e.key === 'Enter') {
-              await updatePriority();
+              await reprioritize(article, display.priority);
             } else if (e.key === 'Escape') {
               updateDisplay({ priority: article.data.priority });
               e.currentTarget.select();
@@ -236,7 +220,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
   const [display, setDisplay] = useState({
     priority: snippet.data.priority / 10,
   });
-  const { reviewSnippet, reviewManager, reviewView, registerActionBarHotkey } =
+  const { reviewSnippet, reviewView, reprioritize, registerActionBarHotkey } =
     useReviewContext();
 
   const updateDisplay = (updates: Partial<typeof display>) => {
@@ -259,22 +243,6 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
     [reviewView, snippet, reviewSnippet]
   );
 
-  const updatePriority = useCallback(async () => {
-    const priority = transformPriority(display.priority);
-    try {
-      await reviewManager.reprioritizeSnippet(snippet.data, priority);
-      new Notice(
-        `Priority set to ${priority / 10}`,
-        SUCCESS_NOTICE_DURATION_MS
-      );
-    } catch (error) {
-      new Notice(
-        `Failed to update priority for snippet ${snippet.data.id} at ${snippet.data.reference}`,
-        ERROR_NOTICE_DURATION_MS
-      );
-    }
-  }, [snippet.data, display.priority]);
-
   return (
     <>
       <Button
@@ -295,10 +263,10 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
               const transformed = transformPriority(e.currentTarget.value);
               updateDisplay({ priority: transformed / 10 });
             }}
-            onBlur={async (e) => await updatePriority()}
+            onBlur={async (e) => await reprioritize(snippet, display.priority)}
             onKeyDown={async (e) => {
               if (e.key === 'Enter') {
-                await updatePriority();
+                await reprioritize(snippet, display.priority);
               } else if (e.key === 'Escape') {
                 updateDisplay({ priority: snippet.data.priority });
                 e.currentTarget.select();
