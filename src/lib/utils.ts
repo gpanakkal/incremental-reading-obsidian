@@ -1,32 +1,9 @@
-import type { App, Editor, TFile } from 'obsidian';
 import {
-  CONTENT_TITLE_SLICE_LENGTH,
-  FORBIDDEN_TITLE_CHARS,
+  DAY_ROLLOVER_OFFSET_HOURS,
   literal,
+  MS_PER_DAY,
+  MS_PER_MINUTE,
 } from './constants';
-import { FRONTMATTER_PATTERN } from './constants.js';
-
-export async function createFile(
-  app: App,
-  absolutePath: string
-): Promise<TFile> {
-  if (app.vault.getAbstractFileByPath(absolutePath)) {
-    throw new Error(`File already exists at ${absolutePath}`);
-  }
-
-  const folderPath = absolutePath.slice(0, absolutePath.lastIndexOf('/'));
-  if (!app.vault.getAbstractFileByPath(folderPath)) {
-    await app.vault.createFolder(folderPath);
-  }
-
-  try {
-    const file = await app.vault.create(absolutePath, '');
-    return file;
-  } catch (e) {
-    console.error(`Failed to create file at ${absolutePath}`);
-    throw e;
-  }
-}
 
 /**
  * Generates an alphanumeric ID of the specified length (default 5)
@@ -47,37 +24,11 @@ export function generateId(length: number = 5): string {
  * Get a title-safe date and time in UTC.
  * Uses the current time if a Date is not passed
  */
-export function getDateTimeString(date?: Date) {
+function getDateTimeString(date?: Date) {
   const dateToUse = date ?? new Date();
   let formatted = `${dateToUse.getUTCFullYear()}-${dateToUse.getUTCMonth() + 1}-${dateToUse.getUTCDate()}`;
   formatted += `T${dateToUse.getHours()}H${dateToUse.getMinutes()}M`;
   return formatted;
-}
-
-/**
- * Remove characters that cannot be used for file names
- * or Obsidian note titles
- * @param checkFinalChar if true, removes spaces and periods from the end
- */
-export function sanitizeForTitle(
-  text: string,
-  checkFinalChar: boolean,
-  maxLength?: number
-) {
-  const cleaned = text
-    .split('')
-    .map((char, i) => {
-      if (checkFinalChar && i === text.length - 1) {
-        if (' .'.includes(char)) return '';
-      }
-      if (FORBIDDEN_TITLE_CHARS.has(char)) {
-        return ' ';
-      } else return char;
-    })
-    .join('')
-    .trim();
-
-  return maxLength ? cleaned.slice(0, maxLength) : cleaned;
 }
 
 /**
@@ -97,25 +48,6 @@ export function getContentSlice(
     : trimmed;
 }
 
-/**
- * Creates a title from a slice of the content and a random ID
- * TODO: handle file system name length limitations?
- */
-export function createTitle(content?: string) {
-  const TITLE_SEGMENT_SEPARATOR = ' - ';
-  const segments = [];
-  if (content) {
-    const sanitized = sanitizeForTitle(
-      content,
-      false,
-      CONTENT_TITLE_SLICE_LENGTH
-    );
-    if (sanitized.length > 0) segments.push(sanitized);
-  }
-  segments.push(generateId());
-  return segments.join(TITLE_SEGMENT_SEPARATOR);
-}
-
 export const isInteger = (value: unknown): value is number =>
   typeof value === 'number' && !Number.isNaN(value) && value % 1 === 0;
 
@@ -128,24 +60,6 @@ export function compareDates(a: number | Date | null, b: number | Date | null) {
   );
 
   return aNum - bNum;
-}
-
-/**
- * If text is selected, returns an object of the EditorPositions and offsets
- * of the selection, or `null` otherwise.
- */
-export function getSelectionWithBounds(editor: Editor) {
-  const selection = editor.getSelection();
-  if (!selection) return null;
-
-  const [start, end] = [editor.getCursor('from'), editor.getCursor('to')];
-  return {
-    selection,
-    start,
-    end,
-    startOffset: editor.posToOffset(start),
-    endOffset: editor.posToOffset(end),
-  };
 }
 
 /**
@@ -165,13 +79,7 @@ export function searchAll(text: string, pattern: RegExp) {
 
   return results;
 }
-export function splitFrontMatter(
-  noteText: string
-): { frontMatter: string; body: string } | null {
-  const matches = noteText.match(FRONTMATTER_PATTERN);
-  if (!matches) return null;
-  return { frontMatter: matches[1], body: matches[2] };
-}
+
 /** Get Obsidian's internal MarkdownEditor */
 export function getEditorClass(app: any) {
   // Create a temporary editor instance
@@ -286,3 +194,19 @@ export const deepCopy = <T extends unknown>(value: T): T => {
   }
   return clone as T;
 };
+
+/**
+ * Get the rollover-adjusted end of day as a Unix timestamp.
+ */
+export function getEndOfToday() {
+  const date = new Date();
+  // get start of day in local time zone
+  const startOfToday = Date.parse(date.toDateString());
+  const rolloverOffsetMs = DAY_ROLLOVER_OFFSET_HOURS * 60 * MS_PER_MINUTE;
+  let endOfDayLocal = startOfToday + rolloverOffsetMs;
+  if (Date.parse(date.toUTCString()) - startOfToday >= rolloverOffsetMs) {
+    // add a full day since we're past the rollover point
+    endOfDayLocal += MS_PER_DAY;
+  }
+  return endOfDayLocal;
+}

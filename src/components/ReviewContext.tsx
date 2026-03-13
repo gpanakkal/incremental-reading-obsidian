@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { createContext, useContext, useState } from 'react';
-import type { Dispatch, PropsWithChildren } from 'react';
+import { createContext, useContext } from 'react';
+import type { PropsWithChildren } from 'react';
 import { useDispatch } from 'react-redux';
 import { Notice } from 'obsidian';
 import type { Scope, WorkspaceLeaf } from 'obsidian';
@@ -25,7 +25,7 @@ import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
 import type IncrementalReadingPlugin from '#/main';
 import { EditingState } from './types';
-import { deepCopy, getContentSlice, splitFrontMatter } from '#/lib/utils';
+import { deepCopy, getContentSlice } from '#/lib/utils';
 import {
   addSeenId,
   setCurrentItem,
@@ -34,6 +34,7 @@ import {
   setShowAnswer,
 } from '#/lib/store';
 import { useAppStore } from '#/hooks/useAppSelector';
+import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
@@ -135,7 +136,7 @@ export function ReviewContextProvider({
         if (!delimitersChanged) return;
 
         await plugin.app.vault.process(reviewCard.file, (fileText) => {
-          const split = splitFrontMatter(fileText);
+          const split = ObsidianHelpers.splitFrontMatter(fileText);
           if (!split)
             throw new Error(
               `Failed to parse frontmatter from note "${reviewCard.data.reference}, but note has frontmatter`
