@@ -14,6 +14,7 @@ import type {
   SnippetHighlight,
 } from '../SnippetOffsetTracker';
 import type ReviewManager from '../ReviewManager';
+import { ObsidianHelpers } from '../ObsidianHelpers';
 
 /**
  * Annotation to mark transactions from external value sync (e.g., when IREditor
@@ -162,9 +163,9 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         // for undo), so mapPos() handles everything - even when Obsidian groups
         // multiple edits into a single undo action.
         const oldDocContent = update.startState.doc.toString();
-        const oldBodyStart = reviewManager.getBodyStartOffset(oldDocContent);
+        const oldBodyStart = ObsidianHelpers.getBodyStartOffset(oldDocContent);
         const newDocContent = update.state.doc.toString();
-        const newBodyStart = reviewManager.getBodyStartOffset(newDocContent);
+        const newBodyStart = ObsidianHelpers.getBodyStartOffset(newDocContent);
 
         reviewManager.snippetTracker.updateOffsetsWithMapping(
           this.file.path,
@@ -273,7 +274,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
       // Calculate body start offset for converting body-relative to absolute
       const docContent = view.state.doc.toString();
-      const bodyStart = reviewManager.getBodyStartOffset(docContent);
+      const bodyStart = ObsidianHelpers.getBodyStartOffset(docContent);
 
       const docLength = view.state.doc.length;
       const builder = new RangeSetBuilder<Decoration>();
