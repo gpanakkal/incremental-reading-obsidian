@@ -32,6 +32,36 @@ function getDateTimeString(date?: Date) {
 }
 
 /**
+ * Get the rollover-adjusted end of day as a Unix timestamp.
+ */
+export function getEndOfToday() {
+  const date = new Date();
+  // get start of day in local time zone
+  const startOfToday = Date.parse(date.toDateString());
+  const rolloverOffsetMs = DAY_ROLLOVER_OFFSET_HOURS * 60 * MS_PER_MINUTE;
+  let endOfDayLocal = startOfToday + rolloverOffsetMs;
+  if (Date.parse(date.toUTCString()) - startOfToday >= rolloverOffsetMs) {
+    // add a full day since we're past the rollover point
+    endOfDayLocal += MS_PER_DAY;
+  }
+  return endOfDayLocal;
+}
+
+/**
+ * Make a deep copy of an object
+ * TODO: handle loops
+ */
+export const deepCopy = <T extends unknown>(value: T): T => {
+  if (value === null || typeof value !== 'object') return value;
+
+  let clone = {};
+  for (const key in value) {
+    Object.assign(clone, { [key]: deepCopy(value[key]) });
+  }
+  return clone as T;
+};
+
+/**
  * Returns the start of `content` as a string no longer than `sliceLength`,
  * adding ellipses if longer
  */
@@ -170,43 +200,3 @@ export const transformPriority = (rawPriority: string | number) => {
   const rounded = Math.round(clamped * 10);
   return rounded;
 };
-
-export function getClozeGroupsPattern(delimiters: [string, string]) {
-  return new RegExp(
-    `([\\s\\S]*)` +
-      `${literal(delimiters[0])}` +
-      `([\\s\\S]*?)` +
-      `${literal(delimiters[1])}` +
-      `([\\s\\S]*)`
-  );
-}
-
-/**
- * Make a deep copy of an object
- * TODO: handle loops
- */
-export const deepCopy = <T extends unknown>(value: T): T => {
-  if (value === null || typeof value !== 'object') return value;
-
-  let clone = {};
-  for (const key in value) {
-    Object.assign(clone, { [key]: deepCopy(value[key]) });
-  }
-  return clone as T;
-};
-
-/**
- * Get the rollover-adjusted end of day as a Unix timestamp.
- */
-export function getEndOfToday() {
-  const date = new Date();
-  // get start of day in local time zone
-  const startOfToday = Date.parse(date.toDateString());
-  const rolloverOffsetMs = DAY_ROLLOVER_OFFSET_HOURS * 60 * MS_PER_MINUTE;
-  let endOfDayLocal = startOfToday + rolloverOffsetMs;
-  if (Date.parse(date.toUTCString()) - startOfToday >= rolloverOffsetMs) {
-    // add a full day since we're past the rollover point
-    endOfDayLocal += MS_PER_DAY;
-  }
-  return endOfDayLocal;
-}

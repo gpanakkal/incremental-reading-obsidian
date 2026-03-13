@@ -16,6 +16,7 @@ import { isReviewCard } from '#/lib/types';
 import {
   CLOZE_DELIMITERS,
   CONTENT_TITLE_SLICE_LENGTH,
+  ERROR_NOTICE_DURATION_MS,
   LEGACY_CLOZE_DELIMITERS,
   MS_PER_DAY,
   REVIEW_FETCH_COUNT,
@@ -25,7 +26,7 @@ import type ReviewManager from '#/lib/ReviewManager';
 import type ReviewView from '#/views/ReviewView';
 import type IncrementalReadingPlugin from '#/main';
 import { EditingState } from './types';
-import { deepCopy, getContentSlice } from '#/lib/utils';
+import { deepCopy, getContentSlice, transformPriority } from '#/lib/utils';
 import {
   addSeenId,
   setCurrentItem,
@@ -34,7 +35,7 @@ import {
   setShowAnswer,
 } from '#/lib/store';
 import { useAppStore } from '#/hooks/useAppSelector';
-import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
@@ -48,6 +49,10 @@ interface ReviewContextProps {
   reviewSnippet: (
     snippet: ReviewSnippet,
     nextInterval?: number
+  ) => Promise<void>;
+  reprioritize: (
+    item: ReviewArticle | ReviewSnippet,
+    newPriority: number
   ) => Promise<void>;
   gradeCard: (card: ReviewCard, grade: Grade) => Promise<void>;
   dismissItem: (item: ReviewItem) => Promise<void>;
@@ -136,7 +141,7 @@ export function ReviewContextProvider({
         if (!delimitersChanged) return;
 
         await plugin.app.vault.process(reviewCard.file, (fileText) => {
-          const split = ObsidianHelpers.splitFrontMatter(fileText);
+          const split = Obsidian.splitFrontMatter(fileText);
           if (!split)
             throw new Error(
               `Failed to parse frontmatter from note "${reviewCard.data.reference}, but note has frontmatter`
@@ -204,6 +209,28 @@ export function ReviewContextProvider({
     }
   };
 
+  /**
+   * @param newPriority decimal number from 1.0 to 5.0, inclusive
+   */
+  const reprioritize = async (
+    item: ReviewArticle | ReviewSnippet,
+    newPriority: number
+  ) => {
+    const priority = transformPriority(newPriority);
+    try {
+      await reviewManager.reprioritize(item.data, priority);
+      new Notice(
+        `Priority set to ${priority / 10}`,
+        SUCCESS_NOTICE_DURATION_MS
+      );
+    } catch (error) {
+      new Notice(
+        `Failed to update priority for "${item.data.reference}"`,
+        ERROR_NOTICE_DURATION_MS
+      );
+    }
+  };
+
   const gradeCard = async (card: ReviewCard, grade: Grade) => {
     await reviewManager.reviewCard(card.data, grade);
     new Notice(`Graded as: ${Rating[grade]}`);
@@ -214,12 +241,7 @@ export function ReviewContextProvider({
   };
 
   const dismissItem = async (item: ReviewItem) => {
-    const type = reviewManager.getNoteType(item.file);
-    if (!type) {
-      console.error(item);
-      throw new TypeError(`Item type not recognized`);
-    }
-    await reviewManager.dismissItem(type, item.data.id);
+    await reviewManager.dismissItem(item);
     if (store.getState().currentItem?.data.id === item.data.id) {
       // update item in Redux store
       dispatch(setDismissed(true));
@@ -237,18 +259,13 @@ export function ReviewContextProvider({
 
     const [_folder, subRef] = item.data.reference.split('/');
     new Notice(
-      `Dismissed ${type} "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}"`
+      `Dismissed "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}"`
     );
     getNext();
   };
 
   const unDismissItem = async (item: ReviewItem) => {
-    const type = reviewManager.getNoteType(item.file);
-    if (!type) {
-      console.error(item);
-      throw new TypeError(`Item type not recognized`);
-    }
-    await reviewManager.unDismissItem(type, item.data.id);
+    await reviewManager.unDismissItem(item);
     if (store.getState().currentItem?.data.id === item.data.id) {
       // update item in Redux store
       dispatch(setDismissed(false));
@@ -266,7 +283,7 @@ export function ReviewContextProvider({
 
     const [_folder, subRef] = item.data.reference.split('/');
     new Notice(
-      `Restored ${type} "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}" to queue`
+      `Restored "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}" to queue`
     );
   };
 
@@ -283,7 +300,7 @@ export function ReviewContextProvider({
 
   const saveNote = async (item: ReviewItem, newContent: string) => {
     // Save document content and highlight offsets together to avoid race conditions
-    const highlights = reviewManager.snippetTracker.getHighlights(
+    const highlights = reviewManager.snippets.offsetTracker.getHighlights(
       item.file.path
     );
 
@@ -337,6 +354,7 @@ export function ReviewContextProvider({
     getNext,
     reviewArticle,
     reviewSnippet,
+    reprioritize,
     gradeCard,
     dismissItem,
     unDismissItem,

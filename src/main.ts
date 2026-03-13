@@ -12,10 +12,7 @@ import ReviewManager from './lib/ReviewManager';
 import ReviewView from './views/ReviewView';
 import { PriorityModal } from './views/PriorityModal';
 import type { ReviewItem } from './lib/types';
-import SRSCard from './lib/SRSCard';
 import { getEditorClass } from './lib/utils';
-import Snippet from './lib/Snippet';
-import Article from './lib/Article';
 import { QueryModal } from './views/QueryModal';
 import { createIRExtensions } from './lib/extensions';
 import { queryClient } from './lib/queryClient';
@@ -179,23 +176,7 @@ export default class IncrementalReadingPlugin extends Plugin {
           new Notice(`Plugin still loading`);
           return;
         }
-        const articles = await this.#reviewManager._fetchArticleData({
-          includeDismissed: true,
-        });
-        const snippets = await this.#reviewManager._fetchSnippetData({
-          includeDismissed: true,
-        });
-        const cards = await this.#reviewManager._fetchCardData({
-          includeDismissed: true,
-        });
-
-        if (!articles && !snippets && !cards) {
-          new Notice('No entries found');
-          return;
-        }
-        console.table(articles.map(Article.rowToDisplay));
-        console.table(snippets.map(Snippet.rowToDisplay));
-        console.table(cards.map(SRSCard.rowToDisplay));
+        await this.#reviewManager._logItems();
       },
     });
 
