@@ -1243,15 +1243,15 @@ export default class ReviewManager {
     }
     const type = this.getNoteType(concreteFile);
     if (!type) {
-      console.log(`Found no matching IR tags; ignoring`);
+      console.warn(`Found no matching IR tags; ignoring`);
       return;
     }
     if (!oldPath.startsWith(DATA_DIRECTORY)) {
-      console.log('File was not previously in IR directory; ignoring');
+      console.warn('File was not previously in IR directory; ignoring');
       return;
     }
     if (!newPath.startsWith(DATA_DIRECTORY)) {
-      console.log('File is no longer in IR directory; ignoring');
+      console.warn('File is no longer in IR directory; ignoring');
       return;
     }
 
@@ -1371,15 +1371,24 @@ export default class ReviewManager {
     return newNote;
   }
 
+  /**
+   * Gets the type of a note based on its tags. Can return a false negative
+   * if performed too soon after note creation.
+   * TODO: use more robust approach to getting tags
+   */
   getNoteType(note: TFile): NoteType | null {
-    const tags = this.app.metadataCache.getFileCache(note)?.frontmatter?.tags;
+    const tags = this.getTags(note);
     if (!tags) return null;
-
-    const tagSet: Set<string> = new Set(Array.isArray(tags) ? tags : [tags]);
-    if (tagSet.has(ARTICLE_TAG)) return 'article';
-    else if (tagSet.has(SNIPPET_TAG)) return 'snippet';
-    else if (tagSet.has(CARD_TAG)) return 'card';
+    if (tags.includes(ARTICLE_TAG)) return 'article';
+    else if (tags.includes(SNIPPET_TAG)) return 'snippet';
+    else if (tags.includes(CARD_TAG)) return 'card';
     else return null;
+  }
+
+  getTags(note: TFile): string[] {
+    const rawTags =
+      this.app.metadataCache.getFileCache(note)?.frontmatter?.tags;
+    return Array.isArray(rawTags) ? rawTags : [rawTags];
   }
 
   /** Get the vault absolute directory for a type of review item */

@@ -6,7 +6,7 @@ import { actionBarExtension } from './ActionBarExtension';
 import type IncrementalReadingPlugin from '#/main';
 
 // Re-export for convenience
-export { irPluginFacet } from './irPluginFacet';
+export { irPluginFacet, isReviewInterfaceFacet } from './irPluginFacet';
 export {
   isExternalSync,
   refreshHighlightsEffect,
