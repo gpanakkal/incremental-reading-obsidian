@@ -20,7 +20,12 @@ import {
 } from '#/lib/constants';
 import { transformPriority } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
-import type { ReviewArticle, ReviewItem, ReviewSnippet } from '#/lib/types';
+import {
+  isReviewCard,
+  type ReviewArticle,
+  type ReviewItem,
+  type ReviewSnippet,
+} from '#/lib/types';
 
 /**
  * State effect to toggle review mode on/off.
@@ -45,7 +50,7 @@ export interface ReviewCallbacks {
   dismissItem?: (item: any) => Promise<void>;
   skipItem?: (item: any) => void;
   setShowAnswer?: (show: boolean) => void;
-  getCurrentItem?: () => any;
+  getCurrentItem?: () => ReviewItem | null;
 }
 
 export const setReviewCallbacks = StateEffect.define<ReviewCallbacks>();
@@ -200,7 +205,7 @@ function renderReviewModeActions(
     if (item) {
       const plugin = view.state.facet(irPluginFacet);
       const reviewManager = plugin?.reviewManager;
-      if (reviewManager) {
+      if (reviewManager && !isReviewCard(item)) {
         const priorityEl = createPriorityInput(
           item.data.priority / 10,
           async (newPriority) => {
