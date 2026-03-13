@@ -1,9 +1,9 @@
 import classcat from 'classcat';
 import { Component, MarkdownRenderer } from 'obsidian';
 import { useEffect, useRef } from 'react';
-import SRSCard from '#/lib/SRSCard';
 import { useReviewContext } from './ReviewContext';
-import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { CardManager } from '#/lib/items/CardManager';
 
 /** Read-only card viewer */
 export function CardViewer({ cardText }: { cardText: string }) {
@@ -24,12 +24,12 @@ export function CardViewer({ cardText }: { cardText: string }) {
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const splitResult = ObsidianHelpers.splitFrontMatter(cardText);
+    const splitResult = Obsidian.splitFrontMatter(cardText);
     if (!splitResult) {
       throw new Error('Failed to parse frontmatter from note:\n' + cardText);
     }
 
-    const withAnswerHidden = SRSCard.hideAnswer(splitResult.body);
+    const withAnswerHidden = CardManager.hideAnswer(splitResult.body);
     const component = new Component();
     component.load();
     containerRef.current.empty();

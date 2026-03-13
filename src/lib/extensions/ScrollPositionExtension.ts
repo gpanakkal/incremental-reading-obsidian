@@ -1,6 +1,6 @@
 import { ViewPlugin } from '@codemirror/view';
 import { irPluginFacet } from './irPluginFacet';
-import { getFileFromState, getAppFromState, isIRNote } from './utils';
+import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 
 /**
  * CodeMirror extension that saves and restores scroll position for IR notes.
@@ -23,11 +23,20 @@ export const scrollPositionExtension = ViewPlugin.define(
     const propertiesLoadTimeoutMs = 300;
 
     const plugin = view.state.facet(irPluginFacet);
-    const file = getFileFromState(view.state);
-    const app = getAppFromState(view.state);
+    const info = Obsidian.getFileInfoFromState(view.state);
+    if (!info)
+      return {
+        destroy() {},
+      };
+
+    const { file, app } = info;
+    if (!file)
+      return {
+        destroy() {},
+      };
 
     // Early return if plugin/file not available or not an IR note
-    if (!plugin || !file || !app || !isIRNote(app, file)) {
+    if (!plugin || !file || !app || !Obsidian.getNoteType(file, app)) {
       return {
         destroy() {},
       };
@@ -60,8 +69,8 @@ export const scrollPositionExtension = ViewPlugin.define(
     const handleScroll = async () => {
       if (isRestoring) return;
 
-      const currentFile = getFileFromState(view.state);
-      if (!currentFile) return;
+      const info = Obsidian.getFileInfoFromState(view.state);
+      if (!info || !info.file) return;
 
       const scroller = view.scrollDOM;
       const frontmatterHeight = getFrontmatterHeight();
@@ -76,7 +85,7 @@ export const scrollPositionExtension = ViewPlugin.define(
         left: scroller.scrollLeft,
       };
 
-      await reviewManager.saveScrollPosition(currentFile, currentPos);
+      await reviewManager.saveScrollPosition(info.file, currentPos);
     };
 
     // Restore scroll position after properties widget has rendered

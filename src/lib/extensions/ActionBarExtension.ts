@@ -1,31 +1,23 @@
 import type { Panel, EditorView } from '@codemirror/view';
 import { showPanel } from '@codemirror/view';
-import {
-  StateField,
-  StateEffect,
-  Facet,
-  type Extension,
-} from '@codemirror/state';
+import { StateField, StateEffect, type Extension } from '@codemirror/state';
+import type { App } from 'obsidian';
 import { Notice } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
-import {
-  getFileFromState,
-  getAppFromState,
-  getIRNoteType,
-  type IRNoteType,
-} from './utils';
 import {
   ERROR_NOTICE_DURATION_MS,
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
 import { transformPriority } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
+import type { NoteType } from '#/lib/types';
 import {
   isReviewCard,
   type ReviewArticle,
   type ReviewItem,
   type ReviewSnippet,
 } from '#/lib/types';
+import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 
 /**
  * State effect to toggle review mode on/off.
@@ -91,7 +83,8 @@ export const actionBarStateField = StateField.define<ActionBarState>({
  * so we can assume it's valid.
  */
 function createActionBarPanel(
-  noteType: IRNoteType
+  noteType: NoteType,
+  app: App
 ): (view: EditorView) => Panel {
   return (view: EditorView): Panel => {
     const dom = document.createElement('div');
@@ -102,7 +95,7 @@ function createActionBarPanel(
 
     return {
       dom,
-      top: !this.app.isMobile,
+      top: !app.isMobile,
       update(update) {
         // Re-render if state changed
         const prevState = update.startState.field(actionBarStateField);
@@ -112,13 +105,15 @@ function createActionBarPanel(
           prevState.isReviewMode !== newState.isReviewMode ||
           prevState.showAnswer !== newState.showAnswer
         ) {
-          const file = getFileFromState(update.state);
-          const app = getAppFromState(update.state);
-          if (file && app) {
-            const currentNoteType = getIRNoteType(app, file);
-            if (currentNoteType) {
-              renderActionBar(update.view, dom, currentNoteType);
-            }
+          const info = Obsidian.getFileInfoFromState(update.state);
+          if (!info) return;
+
+          const { file, app } = info;
+          if (!file) return;
+
+          const currentNoteType = Obsidian.getNoteType(file, app);
+          if (currentNoteType) {
+            renderActionBar(update.view, dom, currentNoteType);
           }
         }
       },
@@ -132,7 +127,7 @@ function createActionBarPanel(
 function renderActionBar(
   view: EditorView,
   container: HTMLElement,
-  noteType: IRNoteType
+  noteType: NoteType
 ) {
   const state = view.state.field(actionBarStateField);
   const plugin = view.state.facet(irPluginFacet);
@@ -144,7 +139,7 @@ function renderActionBar(
     renderReviewModeActions(view, container, noteType, state);
   } else {
     // Standalone mode: basic actions via ReviewManager
-    renderStandaloneModeActions(view, container, noteType, plugin);
+    renderStandaloneModeActions(view, container, plugin);
   }
 }
 
@@ -154,7 +149,7 @@ function renderActionBar(
 function renderReviewModeActions(
   view: EditorView,
   container: HTMLElement,
-  noteType: IRNoteType,
+  noteType: NoteType,
   state: ActionBarState
 ) {
   const { callbacks } = state;
@@ -211,12 +206,12 @@ function renderReviewModeActions(
           async (newPriority) => {
             try {
               if (noteType === 'article') {
-                await reviewManager.reprioritizeArticle(
+                await reviewManager.reprioritize(
                   item.data as ReviewArticle['data'],
                   newPriority
                 );
               } else if (noteType === 'snippet') {
-                await reviewManager.reprioritizeSnippet(
+                await reviewManager.reprioritize(
                   item.data as ReviewSnippet['data'],
                   newPriority
                 );
@@ -272,7 +267,6 @@ function renderReviewModeActions(
 function renderStandaloneModeActions(
   view: EditorView,
   container: HTMLElement,
-  noteType: IRNoteType,
   plugin: IncrementalReadingPlugin | null
 ) {
   if (!plugin || !plugin.reviewManager) {
@@ -280,10 +274,11 @@ function renderStandaloneModeActions(
   }
 
   const { reviewManager } = plugin;
-  const file = getFileFromState(view.state);
-  if (!file) {
-    return;
-  }
+  const info = Obsidian.getFileInfoFromState(view.state);
+  if (!info) return;
+
+  const { file } = info;
+  if (!file) return;
 
   // Create dismiss button with loading state, then fetch actual status
   const dismissToggleBtn = createButton('Loading...', async () => {});
@@ -325,11 +320,11 @@ function renderStandaloneModeActions(
 
           const isDismissed = item.data.dismissed;
           if (isDismissed) {
-            await reviewManager.unDismissItem(noteType, item.data.id);
+            await reviewManager.unDismissItem(item);
             new Notice('Item restored to queue', SUCCESS_NOTICE_DURATION_MS);
             updateButtonLabel(false);
           } else {
-            await reviewManager.dismissItem(noteType, item.data.id);
+            await reviewManager.dismissItem(item);
             new Notice('Item dismissed', SUCCESS_NOTICE_DURATION_MS);
             updateButtonLabel(true);
           }
@@ -466,24 +461,20 @@ const actionBarPanelFacet = showPanel.compute(
   (state) => {
     // Don't show the CM panel when in review mode - the React ActionBar handles that
     const actionBarState = state.field(actionBarStateField);
-    if (actionBarState.isReviewMode) {
-      return null;
-    }
+    if (actionBarState.isReviewMode) return null;
 
-    const file = getFileFromState(state);
-    const app = getAppFromState(state);
+    const info = Obsidian.getFileInfoFromState(state);
+    if (!info) return null;
 
-    if (!file || !app) {
-      return null;
-    }
+    const { file, app } = info;
 
-    const noteType = getIRNoteType(app, file);
-    if (!noteType) {
-      return null;
-    }
+    if (!file) return null;
+
+    const noteType = Obsidian.getNoteType(file, app);
+    if (!noteType) return null;
 
     // Return the panel constructor with the noteType pre-bound
-    return createActionBarPanel(noteType);
+    return createActionBarPanel(noteType, app);
   }
 );
 

@@ -3,18 +3,12 @@ import type { ViewUpdate, DecorationSet, EditorView } from '@codemirror/view';
 import { Annotation, RangeSetBuilder, StateEffect } from '@codemirror/state';
 import type { TFile } from 'obsidian';
 import { irPluginFacet, isReviewInterfaceFacet } from './irPluginFacet';
-import {
-  getFileFromState,
-  getAppFromState,
-  getIRNoteType,
-  isIRSource,
-} from './utils';
 import type {
   SnippetOffsetTracker,
   SnippetHighlight,
 } from '../SnippetOffsetTracker';
 import type ReviewManager from '../ReviewManager';
-import { ObsidianHelpers } from '../ObsidianHelpers';
+import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 
 /**
  * Annotation to mark transactions from external value sync (e.g., when IREditor
@@ -49,7 +43,8 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     private isReviewInterface: boolean = false;
 
     constructor(view: EditorView) {
-      this.file = getFileFromState(view.state);
+      const info = Obsidian.getFileInfoFromState(view.state);
+      this.file = info?.file ?? null;
       this.decorations = Decoration.none;
 
       // Determined via facet provided by IREditor's buildLocalExtensions().
@@ -63,23 +58,19 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
     private async loadHighlights(view: EditorView) {
       const plugin = view.state.facet(irPluginFacet);
-      const app = getAppFromState(view.state);
+      const info = Obsidian.getFileInfoFromState(view.state);
 
-      if (!plugin || !app || !this.file) {
-        return;
-      }
+      if (!plugin || !info || !this.file) return;
 
-      const isSource = isIRSource(app, this.file);
-      const noteType = getIRNoteType(app, this.file);
+      const isSource = Obsidian.isSourceNote(this.file, info.app);
+      const noteType = Obsidian.getNoteType(this.file, info.app);
       // Only sources, articles, and snippets can have child snippets
       if (!(isSource || noteType === 'article' || noteType === 'snippet')) {
         return;
       }
 
       const reviewManager = plugin.reviewManager;
-      if (!reviewManager) {
-        return;
-      }
+      if (!reviewManager) return;
 
       // Load highlights from database into tracker (offsets are body-relative)
       await reviewManager.getSnippetHighlights(this.file);
@@ -88,7 +79,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       // Build decorations from tracker
       this.decorations = this.buildDecorations(
         view,
-        reviewManager.snippetTracker,
+        reviewManager.snippets.offsetTracker,
         reviewManager
       );
 
@@ -100,9 +91,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       const plugin = update.state.facet(irPluginFacet);
       const reviewManager = plugin?.reviewManager;
 
-      if (!reviewManager || !this.file) {
-        return;
-      }
+      if (!reviewManager || !this.file) return;
 
       // If highlights haven't been loaded yet but we received a refresh effect
       // (e.g. a snippet was just created from this note, which tagged it as
@@ -120,7 +109,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           this.highlightsLoaded = true;
           this.decorations = this.buildDecorations(
             update.view,
-            reviewManager.snippetTracker,
+            reviewManager.snippets.offsetTracker,
             reviewManager
           );
         }
@@ -163,11 +152,11 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         // for undo), so mapPos() handles everything - even when Obsidian groups
         // multiple edits into a single undo action.
         const oldDocContent = update.startState.doc.toString();
-        const oldBodyStart = ObsidianHelpers.getBodyStartOffset(oldDocContent);
+        const oldBodyStart = Obsidian.getBodyStartOffset(oldDocContent);
         const newDocContent = update.state.doc.toString();
-        const newBodyStart = ObsidianHelpers.getBodyStartOffset(newDocContent);
+        const newBodyStart = Obsidian.getBodyStartOffset(newDocContent);
 
-        reviewManager.snippetTracker.updateOffsetsWithMapping(
+        reviewManager.snippets.offsetTracker.updateOffsetsWithMapping(
           this.file.path,
           update.changes,
           oldBodyStart,
@@ -177,7 +166,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         // In regular Obsidian editor, we handle persistence here with debouncing.
         // In the review interface, ReviewItem.saveNote() handles persistence.
         if (!this.isReviewInterface) {
-          const highlights = reviewManager.snippetTracker.getHighlights(
+          const highlights = reviewManager.snippets.offsetTracker.getHighlights(
             this.file.path
           );
           this.schedulePersist(reviewManager, this.file, highlights);
@@ -188,7 +177,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       // (either from document edits above, or from external refresh after snippet creation)
       this.decorations = this.buildDecorations(
         update.view,
-        reviewManager.snippetTracker,
+        reviewManager.snippets.offsetTracker,
         reviewManager
       );
     }
@@ -209,7 +198,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       // Rebuild decorations
       this.decorations = this.buildDecorations(
         view,
-        reviewManager.snippetTracker,
+        reviewManager.snippets.offsetTracker,
         reviewManager
       );
 
@@ -237,7 +226,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     ) {
       if (!file) return;
 
-      // const highlights = reviewManager.snippetTracker.getHighlights(
+      // const highlights = reviewManager.snippets.offsetTracker.getHighlights(
       //   this.file.path
       // );
       // console.log(
@@ -274,7 +263,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
       // Calculate body start offset for converting body-relative to absolute
       const docContent = view.state.doc.toString();
-      const bodyStart = ObsidianHelpers.getBodyStartOffset(docContent);
+      const bodyStart = Obsidian.getBodyStartOffset(docContent);
 
       const docLength = view.state.doc.length;
       const builder = new RangeSetBuilder<Decoration>();
