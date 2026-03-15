@@ -1,32 +1,31 @@
-import type { App, TFile } from 'obsidian';
-import { normalizePath, Notice } from 'obsidian';
-import type { SQLiteRepository } from '../repository';
 import type {
-  IArticleBase,
+  ArticleDisplay,
+  ArticleRow,
   IArticleActive,
+  IArticleBase,
   IArticleReview,
   ReviewArticle,
-  ArticleRow,
-  ArticleDisplay,
 } from '#/lib/types';
+import type { App, TFile } from 'obsidian';
+import { normalizePath, Notice } from 'obsidian';
 import {
-  TEXT_BASE_REVIEW_INTERVAL,
-  SNIPPET_TAG,
-  SOURCE_PROPERTY_NAME,
-  ERROR_NOTICE_DURATION_MS,
-  SUCCESS_NOTICE_DURATION_MS,
-  CARD_TAG,
-  TEXT_REVIEW_MULTIPLIER_BASE,
-  TEXT_REVIEW_MULTIPLIER_STEP,
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
+  CARD_TAG,
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
+  ERROR_NOTICE_DURATION_MS,
   INVALID_TITLE_MESSAGE,
+  SNIPPET_TAG,
+  SOURCE_PROPERTY_NAME,
+  SUCCESS_NOTICE_DURATION_MS,
+  TEXT_BASE_REVIEW_INTERVAL,
+  TEXT_REVIEW_MULTIPLIER_BASE,
+  TEXT_REVIEW_MULTIPLIER_STEP,
 } from '../constants';
-import { getEndOfToday } from '../utils';
-import { generateId, getContentSlice } from '../utils';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import type { SQLiteRepository } from '../repository';
+import { generateId, getContentSlice, getEndOfToday } from '../utils';
 import { ItemManager } from './ItemManager';
 
 export class ArticleManager extends ItemManager {

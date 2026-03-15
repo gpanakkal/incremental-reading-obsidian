@@ -1,10 +1,10 @@
+import { useAppSelector } from '#/hooks/useAppSelector';
 import { isReviewCard, type ReviewItem } from '#/lib/types';
+import type { EditorView } from '@codemirror/view';
+import { useQuery } from '@tanstack/react-query';
+import { CardViewer } from './CardViewer';
 import { IREditor } from './IREditor';
 import { useReviewContext } from './ReviewContext';
-import type { EditorView } from '@codemirror/view';
-import { CardViewer } from './CardViewer';
-import { useQuery } from '@tanstack/react-query';
-import { useAppSelector } from '#/hooks/useAppSelector';
 
 /**
  * TODO:

@@ -1,23 +1,23 @@
+import type IncrementalReadingPlugin from '#/main';
 import type { Extension } from '@codemirror/state';
+import { actionBarExtension } from './ActionBarExtension';
 import { irPluginFacet } from './irPluginFacet';
 import { scrollPositionExtension } from './ScrollPositionExtension';
 import { snippetHighlightExtension } from './SnippetHighlightExtension';
-import { actionBarExtension } from './ActionBarExtension';
-import type IncrementalReadingPlugin from '#/main';
 
 // Re-export for convenience
+export {
+  actionBarStateField,
+  setReviewCallbacks,
+  setReviewModeEffect,
+  setShowAnswerEffect,
+  type ReviewCallbacks,
+} from './ActionBarExtension';
 export { irPluginFacet, isReviewInterfaceFacet } from './irPluginFacet';
 export {
   isExternalSync,
   refreshHighlightsEffect,
 } from './SnippetHighlightExtension';
-export {
-  setReviewModeEffect,
-  setShowAnswerEffect,
-  setReviewCallbacks,
-  actionBarStateField,
-  type ReviewCallbacks,
-} from './ActionBarExtension';
 
 /**
  * Creates the complete set of IR extensions for registration with Obsidian.

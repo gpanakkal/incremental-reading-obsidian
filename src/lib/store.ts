@@ -1,9 +1,9 @@
-import { createSlice, configureStore, createAction } from '@reduxjs/toolkit';
-import type { PayloadAction } from '@reduxjs/toolkit';
-import { type ReviewItem } from './types';
 import type { EditCoordinates, EditState } from '#/components/types';
 import { EditingState } from '#/components/types';
+import type { PayloadAction } from '@reduxjs/toolkit';
+import { configureStore, createAction, createSlice } from '@reduxjs/toolkit';
 import { enableMapSet } from 'immer';
+import { type ReviewItem } from './types';
 
 enableMapSet(); // needed to use sets with immer
 export const resetSession = createAction('resetSession');

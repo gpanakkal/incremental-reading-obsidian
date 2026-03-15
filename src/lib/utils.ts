@@ -1,6 +1,5 @@
 import {
   DAY_ROLLOVER_OFFSET_HOURS,
-  literal,
   MS_PER_DAY,
   MS_PER_MINUTE,
 } from './constants';
@@ -11,7 +10,7 @@ import {
 export function generateId(length: number = 5): string {
   if (length <= 0 || length % 1 !== 0) {
     throw new TypeError(
-      `Length must be a positive integer; received ${length}`
+      `Length must be a positive integer; received ${length}`,
     );
   }
 
@@ -20,16 +19,16 @@ export function generateId(length: number = 5): string {
     .slice(2, length + 2); // remove the decimal place
 }
 
-/**
- * Get a title-safe date and time in UTC.
- * Uses the current time if a Date is not passed
- */
-function getDateTimeString(date?: Date) {
-  const dateToUse = date ?? new Date();
-  let formatted = `${dateToUse.getUTCFullYear()}-${dateToUse.getUTCMonth() + 1}-${dateToUse.getUTCDate()}`;
-  formatted += `T${dateToUse.getHours()}H${dateToUse.getMinutes()}M`;
-  return formatted;
-}
+// /**
+//  * Get a title-safe date and time in UTC.
+//  * Uses the current time if a Date is not passed
+//  */
+// function getDateTimeString(date?: Date) {
+//   const dateToUse = date ?? new Date();
+//   let formatted = `${dateToUse.getUTCFullYear()}-${dateToUse.getUTCMonth() + 1}-${dateToUse.getUTCDate()}`;
+//   formatted += `T${dateToUse.getHours()}H${dateToUse.getMinutes()}M`;
+//   return formatted;
+// }
 
 /**
  * Get the rollover-adjusted end of day as a Unix timestamp.
@@ -51,7 +50,7 @@ export function getEndOfToday() {
  * Make a deep copy of an object
  * TODO: handle loops
  */
-export const deepCopy = <T extends unknown>(value: T): T => {
+export const deepCopy = <T>(value: T): T => {
   if (value === null || typeof value !== 'object') return value;
 
   let clone = {};
@@ -68,7 +67,7 @@ export const deepCopy = <T extends unknown>(value: T): T => {
 export function getContentSlice(
   content: string,
   sliceLength: number,
-  ellipses: boolean = false
+  ellipses: boolean = false,
 ) {
   const trimmed = content.trim();
   if (!ellipses) return trimmed.slice(0, sliceLength);
@@ -86,7 +85,7 @@ export function compareDates(a: number | Date | null, b: number | Date | null) {
   if (a === null) return 1;
   if (b === null) return -1;
   const [aNum, bNum] = [a, b].map((val) =>
-    typeof val === 'number' ? val : Date.parse(val.toUTCString())
+    typeof val === 'number' ? val : Date.parse(val.toUTCString()),
   );
 
   return aNum - bNum;
@@ -98,9 +97,13 @@ export function compareDates(a: number | Date | null, b: number | Date | null) {
 export function searchAll(text: string, pattern: RegExp) {
   let results: { match: string; index: number }[] = [];
   const matches = text.matchAll(pattern);
-  while (true) {
+  let done = false;
+  while (!done) {
     const next = matches.next();
-    if (next.done) break;
+    if (next.done) {
+      done = false;
+      break;
+    }
     const { index } = next.value;
     const matchText = next.value[0];
     if (index === undefined) throw new TypeError(`Index must be a number`);
@@ -111,6 +114,7 @@ export function searchAll(text: string, pattern: RegExp) {
 }
 
 /** Get Obsidian's internal MarkdownEditor */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function getEditorClass(app: any) {
   // Create a temporary editor instance
   const md = app.embedRegistry.embedByExtension.md(
@@ -120,7 +124,7 @@ export function getEditorClass(app: any) {
       state: {},
     },
     null,
-    ''
+    '',
   );
 
   try {
@@ -129,7 +133,7 @@ export function getEditorClass(app: any) {
     md.showEditor();
 
     const MarkdownEditor = Object.getPrototypeOf(
-      Object.getPrototypeOf(md.editMode)
+      Object.getPrototypeOf(md.editMode),
     ).constructor;
 
     // Store reference to original buildExtensions method to copy extensions
@@ -144,6 +148,7 @@ export function getEditorClass(app: any) {
 /**
  * Get base extensions that would be used in a standard MarkdownEditor
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function getBaseMarkdownExtensions(app: any) {
   const md = app.embedRegistry.embedByExtension.md(
     {
@@ -152,7 +157,7 @@ export function getBaseMarkdownExtensions(app: any) {
       state: {},
     },
     null,
-    ''
+    '',
   );
 
   try {

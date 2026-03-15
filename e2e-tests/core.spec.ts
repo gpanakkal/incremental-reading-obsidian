@@ -5,18 +5,18 @@ import test, {
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
 import {
+  executeCommand,
+  finalizeArticleImport,
+  openNote,
+  selectParagraph,
+} from './helpers';
+import {
   closeElectron,
   createVaultCopy,
   launchElectron,
   openVault,
   shouldCleanup,
 } from './setup/helpers';
-import {
-  executeCommand,
-  finalizeArticleImport,
-  openNote,
-  selectParagraph,
-} from './helpers';
 
 /**
  * Tests of core plugin functionality:
