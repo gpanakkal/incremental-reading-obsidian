@@ -1,10 +1,12 @@
 import type {
   ArticleDisplay,
   ArticleRow,
+  PluginFrontMatter,
   IArticleActive,
   IArticleBase,
   IArticleReview,
   ReviewArticle,
+  FrontMatterUpdates,
 } from '#/lib/types';
 import type { App, TFile } from 'obsidian';
 import { normalizePath, Notice } from 'obsidian';
@@ -23,7 +25,7 @@ import {
   TEXT_REVIEW_MULTIPLIER_BASE,
   TEXT_REVIEW_MULTIPLIER_STEP,
 } from '../constants';
-import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import { ObsidianHelpers as Obsidian, ObsidianHelpers } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../repository';
 import { generateId, getContentSlice, getEndOfToday } from '../utils';
 import { ItemManager } from './ItemManager';
@@ -71,11 +73,13 @@ export class ArticleManager extends ItemManager {
       }
       // Read the content of the current file
       const content = await this.app.vault.cachedRead(file);
-      const frontmatter =
-        this.app.metadataCache.getFileCache(file)?.frontmatter;
-      if (frontmatter?.tags?.length) {
-        const tags: string[] = frontmatter.tags;
-        if (tags.some((tag) => new Set([SNIPPET_TAG, CARD_TAG]).has(tag))) {
+      const frontmatter = ObsidianHelpers.getFrontMatter(file, this.app);
+      if (frontmatter?.tags) {
+        if (
+          frontmatter.tags.some((tag) =>
+            new Set([SNIPPET_TAG, CARD_TAG]).has(tag)
+          )
+        ) {
           new Notice(
             `Note contains a snippet or card tag; canceling import`,
             ERROR_NOTICE_DURATION_MS
@@ -117,7 +121,7 @@ export class ArticleManager extends ItemManager {
       }
 
       // Tag it and create a link to the source if it doesn't exist
-      const frontmatterUpdates: Record<string, any> = {
+      const frontmatterUpdates: FrontMatterUpdates = {
         tags: ARTICLE_TAG,
       };
       if (!frontmatter?.source) {
