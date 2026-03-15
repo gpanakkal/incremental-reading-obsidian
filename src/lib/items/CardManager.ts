@@ -1,33 +1,32 @@
+import type {
+  ISRSCard,
+  ISRSCardDisplay,
+  ReviewCard,
+  SRSCardRow,
+} from '#/lib/types';
 import type { TFile } from 'obsidian';
 import { Notice, type App, type Editor, type MarkdownView } from 'obsidian';
-import type { SQLiteRepository } from '../repository';
-import type {
-  ReviewCard,
-  ISRSCardDisplay,
-  SRSCardRow,
-  ISRSCard,
-} from '#/lib/types';
-import {
-  SOURCE_PROPERTY_NAME,
-  ERROR_NOTICE_DURATION_MS,
-  CARD_DIRECTORY,
-  CARD_TAG,
-  CLOZE_DELIMITERS,
-  CLOZE_DELIMITER_PATTERN,
-  TRANSCLUSION_HIDE_TITLE_ALIAS,
-  MS_PER_DAY,
-  CARD_ANSWER_REPLACEMENT,
-  CLOZE_GROUPS_PATTERN,
-  literal,
-} from '../constants';
-import { getEndOfToday } from '../utils';
+import type ReviewView from 'src/views/ReviewView';
 import type { FSRS, FSRSParameters, Grade, StateType } from 'ts-fsrs';
 import { fsrs, generatorParameters, State } from 'ts-fsrs';
-import { searchAll } from '../utils';
-import SRSCard from '../SRSCard';
-import type ReviewView from 'src/views/ReviewView';
-import SRSCardReview from '../SRSCardReview';
+import {
+  CARD_ANSWER_REPLACEMENT,
+  CARD_DIRECTORY,
+  CARD_TAG,
+  CLOZE_DELIMITER_PATTERN,
+  CLOZE_DELIMITERS,
+  CLOZE_GROUPS_PATTERN,
+  ERROR_NOTICE_DURATION_MS,
+  literal,
+  MS_PER_DAY,
+  SOURCE_PROPERTY_NAME,
+  TRANSCLUSION_HIDE_TITLE_ALIAS,
+} from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import type { SQLiteRepository } from '../repository';
+import SRSCard from '../SRSCard';
+import SRSCardReview from '../SRSCardReview';
+import { getEndOfToday, searchAll } from '../utils';
 import { ItemManager } from './ItemManager';
 
 const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {

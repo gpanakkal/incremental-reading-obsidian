@@ -1,8 +1,8 @@
+import type ReviewManager from '#/lib/ReviewManager';
 import type { App, TFile } from 'obsidian';
 import { Modal } from 'obsidian';
 import { render } from 'preact';
 import { PriorityModalContent } from '../components/PriorityModalContent';
-import type ReviewManager from '#/lib/ReviewManager';
 
 export class PriorityModal extends Modal {
   reviewManager: ReviewManager;

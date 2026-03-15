@@ -1,6 +1,6 @@
-import type { App, Editor, MarkdownFileInfo, TFile } from 'obsidian';
-import { normalizePath, editorInfoField } from 'obsidian';
 import type { EditorState } from '@codemirror/state';
+import type { App, Editor, MarkdownFileInfo, TFile } from 'obsidian';
+import { editorInfoField, normalizePath } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
@@ -276,19 +276,22 @@ export class ObsidianHelpers {
     updates: Record<string, any>,
     app: App
   ) {
-    await app.fileManager.processFrontMatter(file, (frontmatter: { tags: string[] }) => {
-      const { tags } = frontmatter;
-      const updateTags = Array.isArray(updates.tags)
-        ? updates.tags
-        : [updates.tags];
-      const combinedTags = tags
-        ? [...new Set([...tags, ...updateTags])]
-        : updateTags;
-      Object.assign(frontmatter, {
-        ...updates,
-        tags: combinedTags,
-      });
-    });
+    await app.fileManager.processFrontMatter(
+      file,
+      (frontmatter: { tags: string[] }) => {
+        const { tags } = frontmatter;
+        const updateTags = Array.isArray(updates.tags)
+          ? updates.tags
+          : [updates.tags];
+        const combinedTags = tags
+          ? [...new Set([...tags, ...updateTags])]
+          : updateTags;
+        Object.assign(frontmatter, {
+          ...updates,
+          tags: combinedTags,
+        });
+      }
+    );
   }
 
   /**

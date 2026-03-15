@@ -52,7 +52,12 @@ export const migrations: Migration[] = [
     version: 1,
     description: 'Add start_offset and end_offset columns to snippet table',
     up: (db) => {
-      addColumnIfNotExists(db, 'snippet', 'start_offset', 'INTEGER DEFAULT NULL');
+      addColumnIfNotExists(
+        db,
+        'snippet',
+        'start_offset',
+        'INTEGER DEFAULT NULL'
+      );
       addColumnIfNotExists(db, 'snippet', 'end_offset', 'INTEGER DEFAULT NULL');
     },
   },
@@ -60,8 +65,18 @@ export const migrations: Migration[] = [
     version: 2,
     description: 'Add scroll position column to article and snippet tables',
     up: (db) => {
-      addColumnIfNotExists(db, 'article', 'scroll_top', 'INTEGER NOT NULL DEFAULT 0');
-      addColumnIfNotExists(db, 'snippet', 'scroll_top', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfNotExists(
+        db,
+        'article',
+        'scroll_top',
+        'INTEGER NOT NULL DEFAULT 0'
+      );
+      addColumnIfNotExists(
+        db,
+        'snippet',
+        'scroll_top',
+        'INTEGER NOT NULL DEFAULT 0'
+      );
     },
   },
 ];

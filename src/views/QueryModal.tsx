@@ -1,6 +1,6 @@
+import type ReviewManager from '#/lib/ReviewManager';
 import type { App } from 'obsidian';
 import { Modal } from 'obsidian';
-import type ReviewManager from '#/lib/ReviewManager';
 
 export class QueryModal extends Modal {
   reviewManager: ReviewManager;

@@ -1,19 +1,19 @@
-import type IncrementalReadingPlugin from '#/main';
-import type { IconName, TFile } from 'obsidian';
-import type { WorkspaceLeaf } from 'obsidian';
-import { FileView, Scope } from 'obsidian';
-import { render } from 'preact';
-import type { Unsubscribe } from '@reduxjs/toolkit';
-import type { ReviewItem } from '#/lib/types';
+import { createReviewInterface } from '#/components/ReviewInterface';
 import { PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
-import { createReviewInterface } from '#/components/ReviewInterface';
 import { resetSession } from '#/lib/store';
+import type { ReviewItem } from '#/lib/types';
+import type IncrementalReadingPlugin from '#/main';
+import type { Unsubscribe } from '@reduxjs/toolkit';
+import type { IconName, WorkspaceLeaf } from 'obsidian';
+import { FileView, Scope } from 'obsidian';
+import { render } from 'preact';
 
 export default class ReviewView extends FileView {
   static #viewType = 'incremental-reading-review';
   #reviewManager: ReviewManager;
   plugin: IncrementalReadingPlugin;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   activeEditor: any;
   /* required for review view to open */
   allowNoFile: boolean = true;

@@ -1,9 +1,9 @@
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { CardManager } from '#/lib/items/CardManager';
 import classcat from 'classcat';
 import { Component, MarkdownRenderer } from 'obsidian';
 import { useEffect, useRef } from 'react';
 import { useReviewContext } from './ReviewContext';
-import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
-import { CardManager } from '#/lib/items/CardManager';
 
 /** Read-only card viewer */
 export function CardViewer({ cardText }: { cardText: string }) {

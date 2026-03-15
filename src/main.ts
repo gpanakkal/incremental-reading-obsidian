@@ -8,22 +8,23 @@ import {
 import { SQLiteRepository } from './lib/repository';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
 import databaseSchema from './db/schema.sql';
-import ReviewManager from './lib/ReviewManager';
-import ReviewView from './views/ReviewView';
-import { PriorityModal } from './views/PriorityModal';
-import type { ReviewItem } from './lib/types';
-import { getEditorClass } from './lib/utils';
-import { QueryModal } from './views/QueryModal';
 import { createIRExtensions } from './lib/extensions';
 import { queryClient } from './lib/queryClient';
+import ReviewManager from './lib/ReviewManager';
 import { setReviewViewSaving, store } from './lib/store';
 import type { IRPluginSettings } from './lib/settings';
 import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
+import type { ReviewItem } from './lib/types';
+import { getEditorClass } from './lib/utils';
+import { PriorityModal } from './views/PriorityModal';
+import { QueryModal } from './views/QueryModal';
+import ReviewView from './views/ReviewView';
 
 export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;
   #reviewManager: ReviewManager;
   store: typeof store;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   MarkdownEditor: any;
 
   /**
@@ -244,6 +245,7 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         if (this.app.isMobile) {
           // TODO: remove 'as' assertion once mobileNavbar type is added
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const navbarBox = (this.app.mobileNavbar as any)?.containerEl as
             | HTMLElement
             | undefined;
