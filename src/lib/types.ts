@@ -2,7 +2,7 @@
 import type { TFile } from 'obsidian';
 import type { SafeOmit } from 'src/lib/utility-types';
 import type { Card, ReviewLog, StateType } from 'ts-fsrs';
-import type { TABLE_NAMES } from './constants';
+import type { SOURCE_PROPERTY_NAME, TABLE_NAMES } from './constants';
 
 export interface IArticleBase {
   id: string;
@@ -174,3 +174,16 @@ export function isReviewCard(value: ReviewItem): value is ReviewCard {
 }
 
 export type NoteType = 'article' | 'snippet' | 'card';
+
+/**
+ * Frontmatter properties used by this plugin
+ */
+export type PluginFrontMatter = {
+  [SOURCE_PROPERTY_NAME]?: string;
+  tags?: string[];
+  delimiters?: [string, string];
+}
+
+export type FrontMatterUpdates = SafeOmit<PluginFrontMatter, 'tags'> & {
+  tags?: string | string[];
+}

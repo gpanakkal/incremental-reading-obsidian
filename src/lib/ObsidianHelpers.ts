@@ -1,5 +1,5 @@
 import type { EditorState } from '@codemirror/state';
-import type { App, Editor, MarkdownFileInfo, TFile } from 'obsidian';
+import type { App, Editor, FrontMatterCache, MarkdownFileInfo, TFile } from 'obsidian';
 import { editorInfoField, normalizePath } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
@@ -15,7 +15,7 @@ import {
   SOURCE_TAG,
 } from './constants';
 import { FRONTMATTER_PATTERN } from './constants.js';
-import type { NoteType } from './types';
+import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
 import { generateId } from './utils';
 
 export class ObsidianHelpers {
@@ -148,7 +148,7 @@ export class ObsidianHelpers {
    * TODO: use more robust approach to getting tags
    */
   static getNoteType(note: TFile, app: App): NoteType | null {
-    const tags = this.getTags(note, app);
+    const { tags } = this.getFrontMatter(note, app) ?? {};
     if (!tags) return null;
     if (tags.includes(ARTICLE_TAG)) return 'article';
     else if (tags.includes(SNIPPET_TAG)) return 'snippet';
@@ -160,14 +160,9 @@ export class ObsidianHelpers {
    * Check if a file has the ir-source tag
    */
   static isSourceNote(file: TFile, app: App): boolean {
-    const tags = this.getTags(file, app);
+    const { tags } = this.getFrontMatter(file, app) ?? {};
     if (!tags) return false;
     return tags.includes(SOURCE_TAG);
-  }
-
-  static getTags(note: TFile, app: App): string[] {
-    const rawTags = app.metadataCache.getFileCache(note)?.frontmatter?.tags;
-    return Array.isArray(rawTags) ? rawTags : [rawTags];
   }
 
   /**
@@ -271,14 +266,26 @@ export class ObsidianHelpers {
     );
   }
 
+  static getFrontMatter(
+    file: TFile,
+    app: App
+  ): (PluginFrontMatter & FrontMatterCache) | undefined {
+    const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
+    if (frontmatter && 'tags' in frontmatter) {
+      const { tags } = frontmatter;
+      frontmatter.tags = Array.isArray(tags) ? tags : [tags];
+    }
+    return frontmatter;
+  }
+
   static async updateFrontMatter(
     file: TFile,
-    updates: Record<string, any>,
+    updates: FrontMatterUpdates,
     app: App
   ) {
     await app.fileManager.processFrontMatter(
       file,
-      (frontmatter: { tags: string[] }) => {
+      (frontmatter: PluginFrontMatter) => {
         const { tags } = frontmatter;
         const updateTags = Array.isArray(updates.tags)
           ? updates.tags
