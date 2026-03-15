@@ -37,6 +37,9 @@ import type { Scope, WorkspaceLeaf } from 'obsidian';
 import type { PropsWithChildren } from 'react';
 import type { Grade } from 'ts-fsrs';
 
+// work around "Cannot call impure function during render"
+const getNow = () => Date.now();
+
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
   reviewView: ReviewView;
@@ -68,7 +71,6 @@ export function ReviewContextProvider({
   plugin,
   reviewView,
   reviewManager,
-  leaf,
   children,
 }: PropsWithChildren<{
   reviewView: ReviewView;
@@ -80,7 +82,7 @@ export function ReviewContextProvider({
   const dispatch = useDispatch();
   const store = useAppStore();
 
-  const { isPending, isError, data } = useQuery({
+  useQuery({
     queryKey: ['current-review-item'],
     queryFn: async () => {
       dispatch(setEditState(EditingState.cancel));
@@ -88,6 +90,7 @@ export function ReviewContextProvider({
       // Check if there's an initial item to display first
       if (reviewView.initialItem) {
         const initialItem = reviewView.initialItem;
+        // eslint-disable-next-line react-hooks/immutability
         reviewView.initialItem = null; // Clear so next call uses normal queue
         if (isReviewCard(initialItem)) await updateDelimiters(initialItem);
         dispatch(setCurrentItem(initialItem));
@@ -170,7 +173,7 @@ export function ReviewContextProvider({
     nextInterval?: number
   ) => {
     try {
-      await reviewManager.reviewArticle(article.data, Date.now(), nextInterval);
+      await reviewManager.reviewArticle(article.data, getNow(), nextInterval);
       if (article.data.dismissed) {
         await unDismissItem(article);
       }
@@ -192,7 +195,7 @@ export function ReviewContextProvider({
     nextInterval?: number
   ) => {
     try {
-      await reviewManager.reviewSnippet(snippet.data, Date.now(), nextInterval);
+      await reviewManager.reviewSnippet(snippet.data, getNow(), nextInterval);
       if (snippet.data.dismissed) {
         await unDismissItem(snippet);
       }

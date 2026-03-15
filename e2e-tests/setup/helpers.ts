@@ -180,6 +180,8 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
   const maximizeButton = window.getByLabel('Maximize');
   try {
     await maximizeButton.click();
-  } catch {}
+  } catch {
+    /* empty */
+  }
   return window;
 }

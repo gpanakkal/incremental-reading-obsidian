@@ -250,7 +250,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     private buildDecorations(
       view: EditorView,
       tracker: SnippetOffsetTracker,
-      reviewManager: ReviewManager
+      _reviewManager: ReviewManager
     ): DecorationSet {
       if (!this.file) {
         return Decoration.none;

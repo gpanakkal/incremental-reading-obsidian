@@ -182,6 +182,7 @@ export type PluginFrontMatter = {
   [SOURCE_PROPERTY_NAME]?: string;
   tags?: string[];
   delimiters?: [string, string];
+  created?: string;
 };
 
 export type FrontMatterUpdates = SafeOmit<PluginFrontMatter, 'tags'> & {

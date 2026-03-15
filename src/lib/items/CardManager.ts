@@ -56,7 +56,7 @@ export class CardManager extends ItemManager {
         last_review: new Date(last_review),
       }),
       dismissed: !!dismissed,
-      state: State[cardRow.state] as StateType,
+      state: State[state] as StateType,
     };
   }
 
@@ -68,7 +68,7 @@ export class CardManager extends ItemManager {
       due: Date.parse(due.toISOString()),
       dismissed: dismissed ? 1 : 0,
       last_review: last_review ? Date.parse(last_review?.toISOString()) : null,
-      state: State[card.state],
+      state: State[state],
     };
   }
 
@@ -145,7 +145,7 @@ export class CardManager extends ItemManager {
 
     try {
       const withDelimiters = this.delimitText(content, bounds)[0]; // TODO: create many cards at once and transclude/link all?
-      const { card, cardFile } = await this.createFileAndEntry(
+      const { cardFile } = await this.createFileAndEntry(
         withDelimiters,
         currentFile
       );
@@ -212,16 +212,14 @@ export class CardManager extends ItemManager {
         card.lapses,
         card.state,
       ];
-      const insertResult = await this.repo.mutate(
+      await this.repo.mutate(
         `INSERT INTO srs_card (id, reference, parent, created_at, due, last_review, ` +
           `stability, difficulty, elapsed_days, scheduled_days, reps, lapses, state) ` +
           `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
         params
       );
 
-      const fetchedCard = (
-        await this.repo.query('SELECT * FROM srs_card WHERE id = $1', [card.id])
-      )[0];
+      await this.repo.query('SELECT * FROM srs_card WHERE id = $1', [card.id]);
 
       return { card, cardFile };
     } catch (error) {
