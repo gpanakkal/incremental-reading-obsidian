@@ -1,3 +1,14 @@
+import { useQuery } from '@tanstack/react-query';
+import { Notice } from 'obsidian';
+import { useCallback, useEffect, useState } from 'preact/hooks';
+import { useDispatch } from 'react-redux';
+import { Rating } from 'ts-fsrs';
+import { useAppSelector, useAppStore } from '#/hooks/useAppSelector';
+import {
+  ERROR_NOTICE_DURATION_MS,
+  SUCCESS_NOTICE_DURATION_MS,
+} from '#/lib/constants';
+import { setShowAnswer } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import {
   isReviewCard,
@@ -7,19 +18,8 @@ import {
   isReviewArticle,
   isReviewSnippet,
 } from '#/lib/types';
-import { Rating } from 'ts-fsrs';
-import { useReviewContext } from './ReviewContext';
-import { useCallback, useEffect, useState } from 'preact/hooks';
-import {
-  ERROR_NOTICE_DURATION_MS,
-  SUCCESS_NOTICE_DURATION_MS,
-} from '#/lib/constants';
 import { transformPriority } from '#/lib/utils';
-import { Notice } from 'obsidian';
-import { useAppSelector, useAppStore } from '#/hooks/useAppSelector';
-import { setShowAnswer } from '#/lib/store';
-import { useDispatch } from 'react-redux';
-import { useQuery } from '@tanstack/react-query';
+import { useReviewContext } from './ReviewContext';
 
 export function ActionBar() {
   const store = useAppStore();

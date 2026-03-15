@@ -1,7 +1,7 @@
 import type { ArticleRow, SRSCardRow, SnippetRow } from '#/lib/types';
-import type { App, TAbstractFile } from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../repository';
+import type { App, TAbstractFile } from 'obsidian';
 
 export class ItemManager {
   app: App;

@@ -1,9 +1,9 @@
+import * as fs from 'node:fs/promises';
 import test, {
   expect,
   type ElectronApplication,
   type Page,
 } from '@playwright/test';
-import * as fs from 'node:fs/promises';
 import {
   executeCommand,
   finalizeArticleImport,

@@ -6,7 +6,6 @@ import {
   type Plugin,
   type TAbstractFile,
 } from 'obsidian';
-import type { BindParams, Database, QueryExecResult } from 'sql.js';
 import initSqlJs from 'sql.js';
 import {
   applyMigrations,
@@ -14,6 +13,8 @@ import {
   getSchemaVersion,
   MigrationVerificationError,
 } from '../db/migrations';
+// @ts-ignore - WASM imported as base64 string via custom esbuild plugin
+import wasmBase64 from '../db/sql-wasm.wasm';
 import {
   BACKUP_DIRECTORY,
   DATA_DIRECTORY,
@@ -22,8 +23,7 @@ import {
 } from '../lib/constants';
 import type { RowTypes } from '../lib/types';
 import type { Primitive } from '../lib/utility-types';
-// @ts-ignore - WASM imported as base64 string via custom esbuild plugin
-import wasmBase64 from '../db/sql-wasm.wasm';
+import type { BindParams, Database, QueryExecResult } from 'sql.js';
 
 export class SQLiteRepository {
   app: App;

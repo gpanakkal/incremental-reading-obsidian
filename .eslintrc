@@ -5,7 +5,8 @@
     "plugins": [
       "@typescript-eslint",
       "react",
-      "react-hooks"
+      "react-hooks",
+      "import"
     ],
     "extends": [
       "eslint:recommended",
@@ -17,7 +18,14 @@
     "settings": {
       "react": {
         "version": "detect"
-      }
+      },
+      "import/resolver": {
+        "typescript": {
+          "alwaysTryTypes": true,
+          "project": "./tsconfig.json"
+        }
+      },
+      "import/internal-regex": "^#/"
     },
     "parserOptions": {
         "sourceType": "module",
@@ -39,6 +47,23 @@
       "@typescript-eslint/no-inferrable-types": "off",
       "@typescript-eslint/no-empty-interface": "off",
       "prefer-const": ["off"],
-      "react/react-in-jsx-scope": ["off"]
-    } 
+      "react/react-in-jsx-scope": ["off"],
+      "import/order": ["warn", {
+        "groups": [
+          "builtin",
+          "external",
+          "internal",
+          "parent",
+          "sibling",
+          "index",
+          "object",
+          "type"
+        ],
+        "pathGroups": [
+          { "pattern": "#/**", "group": "internal" }
+        ],
+        "alphabetize": { "order": "asc", "caseInsensitive": true },
+        "newlines-between": "ignore"
+      }]
+    }
   }

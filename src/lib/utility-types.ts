@@ -11,7 +11,8 @@ export type SQLitePrimitive = string | number | null;
 
 export type StringRecord<T> = Record<string, T>;
 
-export type StringKeys<T extends Record<string | number | symbol, unknown>> = Extract<keyof T, string>;
+export type StringKeys<T extends Record<string | number | symbol, unknown>> =
+  Extract<keyof T, string>;
 
 export type NullishToOptional<T> = {
   [P in keyof T as T[P] extends null | undefined ? never : P]: T[P];
@@ -22,4 +23,6 @@ export type NullishToOptional<T> = {
 /**
  * Improves hints for types generated via helpers
  */
-export type Resolve<T> = T extends (...args: never) => unknown ? T : { [P in keyof T]: T[P] };
+export type Resolve<T> = T extends (...args: never) => unknown
+  ? T
+  : { [P in keyof T]: T[P] };

@@ -10,7 +10,7 @@ import {
 export function generateId(length: number = 5): string {
   if (length <= 0 || length % 1 !== 0) {
     throw new TypeError(
-      `Length must be a positive integer; received ${length}`,
+      `Length must be a positive integer; received ${length}`
     );
   }
 
@@ -67,7 +67,7 @@ export const deepCopy = <T>(value: T): T => {
 export function getContentSlice(
   content: string,
   sliceLength: number,
-  ellipses: boolean = false,
+  ellipses: boolean = false
 ) {
   const trimmed = content.trim();
   if (!ellipses) return trimmed.slice(0, sliceLength);
@@ -85,7 +85,7 @@ export function compareDates(a: number | Date | null, b: number | Date | null) {
   if (a === null) return 1;
   if (b === null) return -1;
   const [aNum, bNum] = [a, b].map((val) =>
-    typeof val === 'number' ? val : Date.parse(val.toUTCString()),
+    typeof val === 'number' ? val : Date.parse(val.toUTCString())
   );
 
   return aNum - bNum;
@@ -124,7 +124,7 @@ export function getEditorClass(app: any) {
       state: {},
     },
     null,
-    '',
+    ''
   );
 
   try {
@@ -133,7 +133,7 @@ export function getEditorClass(app: any) {
     md.showEditor();
 
     const MarkdownEditor = Object.getPrototypeOf(
-      Object.getPrototypeOf(md.editMode),
+      Object.getPrototypeOf(md.editMode)
     ).constructor;
 
     // Store reference to original buildExtensions method to copy extensions
@@ -157,7 +157,7 @@ export function getBaseMarkdownExtensions(app: any) {
       state: {},
     },
     null,
-    '',
+    ''
   );
 
   try {
