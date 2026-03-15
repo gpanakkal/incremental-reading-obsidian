@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { CSS_CLASS_PREFIX } from '#/lib/constants';
 import type { ReviewItem } from '#/lib/types';
 import type ReviewView from '#/views/ReviewView';

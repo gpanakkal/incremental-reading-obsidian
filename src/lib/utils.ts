@@ -137,7 +137,7 @@ export function getEditorClass(app: any) {
     ).constructor;
 
     // Store reference to original buildExtensions method to copy extensions
-    const originalBuildExtensions = MarkdownEditor.prototype.buildExtensions;
+    const _originalBuildExtensions = MarkdownEditor.prototype.buildExtensions;
 
     return MarkdownEditor;
   } finally {

@@ -36,7 +36,7 @@ describe('SnippetOffsetTracker', () => {
       // Simulate deleting 100 characters before the snippets, which would
       // map both start and end to position 0
       const oldDoc = Text.of(['x'.repeat(200)]);
-      const newDoc = Text.of(['x'.repeat(100)]);
+      const _newDoc = Text.of(['x'.repeat(100)]);
       const changes = ChangeSet.of({ from: 0, to: 100 }, oldDoc.length);
 
       tracker.updateOffsetsWithMapping(filePath, changes, 0, 0);

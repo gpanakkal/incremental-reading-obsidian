@@ -2,7 +2,6 @@ import { normalizePath, Notice } from 'obsidian';
 import type {
   ArticleDisplay,
   ArticleRow,
-  PluginFrontMatter,
   IArticleActive,
   IArticleBase,
   IArticleReview,
@@ -247,12 +246,12 @@ export class ArticleManager extends ItemManager {
       reviewed +
       (nextReviewInterval ?? (await this.nextReviewInterval(article)));
     try {
-      const insertReviewResult = await this.repo.mutate(
+      await this.repo.mutate(
         'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
         [crypto.randomUUID(), article.id, reviewed]
       );
 
-      const updateResult = await this.repo.mutate(
+      await this.repo.mutate(
         `UPDATE article SET dismissed = 0, due = $1 WHERE id = $2`,
         [nextReview, article.id]
       );

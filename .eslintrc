@@ -39,7 +39,13 @@
         "allowTemplateLiterals": true,
         "avoidEscape": true
       }],
-      "@typescript-eslint/no-unused-vars": ["warn", { "args": "none" }],
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        { "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "caughtErrorsIgnorePattern": "^_"
+        }
+      ],
       "@typescript-eslint/ban-ts-comment": "off",
       "no-prototype-builtins": "off",
       "@typescript-eslint/no-empty-function": "off",

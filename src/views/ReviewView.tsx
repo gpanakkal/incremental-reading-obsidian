@@ -95,7 +95,7 @@ export default class ReviewView extends FileView {
     this.plugin.store.dispatch(resetSession());
   }
 
-  async onLoadFile(file: unknown): Promise<void> {}
+  async onLoadFile(_file: unknown): Promise<void> {}
 
-  async onUnloadFile(file: unknown): Promise<void> {}
+  async onUnloadFile(_file: unknown): Promise<void> {}
 }
