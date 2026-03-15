@@ -1,3 +1,6 @@
+import { StateEffect, StateField, type Extension } from '@codemirror/state';
+import { showPanel } from '@codemirror/view';
+import { Notice } from 'obsidian';
 import {
   ERROR_NOTICE_DURATION_MS,
   SUCCESS_NOTICE_DURATION_MS,
@@ -11,13 +14,10 @@ import {
 } from '#/lib/types';
 import { transformPriority } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
-import { StateEffect, StateField, type Extension } from '@codemirror/state';
-import type { EditorView, Panel } from '@codemirror/view';
-import { showPanel } from '@codemirror/view';
-import type { App } from 'obsidian';
-import { Notice } from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import { irPluginFacet } from './irPluginFacet';
+import type { EditorView, Panel } from '@codemirror/view';
+import type { App } from 'obsidian';
 
 /**
  * State effect to toggle review mode on/off.

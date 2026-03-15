@@ -1,3 +1,8 @@
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Notice } from 'obsidian';
+import { createContext, useContext } from 'react';
+import { useDispatch } from 'react-redux';
+import { Rating } from 'ts-fsrs';
 import { useAppStore } from '#/hooks/useAppSelector';
 import {
   CLOZE_DELIMITERS,
@@ -27,15 +32,10 @@ import { isReviewCard } from '#/lib/types';
 import { deepCopy, getContentSlice, transformPriority } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Scope, WorkspaceLeaf } from 'obsidian';
-import { Notice } from 'obsidian';
-import type { PropsWithChildren } from 'react';
-import { createContext, useContext } from 'react';
-import { useDispatch } from 'react-redux';
-import type { Grade } from 'ts-fsrs';
-import { Rating } from 'ts-fsrs';
 import { EditingState } from './types';
+import type { Scope, WorkspaceLeaf } from 'obsidian';
+import type { PropsWithChildren } from 'react';
+import type { Grade } from 'ts-fsrs';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;

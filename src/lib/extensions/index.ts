@@ -1,9 +1,9 @@
 import type IncrementalReadingPlugin from '#/main';
-import type { Extension } from '@codemirror/state';
 import { actionBarExtension } from './ActionBarExtension';
 import { irPluginFacet } from './irPluginFacet';
 import { scrollPositionExtension } from './ScrollPositionExtension';
 import { snippetHighlightExtension } from './SnippetHighlightExtension';
+import type { Extension } from '@codemirror/state';
 
 // Re-export for convenience
 export {

@@ -1,7 +1,7 @@
 import { ChangeSet, Text } from '@codemirror/state';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { SnippetHighlight } from './SnippetOffsetTracker';
 import { SnippetOffsetTracker } from './SnippetOffsetTracker';
+import type { SnippetHighlight } from './SnippetOffsetTracker';
 
 function createHighlight(
   id: string,

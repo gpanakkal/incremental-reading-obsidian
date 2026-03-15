@@ -1,8 +1,8 @@
 // Card, Snippet, ReviewLog, FSRSParameters
+import type { SOURCE_PROPERTY_NAME, TABLE_NAMES } from './constants';
 import type { TFile } from 'obsidian';
 import type { SafeOmit } from 'src/lib/utility-types';
 import type { Card, ReviewLog, StateType } from 'ts-fsrs';
-import type { SOURCE_PROPERTY_NAME, TABLE_NAMES } from './constants';
 
 export interface IArticleBase {
   id: string;
@@ -182,8 +182,8 @@ export type PluginFrontMatter = {
   [SOURCE_PROPERTY_NAME]?: string;
   tags?: string[];
   delimiters?: [string, string];
-}
+};
 
 export type FrontMatterUpdates = SafeOmit<PluginFrontMatter, 'tags'> & {
   tags?: string | string[];
-}
+};

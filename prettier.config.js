@@ -8,7 +8,6 @@ const config = {
   semi: true,
   singleQuote: true,
   printWidth: 80,
-  plugins: ['prettier-plugin-organize-imports'],
 };
 
 export default config;

@@ -1,8 +1,8 @@
-import type ReviewManager from '#/lib/ReviewManager';
+import { useState } from 'preact/hooks';
 import { DEFAULT_PRIORITY } from '#/lib/constants';
+import type ReviewManager from '#/lib/ReviewManager';
 import { transformPriority } from '#/lib/utils';
 import type { TFile } from 'obsidian';
-import { useState } from 'preact/hooks';
 
 interface PriorityModalProps {
   reviewManager: ReviewManager;

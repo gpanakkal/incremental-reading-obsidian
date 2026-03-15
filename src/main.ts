@@ -1,24 +1,24 @@
-import type { TAbstractFile, WorkspaceLeaf } from 'obsidian';
 import { MarkdownView, Notice, Plugin, TFile } from 'obsidian';
+// @ts-ignore - SQL schema imported via custom esbuild plugin
+import databaseSchema from './db/schema.sql';
 import {
   DATABASE_FILE_PATH,
   ERROR_NOTICE_DURATION_MS,
   PLACEHOLDER_PLUGIN_ICON,
 } from './lib/constants';
-import { SQLiteRepository } from './lib/repository';
-// @ts-ignore - SQL schema imported via custom esbuild plugin
-import databaseSchema from './db/schema.sql';
 import { createIRExtensions } from './lib/extensions';
 import { queryClient } from './lib/queryClient';
+import { SQLiteRepository } from './lib/repository';
 import ReviewManager from './lib/ReviewManager';
-import { setReviewViewSaving, store } from './lib/store';
-import type { IRPluginSettings } from './lib/settings';
 import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
-import type { ReviewItem } from './lib/types';
+import { setReviewViewSaving, store } from './lib/store';
 import { getEditorClass } from './lib/utils';
 import { PriorityModal } from './views/PriorityModal';
 import { QueryModal } from './views/QueryModal';
 import ReviewView from './views/ReviewView';
+import type { IRPluginSettings } from './lib/settings';
+import type { ReviewItem } from './lib/types';
+import type { TAbstractFile, WorkspaceLeaf } from 'obsidian';
 
 export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;

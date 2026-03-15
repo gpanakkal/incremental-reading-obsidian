@@ -1,5 +1,3 @@
-import type { EditorState } from '@codemirror/state';
-import type { App, Editor, FrontMatterCache, MarkdownFileInfo, TFile } from 'obsidian';
 import { editorInfoField, normalizePath } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
@@ -15,8 +13,16 @@ import {
   SOURCE_TAG,
 } from './constants';
 import { FRONTMATTER_PATTERN } from './constants.js';
-import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
 import { generateId } from './utils';
+import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
+import type { EditorState } from '@codemirror/state';
+import type {
+  App,
+  Editor,
+  FrontMatterCache,
+  MarkdownFileInfo,
+  TFile,
+} from 'obsidian';
 
 export class ObsidianHelpers {
   /**

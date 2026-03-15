@@ -1,7 +1,5 @@
 import { insertBlankLine } from '@codemirror/commands';
-import type { Extension } from '@codemirror/state';
 import { EditorSelection, Prec } from '@codemirror/state';
-import type { ViewUpdate } from '@codemirror/view';
 import {
   keymap,
   placeholder as placeholderExt,
@@ -11,16 +9,8 @@ import {
 import classcat from 'classcat';
 import { Platform } from 'obsidian';
 import { useEffect, useRef, type MutableRefObject } from 'react';
-import {
-  getEditorAppProxy,
-  setInsertMode,
-  getMarkdownController,
-} from './helpers';
-import { useReviewContext } from './ReviewContext';
-import { getBaseMarkdownExtensions } from '../lib/utils';
-import type { ReviewItem } from '#/lib/types';
-import { isReviewArticle } from '#/lib/types';
-import { TitleEditor } from './TitleEditor';
+import { useDispatch } from 'react-redux';
+import { useAppSelector, useAppStore } from '#/hooks/useAppSelector';
 import {
   setReviewModeEffect,
   setShowAnswerEffect,
@@ -29,10 +19,20 @@ import {
   isReviewInterfaceFacet,
   type ReviewCallbacks,
 } from '#/lib/extensions';
-import { useDispatch } from 'react-redux';
 import { isEditing, setShowAnswer } from '#/lib/store';
-import { useAppSelector, useAppStore } from '#/hooks/useAppSelector';
+import type { ReviewItem } from '#/lib/types';
+import { isReviewArticle } from '#/lib/types';
+import { getBaseMarkdownExtensions } from '../lib/utils';
+import {
+  getEditorAppProxy,
+  setInsertMode,
+  getMarkdownController,
+} from './helpers';
+import { useReviewContext } from './ReviewContext';
+import { TitleEditor } from './TitleEditor';
 import type { EditCoordinates } from './types';
+import type { Extension } from '@codemirror/state';
+import type { ViewUpdate } from '@codemirror/view';
 
 /**
  * Credit goes to mgmeyers for figuring out how to get the editor prototype.

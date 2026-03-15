@@ -1,14 +1,14 @@
+import { QueryClientProvider, useQuery } from '@tanstack/react-query';
+import { Provider as ReduxProvider } from 'react-redux';
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { queryClient } from '#/lib/queryClient';
 import type ReviewManager from '#/lib/ReviewManager';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
-import { QueryClientProvider, useQuery } from '@tanstack/react-query';
-import type { WorkspaceLeaf } from 'obsidian';
-import { Provider as ReduxProvider } from 'react-redux';
 import { ActionBar } from './ActionBar';
 import { ReviewContextProvider, useReviewContext } from './ReviewContext';
 import ReviewItem from './ReviewItem';
+import type { WorkspaceLeaf } from 'obsidian';
 
 export function createReviewInterface(props: {
   reviewView: ReviewView;
