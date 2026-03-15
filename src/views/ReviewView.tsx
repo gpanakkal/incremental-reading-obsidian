@@ -1,3 +1,5 @@
+import { FileView, Scope } from 'obsidian';
+import { render } from 'preact';
 import { createReviewInterface } from '#/components/ReviewInterface';
 import { PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
 import type ReviewManager from '#/lib/ReviewManager';
@@ -6,8 +8,6 @@ import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type { Unsubscribe } from '@reduxjs/toolkit';
 import type { IconName, WorkspaceLeaf } from 'obsidian';
-import { FileView, Scope } from 'obsidian';
-import { render } from 'preact';
 
 export default class ReviewView extends FileView {
   static #viewType = 'incremental-reading-review';

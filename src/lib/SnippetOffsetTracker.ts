@@ -1,5 +1,5 @@
-import type { ChangeSet } from '@codemirror/state';
 import type { ISnippetBase } from './types';
+import type { ChangeSet } from '@codemirror/state';
 
 /**
  * Service for tracking snippet highlights and updating their offsets in real-time

@@ -1,14 +1,11 @@
+import { Notice, type App, type Editor, type MarkdownView } from 'obsidian';
+import { fsrs, generatorParameters, State } from 'ts-fsrs';
 import type {
   ISRSCard,
   ISRSCardDisplay,
   ReviewCard,
   SRSCardRow,
 } from '#/lib/types';
-import type { TFile } from 'obsidian';
-import { Notice, type App, type Editor, type MarkdownView } from 'obsidian';
-import type ReviewView from 'src/views/ReviewView';
-import type { FSRS, FSRSParameters, Grade, StateType } from 'ts-fsrs';
-import { fsrs, generatorParameters, State } from 'ts-fsrs';
 import {
   CARD_ANSWER_REPLACEMENT,
   CARD_DIRECTORY,
@@ -23,11 +20,14 @@ import {
   TRANSCLUSION_HIDE_TITLE_ALIAS,
 } from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
-import type { SQLiteRepository } from '../repository';
 import SRSCard from '../SRSCard';
 import SRSCardReview from '../SRSCardReview';
 import { getEndOfToday, searchAll } from '../utils';
 import { ItemManager } from './ItemManager';
+import type { SQLiteRepository } from '../repository';
+import type { TFile } from 'obsidian';
+import type ReviewView from 'src/views/ReviewView';
+import type { FSRS, FSRSParameters, Grade, StateType } from 'ts-fsrs';
 
 const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
   enable_fuzz: false,

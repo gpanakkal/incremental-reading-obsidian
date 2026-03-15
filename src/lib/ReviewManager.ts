@@ -1,3 +1,10 @@
+import { type App, type Editor, type MarkdownView } from 'obsidian';
+import {
+  ReviewArticle,
+  ReviewCard,
+  ReviewSnippet,
+  isArticle,
+} from '#/lib/types';
 import type {
   ArticleRow,
   IArticleBase,
@@ -6,23 +13,16 @@ import type {
   ReviewItem,
   SnippetRow,
 } from '#/lib/types';
-import {
-  ReviewArticle,
-  ReviewCard,
-  ReviewSnippet,
-  isArticle,
-} from '#/lib/types';
-import type { TAbstractFile, TFile } from 'obsidian';
-import { type App, type Editor, type MarkdownView } from 'obsidian';
-import type ReviewView from 'src/views/ReviewView';
-import type { Grade } from 'ts-fsrs';
-import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
+import type ReviewView from '#/views/ReviewView';
 import { DATA_DIRECTORY, REVIEW_FETCH_COUNT } from './constants';
 import { ArticleManager } from './items/ArticleManager';
 import { CardManager } from './items/CardManager';
 import { SnippetManager } from './items/SnippetManager';
-import type { SQLiteRepository } from './repository';
+import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import { compareDates } from './utils';
+import type { SQLiteRepository } from './repository';
+import type { TAbstractFile, TFile } from 'obsidian';
+import type { Grade } from 'ts-fsrs';
 
 export default class ReviewManager {
   app: App;

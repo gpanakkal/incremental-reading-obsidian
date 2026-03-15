@@ -1,6 +1,6 @@
+import { useSelector, useStore } from 'react-redux';
 import { IRPluginState } from '#/lib/store';
 import type { TypedUseSelectorHook } from 'react-redux';
-import { useSelector, useStore } from 'react-redux';
 
 /**
  * Subscribes the calling component to state changes and triggers re-renders,

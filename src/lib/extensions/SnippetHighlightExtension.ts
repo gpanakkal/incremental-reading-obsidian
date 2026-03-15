@@ -1,14 +1,14 @@
 import { Annotation, RangeSetBuilder, StateEffect } from '@codemirror/state';
-import type { DecorationSet, EditorView, ViewUpdate } from '@codemirror/view';
 import { Decoration, ViewPlugin } from '@codemirror/view';
-import type { TFile } from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import { irPluginFacet, isReviewInterfaceFacet } from './irPluginFacet';
 import type ReviewManager from '../ReviewManager';
 import type {
   SnippetHighlight,
   SnippetOffsetTracker,
 } from '../SnippetOffsetTracker';
-import { irPluginFacet, isReviewInterfaceFacet } from './irPluginFacet';
+import type { DecorationSet, EditorView, ViewUpdate } from '@codemirror/view';
+import type { TFile } from 'obsidian';
 
 /**
  * Annotation to mark transactions from external value sync (e.g., when IREditor

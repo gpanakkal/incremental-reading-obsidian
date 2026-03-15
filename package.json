@@ -48,6 +48,8 @@
 		"esbuild": "~0.25.9",
 		"esbuild-plugin-wasm": "~1.1.0",
 		"eslint": "8.57.1",
+		"eslint-import-resolver-typescript": "^3.10.1",
+		"eslint-plugin-import": "^2.32.0",
 		"eslint-plugin-react": "7.37.5",
 		"eslint-plugin-react-hooks": "7.0.1",
 		"obsidian": "^1.11.0",
@@ -55,7 +57,6 @@
 		"prettier": "~3.6.2",
 		"prettier-eslint": "16.4.2",
 		"prettier-eslint-cli": "7.1.0",
-		"prettier-plugin-organize-imports": "4.3.0",
 		"tslib": "2.4.0",
 		"typescript": "5.9.3",
 		"vitest": "~3.2.4"

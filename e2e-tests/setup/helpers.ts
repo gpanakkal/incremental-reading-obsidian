@@ -1,11 +1,11 @@
-import type { Locator } from '@playwright/test';
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs/promises';
+import * as path from 'path';
 import {
   _electron as electron,
   type ElectronApplication,
 } from '@playwright/test';
-import * as crypto from 'node:crypto';
-import * as fs from 'node:fs/promises';
-import * as path from 'path';
+import type { Locator } from '@playwright/test';
 
 /**
  * Thanks to qawatake for providing an example testing setup

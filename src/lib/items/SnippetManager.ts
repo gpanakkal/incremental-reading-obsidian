@@ -1,3 +1,10 @@
+import {
+  Notice,
+  TFile,
+  type App,
+  type Editor,
+  type MarkdownView,
+} from 'obsidian';
 import type {
   ArticleRow,
   ISnippetActive,
@@ -6,14 +13,6 @@ import type {
   ISnippetReview,
   SnippetRow,
 } from '#/lib/types';
-import {
-  Notice,
-  TFile,
-  type App,
-  type Editor,
-  type MarkdownView,
-} from 'obsidian';
-import type ReviewView from 'src/views/ReviewView';
 import {
   DEFAULT_PRIORITY,
   ERROR_NOTICE_DURATION_MS,
@@ -28,13 +27,14 @@ import {
   TEXT_REVIEW_MULTIPLIER_STEP,
 } from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
-import type { SQLiteRepository } from '../repository';
 import {
   SnippetOffsetTracker,
   type SnippetHighlight,
 } from '../SnippetOffsetTracker';
 import { getEndOfToday } from '../utils';
 import { ItemManager } from './ItemManager';
+import type { SQLiteRepository } from '../repository';
+import type ReviewView from 'src/views/ReviewView';
 
 export class SnippetManager extends ItemManager {
   app: App;

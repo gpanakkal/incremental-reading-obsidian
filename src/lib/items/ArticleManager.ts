@@ -1,3 +1,4 @@
+import { normalizePath, Notice } from 'obsidian';
 import type {
   ArticleDisplay,
   ArticleRow,
@@ -8,8 +9,6 @@ import type {
   ReviewArticle,
   FrontMatterUpdates,
 } from '#/lib/types';
-import type { App, TFile } from 'obsidian';
-import { normalizePath, Notice } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
@@ -25,10 +24,14 @@ import {
   TEXT_REVIEW_MULTIPLIER_BASE,
   TEXT_REVIEW_MULTIPLIER_STEP,
 } from '../constants';
-import { ObsidianHelpers as Obsidian, ObsidianHelpers } from '../ObsidianHelpers';
-import type { SQLiteRepository } from '../repository';
+import {
+  ObsidianHelpers as Obsidian,
+  ObsidianHelpers,
+} from '../ObsidianHelpers';
 import { generateId, getContentSlice, getEndOfToday } from '../utils';
 import { ItemManager } from './ItemManager';
+import type { SQLiteRepository } from '../repository';
+import type { App, TFile } from 'obsidian';
 
 export class ArticleManager extends ItemManager {
   app: App;

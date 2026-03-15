@@ -1,6 +1,6 @@
+import { createEmptyCard } from 'ts-fsrs';
 import type { ISRSCard } from '#/lib/types';
 import type { State } from 'ts-fsrs';
-import { createEmptyCard } from 'ts-fsrs';
 
 export default class SRSCard implements ISRSCard {
   id: string;

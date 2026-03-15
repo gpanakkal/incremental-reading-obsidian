@@ -1,8 +1,8 @@
-import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
-import { CardManager } from '#/lib/items/CardManager';
 import classcat from 'classcat';
 import { Component, MarkdownRenderer } from 'obsidian';
 import { useEffect, useRef } from 'react';
+import { CardManager } from '#/lib/items/CardManager';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { useReviewContext } from './ReviewContext';
 
 /** Read-only card viewer */
