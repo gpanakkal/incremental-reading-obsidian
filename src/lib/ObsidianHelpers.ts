@@ -276,7 +276,7 @@ export class ObsidianHelpers {
     updates: Record<string, any>,
     app: App
   ) {
-    await app.fileManager.processFrontMatter(file, (frontmatter) => {
+    await app.fileManager.processFrontMatter(file, (frontmatter: { tags: string[] }) => {
       const { tags } = frontmatter;
       const updateTags = Array.isArray(updates.tags)
         ? updates.tags
