@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import type { App } from 'obsidian';
 
 // Reusable functions to execute Obsidian operations in tests
 
@@ -8,6 +9,7 @@ import type { Page } from '@playwright/test';
  */
 export async function executeCommand(window: Page, commandId: string) {
   await window.evaluate(async (id) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).app.commands.executeCommandById(id);
     // Yield to the event loop so Obsidian can process the command's
     // side effects (opening modals, async DB writes, rendering) before
@@ -39,7 +41,7 @@ export async function openNote(window: Page, path: string) {
   const fileOpenPromise = window.evaluate(() => {
     return new Promise<void>((resolve) => {
       const NOTE_OPEN_TIMEOUT_MS = 10_000;
-      const workspace = (window as any).app.workspace;
+      const workspace = (window as Page & { app: App }).app.workspace;
       const ref = workspace.on('file-open', () => {
         workspace.offref(ref);
         resolve();

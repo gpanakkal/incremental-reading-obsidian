@@ -1,8 +1,8 @@
-import type { Editor as ObsidianEditor } from 'obsidian';
-import type { EditorView } from '@codemirror/view';
 import { CSS_CLASS_PREFIX } from '#/lib/constants';
-import type ReviewView from '#/views/ReviewView';
 import type { ReviewItem } from '#/lib/types';
+import type ReviewView from '#/views/ReviewView';
+import type { EditorView } from '@codemirror/view';
+import type { Editor as ObsidianEditor } from 'obsidian';
 
 /** Adds the plugin prefix to each of a space-separated list of classes */
 export const prefixedClasses = (classes: string) =>

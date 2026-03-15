@@ -1,15 +1,7 @@
-import type { Panel, EditorView } from '@codemirror/view';
-import { showPanel } from '@codemirror/view';
-import { StateField, StateEffect, type Extension } from '@codemirror/state';
-import type { App } from 'obsidian';
-import { Notice } from 'obsidian';
-import { irPluginFacet } from './irPluginFacet';
 import {
   ERROR_NOTICE_DURATION_MS,
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
-import { transformPriority } from '#/lib/utils';
-import type IncrementalReadingPlugin from '#/main';
 import type { NoteType } from '#/lib/types';
 import {
   isReviewCard,
@@ -17,7 +9,15 @@ import {
   type ReviewItem,
   type ReviewSnippet,
 } from '#/lib/types';
+import { transformPriority } from '#/lib/utils';
+import type IncrementalReadingPlugin from '#/main';
+import { StateEffect, StateField, type Extension } from '@codemirror/state';
+import type { EditorView, Panel } from '@codemirror/view';
+import { showPanel } from '@codemirror/view';
+import type { App } from 'obsidian';
+import { Notice } from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import { irPluginFacet } from './irPluginFacet';
 
 /**
  * State effect to toggle review mode on/off.

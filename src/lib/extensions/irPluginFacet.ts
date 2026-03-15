@@ -1,5 +1,5 @@
-import { Facet } from '@codemirror/state';
 import type IncrementalReadingPlugin from '#/main';
+import { Facet } from '@codemirror/state';
 
 /**
  * Facet that marks a CodeMirror editor as belonging to the IR review interface.

@@ -1,39 +1,39 @@
+import type {
+  ArticleRow,
+  ISnippetActive,
+  ISnippetBase,
+  ISnippetDisplay,
+  ISnippetReview,
+  SnippetRow,
+} from '#/lib/types';
 import {
-  TFile,
   Notice,
+  TFile,
   type App,
   type Editor,
   type MarkdownView,
 } from 'obsidian';
-import type { SQLiteRepository } from '../repository';
-import type {
-  ISnippetBase,
-  ISnippetActive,
-  ISnippetReview,
-  SnippetRow,
-  ArticleRow,
-  ISnippetDisplay,
-} from '#/lib/types';
+import type ReviewView from 'src/views/ReviewView';
 import {
-  SNIPPET_DIRECTORY,
-  TEXT_BASE_REVIEW_INTERVAL,
-  SNIPPET_TAG,
-  SOURCE_TAG,
-  SOURCE_PROPERTY_NAME,
+  DEFAULT_PRIORITY,
   ERROR_NOTICE_DURATION_MS,
+  SNIPPET_DIRECTORY,
+  SNIPPET_TAG,
+  SOURCE_PROPERTY_NAME,
+  SOURCE_TAG,
   SUCCESS_NOTICE_DURATION_MS,
+  TEXT_BASE_REVIEW_INTERVAL,
   TEXT_REVIEW_INTERVALS,
   TEXT_REVIEW_MULTIPLIER_BASE,
   TEXT_REVIEW_MULTIPLIER_STEP,
-  DEFAULT_PRIORITY,
 } from '../constants';
-import { getEndOfToday } from '../utils';
-import type ReviewView from 'src/views/ReviewView';
+import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import type { SQLiteRepository } from '../repository';
 import {
   SnippetOffsetTracker,
   type SnippetHighlight,
 } from '../SnippetOffsetTracker';
-import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import { getEndOfToday } from '../utils';
 import { ItemManager } from './ItemManager';
 
 export class SnippetManager extends ItemManager {

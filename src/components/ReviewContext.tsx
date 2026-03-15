@@ -1,18 +1,4 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { createContext, useContext } from 'react';
-import type { PropsWithChildren } from 'react';
-import { useDispatch } from 'react-redux';
-import { Notice } from 'obsidian';
-import type { Scope, WorkspaceLeaf } from 'obsidian';
-import type { Grade } from 'ts-fsrs';
-import { Rating } from 'ts-fsrs';
-import type {
-  ReviewArticle,
-  ReviewCard,
-  ReviewSnippet,
-  ReviewItem,
-} from '#/lib/types';
-import { isReviewCard } from '#/lib/types';
+import { useAppStore } from '#/hooks/useAppSelector';
 import {
   CLOZE_DELIMITERS,
   CONTENT_TITLE_SLICE_LENGTH,
@@ -22,11 +8,8 @@ import {
   REVIEW_FETCH_COUNT,
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type ReviewManager from '#/lib/ReviewManager';
-import type ReviewView from '#/views/ReviewView';
-import type IncrementalReadingPlugin from '#/main';
-import { EditingState } from './types';
-import { deepCopy, getContentSlice, transformPriority } from '#/lib/utils';
 import {
   addSeenId,
   setCurrentItem,
@@ -34,8 +17,25 @@ import {
   setEditState,
   setShowAnswer,
 } from '#/lib/store';
-import { useAppStore } from '#/hooks/useAppSelector';
-import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import type {
+  ReviewArticle,
+  ReviewCard,
+  ReviewItem,
+  ReviewSnippet,
+} from '#/lib/types';
+import { isReviewCard } from '#/lib/types';
+import { deepCopy, getContentSlice, transformPriority } from '#/lib/utils';
+import type IncrementalReadingPlugin from '#/main';
+import type ReviewView from '#/views/ReviewView';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import type { Scope, WorkspaceLeaf } from 'obsidian';
+import { Notice } from 'obsidian';
+import type { PropsWithChildren } from 'react';
+import { createContext, useContext } from 'react';
+import { useDispatch } from 'react-redux';
+import type { Grade } from 'ts-fsrs';
+import { Rating } from 'ts-fsrs';
+import { EditingState } from './types';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
@@ -119,7 +119,7 @@ export function ReviewContextProvider({
       await plugin.withReviewViewSave(async () => {
         await plugin.app.fileManager.processFrontMatter(
           reviewCard.file,
-          (frontmatter: Record<string, any>) => {
+          (frontmatter: Record<string, unknown>) => {
             if ('delimiters' in frontmatter) {
               currentDelimiters = frontmatter.delimiters as [string, string];
             }
@@ -337,7 +337,7 @@ export function ReviewContextProvider({
     return reviewView.scope.register(modifiers, key, async (evt, ctx) => {
       // prevent other keybinds listeners from firing
       evt.stopImmediatePropagation();
-      const hotkeyStr = `${modifiers ? modifiers.join(' + ') + ' + ' : ''}${key}`;
+      // const hotkeyStr = `${modifiers ? modifiers.join(' + ') + ' + ' : ''}${key}`;
       if (inEditMode()) {
         // console.log(`Ignoring keybind "${hotkeyStr}" since we're in edit mode`);
         return;

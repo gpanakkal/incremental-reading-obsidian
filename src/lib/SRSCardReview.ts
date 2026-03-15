@@ -1,6 +1,5 @@
 import type { ISRSCardReview, SRSCardReviewRow } from '#/lib/types';
-import type { ReviewLog } from 'ts-fsrs';
-import type { State } from 'ts-fsrs';
+import type { ReviewLog, State } from 'ts-fsrs';
 
 export default class SRSCardReview implements ISRSCardReview {
   id: string;

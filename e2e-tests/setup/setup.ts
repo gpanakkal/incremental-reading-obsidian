@@ -1,11 +1,11 @@
 import test, { type ElectronApplication } from '@playwright/test';
 import {
-  createVaultCopy,
-  launchElectron,
   closeElectron,
-  shouldCleanup,
-  openVault,
+  createVaultCopy,
   deleteVaultCopy,
+  launchElectron,
+  openVault,
+  shouldCleanup,
 } from './helpers';
 
 let app: ElectronApplication;

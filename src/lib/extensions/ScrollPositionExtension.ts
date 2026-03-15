@@ -1,6 +1,6 @@
 import { ViewPlugin } from '@codemirror/view';
-import { irPluginFacet } from './irPluginFacet';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import { irPluginFacet } from './irPluginFacet';
 
 /**
  * CodeMirror extension that saves and restores scroll position for IR notes.
