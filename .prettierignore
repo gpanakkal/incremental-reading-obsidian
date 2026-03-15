@@ -1,7 +1,16 @@
 .prettierignore
 
+node_modules/
+
 README.md
 LICENSE
+*.json
+*.yml
+
+test-vault/
+test-vaults/
+test-results/
+scripts/
 
 # Ignore artifacts:
 build
