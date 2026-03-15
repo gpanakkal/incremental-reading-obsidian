@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { insertBlankLine } from '@codemirror/commands';
 import { EditorSelection, Prec } from '@codemirror/state';
 import {
@@ -20,7 +21,12 @@ import {
   type ReviewCallbacks,
 } from '#/lib/extensions';
 import { isEditing, setShowAnswer } from '#/lib/store';
-import type { ReviewItem } from '#/lib/types';
+import type {
+  ReviewArticle,
+  ReviewCard,
+  ReviewItem,
+  ReviewSnippet,
+} from '#/lib/types';
 import { isReviewArticle } from '#/lib/types';
 import { getBaseMarkdownExtensions } from '../lib/utils';
 import {
@@ -33,6 +39,7 @@ import { TitleEditor } from './TitleEditor';
 import type { EditCoordinates } from './types';
 import type { Extension } from '@codemirror/state';
 import type { ViewUpdate } from '@codemirror/view';
+import type { Grade } from 'ts-fsrs';
 
 /**
  * Credit goes to mgmeyers for figuring out how to get the editor prototype.
@@ -247,11 +254,12 @@ export function IREditor({
       // Enable review mode in the action bar extension
       // This tells the extension we're in the review interface context
       const reviewCallbacks: ReviewCallbacks = {
-        reviewArticle: async (data) => reviewArticle(data),
-        reviewSnippet: async (data) => reviewSnippet(data),
-        gradeCard: async (data, grade) => gradeCard(data, grade),
-        dismissItem: async (reviewItem) => dismissItem(reviewItem),
-        skipItem: (reviewItem) => skipItem(reviewItem),
+        reviewArticle: async (item: ReviewArticle) => reviewArticle(item),
+        reviewSnippet: async (item: ReviewSnippet) => reviewSnippet(item),
+        gradeCard: async (item: ReviewCard, grade: Grade) =>
+          gradeCard(item, grade),
+        dismissItem: async (reviewItem: ReviewItem) => dismissItem(reviewItem),
+        skipItem: (reviewItem: ReviewItem) => skipItem(reviewItem),
         setShowAnswer: (show) => dispatch(setShowAnswer(show)),
         getCurrentItem: () => store.getState().currentItem,
       };

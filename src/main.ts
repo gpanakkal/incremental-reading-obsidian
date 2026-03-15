@@ -57,7 +57,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     const ribbonIconEl = this.addRibbonIcon(
       PLACEHOLDER_PLUGIN_ICON,
       'Incremental Reading',
-      async (evt: MouseEvent) => {
+      async (_evt: MouseEvent) => {
         // Called when the user clicks the icon.
         await this.learn();
       }

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import {
   Notice,
   TFile,
@@ -199,6 +200,7 @@ export class SnippetManager extends ItemManager {
     let offsets: { start: number; end: number } | null = null;
 
     // Try to get offsets from CodeMirror
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const cm = (editor as any).cm;
     if (cm && cm.state && cm.state.selection) {
       const range = cm.state.selection.ranges[0];
@@ -383,7 +385,7 @@ export class SnippetManager extends ItemManager {
     parentFile: TFile,
     snippetFile: TFile,
     parentEntry: ArticleRow | SnippetRow | null | undefined,
-    cm: { dispatch: (spec: any) => void }
+    cm: { dispatch: (spec: unknown) => void }
   ) {
     if (parentEntry) {
       await this.getHighlights(parentFile);
@@ -474,12 +476,12 @@ export class SnippetManager extends ItemManager {
       reviewed +
       (nextReviewInterval ?? (await this.nextReviewInterval(snippet)));
     try {
-      const insertReviewResult = await this.repo.mutate(
+      await this.repo.mutate(
         'INSERT INTO snippet_review (id, snippet_id, review_time) VALUES ($1, $2, $3)',
         [crypto.randomUUID(), snippet.id, reviewed]
       );
 
-      const updateResult = await this.repo.mutate(
+      await this.repo.mutate(
         `UPDATE snippet SET dismissed = 0, due = $1 WHERE id = $2`,
         [nextReview, snippet.id]
       );

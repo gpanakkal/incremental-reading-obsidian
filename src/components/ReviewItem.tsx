@@ -15,11 +15,7 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
   const { plugin } = useReviewContext();
   const showAnswer = useAppSelector((state) => state.showAnswer);
 
-  const {
-    isPending,
-    isError,
-    data: fileText,
-  } = useQuery({
+  const { data: fileText } = useQuery({
     queryKey: [item.data.id, 'file-text'],
     queryFn: async () => await plugin.app.vault.read(item.file),
   });
@@ -34,7 +30,7 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
           key={item.data.id}
           value={fileText}
           className="ir-editor"
-          onEnter={(cm: EditorView, mod: boolean, shift: boolean) => false}
+          onEnter={(_cm: EditorView, _mod: boolean, _shift: boolean) => false}
           onEscape={() => {}}
           item={item}
         />

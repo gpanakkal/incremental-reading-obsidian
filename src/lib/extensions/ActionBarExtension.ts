@@ -5,9 +5,11 @@ import {
   ERROR_NOTICE_DURATION_MS,
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
-import type { NoteType } from '#/lib/types';
+import type { NoteType, ReviewCard } from '#/lib/types';
 import {
+  isReviewArticle,
   isReviewCard,
+  isReviewSnippet,
   type ReviewArticle,
   type ReviewItem,
   type ReviewSnippet,
@@ -36,11 +38,11 @@ export const setShowAnswerEffect = StateEffect.define<boolean>();
  * This allows ReviewView to inject its context methods into the extension.
  */
 export interface ReviewCallbacks {
-  reviewArticle?: (article: any) => Promise<void>;
-  reviewSnippet?: (snippet: any) => Promise<void>;
-  gradeCard?: (card: any, grade: number) => Promise<void>;
-  dismissItem?: (item: any) => Promise<void>;
-  skipItem?: (item: any) => void;
+  reviewArticle?: (article: ReviewArticle) => Promise<void>;
+  reviewSnippet?: (snippet: ReviewSnippet) => Promise<void>;
+  gradeCard?: (card: ReviewCard, grade: number) => Promise<void>;
+  dismissItem?: (item: ReviewItem) => Promise<void>;
+  skipItem?: (item: ReviewItem) => void;
   setShowAnswer?: (show: boolean) => void;
   getCurrentItem?: () => ReviewItem | null;
 }
@@ -167,8 +169,8 @@ function renderReviewModeActions(
       for (const { label, grade } of grades) {
         const btn = createButton(label, async () => {
           const item = callbacks.getCurrentItem?.();
-          if (item && callbacks.gradeCard) {
-            await callbacks.gradeCard(item.data, grade);
+          if (item && isReviewCard(item) && callbacks.gradeCard) {
+            await callbacks.gradeCard(item, grade);
           }
         });
         container.appendChild(btn);
@@ -187,10 +189,10 @@ function renderReviewModeActions(
       const item = callbacks.getCurrentItem?.();
       if (!item) return;
 
-      if (noteType === 'article' && callbacks.reviewArticle) {
-        await callbacks.reviewArticle(item.data);
-      } else if (noteType === 'snippet' && callbacks.reviewSnippet) {
-        await callbacks.reviewSnippet(item.data);
+      if (isReviewArticle(item)) {
+        await callbacks.reviewArticle?.(item);
+      } else if (isReviewSnippet(item)) {
+        await callbacks.reviewSnippet?.(item);
       }
     });
     container.appendChild(continueBtn);

@@ -182,7 +182,7 @@ export class ObsidianHelpers {
     app,
   }: {
     content: string;
-    frontmatter?: Record<string, any>;
+    frontmatter?: PluginFrontMatter;
     fileName: string;
     directory: string;
     app: App;
@@ -310,7 +310,7 @@ export class ObsidianHelpers {
   /**
    * (WIP) Get the block, bullet list item, or code block the cursor is currently within
    */
-  static getCurrentContent(editor: Editor, file: TFile) {
+  static getCurrentContent(editor: Editor, _file: TFile) {
     const cursor = editor.getCursor();
     const block = editor.getLine(cursor.line);
 
