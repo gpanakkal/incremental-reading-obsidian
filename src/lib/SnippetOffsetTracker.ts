@@ -148,6 +148,18 @@ export class SnippetOffsetTracker {
   }
 
   /**
+   * Move the cached highlights from oldPath to newPath.
+   * Called when Obsidian renames a file so that open editors
+   * using the new path still find their highlight data.
+   */
+  renameFile(oldPath: string, newPath: string) {
+    const highlights = this.highlightCache.get(oldPath);
+    if (highlights === undefined) return;
+    this.highlightCache.delete(oldPath);
+    this.highlightCache.set(newPath, highlights);
+  }
+
+  /**
    * Clear all caches
    */
   clearAll() {

@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS article_review (
 CREATE TABLE IF NOT EXISTS snippet (
   id TEXT NOT NULL, -- UUID
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
-  parent TEXT DEFAULT NULL,
+  parent TEXT DEFAULT NULL, -- null if it wasn't created from an article or snippet
   due INTEGER, -- unix timestamp
   priority INTEGER NOT NULL,
   dismissed INTEGER DEFAULT 0,
