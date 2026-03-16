@@ -55,7 +55,7 @@ if [[ "$MODE" == "local" ]]; then
     if [[ -z "$obsidian_app" ]]; then
       # Check for Flatpak installation
       if [[ -d "/var/lib/flatpak/app/md.obsidian.Obsidian" ]]; then
-        obsidian_app="/var/lib/flatpak/app/md.obsidian.Obsidian/current/active/files/obsidian"
+        obsidian_app="/var/lib/flatpak/app/md.obsidian.Obsidian/current/active/files"
       # Check for Snap installation
       elif [[ -d "/snap/obsidian/current" ]]; then
         obsidian_app="/snap/obsidian/current"
