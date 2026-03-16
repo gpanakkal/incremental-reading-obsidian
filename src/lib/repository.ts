@@ -207,14 +207,11 @@ export class SQLiteRepository {
   /**
    * Overwrite or create the database file
    */
-  async save(creating: boolean = false) {
+  async save() {
     if (!this.db) throw new Error('Database was not initialized on repository');
     try {
       this.#pendingSaveCount++;
       const data = this.db.export().buffer;
-      if (!creating && !this.dbExists()) {
-        await this.initDb();
-      }
       const dataDir = this.app.vault.getFolderByPath(DATA_DIRECTORY);
       if (!dataDir) {
         await this.app.vault.createFolder(DATA_DIRECTORY);
@@ -235,7 +232,8 @@ export class SQLiteRepository {
   }
 
   /**
-   * Initialize the database, assuming the file doesn't exist
+   * Initialize the in-memory database.
+   * If a database file exists, use `loadDb()` instead
    * @returns a Database, or null if an error is thrown
    */
   async initDb() {
@@ -243,7 +241,6 @@ export class SQLiteRepository {
       const sql = await this.loadWasm();
       this.db = new sql.Database();
       this.db.exec(this.#schema);
-      await this.save(true);
       console.info('Incremental Reading database initialized');
       return this.db;
     } catch (error) {
