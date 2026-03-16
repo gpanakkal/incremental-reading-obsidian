@@ -200,7 +200,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
               e.currentTarget.select();
             }
           }}
-          onFocusIn={(e) => e.currentTarget.select()}
+          onFocus={(e) => e.currentTarget.select()}
         />
       </label>
     </>
@@ -267,7 +267,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
                 e.currentTarget.select();
               }
             }}
-            onFocusIn={(e) => e.currentTarget.select()}
+            onFocus={(e) => e.currentTarget.select()}
           />
         </label>
       </div>
