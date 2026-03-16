@@ -254,11 +254,12 @@ export default class ReviewManager {
   async handleExternalRename(file: TAbstractFile, oldPath: string) {
     // TODO: handle files being moved into or out of the IR folder
     const newPath = file.path;
-    console.log(`file rename detected: ${oldPath} -> ${newPath}`);
+    // console.log(`file rename detected: ${oldPath} -> ${newPath}`);
     const concreteFile = this.app.vault.getFileByPath(newPath);
     if (!concreteFile) {
       throw new Error(`Failed to find a file at ${newPath}`);
     }
+    this.snippets.offsetTracker.renameFile(oldPath, newPath);
     const type = Obsidian.getNoteType(concreteFile, this.app);
     if (!type) {
       // console.log(`Found no matching IR tags; ignoring`);
