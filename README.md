@@ -14,10 +14,13 @@ Since this is integrated directly into Obsidian, your learning materials, snippe
 See [Technical Details](#technical-details) for key terminology and details on how the incremental reading process works in this plugin.
 
 ## Setup
-[Install via BRAT](https://tfthacker.com/brat-quick-guide#Adding+a+beta+plugin).
-
 > [!IMPORTANT]
-> This plugin supports Obsidian Sync, but you must enable "sync all other types" on all devices for it to work.
+> This plugin supports Obsidian Sync, but make sure to enable "sync all other types" on each device **before** installing the plugin.
+> Sync may overwrite the plugin's database if you install the plugin first.
+>
+> You can easily recover the database if this happens: go to the Files pane, right click on `incremental-reading/ir-user-data.sqlite`, and select `Open version history`.
+
+[Install via BRAT](https://tfthacker.com/brat-quick-guide#Adding+a+beta+plugin).
 
 ## Using the plugin
 1. Import some learning material into an Obsidian note. See [Third-Party Tools](#third-party-tools) for HTML/PDF conversion.
