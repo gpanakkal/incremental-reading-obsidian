@@ -59,6 +59,7 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
     skipItem,
     reviewView,
     registerActionBarHotkey,
+    plugin,
   } = useReviewContext();
   const [isDismissed, setIsDismissed] = useState(reviewItem.data.dismissed);
 
@@ -84,6 +85,7 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
     function initHotkeys() {
       const handlers = [
         reviewView.scope.register(null, 'Escape', (evt) => {
+          if (!plugin.settings.allowEscBind) return;
           stopEditing(evt);
         }),
         registerActionBarHotkey(['Alt'], 'd', async () => {

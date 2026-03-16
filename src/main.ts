@@ -1,12 +1,5 @@
-import type { App, TAbstractFile, WorkspaceLeaf } from 'obsidian';
-import {
-  MarkdownView,
-  Notice,
-  Plugin,
-  PluginSettingTab,
-  Setting,
-  TFile,
-} from 'obsidian';
+import type { TAbstractFile, WorkspaceLeaf } from 'obsidian';
+import { MarkdownView, Notice, Plugin, TFile } from 'obsidian';
 import {
   DATABASE_FILE_PATH,
   ERROR_NOTICE_DURATION_MS,
@@ -26,14 +19,8 @@ import Article from './lib/Article';
 import { QueryModal } from './views/QueryModal';
 import { createIRExtensions } from './lib/extensions';
 import { queryClient } from './lib/queryClient';
-
-interface IRPluginSettings {
-  mySetting: string;
-}
-
-const DEFAULT_SETTINGS: IRPluginSettings = {
-  mySetting: 'default',
-};
+import type { IRPluginSettings } from './lib/settings';
+import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
 
 export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;
@@ -261,8 +248,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     // Invalidate review item cache when the current item's file is modified externally
     this.registerEvent(this.app.vault.on('modify', invalidateCache));
 
-    // This adds a settings tab so the user can configure various aspects of the plugin
-    // this.addSettingTab(new SampleSettingTab(this.app, this)); // TODO: set up settings
+    this.addSettingTab(new IRSettingTab(this.app, this));
 
     // // If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
     // // Using this function will automatically remove the event listener when this plugin is disabled.
@@ -416,33 +402,5 @@ export default class IncrementalReadingPlugin extends Plugin {
     queryClient.invalidateQueries({
       queryKey: [currentItem.data.reference],
     });
-  }
-}
-
-class IRSettingTab extends PluginSettingTab {
-  plugin: IncrementalReadingPlugin;
-
-  constructor(app: App, plugin: IncrementalReadingPlugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
-
-  display(): void {
-    const { containerEl } = this;
-
-    containerEl.empty();
-
-    new Setting(containerEl)
-      .setName('Setting #1')
-      .setDesc("It's a secret")
-      .addText((text) =>
-        text
-          .setPlaceholder('Enter your secret')
-          .setValue(this.plugin.settings.mySetting)
-          .onChange(async (value) => {
-            this.plugin.settings.mySetting = value;
-            await this.plugin.saveSettings();
-          })
-      );
   }
 }
