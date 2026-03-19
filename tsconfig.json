@@ -26,5 +26,5 @@
     },
     "lib": ["DOM", "ES5", "ES6", "ES7", "ES2021"]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "vitest.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "e2e-tests/**/*.ts", "vitest.config.ts"]
 }
