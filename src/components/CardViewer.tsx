@@ -33,7 +33,7 @@ export function CardViewer({ cardText }: { cardText: string }) {
     const component = new Component();
     component.load();
     containerRef.current.empty();
-    MarkdownRenderer.render(
+    void MarkdownRenderer.render(
       reviewView.app,
       withAnswerHidden,
       containerRef.current,
