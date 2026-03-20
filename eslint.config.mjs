@@ -11,7 +11,10 @@ const TEST_FILES = ['**/*.test.ts', '**/*.spec.ts', 'e2e-tests/**'];
 
 export default defineConfig([
   { files: LINT_TARGETS, ...js.configs.recommended },
-  ...tseslint.configs.recommendedTypeChecked.map(c => ({ files: LINT_TARGETS, ...c })),
+  ...tseslint.configs.recommendedTypeChecked.map((c) => ({
+    files: LINT_TARGETS,
+    ...c,
+  })),
   { files: LINT_TARGETS, ...react.configs.flat.recommended },
   { files: LINT_TARGETS, ...reactHooks.configs.flat.recommended },
   ...obsidianmd.configs.recommended,
@@ -23,7 +26,7 @@ export default defineConfig([
       // workaround for compatibility with tseslint's type-aware linting
       // until Obsidian plugin can be configured to exclude .js files
       ...Object.fromEntries(
-        Object.keys(obsidianmd.rules).map(r => [`obsidianmd/${r}`, 'off'])
+        Object.keys(obsidianmd.rules).map((r) => [`obsidianmd/${r}`, 'off'])
       ),
     },
   },
@@ -33,6 +36,9 @@ export default defineConfig([
       globals: {
         ...globals.node,
       },
+    },
+    rules: {
+      'import/no-nodejs-modules': 'off',
     },
   },
   globalIgnores(['**/node_modules/', '**/main.js']),

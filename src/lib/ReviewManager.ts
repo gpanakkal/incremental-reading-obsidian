@@ -220,12 +220,16 @@ export default class ReviewManager {
     });
 
     if (!articles && !snippets && !cards) {
+      // eslint-disable-next-line no-console
       console.log('No entries found');
       return;
     }
-    console.table(articles.map(ArticleManager.rowToDisplay));
-    console.table(snippets.map(SnippetManager.rowToDisplay));
-    console.table(cards.map(CardManager.rowToDisplay));
+    // eslint-disable-next-line no-console
+    console.table(articles.map((el) => ArticleManager.rowToDisplay(el)));
+    // eslint-disable-next-line no-console
+    console.table(snippets.map((el) => SnippetManager.rowToDisplay(el)));
+    // eslint-disable-next-line no-console
+    console.table(cards.map((el) => CardManager.rowToDisplay(el)));
   }
 
   async dismissItem(item: ReviewItem): Promise<void> {

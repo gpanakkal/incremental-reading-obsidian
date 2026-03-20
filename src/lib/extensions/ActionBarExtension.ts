@@ -224,6 +224,7 @@ function renderReviewModeActions(
               );
             } catch (error) {
               new Notice(`Failed to update priority`, ERROR_NOTICE_DURATION_MS);
+              console.error(error);
             }
           },
           item.data.priority / 10, // Reset value on Escape
@@ -404,6 +405,7 @@ function createPriorityInput(
     try {
       await onSave(currentPriority);
     } catch (error) {
+      console.error(error);
       // Reset on error
       currentPriority = Math.round(resetValue * 10);
       input.value = String(resetValue);

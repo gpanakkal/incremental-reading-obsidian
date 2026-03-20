@@ -111,16 +111,16 @@ export function applyMigrations(db: Database): number {
     return currentVersion;
   }
 
-  console.info(`Applying ${pendingMigrations.length} migration(s)...`);
+  // console.info(`Applying ${pendingMigrations.length} migration(s)...`);
 
   for (const migration of pendingMigrations) {
     try {
-      console.info(
-        `Applying migration ${migration.version}: ${migration.description}`
-      );
+      // console.info(
+      //   `Applying migration ${migration.version}: ${migration.description}`
+      // );
       migration.up(db);
       db.exec(`PRAGMA user_version = ${migration.version}`);
-      console.info(`Migration ${migration.version} applied successfully`);
+      // console.info(`Migration ${migration.version} applied successfully`);
     } catch (error) {
       console.error(`Migration ${migration.version} failed:`, error);
       throw new Error(`Migration ${migration.version} failed: ${error}`);
@@ -128,7 +128,7 @@ export function applyMigrations(db: Database): number {
   }
 
   const newVersion = getSchemaVersion(db);
-  console.info(`Database schema updated to version ${newVersion}`);
+  // console.info(`Database schema updated to version ${newVersion}`);
 
   return newVersion;
 }

@@ -226,7 +226,7 @@ export function ReviewContextProvider({
         `Priority set to ${priority / 10}`,
         SUCCESS_NOTICE_DURATION_MS
       );
-    } catch (error) {
+    } catch (_error) {
       new Notice(
         `Failed to update priority for "${item.data.reference}"`,
         ERROR_NOTICE_DURATION_MS
