@@ -49,7 +49,7 @@ const seenIdsSlice = createSlice({
     },
   },
   extraReducers: (builder) => {
-    builder.addCase(resetSession, () => {});
+    builder.addCase(resetSession, () => ({}));
   },
 });
 

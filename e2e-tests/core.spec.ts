@@ -64,11 +64,7 @@ test.describe('Article Importing', () => {
     // macOS uses native context menus which are invisible to Playwright
     test.skip(process.platform === 'darwin', 'Native context menus on macOS');
 
-    await window
-      .locator('div')
-      .filter({ hasText: /^sources$/ })
-      .nth(1)
-      .click();
+    await window.getByText('sources').click();
 
     await window.getByText('Curse of dimensionality - Wikipedia').click({
       button: 'right',
