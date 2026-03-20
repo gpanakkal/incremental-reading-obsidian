@@ -288,7 +288,7 @@ function renderStandaloneModeActions(
   container.appendChild(dismissToggleBtn);
 
   // Fetch dismissed status and update button
-  (async () => {
+  void (async () => {
     try {
       const item = await reviewManager.getReviewItemFromFile(file);
 
@@ -367,10 +367,10 @@ function createButton(
   const btn = document.createElement('button');
   btn.className = 'ir-review-button';
   btn.textContent = label;
-  btn.addEventListener('click', async (e) => {
+  btn.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    await onClick();
+    void onClick();
   });
   return btn;
 }
@@ -417,21 +417,22 @@ function createPriorityInput(
       currentPriority = priority;
       // Update display to show decimal form
       input.value = String(priority / 10);
-    } catch (error) {
+    } catch (_error) {
       // Invalid input - ignore
     }
   });
 
   input.addEventListener('blur', () => {
-    saveValue();
+    void saveValue();
   });
 
-  input.addEventListener('keydown', async (e) => {
+  input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      await saveValue();
+      saveValue()
+        .then(() => editorView.focus())
+        .catch(() => {});
       // Return focus to the editor body
-      editorView.focus();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       currentPriority = Math.round(resetValue * 10);

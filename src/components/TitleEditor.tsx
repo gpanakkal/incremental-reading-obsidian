@@ -11,7 +11,7 @@ export function TitleEditor({ item }: { item: ReviewArticle }) {
   useEffect(() => {
     if (!titleRef.current) return;
     titleRef.current.textContent = item.file.basename;
-  }, [titleRef.current, item.file.basename]);
+  }, [item.file.basename]);
 
   const handleBlur = async () => {
     if (!titleRef.current) return;
@@ -54,7 +54,7 @@ export function TitleEditor({ item }: { item: ReviewArticle }) {
       ref={titleRef}
       className="ir-title inline-title"
       contentEditable
-      onBlur={handleBlur}
+      onBlur={() => void handleBlur()}
       onKeyDown={handleKeyDown}
     >
       {item.file.basename}

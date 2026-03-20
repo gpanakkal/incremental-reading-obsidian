@@ -49,7 +49,7 @@ export function PriorityModalContent({
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault();
-                handleSubmit();
+                void handleSubmit();
               } else if (e.key === 'Escape') {
                 onClose();
               }
@@ -60,7 +60,7 @@ export function PriorityModalContent({
       </div>
       <div className="modal-button-container">
         <button onClick={onClose}>Cancel</button>
-        <button onClick={handleSubmit} className="mod-cta">
+        <button onClick={() => void handleSubmit()} className="mod-cta">
           Import
         </button>
       </div>

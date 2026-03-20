@@ -53,7 +53,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       this.isReviewInterface = view.state.facet(isReviewInterfaceFacet);
 
       // Load highlights asynchronously
-      this.loadHighlights(view);
+      void this.loadHighlights(view);
     }
 
     private async loadHighlights(view: EditorView) {
@@ -139,7 +139,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
             // console.log(
             //   `[SnippetHighlightExtension] External file sync in standard editor, reloading from DB`
             // );
-            this.reloadHighlightsFromDB(update.view, reviewManager);
+            void this.reloadHighlightsFromDB(update.view, reviewManager);
           }
           // Review interface: the shared snippetTracker already has correct
           // offsets from the standard editor's mapping. Just rebuild decorations
@@ -215,7 +215,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         clearTimeout(this.persistTimeout);
       }
       this.persistTimeout = setTimeout(() => {
-        this.persistHighlights(reviewManager, file, highlights);
+        void this.persistHighlights(reviewManager, file, highlights);
       }, 2000); // 2 second debounce
     }
 
@@ -333,7 +333,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           event.preventDefault();
           event.stopPropagation();
 
-          plugin.app.workspace.openLinkText(snippetRef, '', true);
+          void plugin.app.workspace.openLinkText(snippetRef, '', true);
           return true;
         }
 

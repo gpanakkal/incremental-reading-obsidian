@@ -21,7 +21,9 @@ export const SUCCESS_NOTICE_DURATION_MS = 5000;
 
 /** characters that should never be permitted in note titles */
 export const FORBIDDEN_TITLE_CHARS = new Set(`#^[]|*"\\/<>:?\n`.split(''));
-export const INVALID_TITLE_MESSAGE = `Titles cannot contain any of the following: ${FORBIDDEN_TITLE_CHARS}`;
+export const INVALID_TITLE_MESSAGE =
+  `Titles cannot contain any of the following: ` +
+  `${[...FORBIDDEN_TITLE_CHARS.keys()].join(', ')}`;
 export const CONTENT_TITLE_SLICE_LENGTH = 50;
 export const SNIPPET_SLICE_LENGTH = 30;
 

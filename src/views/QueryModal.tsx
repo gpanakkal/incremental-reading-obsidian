@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import { Modal } from 'obsidian';
 import type ReviewManager from '#/lib/ReviewManager';
 import type { App } from 'obsidian';
@@ -14,7 +15,7 @@ export class QueryModal extends Modal {
     const { contentEl } = this;
 
     // Set modal title
-    contentEl.createEl('h2', { text: 'SQL Query Console' });
+    contentEl.createEl('h2', { text: 'SQL query console' });
 
     // Create textarea for SQL input
     const textarea = contentEl.createEl('textarea', {
@@ -34,9 +35,9 @@ export class QueryModal extends Modal {
 
     // Create execute button
     const executeBtn = buttonContainer.createEl('button', {
-      text: 'Execute Query',
+      text: 'Execute query',
     });
-    executeBtn.addEventListener('click', async () => {
+    executeBtn.addEventListener('click', () => {
       const query = textarea.value.trim();
       if (!query) {
         console.info('No query entered');
@@ -45,9 +46,10 @@ export class QueryModal extends Modal {
 
       try {
         console.info('Executing query:', query);
-        const result = await this.reviewManager.repo.query(query);
-        console.info('Query result:');
-        console.table(result);
+        void this.reviewManager.repo.query(query).then((result) => {
+          console.info('Query result:');
+          console.table(result);
+        });
       } catch (error) {
         console.error('Query error:', error);
       }
@@ -63,7 +65,7 @@ export class QueryModal extends Modal {
     textarea.focus();
 
     // Add Enter+Ctrl shortcut to execute
-    textarea.addEventListener('keydown', async (e) => {
+    textarea.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && e.ctrlKey) {
         e.preventDefault();
         executeBtn.click();
