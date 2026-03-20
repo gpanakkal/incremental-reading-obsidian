@@ -24,7 +24,7 @@ import SRSCard from '../SRSCard';
 import SRSCardReview from '../SRSCardReview';
 import { getEndOfToday, searchAll } from '../utils';
 import { ItemManager } from './ItemManager';
-import type { SQLiteRepository } from '../repository';
+import type { SQLiteRepository } from '../types';
 import type { TFile } from 'obsidian';
 import type ReviewView from 'src/views/ReviewView';
 import type { FSRS, FSRSParameters, Grade, StateType } from 'ts-fsrs';

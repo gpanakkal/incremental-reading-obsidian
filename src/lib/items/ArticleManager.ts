@@ -29,7 +29,7 @@ import {
 } from '../ObsidianHelpers';
 import { generateId, getContentSlice, getEndOfToday } from '../utils';
 import { ItemManager } from './ItemManager';
-import type { SQLiteRepository } from '../repository';
+import type { SQLiteRepository } from '../types';
 import type { App, TFile } from 'obsidian';
 
 export class ArticleManager extends ItemManager {
