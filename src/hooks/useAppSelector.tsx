@@ -1,5 +1,5 @@
 import { useSelector, useStore } from 'react-redux';
-import { IRPluginState } from '#/lib/store';
+import type { IRPluginState } from '#/lib/store';
 import type { TypedUseSelectorHook } from 'react-redux';
 
 /**

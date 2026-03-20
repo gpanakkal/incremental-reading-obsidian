@@ -1,10 +1,5 @@
 import { type App, type Editor, type MarkdownView } from 'obsidian';
-import {
-  ReviewArticle,
-  ReviewCard,
-  ReviewSnippet,
-  isArticle,
-} from '#/lib/types';
+import { isArticle } from '#/lib/types';
 import type {
   ArticleRow,
   IArticleBase,
@@ -12,6 +7,9 @@ import type {
   ISnippetBase,
   ReviewItem,
   SnippetRow,
+  ReviewArticle,
+  ReviewCard,
+  ReviewSnippet,
 } from '#/lib/types';
 import type ReviewView from '#/views/ReviewView';
 import { DATA_DIRECTORY, REVIEW_FETCH_COUNT } from './constants';
@@ -164,7 +162,6 @@ export default class ReviewManager {
     dueBy?: number;
     limit?: number;
   }) {
-    app;
     try {
       const cardsDue = await this.cards.getDue(dueBy, limit);
       const snippetsDue = await this.snippets.getDue(dueBy, limit);

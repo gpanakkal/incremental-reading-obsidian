@@ -12,18 +12,18 @@ import {
   getPendingMigrations,
   getSchemaVersion,
   MigrationVerificationError,
-} from '../db/migrations';
+} from '#/db/migrations';
+import type { BindParams, Database, QueryExecResult } from 'sql.js';
 // @ts-ignore - WASM imported as base64 string via custom esbuild plugin
-import wasmBase64 from '../db/sql-wasm.wasm';
+import wasmBase64 from '#/db/sql-wasm.wasm';
 import {
   BACKUP_DIRECTORY,
   DATA_DIRECTORY,
   LOG_DIRECTORY,
   TABLE_NAMES,
-} from '../lib/constants';
-import type { RowTypes } from '../lib/types';
-import type { Primitive } from '../lib/utility-types';
-import type { BindParams, Database, QueryExecResult } from 'sql.js';
+} from '#/lib/constants';
+import type { RowTypes } from '#/lib/types';
+import type { Primitive } from '#/lib/utility-types';
 
 export class SQLiteRepository {
   app: App;
@@ -50,7 +50,9 @@ export class SQLiteRepository {
     this.#dbFilePath = normalizePath(dbFilePath);
     this.#schema = schema;
     this.#onMigrationFailure = onMigrationFailure;
-    this.handleFileChange = this.handleFileChange.bind(this);
+    this.handleFileChange = this.handleFileChange.bind(this) as (
+      file: TAbstractFile
+    ) => Promise<void>;
   }
 
   /**

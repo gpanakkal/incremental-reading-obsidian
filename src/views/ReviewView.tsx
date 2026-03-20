@@ -49,6 +49,7 @@ export default class ReviewView extends FileView {
   }
 
   getDisplayText(): string {
+    // eslint-disable-next-line obsidianmd/ui/sentence-case
     return 'Incremental Reading';
   }
 
