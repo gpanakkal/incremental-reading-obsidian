@@ -102,7 +102,7 @@ export function ReviewContextProvider({
       });
       const { seenIds } = plugin.store.getState();
       const nextItem: ReviewItem | null =
-        result.all.filter(({ data }) => !seenIds.has(data.id))[0] ?? null;
+        result.all.filter(({ data }) => !(data.id in seenIds))[0] ?? null;
 
       if (nextItem && isReviewCard(nextItem)) await updateDelimiters(nextItem);
 
