@@ -56,7 +56,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     // TODO: replace the placeholder
     const ribbonIconEl = this.addRibbonIcon(
       PLACEHOLDER_PLUGIN_ICON,
-      'Incremental Reading',
+      'Incremental reading',
       async (_evt: MouseEvent) => {
         // Called when the user clicks the icon.
         await this.learn();
@@ -103,7 +103,7 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     this.addCommand({
       id: 'create-card',
-      name: 'Create SRS card',
+      name: 'Create spaced repetition card',
       callback: () => {
         if (!this.#reviewManager) {
           new Notice(`Plugin still loading`);
@@ -149,7 +149,7 @@ export default class IncrementalReadingPlugin extends Plugin {
           ).open();
         } else {
           new Notice(
-            'A markdown note must be active',
+            'A Markdown note must be active',
             ERROR_NOTICE_DURATION_MS
           );
         }
@@ -165,13 +165,13 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       id: 'learn',
       name: 'Learn',
-      callback: async () => await this.learn.call(this),
+      callback: async () => await this.learn(),
     });
 
     this.addCommand({
       // TODO: remove after done testing
       id: 'list-entries',
-      name: '(dev) List articles, snippets and cards',
+      name: '(dev) list articles, snippets and cards',
       callback: async () => {
         if (!this.#reviewManager) {
           new Notice(`Plugin still loading`);
@@ -184,7 +184,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       // TODO: remove after done testing
       id: 'query-db',
-      name: '(dev) Query the database',
+      name: '(dev) query the database',
       callback: async () => {
         if (!this.#reviewManager) {
           new Notice(`Plugin still loading`);
@@ -205,24 +205,25 @@ export default class IncrementalReadingPlugin extends Plugin {
       })
     );
 
-    const invalidateCache: (file: TAbstractFile) => Promise<void> =
-      this.invalidateCurrentItemCache.bind(this);
+    const invalidateCache = this.invalidateCurrentItemCache.bind(this) as (
+      file: TAbstractFile
+    ) => Promise<void>;
     // Invalidate review item cache when the current item's file is modified externally
-    this.registerEvent(this.app.vault.on('modify', invalidateCache));
+    this.registerEvent(
+      this.app.vault.on('modify', (file) => void invalidateCache(file))
+    );
 
     // listen for file renames to update references in db
     this.registerEvent(
-      this.app.vault.on(
-        'rename',
-        async (file: TAbstractFile, oldPath: string) => {
-          if (!this.#reviewManager) {
-            // console.log('Review manager not ready; returning');
-            return;
-          }
-          await this.#reviewManager.handleExternalRename(file, oldPath);
-          await invalidateCache(file);
+      this.app.vault.on('rename', (file, oldPath) => {
+        if (!this.#reviewManager) {
+          // console.log('Review manager not ready; returning');
+          return;
         }
-      )
+        void this.#reviewManager
+          .handleExternalRename(file, oldPath)
+          .then(() => invalidateCache(file));
+      })
     );
 
     this.addSettingTab(new IRSettingTab(this.app, this));
@@ -245,8 +246,14 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         if (this.app.isMobile) {
           // TODO: remove 'as' assertion once mobileNavbar type is added
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const navbarBox = (this.app.mobileNavbar as any)?.containerEl as
+
+          if (
+            !this.app.mobileNavbar ||
+            !('containerEl' in this.app.mobileNavbar)
+          ) {
+            throw new Error(`Failed to find navbar container element.`);
+          }
+          const navbarBox = this.app.mobileNavbar.containerEl as
             | HTMLElement
             | undefined;
           if (navbarBox) {
@@ -278,14 +285,14 @@ export default class IncrementalReadingPlugin extends Plugin {
         const repo = await SQLiteRepository.start(
           this,
           DATABASE_FILE_PATH,
-          databaseSchema,
+          databaseSchema as string,
           (error) => {
             console.error(
               'Incremental Reading - Migration verification failed:',
               error.errors
             );
             new Notice(
-              `Incremental Reading: Database migration failed. Check the console for details.`,
+              `Incremental reading: database migration failed. Check the console for details.`,
               0
             );
             this.unload();
@@ -316,7 +323,8 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const saved = (await this.loadData()) as object;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
   }
 
   async saveSettings() {
@@ -343,7 +351,9 @@ export default class IncrementalReadingPlugin extends Plugin {
       // If the view was already open, invalidate the query to trigger a refetch
       // This ensures the new initial item is displayed immediately
       if (viewAlreadyOpen) {
-        queryClient.invalidateQueries({ queryKey: ['current-review-item'] });
+        await queryClient.invalidateQueries({
+          queryKey: ['current-review-item'],
+        });
       }
     }
 

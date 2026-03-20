@@ -126,7 +126,7 @@ export class CardManager extends ItemManager {
   async create(editor: Editor, view: MarkdownView | ReviewView) {
     const currentFile = view.file;
     if (!currentFile) {
-      new Notice(`A markdown file must be active`, ERROR_NOTICE_DURATION_MS);
+      new Notice(`A Markdown file must be active`, ERROR_NOTICE_DURATION_MS);
       return;
     }
 
@@ -159,7 +159,10 @@ export class CardManager extends ItemManager {
       // move the cursor to the next block
       editor.setSelection({ line: blockLine + 1, ch: 0 });
     } catch (error) {
-      new Notice(error);
+      if (error instanceof Error) {
+        console.error(error);
+      }
+      new Notice(`Failed to create card`);
     }
   }
 

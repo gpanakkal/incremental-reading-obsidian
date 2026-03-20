@@ -165,7 +165,7 @@ export function ReviewContextProvider({
   };
 
   const getNext = () => {
-    queryClient.invalidateQueries({ queryKey: ['current-review-item'] });
+    void queryClient.invalidateQueries({ queryKey: ['current-review-item'] });
   };
 
   const reviewArticle = async (

@@ -199,7 +199,6 @@ export class SnippetManager extends ItemManager {
     let offsets: { start: number; end: number } | null = null;
 
     // Try to get offsets from CodeMirror
-     
     const cm = editor.cm;
     if (cm && cm.state && cm.state.selection) {
       const range = cm.state.selection.ranges[0];
