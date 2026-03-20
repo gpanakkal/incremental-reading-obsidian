@@ -22,10 +22,10 @@ import {
   LOG_DIRECTORY,
   TABLE_NAMES,
 } from '#/lib/constants';
-import type { RowTypes } from '#/lib/types';
+import type { RowTypes, SQLiteRepository } from '#/lib/types';
 import type { Primitive } from '#/lib/utility-types';
 
-export class SQLiteRepository {
+export class SQLJSRepository implements SQLiteRepository {
   app: App;
   adapter: DataAdapter;
   db: Database;
@@ -66,8 +66,8 @@ export class SQLiteRepository {
     dbFilePath: string,
     schema: string,
     onMigrationFailure?: (error: MigrationVerificationError) => void
-  ): Promise<SQLiteRepository> {
-    const repo = new SQLiteRepository(
+  ): Promise<SQLJSRepository> {
+    const repo = new SQLJSRepository(
       plugin.app,
       dbFilePath,
       schema,

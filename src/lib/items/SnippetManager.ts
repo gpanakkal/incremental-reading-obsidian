@@ -33,7 +33,7 @@ import {
 } from '../SnippetOffsetTracker';
 import { getEndOfToday } from '../utils';
 import { ItemManager } from './ItemManager';
-import type { SQLiteRepository } from '../repository';
+import type { SQLiteRepository } from '../types';
 import type ReviewView from 'src/views/ReviewView';
 
 export class SnippetManager extends ItemManager {

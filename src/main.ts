@@ -1,4 +1,5 @@
 import { MarkdownView, Notice, Plugin, TFile } from 'obsidian';
+import type { TAbstractFile, WorkspaceLeaf } from 'obsidian';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
 import databaseSchema from './db/schema.sql';
 import {
@@ -8,17 +9,16 @@ import {
 } from './lib/constants';
 import { createIRExtensions } from './lib/extensions';
 import { queryClient } from './lib/queryClient';
-import { SQLiteRepository } from './lib/repository';
+import { SQLJSRepository } from './lib/repository/SQLJSRepository';
 import ReviewManager from './lib/ReviewManager';
+import type { IRPluginSettings } from './lib/settings';
 import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
 import { setReviewViewSaving, store } from './lib/store';
+import type { ReviewItem, SQLiteRepository } from './lib/types';
 import { getEditorClass } from './lib/utils';
 import { PriorityModal } from './views/PriorityModal';
 import { QueryModal } from './views/QueryModal';
 import ReviewView from './views/ReviewView';
-import type { IRPluginSettings } from './lib/settings';
-import type { ReviewItem } from './lib/types';
-import type { TAbstractFile, WorkspaceLeaf } from 'obsidian';
 
 export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;
@@ -282,24 +282,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         }
 
         this.store = store;
-        const repo = await SQLiteRepository.start(
-          this,
-          DATABASE_FILE_PATH,
-          databaseSchema as string,
-          (error) => {
-            console.error(
-              'Incremental Reading - Migration verification failed:',
-              error.errors
-            );
-            new Notice(
-              `Incremental reading: database migration failed. Check the console for details.`,
-              0
-            );
-            this.unload();
-          }
-        );
-
-        this.#reviewManager = new ReviewManager(this.app, repo);
+        await this.initReviewManager();
         this.registerView(
           ReviewView.viewType,
           (leaf) => new ReviewView(leaf, this, this.#reviewManager)
@@ -329,6 +312,27 @@ export default class IncrementalReadingPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  private async initReviewManager() {
+    const repo: SQLiteRepository = await SQLJSRepository.start(
+      this,
+      DATABASE_FILE_PATH,
+      databaseSchema as string,
+      (error) => {
+        console.error(
+          'Incremental Reading - Migration verification failed:',
+          error.errors
+        );
+        new Notice(
+          `Incremental reading: database migration failed. Check the console for details.`,
+          0
+        );
+        this.unload();
+      }
+    );
+
+    this.#reviewManager = new ReviewManager(this.app, repo);
   }
 
   async learn(initialItem?: ReviewItem) {
