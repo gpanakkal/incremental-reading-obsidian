@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import {
   Notice,
   TFile,
@@ -200,8 +199,8 @@ export class SnippetManager extends ItemManager {
     let offsets: { start: number; end: number } | null = null;
 
     // Try to get offsets from CodeMirror
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cm = (editor as any).cm;
+     
+    const cm = editor.cm;
     if (cm && cm.state && cm.state.selection) {
       const range = cm.state.selection.ranges[0];
       if (range) {
