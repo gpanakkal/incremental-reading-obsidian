@@ -1,11 +1,9 @@
 import { configureStore, createAction, createSlice } from '@reduxjs/toolkit';
-import { enableMapSet } from 'immer';
 import type { EditCoordinates, EditState } from '#/components/types';
 import { EditingState } from '#/components/types';
 import { type ReviewItem } from './types';
 import type { PayloadAction } from '@reduxjs/toolkit';
 
-enableMapSet(); // needed to use sets with immer
 export const resetSession = createAction('resetSession');
 
 const currentItemSlice = createSlice({
@@ -44,14 +42,14 @@ export const { setShowAnswer } = showAnswerSlice.actions;
 // TODO: use instead of ReviewView.seenIds
 const seenIdsSlice = createSlice({
   name: 'seenIds',
-  initialState: new Set<string>(),
+  initialState: {} as Record<string, true>,
   reducers: {
     addSeenId: (state, action: PayloadAction<string>) => {
-      state.add(action.payload);
+      Object.assign(state, { [action.payload]: true });
     },
   },
   extraReducers: (builder) => {
-    builder.addCase(resetSession, () => new Set<string>());
+    builder.addCase(resetSession, () => {});
   },
 });
 
