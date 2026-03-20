@@ -259,7 +259,7 @@ export class SQLiteRepository {
   }
 
   /** Print database schema in the console */
-  async _getSchema(tableName: string) {
+  _getSchema(tableName: string) {
     if (!this.db) throw new Error('Database was not initialized on repository');
     const result = this.db.exec(
       'SELECT sql from sqlite_schema WHERE name = $1',
@@ -276,6 +276,7 @@ export class SQLiteRepository {
       return;
     }
     const segments = schemaString.toString().split('\n');
+    // eslint-disable-next-line no-console
     segments.forEach(console.info);
   }
 
@@ -427,7 +428,7 @@ export class SQLiteRepository {
       );
     }
 
-    console.info(`Incremental Reading - Database backed up to ${backupPath}`);
+    console.debug(`Incremental Reading - Database backed up to ${backupPath}`);
     return backupPath;
   }
 
@@ -563,28 +564,15 @@ export class SQLiteRepository {
   }
 
   private async loadWasm() {
-    // Log environment info for debugging mobile issues
-    // console.log('Incremental Reading - Environment check:', {
-    //   platform: Platform.isMobile ? 'mobile' : 'desktop',
-    //   hasBuffer: typeof Buffer !== 'undefined',
-    //   hasAtob: typeof atob !== 'undefined',
-    //   userAgent: navigator.userAgent,
-    // });
-
     // Decode base64 WASM to binary using browser-compatible API (instead of Node.js Buffer)
     // This ensures compatibility with mobile devices (iOS/Android WebView)
-    const binaryString = atob(wasmBase64);
+    const binaryString = atob(wasmBase64 as string);
     const wasmBinary = new Uint8Array(binaryString.length);
     for (let i = 0; i < binaryString.length; i++) {
       wasmBinary[i] = binaryString.charCodeAt(i);
     }
 
     try {
-      // console.log(
-      //   'Incremental Reading - Initializing WASM, size:',
-      //   wasmBinary.length,
-      //   'bytes'
-      // );
       const sql = await initSqlJs({
         wasmBinary: wasmBinary as unknown as ArrayBuffer,
       });

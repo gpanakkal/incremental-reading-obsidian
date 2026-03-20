@@ -9,7 +9,7 @@ import {
 /**
  * See https://github.com/microsoft/playwright/issues/5181#issuecomment-2769098576
  */
-(async () => {
+void (async () => {
   await deleteVaultCopy(path.join(testVaultsDir, 'codegen'));
   const vaultPath = await createVaultCopy('', 'codegen');
   const app = await launchElectron(vaultPath);

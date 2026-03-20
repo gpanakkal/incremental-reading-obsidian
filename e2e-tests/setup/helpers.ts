@@ -38,6 +38,8 @@ export async function createVaultCopy(prefix: string, subDirectory?: string) {
   // refresh the plugin files from the project root.
   const pluginDir = path.join(
     vaultPath,
+    // ignore this rule here since we're using the test vault
+    // eslint-disable-next-line obsidianmd/hardcoded-config-path
     '.obsidian/plugins/incremental-reading'
   );
   await fs.mkdir(pluginDir, { recursive: true });

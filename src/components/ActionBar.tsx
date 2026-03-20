@@ -99,7 +99,7 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
           stopEditing(evt);
         }),
         registerActionBarHotkey(['Alt'], 'd', async () => {
-          isDismissed
+          return isDismissed
             ? await unDismissItem(reviewItem)
             : await dismissItem(reviewItem);
         }),
@@ -191,10 +191,12 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
             const transformed = transformPriority(e.currentTarget.value);
             updateDisplay({ priority: transformed / 10 });
           }}
-          onBlur={async (e) => await reprioritize(article, display.priority)}
-          onKeyDown={async (e) => {
+          onBlur={() => {
+            void reprioritize(article, display.priority);
+          }}
+          onKeyDown={(e) => {
             if (e.key === 'Enter') {
-              await reprioritize(article, display.priority);
+              void reprioritize(article, display.priority);
             } else if (e.key === 'Escape') {
               updateDisplay({ priority: article.data.priority });
               e.currentTarget.select();
@@ -258,10 +260,10 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
               const transformed = transformPriority(e.currentTarget.value);
               updateDisplay({ priority: transformed / 10 });
             }}
-            onBlur={async (e) => await reprioritize(snippet, display.priority)}
-            onKeyDown={async (e) => {
+            onBlur={() => void reprioritize(snippet, display.priority)}
+            onKeyDown={(e) => {
               if (e.key === 'Enter') {
-                await reprioritize(snippet, display.priority);
+                void reprioritize(snippet, display.priority);
               } else if (e.key === 'Escape') {
                 updateDisplay({ priority: snippet.data.priority });
                 e.currentTarget.select();
@@ -371,7 +373,7 @@ function Button({
   return (
     <button
       className="ir-review-button"
-      onClick={handleClick}
+      onClick={(e) => void handleClick(e)}
       title={tooltip}
       disabled={disabled}
     >
