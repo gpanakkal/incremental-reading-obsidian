@@ -191,7 +191,9 @@ export class ObsidianHelpers {
       const fullPath = normalizePath(`${directory}/${fileName}`);
       const file = await ObsidianHelpers.createFile(app, fullPath);
       await app.vault.append(file, content);
-      frontmatter && (await this.updateFrontMatter(file, frontmatter, app));
+      if (frontmatter) {
+        await this.updateFrontMatter(file, frontmatter, app);
+      }
       return file;
     } catch (error) {
       console.error(error);
@@ -250,7 +252,6 @@ export class ObsidianHelpers {
     if (type === 'article') subDirectory = ARTICLE_DIRECTORY;
     else if (type === 'snippet') subDirectory = SNIPPET_DIRECTORY;
     else if (type === 'card') subDirectory = CARD_DIRECTORY;
-    else throw new TypeError(`Type "${type}" is invalid`);
     return normalizePath(`${DATA_DIRECTORY}/${subDirectory}`);
   }
 

@@ -24,7 +24,7 @@ export class IRSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Esc exits edit mode in review')
       .setDesc(
-        "Action bar hotkeys don't work when editing. Disable this for Vim compatibility."
+        "Action bar hotkeys don't work when editing. Disable this for vim compatibility."
       )
       .addToggle((component) =>
         component

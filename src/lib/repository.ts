@@ -84,7 +84,11 @@ export class SQLiteRepository {
       await repo.initDb();
     }
     // listen for sync updates to the database and re-read the file
-    plugin.registerEvent(repo.app.vault.on('modify', repo.handleFileChange));
+    plugin.registerEvent(
+      repo.app.vault.on('modify', (file) => {
+        void repo.handleFileChange(file);
+      })
+    );
     return repo;
   }
 
@@ -176,14 +180,16 @@ export class SQLiteRepository {
       if (!results || !results.length) return [[]];
 
       // in SQL.js, selected rows are returned in form [{ columns: string[], values: Array<SQLValue[]> }]
-      const formatted = results.map(this.formatResult);
+      const formatted = results.map((result) => this.formatResult(result));
       return formatted;
-    } catch (error) {
-      console.error('Incremental Reading - Database query failed:', {
-        error: error?.message || error,
-        query: query.slice(0, 100) + (query.length > 100 ? '...' : ''),
-        platform: Platform.isMobile ? 'mobile' : 'desktop',
-      });
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        console.error('Incremental Reading - Database query failed:', {
+          error: error?.message || error,
+          query: query.slice(0, 100) + (query.length > 100 ? '...' : ''),
+          platform: Platform.isMobile ? 'mobile' : 'desktop',
+        });
+      }
       return [[]];
     }
   }
@@ -224,12 +230,14 @@ export class SQLiteRepository {
       );
     } catch (error) {
       this.#pendingSaveCount--;
-      console.error('Incremental Reading - Failed to save database:', {
-        error: 'message' in error ? error.message : error,
-        platform: Platform,
-        dbPath: this.#dbFilePath,
-      });
-      throw error; // Re-throw to surface critical save failures
+      if (error instanceof Error) {
+        console.error('Incremental Reading - Failed to save database:', {
+          error: 'message' in error ? error.message : error,
+          platform: Platform,
+          dbPath: this.#dbFilePath,
+        });
+        throw error; // Re-throw to surface critical save failures
+      }
     }
   }
 
@@ -243,7 +251,6 @@ export class SQLiteRepository {
       const sql = await this.loadWasm();
       this.db = new sql.Database();
       this.db.exec(this.#schema);
-      console.info('Incremental Reading database initialized');
       return this.db;
     } catch (error) {
       console.error(error);
@@ -374,11 +381,13 @@ export class SQLiteRepository {
       return this.db;
     } catch (error) {
       if (error instanceof MigrationVerificationError) throw error;
-      console.error('Incremental Reading - Failed to reload database:', {
-        error: error?.message || error,
-        platform: Platform.isMobile ? 'mobile' : 'desktop',
-        dbPath: this.#dbFilePath,
-      });
+      if (error instanceof Error) {
+        console.error('Incremental Reading - Failed to reload database:', {
+          error: error?.message || error,
+          platform: Platform.isMobile ? 'mobile' : 'desktop',
+          dbPath: this.#dbFilePath,
+        });
+      }
       return null;
     }
   }
@@ -583,11 +592,13 @@ export class SQLiteRepository {
       return sql;
     } catch (error) {
       console.error('Incremental Reading - Failed to initialize WASM:', error);
-      console.error('Error details:', {
-        name: error?.name,
-        message: error?.message,
-        stack: error?.stack,
-      });
+      if (error instanceof Error) {
+        console.error('Error details:', {
+          name: error?.name,
+          message: error?.message,
+          stack: error?.stack,
+        });
+      }
       throw error;
     }
   }

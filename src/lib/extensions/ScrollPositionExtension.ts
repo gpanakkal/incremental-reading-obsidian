@@ -66,7 +66,7 @@ export const scrollPositionExtension = ViewPlugin.define(
 
     // Save scroll position handler
     // Subtracts frontmatter height so we store body-relative position
-    const handleScroll = async () => {
+    const handleScroll = () => {
       if (isRestoring) return;
 
       const info = Obsidian.getFileInfoFromState(view.state);
@@ -85,7 +85,7 @@ export const scrollPositionExtension = ViewPlugin.define(
         left: scroller.scrollLeft,
       };
 
-      await reviewManager.saveScrollPosition(info.file, currentPos);
+      void reviewManager.saveScrollPosition(info.file, currentPos);
     };
 
     // Restore scroll position after properties widget has rendered
@@ -111,14 +111,14 @@ export const scrollPositionExtension = ViewPlugin.define(
     // Wait for the properties widget to be fully rendered before restoring scroll.
     // The properties widget is an embedded block (cm-embed-block) that renders
     // asynchronously after the initial document load.
-    const waitForPropertiesAndRestore = () => {
+    const waitForPropertiesAndRestore = async () => {
       const contentDOM = view.contentDOM;
 
       // Check if properties widget already exists
       const propertiesWidget = contentDOM.querySelector('.metadata-container');
       if (propertiesWidget) {
         // Already rendered, restore immediately
-        restoreScrollPosition();
+        await restoreScrollPosition();
         return;
       }
 
@@ -131,7 +131,7 @@ export const scrollPositionExtension = ViewPlugin.define(
           if (timeoutId !== undefined) clearTimeout(timeoutId);
           // Give the widget a moment to finish layout
           requestAnimationFrame(() => {
-            restoreScrollPosition();
+            void restoreScrollPosition();
           });
         }
       });
@@ -145,20 +145,22 @@ export const scrollPositionExtension = ViewPlugin.define(
       // (file might not have frontmatter, or we're in IREditor)
       timeoutId = window.setTimeout(() => {
         mutationObserver?.disconnect();
-        restoreScrollPosition();
+        void restoreScrollPosition();
       }, propertiesLoadTimeoutMs);
     };
 
     // Start the scroll restoration process
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        waitForPropertiesAndRestore();
-
-        // Add scroll listener with AbortController for clean lifecycle
-        abortController = new AbortController();
-        view.scrollDOM.addEventListener('scrollend', handleScroll, {
-          signal: abortController.signal,
-        });
+        waitForPropertiesAndRestore()
+          .then(() => {
+            // Add scroll listener with AbortController for clean lifecycle
+            abortController = new AbortController();
+            view.scrollDOM.addEventListener('scrollend', handleScroll, {
+              signal: abortController.signal,
+            });
+          })
+          .catch(() => {});
       });
     });
 
