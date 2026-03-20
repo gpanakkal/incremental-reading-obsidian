@@ -23,35 +23,6 @@ export const prefixedClasses = (classes: string) =>
 //     : mod || shift;
 // }
 
-export function getEditorAppProxy(view: ReviewView) {
-  return new Proxy(view.app, {
-    get(target, prop, reveiver) {
-      if (prop === 'vault') {
-        return new Proxy(view.app.vault, {
-          get(target, prop, reveiver) {
-            if (prop === 'config') {
-              return new Proxy((view.app.vault as any).config, {
-                get(target, prop, reveiver) {
-                  if (
-                    ['showLineNumber', 'foldHeading', 'foldIndent'].includes(
-                      prop as string
-                    )
-                  ) {
-                    return false;
-                  }
-                  return Reflect.get(target, prop, reveiver);
-                },
-              });
-            }
-            return Reflect.get(target, prop, reveiver);
-          },
-        });
-      }
-      return Reflect.get(target, prop, reveiver);
-    },
-  });
-}
-
 export function setInsertMode(cm: EditorView) {
   const vim = getVimPlugin(cm);
   if (vim) {

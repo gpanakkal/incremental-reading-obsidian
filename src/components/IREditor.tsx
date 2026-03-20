@@ -29,11 +29,7 @@ import type {
 } from '#/lib/types';
 import { isReviewArticle } from '#/lib/types';
 import { getBaseMarkdownExtensions } from '../lib/utils';
-import {
-  getEditorAppProxy,
-  setInsertMode,
-  getMarkdownController,
-} from './helpers';
+import { setInsertMode, getMarkdownController } from './helpers';
 import { useReviewContext } from './ReviewContext';
 import { TitleEditor } from './TitleEditor';
 import type { EditCoordinates } from './types';
@@ -217,17 +213,14 @@ export function IREditor({
         }
       }
 
+      const app = reviewView.plugin.app;
+      let editor: any;
+      let cm: EditorView;
       const controller = getMarkdownController(
         reviewView,
         () => editor.editor,
         item
       );
-      const app = getEditorAppProxy(reviewView);
-
-      let editor: any;
-      let cm: EditorView;
-      let titleContainer: HTMLDivElement | null = null;
-
       try {
         editor = new (Editor as any)(app, elRef.current, controller);
         cm = editor.cm;
