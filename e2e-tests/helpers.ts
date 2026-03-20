@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-call */
 import type { Page } from '@playwright/test';
 import type { App } from 'obsidian';
 
@@ -9,7 +12,6 @@ import type { App } from 'obsidian';
  */
 export async function executeCommand(window: Page, commandId: string) {
   await window.evaluate(async (id) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).app.commands.executeCommandById(id);
     // Yield to the event loop so Obsidian can process the command's
     // side effects (opening modals, async DB writes, rendering) before
