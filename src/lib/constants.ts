@@ -53,7 +53,7 @@ export const TEXT_REVIEW_INTERVALS = {
   ONE_WEEK: 7 * MS_PER_DAY,
 };
 
-/** Number of rows to fetch at a time when reviewing */
+/** Number of rows to fetch at a time for queue */
 export const REVIEW_FETCH_COUNT = 50;
 
 export const LEGACY_CLOZE_DELIMITERS: [string, string] = ['{{', '}}'];
@@ -80,3 +80,5 @@ export const TRANSCLUSION_HIDE_TITLE_ALIAS = 'ir-hide-title';
 export const CSS_CLASS_PREFIX = 'ir';
 
 export const QUERY_STALE_TIME = MS_PER_MINUTE;
+
+export const MAX_SQL_QUERY_PARAMS = 999;
