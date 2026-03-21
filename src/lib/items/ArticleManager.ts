@@ -16,6 +16,7 @@ import {
   DATA_DIRECTORY,
   ERROR_NOTICE_DURATION_MS,
   INVALID_TITLE_MESSAGE,
+  MAX_SQL_QUERY_PARAMS,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
   SUCCESS_NOTICE_DURATION_MS,
@@ -179,11 +180,14 @@ export class ArticleManager extends ItemManager {
 
   async getDue(
     dueBy?: number,
-    limit?: number
+    limit?: number,
+    excludeIds?: string[]
   ): Promise<{ data: IArticleActive; file: TFile }[]> {
     const dueTime = dueBy ?? getEndOfToday();
     try {
-      const articlesDue = (await this.fetchMany({ dueBy: dueTime, limit })).map(
+      const articlesDue = (
+        await this.fetchMany({ dueBy: dueTime, limit, excludeIds })
+      ).map(
         async (item) => ({
           data: ArticleManager.rowToBase(item),
           file: Obsidian.getNote(item.reference, this.app),
@@ -212,16 +216,28 @@ export class ArticleManager extends ItemManager {
     dueBy?: number;
     limit?: number;
     includeDismissed?: boolean;
+    excludeIds?: string[];
   }) {
     let query = 'SELECT * FROM article';
     const conditions = [];
     const params = [];
     if (opts?.dueBy) {
-      params.push(opts?.dueBy);
+      params.push(opts.dueBy);
       conditions.push(`due <= $${params.length}`);
     }
     if (!opts?.includeDismissed) {
       conditions.push('dismissed = 0');
+    }
+
+    if (opts?.excludeIds) {
+      const currentParamCount = params.length;
+      let condition = `id NOT IN (`;
+      condition +=
+        opts.excludeIds
+          .map((_, i) => `$${currentParamCount + i + 1}`)
+          .join(', ') + ')';
+      conditions.push(condition);
+      params.push(...opts.excludeIds);
     }
 
     if (conditions.length) {
@@ -235,6 +251,11 @@ export class ArticleManager extends ItemManager {
       query += ` LIMIT $${params.length}`;
     }
 
+    if (params.length > MAX_SQL_QUERY_PARAMS) {
+      throw new Error(
+        `Param count ${params.length} exceeded the limit for query "${query}"`
+      );
+    }
     return ((await this.repo.query(query, params)) ?? []) as ArticleRow[];
   }
 

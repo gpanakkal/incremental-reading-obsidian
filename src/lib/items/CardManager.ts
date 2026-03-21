@@ -15,6 +15,7 @@ import {
   CLOZE_GROUPS_PATTERN,
   ERROR_NOTICE_DURATION_MS,
   literal,
+  MAX_SQL_QUERY_PARAMS,
   MS_PER_DAY,
   SOURCE_PROPERTY_NAME,
   TRANSCLUSION_HIDE_TITLE_ALIAS,
@@ -112,10 +113,16 @@ export class CardManager extends ItemManager {
     };
   }
 
-  async getDue(dueBy?: number, limit?: number): Promise<ReviewCard[]> {
+  async getDue(
+    dueBy?: number,
+    limit?: number,
+    excludeIds?: string[]
+  ): Promise<ReviewCard[]> {
     const dueTime = dueBy ?? getEndOfToday();
     try {
-      const cardsDue = (await this.fetchMany({ dueBy: dueTime, limit })).map(
+      const cardsDue = (
+        await this.fetchMany({ dueBy: dueTime, limit, excludeIds })
+      ).map(
         async (item) => ({
           data: CardManager.rowToDisplay(item),
           file: Obsidian.getNote(item.reference, this.app),
@@ -357,6 +364,7 @@ export class CardManager extends ItemManager {
     dueBy?: number;
     limit?: number;
     includeDismissed?: boolean;
+    excludeIds?: string[];
   }) {
     let query = 'SELECT * FROM srs_card';
     const conditions = [];
@@ -367,6 +375,17 @@ export class CardManager extends ItemManager {
     }
     if (!opts?.includeDismissed) {
       conditions.push('dismissed = 0');
+    }
+
+    if (opts?.excludeIds) {
+      const currentParamCount = params.length;
+      let condition = `id NOT IN (`;
+      condition +=
+        opts.excludeIds
+          .map((_, i) => `$${currentParamCount + i + 1}`)
+          .join(', ') + ')';
+      conditions.push(condition);
+      params.push(...opts.excludeIds);
     }
 
     if (conditions.length) {
@@ -380,6 +399,11 @@ export class CardManager extends ItemManager {
       query += ` LIMIT $${params.length}`;
     }
 
+    if (params.length > MAX_SQL_QUERY_PARAMS) {
+      throw new Error(
+        `Param count ${params.length} exceeded the limit for query "${query}"`
+      );
+    }
     return ((await this.repo.query(query, params)) ?? []) as SRSCardRow[];
   }
 
