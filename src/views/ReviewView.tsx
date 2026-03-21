@@ -6,8 +6,7 @@ import type ReviewManager from '#/lib/ReviewManager';
 import { resetSession } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
-import type { Unsubscribe } from '@reduxjs/toolkit';
-import type { IconName, WorkspaceLeaf } from 'obsidian';
+import type { IconName, TFile, WorkspaceLeaf } from 'obsidian';
 
 export default class ReviewView extends FileView {
   static #viewType = 'incremental-reading-review';
@@ -23,7 +22,6 @@ export default class ReviewView extends FileView {
    */
   initialItem: ReviewItem | null = null;
   scope: Scope;
-  #unsubscribe: Unsubscribe;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -34,10 +32,11 @@ export default class ReviewView extends FileView {
     this.plugin = plugin;
     this.#reviewManager = reviewManager;
     this.scope = new Scope(this.plugin.app.scope);
-    this.#unsubscribe = plugin.store.subscribe(() => {
-      const { currentItem } = plugin.store.getState();
-      this.file = currentItem?.file ?? null;
-    });
+  }
+
+  /** Use this to synchronously set file when fetching a new item */
+  setFile(file: TFile | null) {
+    this.file = file;
   }
 
   static get viewType() {
@@ -92,7 +91,6 @@ export default class ReviewView extends FileView {
   async onClose() {
     render(null, this.containerEl);
     this.activeEditor = null;
-    this.#unsubscribe();
     this.plugin.store.dispatch(resetSession());
   }
 

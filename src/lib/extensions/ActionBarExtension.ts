@@ -17,6 +17,7 @@ import {
 import { transformPriority } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import { fetchByFile, invalidateCacheOnMatch } from '../queryClient';
 import { irPluginFacet } from './irPluginFacet';
 import type { EditorView, Panel } from '@codemirror/view';
 import type { App } from 'obsidian';
@@ -332,7 +333,7 @@ function renderStandaloneModeActions(
             updateButtonLabel(true);
           }
 
-          await plugin.invalidateCurrentItemCache(item.file);
+          await invalidateCacheOnMatch(item.file, reviewManager);
         } catch (error) {
           console.error('Failed to toggle dismiss status:', error);
           new Notice('Failed to update item', ERROR_NOTICE_DURATION_MS);
@@ -347,7 +348,7 @@ function renderStandaloneModeActions(
   // Open in review button
   const openInReviewBtn = createButton('Open in Review', async () => {
     // Build a ReviewItem from this file to pass to the review interface
-    const reviewItem = await reviewManager.getReviewItemFromFile(file);
+    const reviewItem = await fetchByFile(file, reviewManager);
     if (reviewItem) {
       await plugin.learn(reviewItem);
     } else {

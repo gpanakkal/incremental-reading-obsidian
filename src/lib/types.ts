@@ -1,6 +1,6 @@
 // Card, Snippet, ReviewLog, FSRSParameters
 import type { SOURCE_PROPERTY_NAME, TABLE_NAMES } from './constants';
-import type { TFile } from 'obsidian';
+import type { TAbstractFile, TFile } from 'obsidian';
 import type { Primitive, SafeOmit } from 'src/lib/utility-types';
 import type { Card, ReviewLog, StateType } from 'ts-fsrs';
 
@@ -193,4 +193,5 @@ export interface SQLiteRepository {
   query(query: string, params?: Primitive[]): Promise<RowTypes[]>;
   mutate(query: string, params?: Primitive[]): Promise<RowTypes[][]>;
   execSql(query: string, params?: Primitive[]): Promise<RowTypes[][]>;
+  handleFileChange(file: TAbstractFile): Promise<void>;
 }
