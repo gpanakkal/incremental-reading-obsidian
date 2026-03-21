@@ -48,13 +48,22 @@ export function getEndOfToday() {
 }
 
 /**
+ * Check if a value is a non-array object
+ */
+export const isObject = <T extends Record<string | number | symbol, unknown>>(
+  val: unknown
+): val is T => {
+  return typeof val === 'object' && !Array.isArray(val) && val !== null;
+};
+
+/**
  * Make a deep copy of an object
  * TODO: handle loops
  */
 export const deepCopy = <T>(value: T): T => {
-  if (value === null || typeof value !== 'object') return value;
+  if (!isObject(value)) return value;
 
-  let clone = {};
+  const clone = {};
   for (const key in value) {
     Object.assign(clone, { [key]: deepCopy(value[key]) });
   }
@@ -70,14 +79,14 @@ export const deepMerge = <T extends object>(
   obj1: T,
   obj2: DeepPartial<T>
 ): T => {
-  let merged = deepCopy(obj1);
+  const merged = deepCopy(obj1);
   const keys = Object.keys(obj2) as Array<keyof typeof obj2>;
   for (const key of keys) {
     const val1 = obj1[key as unknown as keyof T];
     const val2 = obj2[key];
-    if (val1 === null || typeof val1 !== 'object') {
+    if (!isObject(val1)) {
       Object.assign(merged, { [key]: val2 });
-    } else if (val2 !== null && typeof val2 === 'object') {
+    } else if (isObject(val2)) {
       Object.assign(merged, {
         [key]: deepMerge(val1, val2 as DeepPartial<T[keyof T] & object>),
       });
