@@ -1,10 +1,9 @@
-import { useQuery } from '@tanstack/react-query';
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { isReviewCard, type ReviewItem } from '#/lib/types';
 import { CardViewer } from './CardViewer';
 import { IREditor } from './IREditor';
-import { useReviewContext } from './ReviewContext';
 import type { EditorView } from '@codemirror/view';
+import { useCurrentItemFileText } from '#/hooks/useReactQuery';
 
 /**
  * TODO:
@@ -12,13 +11,9 @@ import type { EditorView } from '@codemirror/view';
  * - loading spinner and error element
  */
 export default function ReviewItem({ item }: { item: ReviewItem }) {
-  const { plugin } = useReviewContext();
   const showAnswer = useAppSelector((state) => state.showAnswer);
 
-  const { data: fileText } = useQuery({
-    queryKey: [item.data.id, 'file-text'],
-    queryFn: async () => await plugin.app.vault.read(item.file),
-  });
+  const { data: fileText } = useCurrentItemFileText();
 
   if (!fileText) return <></>;
   return (

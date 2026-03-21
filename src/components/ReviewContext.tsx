@@ -1,26 +1,20 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Notice } from 'obsidian';
 import { createContext, useContext } from 'react';
 import { useDispatch } from 'react-redux';
 import { Rating } from 'ts-fsrs';
 import { useAppStore } from '#/hooks/useAppSelector';
 import {
-  CLOZE_DELIMITERS,
   CONTENT_TITLE_SLICE_LENGTH,
   ERROR_NOTICE_DURATION_MS,
-  LEGACY_CLOZE_DELIMITERS,
   MS_PER_DAY,
-  REVIEW_FETCH_COUNT,
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
-import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type ReviewManager from '#/lib/ReviewManager';
 import {
   addSeenId,
-  setCurrentItem,
-  setDismissed,
+  resetCurrentItem,
   setEditState,
-  setShowAnswer,
+  setReviewViewSaving,
 } from '#/lib/store';
 import type {
   ReviewArticle,
@@ -28,14 +22,15 @@ import type {
   ReviewItem,
   ReviewSnippet,
 } from '#/lib/types';
-import { isReviewCard } from '#/lib/types';
-import { deepCopy, getContentSlice, transformPriority } from '#/lib/utils';
+import { getContentSlice, transformPriority } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import { EditingState } from './types';
 import type { Scope, WorkspaceLeaf } from 'obsidian';
 import type { PropsWithChildren } from 'react';
 import type { Grade } from 'ts-fsrs';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { updateQueryCache } from '#/lib/queryClient';
 
 // work around "Cannot call impure function during render"
 const getNow = () => Date.now();
@@ -78,94 +73,26 @@ export function ReviewContextProvider({
   leaf: WorkspaceLeaf;
   reviewManager: ReviewManager;
 }>) {
-  const queryClient = useQueryClient();
   const dispatch = useDispatch();
   const store = useAppStore();
-
-  useQuery({
-    queryKey: ['current-review-item'],
-    queryFn: async () => {
-      dispatch(setEditState(EditingState.cancel));
-      dispatch(setShowAnswer(false));
-      // Check if there's an initial item to display first
-      if (reviewView.initialItem) {
-        const initialItem = reviewView.initialItem;
-        // eslint-disable-next-line react-hooks/immutability
-        reviewView.initialItem = null; // Clear so next call uses normal queue
-        if (isReviewCard(initialItem)) await updateDelimiters(initialItem);
-        dispatch(setCurrentItem(initialItem));
-        return initialItem;
-      }
-
-      const result = await reviewManager.getDue({
-        limit: REVIEW_FETCH_COUNT,
-      });
-      const { seenIds } = plugin.store.getState();
-      const nextItem: ReviewItem | null =
-        result.all.filter(({ data }) => !(data.id in seenIds))[0] ?? null;
-
-      if (nextItem && isReviewCard(nextItem)) await updateDelimiters(nextItem);
-
-      dispatch(setCurrentItem(nextItem));
-      queryClient.setQueryData<ReviewItem>([nextItem.data.id], () => nextItem);
-      return nextItem;
-    },
-  });
-
-  const updateDelimiters = async (reviewCard: ReviewCard) => {
+  /**
+   * Wrap a file-modifying operation to prevent external modification detection.
+   * The vault 'modify' event handler will ignore changes while this is active.
+   */
+  async function withReviewViewSave<T>(
+    operation: () => Promise<T>
+  ): Promise<T> {
+    store.dispatch(setReviewViewSaving(true));
     try {
-      let currentDelimiters = LEGACY_CLOZE_DELIMITERS;
-      let delimitersChanged = true;
-      const [left, right] = CLOZE_DELIMITERS;
-
-      // Wrap file modifications in withReviewViewSave to prevent external modification detection
-      await plugin.withReviewViewSave(async () => {
-        await plugin.app.fileManager.processFrontMatter(
-          reviewCard.file,
-          (frontmatter: Record<string, unknown>) => {
-            if ('delimiters' in frontmatter) {
-              currentDelimiters = frontmatter.delimiters as [string, string];
-            }
-            if (!Array.isArray(currentDelimiters)) {
-              throw new TypeError(
-                `Delimiters stored on note "${reviewCard.data.reference}" were not a list`
-              );
-            }
-            if (
-              currentDelimiters[0] === left &&
-              currentDelimiters[1] === right
-            ) {
-              delimitersChanged = false;
-            } else {
-              frontmatter.delimiters = CLOZE_DELIMITERS;
-            }
-          }
-        );
-        if (!delimitersChanged) return;
-
-        await plugin.app.vault.process(reviewCard.file, (fileText) => {
-          const split = Obsidian.splitFrontMatter(fileText);
-          if (!split)
-            throw new Error(
-              `Failed to parse frontmatter from note "${reviewCard.data.reference}, but note has frontmatter`
-            );
-          const { start, answer, end } = reviewManager.parseCloze(
-            split.body,
-            currentDelimiters
-          );
-          return split.frontMatter + start + `${left}${answer}${right}` + end;
-        });
-      });
-    } catch (error) {
-      if (error instanceof Error) {
-        const refMessage = `\nThis error occurred in "${reviewCard.data.reference}"`;
-        throw new Error(error.message + refMessage);
-      }
+      return await operation();
+    } finally {
+      store.dispatch(setReviewViewSaving(false));
     }
-  };
+  }
 
+  /** Call this after reviewing, skipping, or dismissing an item */
   const getNext = () => {
-    void queryClient.invalidateQueries({ queryKey: ['current-review-item'] });
+    dispatch(resetCurrentItem());
   };
 
   const reviewArticle = async (
@@ -245,20 +172,7 @@ export function ReviewContextProvider({
 
   const dismissItem = async (item: ReviewItem) => {
     await reviewManager.dismissItem(item);
-    if (store.getState().currentItem?.data.id === item.data.id) {
-      // update item in Redux store
-      dispatch(setDismissed(true));
-    }
-    queryClient.setQueryData([item.data.id], (prev: ReviewItem) => {
-      const updatedData = deepCopy(prev.data);
-      return {
-        data: {
-          ...updatedData,
-          dismissed: true,
-        },
-        file: prev.file,
-      };
-    });
+    updateQueryCache(item.data.id, { dismissed: true });
 
     const [_folder, subRef] = item.data.reference.split('/');
     new Notice(
@@ -269,20 +183,12 @@ export function ReviewContextProvider({
 
   const unDismissItem = async (item: ReviewItem) => {
     await reviewManager.unDismissItem(item);
-    if (store.getState().currentItem?.data.id === item.data.id) {
-      // update item in Redux store
-      dispatch(setDismissed(false));
+    updateQueryCache(item.data.id, { dismissed: false });
+    const { currentItemId } = store.getState();
+    // TODO: check if we're in a review session once that state is added
+    if (currentItemId === null) {
+      getNext();
     }
-    queryClient.setQueryData([item.data.id], (prev: ReviewItem) => {
-      const updatedData = deepCopy(prev.data);
-      return {
-        data: {
-          ...updatedData,
-          dismissed: false,
-        },
-        file: prev.file,
-      };
-    });
 
     const [_folder, subRef] = item.data.reference.split('/');
     new Notice(
@@ -307,9 +213,8 @@ export function ReviewContextProvider({
       item.file.path
     );
 
-    // Wrap in withReviewViewSave so it's recognized as an internal change
-    await plugin.withReviewViewSave(async () => {
-      await plugin.app.vault.process(item.file, () => newContent);
+    await withReviewViewSave(async () => {
+      await Obsidian.editNote(plugin.app, item.file, () => newContent);
 
       // Save body-relative highlight offsets
       for (const h of highlights) {

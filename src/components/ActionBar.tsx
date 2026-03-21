@@ -1,8 +1,8 @@
-import { useQuery } from '@tanstack/react-query';
 import { useEffect, useState } from 'preact/hooks';
 import { useDispatch } from 'react-redux';
 import { Rating } from 'ts-fsrs';
-import { useAppSelector, useAppStore } from '#/hooks/useAppSelector';
+import { useAppSelector } from '#/hooks/useAppSelector';
+import { useCurrentItem } from '#/hooks/useReactQuery';
 import { setShowAnswer } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import {
@@ -17,17 +17,7 @@ import { transformPriority } from '#/lib/utils';
 import { useReviewContext } from './ReviewContext';
 
 export function ActionBar() {
-  const store = useAppStore();
-  const { reviewManager } = useReviewContext();
-  const { data: currentItem } = useQuery({
-    queryKey: [store.getState().currentItem?.data.id],
-    queryFn: async () => {
-      const currentItem = store.getState().currentItem;
-      if (!currentItem) return;
-      const item = await reviewManager.getReviewItemFromFile(currentItem.file);
-      return item ?? undefined;
-    },
-  });
+  const { data: currentItem } = useCurrentItem();
 
   return (
     <div className="ir-action-bar" tabIndex={-1}>

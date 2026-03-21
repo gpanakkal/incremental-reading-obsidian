@@ -1,33 +1,25 @@
 import { configureStore, createAction, createSlice } from '@reduxjs/toolkit';
 import type { EditCoordinates, EditState } from '#/components/types';
 import { EditingState } from '#/components/types';
-import { type ReviewItem } from './types';
 import type { PayloadAction } from '@reduxjs/toolkit';
 
 export const resetSession = createAction('resetSession');
+export const resetCurrentItem = createAction('resetCurrentItem');
 
-const currentItemSlice = createSlice({
-  name: 'currentItem',
-  initialState: null as ReviewItem | null,
+const currentItemIdSlice = createSlice({
+  name: 'currentItemId',
+  initialState: null as string | null,
   reducers: {
-    setCurrentItem: (_state, action: PayloadAction<ReviewItem | null>) =>
+    setCurrentItemId: (_state, action: PayloadAction<string | null>) =>
       action.payload,
-    setDismissed: (state, action: PayloadAction<boolean>) => {
-      if (state === null) {
-        console.error(
-          `Attempted to update currentItem, but currentItem is null`
-        );
-        return;
-      }
-      state.data.dismissed = action.payload;
-    },
   },
   extraReducers: (builder) => {
     builder.addCase(resetSession, () => null);
+    builder.addCase(resetCurrentItem, () => null);
   },
 });
 
-export const { setCurrentItem, setDismissed } = currentItemSlice.actions;
+export const { setCurrentItemId } = currentItemIdSlice.actions;
 
 export const showAnswerSlice = createSlice({
   name: 'showAnswer',
@@ -35,11 +27,15 @@ export const showAnswerSlice = createSlice({
   reducers: {
     setShowAnswer: (_, action: PayloadAction<boolean>) => action.payload,
   },
+  extraReducers: (builder) => {
+    builder.addCase(resetSession, () => false);
+    builder.addCase(resetCurrentItem, () => false);
+  },
 });
 
 export const { setShowAnswer } = showAnswerSlice.actions;
 
-// TODO: use instead of ReviewView.seenIds
+// Track which items have been skipped
 const seenIdsSlice = createSlice({
   name: 'seenIds',
   initialState: {} as Record<string, true>,
@@ -67,6 +63,7 @@ const isReviewViewSavingSlice = createSlice({
       action.payload,
   },
   extraReducers: (builder) => {
+    // could this cause a problem if resetSession() is called while reviewView is saving?
     builder.addCase(resetSession, () => false);
   },
 });
@@ -78,6 +75,9 @@ const editStateSlice = createSlice({
   initialState: EditingState.cancel as EditState,
   reducers: {
     setEditState: (_state, action: PayloadAction<EditState>) => action.payload,
+  },
+  extraReducers: (builder) => {
+    builder.addCase(resetCurrentItem, () => EditingState.cancel);
   },
   selectors: {
     isEditing: (editState): editState is EditCoordinates => {
@@ -93,7 +93,7 @@ export const { isEditing } = editStateSlice.selectors;
 
 export const store = configureStore({
   reducer: {
-    currentItem: currentItemSlice.reducer,
+    currentItemId: currentItemIdSlice.reducer,
     showAnswer: showAnswerSlice.reducer,
     seenIds: seenIdsSlice.reducer,
     isReviewViewSaving: isReviewViewSavingSlice.reducer,
