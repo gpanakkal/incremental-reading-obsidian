@@ -39,7 +39,7 @@ export class SQLJSRepository implements SQLiteRepository {
   /**
    * Use .start to instantiate
    */
-  private constructor(
+  protected constructor(
     app: App,
     dbFilePath: string,
     schema: string,
@@ -57,9 +57,8 @@ export class SQLJSRepository implements SQLiteRepository {
 
   /**
    * Asynchronous factory function
-   * @param plugin the plugin instance (used for registering and cleaning up event handlers)
+   * @param plugin the plugin instance
    * @param schema the SQL schema as a string
-   * @param pluginDir the plugin's installation directory (from this.manifest.dir)
    */
   static async start(
     plugin: Plugin,
@@ -83,12 +82,6 @@ export class SQLJSRepository implements SQLiteRepository {
     } else {
       await repo.initDb();
     }
-    // listen for sync updates to the database and re-read the file
-    plugin.registerEvent(
-      repo.app.vault.on('modify', (file) => {
-        void repo.handleFileChange(file);
-      })
-    );
     return repo;
   }
 
@@ -145,26 +138,6 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   /**
-   * Converts params to SQLite-appropriate types
-   */
-  coerceParams(params: Primitive[]): BindParams {
-    return params.map((param) => {
-      switch (typeof param) {
-        case 'boolean':
-          return Number(param);
-        case 'symbol':
-          return param.toString();
-        case 'undefined':
-          return null;
-        case 'string':
-        case 'number':
-        case 'object': // typeof null
-          return param;
-      }
-    });
-  }
-
-  /**
    * Execute one or more queries and return an array of objects corresponding to table rows.
    * Use `query` or `mutate` methods above instead where possible.
    *
@@ -195,10 +168,30 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   /**
+   * Converts params to SQLite-appropriate types
+   */
+  protected coerceParams(params: Primitive[]): BindParams {
+    return params.map((param) => {
+      switch (typeof param) {
+        case 'boolean':
+          return Number(param);
+        case 'symbol':
+          return param.toString();
+        case 'undefined':
+          return null;
+        case 'string':
+        case 'number':
+        case 'object': // typeof null
+          return param;
+      }
+    });
+  }
+
+  /**
    * Format the result of a single query
    * TODO: convert snake_case properties to camelCase?
    */
-  formatResult<T extends RowTypes>(result: QueryExecResult): T[] {
+  protected formatResult<T extends RowTypes>(result: QueryExecResult): T[] {
     const { columns, values } = result;
     const formattedEntries = values.map((row) => {
       const output = row.reduce(
@@ -215,7 +208,7 @@ export class SQLJSRepository implements SQLiteRepository {
   /**
    * Overwrite or create the database file
    */
-  async save() {
+  protected async save() {
     if (!this.db) throw new Error('Database was not initialized on repository');
     try {
       this.#pendingSaveCount++;
@@ -246,7 +239,7 @@ export class SQLJSRepository implements SQLiteRepository {
    * If a database file exists, use `loadDb()` instead
    * @returns a Database, or null if an error is thrown
    */
-  async initDb() {
+  protected async initDb() {
     try {
       const sql = await this.loadWasm();
       this.db = new sql.Database();
@@ -283,7 +276,7 @@ export class SQLJSRepository implements SQLiteRepository {
   /**
    * Check if the database file exists
    */
-  private dbExists() {
+  protected dbExists() {
     const dataDir = this.app.vault.getFolderByPath(DATA_DIRECTORY);
     if (!dataDir) return false;
 
@@ -297,7 +290,7 @@ export class SQLJSRepository implements SQLiteRepository {
    * @returns a Database, or `null` if the file is invalid or not found
    * @throws {MigrationVerificationError} if post-migration verification fails
    */
-  private async loadDb() {
+  protected async loadDb() {
     try {
       const result = await this.reloadDb();
       if (!result) {
@@ -319,7 +312,7 @@ export class SQLJSRepository implements SQLiteRepository {
    * @returns a Database, or `null` if the file is invalid or not found
    * @throws {MigrationVerificationError} if post-migration verification fails
    */
-  private async reloadDb() {
+  protected async reloadDb() {
     try {
       this.#sql ||= await this.loadWasm();
       const dbArrayBuffer = await this.app.vault.adapter.readBinary(
@@ -397,7 +390,7 @@ export class SQLJSRepository implements SQLiteRepository {
    * Back up the database file before applying migrations.
    * Verifies backup integrity via SHA-256 checksum comparison.
    */
-  private async backupDatabase(currentVersion: number): Promise<string> {
+  protected async backupDatabase(currentVersion: number): Promise<string> {
     const dirExists = await this.adapter.exists(
       normalizePath(BACKUP_DIRECTORY)
     );
@@ -432,13 +425,13 @@ export class SQLJSRepository implements SQLiteRepository {
     return backupPath;
   }
 
-  private async sha256(data: ArrayBuffer): Promise<string> {
+  protected async sha256(data: ArrayBuffer): Promise<string> {
     const hashBuffer = await crypto.subtle.digest('SHA-256', data);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
-  private snapshotRowCounts(): Record<string, number> {
+  protected snapshotRowCounts(): Record<string, number> {
     const snapshot: Record<string, number> = {};
     for (const table of TABLE_NAMES) {
       try {
@@ -451,7 +444,7 @@ export class SQLJSRepository implements SQLiteRepository {
     return snapshot;
   }
 
-  private foreignKeyCheck(): string | null {
+  protected foreignKeyCheck(): string | null {
     try {
       this.db.exec('PRAGMA foreign_keys = ON');
       const fkResult = this.db.exec('PRAGMA foreign_key_check');
@@ -464,7 +457,7 @@ export class SQLJSRepository implements SQLiteRepository {
     }
   }
 
-  private verifyMigration(
+  protected verifyMigration(
     preRowCounts: Record<string, number>,
     preFkIssues: string | null,
     expectedRowCountChanges?: Record<string, number>
@@ -537,7 +530,7 @@ export class SQLJSRepository implements SQLiteRepository {
     return { passed: errors.length === 0, errors };
   }
 
-  private async writeErrorLog(
+  protected async writeErrorLog(
     errors: string[],
     context: { previousVersion: number; targetVersion: number }
   ): Promise<string> {
@@ -563,7 +556,7 @@ export class SQLJSRepository implements SQLiteRepository {
     return logPath;
   }
 
-  private async loadWasm() {
+  protected async loadWasm() {
     // Decode base64 WASM to binary using browser-compatible API (instead of Node.js Buffer)
     // This ensures compatibility with mobile devices (iOS/Android WebView)
     const binaryString = atob(wasmBase64 as string);
