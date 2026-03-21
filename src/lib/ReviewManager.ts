@@ -207,6 +207,16 @@ export default class ReviewManager {
     }
     return null;
   }
+  /**
+   * Fetches a ReviewItem.
+   * Returns null if the item is not found in the database.
+   */
+  async getReviewItemFromId(itemId: string): Promise<ReviewItem | null> {
+    let row: ReviewItem | null = await this.articles.fetch(itemId);
+    if (!row) row = await this.snippets.fetch(itemId);
+    if (!row) row = await this.cards.fetch(itemId);
+    return row;
+  }
 
   async _logItems() {
     const articles = await this.articles.fetchMany({

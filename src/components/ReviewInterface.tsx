@@ -1,12 +1,12 @@
-import { QueryClientProvider, useQuery } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { Provider as ReduxProvider } from 'react-redux';
-import { useAppSelector } from '#/hooks/useAppSelector';
+import { useCurrentItem } from '#/hooks/useReactQuery';
 import { queryClient } from '#/lib/queryClient';
 import type ReviewManager from '#/lib/ReviewManager';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import { ActionBar } from './ActionBar';
-import { ReviewContextProvider, useReviewContext } from './ReviewContext';
+import { ReviewContextProvider } from './ReviewContext';
 import ReviewItem from './ReviewItem';
 import type { WorkspaceLeaf } from 'obsidian';
 
@@ -28,17 +28,7 @@ export function createReviewInterface(props: {
 }
 
 function ReviewInterface() {
-  const currentItem = useAppSelector((state) => state.currentItem);
-  const { getNext, reviewManager } = useReviewContext();
-  if (!currentItem) getNext();
-  const { data: item } = useQuery({
-    queryKey: [currentItem?.data.id],
-    queryFn: async () => {
-      if (!currentItem) return;
-      const item = await reviewManager.getReviewItemFromFile(currentItem.file);
-      return item;
-    },
-  });
+  const { data: item } = useCurrentItem();
 
   return (
     <div className={'ir-review-interface view-content'}>

@@ -23,10 +23,7 @@ import {
   TEXT_REVIEW_MULTIPLIER_BASE,
   TEXT_REVIEW_MULTIPLIER_STEP,
 } from '../constants';
-import {
-  ObsidianHelpers as Obsidian,
-  ObsidianHelpers,
-} from '../ObsidianHelpers';
+import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import { generateId, getContentSlice, getEndOfToday } from '../utils';
 import { ItemManager } from './ItemManager';
 import type { SQLiteRepository } from '../types';
@@ -35,7 +32,6 @@ import type { App, TFile } from 'obsidian';
 export class ArticleManager extends ItemManager {
   app: App;
   repo: SQLiteRepository;
-  helpers: Obsidian;
 
   static rowToBase(articleRow: ArticleRow): IArticleBase {
     return {
@@ -60,6 +56,16 @@ export class ArticleManager extends ItemManager {
     };
   }
 
+  rowToReviewArticle(row: ArticleRow): ReviewArticle | null {
+    const base = ArticleManager.rowToBase(row);
+    const file = Obsidian.getNote(row.reference, this.app);
+    if (!file) return null;
+    return {
+      data: base,
+      file,
+    };
+  }
+
   /**
    * Import the currently opened note as an article
    */
@@ -75,7 +81,7 @@ export class ArticleManager extends ItemManager {
       }
       // Read the content of the current file
       const content = await this.app.vault.cachedRead(file);
-      const frontmatter = ObsidianHelpers.getFrontMatter(file, this.app);
+      const frontmatter = Obsidian.getFrontMatter(file, this.app);
       if (frontmatter?.tags) {
         if (
           frontmatter.tags.some((tag) =>
@@ -193,6 +199,13 @@ export class ArticleManager extends ItemManager {
       console.error(error);
       return [];
     }
+  }
+
+  async fetch(id: string): Promise<ReviewArticle | null> {
+    const query = `SELECT * FROM article WHERE id = $1`;
+    const result = await this.repo.query(query, [id]);
+    if (!result[0]) return null;
+    return this.rowToReviewArticle(result[0] as ArticleRow);
   }
 
   async fetchMany(opts?: {

@@ -3,6 +3,7 @@ import {
   MS_PER_DAY,
   MS_PER_MINUTE,
 } from './constants';
+import type { DeepPartial } from './utility-types';
 
 /**
  * Generates an alphanumeric ID of the specified length (default 5)
@@ -58,6 +59,34 @@ export const deepCopy = <T>(value: T): T => {
     Object.assign(clone, { [key]: deepCopy(value[key]) });
   }
   return clone as T;
+};
+
+/**
+ * (WIP) Recursively merge two objects, overwriting primitives and iterables
+ * on obj1 with values from obj2 where applicable
+ * TODO: handle loops
+ */
+export const deepMerge = <T extends object>(
+  obj1: T,
+  obj2: DeepPartial<T>
+): T => {
+  let merged = deepCopy(obj1);
+  const keys = Object.keys(obj2) as Array<keyof typeof obj2>;
+  for (const key of keys) {
+    const val1 = obj1[key as unknown as keyof T];
+    const val2 = obj2[key];
+    if (val1 === null || typeof val1 !== 'object') {
+      Object.assign(merged, { [key]: val2 });
+    } else if (val2 !== null && typeof val2 === 'object') {
+      Object.assign(merged, {
+        [key]: deepMerge(val1, val2 as DeepPartial<T[keyof T] & object>),
+      });
+    } else {
+      // obj1 has an object on the key but obj2 doesn't, so we overwrite
+      Object.assign(merged, { [key]: obj2[key] });
+    }
+  }
+  return merged;
 };
 
 /**

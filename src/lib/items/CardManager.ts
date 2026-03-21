@@ -38,7 +38,6 @@ export class CardManager extends ItemManager {
   app: App;
   repo: SQLiteRepository;
   #fsrs: FSRS;
-  helpers: Obsidian;
 
   constructor(app: App, repo: SQLiteRepository) {
     super(app, repo);
@@ -82,6 +81,7 @@ export class CardManager extends ItemManager {
       last_review: last_review ? Date.parse(last_review?.toISOString()) : null,
     };
   }
+
   static getClozeGroupsPattern(delimiters: [string, string]) {
     return new RegExp(
       `([\\s\\S]*)` +
@@ -100,6 +100,16 @@ export class CardManager extends ItemManager {
     const [_, pre, _answer, post] = match;
     const formattedContent = pre + CARD_ANSWER_REPLACEMENT + post;
     return formattedContent;
+  }
+
+  rowToReviewCard(row: SRSCardRow): ReviewCard | null {
+    const base = CardManager.rowToDisplay(row);
+    const file = Obsidian.getNote(row.reference, this.app);
+    if (!file) return null;
+    return {
+      data: base,
+      file,
+    };
   }
 
   async getDue(dueBy?: number, limit?: number): Promise<ReviewCard[]> {
@@ -272,6 +282,56 @@ export class CardManager extends ItemManager {
     }
   }
 
+  async updateDelimiters(
+    reviewCard: ReviewCard,
+    oldDelimiters: [string, string]
+  ) {
+    try {
+      let currentDelimiters = oldDelimiters;
+      let delimitersChanged = true;
+      const [left, right] = CLOZE_DELIMITERS;
+
+      await Obsidian.updateFrontMatter(
+        reviewCard.file,
+        (frontmatter: Record<string, unknown>) => {
+          if ('delimiters' in frontmatter) {
+            currentDelimiters = frontmatter.delimiters as [string, string];
+          }
+          if (!Array.isArray(currentDelimiters)) {
+            throw new TypeError(
+              `Delimiters stored on note "${reviewCard.data.reference}" were not a list`
+            );
+          }
+          if (currentDelimiters[0] === left && currentDelimiters[1] === right) {
+            delimitersChanged = false;
+          } else {
+            frontmatter.delimiters = CLOZE_DELIMITERS;
+          }
+        },
+        this.app
+      );
+      if (!delimitersChanged) return;
+
+      await Obsidian.editNote(this.app, reviewCard.file, (fileText) => {
+        const split = Obsidian.splitFrontMatter(fileText);
+        if (!split)
+          throw new Error(
+            `Failed to parse frontmatter from note "${reviewCard.data.reference}, but note has frontmatter`
+          );
+        const { start, answer, end } = this.parseCloze(
+          split.body,
+          currentDelimiters
+        );
+        return split.frontMatter + start + `${left}${answer}${right}` + end;
+      });
+    } catch (error) {
+      if (error instanceof Error) {
+        const refMessage = `\nThis error occurred in "${reviewCard.data.reference}"`;
+        throw new Error(error.message + refMessage);
+      }
+    }
+  }
+
   parseCloze(
     text: string,
     delimiters: [string, string]
@@ -284,6 +344,13 @@ export class CardManager extends ItemManager {
       );
     const [_, start, answer, end] = match;
     return { start, answer, end };
+  }
+
+  async fetch(id: string): Promise<ReviewCard | null> {
+    const query = `SELECT * FROM srs_card WHERE id = $1`;
+    const result = await this.repo.query(query, [id]);
+    if (!result[0]) return null;
+    return this.rowToReviewCard(result[0] as SRSCardRow);
   }
 
   async fetchMany(opts?: {

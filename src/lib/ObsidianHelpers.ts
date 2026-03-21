@@ -18,6 +18,7 @@ import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
 import type { EditorState } from '@codemirror/state';
 import type {
   App,
+  DataWriteOptions,
   Editor,
   FrontMatterCache,
   MarkdownFileInfo,
@@ -229,6 +230,18 @@ export class ObsidianHelpers {
   }
 
   /**
+   * Atomically modify a note
+   */
+  static async editNote(
+    app: App,
+    file: TFile,
+    fn: (data: string) => string,
+    options?: DataWriteOptions
+  ): Promise<string> {
+    return app.vault.process(file, fn, options);
+  }
+
+  /**
    * Rename a file without moving it
    * @throws if the title contains invalid characters
    * or if the rename operation fails
@@ -287,25 +300,29 @@ export class ObsidianHelpers {
 
   static async updateFrontMatter(
     file: TFile,
-    updates: FrontMatterUpdates,
+    updates: FrontMatterUpdates | ((frontmatter: unknown) => void),
     app: App
   ) {
-    await app.fileManager.processFrontMatter(
-      file,
-      (frontmatter: PluginFrontMatter) => {
-        const { tags } = frontmatter;
-        const updateTags = Array.isArray(updates.tags)
-          ? updates.tags
-          : [updates.tags];
-        const combinedTags = tags
-          ? [...new Set([...tags, ...updateTags])]
-          : updateTags;
-        Object.assign(frontmatter, {
-          ...updates,
-          tags: combinedTags,
-        });
-      }
-    );
+    if (typeof updates === 'function') {
+      await app.fileManager.processFrontMatter(file, updates);
+    } else {
+      await app.fileManager.processFrontMatter(
+        file,
+        (frontmatter: PluginFrontMatter) => {
+          const { tags } = frontmatter;
+          const updateTags = Array.isArray(updates.tags)
+            ? updates.tags
+            : [updates.tags];
+          const combinedTags = tags
+            ? [...new Set([...tags, ...updateTags])]
+            : updateTags;
+          Object.assign(frontmatter, {
+            ...updates,
+            tags: combinedTags,
+          });
+        }
+      );
+    }
   }
 
   /**

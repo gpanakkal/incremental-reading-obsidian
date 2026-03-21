@@ -36,6 +36,7 @@ import type { EditCoordinates } from './types';
 import type { Extension } from '@codemirror/state';
 import type { ViewUpdate } from '@codemirror/view';
 import type { Grade } from 'ts-fsrs';
+import { useCurrentItem } from '#/hooks/useReactQuery';
 
 /**
  * Credit goes to mgmeyers for figuring out how to get the editor prototype.
@@ -84,6 +85,7 @@ export function IREditor({
   const internalRef = useRef<EditorView | null>(null);
   const { saveNote } = useReviewContext();
   const store = useAppStore();
+  const { data: currentItem } = useCurrentItem();
   const showAnswer = useAppSelector((state) => state.showAnswer);
 
   const handleChange = async (update: ViewUpdate) => {
@@ -254,7 +256,7 @@ export function IREditor({
         dismissItem: async (reviewItem: ReviewItem) => dismissItem(reviewItem),
         skipItem: (reviewItem: ReviewItem) => skipItem(reviewItem),
         setShowAnswer: (show) => dispatch(setShowAnswer(show)),
-        getCurrentItem: () => store.getState().currentItem,
+        getCurrentItem: () => currentItem ?? null,
       };
 
       cm.dispatch({
@@ -337,7 +339,7 @@ export function IREditor({
     return () => {
       cleanup();
     };
-  }, [reviewView, reviewManager, store]);
+  }, [reviewView, reviewManager, store, currentItem]);
 
   useEffect(
     function updateEditorContent() {

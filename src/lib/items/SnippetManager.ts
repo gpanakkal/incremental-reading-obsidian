@@ -11,6 +11,7 @@ import type {
   ISnippetBase,
   ISnippetDisplay,
   ISnippetReview,
+  ReviewSnippet,
   SnippetRow,
 } from '#/lib/types';
 import {
@@ -66,6 +67,16 @@ export class SnippetManager extends ItemManager {
       ...snippet,
       due: snippet.due ? Date.parse(snippet.due.toISOString()) : null,
       dismissed: Number(snippet.dismissed),
+    };
+  }
+
+  rowToReviewSnippet(row: SnippetRow): ReviewSnippet | null {
+    const base = SnippetManager.rowToBase(row);
+    const file = Obsidian.getNote(row.reference, this.app);
+    if (!file) return null;
+    return {
+      data: base,
+      file,
     };
   }
 
@@ -290,6 +301,13 @@ export class SnippetManager extends ItemManager {
       );
       console.error(error);
     }
+  }
+
+  async fetch(id: string): Promise<ReviewSnippet | null> {
+    const query = `SELECT * FROM snippet WHERE id = $1`;
+    const result = await this.repo.query(query, [id]);
+    if (!result[0]) return null;
+    return this.rowToReviewSnippet(result[0] as SnippetRow);
   }
 
   async fetchMany(opts?: {
