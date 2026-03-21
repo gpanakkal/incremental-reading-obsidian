@@ -17,6 +17,7 @@ import type {
 import {
   DEFAULT_PRIORITY,
   ERROR_NOTICE_DURATION_MS,
+  MAX_SQL_QUERY_PARAMS,
   SNIPPET_DIRECTORY,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
@@ -100,11 +101,14 @@ export class SnippetManager extends ItemManager {
 
   async getDue(
     dueBy?: number,
-    limit?: number
+    limit?: number,
+    excludeIds?: string[]
   ): Promise<{ data: ISnippetActive; file: TFile }[]> {
     const dueTime = dueBy ?? getEndOfToday();
     try {
-      const snippetsDue = (await this.fetchMany({ dueBy: dueTime, limit })).map(
+      const snippetsDue = (
+        await this.fetchMany({ dueBy: dueTime, limit, excludeIds })
+      ).map(
         async (item) => ({
           data: SnippetManager.rowToBase(item),
           file: Obsidian.getNote(item.reference, this.app),
@@ -314,6 +318,7 @@ export class SnippetManager extends ItemManager {
     dueBy?: number;
     limit?: number;
     includeDismissed?: boolean;
+    excludeIds?: string[];
   }) {
     let query = 'SELECT * FROM snippet';
     const conditions = [];
@@ -324,6 +329,17 @@ export class SnippetManager extends ItemManager {
     }
     if (!opts?.includeDismissed) {
       conditions.push('dismissed = 0');
+    }
+
+    if (opts?.excludeIds) {
+      const currentParamCount = params.length;
+      let condition = `id NOT IN (`;
+      condition +=
+        opts.excludeIds
+          .map((_, i) => `$${currentParamCount + i + 1}`)
+          .join(', ') + ')';
+      conditions.push(condition);
+      params.push(...opts.excludeIds);
     }
 
     if (conditions.length) {
@@ -337,6 +353,11 @@ export class SnippetManager extends ItemManager {
       query += ` LIMIT $${params.length}`;
     }
 
+    if (params.length > MAX_SQL_QUERY_PARAMS) {
+      throw new Error(
+        `Param count ${params.length} exceeded the limit for query "${query}"`
+      );
+    }
     return ((await this.repo.query(query, params)) ?? []) as SnippetRow[];
   }
 

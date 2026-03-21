@@ -12,7 +12,7 @@ import type {
   ReviewSnippet,
 } from '#/lib/types';
 import type ReviewView from '#/views/ReviewView';
-import { DATA_DIRECTORY, REVIEW_FETCH_COUNT } from './constants';
+import { DATA_DIRECTORY } from './constants';
 import { ArticleManager } from './items/ArticleManager';
 import { CardManager } from './items/CardManager';
 import { SnippetManager } from './items/SnippetManager';
@@ -157,15 +157,17 @@ export default class ReviewManager {
    */
   async getDue({
     dueBy,
-    limit = REVIEW_FETCH_COUNT,
+    limit = 1,
+    excludeIds,
   }: {
     dueBy?: number;
     limit?: number;
+    excludeIds?: string[];
   }) {
     try {
-      const cardsDue = await this.cards.getDue(dueBy, limit);
-      const snippetsDue = await this.snippets.getDue(dueBy, limit);
-      const articlesDue = await this.articles.getDue(dueBy, limit);
+      const cardsDue = await this.cards.getDue(dueBy, limit, excludeIds);
+      const snippetsDue = await this.snippets.getDue(dueBy, limit, excludeIds);
+      const articlesDue = await this.articles.getDue(dueBy, limit, excludeIds);
       const allDue = [...cardsDue, ...snippetsDue, ...articlesDue].sort(
         (a, b) => compareDates(a.data.due, b.data.due)
       );

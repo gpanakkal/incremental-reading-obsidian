@@ -4,11 +4,7 @@ import { isReviewCard, type ReviewItem } from './types';
 import type { TAbstractFile, TFile } from 'obsidian';
 import { deepMerge } from './utils';
 import type { DeepPartial } from './utility-types';
-import {
-  CLOZE_DELIMITERS,
-  QUERY_STALE_TIME,
-  REVIEW_FETCH_COUNT,
-} from './constants';
+import { CLOZE_DELIMITERS, QUERY_STALE_TIME } from './constants';
 import { setCurrentItemId, store } from './store';
 
 export const queryClient = new QueryClient({
@@ -161,10 +157,11 @@ export function updateQueryCache<T extends ReviewItem, D extends T['data']>(
 async function fetchNextItem(
   reviewManager: ReviewManager
 ): Promise<ReviewItem | null> {
-  const result = await reviewManager.getDue({
-    limit: REVIEW_FETCH_COUNT,
-  });
   const { seenIds } = store.getState();
+  const excludeIds = Object.keys(seenIds);
+  const result = await reviewManager.getDue({
+    ...(excludeIds.length && { excludeIds }),
+  });
   const nextItem: ReviewItem | null =
     result.all.filter(({ data }) => !(data.id in seenIds))[0] ?? null;
 
