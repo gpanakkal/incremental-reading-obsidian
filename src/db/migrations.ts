@@ -101,14 +101,15 @@ export function getPendingMigrations(db: Database): Migration[] {
  * Apply pending migrations to bring database to current schema version.
  * This is a pure SQL operation — backup and verification are handled by the caller.
  * @param db The SQLite database instance
- * @returns The new schema version
+ * @returns `true` if migrations were applied or `false` otherwise
+ * @throws if migrations fail
  */
-export function applyMigrations(db: Database): number {
+export function applyMigrations(db: Database): boolean {
   const currentVersion = getSchemaVersion(db);
   const pendingMigrations = getPendingMigrations(db);
 
   if (pendingMigrations.length === 0) {
-    return currentVersion;
+    return false;
   }
 
   // console.info(`Applying ${pendingMigrations.length} migration(s)...`);
@@ -130,5 +131,5 @@ export function applyMigrations(db: Database): number {
   const newVersion = getSchemaVersion(db);
   // console.info(`Database schema updated to version ${newVersion}`);
 
-  return newVersion;
+  return true;
 }
