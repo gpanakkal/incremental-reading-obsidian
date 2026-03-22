@@ -4,7 +4,7 @@ import { useAppSelector } from './useAppSelector';
 import {
   currentItemQueryFn,
   invalidateCurrentItemQuery,
-} from '#/lib/queryClient';
+} from '#/lib/query-client';
 import { useEffect } from 'preact/hooks';
 
 export function useCurrentItem() {
