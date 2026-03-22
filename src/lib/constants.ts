@@ -77,7 +77,6 @@ export const CARD_ANSWER_REPLACEMENT = `<mark class="ir-hidden-answer">\\\_\\\_\
 
 export const FRONTMATTER_PATTERN = /^(---\n[\s\S]*?\n---\n)([\s\S]*)$/;
 export const TRANSCLUSION_HIDE_TITLE_ALIAS = 'ir-hide-title';
-export const CSS_CLASS_PREFIX = 'ir';
 
 export const QUERY_STALE_TIME = MS_PER_MINUTE;
 

@@ -1,5 +1,5 @@
-import { MarkdownView, Notice, Plugin, TFile } from 'obsidian';
 import type { TAbstractFile, WorkspaceLeaf } from 'obsidian';
+import { MarkdownView, Notice, Plugin, TFile } from 'obsidian';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
 import databaseSchema from './db/schema.sql';
 import {
@@ -8,6 +8,8 @@ import {
   PLACEHOLDER_PLUGIN_ICON,
 } from './lib/constants';
 import { createIRExtensions } from './lib/extensions';
+import type { ExtractedMarkdownEditor } from './lib/obsidian-editor';
+import { getEditorClass } from './lib/obsidian-editor';
 import {
   invalidateCacheOnMatch,
   invalidateCurrentItemQuery,
@@ -18,7 +20,6 @@ import type { IRPluginSettings } from './lib/settings';
 import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
-import { getEditorClass } from './lib/utils';
 import { PriorityModal } from './views/PriorityModal';
 import { QueryModal } from './views/QueryModal';
 import ReviewView from './views/ReviewView';
@@ -27,8 +28,8 @@ export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;
   reviewManager: ReviewManager;
   store: typeof store;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  MarkdownEditor: any;
+
+  MarkdownEditor: typeof ExtractedMarkdownEditor;
 
   async onload() {
     await this.loadSettings();
@@ -283,9 +284,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     });
   }
 
-  onunload() {
-    this.MarkdownEditor = null; // is this necessary?
-  }
+  onunload() {}
 
   async loadSettings() {
     const saved = (await this.loadData()) as object;
