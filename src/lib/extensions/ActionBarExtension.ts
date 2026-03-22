@@ -17,7 +17,7 @@ import {
 import { transformPriority } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
-import { fetchByFile, invalidateCacheOnMatch } from '../queryClient';
+import { fetchByFile, invalidateCacheOnMatch } from '../query-client';
 import { irPluginFacet } from './irPluginFacet';
 import type { EditorView, Panel } from '@codemirror/view';
 import type { App } from 'obsidian';
