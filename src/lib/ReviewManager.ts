@@ -19,7 +19,6 @@ import { SnippetManager } from './items/SnippetManager';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import { compareDates } from './utils';
 import type { SQLiteRepository } from './types';
-import type { EditorView } from '@codemirror/view';
 import type { TAbstractFile, TFile } from 'obsidian';
 import type { Grade } from 'ts-fsrs';
 
@@ -29,7 +28,6 @@ export default class ReviewManager {
   snippets: SnippetManager;
   cards: CardManager;
   articles: ArticleManager;
-  currentEditorView: { view: EditorView; file: TFile } | null = null;
 
   constructor(app: App, repo: SQLiteRepository) {
     this.app = app;

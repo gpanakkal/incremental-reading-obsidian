@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { insertBlankLine } from '@codemirror/commands';
 import { EditorSelection, Prec } from '@codemirror/state';
 import {
@@ -28,8 +27,9 @@ import type {
   ReviewSnippet,
 } from '#/lib/types';
 import { isReviewArticle } from '#/lib/types';
-import { getBaseMarkdownExtensions } from '../lib/utils';
-import { setInsertMode, getMarkdownController } from './helpers';
+import type { ExtractedMobileToolbar } from '#/lib/obsidian-editor';
+import { getBaseMarkdownExtensions } from '#/lib/obsidian-editor';
+import { setInsertMode, getMarkdownController } from '#/lib/obsidian-editor';
 import { useReviewContext } from './ReviewContext';
 import { TitleEditor } from './TitleEditor';
 import type { EditCoordinates } from './types';
@@ -98,7 +98,8 @@ export function IREditor({
   // extend the MarkdownEditor extracted from Obsidian
   useEffect(() => {
     const setupEditor = () => {
-      class Editor extends reviewView.plugin.MarkdownEditor {
+      // eslint-disable-next-line react-hooks/unsupported-syntax
+      class CustomEditor extends reviewView.plugin.MarkdownEditor {
         isIncrementalReadingEditor = true;
 
         // // Override getSelection to provide proper context
@@ -108,7 +109,7 @@ export function IREditor({
 
         onUpdate(update: ViewUpdate, changed: boolean) {
           super.onUpdate(update, changed);
-          handleChange(update);
+          void handleChange(update);
         }
 
         buildLocalExtensions(): Extension[] {
@@ -143,7 +144,7 @@ export function IREditor({
                   }
 
                   evt.win.setTimeout(() => {
-                    this.app.workspace.activeEditor = this.owner;
+                    reviewView.app.workspace.activeEditor = this.owner;
                     if (Platform.isMobile && this.app.mobileToolbar) {
                       this.app.mobileToolbar.update();
                     }
@@ -179,7 +180,7 @@ export function IREditor({
               if (this.app.vault.getConfig('smartIndentList')) {
                 this.editor.newlineAndIndentContinueMarkdownList();
               } else {
-                insertBlankLine(cm as any);
+                insertBlankLine(cm);
               }
               return true;
             };
@@ -215,8 +216,8 @@ export function IREditor({
         }
       }
 
-      const app = reviewView.plugin.app;
-      let editor: any;
+      const app = reviewView.app;
+      let editor: CustomEditor;
       let cm: EditorView;
       const controller = getMarkdownController(
         reviewView,
@@ -224,27 +225,17 @@ export function IREditor({
         item
       );
       try {
-        editor = new (Editor as any)(app, elRef.current, controller);
+        editor = new CustomEditor(app, elRef.current, controller);
         cm = editor.cm;
+        internalRef.current = cm;
+        controller.editMode = editor;
+        editor.set(value ?? '');
+
+        if (editorRef) editorRef.current = cm;
       } catch (error) {
         console.error('Error creating editor:', error);
-        console.error('Error stack:', error.stack);
         throw error;
       }
-
-      internalRef.current = cm;
-      if (editorRef) editorRef.current = cm;
-
-      // Store editor view reference in ReviewManager for highlight refresh
-      if (item.file) {
-        reviewManager.currentEditorView = {
-          view: cm,
-          file: item.file,
-        };
-      }
-
-      controller.editMode = editor;
-      editor.set(value ?? '');
 
       // Enable review mode in the action bar extension
       // This tells the extension we're in the review interface context
@@ -308,13 +299,13 @@ export function IREditor({
           }
 
           try {
-            if (reviewView.activeEditor === controller) {
+            if (reviewView.activeEditor === (controller as unknown)) {
               reviewView.activeEditor = null;
             }
 
             if ((app.workspace.activeEditor as unknown) === controller) {
               app.workspace.activeEditor = null;
-              (app as any).mobileToolbar?.update();
+              (app.mobileToolbar as ExtractedMobileToolbar)?.update();
               reviewView.contentEl.removeClass('is-mobile-editing');
             }
           } catch (error) {
@@ -326,10 +317,6 @@ export function IREditor({
           elRef.current?.removeChild(elRef.current?.children[0]);
           internalRef.current = null;
           if (editorRef) editorRef.current = null;
-          // Clear editor view reference from ReviewManager if it matches this file
-          if (reviewManager.currentEditorView?.file === item.file) {
-            reviewManager.currentEditorView = null;
-          }
         }
       };
       return cleanupEffect;
@@ -343,25 +330,22 @@ export function IREditor({
 
   useEffect(
     function updateEditorContent() {
-      // Defer the dispatch to avoid "update in progress" errors
-      setTimeout(() => {
-        if (!internalRef.current) return;
+      if (!internalRef.current) return;
 
-        const view = internalRef.current;
-        // Only update if the content actually changed
-        if (view.state.doc.toString() !== (value ?? '')) {
-          view.dispatch({
-            changes: {
-              from: 0,
-              to: view.state.doc.length,
-              insert: value ?? '',
-            },
-            annotations: isExternalSync.of(true),
-          });
-        }
-      }, 0);
+      const view = internalRef.current;
+      // Only update if the content actually changed
+      if (view.state.doc.toString() !== value) {
+        view.dispatch({
+          changes: {
+            from: 0,
+            to: view.state.doc.length,
+            insert: value ?? '',
+          },
+          annotations: isExternalSync.of(true),
+        });
+      }
     },
-    [internalRef.current, value]
+    [value]
   );
 
   // Sync showAnswer state to the action bar extension
@@ -370,7 +354,7 @@ export function IREditor({
     internalRef.current.dispatch({
       effects: setShowAnswerEffect.of(showAnswer),
     });
-  }, [item, showAnswer]);
+  }, [showAnswer]);
 
   const cls = [
     'markdown-source-view',

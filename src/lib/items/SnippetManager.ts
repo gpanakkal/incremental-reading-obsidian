@@ -250,10 +250,6 @@ export class SnippetManager extends ItemManager {
     );
 
     // Refresh highlights immediately after snippet creation.
-    // Always use `cm` (the CodeMirror EditorView from the active editor) rather
-    // than `currentEditorView`, which may point to a different view (e.g. the
-    // review interface's editor) even when the snippet was created from the
-    // standard note view.
     if (offsets && cm) {
       await this.refreshHighlightsAfterSnippetCreation(
         currentFile,

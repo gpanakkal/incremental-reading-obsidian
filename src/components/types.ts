@@ -1,4 +1,4 @@
-import type { getMarkdownController } from './helpers';
+import type { getMarkdownController } from '#/lib/obsidian-editor';
 
 export interface EditCoordinates {
   x: number;
