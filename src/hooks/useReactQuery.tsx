@@ -31,8 +31,11 @@ export function useCurrentItemFileText() {
   const { data: currentItem } = useCurrentItem();
 
   return useQuery({
+    enabled: !!currentItem,
     queryKey: ['item', currentItem?.data.id, 'file-text'],
-    queryFn: async () =>
-      currentItem ? await plugin.app.vault.read(currentItem.file) : null,
+    queryFn: async () => {
+      if (!currentItem) return;
+      return plugin.app.vault.read(currentItem.file);
+    },
   });
 }
