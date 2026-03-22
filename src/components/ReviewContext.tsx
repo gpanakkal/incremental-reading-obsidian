@@ -30,7 +30,7 @@ import type { Scope, WorkspaceLeaf } from 'obsidian';
 import type { PropsWithChildren } from 'react';
 import type { Grade } from 'ts-fsrs';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
-import { updateQueryCache } from '#/lib/queryClient';
+import { updateQueryCache } from '#/lib/query-client';
 
 // work around "Cannot call impure function during render"
 const getNow = () => Date.now();

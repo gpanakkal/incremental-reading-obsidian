@@ -13,7 +13,7 @@ import { getEditorClass } from './lib/obsidian-editor';
 import {
   invalidateCacheOnMatch,
   invalidateCurrentItemQuery,
-} from './lib/queryClient';
+} from './lib/query-client';
 import { SQLJSRepository } from './lib/repository/SQLJSRepository';
 import ReviewManager from './lib/ReviewManager';
 import type { IRPluginSettings } from './lib/settings';
