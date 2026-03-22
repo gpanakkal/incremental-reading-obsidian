@@ -8,7 +8,12 @@ import {
 } from '@codemirror/view';
 import classcat from 'classcat';
 import { Platform } from 'obsidian';
-import { useEffect, useRef, type MutableRefObject } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  type MutableRefObject,
+} from 'react';
 import { useDispatch } from 'react-redux';
 import { useAppSelector, useAppStore } from '#/hooks/useAppSelector';
 import {
@@ -36,7 +41,6 @@ import type { EditCoordinates } from './types';
 import type { Extension } from '@codemirror/state';
 import type { ViewUpdate } from '@codemirror/view';
 import type { Grade } from 'ts-fsrs';
-import { useCurrentItem } from '#/hooks/useReactQuery';
 
 /**
  * Credit goes to mgmeyers for figuring out how to get the editor prototype.
@@ -83,16 +87,17 @@ export function IREditor({
   } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
+  const itemRef = useRef(item);
   const { saveNote } = useReviewContext();
   const store = useAppStore();
-  const { data: currentItem } = useCurrentItem();
   const showAnswer = useAppSelector((state) => state.showAnswer);
 
   const handleChange = async (update: ViewUpdate) => {
     if (!update.docChanged) return;
 
     const docText = update.state.doc.toString();
-    await saveNote(item, docText);
+    // TODO: don't save if changes occurred outside review
+    await saveNote(itemRef.current, docText);
   };
 
   // extend the MarkdownEditor extracted from Obsidian
@@ -222,7 +227,7 @@ export function IREditor({
       const controller = getMarkdownController(
         reviewView,
         () => editor.editor,
-        item
+        itemRef.current
       );
       try {
         editor = new CustomEditor(app, elRef.current, controller);
@@ -247,7 +252,7 @@ export function IREditor({
         dismissItem: async (reviewItem: ReviewItem) => dismissItem(reviewItem),
         skipItem: (reviewItem: ReviewItem) => skipItem(reviewItem),
         setShowAnswer: (show) => dispatch(setShowAnswer(show)),
-        getCurrentItem: () => currentItem ?? null,
+        getCurrentItem: () => itemRef.current,
       };
 
       cm.dispatch({
@@ -326,9 +331,9 @@ export function IREditor({
     return () => {
       cleanup();
     };
-  }, [reviewView, reviewManager, store, currentItem]);
+  }, [reviewView, reviewManager, store]);
 
-  useEffect(
+  useLayoutEffect(
     function updateEditorContent() {
       if (!internalRef.current) return;
 

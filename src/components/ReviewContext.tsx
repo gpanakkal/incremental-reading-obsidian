@@ -82,11 +82,11 @@ export function ReviewContextProvider({
   async function withReviewViewSave<T>(
     operation: () => Promise<T>
   ): Promise<T> {
-    store.dispatch(setReviewViewSaving(true));
+    dispatch(setReviewViewSaving(true));
     try {
       return await operation();
     } finally {
-      store.dispatch(setReviewViewSaving(false));
+      dispatch(setReviewViewSaving(false));
     }
   }
 
@@ -214,17 +214,16 @@ export function ReviewContextProvider({
     );
 
     await withReviewViewSave(async () => {
-      await Obsidian.editNote(plugin.app, item.file, () => newContent);
-
-      // Save body-relative highlight offsets
-      for (const h of highlights) {
-        await reviewManager.updateSnippetOffsets(
-          h.id,
-          h.start_offset,
-          h.end_offset
-        );
-      }
+      await Obsidian.editNote(reviewView.app, item.file, () => newContent);
     });
+    // Save body-relative highlight offsets
+    for (const h of highlights) {
+      await reviewManager.updateSnippetOffsets(
+        h.id,
+        h.start_offset,
+        h.end_offset
+      );
+    }
 
     dispatch(setEditState(EditingState.complete));
   };
