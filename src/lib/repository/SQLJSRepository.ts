@@ -93,7 +93,7 @@ export class SQLJSRepository implements SQLiteRepository {
     if (file.path !== this.dbFilePath || file.deleted) {
       return;
     }
-    // skip reload if the changes occurred locally
+    // skip reload if the changes resulted from saving this db instance to disk
     if (this.#pendingSaveCount > 0) {
       this.#pendingSaveCount--;
       return;
@@ -342,34 +342,38 @@ export class SQLJSRepository implements SQLiteRepository {
           }
         }
 
-        applyMigrations(this.db);
+        const updated = applyMigrations(this.db);
 
-        const verification = this.verifyMigration(
-          preRowCounts,
-          preFkIssues,
-          Object.keys(expectedChanges).length > 0 ? expectedChanges : undefined
-        );
-
-        if (!verification.passed) {
-          const newVersion = getSchemaVersion(this.db);
-          const logPath = await this.writeErrorLog(verification.errors, {
-            previousVersion,
-            targetVersion: newVersion,
-          });
-
-          console.error(
-            'Incremental Reading - Migration verification failed:',
-            verification.errors
+        if (updated) {
+          const verification = this.verifyMigration(
+            preRowCounts,
+            preFkIssues,
+            Object.keys(expectedChanges).length > 0
+              ? expectedChanges
+              : undefined
           );
 
-          throw new MigrationVerificationError(
-            `Migration verification failed (v${previousVersion} -> v${newVersion}). See log: ${logPath}`,
-            verification.errors,
-            logPath
-          );
+          if (!verification.passed) {
+            const newVersion = getSchemaVersion(this.db);
+            const logPath = await this.writeErrorLog(verification.errors, {
+              previousVersion,
+              targetVersion: newVersion,
+            });
+
+            console.error(
+              'Incremental Reading - Migration verification failed:',
+              verification.errors
+            );
+
+            throw new MigrationVerificationError(
+              `Migration verification failed (v${previousVersion} -> v${newVersion}). See log: ${logPath}`,
+              verification.errors,
+              logPath
+            );
+          }
+
+          await this.save();
         }
-
-        await this.save();
       }
 
       return this.db;
