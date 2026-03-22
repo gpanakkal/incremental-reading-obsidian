@@ -7,13 +7,14 @@ import { resetSession } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type { IconName, TFile, WorkspaceLeaf } from 'obsidian';
+import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 
 export default class ReviewView extends FileView {
   static #viewType = 'incremental-reading-review';
   #reviewManager: ReviewManager;
   plugin: IncrementalReadingPlugin;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  activeEditor: any;
+
+  activeEditor: ExtractedMarkdownEditor['owner'];
   /* required for review view to open */
   allowNoFile: boolean = true;
   /**
