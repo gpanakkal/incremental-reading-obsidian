@@ -343,4 +343,14 @@ export class ObsidianHelpers {
     const info = state.field(editorInfoField, false);
     return info ?? null;
   }
+
+  static inEditMode(document: Document): boolean {
+    const el = document.activeElement as HTMLElement | null;
+    return !!(
+      el &&
+      (el.isContentEditable ||
+        el.tagName === 'INPUT' ||
+        el.tagName === 'TEXTAREA')
+    );
+  }
 }

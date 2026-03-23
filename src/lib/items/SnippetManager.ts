@@ -129,8 +129,8 @@ export class SnippetManager extends ItemManager {
   /**
    * Save the selected text and add it to the learning queue
    *
-   * todo:
-   * - handle edge cases (uncommon characters, leading/trailing spaces, )
+   * TODO:
+   * - handle edge cases (uncommon characters, leading/trailing spaces or omitted delimiters)
    * - selections from web viewer
    * - selections from native PDF viewer
    */

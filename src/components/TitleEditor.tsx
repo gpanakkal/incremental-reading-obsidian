@@ -7,7 +7,6 @@ export function TitleEditor({ item }: { item: ReviewArticle }) {
   const titleRef = useRef<HTMLDivElement>(null);
   const { reviewManager } = useReviewContext();
 
-  // TODO: replace with a listener to handle external rename events
   useEffect(() => {
     if (!titleRef.current) return;
     titleRef.current.textContent = item.file.basename;

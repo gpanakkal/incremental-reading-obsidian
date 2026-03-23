@@ -8,12 +8,10 @@ import type ReviewView from '#/views/ReviewView';
 import { ActionBar } from './ActionBar';
 import { ReviewContextProvider } from './ReviewContext';
 import ReviewItem from './ReviewItem';
-import type { WorkspaceLeaf } from 'obsidian';
 
 export function createReviewInterface(props: {
   reviewView: ReviewView;
   plugin: IncrementalReadingPlugin;
-  leaf: WorkspaceLeaf;
   reviewManager: ReviewManager;
 }) {
   return (

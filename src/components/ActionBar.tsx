@@ -53,76 +53,27 @@ function GlobalActions() {
  * Actions common to articles, snippets, and cards
  */
 function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
-  const {
-    dismissItem,
-    unDismissItem,
-    skipItem,
-    reviewView,
-    registerActionBarHotkey,
-    plugin,
-  } = useReviewContext();
+  const { dismissItem, unDismissItem, skipItem } = useReviewContext();
   const isDismissed = reviewItem.data.dismissed;
-
-  const stopEditing = (evt: KeyboardEvent) => {
-    const editor = document.querySelector(
-      'div.ir-review-interface div.cm-editor'
-    );
-    const actionBar = document.querySelector(
-      'div.ir-review-interface div.ir-action-bar'
-    );
-    if (!editor || !actionBar) {
-      console.warn(`Editor or action bar not found!`);
-      return;
-    }
-    if (editor.contains(document.activeElement)) {
-      (actionBar as HTMLElement).focus();
-      // intercept other keybinds
-      evt.stopImmediatePropagation();
-    }
-  };
-
-  useEffect(
-    function initHotkeys() {
-      const handlers = [
-        reviewView.scope.register(null, 'Escape', (evt) => {
-          if (!plugin.settings.allowEscBind) return;
-          stopEditing(evt);
-        }),
-        registerActionBarHotkey(['Alt'], 'd', async () => {
-          return isDismissed
-            ? await unDismissItem(reviewItem)
-            : await dismissItem(reviewItem);
-        }),
-        registerActionBarHotkey(['Alt'], 's', () => {
-          skipItem(reviewItem);
-        }),
-      ];
-
-      return () => {
-        handlers.forEach((handler) => reviewView.scope.unregister(handler));
-      };
-    },
-    [reviewItem]
-  );
 
   return (
     <>
       {isDismissed ? (
         <Button
           label="Un-dismiss"
-          tooltip="Alt + D"
+          tooltip="Restore item to queue"
           handleClick={async () => await unDismissItem(reviewItem)}
         />
       ) : (
         <Button
           label="Dismiss"
-          tooltip="Alt + D"
+          tooltip="Stop scheduling this item for review"
           handleClick={async () => await dismissItem(reviewItem)}
         />
       )}
       <Button
         label={'Skip'}
-        tooltip="Alt + S"
+        tooltip="Skip for current review session"
         handleClick={() => {
           skipItem(reviewItem);
         }}
@@ -139,8 +90,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
   const [display, setDisplay] = useState({
     priority: article.data.priority / 10,
   });
-  const { reviewArticle, reviewView, reprioritize, registerActionBarHotkey } =
-    useReviewContext();
+  const { reviewArticle, reprioritize } = useReviewContext();
 
   const updateDisplay = (updates: Partial<typeof display>) => {
     setDisplay((prev) => ({ ...prev, ...updates }));
@@ -150,23 +100,11 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
     setDisplay({ priority: article.data.priority / 10 });
   }, [article]);
 
-  useEffect(
-    function initHotkeys() {
-      const handler = registerActionBarHotkey(['Alt'], 'c', async () => {
-        await reviewArticle(article);
-      });
-      return () => {
-        if (handler) reviewView.scope.unregister(handler);
-      };
-    },
-    [reviewView, article, reviewArticle]
-  );
-
   return (
     <>
       <Button
         label="Continue"
-        tooltip="Alt + C"
+        tooltip="Mark article as reviewed and go to the next"
         handleClick={async () => await reviewArticle(article)}
       />
       <label className={'ir-priority-label'}>
@@ -207,8 +145,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
   const [display, setDisplay] = useState({
     priority: snippet.data.priority / 10,
   });
-  const { reviewSnippet, reviewView, reprioritize, registerActionBarHotkey } =
-    useReviewContext();
+  const { reviewSnippet, reprioritize } = useReviewContext();
 
   const updateDisplay = (updates: Partial<typeof display>) => {
     setDisplay((prev) => ({ ...prev, ...updates }));
@@ -218,23 +155,11 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
     setDisplay({ priority: snippet.data.priority / 10 });
   }, [snippet]);
 
-  useEffect(
-    function initHotkeys() {
-      const handler = registerActionBarHotkey(['Alt'], 'c', async () => {
-        await reviewSnippet(snippet);
-      });
-      return () => {
-        reviewView.scope.unregister(handler);
-      };
-    },
-    [reviewView, snippet, reviewSnippet]
-  );
-
   return (
     <>
       <Button
         label="Continue"
-        tooltip="Alt + C"
+        tooltip="Mark snippet as reviewed and go to the next"
         handleClick={async () => await reviewSnippet(snippet)}
       />
       <div className="ir-priority-container">
@@ -270,44 +195,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
 function CardActions({ card }: { card: ReviewCard }) {
   const dispatch = useDispatch();
   const showAnswer = useAppSelector((state) => state.showAnswer);
-  const { gradeCard, reviewView, registerActionBarHotkey } = useReviewContext();
-
-  useEffect(
-    function initShowAnswerHotkey() {
-      const handler = registerActionBarHotkey(['Alt'], 'c', () => {
-        dispatch(setShowAnswer(true));
-      });
-      return () => {
-        reviewView.scope.unregister(handler);
-      };
-    },
-    [reviewView, card]
-  );
-
-  useEffect(
-    function initGradingHotkeys() {
-      if (!showAnswer) return;
-
-      const handlers = [
-        registerActionBarHotkey(null, '1', async () => {
-          await gradeCard(card, Rating.Again);
-        }),
-        registerActionBarHotkey(null, '2', async () => {
-          await gradeCard(card, Rating.Hard);
-        }),
-        registerActionBarHotkey(null, '3', async () => {
-          await gradeCard(card, Rating.Good);
-        }),
-        registerActionBarHotkey(null, '4', async () => {
-          await gradeCard(card, Rating.Easy);
-        }),
-      ];
-      return () => {
-        handlers.forEach((handler) => reviewView.scope.unregister(handler));
-      };
-    },
-    [card, showAnswer]
-  );
+  const { gradeCard } = useReviewContext();
 
   return (
     <>
@@ -315,22 +203,18 @@ function CardActions({ card }: { card: ReviewCard }) {
         <>
           <Button
             label="🔁 Again"
-            tooltip="1"
             handleClick={async () => await gradeCard(card, Rating.Again)}
           />
           <Button
             label="👎 Hard"
-            tooltip="2"
             handleClick={async () => await gradeCard(card, Rating.Hard)}
           />
           <Button
             label="👍 Good"
-            tooltip="3"
             handleClick={async () => await gradeCard(card, Rating.Good)}
           />
           <Button
             label="✅ Easy"
-            tooltip="4"
             handleClick={async () => await gradeCard(card, Rating.Easy)}
           />
         </>
@@ -338,7 +222,6 @@ function CardActions({ card }: { card: ReviewCard }) {
         <>
           <Button
             label="Show Answer"
-            tooltip="Alt + C"
             handleClick={() => {
               dispatch(setShowAnswer(true));
             }}

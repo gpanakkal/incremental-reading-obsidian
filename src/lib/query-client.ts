@@ -31,6 +31,9 @@ export async function fetchCurrentItem(
   });
 }
 
+export const getCurrentItemSync = (): ReviewItem | undefined =>
+  queryClient.getQueryData(['current-review-item']);
+
 export async function fetchById(
   itemId: string,
   reviewManager: ReviewManager
