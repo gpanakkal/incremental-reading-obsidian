@@ -274,11 +274,11 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   private async initReviewManager() {
-    const repo: SQLiteRepository = await SQLJSRepository.start(
-      this,
-      DATABASE_FILE_PATH,
-      databaseSchema as string,
-      (error) => {
+    const repo: SQLiteRepository = await SQLJSRepository.start({
+      plugin: this,
+      dbFilePath: DATABASE_FILE_PATH,
+      schema: databaseSchema as string,
+      onMigrationFailure: (error) => {
         console.error(
           'Incremental Reading - Migration verification failed:',
           error.errors
@@ -289,8 +289,9 @@ export default class IncrementalReadingPlugin extends Plugin {
           0
         );
         this.unload();
-      }
-    );
+      },
+      onReloadFromDisk: async () => invalidateCurrentItemQuery(),
+    });
     // listen for sync updates to the database and re-read the file
     this.registerEvent(
       this.app.vault.on('modify', (file) => {

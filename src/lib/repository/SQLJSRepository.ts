@@ -35,21 +35,24 @@ export class SQLJSRepository implements SQLiteRepository {
   #sql: initSqlJs.SqlJsStatic;
   #pendingSaveCount: number = 0;
   #onMigrationFailure?: (error: MigrationVerificationError) => void;
+  onReloadFromDisk?: () => void | Promise<void>;
 
   /**
    * Use .start to instantiate
    */
-  protected constructor(
-    app: App,
-    dbFilePath: string,
-    schema: string,
-    onMigrationFailure?: (error: MigrationVerificationError) => void
-  ) {
-    this.app = app;
-    this.adapter = app.vault.adapter;
-    this.#dbFilePath = normalizePath(dbFilePath);
-    this.#schema = schema;
-    this.#onMigrationFailure = onMigrationFailure;
+  protected constructor(params: {
+    app: App;
+    dbFilePath: string;
+    schema: string;
+    onMigrationFailure?: (error: MigrationVerificationError) => void;
+    onReloadFromDisk?: () => void | Promise<void>;
+  }) {
+    this.app = params.app;
+    this.adapter = params.app.vault.adapter;
+    this.#dbFilePath = normalizePath(params.dbFilePath);
+    this.#schema = params.schema;
+    this.#onMigrationFailure = params.onMigrationFailure;
+    this.onReloadFromDisk = params.onReloadFromDisk;
     this.handleFileChange = this.handleFileChange.bind(this) as (
       file: TAbstractFile
     ) => Promise<void>;
@@ -60,24 +63,22 @@ export class SQLJSRepository implements SQLiteRepository {
    * @param plugin the plugin instance
    * @param schema the SQL schema as a string
    */
-  static async start(
-    plugin: Plugin,
-    dbFilePath: string,
-    schema: string,
-    onMigrationFailure?: (error: MigrationVerificationError) => void
-  ): Promise<SQLJSRepository> {
-    const repo = new SQLJSRepository(
-      plugin.app,
-      dbFilePath,
-      schema,
-      onMigrationFailure
-    );
+  static async start(params: {
+    plugin: Plugin;
+    dbFilePath: string;
+    schema: string;
+    onMigrationFailure?: (error: MigrationVerificationError) => void;
+    onReloadFromDisk?: () => void | Promise<void>;
+  }): Promise<SQLJSRepository> {
+    const repo = new SQLJSRepository({ ...params, app: params.plugin.app });
     // load the database file or create it if loading fails
     // TODO: handle failed loads when the file exists
     if (repo.dbExists()) {
       const result = await repo.loadDb();
       if (result === null) {
-        throw new Error(`Db file found at ${dbFilePath}, but failed to load`);
+        throw new Error(
+          `Db file found at ${params.dbFilePath}, but failed to load`
+        );
       }
     } else {
       await repo.initDb();
@@ -101,6 +102,7 @@ export class SQLJSRepository implements SQLiteRepository {
 
     try {
       await this.reloadDb();
+      await this.onReloadFromDisk?.();
     } catch (error) {
       if (
         error instanceof MigrationVerificationError &&
@@ -129,7 +131,7 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   async mutate(query: string, params: Primitive[] = []) {
     const result = await this.execSql(query, params);
-    await this.save();
+    void this.save();
     return result;
   }
 
