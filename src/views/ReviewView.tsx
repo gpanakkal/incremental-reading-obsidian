@@ -30,14 +30,20 @@ export default class ReviewView extends FileView {
     reviewManager: ReviewManager
   ) {
     super(leaf);
+    this.allowNoFile = true;
     this.plugin = plugin;
     this.#reviewManager = reviewManager;
     this.scope = new Scope(this.plugin.app.scope);
   }
 
-  /** Use this to synchronously set file when fetching a new item */
+  /** Synchronously set file and title.
+   * Use when fetching a new item
+   */
   setFile(file: TFile | null) {
     this.file = file;
+    this.leaf.tabHeaderInnerTitleEl.setText(
+      file?.basename || 'Incremental Reading'
+    );
   }
 
   static get viewType() {
@@ -49,8 +55,7 @@ export default class ReviewView extends FileView {
   }
 
   getDisplayText(): string {
-    // eslint-disable-next-line obsidianmd/ui/sentence-case
-    return 'Incremental Reading';
+    return this.file?.basename || 'Incremental Reading';
   }
 
   getIcon(): IconName {
