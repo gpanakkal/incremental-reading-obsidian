@@ -1,4 +1,4 @@
-import { FileView, Scope } from 'obsidian';
+import { FileView } from 'obsidian';
 import { render } from 'preact';
 import { createReviewInterface } from '#/components/ReviewInterface';
 import { PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
@@ -22,7 +22,6 @@ export default class ReviewView extends FileView {
    * Set this before opening the view to jump to a specific item.
    */
   initialItem: ReviewItem | null = null;
-  scope: Scope;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -33,7 +32,6 @@ export default class ReviewView extends FileView {
     this.allowNoFile = true;
     this.plugin = plugin;
     this.#reviewManager = reviewManager;
-    this.scope = new Scope(this.plugin.app.scope);
   }
 
   /** Synchronously set file and title.
@@ -55,7 +53,7 @@ export default class ReviewView extends FileView {
   }
 
   getDisplayText(): string {
-    return this.file?.basename || 'Incremental Reading';
+    return this.file?.basename || 'Incremental reading';
   }
 
   getIcon(): IconName {
