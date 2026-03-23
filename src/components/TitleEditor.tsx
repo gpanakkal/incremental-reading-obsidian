@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'preact/compat';
+import { useRef, useLayoutEffect } from 'preact/compat';
 import type { ReviewArticle } from '#/lib/types';
 import { useReviewContext } from './ReviewContext';
 
@@ -7,7 +7,7 @@ export function TitleEditor({ item }: { item: ReviewArticle }) {
   const titleRef = useRef<HTMLDivElement>(null);
   const { reviewManager } = useReviewContext();
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!titleRef.current) return;
     titleRef.current.textContent = item.file.basename;
   }, [item.file.basename]);

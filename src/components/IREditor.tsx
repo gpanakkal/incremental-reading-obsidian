@@ -9,9 +9,11 @@ import {
 import classcat from 'classcat';
 import { Platform } from 'obsidian';
 import {
+  createPortal,
   useEffect,
   useLayoutEffect,
   useRef,
+  useState,
   type MutableRefObject,
 } from 'react';
 import { useDispatch } from 'react-redux';
@@ -87,6 +89,7 @@ export function IREditor({
   } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
+  const [titlePortalEl, setTitlePortalEl] = useState<Element | null>(null);
   const itemRef = useRef(item);
   const { saveNote } = useReviewContext();
   const store = useAppStore();
@@ -224,6 +227,8 @@ export function IREditor({
       const app = reviewView.app;
       let editor: CustomEditor;
       let cm: EditorView;
+      let titleContainer: HTMLDivElement | null = null;
+
       const controller = getMarkdownController(
         reviewView,
         () => editor.editor,
@@ -262,6 +267,18 @@ export function IREditor({
         ],
       });
 
+      // Render TitleEditor via React portal into a container prepended to
+      // .cm-sizer, so it appears above the note body. .cm-sizer is created
+      // synchronously by CodeMirror's constructor, so it's always present here.
+      if (isReviewArticle(item)) {
+        const cmSizer = cm.dom.querySelector('.cm-sizer');
+        if (cmSizer) {
+          titleContainer = document.createElement('div');
+          cmSizer.prepend(titleContainer);
+          setTitlePortalEl(titleContainer);
+        }
+      }
+
       const { editState } = store.getState();
       if (isEditing({ editState })) {
         cm.dispatch({
@@ -293,6 +310,9 @@ export function IREditor({
       }
 
       const cleanupEffect = () => {
+        titleContainer?.remove();
+        setTitlePortalEl(null);
+
         if (Platform.isMobile) {
           try {
             cm.dom.win.removeEventListener('keyboardDidShow', onShow);
@@ -380,8 +400,12 @@ export function IREditor({
 
   return (
     <>
-      {isReviewArticle(item) && <TitleEditor item={item} />}
       <div className={classcat(cls)} ref={elRef}></div>
+      {titlePortalEl &&
+        createPortal(
+          <TitleEditor item={item as ReviewArticle} />,
+          titlePortalEl
+        )}
     </>
   );
 }
