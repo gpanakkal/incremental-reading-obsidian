@@ -15,7 +15,6 @@ export function useCurrentItem() {
     queryKey: ['current-review-item'],
     queryFn: async () => {
       const item = await currentItemQueryFn(reviewManager);
-      reviewView.setFile(item?.file ?? null);
       return item;
     },
   });
@@ -23,6 +22,11 @@ export function useCurrentItem() {
   useEffect(() => {
     void invalidateCurrentItemQuery();
   }, [currentItemId]);
+
+  useEffect(() => {
+    reviewView.setFile(result.data?.file ?? null);
+  }, [result.data?.file, reviewView]);
+
   return result;
 }
 

@@ -235,40 +235,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         }
 
         if (this.app.isMobile) {
-          // TODO: remove 'as' assertion once mobileNavbar type is added
-
-          if (
-            !this.app.mobileNavbar ||
-            !('containerEl' in this.app.mobileNavbar)
-          ) {
-            throw new Error(`Failed to find navbar container element.`);
-          }
-          const navbarBox = this.app.mobileNavbar.containerEl as
-            | HTMLElement
-            | undefined;
-          if (navbarBox) {
-            const setNavbarHeightProp = (height?: number) => {
-              let calculatedHeight: number =
-                height ?? navbarBox.getBoundingClientRect().height;
-              const marginBottom =
-                parseFloat(getComputedStyle(navbarBox).marginBottom) || 0;
-              calculatedHeight += marginBottom;
-
-              document.body.style.setProperty(
-                '--ir-mobile-toolbar-height',
-                `${calculatedHeight}px`
-              );
-            };
-
-            const observer = new ResizeObserver(() => setNavbarHeightProp());
-
-            observer.observe(navbarBox);
-            setNavbarHeightProp();
-            this.register(function cleanupNavbarObserver() {
-              observer.disconnect();
-              document.body.style.removeProperty('--ir-mobile-toolbar-height');
-            });
-          }
+          this.configureNavbarPosition();
         }
 
         this.store = store;
@@ -362,5 +329,38 @@ export default class IncrementalReadingPlugin extends Plugin {
     }
 
     await this.app.workspace.revealLeaf(leaf);
+  }
+
+  private configureNavbarPosition() {
+    if (!this.app.mobileNavbar || !('containerEl' in this.app.mobileNavbar)) {
+      throw new Error(`Failed to find navbar container element.`);
+    }
+    // TODO: remove 'as' assertion once mobileNavbar type is added
+    const navbarBox = this.app.mobileNavbar.containerEl as
+      | HTMLElement
+      | undefined;
+    if (navbarBox) {
+      const setNavbarHeightProp = (height?: number) => {
+        let calculatedHeight: number =
+          height ?? navbarBox.getBoundingClientRect().height;
+        const marginBottom =
+          parseFloat(getComputedStyle(navbarBox).marginBottom) || 0;
+        calculatedHeight += marginBottom;
+
+        document.body.style.setProperty(
+          '--ir-mobile-toolbar-height',
+          `${calculatedHeight}px`
+        );
+      };
+
+      const observer = new ResizeObserver(() => setNavbarHeightProp());
+
+      observer.observe(navbarBox);
+      setNavbarHeightProp();
+      this.register(function cleanupNavbarObserver() {
+        observer.disconnect();
+        document.body.style.removeProperty('--ir-mobile-toolbar-height');
+      });
+    }
   }
 }
