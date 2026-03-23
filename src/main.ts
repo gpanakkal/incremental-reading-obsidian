@@ -23,6 +23,7 @@ import type { ReviewItem, SQLiteRepository } from './lib/types';
 import { PriorityModal } from './views/PriorityModal';
 import { QueryModal } from './views/QueryModal';
 import ReviewView from './views/ReviewView';
+import { initReviewCommands } from './lib/review-commands';
 
 export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;
@@ -71,7 +72,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         if (!editor) {
           return;
         }
-        const reviewView = this.app.workspace.getActiveViewOfType(ReviewView);
+        const reviewView = this.getActiveReviewView();
         if (reviewView) {
           return this.reviewManager.createSnippet(editor, reviewView);
         }
@@ -96,7 +97,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         if (!editor) {
           return;
         }
-        const reviewView = this.app.workspace.getActiveViewOfType(ReviewView);
+        const reviewView = this.getActiveReviewView();
         if (reviewView) {
           return this.reviewManager.createCard(editor, reviewView);
         }
@@ -117,7 +118,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       if (file instanceof TFile) {
         new PriorityModal(this.app, this.reviewManager, file).open();
       } else {
-        const reviewView = this.app.workspace.getActiveViewOfType(ReviewView);
+        const reviewView = this.getActiveReviewView();
         if (reviewView) {
           new Notice('Cannot import articles from review view', 0);
           return;
@@ -176,6 +177,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         new QueryModal(this.app, this.reviewManager).open();
       },
     });
+
+    initReviewCommands(this);
 
     this.registerEvent(
       this.app.workspace.on('file-menu', (menu, file) => {
@@ -289,6 +292,10 @@ export default class IncrementalReadingPlugin extends Plugin {
   async loadSettings() {
     const saved = (await this.loadData()) as object;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+  }
+
+  getActiveReviewView() {
+    return this.app.workspace.getActiveViewOfType(ReviewView);
   }
 
   async saveSettings() {

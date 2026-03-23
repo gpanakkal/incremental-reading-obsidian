@@ -113,8 +113,6 @@ export class SQLJSRepository implements SQLiteRepository {
 
   /**
    * Execute a read query and return an array of objects corresponding to table rows
-   *  TODO:
-   * - handle errors better?
    * @param query
    * @returns an array of rows
    */
@@ -126,8 +124,6 @@ export class SQLJSRepository implements SQLiteRepository {
 
   /**
    * Execute a write query
-   *  TODO:
-   * - handle errors better?
    * @param query
    * @returns an empty array on success
    */

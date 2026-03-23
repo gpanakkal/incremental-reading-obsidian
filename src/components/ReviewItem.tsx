@@ -8,7 +8,8 @@ import { useCurrentItemFileText } from '#/hooks/useReactQuery';
 /**
  * TODO:
  * - indicate if the item is a snippet, card, or article
- * - loading spinner and error element
+ * - loading spinner?
+ * - error element
  */
 export default function ReviewItem({ item }: { item: ReviewItem }) {
   const showAnswer = useAppSelector((state) => state.showAnswer);

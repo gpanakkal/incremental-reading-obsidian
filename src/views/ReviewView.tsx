@@ -82,7 +82,6 @@ export default class ReviewView extends FileView {
       createReviewInterface({
         reviewView: this,
         plugin: this.plugin,
-        leaf: this.leaf,
         reviewManager: this.#reviewManager,
       }),
       this.containerEl
