@@ -57,30 +57,26 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       id: 'extract-selection',
       name: 'Extract selection to snippet',
-      // hotkeys: [
-      //   {
-      //     modifiers: ['Alt'],
-      //     key: 'X',
-      //   },
-      // ],
-      callback: async () => {
+      // hotkeys: [{ key: 'X', modifiers: ['Alt'] }],
+      checkCallback: (checking) => {
         if (!this.reviewManager) {
           new Notice(`Plugin still loading`);
-          return;
+          return false;
         }
         const editor = this.app.workspace.activeEditor?.editor;
-        if (!editor) {
-          return;
-        }
+        if (!editor) return false;
+
         const reviewView = this.getActiveReviewView();
+        if (checking) return true;
+
         if (reviewView) {
-          return this.reviewManager.createSnippet(editor, reviewView);
+          void this.reviewManager.createSnippet(editor, reviewView);
         }
 
         const markdownView =
           this.app.workspace.getActiveViewOfType(MarkdownView);
         if (markdownView) {
-          return this.reviewManager.createSnippet(editor, markdownView);
+          void this.reviewManager.createSnippet(editor, markdownView);
         }
       },
     });
@@ -88,62 +84,70 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       id: 'create-card',
       name: 'Create spaced repetition card',
-      callback: () => {
+      // hotkeys: [{ key: 'Z', modifiers: ['Alt'] }],
+      checkCallback: (checking) => {
         if (!this.reviewManager) {
           new Notice(`Plugin still loading`);
-          return;
+          return false;
         }
         const editor = this.app.workspace.activeEditor?.editor;
-        if (!editor) {
-          return;
-        }
+        if (!editor) return false;
+        if (checking) return true;
+
         const reviewView = this.getActiveReviewView();
         if (reviewView) {
-          return this.reviewManager.createCard(editor, reviewView);
+          void this.reviewManager.createCard(editor, reviewView);
         }
 
         const markdownView =
           this.app.workspace.getActiveViewOfType(MarkdownView);
         if (markdownView) {
-          return this.reviewManager.createCard(editor, markdownView);
+          void this.reviewManager.createCard(editor, markdownView);
         }
       },
     });
 
-    const importArticle = (file?: TAbstractFile) => {
+    const importArticleFromFileMenu = (file: TAbstractFile) => {
       if (!this.reviewManager) {
         new Notice(`Plugin still loading`);
         return;
       }
-      if (file instanceof TFile) {
-        new PriorityModal(this.app, this.reviewManager, file).open();
-      } else {
-        const reviewView = this.getActiveReviewView();
-        if (reviewView) {
-          new Notice('Cannot import articles from review view', 0);
-          return;
-        }
-
-        const markdownView = this.app.workspace.getActiveFileView();
-        if (markdownView?.file) {
-          new PriorityModal(
-            this.app,
-            this.reviewManager,
-            markdownView.file
-          ).open();
-        } else {
-          new Notice(
-            'A Markdown note must be active',
-            ERROR_NOTICE_DURATION_MS
-          );
-        }
+      if (this.getActiveReviewView()) {
+        new Notice('Cannot import articles from review view', 0);
+        return;
       }
+      const concreteFile = this.app.vault.getFileByPath(file.path);
+      if (!(concreteFile instanceof TFile)) return;
+
+      new PriorityModal(this.app, this.reviewManager, concreteFile).open();
     };
 
     this.addCommand({
       id: 'import-article',
       name: 'Import article',
-      callback: importArticle,
+      checkCallback: (checking: boolean) => {
+        if (!this.reviewManager) {
+          new Notice(`Plugin still loading`);
+          return false;
+        }
+        const reviewView = this.getActiveReviewView();
+        if (reviewView) {
+          new Notice('Cannot import articles from review view', 0);
+          return false;
+        }
+
+        const fileView = this.app.workspace.getActiveFileView();
+        if (!fileView?.file) {
+          new Notice(
+            'A Markdown note must be active',
+            ERROR_NOTICE_DURATION_MS
+          );
+          return false;
+        }
+
+        if (checking) return true;
+        new PriorityModal(this.app, this.reviewManager, fileView.file).open();
+      },
     });
 
     this.addCommand({
@@ -186,7 +190,7 @@ export default class IncrementalReadingPlugin extends Plugin {
           item
             .setTitle('Import article')
             .setIcon(PLACEHOLDER_PLUGIN_ICON)
-            .onClick(async () => importArticle(file));
+            .onClick(async () => importArticleFromFileMenu(file));
         });
       })
     );
