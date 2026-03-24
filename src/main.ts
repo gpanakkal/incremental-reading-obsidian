@@ -2,11 +2,7 @@ import type { WorkspaceLeaf, TFile } from 'obsidian';
 import { MarkdownView, Notice, Plugin } from 'obsidian';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
 import databaseSchema from './db/schema.sql';
-import {
-  DATABASE_FILE_PATH,
-  ERROR_NOTICE_DURATION_MS,
-  PLACEHOLDER_PLUGIN_ICON,
-} from './lib/constants';
+import { DATABASE_FILE_PATH, PLACEHOLDER_PLUGIN_ICON } from './lib/constants';
 import { createIRExtensions } from './lib/extensions';
 import type { ExtractedMarkdownEditor } from './lib/obsidian-editor';
 import { getEditorClass } from './lib/obsidian-editor';
@@ -59,10 +55,8 @@ export default class IncrementalReadingPlugin extends Plugin {
       name: 'Extract selection to snippet',
       // hotkeys: [{ key: 'X', modifiers: ['Alt'] }],
       checkCallback: (checking) => {
-        if (!this.reviewManager) {
-          new Notice(`Plugin still loading`);
-          return false;
-        }
+        if (!this.reviewManager) return false;
+
         const editor = this.app.workspace.activeEditor?.editor;
         if (!editor) return false;
 
@@ -86,10 +80,8 @@ export default class IncrementalReadingPlugin extends Plugin {
       name: 'Create spaced repetition card',
       // hotkeys: [{ key: 'Z', modifiers: ['Alt'] }],
       checkCallback: (checking) => {
-        if (!this.reviewManager) {
-          new Notice(`Plugin still loading`);
-          return false;
-        }
+        if (!this.reviewManager) return false;
+
         const editor = this.app.workspace.activeEditor?.editor;
         if (!editor) return false;
         if (checking) return true;
@@ -124,24 +116,13 @@ export default class IncrementalReadingPlugin extends Plugin {
       id: 'import-article',
       name: 'Import article',
       checkCallback: (checking: boolean) => {
-        if (!this.reviewManager) {
-          new Notice(`Plugin still loading`);
-          return false;
-        }
+        if (!this.reviewManager) return false;
+
         const reviewView = this.getActiveReviewView();
-        if (reviewView) {
-          new Notice('Cannot import articles from review view', 0);
-          return false;
-        }
+        if (reviewView) return false;
 
         const fileView = this.app.workspace.getActiveFileView();
-        if (!fileView?.file) {
-          new Notice(
-            'A Markdown note must be active',
-            ERROR_NOTICE_DURATION_MS
-          );
-          return false;
-        }
+        if (!fileView?.file) return false;
 
         if (checking) return true;
         new PriorityModal(this.app, this.reviewManager, fileView.file).open();
