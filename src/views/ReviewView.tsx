@@ -103,7 +103,17 @@ export default class ReviewView extends FileView {
     this.plugin.store.dispatch(resetSession());
   }
 
-  async onLoadFile(_file: unknown): Promise<void> {}
+  /* TODO: add file options */
+  // onPaneMenu(menu: Menu, source: 'more-options' | 'tab-header' | string): void {
+  //   super.onPaneMenu(menu, source);
+  // }
 
-  async onUnloadFile(_file: unknown): Promise<void> {}
+  /* TODO: investigate how to use this */
+  async onLoadFile(file: TFile): Promise<void> {
+    await super.onLoadFile(file);
+  }
+
+  async onUnloadFile(file: TFile): Promise<void> {
+    await super.onUnloadFile(file);
+  }
 }
