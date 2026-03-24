@@ -3,6 +3,13 @@
   display: none;
 }
 
+.workspace-leaf-content[data-type='incremental-reading-review'] .view-content {
+  /* to match vanilla styling */
+  padding: 0;
+  /* Required for the div.cm-sizer to limit max height correctly */
+  overflow: hidden;
+}
+
 .ir-review-placeholder {
   display: flex;
   align-items: center;
