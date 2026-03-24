@@ -39,9 +39,13 @@ export default class ReviewView extends FileView {
    */
   setFile(file: TFile | null) {
     this.file = file;
-    this.leaf.tabHeaderInnerTitleEl.setText(
-      file?.basename || 'Incremental Reading'
-    );
+    if (file) {
+      this.leaf.tabHeaderInnerTitleEl.setText(file.basename);
+      this.titleEl.setText(file.basename);
+    } else {
+      this.leaf.tabHeaderInnerTitleEl.setText('Incremental reading');
+      this.titleEl.setText('Incremental reading');
+    }
   }
 
   static get viewType() {
@@ -80,19 +84,21 @@ export default class ReviewView extends FileView {
   }
 
   async onOpen() {
-    this.containerEl.empty();
+    if (!this.app.isMobile) {
+      this.headerEl.hide();
+    }
     render(
       createReviewInterface({
         reviewView: this,
         plugin: this.plugin,
         reviewManager: this.#reviewManager,
       }),
-      this.containerEl
+      this.contentEl
     );
   }
 
   async onClose() {
-    render(null, this.containerEl);
+    render(null, this.contentEl);
     this.activeEditor = null;
     this.plugin.store.dispatch(resetSession());
   }

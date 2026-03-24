@@ -30,9 +30,11 @@ function ReviewInterface() {
 
   return (
     <div className={'ir-review-interface view-content'}>
-      <ActionBar />
       {item ? (
-        <ReviewItem item={item} />
+        <>
+          <ActionBar />
+          <ReviewItem item={item} />
+        </>
       ) : (
         <div className="ir-review-placeholder">Nothing due for review.</div>
       )}

@@ -47,15 +47,15 @@ test('Can open the review interface by executing the command', async () => {
 
   // Verify the tab header for the review interface is visible
   await expect(
-    window.locator('div.workspace-tab-header[aria-label="Incremental Reading"]')
+    window.locator('div.workspace-tab-header[aria-label="Incremental reading"]')
   ).toBeVisible();
 });
 
 test('Can open the review interface from the ribbon button', async () => {
-  await window.getByLabel('Incremental Reading').click();
+  await window.getByLabel('Incremental reading').click();
   // Verify the tab header for the review interface is visible
   await expect(
-    window.locator('div.workspace-tab-header[aria-label="Incremental Reading"]')
+    window.locator('div.workspace-tab-header[aria-label="Incremental reading"]')
   ).toBeVisible();
 });
 
@@ -71,7 +71,7 @@ test.describe('Article Importing', () => {
     });
     await window.getByText('Import article').click();
     await finalizeArticleImport(window);
-    await window.getByLabel('Incremental Reading').click();
+    await window.getByLabel('Incremental reading').click();
 
     // look for the action bar to confirm we're in review
     await expect(
@@ -105,7 +105,7 @@ test.describe('Article Importing', () => {
         .getByText(
           'Memorizing a programming language using spaced repetition software'
         )
-        .nth(3)
+        .nth(5)
     ).toBeInViewport();
   });
 
@@ -128,7 +128,7 @@ test.describe('Article Importing', () => {
         .getByText(
           'Memorizing a programming language using spaced repetition software'
         )
-        .nth(3)
+        .nth(5)
     ).toBeVisible();
   });
 });
@@ -180,7 +180,7 @@ test.describe('Action Bar', () => {
         .getByText(
           'Memorizing a programming language using spaced repetition software'
         )
-        .nth(3)
+        .nth(5)
     ).toBeVisible();
   });
 
