@@ -1,5 +1,5 @@
-import type { TAbstractFile, WorkspaceLeaf } from 'obsidian';
-import { MarkdownView, Notice, Plugin, TFile } from 'obsidian';
+import type { WorkspaceLeaf, TFile } from 'obsidian';
+import { MarkdownView, Notice, Plugin } from 'obsidian';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
 import databaseSchema from './db/schema.sql';
 import {
@@ -107,7 +107,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       },
     });
 
-    const importArticleFromFileMenu = (file: TAbstractFile) => {
+    const importArticleFromFileMenu = (file: TFile) => {
       if (!this.reviewManager) {
         new Notice(`Plugin still loading`);
         return;
@@ -116,10 +116,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         new Notice('Cannot import articles from review view', 0);
         return;
       }
-      const concreteFile = this.app.vault.getFileByPath(file.path);
-      if (!(concreteFile instanceof TFile)) return;
 
-      new PriorityModal(this.app, this.reviewManager, concreteFile).open();
+      new PriorityModal(this.app, this.reviewManager, file).open();
     };
 
     this.addCommand({
@@ -185,13 +183,19 @@ export default class IncrementalReadingPlugin extends Plugin {
     initReviewCommands(this);
 
     this.registerEvent(
-      this.app.workspace.on('file-menu', (menu, file) => {
-        menu.addItem((item) => {
-          item
-            .setTitle('Import article')
-            .setIcon(PLACEHOLDER_PLUGIN_ICON)
-            .onClick(async () => importArticleFromFileMenu(file));
-        });
+      this.app.workspace.on('file-menu', (menu, abstractFile) => {
+        const file = this.app.vault.getFileByPath(abstractFile.path);
+        if (file) {
+          menu.addItem((item) => {
+            item
+              .setTitle('Import article')
+              .setIcon(PLACEHOLDER_PLUGIN_ICON)
+              .onClick(async () => importArticleFromFileMenu(file));
+          });
+        } else {
+          // TODO: entire folder imports
+          // const folder = this.app.vault.getFolderByPath(abstractFile.path);
+        }
       })
     );
 
