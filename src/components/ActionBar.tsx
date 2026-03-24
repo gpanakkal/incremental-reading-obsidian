@@ -41,9 +41,10 @@ export function ActionBar() {
 
 /**
  * TODO:
- * - forward/back
+ * - always render ActionBar once a global action exists
+ * - forward/back (or use the view header)
  * - view queue
- * - undo last review
+ * - undo last review/dismissal
  */
 function GlobalActions() {
   return <></>;

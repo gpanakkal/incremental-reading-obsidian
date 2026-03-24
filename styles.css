@@ -10,6 +10,20 @@
   overflow: hidden;
 }
 
+/* make text visible under header buttons on mobile */
+.is-phone
+  .mod-root
+  .workspace-leaf-content[data-type='incremental-reading-review'] {
+  --view-top-spacing: 0;
+}
+
+/* hide the header title on mobile */
+.is-phone.show-inline-title
+  .workspace-leaf-content[data-type='incremental-reading-review']
+  .view-header-title-container {
+  display: none;
+}
+
 .ir-review-placeholder {
   display: flex;
   align-items: center;
