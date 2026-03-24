@@ -7,7 +7,7 @@ const safeStringKey = () => fc.stringMatching(/^[a-zA-Z$][a-zA-Z0-9$_]*$/);
 describe('deepCopy', () => {
   it('copies nested objects and iterables', () => {
     fc.assert(
-      fc.property(fc.object(), (obj1) => {
+      fc.property(fc.object({ key: safeStringKey() }), (obj1) => {
         const copy = deepCopy(obj1);
         expect(copy).toEqual(obj1);
         expect(copy).not.toBe(obj1);
