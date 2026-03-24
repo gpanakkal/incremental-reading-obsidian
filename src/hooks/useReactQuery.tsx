@@ -24,7 +24,16 @@ export function useCurrentItem() {
   }, [currentItemId]);
 
   useEffect(() => {
-    reviewView.setFile(result.data?.file ?? null);
+    async function viewHandleFileChange() {
+      if (reviewView.file) {
+        await reviewView.onUnloadFile(reviewView.file);
+      }
+      reviewView.setFile(result.data?.file ?? null);
+      if (result.data?.file) {
+        await reviewView.onLoadFile(result.data?.file);
+      }
+    }
+    void viewHandleFileChange();
   }, [result.data?.file, reviewView]);
 
   return result;
