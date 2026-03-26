@@ -346,11 +346,11 @@ function renderStandaloneModeActions(
   })();
 
   // Open in review button
-  const openInReviewBtn = createButton('Open in Review', async () => {
+  const openInReviewBtn = createButton('Enter Review', async () => {
     // Build a ReviewItem from this file to pass to the review interface
     const reviewItem = await fetchByFile(file, reviewManager);
     if (reviewItem) {
-      await plugin.learn(reviewItem);
+      await plugin.learn(reviewItem, false);
     } else {
       // Item not in database, just open the review interface
       await plugin.learn();

@@ -333,7 +333,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           event.preventDefault();
           event.stopPropagation();
 
-          void plugin.app.workspace.openLinkText(snippetRef, '', true);
+          void plugin.app.workspace.openLinkText(snippetRef, '');
           return true;
         }
 

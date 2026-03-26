@@ -294,7 +294,7 @@ test.describe('Extracting snippets', () => {
       `incremental-reading/snippets/Before we start discussing`
     );
     await expect(
-      window.getByRole('button', { name: 'Open in Review' })
+      window.getByRole('button', { name: 'Enter Review' })
     ).toBeVisible();
   });
 
@@ -321,7 +321,7 @@ test.describe('Extracting snippets', () => {
       `incremental-reading/snippets/Before we start discussing`
     );
     await expect(
-      window.getByRole('button', { name: 'Open in Review' })
+      window.getByRole('button', { name: 'Enter Review' })
     ).toBeVisible();
   });
 
@@ -348,7 +348,7 @@ test.describe('Extracting snippets', () => {
       `incremental-reading/snippets/Security has become a buzzword`
     );
     // open the first snippet in review
-    await window.getByRole('button', { name: 'Open in Review' }).click();
+    await window.getByRole('button', { name: 'Enter Review' }).click();
 
     // look for the action bar to confirm we're in review
     await expect(
@@ -363,7 +363,7 @@ test.describe('Extracting snippets', () => {
       window,
       `incremental-reading/snippets/Before we start discussing`
     );
-    await window.getByRole('button', { name: 'Open in Review' }).click();
+    await window.getByRole('button', { name: 'Enter Review' }).click();
 
     // look for the action bar to confirm we're in review
     await expect(
@@ -410,7 +410,7 @@ test.describe('Extracting snippets', () => {
     );
 
     await expect(
-      window.getByRole('button', { name: 'Open in Review' })
+      window.getByRole('button', { name: 'Enter Review' })
     ).toBeInViewport();
   });
 });

@@ -280,7 +280,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.reviewManager = new ReviewManager(this.app, repo);
   }
 
-  async learn(initialItem?: ReviewItem) {
+  async learn(initialItem?: ReviewItem, newLeaf: boolean = true) {
     let leaf: WorkspaceLeaf | null = null;
     const leaves = this.app.workspace.getLeavesOfType(ReviewView.viewType);
     const viewAlreadyOpen = leaves.length > 0;
@@ -288,7 +288,11 @@ export default class IncrementalReadingPlugin extends Plugin {
     if (viewAlreadyOpen) {
       leaf = leaves[0];
     } else {
-      leaf = this.app.workspace.getLeaf('tab');
+      if (newLeaf) {
+        leaf = this.app.workspace.getLeaf('tab');
+      } else {
+        leaf = this.app.workspace.getLeaf(false);
+      }
       await leaf.setViewState({ type: ReviewView.viewType, active: true });
     }
 
