@@ -81,5 +81,6 @@ export const FRONTMATTER_PATTERN = /^(---\n[\s\S]*?\n---\n)([\s\S]*)$/;
 export const TRANSCLUSION_HIDE_TITLE_ALIAS = 'ir-hide-title';
 
 export const QUERY_STALE_TIME = MS_PER_MINUTE;
+export const CURRENT_ITEM_REFETCH_TIME = 1000 * 5;
 
 export const MAX_SQL_QUERY_PARAMS = 999;

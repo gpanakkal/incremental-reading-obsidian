@@ -18,6 +18,7 @@ export const queryClient = new QueryClient({
 // #region Queries for use outside React only
 // see useReactQuery.tsx for React queries
 
+/** Does not auto-refetch */
 export async function fetchCurrentItem(
   reviewManager: ReviewManager
 ): Promise<ReviewItem | null> {
@@ -106,6 +107,11 @@ export async function invalidateCurrentItemQuery() {
   await Promise.all(queries);
 }
 
+export async function refetchCurrentItem() {
+  return queryClient.refetchQueries({
+    queryKey: ['current-review-item'],
+  });
+}
 /**
  * Invalidates the React Query cache when the passed file is also open in
  * review. Used to keep review in sync with other editor panes.

@@ -99,20 +99,11 @@ export default class IncrementalReadingPlugin extends Plugin {
       },
     });
 
-    const importArticleFromFileMenu = (file: TFile) => {
-      if (!this.reviewManager) {
-        new Notice(`Plugin still loading`);
-        return;
-      }
-      if (this.getActiveReviewView()) {
-        new Notice('Cannot import articles from review view', 0);
-        return;
-      }
-
+    const importArticle = async (file: TFile) => {
       if (this.settings.showImportDialog) {
         new PriorityModal(this, file).open();
       } else {
-        void this.reviewManager.importArticle(
+        await this.reviewManager.importArticle(
           file,
           this.settings.defaultPriority
         );
@@ -132,14 +123,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         if (!fileView?.file) return false;
 
         if (checking) return true;
-        if (this.settings.showImportDialog) {
-          new PriorityModal(this, fileView.file).open();
-        } else {
-          void this.reviewManager.importArticle(
-            fileView.file,
-            this.settings.defaultPriority
-          );
-        }
+        void importArticle(fileView.file);
       },
     });
 
@@ -180,12 +164,14 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on('file-menu', (menu, abstractFile) => {
         const file = this.app.vault.getFileByPath(abstractFile.path);
-        if (file) {
+        if (file && this.reviewManager) {
           menu.addItem((item) => {
             item
               .setTitle('Import article')
               .setIcon(PLACEHOLDER_PLUGIN_ICON)
-              .onClick(async () => importArticleFromFileMenu(file));
+              .onClick(async () => {
+                await importArticle(file);
+              });
           });
         } else {
           // TODO: entire folder imports
@@ -301,10 +287,6 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   async learn(initialItem?: ReviewItem) {
-    if (initialItem) {
-      store.dispatch(setCurrentItemId(initialItem.data.id));
-    }
-
     let leaf: WorkspaceLeaf | null = null;
     const leaves = this.app.workspace.getLeavesOfType(ReviewView.viewType);
     const viewAlreadyOpen = leaves.length > 0;
@@ -318,17 +300,20 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     // Set the initial item on the view if provided
     if (initialItem) {
-      const view = leaf.view as ReviewView;
-      view.initialItem = initialItem;
-
-      // If the view was already open, invalidate the query to trigger a refetch
-      // This ensures the new initial item is displayed immediately
-      if (viewAlreadyOpen) {
-        await invalidateCurrentItemQuery();
+      if (!viewAlreadyOpen) {
+        const view = leaf.view as ReviewView;
+        view.initialItem = initialItem;
       }
+      store.dispatch(setCurrentItemId(initialItem.data.id));
     }
 
     await this.app.workspace.revealLeaf(leaf);
+
+    // If the view was already open, invalidate the query to trigger a refetch
+    // This ensures the new initial item is displayed immediately
+    if (viewAlreadyOpen && !initialItem) {
+      await invalidateCurrentItemQuery();
+    }
   }
 
   private configureNavbarPosition() {
