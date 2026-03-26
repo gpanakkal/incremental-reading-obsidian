@@ -7,7 +7,6 @@ import {
 } from 'obsidian';
 import type {
   ArticleRow,
-  ISnippetActive,
   ISnippetBase,
   ISnippetDisplay,
   ISnippetReview,
@@ -103,7 +102,7 @@ export class SnippetManager extends ItemManager {
     dueBy?: number,
     limit?: number,
     excludeIds?: string[]
-  ): Promise<{ data: ISnippetActive; file: TFile }[]> {
+  ): Promise<ReviewSnippet[]> {
     const dueTime = dueBy ?? getEndOfToday();
     try {
       const snippetsDue = (
@@ -117,8 +116,7 @@ export class SnippetManager extends ItemManager {
       );
       const result = await Promise.all(snippetsDue);
       return result.filter(
-        (snippet): snippet is { data: ISnippetActive; file: TFile } =>
-          snippet.file !== null
+        (snippet): snippet is ReviewSnippet => snippet.file !== null
       );
     } catch (error) {
       console.error(error);

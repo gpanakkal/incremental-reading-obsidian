@@ -2,7 +2,6 @@ import { normalizePath, Notice } from 'obsidian';
 import type {
   ArticleDisplay,
   ArticleRow,
-  IArticleActive,
   IArticleBase,
   IArticleReview,
   ReviewArticle,
@@ -187,7 +186,7 @@ export class ArticleManager extends ItemManager {
     dueBy?: number,
     limit?: number,
     excludeIds?: string[]
-  ): Promise<{ data: IArticleActive; file: TFile }[]> {
+  ): Promise<ReviewArticle[]> {
     const dueTime = dueBy ?? getEndOfToday();
     try {
       const articlesDue = (
@@ -201,8 +200,7 @@ export class ArticleManager extends ItemManager {
       );
       const result = await Promise.all(articlesDue);
       return result.filter(
-        (article): article is { data: IArticleActive; file: TFile } =>
-          article.file !== null
+        (article): article is ReviewArticle => article.file !== null
       );
     } catch (error) {
       console.error(error);

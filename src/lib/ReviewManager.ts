@@ -151,7 +151,7 @@ export default class ReviewManager {
    * TODO:
    * - paginate
    * - allow filtering out a list of IDs
-   * @param dueBy Unix timestamp. Defaults to current time.
+   * @param dueBy Unix timestamp. Defaults to the end of the day plus the rollover offset.
    */
   async getDue({
     dueBy,

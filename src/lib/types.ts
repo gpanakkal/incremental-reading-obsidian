@@ -21,16 +21,6 @@ export interface ArticleDisplay extends SafeOmit<IArticleBase, 'due'> {
   due: Date | null;
 }
 
-export interface IArticleActive extends IArticleBase {
-  due: number;
-  dismissed: false;
-}
-
-export interface IArticleDismissed extends IArticleBase {
-  due: null;
-  dismissed: true;
-}
-
 export interface IArticleReview {
   id: string;
   article_id: string;
@@ -55,16 +45,6 @@ export interface SnippetRow extends SafeOmit<ISnippetBase, 'dismissed'> {
 
 export interface ISnippetDisplay extends SafeOmit<ISnippetBase, 'due'> {
   due: Date | null;
-}
-
-export interface ISnippetActive extends ISnippetBase {
-  due: number;
-  dismissed: false;
-}
-
-export interface ISnippetDismissed extends ISnippetBase {
-  due: null;
-  dismissed: true;
 }
 
 export interface ISnippetReview {
