@@ -37,6 +37,8 @@ interface ReviewContextProps {
   unDismissItem: (item: ReviewItem) => Promise<void>;
   skipItem: (item: ReviewItem) => void;
   saveNote: (item: ReviewItem, newContent: string) => Promise<void>;
+  createSnippet: (firstReview?: number) => Promise<ReviewSnippet | null>;
+  createCard: () => Promise<ReviewCard | null>;
 }
 
 const ReviewContext = createContext<ReviewContextProps | null>(null);

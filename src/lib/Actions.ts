@@ -7,7 +7,7 @@ import {
   ERROR_NOTICE_DURATION_MS,
   CONTENT_TITLE_SLICE_LENGTH,
 } from './constants';
-import { updateQueryCache } from './query-client';
+import { invalidateItemQuery } from './query-client';
 import { resetCurrentItem, store, addSeenId } from './store';
 import {
   type ReviewArticle,
@@ -17,6 +17,7 @@ import {
   isReviewArticle,
 } from './types';
 import { transformPriority, getContentSlice } from './utils';
+import { MarkdownView } from 'obsidian';
 
 /**
  * Coordinates review operations with store and query cache updates
@@ -120,18 +121,21 @@ export class Actions {
 
   dismissItem = async (item: ReviewItem) => {
     await this.plugin.reviewManager.dismissItem(item);
-    updateQueryCache(item.data.id, { dismissed: true });
+    await invalidateItemQuery(item.data.id);
 
     const [_folder, subRef] = item.data.reference.split('/');
     new Notice(
       `Dismissed "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}"`
     );
-    this.getNext();
+    const { currentItemId } = store.getState();
+    if (item.data.id === currentItemId) {
+      this.getNext();
+    }
   };
 
   unDismissItem = async (item: ReviewItem) => {
     await this.plugin.reviewManager.unDismissItem(item);
-    updateQueryCache(item.data.id, { dismissed: false });
+    await invalidateItemQuery(item.data.id);
     const { currentItemId } = store.getState();
     if (currentItemId === null) {
       // TODO: set the now-undismissed item as the current one?
@@ -153,5 +157,31 @@ export class Actions {
       `Skipping ${folder}/${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH + 5, true)} until next session`
     );
     this.getNext();
+  };
+
+  createSnippet = async (firstReview?: number) => {
+    const editor = this.plugin.app.workspace.activeEditor?.editor;
+    if (!editor) return null;
+    const view =
+      this.plugin.getActiveReviewView() ??
+      this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view) return null;
+    const result = await this.plugin.reviewManager.createSnippet(
+      editor,
+      view,
+      firstReview
+    );
+    return result;
+  };
+
+  createCard = async () => {
+    const editor = this.plugin.app.workspace.activeEditor?.editor;
+    if (!editor) return null;
+    const view =
+      this.plugin.getActiveReviewView() ??
+      this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view) return null;
+    const result = await this.plugin.reviewManager.createCard(editor, view);
+    return result;
   };
 }

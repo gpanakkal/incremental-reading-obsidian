@@ -138,21 +138,30 @@ export async function invalidateCacheOnMatch(
   await invalidateItemQuery(currentItem.data.id);
 }
 /**
- * Deep merges updated fields into local cache on the item ID key.
- *  Note that iterables are overwritten instead of being merged
+ * Deep merges updated fields into locally cached item data.
+ * Iterables are overwritten instead of being merged.
  * @param updates a partial object containing updates, or an updater function
  */
 export function updateQueryCache<T extends ReviewItem, D extends T['data']>(
   id: string,
   updates: DeepPartial<D> | ((cachedData: T) => ReviewItem)
 ) {
+  const { currentItemId } = store.getState();
   if (typeof updates === 'function') {
-    return queryClient.setQueryData(['item', id], updates);
+    queryClient.setQueryData(['item', id], updates);
+    if (id === currentItemId)
+      queryClient.setQueryData(['current-review-item'], updates);
+  } else {
+    queryClient.setQueryData(['item', id], (prev: T) => ({
+      ...prev,
+      data: deepMerge(prev.data, updates),
+    }));
+    if (id === currentItemId)
+      queryClient.setQueryData(['current-review-item'], (prev: T) => ({
+        ...prev,
+        data: deepMerge(prev.data, updates),
+      }));
   }
-  return queryClient.setQueryData(['item', id], (prev: T) => ({
-    ...prev,
-    data: deepMerge(prev.data, updates),
-  }));
 }
 // #endregion
 

@@ -54,7 +54,8 @@ function GlobalActions() {
  * Actions common to articles, snippets, and cards
  */
 function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
-  const { dismissItem, unDismissItem, skipItem } = useReviewContext();
+  const { dismissItem, unDismissItem, skipItem, createSnippet, createCard } =
+    useReviewContext();
   const isDismissed = reviewItem.data.dismissed;
 
   return (
@@ -77,6 +78,20 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
         tooltip="Skip for current review session"
         handleClick={() => {
           skipItem(reviewItem);
+        }}
+      />
+      <Button
+        label={'Snip'}
+        tooltip="Extract selected text to a new snippet"
+        handleClick={async () => {
+          await createSnippet();
+        }}
+      />
+      <Button
+        label={'Create card'}
+        // tooltip="Create card"
+        handleClick={async () => {
+          await createCard();
         }}
       />
     </>

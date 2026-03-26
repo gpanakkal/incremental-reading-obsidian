@@ -59,18 +59,13 @@ export default class IncrementalReadingPlugin extends Plugin {
         const editor = this.app.workspace.activeEditor?.editor;
         if (!editor) return false;
 
-        const reviewView = this.getActiveReviewView();
+        const view =
+          this.getActiveReviewView() ??
+          this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view) return false;
         if (checking) return true;
 
-        if (reviewView) {
-          void this.reviewManager.createSnippet(editor, reviewView);
-        }
-
-        const markdownView =
-          this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (markdownView) {
-          void this.reviewManager.createSnippet(editor, markdownView);
-        }
+        void this.reviewManager.createSnippet(editor, view);
       },
     });
 
