@@ -27,6 +27,7 @@ import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import {
   generateId,
   getContentSlice,
+  getDateString,
   getEndOfToday,
   validatePriority,
 } from '../utils';
@@ -178,6 +179,62 @@ export class ArticleManager extends ItemManager {
         `Failed to import article "${file.name}"`,
         ERROR_NOTICE_DURATION_MS
       );
+      console.error(error);
+    }
+  }
+
+  /**
+   * Create a new empty article
+   */
+  async create(priority: number) {
+    try {
+      const newNoteName = Obsidian.createTitle(
+        `New article ${getDateString()}`
+      );
+      const articleFile = await Obsidian.createNote({
+        content: '',
+        frontmatter: {
+          created: new Date().toISOString(),
+        },
+        fileName: `${newNoteName}.md`,
+        directory: Obsidian.getDirectory('article'),
+        app: this.app,
+      });
+
+      if (!articleFile) {
+        throw new Error(`Failed to create empty article`);
+      }
+
+      const frontmatterUpdates: FrontMatterUpdates = {
+        tags: ARTICLE_TAG,
+      };
+
+      await Obsidian.updateFrontMatter(
+        articleFile,
+        frontmatterUpdates,
+        this.app
+      );
+
+      // Insert into database with immediate due time
+      const dueTime = Date.now();
+      const result = await this.repo.mutate(
+        'INSERT INTO article (id, reference, due, priority) VALUES ($1, $2, $3, $4)',
+        [
+          crypto.randomUUID(),
+          `${ARTICLE_DIRECTORY}/${articleFile.name}`,
+          dueTime,
+          priority,
+        ]
+      );
+
+      const articleRow = result[0][0] as ArticleRow | undefined;
+      if (!articleRow) return;
+      return {
+        data: ArticleManager.rowToBase(articleRow),
+        file: articleFile,
+      };
+    } catch (error) {
+      new Notice(`Failed to create empty article`, ERROR_NOTICE_DURATION_MS);
       console.error(error);
     }
   }

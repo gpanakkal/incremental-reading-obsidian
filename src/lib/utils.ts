@@ -22,16 +22,26 @@ export function generateId(length: number = 5): string {
     .slice(2, length + 2); // remove the decimal place
 }
 
-// /**
-//  * Get a title-safe date and time in UTC.
-//  * Uses the current time if a Date is not passed
-//  */
-// function getDateTimeString(date?: Date) {
-//   const dateToUse = date ?? new Date();
-//   let formatted = `${dateToUse.getUTCFullYear()}-${dateToUse.getUTCMonth() + 1}-${dateToUse.getUTCDate()}`;
-//   formatted += `T${dateToUse.getHours()}H${dateToUse.getMinutes()}M`;
-//   return formatted;
-// }
+/**
+ * Get a title-safe date and time in UTC.
+ * Uses the current time if a Date is not passed
+ */
+export function getDateTimeStringUTC(date?: Date) {
+  const dateToUse = date ?? new Date();
+  let formatted = `${dateToUse.getUTCFullYear()}-${dateToUse.getUTCMonth() + 1}-${dateToUse.getUTCDate()}`;
+  formatted += `T${dateToUse.getHours()}H${dateToUse.getMinutes()}M`;
+  return formatted;
+}
+
+/**
+ * Get a title-safe date in local time.
+ * Uses the current time if a Date is not passed
+ */
+export function getDateString(date?: Date) {
+  const dateToUse = date ?? new Date();
+  const formatted = `${dateToUse.getFullYear()}-${dateToUse.getMonth() + 1}-${dateToUse.getDate()}`;
+  return formatted;
+}
 
 /**
  * Get the rollover-adjusted end of day as a Unix timestamp.

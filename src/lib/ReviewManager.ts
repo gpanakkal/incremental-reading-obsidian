@@ -120,6 +120,10 @@ export default class ReviewManager {
     return this.articles.import(file, priority);
   }
 
+  async createEmptyArticle(priority: number) {
+    return this.articles.create(priority);
+  }
+
   async reviewArticle(
     article: IArticleBase,
     reviewTime?: number,

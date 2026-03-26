@@ -127,6 +127,19 @@ export default class IncrementalReadingPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: 'create-empty-article',
+      name: 'Create empty article',
+      checkCallback: (checking: boolean) => {
+        if (!this.reviewManager) return false;
+
+        if (checking) return true;
+        void this.reviewManager
+          .createEmptyArticle(this.settings.defaultPriority)
+          .then((article) => void this.learn(article));
+      },
+    });
+
+    this.addCommand({
       id: 'learn',
       name: 'Learn',
       callback: async () => await this.learn(),

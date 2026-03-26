@@ -202,7 +202,7 @@ export class ObsidianHelpers {
   }
 
   /**
-   * Shared logic for creating snippets and cards.
+   * Shared logic for creating items from (possibly empty) text.
    * Throws if it fails to create the file.
    */
   static async createFromText(
