@@ -217,22 +217,14 @@ export class ArticleManager extends ItemManager {
 
       // Insert into database with immediate due time
       const dueTime = Date.now();
-      const result = await this.repo.mutate(
+      const id = crypto.randomUUID();
+      await this.repo.mutate(
         'INSERT INTO article (id, reference, due, priority) VALUES ($1, $2, $3, $4)',
-        [
-          crypto.randomUUID(),
-          `${ARTICLE_DIRECTORY}/${articleFile.name}`,
-          dueTime,
-          priority,
-        ]
+        [id, `${ARTICLE_DIRECTORY}/${articleFile.name}`, dueTime, priority]
       );
 
-      const articleRow = result[0][0] as ArticleRow | undefined;
-      if (!articleRow) return;
-      return {
-        data: ArticleManager.rowToBase(articleRow),
-        file: articleFile,
-      };
+      const result = await this.fetch(id);
+      return result ?? undefined;
     } catch (error) {
       new Notice(`Failed to create empty article`, ERROR_NOTICE_DURATION_MS);
       console.error(error);
