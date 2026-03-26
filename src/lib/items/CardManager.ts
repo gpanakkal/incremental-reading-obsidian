@@ -144,14 +144,14 @@ export class CardManager extends ItemManager {
     const currentFile = view.file;
     if (!currentFile) {
       new Notice(`A Markdown file must be active`, ERROR_NOTICE_DURATION_MS);
-      return;
+      return null;
     }
 
     const block = Obsidian.getCurrentContent(editor, currentFile);
     // TODO: ensure block content is correct for bullet lists (should only use the current bullet) and code blocks (get the whole code block)
     if (!block) {
       new Notice('No block content found', ERROR_NOTICE_DURATION_MS);
-      return;
+      return null;
     }
     const { content, line: blockLine } = block;
 
@@ -162,12 +162,14 @@ export class CardManager extends ItemManager {
 
     try {
       const withDelimiters = this.delimitText(content, bounds)[0]; // TODO: create many cards at once and transclude/link all?
-      const { cardFile } = await this.createFileAndEntry(
+      const reviewCard = await this.createFileAndEntry(
         withDelimiters,
         currentFile
       );
+      if (!reviewCard) throw new Error(`Failed to create card`);
+
       const linkToCard = Obsidian.generateMarkdownLink(
-        cardFile,
+        reviewCard.file,
         currentFile,
         this.app,
         TRANSCLUSION_HIDE_TITLE_ALIAS
@@ -175,11 +177,13 @@ export class CardManager extends ItemManager {
       Obsidian.transcludeLink(editor, linkToCard, blockLine);
       // move the cursor to the next block
       editor.setSelection({ line: blockLine + 1, ch: 0 });
+      return reviewCard;
     } catch (error) {
       if (error instanceof Error) {
         console.error(error);
       }
       new Notice(`Failed to create card`);
+      return null;
     }
   }
 
@@ -239,9 +243,8 @@ export class CardManager extends ItemManager {
         params
       );
 
-      await this.repo.query('SELECT * FROM srs_card WHERE id = $1', [card.id]);
-
-      return { card, cardFile };
+      const reviewCard = await this.fetch(card.id);
+      return reviewCard;
     } catch (error) {
       console.error(error);
       // TODO: error handling

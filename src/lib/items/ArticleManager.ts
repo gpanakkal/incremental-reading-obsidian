@@ -154,14 +154,10 @@ export class ArticleManager extends ItemManager {
 
       // Insert into database with immediate due time
       const dueTime = Date.now();
-      const result = await this.repo.mutate(
+      const id = crypto.randomUUID();
+      await this.repo.mutate(
         'INSERT INTO article (id, reference, due, priority) VALUES ($1, $2, $3, $4)',
-        [
-          crypto.randomUUID(),
-          `${ARTICLE_DIRECTORY}/${articleFile.name}`,
-          dueTime,
-          priority,
-        ]
+        [id, `${ARTICLE_DIRECTORY}/${articleFile.name}`, dueTime, priority]
       );
 
       const titleSlice = getContentSlice(
@@ -173,6 +169,7 @@ export class ArticleManager extends ItemManager {
         `Imported "${titleSlice}" with priority ${priority / 10}`,
         SUCCESS_NOTICE_DURATION_MS
       );
+      const result = await this.fetch(id);
       return result;
     } catch (error) {
       new Notice(
@@ -180,6 +177,7 @@ export class ArticleManager extends ItemManager {
         ERROR_NOTICE_DURATION_MS
       );
       console.error(error);
+      return null;
     }
   }
 
@@ -224,10 +222,11 @@ export class ArticleManager extends ItemManager {
       );
 
       const result = await this.fetch(id);
-      return result ?? undefined;
+      return result;
     } catch (error) {
       new Notice(`Failed to create empty article`, ERROR_NOTICE_DURATION_MS);
       console.error(error);
+      return null;
     }
   }
 
@@ -332,15 +331,18 @@ export class ArticleManager extends ItemManager {
       reviewed +
       (nextReviewInterval ?? (await this.nextReviewInterval(article)));
     try {
-      await this.repo.mutate(
-        'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
-        [crypto.randomUUID(), article.id, reviewed]
-      );
+      const id = crypto.randomUUID();
+      await Promise.all([
+        this.repo.mutate(
+          'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
+          [id, article.id, reviewed]
+        ),
 
-      await this.repo.mutate(
-        `UPDATE article SET dismissed = 0, due = $1 WHERE id = $2`,
-        [nextReview, article.id]
-      );
+        this.repo.mutate(
+          `UPDATE article SET dismissed = 0, due = $1 WHERE id = $2`,
+          [nextReview, article.id]
+        ),
+      ]);
     } catch (error) {
       console.error(error);
     }

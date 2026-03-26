@@ -149,7 +149,7 @@ export class SnippetManager extends ItemManager {
         `Snipping not supported from ${view.getViewType()}`,
         ERROR_NOTICE_DURATION_MS
       );
-      return;
+      return null;
     }
 
     // console.log(
@@ -159,7 +159,7 @@ export class SnippetManager extends ItemManager {
     const selection = editor.getSelection() || view.getSelection();
     if (!selection) {
       new Notice('Text must be selected', ERROR_NOTICE_DURATION_MS);
-      return;
+      return null;
     }
     const snippetFile = await Obsidian.createFromText(
       selection,
@@ -276,8 +276,9 @@ export class SnippetManager extends ItemManager {
         `(id, reference, due, priority, parent, start_offset, end_offset) ` +
         `VALUES ($1, $2, $3, $4, $5, $6, $7)`;
       // save the snippet to the database
-      const result = await this.repo.mutate(query, [
-        crypto.randomUUID(),
+      const id = crypto.randomUUID();
+      await this.repo.mutate(query, [
+        id,
         `${SNIPPET_DIRECTORY}/${snippetFile.name}`,
         reviewTime,
         priority,
@@ -291,6 +292,8 @@ export class SnippetManager extends ItemManager {
         `snippet created: ${snippetFile.basename}`,
         SUCCESS_NOTICE_DURATION_MS
       );
+
+      const result = await this.fetch(id);
       return result;
     } catch (error) {
       new Notice(
@@ -298,6 +301,7 @@ export class SnippetManager extends ItemManager {
         ERROR_NOTICE_DURATION_MS
       );
       console.error(error);
+      return null;
     }
   }
 

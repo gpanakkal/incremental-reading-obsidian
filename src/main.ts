@@ -135,7 +135,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         if (checking) return true;
         void this.reviewManager
           .createEmptyArticle(this.settings.defaultPriority)
-          .then((article) => void this.learn(article));
+          .then((article) => void this.learn(article ?? undefined));
       },
     });
 
