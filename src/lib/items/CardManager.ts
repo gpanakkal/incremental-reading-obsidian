@@ -122,17 +122,9 @@ export class CardManager extends ItemManager {
     try {
       const cardsDue = (
         await this.fetchMany({ dueBy: dueTime, limit, excludeIds })
-      ).map(
-        async (item) => ({
-          data: CardManager.rowToDisplay(item),
-          file: Obsidian.getNote(item.reference, this.app),
-        }),
-        this
-      );
-      const result = await Promise.all(cardsDue);
-      return result.filter(
-        (card): card is { data: ISRSCardDisplay; file: TFile } =>
-          card.file !== null
+      ).map((item) => this.rowToReviewCard(item), this);
+      return cardsDue.filter(
+        (card): card is ReviewCard => !!card && card.file !== null
       );
     } catch (error) {
       console.error(error);

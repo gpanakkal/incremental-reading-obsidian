@@ -1,7 +1,7 @@
 // Helpers for using Obsidian's internal MarkdownEditor
 
 import type ReviewView from '#/views/ReviewView';
-import type { Extension, Facet } from '@codemirror/state';
+import type { Extension } from '@codemirror/state';
 import type { EditorView, ViewUpdate } from '@codemirror/view';
 import type { App, Editor, MarkdownView } from 'obsidian';
 import type { EmbedMarkdownComponent, MobileToolbar } from 'obsidian-typings';
@@ -16,14 +16,6 @@ interface ExtractedEmbedMarkdownComponent extends EmbedMarkdownComponent {
   showEditor: () => void;
   editMode?: ExtractedEditMode;
 }
-
-type FacetProvider = {
-  dependencies: readonly unknown[];
-  facet: Facet<unknown>;
-  type: 0 | 1 | 2;
-  id: number;
-  value: unknown;
-};
 
 export interface ExtractedMobileToolbar extends MobileToolbar {
   update: () => void;
@@ -46,12 +38,6 @@ export class ExtractedMarkdownEditor {
   editor: Editor;
   cm: EditorView;
   set: (data: string) => void;
-}
-
-interface MarkdownEditorPrototype {
-  constructor: () => ExtractedMarkdownEditor;
-  /** Original extension building method (use to copy extensions) */
-  buildLocalExtensions: () => FacetProvider[];
 }
 
 function getExtractedEmbedMd(app: App): ExtractedEmbedMarkdownComponent {

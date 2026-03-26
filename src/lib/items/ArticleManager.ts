@@ -239,16 +239,10 @@ export class ArticleManager extends ItemManager {
     try {
       const articlesDue = (
         await this.fetchMany({ dueBy: dueTime, limit, excludeIds })
-      ).map(
-        async (item) => ({
-          data: ArticleManager.rowToBase(item),
-          file: Obsidian.getNote(item.reference, this.app),
-        }),
-        this
-      );
-      const result = await Promise.all(articlesDue);
-      return result.filter(
-        (article): article is ReviewArticle => article.file !== null
+      ).map((row) => this.rowToReviewArticle(row), this);
+      return articlesDue.filter(
+        (article): article is ReviewArticle =>
+          !!article && article.file !== null
       );
     } catch (error) {
       console.error(error);
@@ -358,21 +352,18 @@ export class ArticleManager extends ItemManager {
       return;
     }
 
+    const { file } = article;
+    const currentName = file.basename;
     try {
-      const { file } = article;
-      const currentName = file.basename;
       await Obsidian.renameFile(file, newName, this.app);
       const newReference = `${ARTICLE_DIRECTORY}/${file.basename}.${file.extension}`;
-      await this.repo
-        .mutate(`UPDATE article SET reference = $1 WHERE id = $2`, [
-          newReference,
-          article.data.id,
-        ])
-        .catch(async () => {
-          await Obsidian.renameFile(file, currentName, this.app);
-        });
+      await this.repo.mutate(
+        `UPDATE article SET reference = $1 WHERE id = $2`,
+        [newReference, article.data.id]
+      );
     } catch (error) {
       console.error(error);
+      await Obsidian.renameFile(file, currentName, this.app);
     }
   }
 

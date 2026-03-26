@@ -129,10 +129,10 @@ export class SQLJSRepository implements SQLiteRepository {
    * @param query
    * @returns an empty array on success
    */
-  async mutate(query: string, params: Primitive[] = []) {
+  mutate(query: string, params: Primitive[] = []) {
     const result = this._execSql(query, params);
     void this.save();
-    return result as [[]];
+    return result as [][];
   }
 
   /**

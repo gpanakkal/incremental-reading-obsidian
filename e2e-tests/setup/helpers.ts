@@ -133,7 +133,7 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
   await window.waitForLoadState('domcontentloaded');
 
   // Stub the file picker
-  await app.evaluate(async ({ dialog }, fakePath) => {
+  await app.evaluate(({ dialog }, fakePath) => {
     dialog.showOpenDialogSync = () => {
       return [fakePath];
     };

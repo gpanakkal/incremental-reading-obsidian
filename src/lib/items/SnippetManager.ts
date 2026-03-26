@@ -107,16 +107,11 @@ export class SnippetManager extends ItemManager {
     try {
       const snippetsDue = (
         await this.fetchMany({ dueBy: dueTime, limit, excludeIds })
-      ).map(
-        async (item) => ({
-          data: SnippetManager.rowToBase(item),
-          file: Obsidian.getNote(item.reference, this.app),
-        }),
-        this
-      );
+      ).map(async (item) => this.rowToReviewSnippet(item), this);
       const result = await Promise.all(snippetsDue);
       return result.filter(
-        (snippet): snippet is ReviewSnippet => snippet.file !== null
+        (snippet): snippet is ReviewSnippet =>
+          !!snippet && snippet.file !== null
       );
     } catch (error) {
       console.error(error);

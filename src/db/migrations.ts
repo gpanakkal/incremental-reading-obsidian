@@ -105,7 +105,6 @@ export function getPendingMigrations(db: Database): Migration[] {
  * @throws if migrations fail
  */
 export function applyMigrations(db: Database): boolean {
-  const currentVersion = getSchemaVersion(db);
   const pendingMigrations = getPendingMigrations(db);
 
   if (pendingMigrations.length === 0) {
@@ -128,8 +127,7 @@ export function applyMigrations(db: Database): boolean {
     }
   }
 
-  const newVersion = getSchemaVersion(db);
-  // console.info(`Database schema updated to version ${newVersion}`);
+  // console.info(`Database schema updated to version ${getSchemaVersion(db)}`);
 
   return true;
 }
