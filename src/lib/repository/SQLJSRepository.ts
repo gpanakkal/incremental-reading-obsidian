@@ -118,8 +118,8 @@ export class SQLJSRepository implements SQLiteRepository {
    * @param query
    * @returns an array of rows
    */
-  async query(query: string, params: Primitive[] = []) {
-    const result = await this.execSql(query, params);
+  query(query: string, params: Primitive[] = []) {
+    const result = this._execSql(query, params);
     const rows = result[0];
     return rows;
   }
@@ -130,7 +130,7 @@ export class SQLJSRepository implements SQLiteRepository {
    * @returns an empty array on success
    */
   async mutate(query: string, params: Primitive[] = []) {
-    const result = await this.execSql(query, params);
+    const result = this._execSql(query, params);
     void this.save();
     return result;
   }
@@ -144,7 +144,7 @@ export class SQLJSRepository implements SQLiteRepository {
    * @param query
    * @returns an array where each top-level element is the result of a query
    */
-  async execSql(query: string, params: Primitive[] = []) {
+  _execSql(query: string, params: Primitive[] = []) {
     // console.log({ query, params });
     try {
       const results = this.db.exec(query, this.coerceParams(params));
@@ -247,28 +247,6 @@ export class SQLJSRepository implements SQLiteRepository {
       console.error(error);
       return null;
     }
-  }
-
-  /** Print database schema in the console */
-  _getSchema(tableName: string) {
-    if (!this.db) throw new Error('Database was not initialized on repository');
-    const result = this.db.exec(
-      'SELECT sql from sqlite_schema WHERE name = $1',
-      [tableName]
-    );
-    if (!result) {
-      console.warn(`No schema found for table ${tableName}`);
-      return;
-    }
-
-    const schemaString = result[0].values[0][0];
-    if (!schemaString) {
-      console.warn('No schema returned');
-      return;
-    }
-    const segments = schemaString.toString().split('\n');
-    // eslint-disable-next-line no-console
-    segments.forEach(console.info);
   }
 
   /**

@@ -106,7 +106,9 @@ export function IREditor({
   // extend the MarkdownEditor extracted from Obsidian
   useEffect(() => {
     const setupEditor = () => {
-      // eslint-disable-next-line react-hooks/unsupported-syntax
+      /* eslint-disable-next-line react-hooks/unsupported-syntax --
+       * Required since we have to create CustomEditor at runtime
+       **/
       class CustomEditor extends reviewView.plugin.MarkdownEditor {
         isIncrementalReadingEditor = true;
 

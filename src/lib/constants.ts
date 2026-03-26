@@ -74,7 +74,7 @@ export const CLOZE_GROUPS_PATTERN = new RegExp(
   `([\\s\\S]*)` + CLOZE_PATTERN_BASE + `([\\s\\S]*)`
 );
 
-// eslint-disable-next-line no-useless-escape
+// eslint-disable-next-line no-useless-escape -- this string is parsed twice
 export const CARD_ANSWER_REPLACEMENT = `<mark class="ir-hidden-answer">\\\_\\\_\\\_\\\_\\\_\\\_</mark>`;
 
 export const FRONTMATTER_PATTERN = /^(---\n[\s\S]*?\n---\n)([\s\S]*)$/;

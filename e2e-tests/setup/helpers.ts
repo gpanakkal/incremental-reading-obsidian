@@ -1,4 +1,3 @@
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'path';
 import {
@@ -24,7 +23,7 @@ export const shouldCleanup = process.env.E2E_CLEANUP === '1';
 
 export async function createVaultCopy(prefix: string, subDirectory?: string) {
   await fs.mkdir(testVaultsDir, { recursive: true });
-  const id = crypto.randomBytes(4).toString('hex');
+  const id = crypto.randomUUID().slice(0, 8);
   const pathSegments = [testVaultsDir];
   if (subDirectory) pathSegments.push(subDirectory);
   const name = prefix ? `${prefix}-${id}` : id;

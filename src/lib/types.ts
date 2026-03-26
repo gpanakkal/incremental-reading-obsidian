@@ -170,8 +170,11 @@ export type FrontMatterUpdates = SafeOmit<PluginFrontMatter, 'tags'> & {
 };
 
 export interface SQLiteRepository {
-  query(query: string, params?: Primitive[]): Promise<RowTypes[]>;
+  query(query: string, params?: Primitive[]): RowTypes[] | Promise<RowTypes[]>;
   mutate(query: string, params?: Primitive[]): Promise<RowTypes[][]>;
-  execSql(query: string, params?: Primitive[]): Promise<RowTypes[][]>;
+  _execSql(
+    query: string,
+    params?: Primitive[]
+  ): RowTypes[][] | Promise<RowTypes[][]>;
   handleFileChange(file: TAbstractFile): Promise<void>;
 }

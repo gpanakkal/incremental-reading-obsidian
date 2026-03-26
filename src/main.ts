@@ -17,7 +17,6 @@ import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
 import { PriorityModal } from './views/PriorityModal';
-import { QueryModal } from './views/QueryModal';
 import ReviewView from './views/ReviewView';
 import { initReviewCommands } from './lib/review-commands';
 
@@ -143,19 +142,6 @@ export default class IncrementalReadingPlugin extends Plugin {
           return;
         }
         await this.reviewManager._logItems();
-      },
-    });
-
-    this.addCommand({
-      // TODO: remove after done testing
-      id: 'query-db',
-      name: '(dev) query the database',
-      callback: async () => {
-        if (!this.reviewManager) {
-          new Notice(`Plugin still loading`);
-          return;
-        }
-        new QueryModal(this.app, this.reviewManager).open();
       },
     });
 
