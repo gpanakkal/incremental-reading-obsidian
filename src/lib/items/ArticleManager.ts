@@ -25,7 +25,12 @@ import {
   TEXT_REVIEW_MULTIPLIER_STEP,
 } from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
-import { generateId, getContentSlice, getEndOfToday } from '../utils';
+import {
+  generateId,
+  getContentSlice,
+  getEndOfToday,
+  validatePriority,
+} from '../utils';
 import { ItemManager } from './ItemManager';
 import type { SQLiteRepository } from '../types';
 import type { App, TFile } from 'obsidian';
@@ -326,11 +331,7 @@ export class ArticleManager extends ItemManager {
    * Change the priority of an article and recalculate its next due date
    */
   async reprioritize(article: IArticleBase, newPriority: number) {
-    if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
-      throw new TypeError(
-        `Priority must be an integer between 10 and 50 inclusive; received ${newPriority}`
-      );
-    }
+    validatePriority(newPriority);
     const { priority: _, ...rest } = article;
     const lastReview = await this.getLastReview(article);
     const newInterval = await this.nextReviewInterval({

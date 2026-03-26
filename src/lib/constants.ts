@@ -41,7 +41,9 @@ export const TABLE_NAMES = Object.freeze([
   'srs_card_review',
 ] as const);
 
-export const DEFAULT_PRIORITY = 25;
+export const MINIMUM_PRIORITY = 10;
+export const MAXIMUM_PRIORITY = 50;
+export const DEFAULT_PRIORITY = 30;
 
 export const TEXT_BASE_REVIEW_INTERVAL = MS_PER_DAY * 1;
 export const TEXT_REVIEW_MULTIPLIER_BASE = 1.01;

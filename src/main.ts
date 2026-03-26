@@ -109,7 +109,14 @@ export default class IncrementalReadingPlugin extends Plugin {
         return;
       }
 
-      new PriorityModal(this.app, this.reviewManager, file).open();
+      if (this.settings.showImportDialog) {
+        new PriorityModal(this, file).open();
+      } else {
+        void this.reviewManager.importArticle(
+          file,
+          this.settings.defaultPriority
+        );
+      }
     };
 
     this.addCommand({
@@ -125,7 +132,14 @@ export default class IncrementalReadingPlugin extends Plugin {
         if (!fileView?.file) return false;
 
         if (checking) return true;
-        new PriorityModal(this.app, this.reviewManager, fileView.file).open();
+        if (this.settings.showImportDialog) {
+          new PriorityModal(this, fileView.file).open();
+        } else {
+          void this.reviewManager.importArticle(
+            fileView.file,
+            this.settings.defaultPriority
+          );
+        }
       },
     });
 

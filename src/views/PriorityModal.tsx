@@ -1,16 +1,16 @@
 import { Modal } from 'obsidian';
 import { render } from 'preact';
-import type ReviewManager from '#/lib/ReviewManager';
 import { PriorityModalContent } from '../components/PriorityModalContent';
-import type { App, TFile } from 'obsidian';
+import type { TFile } from 'obsidian';
+import type IncrementalReadingPlugin from '#/main';
 
 export class PriorityModal extends Modal {
-  reviewManager: ReviewManager;
+  plugin: IncrementalReadingPlugin;
   file: TFile;
 
-  constructor(app: App, reviewManager: ReviewManager, file: TFile) {
-    super(app);
-    this.reviewManager = reviewManager;
+  constructor(plugin: IncrementalReadingPlugin, file: TFile) {
+    super(plugin.app);
+    this.plugin = plugin;
     this.file = file;
   }
 
@@ -18,7 +18,7 @@ export class PriorityModal extends Modal {
     const { contentEl } = this;
     render(
       <PriorityModalContent
-        reviewManager={this.reviewManager}
+        plugin={this.plugin}
         file={this.file}
         onClose={() => this.close()}
       />,

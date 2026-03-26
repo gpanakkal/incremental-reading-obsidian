@@ -1,22 +1,22 @@
 import { useState } from 'preact/hooks';
-import { DEFAULT_PRIORITY } from '#/lib/constants';
-import type ReviewManager from '#/lib/ReviewManager';
-import { transformPriority } from '#/lib/utils';
+import { MAXIMUM_PRIORITY, MINIMUM_PRIORITY } from '#/lib/constants';
+import { toDisplayPriority, transformPriority } from '#/lib/utils';
 import type { TFile } from 'obsidian';
+import type IncrementalReadingPlugin from '#/main';
 
 interface PriorityModalProps {
-  reviewManager: ReviewManager;
+  plugin: IncrementalReadingPlugin;
   file: TFile;
   onClose: () => void;
 }
 
 export function PriorityModalContent({
-  reviewManager,
+  plugin,
   file,
   onClose,
 }: PriorityModalProps) {
   const [display, setDisplay] = useState({
-    priority: DEFAULT_PRIORITY / 10,
+    priority: plugin.settings.defaultPriority / 10,
   });
 
   const updateDisplay = (updates: Partial<typeof display>) => {
@@ -25,17 +25,19 @@ export function PriorityModalContent({
 
   const handleSubmit = async () => {
     const priority = transformPriority(display.priority);
-    await reviewManager.importArticle(file, priority);
+    await plugin.reviewManager.importArticle(file, priority);
     onClose();
   };
+
+  const tooltip =
+    `Set the priority for this article. Priority ranges from ` +
+    `${toDisplayPriority(MINIMUM_PRIORITY)} (highest) to ` +
+    `${toDisplayPriority(MAXIMUM_PRIORITY)} (lowest).`;
 
   return (
     <div className="ir-priority-modal">
       <h2>Import article</h2>
-      <p>
-        Set the priority for this article. Priority ranges from 1 (highest) to 5
-        (lowest).
-      </p>
+      <p>{tooltip}</p>
       <div className="ir-priority-input-container">
         <label>
           Priority:{' '}
