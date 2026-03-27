@@ -19,11 +19,13 @@ import type { ReviewItem, SQLiteRepository } from './lib/types';
 import { PriorityModal } from './views/PriorityModal';
 import ReviewView from './views/ReviewView';
 import { initReviewCommands } from './lib/review-commands';
+import { Actions } from './lib/Actions';
 
 export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;
   reviewManager: ReviewManager;
   store: typeof store;
+  actions: Actions;
 
   MarkdownEditor: typeof ExtractedMarkdownEditor;
 
@@ -219,6 +221,7 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         this.store = store;
         await this.initReviewManager();
+        this.actions = new Actions(this);
         this.registerView(
           ReviewView.viewType,
           (leaf) => new ReviewView(leaf, this, this.reviewManager)

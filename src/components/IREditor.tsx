@@ -78,15 +78,7 @@ export function IREditor({
 }: IREditorProps) {
   const dispatch = useDispatch();
 
-  const {
-    reviewView,
-    reviewManager,
-    reviewArticle,
-    reviewSnippet,
-    gradeCard,
-    dismissItem,
-    skipItem,
-  } = useReviewContext();
+  const { reviewView, reviewManager, actions } = useReviewContext();
   const elRef = useRef<HTMLDivElement | null>(null);
   const internalRef = useRef<EditorView | null>(null);
   const [titlePortalEl, setTitlePortalEl] = useState<Element | null>(null);
@@ -252,12 +244,15 @@ export function IREditor({
       // Enable review mode in the action bar extension
       // This tells the extension we're in the review interface context
       const reviewCallbacks: ReviewCallbacks = {
-        reviewArticle: async (item: ReviewArticle) => reviewArticle(item),
-        reviewSnippet: async (item: ReviewSnippet) => reviewSnippet(item),
+        reviewArticle: async (item: ReviewArticle) =>
+          actions.reviewArticle(item),
+        reviewSnippet: async (item: ReviewSnippet) =>
+          actions.reviewSnippet(item),
         gradeCard: async (item: ReviewCard, grade: Grade) =>
-          gradeCard(item, grade),
-        dismissItem: async (reviewItem: ReviewItem) => dismissItem(reviewItem),
-        skipItem: (reviewItem: ReviewItem) => skipItem(reviewItem),
+          actions.gradeCard(item, grade),
+        dismissItem: async (reviewItem: ReviewItem) =>
+          actions.dismissItem(reviewItem),
+        skipItem: (reviewItem: ReviewItem) => actions.skipItem(reviewItem),
         setShowAnswer: (show) => dispatch(setShowAnswer(show)),
         getCurrentItem: () => itemRef.current,
       };

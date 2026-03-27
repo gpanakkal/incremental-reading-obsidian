@@ -54,8 +54,7 @@ function GlobalActions() {
  * Actions common to articles, snippets, and cards
  */
 function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
-  const { dismissItem, unDismissItem, skipItem, createSnippet, createCard } =
-    useReviewContext();
+  const { actions } = useReviewContext();
   const isDismissed = reviewItem.data.dismissed;
 
   return (
@@ -64,34 +63,34 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
         <Button
           label="Un-dismiss"
           tooltip="Restore item to queue"
-          handleClick={async () => await unDismissItem(reviewItem)}
+          handleClick={async () => await actions.unDismissItem(reviewItem)}
         />
       ) : (
         <Button
           label="Dismiss"
           tooltip="Stop scheduling this item for review"
-          handleClick={async () => await dismissItem(reviewItem)}
+          handleClick={async () => await actions.dismissItem(reviewItem)}
         />
       )}
       <Button
         label={'Skip'}
         tooltip="Skip for current review session"
         handleClick={() => {
-          skipItem(reviewItem);
+          actions.skipItem(reviewItem);
         }}
       />
       <Button
         label={'Snip'}
         tooltip="Extract selected text to a new snippet"
         handleClick={async () => {
-          await createSnippet();
+          await actions.createSnippet();
         }}
       />
       <Button
         label={'Create card'}
         // tooltip="Create card"
         handleClick={async () => {
-          await createCard();
+          await actions.createCard();
         }}
       />
     </>
@@ -106,7 +105,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
   const [display, setDisplay] = useState({
     priority: article.data.priority / 10,
   });
-  const { reviewArticle, reprioritize } = useReviewContext();
+  const { actions } = useReviewContext();
 
   const updateDisplay = (updates: Partial<typeof display>) => {
     setDisplay((prev) => ({ ...prev, ...updates }));
@@ -121,7 +120,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
       <Button
         label="Continue"
         tooltip="Mark article as reviewed and go to the next"
-        handleClick={async () => await reviewArticle(article)}
+        handleClick={async () => await actions.reviewArticle(article)}
       />
       <label className={'ir-priority-label'}>
         Priority
@@ -136,11 +135,11 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
             updateDisplay({ priority: transformed / 10 });
           }}
           onBlur={() => {
-            void reprioritize(article, display.priority);
+            void actions.reprioritize(article, display.priority);
           }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
-              void reprioritize(article, display.priority);
+              void actions.reprioritize(article, display.priority);
             } else if (e.key === 'Escape') {
               updateDisplay({ priority: article.data.priority });
               e.currentTarget.select();
@@ -161,7 +160,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
   const [display, setDisplay] = useState({
     priority: snippet.data.priority / 10,
   });
-  const { reviewSnippet, reprioritize } = useReviewContext();
+  const { actions } = useReviewContext();
 
   const updateDisplay = (updates: Partial<typeof display>) => {
     setDisplay((prev) => ({ ...prev, ...updates }));
@@ -176,7 +175,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
       <Button
         label="Continue"
         tooltip="Mark snippet as reviewed and go to the next"
-        handleClick={async () => await reviewSnippet(snippet)}
+        handleClick={async () => await actions.reviewSnippet(snippet)}
       />
       <div className="ir-priority-container">
         <label className={'ir-priority-label'}>
@@ -191,10 +190,10 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
               const transformed = transformPriority(e.currentTarget.value);
               updateDisplay({ priority: transformed / 10 });
             }}
-            onBlur={() => void reprioritize(snippet, display.priority)}
+            onBlur={() => void actions.reprioritize(snippet, display.priority)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
-                void reprioritize(snippet, display.priority);
+                void actions.reprioritize(snippet, display.priority);
               } else if (e.key === 'Escape') {
                 updateDisplay({ priority: snippet.data.priority });
                 e.currentTarget.select();
@@ -211,7 +210,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
 function CardActions({ card }: { card: ReviewCard }) {
   const dispatch = useDispatch();
   const showAnswer = useAppSelector((state) => state.showAnswer);
-  const { gradeCard } = useReviewContext();
+  const { actions } = useReviewContext();
 
   return (
     <>
@@ -219,19 +218,21 @@ function CardActions({ card }: { card: ReviewCard }) {
         <>
           <Button
             label="🔁 Again"
-            handleClick={async () => await gradeCard(card, Rating.Again)}
+            handleClick={async () =>
+              await actions.gradeCard(card, Rating.Again)
+            }
           />
           <Button
             label="👎 Hard"
-            handleClick={async () => await gradeCard(card, Rating.Hard)}
+            handleClick={async () => await actions.gradeCard(card, Rating.Hard)}
           />
           <Button
             label="👍 Good"
-            handleClick={async () => await gradeCard(card, Rating.Good)}
+            handleClick={async () => await actions.gradeCard(card, Rating.Good)}
           />
           <Button
             label="✅ Easy"
-            handleClick={async () => await gradeCard(card, Rating.Easy)}
+            handleClick={async () => await actions.gradeCard(card, Rating.Easy)}
           />
         </>
       ) : (

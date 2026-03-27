@@ -1,44 +1,20 @@
-import { Actions } from '#/lib/Actions';
+import type { Actions } from '#/lib/Actions';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type ReviewManager from '#/lib/ReviewManager';
 import { setReviewViewSaving } from '#/lib/store';
-import type {
-  ReviewArticle,
-  ReviewCard,
-  ReviewItem,
-  ReviewSnippet,
-} from '#/lib/types';
+import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import type { PropsWithChildren } from 'react';
 import { createContext, useContext } from 'react';
 import { useDispatch } from 'react-redux';
-import type { Grade } from 'ts-fsrs';
 
 interface ReviewContextProps {
   plugin: IncrementalReadingPlugin;
   reviewView: ReviewView;
   reviewManager: ReviewManager;
-  getNext: () => void;
-  reviewArticle: (
-    article: ReviewArticle,
-    nextInterval?: number
-  ) => Promise<void>;
-  reviewSnippet: (
-    snippet: ReviewSnippet,
-    nextInterval?: number
-  ) => Promise<void>;
-  reprioritize: (
-    item: ReviewArticle | ReviewSnippet,
-    newPriority: number
-  ) => Promise<void>;
-  gradeCard: (card: ReviewCard, grade: Grade) => Promise<void>;
-  dismissItem: (item: ReviewItem) => Promise<void>;
-  unDismissItem: (item: ReviewItem) => Promise<void>;
-  skipItem: (item: ReviewItem) => void;
+  actions: Actions;
   saveNote: (item: ReviewItem, newContent: string) => Promise<void>;
-  createSnippet: (firstReview?: number) => Promise<ReviewSnippet | null>;
-  createCard: () => Promise<ReviewCard | null>;
 }
 
 const ReviewContext = createContext<ReviewContextProps | null>(null);
@@ -54,7 +30,6 @@ export function ReviewContextProvider({
   reviewManager: ReviewManager;
 }>) {
   const dispatch = useDispatch();
-  const actions = new Actions(plugin);
   /**
    * Wrap a file-modifying operation to prevent external modification detection.
    * The vault 'modify' event handler will ignore changes while this is active.
@@ -90,10 +65,11 @@ export function ReviewContextProvider({
   };
 
   const value = {
+    plugin,
     reviewView,
     reviewManager,
+    actions: plugin.actions,
     saveNote,
-    ...actions,
   };
   return (
     <ReviewContext.Provider value={value}>{children}</ReviewContext.Provider>
