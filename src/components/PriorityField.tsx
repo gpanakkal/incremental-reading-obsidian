@@ -1,6 +1,6 @@
 import type { ReviewArticle, ReviewSnippet } from '#/lib/types';
 import { transformPriority } from '#/lib/utils';
-import { useState, useEffect } from 'preact/hooks';
+import { useState } from 'react';
 import { useReviewContext } from './ReviewContext';
 
 export function PriorityField({
@@ -17,9 +17,11 @@ export function PriorityField({
     setDisplay((prev) => ({ ...prev, ...updates }));
   };
 
-  useEffect(() => {
+  const [prevItemPrio, setPrevItemPrio] = useState(item.data.priority);
+  if (item.data.priority !== prevItemPrio) {
+    setPrevItemPrio(item.data.priority);
     setDisplay({ priority: item.data.priority / 10 });
-  }, [item]);
+  }
 
   return (
     <div className="ir-priority-container">

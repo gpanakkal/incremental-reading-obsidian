@@ -1,4 +1,4 @@
-import { useRef, useLayoutEffect } from 'preact/compat';
+import { useRef, useLayoutEffect } from 'react';
 import type { ReviewArticle } from '#/lib/types';
 import { useReviewContext } from './ReviewContext';
 

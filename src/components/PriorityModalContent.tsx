@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks';
+import { useState } from 'react';
 import { MAXIMUM_PRIORITY, MINIMUM_PRIORITY } from '#/lib/constants';
 import { toDisplayPriority, transformPriority } from '#/lib/utils';
 import type { TFile } from 'obsidian';
