@@ -99,10 +99,14 @@ export default class IncrementalReadingPlugin extends Plugin {
       if (this.settings.showImportDialog) {
         new PriorityModal(this, file).open();
       } else {
-        await this.reviewManager.importArticle(
+        const article = await this.reviewManager.importArticle(
           file,
           this.settings.defaultPriority
         );
+        if (article && this.getOpenReviewLeaf()) {
+          // set the new import as the current item and focus the review pane
+          await this.learn(article);
+        }
       }
     };
 
@@ -112,8 +116,8 @@ export default class IncrementalReadingPlugin extends Plugin {
       checkCallback: (checking: boolean) => {
         if (!this.reviewManager) return false;
 
-        const reviewView = this.getActiveReviewView();
-        if (reviewView) return false;
+        const activeReviewView = this.getActiveReviewView();
+        if (activeReviewView) return false;
 
         const fileView = this.app.workspace.getActiveFileView();
         if (!fileView?.file) return false;
@@ -247,8 +251,13 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
   }
 
-  getActiveReviewView() {
+  getActiveReviewView(): ReviewView | null {
     return this.app.workspace.getActiveViewOfType(ReviewView);
+  }
+
+  getOpenReviewLeaf(): WorkspaceLeaf | null {
+    const leaves = this.app.workspace.getLeavesOfType(ReviewView.viewType);
+    return leaves[0] ?? null;
   }
 
   async saveSettings() {
@@ -284,37 +293,27 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   async learn(initialItem?: ReviewItem, newLeaf: boolean = true) {
-    let leaf: WorkspaceLeaf | null = null;
-    const leaves = this.app.workspace.getLeavesOfType(ReviewView.viewType);
-    const viewAlreadyOpen = leaves.length > 0;
+    const openReviewLeaf: WorkspaceLeaf | null = this.getOpenReviewLeaf();
+    const leaf =
+      openReviewLeaf ?? this.app.workspace.getLeaf(newLeaf ? 'tab' : false);
 
-    if (viewAlreadyOpen) {
-      leaf = leaves[0];
-    } else {
-      if (newLeaf) {
-        leaf = this.app.workspace.getLeaf('tab');
-      } else {
-        leaf = this.app.workspace.getLeaf(false);
-      }
-      await leaf.setViewState({ type: ReviewView.viewType, active: true });
-    }
-
+    await leaf.setViewState({
+      type: ReviewView.viewType,
+      active: true,
+    });
     // Set the initial item on the view if provided
     if (initialItem) {
-      if (!viewAlreadyOpen) {
-        const view = leaf.view as ReviewView;
-        view.initialItem = initialItem;
+      if (!openReviewLeaf) {
+        (leaf.view as ReviewView).initialItem = initialItem;
       }
       store.dispatch(setCurrentItemId(initialItem.data.id));
+    } else {
+      // If the view was already open, invalidate the query to trigger a refetch
+      // This ensures the new initial item is displayed immediately
+      if (openReviewLeaf) await invalidateCurrentItemQuery();
     }
 
     await this.app.workspace.revealLeaf(leaf);
-
-    // If the view was already open, invalidate the query to trigger a refetch
-    // This ensures the new initial item is displayed immediately
-    if (viewAlreadyOpen && !initialItem) {
-      await invalidateCurrentItemQuery();
-    }
   }
 
   private configureNavbarPosition() {

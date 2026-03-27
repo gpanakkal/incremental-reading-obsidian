@@ -25,7 +25,10 @@ export function PriorityModalContent({
 
   const handleSubmit = async () => {
     const priority = transformPriority(display.priority);
-    await plugin.reviewManager.importArticle(file, priority);
+    const article = await plugin.reviewManager.importArticle(file, priority);
+    if (article && plugin.getOpenReviewLeaf()) {
+      await plugin.learn(article);
+    }
     onClose();
   };
 

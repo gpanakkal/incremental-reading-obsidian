@@ -111,7 +111,7 @@ export class ArticleManager extends ItemManager {
       if (isDuplicate(file.name)) {
         new Notice(
           `Warning: article with name already exists "${file.name}"`,
-          ERROR_NOTICE_DURATION_MS
+          0
         );
       }
 
