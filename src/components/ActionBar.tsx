@@ -1,19 +1,18 @@
-import { useEffect, useState } from 'preact/hooks';
-import { useDispatch } from 'react-redux';
-import { Rating } from 'ts-fsrs';
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { useCurrentItem } from '#/hooks/useReactQuery';
 import { setShowAnswer } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import {
+  isReviewArticle,
   isReviewCard,
+  isReviewSnippet,
+  type ReviewArticle,
   type ReviewCard,
   type ReviewSnippet,
-  type ReviewArticle,
-  isReviewArticle,
-  isReviewSnippet,
 } from '#/lib/types';
-import { transformPriority } from '#/lib/utils';
+import { useDispatch } from 'react-redux';
+import { Rating } from 'ts-fsrs';
+import { PriorityField } from './PriorityField';
 import { useReviewContext } from './ReviewContext';
 
 export function ActionBar() {
@@ -101,19 +100,8 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
  * TODO:
  * - manual scheduling
  */
-function ArticleActions({ article: article }: { article: ReviewArticle }) {
-  const [display, setDisplay] = useState({
-    priority: article.data.priority / 10,
-  });
+function ArticleActions({ article }: { article: ReviewArticle }) {
   const { actions } = useReviewContext();
-
-  const updateDisplay = (updates: Partial<typeof display>) => {
-    setDisplay((prev) => ({ ...prev, ...updates }));
-  };
-
-  useEffect(() => {
-    setDisplay({ priority: article.data.priority / 10 });
-  }, [article]);
 
   return (
     <>
@@ -122,32 +110,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
         tooltip="Mark article as reviewed and go to the next"
         handleClick={async () => await actions.reviewArticle(article)}
       />
-      <label className={'ir-priority-label'}>
-        Priority
-        <input
-          id={'ir-priority-input'}
-          value={display.priority}
-          className={'ir-priority-input'}
-          type="text"
-          inputMode="decimal"
-          onChange={(e) => {
-            const transformed = transformPriority(e.currentTarget.value);
-            updateDisplay({ priority: transformed / 10 });
-          }}
-          onBlur={() => {
-            void actions.reprioritize(article, display.priority);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              void actions.reprioritize(article, display.priority);
-            } else if (e.key === 'Escape') {
-              updateDisplay({ priority: article.data.priority });
-              e.currentTarget.select();
-            }
-          }}
-          onFocus={(e) => e.currentTarget.select()}
-        />
-      </label>
+      <PriorityField item={article} />
     </>
   );
 }
@@ -157,18 +120,7 @@ function ArticleActions({ article: article }: { article: ReviewArticle }) {
  * - manual scheduling
  */
 function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
-  const [display, setDisplay] = useState({
-    priority: snippet.data.priority / 10,
-  });
   const { actions } = useReviewContext();
-
-  const updateDisplay = (updates: Partial<typeof display>) => {
-    setDisplay((prev) => ({ ...prev, ...updates }));
-  };
-
-  useEffect(() => {
-    setDisplay({ priority: snippet.data.priority / 10 });
-  }, [snippet]);
 
   return (
     <>
@@ -177,32 +129,7 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
         tooltip="Mark snippet as reviewed and go to the next"
         handleClick={async () => await actions.reviewSnippet(snippet)}
       />
-      <div className="ir-priority-container">
-        <label className={'ir-priority-label'}>
-          Priority
-          <input
-            id={'ir-priority-input'}
-            value={display.priority}
-            className={'ir-priority-input'}
-            type="text"
-            inputMode="decimal"
-            onChange={(e) => {
-              const transformed = transformPriority(e.currentTarget.value);
-              updateDisplay({ priority: transformed / 10 });
-            }}
-            onBlur={() => void actions.reprioritize(snippet, display.priority)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                void actions.reprioritize(snippet, display.priority);
-              } else if (e.key === 'Escape') {
-                updateDisplay({ priority: snippet.data.priority });
-                e.currentTarget.select();
-              }
-            }}
-            onFocus={(e) => e.currentTarget.select()}
-          />
-        </label>
-      </div>
+      <PriorityField item={snippet} />
     </>
   );
 }
