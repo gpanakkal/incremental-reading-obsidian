@@ -75,6 +75,15 @@
       "key": "X"
     }
   ],
+  "app:reload": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "R"
+    }
+  ],
   "incremental-reading:extract-selection": [
     {
       "modifiers": [
@@ -91,13 +100,92 @@
       "key": "Z"
     }
   ],
-  "app:reload": [
+  "incremental-reading:show-card-answer": [
     {
       "modifiers": [
-        "Mod",
-        "Shift"
+        "Alt"
       ],
-      "key": "R"
+      "key": "A"
+    }
+  ],
+  "incremental-reading:dismiss-item": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "D"
+    }
+  ],
+  "incremental-reading:undismiss-item": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "D"
+    }
+  ],
+  "incremental-reading:skip-item": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "S"
+    }
+  ],
+  "incremental-reading:grade-card-again": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "1"
+    }
+  ],
+  "incremental-reading:grade-card-hard": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "2"
+    }
+  ],
+  "incremental-reading:grade-card-good": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "3"
+    }
+  ],
+  "incremental-reading:grade-card-easy": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "4"
+    }
+  ],
+  "incremental-reading:mark-review": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "A"
+    }
+  ],
+  "incremental-reading:create-empty-article": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "P"
+    }
+  ],
+  "incremental-reading:import-article": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "I"
     }
   ]
 }
