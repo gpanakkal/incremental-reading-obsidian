@@ -1,4 +1,5 @@
 import { defineConfig, globalIgnores } from 'eslint/config';
+import tsparser from '@typescript-eslint/parser';
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import react from 'eslint-plugin-react';
@@ -19,18 +20,6 @@ export default defineConfig([
   { files: LINT_TARGETS, ...reactHooks.configs.flat.recommended },
   ...obsidianmd.configs.recommended,
   {
-    files: ['**/*.{js,mjs,cjs}'],
-    ...tseslint.configs.disableTypeChecked,
-    rules: {
-      ...tseslint.configs.disableTypeChecked.rules,
-      // workaround for compatibility with tseslint's type-aware linting
-      // until Obsidian plugin can be configured to exclude .js files
-      ...Object.fromEntries(
-        Object.keys(obsidianmd.rules).map((r) => [`obsidianmd/${r}`, 'off'])
-      ),
-    },
-  },
-  {
     files: TEST_FILES,
     languageOptions: {
       globals: {
@@ -49,6 +38,7 @@ export default defineConfig([
         ...globals.browser,
       },
       sourceType: 'module',
+      parser: tsparser,
       parserOptions: {
         ecmaFeatures: {
           jsx: true,
