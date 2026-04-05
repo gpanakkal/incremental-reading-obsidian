@@ -4,10 +4,12 @@ CREATE TABLE IF NOT EXISTS article (
   due INTEGER, -- unix timestamp
   interval INTEGER NOT NULL, -- the interval that was used to calculate `due`
   priority INTEGER NOT NULL, -- used when manual interval is null
+  fixed_interval_days INTEGER NULL,
   dismissed INTEGER DEFAULT 0,
   scroll_top INTEGER NOT NULL DEFAULT 0,
   CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
+  CHECK(fixed_interval_days >= 1 AND fixed_interval_days <= 7),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
   CHECK(due IS NOT NULL OR dismissed = TRUE)
 );
@@ -89,4 +91,4 @@ CREATE TABLE IF NOT EXISTS srs_card_review (
   CHECK(rating >= 0 AND rating <= 4)
 );
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;

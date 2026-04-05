@@ -1,17 +1,116 @@
 import {
+  MAXIMUM_FIXED_REVIEW_INTERVAL,
   MAXIMUM_PRIORITY,
+  MINIMUM_FIXED_REVIEW_INTERVAL,
   MINIMUM_PRIORITY,
+  MS_PER_DAY,
   TEXT_BASE_REVIEW_INTERVAL,
   TEXT_REVIEW_MULTIPLIER_BASE,
   TEXT_REVIEW_MULTIPLIER_STEP,
 } from './constants';
 import type { IArticleBase, ISnippetBase } from './types';
-import { clamp, isInteger, sequenceSum } from './utils';
+import {
+  binarySearch,
+  clamp,
+  intSequence,
+  isInteger,
+  sequenceSum,
+} from './utils';
 
 /**
  * Logic for scheduling future reviews of non-SRS items
  */
 export default class IRScheduler {
+  /**
+   * Calculates the priority required for the next `targetReviewCount` reviews of the child to
+   * occur before the next `targetReviewCount` reviews of the parent.
+   *
+   * TODO:
+   * - decide if nth child review should occur on same day or day before nth parent review
+   * @param targetReviewCount the number of future reviews of the child meant
+   * to occur before the same number of reviews in the parent
+   * @param childDue Child's next review date as a Unix timestamp
+   * @returns the calculated priority and how far ahead the child's nth review
+   * falls of the desired target
+   * @throws if either `parent.due` or `parent.fixed_interval_days` are null
+   */
+  static childPriorityFromFixedInterval(
+    parent: IArticleBase,
+    targetReviewCount: number,
+    childDue: number
+  ): { priority: number; overshootMs: number } {
+    this.validateReviewCount(targetReviewCount);
+
+    const { fixed_interval_days, due } = parent;
+    if (fixed_interval_days === null) {
+      throw new Error(`Parent "${parent.reference}" has no fixed interval`);
+    }
+
+    if (due === null) {
+      throw new TypeError(`Parent "${parent.reference}" has no due date`);
+    }
+
+    const totalIntervalMs =
+      fixed_interval_days * (targetReviewCount - 1) * MS_PER_DAY;
+    const parentNthDueTimeMs = due + totalIntervalMs;
+
+    const upperBound = 0;
+    let bestDiffMs = Infinity;
+
+    const getPrioDiff = (priority: number) => {
+      // return 0 if it yields a negative diff and the next-highest priority returns a positive one
+      const forecastedDueTimeMs =
+        childDue +
+        this.cumulativeInterval(
+          priority,
+          TEXT_BASE_REVIEW_INTERVAL,
+          targetReviewCount
+        );
+      const diffMs = forecastedDueTimeMs - parentNthDueTimeMs;
+      return diffMs;
+    };
+
+    const prioComparator = (priority: number): number => {
+      const currentDiff = getPrioDiff(priority);
+      if (currentDiff > upperBound) {
+        // look for a lower priority unless we're at the minimum
+        if (priority === MINIMUM_PRIORITY) {
+          bestDiffMs = currentDiff;
+          return 0;
+        } else return -1;
+      }
+
+      if (priority === MAXIMUM_PRIORITY) {
+        bestDiffMs = currentDiff;
+        return 0;
+      }
+      const nextDiff = getPrioDiff(priority + 1);
+
+      // current diff is in the desired range; check the next priority, if any
+      if (nextDiff < upperBound && nextDiff > currentDiff) {
+        // the next priority is a better fit, so search to the right
+        return 1;
+      }
+      bestDiffMs = currentDiff;
+      return 0;
+    };
+
+    // use binary search to find the priority that best aligns with the target
+    const result = binarySearch(
+      intSequence(MINIMUM_PRIORITY, MAXIMUM_PRIORITY),
+      (priority: number) => prioComparator(priority)
+    );
+
+    if (result === null) {
+      throw new Error(
+        `Priority search returned null. This shouldn't happen.\n` +
+          JSON.stringify({ parent, targetReviewCount, childDue })
+      );
+    }
+
+    return { priority: result.match, overshootMs: bestDiffMs };
+  }
+
   /**
    * Calculates the interval between the next two reviews using the current
    * due time and the last review time
@@ -20,6 +119,10 @@ export default class IRScheduler {
    * - ensure this is not used when calculating the first due time
    */
   static nextInterval(text: IArticleBase | ISnippetBase): number {
+    if ('fixed_interval_days' in text && text.fixed_interval_days !== null) {
+      return text.fixed_interval_days * MS_PER_DAY;
+    }
+
     const intervalMultiplier = this.getIntervalMultiplier(text.priority);
     const lastInterval = text.interval ?? TEXT_BASE_REVIEW_INTERVAL;
     const nextInterval = Math.round(lastInterval * intervalMultiplier);
@@ -56,6 +159,42 @@ export default class IRScheduler {
     );
 
     return totalIntervalMs;
+  }
+
+  /**
+   * Get the due time for the nth review from now as a Unix timestamp, assuming
+   *  all reviews happen on time and the priority is never changed
+   *
+   * @param futureReviewCount the number of reviews into the future to project
+   * TODO:
+   * - fuzz review times for more realistic forecasts
+   */
+  static forecastReviewTime(
+    text: IArticleBase | ISnippetBase,
+    futureReviewCount: number
+  ) {
+    this.validateReviewCount(futureReviewCount);
+    if (!text.due)
+      throw new Error(
+        `Passed text (${text.reference}) is not scheduled for review`
+      );
+
+    if (futureReviewCount === 1) return text.due;
+    if ('fixed_interval_days' in text && text.fixed_interval_days !== null) {
+      return (
+        text.due +
+        (futureReviewCount - 1) * text.fixed_interval_days * MS_PER_DAY
+      );
+    }
+
+    const totalIntervalMs = this.cumulativeInterval(
+      text.priority,
+      text.interval ?? TEXT_BASE_REVIEW_INTERVAL,
+      futureReviewCount
+    );
+
+    const forecastedReviewTime = text.due + totalIntervalMs;
+    return forecastedReviewTime;
   }
 
   static validateReviewCount(count: number) {
@@ -105,5 +244,25 @@ export default class IRScheduler {
     let displayPriority = (priority / 10).toString().slice(0, 3);
     if (displayPriority.length === 1) displayPriority += `.0`;
     return displayPriority;
+  }
+
+  static isValidFixedInterval(interval: number) {
+    return (
+      interval % 1 === 0 &&
+      interval >= MINIMUM_FIXED_REVIEW_INTERVAL &&
+      interval <= MAXIMUM_FIXED_REVIEW_INTERVAL
+    );
+  }
+
+  /**
+   * @throws if passed an invalid fixed interval
+   */
+  static validateFixedInterval(interval: number) {
+    if (!this.isValidFixedInterval(interval)) {
+      throw new TypeError(
+        `Fixed interval must be an integer from ${MINIMUM_FIXED_REVIEW_INTERVAL}` +
+          ` to ${MAXIMUM_FIXED_REVIEW_INTERVAL}; received "${interval}"`
+      );
+    }
   }
 }

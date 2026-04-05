@@ -2,6 +2,7 @@ import {
   DEFAULT_PRIORITY,
   ERROR_NOTICE_DURATION_MS,
   MAX_SQL_QUERY_PARAMS,
+  REVIEW_COUNT_FOR_PRIORITY_SCALING,
   SNIPPET_DIRECTORY,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
@@ -211,7 +212,22 @@ export class SnippetManager extends ItemManager {
     //   currentFileEntry
     // );
 
-    const priority = currentFileEntry?.priority ?? DEFAULT_PRIORITY;
+    let priority = currentFileEntry?.priority ?? DEFAULT_PRIORITY;
+    // if the parent is on a fixed-interval schedule, calculate priority
+    // for this snippet so its first n reviews occur before the first n
+    // reviews of the parent item
+    if (
+      'fixed_interval_days' in currentFileEntry &&
+      currentFileEntry.fixed_interval_days
+    ) {
+      const { priority: calculatedPrio } =
+        IRScheduler.childPriorityFromFixedInterval(
+          currentFileEntry,
+          REVIEW_COUNT_FOR_PRIORITY_SCALING,
+          snippetDueTime
+        );
+      priority = calculatedPrio;
+    }
 
     // Calculate body-relative character offsets for highlighting
     let offsets: { start: number; end: number } | null = null;

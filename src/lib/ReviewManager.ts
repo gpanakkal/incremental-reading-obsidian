@@ -150,6 +150,20 @@ export default class ReviewManager {
     }
     return this.snippets.reprioritize(item, newPriority);
   }
+
+  /**
+   * Set a new interval without adjusting due date if due in today's review day
+   * @param newIntervalDays an integer number of days between reviews
+   * @returns
+   */
+  async setFixedInterval(article: IArticleBase, newIntervalDays: number) {
+    return this.articles.setFixedInterval(article, newIntervalDays);
+  }
+
+  async disableFixedInterval(article: IArticleBase, newPriority: number) {
+    return this.articles.disableFixedInterval(article, newPriority);
+  }
+
   /**
    * Fetch all snippets, cards, and articles ready for review, then order by due ASC
    * TODO:

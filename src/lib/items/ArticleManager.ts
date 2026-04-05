@@ -309,6 +309,16 @@ export class ArticleManager extends ItemManager {
     return lastReview;
   }
 
+  protected async getReviewCount(article: IArticleBase) {
+    const reviewCount = (
+      await this.repo.query(
+        `SELECT COUNT(id) FROM article_review WHERE article_id = $1`,
+        [article.id]
+      )
+    )[0] as unknown as number;
+    return reviewCount;
+  }
+
   /**
    * Add a ArticleReview and update the due date and interval
    * TODO: combine the operations into a transaction
@@ -382,6 +392,51 @@ export class ArticleManager extends ItemManager {
     await this.repo.mutate(
       `UPDATE article SET priority = $1, due = $2, interval = $3 WHERE id = $4`,
       [newPriority, newDueTime, newInterval, article.id]
+    );
+  }
+  /**
+   * @param fixedInterval the interval in days
+   */
+  async setFixedInterval(article: IArticleBase, fixedIntervalDays: number) {
+    IRScheduler.validateFixedInterval(fixedIntervalDays);
+
+    const lastReview = await this.getLastReview(article);
+    const fixedIntervalMs = IRScheduler.nextInterval({
+      ...article,
+      fixed_interval_days: fixedIntervalDays,
+    });
+    const newDueTime = lastReview
+      ? lastReview.review_time + fixedIntervalMs
+      : article.due;
+
+    await this.repo.mutate(
+      `UPDATE article SET fixed_interval_days = $1, due = $2 ` +
+        `WHERE id = $3`,
+      [fixedIntervalDays, newDueTime, article.id]
+    );
+  }
+  /**
+   * @param newPriority the priority to use for calculating the interval
+   * TODO: handle changing from fixed interval to priority scheduling by
+   * simulating how the interval would have grown
+   */
+  async disableFixedInterval(article: IArticleBase, newPriority: number) {
+    IRScheduler.validatePriority(newPriority);
+
+    const lastReview = await this.getLastReview(article);
+    const reviewCount = await this.getReviewCount(article);
+    // TODO: use IRScheduler.cumulativeInterval here
+    const mult = IRScheduler.getIntervalMultiplier(newPriority);
+    const newInterval = TEXT_BASE_REVIEW_INTERVAL * mult ** reviewCount;
+
+    const newDueTime = lastReview
+      ? lastReview.review_time + newInterval
+      : article.due;
+
+    await this.repo.mutate(
+      `UPDATE article SET fixed_interval_days = NULL, due = $1, interval = $2 ` +
+        `WHERE id = $3`,
+      [newDueTime, newInterval, article.id]
     );
   }
 }

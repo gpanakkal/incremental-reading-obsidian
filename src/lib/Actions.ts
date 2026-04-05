@@ -111,6 +111,53 @@ export class Actions {
     }
   };
 
+  setFixedInterval = async (article: ReviewArticle, intervalDays: number) => {
+    try {
+      await this.plugin.reviewManager.setFixedInterval(
+        article.data,
+        intervalDays
+      );
+
+      new Notice(
+        `Scheduled for review every ${intervalDays} days`,
+        SUCCESS_NOTICE_DURATION_MS
+      );
+    } catch (error) {
+      console.error(error);
+      new Notice(
+        `Failed to set fixed review interval for "${article.data.reference}"`,
+        ERROR_NOTICE_DURATION_MS
+      );
+    }
+  };
+
+  /**
+   * @param newPriority The priority to use for recalculating the dynamic
+   * interval and due date
+   */
+  disableFixedInterval = async (
+    article: ReviewArticle,
+    newPriority: number
+  ) => {
+    try {
+      await this.plugin.reviewManager.disableFixedInterval(
+        article.data,
+        newPriority
+      );
+
+      new Notice(
+        `Switched to priority-based scheduling`,
+        SUCCESS_NOTICE_DURATION_MS
+      );
+    } catch (error) {
+      console.error(error);
+      new Notice(
+        `Failed to enable priority-based scheduling for "${article.data.reference}"`,
+        ERROR_NOTICE_DURATION_MS
+      );
+    }
+  };
+
   gradeCard = async (card: ReviewCard, grade: Grade) => {
     await this.plugin.reviewManager.reviewCard(card.data, grade);
     new Notice(`Graded as: ${Rating[grade]}`);

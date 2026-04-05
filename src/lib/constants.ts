@@ -45,6 +45,17 @@ export const MINIMUM_PRIORITY = 10;
 export const MAXIMUM_PRIORITY = 50;
 export const DEFAULT_PRIORITY = 30;
 
+export const MINIMUM_FIXED_REVIEW_INTERVAL = 1;
+export const MAXIMUM_FIXED_REVIEW_INTERVAL = 30;
+
+/**
+ * The number of reviews to use to calculate a descendant's priority based on
+ * the parent's fixed review interval
+ */
+export const REVIEW_COUNT_FOR_PRIORITY_SCALING = 4;
+
+export const MAX_TESTED_REVIEW_COUNT = 50;
+
 export const TEXT_BASE_REVIEW_INTERVAL = MS_PER_DAY * 1;
 export const TEXT_REVIEW_MULTIPLIER_BASE = 1.01;
 export const TEXT_REVIEW_MULTIPLIER_STEP = 0.015;

@@ -1,8 +1,16 @@
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { MAXIMUM_PRIORITY, MINIMUM_PRIORITY } from './constants';
+import {
+  MAX_TESTED_REVIEW_COUNT,
+  MAXIMUM_FIXED_REVIEW_INTERVAL,
+  MAXIMUM_PRIORITY,
+  MINIMUM_FIXED_REVIEW_INTERVAL,
+  MINIMUM_PRIORITY,
+  MS_PER_DAY,
+} from './constants';
 import IRScheduler from './IRScheduler';
-import { clamp } from './utils';
+import type { IArticleBase, ISnippetBase } from './types';
+import { clamp, intSequence } from './utils';
 
 describe('transformPriority', () => {
   it(
@@ -59,6 +67,165 @@ describe('toDisplayPriority', () => {
           expect(() => IRScheduler.toDisplayPriority(priority)).toThrow();
         }
       )
+    );
+  });
+});
+
+const MS_PER_YEAR = MS_PER_DAY * 365;
+const MAX_VALID_TIMESTAMP_DATE = 8.64e15;
+
+describe('forecastReviewTime', () => {
+  it('returns the next due date if n equals 1', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: -MS_PER_YEAR, max: MS_PER_YEAR }),
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        (dueOffset, priority) => {
+          const now = Date.now();
+          const due = now + dueOffset;
+          const forecast = IRScheduler.forecastReviewTime(
+            {
+              due,
+              priority,
+              fixed_interval_days: null,
+              reference: 'fake-article',
+            } as unknown as IArticleBase,
+            1
+          );
+          expect(forecast).toBe(due);
+        }
+      )
+    );
+  });
+
+  it(`uses the fixed interval if it's not null`, () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: -MS_PER_YEAR, max: MS_PER_YEAR }),
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        fc.integer({ min: 2, max: MAX_TESTED_REVIEW_COUNT }),
+        fc.integer({
+          min: MINIMUM_FIXED_REVIEW_INTERVAL,
+          max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+        }),
+        (dueOffset, priority, n, fixed_interval_days) => {
+          const now = Date.now();
+          const due = now + dueOffset;
+          const forecast = IRScheduler.forecastReviewTime(
+            {
+              due,
+              priority,
+              fixed_interval_days,
+              reference: 'fake-article',
+            } as unknown as IArticleBase,
+            n
+          );
+          expect(forecast).toBe(
+            due + fixed_interval_days * (n - 1) * MS_PER_DAY
+          );
+          expect(new Date(forecast).toDateString()).not.toBe('Invalid Date');
+        }
+      )
+    );
+  });
+
+  it('returns a time after the next due date for n > 1', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: -MS_PER_YEAR, max: MS_PER_YEAR }),
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        fc.integer({ min: 2, max: MAX_TESTED_REVIEW_COUNT }),
+        (dueOffset, priority, n) => {
+          const now = Date.now();
+          const due = now + dueOffset;
+          const forecast = IRScheduler.forecastReviewTime(
+            {
+              due,
+              priority,
+              fixed_interval_days: null,
+              reference: 'fake-article',
+            } as unknown as IArticleBase,
+            n
+          );
+          expect(forecast).toBeGreaterThan(due);
+          if (forecast <= MAX_VALID_TIMESTAMP_DATE) {
+            expect(new Date(forecast).toDateString()).not.toBe('Invalid Date');
+          }
+        }
+      )
+    );
+  });
+});
+
+describe('childPriorityFromFixedInterval', () => {
+  const now = Date.now();
+
+  /** Iteratively finds the best priority. Slower than the production method */
+  const getPriority = (
+    parent: IArticleBase,
+    targetReviewCount: number,
+    childDueTime: number
+  ) => {
+    if (parent.due === null) throw new Error(`Parent must have a due time`);
+
+    const child = {
+      due: childDueTime,
+      reference: '',
+    } as ISnippetBase;
+
+    const reversePriorities = intSequence(MAXIMUM_PRIORITY, MINIMUM_PRIORITY);
+
+    const parentReviewTime = IRScheduler.forecastReviewTime(
+      parent,
+      targetReviewCount
+    );
+
+    const iterativeMatch = reversePriorities.find((priority) => {
+      const childReviewTime = IRScheduler.forecastReviewTime(
+        {
+          ...child,
+          priority,
+        },
+        targetReviewCount
+      );
+      return childReviewTime - parentReviewTime < 0;
+    });
+    return iterativeMatch ?? MINIMUM_PRIORITY;
+  };
+
+  it('gets the priority that best fits without overshooting', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 365 }),
+        fc.integer({ min: now - MS_PER_YEAR, max: now + MS_PER_YEAR }),
+        fc.integer({ min: 2, max: MAX_TESTED_REVIEW_COUNT }),
+        (fixed_interval_days, due, targetReviewCount) => {
+          const fakeParentItem = {
+            fixed_interval_days,
+            due,
+          } as unknown as IArticleBase;
+
+          const childDueTime = now + MS_PER_DAY;
+          const result = IRScheduler.childPriorityFromFixedInterval(
+            fakeParentItem,
+            targetReviewCount,
+            childDueTime
+          );
+
+          expect(IRScheduler.isValidPriority(result.priority)).toBe(true);
+
+          // TODO: check only the priority after result.priority since it should
+          // overshoot the target (unless result.priority is the minimum and it
+          // already overshoots)
+          const iterativelyFoundPriority = getPriority(
+            fakeParentItem,
+            targetReviewCount,
+            childDueTime
+          );
+          expect(result.priority).toEqual(iterativelyFoundPriority);
+        }
+      ),
+      { numRuns: 1_000 }
     );
   });
 });
