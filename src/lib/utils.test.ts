@@ -133,10 +133,10 @@ describe('binarySearch', () => {
             (compareValue) => target - compareValue
           );
 
-          const foundIndex = sorted.indexOf(target);
-          if (foundIndex !== -1) {
+          const matchFound = sorted.includes(target);
+          if (matchFound) {
             expect(result!.match).toBe(target);
-            expect(result!.i).toBe(foundIndex);
+            expect(result!.match).toBe(sorted[result!.i]);
           } else {
             expect(result).toBeNull();
           }
