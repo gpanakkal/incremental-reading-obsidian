@@ -127,7 +127,7 @@ export function getContentSlice(
     : trimmed;
 }
 
-export const isInteger = (value: unknown): value is number =>
+export const isInteger = (value: unknown): boolean =>
   typeof value === 'number' && !Number.isNaN(value) && value % 1 === 0;
 
 export function compareDates(a: number | Date | null, b: number | Date | null) {
@@ -168,6 +168,9 @@ export const isValidPriority = (priority: number) =>
   priority >= MINIMUM_PRIORITY &&
   priority <= MAXIMUM_PRIORITY;
 
+/**
+ * @throws if passed an invalid priority
+ */
 export const validatePriority = (priority: number) => {
   if (!isValidPriority(priority))
     throw new TypeError(
@@ -197,4 +200,63 @@ export const toDisplayPriority = (priority: number): string => {
   let displayPriority = (priority / 10).toString().slice(0, 3);
   if (displayPriority.length === 1) displayPriority += `.0`;
   return displayPriority;
+};
+
+/**
+ * Generates an array of integers in order from start to end.
+ * Iterates negatively if end < start.
+ */
+export const intSequence = (start: number, end: number): number[] => {
+  const isPos = end >= start;
+  let seq = new Array(Math.abs(end - start) + 1).fill(start) as number[];
+  seq = seq.map((start, i) => start + (isPos ? i : -i));
+  return seq;
+};
+
+export const sequenceSum = (
+  start: number,
+  end: number,
+  func: (k: number) => number
+) => {
+  const seq = intSequence(start, end);
+  return seq.reduce((acc, el) => acc + func(el), 0);
+};
+
+/**
+ *
+ * @param values an array of numbers, assumed to be sorted in ascending order
+ * @param comparator A callback that returns 0 if a match is found, a positive
+ * value if the search target is greater than `compareValue`, or a negative
+ *  value otherwise.
+ */
+export const binarySearch = <T>(
+  values: Array<T>,
+  comparator: (compareValue: T) => number
+): { i: number; match: T } | null => {
+  let left = 0;
+  let right = values.length - 1;
+
+  while (left <= right) {
+    const midIndex = Math.floor((left + right) / 2);
+    const compareValue = values[midIndex];
+    const compareResult = comparator(compareValue);
+    if (compareResult < 0) {
+      right = midIndex - 1;
+    } else if (compareResult > 0) {
+      left = midIndex + 1;
+    } else {
+      return { i: midIndex, match: compareValue };
+    }
+  }
+  return null;
+};
+
+export const clamp = (value: number, bounds: [number, number]): number => {
+  if ([value, ...bounds].some(Number.isNaN))
+    throw new TypeError(
+      `Attempted to clamp value ${value} within [${(bounds[0], bounds[1])}], ` +
+        `but some of these values are NaN`
+    );
+  const [min, max] = bounds.sort((a, b) => a - b);
+  return Math.max(min, Math.min(max, value));
 };
