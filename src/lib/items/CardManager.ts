@@ -1,11 +1,14 @@
-import { Notice, type App, type Editor, type MarkdownView } from 'obsidian';
-import { fsrs, generatorParameters, State } from 'ts-fsrs';
 import type {
   ISRSCard,
   ISRSCardDisplay,
   ReviewCard,
   SRSCardRow,
 } from '#/lib/types';
+import type { TFile } from 'obsidian';
+import { Notice, type App, type Editor, type MarkdownView } from 'obsidian';
+import type ReviewView from 'src/views/ReviewView';
+import type { FSRS, FSRSParameters, Grade, StateType } from 'ts-fsrs';
+import { fsrs, generatorParameters, State } from 'ts-fsrs';
 import {
   CARD_ANSWER_REPLACEMENT,
   CARD_DIRECTORY,
@@ -23,12 +26,9 @@ import {
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import SRSCard from '../SRSCard';
 import SRSCardReview from '../SRSCardReview';
+import type { SQLiteRepository } from '../types';
 import { getEndOfToday, searchAll } from '../utils';
 import { ItemManager } from './ItemManager';
-import type { SQLiteRepository } from '../types';
-import type { TFile } from 'obsidian';
-import type ReviewView from 'src/views/ReviewView';
-import type { FSRS, FSRSParameters, Grade, StateType } from 'ts-fsrs';
 
 const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
   enable_fuzz: false,
@@ -36,8 +36,6 @@ const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
 };
 
 export class CardManager extends ItemManager {
-  app: App;
-  repo: SQLiteRepository;
   #fsrs: FSRS;
 
   constructor(app: App, repo: SQLiteRepository) {

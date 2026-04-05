@@ -1,3 +1,12 @@
+import type { EditorState } from '@codemirror/state';
+import type {
+  App,
+  DataWriteOptions,
+  Editor,
+  FrontMatterCache,
+  MarkdownFileInfo,
+  TFile,
+} from 'obsidian';
 import { editorInfoField, normalizePath } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
@@ -13,17 +22,8 @@ import {
   SOURCE_TAG,
 } from './constants';
 import { FRONTMATTER_PATTERN } from './constants.js';
-import { generateId } from './utils';
 import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
-import type { EditorState } from '@codemirror/state';
-import type {
-  App,
-  DataWriteOptions,
-  Editor,
-  FrontMatterCache,
-  MarkdownFileInfo,
-  TFile,
-} from 'obsidian';
+import { generateId } from './utils';
 
 export class ObsidianHelpers {
   /**
@@ -300,7 +300,9 @@ export class ObsidianHelpers {
 
   static async updateFrontMatter(
     file: TFile,
-    updates: FrontMatterUpdates | ((frontmatter: unknown) => void),
+    updates:
+      | FrontMatterUpdates
+      | ((frontmatter: Record<string, unknown>) => void),
     app: App
   ) {
     if (typeof updates === 'function') {
