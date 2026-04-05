@@ -1,5 +1,5 @@
+import IRScheduler from '#/lib/IRScheduler';
 import type { ReviewArticle, ReviewSnippet } from '#/lib/types';
-import { transformPriority } from '#/lib/utils';
 import { useState } from 'react';
 import { useReviewContext } from './ReviewContext';
 
@@ -34,7 +34,9 @@ export function PriorityField({
           type="text"
           inputMode="decimal"
           onChange={(e) => {
-            const transformed = transformPriority(e.currentTarget.value);
+            const transformed = IRScheduler.transformPriority(
+              e.currentTarget.value
+            );
             updateDisplay({ priority: transformed / 10 });
           }}
           onBlur={() => {

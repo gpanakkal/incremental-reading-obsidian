@@ -1,7 +1,5 @@
 import {
   DAY_ROLLOVER_OFFSET_HOURS,
-  MAXIMUM_PRIORITY,
-  MINIMUM_PRIORITY,
   MS_PER_DAY,
   MS_PER_MINUTE,
 } from './constants';
@@ -162,45 +160,6 @@ export function searchAll(text: string, pattern: RegExp) {
 
   return results;
 }
-
-export const isValidPriority = (priority: number) =>
-  priority % 1 === 0 &&
-  priority >= MINIMUM_PRIORITY &&
-  priority <= MAXIMUM_PRIORITY;
-
-/**
- * @throws if passed an invalid priority
- */
-export const validatePriority = (priority: number) => {
-  if (!isValidPriority(priority))
-    throw new TypeError(
-      `Priority must be an integer between ${MINIMUM_PRIORITY} and ` +
-        `${MAXIMUM_PRIORITY} inclusive; received "${priority}"`
-    );
-};
-
-/** Clamp display value and convert to integer */
-export const transformPriority = (displayPriority: string | number) => {
-  const priorityNum = Number(displayPriority);
-  if (Number.isNaN(priorityNum)) {
-    throw new TypeError(`Priority cannot be NaN`);
-  }
-
-  let withDecimal = Number(priorityNum.toString().slice(0, 3));
-  while (withDecimal >= 10) {
-    withDecimal = withDecimal / 10;
-  }
-  const asInt = withDecimal * 10;
-  const clamped = Math.min(MAXIMUM_PRIORITY, Math.max(MINIMUM_PRIORITY, asInt));
-  return Math.round(clamped);
-};
-
-export const toDisplayPriority = (priority: number): string => {
-  validatePriority(priority);
-  let displayPriority = (priority / 10).toString().slice(0, 3);
-  if (displayPriority.length === 1) displayPriority += `.0`;
-  return displayPriority;
-};
 
 /**
  * Generates an array of integers in order from start to end.

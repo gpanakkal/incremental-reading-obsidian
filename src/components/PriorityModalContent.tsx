@@ -1,8 +1,8 @@
-import { useState } from 'react';
 import { MAXIMUM_PRIORITY, MINIMUM_PRIORITY } from '#/lib/constants';
-import { toDisplayPriority, transformPriority } from '#/lib/utils';
-import type { TFile } from 'obsidian';
+import IRScheduler from '#/lib/IRScheduler';
 import type IncrementalReadingPlugin from '#/main';
+import type { TFile } from 'obsidian';
+import { useState } from 'react';
 
 interface PriorityModalProps {
   plugin: IncrementalReadingPlugin;
@@ -24,7 +24,7 @@ export function PriorityModalContent({
   };
 
   const handleSubmit = async () => {
-    const priority = transformPriority(display.priority);
+    const priority = IRScheduler.transformPriority(display.priority);
     const article = await plugin.reviewManager.importArticle(file, priority);
     if (article && plugin.getOpenReviewLeaf()) {
       await plugin.learn(article);
@@ -34,8 +34,8 @@ export function PriorityModalContent({
 
   const tooltip =
     `Set the priority for this article. Priority ranges from ` +
-    `${toDisplayPriority(MINIMUM_PRIORITY)} (highest) to ` +
-    `${toDisplayPriority(MAXIMUM_PRIORITY)} (lowest).`;
+    `${IRScheduler.toDisplayPriority(MINIMUM_PRIORITY)} (highest) to ` +
+    `${IRScheduler.toDisplayPriority(MAXIMUM_PRIORITY)} (lowest).`;
 
   return (
     <div className="ir-priority-modal">
@@ -48,7 +48,9 @@ export function PriorityModalContent({
             type="text"
             value={display.priority}
             onChange={(e) => {
-              const transformed = transformPriority(e.currentTarget.value);
+              const transformed = IRScheduler.transformPriority(
+                e.currentTarget.value
+              );
               updateDisplay({ priority: transformed / 10 });
             }}
             onKeyDown={(e) => {

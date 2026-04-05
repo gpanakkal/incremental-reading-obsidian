@@ -1,23 +1,24 @@
 import type IncrementalReadingPlugin from '#/main';
+import { MarkdownView } from 'obsidian';
 import type { Grade } from 'ts-fsrs';
 import { Rating } from 'ts-fsrs';
 import {
+  CONTENT_TITLE_SLICE_LENGTH,
+  ERROR_NOTICE_DURATION_MS,
   MS_PER_DAY,
   SUCCESS_NOTICE_DURATION_MS,
-  ERROR_NOTICE_DURATION_MS,
-  CONTENT_TITLE_SLICE_LENGTH,
 } from './constants';
+import IRScheduler from './IRScheduler';
 import { invalidateItemQuery } from './query-client';
-import { resetCurrentItem, store, addSeenId } from './store';
+import { addSeenId, resetCurrentItem, store } from './store';
 import {
   type ReviewArticle,
-  type ReviewSnippet,
   type ReviewCard,
   type ReviewItem,
+  type ReviewSnippet,
   isReviewArticle,
 } from './types';
-import { transformPriority, getContentSlice } from './utils';
-import { MarkdownView } from 'obsidian';
+import { getContentSlice } from './utils';
 
 /**
  * Coordinates review operations with store and query cache updates
@@ -95,7 +96,7 @@ export class Actions {
     item: ReviewArticle | ReviewSnippet,
     newPriority: number
   ) => {
-    const priority = transformPriority(newPriority);
+    const priority = IRScheduler.transformPriority(newPriority);
     try {
       await this.plugin.reviewManager.reprioritize(item.data, priority);
       new Notice(

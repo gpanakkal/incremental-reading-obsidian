@@ -1,11 +1,11 @@
 import type IncrementalReadingPlugin from '#/main';
-import { PluginSettingTab, type App, Setting } from 'obsidian';
+import { PluginSettingTab, Setting, type App } from 'obsidian';
 import {
   DEFAULT_PRIORITY,
   MAXIMUM_PRIORITY,
   MINIMUM_PRIORITY,
 } from './constants';
-import { transformPriority } from './utils';
+import IRScheduler from './IRScheduler';
 
 export interface IRPluginSettings {
   defaultPriority: number;
@@ -38,7 +38,8 @@ export class IRSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.defaultPriority / 10)
           .setDynamicTooltip()
           .onChange(async (value) => {
-            this.plugin.settings.defaultPriority = transformPriority(value);
+            this.plugin.settings.defaultPriority =
+              IRScheduler.transformPriority(value);
             await this.plugin.saveSettings();
           });
       });

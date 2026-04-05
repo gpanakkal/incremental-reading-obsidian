@@ -1,19 +1,3 @@
-import type {
-  IArticleBase,
-  ISnippetBase,
-  ISnippetDisplay,
-  ISnippetReview,
-  ReviewSnippet,
-  SnippetRow,
-} from '#/lib/types';
-import {
-  Notice,
-  TFile,
-  type App,
-  type Editor,
-  type MarkdownView,
-} from 'obsidian';
-import type ReviewView from 'src/views/ReviewView';
 import {
   DEFAULT_PRIORITY,
   ERROR_NOTICE_DURATION_MS,
@@ -23,22 +7,34 @@ import {
   SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
   SUCCESS_NOTICE_DURATION_MS,
-  TEXT_BASE_REVIEW_INTERVAL,
   TEXT_REVIEW_INTERVALS,
-  TEXT_REVIEW_MULTIPLIER_BASE,
-  TEXT_REVIEW_MULTIPLIER_STEP,
-} from '../constants';
-import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+} from '#/lib/constants';
+import IRScheduler from '#/lib/IRScheduler';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import {
   SnippetOffsetTracker,
   type SnippetHighlight,
-} from '../SnippetOffsetTracker';
-import type { SQLiteRepository } from '../types';
-import { getEndOfToday } from '../utils';
+} from '#/lib/SnippetOffsetTracker';
+import type {
+  IArticleBase,
+  ISnippetBase,
+  ISnippetDisplay,
+  ISnippetReview,
+  ReviewSnippet,
+  SnippetRow,
+  SQLiteRepository,
+} from '#/lib/types';
+import { getEndOfToday } from '#/lib/utils';
+import {
+  Notice,
+  TFile,
+  type App,
+  type Editor,
+  type MarkdownView,
+} from 'obsidian';
+import type ReviewView from 'src/views/ReviewView';
 import { ArticleManager } from './ArticleManager';
 import { ItemManager } from './ItemManager';
-import type { SQLiteRepository } from '../types';
-import type ReviewView from 'src/views/ReviewView';
 
 export class SnippetManager extends ItemManager {
   offsetTracker: SnippetOffsetTracker;
@@ -540,12 +536,8 @@ export class SnippetManager extends ItemManager {
    * Change the priority of a snippet and recalculate its next due date
    */
   async reprioritize(snippet: ISnippetBase, newPriority: number) {
-    if (newPriority % 1 !== 0 || newPriority < 10 || newPriority > 50) {
-      throw new TypeError(
-        `Priority must be an integer between 10 and 50 inclusive; received ${newPriority}`
-      );
-    }
-    const { priority: _, ...rest } = snippet;
+    IRScheduler.validatePriority(newPriority);
+
     const lastReview = await this.getLastReview(snippet);
     const newInterval = await this.nextReviewInterval({
       ...rest,

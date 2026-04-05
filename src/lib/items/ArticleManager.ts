@@ -1,12 +1,3 @@
-import type {
-  ArticleDisplay,
-  ArticleRow,
-  FrontMatterUpdates,
-  IArticleBase,
-  IArticleReview,
-  ReviewArticle,
-} from '#/lib/types';
-import { normalizePath, Notice } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
@@ -20,20 +11,26 @@ import {
   SOURCE_PROPERTY_NAME,
   SUCCESS_NOTICE_DURATION_MS,
   TEXT_BASE_REVIEW_INTERVAL,
-  TEXT_REVIEW_MULTIPLIER_BASE,
-  TEXT_REVIEW_MULTIPLIER_STEP,
-} from '../constants';
-import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+} from '#/lib/constants';
+import IRScheduler from '#/lib/IRScheduler';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import type {
+  ArticleDisplay,
+  ArticleRow,
+  FrontMatterUpdates,
+  IArticleBase,
+  IArticleReview,
+  ReviewArticle,
+} from '#/lib/types';
 import {
   generateId,
   getContentSlice,
   getDateString,
   getEndOfToday,
-  validatePriority,
-} from '../utils';
+} from '#/lib/utils';
+import type { TFile } from 'obsidian';
+import { normalizePath, Notice } from 'obsidian';
 import { ItemManager } from './ItemManager';
-import type { SQLiteRepository } from '../types';
-import type { App, TFile } from 'obsidian';
 
 export class ArticleManager extends ItemManager {
   static rowToBase(articleRow: ArticleRow): IArticleBase {
@@ -312,6 +309,10 @@ export class ArticleManager extends ItemManager {
     return lastReview;
   }
 
+  /**
+   * Add a ArticleReview and update the due date and interval
+   * TODO: combine the operations into a transaction
+   */
   async review(
     article: IArticleBase,
     reviewTime?: number,
@@ -322,13 +323,12 @@ export class ArticleManager extends ItemManager {
       reviewed +
       (nextReviewInterval ?? (await this.nextReviewInterval(article)));
     try {
-      const id = crypto.randomUUID();
+    try {
       await Promise.all([
         this.repo.mutate(
           'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
-          [id, article.id, reviewed]
+          [crypto.randomUUID(), article.id, reviewed]
         ),
-
         this.repo.mutate(
           `UPDATE article SET dismissed = 0, due = $1 WHERE id = $2`,
           [nextReview, article.id]
@@ -368,8 +368,8 @@ export class ArticleManager extends ItemManager {
    * Change the priority of an article and recalculate its next due date
    */
   async reprioritize(article: IArticleBase, newPriority: number) {
-    validatePriority(newPriority);
-    const { priority: _, ...rest } = article;
+    IRScheduler.validatePriority(newPriority);
+
     const lastReview = await this.getLastReview(article);
     const newInterval = await this.nextReviewInterval({
       ...rest,

@@ -1,10 +1,10 @@
-import { StateEffect, StateField, type Extension } from '@codemirror/state';
-import { showPanel } from '@codemirror/view';
-import { Notice } from 'obsidian';
 import {
   ERROR_NOTICE_DURATION_MS,
   SUCCESS_NOTICE_DURATION_MS,
 } from '#/lib/constants';
+import IRScheduler from '#/lib/IRScheduler';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { fetchByFile, invalidateCacheOnMatch } from '#/lib/query-client';
 import type { NoteType, ReviewCard } from '#/lib/types';
 import {
   isReviewArticle,
@@ -14,13 +14,13 @@ import {
   type ReviewItem,
   type ReviewSnippet,
 } from '#/lib/types';
-import { transformPriority } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
-import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
-import { fetchByFile, invalidateCacheOnMatch } from '../query-client';
-import { irPluginFacet } from './irPluginFacet';
+import { StateEffect, StateField, type Extension } from '@codemirror/state';
 import type { EditorView, Panel } from '@codemirror/view';
+import { showPanel } from '@codemirror/view';
 import type { App } from 'obsidian';
+import { Notice } from 'obsidian';
+import { irPluginFacet } from './irPluginFacet';
 
 /**
  * State effect to toggle review mode on/off.
@@ -416,7 +416,7 @@ function createPriorityInput(
   // Transform input in real-time as user types (e.g., "21" -> "2.1")
   input.addEventListener('input', () => {
     try {
-      const priority = transformPriority(input.value);
+      const priority = IRScheduler.transformPriority(input.value);
       currentPriority = priority;
       // Update display to show decimal form
       input.value = String(priority / 10);
