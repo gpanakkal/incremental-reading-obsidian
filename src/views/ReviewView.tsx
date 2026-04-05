@@ -14,7 +14,7 @@ export default class ReviewView extends FileView {
   #reviewManager: ReviewManager;
   plugin: IncrementalReadingPlugin;
 
-  activeEditor: ExtractedMarkdownEditor['owner'];
+  activeEditor: ExtractedMarkdownEditor['owner'] = null;
   /* required for review view to open */
   allowNoFile: boolean = true;
   /**
@@ -84,6 +84,7 @@ export default class ReviewView extends FileView {
   }
 
   async onOpen() {
+    await super.onOpen();
     if (!this.app.isMobile) {
       this.headerEl.hide();
     }
@@ -98,6 +99,7 @@ export default class ReviewView extends FileView {
   }
 
   async onClose() {
+    await super.onClose();
     render(null, this.contentEl);
     this.activeEditor = null;
     this.plugin.store.dispatch(resetSession());
