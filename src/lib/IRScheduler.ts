@@ -115,8 +115,6 @@ export default class IRScheduler {
    * Calculates the interval between the next two reviews using the current
    * due time and the last review time
    *
-   * TODO:
-   * - ensure this is not used when calculating the first due time
    */
   static nextInterval(text: IArticleBase | ISnippetBase): number {
     if ('fixed_interval_days' in text && text.fixed_interval_days !== null) {
@@ -124,7 +122,7 @@ export default class IRScheduler {
     }
 
     const intervalMultiplier = this.getIntervalMultiplier(text.priority);
-    const lastInterval = text.interval ?? TEXT_BASE_REVIEW_INTERVAL;
+    const lastInterval = text.interval;
     const nextInterval = Math.round(lastInterval * intervalMultiplier);
     return nextInterval;
   }
