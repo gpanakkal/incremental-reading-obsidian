@@ -1,12 +1,12 @@
-import { normalizePath, Notice } from 'obsidian';
 import type {
   ArticleDisplay,
   ArticleRow,
+  FrontMatterUpdates,
   IArticleBase,
   IArticleReview,
   ReviewArticle,
-  FrontMatterUpdates,
 } from '#/lib/types';
+import { normalizePath, Notice } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
@@ -36,9 +36,6 @@ import type { SQLiteRepository } from '../types';
 import type { App, TFile } from 'obsidian';
 
 export class ArticleManager extends ItemManager {
-  app: App;
-  repo: SQLiteRepository;
-
   static rowToBase(articleRow: ArticleRow): IArticleBase {
     return {
       ...articleRow,

@@ -1,3 +1,11 @@
+import type {
+  IArticleBase,
+  ISnippetBase,
+  ISnippetDisplay,
+  ISnippetReview,
+  ReviewSnippet,
+  SnippetRow,
+} from '#/lib/types';
 import {
   Notice,
   TFile,
@@ -5,14 +13,7 @@ import {
   type Editor,
   type MarkdownView,
 } from 'obsidian';
-import type {
-  ArticleRow,
-  ISnippetBase,
-  ISnippetDisplay,
-  ISnippetReview,
-  ReviewSnippet,
-  SnippetRow,
-} from '#/lib/types';
+import type ReviewView from 'src/views/ReviewView';
 import {
   DEFAULT_PRIORITY,
   ERROR_NOTICE_DURATION_MS,
@@ -32,14 +33,14 @@ import {
   SnippetOffsetTracker,
   type SnippetHighlight,
 } from '../SnippetOffsetTracker';
+import type { SQLiteRepository } from '../types';
 import { getEndOfToday } from '../utils';
+import { ArticleManager } from './ArticleManager';
 import { ItemManager } from './ItemManager';
 import type { SQLiteRepository } from '../types';
 import type ReviewView from 'src/views/ReviewView';
 
 export class SnippetManager extends ItemManager {
-  app: App;
-  repo: SQLiteRepository;
   offsetTracker: SnippetOffsetTracker;
 
   constructor(app: App, repo: SQLiteRepository) {
@@ -132,7 +133,7 @@ export class SnippetManager extends ItemManager {
     view: MarkdownView | ReviewView,
     firstReview?: number
   ) {
-    const reviewTime =
+    const snippetDueTime =
       firstReview || Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
 
     // capture the current file BEFORE any async operations
@@ -189,11 +190,23 @@ export class SnippetManager extends ItemManager {
     }
 
     // inherit priority from the source file if it has one, or assign default priority
-    let currentFileEntry;
+    let currentFileEntry: IArticleBase | ISnippetBase | null = null;
     if (parentType === 'article') {
-      currentFileEntry = await this.findArticle(currentFile);
+      const articleRow = await this.findArticle(currentFile);
+      if (articleRow) {
+        currentFileEntry = ArticleManager.rowToBase(articleRow);
+      }
     } else if (parentType === 'snippet') {
-      currentFileEntry = await this.findSnippet(currentFile);
+      const snippetRow = await this.findSnippet(currentFile);
+      if (snippetRow) {
+        currentFileEntry = SnippetManager.rowToBase(snippetRow);
+      }
+    }
+
+    if (!currentFileEntry) {
+      throw new Error(
+        `Couldn't find entry for ${parentType} ${currentFile.path}`
+      );
     }
 
     // console.log(
@@ -236,7 +249,7 @@ export class SnippetManager extends ItemManager {
     // Create the snippet entry
     const result = await this.createEntry(
       snippetFile,
-      reviewTime,
+      snippetDueTime,
       priority,
       currentFileEntry?.id,
       offsets ?? undefined
@@ -247,7 +260,7 @@ export class SnippetManager extends ItemManager {
       await this.refreshHighlightsAfterSnippetCreation(
         currentFile,
         snippetFile,
-        currentFileEntry,
+        !!currentFileEntry,
         cm
       );
     }
@@ -257,10 +270,13 @@ export class SnippetManager extends ItemManager {
 
   /**
    * Given a preexisting snippet file, insert into database
+   * @param dueTime when the snippet should first be due. Intervals between
+   * subsequent reviews always scale from the base review interval regardless
+   * of how far `dueTime` is in the future.
    */
   protected async createEntry(
     snippetFile: TFile,
-    reviewTime: number,
+    dueTime: number,
     priority: number,
     parentId?: string,
     offsets?: { start: number; end: number }
@@ -275,7 +291,7 @@ export class SnippetManager extends ItemManager {
       await this.repo.mutate(query, [
         id,
         `${SNIPPET_DIRECTORY}/${snippetFile.name}`,
-        reviewTime,
+        dueTime,
         priority,
         parentId,
         offsets?.start ?? null,
@@ -414,8 +430,8 @@ export class SnippetManager extends ItemManager {
   private async refreshHighlightsAfterSnippetCreation(
     parentFile: TFile,
     snippetFile: TFile,
-    parentEntry: ArticleRow | SnippetRow | null | undefined,
-    cm: { dispatch: (spec: unknown) => void }
+    parentEntry: boolean,
+    cm: Editor['cm']
   ) {
     if (parentEntry) {
       await this.getHighlights(parentFile);
