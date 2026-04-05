@@ -150,8 +150,14 @@ export class ArticleManager extends ItemManager {
       const dueTime = Date.now();
       const id = crypto.randomUUID();
       await this.repo.mutate(
-        'INSERT INTO article (id, reference, due, priority) VALUES ($1, $2, $3, $4)',
-        [id, `${ARTICLE_DIRECTORY}/${articleFile.name}`, dueTime, priority]
+        'INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)',
+        [
+          id,
+          `${ARTICLE_DIRECTORY}/${articleFile.name}`,
+          dueTime,
+          TEXT_BASE_REVIEW_INTERVAL,
+          priority,
+        ]
       );
 
       const titleSlice = getContentSlice(
@@ -211,8 +217,14 @@ export class ArticleManager extends ItemManager {
       const dueTime = Date.now();
       const id = crypto.randomUUID();
       await this.repo.mutate(
-        'INSERT INTO article (id, reference, due, priority) VALUES ($1, $2, $3, $4)',
-        [id, `${ARTICLE_DIRECTORY}/${articleFile.name}`, dueTime, priority]
+        'INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)',
+        [
+          id,
+          `${ARTICLE_DIRECTORY}/${articleFile.name}`,
+          dueTime,
+          TEXT_BASE_REVIEW_INTERVAL,
+          priority,
+        ]
       );
 
       const result = await this.fetch(id);
