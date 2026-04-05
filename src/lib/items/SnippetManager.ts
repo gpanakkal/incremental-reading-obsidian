@@ -7,6 +7,7 @@ import {
   SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
   SUCCESS_NOTICE_DURATION_MS,
+  TEXT_BASE_REVIEW_INTERVAL,
   TEXT_REVIEW_INTERVALS,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
@@ -280,14 +281,15 @@ export class SnippetManager extends ItemManager {
     try {
       const query =
         `INSERT INTO snippet ` +
-        `(id, reference, due, priority, parent, start_offset, end_offset) ` +
-        `VALUES ($1, $2, $3, $4, $5, $6, $7)`;
+        `(id, reference, due, interval, priority, parent, start_offset, end_offset) ` +
+        `VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
       // save the snippet to the database
       const id = crypto.randomUUID();
       await this.repo.mutate(query, [
         id,
         `${SNIPPET_DIRECTORY}/${snippetFile.name}`,
         dueTime,
+        TEXT_BASE_REVIEW_INTERVAL,
         priority,
         parentId,
         offsets?.start ?? null,
@@ -506,7 +508,8 @@ export class SnippetManager extends ItemManager {
   }
 
   /**
-   * Add a SnippetReview and set the next review date
+   * Add a SnippetReview and update the due date and interval
+   * TODO: combine the operations into a transaction
    */
   async review(
     snippet: ISnippetBase,
@@ -514,19 +517,21 @@ export class SnippetManager extends ItemManager {
     nextReviewInterval?: number
   ) {
     const reviewed = reviewTime || Date.now();
-    const nextReview =
-      reviewed +
-      (nextReviewInterval ?? (await this.nextReviewInterval(snippet)));
-    try {
-      await this.repo.mutate(
-        'INSERT INTO snippet_review (id, snippet_id, review_time) VALUES ($1, $2, $3)',
-        [crypto.randomUUID(), snippet.id, reviewed]
-      );
+    const nextInterval =
+      nextReviewInterval ?? IRScheduler.nextInterval(snippet);
+    const nextDueTime = reviewed + nextInterval;
 
-      await this.repo.mutate(
-        `UPDATE snippet SET dismissed = 0, due = $1 WHERE id = $2`,
-        [nextReview, snippet.id]
-      );
+    try {
+      await Promise.all([
+        this.repo.mutate(
+          'INSERT INTO snippet_review (id, snippet_id, review_time) VALUES ($1, $2, $3)',
+          [crypto.randomUUID(), snippet.id, reviewed]
+        ),
+        this.repo.mutate(
+          `UPDATE snippet SET dismissed = 0, due = $1, interval = $2 WHERE id = $3`,
+          [nextDueTime, nextInterval, snippet.id]
+        ),
+      ]);
     } catch (error) {
       console.error(error);
     }
@@ -539,8 +544,8 @@ export class SnippetManager extends ItemManager {
     IRScheduler.validatePriority(newPriority);
 
     const lastReview = await this.getLastReview(snippet);
-    const newInterval = await this.nextReviewInterval({
-      ...rest,
+    const newInterval = IRScheduler.nextInterval({
+      ...snippet,
       priority: newPriority,
     });
     const newDueTime = lastReview
@@ -548,24 +553,8 @@ export class SnippetManager extends ItemManager {
       : snippet.due;
 
     await this.repo.mutate(
-      `UPDATE snippet SET priority = $1, due = $2 WHERE id = $3`,
-      [newPriority, newDueTime, snippet.id]
+      `UPDATE snippet SET priority = $1, due = $2, interval = $3 WHERE id = $4`,
+      [newPriority, newDueTime, newInterval, snippet.id]
     );
-  }
-
-  protected async nextReviewInterval(text: ISnippetBase): Promise<number> {
-    const intervalMultiplier =
-      TEXT_REVIEW_MULTIPLIER_BASE +
-      (text.priority - 10) * TEXT_REVIEW_MULTIPLIER_STEP;
-
-    const lastReview = await this.getLastReview(text);
-
-    const lastInterval =
-      lastReview && text.due
-        ? text.due - lastReview.review_time
-        : TEXT_BASE_REVIEW_INTERVAL;
-
-    const nextInterval = Math.round(lastInterval * intervalMultiplier);
-    return nextInterval;
   }
 }

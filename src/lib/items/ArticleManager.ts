@@ -319,10 +319,10 @@ export class ArticleManager extends ItemManager {
     nextReviewInterval?: number
   ) {
     const reviewed = reviewTime || Date.now();
-    const nextReview =
-      reviewed +
-      (nextReviewInterval ?? (await this.nextReviewInterval(article)));
-    try {
+    const nextInterval =
+      nextReviewInterval ?? IRScheduler.nextInterval(article);
+    const nextDueTime = reviewed + nextInterval;
+
     try {
       await Promise.all([
         this.repo.mutate(
@@ -330,8 +330,8 @@ export class ArticleManager extends ItemManager {
           [crypto.randomUUID(), article.id, reviewed]
         ),
         this.repo.mutate(
-          `UPDATE article SET dismissed = 0, due = $1 WHERE id = $2`,
-          [nextReview, article.id]
+          `UPDATE article SET dismissed = 0, due = $1, interval = $2 WHERE id = $3`,
+          [nextDueTime, nextInterval, article.id]
         ),
       ]);
     } catch (error) {
@@ -371,8 +371,8 @@ export class ArticleManager extends ItemManager {
     IRScheduler.validatePriority(newPriority);
 
     const lastReview = await this.getLastReview(article);
-    const newInterval = await this.nextReviewInterval({
-      ...rest,
+    const newInterval = IRScheduler.nextInterval({
+      ...article,
       priority: newPriority,
     });
     const newDueTime = lastReview
@@ -380,24 +380,8 @@ export class ArticleManager extends ItemManager {
       : article.due;
 
     await this.repo.mutate(
-      `UPDATE article SET priority = $1, due = $2 WHERE id = $3`,
-      [newPriority, newDueTime, article.id]
+      `UPDATE article SET priority = $1, due = $2, interval = $3 WHERE id = $4`,
+      [newPriority, newDueTime, newInterval, article.id]
     );
-  }
-
-  protected async nextReviewInterval(text: IArticleBase): Promise<number> {
-    const intervalMultiplier =
-      TEXT_REVIEW_MULTIPLIER_BASE +
-      (text.priority - 10) * TEXT_REVIEW_MULTIPLIER_STEP;
-
-    const lastReview = await this.getLastReview(text);
-
-    const lastInterval =
-      lastReview && text.due
-        ? text.due - lastReview.review_time
-        : TEXT_BASE_REVIEW_INTERVAL;
-
-    const nextInterval = Math.round(lastInterval * intervalMultiplier);
-    return nextInterval;
   }
 }

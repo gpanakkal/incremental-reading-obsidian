@@ -1,10 +1,63 @@
-import { MAXIMUM_PRIORITY, MINIMUM_PRIORITY } from './constants';
-import { clamp, isInteger } from './utils';
+import {
+  MAXIMUM_PRIORITY,
+  MINIMUM_PRIORITY,
+  TEXT_BASE_REVIEW_INTERVAL,
+  TEXT_REVIEW_MULTIPLIER_BASE,
+  TEXT_REVIEW_MULTIPLIER_STEP,
+} from './constants';
+import type { IArticleBase, ISnippetBase } from './types';
+import { clamp, isInteger, sequenceSum } from './utils';
 
 /**
  * Logic for scheduling future reviews of non-SRS items
  */
 export default class IRScheduler {
+  /**
+   * Calculates the interval between the next two reviews using the current
+   * due time and the last review time
+   *
+   * TODO:
+   * - ensure this is not used when calculating the first due time
+   */
+  static nextInterval(text: IArticleBase | ISnippetBase): number {
+    const intervalMultiplier = this.getIntervalMultiplier(text.priority);
+    const lastInterval = text.interval ?? TEXT_BASE_REVIEW_INTERVAL;
+    const nextInterval = Math.round(lastInterval * intervalMultiplier);
+    return nextInterval;
+  }
+
+  static getIntervalMultiplier(priority: number): number {
+    return (
+      TEXT_REVIEW_MULTIPLIER_BASE +
+      (priority - 10) * TEXT_REVIEW_MULTIPLIER_STEP
+    );
+  }
+
+  /**
+   * Get the time until the nth review from now as a Unix timestamp, assuming
+   * all reviews happen on time and the priority is never changed
+   *
+   * @param futureReviewCount the number of reviews into the future to project
+   */
+  static cumulativeInterval(
+    priority: number,
+    currentInterval: number,
+    futureReviewCount: number
+  ) {
+    this.validateReviewCount(futureReviewCount);
+
+    const totalIntervalMs = Math.round(
+      currentInterval *
+        sequenceSum(
+          0,
+          futureReviewCount - 1,
+          (k) => this.getIntervalMultiplier(priority) ** k
+        )
+    );
+
+    return totalIntervalMs;
+  }
+
   static validateReviewCount(count: number) {
     if (!isInteger(count) || count < 1) {
       throw new TypeError(

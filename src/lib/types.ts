@@ -8,8 +8,10 @@ export interface IArticleBase {
   id: string;
   reference: string;
   due: number | null;
+  interval: number;
   dismissed: boolean;
   priority: number;
+  fixed_interval_days: number | null;
   scroll_top: number;
 }
 
@@ -31,6 +33,7 @@ export interface ISnippetBase {
   id: string;
   reference: string;
   due: number | null;
+  interval: number;
   dismissed: boolean;
   priority: number;
   parent: string | null;
@@ -143,6 +146,12 @@ export function isSnippet(
 
 export function isReviewSnippet(value: ReviewItem): value is ReviewSnippet {
   return !isReviewCard(value) && 'parent' in value.data;
+}
+
+export function isReviewText(
+  value: ReviewItem
+): value is ReviewArticle | ReviewSnippet {
+  return isReviewSnippet(value) || isReviewArticle(value);
 }
 
 export function isSRSCard(value: ISnippetBase | ISRSCard): value is ISRSCard {

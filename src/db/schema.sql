@@ -2,9 +2,11 @@ CREATE TABLE IF NOT EXISTS article (
   id TEXT NOT NULL, -- UUID
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
   due INTEGER, -- unix timestamp
-  priority INTEGER NOT NULL,
+  interval INTEGER NOT NULL, -- the interval that was used to calculate `due`
+  priority INTEGER NOT NULL, -- used when manual interval is null
   dismissed INTEGER DEFAULT 0,
   scroll_top INTEGER NOT NULL DEFAULT 0,
+  CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
   CHECK(due IS NOT NULL OR dismissed = TRUE)
@@ -25,11 +27,13 @@ CREATE TABLE IF NOT EXISTS snippet (
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
   parent TEXT DEFAULT NULL, -- null if it wasn't created from an article or snippet
   due INTEGER, -- unix timestamp
+  interval INTEGER NOT NULL, -- the interval that was used to calculate `due`
   priority INTEGER NOT NULL,
   dismissed INTEGER DEFAULT 0,
   scroll_top INTEGER NOT NULL DEFAULT 0,
   start_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
   end_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
+  CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
   CHECK(due IS NOT NULL OR dismissed = TRUE)
