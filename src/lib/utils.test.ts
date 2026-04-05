@@ -155,7 +155,7 @@ describe('clamp', () => {
         fc.oneof(fc.integer(), fc.float({ noNaN: true })),
         fc.oneof(fc.integer(), fc.float({ noNaN: true })),
         (value, boundA, boundB) => {
-          const clamped = clamp(value, [boundA, boundB]);
+          const clamped = clamp(value, boundA, boundB);
           const min = Math.min(boundA, boundB);
           const max = Math.max(boundA, boundB);
           expect(clamped).toBeLessThanOrEqual(max);
@@ -173,9 +173,9 @@ describe('clamp', () => {
         fc.oneof(fc.integer(), fc.float()),
         fc.oneof(fc.integer(), fc.float()),
         (value, boundA, boundB) => {
-          expect(() => clamp(NaN, [boundA, boundB])).toThrow();
-          expect(() => clamp(value, [NaN, boundB])).toThrow();
-          expect(() => clamp(value, [boundA, NaN])).toThrow();
+          expect(() => clamp(NaN, boundA, boundB)).toThrow();
+          expect(() => clamp(value, NaN, boundB)).toThrow();
+          expect(() => clamp(value, boundA, NaN)).toThrow();
         }
       )
     );

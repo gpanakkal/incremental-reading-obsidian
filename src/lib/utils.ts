@@ -128,7 +128,7 @@ export function getContentSlice(
 }
 
 export const isInteger = (value: unknown): boolean =>
-  typeof value === 'number' && !Number.isNaN(value) && value % 1 === 0;
+  typeof value === 'number' && value % 1 === 0;
 
 export function compareDates(a: number | Date | null, b: number | Date | null) {
   if (a === null && b === null) return 0;
@@ -251,12 +251,19 @@ export const binarySearch = <T>(
   return null;
 };
 
-export const clamp = (value: number, bounds: [number, number]): number => {
-  if ([value, ...bounds].some(Number.isNaN))
+export const clamp = (
+  value: number,
+  lowerBound: number,
+  upperBound: number
+): number => {
+  if ([value, lowerBound, upperBound].some(Number.isNaN))
     throw new TypeError(
-      `Attempted to clamp value ${value} within [${(bounds[0], bounds[1])}], ` +
-        `but some of these values are NaN`
+      `Attempted to clamp value ${value} within [${lowerBound}, ${upperBound}]` +
+        `, but some of these values are NaN`
     );
-  const [min, max] = bounds.sort((a, b) => a - b);
+  const [min, max] = [
+    Math.min(lowerBound, upperBound),
+    Math.max(lowerBound, upperBound),
+  ];
   return Math.max(min, Math.min(max, value));
 };
