@@ -1,4 +1,10 @@
 import {
+  applyMigrations,
+  getPendingMigrations,
+  getSchemaVersion,
+  MigrationVerificationError,
+} from '#/db/migrations';
+import {
   normalizePath,
   Platform,
   type App,
@@ -6,14 +12,8 @@ import {
   type Plugin,
   type TAbstractFile,
 } from 'obsidian';
-import initSqlJs from 'sql.js';
-import {
-  applyMigrations,
-  getPendingMigrations,
-  getSchemaVersion,
-  MigrationVerificationError,
-} from '#/db/migrations';
 import type { BindParams, Database, QueryExecResult } from 'sql.js';
+import initSqlJs from 'sql.js';
 // @ts-ignore - WASM imported as base64 string via custom esbuild plugin
 import wasmBase64 from '#/db/sql-wasm.wasm';
 import {
@@ -28,11 +28,10 @@ import type { Primitive } from '#/lib/utility-types';
 export class SQLJSRepository implements SQLiteRepository {
   app: App;
   adapter: DataAdapter;
-  db: Database;
+  db: Database | null = null;
   #dbFilePath: string;
   #schema: string;
-  /**  */
-  #sql: initSqlJs.SqlJsStatic;
+  #sql: initSqlJs.SqlJsStatic | null = null;
   #pendingSaveCount: number = 0;
   #onMigrationFailure?: (error: MigrationVerificationError) => void;
   onReloadFromDisk?: () => void | Promise<void>;
@@ -147,7 +146,7 @@ export class SQLJSRepository implements SQLiteRepository {
   _execSql(query: string, params: Primitive[] = []) {
     // console.log({ query, params });
     try {
-      const results = this.db.exec(query, this.coerceParams(params));
+      const results = this.db?.exec(query, this.coerceParams(params));
       if (!results || !results.length) return [[]];
 
       // in SQL.js, selected rows are returned in form [{ columns: string[], values: Array<SQLValue[]> }]
@@ -239,8 +238,8 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   protected async initDb() {
     try {
-      const sql = await this.loadWasm();
-      this.db = new sql.Database();
+      this.#sql ||= await this.loadWasm();
+      this.db = new this.#sql.Database();
       this.db.exec(this.#schema);
       return this.db;
     } catch (error) {
@@ -415,6 +414,7 @@ export class SQLJSRepository implements SQLiteRepository {
     const snapshot: Record<string, number> = {};
     for (const table of TABLE_NAMES) {
       try {
+        if (!this.db) throw new Error(`Database not initialized`);
         const result = this.db.exec(`SELECT COUNT(*) FROM ${table}`);
         snapshot[table] = (result[0]?.values[0]?.[0] as number) ?? 0;
       } catch {
@@ -426,6 +426,7 @@ export class SQLJSRepository implements SQLiteRepository {
 
   protected foreignKeyCheck(): string | null {
     try {
+      if (!this.db) throw new Error(`Database not initialized`);
       this.db.exec('PRAGMA foreign_keys = ON');
       const fkResult = this.db.exec('PRAGMA foreign_key_check');
       if (fkResult.length > 0 && fkResult[0].values.length > 0) {
@@ -446,6 +447,7 @@ export class SQLJSRepository implements SQLiteRepository {
 
     // 1. Structural integrity
     try {
+      if (!this.db) throw new Error(`Database not initialized`);
       const result = this.db.exec('PRAGMA integrity_check');
       const status = result[0]?.values[0]?.[0] as string;
       if (status !== 'ok') {
@@ -497,6 +499,7 @@ export class SQLJSRepository implements SQLiteRepository {
     ];
     for (const check of checkQueries) {
       try {
+        if (!this.db) throw new Error(`Database not initialized`);
         const result = this.db.exec(check.sql);
         const count = (result[0]?.values[0]?.[0] as number) ?? 0;
         if (count > 0) {
