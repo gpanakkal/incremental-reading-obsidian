@@ -259,14 +259,11 @@ export const migrations: Migration[] = [
           },
           (row: SafeOmit<TableNameToRowType['snippet'], 'interval'>) => {
             const lastReviewTime = latestReviewBySnippet[row.id];
-            const lastInterval =
-              lastReviewTime && row.due
-                ? row.due - lastReviewTime
-                : TEXT_BASE_REVIEW_INTERVAL;
-            return {
-              ...row,
-              interval: lastInterval,
-            };
+            const computed =
+              lastReviewTime && row.due ? row.due - lastReviewTime : 0;
+            const interval =
+              computed > 0 ? computed : TEXT_BASE_REVIEW_INTERVAL;
+            return { ...row, interval };
           }
         );
       })();
