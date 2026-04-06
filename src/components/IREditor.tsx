@@ -1,12 +1,36 @@
-import { insertBlankLine } from '@codemirror/commands';
-import { EditorSelection, Prec } from '@codemirror/state';
+import { useAppSelector, useAppStore } from '#/hooks/useAppSelector';
 import {
+  isExternalSync,
+  isReviewInterfaceFacet,
+  setReviewCallbacks,
+  setReviewModeEffect,
+  setShowAnswerEffect,
+  type ReviewCallbacks,
+} from '#/lib/extensions';
+import type { ExtractedMobileToolbar } from '#/lib/obsidian-editor';
+import {
+  getBaseMarkdownExtensions,
+  getMarkdownController,
+  setInsertMode,
+} from '#/lib/obsidian-editor';
+import { isEditing, setShowAnswer } from '#/lib/store';
+import type {
+  ReviewArticle,
+  ReviewCard,
+  ReviewItem,
+  ReviewSnippet,
+} from '#/lib/types';
+import { isReviewArticle } from '#/lib/types';
+import { insertBlankLine } from '@codemirror/commands';
+import type { Extension } from '@codemirror/state';
+import { EditorSelection, Prec } from '@codemirror/state';
+import type { ViewUpdate } from '@codemirror/view';
+import {
+  EditorView,
   keymap,
   placeholder as placeholderExt,
-  EditorView,
   scrollPastEnd,
 } from '@codemirror/view';
-import classcat from 'classcat';
 import { Platform } from 'obsidian';
 import {
   createPortal,
@@ -17,32 +41,10 @@ import {
   type MutableRefObject,
 } from 'react';
 import { useDispatch } from 'react-redux';
-import { useAppSelector, useAppStore } from '#/hooks/useAppSelector';
-import {
-  setReviewModeEffect,
-  setShowAnswerEffect,
-  setReviewCallbacks,
-  isExternalSync,
-  isReviewInterfaceFacet,
-  type ReviewCallbacks,
-} from '#/lib/extensions';
-import { isEditing, setShowAnswer } from '#/lib/store';
-import type {
-  ReviewArticle,
-  ReviewCard,
-  ReviewItem,
-  ReviewSnippet,
-} from '#/lib/types';
-import { isReviewArticle } from '#/lib/types';
-import type { ExtractedMobileToolbar } from '#/lib/obsidian-editor';
-import { getBaseMarkdownExtensions } from '#/lib/obsidian-editor';
-import { setInsertMode, getMarkdownController } from '#/lib/obsidian-editor';
+import type { Grade } from 'ts-fsrs';
 import { useReviewContext } from './ReviewContext';
 import { TitleEditor } from './TitleEditor';
 import type { EditCoordinates } from './types';
-import type { Extension } from '@codemirror/state';
-import type { ViewUpdate } from '@codemirror/view';
-import type { Grade } from 'ts-fsrs';
 
 /**
  * Credit goes to mgmeyers for figuring out how to get the editor prototype.
@@ -397,7 +399,7 @@ export function IREditor({
 
   return (
     <>
-      <div className={classcat(cls)} ref={elRef}></div>
+      <div className={cls.join(' ')} ref={elRef}></div>
       {titlePortalEl &&
         createPortal(
           <TitleEditor item={item as ReviewArticle} />,

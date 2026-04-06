@@ -1,8 +1,7 @@
-import classcat from 'classcat';
-import { Component, MarkdownRenderer } from 'obsidian';
-import { useEffect, useRef } from 'react';
 import { CardManager } from '#/lib/items/CardManager';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { Component, MarkdownRenderer } from 'obsidian';
+import { useEffect, useRef } from 'react';
 import { useReviewContext } from './ReviewContext';
 
 /** Read-only card viewer */
@@ -48,7 +47,7 @@ export function CardViewer({ cardText }: { cardText: string }) {
   }, [cardText, reviewView.app]);
 
   return (
-    <div className={classcat(cls)}>
+    <div className={cls.join(' ')}>
       <div
         ref={containerRef}
         className={'markdown-preview-sizer ir-card-viewer'}

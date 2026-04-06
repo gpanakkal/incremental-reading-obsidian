@@ -25,7 +25,6 @@
 	"dependencies": {
 		"@reduxjs/toolkit": "2.11.2",
 		"@tanstack/react-query": "5.90.2",
-		"classcat": "5.0.5",
 		"preact": "10.28.3",
 		"react": "npm:@preact/compat",
 		"react-dom": "npm:@preact/compat",
