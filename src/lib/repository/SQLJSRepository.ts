@@ -3,7 +3,8 @@ import {
   getPendingMigrations,
   getSchemaVersion,
   MigrationVerificationError,
-} from '#/db/migrations';
+} from '#/db/migration-helpers';
+import { migrations } from '#/db/migrations';
 import {
   normalizePath,
   Platform,
@@ -297,7 +298,7 @@ export class SQLJSRepository implements SQLiteRepository {
       // for mobile compatibility
       this.db = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
 
-      const pending = getPendingMigrations(this.db);
+      const pending = getPendingMigrations(this.db, migrations);
       if (pending.length > 0) {
         const previousVersion = getSchemaVersion(this.db);
         await this.backupDatabase(previousVersion);
@@ -317,7 +318,7 @@ export class SQLJSRepository implements SQLiteRepository {
           }
         }
 
-        const updated = applyMigrations(this.db);
+        const updated = applyMigrations(this.db, pending);
 
         if (updated) {
           const verification = this.verifyMigration(

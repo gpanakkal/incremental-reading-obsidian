@@ -13,6 +13,11 @@ import type { Database, SqlJsStatic } from 'sql.js';
 import initSqlJs from 'sql.js';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+  applyMigrations,
+  getSchemaVersion,
+  recreateTable,
+} from './migration-helpers';
 // migrations.ts imports `databaseSchema` via a custom esbuild plugin that
 // handles `.sql` files as strings. Vitest doesn't use that plugin, so we
 // mock the module before importing migrations.
@@ -22,8 +27,7 @@ const schemaSQL = readFileSync(schemaPath, 'utf-8');
 vi.mock('./schema.sql', () => ({ default: schemaSQL }));
 
 // Import after the mock is registered
-const { applyMigrations, getSchemaVersion, migrations, recreateTable } =
-  await import('./migrations');
+const { migrations } = await import('./migrations');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -142,14 +146,14 @@ describe('migration v1 — add start_offset and end_offset to snippet', () => {
   });
 
   it('adds start_offset and end_offset columns', () => {
-    applyMigrations(db);
+    applyMigrations(db, migrations);
     const cols = columnNames(db, 'snippet');
     expect(cols).toContain('start_offset');
     expect(cols).toContain('end_offset');
   });
 
   it('increments user_version to at least 1', () => {
-    applyMigrations(db);
+    applyMigrations(db, migrations);
     expect(getSchemaVersion(db)).toBeGreaterThanOrEqual(1);
   });
 
@@ -158,7 +162,7 @@ describe('migration v1 — add start_offset and end_offset to snippet', () => {
       `INSERT INTO snippet (id, reference, due, priority, dismissed)
        VALUES ('s1', 'note.md#snippet-1', 1000, 20, 0)`
     );
-    applyMigrations(db);
+    applyMigrations(db, migrations);
     const rows = selectAll(db, 'snippet');
     expect(rows).toHaveLength(1);
     expect(rows[0].reference).toBe('note.md#snippet-1');
@@ -182,12 +186,12 @@ describe('migration v2 — add scroll_top to article and snippet', () => {
   });
 
   it('adds scroll_top to article', () => {
-    applyMigrations(db);
+    applyMigrations(db, migrations);
     expect(columnNames(db, 'article')).toContain('scroll_top');
   });
 
   it('adds scroll_top to snippet', () => {
-    applyMigrations(db);
+    applyMigrations(db, migrations);
     expect(columnNames(db, 'snippet')).toContain('scroll_top');
   });
 
@@ -196,7 +200,7 @@ describe('migration v2 — add scroll_top to article and snippet', () => {
       `INSERT INTO article (id, reference, due, priority, dismissed)
        VALUES ('a1', 'article.md', 1000, 30, 0)`
     );
-    applyMigrations(db);
+    applyMigrations(db, migrations);
     const rows = selectAll(db, 'article');
     expect(rows[0].scroll_top).toBe(0);
   });
@@ -214,12 +218,12 @@ describe('migration v3 — backfill interval on article and snippet', () => {
   });
 
   it('adds interval column to article', () => {
-    applyMigrations(db);
+    applyMigrations(db, migrations);
     expect(columnNames(db, 'article')).toContain('interval');
   });
 
   it('adds interval column to snippet', () => {
-    applyMigrations(db);
+    applyMigrations(db, migrations);
     expect(columnNames(db, 'snippet')).toContain('interval');
   });
 
@@ -235,7 +239,7 @@ describe('migration v3 — backfill interval on article and snippet', () => {
        VALUES ('r1', 'a1', ${reviewTime})`
     );
 
-    applyMigrations(db);
+    applyMigrations(db, migrations);
 
     const rows = selectAll(db, 'article');
     expect(rows[0].interval).toBe(due - reviewTime);
@@ -247,7 +251,7 @@ describe('migration v3 — backfill interval on article and snippet', () => {
        VALUES ('a1', 'article.md', 1000000, 30, 0)`
     );
 
-    applyMigrations(db);
+    applyMigrations(db, migrations);
 
     const rows = selectAll(db, 'article');
     expect(rows[0].interval).toBe(TEXT_BASE_REVIEW_INTERVAL);
@@ -265,7 +269,7 @@ describe('migration v3 — backfill interval on article and snippet', () => {
        ('r2', 'a1', 1500000)`
     );
 
-    applyMigrations(db);
+    applyMigrations(db, migrations);
 
     const rows = selectAll(db, 'article');
     expect(rows[0].interval).toBe(due - 1_500_000);
@@ -283,7 +287,7 @@ describe('migration v3 — backfill interval on article and snippet', () => {
     );
     // a2 has no review → TEXT_BASE_REVIEW_INTERVAL
 
-    applyMigrations(db);
+    applyMigrations(db, migrations);
 
     const rows = selectAll(db, 'article');
     const byId = Object.fromEntries(rows.map((r) => [r.id, r])) as Record<
@@ -306,7 +310,7 @@ describe('migration v3 — backfill interval on article and snippet', () => {
        VALUES ('sr1', 'sn1', ${reviewTime})`
     );
 
-    applyMigrations(db);
+    applyMigrations(db, migrations);
 
     const rows = selectAll(db, 'snippet');
     expect(rows[0].interval).toBe(due - reviewTime);
@@ -317,7 +321,7 @@ describe('migration v3 — backfill interval on article and snippet', () => {
       `INSERT INTO article (id, reference, due, priority, dismissed, fixed_interval_days, scroll_top)
        VALUES ('a1', 'article.md', 999, 40, 0, 3, 42)`
     );
-    applyMigrations(db);
+    applyMigrations(db, migrations);
     const rows = selectAll(db, 'article');
     expect(rows[0]).toEqual({
       id: 'a1',
@@ -332,7 +336,7 @@ describe('migration v3 — backfill interval on article and snippet', () => {
   });
 
   it('updates user_version to 3', () => {
-    applyMigrations(db);
+    applyMigrations(db, migrations);
     expect(getSchemaVersion(db)).toBe(3);
   });
 });
@@ -356,16 +360,11 @@ describe('applyMigrations — transaction safety', () => {
     // Directly invoke applyMigrations with the broken migration via DB state trick:
     // set user_version to 98 so only the bad migration is pending, then patch migrations
     db.exec('PRAGMA user_version = 98');
-    const originalMigrations = migrations.splice(0);
-    migrations.push(badMigration);
-    try {
-      expect(() => applyMigrations(db)).toThrow('Migration 99 failed');
-      // version must not have advanced
-      expect(getSchemaVersion(db)).toBe(98);
-    } finally {
-      migrations.splice(0);
-      migrations.push(...originalMigrations);
-    }
+    expect(() => applyMigrations(db, [badMigration])).toThrow(
+      'Migration 99 failed'
+    );
+    // version must not have advanced
+    expect(getSchemaVersion(db)).toBe(98);
   });
 });
 
