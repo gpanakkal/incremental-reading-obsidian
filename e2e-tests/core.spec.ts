@@ -1,9 +1,9 @@
-import * as fs from 'node:fs/promises';
 import test, {
   expect,
   type ElectronApplication,
   type Page,
 } from '@playwright/test';
+import * as fs from 'node:fs/promises';
 import {
   executeCommand,
   finalizeArticleImport,
@@ -365,6 +365,8 @@ test.describe('Extracting snippets', () => {
     );
     await window.getByRole('button', { name: 'Enter Review' }).click();
 
+    // wait to reduce test flakiness
+    await window.waitForTimeout(300);
     // look for the action bar to confirm we're in review
     await expect(
       window.getByRole('button', { name: 'Continue' })
