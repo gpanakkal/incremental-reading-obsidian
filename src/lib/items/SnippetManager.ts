@@ -201,7 +201,7 @@ export class SnippetManager extends ItemManager {
       }
     }
 
-    if (!currentFileEntry) {
+    if (parentType && !currentFileEntry) {
       throw new Error(
         `Couldn't find entry for ${parentType} ${currentFile.path}`
       );
@@ -217,6 +217,7 @@ export class SnippetManager extends ItemManager {
     // for this snippet so its first n reviews occur before the first n
     // reviews of the parent item
     if (
+      currentFileEntry &&
       'fixed_interval_days' in currentFileEntry &&
       currentFileEntry.fixed_interval_days
     ) {
