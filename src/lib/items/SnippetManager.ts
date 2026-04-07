@@ -221,13 +221,11 @@ export class SnippetManager extends ItemManager {
       'fixed_interval_days' in currentFileEntry &&
       currentFileEntry.fixed_interval_days
     ) {
-      const { priority: calculatedPrio } =
-        IRScheduler.childPriorityFromFixedInterval(
-          currentFileEntry,
-          REVIEW_COUNT_FOR_PRIORITY_SCALING,
-          snippetDueTime
-        );
-      priority = calculatedPrio;
+      priority = IRScheduler.childPriorityFromFixedInterval(
+        currentFileEntry,
+        REVIEW_COUNT_FOR_PRIORITY_SCALING,
+        snippetDueTime
+      );
     }
 
     // Calculate body-relative character offsets for highlighting
