@@ -138,18 +138,23 @@
   margin-top: 0 !important;
 }
 
+:root {
+  --ir-snippet-highlight-color: rgba(255, 235, 59, 0.3);
+  --ir-snippet-highlight-color-hover: rgba(255, 235, 59, 0.5);
+}
+
 /* Snippet highlight styles */
 .ir-snippet-highlight {
   cursor: pointer;
   border-bottom: 1px dashed var(--text-accent);
   transition: all 0.2s ease;
   text-decoration: none;
-  background-color: rgba(255, 235, 59, 0.3);
+  background-color: var(--ir-snippet-highlight-color);
 }
 
 /* Apply highlight to all descendants */
 .ir-snippet-highlight * {
-  background-color: rgba(255, 235, 59, 0.3);
+  background-color: var(--ir-snippet-highlight-color);
 }
 
 /* Exception: keep external link icons transparent */
@@ -158,13 +163,13 @@
 }
 
 .ir-snippet-highlight:hover {
-  background-color: rgba(255, 235, 59, 0.5);
+  background-color: var(--ir-snippet-highlight-color-hover);
   border-bottom-color: var(--text-accent-hover);
 }
 
 /* Apply hover to all descendants */
 .ir-snippet-highlight:hover * {
-  background-color: rgba(255, 235, 59, 0.5);
+  background-color: var(--ir-snippet-highlight-color-hover);
 }
 
 /* Keep external links transparent on hover */
