@@ -29,7 +29,7 @@ import {
   getEndOfToday,
 } from '#/lib/utils';
 import type { TFile } from 'obsidian';
-import { normalizePath, Notice } from 'obsidian';
+import { Notice } from 'obsidian';
 import { ItemManager } from './ItemManager';
 
 export class ArticleManager extends ItemManager {
@@ -97,12 +97,7 @@ export class ArticleManager extends ItemManager {
       }
 
       // check if an article with this name already exists
-      const getTargetPath = (fileName: string) =>
-        normalizePath(`${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/${fileName}`);
-      const isDuplicate = (fileName: string) =>
-        this.app.vault.getAbstractFileByPath(getTargetPath(fileName));
-
-      if (isDuplicate(file.name)) {
+      if (Obsidian.isDuplicate(file.name, 'article', this.app)) {
         new Notice(
           `Warning: article with name already exists "${file.name}"`,
           0
@@ -110,7 +105,7 @@ export class ArticleManager extends ItemManager {
       }
 
       let importFileName = file.name;
-      while (isDuplicate(importFileName)) {
+      while (Obsidian.isDuplicate(file.name, 'article', this.app)) {
         importFileName = `${file.basename} - ${generateId()}.${file.extension}`;
       }
 
@@ -124,7 +119,7 @@ export class ArticleManager extends ItemManager {
 
       if (!articleFile) {
         throw new Error(
-          `Failed to create note ${getTargetPath(importFileName)}`
+          `Failed to create note ${Obsidian.getTargetPath(importFileName, 'article')}`
         );
       }
 

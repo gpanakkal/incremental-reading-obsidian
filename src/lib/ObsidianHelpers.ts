@@ -268,6 +268,16 @@ export class ObsidianHelpers {
     return normalizePath(`${DATA_DIRECTORY}/${subDirectory}`);
   }
 
+  static getTargetPath(fileName: string, noteType: NoteType) {
+    const dir = this.getDirectory(noteType);
+    return normalizePath(`${dir}/${fileName}`);
+  }
+
+  static isDuplicate(fileName: string, noteType: NoteType, app: App) {
+    return !!app.vault.getAbstractFileByPath(
+      this.getTargetPath(fileName, noteType)
+    );
+  }
   /**
    * Generates a link with an absolute path and the file name as alias
    */
