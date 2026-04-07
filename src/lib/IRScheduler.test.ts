@@ -206,13 +206,13 @@ describe('childPriorityFromFixedInterval', () => {
           } as unknown as IArticleBase;
 
           const childDueTime = now + MS_PER_DAY;
-          const result = IRScheduler.childPriorityFromFixedInterval(
+          const priority = IRScheduler.childPriorityFromFixedInterval(
             fakeParentItem,
             targetReviewCount,
             childDueTime
           );
 
-          expect(IRScheduler.isValidPriority(result.priority)).toBe(true);
+          expect(IRScheduler.isValidPriority(priority)).toBe(true);
 
           // TODO: check only the priority after result.priority since it should
           // overshoot the target (unless result.priority is the minimum and it
@@ -222,7 +222,7 @@ describe('childPriorityFromFixedInterval', () => {
             targetReviewCount,
             childDueTime
           );
-          expect(result.priority).toEqual(iterativelyFoundPriority);
+          expect(priority).toEqual(iterativelyFoundPriority);
         }
       ),
       { numRuns: 1_000 }

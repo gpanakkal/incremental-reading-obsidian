@@ -38,7 +38,7 @@ export default class IRScheduler {
     parent: IArticleBase,
     targetReviewCount: number,
     childDue: number
-  ): { priority: number; overshootMs: number } {
+  ): number {
     this.validateReviewCount(targetReviewCount);
 
     const { fixed_interval_days, due } = parent;
@@ -55,7 +55,6 @@ export default class IRScheduler {
     const parentNthDueTimeMs = due + totalIntervalMs;
 
     const upperBound = 0;
-    let bestDiffMs = Infinity;
 
     const getPrioDiff = (priority: number) => {
       // return 0 if it yields a negative diff and the next-highest priority returns a positive one
@@ -75,13 +74,11 @@ export default class IRScheduler {
       if (currentDiff > upperBound) {
         // look for a lower priority unless we're at the minimum
         if (priority === MINIMUM_PRIORITY) {
-          bestDiffMs = currentDiff;
           return 0;
         } else return -1;
       }
 
       if (priority === MAXIMUM_PRIORITY) {
-        bestDiffMs = currentDiff;
         return 0;
       }
       const nextDiff = getPrioDiff(priority + 1);
@@ -91,7 +88,7 @@ export default class IRScheduler {
         // the next priority is a better fit, so search to the right
         return 1;
       }
-      bestDiffMs = currentDiff;
+
       return 0;
     };
 
@@ -108,7 +105,7 @@ export default class IRScheduler {
       );
     }
 
-    return { priority: result.match, overshootMs: bestDiffMs };
+    return result.match;
   }
 
   /**
