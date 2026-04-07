@@ -2,11 +2,13 @@ import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
   MAX_TESTED_REVIEW_COUNT,
+  MAX_VALID_TIMESTAMP_DATE,
   MAXIMUM_FIXED_REVIEW_INTERVAL,
   MAXIMUM_PRIORITY,
   MINIMUM_FIXED_REVIEW_INTERVAL,
   MINIMUM_PRIORITY,
   MS_PER_DAY,
+  MS_PER_YEAR,
 } from './constants';
 import IRScheduler from './IRScheduler';
 import type { IArticleBase, ISnippetBase } from './types';
@@ -70,9 +72,6 @@ describe('toDisplayPriority', () => {
     );
   });
 });
-
-const MS_PER_YEAR = MS_PER_DAY * 365;
-const MAX_VALID_TIMESTAMP_DATE = 8.64e15;
 
 describe('forecastReviewTime', () => {
   it('returns the next due date if n equals 1', () => {

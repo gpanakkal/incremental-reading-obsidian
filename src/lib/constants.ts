@@ -29,6 +29,9 @@ export const SNIPPET_SLICE_LENGTH = 30;
 
 export const MS_PER_MINUTE = 1000 * 60;
 export const MS_PER_DAY = 1000 * 86_400;
+export const MS_PER_YEAR = MS_PER_DAY * 365;
+export const MAX_VALID_TIMESTAMP_DATE = 8.64e15;
+
 /** Local time to roll over to a new day. Defaults to 0400 (4 AM). Must be positive */
 export const DAY_ROLLOVER_OFFSET_HOURS = 4;
 
