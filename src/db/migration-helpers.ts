@@ -167,7 +167,6 @@ export function applyMigrations(
       db.exec('COMMIT');
     } catch (error) {
       db.exec('ROLLBACK');
-      console.error(`Migration ${migration.version} failed:`, error);
       throw new Error(`Migration ${migration.version} failed: ${error}`);
     }
   }
