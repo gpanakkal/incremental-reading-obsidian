@@ -14,35 +14,33 @@ import IRScheduler from './IRScheduler';
 import type { IArticleBase, ISnippetBase } from './types';
 import { clamp, intSequence } from './utils';
 
+const validDisplayPriorityPattern = /^\d(\.\d)?$/;
+
 describe('transformPriority', () => {
-  it(
-    `converts inputs into integers between ${MINIMUM_PRIORITY} and ` +
-      `${MAXIMUM_PRIORITY}, inclusive`,
-    () => {
-      fc.assert(
-        fc.property(
-          fc.oneof(
-            fc.integer(),
-            fc.float({ noNaN: true }),
-            fc.stringMatching(/^[0-9]+(\.[0-9]*)?$/)
-          ),
-          (displayValue) => {
-            const clampedDisplayValue = clamp(
-              Number(displayValue),
-              MINIMUM_PRIORITY / 10,
-              MAXIMUM_PRIORITY / 10
-            );
-            const result = IRScheduler.transformPriority(displayValue);
-            expect(result).toBeGreaterThanOrEqual(MINIMUM_PRIORITY);
-            expect(result).toBeLessThanOrEqual(MAXIMUM_PRIORITY);
-            expect(result % 1).toEqual(0);
-            expect(result).toEqual(Math.round(clampedDisplayValue * 10));
-          }
+  it(`converts inputs into valid internal priorities`, () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.integer(),
+          fc.float({ noNaN: true }),
+          fc.stringMatching(validDisplayPriorityPattern)
         ),
-        { numRuns: 1_000 }
-      );
-    }
-  );
+        (displayValue) => {
+          const clampedDisplayValue = clamp(
+            Number(displayValue),
+            MINIMUM_PRIORITY / 10,
+            MAXIMUM_PRIORITY / 10
+          );
+          const result = IRScheduler.transformPriority(displayValue);
+          expect(result).toSatisfy((v: number) =>
+            IRScheduler.isValidPriority(v)
+          );
+          expect(result).toEqual(Math.round(clampedDisplayValue * 10));
+        }
+      ),
+      { numRuns: 1_000 }
+    );
+  });
 });
 
 describe('toDisplayPriority', () => {
@@ -69,6 +67,37 @@ describe('toDisplayPriority', () => {
           expect(() => IRScheduler.toDisplayPriority(priority)).toThrow();
         }
       )
+    );
+  });
+});
+
+describe('adjustDisplayPriorityOnChange', () => {
+  const displayPriorityPattern = /^\d+(\.\d*)?$|^\.\d*$/;
+  it(`converts valid inputs into decimal values with one decimal place`, () => {
+    fc.assert(
+      fc.property(fc.stringMatching(displayPriorityPattern), (priority) => {
+        const result = IRScheduler.adjustDisplayPriorityOnChange(priority);
+        expect(result.toString()).toMatch(validDisplayPriorityPattern);
+        expect(IRScheduler.transformPriority(result));
+      })
+    );
+  });
+  it(`throws given invalid priorities`, () => {
+    fc.assert(
+      fc.property(fc.string(), (priority) => {
+        try {
+          const adjusted = IRScheduler.adjustDisplayPriorityOnChange(priority);
+          // verify that `adjusted` is just internal priority / 10
+          expect(IRScheduler.transformPriority(adjusted)).toBe(
+            Math.round(adjusted * 10)
+          );
+        } catch (_e) {
+          // verify that the throw was caused by adjustDisplayPriorityOnChange
+          expect(() =>
+            IRScheduler.adjustDisplayPriorityOnChange(priority)
+          ).toThrow();
+        }
+      })
     );
   });
 });

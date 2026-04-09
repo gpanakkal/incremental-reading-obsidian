@@ -241,6 +241,33 @@ export default class IRScheduler {
     return displayPriority;
   }
 
+  /** Use this to transform priorities in the priority field's onChange callback */
+  static adjustDisplayPriorityOnChange(displayPriority: string) {
+    // remove invalid characters
+    const filtered = displayPriority.replaceAll(/(?![\d.])/g, '');
+    // add a leading zero if needed
+    const implicitZeroImputed = filtered.startsWith('.')
+      ? '0' + filtered
+      : filtered;
+
+    if (Number.isNaN(Number.parseFloat(implicitZeroImputed))) {
+      throw new TypeError(`Received invalid priority "${displayPriority}"`);
+    }
+
+    // ensure the decimal point is after the first digit
+    let scaled = implicitZeroImputed.slice(0, 3);
+    if (/^\d{2,}/.test(scaled)) {
+      scaled = scaled[0] + '.' + scaled[1];
+    }
+
+    const clamped = Math.min(
+      MAXIMUM_PRIORITY / 10,
+      Math.max(MINIMUM_PRIORITY / 10, Number.parseFloat(scaled))
+    );
+
+    return clamped;
+  }
+
   static isValidFixedInterval(interval: number) {
     return (
       interval % 1 === 0 &&
