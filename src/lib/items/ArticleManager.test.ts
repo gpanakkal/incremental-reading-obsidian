@@ -19,6 +19,7 @@ import { ArticleManager } from './ArticleManager';
 function makeArticle(overrides: Partial<IArticleBase> = {}): IArticleBase {
   return {
     id: 'article-1',
+    type: 'article',
     reference: 'articles/test.md',
     due: Date.now(),
     interval: TEXT_BASE_REVIEW_INTERVAL,

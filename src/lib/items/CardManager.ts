@@ -48,6 +48,7 @@ export class CardManager extends ItemManager {
     const { created_at, due, dismissed, last_review, state, ...rest } = cardRow;
     return {
       ...rest,
+      type: 'card',
       created_at: new Date(created_at),
       due: new Date(due),
       ...(last_review && {
@@ -59,7 +60,15 @@ export class CardManager extends ItemManager {
   }
 
   static displayToRow(card: ISRSCardDisplay): SRSCardRow {
-    const { created_at, due, dismissed, last_review, state, ...rest } = card;
+    const {
+      created_at,
+      due,
+      dismissed,
+      last_review,
+      state,
+      type: _,
+      ...rest
+    } = card;
     return {
       ...rest,
       created_at: Date.parse(created_at.toISOString()),
@@ -71,7 +80,7 @@ export class CardManager extends ItemManager {
   }
 
   static baseToRow(card: ISRSCard): SRSCardRow {
-    const { created_at, due, dismissed, last_review, ...rest } = card;
+    const { created_at, due, dismissed, last_review, type: _, ...rest } = card;
     return {
       ...rest,
       created_at: Date.parse(created_at.toISOString()),

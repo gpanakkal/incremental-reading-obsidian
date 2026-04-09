@@ -1,11 +1,12 @@
 // Card, Snippet, ReviewLog, FSRSParameters
-import type { SOURCE_PROPERTY_NAME, TABLE_NAMES } from './constants';
 import type { TAbstractFile, TFile } from 'obsidian';
 import type { Primitive, SafeOmit } from 'src/lib/utility-types';
 import type { Card, ReviewLog, StateType } from 'ts-fsrs';
+import type { SOURCE_PROPERTY_NAME, TABLE_NAMES } from './constants';
 
 export interface IArticleBase {
   id: string;
+  type: 'article';
   reference: string;
   due: number | null;
   interval: number;
@@ -15,7 +16,8 @@ export interface IArticleBase {
   scroll_top: number;
 }
 
-export interface ArticleRow extends SafeOmit<IArticleBase, 'dismissed'> {
+export interface ArticleRow
+  extends SafeOmit<IArticleBase, 'dismissed' | 'type'> {
   dismissed: number;
 }
 
@@ -31,6 +33,7 @@ export interface IArticleReview {
 
 export interface ISnippetBase {
   id: string;
+  type: 'snippet';
   reference: string;
   due: number | null;
   interval: number;
@@ -42,7 +45,8 @@ export interface ISnippetBase {
   scroll_top: number;
 }
 
-export interface SnippetRow extends SafeOmit<ISnippetBase, 'dismissed'> {
+export interface SnippetRow
+  extends SafeOmit<ISnippetBase, 'dismissed' | 'type'> {
   dismissed: number;
 }
 
@@ -58,6 +62,7 @@ export interface ISnippetReview {
 
 export interface ISRSCard extends Card {
   id: string;
+  type: 'card';
   reference: string;
   created_at: Date;
   dismissed: boolean;
@@ -70,7 +75,7 @@ export interface ISRSCardDisplay extends SafeOmit<ISRSCard, 'state'> {
 export interface SRSCardRow
   extends SafeOmit<
     ISRSCard,
-    'created_at' | 'due' | 'last_review' | 'dismissed'
+    'created_at' | 'due' | 'last_review' | 'dismissed' | 'type'
   > {
   created_at: number;
   due: number;
@@ -124,6 +129,9 @@ export type ReviewCard = {
 
 export type ReviewItem = ReviewArticle | ReviewSnippet | ReviewCard;
 
+/** Any item subject to non-SRS scheduling */
+export type ReviewText = ReviewArticle | ReviewSnippet;
+
 export function isArticle(
   value: IArticleBase | ISnippetBase | ISRSCard
 ): value is IArticleBase {
@@ -148,9 +156,7 @@ export function isReviewSnippet(value: ReviewItem): value is ReviewSnippet {
   return !isReviewCard(value) && 'parent' in value.data;
 }
 
-export function isReviewText(
-  value: ReviewItem
-): value is ReviewArticle | ReviewSnippet {
+export function isReviewText(value: ReviewItem): value is ReviewText {
   return isReviewSnippet(value) || isReviewArticle(value);
 }
 
@@ -187,3 +193,5 @@ export interface SQLiteRepository {
   ): RowTypes[][] | Promise<RowTypes[][]>;
   handleFileChange(file: TAbstractFile): Promise<void>;
 }
+
+export type SchedulingStrategy = 'priority' | 'fixed-interval';

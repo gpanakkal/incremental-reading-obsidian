@@ -36,6 +36,7 @@ export class ArticleManager extends ItemManager {
   static rowToBase(articleRow: ArticleRow): IArticleBase {
     return {
       ...articleRow,
+      type: 'article',
       dismissed: Boolean(articleRow.dismissed),
     };
   }
@@ -43,14 +44,16 @@ export class ArticleManager extends ItemManager {
   static rowToDisplay(articleRow: ArticleRow): ArticleDisplay {
     return {
       ...articleRow,
+      type: 'article',
       due: articleRow.due ? new Date(articleRow.due) : null,
       dismissed: Boolean(articleRow.dismissed),
     };
   }
 
   static displayToRow(article: ArticleDisplay): ArticleRow {
+    const { type: _, ...rest } = article;
     return {
-      ...article,
+      ...rest,
       due: article.due ? Date.parse(article.due.toISOString()) : null,
       dismissed: Number(article.dismissed),
     };

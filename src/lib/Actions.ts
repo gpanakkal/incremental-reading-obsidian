@@ -11,6 +11,7 @@ import {
 import IRScheduler from './IRScheduler';
 import { invalidateItemQuery } from './query-client';
 import { addSeenId, resetCurrentItem, store } from './store';
+import type { ReviewText } from './types';
 import {
   type ReviewArticle,
   type ReviewCard,
@@ -35,10 +36,7 @@ export class Actions {
     this.plugin.store.dispatch(resetCurrentItem());
   };
 
-  review = async (
-    item: ReviewArticle | ReviewSnippet,
-    nextInterval?: number
-  ) => {
+  review = async (item: ReviewText, nextInterval?: number) => {
     if (isReviewArticle(item)) return this.reviewArticle(item, nextInterval);
     return this.reviewSnippet(item, nextInterval);
   };
@@ -92,10 +90,7 @@ export class Actions {
   /**
    * @param newPriority decimal number from 1.0 to 5.0, inclusive
    */
-  reprioritize = async (
-    item: ReviewArticle | ReviewSnippet,
-    newPriority: number
-  ) => {
+  reprioritize = async (item: ReviewText, newPriority: number) => {
     const priority = IRScheduler.transformPriority(newPriority);
     try {
       await this.plugin.reviewManager.reprioritize(item.data, priority);

@@ -49,6 +49,7 @@ export class SnippetManager extends ItemManager {
   static rowToBase(snippetRow: SnippetRow): ISnippetBase {
     return {
       ...snippetRow,
+      type: 'snippet',
       dismissed: Boolean(snippetRow.dismissed),
     };
   }
@@ -56,14 +57,16 @@ export class SnippetManager extends ItemManager {
   static rowToDisplay(snippetRow: SnippetRow): ISnippetDisplay {
     return {
       ...snippetRow,
+      type: 'snippet',
       due: snippetRow.due ? new Date(snippetRow.due) : null,
       dismissed: Boolean(snippetRow.dismissed),
     };
   }
 
   static displayToRow(snippet: ISnippetDisplay): SnippetRow {
+    const { type: _, ...rest } = snippet;
     return {
-      ...snippet,
+      ...rest,
       due: snippet.due ? Date.parse(snippet.due.toISOString()) : null,
       dismissed: Number(snippet.dismissed),
     };
@@ -409,6 +412,7 @@ export class SnippetManager extends ItemManager {
 
       const highlights = results.map((r) => ({
         ...r,
+        type: 'snippet' as const,
         dismissed: Boolean(r.dismissed),
         start_offset: r.start_offset!,
         end_offset: r.end_offset!,
@@ -460,6 +464,7 @@ export class SnippetManager extends ItemManager {
           ...existing,
           {
             ...snippetRow,
+            type: 'snippet' as const,
             dismissed: Boolean(snippetRow.dismissed),
             start_offset: snippetRow.start_offset,
             end_offset: snippetRow.end_offset,
@@ -501,6 +506,7 @@ export class SnippetManager extends ItemManager {
 
       highlights.push({
         ...snippetRow,
+        type: 'snippet' as const,
         dismissed: Boolean(snippetRow.dismissed),
         start_offset: snippetRow.start_offset,
         end_offset: snippetRow.end_offset,
