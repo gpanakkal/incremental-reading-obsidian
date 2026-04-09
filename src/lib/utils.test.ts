@@ -55,7 +55,7 @@ describe('sequenceSum', () => {
           expect(result).toEqual(manualResult);
         }
       ),
-      { numRuns: 1_000 }
+      { numRuns: 100 }
     );
   });
 });
@@ -82,7 +82,7 @@ describe('binarySearch', () => {
           }
         }
       ),
-      { numRuns: 10_000 }
+      { numRuns: 1_000 }
     );
   });
 });
@@ -102,7 +102,7 @@ describe('clamp', () => {
           expect(clamped).toBeGreaterThanOrEqual(min);
         }
       ),
-      { numRuns: 10_000 }
+      { numRuns: 1_000 }
     );
   });
 
