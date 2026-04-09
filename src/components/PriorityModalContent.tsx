@@ -1,74 +1,118 @@
-import { MAXIMUM_PRIORITY, MINIMUM_PRIORITY } from '#/lib/constants';
+import {
+  MAXIMUM_PRIORITY,
+  MINIMUM_FIXED_REVIEW_INTERVAL,
+  MINIMUM_PRIORITY,
+} from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
-import type IncrementalReadingPlugin from '#/main';
-import type { TFile } from 'obsidian';
+import type { SchedulingStrategy } from '#/lib/types';
 import { useState } from 'react';
-
-interface PriorityModalProps {
-  plugin: IncrementalReadingPlugin;
-  file: TFile;
-  onClose: () => void;
-}
+import { FixedIntervalField } from './action-bar/FixedIntervalField';
+import { PriorityField } from './action-bar/PriorityField';
+import type { SchedulingModalProps } from './types';
 
 export function PriorityModalContent({
   plugin,
-  file,
+  type,
+  schedule,
   onClose,
-}: PriorityModalProps) {
-  const [display, setDisplay] = useState({
-    priority: plugin.settings.defaultPriority / 10,
+}: SchedulingModalProps) {
+  // if no data, assume we're going to import later
+  const [strategy, setStrategy] = useState<SchedulingStrategy>(
+    schedule.intervalDays === null ? 'priority' : 'fixed-interval'
+  );
+
+  const [scheduleValues, setScheduleValues] = useState({
+    priority: schedule.priority ?? plugin.settings.defaultPriority,
+    fixedIntervalDays: schedule.intervalDays ?? MINIMUM_FIXED_REVIEW_INTERVAL,
   });
 
-  const updateDisplay = (updates: Partial<typeof display>) => {
-    setDisplay((prev) => ({ ...prev, ...updates }));
+  const updateValues = (updates: Partial<typeof scheduleValues>) => {
+    setScheduleValues((prev) => ({ ...prev, ...updates }));
   };
 
-  const handleSubmit = async () => {
-    const priority = IRScheduler.transformPriority(display.priority);
-    const article = await plugin.reviewManager.importArticle(file, priority);
-    if (article && plugin.getOpenReviewLeaf()) {
-      await plugin.learn(article);
+  const handleToggle = (value: boolean) => {
+    if (value === true) {
+      setStrategy('priority');
+    } else {
+      setStrategy('fixed-interval');
     }
-    onClose();
   };
 
-  const tooltip =
-    `Set the priority for this article. Priority ranges from ` +
-    `${IRScheduler.toDisplayPriority(MINIMUM_PRIORITY)} (highest) to ` +
-    `${IRScheduler.toDisplayPriority(MAXIMUM_PRIORITY)} (lowest).`;
+  const handleEnter = () => {
+    const value =
+      strategy === 'priority'
+        ? scheduleValues.priority
+        : scheduleValues.fixedIntervalDays;
+
+    onClose({ strategy, value });
+  };
+
+  const intervalTooltip = `Set the interval between reviews, in days.`;
+
+  const prioTooltip =
+    `Priority ranges from ` +
+    `${IRScheduler.toDisplayPriority(MINIMUM_PRIORITY)} (most frequently shown) to ` +
+    `${IRScheduler.toDisplayPriority(MAXIMUM_PRIORITY)} (least frequently shown).`;
 
   return (
-    <div className="ir-priority-modal">
-      <h2>Import article</h2>
-      <p>{tooltip}</p>
-      <div className="ir-priority-input-container">
-        <label>
-          Priority:{' '}
-          <input
-            type="text"
-            value={display.priority}
-            onChange={(e) => {
-              const transformed = IRScheduler.transformPriority(
-                e.currentTarget.value
-              );
-              updateDisplay({ priority: transformed / 10 });
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                void handleSubmit();
-              } else if (e.key === 'Escape') {
-                onClose();
+    <div
+      className="ir-scheduling-modal"
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          handleEnter();
+        }
+      }}
+    >
+      {type === 'article' && (
+        <div className="ir-scheduling-strategy-toggle">
+          <label className="ir-scheduling-toggle-label">
+            Fixed interval
+            <div
+              className={
+                'checkbox-container' +
+                (strategy === 'priority' ? ' is-enabled' : '')
               }
-            }}
-            onFocus={(e) => e.currentTarget.select()}
+            >
+              <input
+                type="checkbox"
+                checked={strategy === 'priority'}
+                onChange={(e) => handleToggle(e.currentTarget.checked)}
+              />
+            </div>
+            Priority scheduling
+          </label>
+        </div>
+      )}
+      {strategy === 'priority' ? (
+        <>
+          <div>{prioTooltip}</div>
+          <PriorityField
+            initialPriority={scheduleValues.priority}
+            onBlur={async (priority: number) => updateValues({ priority })}
           />
-        </label>
-      </div>
+        </>
+      ) : (
+        <>
+          <div>{intervalTooltip}</div>
+          <FixedIntervalField
+            initialInterval={schedule.intervalDays}
+            onBlur={async (intervalDays: number) =>
+              updateValues({ fixedIntervalDays: intervalDays })
+            }
+          />
+        </>
+      )}
       <div className="modal-button-container">
-        <button onClick={onClose}>Cancel</button>
-        <button onClick={() => void handleSubmit()} className="mod-cta">
-          Import
+        <button
+          onClick={() => {
+            onClose('cancel');
+          }}
+        >
+          Cancel
+        </button>
+        <button onClick={handleEnter} className="mod-cta">
+          Confirm
         </button>
       </div>
     </div>

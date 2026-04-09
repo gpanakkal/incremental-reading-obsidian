@@ -1,27 +1,14 @@
 import IRScheduler from '#/lib/IRScheduler';
-import type { ReviewArticle, ReviewSnippet } from '#/lib/types';
 import { useState } from 'react';
-import { useReviewContext } from './ReviewContext';
 
 export function PriorityField({
-  item,
+  initialPriority,
+  onBlur,
 }: {
-  item: ReviewArticle | ReviewSnippet;
+  initialPriority: number;
+  onBlur: (priority: number) => Promise<void>;
 }) {
-  const { actions } = useReviewContext();
-  const [display, setDisplay] = useState({
-    priority: item.data.priority / 10,
-  });
-
-  const updateDisplay = (updates: Partial<typeof display>) => {
-    setDisplay((prev) => ({ ...prev, ...updates }));
-  };
-
-  const [prevItemPrio, setPrevItemPrio] = useState(item.data.priority);
-  if (item.data.priority !== prevItemPrio) {
-    setPrevItemPrio(item.data.priority);
-    setDisplay({ priority: item.data.priority / 10 });
-  }
+  const [displayPrio, setDisplayPrio] = useState<number>(initialPriority / 10);
 
   return (
     <div className="ir-priority-container">
@@ -29,24 +16,29 @@ export function PriorityField({
         Priority
         <input
           id={'ir-priority-input'}
-          value={display.priority}
+          value={displayPrio}
           className={'ir-priority-input'}
           type="text"
-          inputMode="decimal"
+          inputMode="numeric"
           onChange={(e) => {
-            const transformed = IRScheduler.transformPriority(
-              e.currentTarget.value
-            );
-            updateDisplay({ priority: transformed / 10 });
+            try {
+              const adjusted = IRScheduler.adjustDisplayPriorityOnChange(
+                e.currentTarget.value
+              );
+              setDisplayPrio(adjusted);
+            } catch (_error) {
+              /* fall back to prior value */
+            }
           }}
           onBlur={() => {
-            void actions.reprioritize(item, display.priority);
+            const transformed = IRScheduler.transformPriority(displayPrio);
+            void onBlur(transformed);
           }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.currentTarget.blur();
             } else if (e.key === 'Escape') {
-              updateDisplay({ priority: item.data.priority });
+              setDisplayPrio(initialPriority);
               e.currentTarget.select();
             }
           }}

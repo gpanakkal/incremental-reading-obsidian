@@ -1,4 +1,6 @@
 import type { getMarkdownController } from '#/lib/obsidian-editor';
+import type { ReviewText, SchedulingStrategy } from '#/lib/types';
+import type IncrementalReadingPlugin from '#/main';
 
 export interface EditCoordinates {
   x: number;
@@ -13,3 +15,16 @@ export enum EditingState {
 export type EditState = EditCoordinates | EditingState;
 
 export type MarkdownController = ReturnType<typeof getMarkdownController>;
+
+/** For React components rendered inside Obsidian Modals */
+export interface SchedulingModalProps {
+  plugin: IncrementalReadingPlugin;
+  type: ReviewText['data']['type'];
+  schedule: {
+    intervalDays: number | null;
+    priority: number;
+  };
+  onClose: (
+    args: 'cancel' | { strategy: SchedulingStrategy; value: number }
+  ) => void;
+}

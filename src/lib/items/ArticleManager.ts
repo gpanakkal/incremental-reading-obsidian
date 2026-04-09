@@ -72,7 +72,11 @@ export class ArticleManager extends ItemManager {
   /**
    * Import the currently opened note as an article
    */
-  async import(file: TFile, priority: number) {
+  async import(
+    file: TFile,
+    priority: number,
+    fixedIntervalDays: number | null
+  ) {
     try {
       // check if the file is inside the plugin's data directory
       if (file.path.startsWith(DATA_DIRECTORY)) {
@@ -148,13 +152,14 @@ export class ArticleManager extends ItemManager {
       const dueTime = Date.now();
       const id = crypto.randomUUID();
       await this.repo.mutate(
-        'INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)',
+        'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days) VALUES ($1, $2, $3, $4, $5, $6)',
         [
           id,
           `${ARTICLE_DIRECTORY}/${articleFile.name}`,
           dueTime,
           TEXT_BASE_REVIEW_INTERVAL,
           priority,
+          fixedIntervalDays,
         ]
       );
 
@@ -163,8 +168,13 @@ export class ArticleManager extends ItemManager {
         CONTENT_TITLE_SLICE_LENGTH,
         true
       );
+
+      const schedulingString =
+        fixedIntervalDays === null
+          ? `priority ${IRScheduler.toDisplayPriority(priority)}`
+          : `fixed interval of ${fixedIntervalDays} days`;
       new Notice(
-        `Imported "${titleSlice}" with priority ${priority / 10}`,
+        `Imported "${titleSlice}" with ${schedulingString}`,
         SUCCESS_NOTICE_DURATION_MS
       );
       const result = await this.fetch(id);

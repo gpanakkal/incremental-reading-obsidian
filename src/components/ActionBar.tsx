@@ -1,18 +1,22 @@
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { useCurrentItem } from '#/hooks/useReactQuery';
 import { setShowAnswer } from '#/lib/store';
-import type { ReviewItem } from '#/lib/types';
+import type { ReviewItem, ReviewText } from '#/lib/types';
 import {
   isReviewArticle,
   isReviewCard,
   isReviewSnippet,
+  isReviewText,
   type ReviewArticle,
   type ReviewCard,
   type ReviewSnippet,
 } from '#/lib/types';
+import { PriorityModal } from '#/views/PriorityModal';
+import { CalendarSync } from 'lucide-react';
 import { useDispatch } from 'react-redux';
 import { Rating } from 'ts-fsrs';
-import { PriorityField } from './PriorityField';
+import { FixedIntervalField } from './action-bar/FixedIntervalField';
+import { PriorityField } from './action-bar/PriorityField';
 import { useReviewContext } from './ReviewContext';
 
 export function ActionBar() {
@@ -24,6 +28,7 @@ export function ActionBar() {
       {currentItem && (
         <>
           {isReviewCard(currentItem) && <CardActions card={currentItem} />}
+          {isReviewText(currentItem) && <TextActions text={currentItem} />}
           {isReviewArticle(currentItem) && (
             <ArticleActions article={currentItem} />
           )}
@@ -60,38 +65,109 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
     <>
       {isDismissed ? (
         <Button
-          label="Un-dismiss"
           tooltip="Restore item to queue"
           handleClick={async () => await actions.unDismissItem(reviewItem)}
-        />
+        >
+          Un-dismis
+        </Button>
       ) : (
         <Button
-          label="Dismiss"
           tooltip="Stop scheduling this item for review"
           handleClick={async () => await actions.dismissItem(reviewItem)}
-        />
+        >
+          Dismiss
+        </Button>
       )}
       <Button
-        label={'Skip'}
-        tooltip="Skip for current review session"
-        handleClick={() => {
-          actions.skipItem(reviewItem);
-        }}
-      />
-      <Button
-        label={'Snip'}
         tooltip="Extract selected text to a new snippet"
         handleClick={async () => {
           await actions.createSnippet();
         }}
-      />
+      >
+        Snip
+      </Button>
       <Button
-        label={'Create card'}
         // tooltip="Create card"
         handleClick={async () => {
           await actions.createCard();
         }}
-      />
+      >
+        Create card
+      </Button>
+    </>
+  );
+}
+
+/**
+ * Actions shared by articles and snippets.
+ * TODO:
+ * - overflow menu
+ */
+function TextActions({ text }: { text: ReviewText }) {
+  const { actions } = useReviewContext();
+
+  return (
+    <>
+      <Button
+        tooltip="Mark as reviewed and go to the next"
+        handleClick={async () => await actions.review(text)}
+      >
+        Continue
+      </Button>
+      <Button
+        tooltip="Skip for current review session"
+        handleClick={() => {
+          actions.skipItem(text);
+        }}
+      >
+        Skip
+      </Button>
+      <TextScheduler text={text} />
+    </>
+  );
+}
+
+/**
+ * Field to set the priority or fixed interval plus a button to open a
+ * SchedulingModal
+ */
+function TextScheduler({ text }: { text: ReviewText }) {
+  const { plugin, actions } = useReviewContext();
+  const strategy =
+    text.data.type === 'article' && text.data.fixed_interval_days !== null
+      ? 'fixed'
+      : 'priority';
+
+  return (
+    <>
+      {strategy === 'priority' && (
+        <PriorityField
+          key={text.data.id}
+          onBlur={async (priority: number) => {
+            await actions.reprioritize(text, priority);
+          }}
+          initialPriority={text.data.priority}
+        />
+      )}
+      {strategy === 'fixed' && (
+        <FixedIntervalField
+          key={text.data.id}
+          onBlur={async (intervalDays: number) => {
+            await actions.manageFixedInterval(text as ReviewArticle, {
+              newIntervalDays: intervalDays,
+            });
+          }}
+          initialInterval={(text as ReviewArticle).data.fixed_interval_days}
+        />
+      )}
+      <Button
+        tooltip="Change scheduling strategy"
+        handleClick={() => {
+          new PriorityModal(plugin, text).open();
+        }}
+      >
+        <CalendarSync />
+      </Button>
     </>
   );
 }
@@ -100,38 +176,12 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
  * TODO:
  * - manual scheduling
  */
-function ArticleActions({ article }: { article: ReviewArticle }) {
-  const { actions } = useReviewContext();
-
-  return (
-    <>
-      <Button
-        label="Continue"
-        tooltip="Mark article as reviewed and go to the next"
-        handleClick={async () => await actions.reviewArticle(article)}
-      />
-      <PriorityField item={article} />
-    </>
-  );
+function ArticleActions({ article: _article }: { article: ReviewArticle }) {
+  return <></>;
 }
 
-/**
- * TODO:
- * - manual scheduling
- */
-function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
-  const { actions } = useReviewContext();
-
-  return (
-    <>
-      <Button
-        label="Continue"
-        tooltip="Mark snippet as reviewed and go to the next"
-        handleClick={async () => await actions.reviewSnippet(snippet)}
-      />
-      <PriorityField item={snippet} />
-    </>
-  );
+function SnippetActions({ snippet: _snippet }: { snippet: ReviewSnippet }) {
+  return <></>;
 }
 
 function CardActions({ card }: { card: ReviewCard }) {
@@ -144,32 +194,45 @@ function CardActions({ card }: { card: ReviewCard }) {
       {showAnswer ? (
         <>
           <Button
-            label="🔁 Again"
             handleClick={async () =>
               await actions.gradeCard(card, Rating.Again)
             }
-          />
+          >
+            🔁 Again
+          </Button>
           <Button
-            label="👎 Hard"
             handleClick={async () => await actions.gradeCard(card, Rating.Hard)}
-          />
+          >
+            👎 Hard
+          </Button>
           <Button
-            label="👍 Good"
             handleClick={async () => await actions.gradeCard(card, Rating.Good)}
-          />
+          >
+            👍 Good
+          </Button>
           <Button
-            label="✅ Easy"
             handleClick={async () => await actions.gradeCard(card, Rating.Easy)}
-          />
+          >
+            ✅ Easy
+          </Button>
         </>
       ) : (
         <>
           <Button
-            label="Show Answer"
             handleClick={() => {
               dispatch(setShowAnswer(true));
             }}
-          />
+          >
+            Show Answer
+          </Button>
+          <Button
+            tooltip="Skip for current review session"
+            handleClick={() => {
+              actions.skipItem(card);
+            }}
+          >
+            Skip
+          </Button>
         </>
       )}
     </>
@@ -177,16 +240,15 @@ function CardActions({ card }: { card: ReviewCard }) {
 }
 
 function Button({
-  label,
+  children,
   handleClick,
   disabled,
   tooltip,
-}: {
-  label: string;
+}: React.PropsWithChildren<{
   handleClick: (e: MouseEvent) => Promise<void> | void;
   disabled?: boolean;
   tooltip?: string;
-}) {
+}>) {
   return (
     <button
       className="ir-review-button"
@@ -194,7 +256,7 @@ function Button({
       title={tooltip}
       disabled={disabled}
     >
-      {label}
+      {children}
     </button>
   );
 }

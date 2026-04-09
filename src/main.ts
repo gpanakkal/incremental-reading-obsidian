@@ -1,7 +1,8 @@
-import type { WorkspaceLeaf, TFile } from 'obsidian';
+import type { TFile, WorkspaceLeaf } from 'obsidian';
 import { MarkdownView, Notice, Plugin } from 'obsidian';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
 import databaseSchema from './db/schema.sql';
+import { Actions } from './lib/Actions';
 import { DATABASE_FILE_PATH, PLACEHOLDER_PLUGIN_ICON } from './lib/constants';
 import { createIRExtensions } from './lib/extensions';
 import type { ExtractedMarkdownEditor } from './lib/obsidian-editor';
@@ -11,6 +12,7 @@ import {
   invalidateCurrentItemQuery,
 } from './lib/query-client';
 import { SQLJSRepository } from './lib/repository/SQLJSRepository';
+import { initReviewCommands } from './lib/review-commands';
 import ReviewManager from './lib/ReviewManager';
 import type { IRPluginSettings } from './lib/settings';
 import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
@@ -18,8 +20,6 @@ import { setCurrentItemId, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
 import { PriorityModal } from './views/PriorityModal';
 import ReviewView from './views/ReviewView';
-import { initReviewCommands } from './lib/review-commands';
-import { Actions } from './lib/Actions';
 
 export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;
@@ -97,11 +97,12 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     const importArticle = async (file: TFile) => {
       if (this.settings.showImportDialog) {
-        new PriorityModal(this, file).open();
+        new PriorityModal(this, { file, data: null }).open();
       } else {
         const article = await this.reviewManager.importArticle(
           file,
-          this.settings.defaultPriority
+          this.settings.defaultPriority,
+          null
         );
         if (article && this.getOpenReviewLeaf()) {
           // set the new import as the current item and focus the review pane

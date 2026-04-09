@@ -1,26 +1,26 @@
-import { type App, type Editor, type MarkdownView } from 'obsidian';
-import { isArticle } from '#/lib/types';
 import type {
   ArticleRow,
   IArticleBase,
   ISRSCardDisplay,
   ISnippetBase,
-  ReviewItem,
-  SnippetRow,
   ReviewArticle,
   ReviewCard,
+  ReviewItem,
   ReviewSnippet,
+  SnippetRow,
 } from '#/lib/types';
+import { isArticle } from '#/lib/types';
 import type ReviewView from '#/views/ReviewView';
+import type { TAbstractFile, TFile } from 'obsidian';
+import { type App, type Editor, type MarkdownView } from 'obsidian';
+import type { Grade } from 'ts-fsrs';
 import { DATA_DIRECTORY } from './constants';
 import { ArticleManager } from './items/ArticleManager';
 import { CardManager } from './items/CardManager';
 import { SnippetManager } from './items/SnippetManager';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
-import { compareDates } from './utils';
 import type { SQLiteRepository } from './types';
-import type { TAbstractFile, TFile } from 'obsidian';
-import type { Grade } from 'ts-fsrs';
+import { compareDates } from './utils';
 
 export default class ReviewManager {
   app: App;
@@ -116,8 +116,12 @@ export default class ReviewManager {
   /**
    * Import the currently opened note as an article
    */
-  async importArticle(file: TFile, priority: number) {
-    return this.articles.import(file, priority);
+  async importArticle(
+    file: TFile,
+    priority: number,
+    fixedIntervalDays: number | null
+  ) {
+    return this.articles.import(file, priority, fixedIntervalDays);
   }
 
   async createEmptyArticle(priority: number) {
@@ -153,15 +157,18 @@ export default class ReviewManager {
 
   /**
    * Set a new interval without adjusting due date if due in today's review day
-   * @param newIntervalDays an integer number of days between reviews
+   * @param changes an object with the new interval or the new priority
    * @returns
    */
-  async setFixedInterval(article: IArticleBase, newIntervalDays: number) {
-    return this.articles.setFixedInterval(article, newIntervalDays);
-  }
-
-  async disableFixedInterval(article: IArticleBase, newPriority: number) {
-    return this.articles.disableFixedInterval(article, newPriority);
+  async manageFixedInterval(
+    article: IArticleBase,
+    changes: { newIntervalDays: number } | { newPriority: number }
+  ) {
+    if ('newIntervalDays' in changes) {
+      return this.articles.setFixedInterval(article, changes.newIntervalDays);
+    } else {
+      return this.articles.disableFixedInterval(article, changes.newPriority);
+    }
   }
 
   /**

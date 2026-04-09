@@ -90,8 +90,8 @@ export class Actions {
   /**
    * @param newPriority decimal number from 1.0 to 5.0, inclusive
    */
-  reprioritize = async (item: ReviewText, newPriority: number) => {
-    const priority = IRScheduler.transformPriority(newPriority);
+  reprioritize = async (item: ReviewText, priority: number) => {
+    IRScheduler.validatePriority(priority);
     try {
       await this.plugin.reviewManager.reprioritize(item.data, priority);
       new Notice(
@@ -106,51 +106,12 @@ export class Actions {
     }
   };
 
-  setFixedInterval = async (article: ReviewArticle, intervalDays: number) => {
-    try {
-      await this.plugin.reviewManager.setFixedInterval(
-        article.data,
-        intervalDays
-      );
-
-      new Notice(
-        `Scheduled for review every ${intervalDays} days`,
-        SUCCESS_NOTICE_DURATION_MS
-      );
-    } catch (error) {
-      console.error(error);
-      new Notice(
-        `Failed to set fixed review interval for "${article.data.reference}"`,
-        ERROR_NOTICE_DURATION_MS
-      );
-    }
-  };
-
-  /**
-   * @param newPriority The priority to use for recalculating the dynamic
-   * interval and due date
-   */
-  disableFixedInterval = async (
+  /** Set or remove a fixed interval on an article */
+  manageFixedInterval = async (
     article: ReviewArticle,
-    newPriority: number
+    changes: { newIntervalDays: number } | { newPriority: number }
   ) => {
-    try {
-      await this.plugin.reviewManager.disableFixedInterval(
-        article.data,
-        newPriority
-      );
-
-      new Notice(
-        `Switched to priority-based scheduling`,
-        SUCCESS_NOTICE_DURATION_MS
-      );
-    } catch (error) {
-      console.error(error);
-      new Notice(
-        `Failed to enable priority-based scheduling for "${article.data.reference}"`,
-        ERROR_NOTICE_DURATION_MS
-      );
-    }
+    await this.plugin.reviewManager.manageFixedInterval(article.data, changes);
   };
 
   gradeCard = async (card: ReviewCard, grade: Grade) => {
