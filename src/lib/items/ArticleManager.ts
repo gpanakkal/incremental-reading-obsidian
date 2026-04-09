@@ -108,7 +108,7 @@ export class ArticleManager extends ItemManager {
       }
 
       let importFileName = file.name;
-      while (Obsidian.isDuplicate(file.name, 'article', this.app)) {
+      while (Obsidian.isDuplicate(importFileName, 'article', this.app)) {
         importFileName = `${file.basename} - ${generateId()}.${file.extension}`;
       }
 
