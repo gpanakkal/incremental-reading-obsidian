@@ -407,22 +407,29 @@ export class ArticleManager extends ItemManager {
    * @param fixedInterval the interval in days
    */
   async setFixedInterval(article: IArticleBase, fixedIntervalDays: number) {
-    IRScheduler.validateFixedInterval(fixedIntervalDays);
+    try {
+      IRScheduler.validateFixedInterval(fixedIntervalDays);
 
-    const lastReview = await this.getLastReview(article);
-    const fixedIntervalMs = IRScheduler.nextInterval({
-      ...article,
-      fixed_interval_days: fixedIntervalDays,
-    });
-    const newDueTime = lastReview
-      ? lastReview.review_time + fixedIntervalMs
-      : article.due;
+      const lastReview = await this.getLastReview(article);
+      const fixedIntervalMs = IRScheduler.nextInterval({
+        ...article,
+        fixed_interval_days: fixedIntervalDays,
+      });
+      const newDueTime = lastReview
+        ? lastReview.review_time + fixedIntervalMs
+        : article.due;
 
-    await this.repo.mutate(
-      `UPDATE article SET fixed_interval_days = $1, due = $2 ` +
-        `WHERE id = $3`,
-      [fixedIntervalDays, newDueTime, article.id]
-    );
+      await this.repo.mutate(
+        `UPDATE article SET fixed_interval_days = $1, due = $2 ` +
+          `WHERE id = $3`,
+        [fixedIntervalDays, newDueTime, article.id]
+      );
+    } catch (e) {
+      new Notice(
+        `Failed to set fixed interval for article ${article.reference}`
+      );
+      console.error(e);
+    }
   }
   /**
    * @param newPriority the priority to use for calculating the interval
@@ -430,22 +437,28 @@ export class ArticleManager extends ItemManager {
    * simulating how the interval would have grown
    */
   async disableFixedInterval(article: IArticleBase, newPriority: number) {
-    IRScheduler.validatePriority(newPriority);
+    try {
+      IRScheduler.validatePriority(newPriority);
 
-    const lastReview = await this.getLastReview(article);
-    const reviewCount = await this.getReviewCount(article);
-    // TODO: use IRScheduler.cumulativeInterval here
-    const mult = IRScheduler.getIntervalMultiplier(newPriority);
-    const newInterval = TEXT_BASE_REVIEW_INTERVAL * mult ** reviewCount;
+      const lastReview = await this.getLastReview(article);
+      const reviewCount = await this.getReviewCount(article);
+      // TODO: use IRScheduler.cumulativeInterval here
+      const mult = IRScheduler.getIntervalMultiplier(newPriority);
+      const newInterval = TEXT_BASE_REVIEW_INTERVAL * mult ** reviewCount;
 
-    const newDueTime = lastReview
-      ? lastReview.review_time + newInterval
-      : article.due;
+      const newDueTime = lastReview
+        ? lastReview.review_time + newInterval
+        : article.due;
 
-    await this.repo.mutate(
-      `UPDATE article SET fixed_interval_days = NULL, due = $1, interval = $2 ` +
-        `WHERE id = $3`,
-      [newDueTime, newInterval, article.id]
-    );
+      await this.repo.mutate(
+        `UPDATE article SET fixed_interval_days = NULL, due = $1, interval = $2 ` +
+          `WHERE id = $3`,
+        [newDueTime, newInterval, article.id]
+      );
+    } catch (_e) {
+      new Notice(
+        `Failed to disable fixed interval for article ${article.reference}`
+      );
+    }
   }
 }

@@ -70,7 +70,7 @@ function lastMutateCall(repo: SQLiteRepository): [string, unknown[]] {
 // #endregion
 
 describe('disableFixedInterval', () => {
-  it('throws if the priority is out of range', async () => {
+  it('does not mutate the database if the priority is invalid', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.oneof(
@@ -81,9 +81,9 @@ describe('disableFixedInterval', () => {
           const article = makeArticle();
           const repo = makeRepo(undefined, 0);
           const manager = new ArticleManager({} as never, repo);
-          await expect(async () =>
-            manager.disableFixedInterval(article, badPriority)
-          ).rejects.toThrow();
+          await manager.disableFixedInterval(article, badPriority);
+          const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls;
+          expect(calls).toHaveLength(0);
         }
       )
     );
