@@ -320,12 +320,11 @@ export class ArticleManager extends ItemManager {
   }
 
   protected async getReviewCount(article: IArticleBase) {
-    const reviewCount = (
-      await this.repo.query(
-        `SELECT COUNT(id) FROM article_review WHERE article_id = $1`,
-        [article.id]
-      )
-    )[0] as unknown as number;
+    const queryResult = (await this.repo.query(
+      `SELECT COUNT(id) FROM article_review WHERE article_id = $1`,
+      [article.id]
+    )) as unknown as [{ 'COUNT(id)': number }];
+    const reviewCount = queryResult[0]['COUNT(id)'];
     return reviewCount;
   }
 
