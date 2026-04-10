@@ -242,7 +242,10 @@ export default class IRScheduler {
     return displayPriority;
   }
 
-  /** Use this to transform priorities in the priority field's onChange callback */
+  /**
+   * Use this to transform priorities in the priority field's onChange callback
+   * @throws if the input is not a number
+   */
   static adjustDisplayPriorityOnChange(displayPriority: string) {
     // remove invalid characters
     const filtered = displayPriority.replaceAll(/(?![\d.])/g, '');
@@ -261,9 +264,10 @@ export default class IRScheduler {
       scaled = scaled[0] + '.' + scaled[1];
     }
 
-    const clamped = Math.min(
-      MAXIMUM_PRIORITY / 10,
-      Math.max(MINIMUM_PRIORITY / 10, Number.parseFloat(scaled))
+    const clamped = clamp(
+      Number.parseFloat(scaled),
+      MINIMUM_PRIORITY / 10,
+      MAXIMUM_PRIORITY / 10
     );
 
     return clamped;
