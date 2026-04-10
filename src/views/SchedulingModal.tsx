@@ -9,9 +9,9 @@ import type IncrementalReadingPlugin from '#/main';
 import type { TFile } from 'obsidian';
 import { Modal } from 'obsidian';
 import { render } from 'preact';
-import { PriorityModalContent } from '../components/PriorityModalContent';
+import { SchedulingModalContent } from '../components/SchedulingModalContent';
 
-export class PriorityModal extends Modal {
+export class SchedulingModal extends Modal {
   plugin: IncrementalReadingPlugin;
   file: TFile;
   data: ReviewText['data'] | null;
@@ -97,7 +97,7 @@ export class PriorityModal extends Modal {
       }
     }
     render(
-      <PriorityModalContent
+      <SchedulingModalContent
         plugin={plugin}
         type={data ? data.type : 'article'}
         schedule={schedule}

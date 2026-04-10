@@ -10,7 +10,7 @@ import { FixedIntervalField } from './action-bar/FixedIntervalField';
 import { PriorityField } from './action-bar/PriorityField';
 import type { SchedulingModalProps } from './types';
 
-export function PriorityModalContent({
+export function SchedulingModalContent({
   plugin,
   type,
   schedule,

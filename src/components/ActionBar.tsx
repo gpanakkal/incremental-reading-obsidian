@@ -11,7 +11,7 @@ import {
   type ReviewCard,
   type ReviewSnippet,
 } from '#/lib/types';
-import { PriorityModal } from '#/views/PriorityModal';
+import { SchedulingModal } from '#/views/SchedulingModal';
 import { CalendarSync } from 'lucide-react';
 import { useDispatch } from 'react-redux';
 import { Rating } from 'ts-fsrs';
@@ -163,7 +163,7 @@ function TextScheduler({ text }: { text: ReviewText }) {
       <Button
         tooltip="Change scheduling strategy"
         handleClick={() => {
-          new PriorityModal(plugin, text).open();
+          new SchedulingModal(plugin, text).open();
         }}
       >
         <CalendarSync />

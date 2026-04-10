@@ -18,8 +18,8 @@ import type { IRPluginSettings } from './lib/settings';
 import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
-import { PriorityModal } from './views/PriorityModal';
 import ReviewView from './views/ReviewView';
+import { SchedulingModal } from './views/SchedulingModal';
 
 export default class IncrementalReadingPlugin extends Plugin {
   settings: IRPluginSettings;
@@ -97,7 +97,7 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     const importArticle = async (file: TFile) => {
       if (this.settings.showImportDialog) {
-        new PriorityModal(this, { file, data: null }).open();
+        new SchedulingModal(this, { file, data: null }).open();
       } else {
         const article = await this.reviewManager.importArticle(
           file,
