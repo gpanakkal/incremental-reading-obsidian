@@ -18,13 +18,6 @@ import {
   shouldCleanup,
 } from './setup/helpers';
 
-/**
- * Tests of core plugin functionality:
- * - Opening review interface
- * - Importing articles
- * -
- */
-
 let app: ElectronApplication;
 let window: Page;
 let vaultPath: string;

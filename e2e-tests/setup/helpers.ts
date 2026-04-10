@@ -1,10 +1,10 @@
-import * as fs from 'node:fs/promises';
-import * as path from 'path';
+import type { Locator } from '@playwright/test';
 import {
   _electron as electron,
   type ElectronApplication,
 } from '@playwright/test';
-import type { Locator } from '@playwright/test';
+import * as fs from 'node:fs/promises';
+import * as path from 'path';
 
 /**
  * Thanks to qawatake for providing an example testing setup
@@ -37,8 +37,7 @@ export async function createVaultCopy(prefix: string, subDirectory?: string) {
   // refresh the plugin files from the project root.
   const pluginDir = path.join(
     vaultPath,
-    // ignore this rule here since we're using the test vault
-    // eslint-disable-next-line obsidianmd/hardcoded-config-path
+    // eslint-disable-next-line obsidianmd/hardcoded-config-path -- test file, ignore
     '.obsidian/plugins/incremental-reading'
   );
   await fs.mkdir(pluginDir, { recursive: true });
