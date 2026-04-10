@@ -1,6 +1,6 @@
 # Obsidian Incremental Reading
 > [!NOTE]
-> This plugin is in early development. The core feature set is implemented, butExpect bugs and feature limitations (see [Known Limitations](#known-limitations-and-issues)).
+> This plugin is in early development. The core feature set is implemented, but expect bugs and feature limitations (see [Known Limitations](#known-limitations-and-issues)).
 
 This is a plugin for [Obsidian](https://obsidian.md) that enables incremental reading, a powerful, low-friction workflow for learning from texts. 
 
@@ -14,30 +14,37 @@ Since this is integrated directly into Obsidian, your learning materials, snippe
 See [Technical Details](#technical-details) for key terminology and details on how the incremental reading process works in this plugin.
 
 ## Setup
-> [!IMPORTANT]
-> This plugin supports Obsidian Sync, but make sure to enable "sync all other types" on each device **before** installing the plugin.
-> Sync may overwrite the plugin's database if you install the plugin first.
->
-> You can easily recover the database if this happens: go to the Files pane, right click on `incremental-reading/ir-user-data.sqlite`, and select `Open version history`.
+#### 1. Install BRAT
+Go to settings → Community plugins → turn on community plugins (if you haven't already) → Browse → search for BRAT
 
-[Install via BRAT](https://tfthacker.com/brat-quick-guide#Adding+a+beta+plugin).
+#### 2. Install Incremental Reading
+In the installed plugins list, open BRAT's settings → Add beta plugin → paste the link: https://github.com/gpanakkal/incremental-reading-obsidian → select "Latest version" in the dropdown, and confirm.
+
+#### 3. Configure Obsidian Sync
+If you don't use Sync, skip this step.
+
+Go to settings → Sync → enable **Sync all other types**. Repeat this on each device.
+> [!IMPORTANT]
+> Sync will overwrite the plugin's database if you use the plugin on a second device before enabling "Sync all other types".
+>
+> You can easily recover the database if this happens: Open the Files pane → find `incremental-reading/ir-user-data` and right-click (on mobile, tap and hold until it lights up) → select **Open version history** → select the newest version from your first device → select **Restore**.
 
 ## Using the plugin
 1. Import some learning material into an Obsidian note. See [Third-Party Tools](#third-party-tools) for HTML/PDF conversion.
-2. Run `Import article` from the command palette to add the entire note to your study queue. Set a lower priority (e.g., 1.5) if you want to review it frequently. See [priority scheduling](#priority-scheduling) for more details.
+2. Run **Import article** from the command palette to add the entire note to your study queue. Set a lower priority (e.g., 1.5) if you want to review it frequently. See [priority scheduling](#priority-scheduling) for more details.
 > [!TIP]
-> You can also import notes from the editor context menu (three dots in the top right corner), or by right-clicking on the note in the Files tab and selecting `Import article`.
+> You can also import notes from the editor context menu (three dots in the top right corner), or by right-clicking on the note in the Files tab and selecting **Import article**.
 3. Set aside some time for a [study session](#study-sessions) each day, depending on how much you want to learn. Even 10 minutes is fine!
 > [!TIP]
-> Bind hotkeys for the `Extract selection` and `Create SRS card` commands, as these are frequently used in incremental reading.
+> Bind hotkeys for the **Extract selection** and **Create SRS card** commands, as these are frequently used in incremental reading.
 
 ### Study Sessions
-Once you've imported some material, begin a study session by clicking the `Incremental Reading` button in the left ribbon (or `Incremental Reading: Learn` from the command palette).
+Once you've imported some material, begin a study session by selecting the **Incremental Reading** button in the left ribbon (or **Incremental Reading: Learn** from the command palette).
 1. The first item in the queue will be shown to you. Read as much as you like, extracting interesting/important passages to snippets as you go.
-2. Press `Continue` when you want to move on to the next item in the queue. Don't worry about losing track of the current item; it will be shown to you again in the future.
+2. Select **Continue** when you want to move on to the next item in the queue. Don't worry about losing track of the current item; it will be shown to you again in the future.
 > [!TIP]
-> If you don't want to see an item again, press `Dismiss` instead.
-3. Cards you've made will show up in review on subsequent days. Mentally fill in the blank or answer the question, then click "Show Answer". Grade yourself per [these criteria](#grading-cards).
+> If you don't want to see an item again, select **Dismiss** instead.
+3. Cards you've made will show up in review on subsequent days. Mentally fill in the blank or answer the question, then select "Show Answer". Grade yourself per [these criteria](#grading-cards).
 > [!WARNING]
 > For spaced repetition to work properly, make sure you're actually attempting to recall the answer before revealing it.
 
@@ -48,7 +55,7 @@ As you build understanding, you may find the phrasing of a snippet can be improv
 
 #### Making cards
 Once a snippet has been sufficiently trimmed down and revised, it's ready to be turned into one or more spaced repetition cards. 
-- Currently, all cards are created as fill-in-the-blank questions from text blocks - just select the part of the text that you want to be the answer, and run `Create SRS card`.
+- Currently, all cards are created as fill-in-the-blank questions from text blocks - just select the part of the text that you want to be the answer, and run **Create SRS card**.
 - The entire paragraph or bullet point containing the selected text will be extracted to the card. Add newlines and split bullets up as needed to avoid including extra text.
 - Ideally, each card will be one or two brief sentences, with only one correct answer. The shorter the better, as long as it remains unambiguous how to answer the question.
 
@@ -81,7 +88,7 @@ This is especially handy for:
 
 ## Third-Party Tools
 - [Obsidian Web Clipper](https://obsidian.md/clipper): A browser extension to save webpages to your vault, from the Obsidian team themselves. 
-  - This is also built into Obsidian's web viewer; just click the overflow menu in the top right and select `Save to vault`.
+  - This is also built into Obsidian's web viewer; just select the overflow menu in the top right and select **Save to vault**.
 - [MarkDownload browser extension](https://github.com/deathau/markdownload) - this works better than the Obsidian clipper on some websites
 - [Marker](https://github.com/datalab-to/marker) for PDF conversion
 
@@ -115,7 +122,7 @@ The default priority-based system is generally recommended, but fixed intervals 
 ##### Priority Scheduling
 In this approach, items are scheduled for review using intervals that lengthen on each review, starting from one day. Priorities control how quickly these intervals grow.
 
-Priorities range from `1` to `5`, where `1` means "widen intervals _extremely_ slowly", while `5` means each interval will be ~1.6 times the length of the previous one.
+Priorities range from **1** to **5**, where **1** means "widen intervals _extremely_ slowly", while **5** means each interval will be ~1.6 times the length of the previous one.
 > [!TIP]
 > Use decimal priorities for more fine-grained control. For convenience, you can simply enter a two digit number from 10 to 50. The decimal point will be inserted automatically.
 
@@ -124,7 +131,7 @@ Reducing the priority will not make future intervals shorter; it only slows the 
 Don't worry if setting priorities feels unintuitive at first. You'll develop a feel for it with practice.
 
 ##### Fixed-Interval Scheduling
-Articles can be configured to be reviewed on a fixed interval (e.g., daily or weekly) instead of using the priority system. Use the `Manage item scheduling` command to change the scheduling method.
+Articles can be configured to be reviewed on a fixed interval (e.g., daily or weekly) instead of using the priority system. Use the **Manage item scheduling** command to change the scheduling method.
 
 ### Plugin Data
 To avoid side effects, this plugin (mostly) does not modify files outside its data folder. 
