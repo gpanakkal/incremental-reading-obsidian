@@ -268,7 +268,33 @@ test.describe('Action Bar', () => {
     await expect(window.locator('.ir-title')).toBeInViewport();
   });
 
-  test.skip('Can change priority from the review pane', async () => {});
+  test('Can change priority from the review pane', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+
+    await executeCommand(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await executeCommand(window, 'incremental-reading:learn');
+
+    const priorityInput = window.getByRole('textbox', { name: 'Priority' });
+
+    // change the priority twice in rapid succession
+    await priorityInput.fill('11');
+    await priorityInput.press('Enter');
+    await expect(priorityInput).toHaveValue('1.1');
+    await priorityInput.fill('49');
+    await priorityInput.press('Enter');
+    await expect(priorityInput).toHaveValue('4.9');
+
+    // re-open the review interface to verify the changes persisted
+    await executeCommand(window, 'workspace:close');
+
+    await executeCommand(window, 'incremental-reading:learn');
+    const priorityInput2 = window.getByRole('textbox', { name: 'Priority' });
+    await expect(priorityInput2).toHaveValue('4.9');
+  });
 });
 
 test.describe('Extracting snippets', () => {
