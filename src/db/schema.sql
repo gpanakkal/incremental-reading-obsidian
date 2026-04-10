@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS article (
   scroll_top INTEGER NOT NULL DEFAULT 0,
   CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
-  CHECK(fixed_interval_days >= 1 AND fixed_interval_days <= 7),
+  CHECK(fixed_interval_days > 0),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
   CHECK(due IS NOT NULL OR dismissed = TRUE)
 );
