@@ -49,7 +49,7 @@ function makeRepo(
         return lastReview ? [lastReview] : [];
       }
       if (sql.includes('COUNT(id)')) {
-        return [reviewCount];
+        return [{ ['COUNT(id)']: reviewCount }];
       }
       return [];
     }),
