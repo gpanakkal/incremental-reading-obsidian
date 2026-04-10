@@ -84,6 +84,15 @@
       "key": "R"
     }
   ],
+  "incremental-reading:learn": [
+    {
+      "modifiers": [
+        "Alt",
+        "Shift"
+      ],
+      "key": "E"
+    }
+  ],
   "incremental-reading:extract-selection": [
     {
       "modifiers": [
@@ -177,7 +186,7 @@
       "modifiers": [
         "Alt"
       ],
-      "key": "P"
+      "key": "O"
     }
   ],
   "incremental-reading:import-article": [
@@ -186,6 +195,14 @@
         "Alt"
       ],
       "key": "I"
+    }
+  ],
+  "incremental-reading:open-scheduling-modal": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "P"
     }
   ]
 }
