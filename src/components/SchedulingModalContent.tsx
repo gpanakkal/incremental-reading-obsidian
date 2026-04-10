@@ -1,4 +1,5 @@
 import {
+  MAXIMUM_FIXED_REVIEW_INTERVAL,
   MAXIMUM_PRIORITY,
   MINIMUM_FIXED_REVIEW_INTERVAL,
   MINIMUM_PRIORITY,
@@ -47,7 +48,9 @@ export function SchedulingModalContent({
     onClose({ strategy, value });
   };
 
-  const intervalTooltip = `Set the interval between reviews, in days.`;
+  const intervalTooltip =
+    `Set the time between reviews, in days` +
+    ` from ${MINIMUM_FIXED_REVIEW_INTERVAL} to ${MAXIMUM_FIXED_REVIEW_INTERVAL}.`;
 
   const prioTooltip =
     `Priority ranges from ` +
@@ -67,7 +70,7 @@ export function SchedulingModalContent({
       {type === 'article' && (
         <div className="ir-scheduling-strategy-toggle">
           <label className="ir-scheduling-toggle-label">
-            Fixed interval
+            Fixed intervals
             <div
               className={
                 'checkbox-container' +

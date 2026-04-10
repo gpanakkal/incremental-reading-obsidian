@@ -435,9 +435,13 @@ export class ArticleManager extends ItemManager {
         [fixedIntervalDays, newDueTime, article.id]
       );
     } catch (e) {
-      new Notice(
-        `Failed to set fixed interval for article ${article.reference}`
-      );
+      if (e instanceof Error) {
+        new Notice(
+          `Failed to set fixed interval for "${article.reference}":` +
+            e.message,
+          ERROR_NOTICE_DURATION_MS
+        );
+      }
       console.error(e);
     }
   }
