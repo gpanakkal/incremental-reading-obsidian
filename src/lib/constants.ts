@@ -32,8 +32,14 @@ export const MS_PER_DAY = 1000 * 86_400;
 export const MS_PER_YEAR = MS_PER_DAY * 365;
 export const MAX_VALID_TIMESTAMP_DATE = 8.64e15;
 
-/** Local time to roll over to a new day. Defaults to 0400 (4 AM). Must be positive */
-export const DAY_ROLLOVER_OFFSET_HOURS = 4;
+/** When to roll over to a new review day relative to midnight.
+ * Default is 4 (4 AM)
+ */
+export const DAY_ROLLOVER_OFFSET_HOURS = {
+  DEFAULT: 4,
+  MIN: -12,
+  MAX: 12,
+};
 
 export const TABLE_NAMES = Object.freeze([
   'article',

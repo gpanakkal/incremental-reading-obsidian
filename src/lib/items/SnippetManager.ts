@@ -27,13 +27,8 @@ import type {
   SQLiteRepository,
 } from '#/lib/types';
 import { getEndOfToday } from '#/lib/utils';
-import {
-  Notice,
-  TFile,
-  type App,
-  type Editor,
-  type MarkdownView,
-} from 'obsidian';
+import type IncrementalReadingPlugin from '#/main';
+import { Notice, TFile, type Editor, type MarkdownView } from 'obsidian';
 import type ReviewView from 'src/views/ReviewView';
 import { ArticleManager } from './ArticleManager';
 import { ItemManager } from './ItemManager';
@@ -41,8 +36,8 @@ import { ItemManager } from './ItemManager';
 export class SnippetManager extends ItemManager {
   offsetTracker: SnippetOffsetTracker;
 
-  constructor(app: App, repo: SQLiteRepository) {
-    super(app, repo);
+  constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
+    super(plugin, repo);
     this.offsetTracker = new SnippetOffsetTracker();
   }
 
@@ -105,7 +100,8 @@ export class SnippetManager extends ItemManager {
     limit?: number,
     excludeIds?: string[]
   ): Promise<ReviewSnippet[]> {
-    const dueTime = dueBy ?? getEndOfToday();
+    const dueTime =
+      dueBy ?? getEndOfToday(this.plugin.settings.dayRolloverOffset);
     try {
       const snippetsDue = (
         await this.fetchMany({ dueBy: dueTime, limit, excludeIds })

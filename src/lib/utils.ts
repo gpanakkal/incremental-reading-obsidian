@@ -1,8 +1,4 @@
-import {
-  DAY_ROLLOVER_OFFSET_HOURS,
-  MS_PER_DAY,
-  MS_PER_MINUTE,
-} from './constants';
+import { MS_PER_DAY, MS_PER_MINUTE } from './constants';
 import type { DeepPartial } from './utility-types';
 
 /**
@@ -44,11 +40,11 @@ export function getDateString(date?: Date) {
 /**
  * Get the rollover-adjusted end of day as a Unix timestamp.
  */
-export function getEndOfToday() {
+export function getEndOfToday(offsetHours: number) {
   const date = new Date();
   // get start of day in local time zone
   const startOfToday = Date.parse(date.toDateString());
-  const rolloverOffsetMs = DAY_ROLLOVER_OFFSET_HOURS * 60 * MS_PER_MINUTE;
+  const rolloverOffsetMs = offsetHours * 60 * MS_PER_MINUTE;
   let endOfDayLocal = startOfToday + rolloverOffsetMs;
   if (Date.parse(date.toUTCString()) - startOfToday >= rolloverOffsetMs) {
     // add a full day since we're past the rollover point

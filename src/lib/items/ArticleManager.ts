@@ -249,7 +249,8 @@ export class ArticleManager extends ItemManager {
     limit?: number,
     excludeIds?: string[]
   ): Promise<ReviewArticle[]> {
-    const dueTime = dueBy ?? getEndOfToday();
+    const dueTime =
+      dueBy ?? getEndOfToday(this.plugin.settings.dayRolloverOffset);
     try {
       const articlesDue = (
         await this.fetchMany({ dueBy: dueTime, limit, excludeIds })

@@ -1,4 +1,6 @@
+/* eslint-disable obsidianmd/no-tfile-tfolder-cast -- this is a test file */
 import {
+  DAY_ROLLOVER_OFFSET_HOURS,
   DEFAULT_PRIORITY,
   MAXIMUM_PRIORITY,
   MINIMUM_PRIORITY,
@@ -6,13 +8,16 @@ import {
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   IArticleBase,
   IArticleReview,
   SQLiteRepository,
 } from '#/lib/types';
+import { getEndOfToday } from '#/lib/utils';
 import fc from 'fast-check';
-import { describe, expect, it, vi } from 'vitest';
+import type { TFile } from 'obsidian';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ArticleManager } from './ArticleManager';
 
 // #region HELPERS
@@ -57,6 +62,11 @@ function makeRepo(
     _execSql: vi.fn(),
     handleFileChange: vi.fn(),
   } as unknown as SQLiteRepository;
+}
+
+function makeArticleRow(overrides: Partial<IArticleBase> = {}) {
+  const { dismissed, ...rest } = makeArticle(overrides);
+  return { ...rest, dismissed: Number(dismissed) };
 }
 
 /** Returns the [sql, params] tuple from the latest call to repo.mutate */
@@ -178,5 +188,71 @@ describe('disableFixedInterval', () => {
         )
       );
     });
+  });
+});
+
+describe('getDue', () => {
+  // Year 2000–2100 in ms, used to generate arbitrary "current time" values.
+  const YEAR_2000_MS = new Date('2000-01-01T12:00:00Z').getTime();
+  const YEAR_2100_MS = new Date('2100-01-01T12:00:00Z').getTime();
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(Obsidian, 'getNote').mockReturnValue({
+      path: 'articles/test.md',
+    } as TFile);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** Repo that filters rows by the dueBy param, mirroring the SQL `due <= $1` condition. */
+  function makeRepoWithArticles(
+    rows: ReturnType<typeof makeArticleRow>[]
+  ): SQLiteRepository {
+    return {
+      query: vi.fn().mockImplementation((sql: string, params: unknown[]) => {
+        if (sql.startsWith('SELECT * FROM article')) {
+          const dueBy = params[0] as number | undefined;
+          return dueBy !== undefined
+            ? rows.filter((r) => r.due !== null && r.due <= dueBy)
+            : rows;
+        }
+        return [];
+      }),
+      mutate: vi.fn().mockResolvedValue([[]]),
+      _execSql: vi.fn(),
+      handleFileChange: vi.fn(),
+    } as unknown as SQLiteRepository;
+  }
+
+  it('returns articles due at or before the offset-adjusted end of day, but not after', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: YEAR_2000_MS, max: YEAR_2100_MS }),
+        fc.integer({ min: DAY_ROLLOVER_OFFSET_HOURS.MIN, max: DAY_ROLLOVER_OFFSET_HOURS.MAX }),
+        async (nowMs, offset) => {
+          vi.setSystemTime(nowMs);
+
+          const cutoff = getEndOfToday(offset);
+          const rowAtCutoff = makeArticleRow({ id: 'at-cutoff', due: cutoff });
+          const rowAfterCutoff = makeArticleRow({ id: 'after-cutoff', due: cutoff + 1 });
+          const repo = makeRepoWithArticles([rowAtCutoff, rowAfterCutoff]);
+          const plugin = {
+            app: {},
+            settings: { dayRolloverOffset: offset },
+          } as never;
+          const manager = new ArticleManager(plugin, repo);
+
+          const results = await manager.getDue();
+
+          const ids = results.map((r) => r.data.id);
+          expect(ids).toContain('at-cutoff');
+          expect(ids).not.toContain('after-cutoff');
+        }
+      )
+    );
   });
 });

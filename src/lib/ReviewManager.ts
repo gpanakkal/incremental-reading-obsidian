@@ -10,6 +10,7 @@ import type {
   SnippetRow,
 } from '#/lib/types';
 import { isArticle } from '#/lib/types';
+import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import type { TAbstractFile, TFile } from 'obsidian';
 import { type App, type Editor, type MarkdownView } from 'obsidian';
@@ -23,18 +24,20 @@ import type { SQLiteRepository } from './types';
 import { compareDates } from './utils';
 
 export default class ReviewManager {
+  plugin: IncrementalReadingPlugin;
   app: App;
   #repo: SQLiteRepository;
   snippets: SnippetManager;
   cards: CardManager;
   articles: ArticleManager;
 
-  constructor(app: App, repo: SQLiteRepository) {
-    this.app = app;
+  constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
+    this.plugin = plugin;
+    this.app = plugin.app;
     this.#repo = repo;
-    this.snippets = new SnippetManager(app, repo);
-    this.cards = new CardManager(app, repo);
-    this.articles = new ArticleManager(app, repo);
+    this.snippets = new SnippetManager(plugin, repo);
+    this.cards = new CardManager(plugin, repo);
+    this.articles = new ArticleManager(plugin, repo);
   }
 
   // TODO: remove for production

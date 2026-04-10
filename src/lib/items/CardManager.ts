@@ -4,8 +4,9 @@ import type {
   ReviewCard,
   SRSCardRow,
 } from '#/lib/types';
+import type IncrementalReadingPlugin from '#/main';
 import type { TFile } from 'obsidian';
-import { Notice, type App, type Editor, type MarkdownView } from 'obsidian';
+import { Notice, type Editor, type MarkdownView } from 'obsidian';
 import type ReviewView from 'src/views/ReviewView';
 import type { FSRS, FSRSParameters, Grade, StateType } from 'ts-fsrs';
 import { fsrs, generatorParameters, State } from 'ts-fsrs';
@@ -38,8 +39,8 @@ const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
 export class CardManager extends ItemManager {
   #fsrs: FSRS;
 
-  constructor(app: App, repo: SQLiteRepository) {
-    super(app, repo);
+  constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
+    super(plugin, repo);
     const params = generatorParameters(FSRS_PARAMETER_DEFAULTS);
     this.#fsrs = fsrs(params);
   }
@@ -125,7 +126,8 @@ export class CardManager extends ItemManager {
     limit?: number,
     excludeIds?: string[]
   ): Promise<ReviewCard[]> {
-    const dueTime = dueBy ?? getEndOfToday();
+    const dueTime =
+      dueBy ?? getEndOfToday(this.plugin.settings.dayRolloverOffset);
     try {
       const cardsDue = (
         await this.fetchMany({ dueBy: dueTime, limit, excludeIds })

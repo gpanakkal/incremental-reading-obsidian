@@ -290,7 +290,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         void repo.handleFileChange(file);
       })
     );
-    this.reviewManager = new ReviewManager(this.app, repo);
+    this.reviewManager = new ReviewManager(this, repo);
   }
 
   async learn(initialItem?: ReviewItem, newLeaf: boolean = true) {

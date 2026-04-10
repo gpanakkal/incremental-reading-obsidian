@@ -1,14 +1,17 @@
 import type { ArticleRow, SRSCardRow, SnippetRow } from '#/lib/types';
+import type IncrementalReadingPlugin from '#/main';
+import type { App, TAbstractFile } from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
-import type { App, TAbstractFile } from 'obsidian';
 
 export class ItemManager {
+  plugin: IncrementalReadingPlugin;
   app: App;
   repo: SQLiteRepository;
 
-  constructor(app: App, repo: SQLiteRepository) {
-    this.app = app;
+  constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
+    this.plugin = plugin;
+    this.app = plugin.app;
     this.repo = repo;
   }
 
