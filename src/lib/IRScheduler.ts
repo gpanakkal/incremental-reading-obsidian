@@ -288,4 +288,30 @@ export default class IRScheduler {
       );
     }
   }
+
+  /**
+   * Use this to transform intervals in the interval field's onChange callback
+   * @throws if not passed an integer
+   */
+  static adjustFixedIntervalOnChange(displayInterval: string) {
+    const errorMsg = `Received an invalid interval "${displayInterval}"`;
+    const filtered = displayInterval.trim().replaceAll(/(?![\d.])/g, '');
+    if (filtered.length === 0) {
+      throw new TypeError(errorMsg);
+    }
+
+    const parsed = Number.parseInt(filtered);
+
+    if (Number.isNaN(parsed)) {
+      throw new TypeError(errorMsg);
+    }
+
+    const clamped = clamp(
+      Math.round(parsed),
+      MINIMUM_FIXED_REVIEW_INTERVAL,
+      MAXIMUM_FIXED_REVIEW_INTERVAL
+    );
+
+    return clamped;
+  }
 }

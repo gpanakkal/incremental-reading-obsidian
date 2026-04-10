@@ -2,6 +2,7 @@ import {
   MAXIMUM_FIXED_REVIEW_INTERVAL,
   MINIMUM_FIXED_REVIEW_INTERVAL,
 } from '#/lib/constants';
+import IRScheduler from '#/lib/IRScheduler';
 import { useState } from 'react';
 
 export function FixedIntervalField({
@@ -30,7 +31,14 @@ export function FixedIntervalField({
             step={1}
             inputMode="numeric"
             onChange={(e) => {
-              setFixedInterval(Number.parseInt(e.currentTarget.value));
+              try {
+                const adjusted = IRScheduler.adjustFixedIntervalOnChange(
+                  e.currentTarget.value
+                );
+                setFixedInterval(adjusted);
+              } catch (_error) {
+                /** Fall back to prior value */
+              }
             }}
             onBlur={() => {
               void onBlur(fixedInterval);
