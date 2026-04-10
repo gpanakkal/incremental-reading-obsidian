@@ -17,7 +17,17 @@ export default class SRSCardReview implements ISRSCardReview {
   constructor(cardId: string, reviewLog: ReviewLog) {
     this.id = crypto.randomUUID();
     this.card_id = cardId;
-    Object.assign(this, reviewLog);
+    ({
+      due: this.due,
+      review: this.review,
+      stability: this.stability,
+      difficulty: this.difficulty,
+      elapsed_days: this.elapsed_days,
+      last_elapsed_days: this.last_elapsed_days,
+      scheduled_days: this.scheduled_days,
+      rating: this.rating,
+      state: this.state,
+    } = reviewLog);
   }
 
   static rowToDisplay(cardRow: SRSCardReviewRow): ISRSCardReview {

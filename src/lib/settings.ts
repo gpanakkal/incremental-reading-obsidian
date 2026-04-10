@@ -63,9 +63,9 @@ export class IRSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName('Review day offset')
+      .setName('End-of-day shift')
       .setDesc(
-        'Adjust the start time of the review day, in hours after midnight.' +
+        'Adjust the end time of the review day, in hours from midnight.' +
           ' Set this to the time you are most likely to be asleep.' +
           ' Default: 4 AM.'
       )
