@@ -94,6 +94,7 @@ export class Actions {
     IRScheduler.validatePriority(priority);
     try {
       await this.plugin.reviewManager.reprioritize(item.data, priority);
+      await invalidateItemQuery(item.data.id);
       new Notice(
         `Priority set to ${priority / 10}`,
         SUCCESS_NOTICE_DURATION_MS
@@ -112,6 +113,7 @@ export class Actions {
     changes: { newIntervalDays: number } | { newPriority: number }
   ) => {
     await this.plugin.reviewManager.manageFixedInterval(article.data, changes);
+    await invalidateItemQuery(article.data.id);
   };
 
   gradeCard = async (card: ReviewCard, grade: Grade) => {
