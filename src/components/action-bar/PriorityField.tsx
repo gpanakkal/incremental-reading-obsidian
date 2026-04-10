@@ -6,7 +6,7 @@ export function PriorityField({
   onBlur,
 }: {
   initialPriority: number;
-  onBlur: (priority: number) => Promise<void>;
+  onBlur: (priority: number) => void | Promise<void>;
 }) {
   const [displayPrio, setDisplayPrio] = useState<number>(initialPriority / 10);
 

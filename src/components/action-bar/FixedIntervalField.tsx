@@ -10,7 +10,7 @@ export function FixedIntervalField({
   onBlur,
 }: {
   initialInterval: number | null;
-  onBlur: (intervalDays: number) => Promise<void>;
+  onBlur: (intervalDays: number) => void | Promise<void>;
 }) {
   const [fixedInterval, setFixedInterval] = useState<number>(
     initialInterval ?? MINIMUM_FIXED_REVIEW_INTERVAL

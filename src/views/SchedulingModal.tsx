@@ -83,7 +83,7 @@ export class SchedulingModal extends Modal {
     }
   }
 
-  async onOpen() {
+  onOpen() {
     const { plugin, contentEl, data } = this;
     const schedule = {
       intervalDays: null as number | null,

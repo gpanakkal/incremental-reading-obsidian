@@ -109,9 +109,8 @@ export class SnippetManager extends ItemManager {
     try {
       const snippetsDue = (
         await this.fetchMany({ dueBy: dueTime, limit, excludeIds })
-      ).map(async (item) => this.rowToReviewSnippet(item), this);
-      const result = await Promise.all(snippetsDue);
-      return result.filter(
+      ).map((item) => this.rowToReviewSnippet(item), this);
+      return snippetsDue.filter(
         (snippet): snippet is ReviewSnippet =>
           !!snippet && snippet.file !== null
       );

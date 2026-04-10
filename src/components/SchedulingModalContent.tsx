@@ -92,7 +92,7 @@ export function SchedulingModalContent({
           <div>{prioTooltip}</div>
           <PriorityField
             initialPriority={scheduleValues.priority}
-            onBlur={async (priority: number) => updateValues({ priority })}
+            onBlur={(priority: number) => updateValues({ priority })}
           />
         </>
       ) : (
@@ -100,7 +100,7 @@ export function SchedulingModalContent({
           <div>{intervalTooltip}</div>
           <FixedIntervalField
             initialInterval={schedule.intervalDays}
-            onBlur={async (intervalDays: number) =>
+            onBlur={(intervalDays: number) =>
               updateValues({ fixedIntervalDays: intervalDays })
             }
           />
