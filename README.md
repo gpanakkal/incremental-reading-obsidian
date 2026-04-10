@@ -1,10 +1,10 @@
 # Obsidian Incremental Reading
 > [!NOTE]
-> This plugin is in early development. Expect bugs and feature limitations (see [Known Limitations](#known-limitations-and-issues)).
+> This plugin is in early development. The core feature set is implemented, butExpect bugs and feature limitations (see [Known Limitations](#known-limitations-and-issues)).
 
 This is a plugin for [Obsidian](https://obsidian.md) that enables incremental reading, a powerful, low-friction workflow for learning from texts. 
 
-It combines spaced repetition (using [FSRS](https://github.com/open-spaced-repetition/free-spaced-repetition-scheduler)) and a priority-based queuing system to allow users to:
+It combines spaced repetition (using [FSRS](https://github.com/open-spaced-repetition/awesome-fsrs/wiki/The-Algorithm)) and a priority-based queuing system to allow users to:
 - Easily build understanding through a divide-and-conquer approach that provides repeated exposures to learning material.
 - Learn several subjects in parallel without having to manually schedule and keep track of their progress.
 - Retain what they've learned indefinitely with spaced repetition cards.
@@ -76,32 +76,27 @@ This is especially handy for:
 - [The complete (and long) guide to incremental reading in SuperMemo](https://help.supermemo.org/wiki/Incremental_reading)
 
 ## Known Limitations and Issues
-- Importing and making snippets only works on Markdown files. Web page and PDF importing are planned features; in the meantime, there are third-party tools to convert these into markdown - see [Third-Party Tools](#third-party-tools).
+- Creating snippets and cards on partial code blocks, blockquotes, LaTeX, and other types of special formatting can break the formatting. I recommend including the entire formatted section (e.g., the entire code block) when making the snippet/card, and then editing it afterwards as desired.
+- Importing and making snippets only works on Markdown files. Web page and PDF importing are planned features, but in the meantime, check out the suggested [third-party tools](#third-party-tools) to convert these into Markdown.
 
 ## Third-Party Tools
-- [Obsidian Web Clipper](https://obsidian.md/clipper) (this is also built into Obsidian's web viewer; just click the overflow menu in the top right and select `Save to vault`)
+- [Obsidian Web Clipper](https://obsidian.md/clipper): A browser extension to save webpages to your vault, from the Obsidian team themselves. 
+  - This is also built into Obsidian's web viewer; just click the overflow menu in the top right and select `Save to vault`.
 - [MarkDownload browser extension](https://github.com/deathau/markdownload) - this works better than the Obsidian clipper on some websites
 - [Marker](https://github.com/datalab-to/marker) for PDF conversion
 
 ## Technical Details
 ### Terminology
-SRS stands for **Spaced Repetition System**.
-
-Full texts you've imported are **articles**.
-
-Sections of text that you have extracted are **snippets**.
-
-**Cards** are question & answer notes. 
-
-Articles, snippets, and cards are collectively called **items**.
-
-**Sources** are notes that an article was imported from. If a snippet or card is made from a note that is not an item, that note becomes a source as well.
-
-The article/snippet that a snippet or card is made from is its **parent**.
-
-Information that is **self-contained** is understandable by itself. This is vital for cards, which must have a unique and clear prompt.
-
-Information that is **atomic** cannot be simplified without loss of meaning. Cards should be as atomic as possible. See [atomic memory](https://supermemo.guru/wiki/Atomic_memory).
+- SRS stands for **Spaced Repetition System**.
+- A **review** of learning material includes both your first exposure to the material and subsequent re-visits.
+- Full texts you've imported are **articles**.
+- Sections of text that you have extracted are **snippets**.
+- **Cards** are question & answer entries that are scheduling using the spaced repetition algorithm.
+- Articles, snippets, and cards are collectively called **items**.
+- **Sources** are external notes that an article was imported from, or a snippet/card was made from.
+- The item that a snippet or card is made from is its **parent**.
+- Information that is **self-contained** is understandable by itself. This is vital for cards, which must have a unique and clear prompt for the spaced repetition algorithm to work as expected.
+- Information that is **atomic** cannot be simplified without loss of meaning. Cards should be as atomic as possible. See [atomic memory](https://supermemo.guru/wiki/Atomic_memory).
 
 ### How Incremental Reading works in this plugin
 During study sessions, articles, snippets, and cards that are due will be presented to you, interleaved with each other.
