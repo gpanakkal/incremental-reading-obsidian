@@ -15,13 +15,13 @@ import type ReviewView from '#/views/ReviewView';
 import type { TAbstractFile, TFile } from 'obsidian';
 import { type App, type Editor, type MarkdownView } from 'obsidian';
 import type { Grade } from 'ts-fsrs';
-import { DATA_DIRECTORY } from './constants';
-import { ArticleManager } from './items/ArticleManager';
-import { CardManager } from './items/CardManager';
-import { SnippetManager } from './items/SnippetManager';
-import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
-import type { SQLiteRepository } from './types';
-import { compareDates } from './utils';
+import { DATA_DIRECTORY } from '../constants';
+import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import type { SQLiteRepository } from '../types';
+import { compareDates } from '../utils';
+import { ArticleManager } from './ArticleManager';
+import { CardManager } from './CardManager';
+import { SnippetManager } from './SnippetManager';
 
 export default class ReviewManager {
   plugin: IncrementalReadingPlugin;

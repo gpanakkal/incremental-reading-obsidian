@@ -25,11 +25,11 @@ import {
   TRANSCLUSION_HIDE_TITLE_ALIAS,
 } from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
-import SRSCard from '../SRSCard';
-import SRSCardReview from '../SRSCardReview';
 import type { SQLiteRepository } from '../types';
 import { getEndOfToday, searchAll } from '../utils';
 import { ItemManager } from './ItemManager';
+import SRSCard from './SRSCard';
+import SRSCardReview from './SRSCardReview';
 
 const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
   enable_fuzz: false,

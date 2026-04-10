@@ -2,10 +2,12 @@ import { QueryClient } from '@tanstack/react-query';
 import type ReviewManager from './ReviewManager';
 import { isReviewCard, type ReviewItem } from './types';
 import type { TAbstractFile, TFile } from 'obsidian';
-import { deepMerge } from './utils';
-import type { DeepPartial } from './utility-types';
 import { CLOZE_DELIMITERS, QUERY_STALE_TIME } from './constants';
+import type ReviewManager from './items/ReviewManager';
 import { setCurrentItemId, store } from './store';
+import { isReviewCard, type ReviewItem } from './types';
+import type { DeepPartial } from './utility-types';
+import { deepMerge } from './utils';
 
 export const queryClient = new QueryClient({
   defaultOptions: {

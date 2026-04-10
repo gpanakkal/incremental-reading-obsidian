@@ -15,9 +15,9 @@ import { SchedulingModal } from '#/views/SchedulingModal';
 import { CalendarSync } from 'lucide-react';
 import { useDispatch } from 'react-redux';
 import { Rating } from 'ts-fsrs';
-import { FixedIntervalField } from './action-bar/FixedIntervalField';
-import { PriorityField } from './action-bar/PriorityField';
-import { useReviewContext } from './ReviewContext';
+import { useReviewContext } from '../ReviewContext';
+import { FixedIntervalField } from './FixedIntervalField';
+import { PriorityField } from './PriorityField';
 
 export function ActionBar() {
   const { data: currentItem } = useCurrentItem();

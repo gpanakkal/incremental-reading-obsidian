@@ -1,6 +1,6 @@
 import type { Actions } from '#/lib/Actions';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
-import type ReviewManager from '#/lib/ReviewManager';
+import type ReviewManager from '#/lib/items/ReviewManager';
 import { setReviewViewSaving } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';

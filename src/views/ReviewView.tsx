@@ -1,13 +1,13 @@
-import { FileView } from 'obsidian';
-import { render } from 'preact';
 import { createReviewInterface } from '#/components/ReviewInterface';
 import { PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
-import type ReviewManager from '#/lib/ReviewManager';
+import type ReviewManager from '#/lib/items/ReviewManager';
+import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import { resetSession } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type { IconName, TFile, WorkspaceLeaf } from 'obsidian';
-import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
+import { FileView } from 'obsidian';
+import { render } from 'preact';
 
 export default class ReviewView extends FileView {
   static #viewType = 'incremental-reading-review';

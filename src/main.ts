@@ -5,6 +5,7 @@ import databaseSchema from './db/schema.sql';
 import { Actions } from './lib/Actions';
 import { DATABASE_FILE_PATH, PLACEHOLDER_PLUGIN_ICON } from './lib/constants';
 import { createIRExtensions } from './lib/extensions';
+import ReviewManager from './lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from './lib/obsidian-editor';
 import { getEditorClass } from './lib/obsidian-editor';
 import {
@@ -13,7 +14,6 @@ import {
 } from './lib/query-client';
 import { SQLJSRepository } from './lib/repository/SQLJSRepository';
 import { initReviewCommands } from './lib/review-commands';
-import ReviewManager from './lib/ReviewManager';
 import type { IRPluginSettings } from './lib/settings';
 import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, store } from './lib/store';
