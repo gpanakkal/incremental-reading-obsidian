@@ -24,7 +24,7 @@ export async function executeCommand(window: Page, commandId: string) {
  * so we wait for it to disappear.
  */
 export async function finalizeArticleImport(window: Page) {
-  await window.getByRole('button', { name: 'Import' }).click();
+  await window.getByRole('button', { name: 'Confirm' }).click();
   await window.locator('.modal-bg').waitFor({ state: 'hidden' });
 }
 
