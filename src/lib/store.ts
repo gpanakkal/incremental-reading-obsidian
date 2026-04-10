@@ -1,7 +1,7 @@
-import { configureStore, createAction, createSlice } from '@reduxjs/toolkit';
 import type { EditCoordinates, EditState } from '#/components/types';
 import { EditingState } from '#/components/types';
 import type { PayloadAction } from '@reduxjs/toolkit';
+import { configureStore, createAction, createSlice } from '@reduxjs/toolkit';
 
 export const resetSession = createAction('resetSession');
 export const resetCurrentItem = createAction('resetCurrentItem');
@@ -35,21 +35,41 @@ export const showAnswerSlice = createSlice({
 
 export const { setShowAnswer } = showAnswerSlice.actions;
 
-// Track which items have been skipped
+type SeenIdsState = {
+  ids: Record<string, true>;
+  resetTime: number;
+};
+
+// Track which items have been skipped during a session, resetting at rollover
 const seenIdsSlice = createSlice({
   name: 'seenIds',
-  initialState: {} as Record<string, true>,
+  initialState: { ids: {}, resetTime: 0 } as SeenIdsState,
   reducers: {
-    addSeenId: (state, action: PayloadAction<string>) => {
-      Object.assign(state, { [action.payload]: true });
+    addSeenId: (state, action: PayloadAction<{ id: string; resetTime: number }>) => {
+      const { id, resetTime } = action.payload;
+      if (Date.now() >= state.resetTime) {
+        return { ids: { [id]: true }, resetTime };
+      }
+      state.ids[id] = true;
     },
+    resetSeenIds: (_state, action: PayloadAction<number>) => ({
+      ids: {},
+      resetTime: action.payload,
+    }),
   },
   extraReducers: (builder) => {
-    builder.addCase(resetSession, () => ({}));
+    builder.addCase(resetSession, (state) => ({ ids: {}, resetTime: state.resetTime }));
+  },
+  selectors: {
+    // Returns the ids, treating them as empty if the reset time has passed.
+    // Actual state reset happens lazily on the next addSeenId dispatch.
+    getSeenIds: (state: SeenIdsState): Record<string, true> =>
+      Date.now() >= state.resetTime ? {} : state.ids,
   },
 });
 
-export const { addSeenId } = seenIdsSlice.actions;
+export const { addSeenId, resetSeenIds } = seenIdsSlice.actions;
+export const { getSeenIds } = seenIdsSlice.selectors;
 
 /**
  * Flag to track when the review view is saving a file.

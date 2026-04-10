@@ -1,10 +1,8 @@
 import { QueryClient } from '@tanstack/react-query';
-import type ReviewManager from './ReviewManager';
-import { isReviewCard, type ReviewItem } from './types';
 import type { TAbstractFile, TFile } from 'obsidian';
 import { CLOZE_DELIMITERS, QUERY_STALE_TIME } from './constants';
 import type ReviewManager from './items/ReviewManager';
-import { setCurrentItemId, store } from './store';
+import { getSeenIds, setCurrentItemId, store } from './store';
 import { isReviewCard, type ReviewItem } from './types';
 import type { DeepPartial } from './utility-types';
 import { deepMerge } from './utils';
@@ -177,7 +175,7 @@ export function updateQueryCache<T extends ReviewItem, D extends T['data']>(
 async function fetchNextItem(
   reviewManager: ReviewManager
 ): Promise<ReviewItem | null> {
-  const { seenIds } = store.getState();
+  const seenIds = getSeenIds(store.getState());
   const excludeIds = Object.keys(seenIds);
   const result = await reviewManager.getDue({
     ...(excludeIds.length && { excludeIds }),
