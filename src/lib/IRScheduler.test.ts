@@ -9,6 +9,7 @@ import {
   MINIMUM_PRIORITY,
   MS_PER_DAY,
   MS_PER_YEAR,
+  TEXT_BASE_REVIEW_INTERVAL,
 } from './constants';
 import IRScheduler from './IRScheduler';
 import type { IArticleBase, ISnippetBase } from './types';
@@ -98,6 +99,50 @@ describe('adjustDisplayPriorityOnChange', () => {
           ).toThrow();
         }
       })
+    );
+  });
+});
+
+describe('nextInterval', () => {
+  it('never produces decreasing intervals', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({
+          min: 0,
+          max: MS_PER_YEAR * 10,
+        }),
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        (interval, priority) => {
+          const fakeArticle = {
+            interval,
+            fixed_interval_days: null,
+            priority,
+          } as IArticleBase;
+          const newInterval = IRScheduler.nextInterval(fakeArticle);
+          expect(newInterval).toBeGreaterThan(0);
+          expect(newInterval).toBeGreaterThan(interval);
+        }
+      )
+    );
+  });
+  it('uses fixed intervals if provided', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({
+          min: MINIMUM_FIXED_REVIEW_INTERVAL,
+          max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+        }),
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        (fixedIntervalDays, priority) => {
+          const fakeArticle = {
+            interval: TEXT_BASE_REVIEW_INTERVAL,
+            fixed_interval_days: fixedIntervalDays,
+            priority,
+          } as IArticleBase;
+          const newInterval = IRScheduler.nextInterval(fakeArticle);
+          expect(newInterval).toEqual(fixedIntervalDays * MS_PER_DAY);
+        }
+      )
     );
   });
 });
