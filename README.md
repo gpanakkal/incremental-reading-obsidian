@@ -24,7 +24,7 @@ See [Technical Details](#technical-details) for key terminology and details on h
 
 ## Using the plugin
 1. Import some learning material into an Obsidian note. See [Third-Party Tools](#third-party-tools) for HTML/PDF conversion.
-2. Run `Import article` from the command palette to add the entire note to your study queue. Set a lower priority (e.g., 1.5) if you want to review it frequently. See [Priorities](#priorities) for more details.
+2. Run `Import article` from the command palette to add the entire note to your study queue. Set a lower priority (e.g., 1.5) if you want to review it frequently. See [priority scheduling](#priority-scheduling) for more details.
 > [!TIP]
 > You can also import notes from the editor context menu (three dots in the top right corner), or by right-clicking on the note in the Files tab and selecting `Import article`.
 3. Set aside some time for a [study session](#study-sessions) each day, depending on how much you want to learn. Even 10 minutes is fine!
@@ -77,7 +77,6 @@ This is especially handy for:
 
 ## Known Limitations and Issues
 - Importing and making snippets only works on Markdown files. Web page and PDF importing are planned features; in the meantime, there are third-party tools to convert these into markdown - see [Third-Party Tools](#third-party-tools).
-- Manual scheduling of reviews is not yet implemented. For now, set priority to `1` if you wish to keep the time between reviews from increasing.
 
 ## Third-Party Tools
 - [Obsidian Web Clipper](https://obsidian.md/clipper) (this is also built into Obsidian's web viewer; just click the overflow menu in the top right and select `Save to vault`)
@@ -104,23 +103,33 @@ Information that is **self-contained** is understandable by itself. This is vita
 
 Information that is **atomic** cannot be simplified without loss of meaning. Cards should be as atomic as possible. See [atomic memory](https://supermemo.guru/wiki/Atomic_memory).
 
-### How IR works in this plugin
+### How Incremental Reading works in this plugin
 During study sessions, articles, snippets, and cards that are due will be presented to you, interleaved with each other.
-
-The spaced repetition algorithm is only used to schedule cards. Articles and snippets use the [priority](#priorities) system instead.
 
 Imported articles are due immediately. New snippets are scheduled to be reviewed in one day.
 
 When making a card, its content will be [embedded](https://help.obsidian.md/embeds) into its original location, so it can still be useful within its original note.
 
-#### Priorities
-Articles and snippets have priorities ranging from `1` to `5`, where `1` is the highest. 
+#### Scheduling
+Cards are scheduled using the [FSRS algorithm](https://github.com/open-spaced-repetition/awesome-fsrs/wiki/The-Algorithm).
 
-Priorities are used to determine how often material is shown to you; a snippet with priority `1` will be shown daily with very little growth in the time interval between reviews, while at priority `5`, each review interval will be ~1.6 times longer than the last.
+There are two scheduling methods available for articles and snippets: [priority-based scheduling](#priority-scheduling) and [fixed-interval scheduling](#fixed-interval-scheduling).
 
-Prioritizing may feel unintuitive initially. Just remember that priority 1 roughly means "review every day", and try to prioritize relative to other items.
+The default priority-based system is generally recommended, but fixed intervals can work better for long texts (like if you import an entire book as an "article") or if you're studying for a deadline less than 3-4 weeks out.
+
+##### Priority Scheduling
+In this approach, items are scheduled for review using intervals that lengthen on each review, starting from one day. Priorities control how quickly these intervals grow.
+
+Priorities range from `1` to `5`, where `1` means "widen intervals _extremely_ slowly", while `5` means each interval will be ~1.6 times the length of the previous one.
 > [!TIP]
 > Use decimal priorities for more fine-grained control. For convenience, you can simply enter a two digit number from 10 to 50. The decimal point will be inserted automatically.
+
+Reducing the priority will not make future intervals shorter; it only slows the growth.
+
+Don't worry if setting priorities feels unintuitive at first. You'll develop a feel for it with practice.
+
+##### Fixed-Interval Scheduling
+Articles can be configured to be reviewed on a fixed interval (e.g., daily or weekly) instead of using the priority system. Use the `Manage item scheduling` command to change the scheduling method.
 
 ### Plugin Data
 To avoid side effects, this plugin (mostly) does not modify files outside its data folder. 
