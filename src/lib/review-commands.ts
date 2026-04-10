@@ -1,10 +1,11 @@
 import type IncrementalReadingPlugin from '#/main';
-import { setShowAnswer, store } from './store';
-import { getCurrentItemSync } from './query-client';
-import { Actions } from './Actions';
-import { isReviewCard } from './types';
+import { SchedulingModal } from '#/views/SchedulingModal';
 import type { Grade } from 'ts-fsrs';
 import { Rating } from 'ts-fsrs';
+import { Actions } from './Actions';
+import { getCurrentItemSync } from './query-client';
+import { setShowAnswer, store } from './store';
+import { isReviewCard, isReviewText } from './types';
 
 /** Commands corresponding to buttons on the action bar */
 export function initReviewCommands(plugin: IncrementalReadingPlugin) {
@@ -63,6 +64,19 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       if (!item || !item.data.dismissed) return false;
       if (checking) return true;
       void actions.unDismissItem(item);
+    },
+  });
+
+  plugin.addCommand({
+    id: 'open-scheduling-modal',
+    name: 'Manage item scheduling',
+    checkCallback: (checking) => {
+      const view = plugin.getActiveReviewView();
+      if (!view) return false;
+      const item = getCurrentItemSync();
+      if (!item || !isReviewText(item)) return false;
+      if (checking) return true;
+      new SchedulingModal(plugin, item).open();
     },
   });
 
