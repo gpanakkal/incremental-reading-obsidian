@@ -98,13 +98,16 @@
   color: var(--text-on-accent);
 }
 
-.ir-priority-label {
+.ir-priority-label,
+.ir-fixed-interval-label,
+.ir-scheduling-toggle-label {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.ir-priority-input {
+.ir-priority-input,
+.ir-fixed-interval-input {
   max-width: 40px;
   text-align: center;
 }
@@ -126,6 +129,18 @@
 .ir-review-interface .cm-scroller {
   padding: var(--file-margins);
   max-height: 100%;
+}
+
+.ir-scheduling-modal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2);
+}
+
+.ir-scheduling-modal > * {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
 }
 
 .ir-hidden-answer {
