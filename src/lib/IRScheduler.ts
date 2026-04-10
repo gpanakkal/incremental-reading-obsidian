@@ -5,6 +5,7 @@ import {
   MINIMUM_PRIORITY,
   MS_PER_DAY,
   TEXT_BASE_REVIEW_INTERVAL,
+  TEXT_MINIMUM_REVIEW_INTERVAL,
   TEXT_REVIEW_MULTIPLIER_BASE,
   TEXT_REVIEW_MULTIPLIER_STEP,
 } from './constants';
@@ -119,7 +120,7 @@ export default class IRScheduler {
     }
 
     const intervalMultiplier = this.getIntervalMultiplier(text.priority);
-    const lastInterval = text.interval;
+    const lastInterval = Math.max(text.interval, TEXT_MINIMUM_REVIEW_INTERVAL);
     const nextInterval = Math.round(lastInterval * intervalMultiplier);
     return nextInterval;
   }

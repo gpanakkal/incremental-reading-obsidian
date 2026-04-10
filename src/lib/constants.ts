@@ -60,6 +60,9 @@ export const REVIEW_COUNT_FOR_PRIORITY_SCALING = 4;
 export const MAX_TESTED_REVIEW_COUNT = 50;
 
 export const TEXT_BASE_REVIEW_INTERVAL = MS_PER_DAY * 1;
+/** Might change in the future */
+export const TEXT_MINIMUM_REVIEW_INTERVAL = TEXT_BASE_REVIEW_INTERVAL;
+
 export const TEXT_REVIEW_MULTIPLIER_BASE = 1.01;
 export const TEXT_REVIEW_MULTIPLIER_STEP = 0.015;
 export const TEXT_REVIEW_INTERVALS = {
