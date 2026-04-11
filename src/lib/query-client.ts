@@ -175,10 +175,13 @@ export function updateQueryCache<T extends ReviewItem, D extends T['data']>(
 async function fetchNextItem(
   reviewManager: ReviewManager
 ): Promise<ReviewItem | null> {
-  const seenIds = getSeenIds(store.getState());
+  const storeState = store.getState();
+  const seenIds = getSeenIds(storeState);
+  const { typesToReview } = storeState;
   const excludeIds = Object.keys(seenIds);
   const result = await reviewManager.getDue({
     ...(excludeIds.length && { excludeIds }),
+    typesToInclude: typesToReview,
   });
   const nextItem: ReviewItem | null =
     result.all.filter(({ data }) => !(data.id in seenIds))[0] ?? null;

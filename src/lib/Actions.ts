@@ -9,8 +9,18 @@ import {
   SUCCESS_NOTICE_DURATION_MS,
 } from './constants';
 import IRScheduler from './IRScheduler';
-import { invalidateItemQuery } from './query-client';
-import { addSeenId, resetCurrentItem, store } from './store';
+import {
+  fetchCurrentItem,
+  invalidateCurrentItemQuery,
+  invalidateItemQuery,
+} from './query-client';
+import {
+  addSeenId,
+  resetCurrentItem,
+  resetTypesToReview,
+  setTypesToReview,
+  store,
+} from './store';
 import type { ReviewText } from './types';
 import {
   type ReviewArticle,
@@ -190,5 +200,20 @@ export class Actions {
     if (!view) return null;
     const result = await this.plugin.reviewManager.createCard(editor, view);
     return result;
+  };
+
+  setCardsOnly = async (cardsOnly: boolean) => {
+    const currentItem = await fetchCurrentItem(this.plugin.reviewManager);
+    if (cardsOnly) {
+      this.plugin.store.dispatch(setTypesToReview(['card']));
+    } else {
+      this.plugin.store.dispatch(resetTypesToReview());
+    }
+
+    if (currentItem === null) {
+      await invalidateCurrentItemQuery();
+    } else if (cardsOnly && currentItem.data.type !== 'card') {
+      this.getNext();
+    }
   };
 }

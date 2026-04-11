@@ -3,6 +3,7 @@ import type {
   IArticleBase,
   ISRSCardDisplay,
   ISnippetBase,
+  NoteType,
   ReviewArticle,
   ReviewCard,
   ReviewItem,
@@ -185,15 +186,26 @@ export default class ReviewManager {
     dueBy,
     limit = 1,
     excludeIds,
+    typesToInclude,
   }: {
     dueBy?: number;
     limit?: number;
     excludeIds?: string[];
+    typesToInclude: Partial<Record<NoteType, true>>;
   }) {
+    const getCards = 'card' in typesToInclude;
+    const getSnippets = 'snippet' in typesToInclude;
+    const getArticles = 'article' in typesToInclude;
     try {
-      const cardsDue = await this.cards.getDue(dueBy, limit, excludeIds);
-      const snippetsDue = await this.snippets.getDue(dueBy, limit, excludeIds);
-      const articlesDue = await this.articles.getDue(dueBy, limit, excludeIds);
+      const cardsDue = getCards
+        ? await this.cards.getDue(dueBy, limit, excludeIds)
+        : [];
+      const snippetsDue = getSnippets
+        ? await this.snippets.getDue(dueBy, limit, excludeIds)
+        : [];
+      const articlesDue = getArticles
+        ? await this.articles.getDue(dueBy, limit, excludeIds)
+        : [];
       const allDue = [...cardsDue, ...snippetsDue, ...articlesDue].sort(
         (a, b) => compareDates(a.data.due, b.data.due)
       );

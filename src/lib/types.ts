@@ -168,7 +168,7 @@ export function isReviewCard(value: ReviewItem): value is ReviewCard {
   return 'state' in value.data;
 }
 
-export type NoteType = 'article' | 'snippet' | 'card';
+export type NoteType = ReviewItem['data']['type'];
 
 /**
  * Frontmatter properties used by this plugin

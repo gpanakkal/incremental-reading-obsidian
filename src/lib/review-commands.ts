@@ -4,7 +4,7 @@ import type { Grade } from 'ts-fsrs';
 import { Rating } from 'ts-fsrs';
 import { Actions } from './Actions';
 import { getCurrentItemSync } from './query-client';
-import { setShowAnswer, store } from './store';
+import { cardsOnly, setShowAnswer, store } from './store';
 import { isReviewCard, isReviewText } from './types';
 
 /** Commands corresponding to buttons on the action bar */
@@ -77,6 +77,18 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       if (!item || !isReviewText(item)) return false;
       if (checking) return true;
       new SchedulingModal(plugin, item).open();
+    },
+  });
+
+  plugin.addCommand({
+    id: 'toggle-cards-only',
+    name: 'Review: toggle reviewing cards only',
+    checkCallback: (checking) => {
+      const view = plugin.getActiveReviewView();
+      if (!view) return false;
+      if (checking) return true;
+      const showCardsOnly = cardsOnly(store.getState());
+      void actions.setCardsOnly(!showCardsOnly);
     },
   });
 

@@ -2,6 +2,7 @@ import type { EditCoordinates, EditState } from '#/components/types';
 import { EditingState } from '#/components/types';
 import type { PayloadAction } from '@reduxjs/toolkit';
 import { configureStore, createAction, createSlice } from '@reduxjs/toolkit';
+import type { NoteType } from './types';
 
 export const resetSession = createAction('resetSession');
 export const resetCurrentItem = createAction('resetCurrentItem');
@@ -34,6 +35,38 @@ export const showAnswerSlice = createSlice({
 });
 
 export const { setShowAnswer } = showAnswerSlice.actions;
+
+const defaultTypesToReview = Object.freeze({
+  article: true,
+  snippet: true,
+  card: true,
+});
+
+export const typesToReviewSlice = createSlice({
+  name: 'typesToReview',
+  initialState: defaultTypesToReview as Partial<Record<NoteType, true>>,
+  reducers: {
+    setTypesToReview: (_, action: PayloadAction<NoteType[]>) =>
+      action.payload.reduce(
+        (acc, el) => Object.assign(acc, { [el]: true }),
+        {} as Partial<Record<NoteType, true>>
+      ),
+    resetTypesToReview: (_) => defaultTypesToReview,
+  },
+  extraReducers: (builder) => {
+    builder.addCase(resetSession, () => defaultTypesToReview);
+  },
+  selectors: {
+    // Returns the ids, treating them as empty if the reset time has passed.
+    // Actual state reset happens lazily on the next addSeenId dispatch.
+    cardsOnly: (state): boolean =>
+      Object.keys(state).length === 1 && 'card' in state,
+  },
+});
+
+export const { setTypesToReview, resetTypesToReview } =
+  typesToReviewSlice.actions;
+export const { cardsOnly } = typesToReviewSlice.selectors;
 
 type SeenIdsState = {
   ids: Record<string, true>;
@@ -115,6 +148,7 @@ export const store = configureStore({
   reducer: {
     currentItemId: currentItemIdSlice.reducer,
     showAnswer: showAnswerSlice.reducer,
+    typesToReview: typesToReviewSlice.reducer,
     seenIds: seenIdsSlice.reducer,
     isReviewViewSaving: isReviewViewSavingSlice.reducer,
     editState: editStateSlice.reducer,

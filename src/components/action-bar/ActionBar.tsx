@@ -18,6 +18,7 @@ import { Rating } from 'ts-fsrs';
 import { useReviewContext } from '../ReviewContext';
 import { FixedIntervalField } from './FixedIntervalField';
 import { PriorityField } from './PriorityField';
+import { ReviewTypeFilter } from './ReviewTypeFilter';
 
 export function ActionBar() {
   const { data: currentItem } = useCurrentItem();
@@ -51,7 +52,11 @@ export function ActionBar() {
  * - undo last review/dismissal
  */
 function GlobalActions() {
-  return <></>;
+  return (
+    <>
+      <ReviewTypeFilter />
+    </>
+  );
 }
 
 /**
