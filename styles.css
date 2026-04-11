@@ -100,10 +100,14 @@
 
 .ir-priority-label,
 .ir-fixed-interval-label,
-.ir-scheduling-toggle-label {
+.ir-toggle-label {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.ir-toggle {
+  align-content: center;
 }
 
 .ir-priority-input,

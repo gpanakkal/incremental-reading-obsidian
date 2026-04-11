@@ -68,8 +68,8 @@ export function SchedulingModalContent({
       }}
     >
       {type === 'article' && (
-        <div className="ir-scheduling-strategy-toggle">
-          <label className="ir-scheduling-toggle-label">
+        <div className="ir-toggle">
+          <label className="ir-toggle-label">
             Fixed intervals
             <div
               className={
