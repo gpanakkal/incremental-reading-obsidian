@@ -1,5 +1,6 @@
-import type { TFile, WorkspaceLeaf } from 'obsidian';
+import type { App, TFile, WorkspaceLeaf } from 'obsidian';
 import { MarkdownView, Notice, Plugin } from 'obsidian';
+import type { SyncPluginInstance } from 'obsidian-typings';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
 import databaseSchema from './db/schema.sql';
 import { Actions } from './lib/Actions';
@@ -220,6 +221,14 @@ export default class IncrementalReadingPlugin extends Plugin {
           throw new Error('manifest.dir is undefined');
         }
 
+        if (!this.verifySyncSettings) {
+          new Notice(
+            `Incremental reading: please enable "sync all other types"` +
+              ` before using the plugin`,
+            0
+          );
+        }
+
         if (this.app.isMobile) {
           this.configureNavbarPosition();
         }
@@ -348,5 +357,15 @@ export default class IncrementalReadingPlugin extends Plugin {
         document.body.style.removeProperty('--ir-mobile-toolbar-height');
       });
     }
+  }
+
+  private verifySyncSettings(app: App): boolean {
+    const syncPlugin = app.internalPlugins.getEnabledPluginById('sync');
+    if (!syncPlugin) return true;
+    const syncAllOtherTypesEnabled = (
+      syncPlugin as SyncPluginInstance & { allowTypes: Set<string> }
+    ).allowTypes.has('unsupported');
+
+    return syncAllOtherTypesEnabled;
   }
 }
