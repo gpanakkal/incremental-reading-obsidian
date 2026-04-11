@@ -127,6 +127,61 @@ test.describe('Article Importing', () => {
 });
 
 test.describe('Action Bar', () => {
+  test('Can toggle cards-only mode', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+
+    await executeCommand(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await executeCommand(window, 'incremental-reading:learn');
+
+    const toggle = window.locator('.ir-toggle-label > .checkbox-container');
+
+    // show cards only
+    await toggle.check();
+    await expect(
+      window
+        .getByText(
+          'Memorizing a programming language using spaced repetition software'
+        )
+        .nth(5)
+    ).not.toBeVisible();
+
+    // show all items
+    await toggle.uncheck();
+    await expect(
+      window
+        .getByText(
+          'Memorizing a programming language using spaced repetition software'
+        )
+        .nth(5)
+    ).toBeVisible();
+
+    // test again using the plugin command
+
+    // show cards only
+    await executeCommand(window, 'incremental-reading:toggle-cards-only');
+    await expect(
+      window
+        .getByText(
+          'Memorizing a programming language using spaced repetition software'
+        )
+        .nth(5)
+    ).not.toBeVisible();
+
+    // show all items
+    await executeCommand(window, 'incremental-reading:toggle-cards-only');
+    await expect(
+      window
+        .getByText(
+          'Memorizing a programming language using spaced repetition software'
+        )
+        .nth(5)
+    ).toBeVisible();
+  });
+
   test('Can review articles', async () => {
     await openNote(
       window,
