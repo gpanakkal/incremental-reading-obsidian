@@ -14,7 +14,7 @@ export async function executeCommand(window: Page, commandId: string) {
     // side effects (opening modals, async DB writes, rendering) before
     // the test continues. Without this, sequential commands can race
     // because executeCommandById returns synchronously.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }, commandId);
 }
 
