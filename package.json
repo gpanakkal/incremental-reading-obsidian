@@ -25,13 +25,13 @@
 	"dependencies": {
 		"@reduxjs/toolkit": "2.11.2",
 		"@tanstack/react-query": "5.90.2",
-		"lucide-react": "^1.7.0",
+		"lucide-react": "1.7.0",
 		"preact": "10.28.3",
 		"react": "npm:@preact/compat",
 		"react-dom": "npm:@preact/compat",
 		"react-redux": "9.2.0",
-		"sql.js": "~1.11.0",
-		"ts-fsrs": "~4.6.1"
+		"sql.js": "1.11.0",
+		"ts-fsrs": "4.6.1"
 	},
 	"devDependencies": {
 		"@codemirror/commands": "6.8.1",
