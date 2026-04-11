@@ -78,7 +78,10 @@ const seenIdsSlice = createSlice({
   name: 'seenIds',
   initialState: { ids: {}, resetTime: 0 } as SeenIdsState,
   reducers: {
-    addSeenId: (state, action: PayloadAction<{ id: string; resetTime: number }>) => {
+    addSeenId: (
+      state,
+      action: PayloadAction<{ id: string; resetTime: number }>
+    ) => {
       const { id, resetTime } = action.payload;
       if (Date.now() >= state.resetTime) {
         return { ids: { [id]: true }, resetTime };
@@ -91,7 +94,10 @@ const seenIdsSlice = createSlice({
     }),
   },
   extraReducers: (builder) => {
-    builder.addCase(resetSession, (state) => ({ ids: {}, resetTime: state.resetTime }));
+    builder.addCase(resetSession, (state) => ({
+      ids: {},
+      resetTime: state.resetTime,
+    }));
   },
   selectors: {
     // Returns the ids, treating them as empty if the reset time has passed.
