@@ -148,13 +148,7 @@ export class CardManager extends ItemManager {
       return null;
     }
 
-    const block = Obsidian.getCurrentContent(editor, currentFile);
-    // TODO: ensure block content is correct for bullet lists (should only use the current bullet) and code blocks (get the whole code block)
-    if (!block) {
-      new Notice('No block content found', ERROR_NOTICE_DURATION_MS);
-      return null;
-    }
-    const { content, line: blockLine } = block;
+    const { line, lineNumber } = Obsidian.getCurrentLine(editor);
 
     const selectionBounds = Obsidian.getSelectionWithBounds(editor);
     const bounds = selectionBounds
@@ -162,7 +156,7 @@ export class CardManager extends ItemManager {
       : null;
 
     try {
-      const withDelimiters = this.delimitText(content, bounds)[0]; // TODO: create many cards at once and transclude/link all?
+      const withDelimiters = this.delimitText(line, bounds)[0]; // TODO: create many cards at once and transclude/link all?
       const reviewCard = await this.createFileAndEntry(
         withDelimiters,
         currentFile
@@ -175,9 +169,9 @@ export class CardManager extends ItemManager {
         this.app,
         TRANSCLUSION_HIDE_TITLE_ALIAS
       );
-      Obsidian.transcludeLink(editor, linkToCard, blockLine);
+      Obsidian.transcludeLink(editor, linkToCard, lineNumber);
       // move the cursor to the next block
-      editor.setSelection({ line: blockLine + 1, ch: 0 });
+      editor.setSelection({ line: lineNumber + 1, ch: 0 });
       return reviewCard;
     } catch (error) {
       if (error instanceof Error) {

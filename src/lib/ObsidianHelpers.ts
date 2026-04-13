@@ -338,13 +338,13 @@ export class ObsidianHelpers {
   }
 
   /**
-   * (WIP) Get the block, bullet list item, or code block the cursor is currently within
+   * Get the line the cursor is currently in
    */
-  static getCurrentContent(editor: Editor, _file: TFile) {
+  static getCurrentLine(editor: Editor) {
     const cursor = editor.getCursor();
-    const block = editor.getLine(cursor.line);
+    const line = editor.getLine(cursor.line);
 
-    return { content: block, line: cursor.line };
+    return { line, lineNumber: cursor.line };
   }
 
   /**
