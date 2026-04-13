@@ -5,9 +5,9 @@ import type {
   SRSCardRow,
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
+import type ReviewView from '#/views/ReviewView';
 import type { TFile } from 'obsidian';
 import { Notice, type Editor, type MarkdownView } from 'obsidian';
-import type ReviewView from 'src/views/ReviewView';
 import type { FSRS, FSRSParameters, Grade, StateType } from 'ts-fsrs';
 import { fsrs, generatorParameters, State } from 'ts-fsrs';
 import {

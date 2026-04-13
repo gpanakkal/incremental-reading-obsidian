@@ -28,8 +28,8 @@ import type {
 } from '#/lib/types';
 import { getEndOfToday } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
+import type ReviewView from '#/views/ReviewView';
 import { Notice, TFile, type Editor, type MarkdownView } from 'obsidian';
-import type ReviewView from 'src/views/ReviewView';
 import { ArticleManager } from './ArticleManager';
 import { ItemManager } from './ItemManager';
 
