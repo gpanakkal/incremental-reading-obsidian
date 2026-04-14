@@ -21,7 +21,11 @@ export const sandboxArg =
 
 export const shouldCleanup = process.env.E2E_CLEANUP === '1';
 
-export async function createVaultCopy(prefix: string, subDirectory?: string) {
+export async function createVaultCopy(
+  prefix: string,
+  subDirectory?: string,
+  adminElevated?: boolean
+) {
   await fs.mkdir(testVaultsDir, { recursive: true });
   const id = crypto.randomUUID().slice(0, 8);
   const pathSegments = [testVaultsDir];
@@ -44,7 +48,7 @@ export async function createVaultCopy(prefix: string, subDirectory?: string) {
   for (const file of ['main.js', 'manifest.json', 'styles.css']) {
     const target = path.join(pluginDir, file);
     await fs.rm(target, { force: true });
-    if (process.platform === 'win32') {
+    if (process.platform === 'win32' && !adminElevated) {
       // Windows: copy files (symlinks require admin rights)
       await fs.copyFile(path.join(projectRoot, file), target);
     } else {

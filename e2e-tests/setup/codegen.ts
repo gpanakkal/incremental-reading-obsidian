@@ -11,7 +11,7 @@ import {
  */
 void (async () => {
   await deleteVaultCopy(path.join(testVaultsDir, 'codegen'));
-  const vaultPath = await createVaultCopy('', 'codegen');
+  const vaultPath = await createVaultCopy('', 'codegen', true);
   const app = await launchElectron(vaultPath);
 
   const context = app.context();
