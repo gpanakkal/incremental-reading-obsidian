@@ -3,6 +3,7 @@ import type {
   App,
   DataWriteOptions,
   Editor,
+  EditorPosition,
   FrontMatterCache,
   MarkdownFileInfo,
   TFile,
@@ -22,8 +23,9 @@ import {
   SOURCE_TAG,
 } from './constants';
 import { FRONTMATTER_PATTERN } from './constants.js';
+import { Markdown } from './Markdown';
 import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
-import { generateId } from './utils';
+import { binarySearch, generateId } from './utils';
 
 export class ObsidianHelpers {
   /**
@@ -133,13 +135,13 @@ export class ObsidianHelpers {
     return { frontMatter: matches[1], body: matches[2] };
   }
 
-  static transcludeLink(editor: Editor, link: string, blockLine: number) {
-    const line = editor.getLine(blockLine);
-    editor.replaceRange(
-      `!${link}`,
-      { line: blockLine, ch: 0 },
-      { line: blockLine, ch: line.length }
-    );
+  static transcludeLink(
+    editor: Editor,
+    link: string,
+    start: EditorPosition,
+    end: EditorPosition
+  ) {
+    editor.replaceRange(`!${link}`, start, end);
   }
 
   /** Retrieves notes from the data directory given a row's reference */
@@ -335,6 +337,43 @@ export class ObsidianHelpers {
         }
       );
     }
+  }
+
+  /**
+   * Get the line the cursor is currently in,
+   * subtracting leading bullet points
+   * TODO: handle multi-line formatting
+   */
+  static smartGetline(editor: Editor, file: TFile, app: App) {
+    const cursor = editor.getCursor();
+    const block = this.getCurrentLine(editor);
+    // check if we're in a bullet list
+    const listItems = app.metadataCache.getFileCache(file)?.listItems;
+    const defaultReturn = {
+      line: block.line,
+      lineNumber: block.lineNumber,
+      start: 0,
+      end: block.line.length,
+    };
+    if (!listItems) {
+      return defaultReturn;
+    }
+    const matchingBullet = binarySearch(listItems, (item) => {
+      const { start, end } = item.position;
+      if (block.lineNumber < start.line) return -1;
+      if (block.lineNumber > end.line) return 1;
+      return 0;
+    });
+
+    if (!matchingBullet) return defaultReturn;
+    const withoutBullet = Markdown.getListItemText(block.line);
+    const newStart = block.line.length - withoutBullet.length;
+    return {
+      line: withoutBullet,
+      lineNumber: cursor.line,
+      start: newStart,
+      end: block.line.length,
+    };
   }
 
   /**

@@ -148,15 +148,22 @@ export class CardManager extends ItemManager {
       return null;
     }
 
-    const { line, lineNumber } = Obsidian.getCurrentLine(editor);
-
+    // remove leading indent and bullet/number/checkbox formatting
+    const { line, lineNumber, start, end } = Obsidian.smartGetline(
+      editor,
+      currentFile,
+      this.app
+    );
     const selectionBounds = Obsidian.getSelectionWithBounds(editor);
     const bounds = selectionBounds
-      ? ([selectionBounds.start.ch, selectionBounds.end.ch] as const)
+      ? ([
+          selectionBounds.start.ch - start,
+          selectionBounds.end.ch - start,
+        ] as const)
       : null;
 
     try {
-      const withDelimiters = this.delimitText(line, bounds)[0]; // TODO: create many cards at once and transclude/link all?
+      const withDelimiters = this.delimitText(line, bounds)[0];
       const reviewCard = await this.createFileAndEntry(
         withDelimiters,
         currentFile
@@ -169,7 +176,12 @@ export class CardManager extends ItemManager {
         this.app,
         TRANSCLUSION_HIDE_TITLE_ALIAS
       );
-      Obsidian.transcludeLink(editor, linkToCard, lineNumber);
+      Obsidian.transcludeLink(
+        editor,
+        linkToCard,
+        { line: lineNumber, ch: start },
+        { line: lineNumber, ch: end }
+      );
       // move the cursor to the next block
       editor.setSelection({ line: lineNumber + 1, ch: 0 });
       return reviewCard;
