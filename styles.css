@@ -44,11 +44,20 @@
 
 .ir-action-bar {
   display: flex;
-  justify-content: center;
   gap: 8px;
   padding: 12px;
   background: var(--background-secondary);
   flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ir-action-bar > :first-child {
+  margin-inline-start: auto;
+}
+
+.ir-action-bar > :last-child {
+  margin-inline-end: auto;
 }
 
 /* Mobile: Move action bar to bottom using flex order */
