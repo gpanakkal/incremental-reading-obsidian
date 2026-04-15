@@ -78,6 +78,7 @@ export class ObsidianHelpers {
     const cleaned = text
       .split('')
       .map((char, i) => {
+        if (i === 0 && char === '.') return '';
         if (checkFinalChar && i === text.length - 1) {
           if (' .'.includes(char)) return '';
         }
