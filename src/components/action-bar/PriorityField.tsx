@@ -38,7 +38,7 @@ export function PriorityField({
             if (e.key === 'Enter') {
               e.currentTarget.blur();
             } else if (e.key === 'Escape') {
-              setDisplayPrio(initialPriority);
+              setDisplayPrio(initialPriority / 10);
               e.currentTarget.select();
             }
           }}
