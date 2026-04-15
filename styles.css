@@ -171,14 +171,22 @@
   background-color: var(--ir-snippet-highlight-color);
 }
 
-/* Apply highlight to all descendants */
-.ir-snippet-highlight * {
+/* Apply highlight styles to rendered MathJax blocks */
+.ir-snippet-highlight div.math-block {
+  border-bottom: 1px dashed var(--text-accent);
+  transition: all 0.2s ease;
   background-color: var(--ir-snippet-highlight-color);
 }
 
-/* Exception: keep external link icons transparent */
-.ir-snippet-highlight .external-link {
+/* Prevent highlight stacking */
+.ir-snippet-highlight :is(.MathJax *, span.math, a, .external-link) {
   background-color: transparent !important;
+}
+
+/* Use the default cursor on math expression highlights since clicking edits
+ the expression instead of navigating to the snippet */
+.ir-snippet-highlight :is(span.math, .math-block) {
+  cursor: default;
 }
 
 .ir-snippet-highlight:hover {
@@ -186,8 +194,8 @@
   border-bottom-color: var(--text-accent-hover);
 }
 
-/* Apply hover to all descendants */
-.ir-snippet-highlight:hover * {
+/* Apply hover to multi-line MathJax components */
+.ir-snippet-highlight:hover div.math-block {
   background-color: var(--ir-snippet-highlight-color-hover);
 }
 
