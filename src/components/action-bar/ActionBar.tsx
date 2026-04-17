@@ -73,7 +73,7 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
           tooltip="Restore item to queue"
           handleClick={async () => await actions.unDismissItem(reviewItem)}
         >
-          Un-dismis
+          Un-dismiss
         </Button>
       ) : (
         <Button
