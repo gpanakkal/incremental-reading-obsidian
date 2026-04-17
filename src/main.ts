@@ -67,6 +67,14 @@ export default class IncrementalReadingPlugin extends Plugin {
           this.getActiveReviewView() ??
           this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view) return false;
+        if (
+          view.getViewType() === 'markdown' &&
+          view instanceof MarkdownView &&
+          view.currentMode === view.previewMode
+        ) {
+          // disable in reading mode
+          return false;
+        }
         if (checking) return true;
 
         void this.reviewManager.createSnippet(editor, view);
