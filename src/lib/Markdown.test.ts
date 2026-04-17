@@ -1,3 +1,4 @@
+import { testDoc1 } from '#/test/testData';
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { Markdown } from './Markdown';
@@ -87,6 +88,21 @@ describe('getListItemText', () => {
 
     it('strips bullet and checkbox with no trailing text', () => {
       expect(Markdown.getListItemText('- [x] ')).toBe('');
+    });
+  });
+
+  describe('countFootnoteRefs', () => {
+    it('identifies footnotes correctly', () => {
+      const result = Markdown.countFootnoteRefs(testDoc1);
+      expect(result).toEqual(
+        expect.arrayContaining([
+          { name: '1', count: 1 },
+          { name: '5', count: 2 },
+          { name: '15', count: 4 },
+          { name: '24', count: 2 },
+          { name: '26', count: 2 },
+        ])
+      );
     });
   });
 });

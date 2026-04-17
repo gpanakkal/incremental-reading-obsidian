@@ -1,6 +1,10 @@
 /** Assumes that the bullet's indent level has been validated */
 const BULLET_ITEM_PATTERN = /^(\s*(?:-|\d+\.)\s)(\[.\]\s)?(.*)/;
-
+/** TODO: line can start with bullet item pattern; line needs to be preceded by a newline */
+const FOOTNOTE_PATTERN = /\n\[\^([\w\d]+)\]:/g;
+/** link to a footnote defined elsewhere */
+const FOOTNOTE_REFERENCE_PATTERN = /\[\^([\w\d]+)\](?!:)/g;
+const INLINE_FOOTNOTE_PATTERN = /\^\[([\w\d]+)\]/g;
 /** Utilities for parsing Obsidian-flavored Markdown */
 export class Markdown {
   /**
@@ -11,5 +15,23 @@ export class Markdown {
     if (!bulletItemMatch) return line;
     const withoutBullet = bulletItemMatch[bulletItemMatch.length - 1];
     return withoutBullet;
+  }
+
+  static countFootnoteRefs(text: string) {
+    const appearances: string[] = [];
+    const counts: Record<string, number> = {};
+    const footnoteMatches = text.matchAll(FOOTNOTE_REFERENCE_PATTERN);
+    if (!footnoteMatches) return [];
+    const matches = [...footnoteMatches];
+    matches.forEach((match) => {
+      const name = match[1];
+      if (!match[1]) return;
+      if (!(name in counts)) {
+        counts[name] = 0;
+        appearances.push(name);
+      }
+      counts[name] += 1;
+    });
+    return appearances.map((name) => ({ name, count: counts[name] }));
   }
 }

@@ -6,6 +6,7 @@ import databaseSchema from './db/schema.sql';
 import { Actions } from './lib/Actions';
 import { DATABASE_FILE_PATH, PLACEHOLDER_PLUGIN_ICON } from './lib/constants';
 import { createIRExtensions } from './lib/extensions';
+import { registerSnippetHighlightPostProcessor } from './lib/extensions/SnippetHighlightPostProcessor';
 import ReviewManager from './lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from './lib/obsidian-editor';
 import { getEditorClass } from './lib/obsidian-editor';
@@ -205,12 +206,6 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     this.addSettingTab(new IRSettingTab(this.app, this));
 
-    // // If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-    // // Using this function will automatically remove the event listener when this plugin is disabled.
-    // this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-    // 	console.log('click', evt);
-    // });
-
     // // When registering intervals, this function will automatically clear the interval when the plugin is disabled.
     // this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
 
@@ -243,6 +238,25 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         // Register global CodeMirror extensions for IR notes
         this.registerEditorExtension(createIRExtensions(this));
+
+        // Register post-processor for reading mode snippet highlights
+        registerSnippetHighlightPostProcessor(this);
+
+        // Delegated click handler for highlights in reading mode.
+        // The CM extension's eventHandlers.click covers edit mode;
+        // this covers reading mode rendered HTML.
+        this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
+          const target = evt.target as HTMLElement;
+          const highlight = target.closest('.ir-snippet-highlight');
+          if (!highlight) return;
+          const snippetRef = highlight.getAttribute('data-snippet-ref');
+          if (!snippetRef) return;
+          // Skip if inside a CM editor — the CM extension handles that
+          if (target.closest('.cm-editor')) return;
+          evt.preventDefault();
+          evt.stopPropagation();
+          void this.app.workspace.openLinkText(snippetRef, '');
+        });
       } catch (error) {
         console.error(error);
         new Notice(
