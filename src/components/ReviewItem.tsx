@@ -1,9 +1,9 @@
 import { useAppSelector } from '#/hooks/useAppSelector';
+import { useCurrentItemFileText } from '#/hooks/useReactQuery';
 import { isReviewCard, type ReviewItem } from '#/lib/types';
+import type { EditorView } from '@codemirror/view';
 import { CardViewer } from './CardViewer';
 import { IREditor } from './IREditor';
-import type { EditorView } from '@codemirror/view';
-import { useCurrentItemFileText } from '#/hooks/useReactQuery';
 
 /**
  * TODO:
@@ -20,7 +20,11 @@ export default function ReviewItem({ item }: { item: ReviewItem }) {
   return (
     <>
       {isReviewCard(item) && !showAnswer ? (
-        <CardViewer cardText={fileText} key={item.data.id} />
+        <CardViewer
+          cardText={fileText}
+          cardFilePath={item.file.path}
+          key={item.data.id}
+        />
       ) : (
         <IREditor
           key={item.data.id}

@@ -5,7 +5,13 @@ import { useEffect, useRef } from 'react';
 import { useReviewContext } from './ReviewContext';
 
 /** Read-only card viewer */
-export function CardViewer({ cardText }: { cardText: string }) {
+export function CardViewer({
+  cardText,
+  cardFilePath,
+}: {
+  cardText: string;
+  cardFilePath: string;
+}) {
   const { reviewView } = useReviewContext();
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -32,19 +38,29 @@ export function CardViewer({ cardText }: { cardText: string }) {
     const component = new Component();
     component.load();
     containerRef.current.empty();
+    const container = containerRef.current;
     void MarkdownRenderer.render(
       reviewView.app,
       withAnswerHidden,
-      containerRef.current,
-      '', // source path - empty string for embedded content
+      container,
+      cardFilePath,
       component
     );
 
-    // Cleanup on unmount or when cardText changes
+    const handleLinkClick = (evt: MouseEvent) => {
+      const anchor = (evt.target as HTMLElement).closest<HTMLAnchorElement>('a.internal-link[data-href]');
+      if (!anchor) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      void reviewView.app.workspace.openLinkText(anchor.dataset.href!, cardFilePath);
+    };
+    container.addEventListener('click', handleLinkClick);
+
     return () => {
       component.unload();
+      container.removeEventListener('click', handleLinkClick);
     };
-  }, [cardText, reviewView.app]);
+  }, [cardText, cardFilePath, reviewView.app]);
 
   return (
     <div className={cls.join(' ')}>
