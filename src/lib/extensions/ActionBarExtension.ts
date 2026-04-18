@@ -18,7 +18,7 @@ import type IncrementalReadingPlugin from '#/main';
 import { StateEffect, StateField, type Extension } from '@codemirror/state';
 import type { EditorView, Panel } from '@codemirror/view';
 import { showPanel } from '@codemirror/view';
-import type { App } from 'obsidian';
+import type { App, TFile } from 'obsidian';
 import { Notice } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
 
@@ -267,22 +267,15 @@ function renderReviewModeActions(
 
 /**
  * Render actions for standalone mode (normal Obsidian tabs).
+ * Can be called from both CodeMirror panel (edit mode) and reading mode DOM injection.
  */
-function renderStandaloneModeActions(
-  view: EditorView,
-  container: HTMLElement,
-  plugin: IncrementalReadingPlugin | null
-) {
-  if (!plugin || !plugin.reviewManager) {
-    return;
-  }
-
+export function renderStandaloneActionBarDOM(
+  file: TFile,
+  plugin: IncrementalReadingPlugin,
+  container: HTMLElement
+): void {
   const { reviewManager } = plugin;
-  const info = Obsidian.getFileInfoFromState(view.state);
-  if (!info) return;
-
-  const { file } = info;
-  if (!file) return;
+  if (!reviewManager) return;
 
   // Create dismiss button with loading state, then fetch actual status
   const dismissToggleBtn = createButton('Loading...', async () => {});
@@ -357,6 +350,20 @@ function renderStandaloneModeActions(
     }
   });
   container.appendChild(openInReviewBtn);
+}
+
+/**
+ * Render actions for standalone mode (normal Obsidian tabs) from a CodeMirror EditorView.
+ */
+function renderStandaloneModeActions(
+  view: EditorView,
+  container: HTMLElement,
+  plugin: IncrementalReadingPlugin | null
+) {
+  if (!plugin) return;
+  const info = Obsidian.getFileInfoFromState(view.state);
+  if (!info?.file) return;
+  renderStandaloneActionBarDOM(info.file, plugin, container);
 }
 
 /**
