@@ -64,6 +64,8 @@ export default class ReviewView extends FileView {
     return PLACEHOLDER_PLUGIN_ICON;
   }
 
+  // For extending TextFileView/MarkdownView. If implemented incorrectly, can
+  //  erase or overwrite note contents
   // getViewData(): string {}
 
   // setViewData(data: string, clear: boolean): void {}
@@ -85,6 +87,9 @@ export default class ReviewView extends FileView {
 
   async onOpen() {
     await super.onOpen();
+    if (this.initialItem) {
+      this.setFile(this.initialItem.file);
+    }
     if (!this.app.isMobile) {
       this.headerEl.hide();
     }
