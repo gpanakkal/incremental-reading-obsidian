@@ -76,17 +76,24 @@ export function registerSnippetHighlightPostProcessor(
         if (highlight.end_offset <= sectionBodyRelativeStart) continue;
         if (highlight.start_offset >= sectionBodyRelativeEnd) continue;
 
-        const { domSectionStart, domHighlightStart, domHighlightEnd } =
-          await getDomOffsets(
-            plugin.app,
-            beforeSectionText,
-            sectionText,
-            highlight
-          );
+        const {
+          domSectionStart,
+          domSectionEnd,
+          domHighlightStart,
+          domHighlightEnd,
+        } = await getDomOffsets(
+          plugin.app,
+          beforeSectionText,
+          sectionText,
+          highlight
+        );
 
-        // Translate source offsets to DOM offsets relative to the section's start
-        const domStart = domHighlightStart - domSectionStart;
-        const domEnd = domHighlightEnd - domSectionStart;
+        // These are relative to the section, so clamp them
+        const domStart = Math.max(0, domHighlightStart - domSectionStart);
+        const domEnd = Math.min(
+          domSectionEnd,
+          domHighlightEnd - domSectionStart
+        );
 
         // const startOffsetText = sectionText.slice(0, srcStart);
         // const snippetText = sectionText.slice(srcStart, srcEnd);
@@ -98,10 +105,13 @@ export function registerSnippetHighlightPostProcessor(
         //   highlightOffsetStart: highlight.start_offset,
         //   // srcStart,
         //   domStart,
+        //   domEnd,
+        //   domHighlightStart,
+        //   domHighlightEnd,
         //   // startDiff,
         //   // endDiff,
         //   domSectionStart,
-        //   // domSectionStart2,
+        //   domSectionEnd,
         //   offsetLength: highlight.end_offset - highlight.start_offset,
         //   // srcLength: srcEnd - srcStart,
         //   domLength: domEnd - domStart,
@@ -131,12 +141,14 @@ export async function getDomOffsets(
   highlight: SnippetHighlight
 ): Promise<{
   domSectionStart: number;
+  domSectionEnd: number;
   domHighlightStart: number;
   domHighlightEnd: number;
 }> {
+  // since highlights can span multiple sections, clamp to section bounds
   const [sectionHighlightStart, sectionHighlightEnd] = [
-    highlight.start_offset - bodyPrevious.length,
-    highlight.end_offset - bodyPrevious.length,
+    Math.max(highlight.start_offset - bodyPrevious.length, 0),
+    Math.min(highlight.end_offset - bodyPrevious.length, section.length),
   ];
 
   const sectionPrefix = section.slice(0, sectionHighlightStart);
@@ -144,13 +156,17 @@ export async function getDomOffsets(
     sectionHighlightStart,
     sectionHighlightEnd
   );
+  const sectionSuffix = section.slice(sectionHighlightEnd);
   const currentCounts = Markdown.countFootnoteRefs(highlightSlice);
   const footnoteRefNames = currentCounts.map((entry) => entry.name);
   // join using a unique separator so we can split later
   const separator = `${crypto.randomUUID()}`;
-  let stringToRender = [bodyPrevious, sectionPrefix, highlightSlice].join(
-    separator
-  );
+  let stringToRender = [
+    bodyPrevious,
+    sectionPrefix,
+    highlightSlice,
+    sectionSuffix,
+  ].join(separator);
 
   // console.log({ stringToRender });
 
@@ -188,19 +204,33 @@ export async function getDomOffsets(
   const renderedText = dummyElement.textContent;
   // console.log({ renderedText });
   const sections = renderedText.split(separator);
-  const [renderedBodyPrev, renderedSectionStart, renderedSnippet] = sections;
-  // console.log({ beforeSnippet: renderedBodyPrev + renderedSectionStart });
+  const [
+    renderedBodyPrev,
+    renderedSectionPrefix,
+    renderedSnippet,
+    renderedSectionSuffix,
+  ] = sections;
+  // console.log({ beforeSnippet: renderedBodyPrev + renderedSectionPrefix });
   // console.log('original snippet:', highlightSlice);
   // console.log('rendered snippet:', renderedSnippet);
+  // console.log({ renderedSectionEnd: renderedSectionSuffix });
 
   const sectionStartDiff = bodyPrevious.length - renderedBodyPrev.length;
-  const sectionPrefixDiff = sectionPrefix.length - renderedSectionStart.length;
+  const sectionPrefixDiff = sectionPrefix.length - renderedSectionPrefix.length;
   const domHighlightStart =
     highlight.start_offset - sectionStartDiff - sectionPrefixDiff;
-  const domHighlightEnd = domHighlightStart + renderedSnippet.length;
+  const domSectionStart = renderedBodyPrev.length;
+  const domHighlightEnd =
+    Math.max(domHighlightStart, domSectionStart) + renderedSnippet.length;
+  const domSectionLength =
+    renderedSectionPrefix.length +
+    renderedSnippet.length +
+    renderedSectionSuffix.length;
+  const domSectionEnd = domSectionStart + domSectionLength;
 
   return {
-    domSectionStart: renderedBodyPrev.length,
+    domSectionStart,
+    domSectionEnd,
     domHighlightStart,
     domHighlightEnd,
   };
