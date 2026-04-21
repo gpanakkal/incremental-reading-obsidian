@@ -2,6 +2,7 @@ import type IncrementalReadingPlugin from '#/main';
 import {
   Component,
   MarkdownPreviewView,
+  MarkdownView,
   type App,
   type MarkdownPostProcessorContext,
 } from 'obsidian';
@@ -98,7 +99,7 @@ export function registerSnippetHighlightPostProcessor(
         // const startOffsetText = sectionText.slice(0, srcStart);
         // const snippetText = sectionText.slice(srcStart, srcEnd);
 
-        // console.log({
+        // console.debug({
         //   // startOffsetText,
         //   // snippetText,
         //   sectionBodyRelativeStart,
@@ -128,6 +129,43 @@ export function registerSnippetHighlightPostProcessor(
         wrapDomRange(textNodes, domStart, domEnd, highlight);
       }
     }
+  );
+}
+
+export function registerHighlightRefreshListener(
+  plugin: IncrementalReadingPlugin
+): void {
+  // Files whose highlights changed while in edit mode, pending a reading-mode render.
+  const pendingRefresh = new Set<string>();
+
+  plugin.registerEvent(
+    plugin.app.workspace.on('ir-highlights-changed', (...args: unknown[]) => {
+      const filePath = args[0] as string;
+      // If already in preview, rerender immediately; otherwise queue for next mode switch.
+      let rerenderred = false;
+      plugin.app.workspace.iterateAllLeaves((leaf) => {
+        if (!(leaf.view instanceof MarkdownView)) return;
+        if (leaf.view.getMode() !== 'preview') return;
+        if (leaf.view.file?.path !== filePath) return;
+        leaf.view.previewMode.rerender(true);
+        rerenderred = true;
+      });
+      if (!rerenderred) pendingRefresh.add(filePath);
+    })
+  );
+
+  plugin.registerEvent(
+    plugin.app.workspace.on('layout-change', () => {
+      if (pendingRefresh.size === 0) return;
+      plugin.app.workspace.iterateAllLeaves((leaf) => {
+        if (!(leaf.view instanceof MarkdownView)) return;
+        if (leaf.view.getMode() !== 'preview') return;
+        const filePath = leaf.view.file?.path;
+        if (!filePath || !pendingRefresh.has(filePath)) return;
+        leaf.view.previewMode.rerender(true);
+        pendingRefresh.delete(filePath);
+      });
+    })
   );
 }
 
@@ -168,7 +206,7 @@ export async function getDomOffsets(
     sectionSuffix,
   ].join(separator);
 
-  // console.log({ stringToRender });
+  // console.debug({ stringToRender });
 
   if (footnoteRefNames.length > 0) {
     const priorCounts = Markdown.countFootnoteRefs(bodyPrevious);
@@ -187,7 +225,7 @@ export async function getDomOffsets(
       .map((name) => `[^${name}]: --`)
       .join('\n\n');
 
-    // console.log({ pseudoFootnotes });
+    // console.debug({ pseudoFootnotes });
     stringToRender += separator + '\n\n' + pseudoFootnotes;
   }
 
@@ -202,7 +240,7 @@ export async function getDomOffsets(
   );
 
   const renderedText = dummyElement.textContent;
-  // console.log({ renderedText });
+  // console.debug({ renderedText });
   const sections = renderedText.split(separator);
   const [
     renderedBodyPrev,
@@ -210,10 +248,10 @@ export async function getDomOffsets(
     renderedSnippet,
     renderedSectionSuffix,
   ] = sections;
-  // console.log({ beforeSnippet: renderedBodyPrev + renderedSectionPrefix });
-  // console.log('original snippet:', highlightSlice);
-  // console.log('rendered snippet:', renderedSnippet);
-  // console.log({ renderedSectionEnd: renderedSectionSuffix });
+  // console.debug({ beforeSnippet: renderedBodyPrev + renderedSectionPrefix });
+  // console.debug('original snippet:', highlightSlice);
+  // console.debug('rendered snippet:', renderedSnippet);
+  // console.debug({ renderedSectionEnd: renderedSectionSuffix });
 
   const sectionStartDiff = bodyPrevious.length - renderedBodyPrev.length;
   const sectionPrefixDiff = sectionPrefix.length - renderedSectionPrefix.length;

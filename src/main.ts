@@ -7,7 +7,10 @@ import { Actions } from './lib/Actions';
 import { DATABASE_FILE_PATH, PLACEHOLDER_PLUGIN_ICON } from './lib/constants';
 import { createIRExtensions } from './lib/extensions';
 import { registerReadingModeActionBar } from './lib/extensions/ReadingModeActionBar';
-import { registerSnippetHighlightPostProcessor } from './lib/extensions/SnippetHighlightPostProcessor';
+import {
+  registerHighlightRefreshListener,
+  registerSnippetHighlightPostProcessor,
+} from './lib/extensions/SnippetHighlightPostProcessor';
 import ReviewManager from './lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from './lib/obsidian-editor';
 import { getEditorClass } from './lib/obsidian-editor';
@@ -250,6 +253,7 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         // Register post-processor for reading mode snippet highlights
         registerSnippetHighlightPostProcessor(this);
+        registerHighlightRefreshListener(this);
 
         // Register action bar for reading mode standalone notes
         registerReadingModeActionBar(this);

@@ -30,6 +30,7 @@ import { getEndOfToday } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import { Notice, TFile, type Editor, type MarkdownView } from 'obsidian';
+import { refreshHighlightsEffect } from '../extensions';
 import { ArticleManager } from './ArticleManager';
 import { ItemManager } from './ItemManager';
 
@@ -469,8 +470,8 @@ export class SnippetManager extends ItemManager {
       }
     }
 
-    const { refreshHighlightsEffect } = await import('../extensions');
     cm.dispatch({ effects: refreshHighlightsEffect.of(null) });
+    this.plugin.app.workspace.trigger('ir-highlights-changed', parentFile.path);
   }
 
   /**
