@@ -1,7 +1,7 @@
 /** Assumes that the bullet's indent level has been validated */
 const BULLET_ITEM_PATTERN = /^(\s*(?:-|\d+\.)\s)(\[.\]\s)?(.*)/;
-/** TODO: line can start with bullet item pattern; line needs to be preceded by a newline */
-const FOOTNOTE_PATTERN = /\n\[\^([\w\d]+)\]:/g;
+/** Location of footnote text, which must be preceded by a newline and may have list and checkbox formatting. */
+const FOOTNOTE_PATTERN = /\n\s*?((?:-|\d\.)\s*?)?(\[.\]\s)?\[\^([\w\d]+)\]:/g;
 /** link to a footnote defined elsewhere */
 const FOOTNOTE_REFERENCE_PATTERN = /\[\^([\w\d]+)\](?!:)/g;
 const INLINE_FOOTNOTE_PATTERN = /\^\[([\w\d]+)\]/g;
