@@ -339,7 +339,7 @@ export function renderStandaloneActionBarDOM(
   })();
 
   // Open in review button
-  const openInReviewBtn = createButton('Enter Review', async () => {
+  const openInReviewBtn = createButton('Review', async () => {
     // Build a ReviewItem from this file to pass to the review interface
     const reviewItem = await fetchByFile(file, reviewManager);
     if (reviewItem) {

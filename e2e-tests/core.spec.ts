@@ -68,7 +68,7 @@ test.describe('Article Importing', () => {
 
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Continue' })
+      window.getByRole('button', { name: 'Mark as reviewed' })
     ).toBeVisible();
     await expect(
       window.getByText('Curse of dimensionality - Wikipedia').nth(1)
@@ -91,7 +91,7 @@ test.describe('Article Importing', () => {
 
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Continue' })
+      window.getByRole('button', { name: 'Mark as reviewed' })
     ).toBeVisible();
     await expect(
       window
@@ -114,7 +114,7 @@ test.describe('Article Importing', () => {
 
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Continue' })
+      window.getByRole('button', { name: 'Mark as reviewed' })
     ).toBeVisible();
     await expect(
       window
@@ -191,7 +191,7 @@ test.describe('Action Bar', () => {
     await executeCommand(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);
     await executeCommand(window, 'incremental-reading:learn');
-    await window.getByRole('button', { name: 'Continue' }).click();
+    await window.getByRole('button', { name: 'Mark as reviewed' }).click();
 
     await executeCommand(window, 'workspace:close');
 
@@ -215,7 +215,9 @@ test.describe('Action Bar', () => {
     await finalizeArticleImport(window);
     await executeCommand(window, 'incremental-reading:learn');
 
-    const skipButton = window.getByRole('button', { name: 'Skip' });
+    const skipButton = window.getByRole('button', {
+      name: 'Skip for current review session',
+    });
     await expect(skipButton).toBeInViewport();
     await skipButton.click();
 
@@ -242,7 +244,9 @@ test.describe('Action Bar', () => {
     await finalizeArticleImport(window);
     await executeCommand(window, 'incremental-reading:learn');
 
-    const dismissButton = window.getByRole('button', { name: 'Dismiss' });
+    const dismissButton = window.getByRole('button', {
+      name: 'Stop scheduling this item for review',
+    });
     await expect(dismissButton).toBeInViewport();
     await dismissButton.click();
 
@@ -272,7 +276,9 @@ test.describe('Action Bar', () => {
       'incremental-reading/articles/Memorizing a programming language using spaced repetition'
     );
 
-    const dismissButton = window.getByRole('button', { name: 'Dismiss' });
+    const dismissButton = window.getByRole('button', {
+      name: 'Dismiss',
+    });
     await expect(dismissButton).toBeInViewport();
     await dismissButton.click();
 
@@ -300,7 +306,9 @@ test.describe('Action Bar', () => {
       'incremental-reading/articles/Memorizing a programming language using spaced repetition'
     );
 
-    const dismissButton = window.getByRole('button', { name: 'Dismiss' });
+    const dismissButton = window.getByRole('button', {
+      name: 'Dismiss',
+    });
     await expect(dismissButton).toBeInViewport();
     await dismissButton.click();
 
@@ -315,7 +323,9 @@ test.describe('Action Bar', () => {
 
     await executeCommand(window, 'workspace:close');
 
-    const unDismissButton = window.getByRole('button', { name: 'Un-dismiss' });
+    const unDismissButton = window.getByRole('button', {
+      name: 'Un-dismiss',
+    });
     await expect(unDismissButton).toBeInViewport();
     await unDismissButton.click();
 
@@ -367,9 +377,7 @@ test.describe('Extracting snippets', () => {
       window,
       `incremental-reading/snippets/Before we start discussing`
     );
-    await expect(
-      window.getByRole('button', { name: 'Enter Review' })
-    ).toBeVisible();
+    await expect(window.getByRole('button', { name: 'Review' })).toBeVisible();
   });
 
   test('Can extract from articles in review interface', async () => {
@@ -381,7 +389,7 @@ test.describe('Extracting snippets', () => {
 
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Continue' })
+      window.getByRole('button', { name: 'Mark as reviewed' })
     ).toBeVisible();
 
     await selectParagraph(
@@ -394,9 +402,7 @@ test.describe('Extracting snippets', () => {
       window,
       `incremental-reading/snippets/Before we start discussing`
     );
-    await expect(
-      window.getByRole('button', { name: 'Enter Review' })
-    ).toBeVisible();
+    await expect(window.getByRole('button', { name: 'Review' })).toBeVisible();
   });
 
   test('Can extract from snippets in review interface', async () => {
@@ -422,11 +428,11 @@ test.describe('Extracting snippets', () => {
       `incremental-reading/snippets/Security has become a buzzword`
     );
     // open the first snippet in review
-    await window.getByRole('button', { name: 'Enter Review' }).click();
+    await window.getByRole('button', { name: 'Review' }).click();
 
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Continue' })
+      window.getByRole('button', { name: 'Mark as reviewed' })
     ).toBeInViewport();
 
     // Extract the second paragraph
@@ -437,13 +443,13 @@ test.describe('Extracting snippets', () => {
       window,
       `incremental-reading/snippets/Before we start discussing`
     );
-    await window.getByRole('button', { name: 'Enter Review' }).click();
+    await window.getByRole('button', { name: 'Review' }).click();
 
     // wait to reduce test flakiness
     await window.waitForTimeout(300);
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Continue' })
+      window.getByRole('button', { name: 'Mark as reviewed' })
     ).toBeInViewport();
 
     // Make sure the first line is absent so we know we're looking at the new snippet
@@ -486,7 +492,7 @@ test.describe('Extracting snippets', () => {
     );
 
     await expect(
-      window.getByRole('button', { name: 'Enter Review' })
+      window.getByRole('button', { name: 'Review' })
     ).toBeInViewport();
   });
 });

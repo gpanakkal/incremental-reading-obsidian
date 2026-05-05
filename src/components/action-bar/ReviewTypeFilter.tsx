@@ -10,6 +10,7 @@ export function ReviewTypeFilter() {
   return (
     <div className="ir-toggle">
       <label className="ir-toggle-label">
+        {showCardsOnly ? 'Cards only' : 'All items'}
         <div
           className={
             'checkbox-container' + (showCardsOnly ? ' is-enabled' : '')
@@ -22,7 +23,6 @@ export function ReviewTypeFilter() {
             onChange={(e) => void actions.setCardsOnly(e.currentTarget.checked)}
           />
         </div>
-        {showCardsOnly ? 'Cards only' : 'All items'}
       </label>
     </div>
   );

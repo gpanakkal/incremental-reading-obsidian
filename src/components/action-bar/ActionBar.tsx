@@ -12,7 +12,16 @@ import {
   type ReviewSnippet,
 } from '#/lib/types';
 import { SchedulingModal } from '#/views/SchedulingModal';
-import { CalendarSync } from 'lucide-react';
+import {
+  ArchiveRestore,
+  Ban,
+  BrainCog,
+  CalendarSync,
+  Check,
+  Eye,
+  Scissors,
+  SkipForward,
+} from 'lucide-react';
 import { useDispatch } from 'react-redux';
 import { Rating } from 'ts-fsrs';
 import { useReviewContext } from '../ReviewContext';
@@ -69,36 +78,36 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
   return (
     <>
       {isDismissed ? (
-        <Button
+        <ButtonWithIcon
           tooltip="Restore item to queue"
           handleClick={async () => await actions.unDismissItem(reviewItem)}
         >
-          Un-dismiss
-        </Button>
+          <ArchiveRestore />
+        </ButtonWithIcon>
       ) : (
-        <Button
+        <ButtonWithIcon
           tooltip="Stop scheduling this item for review"
           handleClick={async () => await actions.dismissItem(reviewItem)}
         >
-          Dismiss
-        </Button>
+          <Ban stroke="#990000" />
+        </ButtonWithIcon>
       )}
-      <Button
+      <ButtonWithIcon
         tooltip="Extract selected text to a new snippet"
         handleClick={async () => {
           await actions.createSnippet();
         }}
       >
-        Snip
-      </Button>
-      <Button
-        // tooltip="Create card"
+        <Scissors />
+      </ButtonWithIcon>
+      <ButtonWithIcon
+        tooltip="Create card"
         handleClick={async () => {
           await actions.createCard();
         }}
       >
-        Create card
-      </Button>
+        <BrainCog />
+      </ButtonWithIcon>
     </>
   );
 }
@@ -113,20 +122,20 @@ function TextActions({ text }: { text: ReviewText }) {
 
   return (
     <>
-      <Button
-        tooltip="Mark as reviewed and go to the next"
+      <ButtonWithIcon
+        tooltip="Mark as reviewed"
         handleClick={async () => await actions.review(text)}
       >
-        Continue
-      </Button>
-      <Button
+        <Check stroke="#00a700" />
+      </ButtonWithIcon>
+      <ButtonWithIcon
         tooltip="Skip for current review session"
         handleClick={() => {
           actions.skipItem(text);
         }}
       >
-        Skip
-      </Button>
+        <SkipForward />
+      </ButtonWithIcon>
       <TextScheduler text={text} />
     </>
   );
@@ -165,14 +174,14 @@ function TextScheduler({ text }: { text: ReviewText }) {
           initialInterval={(text as ReviewArticle).data.fixed_interval_days}
         />
       )}
-      <Button
+      <ButtonWithIcon
         tooltip="Change scheduling strategy"
         handleClick={() => {
           new SchedulingModal(plugin, text).open();
         }}
       >
         <CalendarSync />
-      </Button>
+      </ButtonWithIcon>
     </>
   );
 }
@@ -198,53 +207,76 @@ function CardActions({ card }: { card: ReviewCard }) {
     <>
       {showAnswer ? (
         <>
-          <Button
+          <ButtonWithIcon
             handleClick={async () =>
               await actions.gradeCard(card, Rating.Again)
             }
           >
             🔁 Again
-          </Button>
-          <Button
+          </ButtonWithIcon>
+          <ButtonWithIcon
             handleClick={async () => await actions.gradeCard(card, Rating.Hard)}
           >
             👎 Hard
-          </Button>
-          <Button
+          </ButtonWithIcon>
+          <ButtonWithIcon
             handleClick={async () => await actions.gradeCard(card, Rating.Good)}
           >
             👍 Good
-          </Button>
-          <Button
+          </ButtonWithIcon>
+          <ButtonWithIcon
             handleClick={async () => await actions.gradeCard(card, Rating.Easy)}
           >
             ✅ Easy
-          </Button>
+          </ButtonWithIcon>
         </>
       ) : (
         <>
-          <Button
+          <ButtonWithIcon
+            tooltip="Show answer"
             handleClick={() => {
               dispatch(setShowAnswer(true));
             }}
           >
-            Show Answer
-          </Button>
-          <Button
+            <Eye />
+          </ButtonWithIcon>
+          <ButtonWithIcon
             tooltip="Skip for current review session"
             handleClick={() => {
               actions.skipItem(card);
             }}
           >
-            Skip
-          </Button>
+            <SkipForward />
+          </ButtonWithIcon>
         </>
       )}
     </>
   );
 }
 
-function Button({
+function ButtonWithIcon({
+  children,
+  handleClick,
+  disabled,
+  tooltip,
+}: React.PropsWithChildren<{
+  handleClick: (e: MouseEvent) => Promise<void> | void;
+  disabled?: boolean;
+  tooltip?: string;
+}>) {
+  return (
+    <button
+      className="ir-review-button clickable-icon"
+      onClick={(e) => void handleClick(e)}
+      title={tooltip}
+      disabled={disabled}
+    >
+      {children}
+    </button>
+  );
+}
+
+function TextButton({
   children,
   handleClick,
   disabled,
