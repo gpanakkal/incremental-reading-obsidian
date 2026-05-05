@@ -448,8 +448,6 @@ export class ArticleManager extends ItemManager {
   }
   /**
    * @param newPriority the priority to use for calculating the interval
-   * TODO: handle changing from fixed interval to priority scheduling by
-   * simulating how the interval would have grown
    */
   async disableFixedInterval(article: IArticleBase, newPriority: number) {
     try {
@@ -457,7 +455,6 @@ export class ArticleManager extends ItemManager {
 
       const lastReview = await this.getLastReview(article);
       const reviewCount = await this.getReviewCount(article);
-      // TODO: use IRScheduler.cumulativeInterval here
       const mult = IRScheduler.getIntervalMultiplier(newPriority);
       const newInterval = TEXT_BASE_REVIEW_INTERVAL * mult ** reviewCount;
 

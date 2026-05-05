@@ -169,8 +169,6 @@ export function updateQueryCache<T extends ReviewItem, D extends T['data']>(
 
 /**
  * Get next due item, reset item state, and update card delimiters
- * TODO: add seenIds arg to reviewManager.getDue and move filtering
- * into SQL query
  */
 async function fetchNextItem(
   reviewManager: ReviewManager

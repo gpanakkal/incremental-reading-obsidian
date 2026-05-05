@@ -287,9 +287,6 @@ describe('childPriorityFromFixedInterval', () => {
 
           expect(IRScheduler.isValidPriority(priority)).toBe(true);
 
-          // TODO: check only the priority after result.priority since it should
-          // overshoot the target (unless result.priority is the minimum and it
-          // already overshoots)
           const iterativelyFoundPriority = getPriority(
             fakeParentItem,
             targetReviewCount,

@@ -66,11 +66,6 @@ export default class ReviewManager {
   // #region SNIPPETS
   /**
    * Save the selected text and add it to the learning queue
-   *
-   * todo:
-   * - handle edge cases (uncommon characters, leading/trailing spaces, )
-   * - selections from web viewer
-   * - selections from native PDF viewer
    */
   async createSnippet(
     editor: Editor,
@@ -179,7 +174,6 @@ export default class ReviewManager {
    * Fetch all snippets, cards, and articles ready for review, then order by due ASC
    * TODO:
    * - paginate
-   * - allow filtering out a list of IDs
    * @param dueBy Unix timestamp. Defaults to the end of the day plus the rollover offset.
    */
   async getDue({

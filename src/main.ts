@@ -39,17 +39,14 @@ export default class IncrementalReadingPlugin extends Plugin {
     await this.loadSettings();
     this.MarkdownEditor = getEditorClass(this.app);
 
-    // This creates an icon in the left ribbon.
-    // TODO: replace the placeholder
     const ribbonIconEl = this.addRibbonIcon(
       PLACEHOLDER_PLUGIN_ICON,
       'Incremental reading',
       async (_evt: MouseEvent) => {
-        // Called when the user clicks the icon.
         await this.learn();
       }
     );
-    // Perform additional things with the ribbon
+
     ribbonIconEl.addClass('incremental-reading-ribbon');
 
     // TODO: show counts of items in queue?

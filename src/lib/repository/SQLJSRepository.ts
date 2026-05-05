@@ -72,7 +72,6 @@ export class SQLJSRepository implements SQLiteRepository {
   }): Promise<SQLJSRepository> {
     const repo = new SQLJSRepository({ ...params, app: params.plugin.app });
     // load the database file or create it if loading fails
-    // TODO: handle failed loads when the file exists
     if (repo.dbExists()) {
       const result = await repo.loadDb();
       if (result === null) {
@@ -187,7 +186,6 @@ export class SQLJSRepository implements SQLiteRepository {
 
   /**
    * Format the result of a single query
-   * TODO: convert snake_case properties to camelCase?
    */
   protected formatResult<T extends RowTypes>(result: QueryExecResult): T[] {
     const { columns, values } = result;
