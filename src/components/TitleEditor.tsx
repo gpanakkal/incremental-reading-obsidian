@@ -1,5 +1,5 @@
-import { useRef, useLayoutEffect } from 'react';
 import type { ReviewArticle } from '#/lib/types';
+import { useLayoutEffect, useRef } from 'react';
 import { useReviewContext } from './ReviewContext';
 
 /** For editing article titles in review */
@@ -18,9 +18,7 @@ export function TitleEditor({ item }: { item: ReviewArticle }) {
     const newTitle = titleRef.current.textContent?.trim() || '';
     if (!newTitle || newTitle === item.file.basename) {
       // Revert to previous title if empty or unchanged
-      if (titleRef.current) {
-        titleRef.current.textContent = item.file.basename;
-      }
+      titleRef.current.textContent = item.file.basename;
       return;
     }
     try {
@@ -28,23 +26,20 @@ export function TitleEditor({ item }: { item: ReviewArticle }) {
     } catch (error) {
       console.error('Failed to rename file:', error);
       // Revert on error
-      if (titleRef.current) {
-        titleRef.current.textContent = item.file.basename;
-      }
+      titleRef.current.textContent = item.file.basename;
     }
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
+    if (!titleRef.current) return;
     if (e.key === 'Enter') {
       e.preventDefault();
-      titleRef.current?.blur();
+      titleRef.current.blur();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       // Revert to original title
-      if (titleRef.current) {
-        titleRef.current.textContent = item.file.basename;
-      }
-      titleRef.current?.blur();
+      titleRef.current.textContent = item.file.basename;
+      titleRef.current.blur();
     }
   };
 
