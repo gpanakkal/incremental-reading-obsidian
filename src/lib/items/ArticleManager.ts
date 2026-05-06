@@ -251,14 +251,34 @@ export class ArticleManager extends ItemManager {
   ): Promise<ReviewArticle[]> {
     const dueTime =
       dueBy ?? getEndOfToday(this.plugin.settings.dayRolloverOffset);
+    let allExcluded = [...(excludeIds ?? [])];
+    let due: ReviewArticle[] = [];
     try {
-      const articlesDue = (
-        await this.fetchMany({ dueBy: dueTime, limit, excludeIds })
-      ).map((row) => this.rowToReviewArticle(row), this);
-      return articlesDue.filter(
-        (article): article is ReviewArticle =>
-          !!article && article.file !== null
-      );
+      // keep fetching until all fetched rows have a note
+      let lastMissingNotes = 0;
+      do {
+        lastMissingNotes = 0;
+        due = (
+          await this.fetchMany({
+            dueBy: dueTime,
+            limit,
+            excludeIds: allExcluded,
+          })
+        )
+          .map((row) => {
+            const item = this.rowToReviewArticle(row);
+            if (!item) {
+              allExcluded.push(row.id);
+              lastMissingNotes += 1;
+            }
+            return item;
+          }, this)
+          .filter(
+            (article): article is ReviewArticle =>
+              !!article && article.file !== null
+          );
+      } while (lastMissingNotes !== 0);
+      return due;
     } catch (error) {
       console.error(error);
       return [];
@@ -289,7 +309,7 @@ export class ArticleManager extends ItemManager {
       conditions.push('dismissed = 0');
     }
 
-    if (opts?.excludeIds) {
+    if (opts?.excludeIds && opts.excludeIds.length) {
       const currentParamCount = params.length;
       let condition = `id NOT IN (`;
       condition +=

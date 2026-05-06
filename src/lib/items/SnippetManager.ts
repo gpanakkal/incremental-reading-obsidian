@@ -103,14 +103,34 @@ export class SnippetManager extends ItemManager {
   ): Promise<ReviewSnippet[]> {
     const dueTime =
       dueBy ?? getEndOfToday(this.plugin.settings.dayRolloverOffset);
+    let allExcluded = [...(excludeIds ?? [])];
+    let due: ReviewSnippet[] = [];
     try {
-      const snippetsDue = (
-        await this.fetchMany({ dueBy: dueTime, limit, excludeIds })
-      ).map((item) => this.rowToReviewSnippet(item), this);
-      return snippetsDue.filter(
-        (snippet): snippet is ReviewSnippet =>
-          !!snippet && snippet.file !== null
-      );
+      // keep fetching until all fetched rows have a note
+      let lastMissingNotes = 0;
+      do {
+        lastMissingNotes = 0;
+        due = (
+          await this.fetchMany({
+            dueBy: dueTime,
+            limit,
+            excludeIds: allExcluded,
+          })
+        )
+          .map((row) => {
+            const item = this.rowToReviewSnippet(row);
+            if (!item) {
+              allExcluded.push(row.id);
+              lastMissingNotes += 1;
+            }
+            return item;
+          }, this)
+          .filter(
+            (snippet): snippet is ReviewSnippet =>
+              !!snippet && snippet.file !== null
+          );
+      } while (lastMissingNotes !== 0);
+      return due;
     } catch (error) {
       console.error(error);
       return [];
@@ -352,7 +372,7 @@ export class SnippetManager extends ItemManager {
       conditions.push('dismissed = 0');
     }
 
-    if (opts?.excludeIds) {
+    if (opts?.excludeIds && opts.excludeIds.length) {
       const currentParamCount = params.length;
       let condition = `id NOT IN (`;
       condition +=
