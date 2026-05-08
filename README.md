@@ -47,17 +47,17 @@ Go to **Settings → Sync** → enable **Sync all other types**. Repeat this on 
 3. Set aside some time for a [study session](#study-sessions) each day, depending on how much you want to learn. Even 10 minutes is fine!
 
 > [!tip]
-> Set up keyboard shortcuts for the **Extract selection** and **Create SRS card** commands, as these are frequently used in incremental reading.
+> Set up keyboard shortcuts for the **Extract selection** and **Create spaced repetition card** commands, as these are frequently used in incremental reading.
 
 ### Study sessions
 
-Once you've imported some material, begin a study session by selecting the **Incremental Reading** button in the left ribbon (or perform **Incremental Reading: Learn** from the command palette).
+Once you've imported some material, begin a study session by selecting the **Incremental reading** button in the left ribbon (or perform **Incremental Reading: Learn** from the command palette).
 
 1. The first item in the queue will be shown to you. Read as much as you like, extracting interesting or important passages to snippets as you go.
-2. Select **Continue** when you want to move on to the next item. Don't worry about losing track of the active item; it will be shown to you again in the future.
+2. Select **Mark as reviewed** when you want to move on to the next item. Don't worry about losing track of the active item; it will be shown to you again in the future.
 
 > [!tip]
-> If you don't want to see an item again, select **Dismiss** instead.
+> If you don't want to see an item again, select **Dismiss from future review** instead.
 
 3. Cards you've made will appear in review on subsequent days. Mentally fill in the blank or answer the question, then show the answer. Grade yourself per [these criteria](#grading-cards).
 
@@ -75,7 +75,7 @@ You may find the phrasing of a snippet can be improved by revising wording, remo
 
 Once a snippet has been sufficiently trimmed down and revised, it's ready to be turned into one or more spaced repetition cards.
 
-- Cards are created as fill-in-the-blank questions from text blocks — just select the part of the text that you want to be the answer, and run **Create SRS card**.
+- Cards are created as fill-in-the-blank questions from text blocks — just select the part of the text that you want to be the answer, and run **Create spaced repetition card**.
 - The entire paragraph or list item containing the selected text will be extracted to the card. Split paragraphs or list items up as needed to avoid including extra text.
 - Cards should ideally be one or two sentences and have only one correct answer. The shorter the better, as long as it remains clear how to answer them.
 
