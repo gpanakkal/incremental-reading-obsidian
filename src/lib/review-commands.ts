@@ -110,28 +110,28 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
 
   plugin.addCommand({
     id: 'grade-card-again',
-    name: 'Review: grade card: again',
+    name: 'Review: grade card 1 (again)',
     // hotkeys: [{ key: '1', modifiers: ['Alt'] }],
     checkCallback: (checking) => gradeCommandCb(checking, Rating.Again),
   });
 
   plugin.addCommand({
     id: 'grade-card-hard',
-    name: 'Review: grade card: hard',
+    name: 'Review: grade card 2 (hard)',
     // hotkeys: [{ key: '2', modifiers: ['Alt'] }],
     checkCallback: (checking) => gradeCommandCb(checking, Rating.Hard),
   });
 
   plugin.addCommand({
     id: 'grade-card-good',
-    name: 'Review: grade card: good',
+    name: 'Review: grade card 3 (good)',
     // hotkeys: [{ key: '3', modifiers: ['Alt'] }],
     checkCallback: (checking) => gradeCommandCb(checking, Rating.Good),
   });
 
   plugin.addCommand({
     id: 'grade-card-easy',
-    name: 'Review: grade card: easy',
+    name: 'Review: grade card 4 (easy)',
     // hotkeys: [{ key: '4', modifiers: ['Alt'] }],
     checkCallback: (checking) => gradeCommandCb(checking, Rating.Easy),
   });
