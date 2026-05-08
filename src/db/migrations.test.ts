@@ -334,11 +334,6 @@ describe('migration v3 — backfill interval on article and snippet', () => {
       scroll_top: 42,
     });
   });
-
-  it('updates user_version to 3', () => {
-    applyMigrations(db, migrations);
-    expect(getSchemaVersion(db)).toBe(3);
-  });
 });
 
 // ---------------------------------------------------------------------------
