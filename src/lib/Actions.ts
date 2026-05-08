@@ -102,6 +102,7 @@ export class Actions {
    */
   reprioritize = async (item: ReviewText, priority: number) => {
     IRScheduler.validatePriority(priority);
+    if (priority === item.data.priority) return;
     try {
       await this.plugin.reviewManager.reprioritize(item.data, priority);
       await invalidateItemQuery(item.data.id);
