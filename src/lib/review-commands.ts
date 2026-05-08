@@ -13,15 +13,21 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
 
   plugin.addCommand({
     id: 'mark-review',
-    name: 'Review: continue',
+    name: 'Review: show answer/mark as reviewed',
     // hotkeys: [{ key: 'A', modifiers: ['Alt'] }],
     checkCallback: (checking) => {
       const view = plugin.getActiveReviewView();
-      if (!view) return false;
+      if (!view || !view.file) return false;
       const currentItem = getCurrentItemSync();
-      if (!currentItem || isReviewCard(currentItem)) return false;
+      if (!currentItem) return false;
+      const isCard = isReviewCard(currentItem);
+      if (isCard && store.getState().showAnswer) {
+        return false;
+      }
       if (checking) return true;
-      void actions.review(currentItem);
+
+      if (isCard) void store.dispatch(setShowAnswer(true));
+      else void actions.review(currentItem);
     },
   });
 
@@ -89,21 +95,6 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       if (checking) return true;
       const showCardsOnly = cardsOnly(store.getState());
       void actions.setCardsOnly(!showCardsOnly);
-    },
-  });
-
-  plugin.addCommand({
-    id: 'show-card-answer',
-    name: 'Review: show answer',
-    // hotkeys: [{ key: 'A', modifiers: ['Alt'] }],
-    checkCallback: (checking) => {
-      if (store.getState().showAnswer) return false;
-      const view = plugin.getActiveReviewView();
-      if (!view || !view.file) return false;
-      const item = getCurrentItemSync();
-      if (!item || !isReviewCard(item)) return false;
-      if (checking) return true;
-      void store.dispatch(setShowAnswer(true));
     },
   });
 
