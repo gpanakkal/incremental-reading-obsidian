@@ -180,6 +180,11 @@ export class CardManager extends ItemManager {
         ] as const)
       : null;
 
+    if (!bounds) {
+      new Notice('Text must be selected', ERROR_NOTICE_DURATION_MS);
+      return;
+    }
+
     try {
       const withDelimiters = this.delimitText(line, bounds)[0];
       const reviewCard = await this.createFileAndEntry(
@@ -207,7 +212,7 @@ export class CardManager extends ItemManager {
       if (error instanceof Error) {
         console.error(error);
       }
-      new Notice(`Failed to create card`);
+      new Notice(`Failed to create card`, ERROR_NOTICE_DURATION_MS);
       return null;
     }
   }
