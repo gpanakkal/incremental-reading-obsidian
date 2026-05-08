@@ -150,4 +150,39 @@ export const migrations: Migration[] = [
       })();
     },
   },
+  {
+    version: 4,
+    description: 'Remove upper bound on fixed review intervals',
+    up: (db) => {
+      recreateTable(
+        db,
+        'article',
+        `CREATE TABLE article (
+            id TEXT NOT NULL, -- UUID
+            reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
+            due INTEGER, -- unix timestamp
+            interval INTEGER NOT NULL, -- the interval that was used to calculate due
+            priority INTEGER NOT NULL, -- used when manual interval is null
+            fixed_interval_days INTEGER NULL,
+            dismissed INTEGER DEFAULT 0,
+            scroll_top INTEGER NOT NULL DEFAULT 0,
+            CHECK(interval > 0),
+            CHECK(priority >= 10 AND priority <= 50),
+            CHECK(fixed_interval_days >= 1),
+            CHECK(dismissed = FALSE OR dismissed = TRUE),
+            CHECK(due IS NOT NULL OR dismissed = TRUE)
+          );`,
+        {
+          id: 'id',
+          dismissed: 'dismissed',
+          due: 'due',
+          reference: 'reference',
+          interval: 'interval',
+          priority: 'priority',
+          fixed_interval_days: 'fixed_interval_days',
+          scroll_top: 'scroll_top',
+        }
+      );
+    },
+  },
 ];
