@@ -12,7 +12,7 @@
 		"e2e": "npm run build && cross-env E2E_CLEANUP=1 npx playwright test --project e2e",
 		"e2e:ui": "npm run build && cross-env E2E_CLEANUP=1 npx playwright test --ui --project e2e",
 		"e2e:keep-vaults": "npm run build && cross-env E2E_CLEANUP=0 npx playwright test --project e2e",
-		"e2e:codegen": "npm run build && npx tsx e2e-tests/setup/codegen.ts",
+		"e2e:codegen": "npx concurrently -k --timings \"npm run dev\" \"npx wait-on main.js && npx tsx e2e-tests/setup/codegen.ts\"",
 		"e2e:docker": "node scripts/docker-e2e.mjs",
 		"e2e:repeat": "npm run build && cross-env E2E_CLEANUP=1 npx playwright test --project e2e --repeat-each 10",
 		"format": "prettier --write \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" && eslint --fix \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\"",
@@ -42,7 +42,8 @@
 		"@types/node": "~24.3.0",
 		"@types/sql.js": "~1.4.9",
 		"builtin-modules": "~3.3.0",
-		"cross-env": "^10.1.0",
+		"concurrently": "9.2.1",
+		"cross-env": "10.1.0",
 		"esbuild": "~0.25.9",
 		"esbuild-plugin-wasm": "~1.1.0",
 		"eslint": "9.39.4",
@@ -60,6 +61,7 @@
 		"typescript": "5.9.3",
 		"typescript-eslint": "^8.57.1",
 		"vite-tsconfig-paths": "^6.1.1",
-		"vitest": "~3.2.4"
+		"vitest": "~3.2.4",
+		"wait-on": "^9.0.5"
 	}
 }
