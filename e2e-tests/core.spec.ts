@@ -473,11 +473,8 @@ test.describe('Extracting snippets', () => {
   });
 
   test('file name has no leading spaces when first char is "["', async () => {
-    test.skip(process.platform === 'darwin', 'Native context menus on macOS');
     await openNote(window, 'sources/Curse of dimensionality - Wikipedia');
-    // replace with command
-    await window.getByRole('button', { name: 'More options' }).click();
-    await window.getByText('Source mode').click();
+    await executeCommand(window, 'editor:toggle-source');
 
     // select the first opening bracket '['
     await window.locator('.cm-formatting.cm-formatting-link').first().click();
