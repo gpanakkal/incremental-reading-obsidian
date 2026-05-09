@@ -1,13 +1,13 @@
-import { defineConfig, globalIgnores } from 'eslint/config';
-import tsparser from '@typescript-eslint/parser';
 import js from '@eslint/js';
-import tseslint from 'typescript-eslint';
+import tsparser from '@typescript-eslint/parser';
+import obsidianmd from 'eslint-plugin-obsidianmd';
 import react from 'eslint-plugin-react';
 import reactHooks from 'eslint-plugin-react-hooks';
-import obsidianmd from 'eslint-plugin-obsidianmd';
+import { defineConfig, globalIgnores } from 'eslint/config';
 import globals from 'globals';
+import tseslint from 'typescript-eslint';
 
-const LINT_TARGETS = ['**/*.{ts,tsx}'];
+const LINT_TARGETS = ['*/*.{ts,tsx}'];
 const TEST_FILES = ['**/*.test.ts', '**/*.spec.ts', 'e2e-tests/**'];
 
 export default defineConfig([
