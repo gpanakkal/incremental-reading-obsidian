@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const projectRoot = resolve(import.meta.dirname, '../..');
+const projectRoot = resolve(import.meta.dirname, '../');
 const resultsDir = resolve(projectRoot, 'e2e-tests/test-results');
 const imageName = 'incremental-reading-e2e';
 
@@ -17,7 +17,7 @@ const imageName = 'incremental-reading-e2e';
 let ghToken = process.env.GH_TOKEN ?? '';
 if (!ghToken) {
   try {
-    const env = readFileSync(resolve(projectRoot, '.env'), 'utf-8');
+    const env = readFileSync(resolve(projectRoot, '.env.local'), 'utf-8');
     ghToken = env.match(/^GH_TOKEN=(.+)$/m)?.[1] ?? '';
   } catch {
     // .env doesn't exist, that's fine

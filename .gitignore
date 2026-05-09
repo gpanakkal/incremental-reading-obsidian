@@ -30,3 +30,4 @@ e2e-tests/test-results/
 e2e-tests/test-vaults/
 
 .env
+.env.local
