@@ -6,7 +6,8 @@
 	"type": "module",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
-		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"check": "tsc --noEmit --skipLibCheck",
+		"build": "npm run check && node esbuild.config.mjs production",
 		"test": "vitest run",
 		"e2e:setup": "npm run build && npx playwright test --project e2e-setup",
 		"e2e": "npm run build && cross-env E2E_CLEANUP=1 npx playwright test --project e2e",
