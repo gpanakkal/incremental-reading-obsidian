@@ -145,7 +145,7 @@
   overflow: hidden;
 }
 
-.ir-review-interface .cm-scroller {
+.ir-review-scroller {
   padding: var(--file-margins);
   max-height: 100%;
 }

@@ -233,6 +233,7 @@ export function IREditor({
       try {
         editor = new CustomEditor(app, elRef.current, controller);
         cm = editor.cm;
+        cm.scrollDOM.classList.add('ir-review-scroller');
         internalRef.current = cm;
         controller.editMode = editor;
         editor.set(value ?? '');
