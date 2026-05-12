@@ -139,10 +139,18 @@
   overflow: hidden;
 }
 
-.ir-review-interface .ir-editor {
+.ir-review-interface .ir-editor,
+.ir-review-interface .markdown-preview-view {
   flex: 1;
   min-height: 0;
-  overflow: hidden;
+}
+
+/* Account for the static tab header on mobile in CardViewer */
+.is-phone
+  .mod-root
+  .workspace-leaf-content[data-type='incremental-reading-review']
+  .markdown-preview-view {
+  padding-top: var(--view-top-spacing-markdown);
 }
 
 .ir-review-scroller {
