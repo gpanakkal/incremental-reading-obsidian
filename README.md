@@ -35,6 +35,8 @@ Go to **Settings → Sync** → enable **Sync all other types**. Repeat this on 
 > Sync will overwrite the plugin's database if you use the plugin on a second device before enabling **Sync all other types**.
 >
 > You can easily recover the database if this happens: open the Files pane → find `incremental-reading/ir-user-data` and right-click (on mobile, tap and hold until it lights up) → select **Open version history** → select the newest version from your first device → select **Restore**.
+>
+> If you don't see the user data file, you may need to enable **Settings → Files and Links → Show all file types**.
 
 ## Use the plugin
 
