@@ -6,15 +6,21 @@ import type { App } from 'obsidian';
 /**
  * Execute an Obsidian command by its ID, bypassing the command palette UI.
  * Uses the unofficial but stable `window.app.commands` API.
+ *
+ * Tip: find command IDs with `app.commands.listCommands()` in the Obsidian dev console
+ * @returns `true` if the command was successfully executed, or `false` otherwise
  */
-export async function executeCommand(window: Page, commandId: string) {
-  await window.evaluate(async (id) => {
-    (window as Page & { app: App }).app.commands.executeCommandById(id);
+export async function executeCommandById(window: Page, commandId: string) {
+  return await window.evaluate(async (id) => {
+    const result = (
+      window as Page & { app: App }
+    ).app.commands.executeCommandById(id);
     // Yield to the event loop so Obsidian can process the command's
     // side effects (opening modals, async DB writes, rendering) before
     // the test continues. Without this, sequential commands can race
     // because executeCommandById returns synchronously.
     await new Promise((resolve) => setTimeout(resolve, 200));
+    return result;
   }, commandId);
 }
 
@@ -50,11 +56,13 @@ export async function openNote(window: Page, path: string) {
     });
   });
 
-  await executeCommand(window, 'switcher:open');
+  await executeCommandById(window, 'switcher:open');
   const quickSwitcher = window.getByPlaceholder('Find or create a note...');
 
   await quickSwitcher.fill(path);
-  await window.locator('div').filter({ hasText: path }).nth(1).click();
+  await quickSwitcher.press('Enter');
+  // click instead of pressing Enter:
+  // await window.locator('div').filter({ hasText: path }).nth(1).click();
 
   // Wait for Obsidian to confirm the file is open
   await fileOpenPromise;
