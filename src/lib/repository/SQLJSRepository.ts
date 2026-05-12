@@ -296,10 +296,18 @@ export class SQLJSRepository implements SQLiteRepository {
       // for mobile compatibility
       this.db = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
 
+      const currentDbVersion = getSchemaVersion(this.db);
+      const latestSchemaVersion = migrations[migrations.length - 1].version;
+      if (currentDbVersion > latestSchemaVersion) {
+        throw new Error(
+          `Plugin is out of date with the database. ` +
+            `Please ensure the plugin is fully updated, then re-enable it.`
+        );
+      }
+
       const pending = getPendingMigrations(this.db, migrations);
       if (pending.length > 0) {
-        const previousVersion = getSchemaVersion(this.db);
-        await this.backupDatabase(previousVersion);
+        await this.backupDatabase(currentDbVersion);
 
         const preRowCounts = this.snapshotRowCounts();
         const preFkIssues = this.foreignKeyCheck();
@@ -330,7 +338,7 @@ export class SQLJSRepository implements SQLiteRepository {
           if (!verification.passed) {
             const newVersion = getSchemaVersion(this.db);
             const logPath = await this.writeErrorLog(verification.errors, {
-              previousVersion,
+              previousVersion: currentDbVersion,
               targetVersion: newVersion,
             });
 
@@ -340,7 +348,7 @@ export class SQLJSRepository implements SQLiteRepository {
             );
 
             throw new MigrationVerificationError(
-              `Migration verification failed (v${previousVersion} -> v${newVersion}). See log: ${logPath}`,
+              `Migration verification failed (v${currentDbVersion} -> v${newVersion}). See log: ${logPath}`,
               verification.errors,
               logPath
             );

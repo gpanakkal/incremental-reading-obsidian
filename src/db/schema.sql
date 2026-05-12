@@ -91,4 +91,4 @@ CREATE TABLE IF NOT EXISTS srs_card_review (
   CHECK(rating >= 0 AND rating <= 4)
 );
 
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
