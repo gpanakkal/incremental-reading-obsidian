@@ -108,7 +108,7 @@ function createActionBarPanel(
           prevState.isReviewMode !== newState.isReviewMode ||
           prevState.showAnswer !== newState.showAnswer
         ) {
-          const info = Obsidian.getFileInfoFromState(update.state);
+          const { info } = Obsidian.getFileInfoFromState(update.state);
           if (!info) return;
 
           const { file, app } = info;
@@ -148,6 +148,7 @@ function renderActionBar(
 
 /**
  * Render actions for review mode (inside ReviewView).
+ * NOTE: this is not used; see ActionBar.tsx instead.
  */
 function renderReviewModeActions(
   view: EditorView,
@@ -361,7 +362,7 @@ function renderStandaloneModeActions(
   plugin: IncrementalReadingPlugin | null
 ) {
   if (!plugin) return;
-  const info = Obsidian.getFileInfoFromState(view.state);
+  const { info } = Obsidian.getFileInfoFromState(view.state);
   if (!info?.file) return;
   renderStandaloneActionBarDOM(info.file, plugin, container);
 }
@@ -476,17 +477,19 @@ const actionBarPanelFacet = showPanel.compute(
     const actionBarState = state.field(actionBarStateField);
     if (actionBarState.isReviewMode) return null;
 
-    const info = Obsidian.getFileInfoFromState(state);
-    if (!info) return null;
+    const { info, editorView } = Obsidian.getFileInfoFromState(state);
+    if (!info?.file) return null;
+
+    const inSubEditor = !editorView?.dom.parentElement?.hasClass(
+      'markdown-source-view'
+    );
+
+    if (inSubEditor) return null;
 
     const { file, app } = info;
-
-    if (!file) return null;
-
     const noteType = Obsidian.getNoteType(file, app);
     if (!noteType) return null;
 
-    // Return the panel constructor with the noteType pre-bound
     return createActionBarPanel(noteType, app);
   }
 );

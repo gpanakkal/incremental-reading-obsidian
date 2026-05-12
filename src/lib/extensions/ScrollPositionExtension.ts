@@ -23,7 +23,7 @@ export const scrollPositionExtension = ViewPlugin.define(
     const propertiesLoadTimeoutMs = 300;
 
     const plugin = view.state.facet(irPluginFacet);
-    const info = Obsidian.getFileInfoFromState(view.state);
+    const { info } = Obsidian.getFileInfoFromState(view.state);
     if (!info)
       return {
         destroy() {},
@@ -69,7 +69,7 @@ export const scrollPositionExtension = ViewPlugin.define(
     const handleScroll = () => {
       if (isRestoring) return;
 
-      const info = Obsidian.getFileInfoFromState(view.state);
+      const { info } = Obsidian.getFileInfoFromState(view.state);
       if (!info || !info.file) return;
 
       const scroller = view.scrollDOM;

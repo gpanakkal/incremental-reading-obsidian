@@ -43,7 +43,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     private isReviewInterface: boolean = false;
 
     constructor(view: EditorView) {
-      const info = Obsidian.getFileInfoFromState(view.state);
+      const { info } = Obsidian.getFileInfoFromState(view.state);
       this.file = info?.file ?? null;
       this.decorations = Decoration.none;
 
@@ -58,7 +58,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
     private async loadHighlights(view: EditorView) {
       const plugin = view.state.facet(irPluginFacet);
-      const info = Obsidian.getFileInfoFromState(view.state);
+      const { info } = Obsidian.getFileInfoFromState(view.state);
 
       if (!plugin || !info || !this.file) return;
 

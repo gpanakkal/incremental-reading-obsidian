@@ -1,4 +1,5 @@
 import type { EditorState } from '@codemirror/state';
+import { EditorView } from '@codemirror/view';
 import type {
   App,
   DataWriteOptions,
@@ -8,7 +9,7 @@ import type {
   MarkdownFileInfo,
   TFile,
 } from 'obsidian';
-import { editorInfoField, normalizePath } from 'obsidian';
+import { editorEditorField, editorInfoField, normalizePath } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
@@ -391,9 +392,13 @@ export class ObsidianHelpers {
    * Get the file associated with the current editor state.
    * Returns null if no file is associated (e.g., in a new unsaved buffer).
    */
-  static getFileInfoFromState(state: EditorState): MarkdownFileInfo | null {
+  static getFileInfoFromState(state: EditorState): {
+    info: MarkdownFileInfo | null;
+    editorView: EditorView | null;
+  } {
     const info = state.field(editorInfoField, false);
-    return info ?? null;
+    const editorView = state.field(editorEditorField, false);
+    return { info: info ?? null, editorView: editorView ?? null };
   }
 
   static inEditMode(document: Document): boolean {
