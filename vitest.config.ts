@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [tsconfigPaths()],
   resolve: {
     alias: {
-      obsidian: resolve(__dirname, 'src/__mocks__/obsidian.ts'),
+      obsidian: resolve(__dirname, 'src/test/__mocks__/obsidian.ts'),
     },
   },
   test: {
