@@ -23,7 +23,7 @@ data.json
 
 *.sqlite
 
-# for e2e
+# E2E Tests
 .obsidian-unpacked
 e2e-tests/setup/test-vault/.obsidian/plugins
 e2e-tests/test-results/
@@ -31,3 +31,7 @@ e2e-tests/test-vaults/
 
 .env
 .env.local
+
+# Vitest
+coverage/
+
