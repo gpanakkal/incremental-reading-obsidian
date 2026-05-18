@@ -29,6 +29,8 @@ test.beforeEach(async () => {
 });
 
 test.afterEach(async () => {
+  // Dismiss open dialogs during shutdown
+  window?.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
   if (app) await closeElectron(app);
   if (shouldCleanup) {
     await fs.rm(vaultPath, { recursive: true, force: true });
