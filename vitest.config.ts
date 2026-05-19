@@ -11,7 +11,7 @@ export default defineConfig({
     },
   },
   test: {
-    exclude: ['**/node_modules/**', '**/e2e-tests/**'],
+    exclude: ['**/node_modules/**', '**/e2e-tests/**', '.stryker-tmp/'],
     coverage: {
       provider: 'v8',
     },
