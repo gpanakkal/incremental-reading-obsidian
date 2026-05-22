@@ -1,12 +1,16 @@
-# vscode
-.vscode 
+node_modules
+.vscode
+.env
+.env.local
+
+# Exclude macOS Finder (System Explorer) View States
+.DS_Store
+
+*.sqlite
 
 # Intellij
 *.iml
 .idea
-
-# npm
-node_modules
 
 # Don't include the compiled main.js file in the repo.
 # They should be uploaded to GitHub releases instead.
@@ -18,19 +22,11 @@ main.js
 # obsidian
 data.json
 
-# Exclude macOS Finder (System Explorer) View States
-.DS_Store
-
-*.sqlite
-
 # E2E Tests
 .obsidian-unpacked
 e2e-tests/setup/test-vault/.obsidian/plugins
 e2e-tests/test-results/
 e2e-tests/test-vaults/
-
-.env
-.env.local
 
 # Vitest
 coverage/
