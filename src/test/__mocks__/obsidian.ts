@@ -10,8 +10,9 @@ export class Notice {
   constructor(_message: string, _duration?: number) {}
 }
 
-// CodeMirror state field stub — imported by ObsidianHelpers but not called in tests
+// CodeMirror state field stubs — imported by ObsidianHelpers but not called in tests
 export const editorInfoField = {};
+export const editorEditorField = {};
 
 // Commonly imported Obsidian classes — stubbed as no-ops so transitive imports resolve
 export class Plugin {}
@@ -23,3 +24,16 @@ export class MarkdownView {}
 export class Component {}
 export class MarkdownRenderer {}
 export const Platform = { isMobile: false, isDesktop: true };
+
+export class MarkdownPreviewView {
+  static async render(
+    _app: unknown,
+    markdown: string,
+    el: HTMLElement,
+    _sourcePath: string,
+    _component: unknown
+  ): Promise<void> {
+    // Minimal stub: write textContent = markdown so tests can control rendered output
+    el.textContent = markdown;
+  }
+}
