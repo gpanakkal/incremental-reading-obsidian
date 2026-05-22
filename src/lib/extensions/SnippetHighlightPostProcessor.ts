@@ -96,28 +96,6 @@ export function registerSnippetHighlightPostProcessor(
           domHighlightEnd - domSectionStart
         );
 
-        // const startOffsetText = sectionText.slice(0, srcStart);
-        // const snippetText = sectionText.slice(srcStart, srcEnd);
-
-        // console.debug({
-        //   // startOffsetText,
-        //   // snippetText,
-        //   sectionBodyRelativeStart,
-        //   highlightOffsetStart: highlight.start_offset,
-        //   // srcStart,
-        //   domStart,
-        //   domEnd,
-        //   domHighlightStart,
-        //   domHighlightEnd,
-        //   // startDiff,
-        //   // endDiff,
-        //   domSectionStart,
-        //   domSectionEnd,
-        //   offsetLength: highlight.end_offset - highlight.start_offset,
-        //   // srcLength: srcEnd - srcStart,
-        //   domLength: domEnd - domStart,
-        // });
-        if (domStart === undefined || domEnd === undefined) continue;
         if (domStart >= domEnd) continue;
 
         // Collect text nodes fresh for each highlight — surroundContents /
@@ -275,7 +253,7 @@ export async function getDomOffsets(
 }
 
 /** Collect all Text nodes in the current section */
-function collectTextNodes(container: HTMLElement): Text[] {
+export function collectTextNodes(container: HTMLElement): Text[] {
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
   const nodes: Text[] = [];
   let node: Node | null;
@@ -292,7 +270,7 @@ function collectTextNodes(container: HTMLElement): Text[] {
  * `domStart` and `domEnd` are offsets into the concatenated text content of
  * all text nodes (the same coordinate space produced by buildSourceToDomOffsetMap).
  */
-function wrapDomRange(
+export function wrapDomRange(
   textNodes: Text[],
   domStart: number,
   domEnd: number,
@@ -337,7 +315,7 @@ interface NodePosition {
  * Given an array of text nodes in document order and a flat character index
  * into their concatenated text content, return the node and offset within it.
  */
-function findNodePosition(
+export function findNodePosition(
   nodes: Text[],
   flatIndex: number
 ): NodePosition | null {
