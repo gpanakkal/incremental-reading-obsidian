@@ -18,7 +18,8 @@
 		"e2e:repeat": "npm run build && cross-env E2E_CLEANUP=1 npx playwright test --project e2e --repeat-each 10",
 		"format": "prettier --write \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" && eslint --fix \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\"",
 		"lint": "eslint \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\"",
-		"version": "node version-bump.mjs && git add manifest.json versions.json"
+		"version": "node version-bump.mjs && git add manifest.json versions.json",
+		"preinstall": "npx only-allow pnpm"
 	},
 	"keywords": [],
 	"author": "Gautam Panakkal <gautampanakkal@gmail.com>",
@@ -31,7 +32,7 @@
 		"preact": "10.28.3",
 		"react": "npm:@preact/compat",
 		"react-dom": "npm:@preact/compat",
-		"react-redux": "9.2.0",
+		"react-redux": "~9.2.0",
 		"sql.js": "1.11.0",
 		"ts-fsrs": "4.6.1"
 	},
@@ -46,16 +47,16 @@
 		"@stryker-mutator/vitest-runner": "9.6.1",
 		"@types/node": "~24.3.0",
 		"@types/sql.js": "~1.4.9",
-		"@vitest/coverage-v8": "4.1.6",
+		"@vitest/coverage-v8": "~4.1.5",
 		"builtin-modules": "~3.3.0",
 		"concurrently": "9.2.1",
 		"cross-env": "10.1.0",
 		"esbuild": "~0.25.9",
 		"esbuild-plugin-wasm": "~1.1.0",
 		"eslint": "9.39.4",
-		"eslint-import-resolver-typescript": "3.10.1",
+		"eslint-import-resolver-typescript": "4.4.4",
 		"eslint-plugin-import": "2.32.0",
-		"eslint-plugin-obsidianmd": "0.1.9",
+		"eslint-plugin-obsidianmd": "^0.2.0",
 		"eslint-plugin-react": "7.37.5",
 		"eslint-plugin-react-hooks": "7.0.1",
 		"fast-check": "4.6.0",
@@ -66,7 +67,7 @@
 		"typescript": "5.9.3",
 		"typescript-eslint": "8.57.1",
 		"vite-tsconfig-paths": "6.1.1",
-		"vitest": "4.1.6",
+		"vitest": "~4.1.5",
 		"wait-on": "9.0.5"
 	}
 }

@@ -1,0 +1,10 @@
+allowBuilds:
+  electron: true
+  esbuild: true
+  obsidian-typings: true
+  unrs-resolver: true
+saveExact: true
+minimumReleaseAge: 20000
+trustPolicyIgnoreAfter: 20000
+trustPolicyExclude:
+  - 'react-redux' # required due to a change in their publishing process https://github.com/reduxjs/reselect/issues/752
