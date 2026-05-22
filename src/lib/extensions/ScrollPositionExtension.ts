@@ -30,11 +30,6 @@ export const scrollPositionExtension = ViewPlugin.define(
       };
 
     const { file, app } = info;
-    if (!file)
-      return {
-        destroy() {},
-      };
-
     // Early return if plugin/file not available or not an IR note
     if (!plugin || !file || !app || !Obsidian.getNoteType(file, app)) {
       return {
@@ -123,12 +118,12 @@ export const scrollPositionExtension = ViewPlugin.define(
       }
 
       // Use MutationObserver to detect when the properties widget appears
-      let timeoutId: number | undefined;
+      let timeoutId: number;
       mutationObserver = new MutationObserver((_mutations, observer) => {
         const widget = contentDOM.querySelector('.metadata-container');
         if (widget) {
           observer.disconnect();
-          if (timeoutId !== undefined) clearTimeout(timeoutId);
+          clearTimeout(timeoutId);
           // Give the widget a moment to finish layout
           requestAnimationFrame(() => {
             void restoreScrollPosition();
