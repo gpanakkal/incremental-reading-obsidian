@@ -23,7 +23,7 @@ export function generateId(length: number = 5): string {
 export function getDateTimeStringUTC(date?: Date) {
   const dateToUse = date ?? new Date();
   let formatted = `${dateToUse.getUTCFullYear()}-${dateToUse.getUTCMonth() + 1}-${dateToUse.getUTCDate()}`;
-  formatted += `T${dateToUse.getHours()}H${dateToUse.getMinutes()}M`;
+  formatted += `T${dateToUse.getUTCHours()}H${dateToUse.getUTCMinutes()}M`;
   return formatted;
 }
 
