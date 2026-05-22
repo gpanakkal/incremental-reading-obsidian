@@ -17,9 +17,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
-          cache-dependency-path: package-lock.json
           cache: 'pnpm'
-      - run: pnpm install
+      - run: pnpm install --frozen-lockfile
       - run: pnpm run build
 
   unit-tests:
@@ -33,9 +32,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
-          cache-dependency-path: package-lock.json
           cache: 'pnpm'
-      - run: pnpm install
+      - run: pnpm install --frozen-lockfile
       - run: pnpm test
 
   e2e:
@@ -53,9 +51,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
-          cache-dependency-path: package-lock.json
           cache: 'pnpm'
-      - run: pnpm install
+      - run: pnpm install --frozen-lockfile
 
       - name: Setup Obsidian (macOS/Linux)
         if: runner.os != 'Windows'
