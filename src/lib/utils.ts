@@ -129,7 +129,7 @@ export function compareDates(a: number | Date | null, b: number | Date | null) {
   if (a === null) return 1;
   if (b === null) return -1;
   const [aNum, bNum] = [a, b].map((val) =>
-    typeof val === 'number' ? val : Date.parse(val.toUTCString())
+    typeof val === 'number' ? val : val.getTime()
   );
 
   return aNum - bNum;
