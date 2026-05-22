@@ -12,8 +12,18 @@ const config = {
   testRunner: 'vitest',
   testRunner_comment:
     'Take a look at https://stryker-mutator.io/docs/stryker-js/vitest-runner for information about the vitest plugin.',
+  mutate: ['src/**/*.ts', '!src/**/*.test.ts', '!src/test/**'],
+  ignorePatterns: [
+    'e2e-tests/',
+    'coverage/',
+    'docs/',
+    'reports/',
+    '**/.*',
+    '/*.*',
+    '!vitest.config.ts',
+  ],
   checkers: ['typescript'],
-  tsconfigFile: 'tsconfig.json',
+  tsconfigFile: 'tsconfig.stryker.json',
   coverageAnalysis: 'perTest',
 };
 export default config;
