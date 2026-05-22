@@ -150,7 +150,6 @@ export function searchAll(text: string, pattern: RegExp) {
     }
     const { index } = next.value;
     const matchText = next.value[0];
-    if (index === undefined) throw new TypeError(`Index must be a number`);
     results.push({ match: matchText, index });
   }
 
