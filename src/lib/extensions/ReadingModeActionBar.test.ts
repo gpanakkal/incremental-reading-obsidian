@@ -3,7 +3,6 @@
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import * as ActionBarExtension from '#/lib/extensions/ActionBarExtension';
 import ReviewView from '#/views/ReviewView';
-import fc from 'fast-check';
 import { MarkdownView, type TFile, type WorkspaceLeaf } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerReadingModeActionBar } from './ReadingModeActionBar';
@@ -141,22 +140,17 @@ describe('registerReadingModeActionBar', () => {
       expect(ActionBarExtension.renderStandaloneActionBarDOM).not.toHaveBeenCalled();
     });
 
-    it('property: does not mount for any mode other than "preview"', () => {
-      fc.assert(
-        fc.property(
-          fc.string().filter((s) => s !== 'preview'),
-          (mode) => {
-            vi.clearAllMocks();
-            vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => {});
-            vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('article');
-            const leaf = makeMarkdownLeaf({ mode });
-            const plugin = makePlugin([leaf]);
-            registerReadingModeActionBar(plugin as never);
-            expect(ActionBarExtension.renderStandaloneActionBarDOM).not.toHaveBeenCalled();
-          }
-        )
-      );
-    });
+    it.each(['source', 'live', '', 'other'])(
+      'does not mount for mode %j (not "preview")',
+      (mode) => {
+        vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => {});
+        vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('article');
+        const leaf = makeMarkdownLeaf({ mode });
+        const plugin = makePlugin([leaf]);
+        registerReadingModeActionBar(plugin as never);
+        expect(ActionBarExtension.renderStandaloneActionBarDOM).not.toHaveBeenCalled();
+      }
+    );
   });
 
   describe('sync() — MarkdownView in preview, file is null', () => {
@@ -205,23 +199,18 @@ describe('registerReadingModeActionBar', () => {
       expect(containerEl.firstElementChild?.className).toContain('ir-reading-mode-bar');
     });
 
-    it('property: mounts for every valid NoteType', () => {
-      fc.assert(
-        fc.property(
-          fc.constantFrom('article' as const, 'snippet' as const, 'card' as const),
-          (noteType) => {
-            vi.clearAllMocks();
-            vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => {});
-            vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue(noteType);
-            const containerEl = makeContainerEl();
-            const leaf = makeMarkdownLeaf({ containerEl });
-            const plugin = makePlugin([leaf]);
-            registerReadingModeActionBar(plugin as never);
-            expect(ActionBarExtension.renderStandaloneActionBarDOM).toHaveBeenCalledOnce();
-          }
-        )
-      );
-    });
+    it.each(['article', 'snippet', 'card'] as const)(
+      'mounts for NoteType %j',
+      (noteType) => {
+        vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => {});
+        vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue(noteType);
+        const containerEl = makeContainerEl();
+        const leaf = makeMarkdownLeaf({ containerEl });
+        const plugin = makePlugin([leaf]);
+        registerReadingModeActionBar(plugin as never);
+        expect(ActionBarExtension.renderStandaloneActionBarDOM).toHaveBeenCalledOnce();
+      }
+    );
   });
 
   describe('mount() — idempotency', () => {
