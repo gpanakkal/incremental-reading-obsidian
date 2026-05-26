@@ -45,7 +45,7 @@ export class ArticleManager extends ItemManager {
     return {
       ...articleRow,
       type: 'article',
-      due: articleRow.due ? new Date(articleRow.due) : null,
+      due: articleRow.due !== null ? new Date(articleRow.due) : null,
       dismissed: Boolean(articleRow.dismissed),
     };
   }
@@ -54,7 +54,7 @@ export class ArticleManager extends ItemManager {
     const { type: _, ...rest } = article;
     return {
       ...rest,
-      due: article.due ? Date.parse(article.due.toISOString()) : null,
+      due: article.due !== null ? Date.parse(article.due.toISOString()) : null,
       dismissed: Number(article.dismissed),
     };
   }
