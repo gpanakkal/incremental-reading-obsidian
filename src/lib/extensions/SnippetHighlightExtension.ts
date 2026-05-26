@@ -1,7 +1,7 @@
 import { Annotation, RangeSetBuilder, StateEffect } from '@codemirror/state';
 import type { DecorationSet, EditorView, ViewUpdate } from '@codemirror/view';
 import { Decoration, ViewPlugin } from '@codemirror/view';
-import type { TFile } from 'obsidian';
+import { type TFile } from 'obsidian';
 import type ReviewManager from '../items/ReviewManager';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type {
@@ -215,28 +215,14 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         clearTimeout(this.persistTimeout);
       }
       this.persistTimeout = setTimeout(() => {
-        void this.persistHighlights(reviewManager, file, highlights);
+        void this.persistHighlights(reviewManager, highlights);
       }, 2000); // 2 second debounce
     }
 
     private async persistHighlights(
       reviewManager: ReviewManager,
-      file: TFile,
       highlights: SnippetHighlight[]
     ) {
-      if (!file) return;
-
-      // const highlights = reviewManager.snippets.offsetTracker.getHighlights(
-      //   this.file.path
-      // );
-      // console.log(
-      //   `[SnippetHighlightExtension] Persisting ${highlights.length} highlights to database`,
-      //   highlights.map((h: SnippetHighlight) => ({
-      //     id: h.id.slice(0, 8),
-      //     start: h.start_offset,
-      //     end: h.end_offset,
-      //   }))
-      // );
       for (const h of highlights) {
         await reviewManager.updateSnippetOffsets(
           h.id,
@@ -244,7 +230,6 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           h.end_offset
         );
       }
-      // console.log(`[SnippetHighlightExtension] Persistence complete`);
     }
 
     private buildDecorations(
