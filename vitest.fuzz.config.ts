@@ -11,7 +11,7 @@ export default mergeConfig(baseConfig, {
       FC_VERBOSE: process.env.FC_VERBOSE ?? 'true',
       FC_END_ON_FAILURE: process.env.FC_END_ON_FAILURE ?? 'false',
     },
-    reporters: [['verbose']],
+    reporters: [['verbose', 'html']],
     threads: {
       singleThread: true,
     },
