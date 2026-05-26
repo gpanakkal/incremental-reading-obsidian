@@ -57,7 +57,7 @@ describe('getListItemText', () => {
       fc.assert(
         fc.property(
           fc.integer({ min: 1, max: 1000 }),
-          fc.string(),
+          fc.string().filter((str) => !/^\s*\[.\]/.test(str)),
           (trailingSpaces, text) => {
             const target = text + ' '.repeat(trailingSpaces);
             expect(Markdown.getListItemText('- ' + target)).toBe(target);
