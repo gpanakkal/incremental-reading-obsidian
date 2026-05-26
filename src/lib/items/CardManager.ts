@@ -23,6 +23,7 @@ import {
   MS_PER_DAY,
   SOURCE_PROPERTY_NAME,
   TRANSCLUSION_HIDE_TITLE_ALIAS,
+  VALID_DELIMITER_PATTERN,
 } from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
@@ -377,7 +378,7 @@ export class CardManager extends ItemManager {
     delimiters: [string, string]
   ): { start: string; answer: string; end: string } {
     if (
-      !delimiters.every((delimiter) => /^[^\w\s].*[^\w\s]$/.test(delimiter))
+      !delimiters.every((delimiter) => VALID_DELIMITER_PATTERN.test(delimiter))
     ) {
       throw new Error(
         `Delimiters cannot start or end with spaces, letters, or digits. ` +

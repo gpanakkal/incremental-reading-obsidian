@@ -85,6 +85,8 @@ export const LEGACY_CLOZE_DELIMITERS: [string, string] = ['{{', '}}'];
 
 export const CLOZE_DELIMITERS: [string, string] = ['(}', '{)'];
 
+export const VALID_DELIMITER_PATTERN = /^[^\w\s].*[^\w\s]$/;
+
 /** Escapes characters in the input for literal regex interpretation */
 export const literal = (pattern: string) =>
   pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

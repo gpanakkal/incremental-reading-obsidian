@@ -4,6 +4,7 @@ import {
   CLOZE_DELIMITERS,
   MS_PER_DAY,
   MS_PER_YEAR,
+  VALID_DELIMITER_PATTERN,
 } from '#/lib/constants';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
@@ -169,8 +170,8 @@ const cardRowArb: fc.Arbitrary<SRSCardRow> = fc.record<SRSCardRow>({
 /** Valid delimiter pairs for testing getClozeGroupsPattern */
 const delimiterArb = fc
   .tuple(
-    fc.string({ minLength: 1, maxLength: 4 }).filter((s) => !s.includes(' ')),
-    fc.string({ minLength: 1, maxLength: 4 }).filter((s) => !s.includes(' '))
+    fc.stringMatching(VALID_DELIMITER_PATTERN),
+    fc.stringMatching(VALID_DELIMITER_PATTERN)
   )
   .filter(([l, r]) => l !== r);
 
@@ -546,27 +547,50 @@ describe('parseCloze', () => {
     ).toThrow();
   });
 
-  it('works with custom delimiters', async () => {
+  it('throws when given invalid delimiters', async () => {
+    const invalidDelimiterArb = fc
+      .string({ minLength: 1 })
+      .filter((s) => !/^[^\w\s].*[^\w\s]$/.test(s));
+    // At least one of the two delimiters must be invalid
+    const atLeastOneInvalidArb = fc
+      .tuple(fc.string({ minLength: 1 }), fc.string({ minLength: 1 }))
+      .filter(
+        ([l, r]) =>
+          !/^[^\w\s].*[^\w\s]$/.test(l) || !/^[^\w\s].*[^\w\s]$/.test(r)
+      );
     await fc.assert(
-      fc.asyncProperty(
-        delimiterArb.filter(
-          // Exclude delimiter strings that appear inside the fixed prefix/answer/suffix strings,
-          // so the greedy-then-lazy regex groups match unambiguously.
-          ([left, right]) =>
-            !`beforemyAnswerafter`.includes(left) &&
-            !`beforemyAnswerafter`.includes(right)
-        ),
-        async ([left, right]) => {
-          const answer = 'myAnswer';
-          const repo = makeRepo();
-          const manager = new CardManager(makePlugin(), repo);
-          const text = `before${left}${answer}${right}after`;
-          const result = manager.parseCloze(text, [left, right]);
-          expect(result.answer).toBe(answer);
-          expect(result.start).toBe('before');
-          expect(result.end).toBe('after');
-        }
-      )
+      fc.asyncProperty(atLeastOneInvalidArb, async ([left, right]) => {
+        const repo = makeRepo();
+        const manager = new CardManager(makePlugin(), repo);
+        expect(() =>
+          manager.parseCloze(`${left}answer${right}`, [left, right])
+        ).toThrow();
+      })
+    );
+    // Also check that a single invalid delimiter alone always throws
+    await fc.assert(
+      fc.asyncProperty(invalidDelimiterArb, async (invalid) => {
+        const repo = makeRepo();
+        const manager = new CardManager(makePlugin(), repo);
+        expect(() =>
+          manager.parseCloze(`${invalid}answer${invalid}`, [invalid, invalid])
+        ).toThrow();
+      })
+    );
+  });
+
+  it('works with valid delimiters', async () => {
+    await fc.assert(
+      fc.asyncProperty(delimiterArb, async ([left, right]) => {
+        const answer = 'myAnswer';
+        const repo = makeRepo();
+        const manager = new CardManager(makePlugin(), repo);
+        const text = `before${left}${answer}${right}after`;
+        const result = manager.parseCloze(text, [left, right]);
+        expect(result.answer).toBe(answer);
+        expect(result.start).toBe('before');
+        expect(result.end).toBe('after');
+      })
     );
   });
 });
