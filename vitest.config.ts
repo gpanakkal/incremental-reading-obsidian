@@ -10,7 +10,12 @@ export default defineConfig({
     },
   },
   test: {
-    exclude: ['**/node_modules/**', '**/e2e-tests/**', '.stryker-tmp/'],
+    exclude: [
+      '**/node_modules/**',
+      '**/e2e-tests/**',
+      '.stryker-tmp/',
+      'src/test/**',
+    ],
     coverage: {
       provider: 'v8',
     },
