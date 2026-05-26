@@ -736,9 +736,6 @@ describe('adjustFixedIntervalOnChange', () => {
   });
 
   it('strips non-digit, non-dot characters', () => {
-    // BUG: the current regex /(?![\d.])/g does not actually strip characters.
-    // The correct regex should be /[^\d.]/g.
-    // These tests are written for the FIXED behavior and will pass once the bug is fixed.
     fc.assert(
       fc.property(
         // A valid digit base that won't throw on its own after stripping
