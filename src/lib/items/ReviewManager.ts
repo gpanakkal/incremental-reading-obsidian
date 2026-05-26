@@ -359,7 +359,6 @@ export default class ReviewManager {
     file: TFile
   ): Promise<{ top: number; left: number } | null> {
     const noteType = Obsidian.getNoteType(file, this.app);
-    if (!noteType || noteType === 'card') return null;
 
     let row: ArticleRow | SnippetRow | null = null;
     if (noteType === 'article') {
@@ -368,7 +367,7 @@ export default class ReviewManager {
       row = await this.snippets.findSnippet(file);
     }
 
-    if (row && typeof row.scroll_top === 'number' && row.scroll_top > 0) {
+    if (row && row.scroll_top > 0) {
       return { top: row.scroll_top, left: 0 };
     }
 
