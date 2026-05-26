@@ -54,7 +54,7 @@ export class SnippetManager extends ItemManager {
     return {
       ...snippetRow,
       type: 'snippet',
-      due: snippetRow.due ? new Date(snippetRow.due) : null,
+      due: snippetRow.due !== null ? new Date(snippetRow.due) : null,
       dismissed: Boolean(snippetRow.dismissed),
     };
   }
@@ -151,7 +151,7 @@ export class SnippetManager extends ItemManager {
     firstReview?: number
   ) {
     const snippetDueTime =
-      firstReview || Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
+      firstReview ?? Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
 
     // capture the current file BEFORE any async operations
     // to avoid race conditions where view.file changes during processing
@@ -553,7 +553,7 @@ export class SnippetManager extends ItemManager {
     reviewTime?: number,
     nextReviewInterval?: number
   ) {
-    const reviewed = reviewTime || Date.now();
+    const reviewed = reviewTime ?? Date.now();
     const nextInterval =
       nextReviewInterval ?? IRScheduler.nextInterval(snippet);
     const nextDueTime = reviewed + nextInterval;
