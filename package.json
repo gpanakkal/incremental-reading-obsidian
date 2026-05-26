@@ -9,6 +9,7 @@
 		"check": "tsc --noEmit --skipLibCheck",
 		"build": "pnpm run check && node esbuild.config.mjs production",
 		"test": "vitest run",
+		"fuzz": "vitest run --config vitest.fuzz.config.ts",
 		"e2e:setup": "pnpm run build && pnpm exec playwright test --project e2e-setup",
 		"e2e": "pnpm run build && cross-env E2E_CLEANUP=1 pnpm exec playwright test --project e2e",
 		"e2e:ui": "pnpm run build && cross-env E2E_CLEANUP=1 pnpm exec playwright test --ui --project e2e",
