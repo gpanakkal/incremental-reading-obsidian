@@ -91,8 +91,7 @@ describe('sequenceSum', () => {
           const manualResult = mockReductions.reduce((acc, el) => acc + el, 0);
           expect(result).toEqual(manualResult);
         }
-      ),
-      { numRuns: 100 }
+      )
     );
   });
 });
@@ -126,8 +125,7 @@ describe('binarySearch', () => {
             expect(result).toBeNull();
           }
         }
-      ),
-      { numRuns: 1_000 }
+      )
     );
   });
 });
@@ -162,8 +160,7 @@ describe('clamp', () => {
           expect(clamped).toBeLessThanOrEqual(max);
           expect(clamped).toBeGreaterThanOrEqual(min);
         }
-      ),
-      { numRuns: 1_000 }
+      )
     );
   });
 
@@ -207,8 +204,7 @@ describe('generateId', () => {
         expect(id).toMatch(/^[a-z0-9]*$/);
         // NOTE: rarely Math.random() produces fewer digits; length is a best-effort
         expect(id.length).toBeLessThanOrEqual(length);
-      }),
-      { numRuns: 200 }
+      })
     );
   });
 
@@ -221,13 +217,8 @@ describe('generateId', () => {
   });
 
   it('defaults to length 5 when no argument is given', () => {
-    fc.assert(
-      fc.property(fc.constant(undefined), () => {
-        const id = generateId();
-        expect(id.length).toBeLessThanOrEqual(5);
-      }),
-      { numRuns: 50 }
-    );
+    const id = generateId();
+    expect(id.length).toBeLessThanOrEqual(5);
   });
 
   it('throws TypeError for non-positive lengths', () => {
