@@ -170,7 +170,7 @@ export default class IRScheduler {
     futureReviewCount: number
   ) {
     this.validateReviewCount(futureReviewCount);
-    if (!text.due)
+    if (text.due === null)
       throw new Error(
         `Passed text (${text.reference}) is not scheduled for review`
       );
@@ -248,7 +248,7 @@ export default class IRScheduler {
    */
   static adjustDisplayPriorityOnChange(displayPriority: string) {
     // remove invalid characters
-    const filtered = displayPriority.replaceAll(/(?![\d.])/g, '');
+    const filtered = displayPriority.replaceAll(/([^\d.])/g, '');
     // add a leading zero if needed
     const implicitZeroImputed = filtered.startsWith('.')
       ? '0' + filtered
@@ -299,11 +299,7 @@ export default class IRScheduler {
    */
   static adjustFixedIntervalOnChange(displayInterval: string) {
     const errorMsg = `Received an invalid interval "${displayInterval}"`;
-    const filtered = displayInterval.trim().replaceAll(/(?![\d.])/g, '');
-    if (filtered.length === 0) {
-      throw new TypeError(errorMsg);
-    }
-
+    const filtered = displayInterval.trim().replaceAll(/([^\d.])/g, '');
     const parsed = Number.parseInt(filtered);
 
     if (Number.isNaN(parsed)) {
