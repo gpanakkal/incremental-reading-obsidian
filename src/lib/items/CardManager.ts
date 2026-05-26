@@ -376,6 +376,14 @@ export class CardManager extends ItemManager {
     text: string,
     delimiters: [string, string]
   ): { start: string; answer: string; end: string } {
+    if (
+      !delimiters.every((delimiter) => /^[^\w\s].*[^\w\s]$/.test(delimiter))
+    ) {
+      throw new Error(
+        `Delimiters cannot start or end with spaces, letters, or digits. ` +
+          `Received "${delimiters}"`
+      );
+    }
     const currentGroupsPattern = CardManager.getClozeGroupsPattern(delimiters);
     const match = text.match(currentGroupsPattern);
     if (!match)
