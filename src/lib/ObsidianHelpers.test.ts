@@ -329,11 +329,13 @@ describe('createTitle', () => {
     fc.assert(
       fc.property(fc.option(fc.string(), { nil: undefined }), (content) => {
         const title = ObsidianHelpers.createTitle(content);
-        // ID is always present as the last segment
         expect(title.length).toBeGreaterThan(0);
-        // Title should end with some alphanumeric ID
-        const lastSegment = title.split(' - ').pop()!;
-        expect(lastSegment).toMatch(/^[a-z0-9]+$/);
+        // The ID is appended last; extract it by finding the last ' - ' separator.
+        // Using lastIndexOf avoids misidentifying ' - ' embedded in the content segment.
+        const sep = ' - ';
+        const sepIdx = title.lastIndexOf(sep);
+        const idSegment = sepIdx === -1 ? title : title.slice(sepIdx + sep.length);
+        expect(idSegment).toMatch(/^[a-z0-9]+$/);
       })
     );
   });
