@@ -52,7 +52,7 @@ export class CardManager extends ItemManager {
       type: 'card',
       created_at: new Date(created_at),
       due: new Date(due),
-      ...(last_review && {
+      ...(last_review !== null && {
         last_review: new Date(last_review),
       }),
       dismissed: !!dismissed,
@@ -75,7 +75,7 @@ export class CardManager extends ItemManager {
       created_at: Date.parse(created_at.toISOString()),
       due: Date.parse(due.toISOString()),
       dismissed: dismissed ? 1 : 0,
-      last_review: last_review ? Date.parse(last_review?.toISOString()) : null,
+      last_review: last_review ? Date.parse(last_review.toISOString()) : null,
       state: State[state],
     };
   }
@@ -87,7 +87,7 @@ export class CardManager extends ItemManager {
       created_at: Date.parse(created_at.toISOString()),
       due: Date.parse(due.toISOString()),
       dismissed: dismissed ? 1 : 0,
-      last_review: last_review ? Date.parse(last_review?.toISOString()) : null,
+      last_review: last_review ? Date.parse(last_review.toISOString()) : null,
     };
   }
 
@@ -487,7 +487,7 @@ export class CardManager extends ItemManager {
         updatedCard.elapsed_days,
         updatedCard.scheduled_days,
         updatedCard.reps,
-        updatedCard.lapses + storedCard.lapses,
+        updatedCard.lapses,
         updatedCard.state,
         card.id,
       ];
