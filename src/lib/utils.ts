@@ -145,12 +145,12 @@ export function searchAll(text: string, pattern: RegExp) {
   while (!done) {
     const next = matches.next();
     if (next.done) {
-      done = false;
-      break;
+      done = true;
+    } else {
+      const { index } = next.value;
+      const matchText = next.value[0];
+      results.push({ match: matchText, index });
     }
-    const { index } = next.value;
-    const matchText = next.value[0];
-    results.push({ match: matchText, index });
   }
 
   return results;
