@@ -95,7 +95,6 @@ export class SQLJSRepository implements SQLiteRepository {
     }
     // skip reload if the changes resulted from saving this db instance to disk
     if (this.pendingSaveCount > 0) {
-      this.pendingSaveCount--;
       return;
     }
 
@@ -206,8 +205,8 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   protected async save() {
     if (!this.db) throw new Error('Database was not initialized on repository');
+    this.pendingSaveCount++;
     try {
-      this.pendingSaveCount++;
       const data = this.db.export().buffer;
       const dataDir = this.app.vault.getFolderByPath(DATA_DIRECTORY);
       if (!dataDir) {
@@ -218,7 +217,6 @@ export class SQLJSRepository implements SQLiteRepository {
         data as ArrayBuffer
       );
     } catch (error) {
-      this.pendingSaveCount--;
       if (error instanceof Error) {
         console.error('Incremental Reading - Failed to save database:', {
           error: 'message' in error ? error.message : error,
@@ -227,6 +225,8 @@ export class SQLJSRepository implements SQLiteRepository {
         });
         throw error; // Re-throw to surface critical save failures
       }
+    } finally {
+      this.pendingSaveCount--;
     }
   }
 
