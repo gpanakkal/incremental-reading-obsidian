@@ -213,10 +213,10 @@ describe('rowToReviewSnippet', () => {
 
   it('returns null when the file cannot be found', async () => {
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(null);
+    const repo = makeSimpleRepo();
+    const manager = new SnippetManager({} as never, repo);
     await fc.assert(
       fc.asyncProperty(snippetRowArb, async (row) => {
-        const repo = makeSimpleRepo();
-        const manager = new SnippetManager({} as never, repo);
         const result = manager.rowToReviewSnippet(row);
         expect(result).toBeNull();
       })
@@ -226,10 +226,10 @@ describe('rowToReviewSnippet', () => {
   it('returns a ReviewSnippet with correct data and file when the file exists', async () => {
     const fakeFile = { path: 'snippets/test.md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
+    const repo = makeSimpleRepo();
+    const manager = new SnippetManager({} as never, repo);
     await fc.assert(
       fc.asyncProperty(snippetRowArb, async (row) => {
-        const repo = makeSimpleRepo();
-        const manager = new SnippetManager({} as never, repo);
         const result = manager.rowToReviewSnippet(row);
         expect(result).not.toBeNull();
         expect(result!.file).toBe(fakeFile);

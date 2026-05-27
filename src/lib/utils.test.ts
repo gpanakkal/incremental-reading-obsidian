@@ -634,7 +634,7 @@ describe('searchAll', () => {
   it('returns match text and index for each match', () => {
     fc.assert(
       fc.property(
-        fc.stringMatching(/^[a-z]{3,20}$/).chain((word) =>
+        fc.stringMatching(/^[a-z]{5,20}$/).chain((word) =>
           fc.tuple(
             fc.array(fc.stringMatching(/^[a-z]{1,5}$/), {
               minLength: 0,

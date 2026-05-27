@@ -180,13 +180,19 @@ const delimiterArb = fc
 describe('rowToDisplay', () => {
   it('converts created_at and due from ms timestamps to Date objects', async () => {
     await fc.assert(
-      fc.asyncProperty(cardRowArb, async (row) => {
-        const display = CardManager.rowToDisplay(row);
-        expect(display.created_at).toBeInstanceOf(Date);
-        expect(display.due).toBeInstanceOf(Date);
-        expect(display.created_at.getTime()).toBe(row.created_at);
-        expect(display.due.getTime()).toBe(row.due);
-      })
+      fc.asyncProperty(
+        fc.integer({ min: 0, max: Date.now() + MS_PER_YEAR * 100 }),
+        fc.integer({ min: 0, max: Date.now() + MS_PER_YEAR * 100 }),
+
+        async (createdAt, due) => {
+          const row = { created_at: createdAt, due } as SRSCardRow;
+          const display = CardManager.rowToDisplay(row);
+          expect(display.created_at).toBeInstanceOf(Date);
+          expect(display.due).toBeInstanceOf(Date);
+          expect(display.created_at.getTime()).toBe(row.created_at);
+          expect(display.due.getTime()).toBe(row.due);
+        }
+      )
     );
   });
 

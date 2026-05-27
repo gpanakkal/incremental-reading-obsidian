@@ -232,8 +232,11 @@ describe('ReviewManager.getDue', () => {
   it('returns only items that are due and belong to the specified typesToInclude', async () => {
     await fc.assert(
       fc.asyncProperty(
-        // Generate a "current time" between year 2000 and 2100
-        fc.integer({ min: YEAR_2000_MS, max: YEAR_2100_MS }),
+        // Generate a "current time" between year 2000 and 2100 at day granularity.
+        // Using day offsets (not milliseconds) shrinks the search space from ~3 trillion
+        // to ~36 500 values, keeping shrinking fast without losing meaningful coverage.
+        fc.integer({ min: 0, max: Math.floor((YEAR_2100_MS - YEAR_2000_MS) / MS_PER_DAY) })
+          .map((days) => YEAR_2000_MS + days * MS_PER_DAY),
         // Generate a non-empty subset of note types to include
         fc.subarray(['article', 'snippet', 'card'] as const, { minLength: 1 }),
         async (nowMs, includedTypes) => {
@@ -255,32 +258,27 @@ describe('ReviewManager.getDue', () => {
           const plugin = makePlugin();
           const manager = new ReviewManager(plugin, repo);
 
-          // Mock each sub-manager's getDue to return [due, notDue], simulating the
-          // SQL `due <= dueBy` filter: only return items whose due <= the passed dueBy.
-          vi.spyOn(manager.articles, 'getDue').mockImplementation(
-            async (dueBy) => {
-              const cutoff = dueBy ?? nowMs;
-              return [dueArticle, notDueArticle].filter(
-                (r) => r.data.due !== null && r.data.due <= cutoff
-              );
-            }
-          );
-          vi.spyOn(manager.snippets, 'getDue').mockImplementation(
-            async (dueBy) => {
-              const cutoff = dueBy ?? nowMs;
-              return [dueSnippet, notDueSnippet].filter(
-                (r) => r.data.due !== null && r.data.due <= cutoff
-              );
-            }
-          );
-          vi.spyOn(manager.cards, 'getDue').mockImplementation(
-            async (dueBy) => {
-              const cutoff = dueBy ?? nowMs;
-              return [dueCard, notDueCard].filter(
-                (r) => r.data.due.getTime() <= cutoff
-              );
-            }
-          );
+          // Direct assignment avoids registering Vitest spies on every iteration
+          // (50 000 spies × 3 sub-managers would exhaust heap before afterEach fires).
+          // We don't assert call counts here, so a tracked spy isn't needed.
+          manager.articles.getDue = async (dueBy) => {
+            const cutoff = dueBy ?? nowMs;
+            return [dueArticle, notDueArticle].filter(
+              (r) => r.data.due !== null && r.data.due <= cutoff
+            );
+          };
+          manager.snippets.getDue = async (dueBy) => {
+            const cutoff = dueBy ?? nowMs;
+            return [dueSnippet, notDueSnippet].filter(
+              (r) => r.data.due !== null && r.data.due <= cutoff
+            );
+          };
+          manager.cards.getDue = async (dueBy) => {
+            const cutoff = dueBy ?? nowMs;
+            return [dueCard, notDueCard].filter(
+              (r) => r.data.due.getTime() <= cutoff
+            );
+          };
 
           const result = await manager.getDue({ typesToInclude });
 
@@ -496,13 +494,15 @@ describe('ReviewManager.reprioritize', () => {
         const repo = makeRepo();
         const manager = new ReviewManager(makePlugin(), repo);
         const article = makeArticleBase();
-        const spy = vi
-          .spyOn(manager.articles, 'reprioritize')
-          .mockResolvedValue(undefined as never);
-        const snippetSpy = vi.spyOn(manager.snippets, 'reprioritize');
+        // vi.fn() assigned directly: tracked per-iteration object, not added to
+        // Vitest's global restore list (unlike vi.spyOn), so it won't accumulate.
+        const articleMock = vi.fn().mockResolvedValue(undefined);
+        const snippetMock = vi.fn().mockResolvedValue(undefined);
+        manager.articles.reprioritize = articleMock;
+        manager.snippets.reprioritize = snippetMock;
         await manager.reprioritize(article, priority);
-        expect(spy).toHaveBeenCalledWith(article, priority);
-        expect(snippetSpy).not.toHaveBeenCalled();
+        expect(articleMock).toHaveBeenCalledWith(article, priority);
+        expect(snippetMock).not.toHaveBeenCalled();
       })
     );
   });
@@ -513,13 +513,13 @@ describe('ReviewManager.reprioritize', () => {
         const repo = makeRepo();
         const manager = new ReviewManager(makePlugin(), repo);
         const snippet = makeSnippetBase();
-        const spy = vi
-          .spyOn(manager.snippets, 'reprioritize')
-          .mockResolvedValue(undefined as never);
-        const articleSpy = vi.spyOn(manager.articles, 'reprioritize');
+        const articleMock = vi.fn().mockResolvedValue(undefined);
+        const snippetMock = vi.fn().mockResolvedValue(undefined);
+        manager.articles.reprioritize = articleMock;
+        manager.snippets.reprioritize = snippetMock;
         await manager.reprioritize(snippet, priority);
-        expect(spy).toHaveBeenCalledWith(snippet, priority);
-        expect(articleSpy).not.toHaveBeenCalled();
+        expect(snippetMock).toHaveBeenCalledWith(snippet, priority);
+        expect(articleMock).not.toHaveBeenCalled();
       })
     );
   });
@@ -542,13 +542,13 @@ describe('ReviewManager.manageFixedInterval', () => {
           const repo = makeRepo();
           const manager = new ReviewManager(makePlugin(), repo);
           const article = makeArticleBase();
-          const spy = vi
-            .spyOn(manager.articles, 'setFixedInterval')
-            .mockResolvedValue(undefined as never);
-          const disableSpy = vi.spyOn(manager.articles, 'disableFixedInterval');
+          const setMock = vi.fn().mockResolvedValue(undefined);
+          const disableMock = vi.fn().mockResolvedValue(undefined);
+          manager.articles.setFixedInterval = setMock;
+          manager.articles.disableFixedInterval = disableMock;
           await manager.manageFixedInterval(article, { newIntervalDays });
-          expect(spy).toHaveBeenCalledWith(article, newIntervalDays);
-          expect(disableSpy).not.toHaveBeenCalled();
+          expect(setMock).toHaveBeenCalledWith(article, newIntervalDays);
+          expect(disableMock).not.toHaveBeenCalled();
         }
       )
     );
@@ -562,13 +562,13 @@ describe('ReviewManager.manageFixedInterval', () => {
           const repo = makeRepo();
           const manager = new ReviewManager(makePlugin(), repo);
           const article = makeArticleBase();
-          const spy = vi
-            .spyOn(manager.articles, 'disableFixedInterval')
-            .mockResolvedValue(undefined as never);
-          const setSpy = vi.spyOn(manager.articles, 'setFixedInterval');
+          const setMock = vi.fn().mockResolvedValue(undefined);
+          const disableMock = vi.fn().mockResolvedValue(undefined);
+          manager.articles.setFixedInterval = setMock;
+          manager.articles.disableFixedInterval = disableMock;
           await manager.manageFixedInterval(article, { newPriority });
-          expect(spy).toHaveBeenCalledWith(article, newPriority);
-          expect(setSpy).not.toHaveBeenCalled();
+          expect(disableMock).toHaveBeenCalledWith(article, newPriority);
+          expect(setMock).not.toHaveBeenCalled();
         }
       )
     );
@@ -1011,6 +1011,7 @@ describe('ReviewManager.saveScrollPosition', () => {
         fc.asyncProperty(
           fc.float({ min: 0, max: 10000, noNaN: true }),
           async (top) => {
+            vi.restoreAllMocks();
             const repo = makeRepo();
             const manager = new ReviewManager(makePlugin(), repo);
             vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(noteType);
@@ -1080,6 +1081,7 @@ describe('ReviewManager.loadScrollPosition', () => {
       fc.asyncProperty(
         fc.integer({ min: 1, max: 100000 }),
         async (scrollTop) => {
+          vi.restoreAllMocks();
           const repo = makeRepo();
           const manager = new ReviewManager(makePlugin(), repo);
           vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
@@ -1118,6 +1120,7 @@ describe('ReviewManager.loadScrollPosition', () => {
       fc.asyncProperty(
         fc.integer({ min: 1, max: 100000 }),
         async (scrollTop) => {
+          vi.restoreAllMocks();
           const repo = makeRepo();
           const manager = new ReviewManager(makePlugin(), repo);
           vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
