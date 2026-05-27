@@ -564,6 +564,7 @@ describe('buildDecorations', () => {
   });
 
   it('property: no throw for arbitrary highlight offsets and doc strings', async () => {
+    stubFileInfo(FILE_PATH, 'article');
     await fc.assert(
       fc.asyncProperty(
         fc.array(
@@ -583,16 +584,8 @@ describe('buildDecorations', () => {
             )
           );
           const irPlugin = makePlugin(rm);
-          vi.spyOn(Obsidian, 'getFileInfoFromState').mockReturnValue({
-            info: { file: { path: FILE_PATH }, app: {} } as never,
-            editorView: null,
-          });
-          vi.spyOn(Obsidian, 'isSourceNote').mockReturnValue(false);
-          vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
-          vi.spyOn(Obsidian, 'getBodyStartOffset').mockReturnValue(0);
           const view = makeView(doc, irPlugin);
           view.destroy();
-          vi.restoreAllMocks();
         }
       )
     );
