@@ -6,6 +6,10 @@ export default defineConfig({
   resolve: {
     alias: {
       obsidian: resolve(__dirname, 'src/test/__mocks__/obsidian.ts'),
+      '#/db/sql-wasm.wasm': resolve(
+        __dirname,
+        'src/test/__mocks__/sql-wasm.ts'
+      ),
       '#': resolve(__dirname, 'src'),
     },
   },
