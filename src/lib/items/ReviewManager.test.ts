@@ -1,5 +1,5 @@
 /* eslint-disable obsidianmd/no-tfile-tfolder-cast -- this is a test file */
-import { DATA_DIRECTORY } from '#/lib/constants';
+import { DATA_DIRECTORY, MS_PER_DAY } from '#/lib/constants';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   ArticleRow,
@@ -11,8 +11,8 @@ import type {
   ReviewItem,
   ReviewSnippet,
   SnippetRow,
-  SRSCardRow,
   SQLiteRepository,
+  SRSCardRow,
 } from '#/lib/types';
 import fc from 'fast-check';
 import type { TAbstractFile, TFile } from 'obsidian';
@@ -138,12 +138,18 @@ function makeReviewItem(type: NoteType, id = 'item-1'): ReviewItem {
   if (type === 'article') {
     return {
       data: makeArticleBase({ id }),
-      file: { ...FAKE_FILE, path: `${DATA_DIRECTORY}/articles/${id}.md` } as TFile,
+      file: {
+        ...FAKE_FILE,
+        path: `${DATA_DIRECTORY}/articles/${id}.md`,
+      } as TFile,
     } satisfies ReviewArticle;
   } else if (type === 'snippet') {
     return {
       data: makeSnippetBase({ id }),
-      file: { ...FAKE_FILE, path: `${DATA_DIRECTORY}/snippets/${id}.md` } as TFile,
+      file: {
+        ...FAKE_FILE,
+        path: `${DATA_DIRECTORY}/snippets/${id}.md`,
+      } as TFile,
     } satisfies ReviewSnippet;
   } else {
     return {
@@ -215,7 +221,7 @@ function makeReviewCard(due: number): ReviewCard {
 
 describe('ReviewManager.getDue', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['Date'] });
   });
 
   afterEach(() => {
@@ -239,11 +245,11 @@ describe('ReviewManager.getDue', () => {
 
           // For each type: one item due at nowMs (due), one item due after nowMs (not due)
           const dueArticle = makeReviewArticle(nowMs);
-          const notDueArticle = makeReviewArticle(nowMs + 1);
+          const notDueArticle = makeReviewArticle(nowMs + MS_PER_DAY);
           const dueSnippet = makeReviewSnippet(nowMs);
-          const notDueSnippet = makeReviewSnippet(nowMs + 1);
+          const notDueSnippet = makeReviewSnippet(nowMs + MS_PER_DAY);
           const dueCard = makeReviewCard(nowMs);
-          const notDueCard = makeReviewCard(nowMs + 1);
+          const notDueCard = makeReviewCard(nowMs + MS_PER_DAY);
 
           const repo = makeRepo();
           const plugin = makePlugin();
@@ -367,7 +373,9 @@ describe('ReviewManager delegation', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     const fakeResult = { start: 'before', answer: 'cloze', end: 'after' };
-    const spy = vi.spyOn(manager.cards, 'parseCloze').mockReturnValue(fakeResult);
+    const spy = vi
+      .spyOn(manager.cards, 'parseCloze')
+      .mockReturnValue(fakeResult);
     const result = manager.parseCloze('text (}cloze{)', ['(}', '{)']);
     expect(spy).toHaveBeenCalledWith('text (}cloze{)', ['(}', '{)']);
     expect(result).toEqual(fakeResult);
@@ -377,7 +385,9 @@ describe('ReviewManager delegation', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     const card = CardManager.rowToDisplay(makeCardRow());
-    const spy = vi.spyOn(manager.cards, 'review').mockResolvedValue(undefined as never);
+    const spy = vi
+      .spyOn(manager.cards, 'review')
+      .mockResolvedValue(undefined as never);
     await manager.reviewCard(card, 3 as never);
     expect(spy).toHaveBeenCalledWith(card, 3, undefined);
   });
@@ -386,7 +396,9 @@ describe('ReviewManager delegation', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     const card = CardManager.rowToDisplay(makeCardRow());
-    const spy = vi.spyOn(manager.cards, 'review').mockResolvedValue(undefined as never);
+    const spy = vi
+      .spyOn(manager.cards, 'review')
+      .mockResolvedValue(undefined as never);
     const t = new Date();
     await manager.reviewCard(card, 1 as never, t);
     expect(spy).toHaveBeenCalledWith(card, 1, t);
@@ -395,7 +407,9 @@ describe('ReviewManager delegation', () => {
   it('getSnippetHighlights delegates to snippets.getHighlights', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    const spy = vi.spyOn(manager.snippets, 'getHighlights').mockResolvedValue([]);
+    const spy = vi
+      .spyOn(manager.snippets, 'getHighlights')
+      .mockResolvedValue([]);
     await manager.getSnippetHighlights(FAKE_FILE);
     expect(spy).toHaveBeenCalledWith(FAKE_FILE);
   });
@@ -403,7 +417,9 @@ describe('ReviewManager delegation', () => {
   it('updateSnippetOffsets delegates to snippets.updateOffsets', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    const spy = vi.spyOn(manager.snippets, 'updateOffsets').mockResolvedValue(undefined as never);
+    const spy = vi
+      .spyOn(manager.snippets, 'updateOffsets')
+      .mockResolvedValue(undefined as never);
     await manager.updateSnippetOffsets('snip-1', 10, 20);
     expect(spy).toHaveBeenCalledWith('snip-1', 10, 20);
   });
@@ -412,7 +428,9 @@ describe('ReviewManager delegation', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     const snippet = makeSnippetBase();
-    const spy = vi.spyOn(manager.snippets, 'review').mockResolvedValue(undefined as never);
+    const spy = vi
+      .spyOn(manager.snippets, 'review')
+      .mockResolvedValue(undefined as never);
     await manager.reviewSnippet(snippet, 1000, 86400000);
     expect(spy).toHaveBeenCalledWith(snippet, 1000, 86400000);
   });
@@ -420,7 +438,9 @@ describe('ReviewManager delegation', () => {
   it('importArticle delegates to articles.import', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    const spy = vi.spyOn(manager.articles, 'import').mockResolvedValue(undefined as never);
+    const spy = vi
+      .spyOn(manager.articles, 'import')
+      .mockResolvedValue(undefined as never);
     await manager.importArticle(FAKE_FILE, 30, null);
     expect(spy).toHaveBeenCalledWith(FAKE_FILE, 30, null);
   });
@@ -428,7 +448,9 @@ describe('ReviewManager delegation', () => {
   it('createEmptyArticle delegates to articles.create', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    const spy = vi.spyOn(manager.articles, 'create').mockResolvedValue(undefined as never);
+    const spy = vi
+      .spyOn(manager.articles, 'create')
+      .mockResolvedValue(undefined as never);
     await manager.createEmptyArticle(25);
     expect(spy).toHaveBeenCalledWith(25);
   });
@@ -437,7 +459,9 @@ describe('ReviewManager delegation', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     const article = makeArticleBase();
-    const spy = vi.spyOn(manager.articles, 'review').mockResolvedValue(undefined as never);
+    const spy = vi
+      .spyOn(manager.articles, 'review')
+      .mockResolvedValue(undefined as never);
     await manager.reviewArticle(article, 1000, 86400000);
     expect(spy).toHaveBeenCalledWith(article, 1000, 86400000);
   });
@@ -445,8 +469,13 @@ describe('ReviewManager delegation', () => {
   it('renameArticle delegates to articles.rename', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    const reviewArticle: ReviewArticle = { data: makeArticleBase(), file: FAKE_FILE };
-    const spy = vi.spyOn(manager.articles, 'rename').mockResolvedValue(undefined as never);
+    const reviewArticle: ReviewArticle = {
+      data: makeArticleBase(),
+      file: FAKE_FILE,
+    };
+    const spy = vi
+      .spyOn(manager.articles, 'rename')
+      .mockResolvedValue(undefined as never);
     await manager.renameArticle(reviewArticle, 'new-name');
     expect(spy).toHaveBeenCalledWith(reviewArticle, 'new-name');
   });
@@ -467,7 +496,9 @@ describe('ReviewManager.reprioritize', () => {
         const repo = makeRepo();
         const manager = new ReviewManager(makePlugin(), repo);
         const article = makeArticleBase();
-        const spy = vi.spyOn(manager.articles, 'reprioritize').mockResolvedValue(undefined as never);
+        const spy = vi
+          .spyOn(manager.articles, 'reprioritize')
+          .mockResolvedValue(undefined as never);
         const snippetSpy = vi.spyOn(manager.snippets, 'reprioritize');
         await manager.reprioritize(article, priority);
         expect(spy).toHaveBeenCalledWith(article, priority);
@@ -482,7 +513,9 @@ describe('ReviewManager.reprioritize', () => {
         const repo = makeRepo();
         const manager = new ReviewManager(makePlugin(), repo);
         const snippet = makeSnippetBase();
-        const spy = vi.spyOn(manager.snippets, 'reprioritize').mockResolvedValue(undefined as never);
+        const spy = vi
+          .spyOn(manager.snippets, 'reprioritize')
+          .mockResolvedValue(undefined as never);
         const articleSpy = vi.spyOn(manager.articles, 'reprioritize');
         await manager.reprioritize(snippet, priority);
         expect(spy).toHaveBeenCalledWith(snippet, priority);
@@ -509,7 +542,9 @@ describe('ReviewManager.manageFixedInterval', () => {
           const repo = makeRepo();
           const manager = new ReviewManager(makePlugin(), repo);
           const article = makeArticleBase();
-          const spy = vi.spyOn(manager.articles, 'setFixedInterval').mockResolvedValue(undefined as never);
+          const spy = vi
+            .spyOn(manager.articles, 'setFixedInterval')
+            .mockResolvedValue(undefined as never);
           const disableSpy = vi.spyOn(manager.articles, 'disableFixedInterval');
           await manager.manageFixedInterval(article, { newIntervalDays });
           expect(spy).toHaveBeenCalledWith(article, newIntervalDays);
@@ -527,7 +562,9 @@ describe('ReviewManager.manageFixedInterval', () => {
           const repo = makeRepo();
           const manager = new ReviewManager(makePlugin(), repo);
           const article = makeArticleBase();
-          const spy = vi.spyOn(manager.articles, 'disableFixedInterval').mockResolvedValue(undefined as never);
+          const spy = vi
+            .spyOn(manager.articles, 'disableFixedInterval')
+            .mockResolvedValue(undefined as never);
           const setSpy = vi.spyOn(manager.articles, 'setFixedInterval');
           await manager.manageFixedInterval(article, { newPriority });
           expect(spy).toHaveBeenCalledWith(article, newPriority);
@@ -550,10 +587,14 @@ describe('ReviewManager.getDue error handling', () => {
   it('returns empty arrays when a sub-manager throws', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(manager.articles, 'getDue').mockRejectedValue(new Error('db error'));
+    vi.spyOn(manager.articles, 'getDue').mockRejectedValue(
+      new Error('db error')
+    );
     vi.spyOn(manager.snippets, 'getDue').mockResolvedValue([]);
     vi.spyOn(manager.cards, 'getDue').mockResolvedValue([]);
-    const result = await manager.getDue({ typesToInclude: { article: true, snippet: true, card: true } });
+    const result = await manager.getDue({
+      typesToInclude: { article: true, snippet: true, card: true },
+    });
     expect(result).toEqual({ all: [], cards: [], snippets: [], articles: [] });
   });
 });
@@ -652,7 +693,10 @@ describe('ReviewManager.getReviewItemFromId', () => {
   it('returns the article when articles.fetch finds it', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    const expected: ReviewArticle = { data: makeArticleBase(), file: FAKE_FILE };
+    const expected: ReviewArticle = {
+      data: makeArticleBase(),
+      file: FAKE_FILE,
+    };
     vi.spyOn(manager.articles, 'fetch').mockResolvedValue(expected);
     const snippetSpy = vi.spyOn(manager.snippets, 'fetch');
     const cardSpy = vi.spyOn(manager.cards, 'fetch');
@@ -665,7 +709,10 @@ describe('ReviewManager.getReviewItemFromId', () => {
   it('falls through to snippets.fetch when articles.fetch returns null', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    const expected: ReviewSnippet = { data: makeSnippetBase(), file: FAKE_FILE };
+    const expected: ReviewSnippet = {
+      data: makeSnippetBase(),
+      file: FAKE_FILE,
+    };
     vi.spyOn(manager.articles, 'fetch').mockResolvedValue(null);
     vi.spyOn(manager.snippets, 'fetch').mockResolvedValue(expected);
     const cardSpy = vi.spyOn(manager.cards, 'fetch');
@@ -677,7 +724,10 @@ describe('ReviewManager.getReviewItemFromId', () => {
   it('falls through to cards.fetch when both articles and snippets return null', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    const expected: ReviewCard = { data: CardManager.rowToDisplay(makeCardRow()), file: FAKE_FILE };
+    const expected: ReviewCard = {
+      data: CardManager.rowToDisplay(makeCardRow()),
+      file: FAKE_FILE,
+    };
     vi.spyOn(manager.articles, 'fetch').mockResolvedValue(null);
     vi.spyOn(manager.snippets, 'fetch').mockResolvedValue(null);
     vi.spyOn(manager.cards, 'fetch').mockResolvedValue(expected);
@@ -717,7 +767,8 @@ describe('ReviewManager.dismissItem and unDismissItem', () => {
       const item = makeReviewItem(type);
       vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(type);
       await manager.dismissItem(item);
-      const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown[]];
+      const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+        .calls[0] as [string, unknown[]];
       expect(sql).toContain(`UPDATE ${expectedTable}`);
       expect(sql).toContain('dismissed = 1');
       expect(params).toEqual([item.data.id]);
@@ -736,7 +787,8 @@ describe('ReviewManager.dismissItem and unDismissItem', () => {
       const item = makeReviewItem(type);
       vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(type);
       await manager.unDismissItem(item);
-      const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown[]];
+      const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+        .calls[0] as [string, unknown[]];
       expect(sql).toContain(`UPDATE ${expectedTable}`);
       expect(sql).toContain('dismissed = 0');
       expect(params).toEqual([item.data.id]);
@@ -768,7 +820,13 @@ describe('ReviewManager.handleExternalRename', () => {
           noteType
             ? {
                 frontmatter: {
-                  tags: [noteType === 'article' ? 'ir-article' : noteType === 'snippet' ? 'ir-text-snippet' : 'ir-card'],
+                  tags: [
+                    noteType === 'article'
+                      ? 'ir-article'
+                      : noteType === 'snippet'
+                        ? 'ir-text-snippet'
+                        : 'ir-card',
+                  ],
                 },
               }
             : null
@@ -782,9 +840,12 @@ describe('ReviewManager.handleExternalRename', () => {
     const app = makeApp(false);
     const manager = new ReviewManager(makePlugin(app as never), repo);
     manager.app = app as never;
-    const abstractFile = { path: `${IR_DIR}/articles/renamed.md` } as TAbstractFile;
-    await expect(manager.handleExternalRename(abstractFile, `${IR_DIR}/articles/old.md`))
-      .rejects.toThrow('Failed to find a file');
+    const abstractFile = {
+      path: `${IR_DIR}/articles/renamed.md`,
+    } as TAbstractFile;
+    await expect(
+      manager.handleExternalRename(abstractFile, `${IR_DIR}/articles/old.md`)
+    ).rejects.toThrow('Failed to find a file');
   });
 
   it('returns early (no mutate) when file has no IR note type', async () => {
@@ -792,9 +853,16 @@ describe('ReviewManager.handleExternalRename', () => {
     const app = makeApp(true, null);
     const manager = new ReviewManager(makePlugin(app as never), repo);
     manager.app = app as never;
-    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(undefined);
-    const abstractFile = { path: `${IR_DIR}/articles/renamed.md` } as TAbstractFile;
-    await manager.handleExternalRename(abstractFile, `${IR_DIR}/articles/old.md`);
+    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+      undefined
+    );
+    const abstractFile = {
+      path: `${IR_DIR}/articles/renamed.md`,
+    } as TAbstractFile;
+    await manager.handleExternalRename(
+      abstractFile,
+      `${IR_DIR}/articles/old.md`
+    );
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 
@@ -803,9 +871,16 @@ describe('ReviewManager.handleExternalRename', () => {
     const app = makeApp(true, 'article');
     const manager = new ReviewManager(makePlugin(app as never), repo);
     manager.app = app as never;
-    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(undefined);
-    const abstractFile = { path: `${IR_DIR}/articles/renamed.md` } as TAbstractFile;
-    await manager.handleExternalRename(abstractFile, 'some-other-folder/old.md');
+    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+      undefined
+    );
+    const abstractFile = {
+      path: `${IR_DIR}/articles/renamed.md`,
+    } as TAbstractFile;
+    await manager.handleExternalRename(
+      abstractFile,
+      'some-other-folder/old.md'
+    );
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 
@@ -823,9 +898,16 @@ describe('ReviewManager.handleExternalRename', () => {
     };
     const manager = new ReviewManager(makePlugin(appObj as never), repo);
     manager.app = appObj as never;
-    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(undefined);
-    const abstractFile = { path: 'some-other-folder/renamed.md' } as TAbstractFile;
-    await manager.handleExternalRename(abstractFile, `${IR_DIR}/articles/old.md`);
+    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+      undefined
+    );
+    const abstractFile = {
+      path: 'some-other-folder/renamed.md',
+    } as TAbstractFile;
+    await manager.handleExternalRename(
+      abstractFile,
+      `${IR_DIR}/articles/old.md`
+    );
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 
@@ -843,9 +925,16 @@ describe('ReviewManager.handleExternalRename', () => {
     };
     const manager = new ReviewManager(makePlugin(appObj as never), repo);
     manager.app = appObj as never;
-    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(undefined);
-    const abstractFile = { path: `${IR_DIR}/articles/same.md` } as TAbstractFile;
-    await manager.handleExternalRename(abstractFile, `${IR_DIR}/articles/same.md`);
+    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+      undefined
+    );
+    const abstractFile = {
+      path: `${IR_DIR}/articles/same.md`,
+    } as TAbstractFile;
+    await manager.handleExternalRename(
+      abstractFile,
+      `${IR_DIR}/articles/same.md`
+    );
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 
@@ -875,10 +964,13 @@ describe('ReviewManager.handleExternalRename', () => {
       };
       const manager = new ReviewManager(makePlugin(appObj as never), repo);
       manager.app = appObj as never;
-      vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(undefined);
+      vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+        undefined
+      );
       const abstractFile = { path: newPath } as TAbstractFile;
       await manager.handleExternalRename(abstractFile, oldPath);
-      const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown[]];
+      const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+        .calls[0] as [string, unknown[]];
       expect(sql).toContain(`UPDATE ${expectedTable}`);
       expect(sql).toContain('SET reference');
       expect(params[0]).toBe('articles/new-name.md');
@@ -916,17 +1008,23 @@ describe('ReviewManager.saveScrollPosition', () => {
     'mutates %s table with rounded scroll_top',
     async (noteType) => {
       await fc.assert(
-        fc.asyncProperty(fc.float({ min: 0, max: 10000, noNaN: true }), async (top) => {
-          const repo = makeRepo();
-          const manager = new ReviewManager(makePlugin(), repo);
-          vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(noteType);
-          vi.spyOn(Obsidian, 'getReferenceFromPath').mockReturnValue('articles/test.md');
-          await manager.saveScrollPosition(FAKE_FILE, { top, left: 0 });
-          const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown[]];
-          expect(sql).toContain(`UPDATE ${noteType}`);
-          expect(sql).toContain('scroll_top');
-          expect(params[0]).toBe(Math.round(top));
-        })
+        fc.asyncProperty(
+          fc.float({ min: 0, max: 10000, noNaN: true }),
+          async (top) => {
+            const repo = makeRepo();
+            const manager = new ReviewManager(makePlugin(), repo);
+            vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(noteType);
+            vi.spyOn(Obsidian, 'getReferenceFromPath').mockReturnValue(
+              'articles/test.md'
+            );
+            await manager.saveScrollPosition(FAKE_FILE, { top, left: 0 });
+            const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+              .calls[0] as [string, unknown[]];
+            expect(sql).toContain(`UPDATE ${noteType}`);
+            expect(sql).toContain('scroll_top');
+            expect(params[0]).toBe(Math.round(top));
+          }
+        )
       );
     }
   );
@@ -970,23 +1068,28 @@ describe('ReviewManager.loadScrollPosition', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
-    vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(makeArticleRow({ scroll_top: 0 }) as never);
+    vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(
+      makeArticleRow({ scroll_top: 0 }) as never
+    );
     const result = await manager.loadScrollPosition(FAKE_FILE);
     expect(result).toBeNull();
   });
 
   it('returns {top, left:0} when article row has scroll_top > 0', async () => {
     await fc.assert(
-      fc.asyncProperty(fc.integer({ min: 1, max: 100000 }), async (scrollTop) => {
-        const repo = makeRepo();
-        const manager = new ReviewManager(makePlugin(), repo);
-        vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
-        vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(
-          makeArticleRow({ scroll_top: scrollTop }) as never
-        );
-        const result = await manager.loadScrollPosition(FAKE_FILE);
-        expect(result).toEqual({ top: scrollTop, left: 0 });
-      })
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 100000 }),
+        async (scrollTop) => {
+          const repo = makeRepo();
+          const manager = new ReviewManager(makePlugin(), repo);
+          vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
+          vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(
+            makeArticleRow({ scroll_top: scrollTop }) as never
+          );
+          const result = await manager.loadScrollPosition(FAKE_FILE);
+          expect(result).toEqual({ top: scrollTop, left: 0 });
+        }
+      )
     );
   });
 
@@ -1003,23 +1106,28 @@ describe('ReviewManager.loadScrollPosition', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
-    vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(makeSnippetRow({ scroll_top: 0 }) as never);
+    vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
+      makeSnippetRow({ scroll_top: 0 }) as never
+    );
     const result = await manager.loadScrollPosition(FAKE_FILE);
     expect(result).toBeNull();
   });
 
   it('returns {top, left:0} when snippet row has scroll_top > 0', async () => {
     await fc.assert(
-      fc.asyncProperty(fc.integer({ min: 1, max: 100000 }), async (scrollTop) => {
-        const repo = makeRepo();
-        const manager = new ReviewManager(makePlugin(), repo);
-        vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
-        vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
-          makeSnippetRow({ scroll_top: scrollTop }) as never
-        );
-        const result = await manager.loadScrollPosition(FAKE_FILE);
-        expect(result).toEqual({ top: scrollTop, left: 0 });
-      })
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 100000 }),
+        async (scrollTop) => {
+          const repo = makeRepo();
+          const manager = new ReviewManager(makePlugin(), repo);
+          vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
+          vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
+            makeSnippetRow({ scroll_top: scrollTop }) as never
+          );
+          const result = await manager.loadScrollPosition(FAKE_FILE);
+          expect(result).toEqual({ top: scrollTop, left: 0 });
+        }
+      )
     );
   });
 
@@ -1039,7 +1147,9 @@ describe('ReviewManager.loadScrollPosition', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
-    const articleSpy = vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(null);
+    const articleSpy = vi
+      .spyOn(manager.articles, 'findArticle')
+      .mockResolvedValue(null);
     const snippetSpy = vi.spyOn(manager.snippets, 'findSnippet');
     await manager.loadScrollPosition(FAKE_FILE);
     expect(articleSpy).toHaveBeenCalled();
@@ -1051,7 +1161,9 @@ describe('ReviewManager.loadScrollPosition', () => {
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
     const articleSpy = vi.spyOn(manager.articles, 'findArticle');
-    const snippetSpy = vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(null);
+    const snippetSpy = vi
+      .spyOn(manager.snippets, 'findSnippet')
+      .mockResolvedValue(null);
     await manager.loadScrollPosition(FAKE_FILE);
     expect(snippetSpy).toHaveBeenCalled();
     expect(articleSpy).not.toHaveBeenCalled();
@@ -1098,12 +1210,20 @@ describe('ReviewManager.getDue sort order', () => {
     const t3 = 3000;
     // Return items out of order from each sub-manager
     const article = makeReviewArticleItem(t3);
-    const snippet: ReviewSnippet = { data: makeSnippetBase({ id: 'snip', due: t1 }), file: FAKE_FILE };
-    const card: ReviewCard = { data: CardManager.rowToDisplay(makeCardRow({ id: 'card', due: t2 })), file: FAKE_FILE };
+    const snippet: ReviewSnippet = {
+      data: makeSnippetBase({ id: 'snip', due: t1 }),
+      file: FAKE_FILE,
+    };
+    const card: ReviewCard = {
+      data: CardManager.rowToDisplay(makeCardRow({ id: 'card', due: t2 })),
+      file: FAKE_FILE,
+    };
     vi.spyOn(manager.articles, 'getDue').mockResolvedValue([article]);
     vi.spyOn(manager.snippets, 'getDue').mockResolvedValue([snippet]);
     vi.spyOn(manager.cards, 'getDue').mockResolvedValue([card]);
-    const result = await manager.getDue({ typesToInclude: { article: true, snippet: true, card: true } });
+    const result = await manager.getDue({
+      typesToInclude: { article: true, snippet: true, card: true },
+    });
     const ids = result.all.map((r) => r.data.id);
     expect(ids).toEqual(['snip', 'card', `article-${t3}`]);
   });
@@ -1118,7 +1238,9 @@ describe('ReviewManager.getReviewItemFromFile card branch', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
-    vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(makeSnippetRow() as never);
+    vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
+      makeSnippetRow() as never
+    );
     const cardSpy = vi.spyOn(manager.cards, 'findCard');
     await manager.getReviewItemFromFile(FAKE_FILE);
     expect(cardSpy).not.toHaveBeenCalled();
@@ -1137,16 +1259,22 @@ describe('ReviewManager.handleExternalRename console.warn mutant', () => {
     const appObj = {
       vault: { getFileByPath: vi.fn().mockReturnValue(file) },
       metadataCache: {
-        getFileCache: vi.fn().mockReturnValue({ frontmatter: { tags: ['ir-article'] } }),
+        getFileCache: vi
+          .fn()
+          .mockReturnValue({ frontmatter: { tags: ['ir-article'] } }),
       },
     };
     const manager = new ReviewManager(makePlugin(appObj as never), repo);
     manager.app = appObj as never;
-    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(undefined);
+    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+      undefined
+    );
     const warnSpy = vi.spyOn(console, 'warn').mockReturnValue(undefined);
     const abstractFile = { path: samePath } as TAbstractFile;
     await manager.handleExternalRename(abstractFile, samePath);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('did not change'));
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('did not change')
+    );
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 });

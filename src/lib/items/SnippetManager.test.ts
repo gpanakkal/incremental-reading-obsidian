@@ -483,7 +483,7 @@ describe('getDue', () => {
   const YEAR_2100_MS = new Date('2100-01-01T12:00:00Z').getTime();
 
   beforeEach(() => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['Date'] });
     vi.spyOn(Obsidian, 'getNote').mockReturnValue({
       path: 'snippets/test.md',
     } as TFile);
@@ -683,7 +683,7 @@ describe('getDue', () => {
 
 describe('review', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['Date'] });
   });
   afterEach(() => {
     vi.useRealTimers();
