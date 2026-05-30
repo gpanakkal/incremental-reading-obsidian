@@ -88,6 +88,10 @@ export function IREditor({
   const { saveNote } = useReviewContext();
   const store = useAppStore();
   const showAnswer = useAppSelector((state) => state.showAnswer);
+  // Tracks the content of the last successful save. updateEditorContent uses
+  // this to distinguish a stale re-fetch of our own write (skip) from a
+  // genuine external modification (apply).
+  const lastSavedContentRef = useRef<string>(value ?? '');
 
   const handleChange = async (update: ViewUpdate) => {
     if (!update.docChanged) return;
@@ -95,6 +99,7 @@ export function IREditor({
     const docText = update.state.doc.toString();
     // TODO: don't save if changes occurred outside review
     await saveNote(itemRef.current, docText);
+    lastSavedContentRef.current = docText;
   };
 
   // extend the MarkdownEditor extracted from Obsidian
@@ -358,16 +363,34 @@ export function IREditor({
       if (!internalRef.current) return;
 
       const view = internalRef.current;
-      // Only update if the content actually changed
-      if (view.state.doc.toString() !== value) {
+      const currentDoc = view.state.doc.toString();
+      if (
+        currentDoc !== value &&
+        value !== lastSavedContentRef.current
+      ) {
+        const newContent = value ?? '';
+        const newLength = newContent.length;
+        // Clamp each range's anchor and head to the new document length.
+        // We can't use selection.map(changes) here because a full-document
+        // replacement maps every position inside the deleted span to 0 via
+        // mapPos — which would lose the cursor position entirely.
+        const clampedSelection = EditorSelection.create(
+          view.state.selection.ranges.map((r) =>
+            EditorSelection.range(
+              Math.min(r.anchor, newLength),
+              Math.min(r.head, newLength)
+            )
+          ),
+          view.state.selection.mainIndex
+        );
+        const { scrollTop, scrollLeft } = view.scrollDOM;
         view.dispatch({
-          changes: {
-            from: 0,
-            to: view.state.doc.length,
-            insert: value ?? '',
-          },
+          changes: { from: 0, to: view.state.doc.length, insert: newContent },
+          selection: clampedSelection,
           annotations: isExternalSync.of(true),
         });
+        view.scrollDOM.scrollTop = scrollTop;
+        view.scrollDOM.scrollLeft = scrollLeft;
       }
     },
     [value]
