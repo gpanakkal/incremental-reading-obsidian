@@ -240,3 +240,217 @@ describe('updateEditorContent restores scrollDOM scroll position after replaceme
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Edge cases for dispatchFullReplacement cursor/selection clamping
+// ---------------------------------------------------------------------------
+
+describe('updateEditorContent clamps cursor to empty replacement content', () => {
+  it('clamps cursor to 0 when replacement content is empty string', () => {
+    const view = makeView('hello world');
+    view.dispatch({ selection: EditorSelection.cursor(6) });
+    expect(view.state.selection.main.head).toBe(6); // precondition
+
+    dispatchFullReplacement(view, '');
+
+    expect(view.state.doc.toString()).toBe('');
+    expect(view.state.selection.main.head).toBe(0);
+    view.destroy();
+  });
+
+  it('clamps cursor to 0 when replacement content is empty string (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ minLength: 1, maxLength: 200 }).chain((initial) =>
+          fc.record({
+            initialContent: fc.constant(initial),
+            cursorPos: fc.integer({ min: 0, max: initial.length }),
+          })
+        ),
+        async ({ initialContent, cursorPos }) => {
+          const view = makeView(initialContent);
+          view.dispatch({ selection: EditorSelection.cursor(cursorPos) });
+
+          dispatchFullReplacement(view, '');
+
+          expect(view.state.doc.toString()).toBe('');
+          // Any cursor position clamped to min(pos, 0) === 0.
+          expect(view.state.selection.main.head).toBe(0);
+
+          view.destroy();
+        }
+      )
+    );
+  });
+});
+
+describe('updateEditorContent clamps selection endpoints independently', () => {
+  // Note: jsdom's EditorView enforces allowMultipleSelections=false, so only
+  // single-range selections are possible in this environment. Multi-range
+  // behavior in dispatchFullReplacement is a trivial extension of the
+  // single-range map — if clamping is correct for one range it is correct
+  // for N (same Math.min per endpoint logic applied by the .map() call).
+
+  it('clamps only the out-of-bounds head of a range when anchor is within bounds', () => {
+    // Range [3, 9] in a 10-char doc. Replacement is 6 chars.
+    // anchor=3 fits (3 <= 6), head=9 does not (9 > 6) → head clamped to 6.
+    const view = makeView('0123456789'); // length 10
+    view.dispatch({ selection: EditorSelection.range(3, 9) });
+
+    dispatchFullReplacement(view, '012345'); // length 6
+
+    expect(view.state.selection.main.anchor).toBe(3);
+    expect(view.state.selection.main.head).toBe(6);
+    view.destroy();
+  });
+
+  it('clamps both anchor and head when both exceed the new document length (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        // initial doc long enough for an out-of-bounds range
+        fc.string({ minLength: 10, maxLength: 200 }).chain((initial) =>
+          fc.record({
+            initialContent: fc.constant(initial),
+            // anchor and head both well beyond any possible newContent
+            anchor: fc.integer({ min: Math.ceil(initial.length * 0.8), max: initial.length }),
+            head: fc.integer({ min: Math.ceil(initial.length * 0.8), max: initial.length }),
+            // newContent is short so both anchor and head exceed its length
+            newContent: fc.string({ minLength: 0, maxLength: Math.floor(initial.length * 0.7) }),
+          })
+        ),
+        async ({ initialContent, anchor, head, newContent }) => {
+          const view = makeView(initialContent);
+          view.dispatch({ selection: EditorSelection.range(anchor, head) });
+
+          dispatchFullReplacement(view, newContent);
+
+          const newLen = newContent.length;
+          expect(view.state.selection.main.anchor).toBe(Math.min(anchor, newLen));
+          expect(view.state.selection.main.head).toBe(Math.min(head, newLen));
+
+          view.destroy();
+        }
+      )
+    );
+  });
+
+  it('leaves anchor and head unchanged when both fit within the new document length (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ minLength: 10, maxLength: 200 }).chain((initial) =>
+          fc.string({ minLength: initial.length, maxLength: initial.length + 100 })
+            .filter((s) => s !== initial)
+            .chain((newContent) =>
+              fc.record({
+                initialContent: fc.constant(initial),
+                newContent: fc.constant(newContent),
+                // anchor and head both well within the new (longer) content
+                anchor: fc.integer({ min: 0, max: initial.length }),
+                head: fc.integer({ min: 0, max: initial.length }),
+              })
+            )
+        ),
+        async ({ initialContent, newContent, anchor, head }) => {
+          const view = makeView(initialContent);
+          view.dispatch({ selection: EditorSelection.range(anchor, head) });
+
+          dispatchFullReplacement(view, newContent);
+
+          // Both endpoints fit — no clamping should occur.
+          expect(view.state.selection.main.anchor).toBe(anchor);
+          expect(view.state.selection.main.head).toBe(head);
+
+          view.destroy();
+        }
+      )
+    );
+  });
+});
+
+describe('updateEditorContent skips when currentDoc already equals the incoming value', () => {
+  it('does not apply a replacement when the fetched value equals the current editor content (no-op guard)', () => {
+    // The editor already has the content that arrived from the prop.
+    // Applying would be a no-op, but dispatching anyway wastes cycles and
+    // resets scroll — the guard should skip.
+    const currentContent = 'unchanged content';
+    const view = makeView(currentContent);
+    view.dispatch({ selection: EditorSelection.cursor(5) });
+
+    // value === currentDoc, so conditionalReplacement must short-circuit
+    // before reaching the `value === lastSaved` check.
+    const applied = conditionalReplacement(view, currentContent, 'something else');
+
+    expect(applied).toBe(false);
+    expect(view.state.doc.toString()).toBe(currentContent);
+    expect(view.state.selection.main.head).toBe(5);
+    view.destroy();
+  });
+
+  it('does not apply a replacement when fetched value matches current doc regardless of lastSaved (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.record({
+          content: fc.string({ minLength: 0, maxLength: 100 }),
+          lastSaved: fc.string({ minLength: 0, maxLength: 100 }),
+          cursorPos: fc.integer({ min: 0, max: 100 }),
+        }),
+        async ({ content, lastSaved, cursorPos }) => {
+          const view = makeView(content);
+          const clampedCursor = Math.min(cursorPos, content.length);
+          view.dispatch({ selection: EditorSelection.cursor(clampedCursor) });
+
+          // value === currentDoc → must always skip, no matter what lastSaved is.
+          const applied = conditionalReplacement(view, content, lastSaved);
+
+          expect(applied).toBe(false);
+          expect(view.state.doc.toString()).toBe(content);
+          expect(view.state.selection.main.head).toBe(clampedCursor);
+          view.destroy();
+        }
+      )
+    );
+  });
+});
+
+describe('updateEditorContent applies genuine external changes (property-based)', () => {
+  it('applies replacement and clamps cursor when value differs from both currentDoc and lastSaved (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ minLength: 0, maxLength: 100 }).chain((editorContent) =>
+          fc
+            .string({ minLength: 0, maxLength: 100 })
+            // lastSaved must differ from externalValue to avoid the echo guard.
+            .chain((lastSaved) =>
+              fc
+                .string({ minLength: 0, maxLength: 100 })
+                .filter((v) => v !== editorContent && v !== lastSaved)
+                .chain((externalValue) =>
+                  fc.record({
+                    editorContent: fc.constant(editorContent),
+                    lastSaved: fc.constant(lastSaved),
+                    externalValue: fc.constant(externalValue),
+                    cursorPos: fc.integer({ min: 0, max: Math.max(editorContent.length, 0) }),
+                  })
+                )
+            )
+        ),
+        async ({ editorContent, lastSaved, externalValue, cursorPos }) => {
+          const view = makeView(editorContent);
+          const clampedCursor = Math.min(cursorPos, editorContent.length);
+          view.dispatch({ selection: EditorSelection.cursor(clampedCursor) });
+
+          const applied = conditionalReplacement(view, externalValue, lastSaved);
+
+          // Must have applied the change.
+          expect(applied).toBe(true);
+          expect(view.state.doc.toString()).toBe(externalValue);
+          // Cursor must land within the new document bounds.
+          const expectedHead = Math.min(clampedCursor, externalValue.length);
+          expect(view.state.selection.main.head).toBe(expectedHead);
+          view.destroy();
+        }
+      ),
+      { numRuns: 200 }
+    );
+  });
+});
