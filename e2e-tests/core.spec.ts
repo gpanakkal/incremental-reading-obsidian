@@ -481,8 +481,8 @@ test.describe('Extracting snippets', () => {
     // select the first opening bracket '['
     await window.locator('.cm-formatting.cm-formatting-link').first().click();
     // highlight the rest of the paragraph
-    await window.getByText('---title: "Curse of').press('Shift+End');
-    await window.getByText('---title: "Curse of').press('Shift+End');
+    await window.getByRole('textbox').press('Shift+End');
+    await window.getByRole('textbox').press('Shift+End');
 
     await executeCommandById(window, 'incremental-reading:extract-selection');
     await openNote(
