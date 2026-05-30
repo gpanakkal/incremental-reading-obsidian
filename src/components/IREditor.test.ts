@@ -14,89 +14,33 @@ function makeView(doc: string): EditorView {
 }
 
 /**
- * Verbatim copy of the buggy dispatch in IREditor.tsx updateEditorContent
- * (lines 363-370). This is the subject under test.
- * When the fix is applied to IREditor.tsx, update this helper to match.
+ * Mirror of the updateEditorContent dispatch in IREditor.tsx.
+ * Keep in sync with that implementation.
  */
 function dispatchFullReplacement(view: EditorView, newContent: string): void {
+  const newLength = newContent.length;
+  const clampedSelection = EditorSelection.create(
+    view.state.selection.ranges.map((r) =>
+      EditorSelection.range(
+        Math.min(r.anchor, newLength),
+        Math.min(r.head, newLength)
+      )
+    ),
+    view.state.selection.mainIndex
+  );
+  const { scrollTop, scrollLeft } = view.scrollDOM;
   view.dispatch({
-    changes: {
-      from: 0,
-      to: view.state.doc.length,
-      insert: newContent,
-    },
+    changes: { from: 0, to: view.state.doc.length, insert: newContent },
+    selection: clampedSelection,
     annotations: isExternalSync.of(true),
   });
-}
-
-interface ScrollSpy {
-  /** Values passed to the scrollTop setter after the spy was attached. */
-  topCalls: number[];
-  /** Values passed to the scrollLeft setter after the spy was attached. */
-  leftCalls: number[];
-  /** Remove the own-property overrides so the element falls back to the prototype. */
-  restore(): void;
-}
-
-/**
- * Installs getter/setter spies directly on `element` for both scrollTop and
- * scrollLeft. Walks the prototype chain to locate the real descriptors (they
- * live on Element.prototype in jsdom 29), then shadows them with own-property
- * overrides so the original implementation still runs and the stored value
- * stays consistent.
- */
-function spyOnScroll(element: Element): ScrollSpy {
-  const topCalls: number[] = [];
-  const leftCalls: number[] = [];
-
-  function findDescriptor(name: string): PropertyDescriptor | undefined {
-    let proto: object | null = Object.getPrototypeOf(element);
-    while (proto) {
-      const desc = Object.getOwnPropertyDescriptor(proto, name);
-      if (desc) return desc;
-      proto = Object.getPrototypeOf(proto) as object | null;
-    }
-    return undefined;
-  }
-
-  const topDesc = findDescriptor('scrollTop');
-  const leftDesc = findDescriptor('scrollLeft');
-
-  Object.defineProperty(element, 'scrollTop', {
-    get() {
-      return topDesc?.get?.call(this) ?? 0;
-    },
-    set(v: number) {
-      topCalls.push(v);
-      topDesc?.set?.call(this, v);
-    },
-    configurable: true,
-  });
-
-  Object.defineProperty(element, 'scrollLeft', {
-    get() {
-      return leftDesc?.get?.call(this) ?? 0;
-    },
-    set(v: number) {
-      leftCalls.push(v);
-      leftDesc?.set?.call(this, v);
-    },
-    configurable: true,
-  });
-
-  return {
-    topCalls,
-    leftCalls,
-    restore() {
-      delete (element as unknown as Record<string, unknown>).scrollTop;
-      delete (element as unknown as Record<string, unknown>).scrollLeft;
-    },
-  };
+  view.scrollDOM.scrollTop = scrollTop;
+  view.scrollDOM.scrollLeft = scrollLeft;
 }
 
 // #endregion
 
-describe('Bug — updateEditorContent destroys cursor position', () => {
+describe('updateEditorContent preserves cursor position', () => {
   afterEach(() => {
     // Views are destroyed at the end of each test; nothing global to clean up.
   });
@@ -127,17 +71,14 @@ describe('Bug — updateEditorContent destroys cursor position', () => {
     view.destroy();
   });
 
-  it('does not disturb cursor when content is unchanged (early-return guard)', () => {
-    // When value === doc content, the guard in updateEditorContent skips the dispatch.
-    // This test documents that branch and confirms the guard itself is safe.
+  it('preserves cursor when replacement content is identical to current doc', () => {
     const view = makeView('hello');
     view.dispatch({ selection: EditorSelection.cursor(3) });
 
-    if (view.state.doc.toString() !== 'hello') {
-      dispatchFullReplacement(view, 'hello');
-    }
+    dispatchFullReplacement(view, 'hello');
 
-    expect(view.state.selection.main.head).toBe(3); // guard fires → no dispatch → passes in both buggy and fixed
+    expect(view.state.doc.toString()).toBe('hello');
+    expect(view.state.selection.main.head).toBe(3);
     view.destroy();
   });
 
@@ -174,8 +115,99 @@ describe('Bug — updateEditorContent destroys cursor position', () => {
   });
 });
 
-describe('Bug — updateEditorContent does not restore scrollDOM scroll position', () => {
-  it('explicitly reassigns scrollTop and scrollLeft after dispatch to restore pre-dispatch values (property-based)', async () => {
+// ---------------------------------------------------------------------------
+// Helper that mirrors the full updateEditorContent guard logic, including the
+// lastSavedContent check. Keep in sync with IREditor.tsx updateEditorContent.
+// ---------------------------------------------------------------------------
+
+/**
+ * Models the full updateEditorContent guard:
+ *   skip if value === currentDoc  (no change at all)
+ *   skip if value === lastSaved   (stale echo of our own save)
+ *   apply otherwise               (genuine external change)
+ *
+ * Returns true if the replacement was applied, false if skipped.
+ */
+function conditionalReplacement(
+  view: EditorView,
+  value: string,
+  lastSavedContent: string
+): boolean {
+  if (view.state.doc.toString() === value) return false;
+  if (value === lastSavedContent) return false;
+  dispatchFullReplacement(view, value);
+  return true;
+}
+
+describe('updateEditorContent skips stale own-save echoes and applies genuine external changes', () => {
+  it('does not apply a replacement when the fetched value equals the last saved content (own-save echo)', () => {
+    // Scenario: user saved "hello" then typed " world" → editor now has "hello world".
+    // A stale fetch returns "hello" (matching lastSaved). The guard must detect this
+    // as our own echo and skip — otherwise the editor reverts to "hello" and
+    // the cursor lands in the wrong place.
+    const lastSaved = 'hello';
+    const editorContent = 'hello world'; // user has typed " world" since last save
+    const view = makeView(editorContent);
+    view.dispatch({ selection: EditorSelection.cursor(11) }); // cursor at end
+
+    const applied = conditionalReplacement(view, lastSaved, lastSaved);
+
+    expect(applied).toBe(false);
+    expect(view.state.doc.toString()).toBe(editorContent);
+    expect(view.state.selection.main.head).toBe(11);
+    view.destroy();
+  });
+
+  it('applies a replacement when the fetched value differs from both editor and last save (external change)', () => {
+    // Someone else edited the file externally. The fetch returns content the
+    // editor has never seen → must apply.
+    const lastSaved = 'hello';
+    const externalChange = 'hello (edited externally)';
+    const view = makeView('hello world');
+    view.dispatch({ selection: EditorSelection.cursor(5) });
+
+    const applied = conditionalReplacement(view, externalChange, lastSaved);
+
+    expect(applied).toBe(true);
+    expect(view.state.doc.toString()).toBe(externalChange);
+    view.destroy();
+  });
+
+  it('preserves editor content and cursor when a stale-echo replacement is correctly skipped (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ minLength: 1, maxLength: 100 }).chain((saved) =>
+          // suffix represents characters typed since the last save
+          fc.string({ minLength: 1, maxLength: 50 }).chain((suffix) => {
+            const editorContent = saved + suffix;
+            return fc.record({
+              lastSaved: fc.constant(saved),
+              editorContent: fc.constant(editorContent),
+              // cursor can be anywhere in the full typed content, including the suffix
+              cursorPos: fc.integer({ min: 0, max: editorContent.length }),
+            });
+          })
+        ),
+        async ({ lastSaved, editorContent, cursorPos }) => {
+          const view = makeView(editorContent);
+          view.dispatch({ selection: EditorSelection.cursor(cursorPos) });
+
+          // Stale fetch returns the last-saved content.
+          // conditionalReplacement (the fixed guard) must skip.
+          const applied = conditionalReplacement(view, lastSaved, lastSaved);
+
+          expect(applied).toBe(false);
+          expect(view.state.doc.toString()).toBe(editorContent);
+          expect(view.state.selection.main.head).toBe(cursorPos);
+          view.destroy();
+        }
+      )
+    );
+  });
+});
+
+describe('updateEditorContent restores scrollDOM scroll position after replacement', () => {
+  it('restores scrollTop and scrollLeft to their pre-dispatch values after replacement (property-based)', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.record({
@@ -186,33 +218,22 @@ describe('Bug — updateEditorContent does not restore scrollDOM scroll position
         }),
         async ({ initialContent, scrollTop, scrollLeft, newContent }) => {
           const view = makeView(initialContent);
-          const spy = spyOnScroll(view.scrollDOM);
 
           // Set the pre-dispatch scroll position.
           view.scrollDOM.scrollTop = scrollTop;
           view.scrollDOM.scrollLeft = scrollLeft;
 
-          // Reset spy call logs — we only care about calls made during/after dispatch.
-          spy.topCalls.length = 0;
-          spy.leftCalls.length = 0;
-
-          // Ensure the dispatch actually fires (guard: newContent must differ from current doc).
+          // Ensure the dispatch actually fires (content must differ from current doc).
           const content =
             newContent !== initialContent ? newContent : newContent + '\x00';
           dispatchFullReplacement(view, content);
 
-          // A correct implementation saves scroll before dispatch and restores it after:
-          //   const savedTop = scrollDOM.scrollTop;
-          //   const savedLeft = scrollDOM.scrollLeft;
-          //   view.dispatch(...);
-          //   scrollDOM.scrollTop = savedTop;   ← this call is what we detect
-          //   scrollDOM.scrollLeft = savedLeft; ← this call is what we detect
-          //
-          // Bug: neither setter is called after dispatch → spy.topCalls is empty → fails.
-          expect(spy.topCalls).toContain(scrollTop);
-          expect(spy.leftCalls).toContain(scrollLeft);
+          // A correct implementation saves scroll before dispatch and restores it
+          // after. Assert the final observable state, not the call sequence —
+          // using the getter confirms the value that actually stuck.
+          expect(view.scrollDOM.scrollTop).toBe(scrollTop);
+          expect(view.scrollDOM.scrollLeft).toBe(scrollLeft);
 
-          spy.restore();
           view.destroy();
         }
       )
