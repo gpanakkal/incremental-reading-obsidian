@@ -41,6 +41,8 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     private highlightsLoaded: boolean = false;
     private persistTimeout: ReturnType<typeof setTimeout> | null = null;
     private isReviewInterface: boolean = false;
+    // keep track of if the ViewPlugin was destroyed
+    private destroyed: boolean = false;
 
     constructor(view: EditorView) {
       const { info } = Obsidian.getFileInfoFromState(view.state);
@@ -64,6 +66,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
       const isSource = Obsidian.isSourceNote(this.file, info.app);
       const noteType = await Obsidian.getNoteType(this.file, info.app);
+      if (this.destroyed) return;
       // Only sources, articles, and snippets can have child snippets
       if (!(isSource || noteType === 'article' || noteType === 'snippet')) {
         return;
@@ -74,6 +77,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
       // Load highlights from database into tracker (offsets are body-relative)
       await reviewManager.getSnippetHighlights(this.file);
+      if (this.destroyed) return;
       this.highlightsLoaded = true;
 
       // Build decorations from tracker
@@ -194,6 +198,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
       // Reload from database
       await reviewManager.getSnippetHighlights(this.file);
+      if (this.destroyed) return;
 
       // Rebuild decorations
       this.decorations = this.buildDecorations(
@@ -288,7 +293,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     }
 
     destroy() {
-      // Clear any pending persist timeout
+      this.destroyed = true;
       if (this.persistTimeout) {
         clearTimeout(this.persistTimeout);
         this.persistTimeout = null;
