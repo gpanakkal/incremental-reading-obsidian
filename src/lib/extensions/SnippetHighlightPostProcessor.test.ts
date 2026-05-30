@@ -2,7 +2,9 @@
 
 // Obsidian's `createEl` global — present in the Obsidian runtime but absent
 // in test environments. Polyfill it before any module under test is loaded.
-(globalThis as Record<string, unknown>)['createEl'] = <K extends keyof HTMLElementTagNameMap>(
+(globalThis as Record<string, unknown>)['createEl'] = <
+  K extends keyof HTMLElementTagNameMap,
+>(
   tag: K
 ): HTMLElementTagNameMap[K] => document.createElement(tag);
 
@@ -18,6 +20,7 @@ import {
 import fc from 'fast-check';
 import { MarkdownPreviewView, MarkdownView } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { NoteType } from '../types';
 
 // #region HELPERS
 
@@ -262,7 +265,9 @@ describe('getDomOffsets', () => {
     const section = 'See [^current] here.'; // length 20
     // start_offset 20 → sectionHighlightStart = max(20-20, 0) = 0 → full section is highlight
     const highlight = makeHighlight({ start_offset: 20, end_offset: 40 });
-    await expect(getDomOffsets({} as never, prev, section, highlight)).resolves.toBeDefined();
+    await expect(
+      getDomOffsets({} as never, prev, section, highlight)
+    ).resolves.toBeDefined();
   });
 
   it('handles footnote refs in bodyPrevious but not in highlight slice', async () => {
@@ -271,7 +276,9 @@ describe('getDomOffsets', () => {
     const prev = 'Before [^prior] text'; // length 20
     const section = 'Plain section text.'; // no footnote refs
     const highlight = makeHighlight({ start_offset: 20, end_offset: 39 });
-    await expect(getDomOffsets({} as never, prev, section, highlight)).resolves.toBeDefined();
+    await expect(
+      getDomOffsets({} as never, prev, section, highlight)
+    ).resolves.toBeDefined();
   });
 
   it('applies sectionStartDiff correctly when renderer compresses bodyPrevious', async () => {
@@ -284,7 +291,7 @@ describe('getDomOffsets', () => {
     // domSectionStart = renderedBodyPrev.length = 4
     // domHighlightStart = 8 - 4 - 0 = 4
     const prev = 'AB**CD**'; // 8 raw chars
-    const section = 'EFGH';  // 4 chars, no markup
+    const section = 'EFGH'; // 4 chars, no markup
     const highlight = makeHighlight({ start_offset: 8, end_offset: 12 });
 
     vi.spyOn(MarkdownPreviewView, 'render').mockImplementation(
@@ -676,7 +683,10 @@ describe('collectTextNodes', () => {
   it('property: concatenated text content equals el.textContent', () => {
     fc.assert(
       fc.property(
-        fc.array(fc.string({ minLength: 0, maxLength: 20 }), { minLength: 0, maxLength: 5 }),
+        fc.array(fc.string({ minLength: 0, maxLength: 20 }), {
+          minLength: 0,
+          maxLength: 5,
+        }),
         (segments) => {
           const el = document.createElement('div');
           for (const seg of segments) {
@@ -756,7 +766,10 @@ describe('findNodePosition', () => {
     // then picks an index that's strictly before a node boundary (offset < node.length).
     fc.assert(
       fc.property(
-        fc.array(fc.string({ minLength: 1, maxLength: 10 }), { minLength: 1, maxLength: 5 }),
+        fc.array(fc.string({ minLength: 1, maxLength: 10 }), {
+          minLength: 1,
+          maxLength: 5,
+        }),
         fc.nat({ max: 49 }),
         (texts, rawIdx) => {
           const flat = texts.join('');
@@ -765,10 +778,15 @@ describe('findNodePosition', () => {
           // and skip any index that is exactly at a cumulative boundary.
           const cumulative: number[] = [];
           let acc = 0;
-          for (const t of texts) { acc += t.length; cumulative.push(acc); }
+          for (const t of texts) {
+            acc += t.length;
+            cumulative.push(acc);
+          }
           // Filter out boundary indices
-          const validIndices = Array.from({ length: flat.length }, (_, i) => i)
-            .filter((i) => !cumulative.includes(i));
+          const validIndices = Array.from(
+            { length: flat.length },
+            (_, i) => i
+          ).filter((i) => !cumulative.includes(i));
           if (validIndices.length === 0) return; // single 1-char segment → boundary=end, skip
           const idx = validIndices[rawIdx % validIndices.length];
           const nodes = makeTextNodes(texts);
@@ -783,7 +801,10 @@ describe('findNodePosition', () => {
   it('property: returns null for any index strictly beyond total length', () => {
     fc.assert(
       fc.property(
-        fc.array(fc.string({ minLength: 0, maxLength: 10 }), { minLength: 0, maxLength: 5 }),
+        fc.array(fc.string({ minLength: 0, maxLength: 10 }), {
+          minLength: 0,
+          maxLength: 5,
+        }),
         fc.nat({ max: 50 }),
         (texts, extra) => {
           const nodes = makeTextNodes(texts);
@@ -914,16 +935,19 @@ describe('registerSnippetHighlightPostProcessor', () => {
       reviewManager: null,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     const ctx = { sourcePath: 'notes/a.md', getSectionInfo: vi.fn() };
     await processor(document.createElement('div'), ctx);
     expect(ctx.getSectionInfo).not.toHaveBeenCalled();
   });
 
   it('returns early when note type is not source, article, or snippet', async () => {
-    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
+    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
+      .ObsidianHelpers;
     vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(false);
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('card');
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('card');
 
     const getSectionInfo = vi.fn();
     const plugin = {
@@ -935,15 +959,21 @@ describe('registerSnippetHighlightPostProcessor', () => {
       reviewManager: null,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
-    await processor(document.createElement('div'), { sourcePath: 'a.md', getSectionInfo });
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    await processor(document.createElement('div'), {
+      sourcePath: 'a.md',
+      getSectionInfo,
+    });
     expect(getSectionInfo).not.toHaveBeenCalled();
   });
 
   it('proceeds when note type is source (isSource=true)', async () => {
-    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
+    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
+      .ObsidianHelpers;
     vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(true);
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue(null);
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue(null);
 
     const getSectionInfo = vi.fn().mockReturnValue(null);
     const plugin = {
@@ -955,16 +985,22 @@ describe('registerSnippetHighlightPostProcessor', () => {
       reviewManager: null,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
-    await processor(document.createElement('div'), { sourcePath: 'a.md', getSectionInfo });
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    await processor(document.createElement('div'), {
+      sourcePath: 'a.md',
+      getSectionInfo,
+    });
     // reviewManager is null, so it returns before getSectionInfo, but type check passed
     expect(getSectionInfo).not.toHaveBeenCalled();
   });
 
   it('returns early when reviewManager is null', async () => {
-    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
+    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
+      .ObsidianHelpers;
     vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(false);
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
 
     const getSectionInfo = vi.fn().mockReturnValue(null);
     const plugin = {
@@ -976,20 +1012,28 @@ describe('registerSnippetHighlightPostProcessor', () => {
       reviewManager: null,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
-    await processor(document.createElement('div'), { sourcePath: 'a.md', getSectionInfo });
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    await processor(document.createElement('div'), {
+      sourcePath: 'a.md',
+      getSectionInfo,
+    });
     expect(getSectionInfo).not.toHaveBeenCalled();
   });
 
   it('returns early when getSectionInfo returns null', async () => {
-    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
+    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
+      .ObsidianHelpers;
     vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(false);
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
     vi.spyOn(ObsidianHelpers, 'getBodyStartOffset').mockReturnValue(0);
 
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([]) },
+      },
     };
     const getSectionInfo = vi.fn().mockReturnValue(null);
     const plugin = {
@@ -1004,15 +1048,21 @@ describe('registerSnippetHighlightPostProcessor', () => {
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
-    await processor(document.createElement('div'), { sourcePath: 'a.md', getSectionInfo });
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    await processor(document.createElement('div'), {
+      sourcePath: 'a.md',
+      getSectionInfo,
+    });
     expect(reviewManager.getSnippetHighlights).not.toHaveBeenCalled();
   });
 
   it('returns early when highlights array is empty', async () => {
-    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
+    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
+      .ObsidianHelpers;
     vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(false);
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
     vi.spyOn(ObsidianHelpers, 'getBodyStartOffset').mockReturnValue(0);
 
     const getHighlights = vi.fn().mockReturnValue([]);
@@ -1020,7 +1070,9 @@ describe('registerSnippetHighlightPostProcessor', () => {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
       snippets: { offsetTracker: { getHighlights } },
     };
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: 'body' });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 0, lineEnd: 0, text: 'body' });
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
@@ -1033,25 +1085,35 @@ describe('registerSnippetHighlightPostProcessor', () => {
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
-    await processor(document.createElement('div'), { sourcePath: 'a.md', getSectionInfo });
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    await processor(document.createElement('div'), {
+      sourcePath: 'a.md',
+      getSectionInfo,
+    });
     expect(getHighlights).toHaveBeenCalledWith('a.md');
   });
 
   it('skips section when sectionBodyRelativeStart < 0 (section is in frontmatter)', async () => {
-    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
+    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
+      .ObsidianHelpers;
     vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(false);
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
     // bodyStart=10, section starts at line 0, sectionAbsoluteStart=0 → sectionBodyRelativeStart=-10
     vi.spyOn(ObsidianHelpers, 'getBodyStartOffset').mockReturnValue(10);
 
     const highlight = makeHighlight({ start_offset: 0, end_offset: 5 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
     const fileContent = '---\nfoo: bar\n---\nbody';
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
@@ -1064,7 +1126,9 @@ describe('registerSnippetHighlightPostProcessor', () => {
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     const el = document.createElement('div');
     el.textContent = 'body';
     await processor(el, { sourcePath: 'a.md', getSectionInfo });
@@ -1073,9 +1137,10 @@ describe('registerSnippetHighlightPostProcessor', () => {
   });
 
   it('skips highlight that ends before or at sectionBodyRelativeStart', async () => {
-    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
+    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
+      .ObsidianHelpers;
     vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(false);
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
     vi.spyOn(ObsidianHelpers, 'getBodyStartOffset').mockReturnValue(0);
 
     // File: "line0\nline1\n" section at line 1 → sectionAbsoluteStart = 6
@@ -1084,9 +1149,13 @@ describe('registerSnippetHighlightPostProcessor', () => {
     const highlight = makeHighlight({ start_offset: 0, end_offset: 5 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
@@ -1099,7 +1168,9 @@ describe('registerSnippetHighlightPostProcessor', () => {
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     const el = document.createElement('div');
     el.textContent = 'line1';
     await processor(el, { sourcePath: 'a.md', getSectionInfo });
@@ -1107,9 +1178,10 @@ describe('registerSnippetHighlightPostProcessor', () => {
   });
 
   it('skips highlight that starts at or after sectionBodyRelativeEnd', async () => {
-    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
+    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
+      .ObsidianHelpers;
     vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(false);
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
     vi.spyOn(ObsidianHelpers, 'getBodyStartOffset').mockReturnValue(0);
 
     // section at line 0, text='hello' (5 chars) → sectionBodyRelativeEnd = 5
@@ -1118,9 +1190,13 @@ describe('registerSnippetHighlightPostProcessor', () => {
     const highlight = makeHighlight({ start_offset: 5, end_offset: 10 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
@@ -1133,7 +1209,9 @@ describe('registerSnippetHighlightPostProcessor', () => {
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     const el = document.createElement('div');
     el.textContent = 'hello';
     await processor(el, { sourcePath: 'a.md', getSectionInfo });
@@ -1141,21 +1219,31 @@ describe('registerSnippetHighlightPostProcessor', () => {
   });
 
   it('injects a highlight span when everything aligns', async () => {
-    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
+    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
+      .ObsidianHelpers;
     vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(false);
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
     vi.spyOn(ObsidianHelpers, 'getBodyStartOffset').mockReturnValue(0);
 
     // Use identity renderer — textContent = markdown
     // File: "hello world", one section at line 0, lineEnd 0
     // section text = 'hello world' (11 chars), highlight [0, 5)
     const fileContent = 'hello world';
-    const highlight = makeHighlight({ id: 'h1', reference: 'ref/a.md', start_offset: 0, end_offset: 5 });
+    const highlight = makeHighlight({
+      id: 'h1',
+      reference: 'ref/a.md',
+      start_offset: 0,
+      end_offset: 5,
+    });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
@@ -1168,7 +1256,9 @@ describe('registerSnippetHighlightPostProcessor', () => {
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     const el = document.createElement('div');
     // The section's rendered text must be present as text nodes
     const p = document.createElement('p');
@@ -1181,9 +1271,10 @@ describe('registerSnippetHighlightPostProcessor', () => {
   });
 
   it('proceeds correctly for noteType=snippet', async () => {
-    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
+    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
+      .ObsidianHelpers;
     vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(false);
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('snippet');
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('snippet');
 
     const getSectionInfo = vi.fn().mockReturnValue(null);
     const plugin = {
@@ -1195,9 +1286,14 @@ describe('registerSnippetHighlightPostProcessor', () => {
       reviewManager: null,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     // reviewManager is null → returns early after type check; getSectionInfo not reached
-    await processor(document.createElement('div'), { sourcePath: 'a.md', getSectionInfo });
+    await processor(document.createElement('div'), {
+      sourcePath: 'a.md',
+      getSectionInfo,
+    });
     expect(getSectionInfo).not.toHaveBeenCalled();
   });
 });
@@ -1220,7 +1316,10 @@ describe('getDomOffsets — footnote branch mutation coverage', () => {
     );
 
     const section = 'See [^note1] for info.';
-    const highlight = makeHighlight({ start_offset: 0, end_offset: section.length });
+    const highlight = makeHighlight({
+      start_offset: 0,
+      end_offset: section.length,
+    });
     await getDomOffsets({} as never, '', section, highlight);
 
     // A footnote definition like [^note1]: -- must appear after the separator
@@ -1237,7 +1336,10 @@ describe('getDomOffsets — footnote branch mutation coverage', () => {
     );
 
     const section = 'Refs [^a] and [^b].';
-    const highlight = makeHighlight({ start_offset: 0, end_offset: section.length });
+    const highlight = makeHighlight({
+      start_offset: 0,
+      end_offset: section.length,
+    });
     await getDomOffsets({} as never, '', section, highlight);
 
     expect(capturedMarkdown).toMatch(/\[\^a\]: --/);
@@ -1254,7 +1356,10 @@ describe('getDomOffsets — footnote branch mutation coverage', () => {
     );
 
     const section = 'Plain text, no refs here.';
-    const highlight = makeHighlight({ start_offset: 0, end_offset: section.length });
+    const highlight = makeHighlight({
+      start_offset: 0,
+      end_offset: section.length,
+    });
     await getDomOffsets({} as never, '', section, highlight);
 
     expect(capturedMarkdown).not.toMatch(/\[\^/);
@@ -1271,7 +1376,7 @@ describe('getDomOffsets — footnote branch mutation coverage', () => {
 
     // prev has [^prior], section has [^current]
     const prev = 'Before [^prior] text.'; // length 21
-    const section = 'See [^current] here.';  // length 20
+    const section = 'See [^current] here.'; // length 20
     const highlight = makeHighlight({ start_offset: 21, end_offset: 41 });
     await getDomOffsets({} as never, prev, section, highlight);
 
@@ -1289,7 +1394,10 @@ describe('getDomOffsets — footnote branch mutation coverage', () => {
     );
 
     const section = 'Refs [^x] and [^y].';
-    const highlight = makeHighlight({ start_offset: 0, end_offset: section.length });
+    const highlight = makeHighlight({
+      start_offset: 0,
+      end_offset: section.length,
+    });
     await getDomOffsets({} as never, '', section, highlight);
 
     // Two definitions exist; they must be joined with \n\n
@@ -1307,7 +1415,10 @@ describe('getDomOffsets — footnote branch mutation coverage', () => {
     );
 
     const section = 'See [^n1].';
-    const highlight = makeHighlight({ start_offset: 0, end_offset: section.length });
+    const highlight = makeHighlight({
+      start_offset: 0,
+      end_offset: section.length,
+    });
     await getDomOffsets({} as never, '', section, highlight);
 
     // The text before the footnote definition must include \n\n (separator + \n\n)
@@ -1330,14 +1441,20 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
         registerEvent: vi.fn(),
         app: {
           workspace: {
-            on: vi.fn().mockImplementation((event: string, handler: (...args: unknown[]) => void) => {
-              if (!handlers.has(event)) handlers.set(event, []);
-              handlers.get(event)!.push(handler);
-              return { event, handler };
-            }),
-            iterateAllLeaves: vi.fn().mockImplementation((cb: (leaf: unknown) => void) => {
-              for (const l of leaves) cb(l);
-            }),
+            on: vi
+              .fn()
+              .mockImplementation(
+                (event: string, handler: (...args: unknown[]) => void) => {
+                  if (!handlers.has(event)) handlers.set(event, []);
+                  handlers.get(event)!.push(handler);
+                  return { event, handler };
+                }
+              ),
+            iterateAllLeaves: vi
+              .fn()
+              .mockImplementation((cb: (leaf: unknown) => void) => {
+                for (const l of leaves) cb(l);
+              }),
           },
         },
       },
@@ -1431,9 +1548,9 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
     h2.get('ir-highlights-changed')![0]('notes/article.md');
 
     // Fire layout-change via a plugin whose iterateAllLeaves yields our non-MarkdownView leaf
-    (p2.app.workspace.iterateAllLeaves as ReturnType<typeof vi.fn>).mockImplementation(
-      (cb: (leaf: unknown) => void) => cb(nonMarkdownLeaf)
-    );
+    (
+      p2.app.workspace.iterateAllLeaves as ReturnType<typeof vi.fn>
+    ).mockImplementation((cb: (leaf: unknown) => void) => cb(nonMarkdownLeaf));
     h2.get('layout-change')![0]();
     expect(rerender).not.toHaveBeenCalled();
   });
@@ -1453,9 +1570,9 @@ describe('registerHighlightRefreshListener — mutant coverage', () => {
     registerHighlightRefreshListener(plugin as never);
     handlers.get('ir-highlights-changed')![0]('notes/article.md');
 
-    (plugin.app.workspace.iterateAllLeaves as ReturnType<typeof vi.fn>).mockImplementation(
-      (cb: (leaf: unknown) => void) => cb(noFileLeaf)
-    );
+    (
+      plugin.app.workspace.iterateAllLeaves as ReturnType<typeof vi.fn>
+    ).mockImplementation((cb: (leaf: unknown) => void) => cb(noFileLeaf));
     handlers.get('layout-change')![0]();
     expect(rerender).not.toHaveBeenCalled();
   });
@@ -1471,16 +1588,20 @@ describe('registerSnippetHighlightPostProcessor — mutant coverage', () => {
 
   async function spyHelpers({
     isSource = false,
-    noteType = 'article' as string | null,
+    noteType = 'article' as NoteType | null,
     bodyStart = 0,
   } = {}) {
     const OH = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
     vi.spyOn(OH, 'isSourceNote').mockReturnValue(isSource);
-    vi.spyOn(OH, 'getNoteType').mockReturnValue(noteType as never);
+    vi.spyOn(OH, 'getNoteType').mockResolvedValue(noteType);
     vi.spyOn(OH, 'getBodyStartOffset').mockReturnValue(bodyStart);
   }
 
-  function makePlugin(reviewManager: unknown, fileContent: string, path = 'a.md') {
+  function makePlugin(
+    reviewManager: unknown,
+    fileContent: string,
+    path = 'a.md'
+  ) {
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
@@ -1493,7 +1614,9 @@ describe('registerSnippetHighlightPostProcessor — mutant coverage', () => {
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     return { plugin, processor };
   }
 
@@ -1502,7 +1625,10 @@ describe('registerSnippetHighlightPostProcessor — mutant coverage', () => {
     await spyHelpers({ noteType: 'snippet' });
     const getSectionInfo = vi.fn().mockReturnValue(null);
     const { processor } = makePlugin(null, 'content');
-    await processor(document.createElement('div'), { sourcePath: 'a.md', getSectionInfo });
+    await processor(document.createElement('div'), {
+      sourcePath: 'a.md',
+      getSectionInfo,
+    });
     // reviewManager null → early return before getSectionInfo
     expect(getSectionInfo).not.toHaveBeenCalled();
   });
@@ -1513,12 +1639,19 @@ describe('registerSnippetHighlightPostProcessor — mutant coverage', () => {
     const highlight = makeHighlight({ start_offset: 0, end_offset: 5 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
     const fileContent = 'hello';
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
     const { plugin, processor } = makePlugin(reviewManager, fileContent);
-    await processor(document.createElement('div'), { sourcePath: 'a.md', getSectionInfo });
+    await processor(document.createElement('div'), {
+      sourcePath: 'a.md',
+      getSectionInfo,
+    });
     expect(plugin.app.vault.cachedRead).toHaveBeenCalled();
   });
 
@@ -1533,9 +1666,13 @@ describe('registerSnippetHighlightPostProcessor — mutant coverage', () => {
     const highlight = makeHighlight({ start_offset: 6, end_offset: 11 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
     const { processor } = makePlugin(reviewManager, fileContent);
     const el = document.createElement('div');
     const p = document.createElement('p');
@@ -1562,9 +1699,13 @@ describe('registerSnippetHighlightPostProcessor — mutant coverage', () => {
     const highlight = makeHighlight({ start_offset: 4, end_offset: 8 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
     const { processor } = makePlugin(reviewManager, fileContent);
     const el = document.createElement('div');
     const p = document.createElement('p');
@@ -1582,10 +1723,14 @@ describe('registerSnippetHighlightPostProcessor — mutant coverage', () => {
     const highlight = makeHighlight({ start_offset: 0, end_offset: 5 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
     const fileContent = '---\nfoo: bar\n---\nbody';
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
     const { plugin, processor } = makePlugin(reviewManager, fileContent);
     const el = document.createElement('div');
     el.textContent = 'body';
@@ -1603,9 +1748,13 @@ describe('registerSnippetHighlightPostProcessor — mutant coverage', () => {
     const highlight = makeHighlight({ start_offset: 0, end_offset: 6 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
     const { processor } = makePlugin(reviewManager, fileContent);
     const el = document.createElement('div');
     const p = document.createElement('p');
@@ -1626,9 +1775,13 @@ describe('registerSnippetHighlightPostProcessor — mutant coverage', () => {
     const highlight = makeHighlight({ start_offset: 5, end_offset: 10 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
     const { processor } = makePlugin(reviewManager, fileContent);
     const el = document.createElement('div');
     const p = document.createElement('p');
@@ -1658,9 +1811,13 @@ describe('registerSnippetHighlightPostProcessor — mutant coverage', () => {
     const highlight = makeHighlight({ start_offset: 3, end_offset: 12 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
     const { processor } = makePlugin(reviewManager, fileContent);
     const el = document.createElement('div');
     const p = document.createElement('p');
@@ -1681,9 +1838,13 @@ describe('registerSnippetHighlightPostProcessor — mutant coverage', () => {
     const highlight = makeHighlight({ start_offset: 3, end_offset: 3 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent });
     const { processor } = makePlugin(reviewManager, fileContent);
     const el = document.createElement('div');
     const p = document.createElement('p');
@@ -1712,11 +1873,15 @@ describe('getDomOffsets — no-footnote path emits no extra segments', () => {
       }
     );
     const section = 'No footnotes here.';
-    const highlight = makeHighlight({ start_offset: 0, end_offset: section.length });
+    const highlight = makeHighlight({
+      start_offset: 0,
+      end_offset: section.length,
+    });
     await getDomOffsets({} as never, '', section, highlight);
     // With > 0: no footnote branch → 3 separator occurrences (between 4 parts)
     // With >= 0: branch runs with empty lists → appends separator + '\n\n' + '' → 4 separators
-    const uuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+    const uuidPattern =
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
     const separatorCount = (capturedMarkdown.match(uuidPattern) ?? []).length;
     expect(separatorCount).toBe(3);
   });
@@ -1732,12 +1897,12 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
 
   async function spyHelpersG({
     isSource = false,
-    noteType = 'article' as string | null,
+    noteType = 'article' as NoteType | null,
     bodyStart = 0,
   } = {}) {
     const OH = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
     vi.spyOn(OH, 'isSourceNote').mockReturnValue(isSource);
-    vi.spyOn(OH, 'getNoteType').mockReturnValue(noteType as never);
+    vi.spyOn(OH, 'getNoteType').mockResolvedValue(noteType);
     vi.spyOn(OH, 'getBodyStartOffset').mockReturnValue(bodyStart);
     return OH;
   }
@@ -1749,14 +1914,22 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
-        vault: { getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }), cachedRead },
+        vault: {
+          getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }),
+          cachedRead,
+        },
         workspace: { on: vi.fn().mockReturnValue({}) },
       },
       reviewManager: null,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
-    await processor(document.createElement('div'), { sourcePath: 'a.md', getSectionInfo: vi.fn() });
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    await processor(document.createElement('div'), {
+      sourcePath: 'a.md',
+      getSectionInfo: vi.fn(),
+    });
     // Guard at line 31 fires → cachedRead must not be called regardless of mutant
     expect(cachedRead).not.toHaveBeenCalled();
   });
@@ -1774,8 +1947,13 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
       reviewManager: null,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
-    await processor(document.createElement('div'), { sourcePath: 'a.md', getSectionInfo });
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    await processor(document.createElement('div'), {
+      sourcePath: 'a.md',
+      getSectionInfo,
+    });
     // reviewManager is null → returns before getSectionInfo. If guard was `if (false)` it would
     // STILL not call getSectionInfo (because reviewManager=null fires first). So we assert
     // that isSourceNote was called (type check happened).
@@ -1790,21 +1968,30 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
     const getSnippetHighlights = vi.fn().mockResolvedValue(undefined);
     const reviewManager = {
       getSnippetHighlights,
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([]) },
+      },
     };
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
-        vault: { getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }), cachedRead },
+        vault: {
+          getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }),
+          cachedRead,
+        },
         workspace: { on: vi.fn().mockReturnValue({}) },
       },
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     await processor(document.createElement('div'), {
       sourcePath: 'a.md',
-      getSectionInfo: vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: 'content' }),
+      getSectionInfo: vi
+        .fn()
+        .mockReturnValue({ lineStart: 0, lineEnd: 0, text: 'content' }),
     });
     expect(getSnippetHighlights).toHaveBeenCalled();
     // highlights.length===0 → early return → cachedRead never reached
@@ -1826,24 +2013,33 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
     const fileContent = 'FRONT\nBODY';
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
     const cachedRead = vi.fn().mockResolvedValue(fileContent);
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
-        vault: { getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }), cachedRead },
+        vault: {
+          getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }),
+          cachedRead,
+        },
         workspace: { on: vi.fn().mockReturnValue({}) },
       },
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     const el = document.createElement('div');
     el.textContent = 'FRONT';
     await processor(el, {
       sourcePath: 'a.md',
-      getSectionInfo: vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
+      getSectionInfo: vi
+        .fn()
+        .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
     });
     expect(cachedRead).toHaveBeenCalled();
     expect(el.querySelector('span.ir-snippet-highlight')).toBeNull();
@@ -1874,19 +2070,28 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
     const highlight = makeHighlight({ start_offset: 0, end_offset: 6 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
-    const getSectionInfo = vi.fn().mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent });
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
-        vault: { getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }), cachedRead: vi.fn().mockResolvedValue(fileContent) },
+        vault: {
+          getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }),
+          cachedRead: vi.fn().mockResolvedValue(fileContent),
+        },
         workspace: { on: vi.fn().mockReturnValue({}) },
       },
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     const el = document.createElement('div');
     const p = document.createElement('p');
     p.textContent = 'LINE1';
@@ -1907,18 +2112,25 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
     const highlight = makeHighlight({ start_offset: 0, end_offset: 5 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
-        vault: { getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }), cachedRead: vi.fn().mockResolvedValue(fileContent) },
+        vault: {
+          getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }),
+          cachedRead: vi.fn().mockResolvedValue(fileContent),
+        },
         workspace: { on: vi.fn().mockReturnValue({}) },
       },
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     const el = document.createElement('div');
     const p = document.createElement('p');
     p.textContent = 'HELLO';
@@ -1926,7 +2138,9 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
     document.body.appendChild(el);
     await processor(el, {
       sourcePath: 'a.md',
-      getSectionInfo: vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
+      getSectionInfo: vi
+        .fn()
+        .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
     });
     document.body.removeChild(el);
     expect(el.querySelector('span.ir-snippet-highlight')).not.toBeNull();
@@ -1942,18 +2156,25 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
     const highlight = makeHighlight({ start_offset: 0, end_offset: 8 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
-        vault: { getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }), cachedRead: vi.fn().mockResolvedValue(fileContent) },
+        vault: {
+          getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }),
+          cachedRead: vi.fn().mockResolvedValue(fileContent),
+        },
         workspace: { on: vi.fn().mockReturnValue({}) },
       },
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     const el = document.createElement('div');
     const p = document.createElement('p');
     p.textContent = 'LINE1';
@@ -1961,7 +2182,9 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
     document.body.appendChild(el);
     await processor(el, {
       sourcePath: 'a.md',
-      getSectionInfo: vi.fn().mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent }),
+      getSectionInfo: vi
+        .fn()
+        .mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent }),
     });
     document.body.removeChild(el);
     expect(el.querySelector('span.ir-snippet-highlight')).not.toBeNull();
@@ -1976,18 +2199,25 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
     const highlight = makeHighlight({ start_offset: 4, end_offset: 5 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
-        vault: { getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }), cachedRead: vi.fn().mockResolvedValue(fileContent) },
+        vault: {
+          getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }),
+          cachedRead: vi.fn().mockResolvedValue(fileContent),
+        },
         workspace: { on: vi.fn().mockReturnValue({}) },
       },
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     const el = document.createElement('div');
     const p = document.createElement('p');
     p.textContent = 'HELLO';
@@ -1995,7 +2225,9 @@ describe('registerSnippetHighlightPostProcessor — guard sentinel tests', () =>
     document.body.appendChild(el);
     await processor(el, {
       sourcePath: 'a.md',
-      getSectionInfo: vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
+      getSectionInfo: vi
+        .fn()
+        .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
     });
     document.body.removeChild(el);
     expect(el.querySelector('span.ir-snippet-highlight')).not.toBeNull();
@@ -2015,12 +2247,12 @@ describe('registerSnippetHighlightPostProcessor — gate bypass', () => {
 
   async function spyHelpersB({
     isSource = false,
-    noteType = 'article' as string | null,
+    noteType = 'article' as NoteType | null,
     bodyStart = 0,
   } = {}) {
     const OH = (await import('#/lib/ObsidianHelpers')).ObsidianHelpers;
     vi.spyOn(OH, 'isSourceNote').mockReturnValue(isSource);
-    vi.spyOn(OH, 'getNoteType').mockReturnValue(noteType as never);
+    vi.spyOn(OH, 'getNoteType').mockResolvedValue(noteType);
     vi.spyOn(OH, 'getBodyStartOffset').mockReturnValue(bodyStart);
   }
 
@@ -2037,7 +2269,9 @@ describe('registerSnippetHighlightPostProcessor — gate bypass', () => {
       reviewManager,
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     return { plugin, processor };
   }
 
@@ -2049,7 +2283,9 @@ describe('registerSnippetHighlightPostProcessor — gate bypass', () => {
     const highlight = makeHighlight({ start_offset: 0, end_offset: 5 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
     const { processor } = makePluginB(reviewManager, fileContent);
     const el = document.createElement('div');
@@ -2059,7 +2295,9 @@ describe('registerSnippetHighlightPostProcessor — gate bypass', () => {
     document.body.appendChild(el);
     await processor(el, {
       sourcePath: 'a.md',
-      getSectionInfo: vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
+      getSectionInfo: vi
+        .fn()
+        .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
     });
     // Type gate fires → no span. With `if (false)` mutant, span WOULD be injected.
     expect(el.querySelector('span.ir-snippet-highlight')).toBeNull();
@@ -2074,7 +2312,9 @@ describe('registerSnippetHighlightPostProcessor — gate bypass', () => {
     const highlight = makeHighlight({ start_offset: 0, end_offset: 7 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
     const { processor } = makePluginB(reviewManager, fileContent);
     const el = document.createElement('div');
@@ -2084,7 +2324,9 @@ describe('registerSnippetHighlightPostProcessor — gate bypass', () => {
     document.body.appendChild(el);
     await processor(el, {
       sourcePath: 'a.md',
-      getSectionInfo: vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
+      getSectionInfo: vi
+        .fn()
+        .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
     });
     expect(el.querySelector('span.ir-snippet-highlight')).not.toBeNull();
   });
@@ -2097,19 +2339,28 @@ describe('registerSnippetHighlightPostProcessor — gate bypass', () => {
     const plugin = {
       registerMarkdownPostProcessor: vi.fn(),
       app: {
-        vault: { getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }), cachedRead },
+        vault: {
+          getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }),
+          cachedRead,
+        },
         workspace: { on: vi.fn().mockReturnValue({}) },
       },
       reviewManager: {
         getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-        snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([]) } },
+        snippets: {
+          offsetTracker: { getHighlights: vi.fn().mockReturnValue([]) },
+        },
       },
     };
     registerSnippetHighlightPostProcessor(plugin as never);
-    const processor = (plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
     await processor(document.createElement('div'), {
       sourcePath: 'a.md',
-      getSectionInfo: vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: 'content' }),
+      getSectionInfo: vi
+        .fn()
+        .mockReturnValue({ lineStart: 0, lineEnd: 0, text: 'content' }),
     });
     expect(cachedRead).not.toHaveBeenCalled();
   });
@@ -2228,7 +2479,9 @@ describe('registerSnippetHighlightPostProcessor — gate bypass', () => {
     const highlight = makeHighlight({ start_offset: 0, end_offset: 6 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
     const getDomOffsetsSpy = vi.spyOn(
       await import('#/lib/extensions/SnippetHighlightPostProcessor'),
@@ -2242,7 +2495,9 @@ describe('registerSnippetHighlightPostProcessor — gate bypass', () => {
     document.body.appendChild(el);
     await processor(el, {
       sourcePath: 'a.md',
-      getSectionInfo: vi.fn().mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent }),
+      getSectionInfo: vi
+        .fn()
+        .mockReturnValue({ lineStart: 1, lineEnd: 1, text: fileContent }),
     });
     expect(getDomOffsetsSpy).not.toHaveBeenCalled();
   });
@@ -2256,7 +2511,9 @@ describe('registerSnippetHighlightPostProcessor — gate bypass', () => {
     const highlight = makeHighlight({ start_offset: 5, end_offset: 10 });
     const reviewManager = {
       getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-      snippets: { offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) } },
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
     };
     const getDomOffsetsSpy = vi.spyOn(
       await import('#/lib/extensions/SnippetHighlightPostProcessor'),
@@ -2270,7 +2527,9 @@ describe('registerSnippetHighlightPostProcessor — gate bypass', () => {
     document.body.appendChild(el);
     await processor(el, {
       sourcePath: 'a.md',
-      getSectionInfo: vi.fn().mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
+      getSectionInfo: vi
+        .fn()
+        .mockReturnValue({ lineStart: 0, lineEnd: 0, text: fileContent }),
     });
     expect(getDomOffsetsSpy).not.toHaveBeenCalled();
   });

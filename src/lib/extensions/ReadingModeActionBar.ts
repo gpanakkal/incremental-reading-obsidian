@@ -12,7 +12,7 @@ class ReadingModeActionBarController {
     private readonly plugin: IncrementalReadingPlugin
   ) {}
 
-  sync(): void {
+  async sync(): Promise<void> {
     const { view } = this.leaf;
     if (!(view instanceof MarkdownView) || view.getMode() !== 'preview') {
       this.unmount();
@@ -23,7 +23,7 @@ class ReadingModeActionBarController {
       this.unmount();
       return;
     }
-    const noteType = ObsidianHelpers.getNoteType(file, this.plugin.app);
+    const noteType = await ObsidianHelpers.getNoteType(file, this.plugin.app);
     if (!noteType) {
       this.unmount();
       return;
@@ -61,7 +61,7 @@ export function registerReadingModeActionBar(
       if (!controllers.has(leaf)) {
         controllers.set(leaf, new ReadingModeActionBarController(leaf, plugin));
       }
-      controllers.get(leaf)!.sync();
+      void controllers.get(leaf)!.sync();
     });
     for (const [leaf, ctrl] of controllers) {
       if (!liveLeaves.has(leaf)) {

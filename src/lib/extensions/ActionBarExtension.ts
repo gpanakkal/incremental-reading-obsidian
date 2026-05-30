@@ -17,7 +17,7 @@ import {
 import type IncrementalReadingPlugin from '#/main';
 import { StateEffect, StateField, type Extension } from '@codemirror/state';
 import type { EditorView, Panel } from '@codemirror/view';
-import { showPanel } from '@codemirror/view';
+import { showPanel, ViewPlugin } from '@codemirror/view';
 import type { App, TFile } from 'obsidian';
 import { Notice } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
@@ -50,6 +50,8 @@ export interface ReviewCallbacks {
 
 export const setReviewCallbacks = StateEffect.define<ReviewCallbacks>();
 
+const setNoteTypeEffect = StateEffect.define<NoteType | null>();
+
 /**
  * State field tracking action bar state.
  */
@@ -57,6 +59,7 @@ interface ActionBarState {
   isReviewMode: boolean;
   showAnswer: boolean;
   callbacks: ReviewCallbacks;
+  noteType: NoteType | null;
 }
 
 export const actionBarStateField = StateField.define<ActionBarState>({
@@ -64,6 +67,7 @@ export const actionBarStateField = StateField.define<ActionBarState>({
     isReviewMode: false,
     showAnswer: false,
     callbacks: {},
+    noteType: null,
   }),
   update(value, tr) {
     let newValue = value;
@@ -74,6 +78,8 @@ export const actionBarStateField = StateField.define<ActionBarState>({
         newValue = { ...newValue, showAnswer: effect.value };
       } else if (effect.is(setReviewCallbacks)) {
         newValue = { ...newValue, callbacks: effect.value };
+      } else if (effect.is(setNoteTypeEffect)) {
+        newValue = { ...newValue, noteType: effect.value };
       }
     }
     return newValue;
@@ -111,13 +117,10 @@ function createActionBarPanel(
           const { info } = Obsidian.getFileInfoFromState(update.state);
           if (!info) return;
 
-          const { file, app } = info;
+          const { file } = info;
           if (!file) return;
 
-          const currentNoteType = Obsidian.getNoteType(file, app);
-          if (currentNoteType) {
-            renderActionBar(update.view, dom, currentNoteType);
-          }
+          renderActionBar(update.view, dom, noteType);
         }
       },
     };
@@ -466,14 +469,55 @@ function createPriorityInput(
 }
 
 /**
+ * ViewPlugin that resolves the note type once per file and writes it into
+ * actionBarStateField via setNoteTypeEffect. Keeping this out of compute()
+ * ensures compute stays a pure state→value function with no side effects.
+ */
+const noteTypePlugin = ViewPlugin.define((view) => {
+  let destroyed = false;
+  let lastFilePath: string | undefined;
+
+  const lookup = (filePath: string) => {
+    const { info } = Obsidian.getFileInfoFromState(view.state);
+    if (!info?.file || !info.app) return;
+    void Obsidian.getNoteType(info.file, info.app).then((resolved) => {
+      if (destroyed) return;
+      const current = view.state.field(actionBarStateField).noteType;
+      if (resolved !== current) {
+        view.dispatch({ effects: setNoteTypeEffect.of(resolved) });
+      }
+    });
+    lastFilePath = filePath;
+  };
+
+  // Initial lookup on mount
+  const { info } = Obsidian.getFileInfoFromState(view.state);
+  if (info?.file) lookup(info.file.path);
+
+  return {
+    update() {
+      const { info: newInfo } = Obsidian.getFileInfoFromState(view.state);
+      if (!newInfo?.file) return;
+      // Re-resolve only when the open file actually changes
+      if (newInfo.file.path !== lastFilePath) {
+        lookup(newInfo.file.path);
+      }
+    },
+    destroy() {
+      destroyed = true;
+    },
+  };
+});
+
+/**
  * Facet for conditionally showing the action bar panel.
  * Only shows for files with IR tags when NOT in review mode.
  * In review mode, the React ActionBar component handles the UI instead.
+ * Pure state→panel derivation; all async work lives in noteTypePlugin.
  */
 const actionBarPanelFacet = showPanel.compute(
   [actionBarStateField],
   (state) => {
-    // Don't show the CM panel when in review mode - the React ActionBar handles that
     const actionBarState = state.field(actionBarStateField);
     if (actionBarState.isReviewMode) return null;
 
@@ -483,14 +527,12 @@ const actionBarPanelFacet = showPanel.compute(
     const inSubEditor = !editorView?.dom.parentElement?.hasClass(
       'markdown-source-view'
     );
-
     if (inSubEditor) return null;
 
-    const { file, app } = info;
-    const noteType = Obsidian.getNoteType(file, app);
+    const { noteType } = actionBarState;
     if (!noteType) return null;
 
-    return createActionBarPanel(noteType, app);
+    return createActionBarPanel(noteType, info.app);
   }
 );
 
@@ -499,5 +541,6 @@ const actionBarPanelFacet = showPanel.compute(
  */
 export const actionBarExtension: Extension = [
   actionBarStateField,
+  noteTypePlugin,
   actionBarPanelFacet,
 ];

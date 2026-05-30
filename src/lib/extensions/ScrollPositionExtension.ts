@@ -30,137 +30,140 @@ export const scrollPositionExtension = ViewPlugin.define(
       };
 
     const { file, app } = info;
-    // Early return if plugin/file not available or not an IR note
-    if (!plugin || !file || !app || !Obsidian.getNoteType(file, app)) {
-      return {
-        destroy() {},
-      };
+
+    if (!plugin || !file || !app) {
+      return { destroy() {} };
     }
 
-    const reviewManager = plugin.reviewManager;
-    if (!reviewManager) {
-      // ReviewManager not yet initialized - skip for now
-      return {
-        destroy() {},
-      };
-    }
+    // keep track of if the ViewPlugin was destroyed
+    let destroyed = false;
+    // Kick off async noteType check; initialise listeners only when confirmed IR note.
+    void Obsidian.getNoteType(file, app).then((noteType) => {
+      if (destroyed || !noteType) return;
 
-    /**
-     * Get the height of the frontmatter/properties widget if visible.
-     * Returns 0 if not present (e.g., in IREditor which hides frontmatter).
-     */
-    const getFrontmatterHeight = (): number => {
-      const propertiesWidget = view.contentDOM.querySelector(
-        '.metadata-container'
-      );
-      if (propertiesWidget) {
-        return propertiesWidget.getBoundingClientRect().height;
-      }
-      return 0;
-    };
+      const reviewManager = plugin.reviewManager;
+      if (!reviewManager) return;
 
-    // Save scroll position handler
-    // Subtracts frontmatter height so we store body-relative position
-    const handleScroll = () => {
-      if (isRestoring) return;
-
-      const { info } = Obsidian.getFileInfoFromState(view.state);
-      if (!info || !info.file) return;
-
-      const scroller = view.scrollDOM;
-      const frontmatterHeight = getFrontmatterHeight();
-
-      // Store body-relative scroll position (subtract frontmatter height)
-      const bodyRelativeTop = Math.max(
-        0,
-        scroller.scrollTop - frontmatterHeight
-      );
-      const currentPos = {
-        top: bodyRelativeTop,
-        left: scroller.scrollLeft,
+      /**
+       * Get the height of the frontmatter/properties widget if visible.
+       * Returns 0 if not present (e.g., in IREditor which hides frontmatter).
+       */
+      const getFrontmatterHeight = (): number => {
+        const propertiesWidget = view.contentDOM.querySelector(
+          '.metadata-container'
+        );
+        if (propertiesWidget) {
+          return propertiesWidget.getBoundingClientRect().height;
+        }
+        return 0;
       };
 
-      void reviewManager.saveScrollPosition(info.file, currentPos);
-    };
+      // Save scroll position handler
+      // Subtracts frontmatter height so we store body-relative position
+      const handleScroll = () => {
+        if (isRestoring) return;
 
-    // Restore scroll position after properties widget has rendered
-    // Adds frontmatter height to convert from body-relative to absolute position
-    const restoreScrollPosition = async () => {
-      const storedScrollPos = await reviewManager.loadScrollPosition(file);
-      if (storedScrollPos) {
-        isRestoring = true;
+        const { info } = Obsidian.getFileInfoFromState(view.state);
+        if (!info || !info.file) return;
+
+        const scroller = view.scrollDOM;
         const frontmatterHeight = getFrontmatterHeight();
 
-        // Convert body-relative position to absolute (add frontmatter height)
-        view.scrollDOM.scrollTo({
-          top: storedScrollPos.top + frontmatterHeight,
-          left: storedScrollPos.left,
-          behavior: 'auto',
-        });
-        scrollTimeout = window.setTimeout(() => {
-          isRestoring = false;
-        }, 200);
-      }
-    };
+        // Store body-relative scroll position (subtract frontmatter height)
+        const bodyRelativeTop = Math.max(
+          0,
+          scroller.scrollTop - frontmatterHeight
+        );
+        const currentPos = {
+          top: bodyRelativeTop,
+          left: scroller.scrollLeft,
+        };
 
-    // Wait for the properties widget to be fully rendered before restoring scroll.
-    // The properties widget is an embedded block (cm-embed-block) that renders
-    // asynchronously after the initial document load.
-    const waitForPropertiesAndRestore = async () => {
-      const contentDOM = view.contentDOM;
+        void reviewManager.saveScrollPosition(info.file, currentPos);
+      };
 
-      // Check if properties widget already exists
-      const propertiesWidget = contentDOM.querySelector('.metadata-container');
-      if (propertiesWidget) {
-        // Already rendered, restore immediately
-        await restoreScrollPosition();
-        return;
-      }
+      // Restore scroll position after properties widget has rendered
+      // Adds frontmatter height to convert from body-relative to absolute position
+      const restoreScrollPosition = async () => {
+        const storedScrollPos = await reviewManager.loadScrollPosition(file);
+        if (storedScrollPos) {
+          isRestoring = true;
+          const frontmatterHeight = getFrontmatterHeight();
 
-      // Use MutationObserver to detect when the properties widget appears
-      let timeoutId: number;
-      mutationObserver = new MutationObserver((_mutations, observer) => {
-        const widget = contentDOM.querySelector('.metadata-container');
-        if (widget) {
-          observer.disconnect();
-          clearTimeout(timeoutId);
-          // Give the widget a moment to finish layout
-          requestAnimationFrame(() => {
-            void restoreScrollPosition();
+          // Convert body-relative position to absolute (add frontmatter height)
+          view.scrollDOM.scrollTo({
+            top: storedScrollPos.top + frontmatterHeight,
+            left: storedScrollPos.left,
+            behavior: 'auto',
           });
+          scrollTimeout = window.setTimeout(() => {
+            isRestoring = false;
+          }, 200);
         }
-      });
+      };
 
-      mutationObserver.observe(contentDOM, {
-        childList: true,
-        subtree: true,
-      });
+      // Wait for the properties widget to be fully rendered before restoring scroll.
+      // The properties widget is an embedded block (cm-embed-block) that renders
+      // asynchronously after the initial document load.
+      const waitForPropertiesAndRestore = async () => {
+        const contentDOM = view.contentDOM;
 
-      // Fallback: if no properties widget appears before timeout, restore anyway
-      // (file might not have frontmatter, or we're in IREditor)
-      timeoutId = window.setTimeout(() => {
-        mutationObserver?.disconnect();
-        void restoreScrollPosition();
-      }, propertiesLoadTimeoutMs);
-    };
+        // Check if properties widget already exists
+        const propertiesWidget = contentDOM.querySelector(
+          '.metadata-container'
+        );
+        if (propertiesWidget) {
+          // Already rendered, restore immediately
+          await restoreScrollPosition();
+          return;
+        }
 
-    // Start the scroll restoration process
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        waitForPropertiesAndRestore()
-          .then(() => {
-            // Add scroll listener with AbortController for clean lifecycle
-            abortController = new AbortController();
-            view.scrollDOM.addEventListener('scrollend', handleScroll, {
-              signal: abortController.signal,
+        // Use MutationObserver to detect when the properties widget appears
+        let timeoutId: number;
+        mutationObserver = new MutationObserver((_mutations, observer) => {
+          const widget = contentDOM.querySelector('.metadata-container');
+          if (widget) {
+            observer.disconnect();
+            clearTimeout(timeoutId);
+            // Give the widget a moment to finish layout
+            requestAnimationFrame(() => {
+              void restoreScrollPosition();
             });
-          })
-          .catch(() => {});
+          }
+        });
+
+        mutationObserver.observe(contentDOM, {
+          childList: true,
+          subtree: true,
+        });
+
+        // Fallback: if no properties widget appears before timeout, restore anyway
+        // (file might not have frontmatter, or we're in IREditor)
+        timeoutId = window.setTimeout(() => {
+          mutationObserver?.disconnect();
+          void restoreScrollPosition();
+        }, propertiesLoadTimeoutMs);
+      };
+
+      // Start the scroll restoration process
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          waitForPropertiesAndRestore()
+            .then(() => {
+              // Add scroll listener with AbortController for clean lifecycle
+              abortController = new AbortController();
+              view.scrollDOM.addEventListener('scrollend', handleScroll, {
+                signal: abortController.signal,
+              });
+            })
+            .catch(() => {});
+        });
       });
     });
 
     return {
       destroy() {
+        destroyed = true;
         abortController?.abort();
         mutationObserver?.disconnect();
         if (scrollTimeout !== undefined) {

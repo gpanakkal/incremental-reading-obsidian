@@ -197,7 +197,7 @@ export class SnippetManager extends ItemManager {
     );
 
     // Tag the source note as ir-source if it doesn't have any IR tag yet
-    const parentType = Obsidian.getNoteType(currentFile, this.app);
+    const parentType = await Obsidian.getNoteType(currentFile, this.app);
     if (!parentType) {
       await Obsidian.updateFrontMatter(
         currentFile,
@@ -410,7 +410,7 @@ export class SnippetManager extends ItemManager {
    */
   async getHighlights(parentFile: TFile) {
     // First find the parent's ID
-    const parentType = Obsidian.getNoteType(parentFile, this.app);
+    const parentType = await Obsidian.getNoteType(parentFile, this.app);
     let parentEntry;
 
     if (parentType === 'article') {
@@ -510,7 +510,8 @@ export class SnippetManager extends ItemManager {
 
       const linkingFile = this.app.vault.getAbstractFileByPath(linkingFilePath);
       if (!linkingFile || !(linkingFile instanceof TFile)) continue;
-      if (Obsidian.getNoteType(linkingFile, this.app) !== 'snippet') continue;
+      if ((await Obsidian.getNoteType(linkingFile, this.app)) !== 'snippet')
+        continue;
 
       const snippetRow = await this.findSnippet(linkingFile);
       if (

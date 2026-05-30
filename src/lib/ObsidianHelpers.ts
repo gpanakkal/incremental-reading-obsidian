@@ -154,17 +154,20 @@ export class ObsidianHelpers {
   }
 
   /**
-   * Gets the type of a note based on its tags. Can return a false `null`
-   * if performed too soon after note creation.
-   * TODO: use more robust approach to getting tags
+   * Gets the type of a note based on its tags.
    */
-  static getNoteType(note: TFile, app: App): NoteType | null {
-    const { tags } = this.getFrontMatter(note, app) ?? {};
-    if (!tags) return null;
-    if (tags.includes(ARTICLE_TAG)) return 'article';
-    else if (tags.includes(SNIPPET_TAG)) return 'snippet';
-    else if (tags.includes(CARD_TAG)) return 'card';
-    else return null;
+  static async getNoteType(note: TFile, app: App): Promise<NoteType | null> {
+    let type: NoteType | null = null;
+    await app.fileManager.processFrontMatter(
+      note,
+      (frontmatter: PluginFrontMatter) => {
+        if (frontmatter.tags === undefined) type = null;
+        else if (frontmatter.tags.includes(ARTICLE_TAG)) type = 'article';
+        else if (frontmatter.tags.includes(SNIPPET_TAG)) type = 'snippet';
+        else if (frontmatter.tags.includes(CARD_TAG)) type = 'card';
+      }
+    );
+    return type;
   }
 
   /**

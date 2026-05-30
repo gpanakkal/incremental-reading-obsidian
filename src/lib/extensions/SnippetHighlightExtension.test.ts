@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
+import { SnippetOffsetTracker } from '#/lib/SnippetOffsetTracker';
 import { EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import fc from 'fast-check';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SnippetOffsetTracker } from '#/lib/SnippetOffsetTracker';
-import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
-import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { NoteType } from '../types';
 import {
   isExternalSync,
   refreshHighlightsEffect,
@@ -18,7 +19,9 @@ import { irPluginFacet, isReviewInterfaceFacet } from './irPluginFacet';
 
 const FILE_PATH = 'notes/a.md';
 
-function makeHighlight(overrides: Partial<SnippetHighlight> = {}): SnippetHighlight {
+function makeHighlight(
+  overrides: Partial<SnippetHighlight> = {}
+): SnippetHighlight {
   return {
     id: 'h1',
     type: 'snippet',
@@ -56,7 +59,9 @@ type FakePlugin = {
   app: { workspace: { openLinkText: ReturnType<typeof vi.fn> } };
 };
 
-function makePlugin(reviewManager: FakeReviewManager | null = null): FakePlugin {
+function makePlugin(
+  reviewManager: FakeReviewManager | null = null
+): FakePlugin {
   return {
     reviewManager,
     app: { workspace: { openLinkText: vi.fn() } },
@@ -69,7 +74,7 @@ function makePlugin(reviewManager: FakeReviewManager | null = null): FakePlugin 
  */
 function stubFileInfo(
   filePath = FILE_PATH,
-  noteType: ReturnType<typeof Obsidian.getNoteType> = 'article',
+  noteType: NoteType | null = 'article',
   isSource = false
 ) {
   const fakeFile = { path: filePath };
@@ -78,7 +83,7 @@ function stubFileInfo(
     editorView: null,
   });
   vi.spyOn(Obsidian, 'isSourceNote').mockReturnValue(isSource);
-  vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(noteType);
+  vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(noteType);
   vi.spyOn(Obsidian, 'getBodyStartOffset').mockReturnValue(0);
   return fakeFile;
 }
@@ -133,17 +138,22 @@ describe('isExternalSync', () => {
     view.destroy();
   });
 
-  it.each([true, false])('annotation value survives round-trip for %s', (flag) => {
-    const view = makeView('test', null);
-    const tr = view.state.update({ annotations: isExternalSync.of(flag) });
-    expect(tr.annotation(isExternalSync)).toBe(flag);
-    view.destroy();
-  });
+  it.each([true, false])(
+    'annotation value survives round-trip for %s',
+    (flag) => {
+      const view = makeView('test', null);
+      const tr = view.state.update({ annotations: isExternalSync.of(flag) });
+      expect(tr.annotation(isExternalSync)).toBe(flag);
+      view.destroy();
+    }
+  );
 
   it('two separate transactions carry independent annotation values', () => {
     const view = makeView('test', null);
     const trTrue = view.state.update({ annotations: isExternalSync.of(true) });
-    const trFalse = view.state.update({ annotations: isExternalSync.of(false) });
+    const trFalse = view.state.update({
+      annotations: isExternalSync.of(false),
+    });
     expect(trTrue.annotation(isExternalSync)).toBe(true);
     expect(trFalse.annotation(isExternalSync)).toBe(false);
     view.destroy();
@@ -265,14 +275,18 @@ describe('update() — refreshHighlightsEffect when not yet loaded', () => {
 
   it('does not throw when refreshHighlightsEffect is dispatched without a plugin', () => {
     const view = makeView('hello', null);
-    expect(() => view.dispatch({ effects: refreshHighlightsEffect.of(null) })).not.toThrow();
+    expect(() =>
+      view.dispatch({ effects: refreshHighlightsEffect.of(null) })
+    ).not.toThrow();
     view.destroy();
   });
 
   it('does not throw when refreshHighlightsEffect is dispatched with null reviewManager', () => {
     const irPlugin = makePlugin(null);
     const view = makeView('hello', irPlugin);
-    expect(() => view.dispatch({ effects: refreshHighlightsEffect.of(null) })).not.toThrow();
+    expect(() =>
+      view.dispatch({ effects: refreshHighlightsEffect.of(null) })
+    ).not.toThrow();
     view.destroy();
   });
 
@@ -288,7 +302,9 @@ describe('update() — refreshHighlightsEffect when not yet loaded', () => {
     const view = makeView('hello world', irPlugin);
 
     // Dispatch refresh effect — should set highlightsLoaded=true synchronously
-    expect(() => view.dispatch({ effects: refreshHighlightsEffect.of(null) })).not.toThrow();
+    expect(() =>
+      view.dispatch({ effects: refreshHighlightsEffect.of(null) })
+    ).not.toThrow();
 
     // Subsequent dispatch won't re-enter the !highlightsLoaded branch
     expect(() => view.dispatch({})).not.toThrow();
@@ -347,21 +363,22 @@ describe('update() — docChanged after highlights are loaded', () => {
 
   it('calls updateOffsetsWithMapping on a user input event', () => {
     const rm = makeReviewManager();
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     const { view } = makeLoadedView('hello world', rm, false);
     view.dispatch({ changes: { from: 5, insert: '!' }, userEvent: 'input' });
-    expect(updateSpy).toHaveBeenCalledWith(
-      FILE_PATH,
-      expect.anything(),
-      0,
-      0
-    );
+    expect(updateSpy).toHaveBeenCalledWith(FILE_PATH, expect.anything(), 0, 0);
     view.destroy();
   });
 
   it('calls updateOffsetsWithMapping on a delete event', () => {
     const rm = makeReviewManager();
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     const { view } = makeLoadedView('hello world', rm, false);
     view.dispatch({ changes: { from: 5, to: 6 }, userEvent: 'delete' });
     expect(updateSpy).toHaveBeenCalled();
@@ -370,7 +387,10 @@ describe('update() — docChanged after highlights are loaded', () => {
 
   it('calls updateOffsetsWithMapping on an undo event', () => {
     const rm = makeReviewManager();
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     const { view } = makeLoadedView('hello world', rm, false);
     view.dispatch({ changes: { from: 0, insert: 'x' }, userEvent: 'undo' });
     expect(updateSpy).toHaveBeenCalled();
@@ -379,7 +399,10 @@ describe('update() — docChanged after highlights are loaded', () => {
 
   it('calls updateOffsetsWithMapping on a redo event', () => {
     const rm = makeReviewManager();
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     const { view } = makeLoadedView('hello world', rm, false);
     view.dispatch({ changes: { from: 0, insert: 'x' }, userEvent: 'redo' });
     expect(updateSpy).toHaveBeenCalled();
@@ -388,7 +411,10 @@ describe('update() — docChanged after highlights are loaded', () => {
 
   it('does NOT call updateOffsetsWithMapping on non-user docChanged in standard editor', () => {
     const rm = makeReviewManager();
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     const { view } = makeLoadedView('hello world', rm, false);
     // No userEvent → external sync → reloadHighlightsFromDB path
     view.dispatch({ changes: { from: 0, insert: 'X' } });
@@ -398,7 +424,10 @@ describe('update() — docChanged after highlights are loaded', () => {
 
   it('does NOT call updateOffsetsWithMapping on non-user docChanged in review interface', () => {
     const rm = makeReviewManager();
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     const { view } = makeLoadedView('hello world', rm, true);
     view.dispatch({ changes: { from: 0, insert: 'X' } });
     expect(updateSpy).not.toHaveBeenCalled();
@@ -580,7 +609,11 @@ describe('buildDecorations', () => {
           rm.snippets.offsetTracker.loadHighlights(
             FILE_PATH,
             rawHighlights.map((h, i) =>
-              makeHighlight({ id: `h${i}`, start_offset: h.start, end_offset: h.end })
+              makeHighlight({
+                id: `h${i}`,
+                start_offset: h.start,
+                end_offset: h.end,
+              })
             )
           );
           const irPlugin = makePlugin(rm);
@@ -651,7 +684,9 @@ describe('schedulePersist and destroy', () => {
     await Promise.resolve();
 
     // Total calls should be exactly what the second (coalesced) timer fires
-    expect(rm.updateSnippetOffsets.mock.calls.length).toBeGreaterThanOrEqual(callsAfterFirst);
+    expect(rm.updateSnippetOffsets.mock.calls.length).toBeGreaterThanOrEqual(
+      callsAfterFirst
+    );
     view.destroy();
   });
 
@@ -694,7 +729,10 @@ describe('click event handler', () => {
     const plain = document.createElement('span');
     document.body.appendChild(plain);
     const event = new MouseEvent('click', { bubbles: true, cancelable: true });
-    Object.defineProperty(event, 'target', { value: plain, configurable: true });
+    Object.defineProperty(event, 'target', {
+      value: plain,
+      configurable: true,
+    });
     expect(() => view.contentDOM.dispatchEvent(event)).not.toThrow();
     document.body.removeChild(plain);
     view.destroy();
@@ -749,7 +787,10 @@ describe('mutant-killing: highlightsLoaded initial state', () => {
     const irPlugin = makePlugin(rm);
     stubFileInfo(FILE_PATH, 'article');
     rm.getSnippetHighlights.mockReturnValue(new Promise(() => {}));
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     const view = makeView('hello world', irPlugin);
 
     // No refresh effect dispatched → highlights NOT loaded → update() returns early
@@ -783,7 +824,10 @@ describe('mutant-killing: .some() vs .every() for hasRefresh', () => {
     // Verify that after the second dispatch, subsequent user edits go through
     // the loaded-highlights path (updateOffsetsWithMapping is called).
     vi.spyOn(Obsidian, 'getBodyStartOffset').mockReturnValue(0);
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     view.dispatch({ changes: { from: 5, insert: '!' }, userEvent: 'input' });
     expect(updateSpy).toHaveBeenCalled();
     view.destroy();
@@ -796,7 +840,10 @@ describe('mutant-killing: .some() vs .every() for hasRefresh', () => {
     const irPlugin = makePlugin(rm);
     stubFileInfo(FILE_PATH, 'article');
     rm.getSnippetHighlights.mockReturnValue(new Promise(() => {}));
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     const view = makeView('hello world', irPlugin);
 
     // Dispatch without refresh effect
@@ -829,7 +876,10 @@ describe('mutant-killing: !highlightsLoaded guard', () => {
     view.dispatch({ effects: refreshHighlightsEffect.of(null) });
 
     vi.spyOn(Obsidian, 'getBodyStartOffset').mockReturnValue(0);
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     view.dispatch({ changes: { from: 5, insert: '?' }, userEvent: 'input' });
     expect(updateSpy).toHaveBeenCalled();
     view.destroy();
@@ -870,8 +920,16 @@ describe('mutant-killing: schedulePersist and persistHighlights body', () => {
 
     // Should call updateSnippetOffsets for each of the 2 highlights
     expect(rm.updateSnippetOffsets).toHaveBeenCalledTimes(2);
-    expect(rm.updateSnippetOffsets).toHaveBeenCalledWith('ha', expect.any(Number), expect.any(Number));
-    expect(rm.updateSnippetOffsets).toHaveBeenCalledWith('hb', expect.any(Number), expect.any(Number));
+    expect(rm.updateSnippetOffsets).toHaveBeenCalledWith(
+      'ha',
+      expect.any(Number),
+      expect.any(Number)
+    );
+    expect(rm.updateSnippetOffsets).toHaveBeenCalledWith(
+      'hb',
+      expect.any(Number),
+      expect.any(Number)
+    );
     view.destroy();
   });
 
@@ -981,7 +1039,7 @@ describe('mutant-killing: bodyStart arithmetic in buildDecorations', () => {
       editorView: null,
     });
     vi.spyOn(Obsidian, 'isSourceNote').mockReturnValue(false);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
     vi.spyOn(Obsidian, 'getBodyStartOffset').mockReturnValue(4);
 
     const view = makeView(doc, irPlugin);
@@ -1002,7 +1060,12 @@ describe('mutant-killing: Decoration.mark class attribute', () => {
   it('produced decorations use class ir-snippet-highlight', async () => {
     const rm = makeReviewManager();
     rm.snippets.offsetTracker.loadHighlights(FILE_PATH, [
-      makeHighlight({ id: 'h1', reference: 'snippets/a.md', start_offset: 0, end_offset: 5 }),
+      makeHighlight({
+        id: 'h1',
+        reference: 'snippets/a.md',
+        start_offset: 0,
+        end_offset: 5,
+      }),
     ]);
     rm.getSnippetHighlights.mockResolvedValue(undefined);
     const irPlugin = makePlugin(rm);
@@ -1024,7 +1087,12 @@ describe('mutant-killing: Decoration.mark class attribute', () => {
   it('produced decorations carry data-snippet-id and data-snippet-ref attributes', async () => {
     const rm = makeReviewManager();
     rm.snippets.offsetTracker.loadHighlights(FILE_PATH, [
-      makeHighlight({ id: 'myId', reference: 'snippets/b.md', start_offset: 0, end_offset: 5 }),
+      makeHighlight({
+        id: 'myId',
+        reference: 'snippets/b.md',
+        start_offset: 0,
+        end_offset: 5,
+      }),
     ]);
     rm.getSnippetHighlights.mockResolvedValue(undefined);
     const irPlugin = makePlugin(rm);
@@ -1034,7 +1102,8 @@ describe('mutant-killing: Decoration.mark class attribute', () => {
     const plugin = view.plugin(snippetHighlightExtension);
     let attrs: Record<string, string> | undefined;
     plugin!.decorations.between(0, 100, (_from, _to, value) => {
-      attrs = (value.spec as { attributes?: Record<string, string> }).attributes;
+      attrs = (value.spec as { attributes?: Record<string, string> })
+        .attributes;
     });
     expect(attrs?.['data-snippet-id']).toBe('myId');
     expect(attrs?.['data-snippet-ref']).toBe('snippets/b.md');
@@ -1058,7 +1127,10 @@ describe('mutant-killing: if (hasRefresh) guard correctness', () => {
     const irPlugin = makePlugin(rm);
     stubFileInfo(FILE_PATH, 'article');
     rm.getSnippetHighlights.mockReturnValue(new Promise(() => {}));
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     const view = makeView('hello world', irPlugin);
 
     // First dispatch: no effect — should NOT set highlightsLoaded (with correct code)
@@ -1131,7 +1203,10 @@ describe('mutant-killing: highlightsLoaded set correctly after async load', () =
     rm.getSnippetHighlights.mockResolvedValue(undefined);
     const irPlugin = makePlugin(rm);
     stubFileInfo(FILE_PATH, 'article');
-    const updateSpy = vi.spyOn(rm.snippets.offsetTracker, 'updateOffsetsWithMapping');
+    const updateSpy = vi.spyOn(
+      rm.snippets.offsetTracker,
+      'updateOffsetsWithMapping'
+    );
     const view = makeView('hello world', irPlugin);
 
     // Await full async resolution including view.dispatch({}) at end of loadHighlights

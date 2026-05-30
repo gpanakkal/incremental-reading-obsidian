@@ -40,6 +40,7 @@ function makePlugin(appOverrides: Record<string, unknown> = {}) {
   return {
     app: { ...appOverrides },
     settings: { dayRolloverOffset: 4 },
+    registerEvent: vi.fn(),
   } as never;
 }
 
@@ -611,7 +612,7 @@ describe('ReviewManager.getReviewItemFromFile', () => {
   it('returns null when getNoteType returns null', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(null);
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(null);
     const result = await manager.getReviewItemFromFile(FAKE_FILE);
     expect(result).toBeNull();
   });
@@ -619,7 +620,7 @@ describe('ReviewManager.getReviewItemFromFile', () => {
   it('returns null when article row not found', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
     vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(null);
     const result = await manager.getReviewItemFromFile(FAKE_FILE);
     expect(result).toBeNull();
@@ -629,7 +630,7 @@ describe('ReviewManager.getReviewItemFromFile', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     const row = makeArticleRow();
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
     vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(row as never);
     const result = await manager.getReviewItemFromFile(FAKE_FILE);
     expect(result).not.toBeNull();
@@ -641,7 +642,7 @@ describe('ReviewManager.getReviewItemFromFile', () => {
   it('returns null when snippet row not found', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
     vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(null);
     const result = await manager.getReviewItemFromFile(FAKE_FILE);
     expect(result).toBeNull();
@@ -651,7 +652,7 @@ describe('ReviewManager.getReviewItemFromFile', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     const row = makeSnippetRow();
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
     vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(row as never);
     const result = await manager.getReviewItemFromFile(FAKE_FILE);
     expect(result).not.toBeNull();
@@ -662,7 +663,7 @@ describe('ReviewManager.getReviewItemFromFile', () => {
   it('returns null when card row not found', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('card');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('card');
     vi.spyOn(manager.cards, 'findCard').mockResolvedValue(null);
     const result = await manager.getReviewItemFromFile(FAKE_FILE);
     expect(result).toBeNull();
@@ -672,7 +673,7 @@ describe('ReviewManager.getReviewItemFromFile', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     const row = makeCardRow();
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('card');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('card');
     vi.spyOn(manager.cards, 'findCard').mockResolvedValue(row as never);
     const result = await manager.getReviewItemFromFile(FAKE_FILE);
     expect(result).not.toBeNull();
@@ -765,7 +766,7 @@ describe('ReviewManager.dismissItem and unDismissItem', () => {
       const repo = makeRepo();
       const manager = new ReviewManager(makePlugin(), repo);
       const item = makeReviewItem(type);
-      vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(type);
+      vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(type);
       await manager.dismissItem(item);
       const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
         .calls[0] as [string, unknown[]];
@@ -785,7 +786,7 @@ describe('ReviewManager.dismissItem and unDismissItem', () => {
       const repo = makeRepo();
       const manager = new ReviewManager(makePlugin(), repo);
       const item = makeReviewItem(type);
-      vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(type);
+      vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(type);
       await manager.unDismissItem(item);
       const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
         .calls[0] as [string, unknown[]];
@@ -811,26 +812,34 @@ describe('ReviewManager.handleExternalRename', () => {
     const file = fileExists
       ? ({ path: `${IR_DIR}/articles/renamed.md` } as TFile)
       : null;
+    const tagMap: Record<NonNullable<NoteType>, string> = {
+      article: 'ir-article',
+      snippet: 'ir-text-snippet',
+      card: 'ir-card',
+    };
+    const tags = noteType ? [tagMap[noteType]] : undefined;
+    const frontmatterContent = noteType
+      ? `---\ntags: [${tagMap[noteType]}]\n---\n`
+      : 'no frontmatter here';
     return {
       vault: {
         getFileByPath: vi.fn().mockReturnValue(file),
+        cachedRead: vi.fn().mockResolvedValue(frontmatterContent),
+      },
+      fileManager: {
+        processFrontMatter: vi.fn().mockImplementation(
+          async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+            cb(tags !== undefined ? { tags } : {});
+          }
+        ),
       },
       metadataCache: {
-        getFileCache: vi.fn().mockReturnValue(
-          noteType
-            ? {
-                frontmatter: {
-                  tags: [
-                    noteType === 'article'
-                      ? 'ir-article'
-                      : noteType === 'snippet'
-                        ? 'ir-text-snippet'
-                        : 'ir-card',
-                  ],
-                },
-              }
-            : null
-        ),
+        getFileCache: vi.fn(),
+        on: vi.fn().mockImplementation((_event: string, cb: (f: TFile) => void) => {
+          if (file) cb(file);
+          return Symbol('ref');
+        }),
+        offref: vi.fn(),
       },
     };
   }
@@ -889,12 +898,18 @@ describe('ReviewManager.handleExternalRename', () => {
     // file path is outside IR dir
     const file = { path: 'some-other-folder/renamed.md' } as TFile;
     const appObj = {
-      vault: { getFileByPath: vi.fn().mockReturnValue(file) },
-      metadataCache: {
-        getFileCache: vi.fn().mockReturnValue({
-          frontmatter: { tags: ['ir-article'] },
-        }),
+      vault: {
+        getFileByPath: vi.fn().mockReturnValue(file),
+        cachedRead: vi.fn().mockResolvedValue('---\ntags: [ir-article]\n---\n'),
       },
+      fileManager: {
+        processFrontMatter: vi.fn().mockImplementation(
+          async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+            cb({ tags: ['ir-article'] });
+          }
+        ),
+      },
+      metadataCache: { getFileCache: vi.fn(), on: vi.fn().mockReturnValue(Symbol()), offref: vi.fn() },
     };
     const manager = new ReviewManager(makePlugin(appObj as never), repo);
     manager.app = appObj as never;
@@ -916,12 +931,18 @@ describe('ReviewManager.handleExternalRename', () => {
     // same basename in same subfolder → same reference
     const sameFile = { path: `${IR_DIR}/articles/same.md` } as TFile;
     const appObj = {
-      vault: { getFileByPath: vi.fn().mockReturnValue(sameFile) },
-      metadataCache: {
-        getFileCache: vi.fn().mockReturnValue({
-          frontmatter: { tags: ['ir-article'] },
-        }),
+      vault: {
+        getFileByPath: vi.fn().mockReturnValue(sameFile),
+        cachedRead: vi.fn().mockResolvedValue('---\ntags: [ir-article]\n---\n'),
       },
+      fileManager: {
+        processFrontMatter: vi.fn().mockImplementation(
+          async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+            cb({ tags: ['ir-article'] });
+          }
+        ),
+      },
+      metadataCache: { getFileCache: vi.fn(), on: vi.fn().mockReturnValue(Symbol()), offref: vi.fn() },
     };
     const manager = new ReviewManager(makePlugin(appObj as never), repo);
     manager.app = appObj as never;
@@ -955,12 +976,18 @@ describe('ReviewManager.handleExternalRename', () => {
       const oldPath = `${IR_DIR}/articles/old-name.md`;
       const file = { path: newPath } as TFile;
       const appObj = {
-        vault: { getFileByPath: vi.fn().mockReturnValue(file) },
-        metadataCache: {
-          getFileCache: vi.fn().mockReturnValue({
-            frontmatter: { tags: [tagMap[noteType]] },
-          }),
+        vault: {
+          getFileByPath: vi.fn().mockReturnValue(file),
+          cachedRead: vi.fn().mockResolvedValue(`---\ntags: [${tagMap[noteType]}]\n---\n`),
         },
+        fileManager: {
+          processFrontMatter: vi.fn().mockImplementation(
+            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+              cb({ tags: [tagMap[noteType]] });
+            }
+          ),
+        },
+        metadataCache: { getFileCache: vi.fn(), on: vi.fn().mockReturnValue(Symbol()), offref: vi.fn() },
       };
       const manager = new ReviewManager(makePlugin(appObj as never), repo);
       manager.app = appObj as never;
@@ -991,7 +1018,7 @@ describe('ReviewManager.saveScrollPosition', () => {
   it('does nothing when noteType is null', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(null);
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(null);
     await manager.saveScrollPosition(FAKE_FILE, { top: 100, left: 0 });
     expect(repo.mutate).not.toHaveBeenCalled();
   });
@@ -999,7 +1026,7 @@ describe('ReviewManager.saveScrollPosition', () => {
   it('does nothing when noteType is card', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('card');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('card');
     await manager.saveScrollPosition(FAKE_FILE, { top: 100, left: 0 });
     expect(repo.mutate).not.toHaveBeenCalled();
   });
@@ -1014,7 +1041,7 @@ describe('ReviewManager.saveScrollPosition', () => {
             vi.restoreAllMocks();
             const repo = makeRepo();
             const manager = new ReviewManager(makePlugin(), repo);
-            vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(noteType);
+            vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(noteType);
             vi.spyOn(Obsidian, 'getReferenceFromPath').mockReturnValue(
               'articles/test.md'
             );
@@ -1043,7 +1070,7 @@ describe('ReviewManager.loadScrollPosition', () => {
   it('returns null when noteType is null', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(null);
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(null);
     const result = await manager.loadScrollPosition(FAKE_FILE);
     expect(result).toBeNull();
   });
@@ -1051,7 +1078,7 @@ describe('ReviewManager.loadScrollPosition', () => {
   it('returns null when noteType is card', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('card');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('card');
     const result = await manager.loadScrollPosition(FAKE_FILE);
     expect(result).toBeNull();
   });
@@ -1059,7 +1086,7 @@ describe('ReviewManager.loadScrollPosition', () => {
   it('returns null when article row not found', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
     vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(null);
     const result = await manager.loadScrollPosition(FAKE_FILE);
     expect(result).toBeNull();
@@ -1068,7 +1095,7 @@ describe('ReviewManager.loadScrollPosition', () => {
   it('returns null when article row scroll_top is 0', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
     vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(
       makeArticleRow({ scroll_top: 0 }) as never
     );
@@ -1084,7 +1111,7 @@ describe('ReviewManager.loadScrollPosition', () => {
           vi.restoreAllMocks();
           const repo = makeRepo();
           const manager = new ReviewManager(makePlugin(), repo);
-          vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
+          vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
           vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(
             makeArticleRow({ scroll_top: scrollTop }) as never
           );
@@ -1098,7 +1125,7 @@ describe('ReviewManager.loadScrollPosition', () => {
   it('returns null when snippet row not found', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
     vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(null);
     const result = await manager.loadScrollPosition(FAKE_FILE);
     expect(result).toBeNull();
@@ -1107,7 +1134,7 @@ describe('ReviewManager.loadScrollPosition', () => {
   it('returns null when snippet row scroll_top is 0', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
     vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
       makeSnippetRow({ scroll_top: 0 }) as never
     );
@@ -1123,7 +1150,7 @@ describe('ReviewManager.loadScrollPosition', () => {
           vi.restoreAllMocks();
           const repo = makeRepo();
           const manager = new ReviewManager(makePlugin(), repo);
-          vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
+          vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
           vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
             makeSnippetRow({ scroll_top: scrollTop }) as never
           );
@@ -1137,7 +1164,7 @@ describe('ReviewManager.loadScrollPosition', () => {
   it('card noteType does not call findArticle or findSnippet', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('card');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('card');
     const articleSpy = vi.spyOn(manager.articles, 'findArticle');
     const snippetSpy = vi.spyOn(manager.snippets, 'findSnippet');
     const result = await manager.loadScrollPosition(FAKE_FILE);
@@ -1149,7 +1176,7 @@ describe('ReviewManager.loadScrollPosition', () => {
   it('article noteType calls findArticle but not findSnippet', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
     const articleSpy = vi
       .spyOn(manager.articles, 'findArticle')
       .mockResolvedValue(null);
@@ -1162,7 +1189,7 @@ describe('ReviewManager.loadScrollPosition', () => {
   it('snippet noteType calls findSnippet but not findArticle', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
     const articleSpy = vi.spyOn(manager.articles, 'findArticle');
     const snippetSpy = vi
       .spyOn(manager.snippets, 'findSnippet')
@@ -1175,7 +1202,7 @@ describe('ReviewManager.loadScrollPosition', () => {
   it('returns null when scroll_top is not a number', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
     // scroll_top is undefined — exercises the typeof check
     vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(
       makeArticleRow({ scroll_top: undefined as unknown as number }) as never
@@ -1187,7 +1214,7 @@ describe('ReviewManager.loadScrollPosition', () => {
   it('snippet: returns null when scroll_top is not a number', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
     vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
       makeSnippetRow({ scroll_top: undefined as unknown as number }) as never
     );
@@ -1240,7 +1267,7 @@ describe('ReviewManager.getReviewItemFromFile card branch', () => {
   it('does not call findCard when noteType is snippet (card branch not taken)', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockReturnValue('snippet');
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
     vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
       makeSnippetRow() as never
     );
@@ -1260,12 +1287,18 @@ describe('ReviewManager.handleExternalRename console.warn mutant', () => {
     const samePath = `${DATA_DIRECTORY}/articles/same.md`;
     const file = { path: samePath } as TFile;
     const appObj = {
-      vault: { getFileByPath: vi.fn().mockReturnValue(file) },
-      metadataCache: {
-        getFileCache: vi
-          .fn()
-          .mockReturnValue({ frontmatter: { tags: ['ir-article'] } }),
+      vault: {
+        getFileByPath: vi.fn().mockReturnValue(file),
+        cachedRead: vi.fn().mockResolvedValue('---\ntags: [ir-article]\n---\n'),
       },
+      fileManager: {
+        processFrontMatter: vi.fn().mockImplementation(
+          async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+            cb({ tags: ['ir-article'] });
+          }
+        ),
+      },
+      metadataCache: { getFileCache: vi.fn(), on: vi.fn().mockReturnValue(Symbol()), offref: vi.fn() },
     };
     const manager = new ReviewManager(makePlugin(appObj as never), repo);
     manager.app = appObj as never;

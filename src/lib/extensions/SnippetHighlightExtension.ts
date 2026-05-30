@@ -63,7 +63,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       if (!plugin || !info || !this.file) return;
 
       const isSource = Obsidian.isSourceNote(this.file, info.app);
-      const noteType = Obsidian.getNoteType(this.file, info.app);
+      const noteType = await Obsidian.getNoteType(this.file, info.app);
       // Only sources, articles, and snippets can have child snippets
       if (!(isSource || noteType === 'article' || noteType === 'snippet')) {
         return;

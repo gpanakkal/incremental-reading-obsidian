@@ -27,7 +27,7 @@ export function registerSnippetHighlightPostProcessor(
       if (!file) return;
 
       const isSource = ObsidianHelpers.isSourceNote(file, plugin.app);
-      const noteType = ObsidianHelpers.getNoteType(file, plugin.app);
+      const noteType = await ObsidianHelpers.getNoteType(file, plugin.app);
       if (!(isSource || noteType === 'article' || noteType === 'snippet'))
         return;
 

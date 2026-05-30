@@ -14,6 +14,7 @@ import {
 } from '#/lib/constants';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import type { NoteType, PluginFrontMatter } from '#/lib/types';
+import { EditorState } from '@codemirror/state';
 import fc from 'fast-check';
 import type {
   App,
@@ -43,7 +44,9 @@ function makeEditor(overrides: Partial<Editor> = {}): Editor {
   return {
     getSelection: vi.fn().mockReturnValue(''),
     getCursor: vi.fn().mockReturnValue({ line: 0, ch: 0 }),
-    posToOffset: vi.fn().mockImplementation(({ line, ch }: EditorPosition) => line * 100 + ch),
+    posToOffset: vi
+      .fn()
+      .mockImplementation(({ line, ch }: EditorPosition) => line * 100 + ch),
     getLine: vi.fn().mockReturnValue(''),
     replaceRange: vi.fn(),
     ...overrides,
@@ -274,7 +277,9 @@ describe('sanitizeForTitle', () => {
     fc.assert(
       fc.property(
         fc.string().filter((s) => {
-          if ([...FORBIDDEN_TITLE_CHARS].some((c) => s.includes(c))) return false;
+          if ([...FORBIDDEN_TITLE_CHARS].some((c) => s.includes(c))) {
+            return false;
+          }
           if (s.startsWith('.')) return false;
           return true;
         }),
@@ -334,7 +339,8 @@ describe('createTitle', () => {
         // Using lastIndexOf avoids misidentifying ' - ' embedded in the content segment.
         const sep = ' - ';
         const sepIdx = title.lastIndexOf(sep);
-        const idSegment = sepIdx === -1 ? title : title.slice(sepIdx + sep.length);
+        const idSegment =
+          sepIdx === -1 ? title : title.slice(sepIdx + sep.length);
         expect(idSegment).toMatch(/^[a-z0-9]+$/);
       })
     );
@@ -366,7 +372,9 @@ describe('getReferenceFromPath', () => {
 
   it('returns undefined when DATA_DIRECTORY is not in the path', () => {
     // split on missing separator gives original string at index 0, index 1 is undefined
-    expect(ObsidianHelpers.getReferenceFromPath('other/path/note.md')).toBeUndefined();
+    expect(
+      ObsidianHelpers.getReferenceFromPath('other/path/note.md')
+    ).toBeUndefined();
   });
 
   it('handles nested paths after DATA_DIRECTORY', () => {
@@ -378,7 +386,9 @@ describe('getReferenceFromPath', () => {
   it('returns the reference for arbitrary non-empty subpaths', () => {
     fc.assert(
       fc.property(
-        fc.string({ minLength: 1 }).filter((s) => !s.includes(`${DATA_DIRECTORY}/`)),
+        fc
+          .string({ minLength: 1 })
+          .filter((s) => !s.includes(`${DATA_DIRECTORY}/`)),
         (ref) => {
           const vaultPath = `${DATA_DIRECTORY}/${ref}`;
           expect(ObsidianHelpers.getReferenceFromPath(vaultPath)).toBe(ref);
@@ -394,12 +404,16 @@ describe('getReferenceFromPath', () => {
 describe('getDirectory', () => {
   it('returns article directory path for "article" type', () => {
     const result = ObsidianHelpers.getDirectory('article');
-    expect(result).toBe(normalizePath(`${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`));
+    expect(result).toBe(
+      normalizePath(`${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`)
+    );
   });
 
   it('returns snippet directory path for "snippet" type', () => {
     const result = ObsidianHelpers.getDirectory('snippet');
-    expect(result).toBe(normalizePath(`${DATA_DIRECTORY}/${SNIPPET_DIRECTORY}`));
+    expect(result).toBe(
+      normalizePath(`${DATA_DIRECTORY}/${SNIPPET_DIRECTORY}`)
+    );
   });
 
   it('returns card directory path for "card" type', () => {
@@ -449,7 +463,9 @@ describe('getFileInfoFromState', () => {
       const callCount = field.mock.calls.length;
       return callCount === 1 ? fakeInfo : fakeEditorView;
     });
-    const state = { field } as unknown as import('@codemirror/state').EditorState;
+    const state = {
+      field,
+    } as unknown as EditorState;
 
     const result = ObsidianHelpers.getFileInfoFromState(state);
     expect(result.info).toBe(fakeInfo);
@@ -462,7 +478,7 @@ describe('getFileInfoFromState', () => {
   it('returns nulls when state.field returns undefined for both fields', () => {
     const state = {
       field: vi.fn().mockReturnValue(undefined),
-    } as unknown as import('@codemirror/state').EditorState;
+    } as unknown as EditorState;
 
     const result = ObsidianHelpers.getFileInfoFromState(state);
     expect(result.info).toBeNull();
@@ -488,14 +504,20 @@ describe('inEditMode', () => {
 
   it('returns true when activeElement is INPUT', () => {
     const doc = {
-      activeElement: { isContentEditable: false, tagName: 'INPUT' } as HTMLElement,
+      activeElement: {
+        isContentEditable: false,
+        tagName: 'INPUT',
+      } as HTMLElement,
     } as unknown as Document;
     expect(ObsidianHelpers.inEditMode(doc)).toBe(true);
   });
 
   it('returns true when activeElement is TEXTAREA', () => {
     const doc = {
-      activeElement: { isContentEditable: false, tagName: 'TEXTAREA' } as HTMLElement,
+      activeElement: {
+        isContentEditable: false,
+        tagName: 'TEXTAREA',
+      } as HTMLElement,
     } as unknown as Document;
     expect(ObsidianHelpers.inEditMode(doc)).toBe(true);
   });
@@ -505,7 +527,10 @@ describe('inEditMode', () => {
     fc.assert(
       fc.property(fc.constantFrom(...tags), (tag) => {
         const doc = {
-          activeElement: { isContentEditable: false, tagName: tag } as HTMLElement,
+          activeElement: {
+            isContentEditable: false,
+            tagName: tag,
+          } as HTMLElement,
         } as unknown as Document;
         expect(ObsidianHelpers.inEditMode(doc)).toBe(false);
       })
@@ -518,7 +543,10 @@ describe('inEditMode', () => {
         fc.string().filter((s) => s !== 'INPUT' && s !== 'TEXTAREA'),
         (tag) => {
           const doc = {
-            activeElement: { isContentEditable: false, tagName: tag } as HTMLElement,
+            activeElement: {
+              isContentEditable: false,
+              tagName: tag,
+            } as HTMLElement,
           } as unknown as Document;
           expect(ObsidianHelpers.inEditMode(doc)).toBe(false);
         }
@@ -539,9 +567,9 @@ describe('getSelectionWithBounds', () => {
   it('returns selection data when text is selected', () => {
     const from: EditorPosition = { line: 0, ch: 2 };
     const to: EditorPosition = { line: 0, ch: 7 };
-    const getCursor = vi.fn().mockImplementation((pos: 'from' | 'to') =>
-      pos === 'from' ? from : to
-    );
+    const getCursor = vi
+      .fn()
+      .mockImplementation((pos: 'from' | 'to') => (pos === 'from' ? from : to));
     const editor = makeEditor({
       getSelection: vi.fn().mockReturnValue('hello'),
       getCursor,
@@ -563,9 +591,11 @@ describe('getSelectionWithBounds', () => {
   it('startOffset < endOffset when selection is non-empty forward', () => {
     const editor = makeEditor({
       getSelection: vi.fn().mockReturnValue('text'),
-      getCursor: vi.fn().mockImplementation((pos: 'from' | 'to') =>
-        pos === 'from' ? { line: 0, ch: 0 } : { line: 0, ch: 4 }
-      ),
+      getCursor: vi
+        .fn()
+        .mockImplementation((pos: 'from' | 'to') =>
+          pos === 'from' ? { line: 0, ch: 0 } : { line: 0, ch: 4 }
+        ),
       posToOffset: vi.fn().mockImplementation(({ ch }: EditorPosition) => ch),
     });
     const result = ObsidianHelpers.getSelectionWithBounds(editor);
@@ -697,7 +727,13 @@ describe('getFrontMatter', () => {
   });
 
   it('returns frontmatter when present', () => {
-    const fm = { tags: ['ir-article'], position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 3, col: 3, offset: 30 } } } as unknown as FrontMatterCache;
+    const fm = {
+      tags: ['ir-article'],
+      position: {
+        start: { line: 0, col: 0, offset: 0 },
+        end: { line: 3, col: 3, offset: 30 },
+      },
+    } as unknown as FrontMatterCache;
     const app = makeApp({
       metadataCache: {
         getFileCache: vi.fn().mockReturnValue({ frontmatter: fm }),
@@ -708,7 +744,13 @@ describe('getFrontMatter', () => {
   });
 
   it('normalizes a single-string tags field to an array', () => {
-    const fm = { tags: 'ir-article', position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 3, col: 3, offset: 30 } } };
+    const fm = {
+      tags: 'ir-article',
+      position: {
+        start: { line: 0, col: 0, offset: 0 },
+        end: { line: 3, col: 3, offset: 30 },
+      },
+    };
     const app = makeApp({
       metadataCache: {
         getFileCache: vi.fn().mockReturnValue({ frontmatter: fm }),
@@ -720,7 +762,13 @@ describe('getFrontMatter', () => {
   });
 
   it('keeps tags array unchanged when it is already an array', () => {
-    const fm = { tags: ['ir-article', 'ir-source'], position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 3, col: 3, offset: 30 } } } as unknown as FrontMatterCache;
+    const fm = {
+      tags: ['ir-article', 'ir-source'],
+      position: {
+        start: { line: 0, col: 0, offset: 0 },
+        end: { line: 3, col: 3, offset: 30 },
+      },
+    } as unknown as FrontMatterCache;
     const app = makeApp({
       metadataCache: {
         getFileCache: vi.fn().mockReturnValue({ frontmatter: fm }),
@@ -738,47 +786,69 @@ describe('getNoteType', () => {
   afterEach(() => vi.restoreAllMocks());
 
   function makeAppWithTags(tags: string[] | undefined): App {
-    const fm = tags !== undefined ? { tags, position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 3, col: 3, offset: 30 } } } : undefined;
     return makeApp({
-      metadataCache: {
-        getFileCache: vi.fn().mockReturnValue(fm ? { frontmatter: fm } : null),
-      } as unknown as App['metadataCache'],
+      fileManager: {
+        processFrontMatter: vi
+          .fn()
+          .mockImplementation(
+            async (
+              _file: unknown,
+              cb: (fm: Record<string, unknown>) => void
+            ) => {
+              cb(tags !== undefined ? { tags } : {});
+            }
+          ),
+      } as unknown as App['fileManager'],
     });
   }
 
-  it('returns null when frontmatter has no tags', () => {
+  it('returns null when frontmatter has no tags', async () => {
     const app = makeAppWithTags(undefined);
-    expect(ObsidianHelpers.getNoteType(makeTFile(), app)).toBeNull();
+    await expect(
+      ObsidianHelpers.getNoteType(makeTFile(), app)
+    ).resolves.toBeNull();
   });
 
-  it('returns "article" when tags include ARTICLE_TAG', () => {
+  it('returns "article" when tags include ARTICLE_TAG', async () => {
     const app = makeAppWithTags([ARTICLE_TAG]);
-    expect(ObsidianHelpers.getNoteType(makeTFile(), app)).toBe('article');
+    await expect(ObsidianHelpers.getNoteType(makeTFile(), app)).resolves.toBe(
+      'article'
+    );
   });
 
-  it('returns "snippet" when tags include SNIPPET_TAG', () => {
+  it('returns "snippet" when tags include SNIPPET_TAG', async () => {
     const app = makeAppWithTags([SNIPPET_TAG]);
-    expect(ObsidianHelpers.getNoteType(makeTFile(), app)).toBe('snippet');
+    await expect(ObsidianHelpers.getNoteType(makeTFile(), app)).resolves.toBe(
+      'snippet'
+    );
   });
 
-  it('returns "card" when tags include CARD_TAG', () => {
+  it('returns "card" when tags include CARD_TAG', async () => {
     const app = makeAppWithTags([CARD_TAG]);
-    expect(ObsidianHelpers.getNoteType(makeTFile(), app)).toBe('card');
+    await expect(ObsidianHelpers.getNoteType(makeTFile(), app)).resolves.toBe(
+      'card'
+    );
   });
 
-  it('returns null when tags do not include any known type tag', () => {
+  it('returns null when tags do not include any known type tag', async () => {
     const app = makeAppWithTags(['random-tag', 'another-tag']);
-    expect(ObsidianHelpers.getNoteType(makeTFile(), app)).toBeNull();
+    await expect(
+      ObsidianHelpers.getNoteType(makeTFile(), app)
+    ).resolves.toBeNull();
   });
 
-  it('prioritizes "article" over "snippet" when both tags are present', () => {
+  it('prioritizes "article" over "snippet" when both tags are present', async () => {
     const app = makeAppWithTags([ARTICLE_TAG, SNIPPET_TAG]);
-    expect(ObsidianHelpers.getNoteType(makeTFile(), app)).toBe('article');
+    await expect(ObsidianHelpers.getNoteType(makeTFile(), app)).resolves.toBe(
+      'article'
+    );
   });
 
-  it('prioritizes "snippet" over "card" when both tags are present', () => {
+  it('prioritizes "snippet" over "card" when both tags are present', async () => {
     const app = makeAppWithTags([SNIPPET_TAG, CARD_TAG]);
-    expect(ObsidianHelpers.getNoteType(makeTFile(), app)).toBe('snippet');
+    await expect(ObsidianHelpers.getNoteType(makeTFile(), app)).resolves.toBe(
+      'snippet'
+    );
   });
 });
 
@@ -796,7 +866,15 @@ describe('isSourceNote', () => {
   it('returns true when tags include SOURCE_TAG', () => {
     const app = makeApp({
       metadataCache: {
-        getFileCache: vi.fn().mockReturnValue({ frontmatter: { tags: [SOURCE_TAG], position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 3, col: 3, offset: 30 } } } }),
+        getFileCache: vi.fn().mockReturnValue({
+          frontmatter: {
+            tags: [SOURCE_TAG],
+            position: {
+              start: { line: 0, col: 0, offset: 0 },
+              end: { line: 3, col: 3, offset: 30 },
+            },
+          },
+        }),
       } as unknown as App['metadataCache'],
     });
     expect(ObsidianHelpers.isSourceNote(makeTFile(), app)).toBe(true);
@@ -805,7 +883,15 @@ describe('isSourceNote', () => {
   it('returns false when tags do not include SOURCE_TAG', () => {
     const app = makeApp({
       metadataCache: {
-        getFileCache: vi.fn().mockReturnValue({ frontmatter: { tags: [ARTICLE_TAG], position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 3, col: 3, offset: 30 } } } }),
+        getFileCache: vi.fn().mockReturnValue({
+          frontmatter: {
+            tags: [ARTICLE_TAG],
+            position: {
+              start: { line: 0, col: 0, offset: 0 },
+              end: { line: 3, col: 3, offset: 30 },
+            },
+          },
+        }),
       } as unknown as App['metadataCache'],
     });
     expect(ObsidianHelpers.isSourceNote(makeTFile(), app)).toBe(false);
@@ -848,10 +934,20 @@ describe('generateMarkdownLink', () => {
         renameFile: vi.fn(),
       } as unknown as App['fileManager'],
     });
-    const target = makeTFile({ path: 'incremental-reading/articles/target.md', basename: 'target' });
-    const source = makeTFile({ path: 'incremental-reading/articles/source.md' });
+    const target = makeTFile({
+      path: 'incremental-reading/articles/target.md',
+      basename: 'target',
+    });
+    const source = makeTFile({
+      path: 'incremental-reading/articles/source.md',
+    });
 
-    const result = ObsidianHelpers.generateMarkdownLink(target, source, app, 'myAlias');
+    const result = ObsidianHelpers.generateMarkdownLink(
+      target,
+      source,
+      app,
+      'myAlias'
+    );
     expect(generateMarkdownLink).toHaveBeenCalledWith(
       target,
       source.path,
@@ -913,7 +1009,10 @@ describe('createFile', () => {
       } as unknown as App['vault'],
     });
 
-    await ObsidianHelpers.createFile(app, 'incremental-reading/articles/note.md');
+    await ObsidianHelpers.createFile(
+      app,
+      'incremental-reading/articles/note.md'
+    );
     expect(createFolder).toHaveBeenCalledWith('incremental-reading/articles');
   });
 
@@ -932,7 +1031,10 @@ describe('createFile', () => {
       } as unknown as App['vault'],
     });
 
-    await ObsidianHelpers.createFile(app, 'incremental-reading/articles/note.md');
+    await ObsidianHelpers.createFile(
+      app,
+      'incremental-reading/articles/note.md'
+    );
     expect(createFolder).not.toHaveBeenCalled();
   });
 
@@ -947,14 +1049,22 @@ describe('createFile', () => {
       } as unknown as App['vault'],
     });
 
-    const result = await ObsidianHelpers.createFile(app, 'incremental-reading/articles/note.md');
+    const result = await ObsidianHelpers.createFile(
+      app,
+      'incremental-reading/articles/note.md'
+    );
     // Kills string literal mutant: '' → "Stryker was here!"
-    expect(create).toHaveBeenCalledWith('incremental-reading/articles/note.md', '');
+    expect(create).toHaveBeenCalledWith(
+      'incremental-reading/articles/note.md',
+      ''
+    );
     expect(result).toBe(createdFile);
   });
 
   it('rethrows when vault.create fails and logs the correct path', async () => {
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
     const path = 'incremental-reading/articles/note.md';
     const app = makeApp({
       vault: {
@@ -964,7 +1074,9 @@ describe('createFile', () => {
       } as unknown as App['vault'],
     });
 
-    await expect(ObsidianHelpers.createFile(app, path)).rejects.toThrow('disk error');
+    await expect(ObsidianHelpers.createFile(app, path)).rejects.toThrow(
+      'disk error'
+    );
     // Kills string literal mutant: error message → ""
     expect(consoleError).toHaveBeenCalledWith(expect.stringContaining(path));
   });
@@ -1013,9 +1125,9 @@ describe('renameFile', () => {
     const file = makeTFile();
     const nameWithForbidden = 'bad/name';
 
-    await expect(ObsidianHelpers.renameFile(file, nameWithForbidden, app)).rejects.toThrow(
-      INVALID_TITLE_MESSAGE
-    );
+    await expect(
+      ObsidianHelpers.renameFile(file, nameWithForbidden, app)
+    ).rejects.toThrow(INVALID_TITLE_MESSAGE);
   });
 
   it('throws for any name containing a forbidden title char', async () => {
@@ -1026,7 +1138,9 @@ describe('renameFile', () => {
         fc.constantFrom(...[...FORBIDDEN_TITLE_CHARS]),
         async (ch) => {
           const name = `valid${ch}name`;
-          await expect(ObsidianHelpers.renameFile(file, name, app)).rejects.toThrow();
+          await expect(
+            ObsidianHelpers.renameFile(file, name, app)
+          ).rejects.toThrow();
         }
       )
     );
@@ -1042,12 +1156,18 @@ describe('renameFile', () => {
       } as unknown as App['fileManager'],
     });
     const file = makeTFile({
-      parent: { path: 'incremental-reading/articles', name: 'articles' } as TFile['parent'],
+      parent: {
+        path: 'incremental-reading/articles',
+        name: 'articles',
+      } as TFile['parent'],
       extension: 'md',
     });
 
     await ObsidianHelpers.renameFile(file, 'new-name', app);
-    expect(renameFile).toHaveBeenCalledWith(file, 'incremental-reading/articles/new-name.md');
+    expect(renameFile).toHaveBeenCalledWith(
+      file,
+      'incremental-reading/articles/new-name.md'
+    );
   });
 
   it('calls fileManager.renameFile without parent path when file has no parent', async () => {
@@ -1059,7 +1179,10 @@ describe('renameFile', () => {
         generateMarkdownLink: vi.fn(),
       } as unknown as App['fileManager'],
     });
-    const file = makeTFile({ parent: null as unknown as TFile['parent'], extension: 'md' });
+    const file = makeTFile({
+      parent: null as unknown as TFile['parent'],
+      extension: 'md',
+    });
 
     await ObsidianHelpers.renameFile(file, 'new-name', app);
     expect(renameFile).toHaveBeenCalledWith(file, 'new-name.md');
@@ -1068,13 +1191,17 @@ describe('renameFile', () => {
   it('throws when sanitized name differs from the input (trailing period)', async () => {
     const app = makeApp();
     const file = makeTFile();
-    await expect(ObsidianHelpers.renameFile(file, 'name.', app)).rejects.toThrow(INVALID_TITLE_MESSAGE);
+    await expect(
+      ObsidianHelpers.renameFile(file, 'name.', app)
+    ).rejects.toThrow(INVALID_TITLE_MESSAGE);
   });
 
   it('throws when sanitized name differs from the input (trailing space)', async () => {
     const app = makeApp();
     const file = makeTFile();
-    await expect(ObsidianHelpers.renameFile(file, 'name ', app)).rejects.toThrow(INVALID_TITLE_MESSAGE);
+    await expect(
+      ObsidianHelpers.renameFile(file, 'name ', app)
+    ).rejects.toThrow(INVALID_TITLE_MESSAGE);
   });
 });
 
@@ -1101,12 +1228,14 @@ describe('updateFrontMatter', () => {
   });
 
   it('calls processFrontMatter with an object update and merges tags', async () => {
-    const processFrontMatter = vi.fn().mockImplementation(
-      async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
-        const fm: PluginFrontMatter = { tags: ['existing-tag'] };
-        cb(fm);
-      }
-    );
+    const processFrontMatter = vi
+      .fn()
+      .mockImplementation(
+        async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
+          const fm: PluginFrontMatter = { tags: ['existing-tag'] };
+          cb(fm);
+        }
+      );
     const app = makeApp({
       fileManager: {
         processFrontMatter,
@@ -1122,11 +1251,13 @@ describe('updateFrontMatter', () => {
 
   it('deduplicates tags when merging', async () => {
     let capturedFm: PluginFrontMatter = { tags: ['tag-a'] };
-    const processFrontMatter = vi.fn().mockImplementation(
-      async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
-        cb(capturedFm);
-      }
-    );
+    const processFrontMatter = vi
+      .fn()
+      .mockImplementation(
+        async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
+          cb(capturedFm);
+        }
+      );
     const app = makeApp({
       fileManager: {
         processFrontMatter,
@@ -1135,18 +1266,24 @@ describe('updateFrontMatter', () => {
       } as unknown as App['fileManager'],
     });
 
-    await ObsidianHelpers.updateFrontMatter(makeTFile(), { tags: ['tag-a', 'tag-b'] }, app);
+    await ObsidianHelpers.updateFrontMatter(
+      makeTFile(),
+      { tags: ['tag-a', 'tag-b'] },
+      app
+    );
     expect(capturedFm.tags).toEqual(['tag-a', 'tag-b']);
     expect(new Set(capturedFm.tags).size).toBe(capturedFm.tags!.length);
   });
 
   it('accepts a string for tags in updates', async () => {
     let capturedFm: PluginFrontMatter = { tags: [] };
-    const processFrontMatter = vi.fn().mockImplementation(
-      async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
-        cb(capturedFm);
-      }
-    );
+    const processFrontMatter = vi
+      .fn()
+      .mockImplementation(
+        async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
+          cb(capturedFm);
+        }
+      );
     const app = makeApp({
       fileManager: {
         processFrontMatter,
@@ -1155,17 +1292,23 @@ describe('updateFrontMatter', () => {
       } as unknown as App['fileManager'],
     });
 
-    await ObsidianHelpers.updateFrontMatter(makeTFile(), { tags: 'single-tag' }, app);
+    await ObsidianHelpers.updateFrontMatter(
+      makeTFile(),
+      { tags: 'single-tag' },
+      app
+    );
     expect(capturedFm.tags).toContain('single-tag');
   });
 
   it('sets tags to updateTags when existing frontmatter has no tags', async () => {
     let capturedFm: PluginFrontMatter = {};
-    const processFrontMatter = vi.fn().mockImplementation(
-      async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
-        cb(capturedFm);
-      }
-    );
+    const processFrontMatter = vi
+      .fn()
+      .mockImplementation(
+        async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
+          cb(capturedFm);
+        }
+      );
     const app = makeApp({
       fileManager: {
         processFrontMatter,
@@ -1174,7 +1317,11 @@ describe('updateFrontMatter', () => {
       } as unknown as App['fileManager'],
     });
 
-    await ObsidianHelpers.updateFrontMatter(makeTFile(), { tags: ['new-tag'] }, app);
+    await ObsidianHelpers.updateFrontMatter(
+      makeTFile(),
+      { tags: ['new-tag'] },
+      app
+    );
     expect(capturedFm.tags).toEqual(['new-tag']);
   });
 });
@@ -1213,7 +1360,10 @@ describe('createNote', () => {
     });
 
     // Kills string mutant: normalizePath(`${directory}/${fileName}`) → normalizePath(``)
-    expect(create).toHaveBeenCalledWith(`${DATA_DIRECTORY}/articles/note.md`, '');
+    expect(create).toHaveBeenCalledWith(
+      `${DATA_DIRECTORY}/articles/note.md`,
+      ''
+    );
     expect(append).toHaveBeenCalledWith(createdFile, 'body text');
     expect(processFrontMatter).toHaveBeenCalled();
     expect(result).toBe(createdFile);
@@ -1247,7 +1397,9 @@ describe('createNote', () => {
   });
 
   it('returns undefined and logs error when createFile throws', async () => {
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
     const app = makeApp({
       vault: {
         getAbstractFileByPath: vi.fn().mockReturnValue(makeTFile()), // triggers 'already exists' error
@@ -1296,7 +1448,11 @@ describe('createFromText', () => {
       } as unknown as App['fileManager'],
     });
 
-    const result = await ObsidianHelpers.createFromText('some text', `${DATA_DIRECTORY}/articles`, app);
+    const result = await ObsidianHelpers.createFromText(
+      'some text',
+      `${DATA_DIRECTORY}/articles`,
+      app
+    );
     expect(result).toBe(createdFile);
     // Kills string mutant: `${newNoteName}.md` → `""` — path must end with .md
     const calledPath = (create.mock.calls[0] as string[])[0];
@@ -1315,18 +1471,24 @@ describe('createFromText', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(
-      ObsidianHelpers.createFromText('content', `${DATA_DIRECTORY}/articles`, app)
+      ObsidianHelpers.createFromText(
+        'content',
+        `${DATA_DIRECTORY}/articles`,
+        app
+      )
     ).rejects.toThrow('Failed to create note');
   });
 
   it('uses a created timestamp in the frontmatter', async () => {
     vi.setSystemTime(new Date('2024-01-15T10:00:00.000Z'));
     let capturedFm: Record<string, unknown> = {};
-    const processFrontMatter = vi.fn().mockImplementation(
-      async (_file: TFile, cb: (fm: Record<string, unknown>) => void) => {
-        cb(capturedFm);
-      }
-    );
+    const processFrontMatter = vi
+      .fn()
+      .mockImplementation(
+        async (_file: TFile, cb: (fm: Record<string, unknown>) => void) => {
+          cb(capturedFm);
+        }
+      );
     const app = makeApp({
       vault: {
         getAbstractFileByPath: vi.fn().mockReturnValue(null),
@@ -1341,7 +1503,11 @@ describe('createFromText', () => {
       } as unknown as App['fileManager'],
     });
 
-    await ObsidianHelpers.createFromText('text', `${DATA_DIRECTORY}/articles`, app);
+    await ObsidianHelpers.createFromText(
+      'text',
+      `${DATA_DIRECTORY}/articles`,
+      app
+    );
     expect(capturedFm['created']).toBeDefined();
   });
 });
@@ -1377,8 +1543,18 @@ describe('smartGetline', () => {
       getLine: vi.fn().mockReturnValue('non-list line'),
     });
     const listItems = [
-      { position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 0, col: 10, offset: 10 } } },
-      { position: { start: { line: 1, col: 0, offset: 0 }, end: { line: 1, col: 10, offset: 10 } } },
+      {
+        position: {
+          start: { line: 0, col: 0, offset: 0 },
+          end: { line: 0, col: 10, offset: 10 },
+        },
+      },
+      {
+        position: {
+          start: { line: 1, col: 0, offset: 0 },
+          end: { line: 1, col: 10, offset: 10 },
+        },
+      },
     ];
     const app = makeApp({
       metadataCache: {
@@ -1398,7 +1574,12 @@ describe('smartGetline', () => {
       getLine: vi.fn().mockReturnValue(bulletLine),
     });
     const listItems = [
-      { position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 0, col: bulletLine.length, offset: bulletLine.length } } },
+      {
+        position: {
+          start: { line: 0, col: 0, offset: 0 },
+          end: { line: 0, col: bulletLine.length, offset: bulletLine.length },
+        },
+      },
     ];
     const app = makeApp({
       metadataCache: {
@@ -1435,9 +1616,24 @@ describe('smartGetline', () => {
       getLine: vi.fn().mockReturnValue('plain line'),
     });
     const listItems = [
-      { position: { start: { line: 5, col: 0, offset: 0 }, end: { line: 5, col: 10, offset: 10 } } },
-      { position: { start: { line: 6, col: 0, offset: 0 }, end: { line: 6, col: 10, offset: 10 } } },
-      { position: { start: { line: 7, col: 0, offset: 0 }, end: { line: 7, col: 10, offset: 10 } } },
+      {
+        position: {
+          start: { line: 5, col: 0, offset: 0 },
+          end: { line: 5, col: 10, offset: 10 },
+        },
+      },
+      {
+        position: {
+          start: { line: 6, col: 0, offset: 0 },
+          end: { line: 6, col: 10, offset: 10 },
+        },
+      },
+      {
+        position: {
+          start: { line: 7, col: 0, offset: 0 },
+          end: { line: 7, col: 10, offset: 10 },
+        },
+      },
     ];
     const app = makeApp({
       metadataCache: {
@@ -1458,9 +1654,24 @@ describe('smartGetline', () => {
       getLine: vi.fn().mockReturnValue('plain line'),
     });
     const listItems = [
-      { position: { start: { line: 2, col: 0, offset: 0 }, end: { line: 2, col: 10, offset: 10 } } },
-      { position: { start: { line: 3, col: 0, offset: 0 }, end: { line: 3, col: 10, offset: 10 } } },
-      { position: { start: { line: 4, col: 0, offset: 0 }, end: { line: 4, col: 10, offset: 10 } } },
+      {
+        position: {
+          start: { line: 2, col: 0, offset: 0 },
+          end: { line: 2, col: 10, offset: 10 },
+        },
+      },
+      {
+        position: {
+          start: { line: 3, col: 0, offset: 0 },
+          end: { line: 3, col: 10, offset: 10 },
+        },
+      },
+      {
+        position: {
+          start: { line: 4, col: 0, offset: 0 },
+          end: { line: 4, col: 10, offset: 10 },
+        },
+      },
     ];
     const app = makeApp({
       metadataCache: {
@@ -1482,9 +1693,24 @@ describe('smartGetline', () => {
       getLine: vi.fn().mockReturnValue(bulletLine),
     });
     const listItems = [
-      { position: { start: { line: 1, col: 0, offset: 0 }, end: { line: 1, col: 5, offset: 5 } } },
-      { position: { start: { line: 4, col: 0, offset: 0 }, end: { line: 4, col: bulletLine.length, offset: bulletLine.length } } },
-      { position: { start: { line: 7, col: 0, offset: 0 }, end: { line: 7, col: 5, offset: 5 } } },
+      {
+        position: {
+          start: { line: 1, col: 0, offset: 0 },
+          end: { line: 1, col: 5, offset: 5 },
+        },
+      },
+      {
+        position: {
+          start: { line: 4, col: 0, offset: 0 },
+          end: { line: 4, col: bulletLine.length, offset: bulletLine.length },
+        },
+      },
+      {
+        position: {
+          start: { line: 7, col: 0, offset: 0 },
+          end: { line: 7, col: 5, offset: 5 },
+        },
+      },
     ];
     const app = makeApp({
       metadataCache: {
@@ -1506,9 +1732,24 @@ describe('smartGetline', () => {
       getLine: vi.fn().mockReturnValue(bulletLine),
     });
     const listItems = [
-      { position: { start: { line: 1, col: 0, offset: 0 }, end: { line: 1, col: bulletLine.length, offset: bulletLine.length } } },
-      { position: { start: { line: 4, col: 0, offset: 0 }, end: { line: 4, col: 5, offset: 5 } } },
-      { position: { start: { line: 7, col: 0, offset: 0 }, end: { line: 7, col: 5, offset: 5 } } },
+      {
+        position: {
+          start: { line: 1, col: 0, offset: 0 },
+          end: { line: 1, col: bulletLine.length, offset: bulletLine.length },
+        },
+      },
+      {
+        position: {
+          start: { line: 4, col: 0, offset: 0 },
+          end: { line: 4, col: 5, offset: 5 },
+        },
+      },
+      {
+        position: {
+          start: { line: 7, col: 0, offset: 0 },
+          end: { line: 7, col: 5, offset: 5 },
+        },
+      },
     ];
     const app = makeApp({
       metadataCache: {
@@ -1530,9 +1771,24 @@ describe('smartGetline', () => {
       getLine: vi.fn().mockReturnValue(bulletLine),
     });
     const listItems = [
-      { position: { start: { line: 1, col: 0, offset: 0 }, end: { line: 1, col: 5, offset: 5 } } },
-      { position: { start: { line: 4, col: 0, offset: 0 }, end: { line: 4, col: 5, offset: 5 } } },
-      { position: { start: { line: 7, col: 0, offset: 0 }, end: { line: 7, col: bulletLine.length, offset: bulletLine.length } } },
+      {
+        position: {
+          start: { line: 1, col: 0, offset: 0 },
+          end: { line: 1, col: 5, offset: 5 },
+        },
+      },
+      {
+        position: {
+          start: { line: 4, col: 0, offset: 0 },
+          end: { line: 4, col: 5, offset: 5 },
+        },
+      },
+      {
+        position: {
+          start: { line: 7, col: 0, offset: 0 },
+          end: { line: 7, col: bulletLine.length, offset: bulletLine.length },
+        },
+      },
     ];
     const app = makeApp({
       metadataCache: {
@@ -1555,9 +1811,24 @@ describe('smartGetline', () => {
       getLine: vi.fn().mockReturnValue(bulletLine),
     });
     const listItems = [
-      { position: { start: { line: 1, col: 0, offset: 0 }, end: { line: 1, col: 5, offset: 5 } } },
-      { position: { start: { line: 4, col: 0, offset: 0 }, end: { line: 4, col: 5, offset: 5 } } },
-      { position: { start: { line: 7, col: 0, offset: 0 }, end: { line: 7, col: 5, offset: 5 } } },
+      {
+        position: {
+          start: { line: 1, col: 0, offset: 0 },
+          end: { line: 1, col: 5, offset: 5 },
+        },
+      },
+      {
+        position: {
+          start: { line: 4, col: 0, offset: 0 },
+          end: { line: 4, col: 5, offset: 5 },
+        },
+      },
+      {
+        position: {
+          start: { line: 7, col: 0, offset: 0 },
+          end: { line: 7, col: 5, offset: 5 },
+        },
+      },
     ];
     const app = makeApp({
       metadataCache: {

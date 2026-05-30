@@ -219,7 +219,7 @@ export default class ReviewManager {
    * Returns null if the item is not found in the database.
    */
   async getReviewItemFromFile(file: TFile): Promise<ReviewItem | null> {
-    const noteType = Obsidian.getNoteType(file, this.app);
+    const noteType = await Obsidian.getNoteType(file, this.app);
     if (noteType === 'article') {
       const row = await this.articles.findArticle(file);
       if (!row) return null;
@@ -277,7 +277,7 @@ export default class ReviewManager {
   }
 
   async dismissItem(item: ReviewItem): Promise<void> {
-    const type = Obsidian.getNoteType(item.file, this.app);
+    const type = await Obsidian.getNoteType(item.file, this.app);
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 1 WHERE id = $1`, [
       item.data.id,
@@ -285,7 +285,7 @@ export default class ReviewManager {
   }
 
   async unDismissItem(item: ReviewItem): Promise<void> {
-    const type = Obsidian.getNoteType(item.file, this.app);
+    const type = await Obsidian.getNoteType(item.file, this.app);
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 0 WHERE id = $1`, [
       item.data.id,
@@ -305,7 +305,8 @@ export default class ReviewManager {
       throw new Error(`Failed to find a file at ${newPath}`);
     }
     this.snippets.offsetTracker.renameFile(oldPath, newPath);
-    const type = Obsidian.getNoteType(concreteFile, this.app);
+
+    const type = await Obsidian.getNoteType(concreteFile, this.app);
     if (!type) {
       // console.log(`Found no matching IR tags; ignoring`);
       return;
@@ -341,7 +342,7 @@ export default class ReviewManager {
     file: TFile,
     scrollInfo: { top: number; left: number }
   ) {
-    const noteType = Obsidian.getNoteType(file, this.app);
+    const noteType = await Obsidian.getNoteType(file, this.app);
     if (!noteType || noteType === 'card') return;
 
     const reference = Obsidian.getReferenceFromPath(file.path);
@@ -358,7 +359,7 @@ export default class ReviewManager {
   async loadScrollPosition(
     file: TFile
   ): Promise<{ top: number; left: number } | null> {
-    const noteType = Obsidian.getNoteType(file, this.app);
+    const noteType = await Obsidian.getNoteType(file, this.app);
 
     let row: ArticleRow | SnippetRow | null = null;
     if (noteType === 'article') {

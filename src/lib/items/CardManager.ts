@@ -241,7 +241,7 @@ export class CardManager extends ItemManager {
         this.app
       );
 
-      const parentType = Obsidian.getNoteType(sourceFile, this.app);
+      const parentType = await Obsidian.getNoteType(sourceFile, this.app);
       let currentFileEntry;
       if (parentType === 'article') {
         currentFileEntry = await this.findArticle(sourceFile);

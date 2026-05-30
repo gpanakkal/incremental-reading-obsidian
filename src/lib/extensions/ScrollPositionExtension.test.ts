@@ -97,7 +97,7 @@ function makeView(opts: {
     info: resolvedInfo as never,
     editorView: null,
   });
-  vi.spyOn(Obsidian, 'getNoteType').mockReturnValue(noteType as never);
+  vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(noteType as never);
 
   return view;
 }

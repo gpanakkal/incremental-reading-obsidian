@@ -81,7 +81,7 @@ function makePlugin(leaves: FakeLeaf[] = []) {
 describe('registerReadingModeActionBar', () => {
   beforeEach(() => {
     vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => {});
-    vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('article');
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
   });
 
   afterEach(() => {
@@ -144,7 +144,7 @@ describe('registerReadingModeActionBar', () => {
       'does not mount for mode %j (not "preview")',
       (mode) => {
         vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => {});
-        vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue('article');
+        vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
         const leaf = makeMarkdownLeaf({ mode });
         const plugin = makePlugin([leaf]);
         registerReadingModeActionBar(plugin as never);
@@ -163,21 +163,23 @@ describe('registerReadingModeActionBar', () => {
   });
 
   describe('sync() — MarkdownView in preview, file present, noteType is null', () => {
-    it('does not mount when getNoteType returns null', () => {
-      vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue(null);
+    it('does not mount when getNoteType returns null', async () => {
+      vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue(null);
       const leaf = makeMarkdownLeaf({});
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
+      await Promise.resolve();
       expect(ActionBarExtension.renderStandaloneActionBarDOM).not.toHaveBeenCalled();
     });
   });
 
   describe('sync() — happy path: mount', () => {
-    it('mounts a bar with correct class names for a valid preview leaf', () => {
+    it('mounts a bar with correct class names for a valid preview leaf', async () => {
       const containerEl = makeContainerEl();
       const leaf = makeMarkdownLeaf({ containerEl });
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
+      await Promise.resolve();
 
       expect(ActionBarExtension.renderStandaloneActionBarDOM).toHaveBeenCalledOnce();
       const [calledFile, calledPlugin, calledBar] =
@@ -190,101 +192,114 @@ describe('registerReadingModeActionBar', () => {
       );
     });
 
-    it('prepends the bar element to the container', () => {
+    it('prepends the bar element to the container', async () => {
       const containerEl = makeContainerEl();
       const leaf = makeMarkdownLeaf({ containerEl });
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
+      await Promise.resolve();
 
       expect(containerEl.firstElementChild?.className).toContain('ir-reading-mode-bar');
     });
 
     it.each(['article', 'snippet', 'card'] as const)(
       'mounts for NoteType %j',
-      (noteType) => {
+      async (noteType) => {
         vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => {});
-        vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue(noteType);
+        vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue(noteType);
         const containerEl = makeContainerEl();
         const leaf = makeMarkdownLeaf({ containerEl });
         const plugin = makePlugin([leaf]);
         registerReadingModeActionBar(plugin as never);
+        await Promise.resolve();
         expect(ActionBarExtension.renderStandaloneActionBarDOM).toHaveBeenCalledOnce();
       }
     );
   });
 
   describe('mount() — idempotency', () => {
-    it('does not mount a second bar if the bar is already in the container', () => {
+    it('does not mount a second bar if the bar is already in the container', async () => {
       const containerEl = makeContainerEl();
       const leaf = makeMarkdownLeaf({ containerEl });
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
+      await Promise.resolve();
 
       plugin.app.workspace.triggerLayoutChange();
+      await Promise.resolve();
 
       // renderStandaloneActionBarDOM should only have been called once (first mount)
       expect(ActionBarExtension.renderStandaloneActionBarDOM).toHaveBeenCalledOnce();
     });
 
-    it('re-mounts the bar if it was removed from the container', () => {
+    it('re-mounts the bar if it was removed from the container', async () => {
       const containerEl = makeContainerEl();
       const leaf = makeMarkdownLeaf({ containerEl });
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
+      await Promise.resolve();
 
       // Detach the bar from the DOM to simulate it being removed
       containerEl.innerHTML = '';
 
       plugin.app.workspace.triggerLayoutChange();
+      await Promise.resolve();
 
       expect(ActionBarExtension.renderStandaloneActionBarDOM).toHaveBeenCalledTimes(2);
     });
   });
 
   describe('unmount() — bar removal', () => {
-    it('removes the bar element from the DOM when unmount is triggered via mode change', () => {
+    it('removes the bar element from the DOM when unmount is triggered via mode change', async () => {
       const containerEl = makeContainerEl();
       const leaf = makeMarkdownLeaf({ containerEl });
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
+      await Promise.resolve();
 
       expect(containerEl.children.length).toBe(1);
 
       leaf.view.getMode.mockReturnValue('source');
       plugin.app.workspace.triggerLayoutChange();
+      await Promise.resolve();
 
       expect(containerEl.children.length).toBe(0);
     });
 
-    it('removes the bar when view.file becomes null', () => {
+    it('removes the bar when view.file becomes null', async () => {
       const containerEl = makeContainerEl();
       const leaf = makeMarkdownLeaf({ containerEl });
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
+      await Promise.resolve();
 
       leaf.view.file = null;
       plugin.app.workspace.triggerLayoutChange();
+      await Promise.resolve();
 
       expect(containerEl.children.length).toBe(0);
     });
 
-    it('removes the bar when getNoteType changes to null', () => {
+    it('removes the bar when getNoteType changes to null', async () => {
       const containerEl = makeContainerEl();
       const leaf = makeMarkdownLeaf({ containerEl });
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
+      await Promise.resolve();
 
-      vi.spyOn(ObsidianHelpers, 'getNoteType').mockReturnValue(null);
+      vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue(null);
       plugin.app.workspace.triggerLayoutChange();
+      await Promise.resolve();
 
       expect(containerEl.children.length).toBe(0);
     });
   });
 
   describe('layout-change — controller lifecycle', () => {
-    it('creates a new controller for a leaf that appears after initial registration', () => {
+    it('creates a new controller for a leaf that appears after initial registration', async () => {
       const plugin = makePlugin([]);
       registerReadingModeActionBar(plugin as never);
+      await Promise.resolve();
 
       const containerEl = makeContainerEl();
       const newLeaf = makeMarkdownLeaf({ containerEl });
@@ -295,15 +310,17 @@ describe('registerReadingModeActionBar', () => {
         }
       );
       plugin.app.workspace.triggerLayoutChange();
+      await Promise.resolve();
 
       expect(ActionBarExtension.renderStandaloneActionBarDOM).toHaveBeenCalledOnce();
     });
 
-    it('unmounts and removes controllers for leaves that disappear', () => {
+    it('unmounts and removes controllers for leaves that disappear', async () => {
       const containerEl = makeContainerEl();
       const leaf = makeMarkdownLeaf({ containerEl });
       const plugin = makePlugin([leaf]);
       registerReadingModeActionBar(plugin as never);
+      await Promise.resolve();
 
       expect(containerEl.children.length).toBe(1);
 
@@ -314,17 +331,19 @@ describe('registerReadingModeActionBar', () => {
         }
       );
       plugin.app.workspace.triggerLayoutChange();
+      await Promise.resolve();
 
       expect(containerEl.children.length).toBe(0);
     });
   });
 
   describe('cleanup callback', () => {
-    it('unmounts all bars when the plugin cleanup runs', () => {
+    it('unmounts all bars when the plugin cleanup runs', async () => {
       const containers = [makeContainerEl(), makeContainerEl()];
       const leaves = containers.map((c) => makeMarkdownLeaf({ containerEl: c }));
       const plugin = makePlugin(leaves);
       registerReadingModeActionBar(plugin as never);
+      await Promise.resolve();
 
       expect(containers[0].children.length).toBe(1);
       expect(containers[1].children.length).toBe(1);
