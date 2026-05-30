@@ -170,6 +170,16 @@ export function isReviewCard(value: ReviewItem): value is ReviewCard {
 
 export type NoteType = ReviewItem['data']['type'];
 
+export function getItemType(item: ReviewItem): NoteType {
+  if (isReviewSnippet(item)) return 'snippet';
+  else if (isReviewCard(item)) return 'card';
+  else if (isReviewArticle(item)) return 'article';
+  else
+    throw new TypeError(
+      `Type not identified for item:\n${JSON.stringify(item)}`
+    );
+}
+
 /**
  * Frontmatter properties used by this plugin
  */

@@ -10,7 +10,7 @@ import type {
   ReviewSnippet,
   SnippetRow,
 } from '#/lib/types';
-import { isArticle } from '#/lib/types';
+import { getItemType, isArticle } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import type { TAbstractFile, TFile } from 'obsidian';
@@ -277,7 +277,7 @@ export default class ReviewManager {
   }
 
   async dismissItem(item: ReviewItem): Promise<void> {
-    const type = await Obsidian.getNoteType(item.file, this.app);
+    const type: NoteType = getItemType(item);
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 1 WHERE id = $1`, [
       item.data.id,
@@ -285,7 +285,7 @@ export default class ReviewManager {
   }
 
   async unDismissItem(item: ReviewItem): Promise<void> {
-    const type = await Obsidian.getNoteType(item.file, this.app);
+    const type: NoteType = getItemType(item);
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 0 WHERE id = $1`, [
       item.data.id,
