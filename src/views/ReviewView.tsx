@@ -17,6 +17,7 @@ export default class ReviewView extends FileView {
   activeEditor: ExtractedMarkdownEditor['owner'] = null;
   /* required for review view to open */
   allowNoFile: boolean = true;
+  #lastFocusedEl: Element | null = null;
   /**
    * Optional initial item to display first instead of the top of the queue.
    * Set this before opening the view to jump to a specific item.
@@ -101,12 +102,27 @@ export default class ReviewView extends FileView {
       }),
       this.contentEl
     );
+
+    this.registerDomEvent(this.contentEl, 'focusin', (e: FocusEvent) => {
+      if (e.target instanceof Element) {
+        this.#lastFocusedEl = e.target;
+      }
+    });
+
+    this.registerEvent(
+      this.app.workspace.on('active-leaf-change', (leaf) => {
+        if (leaf === this.leaf && this.#lastFocusedEl instanceof HTMLElement) {
+          this.#lastFocusedEl.focus();
+        }
+      })
+    );
   }
 
   async onClose() {
     await super.onClose();
     render(null, this.contentEl);
     this.activeEditor = null;
+    this.#lastFocusedEl = null;
     this.plugin.store.dispatch(resetSession());
   }
 
