@@ -103,9 +103,10 @@ export class SchedulingModal extends Modal {
         schedule={schedule}
         onClose={(args) => {
           if (args !== 'cancel') {
-            void this.handleClose(args.strategy, args.value);
+            void this.handleClose(args.strategy, args.value).finally(() =>
+              this.close()
+            );
           }
-          this.close();
         }}
       />,
       contentEl
