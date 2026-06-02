@@ -57,7 +57,14 @@
       "key": "B"
     }
   ],
-  "editor:toggle-checklist-status": [],
+  "editor:focus": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "S"
+    }
+  ],
   "file-explorer:reveal-active-file": [
     {
       "modifiers": [
@@ -131,14 +138,6 @@
         "Alt"
       ],
       "key": "D"
-    }
-  ],
-  "incremental-reading:skip-item": [
-    {
-      "modifiers": [
-        "Alt"
-      ],
-      "key": "S"
     }
   ],
   "incremental-reading:grade-card-again": [
