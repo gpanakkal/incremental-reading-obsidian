@@ -49,13 +49,13 @@ export function SchedulingModalContent({
   };
 
   const intervalTooltip =
-    `Set the time between reviews, in days` +
-    ` from ${MINIMUM_FIXED_REVIEW_INTERVAL} to ${MAXIMUM_FIXED_REVIEW_INTERVAL}.`;
+    `Number of days between reviews, from` +
+    `from ${MINIMUM_FIXED_REVIEW_INTERVAL} to ${MAXIMUM_FIXED_REVIEW_INTERVAL}.`;
 
   const prioTooltip =
-    `Priority ranges from ` +
-    `${IRScheduler.toDisplayPriority(MINIMUM_PRIORITY)} (most frequently shown) to ` +
-    `${IRScheduler.toDisplayPriority(MAXIMUM_PRIORITY)} (least frequently shown).`;
+    `Priority is used to grow the time to the next review, from ` +
+    `${IRScheduler.toDisplayPriority(MINIMUM_PRIORITY)} (slow growth, more frequent review) to ` +
+    `${IRScheduler.toDisplayPriority(MAXIMUM_PRIORITY)} (fast growth, less frequent review).`;
 
   return (
     <div
@@ -93,6 +93,7 @@ export function SchedulingModalContent({
           <PriorityField
             initialPriority={scheduleValues.priority}
             onBlur={(priority: number) => updateValues({ priority })}
+            showMultiplier
           />
         </>
       ) : (

@@ -1,14 +1,23 @@
 import IRScheduler from '#/lib/IRScheduler';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 export function PriorityField({
   initialPriority,
   onBlur,
+  showMultiplier = false,
 }: {
   initialPriority: number;
   onBlur: (priority: number) => void | Promise<void>;
+  showMultiplier?: boolean;
 }) {
   const [displayPrio, setDisplayPrio] = useState<number>(initialPriority / 10);
+
+  useEffect(
+    function updatePrioOnRerender() {
+      setDisplayPrio(initialPriority / 10);
+    },
+    [initialPriority]
+  );
 
   return (
     <div className="ir-priority-container">
@@ -44,6 +53,17 @@ export function PriorityField({
           }}
           onFocus={(e) => e.currentTarget.select()}
         />
+        {showMultiplier && (
+          <div>
+            (
+            {Math.round(
+              IRScheduler.getIntervalMultiplier(
+                IRScheduler.transformPriority(displayPrio)
+              ) * 100
+            ) / 100}
+            x interval multiplier)
+          </div>
+        )}
       </label>
     </div>
   );
