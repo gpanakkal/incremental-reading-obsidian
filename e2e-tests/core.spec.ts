@@ -66,7 +66,6 @@ test.describe('Article Importing', () => {
     });
     await window.getByText('Import article').click();
     await finalizeArticleImport(window);
-    await window.getByLabel('Incremental reading').click();
 
     // look for the action bar to confirm we're in review
     await expect(
