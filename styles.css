@@ -170,6 +170,13 @@
   align-items: center;
 }
 
+.ir-scheduling-tooltip {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding-top: var(--size-4-1);
+  line-height: var(--line-height-tight);
+}
+
 .ir-hidden-answer {
   background-color: yellow;
   padding: 2px 4px;
