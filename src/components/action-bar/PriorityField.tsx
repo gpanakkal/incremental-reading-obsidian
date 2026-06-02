@@ -1,6 +1,10 @@
 import IRScheduler from '#/lib/IRScheduler';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
+/**
+ * Note: pass a `key` prop with the item's ID to ensure priority is updated
+ * correctly when navigating to other items
+ */
 export function PriorityField({
   initialPriority,
   onBlur,
@@ -11,10 +15,14 @@ export function PriorityField({
   showMultiplier?: boolean;
 }) {
   const [displayPrio, setDisplayPrio] = useState<number>(initialPriority / 10);
+  const prevPriorityRef = useRef(initialPriority);
 
   useEffect(
     function updatePrioOnRerender() {
-      setDisplayPrio(initialPriority / 10);
+      if (prevPriorityRef.current !== initialPriority) {
+        prevPriorityRef.current = initialPriority;
+        setDisplayPrio(initialPriority / 10);
+      }
     },
     [initialPriority]
   );
