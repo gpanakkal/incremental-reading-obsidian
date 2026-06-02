@@ -353,6 +353,7 @@ test.describe('Action Bar', () => {
     await expect(priorityInput).toHaveValue('1.1');
     await priorityInput.fill('49');
     await priorityInput.press('Enter');
+    await window.waitForTimeout(300);
     await expect(priorityInput).toHaveValue('4.9');
 
     // re-open the review interface to verify the changes persisted
