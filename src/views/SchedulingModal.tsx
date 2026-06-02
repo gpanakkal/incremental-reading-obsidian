@@ -54,7 +54,10 @@ export class SchedulingModal extends Modal {
       // item already exists, so update its properties
 
       if (strategy === 'priority') {
-        if (item.data.type === 'article') {
+        if (
+          item.data.type === 'article' &&
+          item.data.fixed_interval_days !== null
+        ) {
           promises.push(
             plugin.actions.manageFixedInterval(item as ReviewArticle, {
               newPriority: value,
