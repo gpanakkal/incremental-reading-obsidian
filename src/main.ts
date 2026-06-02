@@ -28,12 +28,12 @@ import ReviewView from './views/ReviewView';
 import { SchedulingModal } from './views/SchedulingModal';
 
 export default class IncrementalReadingPlugin extends Plugin {
-  settings: IRPluginSettings;
-  reviewManager: ReviewManager;
-  store: typeof store;
-  actions: Actions;
+  settings!: IRPluginSettings;
+  reviewManager!: ReviewManager;
+  store!: typeof store;
+  actions!: Actions;
 
-  MarkdownEditor: typeof ExtractedMarkdownEditor;
+  MarkdownEditor!: typeof ExtractedMarkdownEditor;
 
   async onload() {
     await this.loadSettings();
