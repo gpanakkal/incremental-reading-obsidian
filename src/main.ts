@@ -115,8 +115,8 @@ export default class IncrementalReadingPlugin extends Plugin {
           this.settings.defaultPriority,
           null
         );
-        if (article && this.getOpenReviewLeaf()) {
-          // set the new import as the current item and focus the review pane
+        if (article && this.settings.reviewOnImport) {
+          console.log('opening new import for review');
           await this.learn(article);
         }
       }

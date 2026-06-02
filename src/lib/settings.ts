@@ -11,11 +11,13 @@ import IRScheduler from './IRScheduler';
 export interface IRPluginSettings {
   defaultPriority: number;
   showImportDialog: boolean;
+  reviewOnImport: boolean;
   dayRolloverOffset: number;
 }
 export const DEFAULT_SETTINGS: IRPluginSettings = {
   defaultPriority: DEFAULT_PRIORITY,
   showImportDialog: true,
+  reviewOnImport: true,
   dayRolloverOffset: DAY_ROLLOVER_OFFSET_HOURS.DEFAULT,
 };
 
@@ -58,6 +60,18 @@ export class IRSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.showImportDialog)
           .onChange(async (value) => {
             this.plugin.settings.showImportDialog = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Review immediately upon import')
+      .setDesc('Immediately open articles for review when imported.')
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.reviewOnImport)
+          .onChange(async (value) => {
+            this.plugin.settings.reviewOnImport = value;
             await this.plugin.saveSettings();
           });
       });

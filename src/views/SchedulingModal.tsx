@@ -42,7 +42,7 @@ export class SchedulingModal extends Modal {
         throw new Error(`Failed to import article ${file.path}`);
       }
 
-      if (plugin.getOpenReviewLeaf()) {
+      if (plugin.settings.reviewOnImport) {
         await plugin.learn(importedArticle);
       }
     } else {
