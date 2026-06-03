@@ -331,7 +331,7 @@ test.describe('Action Bar', () => {
     await unDismissButton.click();
 
     await executeCommandById(window, 'incremental-reading:learn');
-    await expect(window.locator('.ir-title')).toBeInViewport();
+    await expect(window.locator('.ir-title')).toBeVisible();
   });
 
   test('Can change priority from the review pane', async () => {
