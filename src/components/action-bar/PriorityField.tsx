@@ -49,6 +49,7 @@ export function PriorityField({
           }}
           onBlur={() => {
             const transformed = IRScheduler.transformPriority(displayPrio);
+            prevPriorityRef.current = transformed;
             void onBlur(transformed);
           }}
           onKeyDown={(e) => {
