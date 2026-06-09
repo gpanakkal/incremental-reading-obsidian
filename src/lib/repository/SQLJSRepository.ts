@@ -107,6 +107,8 @@ export class SQLJSRepository implements SQLiteRepository {
         this.#onMigrationFailure
       ) {
         this.#onMigrationFailure(error);
+      } else {
+        console.error(error);
       }
     }
   }
@@ -284,7 +286,8 @@ export class SQLJSRepository implements SQLiteRepository {
    * If migrations are pending, backs up the database first and verifies
    * data integrity after applying them.
    * @returns a Database, or `null` if the file is invalid or not found
-   * @throws {MigrationVerificationError} if post-migration verification fails
+   * @throws if the latest schema version is lower than the database's
+   * current version, or if post-migration verification fails
    */
   protected async reloadDb() {
     try {
@@ -295,6 +298,11 @@ export class SQLJSRepository implements SQLiteRepository {
       // Use browser-compatible Uint8Array instead of Node.js Buffer
       // for mobile compatibility
       this.db = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
+      const result = this.db.exec('PRAGMA integrity_check');
+      const status = result[0]?.values[0]?.[0] as string;
+      if (status !== 'ok') {
+        throw new Error(`integrity_check failed: ${status}`);
+      }
 
       const currentDbVersion = getSchemaVersion(this.db);
       const latestSchemaVersion = migrations[migrations.length - 1].version;
