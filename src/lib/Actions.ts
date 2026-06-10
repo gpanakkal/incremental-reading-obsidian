@@ -41,7 +41,7 @@ export class Actions {
     this.plugin = plugin;
   }
 
-  /** Call this after reviewing, skipping, or dismissing an item */
+  /** Call this after reviewing, skipping, dismissing, or deleting an open item */
   getNext = () => {
     this.plugin.store.dispatch(resetCurrentItem());
   };
@@ -163,6 +163,17 @@ export class Actions {
     new Notice(
       `Restored "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}" to queue`
     );
+  };
+
+  /**
+   * Asks for confirmation if enabled in settings; moves file to trash
+   */
+  deleteItem = async (item: ReviewItem) => {
+    await this.plugin.app.fileManager.promptForFileDeletion(item.file);
+    const { currentItemId } = store.getState();
+    if (item.data.id === currentItemId) {
+      this.getNext();
+    }
   };
 
   skipItem = (item: ReviewItem) => {

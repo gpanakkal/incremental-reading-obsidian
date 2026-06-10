@@ -21,6 +21,7 @@ import {
   Eye,
   Scissors,
   SkipForward,
+  Trash2,
 } from 'lucide-react';
 import { useDispatch } from 'react-redux';
 import { Rating } from 'ts-fsrs';
@@ -92,6 +93,14 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
           <Ban stroke="#b46000" />
         </ButtonWithIcon>
       )}
+      <ButtonWithIcon
+        tooltip="Delete this item and its note"
+        handleClick={async () => {
+          await actions.deleteItem(reviewItem);
+        }}
+      >
+        <Trash2 stroke="#990000" />
+      </ButtonWithIcon>
       <ButtonWithIcon
         tooltip="Extract selected text to a new snippet"
         handleClick={async () => {
