@@ -26,6 +26,7 @@ function makeArticleData(overrides: Partial<IArticleBase> = {}): IArticleBase {
     due: FIXED_NOW,
     interval: 86_400_000,
     dismissed: false,
+    deleted: false,
     priority: 30,
     fixed_interval_days: null,
     scroll_top: 0,

@@ -34,6 +34,7 @@ function makeHighlight(
     due: null,
     interval: 1,
     dismissed: false,
+    deleted: false,
     priority: 50,
     parent: 'articles/parent.md',
     start_offset: 0,

@@ -65,6 +65,7 @@ function makeCardRow(overrides: Partial<SRSCardRow> = {}): SRSCardRow {
     lapses: 0,
     state: State.New,
     dismissed: 0,
+    deleted: false,
     ...overrides,
   };
 }
@@ -88,6 +89,7 @@ function makeCardDisplay(
     lapses: 0,
     state: 'New',
     dismissed: false,
+    deleted: false,
     ...overrides,
   };
 }
@@ -109,6 +111,7 @@ function makeCardBase(overrides: Partial<ISRSCard> = {}): ISRSCard {
     lapses: 0,
     state: State.New,
     dismissed: false,
+    deleted: false,
     ...overrides,
   };
 }
@@ -165,6 +168,7 @@ const cardRowArb: fc.Arbitrary<SRSCardRow> = fc.record<SRSCardRow>({
   lapses: fc.integer({ min: 0, max: 10000 }),
   state: stateArb,
   dismissed: fc.oneof(fc.constant(0 as 0), fc.constant(1 as 1)),
+  deleted: fc.boolean(),
 });
 
 /** Valid delimiter pairs for testing getClozeGroupsPattern */

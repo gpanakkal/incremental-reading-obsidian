@@ -96,6 +96,39 @@ const SCHEMA_V0 = `
     snippet_id TEXT NOT NULL REFERENCES snippet(id),
     review_time INTEGER NOT NULL
   );
+  CREATE TABLE srs_card (
+    id TEXT NOT NULL,
+    reference TEXT NOT NULL UNIQUE,
+    parent TEXT DEFAULT NULL,
+    created_at INTEGER NOT NULL,
+    due INTEGER NOT NULL,
+    dismissed INTEGER DEFAULT 0,
+    last_review INTEGER,
+    stability REAL NOT NULL,
+    difficulty REAL NOT NULL,
+    elapsed_days REAL NOT NULL,
+    scheduled_days REAL NOT NULL,
+    reps INTEGER NOT NULL DEFAULT 0,
+    lapses INTEGER NOT NULL DEFAULT 0,
+    state INTEGER NOT NULL,
+    CHECK(state >= 0 AND state <= 3),
+    CHECK(dismissed = FALSE OR dismissed = TRUE)
+  );
+  CREATE TABLE srs_card_review (
+    id TEXT NOT NULL,
+    card_id TEXT NOT NULL REFERENCES srs_card(id),
+    due INTEGER NOT NULL,
+    review INTEGER NOT NULL,
+    stability REAL NOT NULL,
+    difficulty REAL NOT NULL,
+    elapsed_days REAL NOT NULL,
+    last_elapsed_days REAL NOT NULL,
+    scheduled_days REAL NOT NULL,
+    rating INTEGER NOT NULL,
+    state INTEGER NOT NULL,
+    CHECK(state >= 0 AND state <= 3),
+    CHECK(rating >= 0 AND rating <= 4)
+  );
   PRAGMA user_version = 0;
 `;
 
@@ -130,6 +163,39 @@ const SCHEMA_V2 = `
     id TEXT NOT NULL,
     snippet_id TEXT NOT NULL REFERENCES snippet(id),
     review_time INTEGER NOT NULL
+  );
+  CREATE TABLE srs_card (
+    id TEXT NOT NULL,
+    reference TEXT NOT NULL UNIQUE,
+    parent TEXT DEFAULT NULL,
+    created_at INTEGER NOT NULL,
+    due INTEGER NOT NULL,
+    dismissed INTEGER DEFAULT 0,
+    last_review INTEGER,
+    stability REAL NOT NULL,
+    difficulty REAL NOT NULL,
+    elapsed_days REAL NOT NULL,
+    scheduled_days REAL NOT NULL,
+    reps INTEGER NOT NULL DEFAULT 0,
+    lapses INTEGER NOT NULL DEFAULT 0,
+    state INTEGER NOT NULL,
+    CHECK(state >= 0 AND state <= 3),
+    CHECK(dismissed = FALSE OR dismissed = TRUE)
+  );
+  CREATE TABLE srs_card_review (
+    id TEXT NOT NULL,
+    card_id TEXT NOT NULL REFERENCES srs_card(id),
+    due INTEGER NOT NULL,
+    review INTEGER NOT NULL,
+    stability REAL NOT NULL,
+    difficulty REAL NOT NULL,
+    elapsed_days REAL NOT NULL,
+    last_elapsed_days REAL NOT NULL,
+    scheduled_days REAL NOT NULL,
+    rating INTEGER NOT NULL,
+    state INTEGER NOT NULL,
+    CHECK(state >= 0 AND state <= 3),
+    CHECK(rating >= 0 AND rating <= 4)
   );
   PRAGMA user_version = 2;
 `;
@@ -330,6 +396,7 @@ describe('migration v3 — backfill interval on article and snippet', () => {
       interval: MS_PER_DAY,
       priority: 40,
       dismissed: 0,
+      deleted: 0,
       fixed_interval_days: 3,
       scroll_top: 42,
     });
@@ -407,8 +474,8 @@ describe('recreateTable', () => {
     const rowsBefore = selectAll(db, 'article');
 
     recreateTable<
-      SafeOmit<ArticleRow, 'interval'>,
-      SafeOmit<ArticleRow, 'interval'>
+      SafeOmit<ArticleRow, 'interval' | 'deleted'>,
+      SafeOmit<ArticleRow, 'interval' | 'deleted'>
     >(db, 'article', tableSchema, {
       id: 'id',
       reference: 'reference',
@@ -435,7 +502,7 @@ describe('recreateTable', () => {
     );
 
     // add the `interval` column
-    recreateTable<ArticleRow, SafeOmit<ArticleRow, 'interval'>>(
+    recreateTable<SafeOmit<ArticleRow, 'deleted'>, SafeOmit<ArticleRow, 'interval' | 'deleted'>>(
       db,
       'article',
       `CREATE TABLE article (

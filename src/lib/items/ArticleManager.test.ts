@@ -35,6 +35,7 @@ function makeArticle(overrides: Partial<IArticleBase> = {}): IArticleBase {
     due: Date.now(),
     interval: TEXT_BASE_REVIEW_INTERVAL,
     dismissed: false,
+    deleted: false,
     priority: DEFAULT_PRIORITY,
     fixed_interval_days: null,
     scroll_top: 0,
@@ -103,6 +104,7 @@ const articleRowArb = fc.record<ArticleRow>({
   ),
   interval: fc.integer({ min: 0, max: MS_PER_DAY * 365 * 50 }),
   dismissed: fc.oneof(fc.constant(0), fc.constant(1)),
+  deleted: fc.boolean(),
   priority: fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
   fixed_interval_days: fc.oneof(
     fc.integer({
