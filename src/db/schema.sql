@@ -5,12 +5,14 @@ CREATE TABLE IF NOT EXISTS article (
   interval INTEGER NOT NULL, -- the interval that was used to calculate `due`
   priority INTEGER NOT NULL, -- used when manual interval is null
   fixed_interval_days INTEGER NULL,
-  dismissed INTEGER DEFAULT 0,
+  dismissed INTEGER NOT NULL DEFAULT FALSE,
+  deleted INTEGER NOT NULL DEFAULT FALSE,
   scroll_top INTEGER NOT NULL DEFAULT 0,
   CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(fixed_interval_days > 0),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
+  CHECK(deleted = FALSE OR deleted = TRUE),
   CHECK(due IS NOT NULL OR dismissed = TRUE)
 );
 
@@ -31,13 +33,15 @@ CREATE TABLE IF NOT EXISTS snippet (
   due INTEGER, -- unix timestamp
   interval INTEGER NOT NULL, -- the interval that was used to calculate `due`
   priority INTEGER NOT NULL,
-  dismissed INTEGER DEFAULT 0,
+  dismissed INTEGER NOT NULL DEFAULT FALSE,
+  deleted INTEGER NOT NULL DEFAULT FALSE,
   scroll_top INTEGER NOT NULL DEFAULT 0,
   start_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
   end_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
   CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
+  CHECK(deleted = FALSE OR deleted = TRUE),
   CHECK(due IS NOT NULL OR dismissed = TRUE)
 );
 
@@ -58,7 +62,8 @@ CREATE TABLE IF NOT EXISTS srs_card (
   parent TEXT DEFAULT NULL,
   created_at INTEGER NOT NULL, -- unix timestamp
   due INTEGER NOT NULL,
-  dismissed INTEGER DEFAULT 0,
+  dismissed INTEGER NOT NULL DEFAULT FALSE,
+  deleted INTEGER NOT NULL DEFAULT FALSE,
   last_review INTEGER,
   stability REAL NOT NULL,
   difficulty REAL NOT NULL,
@@ -68,7 +73,8 @@ CREATE TABLE IF NOT EXISTS srs_card (
   lapses INTEGER NOT NULL DEFAULT 0,
   state INTEGER NOT NULL,
   CHECK(state >= 0 AND state <= 3),
-  CHECK(dismissed = FALSE OR dismissed = TRUE)
+  CHECK(dismissed = FALSE OR dismissed = TRUE),
+  CHECK(deleted = FALSE OR deleted = TRUE)
 );
 
 CREATE INDEX IF NOT EXISTS srs_card_uuid ON srs_card(id);
@@ -91,4 +97,4 @@ CREATE TABLE IF NOT EXISTS srs_card_review (
   CHECK(rating >= 0 AND rating <= 4)
 );
 
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;

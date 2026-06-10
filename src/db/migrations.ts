@@ -83,7 +83,7 @@ export const migrations: Migration[] = [
             fixed_interval_days: 'fixed_interval_days',
             scroll_top: 'scroll_top',
           },
-          (row: SafeOmit<TableNameToRowType['article'], 'interval'>) => {
+          (row: SafeOmit<TableNameToRowType['article'], 'interval' | 'deleted'>) => {
             const lastReviewTime = latestReviewByArticle[row.id];
             const computed =
               lastReviewTime && row.due ? row.due - lastReviewTime : 0;
@@ -138,7 +138,7 @@ export const migrations: Migration[] = [
             start_offset: 'start_offset',
             end_offset: 'end_offset',
           },
-          (row: SafeOmit<TableNameToRowType['snippet'], 'interval'>) => {
+          (row: SafeOmit<TableNameToRowType['snippet'], 'interval' | 'deleted'>) => {
             const lastReviewTime = latestReviewBySnippet[row.id];
             const computed =
               lastReviewTime && row.due ? row.due - lastReviewTime : 0;
@@ -181,6 +181,119 @@ export const migrations: Migration[] = [
           priority: 'priority',
           fixed_interval_days: 'fixed_interval_days',
           scroll_top: 'scroll_top',
+        }
+      );
+    },
+  },
+  {
+    version: 5,
+    description: 'Add deleted field on item rows',
+    up: (db) => {
+      recreateTable(
+        db,
+        'article',
+        `CREATE TABLE article (
+          id TEXT NOT NULL, -- UUID
+          reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
+          due INTEGER, -- unix timestamp
+          interval INTEGER NOT NULL, -- the interval that was used to calculate due
+          priority INTEGER NOT NULL, -- used when manual interval is null
+          fixed_interval_days INTEGER NULL,
+          dismissed INTEGER NOT NULL DEFAULT FALSE,
+          deleted INTEGER NOT NULL DEFAULT FALSE,
+          scroll_top INTEGER NOT NULL DEFAULT 0,
+          CHECK(interval > 0),
+          CHECK(priority >= 10 AND priority <= 50),
+          CHECK(fixed_interval_days > 0),
+          CHECK(dismissed = FALSE OR dismissed = TRUE),
+          CHECK(deleted = FALSE OR deleted = TRUE),
+          CHECK(due IS NOT NULL OR dismissed = TRUE)
+        );`,
+        {
+          id: 'id',
+          reference: 'reference',
+          due: 'due',
+          interval: 'interval',
+          priority: 'priority',
+          fixed_interval_days: 'fixed_interval_days',
+          dismissed: 'dismissed',
+          scroll_top: 'scroll_top',
+        }
+      );
+
+      recreateTable(
+        db,
+        'snippet',
+        `CREATE TABLE snippet (
+          id TEXT NOT NULL, -- UUID
+          reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
+          parent TEXT DEFAULT NULL, -- null if it wasn't created from an article or snippet
+          due INTEGER, -- unix timestamp
+          interval INTEGER NOT NULL, -- the interval that was used to calculate due
+          priority INTEGER NOT NULL,
+          dismissed INTEGER NOT NULL DEFAULT FALSE,
+          deleted INTEGER NOT NULL DEFAULT FALSE,
+          scroll_top INTEGER NOT NULL DEFAULT 0,
+          start_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
+          end_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
+          CHECK(interval > 0),
+          CHECK(priority >= 10 AND priority <= 50),
+          CHECK(dismissed = FALSE OR dismissed = TRUE),
+          CHECK(deleted = FALSE OR deleted = TRUE),
+          CHECK(due IS NOT NULL OR dismissed = TRUE)
+        );`,
+        {
+          id: 'id',
+          reference: 'reference',
+          parent: 'parent',
+          due: 'due',
+          interval: 'interval',
+          priority: 'priority',
+          dismissed: 'dismissed',
+          scroll_top: 'scroll_top',
+          start_offset: 'start_offset',
+          end_offset: 'end_offset',
+        }
+      );
+
+      recreateTable(
+        db,
+        'srs_card',
+        `CREATE TABLE srs_card (
+          id TEXT NOT NULL, -- UUID
+          reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
+          parent TEXT DEFAULT NULL,
+          created_at INTEGER NOT NULL, -- unix timestamp
+          due INTEGER NOT NULL,
+          dismissed INTEGER NOT NULL DEFAULT FALSE,
+          deleted INTEGER NOT NULL DEFAULT FALSE,
+          last_review INTEGER,
+          stability REAL NOT NULL,
+          difficulty REAL NOT NULL,
+          elapsed_days REAL NOT NULL,
+          scheduled_days REAL NOT NULL,
+          reps INTEGER NOT NULL DEFAULT 0,
+          lapses INTEGER NOT NULL DEFAULT 0,
+          state INTEGER NOT NULL,
+          CHECK(state >= 0 AND state <= 3),
+          CHECK(dismissed = FALSE OR dismissed = TRUE),
+          CHECK(deleted = FALSE OR deleted = TRUE)
+        );`,
+        {
+          id: 'id',
+          reference: 'reference',
+          created_at: 'created_at',
+          parent: 'parent',
+          due: 'due',
+          dismissed: 'dismissed',
+          last_review: 'last_review',
+          stability: 'stability',
+          difficulty: 'difficulty',
+          elapsed_days: 'elapsed_days',
+          scheduled_days: 'scheduled_days',
+          reps: 'reps',
+          lapses: 'lapses',
+          state: 'state',
         }
       );
     },

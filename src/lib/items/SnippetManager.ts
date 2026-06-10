@@ -71,7 +71,34 @@ export class SnippetManager extends ItemManager {
   rowToReviewSnippet(row: SnippetRow): ReviewSnippet | null {
     const base = SnippetManager.rowToBase(row);
     const file = Obsidian.getNote(row.reference, this.app);
-    if (!file) return null;
+    if (!file) {
+      if (!row.deleted) {
+        void this.markDeleted(row.id, 'snippet');
+      }
+      if (row.parent) {
+        const parentPath = Obsidian.getPathFromReference(row.parent);
+        this.offsetTracker.removeHighlight(parentPath, row.id);
+      }
+      return null;
+    }
+
+    const frontmatter = Obsidian.getFrontMatter(file, this.app);
+    const fileId = frontmatter?.['ir-id'];
+    // id is present but doesn't match
+    if (fileId && fileId !== row.id) {
+      void this.markDeleted(row.id, 'snippet');
+      return null;
+    }
+
+    // some frontmatter is missing; impute it
+    if (!fileId || !frontmatter?.tags?.includes(SNIPPET_TAG)) {
+      void this.setFrontmatter(file, row.id, SNIPPET_TAG);
+    }
+
+    if (row.deleted) {
+      void this.markUndeleted(row.id, 'snippet');
+    }
+
     return {
       data: base,
       file,
@@ -165,10 +192,6 @@ export class SnippetManager extends ItemManager {
       return null;
     }
 
-    // console.log(
-    //   `[createSnippet] Creating snippet from file: ${currentFile.path}`
-    // );
-
     const selection = editor.getSelection() || view.getSelection();
     if (!selection) {
       new Notice('Text must be selected', ERROR_NOTICE_DURATION_MS);
@@ -187,9 +210,11 @@ export class SnippetManager extends ItemManager {
       this.app
     );
 
+    const id = crypto.randomUUID();
     await Obsidian.updateFrontMatter(
       snippetFile,
       {
+        'ir-id': id,
         tags: SNIPPET_TAG,
         [`${SOURCE_PROPERTY_NAME}`]: sourceLink,
       },
@@ -225,11 +250,6 @@ export class SnippetManager extends ItemManager {
         `Couldn't find entry for ${parentType} ${currentFile.path}`
       );
     }
-
-    // console.log(
-    //   `[createSnippet] Parent type: ${parentType}, entry:`,
-    //   currentFileEntry
-    // );
 
     let priority = currentFileEntry?.priority ?? DEFAULT_PRIORITY;
     // if the parent is on a fixed-interval schedule, calculate priority
@@ -280,6 +300,7 @@ export class SnippetManager extends ItemManager {
     // Create the snippet entry
     const result = await this.createEntry(
       snippetFile,
+      id,
       snippetDueTime,
       priority,
       currentFileEntry?.id,
@@ -307,6 +328,7 @@ export class SnippetManager extends ItemManager {
    */
   protected async createEntry(
     snippetFile: TFile,
+    id: string,
     dueTime: number,
     priority: number,
     parentId?: string,
@@ -318,7 +340,6 @@ export class SnippetManager extends ItemManager {
         `(id, reference, due, interval, priority, parent, start_offset, end_offset) ` +
         `VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
       // save the snippet to the database
-      const id = crypto.randomUUID();
       await this.repo.mutate(query, [
         id,
         `${SNIPPET_DIRECTORY}/${snippetFile.name}`,
@@ -359,6 +380,7 @@ export class SnippetManager extends ItemManager {
     dueBy?: number;
     limit?: number;
     includeDismissed?: boolean;
+    includeDeleted?: boolean;
     excludeIds?: string[];
   }) {
     let query = 'SELECT * FROM snippet';
@@ -370,6 +392,10 @@ export class SnippetManager extends ItemManager {
     }
     if (!opts?.includeDismissed) {
       conditions.push('dismissed = 0');
+    }
+
+    if (!opts?.includeDeleted) {
+      conditions.push('deleted = FALSE');
     }
 
     if (opts?.excludeIds && opts.excludeIds.length) {

@@ -66,6 +66,10 @@ export class ObsidianHelpers {
     return reference;
   }
 
+  static getPathFromReference(reference: string): string {
+    return normalizePath(`${DATA_DIRECTORY}/${reference}`);
+  }
+
   /**
    * Remove characters that cannot be used for file names
    * or Obsidian note titles

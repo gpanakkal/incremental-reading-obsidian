@@ -62,7 +62,30 @@ export class ArticleManager extends ItemManager {
   rowToReviewArticle(row: ArticleRow): ReviewArticle | null {
     const base = ArticleManager.rowToBase(row);
     const file = Obsidian.getNote(row.reference, this.app);
-    if (!file) return null;
+    if (!file) {
+      if (!row.deleted) {
+        void this.markDeleted(row.id, 'article');
+      }
+      return null;
+    }
+
+    const frontmatter = Obsidian.getFrontMatter(file, this.app);
+    const fileId = frontmatter?.['ir-id'];
+    // id is present but doesn't match
+    if (fileId && fileId !== row.id) {
+      void this.markDeleted(row.id, 'article');
+      return null;
+    }
+
+    // some frontmatter is missing; impute it
+    if (!fileId || !frontmatter?.tags?.includes(ARTICLE_TAG)) {
+      void this.setFrontmatter(file, row.id, ARTICLE_TAG);
+    }
+
+    if (row.deleted) {
+      void this.markUndeleted(row.id, 'article');
+    }
+
     return {
       data: base,
       file,
@@ -119,6 +142,9 @@ export class ArticleManager extends ItemManager {
       // Create a copy in the articles directory
       const articleFile = await Obsidian.createNote({
         content,
+        frontmatter: {
+          created: new Date().toISOString(),
+        },
         fileName: importFileName,
         directory: Obsidian.getDirectory('article'),
         app: this.app,
@@ -130,8 +156,11 @@ export class ArticleManager extends ItemManager {
         );
       }
 
+      const id = crypto.randomUUID();
+
       // Tag it and create a link to the source if it doesn't exist
       const frontmatterUpdates: FrontMatterUpdates = {
+        'ir-id': id,
         tags: ARTICLE_TAG,
       };
       if (!frontmatter?.source) {
@@ -150,7 +179,6 @@ export class ArticleManager extends ItemManager {
 
       // Insert into database with immediate due time
       const dueTime = Date.now();
-      const id = crypto.randomUUID();
       await this.repo.mutate(
         'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days) VALUES ($1, $2, $3, $4, $5, $6)',
         [
@@ -197,9 +225,13 @@ export class ArticleManager extends ItemManager {
       const newNoteName = Obsidian.createTitle(
         `New article ${getDateString()}`
       );
+
+      const id = crypto.randomUUID();
+
       const articleFile = await Obsidian.createNote({
         content: '',
         frontmatter: {
+          'ir-id': id,
           created: new Date().toISOString(),
         },
         fileName: `${newNoteName}.md`,
@@ -223,7 +255,6 @@ export class ArticleManager extends ItemManager {
 
       // Insert into database with immediate due time
       const dueTime = Date.now();
-      const id = crypto.randomUUID();
       await this.repo.mutate(
         'INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)',
         [
@@ -296,6 +327,7 @@ export class ArticleManager extends ItemManager {
     dueBy?: number;
     limit?: number;
     includeDismissed?: boolean;
+    includeDeleted?: boolean;
     excludeIds?: string[];
   }) {
     let query = 'SELECT * FROM article';
@@ -307,6 +339,10 @@ export class ArticleManager extends ItemManager {
     }
     if (!opts?.includeDismissed) {
       conditions.push('dismissed = 0');
+    }
+
+    if (!opts?.includeDeleted) {
+      conditions.push('deleted = FALSE');
     }
 
     if (opts?.excludeIds && opts.excludeIds.length) {

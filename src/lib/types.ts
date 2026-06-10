@@ -11,6 +11,7 @@ export interface IArticleBase {
   due: number | null;
   interval: number;
   dismissed: boolean;
+  deleted: boolean;
   priority: number;
   fixed_interval_days: number | null;
   scroll_top: number;
@@ -38,6 +39,7 @@ export interface ISnippetBase {
   due: number | null;
   interval: number;
   dismissed: boolean;
+  deleted: boolean;
   priority: number;
   parent: string | null;
   start_offset: number | null;
@@ -66,6 +68,7 @@ export interface ISRSCard extends Card {
   reference: string;
   created_at: Date;
   dismissed: boolean;
+  deleted: boolean;
 }
 
 export interface ISRSCardDisplay extends SafeOmit<ISRSCard, 'state'> {
@@ -185,6 +188,7 @@ export function getItemType(item: ReviewItem): NoteType {
  */
 export type PluginFrontMatter = {
   [SOURCE_PROPERTY_NAME]?: string;
+  'ir-id'?: string;
   tags?: string[];
   delimiters?: [string, string];
   created?: string;

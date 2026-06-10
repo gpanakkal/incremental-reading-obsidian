@@ -4,6 +4,7 @@ import type {
   ISRSCardDisplay,
   ISnippetBase,
   NoteType,
+  PluginFrontMatter,
   ReviewArticle,
   ReviewCard,
   ReviewItem,
@@ -16,7 +17,12 @@ import type ReviewView from '#/views/ReviewView';
 import type { TAbstractFile, TFile } from 'obsidian';
 import { type App, type Editor, type MarkdownView } from 'obsidian';
 import type { Grade } from 'ts-fsrs';
-import { DATA_DIRECTORY } from '../constants';
+import {
+  ARTICLE_TAG,
+  CARD_TAG,
+  DATA_DIRECTORY,
+  SNIPPET_TAG,
+} from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
 import { compareDates } from '../utils';
@@ -255,12 +261,15 @@ export default class ReviewManager {
   async _logItems() {
     const articles = await this.articles.fetchMany({
       includeDismissed: true,
+      includeDeleted: true,
     });
     const snippets = await this.snippets.fetchMany({
       includeDismissed: true,
+      includeDeleted: true,
     });
     const cards = await this.cards.fetchMany({
       includeDismissed: true,
+      includeDeleted: true,
     });
 
     if (!articles && !snippets && !cards) {
@@ -306,7 +315,18 @@ export default class ReviewManager {
     }
     this.snippets.offsetTracker.renameFile(oldPath, newPath);
 
-    const type = await Obsidian.getNoteType(concreteFile, this.app);
+    let type: string | null = null,
+      rowId: string | undefined;
+    await this.app.fileManager.processFrontMatter(
+      concreteFile,
+      (frontmatter: PluginFrontMatter) => {
+        if (frontmatter.tags === undefined) return;
+        rowId = frontmatter['ir-id'];
+        if (frontmatter.tags.includes(ARTICLE_TAG)) type = 'article';
+        else if (frontmatter.tags.includes(SNIPPET_TAG)) type = 'snippet';
+        else if (frontmatter.tags.includes(CARD_TAG)) type = 'card';
+      }
+    );
     if (!type) {
       // console.log(`Found no matching IR tags; ignoring`);
       return;
@@ -320,21 +340,80 @@ export default class ReviewManager {
       return;
     }
 
-    const oldReference = Obsidian.getReferenceFromPath(oldPath);
     const newReference = Obsidian.getReferenceFromPath(newPath);
-    if (oldReference === newReference) {
-      console.warn('File reference did not change; ignoring');
-      return;
-    }
-
     const table = type === 'card' ? 'srs_card' : type;
-    await this.#repo.mutate(
-      `UPDATE ${table} SET reference = $1 WHERE reference = $2`,
-      [newReference, oldReference]
-    );
+
+    if (rowId) {
+      await this.#repo.mutate(
+        `UPDATE ${table} SET reference = $1 WHERE id = $2`,
+        [newReference, rowId]
+      );
+    } else {
+      const oldReference = Obsidian.getReferenceFromPath(oldPath);
+      if (oldReference === newReference) {
+        console.warn('File reference did not change; ignoring');
+        return;
+      }
+
+      await this.#repo.mutate(
+        `UPDATE ${table} SET reference = $1 WHERE reference = $2`,
+        [newReference, oldReference]
+      );
+    }
     // console.log(`Reference updated to ${newReference}`);
   }
 
+  /**
+   * Mark rows as deleted
+   */
+  async handleDeletion(file: TAbstractFile) {
+    const match = await this.articles.findItem(file);
+    if (!match) return;
+
+    const { row, table } = match;
+    if (table === 'snippet') {
+      const parent = (row as SnippetRow).parent;
+      if (parent) {
+        this.snippets.offsetTracker.removeHighlight(
+          Obsidian.getPathFromReference(parent),
+          row.id
+        );
+      }
+    }
+    await this.#repo.mutate(
+      `UPDATE ${table} SET deleted = TRUE WHERE reference = $1`,
+      [Obsidian.getReferenceFromPath(file.path)]
+    );
+  }
+
+  /**
+   * Mark rows as un-deleted where appropriate
+   */
+  async handleCreation(file: TAbstractFile) {
+    const concreteFile = this.app.vault.getFileByPath(file.path);
+    if (!concreteFile) return;
+
+    let id: string | undefined;
+    let type: string | null = null;
+    await this.app.fileManager.processFrontMatter(
+      concreteFile,
+      (frontmatter: PluginFrontMatter) => {
+        if (!frontmatter?.['ir-id']) return;
+        id = frontmatter['ir-id'];
+        if (frontmatter.tags?.includes(ARTICLE_TAG)) type = 'article';
+        else if (frontmatter.tags?.includes(SNIPPET_TAG)) type = 'snippet';
+        else if (frontmatter.tags?.includes(CARD_TAG)) type = 'card';
+      }
+    );
+
+    if (!id || type === null) return;
+
+    const table = type === 'card' ? 'srs_card' : type;
+    await this.#repo.mutate(
+      `UPDATE ${table} SET deleted = FALSE, reference = $1 WHERE id = $2`,
+      [Obsidian.getReferenceFromPath(file.path), id]
+    );
+  }
   /**
    * Save scroll position to database for the article or snippet
    */

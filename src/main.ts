@@ -17,6 +17,7 @@ import { getEditorClass } from './lib/obsidian-editor';
 import {
   invalidateCacheOnMatch,
   invalidateCurrentItemQuery,
+  resetCurrentOnMatch,
 } from './lib/query-client';
 import { SQLJSRepository } from './lib/repository/SQLJSRepository';
 import { initReviewCommands } from './lib/review-commands';
@@ -213,6 +214,20 @@ export default class IncrementalReadingPlugin extends Plugin {
       })
     );
 
+    // listen for file deletions, mark items deleted, and go to next item if
+    // the current item was deleted
+    this.registerEvent(
+      this.app.vault.on('delete', (file) => {
+        if (!this.reviewManager) {
+          // console.log('Review manager not ready; returning');
+          return;
+        }
+        void this.reviewManager
+          .handleDeletion(file)
+          .then(() => resetCurrentOnMatch(file, this.reviewManager));
+      })
+    );
+
     this.addSettingTab(new IRSettingTab(this.app, this));
 
     // // When registering intervals, this function will automatically clear the interval when the plugin is disabled.
@@ -254,6 +269,19 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         // Register action bar for reading mode standalone notes
         registerReadingModeActionBar(this);
+
+        // listen for file creations and handle, especially restored item notes
+        this.registerEvent(
+          this.app.vault.on('create', (file) => {
+            if (!this.reviewManager) {
+              // console.log('Review manager not ready; returning');
+              return;
+            }
+            void this.reviewManager
+              .handleCreation(file)
+              .then(() => invalidateCacheOnMatch(file, this.reviewManager));
+          })
+        );
 
         // Delegated click handler for highlights in reading mode.
         // The CM extension's eventHandlers.click covers edit mode;

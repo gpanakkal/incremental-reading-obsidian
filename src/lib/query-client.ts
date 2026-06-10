@@ -2,7 +2,7 @@ import { QueryClient } from '@tanstack/react-query';
 import type { TAbstractFile, TFile } from 'obsidian';
 import { CLOZE_DELIMITERS, QUERY_STALE_TIME } from './constants';
 import type ReviewManager from './items/ReviewManager';
-import { getSeenIds, setCurrentItemId, store } from './store';
+import { getSeenIds, resetCurrentItem, setCurrentItemId, store } from './store';
 import { isReviewCard, type ReviewItem } from './types';
 import type { DeepPartial } from './utility-types';
 import { deepMerge } from './utils';
@@ -137,6 +137,21 @@ export async function invalidateCacheOnMatch(
 
   await invalidateItemQuery(currentItem.data.id);
 }
+/**
+ * Resets the current item if it matches the passed file. Use when deleting files.
+ */
+export async function resetCurrentOnMatch(
+  file: TAbstractFile,
+  reviewManager: ReviewManager
+) {
+  const currentItem = await fetchCurrentItem(reviewManager);
+  if (!currentItem || currentItem.file.path !== file.path) {
+    return;
+  }
+
+  store.dispatch(resetCurrentItem());
+}
+
 /**
  * Deep merges updated fields into locally cached item data.
  * Iterables are overwritten instead of being merged.

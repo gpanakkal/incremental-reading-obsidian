@@ -115,7 +115,30 @@ export class CardManager extends ItemManager {
   rowToReviewCard(row: SRSCardRow): ReviewCard | null {
     const base = CardManager.rowToDisplay(row);
     const file = Obsidian.getNote(row.reference, this.app);
-    if (!file) return null;
+    if (!file) {
+      if (!row.deleted) {
+        void this.markDeleted(row.id, 'card');
+      }
+      return null;
+    }
+
+    const frontmatter = Obsidian.getFrontMatter(file, this.app);
+    const fileId = frontmatter?.['ir-id'];
+    // id is present but doesn't match
+    if (fileId && fileId !== row.id) {
+      void this.markDeleted(row.id, 'card');
+      return null;
+    }
+
+    // some frontmatter is missing; impute it
+    if (!fileId || !frontmatter?.tags?.includes(CARD_TAG)) {
+      void this.setFrontmatter(file, row.id, CARD_TAG);
+    }
+
+    if (row.deleted) {
+      void this.markUndeleted(row.id, 'card');
+    }
+
     return {
       data: base,
       file,
@@ -226,6 +249,10 @@ export class CardManager extends ItemManager {
         Obsidian.getDirectory('card'),
         this.app
       );
+
+      const reference = `${CARD_DIRECTORY}/${cardFile.basename}.md`;
+      const card = new SRSCard(reference);
+
       const linkToSource = Obsidian.generateMarkdownLink(
         sourceFile,
         cardFile,
@@ -234,6 +261,7 @@ export class CardManager extends ItemManager {
       await Obsidian.updateFrontMatter(
         cardFile,
         {
+          'ir-id': card.id,
           tags: CARD_TAG,
           [`${SOURCE_PROPERTY_NAME}`]: linkToSource,
           delimiters: CLOZE_DELIMITERS,
@@ -249,9 +277,8 @@ export class CardManager extends ItemManager {
         currentFileEntry = await this.findSnippet(sourceFile);
       }
       const parent = currentFileEntry ? currentFileEntry.id : null;
-      // create the database entry as FSRS card + reference
-      const reference = `${CARD_DIRECTORY}/${cardFile.basename}.md`;
-      const card = new SRSCard(reference);
+      // create the database entry
+
       const params = [
         card.id,
         card.reference,
@@ -406,6 +433,7 @@ export class CardManager extends ItemManager {
     dueBy?: number;
     limit?: number;
     includeDismissed?: boolean;
+    includeDeleted?: boolean;
     excludeIds?: string[];
   }) {
     let query = 'SELECT * FROM srs_card';
@@ -417,6 +445,10 @@ export class CardManager extends ItemManager {
     }
     if (!opts?.includeDismissed) {
       conditions.push('dismissed = 0');
+    }
+
+    if (!opts?.includeDeleted) {
+      conditions.push('deleted = FALSE');
     }
 
     if (opts?.excludeIds && opts.excludeIds.length) {
