@@ -114,6 +114,19 @@ const snippetRowArb = fc.record<SnippetRow>({
   scroll_top: fc.integer({ min: 0 }),
 });
 
+/**
+ * Minimal Obsidian App stub. rowToReviewSnippet reads frontmatter via
+ * `app.metadataCache.getFileCache` and fire-and-forgets a `setFrontmatter`
+ * write through `app.fileManager.processFrontMatter` when frontmatter is
+ * missing. Both need to resolve cleanly so the test doesn't emit unhandled
+ * promise rejections.
+ */
+function makeApp(): Record<string, unknown> {
+  return {
+    metadataCache: { getFileCache: () => undefined },
+    fileManager: { processFrontMatter: async () => undefined },
+  };
+}
 // #endregion
 
 describe('rowToBase', () => {
@@ -229,7 +242,7 @@ describe('rowToReviewSnippet', () => {
     const fakeFile = { path: 'snippets/test.md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const repo = makeSimpleRepo();
-    const manager = new SnippetManager({} as never, repo);
+    const manager = new SnippetManager({ app: makeApp() } as never, repo);
     await fc.assert(
       fc.asyncProperty(snippetRowArb, async (row) => {
         const result = manager.rowToReviewSnippet(row);
@@ -293,12 +306,13 @@ describe('fetchMany', () => {
     expect(params).toEqual([]);
   });
 
-  it('produces no WHERE clause when includeDismissed=true and no other filters', async () => {
+  it('omits the dismissed filter when includeDismissed=true, but keeps the default deleted filter', async () => {
     const repo = makeSimpleRepo();
     const manager = new SnippetManager({} as never, repo);
     await manager.fetchMany({ includeDismissed: true });
     const [sql] = lastQueryCall(repo);
-    expect(sql).not.toMatch(/WHERE/i);
+    expect(sql).not.toMatch(/dismissed = 0/i);
+    expect(sql).toMatch(/deleted = FALSE/i);
   });
 
   it('adds a due filter when dueBy is provided', async () => {
@@ -472,7 +486,7 @@ describe('fetch', () => {
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
-    const manager = new SnippetManager({} as never, repo);
+    const manager = new SnippetManager({ app: makeApp() } as never, repo);
     const result = await manager.fetch(row.id);
     expect(result).not.toBeNull();
     expect(result!.data.id).toBe(row.id);
@@ -532,7 +546,7 @@ describe('getDue', () => {
           });
           const repo = makeRepoWithSnippets([rowAtCutoff, rowAfterCutoff]);
           const plugin = {
-            app: {},
+            app: makeApp(),
             settings: { dayRolloverOffset: offset },
           } as never;
           const manager = new SnippetManager(plugin, repo);
@@ -571,7 +585,7 @@ describe('getDue', () => {
     } as unknown as SQLiteRepository;
 
     const plugin = {
-      app: {},
+      app: makeApp(),
       settings: { dayRolloverOffset: 0 },
     } as never;
     const manager = new SnippetManager(plugin, repo);
@@ -598,7 +612,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
 
-    const plugin = { app: {}, settings: { dayRolloverOffset: 0 } } as never;
+    const plugin = { app: makeApp(), settings: { dayRolloverOffset: 0 } } as never;
     const manager = new SnippetManager(plugin, repo);
     await manager.getDue(0, undefined, [rowA.id]);
 
@@ -621,7 +635,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
 
-    const plugin = { app: {}, settings: { dayRolloverOffset: 0 } } as never;
+    const plugin = { app: makeApp(), settings: { dayRolloverOffset: 0 } } as never;
     const manager = new SnippetManager(plugin, repo);
     await manager.getDue(1);
 
@@ -659,7 +673,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
 
-    const plugin = { app: {}, settings: { dayRolloverOffset: 0 } } as never;
+    const plugin = { app: makeApp(), settings: { dayRolloverOffset: 0 } } as never;
     const manager = new SnippetManager(plugin, repo);
     const results = await manager.getDue(1);
     expect(results.map((r) => r.data.id)).not.toContain('no-file-filter');
@@ -674,7 +688,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
     const plugin = {
-      app: {},
+      app: makeApp(),
       settings: { dayRolloverOffset: 0 },
     } as never;
     const manager = new SnippetManager(plugin, repo);

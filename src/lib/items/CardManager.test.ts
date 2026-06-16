@@ -44,7 +44,14 @@ function makeRepo(): SQLiteRepository {
 
 function makePlugin(appOverrides: Record<string, unknown> = {}) {
   return {
-    app: { ...appOverrides },
+    // rowToReviewCard reads frontmatter via metadataCache.getFileCache and
+    // fire-and-forgets a setFrontmatter write via fileManager.processFrontMatter.
+    // Both stubs must resolve cleanly to avoid unhandled rejections.
+    app: {
+      metadataCache: { getFileCache: () => undefined },
+      fileManager: { processFrontMatter: async () => undefined },
+      ...appOverrides,
+    },
     settings: { dayRolloverOffset: 4 },
   } as never;
 }
@@ -894,12 +901,13 @@ describe('fetchMany', () => {
     expect(params[3]).toBe(limit);
   });
 
-  it('produces no WHERE clause when includeDismissed=true and no other filters', async () => {
+  it('omits the dismissed filter when includeDismissed=true, but keeps the default deleted filter', async () => {
     const repo = makeRepo();
     const manager = new CardManager(makePlugin(), repo);
     await manager.fetchMany({ includeDismissed: true });
     const [sql] = lastQueryCall(repo);
-    expect(sql).not.toMatch(/WHERE/i);
+    expect(sql).not.toMatch(/dismissed = 0/i);
+    expect(sql).toMatch(/deleted = FALSE/i);
   });
 
   it('throws when param count exceeds MAX_SQL_QUERY_PARAMS', async () => {
