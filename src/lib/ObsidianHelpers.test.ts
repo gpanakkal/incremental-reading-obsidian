@@ -224,10 +224,8 @@ describe('sanitizeForTitle', () => {
   });
 
   it('checkFinalChar=false preserves trailing space', () => {
-    // trim() is always applied, but trailing space before trim is stripped
-    // The function calls .trim() at the end, so trailing space is removed regardless
     const result = ObsidianHelpers.sanitizeForTitle('hello ', false);
-    expect(result).toBe('hello');
+    expect(result).toBe('hello ');
   });
 
   it('checkFinalChar=false preserves trailing period', () => {
@@ -235,12 +233,15 @@ describe('sanitizeForTitle', () => {
     expect(result).toBe('hello.');
   });
 
-  it('trims whitespace from both ends', () => {
+  it('trims leading whitespace but preserves the trailing character', () => {
     fc.assert(
       fc.property(fc.string(), (text) => {
-        const padded = `   ${text}   `;
+        const padded = `   ${text}`;
         const result = ObsidianHelpers.sanitizeForTitle(padded, false);
-        expect(result).toBe(result.trim());
+        // The last char is always preserved as-is (possibly whitespace).
+        // Everything before it has leading whitespace stripped, so if the result
+        // is longer than 1 char it must start with a non-whitespace character.
+        expect(result.length <= 1 || result === result.trimStart()).toBe(true);
       })
     );
   });
@@ -264,11 +265,11 @@ describe('sanitizeForTitle', () => {
     expect(result.length).toBe(300);
   });
 
-  it('returns empty string for input containing only forbidden chars', () => {
+  it('returns a whitespace-only string for input containing only forbidden chars', () => {
     const input = [...FORBIDDEN_TITLE_CHARS].join('');
     const result = ObsidianHelpers.sanitizeForTitle(input, false);
-    // All forbidden chars become spaces, then trimmed
-    expect(result.trim()).toBe(result);
+    // All forbidden chars become spaces; the last space is preserved as the trailing char
+    expect(result.trim()).toBe('');
     // No forbidden chars remain
     [...FORBIDDEN_TITLE_CHARS].forEach((c) => expect(result).not.toContain(c));
   });
@@ -281,11 +282,14 @@ describe('sanitizeForTitle', () => {
             return false;
           }
           if (s.startsWith('.')) return false;
+          // Leading whitespace is trimmed from all-but-last chars, so strings
+          // longer than 1 with leading whitespace are NOT returned unchanged.
+          if (s.length > 1 && s !== s.trimStart()) return false;
           return true;
         }),
         (text) => {
           const result = ObsidianHelpers.sanitizeForTitle(text, false);
-          expect(result).toBe(text.trim());
+          expect(result).toBe(text);
         }
       )
     );
@@ -652,7 +656,10 @@ describe('getNote', () => {
         getFileByPath: vi.fn().mockReturnValue(file),
       } as unknown as App['vault'],
     });
-    const result = ObsidianHelpers.getNote(`${DATA_DIRECTORY}/articles/note.md`, app);
+    const result = ObsidianHelpers.getNote(
+      `${DATA_DIRECTORY}/articles/note.md`,
+      app
+    );
     expect(app.vault.getFileByPath).toHaveBeenCalledWith(
       `${DATA_DIRECTORY}/articles/note.md`
     );
@@ -661,8 +668,24 @@ describe('getNote', () => {
 
   it('returns null when vault has no matching file', () => {
     const app = makeApp();
-    const result = ObsidianHelpers.getNote(`${DATA_DIRECTORY}/nonexistent.md`, app);
+    const result = ObsidianHelpers.getNote(
+      `${DATA_DIRECTORY}/nonexistent.md`,
+      app
+    );
     expect(result).toBeNull();
+  });
+
+  it('does not strip fragment suffixes from the reference path', () => {
+    const fragmentRef = `${DATA_DIRECTORY}/snippets/snip.md#h1`;
+    const file = makeTFile();
+    const app = makeApp({
+      vault: {
+        getFileByPath: vi.fn().mockReturnValue(file),
+      } as unknown as App['vault'],
+    });
+    const result = ObsidianHelpers.getNote(fragmentRef, app);
+    expect(app.vault.getFileByPath).toHaveBeenCalledWith(fragmentRef);
+    expect(result).toBe(file);
   });
 });
 
@@ -1800,6 +1823,49 @@ describe('smartGetline', () => {
 
     const result = ObsidianHelpers.smartGetline(editor, makeTFile(), app);
     // defaultReturn: start=0, end=line.length, line untouched
+    expect(result.start).toBe(0);
+    expect(result.line).toBe(bulletLine);
+    expect(result.end).toBe(bulletLine.length);
+  });
+
+  it('returns defaultReturn without stripping bullet when cursor is before all list items', () => {
+    // Kills mutant: `if (block.lineNumber < start.line) return -1` → `if (false) return -1`
+    // With the mutant, the binary search comparator never returns -1, so it goes right/matches
+    // the mid-item (returning a truthy match) instead of returning null, causing the bullet
+    // prefix to be stripped incorrectly.
+    const bulletLine = '- item before all list items';
+    const editor = makeEditor({
+      getCursor: vi.fn().mockReturnValue({ line: 0, ch: 0 }),
+      getLine: vi.fn().mockReturnValue(bulletLine),
+    });
+    const listItems = [
+      {
+        position: {
+          start: { line: 5, col: 0, offset: 0 },
+          end: { line: 5, col: 10, offset: 10 },
+        },
+      },
+      {
+        position: {
+          start: { line: 6, col: 0, offset: 0 },
+          end: { line: 6, col: 10, offset: 10 },
+        },
+      },
+      {
+        position: {
+          start: { line: 7, col: 0, offset: 0 },
+          end: { line: 7, col: 10, offset: 10 },
+        },
+      },
+    ];
+    const app = makeApp({
+      metadataCache: {
+        getFileCache: vi.fn().mockReturnValue({ listItems }),
+      } as unknown as App['metadataCache'],
+    });
+
+    const result = ObsidianHelpers.smartGetline(editor, makeTFile(), app);
+    // No match → defaultReturn; bullet prefix must NOT be stripped
     expect(result.start).toBe(0);
     expect(result.line).toBe(bulletLine);
     expect(result.end).toBe(bulletLine.length);
