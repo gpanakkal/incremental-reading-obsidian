@@ -82,10 +82,14 @@ export class ObsidianHelpers {
           return ' ';
         } else return char;
       })
-      .join('')
-      .trim();
+      .join('');
 
-    return maxLength ? cleaned.slice(0, maxLength) : cleaned;
+    const trimmed = checkFinalChar
+      ? cleaned.trim()
+      : cleaned.slice(0, cleaned.length - 1).trimStart() +
+        cleaned.slice(cleaned.length - 1);
+
+    return maxLength ? trimmed.slice(0, maxLength) : trimmed;
   }
 
   /**
@@ -101,7 +105,7 @@ export class ObsidianHelpers {
         false,
         CONTENT_TITLE_SLICE_LENGTH
       );
-      if (sanitized.length > 0) segments.push(sanitized);
+      if (sanitized.trim().length > 0) segments.push(sanitized);
     }
     segments.push(generateId());
     return segments.join(TITLE_SEGMENT_SEPARATOR);
