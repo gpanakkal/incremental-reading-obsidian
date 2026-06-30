@@ -28,3 +28,17 @@ export interface SchedulingModalProps {
     args: 'cancel' | { strategy: SchedulingStrategy; value: number }
   ) => void;
 }
+
+export interface ImportModalProps {
+  plugin: IncrementalReadingPlugin;
+  schedule: {
+    intervalDays: number | null;
+    priority: number;
+  };
+  defaultCopyOnImport: boolean;
+  onClose: (
+    args:
+      | 'cancel'
+      | { strategy: SchedulingStrategy; value: number; makeCopy: boolean }
+  ) => void;
+}

@@ -25,8 +25,8 @@ import type { IRPluginSettings } from './lib/settings';
 import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
+import { ImportModal } from './views/ImportModal';
 import ReviewView from './views/ReviewView';
-import { SchedulingModal } from './views/SchedulingModal';
 
 export default class IncrementalReadingPlugin extends Plugin {
   settings!: IRPluginSettings;
@@ -107,17 +107,25 @@ export default class IncrementalReadingPlugin extends Plugin {
       },
     });
 
-    const importArticle = async (file: TFile) => {
-      if (this.settings.showImportDialog) {
-        new SchedulingModal(this, { file, data: null }).open();
+    const importArticle = async (
+      file: TFile,
+      opts?: {
+        showImportDialog?: boolean;
+        copyOnImport?: boolean;
+        reviewOnImport?: boolean;
+      }
+    ) => {
+      const merged = { ...this.settings, ...(opts ?? {}) };
+      if (merged.showImportDialog) {
+        new ImportModal(this, file, merged.copyOnImport).open();
       } else {
         const article = await this.reviewManager.importArticle(
           file,
           this.settings.defaultPriority,
-          null
+          null,
+          merged.copyOnImport
         );
-        if (article && this.settings.reviewOnImport) {
-          console.log('opening new import for review');
+        if (article && merged.reviewOnImport) {
           await this.learn(article);
         }
       }
