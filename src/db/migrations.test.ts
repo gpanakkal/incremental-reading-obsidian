@@ -133,6 +133,91 @@ const SCHEMA_V0 = `
   PRAGMA user_version = 0;
 `;
 
+/** Schema state after migration v5 (has deleted column on all item tables) */
+const SCHEMA_V5 = `
+  CREATE TABLE article (
+    id TEXT NOT NULL,
+    reference TEXT NOT NULL UNIQUE,
+    due INTEGER,
+    interval INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    fixed_interval_days INTEGER NULL,
+    dismissed INTEGER NOT NULL DEFAULT FALSE,
+    deleted INTEGER NOT NULL DEFAULT FALSE,
+    scroll_top INTEGER NOT NULL DEFAULT 0,
+    CHECK(interval > 0),
+    CHECK(priority >= 10 AND priority <= 50),
+    CHECK(fixed_interval_days > 0),
+    CHECK(dismissed = FALSE OR dismissed = TRUE),
+    CHECK(deleted = FALSE OR deleted = TRUE),
+    CHECK(due IS NOT NULL OR dismissed = TRUE)
+  );
+  CREATE TABLE snippet (
+    id TEXT NOT NULL,
+    reference TEXT NOT NULL UNIQUE,
+    parent TEXT DEFAULT NULL,
+    due INTEGER,
+    interval INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    dismissed INTEGER NOT NULL DEFAULT FALSE,
+    deleted INTEGER NOT NULL DEFAULT FALSE,
+    scroll_top INTEGER NOT NULL DEFAULT 0,
+    start_offset INTEGER DEFAULT NULL,
+    end_offset INTEGER DEFAULT NULL,
+    CHECK(interval > 0),
+    CHECK(priority >= 10 AND priority <= 50),
+    CHECK(dismissed = FALSE OR dismissed = TRUE),
+    CHECK(deleted = FALSE OR deleted = TRUE),
+    CHECK(due IS NOT NULL OR dismissed = TRUE)
+  );
+  CREATE TABLE srs_card (
+    id TEXT NOT NULL,
+    reference TEXT NOT NULL UNIQUE,
+    parent TEXT DEFAULT NULL,
+    created_at INTEGER NOT NULL,
+    due INTEGER NOT NULL,
+    dismissed INTEGER NOT NULL DEFAULT FALSE,
+    deleted INTEGER NOT NULL DEFAULT FALSE,
+    last_review INTEGER,
+    stability REAL NOT NULL,
+    difficulty REAL NOT NULL,
+    elapsed_days REAL NOT NULL,
+    scheduled_days REAL NOT NULL,
+    reps INTEGER NOT NULL DEFAULT 0,
+    lapses INTEGER NOT NULL DEFAULT 0,
+    state INTEGER NOT NULL,
+    CHECK(state >= 0 AND state <= 3),
+    CHECK(dismissed = FALSE OR dismissed = TRUE),
+    CHECK(deleted = FALSE OR deleted = TRUE)
+  );
+  CREATE TABLE article_review (
+    id TEXT NOT NULL,
+    article_id TEXT NOT NULL REFERENCES article(id),
+    review_time INTEGER NOT NULL
+  );
+  CREATE TABLE snippet_review (
+    id TEXT NOT NULL,
+    snippet_id TEXT NOT NULL REFERENCES snippet(id),
+    review_time INTEGER NOT NULL
+  );
+  CREATE TABLE srs_card_review (
+    id TEXT NOT NULL,
+    card_id TEXT NOT NULL REFERENCES srs_card(id),
+    due INTEGER NOT NULL,
+    review INTEGER NOT NULL,
+    stability REAL NOT NULL,
+    difficulty REAL NOT NULL,
+    elapsed_days REAL NOT NULL,
+    last_elapsed_days REAL NOT NULL,
+    scheduled_days REAL NOT NULL,
+    rating INTEGER NOT NULL,
+    state INTEGER NOT NULL,
+    CHECK(state >= 0 AND state <= 3),
+    CHECK(rating >= 0 AND rating <= 4)
+  );
+  PRAGMA user_version = 5;
+`;
+
 /** Schema state before migration v3 (has scroll_top, start/end_offset, but no interval) */
 const SCHEMA_V2 = `
   CREATE TABLE article (
@@ -272,91 +357,6 @@ describe('migration v2 — add scroll_top to article and snippet', () => {
     expect(rows[0].scroll_top).toBe(0);
   });
 });
-
-/** Schema state after migration v5 (has deleted column on all item tables) */
-const SCHEMA_V5 = `
-  CREATE TABLE article (
-    id TEXT NOT NULL,
-    reference TEXT NOT NULL UNIQUE,
-    due INTEGER,
-    interval INTEGER NOT NULL,
-    priority INTEGER NOT NULL,
-    fixed_interval_days INTEGER NULL,
-    dismissed INTEGER NOT NULL DEFAULT FALSE,
-    deleted INTEGER NOT NULL DEFAULT FALSE,
-    scroll_top INTEGER NOT NULL DEFAULT 0,
-    CHECK(interval > 0),
-    CHECK(priority >= 10 AND priority <= 50),
-    CHECK(fixed_interval_days > 0),
-    CHECK(dismissed = FALSE OR dismissed = TRUE),
-    CHECK(deleted = FALSE OR deleted = TRUE),
-    CHECK(due IS NOT NULL OR dismissed = TRUE)
-  );
-  CREATE TABLE snippet (
-    id TEXT NOT NULL,
-    reference TEXT NOT NULL UNIQUE,
-    parent TEXT DEFAULT NULL,
-    due INTEGER,
-    interval INTEGER NOT NULL,
-    priority INTEGER NOT NULL,
-    dismissed INTEGER NOT NULL DEFAULT FALSE,
-    deleted INTEGER NOT NULL DEFAULT FALSE,
-    scroll_top INTEGER NOT NULL DEFAULT 0,
-    start_offset INTEGER DEFAULT NULL,
-    end_offset INTEGER DEFAULT NULL,
-    CHECK(interval > 0),
-    CHECK(priority >= 10 AND priority <= 50),
-    CHECK(dismissed = FALSE OR dismissed = TRUE),
-    CHECK(deleted = FALSE OR deleted = TRUE),
-    CHECK(due IS NOT NULL OR dismissed = TRUE)
-  );
-  CREATE TABLE srs_card (
-    id TEXT NOT NULL,
-    reference TEXT NOT NULL UNIQUE,
-    parent TEXT DEFAULT NULL,
-    created_at INTEGER NOT NULL,
-    due INTEGER NOT NULL,
-    dismissed INTEGER NOT NULL DEFAULT FALSE,
-    deleted INTEGER NOT NULL DEFAULT FALSE,
-    last_review INTEGER,
-    stability REAL NOT NULL,
-    difficulty REAL NOT NULL,
-    elapsed_days REAL NOT NULL,
-    scheduled_days REAL NOT NULL,
-    reps INTEGER NOT NULL DEFAULT 0,
-    lapses INTEGER NOT NULL DEFAULT 0,
-    state INTEGER NOT NULL,
-    CHECK(state >= 0 AND state <= 3),
-    CHECK(dismissed = FALSE OR dismissed = TRUE),
-    CHECK(deleted = FALSE OR deleted = TRUE)
-  );
-  CREATE TABLE article_review (
-    id TEXT NOT NULL,
-    article_id TEXT NOT NULL REFERENCES article(id),
-    review_time INTEGER NOT NULL
-  );
-  CREATE TABLE snippet_review (
-    id TEXT NOT NULL,
-    snippet_id TEXT NOT NULL REFERENCES snippet(id),
-    review_time INTEGER NOT NULL
-  );
-  CREATE TABLE srs_card_review (
-    id TEXT NOT NULL,
-    card_id TEXT NOT NULL REFERENCES srs_card(id),
-    due INTEGER NOT NULL,
-    review INTEGER NOT NULL,
-    stability REAL NOT NULL,
-    difficulty REAL NOT NULL,
-    elapsed_days REAL NOT NULL,
-    last_elapsed_days REAL NOT NULL,
-    scheduled_days REAL NOT NULL,
-    rating INTEGER NOT NULL,
-    state INTEGER NOT NULL,
-    CHECK(state >= 0 AND state <= 3),
-    CHECK(rating >= 0 AND rating <= 4)
-  );
-  PRAGMA user_version = 5;
-`;
 
 // ---------------------------------------------------------------------------
 // Migration v3 tests
@@ -726,5 +726,21 @@ describe('migration v6 — vault-relative references', () => {
   it('advances schema version to 6', () => {
     applyMigrations(db, migrations);
     expect(getSchemaVersion(db)).toBe(6);
+  });
+
+  it('leaves non-reference columns unchanged after prefixing', () => {
+    applyMigrations(db, migrations);
+    const articles = selectAll(db, 'article');
+    expect(articles[0].due).toBe(1000);
+    expect(articles[0].interval).toBe(86400000);
+    expect(articles[0].priority).toBe(30);
+    const snippets = Object.fromEntries(selectAll(db, 'snippet').map((r) => [r.id, r]));
+    expect(snippets['s1'].due).toBe(1000);
+    expect(snippets['s1'].interval).toBe(86400000);
+    expect(snippets['s1'].priority).toBe(20);
+    const cards = selectAll(db, 'srs_card');
+    expect(cards[0].due).toBe(1000);
+    expect(cards[0].stability).toBe(1.0);
+    expect(cards[0].difficulty).toBe(1.0);
   });
 });
