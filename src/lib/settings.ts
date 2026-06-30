@@ -54,10 +54,7 @@ export class IRSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Show article import dialog')
-      .setDesc(
-        'If enabled, shows a confirmation dialog when importing that allows' +
-          ' article settings to be customized.'
-      )
+      .setDesc('Show a dialog when importing that allows customization.')
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.showImportDialog)
@@ -83,7 +80,7 @@ export class IRSettingTab extends PluginSettingTab {
       .setName('Copy articles when importing')
       .setDesc(
         `Copy notes into the data directory (${DATA_DIRECTORY}/) when importing` +
-          ' and leave the original note untouched' +
+          ' and leave the original note untouched.' +
           ' Disable to import notes in-place.'
       )
       .addToggle((toggle) => {
