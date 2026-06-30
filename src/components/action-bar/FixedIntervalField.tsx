@@ -3,7 +3,7 @@ import {
   MINIMUM_FIXED_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export function FixedIntervalField({
   initialInterval,
@@ -14,6 +14,20 @@ export function FixedIntervalField({
 }) {
   const [fixedInterval, setFixedInterval] = useState<number>(
     initialInterval ?? MINIMUM_FIXED_REVIEW_INTERVAL
+  );
+  const prevIntervalRef = useRef(initialInterval);
+
+  useEffect(
+    function updateIntervalOnRerender() {
+      if (
+        initialInterval !== null &&
+        prevIntervalRef.current !== initialInterval
+      ) {
+        prevIntervalRef.current = initialInterval;
+        setFixedInterval(initialInterval);
+      }
+    },
+    [initialInterval]
   );
 
   return (
@@ -41,6 +55,7 @@ export function FixedIntervalField({
               }
             }}
             onBlur={() => {
+              prevIntervalRef.current = fixedInterval;
               void onBlur(fixedInterval);
             }}
             onKeyDown={(e) => {
