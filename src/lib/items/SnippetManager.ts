@@ -3,7 +3,6 @@ import {
   ERROR_NOTICE_DURATION_MS,
   MAX_SQL_QUERY_PARAMS,
   REVIEW_COUNT_FOR_PRIORITY_SCALING,
-  SNIPPET_DIRECTORY,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
@@ -29,7 +28,13 @@ import type {
 import { getEndOfToday } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
-import { Notice, TFile, normalizePath, type Editor, type MarkdownView } from 'obsidian';
+import {
+  normalizePath,
+  Notice,
+  TFile,
+  type Editor,
+  type MarkdownView,
+} from 'obsidian';
 import { refreshHighlightsEffect } from '../extensions';
 import { ArticleManager } from './ArticleManager';
 import { ItemManager } from './ItemManager';
@@ -342,7 +347,7 @@ export class SnippetManager extends ItemManager {
       // save the snippet to the database
       await this.repo.mutate(query, [
         id,
-        `${SNIPPET_DIRECTORY}/${snippetFile.name}`,
+        snippetFile.path,
         dueTime,
         TEXT_BASE_REVIEW_INTERVAL,
         priority,

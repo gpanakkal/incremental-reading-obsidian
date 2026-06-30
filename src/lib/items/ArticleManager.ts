@@ -1,5 +1,4 @@
 import {
-  ARTICLE_DIRECTORY,
   ARTICLE_TAG,
   CARD_TAG,
   CONTENT_TITLE_SLICE_LENGTH,
@@ -183,7 +182,7 @@ export class ArticleManager extends ItemManager {
         'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days) VALUES ($1, $2, $3, $4, $5, $6)',
         [
           id,
-          `${ARTICLE_DIRECTORY}/${articleFile.name}`,
+          articleFile.path,
           dueTime,
           TEXT_BASE_REVIEW_INTERVAL,
           priority,
@@ -257,13 +256,7 @@ export class ArticleManager extends ItemManager {
       const dueTime = Date.now();
       await this.repo.mutate(
         'INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)',
-        [
-          id,
-          `${ARTICLE_DIRECTORY}/${articleFile.name}`,
-          dueTime,
-          TEXT_BASE_REVIEW_INTERVAL,
-          priority,
-        ]
+        [id, articleFile.path, dueTime, TEXT_BASE_REVIEW_INTERVAL, priority]
       );
 
       const result = await this.fetch(id);
@@ -439,10 +432,13 @@ export class ArticleManager extends ItemManager {
     const currentName = file.basename;
     try {
       await Obsidian.renameFile(file, newName, this.app);
-      const newReference = `${ARTICLE_DIRECTORY}/${file.basename}.${file.extension}`;
+      const newPath = file.parent
+        ? `${file.parent.path}/${newName}.${file.extension}`
+        : `${newName}.${file.extension}`;
+
       await this.repo.mutate(
         `UPDATE article SET reference = $1 WHERE id = $2`,
-        [newReference, article.data.id]
+        [newPath, article.data.id]
       );
     } catch (error) {
       console.error(error);

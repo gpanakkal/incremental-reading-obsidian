@@ -12,7 +12,6 @@ import type { FSRS, FSRSParameters, Grade, StateType } from 'ts-fsrs';
 import { fsrs, generatorParameters, State } from 'ts-fsrs';
 import {
   CARD_ANSWER_REPLACEMENT,
-  CARD_DIRECTORY,
   CARD_TAG,
   CLOZE_DELIMITER_PATTERN,
   CLOZE_DELIMITERS,
@@ -250,8 +249,7 @@ export class CardManager extends ItemManager {
         this.app
       );
 
-      const reference = `${CARD_DIRECTORY}/${cardFile.basename}.md`;
-      const card = new SRSCard(reference);
+      const card = new SRSCard(cardFile.path);
 
       const linkToSource = Obsidian.generateMarkdownLink(
         sourceFile,
