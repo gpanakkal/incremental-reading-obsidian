@@ -8,6 +8,7 @@ import type {
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type { App, TAbstractFile, TFile } from 'obsidian';
+import { normalizePath } from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
 
@@ -25,7 +26,7 @@ export class ItemManager {
   async findSnippet(snippetFile: TAbstractFile): Promise<SnippetRow | null> {
     const results = await this.repo.query(
       'SELECT * FROM snippet WHERE reference = $1',
-      [Obsidian.getReferenceFromPath(snippetFile.path)]
+      [normalizePath(snippetFile.path)]
     );
 
     return (results[0] as SnippetRow) ?? null;
@@ -34,7 +35,7 @@ export class ItemManager {
   async findCard(cardFile: TAbstractFile): Promise<SRSCardRow | null> {
     const results = await this.repo.query(
       'SELECT * FROM srs_card WHERE reference = $1',
-      [Obsidian.getReferenceFromPath(cardFile.path)]
+      [normalizePath(cardFile.path)]
     );
 
     return (results[0] as SRSCardRow) ?? null;
@@ -43,7 +44,7 @@ export class ItemManager {
   async findArticle(articleFile: TAbstractFile): Promise<ArticleRow | null> {
     const results = await this.repo.query(
       'SELECT * FROM article WHERE reference = $1',
-      [Obsidian.getReferenceFromPath(articleFile.path)]
+      [normalizePath(articleFile.path)]
     );
 
     return (results[0] as ArticleRow) ?? null;

@@ -1,4 +1,4 @@
-import { TEXT_BASE_REVIEW_INTERVAL } from '#/lib/constants';
+import { DATA_DIRECTORY, TEXT_BASE_REVIEW_INTERVAL } from '#/lib/constants';
 import type { TableNameToRowType } from '#/lib/types';
 import type { SafeOmit } from '#/lib/utility-types';
 import {
@@ -296,6 +296,17 @@ export const migrations: Migration[] = [
           state: 'state',
         }
       );
+    },
+  },
+  {
+    version: 6,
+    description: 'Migrate references from DATA_DIRECTORY-relative to vault-relative paths',
+    up: (db) => {
+      db.exec(`UPDATE article SET reference = '${DATA_DIRECTORY}/' || reference WHERE reference NOT LIKE '${DATA_DIRECTORY}/%'`);
+      db.exec(`UPDATE snippet SET reference = '${DATA_DIRECTORY}/' || reference WHERE reference NOT LIKE '${DATA_DIRECTORY}/%'`);
+      db.exec(`UPDATE snippet SET parent = '${DATA_DIRECTORY}/' || parent WHERE parent IS NOT NULL AND parent NOT LIKE '${DATA_DIRECTORY}/%'`);
+      db.exec(`UPDATE srs_card SET reference = '${DATA_DIRECTORY}/' || reference WHERE reference NOT LIKE '${DATA_DIRECTORY}/%'`);
+      db.exec(`UPDATE srs_card SET parent = '${DATA_DIRECTORY}/' || parent WHERE parent IS NOT NULL AND parent NOT LIKE '${DATA_DIRECTORY}/%'`);
     },
   },
 ];

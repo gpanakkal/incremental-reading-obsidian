@@ -29,7 +29,7 @@ import type {
 import { getEndOfToday } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
-import { Notice, TFile, type Editor, type MarkdownView } from 'obsidian';
+import { Notice, TFile, normalizePath, type Editor, type MarkdownView } from 'obsidian';
 import { refreshHighlightsEffect } from '../extensions';
 import { ArticleManager } from './ArticleManager';
 import { ItemManager } from './ItemManager';
@@ -76,7 +76,7 @@ export class SnippetManager extends ItemManager {
         void this.markDeleted(row.id, 'snippet');
       }
       if (row.parent) {
-        const parentPath = Obsidian.getPathFromReference(row.parent);
+        const parentPath = normalizePath(row.parent);
         this.offsetTracker.removeHighlight(parentPath, row.id);
       }
       return null;
