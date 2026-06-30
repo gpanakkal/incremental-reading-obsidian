@@ -109,6 +109,8 @@ export class SchedulingModal extends Modal {
             void this.handleClose(args.strategy, args.value).finally(() =>
               this.close()
             );
+          } else {
+            this.close();
           }
         }}
       />,
