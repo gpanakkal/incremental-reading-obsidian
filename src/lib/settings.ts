@@ -1,6 +1,7 @@
 import type IncrementalReadingPlugin from '#/main';
 import { PluginSettingTab, Setting, type App } from 'obsidian';
 import {
+  DATA_DIRECTORY,
   DAY_ROLLOVER_OFFSET_HOURS,
   DEFAULT_PRIORITY,
   MAXIMUM_PRIORITY,
@@ -12,12 +13,14 @@ export interface IRPluginSettings {
   defaultPriority: number;
   showImportDialog: boolean;
   reviewOnImport: boolean;
+  copyOnImport: boolean;
   dayRolloverOffset: number;
 }
 export const DEFAULT_SETTINGS: IRPluginSettings = {
   defaultPriority: DEFAULT_PRIORITY,
   showImportDialog: true,
   reviewOnImport: true,
+  copyOnImport: false,
   dayRolloverOffset: DAY_ROLLOVER_OFFSET_HOURS.DEFAULT,
 };
 
@@ -72,6 +75,22 @@ export class IRSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.reviewOnImport)
           .onChange(async (value) => {
             this.plugin.settings.reviewOnImport = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Copy articles when importing')
+      .setDesc(
+        `Copy notes into the data directory (${DATA_DIRECTORY}/) when importing` +
+          ' and leave the original note untouched' +
+          ' Disable to import notes in-place.'
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.copyOnImport)
+          .onChange(async (value) => {
+            this.plugin.settings.copyOnImport = value;
             await this.plugin.saveSettings();
           });
       });
