@@ -31,6 +31,8 @@ import type { TFile } from 'obsidian';
 import { Notice } from 'obsidian';
 import { ItemManager } from './ItemManager';
 
+const IMPORT_BLOCKED_TAGS = new Set([SNIPPET_TAG, CARD_TAG]);
+
 export class ArticleManager extends ItemManager {
   static rowToBase(articleRow: ArticleRow): IArticleBase {
     return {
@@ -92,120 +94,20 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * Import the currently opened note as an article
+   * Import the passed note as an article
    */
   async import(
     file: TFile,
     priority: number,
-    fixedIntervalDays: number | null
+    fixedIntervalDays: number | null,
+    makeCopy?: boolean
   ) {
+    const willCopy = makeCopy ?? this.plugin.settings.copyOnImport;
     try {
-      // check if the file is inside the plugin's data directory
-      if (file.path.startsWith(DATA_DIRECTORY)) {
-        new Notice(
-          `Note is already in the plugin data folder; canceling import`,
-          ERROR_NOTICE_DURATION_MS
-        );
-        return;
+      if (willCopy) {
+        return await this.importCopy(file, priority, fixedIntervalDays);
       }
-      // Read the content of the current file
-      const content = await this.app.vault.cachedRead(file);
-      const frontmatter = Obsidian.getFrontMatter(file, this.app);
-      if (frontmatter?.tags) {
-        if (
-          frontmatter.tags.some((tag) =>
-            new Set([SNIPPET_TAG, CARD_TAG]).has(tag)
-          )
-        ) {
-          new Notice(
-            `Note contains a snippet or card tag; canceling import`,
-            ERROR_NOTICE_DURATION_MS
-          );
-          return;
-        }
-      }
-
-      // check if an article with this name already exists
-      if (Obsidian.isDuplicate(file.name, 'article', this.app)) {
-        new Notice(
-          `Warning: article with name already exists "${file.name}"`,
-          0
-        );
-      }
-
-      let importFileName = file.name;
-      while (Obsidian.isDuplicate(importFileName, 'article', this.app)) {
-        importFileName = `${file.basename} - ${generateId()}.${file.extension}`;
-      }
-
-      // Create a copy in the articles directory
-      const articleFile = await Obsidian.createNote({
-        content,
-        frontmatter: {
-          created: new Date().toISOString(),
-        },
-        fileName: importFileName,
-        directory: Obsidian.getDirectory('article'),
-        app: this.app,
-      });
-
-      if (!articleFile) {
-        throw new Error(
-          `Failed to create note ${Obsidian.getTargetPath(importFileName, 'article')}`
-        );
-      }
-
-      const id = crypto.randomUUID();
-
-      // Tag it and create a link to the source if it doesn't exist
-      const frontmatterUpdates: FrontMatterUpdates = {
-        'ir-id': id,
-        tags: ARTICLE_TAG,
-      };
-      if (!frontmatter?.source) {
-        const sourceLink = Obsidian.generateMarkdownLink(
-          file,
-          articleFile,
-          this.app
-        );
-        frontmatterUpdates[`${SOURCE_PROPERTY_NAME}`] = sourceLink;
-      }
-      await Obsidian.updateFrontMatter(
-        articleFile,
-        frontmatterUpdates,
-        this.app
-      );
-
-      // Insert into database with immediate due time
-      const dueTime = Date.now();
-      await this.repo.mutate(
-        'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days) VALUES ($1, $2, $3, $4, $5, $6)',
-        [
-          id,
-          articleFile.path,
-          dueTime,
-          TEXT_BASE_REVIEW_INTERVAL,
-          priority,
-          fixedIntervalDays,
-        ]
-      );
-
-      const titleSlice = getContentSlice(
-        articleFile.basename,
-        CONTENT_TITLE_SLICE_LENGTH,
-        true
-      );
-
-      const schedulingString =
-        fixedIntervalDays === null
-          ? `priority ${IRScheduler.toDisplayPriority(priority)}`
-          : `fixed interval of ${fixedIntervalDays} days`;
-      new Notice(
-        `Imported "${titleSlice}" with ${schedulingString}`,
-        SUCCESS_NOTICE_DURATION_MS
-      );
-      const result = await this.fetch(id);
-      return result;
+      return await this.importInPlace(file, priority, fixedIntervalDays);
     } catch (error) {
       new Notice(
         `Failed to import article "${file.name}"`,
@@ -214,6 +116,211 @@ export class ArticleManager extends ItemManager {
       console.error(error);
       return null;
     }
+  }
+
+  /**
+   * Import a note directly
+   */
+  private async importInPlace(
+    file: TFile,
+    priority: number,
+    fixedIntervalDays: number | null
+  ) {
+    const frontmatter = Obsidian.getFrontMatter(file, this.app);
+    if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
+      new Notice(
+        `Note contains a snippet or card tag; canceling import`,
+        ERROR_NOTICE_DURATION_MS
+      );
+      return null;
+    }
+
+    // Re-associate if the file already carries an ir-id
+    const existingId = frontmatter?.['ir-id'] as string | undefined;
+    if (existingId) {
+      const rows = await this.repo.query(
+        'SELECT id FROM article WHERE id = $1',
+        [existingId]
+      );
+      if (rows[0]) {
+        await this.repo.mutate(
+          'UPDATE article SET reference = $1 WHERE id = $2',
+          [file.path, existingId]
+        );
+        return this.fetch(existingId);
+      }
+      // Orphaned ir-id: cancel if the file path is already registered
+      const byRef = await this.repo.query(
+        'SELECT id FROM article WHERE reference = $1',
+        [file.path]
+      );
+      if (byRef[0]) {
+        new Notice(
+          `Note is already registered as an article; canceling import`,
+          ERROR_NOTICE_DURATION_MS
+        );
+        return null;
+      }
+      // Orphaned id + no reference match: fall through to fresh import
+    }
+
+    const id = crypto.randomUUID();
+    await Obsidian.updateFrontMatter(
+      file,
+      { 'ir-id': id, tags: ARTICLE_TAG } satisfies FrontMatterUpdates,
+      this.app
+    );
+
+    const dueTime = Date.now();
+    await this.repo.mutate(
+      'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days) VALUES ($1, $2, $3, $4, $5, $6)',
+      [
+        id,
+        file.path,
+        dueTime,
+        TEXT_BASE_REVIEW_INTERVAL,
+        priority,
+        fixedIntervalDays,
+      ]
+    );
+
+    const titleSlice = getContentSlice(
+      file.basename,
+      CONTENT_TITLE_SLICE_LENGTH,
+      true
+    );
+    const schedulingString =
+      fixedIntervalDays === null
+        ? `priority ${IRScheduler.toDisplayPriority(priority)}`
+        : `fixed interval of ${fixedIntervalDays} days`;
+    new Notice(
+      `Imported "${titleSlice}" with ${schedulingString}`,
+      SUCCESS_NOTICE_DURATION_MS
+    );
+    return this.fetch(id);
+  }
+
+  /**
+   * Copy a note to the data directory, then import the copy
+   */
+  private async importCopy(
+    file: TFile,
+    priority: number,
+    fixedIntervalDays: number | null
+  ) {
+    // check if the file is inside the plugin's data directory
+    if (file.path.startsWith(DATA_DIRECTORY)) {
+      new Notice(
+        `Note is already in the plugin data folder; canceling import`,
+        ERROR_NOTICE_DURATION_MS
+      );
+      return null;
+    }
+    // Read the content of the current file
+    const content = await this.app.vault.cachedRead(file);
+    const frontmatter = Obsidian.getFrontMatter(file, this.app);
+    if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
+      new Notice(
+        `Note contains a snippet or card tag; canceling import`,
+        ERROR_NOTICE_DURATION_MS
+      );
+      return null;
+    }
+
+    // Re-associate if the source already carries an ir-id with a matching DB row
+    const existingId = frontmatter?.['ir-id'] as string | undefined;
+    if (existingId) {
+      const rows = await this.repo.query(
+        'SELECT id FROM article WHERE id = $1',
+        [existingId]
+      );
+      if (rows[0]) {
+        await this.repo.mutate(
+          'UPDATE article SET reference = $1 WHERE id = $2',
+          [file.path, existingId]
+        );
+        return this.fetch(existingId);
+      }
+      // Orphaned ir-id: warn but proceed with creating the copy
+      new Notice(
+        `Warning: source note has article metadata but no matching record; creating copy`,
+        0
+      );
+    }
+
+    // check if an article with this name already exists
+    if (Obsidian.isDuplicate(file.name, 'article', this.app)) {
+      new Notice(`Warning: article with name already exists "${file.name}"`, 0);
+    }
+
+    let importFileName = file.name;
+    while (Obsidian.isDuplicate(importFileName, 'article', this.app)) {
+      importFileName = `${file.basename} - ${generateId()}.${file.extension}`;
+    }
+
+    // Create a copy in the articles directory
+    const articleFile = await Obsidian.createNote({
+      content,
+      frontmatter: {
+        created: new Date().toISOString(),
+      },
+      fileName: importFileName,
+      directory: Obsidian.getDirectory('article'),
+      app: this.app,
+    });
+
+    if (!articleFile) {
+      throw new Error(
+        `Failed to create note ${Obsidian.getTargetPath(importFileName, 'article')}`
+      );
+    }
+
+    const id = crypto.randomUUID();
+
+    // Tag it and create a link to the source if it doesn't exist
+    const frontmatterUpdates: FrontMatterUpdates = {
+      'ir-id': id,
+      tags: ARTICLE_TAG,
+    };
+    if (!frontmatter?.source) {
+      const sourceLink = Obsidian.generateMarkdownLink(
+        file,
+        articleFile,
+        this.app
+      );
+      frontmatterUpdates[`${SOURCE_PROPERTY_NAME}`] = sourceLink;
+    }
+    await Obsidian.updateFrontMatter(articleFile, frontmatterUpdates, this.app);
+
+    // Insert into database with immediate due time
+    const dueTime = Date.now();
+    await this.repo.mutate(
+      'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days) VALUES ($1, $2, $3, $4, $5, $6)',
+      [
+        id,
+        articleFile.path,
+        dueTime,
+        TEXT_BASE_REVIEW_INTERVAL,
+        priority,
+        fixedIntervalDays,
+      ]
+    );
+
+    const titleSlice = getContentSlice(
+      articleFile.basename,
+      CONTENT_TITLE_SLICE_LENGTH,
+      true
+    );
+
+    const schedulingString =
+      fixedIntervalDays === null
+        ? `priority ${IRScheduler.toDisplayPriority(priority)}`
+        : `fixed interval of ${fixedIntervalDays} days`;
+    new Notice(
+      `Imported "${titleSlice}" with ${schedulingString}`,
+      SUCCESS_NOTICE_DURATION_MS
+    );
+    return this.fetch(id);
   }
 
   /**

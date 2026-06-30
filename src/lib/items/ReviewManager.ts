@@ -1,3 +1,4 @@
+import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '#/lib/constants';
 import type {
   ArticleRow,
   IArticleBase,
@@ -22,7 +23,6 @@ import {
   normalizePath,
 } from 'obsidian';
 import type { Grade } from 'ts-fsrs';
-import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
 import { compareDates } from '../utils';
@@ -124,9 +124,10 @@ export default class ReviewManager {
   async importArticle(
     file: TFile,
     priority: number,
-    fixedIntervalDays: number | null
+    fixedIntervalDays: number | null,
+    makeCopy?: boolean
   ) {
-    return this.articles.import(file, priority, fixedIntervalDays);
+    return this.articles.import(file, priority, fixedIntervalDays, makeCopy);
   }
 
   async createEmptyArticle(priority: number) {
