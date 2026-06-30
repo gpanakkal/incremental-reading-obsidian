@@ -15,14 +15,14 @@ import { getItemType, isArticle } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import type { TAbstractFile, TFile } from 'obsidian';
-import { type App, type Editor, type MarkdownView } from 'obsidian';
-import type { Grade } from 'ts-fsrs';
 import {
-  ARTICLE_TAG,
-  CARD_TAG,
-  DATA_DIRECTORY,
-  SNIPPET_TAG,
-} from '../constants';
+  type App,
+  type Editor,
+  type MarkdownView,
+  normalizePath,
+} from 'obsidian';
+import type { Grade } from 'ts-fsrs';
+import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
 import { compareDates } from '../utils';
@@ -306,14 +306,12 @@ export default class ReviewManager {
    * @param oldPath The vault-relative path the file had before it was moved
    */
   async handleExternalRename(file: TAbstractFile, oldPath: string) {
-    // TODO: handle files being moved into or out of the IR folder
     const newPath = file.path;
     // console.log(`file rename detected: ${oldPath} -> ${newPath}`);
     const concreteFile = this.app.vault.getFileByPath(newPath);
     if (!concreteFile) {
       throw new Error(`Failed to find a file at ${newPath}`);
     }
-    this.snippets.offsetTracker.renameFile(oldPath, newPath);
 
     let type: string | null = null,
       rowId: string | undefined;
@@ -331,16 +329,9 @@ export default class ReviewManager {
       // console.log(`Found no matching IR tags; ignoring`);
       return;
     }
-    if (!oldPath.startsWith(DATA_DIRECTORY)) {
-      // console.log('File was not previously in IR directory; ignoring');
-      return;
-    }
-    if (!newPath.startsWith(DATA_DIRECTORY)) {
-      // console.log('File is no longer in IR directory; ignoring');
-      return;
-    }
 
-    const newReference = Obsidian.getReferenceFromPath(newPath);
+    const newReference = normalizePath(newPath);
+    this.snippets.offsetTracker.renameFile(oldPath, newReference);
     const table = type === 'card' ? 'srs_card' : type;
 
     if (rowId) {
@@ -349,7 +340,7 @@ export default class ReviewManager {
         [newReference, rowId]
       );
     } else {
-      const oldReference = Obsidian.getReferenceFromPath(oldPath);
+      const oldReference = normalizePath(oldPath);
       if (oldReference === newReference) {
         console.warn('File reference did not change; ignoring');
         return;
@@ -375,14 +366,14 @@ export default class ReviewManager {
       const parent = (row as SnippetRow).parent;
       if (parent) {
         this.snippets.offsetTracker.removeHighlight(
-          Obsidian.getPathFromReference(parent),
+          normalizePath(parent),
           row.id
         );
       }
     }
     await this.#repo.mutate(
       `UPDATE ${table} SET deleted = TRUE WHERE reference = $1`,
-      [Obsidian.getReferenceFromPath(file.path)]
+      [normalizePath(file.path)]
     );
   }
 
@@ -411,7 +402,7 @@ export default class ReviewManager {
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(
       `UPDATE ${table} SET deleted = FALSE, reference = $1 WHERE id = $2`,
-      [Obsidian.getReferenceFromPath(file.path), id]
+      [normalizePath(file.path), id]
     );
   }
   /**
@@ -424,7 +415,7 @@ export default class ReviewManager {
     const noteType = await Obsidian.getNoteType(file, this.app);
     if (!noteType || noteType === 'card') return;
 
-    const reference = Obsidian.getReferenceFromPath(file.path);
+    const reference = normalizePath(file.path);
 
     await this.#repo.mutate(
       `UPDATE ${noteType} SET scroll_top = $1 WHERE reference = $2`,

@@ -361,44 +361,6 @@ describe('createTitle', () => {
 });
 
 // ---------------------------------------------------------------------------
-// getReferenceFromPath
-// ---------------------------------------------------------------------------
-describe('getReferenceFromPath', () => {
-  it('extracts the reference after the DATA_DIRECTORY prefix', () => {
-    const ref = 'articles/note.md';
-    const vaultPath = `${DATA_DIRECTORY}/${ref}`;
-    expect(ObsidianHelpers.getReferenceFromPath(vaultPath)).toBe(ref);
-  });
-
-  it('returns undefined when DATA_DIRECTORY is not in the path', () => {
-    // split on missing separator gives original string at index 0, index 1 is undefined
-    expect(
-      ObsidianHelpers.getReferenceFromPath('other/path/note.md')
-    ).toBeUndefined();
-  });
-
-  it('handles nested paths after DATA_DIRECTORY', () => {
-    const ref = 'snippets/sub/note.md';
-    const vaultPath = `${DATA_DIRECTORY}/${ref}`;
-    expect(ObsidianHelpers.getReferenceFromPath(vaultPath)).toBe(ref);
-  });
-
-  it('returns the reference for arbitrary non-empty subpaths', () => {
-    fc.assert(
-      fc.property(
-        fc
-          .string({ minLength: 1 })
-          .filter((s) => !s.includes(`${DATA_DIRECTORY}/`)),
-        (ref) => {
-          const vaultPath = `${DATA_DIRECTORY}/${ref}`;
-          expect(ObsidianHelpers.getReferenceFromPath(vaultPath)).toBe(ref);
-        }
-      )
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
 // getDirectory
 // ---------------------------------------------------------------------------
 describe('getDirectory', () => {
@@ -683,23 +645,23 @@ describe('getCurrentLine', () => {
 describe('getNote', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('calls getFileByPath with normalized DATA_DIRECTORY/reference path', () => {
+  it('calls getFileByPath with the vault-relative reference path', () => {
     const file = makeTFile();
     const app = makeApp({
       vault: {
         getFileByPath: vi.fn().mockReturnValue(file),
       } as unknown as App['vault'],
     });
-    const result = ObsidianHelpers.getNote('articles/note.md', app);
+    const result = ObsidianHelpers.getNote(`${DATA_DIRECTORY}/articles/note.md`, app);
     expect(app.vault.getFileByPath).toHaveBeenCalledWith(
-      normalizePath(`${DATA_DIRECTORY}/articles/note.md`)
+      `${DATA_DIRECTORY}/articles/note.md`
     );
     expect(result).toBe(file);
   });
 
   it('returns null when vault has no matching file', () => {
     const app = makeApp();
-    const result = ObsidianHelpers.getNote('nonexistent.md', app);
+    const result = ObsidianHelpers.getNote(`${DATA_DIRECTORY}/nonexistent.md`, app);
     expect(result).toBeNull();
   });
 });

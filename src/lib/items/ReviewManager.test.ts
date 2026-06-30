@@ -816,9 +816,10 @@ describe('ReviewManager.handleExternalRename', () => {
     vi.restoreAllMocks();
   });
 
-  function makeApp(fileExists: boolean, noteType: NoteType | null = 'article') {
+  function makeApp(fileExists: boolean, noteType: NoteType | null = 'article', filePath?: string) {
+    const resolvedPath = filePath ?? `${IR_DIR}/articles/renamed.md`;
     const file = fileExists
-      ? ({ path: `${IR_DIR}/articles/renamed.md` } as TFile)
+      ? ({ path: resolvedPath } as TFile)
       : null;
     const tagMap: Record<NonNullable<NoteType>, string> = {
       article: 'ir-article',
@@ -883,55 +884,64 @@ describe('ReviewManager.handleExternalRename', () => {
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 
-  it('returns early (no mutate) when oldPath is outside DATA_DIRECTORY', async () => {
+  it('updates reference when item moves from external folder into IR directory', async () => {
     const repo = makeRepo();
+    const newPath = `${IR_DIR}/articles/renamed.md`;
+    const oldPath = 'some-other-folder/old.md';
     const app = makeApp(true, 'article');
     const manager = new ReviewManager(makePlugin(app as never), repo);
     manager.app = app as never;
     vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
       undefined
     );
-    const abstractFile = {
-      path: `${IR_DIR}/articles/renamed.md`,
-    } as TAbstractFile;
-    await manager.handleExternalRename(
-      abstractFile,
-      'some-other-folder/old.md'
-    );
-    expect(repo.mutate).not.toHaveBeenCalled();
+    const abstractFile = { path: newPath } as TAbstractFile;
+    await manager.handleExternalRename(abstractFile, oldPath);
+    expect(repo.mutate).toHaveBeenCalled();
+    const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, unknown[]];
+    expect(sql).toContain('UPDATE article');
+    expect(params[0]).toBe(newPath);
+    expect(params[1]).toBe(oldPath);
   });
 
-  it('returns early (no mutate) when newPath is outside DATA_DIRECTORY', async () => {
+  it('updates reference when item moves out of IR directory to external folder', async () => {
     const repo = makeRepo();
-    // file path is outside IR dir
-    const file = { path: 'some-other-folder/renamed.md' } as TFile;
-    const appObj = {
-      vault: {
-        getFileByPath: vi.fn().mockReturnValue(file),
-        cachedRead: vi.fn().mockResolvedValue('---\ntags: [ir-article]\n---\n'),
-      },
-      fileManager: {
-        processFrontMatter: vi.fn().mockImplementation(
-          async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-            cb({ tags: ['ir-article'] });
-          }
-        ),
-      },
-      metadataCache: { getFileCache: vi.fn(), on: vi.fn().mockReturnValue(Symbol()), offref: vi.fn() },
-    };
-    const manager = new ReviewManager(makePlugin(appObj as never), repo);
-    manager.app = appObj as never;
+    const newPath = 'some-other-folder/renamed.md';
+    const oldPath = `${IR_DIR}/articles/old.md`;
+    const app = makeApp(true, 'article', newPath);
+    const manager = new ReviewManager(makePlugin(app as never), repo);
+    manager.app = app as never;
     vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
       undefined
     );
-    const abstractFile = {
-      path: 'some-other-folder/renamed.md',
-    } as TAbstractFile;
-    await manager.handleExternalRename(
-      abstractFile,
-      `${IR_DIR}/articles/old.md`
+    const abstractFile = { path: newPath } as TAbstractFile;
+    await manager.handleExternalRename(abstractFile, oldPath);
+    expect(repo.mutate).toHaveBeenCalled();
+    const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, unknown[]];
+    expect(sql).toContain('UPDATE article');
+    expect(params[0]).toBe(newPath);
+    expect(params[1]).toBe(oldPath);
+  });
+
+  it('updates reference when item moves between two non-IR folders', async () => {
+    const repo = makeRepo();
+    const newPath = 'folder-b/new-name.md';
+    const oldPath = 'folder-a/old-name.md';
+    const app = makeApp(true, 'article', newPath);
+    const manager = new ReviewManager(makePlugin(app as never), repo);
+    manager.app = app as never;
+    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+      undefined
     );
-    expect(repo.mutate).not.toHaveBeenCalled();
+    const abstractFile = { path: newPath } as TAbstractFile;
+    await manager.handleExternalRename(abstractFile, oldPath);
+    expect(repo.mutate).toHaveBeenCalled();
+    const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, unknown[]];
+    expect(sql).toContain('UPDATE article');
+    expect(params[0]).toBe(newPath);
+    expect(params[1]).toBe(oldPath);
   });
 
   it('returns early (no mutate) when old and new reference are identical', async () => {
@@ -1008,8 +1018,8 @@ describe('ReviewManager.handleExternalRename', () => {
         .calls[0] as [string, unknown[]];
       expect(sql).toContain(`UPDATE ${expectedTable}`);
       expect(sql).toContain('SET reference');
-      expect(params[0]).toBe('articles/new-name.md');
-      expect(params[1]).toBe('articles/old-name.md');
+      expect(params[0]).toBe(`${IR_DIR}/articles/new-name.md`);
+      expect(params[1]).toBe(`${IR_DIR}/articles/old-name.md`);
     }
   );
 });
@@ -1050,9 +1060,6 @@ describe('ReviewManager.saveScrollPosition', () => {
             const repo = makeRepo();
             const manager = new ReviewManager(makePlugin(), repo);
             vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(noteType);
-            vi.spyOn(Obsidian, 'getReferenceFromPath').mockReturnValue(
-              'articles/test.md'
-            );
             await manager.saveScrollPosition(FAKE_FILE, { top, left: 0 });
             const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
               .calls[0] as [string, unknown[]];

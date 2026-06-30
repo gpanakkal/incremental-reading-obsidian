@@ -61,15 +61,6 @@ export class ObsidianHelpers {
     }
   }
 
-  static getReferenceFromPath(vaultPath: string): string {
-    const reference = vaultPath.split(`${DATA_DIRECTORY}/`)[1];
-    return reference;
-  }
-
-  static getPathFromReference(reference: string): string {
-    return normalizePath(`${DATA_DIRECTORY}/${reference}`);
-  }
-
   /**
    * Remove characters that cannot be used for file names
    * or Obsidian note titles
@@ -150,11 +141,9 @@ export class ObsidianHelpers {
     editor.replaceRange(`!${link}`, start, end);
   }
 
-  /** Retrieves notes from the data directory given a row's reference */
+  /** Retrieves a note from the vault given a vault-relative reference */
   static getNote(reference: string, app: App): TFile | null {
-    return app.vault.getFileByPath(
-      normalizePath(`${DATA_DIRECTORY}/${reference}`)
-    );
+    return app.vault.getFileByPath(normalizePath(reference));
   }
 
   /**

@@ -140,9 +140,8 @@ export class Actions {
     await this.plugin.reviewManager.dismissItem(item);
     await invalidateItemQuery(item.data.id);
 
-    const [_folder, subRef] = item.data.reference.split('/');
     new Notice(
-      `Dismissed "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}"`
+      `Dismissed "${getContentSlice(item.file.basename, CONTENT_TITLE_SLICE_LENGTH, true)}"`
     );
     const { currentItemId } = store.getState();
     if (item.data.id === currentItemId) {
@@ -159,9 +158,8 @@ export class Actions {
       this.getNext();
     }
 
-    const [_folder, subRef] = item.data.reference.split('/');
     new Notice(
-      `Restored "${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH, true)}" to queue`
+      `Restored "${getContentSlice(item.file.basename, CONTENT_TITLE_SLICE_LENGTH, true)}" to queue`
     );
   };
 
@@ -180,10 +178,8 @@ export class Actions {
     const resetTime = getEndOfToday(this.plugin.settings.dayRolloverOffset);
     this.plugin.store.dispatch(addSeenId({ id: item.data.id, resetTime }));
 
-    const { reference } = item.data;
-    const [folder, subRef] = reference.split('/');
     new Notice(
-      `Skipping ${folder}/${getContentSlice(subRef, CONTENT_TITLE_SLICE_LENGTH + 5, true)} until next session`
+      `Skipping ${getContentSlice(item.file.basename, CONTENT_TITLE_SLICE_LENGTH + 5, true)} until next session`
     );
     this.getNext();
   };

@@ -1,4 +1,5 @@
 import {
+  DATA_DIRECTORY,
   MAXIMUM_PRIORITY,
   MINIMUM_PRIORITY,
   MS_PER_DAY,
@@ -231,7 +232,7 @@ describe('migration v1 — add start_offset and end_offset to snippet', () => {
     applyMigrations(db, migrations);
     const rows = selectAll(db, 'snippet');
     expect(rows).toHaveLength(1);
-    expect(rows[0].reference).toBe('note.md#snippet-1');
+    expect(rows[0].reference).toBe(`${DATA_DIRECTORY}/note.md#snippet-1`);
     expect(rows[0].start_offset).toBeNull();
     expect(rows[0].end_offset).toBeNull();
   });
@@ -271,6 +272,91 @@ describe('migration v2 — add scroll_top to article and snippet', () => {
     expect(rows[0].scroll_top).toBe(0);
   });
 });
+
+/** Schema state after migration v5 (has deleted column on all item tables) */
+const SCHEMA_V5 = `
+  CREATE TABLE article (
+    id TEXT NOT NULL,
+    reference TEXT NOT NULL UNIQUE,
+    due INTEGER,
+    interval INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    fixed_interval_days INTEGER NULL,
+    dismissed INTEGER NOT NULL DEFAULT FALSE,
+    deleted INTEGER NOT NULL DEFAULT FALSE,
+    scroll_top INTEGER NOT NULL DEFAULT 0,
+    CHECK(interval > 0),
+    CHECK(priority >= 10 AND priority <= 50),
+    CHECK(fixed_interval_days > 0),
+    CHECK(dismissed = FALSE OR dismissed = TRUE),
+    CHECK(deleted = FALSE OR deleted = TRUE),
+    CHECK(due IS NOT NULL OR dismissed = TRUE)
+  );
+  CREATE TABLE snippet (
+    id TEXT NOT NULL,
+    reference TEXT NOT NULL UNIQUE,
+    parent TEXT DEFAULT NULL,
+    due INTEGER,
+    interval INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    dismissed INTEGER NOT NULL DEFAULT FALSE,
+    deleted INTEGER NOT NULL DEFAULT FALSE,
+    scroll_top INTEGER NOT NULL DEFAULT 0,
+    start_offset INTEGER DEFAULT NULL,
+    end_offset INTEGER DEFAULT NULL,
+    CHECK(interval > 0),
+    CHECK(priority >= 10 AND priority <= 50),
+    CHECK(dismissed = FALSE OR dismissed = TRUE),
+    CHECK(deleted = FALSE OR deleted = TRUE),
+    CHECK(due IS NOT NULL OR dismissed = TRUE)
+  );
+  CREATE TABLE srs_card (
+    id TEXT NOT NULL,
+    reference TEXT NOT NULL UNIQUE,
+    parent TEXT DEFAULT NULL,
+    created_at INTEGER NOT NULL,
+    due INTEGER NOT NULL,
+    dismissed INTEGER NOT NULL DEFAULT FALSE,
+    deleted INTEGER NOT NULL DEFAULT FALSE,
+    last_review INTEGER,
+    stability REAL NOT NULL,
+    difficulty REAL NOT NULL,
+    elapsed_days REAL NOT NULL,
+    scheduled_days REAL NOT NULL,
+    reps INTEGER NOT NULL DEFAULT 0,
+    lapses INTEGER NOT NULL DEFAULT 0,
+    state INTEGER NOT NULL,
+    CHECK(state >= 0 AND state <= 3),
+    CHECK(dismissed = FALSE OR dismissed = TRUE),
+    CHECK(deleted = FALSE OR deleted = TRUE)
+  );
+  CREATE TABLE article_review (
+    id TEXT NOT NULL,
+    article_id TEXT NOT NULL REFERENCES article(id),
+    review_time INTEGER NOT NULL
+  );
+  CREATE TABLE snippet_review (
+    id TEXT NOT NULL,
+    snippet_id TEXT NOT NULL REFERENCES snippet(id),
+    review_time INTEGER NOT NULL
+  );
+  CREATE TABLE srs_card_review (
+    id TEXT NOT NULL,
+    card_id TEXT NOT NULL REFERENCES srs_card(id),
+    due INTEGER NOT NULL,
+    review INTEGER NOT NULL,
+    stability REAL NOT NULL,
+    difficulty REAL NOT NULL,
+    elapsed_days REAL NOT NULL,
+    last_elapsed_days REAL NOT NULL,
+    scheduled_days REAL NOT NULL,
+    rating INTEGER NOT NULL,
+    state INTEGER NOT NULL,
+    CHECK(state >= 0 AND state <= 3),
+    CHECK(rating >= 0 AND rating <= 4)
+  );
+  PRAGMA user_version = 5;
+`;
 
 // ---------------------------------------------------------------------------
 // Migration v3 tests
@@ -391,7 +477,7 @@ describe('migration v3 — backfill interval on article and snippet', () => {
     const rows = selectAll(db, 'article');
     expect(rows[0]).toEqual({
       id: 'a1',
-      reference: 'article.md',
+      reference: `${DATA_DIRECTORY}/article.md`,
       due: 999,
       interval: MS_PER_DAY,
       priority: 40,
@@ -570,5 +656,75 @@ describe('recreateTable', () => {
     });
     const fkResult = db.exec('PRAGMA foreign_keys');
     expect(fkResult[0].values[0][0]).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration v6 tests
+// ---------------------------------------------------------------------------
+
+describe('migration v6 — vault-relative references', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb(SCHEMA_V5);
+    db.exec(`INSERT INTO article (id, reference, due, interval, priority)
+      VALUES ('a1', 'articles/article.md', 1000, 86400000, 30)`);
+    db.exec(`INSERT INTO snippet (id, reference, parent, due, interval, priority)
+      VALUES ('s1', 'snippets/snip.md', 'articles/article.md', 1000, 86400000, 20)`);
+    db.exec(`INSERT INTO snippet (id, reference, parent, due, interval, priority)
+      VALUES ('s2', 'snippets/snip-frag.md#h1', NULL, 1000, 86400000, 20)`);
+    db.exec(`INSERT INTO srs_card
+      (id, reference, parent, created_at, due, stability, difficulty, elapsed_days, scheduled_days, state)
+      VALUES ('c1', 'cards/card.md', 'articles/article.md', 0, 1000, 1.0, 1.0, 0.0, 1.0, 0)`);
+  });
+
+  it('prefixes article references with DATA_DIRECTORY/', () => {
+    applyMigrations(db, migrations);
+    const rows = selectAll(db, 'article');
+    expect(rows[0].reference).toBe(`${DATA_DIRECTORY}/articles/article.md`);
+  });
+
+  it('prefixes snippet references with DATA_DIRECTORY/', () => {
+    applyMigrations(db, migrations);
+    const byId = Object.fromEntries(selectAll(db, 'snippet').map((r) => [r.id, r]));
+    expect(byId['s1'].reference).toBe(`${DATA_DIRECTORY}/snippets/snip.md`);
+  });
+
+  it('preserves #fragment suffix when prefixing snippet references', () => {
+    applyMigrations(db, migrations);
+    const byId = Object.fromEntries(selectAll(db, 'snippet').map((r) => [r.id, r]));
+    expect(byId['s2'].reference).toBe(`${DATA_DIRECTORY}/snippets/snip-frag.md#h1`);
+  });
+
+  it('prefixes srs_card references with DATA_DIRECTORY/', () => {
+    applyMigrations(db, migrations);
+    const rows = selectAll(db, 'srs_card');
+    expect(rows[0].reference).toBe(`${DATA_DIRECTORY}/cards/card.md`);
+  });
+
+  it('prefixes non-null snippet.parent with DATA_DIRECTORY/', () => {
+    applyMigrations(db, migrations);
+    const byId = Object.fromEntries(selectAll(db, 'snippet').map((r) => [r.id, r]));
+    expect(byId['s1'].parent).toBe(`${DATA_DIRECTORY}/articles/article.md`);
+    expect(byId['s2'].parent).toBeNull();
+  });
+
+  it('prefixes non-null srs_card.parent with DATA_DIRECTORY/', () => {
+    applyMigrations(db, migrations);
+    const rows = selectAll(db, 'srs_card');
+    expect(rows[0].parent).toBe(`${DATA_DIRECTORY}/articles/article.md`);
+  });
+
+  it('leaves row counts unchanged', () => {
+    applyMigrations(db, migrations);
+    expect(selectAll(db, 'article')).toHaveLength(1);
+    expect(selectAll(db, 'snippet')).toHaveLength(2);
+    expect(selectAll(db, 'srs_card')).toHaveLength(1);
+  });
+
+  it('advances schema version to 6', () => {
+    applyMigrations(db, migrations);
+    expect(getSchemaVersion(db)).toBe(6);
   });
 });
