@@ -330,25 +330,23 @@ export default class ReviewManager {
       return;
     }
 
-    const newReference = normalizePath(newPath);
-    this.snippets.offsetTracker.renameFile(oldPath, newReference);
+    this.snippets.offsetTracker.renameFile(oldPath, file.path);
     const table = type === 'card' ? 'srs_card' : type;
 
     if (rowId) {
       await this.#repo.mutate(
         `UPDATE ${table} SET reference = $1 WHERE id = $2`,
-        [newReference, rowId]
+        [file.path, rowId]
       );
     } else {
-      const oldReference = normalizePath(oldPath);
-      if (oldReference === newReference) {
+      if (oldPath === file.path) {
         console.warn('File reference did not change; ignoring');
         return;
       }
 
       await this.#repo.mutate(
         `UPDATE ${table} SET reference = $1 WHERE reference = $2`,
-        [newReference, oldReference]
+        [file.path, oldPath]
       );
     }
     // console.log(`Reference updated to ${newReference}`);
@@ -373,7 +371,7 @@ export default class ReviewManager {
     }
     await this.#repo.mutate(
       `UPDATE ${table} SET deleted = TRUE WHERE reference = $1`,
-      [normalizePath(file.path)]
+      [file.path]
     );
   }
 
@@ -402,7 +400,7 @@ export default class ReviewManager {
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(
       `UPDATE ${table} SET deleted = FALSE, reference = $1 WHERE id = $2`,
-      [normalizePath(file.path), id]
+      [file.path, id]
     );
   }
   /**
@@ -415,11 +413,9 @@ export default class ReviewManager {
     const noteType = await Obsidian.getNoteType(file, this.app);
     if (!noteType || noteType === 'card') return;
 
-    const reference = normalizePath(file.path);
-
     await this.#repo.mutate(
       `UPDATE ${noteType} SET scroll_top = $1 WHERE reference = $2`,
-      [Math.round(scrollInfo.top), reference]
+      [Math.round(scrollInfo.top), file.path]
     );
   }
 
