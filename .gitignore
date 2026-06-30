@@ -34,3 +34,6 @@ coverage/
 # Stryker
 .stryker-tmp
 reports/
+
+# Task reviews (branch-scoped, ephemeral)
+reviews/
