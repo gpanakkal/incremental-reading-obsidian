@@ -408,7 +408,7 @@ export class ArticleManager extends ItemManager {
             (article): article is ReviewArticle =>
               !!article && article.file !== null
           );
-      } while (lastMissingNotes !== 0);
+      } while (lastMissingNotes > 0);
       return due;
     } catch (error) {
       console.error(error);
@@ -433,7 +433,7 @@ export class ArticleManager extends ItemManager {
     let query = 'SELECT * FROM article';
     const conditions = [];
     const params = [];
-    if (opts?.dueBy) {
+    if (opts?.dueBy !== undefined) {
       params.push(opts.dueBy);
       conditions.push(`due <= $${params.length}`);
     }
@@ -504,7 +504,7 @@ export class ArticleManager extends ItemManager {
     reviewTime?: number,
     nextReviewInterval?: number
   ) {
-    const reviewed = reviewTime || Date.now();
+    const reviewed = reviewTime ?? Date.now();
     const nextInterval =
       nextReviewInterval ?? IRScheduler.nextInterval(article);
     const nextDueTime = reviewed + nextInterval;
