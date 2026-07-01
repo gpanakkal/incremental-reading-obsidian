@@ -31,7 +31,7 @@ import type { TFile } from 'obsidian';
 import { Notice } from 'obsidian';
 import { ItemManager } from './ItemManager';
 
-const IMPORT_BLOCKED_TAGS = new Set([SNIPPET_TAG, CARD_TAG]);
+const IMPORT_BLOCKED_TAGS = new Set([ARTICLE_TAG, SNIPPET_TAG, CARD_TAG]);
 
 export class ArticleManager extends ItemManager {
   static rowToBase(articleRow: ArticleRow): IArticleBase {
