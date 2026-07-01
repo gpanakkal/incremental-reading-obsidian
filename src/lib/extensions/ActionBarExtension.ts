@@ -18,7 +18,7 @@ import type IncrementalReadingPlugin from '#/main';
 import { StateEffect, StateField, type Extension } from '@codemirror/state';
 import type { EditorView, Panel } from '@codemirror/view';
 import { showPanel, ViewPlugin } from '@codemirror/view';
-import type { App, TFile } from 'obsidian';
+import type { App, EventRef, TFile } from 'obsidian';
 import { Notice } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
 
@@ -476,6 +476,7 @@ function createPriorityInput(
 const noteTypePlugin = ViewPlugin.define((view) => {
   let destroyed = false;
   let lastFilePath: string | undefined;
+  let metadataCacheRef: EventRef | undefined;
 
   const lookup = (filePath: string) => {
     const { info } = Obsidian.getFileInfoFromState(view.state);
@@ -490,21 +491,38 @@ const noteTypePlugin = ViewPlugin.define((view) => {
     lastFilePath = filePath;
   };
 
+  const subscribeToMetadataChanges = (app: App, filePath: string) => {
+    if (metadataCacheRef) {
+      app.metadataCache.offref(metadataCacheRef);
+    }
+    metadataCacheRef = app.metadataCache.on('changed', (changedFile) => {
+      if (changedFile.path === filePath) lookup(filePath);
+    });
+  };
+
   // Initial lookup on mount
   const { info } = Obsidian.getFileInfoFromState(view.state);
-  if (info?.file) lookup(info.file.path);
+  if (info?.file && info.app) {
+    lookup(info.file.path);
+    subscribeToMetadataChanges(info.app, info.file.path);
+  }
 
   return {
     update() {
       const { info: newInfo } = Obsidian.getFileInfoFromState(view.state);
-      if (!newInfo?.file) return;
+      if (!newInfo?.file || !newInfo.app) return;
       // Re-resolve only when the open file actually changes
       if (newInfo.file.path !== lastFilePath) {
         lookup(newInfo.file.path);
+        subscribeToMetadataChanges(newInfo.app, newInfo.file.path);
       }
     },
     destroy() {
       destroyed = true;
+      const { info } = Obsidian.getFileInfoFromState(view.state);
+      if (metadataCacheRef && info?.app) {
+        info.app.metadataCache.offref(metadataCacheRef);
+      }
     },
   };
 });
