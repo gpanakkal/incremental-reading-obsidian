@@ -244,7 +244,11 @@ describe('ReviewManager.getDue', () => {
         // Generate a "current time" between year 2000 and 2100 at day granularity.
         // Using day offsets (not milliseconds) shrinks the search space from ~3 trillion
         // to ~36 500 values, keeping shrinking fast without losing meaningful coverage.
-        fc.integer({ min: 0, max: Math.floor((YEAR_2100_MS - YEAR_2000_MS) / MS_PER_DAY) })
+        fc
+          .integer({
+            min: 0,
+            max: Math.floor((YEAR_2100_MS - YEAR_2000_MS) / MS_PER_DAY),
+          })
           .map((days) => YEAR_2000_MS + days * MS_PER_DAY),
         // Generate a non-empty subset of note types to include
         fc.subarray(['article', 'snippet', 'card'] as const, { minLength: 1 }),
@@ -449,7 +453,17 @@ describe('ReviewManager delegation', () => {
       .spyOn(manager.articles, 'import')
       .mockResolvedValue(undefined as never);
     await manager.importArticle(FAKE_FILE, 30, null);
-    expect(spy).toHaveBeenCalledWith(FAKE_FILE, 30, null);
+    expect(spy).toHaveBeenCalledWith(FAKE_FILE, 30, null, undefined);
+  });
+
+  it('importArticle forwards inPlace to articles.import', async () => {
+    const repo = makeRepo();
+    const manager = new ReviewManager(makePlugin(), repo);
+    const spy = vi
+      .spyOn(manager.articles, 'import')
+      .mockResolvedValue(undefined as never);
+    await manager.importArticle(FAKE_FILE, 30, null, true);
+    expect(spy).toHaveBeenCalledWith(FAKE_FILE, 30, null, true);
   });
 
   it('createEmptyArticle delegates to articles.create', async () => {
@@ -816,11 +830,13 @@ describe('ReviewManager.handleExternalRename', () => {
     vi.restoreAllMocks();
   });
 
-  function makeApp(fileExists: boolean, noteType: NoteType | null = 'article', filePath?: string) {
+  function makeApp(
+    fileExists: boolean,
+    noteType: NoteType | null = 'article',
+    filePath?: string
+  ) {
     const resolvedPath = filePath ?? `${IR_DIR}/articles/renamed.md`;
-    const file = fileExists
-      ? ({ path: resolvedPath } as TFile)
-      : null;
+    const file = fileExists ? ({ path: resolvedPath } as TFile) : null;
     const tagMap: Record<NonNullable<NoteType>, string> = {
       article: 'ir-article',
       snippet: 'ir-text-snippet',
@@ -836,18 +852,22 @@ describe('ReviewManager.handleExternalRename', () => {
         cachedRead: vi.fn().mockResolvedValue(frontmatterContent),
       },
       fileManager: {
-        processFrontMatter: vi.fn().mockImplementation(
-          async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-            cb(tags !== undefined ? { tags } : {});
-          }
-        ),
+        processFrontMatter: vi
+          .fn()
+          .mockImplementation(
+            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+              cb(tags !== undefined ? { tags } : {});
+            }
+          ),
       },
       metadataCache: {
         getFileCache: vi.fn(),
-        on: vi.fn().mockImplementation((_event: string, cb: (f: TFile) => void) => {
-          if (file) cb(file);
-          return Symbol('ref');
-        }),
+        on: vi
+          .fn()
+          .mockImplementation((_event: string, cb: (f: TFile) => void) => {
+            if (file) cb(file);
+            return Symbol('ref');
+          }),
         offref: vi.fn(),
       },
     };
@@ -954,13 +974,19 @@ describe('ReviewManager.handleExternalRename', () => {
         cachedRead: vi.fn().mockResolvedValue('---\ntags: [ir-article]\n---\n'),
       },
       fileManager: {
-        processFrontMatter: vi.fn().mockImplementation(
-          async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-            cb({ tags: ['ir-article'] });
-          }
-        ),
+        processFrontMatter: vi
+          .fn()
+          .mockImplementation(
+            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+              cb({ tags: ['ir-article'] });
+            }
+          ),
       },
-      metadataCache: { getFileCache: vi.fn(), on: vi.fn().mockReturnValue(Symbol()), offref: vi.fn() },
+      metadataCache: {
+        getFileCache: vi.fn(),
+        on: vi.fn().mockReturnValue(Symbol()),
+        offref: vi.fn(),
+      },
     };
     const manager = new ReviewManager(makePlugin(appObj as never), repo);
     manager.app = appObj as never;
@@ -996,16 +1022,27 @@ describe('ReviewManager.handleExternalRename', () => {
       const appObj = {
         vault: {
           getFileByPath: vi.fn().mockReturnValue(file),
-          cachedRead: vi.fn().mockResolvedValue(`---\ntags: [${tagMap[noteType]}]\n---\n`),
+          cachedRead: vi
+            .fn()
+            .mockResolvedValue(`---\ntags: [${tagMap[noteType]}]\n---\n`),
         },
         fileManager: {
-          processFrontMatter: vi.fn().mockImplementation(
-            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-              cb({ tags: [tagMap[noteType]] });
-            }
-          ),
+          processFrontMatter: vi
+            .fn()
+            .mockImplementation(
+              async (
+                _f: unknown,
+                cb: (fm: Record<string, unknown>) => void
+              ) => {
+                cb({ tags: [tagMap[noteType]] });
+              }
+            ),
         },
-        metadataCache: { getFileCache: vi.fn(), on: vi.fn().mockReturnValue(Symbol()), offref: vi.fn() },
+        metadataCache: {
+          getFileCache: vi.fn(),
+          on: vi.fn().mockReturnValue(Symbol()),
+          offref: vi.fn(),
+        },
       };
       const manager = new ReviewManager(makePlugin(appObj as never), repo);
       manager.app = appObj as never;
@@ -1292,6 +1329,235 @@ describe('ReviewManager.getReviewItemFromFile card branch', () => {
   });
 });
 
+describe('ReviewManager.handleExternalRename rowId branch', () => {
+  const IR_DIR = DATA_DIRECTORY;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeAppWithIrId(
+    noteType: 'article' | 'snippet' | 'card',
+    irId: string,
+    newPath: string
+  ) {
+    const tagMap: Record<string, string> = {
+      article: 'ir-article',
+      snippet: 'ir-text-snippet',
+      card: 'ir-card',
+    };
+    const file = { path: newPath } as TFile;
+    return {
+      vault: {
+        getFileByPath: vi.fn().mockReturnValue(file),
+        cachedRead: vi
+          .fn()
+          .mockResolvedValue(
+            `---\ntags: [${tagMap[noteType]}]\nir-id: ${irId}\n---\n`
+          ),
+      },
+      fileManager: {
+        processFrontMatter: vi
+          .fn()
+          .mockImplementation(
+            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+              cb({ tags: [tagMap[noteType]], 'ir-id': irId });
+            }
+          ),
+      },
+      metadataCache: {
+        getFileCache: vi.fn(),
+        on: vi.fn().mockReturnValue(Symbol()),
+        offref: vi.fn(),
+      },
+    };
+  }
+
+  it('uses WHERE id = $2 (not WHERE reference = $2) when frontmatter has ir-id', async () => {
+    const repo = makeRepo();
+    const irId = 'known-row-id';
+    const newPath = `${IR_DIR}/articles/renamed.md`;
+    const oldPath = `${IR_DIR}/articles/old.md`;
+    const app = makeAppWithIrId('article', irId, newPath);
+    const manager = new ReviewManager(makePlugin(app as never), repo);
+    manager.app = app as never;
+    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+      undefined
+    );
+
+    await manager.handleExternalRename(
+      { path: newPath } as TAbstractFile,
+      oldPath
+    );
+
+    expect(repo.mutate).toHaveBeenCalled();
+    const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, unknown[]];
+    expect(sql).toContain('WHERE id = $2');
+    expect(sql).not.toContain('WHERE reference = $2');
+    expect(params[0]).toBe(newPath);
+    expect(params[1]).toBe(irId);
+  });
+
+  it.each([
+    ['article', 'article'],
+    ['snippet', 'snippet'],
+    ['card', 'srs_card'],
+  ] as const)(
+    'rowId branch: updates table "%s" by id for note type %s',
+    async (noteType, expectedTable) => {
+      const repo = makeRepo();
+      const irId = `id-for-${noteType}`;
+      const newPath = `${IR_DIR}/articles/new-name.md`;
+      const oldPath = `${IR_DIR}/articles/old-name.md`;
+      const app = makeAppWithIrId(noteType, irId, newPath);
+      const manager = new ReviewManager(makePlugin(app as never), repo);
+      manager.app = app as never;
+      vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+        undefined
+      );
+
+      await manager.handleExternalRename(
+        { path: newPath } as TAbstractFile,
+        oldPath
+      );
+
+      const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+        .calls[0] as [string, unknown[]];
+      expect(sql).toContain(`UPDATE ${expectedTable}`);
+      expect(sql).toContain('WHERE id = $2');
+      expect(params[1]).toBe(irId);
+    }
+  );
+});
+
+describe('ReviewManager.getReviewItemFromFile card vs null distinction', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns null for getNoteType=null, NOT a card ReviewItem (card branch not taken)', async () => {
+    // Mutant: `else if (noteType === 'card')` → `else if (true)` would try to
+    // call findCard even when noteType is null, so we verify null is returned
+    // without calling findCard.
+    const repo = makeRepo();
+    const manager = new ReviewManager(makePlugin(), repo);
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(null);
+    const findCardSpy = vi
+      .spyOn(manager.cards, 'findCard')
+      .mockResolvedValue(makeCardRow() as never);
+    const result = await manager.getReviewItemFromFile(FAKE_FILE);
+    expect(result).toBeNull();
+    expect(findCardSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns a ReviewCard (not null) for noteType=card when card row exists', async () => {
+    // This test distinguishes the card branch from the null fallthrough:
+    // if mutant changes `=== 'card'` to `true`, the test above catches it;
+    // if the mutant makes cards unreachable this test catches it.
+    const repo = makeRepo();
+    const manager = new ReviewManager(makePlugin(), repo);
+    const row = makeCardRow({ id: 'distinct-card-id' });
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('card');
+    vi.spyOn(manager.cards, 'findCard').mockResolvedValue(row as never);
+    const result = await manager.getReviewItemFromFile(FAKE_FILE);
+    expect(result).not.toBeNull();
+    expect(result!.data.type).toBe('card');
+    expect(result!.data.id).toBe('distinct-card-id');
+  });
+});
+
+describe('ReviewManager.handleExternalRename CARD_TAG condition', () => {
+  const IR_DIR = DATA_DIRECTORY;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('uses table "article" (not "srs_card") when file is tagged as article but not card', async () => {
+    // Mutant: `frontmatter.tags.includes(CARD_TAG)` → `true` would make all
+    // non-article, non-snippet files route to srs_card. An article-tagged file
+    // would still hit the article branch before reaching the card branch, but a
+    // file with ONLY the article tag verifies the cascade is correct.
+    const repo = makeRepo();
+    const newPath = `${IR_DIR}/articles/new-name.md`;
+    const oldPath = `${IR_DIR}/articles/old-name.md`;
+    const file = { path: newPath } as TFile;
+    const appObj = {
+      vault: {
+        getFileByPath: vi.fn().mockReturnValue(file),
+        cachedRead: vi.fn().mockResolvedValue('---\ntags: [ir-article]\n---\n'),
+      },
+      fileManager: {
+        processFrontMatter: vi
+          .fn()
+          .mockImplementation(
+            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+              cb({ tags: ['ir-article'] });
+            }
+          ),
+      },
+      metadataCache: {
+        getFileCache: vi.fn(),
+        on: vi.fn().mockReturnValue(Symbol()),
+        offref: vi.fn(),
+      },
+    };
+    const manager = new ReviewManager(makePlugin(appObj as never), repo);
+    manager.app = appObj as never;
+    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+      undefined
+    );
+    const abstractFile = { path: newPath } as TAbstractFile;
+    await manager.handleExternalRename(abstractFile, oldPath);
+    const [sql] = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      unknown[],
+    ];
+    expect(sql).toContain('UPDATE article');
+    expect(sql).not.toContain('UPDATE srs_card');
+  });
+
+  it('does not mutate when file has IR-formatted tags array but none match any IR tag', async () => {
+    // A file with defined tags but no CARD/SNIPPET/ARTICLE tags — type stays null, no mutate.
+    // If the CARD_TAG mutant is `true`, this file would get treated as a card and mutate.
+    const repo = makeRepo();
+    const newPath = `${IR_DIR}/articles/some.md`;
+    const oldPath = `${IR_DIR}/articles/other.md`;
+    const file = { path: newPath } as TFile;
+    const appObj = {
+      vault: {
+        getFileByPath: vi.fn().mockReturnValue(file),
+        cachedRead: vi
+          .fn()
+          .mockResolvedValue('---\ntags: [some-other-tag]\n---\n'),
+      },
+      fileManager: {
+        processFrontMatter: vi
+          .fn()
+          .mockImplementation(
+            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+              cb({ tags: ['some-other-tag'] });
+            }
+          ),
+      },
+      metadataCache: {
+        getFileCache: vi.fn(),
+        on: vi.fn().mockReturnValue(Symbol()),
+        offref: vi.fn(),
+      },
+    };
+    const manager = new ReviewManager(makePlugin(appObj as never), repo);
+    manager.app = appObj as never;
+    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+      undefined
+    );
+    const abstractFile = { path: newPath } as TAbstractFile;
+    await manager.handleExternalRename(abstractFile, oldPath);
+    expect(repo.mutate).not.toHaveBeenCalled();
+  });
+});
+
 describe('ReviewManager.handleExternalRename console.warn mutant', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -1307,13 +1573,19 @@ describe('ReviewManager.handleExternalRename console.warn mutant', () => {
         cachedRead: vi.fn().mockResolvedValue('---\ntags: [ir-article]\n---\n'),
       },
       fileManager: {
-        processFrontMatter: vi.fn().mockImplementation(
-          async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-            cb({ tags: ['ir-article'] });
-          }
-        ),
+        processFrontMatter: vi
+          .fn()
+          .mockImplementation(
+            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+              cb({ tags: ['ir-article'] });
+            }
+          ),
       },
-      metadataCache: { getFileCache: vi.fn(), on: vi.fn().mockReturnValue(Symbol()), offref: vi.fn() },
+      metadataCache: {
+        getFileCache: vi.fn(),
+        on: vi.fn().mockReturnValue(Symbol()),
+        offref: vi.fn(),
+      },
     };
     const manager = new ReviewManager(makePlugin(appObj as never), repo);
     manager.app = appObj as never;
