@@ -24,6 +24,7 @@ function makeArticleData(overrides: Partial<IArticleBase> = {}): IArticleBase {
     type: 'article',
     reference: ARTICLE_PATH,
     due: FIXED_NOW,
+    due_fuzz: null,
     interval: 86_400_000,
     dismissed: false,
     deleted: false,

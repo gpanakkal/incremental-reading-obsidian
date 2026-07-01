@@ -479,6 +479,7 @@ describe('migration v3 — backfill interval on article and snippet', () => {
       id: 'a1',
       reference: `${DATA_DIRECTORY}/article.md`,
       due: 999,
+      due_fuzz: null,
       interval: MS_PER_DAY,
       priority: 40,
       dismissed: 0,
@@ -560,8 +561,8 @@ describe('recreateTable', () => {
     const rowsBefore = selectAll(db, 'article');
 
     recreateTable<
-      SafeOmit<ArticleRow, 'interval' | 'deleted'>,
-      SafeOmit<ArticleRow, 'interval' | 'deleted'>
+      SafeOmit<ArticleRow, 'interval' | 'deleted' | 'due_fuzz'>,
+      SafeOmit<ArticleRow, 'interval' | 'deleted' | 'due_fuzz'>
     >(db, 'article', tableSchema, {
       id: 'id',
       reference: 'reference',
@@ -588,7 +589,10 @@ describe('recreateTable', () => {
     );
 
     // add the `interval` column
-    recreateTable<SafeOmit<ArticleRow, 'deleted'>, SafeOmit<ArticleRow, 'interval' | 'deleted'>>(
+    recreateTable<
+      SafeOmit<ArticleRow, 'deleted' | 'due_fuzz'>,
+      SafeOmit<ArticleRow, 'interval' | 'deleted' | 'due_fuzz'>
+    >(
       db,
       'article',
       `CREATE TABLE article (
@@ -687,14 +691,20 @@ describe('migration v6 — vault-relative references', () => {
 
   it('prefixes snippet references with DATA_DIRECTORY/', () => {
     applyMigrations(db, migrations);
-    const byId = Object.fromEntries(selectAll(db, 'snippet').map((r) => [r.id, r]));
+    const byId = Object.fromEntries(
+      selectAll(db, 'snippet').map((r) => [r.id, r])
+    );
     expect(byId['s1'].reference).toBe(`${DATA_DIRECTORY}/snippets/snip.md`);
   });
 
   it('preserves #fragment suffix when prefixing snippet references', () => {
     applyMigrations(db, migrations);
-    const byId = Object.fromEntries(selectAll(db, 'snippet').map((r) => [r.id, r]));
-    expect(byId['s2'].reference).toBe(`${DATA_DIRECTORY}/snippets/snip-frag.md#h1`);
+    const byId = Object.fromEntries(
+      selectAll(db, 'snippet').map((r) => [r.id, r])
+    );
+    expect(byId['s2'].reference).toBe(
+      `${DATA_DIRECTORY}/snippets/snip-frag.md#h1`
+    );
   });
 
   it('prefixes srs_card references with DATA_DIRECTORY/', () => {
@@ -705,7 +715,9 @@ describe('migration v6 — vault-relative references', () => {
 
   it('prefixes non-null snippet.parent with DATA_DIRECTORY/', () => {
     applyMigrations(db, migrations);
-    const byId = Object.fromEntries(selectAll(db, 'snippet').map((r) => [r.id, r]));
+    const byId = Object.fromEntries(
+      selectAll(db, 'snippet').map((r) => [r.id, r])
+    );
     expect(byId['s1'].parent).toBe(`${DATA_DIRECTORY}/articles/article.md`);
     expect(byId['s2'].parent).toBeNull();
   });
@@ -723,9 +735,9 @@ describe('migration v6 — vault-relative references', () => {
     expect(selectAll(db, 'srs_card')).toHaveLength(1);
   });
 
-  it('advances schema version to 6', () => {
+  it('advances schema version to 7', () => {
     applyMigrations(db, migrations);
-    expect(getSchemaVersion(db)).toBe(6);
+    expect(getSchemaVersion(db)).toBe(7);
   });
 
   it('leaves non-reference columns unchanged after prefixing', () => {
@@ -734,7 +746,9 @@ describe('migration v6 — vault-relative references', () => {
     expect(articles[0].due).toBe(1000);
     expect(articles[0].interval).toBe(86400000);
     expect(articles[0].priority).toBe(30);
-    const snippets = Object.fromEntries(selectAll(db, 'snippet').map((r) => [r.id, r]));
+    const snippets = Object.fromEntries(
+      selectAll(db, 'snippet').map((r) => [r.id, r])
+    );
     expect(snippets['s1'].due).toBe(1000);
     expect(snippets['s1'].interval).toBe(86400000);
     expect(snippets['s1'].priority).toBe(20);

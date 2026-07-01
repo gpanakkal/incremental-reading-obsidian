@@ -27,6 +27,7 @@ function makeHighlight(
     type: 'snippet',
     reference: 'snippets/a.md',
     due: null,
+    due_fuzz: null,
     interval: 1,
     dismissed: false,
     deleted: false,

@@ -795,6 +795,43 @@ describe('nextInterval', () => {
   });
 });
 
+describe('getDueFuzz', () => {
+  it('returns a value within [-radiusMs, +radiusMs] for any positive radius', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: MS_PER_DAY * 30 }),
+        (radiusMs) => {
+          const fuzz = IRScheduler.getDueFuzz(radiusMs);
+          expect(fuzz).toBeGreaterThanOrEqual(-radiusMs);
+          expect(fuzz).toBeLessThanOrEqual(radiusMs);
+        }
+      )
+    );
+  });
+
+  it('returns a value within the default radius when called with no argument', () => {
+    const defaultRadius = 6 * 60 * 1000 * 60; // 6 hours in ms
+    const fuzz = IRScheduler.getDueFuzz();
+    expect(fuzz).toBeGreaterThanOrEqual(-defaultRadius);
+    expect(fuzz).toBeLessThanOrEqual(defaultRadius);
+  });
+
+  it('throws for non-positive radiusMs', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.integer({ max: 0 }),
+          fc.constant(-1),
+          fc.constant(0)
+        ),
+        (radiusMs) => {
+          expect(() => IRScheduler.getDueFuzz(radiusMs)).toThrow();
+        }
+      )
+    );
+  });
+});
+
 describe('childPriorityFromFixedInterval', () => {
   const now = Date.now();
 

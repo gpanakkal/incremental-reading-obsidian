@@ -37,6 +37,7 @@ function makeArticle(overrides: Partial<IArticleBase> = {}): IArticleBase {
     type: 'article',
     reference: 'articles/test.md',
     due: Date.now(),
+    due_fuzz: null,
     interval: TEXT_BASE_REVIEW_INTERVAL,
     dismissed: false,
     deleted: false,
@@ -116,6 +117,7 @@ const articleRowArb = fc.record<ArticleRow>({
     fc.integer({ min: 0, max: Date.now() + MS_PER_YEAR * 100 }),
     fc.constant(null)
   ),
+  due_fuzz: fc.oneof(fc.integer(), fc.constant(null)),
   interval: fc.integer({ min: 0, max: MS_PER_DAY * 365 * 50 }),
   dismissed: fc.oneof(fc.constant(0), fc.constant(1)),
   deleted: fc.boolean(),
@@ -603,7 +605,10 @@ describe('rowToReviewArticle', () => {
     await fc.assert(
       fc.asyncProperty(articleRowArb, async (row) => {
         const repo = makeSimpleRepo();
-        const manager = new ArticleManager({ app: makeApp() } as never, repo);
+        const manager = new ArticleManager(
+          { app: makeApp(), settings: { fuzzReviewTimes: false } } as never,
+          repo
+        );
         const result = manager.rowToReviewArticle(row);
         expect(result).not.toBeNull();
         expect(result!.file).toBe(fakeFile);
@@ -821,7 +826,10 @@ describe('fetch', () => {
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
-    const manager = new ArticleManager({ app: makeApp() } as never, repo);
+    const manager = new ArticleManager(
+      { app: makeApp(), settings: { fuzzReviewTimes: false } } as never,
+      repo
+    );
     const result = await manager.fetch(row.id);
     expect(result).not.toBeNull();
     expect(result!.data.id).toBe(row.id);
@@ -885,7 +893,10 @@ describe('review', () => {
         async (reviewTime) => {
           const article = makeArticle();
           const repo = makeSimpleRepo();
-          const manager = new ArticleManager({} as never, repo);
+          const manager = new ArticleManager(
+            { settings: { fuzzReviewTimes: false } } as never,
+            repo
+          );
           await manager.review(article, reviewTime);
           const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock
             .calls as [string, unknown[]][];
@@ -905,7 +916,10 @@ describe('review', () => {
     vi.setSystemTime(now);
     const article = makeArticle();
     const repo = makeSimpleRepo();
-    const manager = new ArticleManager({} as never, repo);
+    const manager = new ArticleManager(
+      { settings: { fuzzReviewTimes: false } } as never,
+      repo
+    );
     await manager.review(article);
     const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls as [
       string,
@@ -927,7 +941,10 @@ describe('review', () => {
         async (reviewTime, priority) => {
           const article = makeArticle({ priority });
           const repo = makeSimpleRepo();
-          const manager = new ArticleManager({} as never, repo);
+          const manager = new ArticleManager(
+            { settings: { fuzzReviewTimes: false } } as never,
+            repo
+          );
           await manager.review(article, reviewTime);
 
           const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock
@@ -941,7 +958,7 @@ describe('review', () => {
           const expectedDue = reviewTime + expectedInterval;
           expect(params[0]).toBe(expectedDue);
           expect(params[1]).toBe(expectedInterval);
-          expect(params[2]).toBe(article.id);
+          expect(params[3]).toBe(article.id);
           expect(updateSql).toMatch(/dismissed = 0/i);
         }
       )
@@ -957,7 +974,10 @@ describe('review', () => {
         async (reviewTime, nextInterval) => {
           const article = makeArticle();
           const repo = makeSimpleRepo();
-          const manager = new ArticleManager({} as never, repo);
+          const manager = new ArticleManager(
+            { settings: { fuzzReviewTimes: false } } as never,
+            repo
+          );
           await manager.review(article, reviewTime, nextInterval);
 
           const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock

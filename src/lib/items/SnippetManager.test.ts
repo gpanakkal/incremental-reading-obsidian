@@ -30,6 +30,7 @@ function makeSnippet(overrides: Partial<ISnippetBase> = {}): ISnippetBase {
     type: 'snippet',
     reference: 'snippets/test.md',
     due: Date.now(),
+    due_fuzz: null,
     interval: TEXT_BASE_REVIEW_INTERVAL,
     dismissed: false,
     deleted: false,
@@ -104,6 +105,7 @@ const snippetRowArb = fc.record<SnippetRow>({
     fc.integer({ min: 0, max: Date.now() + MS_PER_YEAR * 100 }),
     fc.constant(null)
   ),
+  due_fuzz: fc.oneof(fc.integer(), fc.constant(null)),
   interval: fc.integer({ min: 0, max: MS_PER_DAY * 365 * 50 }),
   dismissed: fc.oneof(fc.constant(0), fc.constant(1)),
   deleted: fc.boolean(),
@@ -242,7 +244,10 @@ describe('rowToReviewSnippet', () => {
     const fakeFile = { path: 'snippets/test.md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const repo = makeSimpleRepo();
-    const manager = new SnippetManager({ app: makeApp() } as never, repo);
+    const manager = new SnippetManager(
+      { app: makeApp(), settings: { fuzzReviewTimes: false } } as never,
+      repo
+    );
     await fc.assert(
       fc.asyncProperty(snippetRowArb, async (row) => {
         const result = manager.rowToReviewSnippet(row);
@@ -486,7 +491,10 @@ describe('fetch', () => {
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
-    const manager = new SnippetManager({ app: makeApp() } as never, repo);
+    const manager = new SnippetManager(
+      { app: makeApp(), settings: { fuzzReviewTimes: false } } as never,
+      repo
+    );
     const result = await manager.fetch(row.id);
     expect(result).not.toBeNull();
     expect(result!.data.id).toBe(row.id);
@@ -713,7 +721,10 @@ describe('review', () => {
         async (reviewTime) => {
           const snippet = makeSnippet();
           const repo = makeSimpleRepo();
-          const manager = new SnippetManager({} as never, repo);
+          const manager = new SnippetManager(
+            { settings: { fuzzReviewTimes: false } } as never,
+            repo
+          );
           await manager.review(snippet, reviewTime);
           const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock
             .calls as [string, unknown[]][];
@@ -733,7 +744,10 @@ describe('review', () => {
     vi.setSystemTime(now);
     const snippet = makeSnippet();
     const repo = makeSimpleRepo();
-    const manager = new SnippetManager({} as never, repo);
+    const manager = new SnippetManager(
+      { settings: { fuzzReviewTimes: false } } as never,
+      repo
+    );
     await manager.review(snippet);
     const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls as [
       string,
@@ -755,7 +769,10 @@ describe('review', () => {
         async (reviewTime, priority) => {
           const snippet = makeSnippet({ priority });
           const repo = makeSimpleRepo();
-          const manager = new SnippetManager({} as never, repo);
+          const manager = new SnippetManager(
+            { settings: { fuzzReviewTimes: false } } as never,
+            repo
+          );
           await manager.review(snippet, reviewTime);
 
           const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock
@@ -769,7 +786,7 @@ describe('review', () => {
           const expectedDue = reviewTime + expectedInterval;
           expect(params[0]).toBe(expectedDue);
           expect(params[1]).toBe(expectedInterval);
-          expect(params[2]).toBe(snippet.id);
+          expect(params[3]).toBe(snippet.id);
           expect(updateSql).toMatch(/dismissed = 0/i);
         }
       )
@@ -783,7 +800,10 @@ describe('review', () => {
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
-    const manager = new SnippetManager({} as never, repo);
+    const manager = new SnippetManager(
+      { settings: { fuzzReviewTimes: false } } as never,
+      repo
+    );
     await expect(manager.review(makeSnippet(), 1)).resolves.toBeUndefined();
   });
 
@@ -796,7 +816,10 @@ describe('review', () => {
         async (reviewTime, nextInterval) => {
           const snippet = makeSnippet();
           const repo = makeSimpleRepo();
-          const manager = new SnippetManager({} as never, repo);
+          const manager = new SnippetManager(
+            { settings: { fuzzReviewTimes: false } } as never,
+            repo
+          );
           await manager.review(snippet, reviewTime, nextInterval);
 
           const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock
