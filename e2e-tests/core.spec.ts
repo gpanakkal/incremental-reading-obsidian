@@ -67,6 +67,7 @@ test.describe('Article Importing', () => {
     await window.getByText('Import article').click();
     await finalizeArticleImport(window);
 
+    await executeCommandById(window, 'incremental-reading:learn');
     // look for the action bar to confirm we're in review
     await expect(
       window.getByRole('button', { name: 'Mark as reviewed' })
