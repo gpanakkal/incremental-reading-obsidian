@@ -1,3 +1,4 @@
+import IRScheduler from '#/lib/IRScheduler';
 import type {
   ArticleRow,
   NoteType,
@@ -96,6 +97,17 @@ export class ItemManager {
   async markUndeleted(id: string, type: NoteType): Promise<void> {
     const table = type === 'card' ? 'srs_card' : type;
     await this.repo.mutate(`UPDATE ${table} SET deleted = 0 WHERE id = $1`, [
+      id,
+    ]);
+  }
+
+  /** Recalculate and set due_fuzz for a single row */
+  async setReviewTimeFuzz(
+    id: string,
+    table: 'article' | 'snippet'
+  ): Promise<void> {
+    await this.repo.mutate(`UPDATE ${table} SET due_fuzz = $1 WHERE id = $2`, [
+      IRScheduler.getDueFuzz(),
       id,
     ]);
   }

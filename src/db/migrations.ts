@@ -83,7 +83,12 @@ export const migrations: Migration[] = [
             fixed_interval_days: 'fixed_interval_days',
             scroll_top: 'scroll_top',
           },
-          (row: SafeOmit<TableNameToRowType['article'], 'interval' | 'deleted'>) => {
+          (
+            row: SafeOmit<
+              TableNameToRowType['article'],
+              'interval' | 'deleted' | 'due_fuzz'
+            >
+          ) => {
             const lastReviewTime = latestReviewByArticle[row.id];
             const computed =
               lastReviewTime && row.due ? row.due - lastReviewTime : 0;
@@ -138,7 +143,12 @@ export const migrations: Migration[] = [
             start_offset: 'start_offset',
             end_offset: 'end_offset',
           },
-          (row: SafeOmit<TableNameToRowType['snippet'], 'interval' | 'deleted'>) => {
+          (
+            row: SafeOmit<
+              TableNameToRowType['snippet'],
+              'interval' | 'deleted' | 'due_fuzz'
+            >
+          ) => {
             const lastReviewTime = latestReviewBySnippet[row.id];
             const computed =
               lastReviewTime && row.due ? row.due - lastReviewTime : 0;
@@ -300,13 +310,32 @@ export const migrations: Migration[] = [
   },
   {
     version: 6,
-    description: 'Migrate references from DATA_DIRECTORY-relative to vault-relative paths',
+    description:
+      'Migrate references from DATA_DIRECTORY-relative to vault-relative paths',
     up: (db) => {
-      db.exec(`UPDATE article SET reference = '${DATA_DIRECTORY}/' || reference WHERE reference NOT LIKE '${DATA_DIRECTORY}/%'`);
-      db.exec(`UPDATE snippet SET reference = '${DATA_DIRECTORY}/' || reference WHERE reference NOT LIKE '${DATA_DIRECTORY}/%'`);
-      db.exec(`UPDATE snippet SET parent = '${DATA_DIRECTORY}/' || parent WHERE parent IS NOT NULL AND parent NOT LIKE '${DATA_DIRECTORY}/%'`);
-      db.exec(`UPDATE srs_card SET reference = '${DATA_DIRECTORY}/' || reference WHERE reference NOT LIKE '${DATA_DIRECTORY}/%'`);
-      db.exec(`UPDATE srs_card SET parent = '${DATA_DIRECTORY}/' || parent WHERE parent IS NOT NULL AND parent NOT LIKE '${DATA_DIRECTORY}/%'`);
+      db.exec(
+        `UPDATE article SET reference = '${DATA_DIRECTORY}/' || reference WHERE reference NOT LIKE '${DATA_DIRECTORY}/%'`
+      );
+      db.exec(
+        `UPDATE snippet SET reference = '${DATA_DIRECTORY}/' || reference WHERE reference NOT LIKE '${DATA_DIRECTORY}/%'`
+      );
+      db.exec(
+        `UPDATE snippet SET parent = '${DATA_DIRECTORY}/' || parent WHERE parent IS NOT NULL AND parent NOT LIKE '${DATA_DIRECTORY}/%'`
+      );
+      db.exec(
+        `UPDATE srs_card SET reference = '${DATA_DIRECTORY}/' || reference WHERE reference NOT LIKE '${DATA_DIRECTORY}/%'`
+      );
+      db.exec(
+        `UPDATE srs_card SET parent = '${DATA_DIRECTORY}/' || parent WHERE parent IS NOT NULL AND parent NOT LIKE '${DATA_DIRECTORY}/%'`
+      );
+    },
+  },
+  {
+    version: 7,
+    description: 'Add due time intra-day fuzzing column',
+    up: (db) => {
+      addColumnIfNotExists(db, 'article', 'due_fuzz', 'INTEGER DEFAULT NULL');
+      addColumnIfNotExists(db, 'snippet', 'due_fuzz', 'INTEGER DEFAULT NULL');
     },
   },
 ];

@@ -4,6 +4,7 @@ import {
   MINIMUM_FIXED_REVIEW_INTERVAL,
   MINIMUM_PRIORITY,
   MS_PER_DAY,
+  MS_PER_MINUTE,
   TEXT_BASE_REVIEW_INTERVAL,
   TEXT_MINIMUM_REVIEW_INTERVAL,
   TEXT_REVIEW_MULTIPLIER_BASE,
@@ -311,5 +312,17 @@ export default class IRScheduler {
     );
 
     return clamped;
+  }
+
+  /**
+   * Get a random value within `radiusMs` of zero
+   * @param radiusMs max fuzz distance in milliseconds. Default 6 hours.
+   */
+  static getDueFuzz(radiusMs: number = 6 * MS_PER_MINUTE * 60) {
+    if (radiusMs <= 0) throw new Error(`radiusMs must be a positive value`);
+
+    const roll = Math.random();
+    const scaled = (roll - 0.5) * radiusMs * 2;
+    return clamp(scaled, -radiusMs, radiusMs);
   }
 }

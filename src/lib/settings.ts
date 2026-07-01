@@ -17,6 +17,7 @@ export interface IRPluginSettings {
   dayRolloverOffset: number;
   showAdvancedImportCommands: boolean;
   showAdvancedImportMenuItems: boolean;
+  fuzzTextReviews: boolean; // intra-day fuzzing for items except cards
 }
 export const DEFAULT_SETTINGS: IRPluginSettings = {
   defaultPriority: DEFAULT_PRIORITY,
@@ -26,6 +27,7 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   dayRolloverOffset: DAY_ROLLOVER_OFFSET_HOURS.DEFAULT,
   showAdvancedImportCommands: false,
   showAdvancedImportMenuItems: false,
+  fuzzTextReviews: true,
 };
 
 export class IRSettingTab extends PluginSettingTab {
@@ -114,6 +116,20 @@ export class IRSettingTab extends PluginSettingTab {
           .setDynamicTooltip()
           .onChange(async (value) => {
             this.plugin.settings.dayRolloverOffset = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Fuzz review ordering')
+      .setDesc(
+        `Partially shuffle article and snippet reviews within the same day. Cards are not affected.`
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.fuzzTextReviews)
+          .onChange(async (value) => {
+            this.plugin.settings.fuzzTextReviews = value;
             await this.plugin.saveSettings();
           });
       });

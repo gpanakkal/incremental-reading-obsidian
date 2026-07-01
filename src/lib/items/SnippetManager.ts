@@ -104,6 +104,10 @@ export class SnippetManager extends ItemManager {
       void this.markUndeleted(row.id, 'snippet');
     }
 
+    if (this.plugin.settings.fuzzTextReviews && row.due_fuzz === null) {
+      void this.setReviewTimeFuzz(row.id, 'snippet');
+    }
+
     return {
       data: base,
       file,
@@ -589,6 +593,9 @@ export class SnippetManager extends ItemManager {
     const nextInterval =
       nextReviewInterval ?? IRScheduler.nextInterval(snippet);
     const nextDueTime = reviewed + nextInterval;
+    const newFuzz = this.plugin.settings.fuzzTextReviews
+      ? IRScheduler.getDueFuzz()
+      : snippet.due_fuzz;
 
     try {
       await Promise.all([
@@ -597,8 +604,8 @@ export class SnippetManager extends ItemManager {
           [crypto.randomUUID(), snippet.id, reviewed]
         ),
         this.repo.mutate(
-          `UPDATE snippet SET dismissed = 0, due = $1, interval = $2 WHERE id = $3`,
-          [nextDueTime, nextInterval, snippet.id]
+          `UPDATE snippet SET dismissed = 0, due = $1, interval = $2, due_fuzz = $3 WHERE id = $4`,
+          [nextDueTime, nextInterval, newFuzz, snippet.id]
         ),
       ]);
     } catch (error) {

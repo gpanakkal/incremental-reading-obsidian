@@ -87,6 +87,10 @@ export class ArticleManager extends ItemManager {
       void this.markUndeleted(row.id, 'article');
     }
 
+    if (this.plugin.settings.fuzzTextReviews && row.due_fuzz === null) {
+      void this.setReviewTimeFuzz(row.id, 'article');
+    }
+
     return {
       data: base,
       file,
@@ -508,6 +512,9 @@ export class ArticleManager extends ItemManager {
     const nextInterval =
       nextReviewInterval ?? IRScheduler.nextInterval(article);
     const nextDueTime = reviewed + nextInterval;
+    const newFuzz = this.plugin.settings.fuzzTextReviews
+      ? IRScheduler.getDueFuzz()
+      : article.due_fuzz;
 
     try {
       await Promise.all([
@@ -516,8 +523,8 @@ export class ArticleManager extends ItemManager {
           [crypto.randomUUID(), article.id, reviewed]
         ),
         this.repo.mutate(
-          `UPDATE article SET dismissed = 0, due = $1, interval = $2 WHERE id = $3`,
-          [nextDueTime, nextInterval, article.id]
+          `UPDATE article SET dismissed = 0, due = $1, interval = $2, due_fuzz = $3 WHERE id = $4`,
+          [nextDueTime, nextInterval, newFuzz, article.id]
         ),
       ]);
     } catch (error) {

@@ -9,6 +9,7 @@ export interface IArticleBase {
   type: 'article';
   reference: string;
   due: number | null;
+  due_fuzz: number | null;
   interval: number;
   dismissed: boolean;
   deleted: boolean;
@@ -37,6 +38,7 @@ export interface ISnippetBase {
   type: 'snippet';
   reference: string;
   due: number | null;
+  due_fuzz: number | null;
   interval: number;
   dismissed: boolean;
   deleted: boolean;

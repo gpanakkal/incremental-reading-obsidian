@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS article (
   id TEXT NOT NULL, -- UUID
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
   due INTEGER, -- unix timestamp
+  due_fuzz INTEGER DEFAULT NULL -- milliseconds to offset due time for intra-day review ordering
   interval INTEGER NOT NULL, -- the interval that was used to calculate `due`
   priority INTEGER NOT NULL, -- used when manual interval is null
   fixed_interval_days INTEGER NULL,
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS snippet (
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
   parent TEXT DEFAULT NULL, -- null if it wasn't created from an article or snippet
   due INTEGER, -- unix timestamp
+  due_fuzz INTEGER DEFAULT NULL -- milliseconds to offset due time for intra-day review ordering
   interval INTEGER NOT NULL, -- the interval that was used to calculate `due`
   priority INTEGER NOT NULL,
   dismissed INTEGER NOT NULL DEFAULT FALSE,
@@ -97,4 +99,4 @@ CREATE TABLE IF NOT EXISTS srs_card_review (
   CHECK(rating >= 0 AND rating <= 4)
 );
 
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;
