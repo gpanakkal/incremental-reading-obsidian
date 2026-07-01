@@ -1,6 +1,9 @@
 /* eslint-disable obsidianmd/no-tfile-tfolder-cast -- this is a test file */
 import {
   ARTICLE_DIRECTORY,
+  ARTICLE_TAG,
+  CARD_TAG,
+  DATA_DIRECTORY,
   DAY_ROLLOVER_OFFSET_HOURS,
   DEFAULT_PRIORITY,
   MAXIMUM_FIXED_REVIEW_INTERVAL,
@@ -9,6 +12,7 @@ import {
   MINIMUM_PRIORITY,
   MS_PER_DAY,
   MS_PER_YEAR,
+  SNIPPET_TAG,
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
@@ -83,6 +87,16 @@ function lastMutateCall(repo: SQLiteRepository): [string, unknown[]] {
     unknown[],
   ][];
   return calls[calls.length - 1];
+}
+
+function makeImportPlugin(copyOnImport: boolean) {
+  return {
+    app: {
+      ...makeApp(),
+      vault: { cachedRead: vi.fn().mockResolvedValue('# Content') },
+    },
+    settings: { copyOnImport, defaultPriority: DEFAULT_PRIORITY },
+  } as never;
 }
 
 /** Returns the [sql, params] tuple from the latest call to repo.query */
@@ -394,7 +408,10 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
 
-    const plugin = { app: makeApp(), settings: { dayRolloverOffset: 0 } } as never;
+    const plugin = {
+      app: makeApp(),
+      settings: { dayRolloverOffset: 0 },
+    } as never;
     const manager = new ArticleManager(plugin, repo);
     await manager.getDue(1);
 
@@ -419,7 +436,10 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
 
-    const plugin = { app: makeApp(), settings: { dayRolloverOffset: 0 } } as never;
+    const plugin = {
+      app: makeApp(),
+      settings: { dayRolloverOffset: 0 },
+    } as never;
     const manager = new ArticleManager(plugin, repo);
     await manager.getDue(0, undefined, [rowA.id]);
 
@@ -461,7 +481,10 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
 
-    const plugin = { app: makeApp(), settings: { dayRolloverOffset: 0 } } as never;
+    const plugin = {
+      app: makeApp(),
+      settings: { dayRolloverOffset: 0 },
+    } as never;
     const manager = new ArticleManager(plugin, repo);
     const results = await manager.getDue(1);
     expect(results.map((r) => r.data.id)).not.toContain('no-file-filter');
@@ -580,10 +603,7 @@ describe('rowToReviewArticle', () => {
     await fc.assert(
       fc.asyncProperty(articleRowArb, async (row) => {
         const repo = makeSimpleRepo();
-        const manager = new ArticleManager(
-          { app: makeApp() } as never,
-          repo
-        );
+        const manager = new ArticleManager({ app: makeApp() } as never, repo);
         const result = manager.rowToReviewArticle(row);
         expect(result).not.toBeNull();
         expect(result!.file).toBe(fakeFile);
@@ -801,10 +821,7 @@ describe('fetch', () => {
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
-    const manager = new ArticleManager(
-      { app: makeApp() } as never,
-      repo
-    );
+    const manager = new ArticleManager({ app: makeApp() } as never, repo);
     const result = await manager.fetch(row.id);
     expect(result).not.toBeNull();
     expect(result!.data.id).toBe(row.id);
@@ -1001,6 +1018,7 @@ describe('rename', () => {
     vi.spyOn(Obsidian, 'renameFile').mockResolvedValue(undefined);
     const newName = 'new-valid-name';
     const extension = 'md';
+    const parentPath = 'some/folder';
     const repo = makeSimpleRepo();
     const manager = new ArticleManager({} as never, repo);
     const article = {
@@ -1008,23 +1026,16 @@ describe('rename', () => {
       file: {
         basename: 'old-name',
         extension,
-        parent: null,
+        path: `${parentPath}/old-name.${extension}`,
+        parent: { path: parentPath },
       } as unknown as TFile,
     };
-
-    // After renameFile is called, the mock's file.basename should reflect the new name;
-    // since the TFile is a plain object, we simulate by mutating it in the spy.
-    (Obsidian.renameFile as ReturnType<typeof vi.spyOn>).mockImplementation(
-      async (file: TFile) => {
-        (file as { basename: string }).basename = newName;
-      }
-    );
 
     await manager.rename(article, newName);
 
     const [sql, params] = lastMutateCall(repo);
     expect(sql).toMatch(/UPDATE article SET reference = \$1 WHERE id = \$2/i);
-    expect(params[0]).toBe(`${ARTICLE_DIRECTORY}/${newName}.${extension}`);
+    expect(params[0]).toBe(`${parentPath}/${newName}.${extension}`);
     expect(params[1]).toBe('art-1');
   });
 
@@ -1240,5 +1251,396 @@ describe('setFixedInterval', () => {
         }
       )
     );
+  });
+});
+
+describe('fetchMany (includeDeleted option)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('omits the deleted filter when includeDeleted=true', async () => {
+    const repo = makeSimpleRepo();
+    const manager = new ArticleManager({} as never, repo);
+    await manager.fetchMany({ includeDeleted: true });
+    const [sql] = lastQueryCall(repo);
+    expect(sql).not.toMatch(/deleted = FALSE/i);
+  });
+
+  it('includes deleted = FALSE filter by default', async () => {
+    const repo = makeSimpleRepo();
+    const manager = new ArticleManager({} as never, repo);
+    await manager.fetchMany();
+    const [sql] = lastQueryCall(repo);
+    expect(sql).toMatch(/deleted = FALSE/i);
+  });
+
+  it('produces no WHERE clause when all filters are disabled', async () => {
+    const repo = makeSimpleRepo();
+    const manager = new ArticleManager({} as never, repo);
+    await manager.fetchMany({ includeDismissed: true, includeDeleted: true });
+    const [sql] = lastQueryCall(repo);
+    expect(sql).not.toContain(' WHERE ');
+  });
+
+  it('throws with a non-empty message when param count exceeds MAX_SQL_QUERY_PARAMS', async () => {
+    const repo = makeSimpleRepo();
+    const manager = new ArticleManager({} as never, repo);
+    const excludeIds = Array.from({ length: 1000 }, (_, i) => `id-${i}`);
+    await expect(manager.fetchMany({ excludeIds })).rejects.toThrow(/exceeded/i);
+  });
+});
+
+describe('rename (no-parent path)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('uses "<newName>.<ext>" when file has no parent directory', async () => {
+    vi.spyOn(Obsidian, 'renameFile').mockResolvedValue(undefined);
+    const newName = 'rootlevel-name';
+    const extension = 'md';
+    const repo = makeSimpleRepo();
+    const manager = new ArticleManager({} as never, repo);
+    const article = {
+      data: makeArticle({ id: 'art-noparent' }),
+      file: {
+        basename: 'old-name',
+        extension,
+        path: `old-name.${extension}`,
+        parent: null,
+      } as unknown as TFile,
+    };
+
+    await manager.rename(article, newName);
+
+    const [sql, params] = lastMutateCall(repo);
+    expect(sql).toMatch(/UPDATE article SET reference = \$1 WHERE id = \$2/i);
+    expect(params[0]).toBe(`${newName}.${extension}`);
+    expect(params[1]).toBe('art-noparent');
+  });
+});
+
+describe('setFixedInterval (error handling)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does not throw when the validation fails (error is caught)', async () => {
+    const repo = makeSimpleRepo();
+    const manager = new ArticleManager({} as never, repo);
+    await expect(
+      manager.setFixedInterval(makeArticle(), MINIMUM_FIXED_REVIEW_INTERVAL - 1)
+    ).resolves.toBeUndefined();
+    expect(
+      (repo.mutate as ReturnType<typeof vi.fn>).mock.calls
+    ).toHaveLength(0);
+  });
+});
+
+describe('disableFixedInterval (error handling)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does not throw when the validation fails (error is caught internally)', async () => {
+    const repo = makeSimpleRepo();
+    const manager = new ArticleManager({} as never, repo);
+    await expect(
+      manager.disableFixedInterval(makeArticle(), MINIMUM_PRIORITY - 1)
+    ).resolves.toBeUndefined();
+    expect(
+      (repo.mutate as ReturnType<typeof vi.fn>).mock.calls
+    ).toHaveLength(0);
+  });
+});
+
+describe('getDue (filter correctness)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('excludes items where rowToReviewArticle returns null from the final result (article.file null check)', async () => {
+    // rowToReviewArticle returns null when getNote returns null.
+    // Mutant: `!!article && article.file !== null` → `true` would include nulls.
+    // Rows must have distinct references so the mock can discriminate.
+    const rowNoFile = makeArticleRow({ id: 'null-item', reference: 'articles/no-file.md', due: 0 });
+    const rowWithFile = makeArticleRow({ id: 'real-item', reference: 'articles/with-file.md', due: 0 });
+    const file = { path: 'articles/with-file.md' } as TFile;
+
+    vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) =>
+      ref === rowNoFile.reference ? null : file
+    );
+
+    let callCount = 0;
+    const repo = {
+      query: vi.fn().mockImplementation((_sql: string, params: unknown[]) => {
+        callCount++;
+        const excluded = params.slice(1) as string[];
+        return [rowNoFile, rowWithFile].filter(
+          (r) => !excluded.includes(r.id)
+        );
+      }),
+      mutate: vi.fn().mockResolvedValue([[]]),
+      _execSql: vi.fn(),
+      handleFileChange: vi.fn(),
+    } as unknown as SQLiteRepository;
+
+    const plugin = {
+      app: makeApp(),
+      settings: { dayRolloverOffset: 0 },
+    } as never;
+    const manager = new ArticleManager(plugin, repo);
+    const results = await manager.getDue(0);
+
+    expect(results.map((r) => r.data.id)).not.toContain('null-item');
+    expect(results.map((r) => r.data.id)).toContain('real-item');
+    expect(callCount).toBeGreaterThan(1);
+  });
+
+  it('increments the missing-notes counter so the loop retries (not decrements)', async () => {
+    // Mutant: lastMissingNotes += 1 → lastMissingNotes -= 1 would cause the loop
+    // to terminate after one pass even when items are still missing.
+    // Rows must have distinct references so the mock can discriminate.
+    const missingRow = makeArticleRow({ id: 'missing', reference: 'articles/missing.md', due: 0 });
+    const presentRow = makeArticleRow({ id: 'present', reference: 'articles/present.md', due: 0 });
+    const file = { path: 'articles/present.md' } as TFile;
+
+    vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) =>
+      ref === missingRow.reference ? null : file
+    );
+
+    const queryCalls: { sql: string; params: unknown[] }[] = [];
+    const repo = {
+      query: vi.fn().mockImplementation((sql: string, params: unknown[]) => {
+        queryCalls.push({ sql, params });
+        // Extract excludeIds from the params: they follow the optional dueBy param.
+        // Use the SQL to count how many leading params exist before the NOT IN list.
+        const excluded = params.filter(
+          (p): p is string => typeof p === 'string'
+        );
+        return [missingRow, presentRow].filter(
+          (r) => !excluded.includes(r.id)
+        );
+      }),
+      mutate: vi.fn().mockResolvedValue([[]]),
+      _execSql: vi.fn(),
+      handleFileChange: vi.fn(),
+    } as unknown as SQLiteRepository;
+
+    const plugin = {
+      app: makeApp(),
+      settings: { dayRolloverOffset: 0 },
+    } as never;
+    const manager = new ArticleManager(plugin, repo);
+    // Use a future dueBy so the dueBy filter is included (truthy value avoids the bug)
+    await manager.getDue(Date.now() + 1);
+
+    // At least 2 queries should have run — the retry must have happened
+    expect(queryCalls.length).toBeGreaterThanOrEqual(2);
+    // The second call must include the missing row's id as an excluded param
+    expect(queryCalls[1].params).toContain(missingRow.id);
+  });
+});
+
+describe('import', () => {
+  const IMPORT_FILE = {
+    path: 'notes/my-note.md',
+    name: 'my-note.md',
+    basename: 'my-note',
+    extension: 'md',
+  } as TFile;
+
+  const DATA_DIR_FILE = {
+    path: `${DATA_DIRECTORY}/notes/my-note.md`,
+    name: 'my-note.md',
+    basename: 'my-note',
+    extension: 'md',
+  } as TFile;
+
+  const COPY_FILE = {
+    path: `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/my-note.md`,
+    name: 'my-note.md',
+    basename: 'my-note',
+    extension: 'md',
+  } as TFile;
+
+  beforeEach(() => {
+    vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue(undefined);
+    vi.spyOn(Obsidian, 'updateFrontMatter').mockResolvedValue(
+      undefined as never
+    );
+    vi.spyOn(Obsidian, 'isDuplicate').mockReturnValue(false);
+    vi.spyOn(Obsidian, 'createNote').mockResolvedValue(COPY_FILE as never);
+    vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue(
+      '[[notes/my-note.md|my-note]]'
+    );
+    vi.spyOn(Obsidian, 'getDirectory').mockReturnValue(
+      `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`
+    );
+    vi.spyOn(Obsidian, 'getTargetPath').mockReturnValue(
+      `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/my-note.md`
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe('in-place mode', () => {
+    it('registers the original file without creating a copy', async () => {
+      const repo = makeSimpleRepo();
+      const manager = new ArticleManager(makeImportPlugin(false), repo);
+
+      await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+      expect(Obsidian.createNote).not.toHaveBeenCalled();
+      const [sql, params] = lastMutateCall(repo);
+      expect(sql).toContain('INSERT INTO article');
+      expect(params[1]).toBe(IMPORT_FILE.path);
+    });
+
+    it('calls updateFrontMatter on the original file with the article tag', async () => {
+      const repo = makeSimpleRepo();
+      const manager = new ArticleManager(makeImportPlugin(false), repo);
+
+      await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+      expect(Obsidian.updateFrontMatter).toHaveBeenCalledWith(
+        IMPORT_FILE,
+        expect.objectContaining({ tags: ARTICLE_TAG }),
+        expect.anything()
+      );
+    });
+
+    it('does not add a source frontmatter link', async () => {
+      const repo = makeSimpleRepo();
+      const manager = new ArticleManager(makeImportPlugin(false), repo);
+
+      await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+      expect(Obsidian.generateMarkdownLink).not.toHaveBeenCalled();
+      const fmCall = (Obsidian.updateFrontMatter as ReturnType<typeof vi.fn>)
+        .mock.calls[0] as unknown[];
+      expect(fmCall[1]).not.toHaveProperty('source');
+    });
+
+    it('allows files inside DATA_DIRECTORY without early-returning', async () => {
+      const repo = makeSimpleRepo();
+      const manager = new ArticleManager(makeImportPlugin(false), repo);
+
+      await manager.import(DATA_DIR_FILE, DEFAULT_PRIORITY, null, false);
+
+      const [sql, params] = lastMutateCall(repo);
+      expect(sql).toContain('INSERT INTO article');
+      expect(params[1]).toBe(DATA_DIR_FILE.path);
+    });
+
+    it('blocks files tagged as snippets', async () => {
+      const repo = makeSimpleRepo();
+      const manager = new ArticleManager(makeImportPlugin(false), repo);
+      vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+        tags: [SNIPPET_TAG],
+      } as never);
+
+      await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+      expect(repo.mutate).not.toHaveBeenCalled();
+    });
+
+    it('blocks files tagged as cards', async () => {
+      const repo = makeSimpleRepo();
+      const manager = new ArticleManager(makeImportPlugin(false), repo);
+      vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+        tags: [CARD_TAG],
+      } as never);
+
+      await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+      expect(repo.mutate).not.toHaveBeenCalled();
+    });
+
+    it('re-associates with the existing DB record when ir-id matches', async () => {
+      const EXISTING_ID = 'existing-article-id';
+      const repo = makeSimpleRepo();
+      (repo.query as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { id: EXISTING_ID },
+      ]);
+      const manager = new ArticleManager(makeImportPlugin(false), repo);
+      vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+        'ir-id': EXISTING_ID,
+      } as never);
+
+      await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+      const [sql, params] = lastMutateCall(repo);
+      expect(sql).toContain('UPDATE article SET reference');
+      expect(params).toEqual([IMPORT_FILE.path, EXISTING_ID]);
+      expect(Obsidian.updateFrontMatter).not.toHaveBeenCalled();
+    });
+
+    it('cancels with a specific notice when ir-id is orphaned but reference is already in DB', async () => {
+      const ORPHANED_ID = 'orphaned-id';
+      const repo = makeSimpleRepo();
+      // First query (by id) returns nothing; second query (by reference) returns a match
+      (repo.query as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: 'some-other-id' }]);
+      const manager = new ArticleManager(makeImportPlugin(false), repo);
+      vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+        'ir-id': ORPHANED_ID,
+      } as never);
+
+      await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+      expect(repo.mutate).not.toHaveBeenCalled();
+      expect(Obsidian.updateFrontMatter).not.toHaveBeenCalled();
+    });
+
+    it('proceeds with fresh import when ir-id is orphaned and reference is not in DB', async () => {
+      const ORPHANED_ID = 'orphaned-id';
+      const repo = makeSimpleRepo();
+      // Both queries return nothing
+      (repo.query as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
+      const manager = new ArticleManager(makeImportPlugin(false), repo);
+      vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+        'ir-id': ORPHANED_ID,
+      } as never);
+
+      await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+      const [sql] = lastMutateCall(repo);
+      expect(sql).toContain('INSERT INTO article');
+    });
+  });
+
+  describe('plugin.settings.copyOnImport fallback', () => {
+    it('uses copy when copyOnImport is true and makeCopy arg is omitted', async () => {
+      const repo = makeSimpleRepo();
+      const manager = new ArticleManager(makeImportPlugin(true), repo);
+
+      await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null);
+
+      expect(Obsidian.createNote).toHaveBeenCalled();
+      const [, params] = lastMutateCall(repo);
+      expect(params[1]).toBe(COPY_FILE.path);
+    });
+
+    it('uses in-place when copyOnImport is false and makeCopy arg is omitted', async () => {
+      const repo = makeSimpleRepo();
+      const manager = new ArticleManager(makeImportPlugin(false), repo);
+
+      await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null);
+
+      expect(Obsidian.createNote).not.toHaveBeenCalled();
+      const [, params] = lastMutateCall(repo);
+      expect(params[1]).toBe(IMPORT_FILE.path);
+    });
   });
 });
