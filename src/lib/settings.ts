@@ -131,7 +131,6 @@ export class IRSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.showAdvancedImportCommands = value;
             await this.plugin.saveSettings();
-            // TODO: add or remove commands here
             this.plugin.toggleAdvancedCommands(value);
           });
       });

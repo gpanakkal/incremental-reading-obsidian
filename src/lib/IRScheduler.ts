@@ -162,8 +162,6 @@ export default class IRScheduler {
    *  all reviews happen on time and the priority is never changed
    *
    * @param futureReviewCount the number of reviews into the future to project
-   * TODO:
-   * - fuzz review times for more realistic forecasts
    */
   static forecastReviewTime(
     text: IArticleBase | ISnippetBase,
