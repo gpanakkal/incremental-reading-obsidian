@@ -107,30 +107,6 @@ export default class IncrementalReadingPlugin extends Plugin {
       },
     });
 
-    const importArticle = async (
-      file: TFile,
-      opts?: {
-        showImportDialog?: boolean;
-        copyOnImport?: boolean;
-        reviewOnImport?: boolean;
-      }
-    ) => {
-      const merged = { ...this.settings, ...(opts ?? {}) };
-      if (merged.showImportDialog) {
-        new ImportModal(this, file, merged.copyOnImport).open();
-      } else {
-        const article = await this.reviewManager.importArticle(
-          file,
-          this.settings.defaultPriority,
-          null,
-          merged.copyOnImport
-        );
-        if (article && merged.reviewOnImport) {
-          await this.learn(article);
-        }
-      }
-    };
-
     this.addCommand({
       id: 'import-article',
       name: 'Import article',
@@ -144,7 +120,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         if (!fileView?.file) return false;
 
         if (checking) return true;
-        void importArticle(fileView.file);
+        void this.importArticle(fileView.file);
       },
     });
 
@@ -167,6 +143,10 @@ export default class IncrementalReadingPlugin extends Plugin {
       callback: async () => await this.learn(),
     });
 
+    if (this.settings.showAdvancedImportCommands) {
+      this.toggleAdvancedCommands(true);
+    }
+
     this.addCommand({
       // TODO: remove after done testing
       id: 'list-entries',
@@ -186,12 +166,58 @@ export default class IncrementalReadingPlugin extends Plugin {
       this.app.workspace.on('file-menu', (menu, abstractFile) => {
         const file = this.app.vault.getFileByPath(abstractFile.path);
         if (file && this.reviewManager) {
+          menu.addSections(['incremental-reading']);
           menu.addItem((item) => {
             item
               .setTitle('Import article')
               .setIcon(PLACEHOLDER_PLUGIN_ICON)
+              .setSection('incremental-reading')
               .onClick(async () => {
-                await importArticle(file);
+                await this.importArticle(file);
+              });
+          });
+
+          if (!this.settings.showAdvancedImportMenuItems) {
+            return;
+          }
+
+          menu.addItem((item) => {
+            item
+              .setTitle('Import a copy')
+              .setIcon(PLACEHOLDER_PLUGIN_ICON)
+              .setSection('incremental-reading')
+              .onClick(async () => {
+                void this.importArticle(file, { copyOnImport: true });
+              });
+          });
+
+          menu.addItem((item) => {
+            item
+              .setTitle('Import in place')
+              .setIcon(PLACEHOLDER_PLUGIN_ICON)
+              .setSection('incremental-reading')
+              .onClick(async () => {
+                void this.importArticle(file, { copyOnImport: false });
+              });
+          });
+
+          menu.addItem((item) => {
+            item
+              .setTitle('Open import dialog...')
+              .setIcon(PLACEHOLDER_PLUGIN_ICON)
+              .setSection('incremental-reading')
+              .onClick(async () => {
+                void this.importArticle(file, { showImportDialog: true });
+              });
+          });
+
+          menu.addItem((item) => {
+            item
+              .setTitle('Quick import')
+              .setIcon(PLACEHOLDER_PLUGIN_ICON)
+              .setSection('incremental-reading')
+              .onClick(async () => {
+                void this.importArticle(file, { showImportDialog: false });
               });
           });
         } else {
@@ -387,6 +413,107 @@ export default class IncrementalReadingPlugin extends Plugin {
     }
 
     await this.app.workspace.revealLeaf(leaf);
+  }
+
+  async importArticle(
+    file: TFile,
+    opts?: {
+      showImportDialog?: boolean;
+      copyOnImport?: boolean;
+      reviewOnImport?: boolean;
+    }
+  ) {
+    const merged = { ...this.settings, ...(opts ?? {}) };
+    if (merged.showImportDialog) {
+      new ImportModal(this, file, merged.copyOnImport).open();
+    } else {
+      const article = await this.reviewManager.importArticle(
+        file,
+        this.settings.defaultPriority,
+        null,
+        merged.copyOnImport
+      );
+      if (article && merged.reviewOnImport) {
+        await this.learn(article);
+      }
+    }
+  }
+
+  toggleAdvancedCommands(enable: boolean) {
+    if (enable) {
+      this.addCommand({
+        id: 'import-article-copy',
+        name: 'Import article as copy',
+        checkCallback: (checking: boolean) => {
+          if (!this.reviewManager) return false;
+
+          const activeReviewView = this.getActiveReviewView();
+          if (activeReviewView) return false;
+
+          const fileView = this.app.workspace.getActiveFileView();
+          if (!fileView?.file) return false;
+
+          if (checking) return true;
+          void this.importArticle(fileView.file, { copyOnImport: true });
+        },
+      });
+
+      this.addCommand({
+        id: 'import-article-in-place',
+        name: 'Import article in place',
+        checkCallback: (checking: boolean) => {
+          if (!this.reviewManager) return false;
+
+          const activeReviewView = this.getActiveReviewView();
+          if (activeReviewView) return false;
+
+          const fileView = this.app.workspace.getActiveFileView();
+          if (!fileView?.file) return false;
+
+          if (checking) return true;
+          void this.importArticle(fileView.file, { copyOnImport: false });
+        },
+      });
+
+      this.addCommand({
+        id: 'open-import-dialog',
+        name: 'Open import dialog...',
+        checkCallback: (checking: boolean) => {
+          if (!this.reviewManager) return false;
+
+          const activeReviewView = this.getActiveReviewView();
+          if (activeReviewView) return false;
+
+          const fileView = this.app.workspace.getActiveFileView();
+          if (!fileView?.file) return false;
+
+          if (checking) return true;
+          void this.importArticle(fileView.file, { showImportDialog: true });
+        },
+      });
+
+      this.addCommand({
+        id: 'quick-import',
+        name: 'Quick import',
+        checkCallback: (checking: boolean) => {
+          if (!this.reviewManager) return false;
+
+          const activeReviewView = this.getActiveReviewView();
+          if (activeReviewView) return false;
+
+          const fileView = this.app.workspace.getActiveFileView();
+          if (!fileView?.file) return false;
+
+          if (checking) return true;
+          void this.importArticle(fileView.file, { showImportDialog: false });
+        },
+      });
+    } else {
+      this.removeCommand('import-article-copy');
+      this.removeCommand('import-article-in-place');
+      this.removeCommand('open-import-dialog');
+      this.removeCommand('quick-import');
+    }
   }
 
   private configureNavbarPosition() {
