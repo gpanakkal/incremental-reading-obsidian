@@ -21,7 +21,7 @@ export interface IRPluginSettings {
 export const DEFAULT_SETTINGS: IRPluginSettings = {
   defaultPriority: DEFAULT_PRIORITY,
   showImportDialog: true,
-  reviewOnImport: true,
+  reviewOnImport: false,
   copyOnImport: false,
   dayRolloverOffset: DAY_ROLLOVER_OFFSET_HOURS.DEFAULT,
   showAdvancedImportCommands: false,
