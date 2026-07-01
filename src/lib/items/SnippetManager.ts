@@ -165,6 +165,17 @@ export class SnippetManager extends ItemManager {
             (snippet): snippet is ReviewSnippet =>
               !!snippet && snippet.file !== null
           );
+
+        if (this.plugin.settings.fuzzTextReviews) {
+          due.sort(function fuzzOrder(a, b) {
+            if (!b.data.due) return -1;
+            if (!a.data.due) return 1;
+
+            const aFuzzedDue = a.data.due + (a.data.due_fuzz ?? 0);
+            const bFuzzedDue = b.data.due + (b.data.due_fuzz ?? 0);
+            return aFuzzedDue - bFuzzedDue;
+          });
+        }
       } while (lastMissingNotes !== 0);
       return due;
     } catch (error) {
