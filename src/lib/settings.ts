@@ -15,6 +15,8 @@ export interface IRPluginSettings {
   reviewOnImport: boolean;
   copyOnImport: boolean;
   dayRolloverOffset: number;
+  showAdvancedImportCommands: boolean;
+  showAdvancedImportMenuItems: boolean;
 }
 export const DEFAULT_SETTINGS: IRPluginSettings = {
   defaultPriority: DEFAULT_PRIORITY,
@@ -22,6 +24,8 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   reviewOnImport: true,
   copyOnImport: false,
   dayRolloverOffset: DAY_ROLLOVER_OFFSET_HOURS.DEFAULT,
+  showAdvancedImportCommands: false,
+  showAdvancedImportMenuItems: false,
 };
 
 export class IRSettingTab extends PluginSettingTab {
@@ -110,6 +114,36 @@ export class IRSettingTab extends PluginSettingTab {
           .setDynamicTooltip()
           .onChange(async (value) => {
             this.plugin.settings.dayRolloverOffset = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl).setName('Advanced').setHeading();
+
+    new Setting(containerEl)
+      .setName('Enable extra import hotkeys')
+      .setDesc(
+        `Shortcuts to open or bypass the import modal, import a copy, or import in-place.`
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.showAdvancedImportCommands)
+          .onChange(async (value) => {
+            this.plugin.settings.showAdvancedImportCommands = value;
+            await this.plugin.saveSettings();
+            // TODO: add or remove commands here
+            this.plugin.toggleAdvancedCommands(value);
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Show extra file menu entries for importing')
+      .setDesc(`Adds entries corresponding to the extra import commands above.`)
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.showAdvancedImportMenuItems)
+          .onChange(async (value) => {
+            this.plugin.settings.showAdvancedImportMenuItems = value;
             await this.plugin.saveSettings();
           });
       });
