@@ -272,11 +272,6 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);
 
-    await openNote(
-      window,
-      'incremental-reading/articles/Memorizing a programming language using spaced repetition'
-    );
-
     const dismissButton = window.getByRole('button', {
       name: 'Dismiss',
     });
@@ -301,11 +296,6 @@ test.describe('Action Bar', () => {
 
     await executeCommandById(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);
-
-    await openNote(
-      window,
-      'incremental-reading/articles/Memorizing a programming language using spaced repetition'
-    );
 
     const dismissButton = window.getByRole('button', {
       name: 'Dismiss',
