@@ -153,7 +153,9 @@ export class IRSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Show extra file menu entries for importing')
-      .setDesc(`Adds entries corresponding to the extra import commands above.`)
+      .setDesc(
+        `Entries to open or bypass the import modal, import a copy, or import in-place.`
+      )
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.showAdvancedImportMenuItems)
