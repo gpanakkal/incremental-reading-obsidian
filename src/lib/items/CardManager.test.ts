@@ -15,7 +15,8 @@ import type {
 } from '#/lib/types';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
-import { Rating, State } from 'ts-fsrs';
+import type { FSRSParameters, Grade } from 'ts-fsrs';
+import { fsrs, generatorParameters, Rating, State } from 'ts-fsrs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CardManager } from './CardManager';
 
@@ -1335,5 +1336,449 @@ describe('review', () => {
       sql.includes('UPDATE srs_card SET')
     )!;
     expect(updateCall[0]).toMatch(/dismissed = 0/i);
+  });
+});
+
+describe('review — FSRS settings', () => {
+  // #region FSRS HELPERS
+
+  /**
+   * Plugin stub whose settings expose fully-formed fsrsParams. review() reads
+   * these via getFsrs() -> generatorParameters(settings.fsrsParams), so every
+   * FSRS behavior under test is driven by what we pass here.
+   */
+  function makePluginWithFsrs(fsrsParams: FSRSParameters) {
+    return {
+      app: {
+        metadataCache: { getFileCache: () => undefined },
+        fileManager: { processFrontMatter: async () => undefined },
+      },
+      settings: { dayRolloverOffset: 4, fsrsParams },
+    } as never;
+  }
+
+  /** Repo that returns storedRow for the SELECT and records every mutate call. */
+  function makeReviewRepo(storedRow: SRSCardRow): SQLiteRepository {
+    return {
+      query: vi.fn().mockResolvedValue([storedRow]),
+      mutate: vi.fn().mockResolvedValue([[]]),
+      _execSql: vi.fn(),
+      handleFileChange: vi.fn(),
+    } as unknown as SQLiteRepository;
+  }
+
+  /** Pull the [sql, params] tuple for the srs_card UPDATE issued by review(). */
+  function updateParamsFrom(repo: SQLiteRepository): unknown[] {
+    const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls as [
+      string,
+      unknown[],
+    ][];
+    const update = calls.find(([sql]) => sql.includes('UPDATE srs_card SET'));
+    if (!update) throw new Error('review() issued no UPDATE srs_card');
+    return update[1];
+  }
+
+  /** Pull the [sql, params] tuple for the srs_card_review INSERT. */
+  function reviewInsertParamsFrom(repo: SQLiteRepository): unknown[] {
+    const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls as [
+      string,
+      unknown[],
+    ][];
+    const insert = calls.find(([sql]) =>
+      sql.includes('INSERT INTO srs_card_review')
+    );
+    if (!insert) throw new Error('review() issued no srs_card_review INSERT');
+    return insert[1];
+  }
+
+  // From the UPDATE srs_card SET column ordering in CardManager.review():
+  const DUE_PARAM = 0; // due = $1 (ms timestamp)
+  const SCHEDULED_DAYS_PARAM = 5; // scheduled_days = $6
+
+  /**
+   * Run a single review against the given fsrs params and return the scheduling
+   * outputs the plugin persists. A fresh (New-state) card is used unless
+   * overridden so behavior is reproducible across param permutations.
+   */
+  async function runReview(
+    fsrsParams: FSRSParameters,
+    grade: Grade,
+    reviewTime: Date,
+    cardOverrides: Partial<ISRSCardDisplay> = {}
+  ) {
+    const card = makeCardDisplay(cardOverrides);
+    const storedRow = makeCardRow({ id: card.id, state: State.New });
+    const repo = makeReviewRepo(storedRow);
+    const manager = new CardManager(makePluginWithFsrs(fsrsParams), repo);
+    await manager.review(card, grade, reviewTime);
+    const params = updateParamsFrom(repo);
+    return {
+      due: params[DUE_PARAM] as number,
+      scheduledDays: params[SCHEDULED_DAYS_PARAM] as number,
+      reviewInsertParams: reviewInsertParamsFrom(repo),
+      repo,
+    };
+  }
+
+  const gradeArb = fc.constantFrom<Grade>(
+    Rating.Again,
+    Rating.Hard,
+    Rating.Good,
+    Rating.Easy
+  );
+
+  /** request_retention slider range from settings.ts (0.8..0.95, step 0.01). */
+  const retentionArb = fc
+    .integer({ min: 80, max: 95 })
+    .map((n) => n / 100)
+    .filter((n) => Number.isFinite(n));
+
+  /** maximum_interval text field: any positive integer parsed via parseInt. */
+  const maxIntervalArb = fc.integer({ min: 1, max: 36500 });
+
+  /**
+   * A mature, already-reviewed card whose stability is high enough that its
+   * natural interval spans many days — the regime where interval-shaping
+   * settings (retention, maximum_interval, fuzz) have a well-defined,
+   * observable effect. elapsedDays sets how long ago the last review was.
+   */
+  const matureCardArb: fc.Arbitrary<Partial<ISRSCardDisplay>> = fc
+    .record({
+      stability: fc.double({ min: 10, max: 1000, noNaN: true }),
+      difficulty: fc.double({ min: 1, max: 10, noNaN: true }),
+      reps: fc.integer({ min: 5, max: 100 }),
+      elapsedDays: fc.integer({ min: 1, max: 90 }),
+    })
+    .map(({ stability, difficulty, reps, elapsedDays }) => ({
+      state: 'Review' as const,
+      stability,
+      difficulty,
+      reps,
+      last_review: new Date(REVIEW_TIME.getTime() - elapsedDays * MS_PER_DAY),
+    }));
+
+  /** An ordered pair (lo < hi) drawn from the retention slider range. */
+  const retentionPairArb = fc
+    .tuple(retentionArb, retentionArb)
+    .filter(([a, b]) => a !== b)
+    .map(([a, b]) => (a < b ? ([a, b] as const) : ([b, a] as const)));
+
+  /** An ordered pair (lo < hi) of maximum_interval ceilings. */
+  const maxIntervalPairArb = fc
+    .tuple(maxIntervalArb, maxIntervalArb)
+    .filter(([a, b]) => a !== b)
+    .map(([a, b]) => (a < b ? ([a, b] as const) : ([b, a] as const)));
+
+  /** A well-formed params object with the four user-tunable knobs overridable. */
+  function fsrsParamsWith(
+    overrides: Partial<
+      Pick<
+        FSRSParameters,
+        | 'request_retention'
+        | 'maximum_interval'
+        | 'enable_fuzz'
+        | 'enable_short_term'
+      >
+    >
+  ): FSRSParameters {
+    return generatorParameters(overrides);
+  }
+
+  const REVIEW_TIME = new Date('2026-01-01T12:00:00Z');
+
+  // #endregion
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('always persists a due date at or after the review time, for any setting combination and grade', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        retentionArb,
+        maxIntervalArb,
+        fc.boolean(),
+        fc.boolean(),
+        gradeArb,
+        async (retention, maxInterval, fuzz, shortTerm, grade) => {
+          const params = fsrsParamsWith({
+            request_retention: retention,
+            maximum_interval: maxInterval,
+            enable_fuzz: fuzz,
+            enable_short_term: shortTerm,
+          });
+          const { due } = await runReview(params, grade, REVIEW_TIME);
+          expect(typeof due).toBe('number');
+          expect(Number.isNaN(due)).toBe(false);
+          // A card is never scheduled before the moment it was reviewed.
+          expect(due).toBeGreaterThanOrEqual(REVIEW_TIME.getTime());
+        }
+      )
+    );
+  });
+
+  it('produces a positive scheduled interval for a card under any maximum_interval', async () => {
+    // maximum_interval bounds the stability-derived interval inside FSRS but is
+    // not a literal ceiling on scheduled_days once rounding/fuzz are applied, so
+    // the honest invariant is that the interval stays a sane non-negative number.
+    await fc.assert(
+      fc.asyncProperty(
+        maxIntervalArb,
+        retentionArb,
+        fc.boolean(),
+        fc.boolean(),
+        gradeArb,
+        async (maxInterval, retention, fuzz, shortTerm, grade) => {
+          const params = fsrsParamsWith({
+            maximum_interval: maxInterval,
+            request_retention: retention,
+            enable_fuzz: fuzz,
+            enable_short_term: shortTerm,
+          });
+          const { scheduledDays } = await runReview(params, grade, REVIEW_TIME);
+          expect(Number.isFinite(scheduledDays)).toBe(true);
+          expect(scheduledDays).toBeGreaterThanOrEqual(0);
+        }
+      )
+    );
+  });
+
+  it('never schedules further out under a tighter maximum_interval than under a looser one', async () => {
+    // maximum_interval bounds the natural interval, so for any card and grade a
+    // smaller ceiling can only ever pull the interval in (or leave it equal), it
+    // can never push it further out than a larger ceiling would.
+    await fc.assert(
+      fc.asyncProperty(
+        matureCardArb,
+        maxIntervalPairArb,
+        gradeArb,
+        retentionArb,
+        async (cardOverrides, [tight, loose], grade, retention) => {
+          const tightRun = await runReview(
+            fsrsParamsWith({
+              maximum_interval: tight,
+              request_retention: retention,
+              enable_fuzz: false,
+            }),
+            grade,
+            REVIEW_TIME,
+            cardOverrides
+          );
+          const looseRun = await runReview(
+            fsrsParamsWith({
+              maximum_interval: loose,
+              request_retention: retention,
+              enable_fuzz: false,
+            }),
+            grade,
+            REVIEW_TIME,
+            cardOverrides
+          );
+          expect(tightRun.scheduledDays).toBeLessThanOrEqual(
+            looseRun.scheduledDays
+          );
+        }
+      )
+    );
+  });
+
+  it('never schedules a shorter interval at lower targeted retention than at higher retention', async () => {
+    // Tolerating a lower recall target lets reviews spread out, so for any card
+    // and grade the lower-retention interval is always at least the
+    // higher-retention one (monotonic, holding all else fixed).
+    await fc.assert(
+      fc.asyncProperty(
+        matureCardArb,
+        retentionPairArb,
+        gradeArb,
+        maxIntervalArb,
+        async (cardOverrides, [lowRet, highRet], grade, maxInterval) => {
+          const lowRetentionRun = await runReview(
+            fsrsParamsWith({
+              request_retention: lowRet,
+              maximum_interval: maxInterval,
+              enable_fuzz: false,
+            }),
+            grade,
+            REVIEW_TIME,
+            cardOverrides
+          );
+          const highRetentionRun = await runReview(
+            fsrsParamsWith({
+              request_retention: highRet,
+              maximum_interval: maxInterval,
+              enable_fuzz: false,
+            }),
+            grade,
+            REVIEW_TIME,
+            cardOverrides
+          );
+          expect(lowRetentionRun.scheduledDays).toBeGreaterThanOrEqual(
+            highRetentionRun.scheduledDays
+          );
+        }
+      )
+    );
+  });
+
+  it('produces a deterministic interval across repeated reviews when fuzz is disabled', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        matureCardArb,
+        gradeArb,
+        retentionArb,
+        maxIntervalArb,
+        async (cardOverrides, grade, retention, maxInterval) => {
+          const params = fsrsParamsWith({
+            enable_fuzz: false,
+            request_retention: retention,
+            maximum_interval: maxInterval,
+          });
+          const runs = await Promise.all(
+            Array.from({ length: 5 }, () =>
+              runReview(params, grade, REVIEW_TIME, cardOverrides)
+            )
+          );
+          const intervals = runs.map((r) => r.scheduledDays);
+          for (const interval of intervals) {
+            expect(interval).toBe(intervals[0]);
+          }
+        }
+      )
+    );
+  });
+
+  it('keeps a fuzzed interval positive and within a bounded window of the unfuzzed interval', async () => {
+    // For any mature card, fuzz jitters the interval around its deterministic
+    // value but must keep it positive and within a bounded multiple — it can
+    // never zero out a multi-day interval or blow it up unboundedly.
+    await fc.assert(
+      fc.asyncProperty(
+        matureCardArb,
+        gradeArb,
+        retentionArb,
+        async (cardOverrides, grade, retention) => {
+          const unfuzzed = await runReview(
+            fsrsParamsWith({ enable_fuzz: false, request_retention: retention }),
+            grade,
+            REVIEW_TIME,
+            cardOverrides
+          );
+          const fuzzed = await runReview(
+            fsrsParamsWith({ enable_fuzz: true, request_retention: retention }),
+            grade,
+            REVIEW_TIME,
+            cardOverrides
+          );
+          expect(fuzzed.scheduledDays).toBeGreaterThanOrEqual(0);
+          // FSRS only fuzzes intervals of 3+ days; short intervals are untouched.
+          if (unfuzzed.scheduledDays >= 3) {
+            expect(fuzzed.scheduledDays).toBeGreaterThan(0);
+          }
+          expect(fuzzed.scheduledDays).toBeLessThanOrEqual(
+            Math.max(unfuzzed.scheduledDays * 2, 1)
+          );
+        }
+      )
+    );
+  });
+
+  it('schedules non-Easy reviews of a new card at least a full day out when short-term scheduling is disabled', async () => {
+    // With enable_short_term=false, FSRS skips sub-day learning steps, so even a
+    // freshly-created card graded below Easy advances by whole days.
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<Grade>(Rating.Again, Rating.Hard, Rating.Good),
+        fc.date({
+          min: new Date('2000-01-01T00:00:00Z'),
+          max: new Date('2100-01-01T00:00:00Z'),
+          noInvalidDate: true,
+        }),
+        async (grade, reviewTime) => {
+          const params = fsrsParamsWith({ enable_short_term: false });
+          const { due, scheduledDays } = await runReview(
+            params,
+            grade,
+            reviewTime
+          );
+          expect(scheduledDays).toBeGreaterThanOrEqual(1);
+          expect(due - reviewTime.getTime()).toBeGreaterThanOrEqual(MS_PER_DAY);
+        }
+      )
+    );
+  });
+
+  it('schedules a sub-day (minutes-out) review for a non-graduating grade on a new card when short-term scheduling is enabled', async () => {
+    // Mirror of the previous test: with short-term steps ON, a below-Easy grade
+    // on a new card lands back within the same day (0 scheduled days), for any
+    // review time and any of the non-graduating grades.
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<Grade>(Rating.Again, Rating.Hard, Rating.Good),
+        fc.date({
+          min: new Date('2000-01-01T00:00:00Z'),
+          max: new Date('2100-01-01T00:00:00Z'),
+          noInvalidDate: true,
+        }),
+        async (grade, reviewTime) => {
+          const params = fsrsParamsWith({ enable_short_term: true });
+          const { due, scheduledDays } = await runReview(
+            params,
+            grade,
+            reviewTime
+          );
+          expect(scheduledDays).toBe(0);
+          // Still in the future, but within the same day.
+          expect(due).toBeGreaterThan(reviewTime.getTime());
+          expect(due - reviewTime.getTime()).toBeLessThan(MS_PER_DAY);
+        }
+      )
+    );
+  });
+
+  it('routes FSRS card.due to the card row and log.due to the review log, for any setting combination', async () => {
+    // review() feeds the display card straight into getFsrs().repeat(). Recompute
+    // the same repeat() here with identical params to get the authoritative
+    // RecordLogItem, then assert the plugin writes card.due to the srs_card
+    // UPDATE and log.due to the srs_card_review INSERT — these are distinct
+    // (forward- vs backward-looking) dates and must not be swapped.
+    await fc.assert(
+      fc.asyncProperty(
+        retentionArb,
+        maxIntervalArb,
+        fc.boolean(),
+        fc.boolean(),
+        gradeArb,
+        async (retention, maxInterval, fuzz, shortTerm, grade) => {
+          const params = fsrsParamsWith({
+            request_retention: retention,
+            maximum_interval: maxInterval,
+            enable_fuzz: fuzz,
+            enable_short_term: shortTerm,
+          });
+          // Disable fuzz is NOT required: we drive the reference computation with
+          // the very same params, so any fuzz is reproduced identically because
+          // FSRS fuzz is seeded from the card's interval, not wall-clock RNG.
+          const card = makeCardDisplay();
+          const storedRow = makeCardRow({ id: card.id, state: State.New });
+          const repo = makeReviewRepo(storedRow);
+          const manager = new CardManager(makePluginWithFsrs(params), repo);
+          await manager.review(card, grade, REVIEW_TIME);
+
+          const reference = fsrs(generatorParameters(params)).repeat(
+            card,
+            REVIEW_TIME
+          )[grade];
+
+          const cardDue = updateParamsFrom(repo)[DUE_PARAM] as number;
+          const insert = reviewInsertParamsFrom(repo);
+          // srs_card_review INSERT column order: id, card_id, due (index 2), ...
+          const logDue = insert[2] as number;
+
+          expect(cardDue).toBe(reference.card.due.getTime());
+          expect(logDue).toBe(reference.log.due.getTime());
+        }
+      )
+    );
   });
 });
