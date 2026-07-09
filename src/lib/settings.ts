@@ -1,5 +1,6 @@
 import type IncrementalReadingPlugin from '#/main';
-import { PluginSettingTab, Setting, type App } from 'obsidian';
+import { PluginSettingTab, Setting, TextComponent, type App } from 'obsidian';
+import { FSRSParameters, generatorParameters } from 'ts-fsrs';
 import {
   DATA_DIRECTORY,
   DAY_ROLLOVER_OFFSET_HOURS,
@@ -18,7 +19,11 @@ export interface IRPluginSettings {
   showAdvancedImportCommands: boolean;
   showAdvancedImportMenuItems: boolean;
   fuzzTextReviews: boolean; // intra-day fuzzing for items except cards
+  fsrsParams: FSRSParameters;
 }
+
+const FSRS_PARAMETER_DEFAULTS = generatorParameters();
+
 export const DEFAULT_SETTINGS: IRPluginSettings = {
   defaultPriority: DEFAULT_PRIORITY,
   showImportDialog: true,
@@ -28,6 +33,7 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   showAdvancedImportCommands: false,
   showAdvancedImportMenuItems: false,
   fuzzTextReviews: true,
+  fsrsParams: FSRS_PARAMETER_DEFAULTS,
 };
 
 export class IRSettingTab extends PluginSettingTab {
@@ -42,6 +48,8 @@ export class IRSettingTab extends PluginSettingTab {
     const { containerEl } = this;
 
     containerEl.empty();
+
+    new Setting(containerEl).setName('Imports').setHeading();
 
     new Setting(containerEl)
       .setName('Default article priority')
@@ -163,6 +171,73 @@ export class IRSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.showAdvancedImportMenuItems)
           .onChange(async (value) => {
             this.plugin.settings.showAdvancedImportMenuItems = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl).setName('Spaced Repetition').setHeading();
+
+    new Setting(containerEl)
+      .setName('Fuzz review intervals')
+      .setDesc(
+        `Add controlled randomness to subsequent card reviews. Does not affect articles or snippets.`
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.fsrsParams.enable_fuzz)
+          .onChange(async (value) => {
+            this.plugin.settings.fsrsParams.enable_fuzz = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Enable short-term card scheduling')
+      .setDesc(
+        `Schedule cards for next review in a few minutes in some cases where the user chooses a review grade below Easy. Recommended: off.`
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.fsrsParams.enable_short_term)
+          .onChange(async (value) => {
+            this.plugin.settings.fsrsParams.enable_short_term = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Targeted retention')
+      .setDesc(
+        `The card recall score (out of 1) to aim for. Card reviews will be scheduled to target this score. 0.9 is optimal in most cases.`
+      )
+      .addComponent((el) => new TextComponent(el))
+      .addSlider((slider) => {
+        slider
+          .setLimits(0.8, 0.95, 0.01)
+          .setValue(this.plugin.settings.fsrsParams.request_retention)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.fsrsParams.request_retention = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Maximum review interval')
+      .setDesc(
+        `Soft ceiling on the time between card reviews. Fuzzing can exceed this limit slightly. Default: 36,500 days (~10 years).`
+      )
+      .addText((text) => {
+        text
+          .setValue(this.plugin.settings.fsrsParams.maximum_interval.toString())
+          .onChange(async (value) => {
+            const asNum = Number.parseInt(value);
+            if (Number.isNaN(asNum)) {
+              // reject the change and restore previous value
+              return;
+            }
+
+            this.plugin.settings.fsrsParams.maximum_interval = asNum;
             await this.plugin.saveSettings();
           });
       });

@@ -8,7 +8,7 @@ import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import type { TFile } from 'obsidian';
 import { Notice, type Editor, type MarkdownView } from 'obsidian';
-import type { FSRS, FSRSParameters, Grade, StateType } from 'ts-fsrs';
+import type { Grade, StateType } from 'ts-fsrs';
 import { fsrs, generatorParameters, State } from 'ts-fsrs';
 import {
   CARD_ANSWER_REPLACEMENT,
@@ -31,18 +31,9 @@ import { ItemManager } from './ItemManager';
 import SRSCard from './SRSCard';
 import SRSCardReview from './SRSCardReview';
 
-const FSRS_PARAMETER_DEFAULTS: Partial<FSRSParameters> = {
-  enable_fuzz: false,
-  enable_short_term: false,
-};
-
 export class CardManager extends ItemManager {
-  #fsrs: FSRS;
-
   constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
     super(plugin, repo);
-    const params = generatorParameters(FSRS_PARAMETER_DEFAULTS);
-    this.#fsrs = fsrs(params);
   }
 
   static rowToDisplay(cardRow: SRSCardRow): ISRSCardDisplay {
@@ -479,8 +470,13 @@ export class CardManager extends ItemManager {
     return ((await this.repo.query(query, params)) ?? []) as SRSCardRow[];
   }
 
+  getFsrs() {
+    const params = generatorParameters(this.plugin.settings.fsrsParams);
+    return fsrs(params);
+  }
+
   async review(card: ISRSCardDisplay, grade: Grade, reviewTime?: Date) {
-    const recordLog = this.#fsrs.repeat(
+    const recordLog = this.getFsrs().repeat(
       card,
       reviewTime || new Date(),
       (recordLog) => {
