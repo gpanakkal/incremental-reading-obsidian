@@ -98,6 +98,8 @@ export class IRSettingTab extends PluginSettingTab {
           });
       });
 
+    new Setting(containerEl).setName('Reviews').setHeading();
+
     new Setting(containerEl)
       .setName('End-of-day shift')
       .setDesc(
@@ -134,7 +136,7 @@ export class IRSettingTab extends PluginSettingTab {
           });
       });
 
-    new Setting(containerEl).setName('Advanced').setHeading();
+    new Setting(containerEl).setName('Shortcuts').setHeading();
 
     new Setting(containerEl)
       .setName('Enable extra import hotkeys')
