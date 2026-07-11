@@ -1,5 +1,5 @@
 import type IncrementalReadingPlugin from '#/main';
-import { PluginSettingTab, Setting, TextComponent, type App } from 'obsidian';
+import { PluginSettingTab, Setting, type App } from 'obsidian';
 import { FSRSParameters, generatorParameters } from 'ts-fsrs';
 import {
   DATA_DIRECTORY,
@@ -210,7 +210,6 @@ export class IRSettingTab extends PluginSettingTab {
       .setDesc(
         `The card recall score (out of 1) to aim for. Card reviews will be scheduled to target this score. 0.9 is optimal in most cases.`
       )
-      .addComponent((el) => new TextComponent(el))
       .addSlider((slider) => {
         slider
           .setLimits(0.8, 0.95, 0.01)
