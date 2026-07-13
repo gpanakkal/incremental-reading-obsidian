@@ -475,7 +475,8 @@ export class ArticleManager extends ItemManager {
       query += ' WHERE ' + conditions.join(' AND ');
     }
 
-    query += ' ORDER BY priority DESC';
+    // fuzzed due ASC (nulls last) so LIMIT truncates in presentation order
+    query += ' ORDER BY (due IS NULL), due + COALESCE(due_fuzz, 0)';
 
     if (opts?.limit) {
       params.push(opts?.limit);
