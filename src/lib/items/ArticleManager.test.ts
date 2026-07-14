@@ -25,7 +25,11 @@ import type {
 } from '#/lib/types';
 import { getEndOfToday } from '#/lib/utils';
 import fc from 'fast-check';
+import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
+import { resolve } from 'path';
+import type { Database } from 'sql.js';
+import initSqlJs from 'sql.js';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ArticleManager } from './ArticleManager';
@@ -153,6 +157,60 @@ function makeApp(): Record<string, unknown> {
     metadataCache: { getFileCache: () => undefined },
     fileManager: { processFrontMatter: async () => undefined },
   };
+}
+
+/**
+ * A repo backed by a real in-memory sql.js database, so ORDER BY / LIMIT
+ * clauses are actually executed (mock repos ignore them).
+ */
+async function makeSqlJsRepo(): Promise<{
+  repo: SQLiteRepository;
+  db: Database;
+}> {
+  const dbDir = resolve(__dirname, '../../db');
+  const wasmBinary = readFileSync(resolve(__dirname, '../../db/sql-wasm.wasm'));
+  const SQL = await initSqlJs({
+    wasmBinary: wasmBinary as unknown as ArrayBuffer,
+  });
+  const db = new SQL.Database();
+  db.exec(readFileSync(resolve(dbDir, 'schema.sql'), 'utf-8'));
+
+  const query = (sql: string, params: unknown[] = []) => {
+    const results = db.exec(sql, params as never);
+    if (!results.length) return [];
+    const { columns, values } = results[0];
+    return values.map((row) =>
+      Object.fromEntries(columns.map((col, i) => [col, row[i]]))
+    );
+  };
+  const repo = {
+    query: vi.fn().mockImplementation(query),
+    mutate: vi.fn().mockImplementation((sql: string, params: unknown[]) => {
+      query(sql, params);
+      return [[]];
+    }),
+    _execSql: vi.fn(),
+    handleFileChange: vi.fn(),
+  } as unknown as SQLiteRepository;
+  return { repo, db };
+}
+
+function insertArticleRow(
+  db: Database,
+  row: { id: string; due: number; due_fuzz: number | null; priority: number }
+) {
+  db.exec(
+    `INSERT INTO article (id, reference, due, due_fuzz, interval, priority)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      row.id,
+      `articles/${row.id}.md`,
+      row.due,
+      row.due_fuzz,
+      TEXT_BASE_REVIEW_INTERVAL,
+      row.priority,
+    ]
+  );
 }
 // #endregion
 
@@ -356,6 +414,74 @@ describe('getDue', () => {
         }
       )
     );
+  });
+
+  describe('with a real SQLite database', () => {
+    it('applies the SQL limit in fuzzed-due order, not priority order', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      const now = new Date('2026-01-10T12:00:00Z').getTime();
+      // The highest-priority article is effectively due LAST once fuzz is
+      // applied, so a limited fetch must not return it first.
+      insertArticleRow(db, {
+        id: 'later-fuzzed',
+        due: now - 1_000,
+        due_fuzz: 900,
+        priority: MAXIMUM_PRIORITY,
+      });
+      insertArticleRow(db, {
+        id: 'earlier-fuzzed',
+        due: now - 2_000,
+        due_fuzz: 100,
+        priority: MINIMUM_PRIORITY,
+      });
+      const plugin = {
+        app: makeApp(),
+        settings: { dayRolloverOffset: 0, fuzzTextReviews: true },
+      } as never;
+      const manager = new ArticleManager(plugin, repo);
+
+      const results = await manager.getDue(now, 1);
+
+      expect(results.map((r) => r.data.id)).toEqual(['earlier-fuzzed']);
+    });
+
+    it('orders by fuzzed due even when fuzzTextReviews is disabled', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      const now = new Date('2026-01-10T12:00:00Z').getTime();
+      // Priorities are the reverse of fuzzed-due order; stored fuzz must
+      // still determine presentation order when the setting is off.
+      insertArticleRow(db, {
+        id: 'third',
+        due: now - 100,
+        due_fuzz: null,
+        priority: MAXIMUM_PRIORITY,
+      });
+      insertArticleRow(db, {
+        id: 'first',
+        due: now - 5_000,
+        due_fuzz: 1_000,
+        priority: MINIMUM_PRIORITY,
+      });
+      insertArticleRow(db, {
+        id: 'second',
+        due: now - 3_000,
+        due_fuzz: null,
+        priority: DEFAULT_PRIORITY,
+      });
+      const plugin = {
+        app: makeApp(),
+        settings: { dayRolloverOffset: 0, fuzzTextReviews: false },
+      } as never;
+      const manager = new ArticleManager(plugin, repo);
+
+      const results = await manager.getDue(now);
+
+      expect(results.map((r) => r.data.id)).toEqual([
+        'first',
+        'second',
+        'third',
+      ]);
+    });
   });
 
   it('skips rows whose note file is missing and retries until all results have files', async () => {
@@ -628,7 +754,9 @@ describe('rowToReviewArticle', () => {
     await Promise.resolve();
     const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls as [string, unknown[]][];
-    const deleteCall = mutateCalls.find(([sql]) => sql.includes('SET deleted = 1'));
+    const deleteCall = mutateCalls.find(([sql]) =>
+      sql.includes('SET deleted = 1')
+    );
     expect(deleteCall).toBeDefined();
     expect(deleteCall![1][0]).toBe(row.id);
   });
@@ -670,14 +798,20 @@ describe('rowToReviewArticle', () => {
     await Promise.resolve();
     const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls as [string, unknown[]][];
-    const deleteCall = mutateCalls.find(([sql]) => sql.includes('SET deleted = 1'));
+    const deleteCall = mutateCalls.find(([sql]) =>
+      sql.includes('SET deleted = 1')
+    );
     expect(deleteCall).toBeDefined();
   });
 
   it('calls setFrontmatter when the file has an ir-id but lacks the article tag', async () => {
     const fakeFile = { path: 'articles/test.md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    const row = makeArticleRow({ id: 'row-id-002', deleted: false, due_fuzz: 0 });
+    const row = makeArticleRow({
+      id: 'row-id-002',
+      deleted: false,
+      due_fuzz: 0,
+    });
     const processFrontMatterSpy = vi.fn().mockResolvedValue(undefined);
     const repo = makeSimpleRepo();
     const manager = new ArticleManager(
@@ -702,7 +836,11 @@ describe('rowToReviewArticle', () => {
   it('calls setFrontmatter when the file has matching ir-id but no tags field', async () => {
     const fakeFile = { path: 'articles/test.md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    const row = makeArticleRow({ id: 'row-id-003', deleted: false, due_fuzz: 0 });
+    const row = makeArticleRow({
+      id: 'row-id-003',
+      deleted: false,
+      due_fuzz: 0,
+    });
     const processFrontMatterSpy = vi.fn().mockResolvedValue(undefined);
     const repo = makeSimpleRepo();
     const manager = new ArticleManager(
@@ -727,7 +865,11 @@ describe('rowToReviewArticle', () => {
   it('does not call setFrontmatter when the file has both matching ir-id and the article tag', async () => {
     const fakeFile = { path: 'articles/test.md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    const row = makeArticleRow({ id: 'row-id-004', deleted: false, due_fuzz: 0 });
+    const row = makeArticleRow({
+      id: 'row-id-004',
+      deleted: false,
+      due_fuzz: 0,
+    });
     const processFrontMatterSpy = vi.fn().mockResolvedValue(undefined);
     const repo = makeSimpleRepo();
     const manager = new ArticleManager(
@@ -752,7 +894,11 @@ describe('rowToReviewArticle', () => {
   it('does not call markUndeleted when the file exists and the row is not deleted', async () => {
     const fakeFile = { path: 'articles/test.md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    const row = makeArticleRow({ deleted: false, due_fuzz: 0, id: 'row-id-005' });
+    const row = makeArticleRow({
+      deleted: false,
+      due_fuzz: 0,
+      id: 'row-id-005',
+    });
     const repo = makeSimpleRepo();
     const manager = new ArticleManager(
       {
@@ -772,7 +918,9 @@ describe('rowToReviewArticle', () => {
     await Promise.resolve();
     const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls as [string, unknown[]][];
-    const undeleteCall = mutateCalls.find(([sql]) => sql.includes('SET deleted = 0'));
+    const undeleteCall = mutateCalls.find(([sql]) =>
+      sql.includes('SET deleted = 0')
+    );
     expect(undeleteCall).toBeUndefined();
   });
 
@@ -948,12 +1096,14 @@ describe('fetchMany', () => {
     expect(sql).toContain(' WHERE ');
   });
 
-  it('orders results by priority DESC', async () => {
+  it('orders results by fuzzed due ascending with null dues last', async () => {
     const repo = makeSimpleRepo();
     const manager = new ArticleManager({} as never, repo);
     await manager.fetchMany();
     const [sql] = lastQueryCall(repo);
-    expect(sql).toMatch(/ORDER BY priority DESC/i);
+    expect(sql).toMatch(
+      /ORDER BY \(due IS NULL\), due \+ COALESCE\(due_fuzz, 0\)/i
+    );
   });
 });
 
@@ -1484,7 +1634,9 @@ describe('fetchMany (includeDeleted option)', () => {
     const repo = makeSimpleRepo();
     const manager = new ArticleManager({} as never, repo);
     const excludeIds = Array.from({ length: 1000 }, (_, i) => `id-${i}`);
-    await expect(manager.fetchMany({ excludeIds })).rejects.toThrow(/exceeded/i);
+    await expect(manager.fetchMany({ excludeIds })).rejects.toThrow(
+      /exceeded/i
+    );
   });
 });
 
@@ -1529,9 +1681,9 @@ describe('setFixedInterval (error handling)', () => {
     await expect(
       manager.setFixedInterval(makeArticle(), MINIMUM_FIXED_REVIEW_INTERVAL - 1)
     ).resolves.toBeUndefined();
-    expect(
-      (repo.mutate as ReturnType<typeof vi.fn>).mock.calls
-    ).toHaveLength(0);
+    expect((repo.mutate as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+      0
+    );
   });
 });
 
@@ -1546,9 +1698,9 @@ describe('disableFixedInterval (error handling)', () => {
     await expect(
       manager.disableFixedInterval(makeArticle(), MINIMUM_PRIORITY - 1)
     ).resolves.toBeUndefined();
-    expect(
-      (repo.mutate as ReturnType<typeof vi.fn>).mock.calls
-    ).toHaveLength(0);
+    expect((repo.mutate as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+      0
+    );
   });
 });
 
@@ -1565,8 +1717,16 @@ describe('getDue (filter correctness)', () => {
     // rowToReviewArticle returns null when getNote returns null.
     // Mutant: `!!article && article.file !== null` → `true` would include nulls.
     // Rows must have distinct references so the mock can discriminate.
-    const rowNoFile = makeArticleRow({ id: 'null-item', reference: 'articles/no-file.md', due: 0 });
-    const rowWithFile = makeArticleRow({ id: 'real-item', reference: 'articles/with-file.md', due: 0 });
+    const rowNoFile = makeArticleRow({
+      id: 'null-item',
+      reference: 'articles/no-file.md',
+      due: 0,
+    });
+    const rowWithFile = makeArticleRow({
+      id: 'real-item',
+      reference: 'articles/with-file.md',
+      due: 0,
+    });
     const file = { path: 'articles/with-file.md' } as TFile;
 
     vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) =>
@@ -1578,9 +1738,7 @@ describe('getDue (filter correctness)', () => {
       query: vi.fn().mockImplementation((_sql: string, params: unknown[]) => {
         callCount++;
         const excluded = params.slice(1) as string[];
-        return [rowNoFile, rowWithFile].filter(
-          (r) => !excluded.includes(r.id)
-        );
+        return [rowNoFile, rowWithFile].filter((r) => !excluded.includes(r.id));
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
@@ -1603,8 +1761,16 @@ describe('getDue (filter correctness)', () => {
     // Mutant: lastMissingNotes += 1 → lastMissingNotes -= 1 would cause the loop
     // to terminate after one pass even when items are still missing.
     // Rows must have distinct references so the mock can discriminate.
-    const missingRow = makeArticleRow({ id: 'missing', reference: 'articles/missing.md', due: 0 });
-    const presentRow = makeArticleRow({ id: 'present', reference: 'articles/present.md', due: 0 });
+    const missingRow = makeArticleRow({
+      id: 'missing',
+      reference: 'articles/missing.md',
+      due: 0,
+    });
+    const presentRow = makeArticleRow({
+      id: 'present',
+      reference: 'articles/present.md',
+      due: 0,
+    });
     const file = { path: 'articles/present.md' } as TFile;
 
     vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) =>
@@ -1620,9 +1786,7 @@ describe('getDue (filter correctness)', () => {
         const excluded = params.filter(
           (p): p is string => typeof p === 'string'
         );
-        return [missingRow, presentRow].filter(
-          (r) => !excluded.includes(r.id)
-        );
+        return [missingRow, presentRow].filter((r) => !excluded.includes(r.id));
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
@@ -1668,9 +1832,7 @@ describe('fuzzing (rowToReviewArticle)', () => {
 
     const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls as [string, unknown[]][];
-    const fuzzCall = mutateCalls.find(([sql]) =>
-      sql.includes('SET due_fuzz')
-    );
+    const fuzzCall = mutateCalls.find(([sql]) => sql.includes('SET due_fuzz'));
     expect(fuzzCall).toBeDefined();
     expect(fuzzCall![1][0]).toBe(3600000);
     expect(fuzzCall![1][1]).toBe(row.id);
