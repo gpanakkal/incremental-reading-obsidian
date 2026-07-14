@@ -19,7 +19,11 @@ import type {
 } from '#/lib/types';
 import { getEndOfToday } from '#/lib/utils';
 import fc from 'fast-check';
+import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
+import { resolve } from 'path';
+import type { Database } from 'sql.js';
+import initSqlJs from 'sql.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SnippetManager } from './SnippetManager';
 
@@ -129,6 +133,60 @@ function makeApp(): Record<string, unknown> {
     metadataCache: { getFileCache: () => undefined },
     fileManager: { processFrontMatter: async () => undefined },
   };
+}
+
+/**
+ * A repo backed by a real in-memory sql.js database, so ORDER BY / LIMIT
+ * clauses are actually executed (mock repos ignore them).
+ */
+async function makeSqlJsRepo(): Promise<{
+  repo: SQLiteRepository;
+  db: Database;
+}> {
+  const dbDir = resolve(__dirname, '../../db');
+  const wasmBinary = readFileSync(resolve(dbDir, 'sql-wasm.wasm'));
+  const SQL = await initSqlJs({
+    wasmBinary: wasmBinary as unknown as ArrayBuffer,
+  });
+  const db = new SQL.Database();
+  db.exec(readFileSync(resolve(dbDir, 'schema.sql'), 'utf-8'));
+
+  const query = (sql: string, params: unknown[] = []) => {
+    const results = db.exec(sql, params as never);
+    if (!results.length) return [];
+    const { columns, values } = results[0];
+    return values.map((row) =>
+      Object.fromEntries(columns.map((col, i) => [col, row[i]]))
+    );
+  };
+  const repo = {
+    query: vi.fn().mockImplementation(query),
+    mutate: vi.fn().mockImplementation((sql: string, params: unknown[]) => {
+      query(sql, params);
+      return [[]];
+    }),
+    _execSql: vi.fn(),
+    handleFileChange: vi.fn(),
+  } as unknown as SQLiteRepository;
+  return { repo, db };
+}
+
+function insertSnippetRow(
+  db: Database,
+  row: { id: string; due: number; due_fuzz: number | null; priority: number }
+) {
+  db.exec(
+    `INSERT INTO snippet (id, reference, due, due_fuzz, interval, priority)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      row.id,
+      `snippets/${row.id}.md`,
+      row.due,
+      row.due_fuzz,
+      TEXT_BASE_REVIEW_INTERVAL,
+      row.priority,
+    ]
+  );
 }
 // #endregion
 
@@ -270,7 +328,9 @@ describe('rowToReviewSnippet', () => {
     await Promise.resolve();
     const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls as [string, unknown[]][];
-    const deleteCall = mutateCalls.find(([sql]) => sql.includes('SET deleted = 1'));
+    const deleteCall = mutateCalls.find(([sql]) =>
+      sql.includes('SET deleted = 1')
+    );
     expect(deleteCall).toBeDefined();
     expect(deleteCall![1][0]).toBe(row.id);
   });
@@ -342,14 +402,20 @@ describe('rowToReviewSnippet', () => {
     await Promise.resolve();
     const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls as [string, unknown[]][];
-    const deleteCall = mutateCalls.find(([sql]) => sql.includes('SET deleted = 1'));
+    const deleteCall = mutateCalls.find(([sql]) =>
+      sql.includes('SET deleted = 1')
+    );
     expect(deleteCall).toBeDefined();
   });
 
   it('calls setFrontmatter when the file has an ir-id but lacks the snippet tag', async () => {
     const fakeFile = { path: 'snippets/test.md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    const row = makeSnippetRow({ id: 'row-id-002', deleted: false, due_fuzz: 0 });
+    const row = makeSnippetRow({
+      id: 'row-id-002',
+      deleted: false,
+      due_fuzz: 0,
+    });
     const processFrontMatterSpy = vi.fn().mockResolvedValue(undefined);
     const repo = makeSimpleRepo();
     const manager = new SnippetManager(
@@ -374,7 +440,11 @@ describe('rowToReviewSnippet', () => {
   it('does not call setFrontmatter when the file has both matching ir-id and the snippet tag', async () => {
     const fakeFile = { path: 'snippets/test.md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    const row = makeSnippetRow({ id: 'row-id-004', deleted: false, due_fuzz: 0 });
+    const row = makeSnippetRow({
+      id: 'row-id-004',
+      deleted: false,
+      due_fuzz: 0,
+    });
     const processFrontMatterSpy = vi.fn().mockResolvedValue(undefined);
     const repo = makeSimpleRepo();
     const manager = new SnippetManager(
@@ -399,7 +469,11 @@ describe('rowToReviewSnippet', () => {
   it('does not call markUndeleted when the file exists and the row is not deleted', async () => {
     const fakeFile = { path: 'snippets/test.md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    const row = makeSnippetRow({ deleted: false, due_fuzz: 0, id: 'row-id-005' });
+    const row = makeSnippetRow({
+      deleted: false,
+      due_fuzz: 0,
+      id: 'row-id-005',
+    });
     const repo = makeSimpleRepo();
     const manager = new SnippetManager(
       {
@@ -419,7 +493,9 @@ describe('rowToReviewSnippet', () => {
     await Promise.resolve();
     const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
       .calls as [string, unknown[]][];
-    const undeleteCall = mutateCalls.find(([sql]) => sql.includes('SET deleted = 0'));
+    const undeleteCall = mutateCalls.find(([sql]) =>
+      sql.includes('SET deleted = 0')
+    );
     expect(undeleteCall).toBeUndefined();
   });
 
@@ -619,12 +695,14 @@ describe('fetchMany', () => {
     expect(sql).toContain(' WHERE ');
   });
 
-  it('orders results by priority DESC', async () => {
+  it('orders results by fuzzed due ascending with null dues last', async () => {
     const repo = makeSimpleRepo();
     const manager = new SnippetManager({} as never, repo);
     await manager.fetchMany();
     const [sql] = lastQueryCall(repo);
-    expect(sql).toMatch(/ORDER BY priority DESC/i);
+    expect(sql).toMatch(
+      /ORDER BY \(due IS NULL\), due \+ COALESCE\(due_fuzz, 0\)/i
+    );
   });
 });
 
@@ -718,6 +796,36 @@ describe('getDue', () => {
     } as unknown as SQLiteRepository;
   }
 
+  describe('with a real SQLite database', () => {
+    it('applies the SQL limit in fuzzed-due order, not priority order', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      const now = new Date('2026-01-10T12:00:00Z').getTime();
+      // The highest-priority snippet is effectively due LAST once fuzz is
+      // applied, so a limited fetch must not return it first.
+      insertSnippetRow(db, {
+        id: 'later-fuzzed',
+        due: now - 1_000,
+        due_fuzz: 900,
+        priority: MAXIMUM_PRIORITY,
+      });
+      insertSnippetRow(db, {
+        id: 'earlier-fuzzed',
+        due: now - 2_000,
+        due_fuzz: 100,
+        priority: MINIMUM_PRIORITY,
+      });
+      const plugin = {
+        app: makeApp(),
+        settings: { dayRolloverOffset: 0, fuzzTextReviews: true },
+      } as never;
+      const manager = new SnippetManager(plugin, repo);
+
+      const results = await manager.getDue(now, 1);
+
+      expect(results.map((r) => r.data.id)).toEqual(['earlier-fuzzed']);
+    });
+  });
+
   it('returns snippets due at or before the offset-adjusted end of day, but not after', async () => {
     await fc.assert(
       fc.asyncProperty(
@@ -803,7 +911,10 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
 
-    const plugin = { app: makeApp(), settings: { dayRolloverOffset: 0 } } as never;
+    const plugin = {
+      app: makeApp(),
+      settings: { dayRolloverOffset: 0 },
+    } as never;
     const manager = new SnippetManager(plugin, repo);
     await manager.getDue(0, undefined, [rowA.id]);
 
@@ -826,7 +937,10 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
 
-    const plugin = { app: makeApp(), settings: { dayRolloverOffset: 0 } } as never;
+    const plugin = {
+      app: makeApp(),
+      settings: { dayRolloverOffset: 0 },
+    } as never;
     const manager = new SnippetManager(plugin, repo);
     await manager.getDue(1);
 
@@ -864,7 +978,10 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
     } as unknown as SQLiteRepository;
 
-    const plugin = { app: makeApp(), settings: { dayRolloverOffset: 0 } } as never;
+    const plugin = {
+      app: makeApp(),
+      settings: { dayRolloverOffset: 0 },
+    } as never;
     const manager = new SnippetManager(plugin, repo);
     const results = await manager.getDue(1);
     expect(results.map((r) => r.data.id)).not.toContain('no-file-filter');

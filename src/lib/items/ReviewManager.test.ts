@@ -378,6 +378,288 @@ describe('ReviewManager.getDue', () => {
 });
 
 // ---------------------------------------------------------------------------
+// getQueue — maps due rows to a unified, redacted QueueRow[]
+// ---------------------------------------------------------------------------
+
+describe('ReviewManager.getQueue', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Wire a manager so each sub-manager's `fetchMany` returns the given rows and
+   * every reference resolves to a distinct fake TFile. Returns the manager.
+   */
+  function wireQueue(rows: {
+    articles?: ArticleRow[];
+    snippets?: SnippetRow[];
+    cards?: SRSCardRow[];
+  }) {
+    const repo = makeRepo();
+    const manager = new ReviewManager(makePlugin(), repo);
+    vi.spyOn(manager.articles, 'fetchMany').mockResolvedValue(
+      (rows.articles ?? []) as never
+    );
+    vi.spyOn(manager.snippets, 'fetchMany').mockResolvedValue(
+      (rows.snippets ?? []) as never
+    );
+    vi.spyOn(manager.cards, 'fetchMany').mockResolvedValue(
+      (rows.cards ?? []) as never
+    );
+    // Every reference resolves to a file whose path is the reference itself.
+    vi.spyOn(Obsidian, 'getNote').mockImplementation(
+      (reference: string) => ({ path: reference }) as TFile
+    );
+    return manager;
+  }
+
+  it('maps a due article to a QueueRow with id, type, reference, due, and file', async () => {
+    const row = makeArticleRow({
+      id: 'a1',
+      reference: 'articles/a1.md',
+      due: YEAR_2000_MS,
+      due_fuzz: null,
+    });
+    const manager = wireQueue({ articles: [row] });
+
+    const queue = await manager.getQueue({ kind: 'due' });
+
+    expect(queue).toHaveLength(1);
+    const [item] = queue;
+    expect(item.id).toBe('a1');
+    expect(item.type).toBe('article');
+    expect(item.reference).toBe('articles/a1.md');
+    expect(item.due).toEqual(new Date(YEAR_2000_MS));
+    expect(item.file.path).toBe('articles/a1.md');
+  });
+
+  it('omits redacted fields (due_fuzz, scroll_top, offsets, dismissed, deleted) from every QueueRow', async () => {
+    const manager = wireQueue({
+      articles: [makeArticleRow({ id: 'a1', reference: 'articles/a1.md' })],
+      snippets: [
+        makeSnippetRow({
+          id: 's1',
+          reference: 'snippets/s1.md',
+          start_offset: 5,
+          end_offset: 9,
+        }),
+      ],
+      cards: [makeCardRow({ id: 'c1', reference: 'cards/c1.md' })],
+    });
+
+    const queue = await manager.getQueue({ kind: 'due' });
+
+    const forbidden = [
+      'due_fuzz',
+      'scroll_top',
+      'start_offset',
+      'end_offset',
+      'dismissed',
+      'deleted',
+    ];
+    expect(queue).toHaveLength(3);
+    for (const item of queue) {
+      for (const key of forbidden) {
+        expect(item).not.toHaveProperty(key);
+      }
+    }
+  });
+
+  it('applies due_fuzz to the due date for text items', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: YEAR_2000_MS, max: YEAR_2100_MS }),
+        fc.integer({ min: -MS_PER_DAY, max: MS_PER_DAY }),
+        async (due, fuzz) => {
+          vi.restoreAllMocks();
+          const manager = wireQueue({
+            articles: [
+              makeArticleRow({
+                id: 'a1',
+                reference: 'articles/a1.md',
+                due,
+                due_fuzz: fuzz,
+              }),
+            ],
+          });
+          const [item] = await manager.getQueue({ kind: 'due' });
+          expect(item.due?.getTime()).toBe(due + fuzz);
+        }
+      )
+    );
+  });
+
+  it('treats a null due_fuzz as zero fuzz', async () => {
+    const manager = wireQueue({
+      articles: [
+        makeArticleRow({
+          id: 'a1',
+          reference: 'articles/a1.md',
+          due: YEAR_2000_MS,
+          due_fuzz: null,
+        }),
+      ],
+    });
+    const [item] = await manager.getQueue({ kind: 'due' });
+    expect(item.due?.getTime()).toBe(YEAR_2000_MS);
+  });
+
+  it('maps a null due to null (not the epoch) for articles and snippets', async () => {
+    const manager = wireQueue({
+      articles: [
+        makeArticleRow({
+          id: 'a1',
+          reference: 'articles/a1.md',
+          due: null,
+          due_fuzz: 500,
+        }),
+      ],
+      snippets: [
+        makeSnippetRow({
+          id: 's1',
+          reference: 'snippets/s1.md',
+          due: null,
+          due_fuzz: null,
+        }),
+      ],
+    });
+    const queue = await manager.getQueue({ kind: 'due' });
+    expect(queue).toHaveLength(2);
+    for (const item of queue) {
+      expect(item.due).toBeNull();
+    }
+  });
+
+  it('sorts rows with no due time after every dated row', async () => {
+    const manager = wireQueue({
+      articles: [
+        makeArticleRow({
+          id: 'undated',
+          reference: 'articles/undated.md',
+          due: null,
+        }),
+        makeArticleRow({ id: 'dated', reference: 'articles/dated.md', due: 1 }),
+      ],
+    });
+    const queue = await manager.getQueue({ kind: 'due' });
+    expect(queue.map((r) => r.id)).toEqual(['dated', 'undated']);
+  });
+
+  it('does not fuzz card due dates (cards have no fuzz)', async () => {
+    const manager = wireQueue({
+      cards: [
+        makeCardRow({ id: 'c1', reference: 'cards/c1.md', due: YEAR_2000_MS }),
+      ],
+    });
+    const [item] = await manager.getQueue({ kind: 'due' });
+    expect(item.due?.getTime()).toBe(YEAR_2000_MS);
+    expect(item.scheduling).toEqual({ kind: 'none', value: null });
+  });
+
+  it('shows an article its fixed interval when set, never its priority', async () => {
+    const manager = wireQueue({
+      articles: [
+        makeArticleRow({
+          id: 'a1',
+          reference: 'articles/a1.md',
+          fixed_interval_days: 7,
+          priority: 30,
+        }),
+      ],
+    });
+    const [item] = await manager.getQueue({ kind: 'due' });
+    expect(item.scheduling).toEqual({ kind: 'fixed-interval', value: '7' });
+  });
+
+  it('shows an article its priority when it has no fixed interval', async () => {
+    const manager = wireQueue({
+      articles: [
+        makeArticleRow({
+          id: 'a1',
+          reference: 'articles/a1.md',
+          fixed_interval_days: null,
+          priority: 42,
+        }),
+      ],
+    });
+    const [item] = await manager.getQueue({ kind: 'due' });
+    expect(item.scheduling).toEqual({ kind: 'priority', value: '4.2' });
+  });
+
+  it('schedules snippets by priority', async () => {
+    const manager = wireQueue({
+      snippets: [
+        makeSnippetRow({ id: 's1', reference: 'snippets/s1.md', priority: 15 }),
+      ],
+    });
+    const [item] = await manager.getQueue({ kind: 'due' });
+    expect(item.scheduling).toEqual({ kind: 'priority', value: '1.5' });
+  });
+
+  it('sorts the whole queue by fuzzed due ascending across all types', async () => {
+    // article fuzzes from 3000 down to 1500 (earliest), card sits at 2000,
+    // snippet at 3000 — so fuzzed order is article, card, snippet.
+    const manager = wireQueue({
+      articles: [
+        makeArticleRow({
+          id: 'a',
+          reference: 'articles/a.md',
+          due: 3000,
+          due_fuzz: -1500,
+        }),
+      ],
+      cards: [makeCardRow({ id: 'c', reference: 'cards/c.md', due: 2000 })],
+      snippets: [
+        makeSnippetRow({
+          id: 's',
+          reference: 'snippets/s.md',
+          due: 3000,
+          due_fuzz: 0,
+        }),
+      ],
+    });
+    const queue = await manager.getQueue({ kind: 'due' });
+    expect(queue.map((r) => r.id)).toEqual(['a', 'c', 's']);
+  });
+
+  it('returns an empty array when nothing is due', async () => {
+    const manager = wireQueue({});
+    const queue = await manager.getQueue({ kind: 'due' });
+    expect(queue).toEqual([]);
+  });
+
+  it('drops items whose note cannot be resolved', async () => {
+    const repo = makeRepo();
+    const manager = new ReviewManager(makePlugin(), repo);
+    vi.spyOn(manager.articles, 'fetchMany').mockResolvedValue([
+      makeArticleRow({ id: 'gone', reference: 'articles/gone.md' }),
+      makeArticleRow({ id: 'here', reference: 'articles/here.md' }),
+    ] as never);
+    vi.spyOn(manager.snippets, 'fetchMany').mockResolvedValue([] as never);
+    vi.spyOn(manager.cards, 'fetchMany').mockResolvedValue([] as never);
+    vi.spyOn(Obsidian, 'getNote').mockImplementation((reference: string) =>
+      reference === 'articles/here.md' ? ({ path: reference } as TFile) : null
+    );
+    const queue = await manager.getQueue({ kind: 'due' });
+    expect(queue.map((r) => r.id)).toEqual(['here']);
+  });
+
+  it('uses the end of the given day when a date is supplied', async () => {
+    const repo = makeRepo();
+    const manager = new ReviewManager(makePlugin(), repo);
+    const articleFetch = vi
+      .spyOn(manager.articles, 'fetchMany')
+      .mockResolvedValue([] as never);
+    vi.spyOn(manager.snippets, 'fetchMany').mockResolvedValue([] as never);
+    vi.spyOn(manager.cards, 'fetchMany').mockResolvedValue([] as never);
+    vi.spyOn(Obsidian, 'getNote').mockReturnValue(null);
+    const date = new Date(YEAR_2000_MS);
+    await manager.getQueue({ kind: 'due', date });
+    expect(articleFetch).toHaveBeenCalledWith({ dueBy: date.getTime() });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Delegation tests — simple passthrough methods
 // ---------------------------------------------------------------------------
 
@@ -1314,6 +1596,32 @@ describe('ReviewManager.getDue sort order', () => {
     });
     const ids = result.all.map((r) => r.data.id);
     expect(ids).toEqual(['snip', 'card', `article-${t3}`]);
+  });
+
+  it('folds due_fuzz into the cross-type sort, matching getQueue order', async () => {
+    const repo = makeRepo();
+    const manager = new ReviewManager(makePlugin(), repo);
+    // article fuzzes from 3000 down to 1500 (earliest), card sits at 2000,
+    // snippet at 3000 — so fuzzed order is article, card, snippet.
+    const article: ReviewArticle = {
+      data: makeArticleBase({ id: 'art', due: 3000, due_fuzz: -1500 }),
+      file: FAKE_FILE,
+    };
+    const snippet: ReviewSnippet = {
+      data: makeSnippetBase({ id: 'snip', due: 3000, due_fuzz: 0 }),
+      file: FAKE_FILE,
+    };
+    const card: ReviewCard = {
+      data: CardManager.rowToDisplay(makeCardRow({ id: 'card', due: 2000 })),
+      file: FAKE_FILE,
+    };
+    vi.spyOn(manager.articles, 'getDue').mockResolvedValue([article]);
+    vi.spyOn(manager.snippets, 'getDue').mockResolvedValue([snippet]);
+    vi.spyOn(manager.cards, 'getDue').mockResolvedValue([card]);
+    const result = await manager.getDue({
+      typesToInclude: { article: true, snippet: true, card: true },
+    });
+    expect(result.all.map((r) => r.data.id)).toEqual(['art', 'card', 'snip']);
   });
 });
 
