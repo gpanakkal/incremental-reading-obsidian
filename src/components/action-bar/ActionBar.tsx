@@ -34,6 +34,7 @@ import { ReviewTypeFilter } from './ReviewTypeFilter';
 export function ActionBar() {
   const page = useAppSelector((state) => state.page);
   const { data: currentItem } = useCurrentItem();
+  const dispatch = useDispatch();
 
   return (
     <div className="ir-action-bar" tabIndex={-1}>
@@ -41,19 +42,29 @@ export function ActionBar() {
       {page === 'home' ? (
         <HomeActions />
       ) : (
-        currentItem && (
-          <>
-            {isReviewCard(currentItem) && <CardActions card={currentItem} />}
-            {isReviewText(currentItem) && <TextActions text={currentItem} />}
-            {isReviewArticle(currentItem) && (
-              <ArticleActions article={currentItem} />
-            )}
-            {isReviewSnippet(currentItem) && (
-              <SnippetActions snippet={currentItem} />
-            )}
-            <ItemActions reviewItem={currentItem} />
-          </>
-        )
+        <>
+          <ButtonWithIcon
+            tooltip="Go to home screen"
+            handleClick={() => {
+              dispatch(setPage('home'));
+            }}
+          >
+            <House />
+          </ButtonWithIcon>
+          {currentItem && (
+            <>
+              {isReviewCard(currentItem) && <CardActions card={currentItem} />}
+              {isReviewText(currentItem) && <TextActions text={currentItem} />}
+              {isReviewArticle(currentItem) && (
+                <ArticleActions article={currentItem} />
+              )}
+              {isReviewSnippet(currentItem) && (
+                <SnippetActions snippet={currentItem} />
+              )}
+              <ItemActions reviewItem={currentItem} />
+            </>
+          )}
+        </>
       )}
       <GlobalActions />
     </div>
@@ -94,20 +105,11 @@ function GlobalActions() {
  * Actions common to articles, snippets, and cards
  */
 function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
-  const dispatch = useDispatch();
   const { actions } = useReviewContext();
   const isDismissed = reviewItem.data.dismissed;
 
   return (
     <>
-      <ButtonWithIcon
-        tooltip="Go to home screen"
-        handleClick={() => {
-          dispatch(setPage('home'));
-        }}
-      >
-        <House />
-      </ButtonWithIcon>
       {isDismissed ? (
         <ButtonWithIcon
           tooltip="Restore item to queue"
