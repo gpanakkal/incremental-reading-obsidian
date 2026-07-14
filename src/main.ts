@@ -23,7 +23,7 @@ import { SQLJSRepository } from './lib/repository/SQLJSRepository';
 import { initReviewCommands } from './lib/review-commands';
 import type { IRPluginSettings } from './lib/settings';
 import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
-import { setCurrentItemId, store } from './lib/store';
+import { setCurrentItemId, setPage, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
 import { ImportModal } from './views/ImportModal';
 import ReviewView from './views/ReviewView';
@@ -400,12 +400,19 @@ export default class IncrementalReadingPlugin extends Plugin {
       type: ReviewView.viewType,
       active: true,
     });
+    // Only pick the landing page when instantiating a fresh view; an existing
+    // view keeps its page (e.g. mid-review) regardless of skipHomeScreen.
+    if (!openReviewLeaf) {
+      store.dispatch(setPage(this.settings.skipHomeScreen ? 'review' : 'home'));
+    }
     // Set the initial item on the view if provided
     if (initialItem) {
       if (!openReviewLeaf) {
         (leaf.view as ReviewView).initialItem = initialItem;
       }
       store.dispatch(setCurrentItemId(initialItem.data.id));
+      // An explicit item always lands in review, never on the home screen
+      store.dispatch(setPage('review'));
     } else {
       // If the view was already open, invalidate the query to trigger a refetch
       // This ensures the new initial item is displayed immediately
