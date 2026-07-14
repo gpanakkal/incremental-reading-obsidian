@@ -77,6 +77,7 @@ function HomeActions() {
   return (
     <TextButton
       tooltip="Start reviewing the queue"
+      id="begin-review-button"
       handleClick={() => {
         dispatch(setPage('review'));
       }}
@@ -300,14 +301,17 @@ function ButtonWithIcon({
   handleClick,
   disabled,
   tooltip,
+  id,
 }: React.PropsWithChildren<{
   handleClick: (e: MouseEvent) => Promise<void> | void;
   disabled?: boolean;
   tooltip?: string;
+  id?: string;
 }>) {
   return (
     <button
       className="ir-review-button clickable-icon"
+      id={id}
       onClick={(e) => void handleClick(e)}
       title={tooltip}
       disabled={disabled}
@@ -322,14 +326,17 @@ function TextButton({
   handleClick,
   disabled,
   tooltip,
+  id,
 }: React.PropsWithChildren<{
   handleClick: (e: MouseEvent) => Promise<void> | void;
   disabled?: boolean;
   tooltip?: string;
+  id?: string;
 }>) {
   return (
     <button
       className="ir-review-button"
+      id={id}
       onClick={(e) => void handleClick(e)}
       title={tooltip}
       disabled={disabled}
