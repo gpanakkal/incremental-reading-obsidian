@@ -2,7 +2,7 @@ import { createReviewInterface } from '#/components/ReviewInterface';
 import { PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
-import { resetSession } from '#/lib/store';
+import { resetSession, type ReviewPage } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type { IconName, TFile, WorkspaceLeaf } from 'obsidian';
@@ -23,6 +23,7 @@ export default class ReviewView extends FileView {
    * Set this before opening the view to jump to a specific item.
    */
   initialItem: ReviewItem | null = null;
+  #page: ReviewPage;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -33,16 +34,34 @@ export default class ReviewView extends FileView {
     this.allowNoFile = true;
     this.plugin = plugin;
     this.#reviewManager = reviewManager;
+    this.#page = plugin.store.getState().page;
+
+    const unsub = plugin.store.subscribe(() => {
+      const currentPage = plugin.store.getState().page;
+      if (currentPage !== this.#page) {
+        this.#page = plugin.store.getState().page;
+        this.setTitle();
+      }
+    });
+    this.register(() => unsub());
   }
 
-  /** Synchronously set file and title.
+  /**
+   * Synchronously set file and title.
    * Use when fetching a new item
    */
   setFile(file: TFile | null) {
     this.file = file;
-    if (file) {
-      this.leaf.tabHeaderInnerTitleEl.setText(file.basename);
-      this.titleEl.setText(file.basename);
+    this.setTitle();
+  }
+
+  /**
+   * Call when fetching a new item or changing page
+   */
+  setTitle() {
+    if (this.file && this.#page === 'review') {
+      this.leaf.tabHeaderInnerTitleEl.setText(this.file.basename);
+      this.titleEl.setText(this.file.basename);
     } else {
       this.leaf.tabHeaderInnerTitleEl.setText('Incremental reading');
       this.titleEl.setText('Incremental reading');
