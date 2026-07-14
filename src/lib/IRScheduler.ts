@@ -322,7 +322,7 @@ export default class IRScheduler {
     if (radiusMs <= 0) throw new Error(`radiusMs must be a positive value`);
 
     const roll = Math.random();
-    const scaled = (roll - 0.5) * radiusMs * 2;
+    const scaled = Math.round((roll - 0.5) * radiusMs * 2);
     return clamp(scaled, -radiusMs, radiusMs);
   }
 }
