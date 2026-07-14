@@ -168,11 +168,11 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
   }
 
   // Close the community plugins modal if it appears
-  const settingsModal = window.locator('.modal-bg');
+  const enablePluginsModal = window.locator('.modal-bg');
   try {
-    await settingsModal.waitFor({ state: 'visible', timeout: 5000 });
+    await enablePluginsModal.waitFor({ state: 'visible', timeout: 5000 });
     await window.keyboard.press('Escape');
-    await settingsModal.waitFor({ state: 'hidden', timeout: 5000 });
+    await enablePluginsModal.waitFor({ state: 'hidden', timeout: 5000 });
   } catch {
     // Modal didn't appear, continue
   }
