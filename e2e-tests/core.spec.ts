@@ -68,6 +68,7 @@ test.describe('Article Importing', () => {
     await finalizeArticleImport(window);
 
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
     // look for the action bar to confirm we're in review
     await expect(
       window.getByRole('button', { name: 'Mark as reviewed' })
@@ -90,6 +91,7 @@ test.describe('Article Importing', () => {
     await window.getByText('Import article').click();
     await finalizeArticleImport(window);
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
 
     // look for the action bar to confirm we're in review
     await expect(
@@ -113,6 +115,7 @@ test.describe('Article Importing', () => {
     await executeCommandById(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
 
     // look for the action bar to confirm we're in review
     await expect(
@@ -138,6 +141,7 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
 
     const toggle = window.locator('.ir-toggle-label > .checkbox-container');
 
@@ -193,11 +197,13 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
     await window.getByRole('button', { name: 'Mark as reviewed' }).click();
 
     await executeCommandById(window, 'workspace:close');
 
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
     await expect(
       window
         .getByText(
@@ -216,6 +222,7 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
 
     const skipButton = window.getByRole('button', {
       name: 'Skip for current review session',
@@ -227,6 +234,7 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'workspace:close');
 
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
     await expect(
       window
         .getByText(
@@ -245,6 +253,7 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
 
     const dismissButton = window.getByRole('button', {
       name: 'Stop scheduling this item for review',
@@ -255,6 +264,7 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'workspace:close');
 
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
     await expect(
       window
         .getByText(
@@ -280,6 +290,7 @@ test.describe('Action Bar', () => {
     await dismissButton.click();
 
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
     await expect(
       window
         .getByText(
@@ -305,6 +316,7 @@ test.describe('Action Bar', () => {
     await dismissButton.click();
 
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
     await expect(
       window
         .getByText(
@@ -322,6 +334,7 @@ test.describe('Action Bar', () => {
     await unDismissButton.click();
 
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
     await expect(window.locator('.ir-title')).toBeVisible();
   });
 
@@ -334,6 +347,7 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
 
     const priorityInput = window.getByRole('textbox', { name: 'Priority' });
 
@@ -349,6 +363,7 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'workspace:close');
 
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
     const priorityInput2 = window.getByRole('textbox', { name: 'Priority' });
     await expect(priorityInput2).toHaveValue('4.9');
   });
@@ -378,6 +393,7 @@ test.describe('Extracting snippets', () => {
     await executeCommandById(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);
     await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
 
     // look for the action bar to confirm we're in review
     await expect(
