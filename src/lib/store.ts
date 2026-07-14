@@ -22,6 +22,21 @@ const currentItemIdSlice = createSlice({
 
 export const { setCurrentItemId } = currentItemIdSlice.actions;
 
+export type ReviewPage = 'home' | 'review';
+
+export const pageSlice = createSlice({
+  name: 'page',
+  initialState: 'home' as ReviewPage,
+  reducers: {
+    setPage: (_state, action: PayloadAction<ReviewPage>) => action.payload,
+  },
+  extraReducers: (builder) => {
+    builder.addCase(resetSession, () => 'home');
+  },
+});
+
+export const { setPage } = pageSlice.actions;
+
 export const showAnswerSlice = createSlice({
   name: 'showAnswer',
   initialState: false,
@@ -153,6 +168,7 @@ export const { isEditing } = editStateSlice.selectors;
 export const store = configureStore({
   reducer: {
     currentItemId: currentItemIdSlice.reducer,
+    page: pageSlice.reducer,
     showAnswer: showAnswerSlice.reducer,
     typesToReview: typesToReviewSlice.reducer,
     seenIds: seenIdsSlice.reducer,

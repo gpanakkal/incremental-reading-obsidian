@@ -19,6 +19,7 @@ export interface IRPluginSettings {
   showAdvancedImportCommands: boolean;
   showAdvancedImportMenuItems: boolean;
   fuzzTextReviews: boolean; // intra-day fuzzing for items except cards
+  skipHomeScreen: boolean;
   fsrsParams: FSRSParameters;
 }
 
@@ -33,6 +34,7 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   showAdvancedImportCommands: false,
   showAdvancedImportMenuItems: false,
   fuzzTextReviews: true,
+  skipHomeScreen: false,
   fsrsParams: FSRS_PARAMETER_DEFAULTS,
 };
 
@@ -140,6 +142,18 @@ export class IRSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.fuzzTextReviews)
           .onChange(async (value) => {
             this.plugin.settings.fuzzTextReviews = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Skip home screen')
+      .setDesc('Jump to the first due item when running the Learn hotkey.')
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.skipHomeScreen)
+          .onChange(async (value) => {
+            this.plugin.settings.skipHomeScreen = value;
             await this.plugin.saveSettings();
           });
       });
