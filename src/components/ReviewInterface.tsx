@@ -1,3 +1,4 @@
+import { useAppSelector } from '#/hooks/useAppSelector';
 import { useCurrentItem } from '#/hooks/useReactQuery';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { queryClient } from '#/lib/query-client';
@@ -7,6 +8,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { Provider as ReduxProvider } from 'react-redux';
 import { ActionBar } from './action-bar/ActionBar';
 import { ReviewContextProvider } from './ReviewContext';
+import { ReviewHome } from './ReviewHome';
 import ReviewItem from './ReviewItem';
 
 export function createReviewInterface(props: {
@@ -26,16 +28,23 @@ export function createReviewInterface(props: {
 }
 
 function ReviewInterface() {
-  const { data: item } = useCurrentItem();
+  const page = useAppSelector((state) => state.page);
 
   return (
     <div className={'ir-review-interface view-content'}>
       <ActionBar />
-      {item ? (
-        <ReviewItem item={item} />
-      ) : (
-        <div className="ir-review-placeholder">Nothing due for review.</div>
-      )}
+      {page === 'home' ? <ReviewHome /> : <ReviewItemView />}
     </div>
+  );
+}
+
+/** The single-item review flow, reached by clicking a queue row. */
+function ReviewItemView() {
+  const { data: item } = useCurrentItem();
+
+  return item ? (
+    <ReviewItem item={item} />
+  ) : (
+    <div className="ir-review-placeholder">Nothing due for review.</div>
   );
 }

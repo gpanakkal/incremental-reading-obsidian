@@ -250,3 +250,83 @@
   padding: 0 0 16px 0;
   width: 100%;
 }
+
+/* #region Review queue table */
+
+.ir-queue-table {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--size-4-2);
+}
+
+.ir-queue-row {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-3);
+  padding: var(--size-2-3) var(--size-4-2);
+  border-bottom: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+}
+
+.ir-queue-row:hover {
+  background-color: var(--background-modifier-hover);
+}
+
+/* Header row mirrors the row layout so labels align with their columns. */
+.ir-queue-header {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-3);
+  padding: var(--size-2-3) var(--size-4-2);
+  border-bottom: 2px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+}
+
+.ir-queue-cell,
+.ir-queue-header-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-2);
+  min-width: 0;
+  flex: 1;
+}
+
+.ir-queue-inline-label {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+/* HTML wrapper for the type icon (tooltip target); centers the SVG. */
+.ir-queue-type-icon {
+  display: flex;
+  align-items: center;
+}
+
+/* Hover-reveal action slot: hidden until the row is hovered or focused, so
+   per-row action buttons can be added later with no structural change. */
+.ir-queue-cell-actions {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.ir-queue-row:hover .ir-queue-cell-actions,
+.ir-queue-row:focus-within .ir-queue-cell-actions {
+  opacity: 1;
+}
+
+/* Reference truncates on the LEFT (keeps the path end / filename visible)
+   without introducing horizontal scroll. */
+.ir-queue-reference .ir-queue-cell-value {
+  direction: rtl;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+/* #endregion */

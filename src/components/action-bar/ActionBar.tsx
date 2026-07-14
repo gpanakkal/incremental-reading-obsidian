@@ -1,6 +1,6 @@
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { useCurrentItem } from '#/hooks/useReactQuery';
-import { setShowAnswer } from '#/lib/store';
+import { setPage, setShowAnswer } from '#/lib/store';
 import type { ReviewItem, ReviewText } from '#/lib/types';
 import {
   isReviewArticle,
@@ -19,6 +19,7 @@ import {
   CalendarSync,
   Check,
   Eye,
+  House,
   Scissors,
   SkipForward,
   Trash2,
@@ -31,26 +32,46 @@ import { PriorityField } from './PriorityField';
 import { ReviewTypeFilter } from './ReviewTypeFilter';
 
 export function ActionBar() {
+  const page = useAppSelector((state) => state.page);
   const { data: currentItem } = useCurrentItem();
 
   return (
     <div className="ir-action-bar" tabIndex={-1}>
       {/* setting a tabIndex makes the action bar focusable */}
-      {currentItem && (
-        <>
-          {isReviewCard(currentItem) && <CardActions card={currentItem} />}
-          {isReviewText(currentItem) && <TextActions text={currentItem} />}
-          {isReviewArticle(currentItem) && (
-            <ArticleActions article={currentItem} />
-          )}
-          {isReviewSnippet(currentItem) && (
-            <SnippetActions snippet={currentItem} />
-          )}
-          <ItemActions reviewItem={currentItem} />
-        </>
+      {page === 'home' ? (
+        <HomeActions />
+      ) : (
+        currentItem && (
+          <>
+            {isReviewCard(currentItem) && <CardActions card={currentItem} />}
+            {isReviewText(currentItem) && <TextActions text={currentItem} />}
+            {isReviewArticle(currentItem) && (
+              <ArticleActions article={currentItem} />
+            )}
+            {isReviewSnippet(currentItem) && (
+              <SnippetActions snippet={currentItem} />
+            )}
+            <ItemActions reviewItem={currentItem} />
+          </>
+        )
       )}
       <GlobalActions />
     </div>
+  );
+}
+
+function HomeActions() {
+  const dispatch = useDispatch();
+
+  return (
+    <TextButton
+      tooltip="Start reviewing the queue"
+      handleClick={() => {
+        dispatch(setPage('review'));
+      }}
+    >
+      Begin Review
+    </TextButton>
   );
 }
 
@@ -73,11 +94,20 @@ function GlobalActions() {
  * Actions common to articles, snippets, and cards
  */
 function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
+  const dispatch = useDispatch();
   const { actions } = useReviewContext();
   const isDismissed = reviewItem.data.dismissed;
 
   return (
     <>
+      <ButtonWithIcon
+        tooltip="Go to home screen"
+        handleClick={() => {
+          dispatch(setPage('home'));
+        }}
+      >
+        <House />
+      </ButtonWithIcon>
       {isDismissed ? (
         <ButtonWithIcon
           tooltip="Restore item to queue"

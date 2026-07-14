@@ -1,12 +1,24 @@
-import { useQuery } from '@tanstack/react-query';
 import { useReviewContext } from '#/components/ReviewContext';
-import { useAppSelector } from './useAppSelector';
+import type { QueueSubset } from '#/components/types';
+import { CURRENT_ITEM_REFETCH_TIME } from '#/lib/constants';
 import {
   currentItemQueryFn,
   invalidateCurrentItemQuery,
 } from '#/lib/query-client';
+import { useQuery } from '@tanstack/react-query';
 import { useEffect } from 'react';
-import { CURRENT_ITEM_REFETCH_TIME } from '#/lib/constants';
+import { useAppSelector } from './useAppSelector';
+
+/**
+ * Fetch a review-queue subset as a flat, sorted array of `QueueRow`
+ */
+export function useQueue(subset: QueueSubset) {
+  const { reviewManager } = useReviewContext();
+  return useQuery({
+    queryKey: ['queue', subset],
+    queryFn: async () => reviewManager.getQueue(subset),
+  });
+}
 
 export function useCurrentItem() {
   const { reviewManager, reviewView } = useReviewContext();

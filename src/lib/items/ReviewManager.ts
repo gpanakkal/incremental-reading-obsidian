@@ -1,9 +1,14 @@
+import type {
+  QueueRow,
+  QueueScheduling,
+  QueueSubset,
+} from '#/components/types';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '#/lib/constants';
 import type {
   ArticleRow,
   IArticleBase,
-  ISRSCardDisplay,
   ISnippetBase,
+  ISRSCardDisplay,
   NoteType,
   PluginFrontMatter,
   ReviewArticle,
@@ -11,6 +16,7 @@ import type {
   ReviewItem,
   ReviewSnippet,
   SnippetRow,
+  SRSCardRow,
 } from '#/lib/types';
 import { getItemType, isArticle } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
@@ -23,6 +29,7 @@ import {
   normalizePath,
 } from 'obsidian';
 import type { Grade } from 'ts-fsrs';
+import IRScheduler from '../IRScheduler';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
 import { compareDates, compareFuzzedDue } from '../utils';
@@ -222,6 +229,93 @@ export default class ReviewManager {
       return { all: [], cards: [], snippets: [], articles: [] };
     }
   }
+  /**
+   * The scheduling summary shown for an article: its fixed interval when one is
+   * set, otherwise its priority. An article never has both at once.
+   */
+  static articleScheduling(row: ArticleRow): QueueScheduling {
+    return row.fixed_interval_days !== null
+      ? { kind: 'fixed-interval', value: row.fixed_interval_days.toString() }
+      : {
+          kind: 'priority',
+          value: IRScheduler.toDisplayPriority(row.priority),
+        };
+  }
+
+  /** Build a QueueRow for an article, resolving its note or returning null. */
+  #articleToQueueRow(row: ArticleRow): QueueRow | null {
+    const file = Obsidian.getNote(row.reference, this.app);
+    if (!file) return null;
+    return {
+      id: row.id,
+      type: 'article',
+      file,
+      due: row.due === null ? null : new Date(row.due + (row.due_fuzz ?? 0)),
+      reference: row.reference,
+      scheduling: ReviewManager.articleScheduling(row),
+    };
+  }
+
+  /** Build a QueueRow for a snippet (always priority-scheduled). */
+  #snippetToQueueRow(row: SnippetRow): QueueRow | null {
+    const file = Obsidian.getNote(row.reference, this.app);
+    if (!file) return null;
+    return {
+      id: row.id,
+      type: 'snippet',
+      file,
+      due: row.due === null ? null : new Date(row.due + (row.due_fuzz ?? 0)),
+      reference: row.reference,
+      scheduling: {
+        kind: 'priority',
+        value: IRScheduler.toDisplayPriority(row.priority),
+      },
+    };
+  }
+
+  /** Build a QueueRow for a card (no fuzz, no priority/interval scheduling). */
+  #cardToQueueRow(row: SRSCardRow): QueueRow | null {
+    const file = Obsidian.getNote(row.reference, this.app);
+    if (!file) return null;
+    return {
+      id: row.id,
+      type: 'card',
+      file,
+      due: new Date(row.due),
+      reference: row.reference,
+      scheduling: { kind: 'none', value: null },
+    };
+  }
+
+  /**
+   * Fetch a whole review-queue subset as one sorted, flat array of QueueRow.
+   * Unlike {@link getDue}, this fetches everything in the subset (no DB
+   * pagination / limit) and maps each item to a redacted {@link QueueRow}.
+   *
+   * @param subset Discriminated union selecting which items to return. Only
+   *   `{ kind: 'due'; date? }` is implemented; the shape allows `dismissed` /
+   *   `deleted` subsets to be added later without changing the signature.
+   */
+  async getQueue(subset: QueueSubset): Promise<QueueRow[]> {
+    const dueBy = subset.date?.getTime() ?? Number.POSITIVE_INFINITY;
+
+    const [articleRows, snippetRows, cardRows] = await Promise.all([
+      this.articles.fetchMany({ dueBy }),
+      this.snippets.fetchMany({ dueBy }),
+      this.cards.fetchMany({ dueBy }),
+    ]);
+
+    const rows: QueueRow[] = [
+      ...articleRows.map((row) => this.#articleToQueueRow(row)),
+      ...snippetRows.map((row) => this.#snippetToQueueRow(row)),
+      ...cardRows.map((row) => this.#cardToQueueRow(row)),
+    ].filter((row): row is QueueRow => row !== null);
+
+    // `due` is already the fuzzed timestamp, so ordering by it is fuzz order;
+    // rows with no due time sort last (compareDates puts nulls at the end).
+    return rows.sort((a, b) => compareDates(a.due, b.due));
+  }
+
   /**
    * Fetches a ReviewItem given a file.
    * Returns null if the item is not found in the database.
