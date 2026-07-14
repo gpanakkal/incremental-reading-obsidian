@@ -136,6 +136,22 @@ export function compareDates(a: number | Date | null, b: number | Date | null) {
 }
 
 /**
+ * Order items by fuzzed due timestamp, ascending.
+ */
+export function compareFuzzedDue(
+  a: { due: number | Date | null; due_fuzz?: number | null },
+  b: { due: number | Date | null; due_fuzz?: number | null }
+) {
+  if (b.due === null) return -1;
+  if (a.due === null) return 1;
+  const aDueTimestamp = typeof a.due === 'number' ? a.due : a.due.getTime();
+  const bDueTimestamp = typeof b.due === 'number' ? b.due : b.due.getTime();
+  const aFuzzed = aDueTimestamp + (a.due_fuzz ?? 0);
+  const bFuzzed = bDueTimestamp + (b.due_fuzz ?? 0);
+  return aFuzzed - bFuzzed;
+}
+
+/**
  * Get the starting index and text of every match to a pattern
  */
 export function searchAll(text: string, pattern: RegExp) {

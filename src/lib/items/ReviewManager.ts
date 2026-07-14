@@ -25,7 +25,7 @@ import {
 import type { Grade } from 'ts-fsrs';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
-import { compareDates } from '../utils';
+import { compareDates, compareFuzzedDue } from '../utils';
 import { ArticleManager } from './ArticleManager';
 import { CardManager } from './CardManager';
 import { SnippetManager } from './SnippetManager';
@@ -178,7 +178,8 @@ export default class ReviewManager {
   }
 
   /**
-   * Fetch all snippets, cards, and articles ready for review, then order by due ASC
+   * Fetch all snippets, cards, and articles ready for review, then order by
+   * fuzzed due, ascending
    * TODO:
    * - paginate
    * @param dueBy Unix timestamp. Defaults to the end of the day plus the rollover offset.
@@ -208,7 +209,7 @@ export default class ReviewManager {
         ? await this.articles.getDue(dueBy, limit, excludeIds)
         : [];
       const allDue = [...cardsDue, ...snippetsDue, ...articlesDue].sort(
-        (a, b) => compareDates(a.data.due, b.data.due)
+        (a, b) => compareFuzzedDue(a.data, b.data)
       );
       return {
         all: allDue,

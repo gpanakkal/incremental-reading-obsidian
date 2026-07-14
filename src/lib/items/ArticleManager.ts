@@ -22,6 +22,7 @@ import type {
   ReviewArticle,
 } from '#/lib/types';
 import {
+  compareFuzzedDue,
   generateId,
   getContentSlice,
   getDateString,
@@ -414,14 +415,7 @@ export class ArticleManager extends ItemManager {
           );
 
         if (this.plugin.settings.fuzzTextReviews) {
-          due.sort(function fuzzOrder(a, b) {
-            if (!b.data.due) return -1;
-            if (!a.data.due) return 1;
-
-            const aFuzzedDue = a.data.due + (a.data.due_fuzz ?? 0);
-            const bFuzzedDue = b.data.due + (b.data.due_fuzz ?? 0);
-            return aFuzzedDue - bFuzzedDue;
-          });
+          due.sort((a, b) => compareFuzzedDue(a.data, b.data));
         }
       } while (lastMissingNotes > 0);
       return due;
