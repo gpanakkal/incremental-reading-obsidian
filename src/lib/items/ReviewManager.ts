@@ -1,4 +1,5 @@
 import type {
+  QueuePage,
   QueueRow,
   QueueScheduling,
   QueueSubset,
@@ -32,7 +33,7 @@ import type { Grade } from 'ts-fsrs';
 import IRScheduler from '../IRScheduler';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
-import { compareDates, compareFuzzedDue } from '../utils';
+import { compareDates, compareFuzzedDue, compareStrings } from '../utils';
 import { ArticleManager } from './ArticleManager';
 import { CardManager } from './CardManager';
 import { SnippetManager } from './SnippetManager';
@@ -288,16 +289,12 @@ export default class ReviewManager {
   }
 
   /**
-   * Fetch a whole review-queue subset as one sorted, flat array of QueueRow.
+   * Fetch a whole review-queue subset as one sorted, flat array of `QueueRow`.
    * Unlike {@link getDue}, this fetches everything in the subset (no DB
-   * pagination / limit) and maps each item to a redacted {@link QueueRow}.
-   *
-   * @param subset Discriminated union selecting which items to return. Only
-   *   `{ kind: 'due'; date? }` is implemented; the shape allows `dismissed` /
-   *   `deleted` subsets to be added later without changing the signature.
+   * pagination / limit).
    */
-  async getQueue(subset: QueueSubset): Promise<QueueRow[]> {
-    const dueBy = subset.date?.getTime() ?? Number.POSITIVE_INFINITY;
+  async getQueue(subset?: QueueSubset): Promise<QueuePage> {
+    const dueBy = subset?.date?.getTime() ?? Number.POSITIVE_INFINITY;
 
     const [articleRows, snippetRows, cardRows] = await Promise.all([
       this.articles.fetchMany({ dueBy }),
@@ -313,7 +310,29 @@ export default class ReviewManager {
 
     // `due` is already the fuzzed timestamp, so ordering by it is fuzz order;
     // rows with no due time sort last (compareDates puts nulls at the end).
-    return rows.sort((a, b) => compareDates(a.due, b.due));
+    // Ties break on (type, id) so pagination is stable across calls even when
+    // the DB returns tied rows in a different order.
+    rows.sort(
+      (a, b) =>
+        compareDates(a.due, b.due) ||
+        compareStrings(a.type, b.type) ||
+        compareStrings(a.id, b.id)
+    );
+
+    const slice = subset?.slice;
+    const totalRows = rows.length;
+    if (!slice) return { rows, totalRows };
+
+    const lastPage = Math.max(
+      0,
+      Math.ceil(totalRows / slice.entriesPerPage) - 1
+    );
+    const page = Math.min(slice.pageNumber, lastPage);
+    const start = page * slice.entriesPerPage;
+    return {
+      rows: rows.slice(start, start + slice.entriesPerPage),
+      totalRows,
+    };
   }
 
   /**

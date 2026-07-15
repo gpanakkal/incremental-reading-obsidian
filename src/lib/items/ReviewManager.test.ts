@@ -378,7 +378,7 @@ describe('ReviewManager.getDue', () => {
 });
 
 // ---------------------------------------------------------------------------
-// getQueue — maps due rows to a unified, redacted QueueRow[]
+// getQueue — maps rows to a unified QueueRow[] format for display in review queue table
 // ---------------------------------------------------------------------------
 
 describe('ReviewManager.getQueue', () => {
@@ -422,7 +422,7 @@ describe('ReviewManager.getQueue', () => {
     });
     const manager = wireQueue({ articles: [row] });
 
-    const queue = await manager.getQueue({ kind: 'due' });
+    const { rows: queue } = await manager.getQueue();
 
     expect(queue).toHaveLength(1);
     const [item] = queue;
@@ -447,7 +447,7 @@ describe('ReviewManager.getQueue', () => {
       cards: [makeCardRow({ id: 'c1', reference: 'cards/c1.md' })],
     });
 
-    const queue = await manager.getQueue({ kind: 'due' });
+    const { rows: queue } = await manager.getQueue();
 
     const forbidden = [
       'due_fuzz',
@@ -482,7 +482,9 @@ describe('ReviewManager.getQueue', () => {
               }),
             ],
           });
-          const [item] = await manager.getQueue({ kind: 'due' });
+          const {
+            rows: [item],
+          } = await manager.getQueue();
           expect(item.due?.getTime()).toBe(due + fuzz);
         }
       )
@@ -500,7 +502,9 @@ describe('ReviewManager.getQueue', () => {
         }),
       ],
     });
-    const [item] = await manager.getQueue({ kind: 'due' });
+    const {
+      rows: [item],
+    } = await manager.getQueue();
     expect(item.due?.getTime()).toBe(YEAR_2000_MS);
   });
 
@@ -523,7 +527,7 @@ describe('ReviewManager.getQueue', () => {
         }),
       ],
     });
-    const queue = await manager.getQueue({ kind: 'due' });
+    const { rows: queue } = await manager.getQueue();
     expect(queue).toHaveLength(2);
     for (const item of queue) {
       expect(item.due).toBeNull();
@@ -541,7 +545,7 @@ describe('ReviewManager.getQueue', () => {
         makeArticleRow({ id: 'dated', reference: 'articles/dated.md', due: 1 }),
       ],
     });
-    const queue = await manager.getQueue({ kind: 'due' });
+    const { rows: queue } = await manager.getQueue();
     expect(queue.map((r) => r.id)).toEqual(['dated', 'undated']);
   });
 
@@ -551,7 +555,9 @@ describe('ReviewManager.getQueue', () => {
         makeCardRow({ id: 'c1', reference: 'cards/c1.md', due: YEAR_2000_MS }),
       ],
     });
-    const [item] = await manager.getQueue({ kind: 'due' });
+    const {
+      rows: [item],
+    } = await manager.getQueue();
     expect(item.due?.getTime()).toBe(YEAR_2000_MS);
     expect(item.scheduling).toEqual({ kind: 'none', value: null });
   });
@@ -567,7 +573,9 @@ describe('ReviewManager.getQueue', () => {
         }),
       ],
     });
-    const [item] = await manager.getQueue({ kind: 'due' });
+    const {
+      rows: [item],
+    } = await manager.getQueue();
     expect(item.scheduling).toEqual({ kind: 'fixed-interval', value: '7' });
   });
 
@@ -582,7 +590,9 @@ describe('ReviewManager.getQueue', () => {
         }),
       ],
     });
-    const [item] = await manager.getQueue({ kind: 'due' });
+    const {
+      rows: [item],
+    } = await manager.getQueue();
     expect(item.scheduling).toEqual({ kind: 'priority', value: '4.2' });
   });
 
@@ -592,7 +602,9 @@ describe('ReviewManager.getQueue', () => {
         makeSnippetRow({ id: 's1', reference: 'snippets/s1.md', priority: 15 }),
       ],
     });
-    const [item] = await manager.getQueue({ kind: 'due' });
+    const {
+      rows: [item],
+    } = await manager.getQueue();
     expect(item.scheduling).toEqual({ kind: 'priority', value: '1.5' });
   });
 
@@ -618,14 +630,14 @@ describe('ReviewManager.getQueue', () => {
         }),
       ],
     });
-    const queue = await manager.getQueue({ kind: 'due' });
+    const { rows: queue } = await manager.getQueue();
     expect(queue.map((r) => r.id)).toEqual(['a', 'c', 's']);
   });
 
-  it('returns an empty array when nothing is due', async () => {
+  it('returns an empty page when nothing is due', async () => {
     const manager = wireQueue({});
-    const queue = await manager.getQueue({ kind: 'due' });
-    expect(queue).toEqual([]);
+    const page = await manager.getQueue();
+    expect(page).toEqual({ rows: [], totalRows: 0 });
   });
 
   it('drops items whose note cannot be resolved', async () => {
@@ -640,7 +652,7 @@ describe('ReviewManager.getQueue', () => {
     vi.spyOn(Obsidian, 'getNote').mockImplementation((reference: string) =>
       reference === 'articles/here.md' ? ({ path: reference } as TFile) : null
     );
-    const queue = await manager.getQueue({ kind: 'due' });
+    const { rows: queue } = await manager.getQueue();
     expect(queue.map((r) => r.id)).toEqual(['here']);
   });
 
@@ -654,14 +666,137 @@ describe('ReviewManager.getQueue', () => {
     vi.spyOn(manager.cards, 'fetchMany').mockResolvedValue([] as never);
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(null);
     const date = new Date(YEAR_2000_MS);
-    await manager.getQueue({ kind: 'due', date });
+    await manager.getQueue({ date });
     expect(articleFetch).toHaveBeenCalledWith({ dueBy: date.getTime() });
   });
-});
 
-// ---------------------------------------------------------------------------
-// Delegation tests — simple passthrough methods
-// ---------------------------------------------------------------------------
+  describe('pagination', () => {
+    /** n articles with ids i0..i(n-1), due ascending in id order. */
+    function makeDueArticles(n: number) {
+      return Array.from({ length: n }, (_, i) =>
+        makeArticleRow({
+          id: `i${i}`,
+          reference: `articles/i${i}.md`,
+          due: 1000 * (i + 1),
+          due_fuzz: null,
+        })
+      );
+    }
+
+    it('returns the requested page as a contiguous slice of the sorted queue', async () => {
+      const manager = wireQueue({ articles: makeDueArticles(5) });
+
+      const page = await manager.getQueue({
+        slice: { pageNumber: 1, entriesPerPage: 2 },
+      });
+
+      expect(page.rows.map((r) => r.id)).toEqual(['i2', 'i3']);
+    });
+
+    it('reports the whole subset size as totalRows, not the page size', async () => {
+      const manager = wireQueue({ articles: makeDueArticles(5) });
+
+      const page = await manager.getQueue({
+        slice: { pageNumber: 1, entriesPerPage: 2 },
+      });
+
+      expect(page.totalRows).toBe(5);
+    });
+
+    it('clamps a too-high pageNumber to the last page, which may be partial', async () => {
+      // 5 rows / 2 per page → last page holds only i4, not the last 2 rows.
+      const manager = wireQueue({ articles: makeDueArticles(5) });
+
+      const page = await manager.getQueue({
+        slice: { pageNumber: 99, entriesPerPage: 2 },
+      });
+
+      expect(page.rows.map((r) => r.id)).toEqual(['i4']);
+    });
+
+    it('orders due-ties the same way regardless of DB fetch order', async () => {
+      // Same data, permuted fetch order — pages must not shuffle between calls.
+      const tied = (ids: string[]) =>
+        ids.map((id) =>
+          makeArticleRow({
+            id,
+            reference: `articles/${id}.md`,
+            due: 1000,
+            due_fuzz: null,
+          })
+        );
+      const slice = { pageNumber: 0, entriesPerPage: 2 };
+
+      const first = await wireQueue({
+        articles: tied(['b', 'a', 'c']),
+      }).getQueue({ slice });
+      vi.restoreAllMocks();
+      const second = await wireQueue({
+        articles: tied(['c', 'b', 'a']),
+      }).getQueue({ slice });
+
+      expect(first.rows.map((r) => r.id)).toEqual(second.rows.map((r) => r.id));
+    });
+
+    it('pages partition the queue: contiguous, full-sized except the last, covering every row once', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({ min: 0, max: 30 }),
+          fc.integer({ min: 1, max: 7 }),
+          // Small due domain to force plenty of ties.
+          fc.array(fc.integer({ min: 1, max: 5 }), {
+            minLength: 30,
+            maxLength: 30,
+          }),
+          async (count, entriesPerPage, dues) => {
+            vi.restoreAllMocks();
+            const articles = Array.from({ length: count }, (_, i) =>
+              makeArticleRow({
+                id: `i${i}`,
+                reference: `articles/i${i}.md`,
+                due: dues[i] * 1000,
+                due_fuzz: null,
+              })
+            );
+            const manager = wireQueue({ articles });
+
+            const whole = await manager.getQueue();
+            const pageCount = Math.max(1, Math.ceil(count / entriesPerPage));
+            const pages = [];
+            for (let p = 0; p < pageCount; p += 1) {
+              pages.push(
+                await manager.getQueue({
+                  slice: { pageNumber: p, entriesPerPage },
+                })
+              );
+            }
+
+            // Every page but the last is exactly entriesPerPage long, and
+            // each one reports the whole subset size.
+            for (const page of pages.slice(0, -1)) {
+              expect(page.rows).toHaveLength(entriesPerPage);
+            }
+            for (const page of pages) {
+              expect(page.totalRows).toBe(count);
+            }
+            // Concatenated pages reproduce the whole queue, in order.
+            expect(pages.flatMap((page) => page.rows).map((r) => r.id)).toEqual(
+              whole.rows.map((r) => r.id)
+            );
+          }
+        )
+      );
+    });
+
+    it('returns an empty page when nothing is due', async () => {
+      const manager = wireQueue({});
+      const page = await manager.getQueue({
+        slice: { pageNumber: 3, entriesPerPage: 10 },
+      });
+      expect(page).toEqual({ rows: [], totalRows: 0 });
+    });
+  });
+});
 
 describe('ReviewManager delegation', () => {
   afterEach(() => {

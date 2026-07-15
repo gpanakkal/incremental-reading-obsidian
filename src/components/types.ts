@@ -50,11 +50,26 @@ export interface QueueRow {
 }
 
 /**
- * Selects which items `ReviewManager.getQueue` returns. Shaped as a
- * discriminated union so `dismissed`/`deleted` subsets can be added later
- * without changing the method signature.
+ * Narrows which items `ReviewManager.getQueue` returns and how they are
+ * windowed. Everything is optional; an empty subset means the whole due
+ * queue.
  */
-export type QueueSubset = { kind: 'due'; date?: Date };
+export type QueueSubset = {
+  date?: Date;
+  slice?: {
+    pageNumber: number;
+    entriesPerPage: number;
+  };
+};
+
+/**
+ * One page of the review queue. `totalRows` is the size of the whole subset
+ * before slicing, so callers can derive the page count.
+ */
+export interface QueuePage {
+  rows: QueueRow[];
+  totalRows: number;
+}
 
 /** For React components rendered inside Obsidian Modals */
 export interface SchedulingModalProps {

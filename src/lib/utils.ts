@@ -135,6 +135,12 @@ export function compareDates(a: number | Date | null, b: number | Date | null) {
   return aNum - bNum;
 }
 
+/** Locale-independent lexicographic string comparison. */
+export function compareStrings(a: string, b: string) {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
 /**
  * Order items by fuzzed due timestamp, ascending.
  */

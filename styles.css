@@ -329,4 +329,18 @@
   flex: 1;
 }
 
+.ir-queue-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--size-4-3);
+  padding: var(--size-2-3) var(--size-4-2);
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.ir-queue-pagination-indicator {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
 /* #endregion */
