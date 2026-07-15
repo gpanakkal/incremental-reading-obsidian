@@ -10,6 +10,7 @@ import {
   binarySearch,
   clamp,
   compareDates,
+  compareStrings,
   deepCopy,
   deepMerge,
   generateId,
@@ -622,6 +623,29 @@ describe('compareDates', () => {
           expect(compareDates(a, new Date(aMs))).toBe(0);
         }
       )
+    );
+  });
+});
+
+describe('compareStrings', () => {
+  it('orders by code units: negative/zero/positive matching < and ===', () => {
+    fc.assert(
+      fc.property(fc.string(), fc.string(), (a, b) => {
+        const result = compareStrings(a, b);
+        if (a === b) expect(result).toBe(0);
+        else if (a < b) expect(result).toBeLessThan(0);
+        else expect(result).toBeGreaterThan(0);
+      })
+    );
+  });
+
+  it('is antisymmetric', () => {
+    fc.assert(
+      fc.property(fc.string(), fc.string(), (a, b) => {
+        // `+ 0` normalises the -0 produced by negating 0 on equal strings,
+        // which `toBe` (Object.is) would otherwise reject.
+        expect(compareStrings(a, b) + 0).toBe(-compareStrings(b, a) + 0);
+      })
     );
   });
 });
