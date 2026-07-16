@@ -15,8 +15,10 @@ import {
 } from 'obsidian';
 import type { BindParams, Database, QueryExecResult } from 'sql.js';
 import initSqlJs from 'sql.js';
-// @ts-ignore - WASM imported as base64 string via custom esbuild plugin
-import wasmBase64 from '#/db/sql-wasm.wasm';
+// @ts-ignore - WASM imported as base64 string via custom esbuild plugin.
+// Points at the binary shipped with the installed sql.js package so the bundled
+// WASM stays in lockstep with the sql.js version in node_modules.
+import wasmBase64 from 'sql.js/dist/sql-wasm.wasm';
 import {
   BACKUP_DIRECTORY,
   DATA_DIRECTORY,

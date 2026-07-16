@@ -34,7 +34,7 @@
 		"react": "npm:@preact/compat",
 		"react-dom": "npm:@preact/compat",
 		"react-redux": "~9.2.0",
-		"sql.js": "1.11.0",
+		"sql.js": "1.13.0",
 		"ts-fsrs": "4.6.1"
 	},
 	"devDependencies": {
