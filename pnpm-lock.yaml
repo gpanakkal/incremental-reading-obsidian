@@ -33,8 +33,8 @@ importers:
         specifier: ~9.2.0
         version: 9.2.0(@preact/compat@18.3.2(preact@10.28.3))(redux@5.0.1)
       sql.js:
-        specifier: 1.11.0
-        version: 1.11.0
+        specifier: 1.13.0
+        version: 1.13.0
       ts-fsrs:
         specifier: 4.6.1
         version: 4.6.1
@@ -3760,8 +3760,8 @@ packages:
   sprintf-js@1.1.3:
     resolution: {integrity: sha512-Oo+0REFV59/rz3gfJNKQiBlwfHaSESl1pcGyABQsnnIfWOFt6JNj5gCog2U6MLZ//IGYD+nA8nI+mTShREReaA==}
 
-  sql.js@1.11.0:
-    resolution: {integrity: sha512-GsLUDU3vhOo14Pd5ME0y2te49JQyby6HuoCuadevEV+CGgTUjmYRrm7B7lhRyzOgrmcWmspUfyjNb6sOAEqdsA==}
+  sql.js@1.13.0:
+    resolution: {integrity: sha512-RJbVP1HRDlUUXahJ7VMTcu9Rm1Nzw+EBpoPr94vnbD4LwR715F3CcxE2G2k45PewcaZ57pjetYa+LoSJLAASgA==}
 
   stable-hash-x@0.2.0:
     resolution: {integrity: sha512-o3yWv49B/o4QZk5ZcsALc6t0+eCelPc44zZsLtCQnZPDwFpDYSWcDnrv2TtMmMbQ7uKo3J0HTURCqckw23czNQ==}
@@ -8256,7 +8256,7 @@ snapshots:
   sprintf-js@1.1.3:
     optional: true
 
-  sql.js@1.11.0: {}
+  sql.js@1.13.0: {}
 
   stable-hash-x@0.2.0: {}
 

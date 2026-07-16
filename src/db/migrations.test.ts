@@ -37,7 +37,7 @@ const { migrations } = await import('./migrations');
 let SQL: SqlJsStatic;
 
 beforeAll(async () => {
-  const wasmPath = resolve(__dirname, 'sql-wasm.wasm');
+  const wasmPath = require.resolve('sql.js/dist/sql-wasm.wasm');
   const wasmBinary = readFileSync(wasmPath);
   SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
 });

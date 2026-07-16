@@ -168,7 +168,7 @@ async function makeSqlJsRepo(): Promise<{
   db: Database;
 }> {
   const dbDir = resolve(__dirname, '../../db');
-  const wasmBinary = readFileSync(resolve(__dirname, '../../db/sql-wasm.wasm'));
+  const wasmBinary = readFileSync(require.resolve('sql.js/dist/sql-wasm.wasm'));
   const SQL = await initSqlJs({
     wasmBinary: wasmBinary as unknown as ArrayBuffer,
   });
