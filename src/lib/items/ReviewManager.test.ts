@@ -2126,6 +2126,134 @@ describe('ReviewManager.handleExternalRename CARD_TAG condition', () => {
   });
 });
 
+describe('ReviewManager.handleCreation copy detection', () => {
+  const IR_DIR = DATA_DIRECTORY;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeCreationApp(
+    irId: string,
+    existingFiles: { path: string; irId?: string }[]
+  ) {
+    const files = new Map(
+      existingFiles.map(({ path }) => [path, { path } as TFile])
+    );
+    const cachedIds = new Map(
+      existingFiles.map(({ path, irId: fileIrId }) => [path, fileIrId])
+    );
+    return {
+      vault: {
+        getFileByPath: vi.fn(
+          (path: string): TFile | null => files.get(path) ?? null
+        ),
+      },
+      fileManager: {
+        processFrontMatter: vi
+          .fn()
+          .mockImplementation(
+            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
+              cb({ tags: ['ir-article'], 'ir-id': irId });
+            }
+          ),
+      },
+      metadataCache: {
+        getFileCache: vi.fn((file: TFile) => ({
+          frontmatter: { 'ir-id': cachedIds.get(file.path) },
+        })),
+        on: vi.fn().mockReturnValue(Symbol()),
+        offref: vi.fn(),
+      },
+    };
+  }
+
+  it('does not repoint the row when the original note still exists (copy)', async () => {
+    const repo = makeRepo();
+    const originalPath = `${IR_DIR}/articles/original.md`;
+    const copyPath = `${IR_DIR}/articles/original 1.md`;
+    (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { reference: originalPath },
+    ]);
+    const appObj = makeCreationApp('article-1', [
+      { path: originalPath, irId: 'article-1' },
+      { path: copyPath, irId: 'article-1' },
+    ]);
+    const manager = new ReviewManager(makePlugin(appObj as never), repo);
+    manager.app = appObj as never;
+
+    await manager.handleCreation({ path: copyPath } as TAbstractFile);
+
+    expect(repo.mutate).not.toHaveBeenCalled();
+  });
+
+  it('repoints the row when the note at the reference has a different ir-id', async () => {
+    // The stored reference points at a note that is no longer this item's
+    // original (its ir-id differs), so the creation is treated as a restore.
+    const repo = makeRepo();
+    const originalPath = `${IR_DIR}/articles/original.md`;
+    const createdPath = `${IR_DIR}/articles/original 1.md`;
+    (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { reference: originalPath },
+    ]);
+    const appObj = makeCreationApp('article-1', [
+      { path: originalPath, irId: 'some-other-id' },
+      { path: createdPath, irId: 'article-1' },
+    ]);
+    const manager = new ReviewManager(makePlugin(appObj as never), repo);
+    manager.app = appObj as never;
+
+    await manager.handleCreation({ path: createdPath } as TAbstractFile);
+
+    expect(repo.mutate).toHaveBeenCalled();
+    const [, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, unknown[]];
+    expect(params).toEqual([createdPath, 'article-1']);
+  });
+
+  it('repoints and un-deletes the row when the original note is gone (restore)', async () => {
+    const repo = makeRepo();
+    const originalPath = `${IR_DIR}/articles/original.md`;
+    const restoredPath = `${IR_DIR}/restored/original.md`;
+    (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { reference: originalPath },
+    ]);
+    const appObj = makeCreationApp('article-1', [
+      { path: restoredPath, irId: 'article-1' },
+    ]);
+    const manager = new ReviewManager(makePlugin(appObj as never), repo);
+    manager.app = appObj as never;
+
+    await manager.handleCreation({ path: restoredPath } as TAbstractFile);
+
+    expect(repo.mutate).toHaveBeenCalled();
+    const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, unknown[]];
+    expect(sql).toContain('deleted = FALSE');
+    expect(params).toEqual([restoredPath, 'article-1']);
+  });
+
+  it('un-deletes the row when the note is restored at its original path', async () => {
+    const repo = makeRepo();
+    const originalPath = `${IR_DIR}/articles/original.md`;
+    (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { reference: originalPath },
+    ]);
+    const appObj = makeCreationApp('article-1', [
+      { path: originalPath, irId: 'article-1' },
+    ]);
+    const manager = new ReviewManager(makePlugin(appObj as never), repo);
+    manager.app = appObj as never;
+
+    await manager.handleCreation({ path: originalPath } as TAbstractFile);
+
+    expect(repo.mutate).toHaveBeenCalled();
+    const [, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, unknown[]];
+    expect(params).toEqual([originalPath, 'article-1']);
+  });
+});
+
 describe('ReviewManager.handleExternalRename console.warn mutant', () => {
   afterEach(() => {
     vi.restoreAllMocks();
