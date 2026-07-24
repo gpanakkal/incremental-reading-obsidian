@@ -1997,6 +1997,30 @@ describe('ReviewManager.handleExternalRename rowId branch', () => {
       expect(params[1]).toBe(irId);
     }
   );
+
+  it('un-deletes the row matching the ir-id, so renaming a note back to a deleted reference restores it', async () => {
+    const repo = makeRepo();
+    const irId = 'deleted-row-id';
+    const newPath = `${IR_DIR}/articles/restored.md`;
+    const oldPath = `${IR_DIR}/articles/temp-name.md`;
+    const app = makeAppWithIrId('article', irId, newPath);
+    const manager = new ReviewManager(makePlugin(app as never), repo);
+    manager.app = app as never;
+    vi.spyOn(manager.snippets.offsetTracker, 'renameFile').mockReturnValue(
+      undefined
+    );
+
+    await manager.handleExternalRename(
+      { path: newPath } as TAbstractFile,
+      oldPath
+    );
+
+    const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
+      .calls[0] as [string, unknown[]];
+    expect(sql).toContain('deleted = FALSE');
+    expect(sql).toContain('WHERE id = $2');
+    expect(params).toEqual([newPath, irId]);
+  });
 });
 
 describe('ReviewManager.getReviewItemFromFile card vs null distinction', () => {
