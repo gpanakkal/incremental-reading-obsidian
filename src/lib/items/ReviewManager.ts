@@ -496,8 +496,10 @@ export default class ReviewManager {
     const table = type === 'card' ? 'srs_card' : type;
 
     if (rowId) {
+      // Renaming a note to match the reference of a deleted row restores it,
+      // e.g. after deleting a note and recreating it under another name
       await this.#repo.mutate(
-        `UPDATE ${table} SET reference = $1 WHERE id = $2`,
+        `UPDATE ${table} SET reference = $1, deleted = FALSE WHERE id = $2`,
         [file.path, rowId]
       );
     } else {
