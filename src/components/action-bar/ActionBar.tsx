@@ -254,7 +254,7 @@ function CardActions({ card }: { card: ReviewCard }) {
               await actions.gradeCard(card, Rating.Again)
             }
           >
-            🔁 Again
+            🔁 Forgot
           </ButtonWithIcon>
           <ButtonWithIcon
             handleClick={async () => await actions.gradeCard(card, Rating.Hard)}
