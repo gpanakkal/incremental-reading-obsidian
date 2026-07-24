@@ -560,6 +560,24 @@ export default class ReviewManager {
     if (!id || type === null) return;
 
     const table = type === 'card' ? 'srs_card' : type;
+
+    // Copying a note also triggers a creation event; check that the original
+    // note exists and has the right ir-id in frontmatter to ignore copies
+    const row = (
+      await this.#repo.query(`SELECT reference FROM ${table} WHERE id = $1`, [
+        id,
+      ])
+    )[0] as { reference: string } | undefined;
+    if (row && row.reference !== file.path) {
+      const referencedFile = this.app.vault.getFileByPath(row.reference);
+      if (
+        referencedFile &&
+        Obsidian.getFrontMatter(referencedFile, this.app)?.['ir-id'] === id
+      ) {
+        return;
+      }
+    }
+
     await this.#repo.mutate(
       `UPDATE ${table} SET deleted = FALSE, reference = $1 WHERE id = $2`,
       [file.path, id]
