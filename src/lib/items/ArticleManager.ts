@@ -32,7 +32,7 @@ import type { TFile } from 'obsidian';
 import { Notice } from 'obsidian';
 import { ItemManager } from './ItemManager';
 
-const IMPORT_BLOCKED_TAGS = new Set([ARTICLE_TAG, SNIPPET_TAG, CARD_TAG]);
+const IMPORT_BLOCKED_TAGS = new Set([SNIPPET_TAG, CARD_TAG]);
 
 export class ArticleManager extends ItemManager {
   static rowToBase(articleRow: ArticleRow): IArticleBase {
@@ -149,8 +149,12 @@ export class ArticleManager extends ItemManager {
       );
       if (rows[0]) {
         await this.repo.mutate(
-          'UPDATE article SET reference = $1 WHERE id = $2',
+          'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
           [file.path, existingId]
+        );
+        new Notice(
+          `Linked "${file.basename}" to existing article with the same ID`,
+          SUCCESS_NOTICE_DURATION_MS
         );
         return this.fetch(existingId);
       }
@@ -241,8 +245,12 @@ export class ArticleManager extends ItemManager {
       );
       if (rows[0]) {
         await this.repo.mutate(
-          'UPDATE article SET reference = $1 WHERE id = $2',
+          'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
           [file.path, existingId]
+        );
+        new Notice(
+          `Linked "${file.basename}" to existing article with the same ID`,
+          SUCCESS_NOTICE_DURATION_MS
         );
         return this.fetch(existingId);
       }
