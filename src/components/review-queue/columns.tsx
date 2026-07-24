@@ -108,7 +108,7 @@ export function renderQueueCells(
         '—'
       ) : (
         <span>
-          <span className="ir-queue-inline-label">{schedulingLabel(row)}: </span>
+          <span className="ir-queue-inline-label">{schedulingLabel(row)} </span>
           {row.scheduling.value}
         </span>
       ),
