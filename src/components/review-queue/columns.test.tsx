@@ -26,22 +26,18 @@ function makeQueueRow(overrides: Partial<QueueRow> = {}): QueueRow {
 }
 
 const schedulingArb: fc.Arbitrary<QueueScheduling> = fc.oneof(
-  fc
-    .double({ min: 0, max: 100, noNaN: true })
-    .map(
-      (value): QueueScheduling => ({
-        kind: 'priority',
-        value: value.toString(),
-      })
-    ),
-  fc
-    .integer({ min: 1, max: 36_500 })
-    .map(
-      (value): QueueScheduling => ({
-        kind: 'fixed-interval',
-        value: value.toString(),
-      })
-    ),
+  fc.double({ min: 0, max: 100, noNaN: true }).map(
+    (value): QueueScheduling => ({
+      kind: 'priority',
+      value: value.toString(),
+    })
+  ),
+  fc.integer({ min: 1, max: 36_500 }).map(
+    (value): QueueScheduling => ({
+      kind: 'fixed-interval',
+      value: value.toString(),
+    })
+  ),
   fc.constant<QueueScheduling>({ kind: 'none', value: null })
 );
 
@@ -138,7 +134,7 @@ describe('renderQueueCells', () => {
         expect(label.props.className).toBe('ir-queue-inline-label');
         const expectedLabel =
           row.scheduling.kind === 'fixed-interval' ? 'Interval' : 'Priority';
-        expect(label.props.children.join('')).toBe(`${expectedLabel}: `);
+        expect(label.props.children.join('')).toBe(`${expectedLabel} `);
         expect(value).toBe(row.scheduling.value);
       })
     );
