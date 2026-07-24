@@ -336,6 +336,53 @@ export default class ReviewManager {
   }
 
   /**
+   * Resolve a single item id to its current {@link QueueRow}, or `null` when
+   * the row no longer belongs in the review queue (dismissed, deleted, missing,
+   * or with no due time). Mirrors the inclusion rules {@link getQueue} applies,
+   * so a targeted queue update can refetch just the changed row.
+   */
+  async getQueueRow(id: string): Promise<QueueRow | null> {
+    const articleRow = (
+      await this.#repo.query('SELECT * FROM article WHERE id = $1', [id])
+    )[0] as ArticleRow | undefined;
+    if (articleRow) {
+      return this.#includeInQueue(articleRow)
+        ? this.#articleToQueueRow(articleRow)
+        : null;
+    }
+
+    const snippetRow = (
+      await this.#repo.query('SELECT * FROM snippet WHERE id = $1', [id])
+    )[0] as SnippetRow | undefined;
+    if (snippetRow) {
+      return this.#includeInQueue(snippetRow)
+        ? this.#snippetToQueueRow(snippetRow)
+        : null;
+    }
+
+    const cardRow = (
+      await this.#repo.query('SELECT * FROM srs_card WHERE id = $1', [id])
+    )[0] as SRSCardRow | undefined;
+    if (cardRow) {
+      return this.#includeInQueue(cardRow)
+        ? this.#cardToQueueRow(cardRow)
+        : null;
+    }
+
+    return null;
+  }
+
+  /**
+   * Whether a raw row currently qualifies for the queue: not dismissed, not
+   * deleted, and with a due time. Matches the `fetchMany` filters used by
+   * {@link getQueue} (which selects `dismissed = 0 AND deleted = FALSE` and,
+   * because it filters on `due <= dueBy`, never returns null-due rows).
+   */
+  #includeInQueue(row: ArticleRow | SnippetRow | SRSCardRow): boolean {
+    return !row.dismissed && !row.deleted && row.due !== null;
+  }
+
+  /**
    * Fetches a ReviewItem given a file.
    * Returns null if the item is not found in the database.
    */

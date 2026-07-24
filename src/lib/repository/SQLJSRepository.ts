@@ -6,6 +6,21 @@ import {
 } from '#/db/migration-helpers';
 import { migrations } from '#/db/migrations';
 import {
+  BACKUP_DIRECTORY,
+  DATA_DIRECTORY,
+  LOG_DIRECTORY,
+  TABLE_NAMES,
+} from '#/lib/constants';
+import type {
+  DataChangeEvent,
+  DataChangeListener,
+  DataChangeOp,
+  NoteType,
+  RowTypes,
+  SQLiteRepository,
+} from '#/lib/types';
+import type { Primitive } from '#/lib/utility-types';
+import {
   normalizePath,
   Platform,
   type App,
@@ -19,14 +34,17 @@ import initSqlJs from 'sql.js';
 // Points at the binary shipped with the installed sql.js package so the bundled
 // WASM stays in lockstep with the sql.js version in node_modules.
 import wasmBase64 from 'sql.js/dist/sql-wasm.wasm';
-import {
-  BACKUP_DIRECTORY,
-  DATA_DIRECTORY,
-  LOG_DIRECTORY,
-  TABLE_NAMES,
-} from '#/lib/constants';
-import type { RowTypes, SQLiteRepository } from '#/lib/types';
-import type { Primitive } from '#/lib/utility-types';
+
+/**
+ * sqlite table name -> queue `NoteType`, for the tables whose rows appear in
+ * the review queue. Review-log tables are intentionally absent: their writes
+ * never change a queue row directly (the paired item write does).
+ */
+const ITEM_TABLE_TO_NOTE_TYPE: Readonly<Record<string, NoteType>> = {
+  article: 'article',
+  snippet: 'snippet',
+  srs_card: 'card',
+};
 
 export class SQLJSRepository implements SQLiteRepository {
   app: App;
@@ -38,6 +56,13 @@ export class SQLJSRepository implements SQLiteRepository {
   protected pendingSaveCount: number = 0;
   #onMigrationFailure?: (error: MigrationVerificationError) => void;
   onReloadFromDisk?: () => void | Promise<void>;
+
+  #changeListeners = new Set<DataChangeListener>();
+  /**
+   * Row changes reported by the update hook during the current `mutate`,
+   * grouped by note type then op. Flushed to listeners once the write finishes.
+   */
+  #pendingChanges = new Map<NoteType, Map<DataChangeOp, Set<string>>>();
 
   /**
    * Use .start to instantiate
@@ -132,9 +157,75 @@ export class SQLJSRepository implements SQLiteRepository {
    * @returns an empty array on success
    */
   mutate(query: string, params: Primitive[] = []) {
+    this.#pendingChanges.clear();
     const result = this._execSql(query, params);
+    this.#flushChanges();
     void this.save();
     return result as [][];
+  }
+
+  /**
+   * Subscribe to row-level changes on item tables. The listener fires once per
+   * (table, op) per `mutate`, with the affected rows' UUID `id`s.
+   * @returns an unsubscribe function
+   */
+  onDataChange(listener: DataChangeListener): () => void {
+    this.#changeListeners.add(listener);
+    return () => {
+      this.#changeListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Register the sql.js update hook on the current `db`. Must be called every
+   * time `this.db` is (re)assigned, since the hook binds to that instance.
+   *
+   * The hook fires once per changed row, mid-statement, and only reads (never
+   * writes) the db, as sql.js requires. For inserts and updates the row is
+   * still visible, so its UUID `id` is resolvable. Hard SQL `DELETE`s are not
+   * resolvable this way (the row is already gone to a nested query) and are
+   * skipped — but the app removes items by soft-deleting (an `UPDATE` that sets
+   * `deleted`/`dismissed`), which resolves normally, so this is not hit in
+   * practice.
+   */
+  protected registerUpdateHook() {
+    this.db?.updateHook((op, _dbName, table, rowId) => {
+      const noteType = ITEM_TABLE_TO_NOTE_TYPE[table];
+      if (!noteType) return; // not a queue-item table (e.g. a review log)
+
+      const id = this.#resolveRowId(table, rowId);
+      if (id === null) return; // unresolvable (e.g. a hard DELETE); skip
+
+      const byOp =
+        this.#pendingChanges.get(noteType) ??
+        new Map<DataChangeOp, Set<string>>();
+      const ids = byOp.get(op) ?? new Set<string>();
+      ids.add(id);
+      byOp.set(op, ids);
+      this.#pendingChanges.set(noteType, byOp);
+    });
+  }
+
+  /** Resolve a rowid to its UUID `id`, or null if the row is gone. */
+  #resolveRowId(table: string, rowId: number): string | null {
+    const result = this.db?.exec(`SELECT id FROM ${table} WHERE rowid = $1`, [
+      rowId,
+    ]);
+    const id = result?.[0]?.values[0]?.[0];
+    return typeof id === 'string' ? id : null;
+  }
+
+  /** Emit one event per buffered (table, op) and clear the buffer. */
+  #flushChanges() {
+    for (const [table, byOp] of this.#pendingChanges) {
+      for (const [op, ids] of byOp) {
+        const event: DataChangeEvent = { table, op, ids: [...ids] };
+        for (const listener of this.#changeListeners) {
+          listener(event);
+        }
+      }
+    }
+    this.#pendingChanges.clear();
   }
 
   /**
@@ -212,6 +303,8 @@ export class SQLJSRepository implements SQLiteRepository {
     this.pendingSaveCount++;
     try {
       const data = this.db.export().buffer;
+      // sql.js `export()` tears down the update hook
+      this.registerUpdateHook();
       const dataDir = this.app.vault.getFolderByPath(DATA_DIRECTORY);
       if (!dataDir) {
         await this.app.vault.createFolder(DATA_DIRECTORY);
@@ -244,6 +337,7 @@ export class SQLJSRepository implements SQLiteRepository {
       this.#sql ||= await this.loadWasm();
       this.db = new this.#sql.Database();
       this.db.exec(this.#schema);
+      this.registerUpdateHook();
       return this.db;
     } catch (error) {
       console.error(error);
@@ -300,6 +394,7 @@ export class SQLJSRepository implements SQLiteRepository {
       // Use browser-compatible Uint8Array instead of Node.js Buffer
       // for mobile compatibility
       this.db = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
+      this.registerUpdateHook();
       const result = this.db.exec('PRAGMA integrity_check');
       const status = result[0]?.values[0]?.[0] as string;
       if (status !== 'ok') {

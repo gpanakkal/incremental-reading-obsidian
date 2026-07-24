@@ -15,6 +15,7 @@ import ReviewManager from './lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from './lib/obsidian-editor';
 import { getEditorClass } from './lib/obsidian-editor';
 import {
+  applyQueueChange,
   invalidateCacheOnMatch,
   invalidateCurrentItemQuery,
   resetCurrentOnMatch,
@@ -389,6 +390,14 @@ export default class IncrementalReadingPlugin extends Plugin {
       })
     );
     this.reviewManager = new ReviewManager(this, repo);
+
+    // Keep the review-queue table live: when a row on a cached page changes,
+    // patch (or drop) it and reconcile order/totals. Unsubscribe on unload.
+    this.register(
+      repo.onDataChange((event) => {
+        void applyQueueChange(event, this.reviewManager);
+      })
+    );
   }
 
   async learn(initialItem?: ReviewItem, newLeaf: boolean = true) {
