@@ -88,7 +88,8 @@
   margin-top: 0 !important;
 }
 
-.ir-action-bar .clickable-icon svg.lucide {
+.ir-action-bar .clickable-icon svg.lucide,
+.ir-queue-type-icon svg.lucide {
   height: var(--icon-size);
   width: var(--icon-size);
   stroke-width: var(--icon-stroke);
