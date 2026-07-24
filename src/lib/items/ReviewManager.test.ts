@@ -33,6 +33,7 @@ function makeRepo(): SQLiteRepository {
     mutate: vi.fn().mockResolvedValue([[]]),
     _execSql: vi.fn(),
     handleFileChange: vi.fn(),
+    onDataChange: vi.fn(() => vi.fn()),
   } as unknown as SQLiteRepository;
 }
 
@@ -795,6 +796,124 @@ describe('ReviewManager.getQueue', () => {
       });
       expect(page).toEqual({ rows: [], totalRows: 0 });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getQueueRow — resolves one item id to its current QueueRow, or null when the
+// row no longer belongs in the queue (dismissed / deleted / missing / no due).
+// ---------------------------------------------------------------------------
+
+describe('ReviewManager.getQueueRow', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Route `repo.query` by target table so a single raw row can be returned for
+   * whichever `SELECT * FROM <table> WHERE id = ?` the method issues. Every
+   * reference resolves to a file whose path is the reference itself.
+   */
+  function wireRow(rows: {
+    article?: ArticleRow;
+    snippet?: SnippetRow;
+    card?: SRSCardRow;
+  }) {
+    const repo = makeRepo();
+    vi.spyOn(repo, 'query').mockImplementation((sql: string) => {
+      if (sql.includes('FROM article'))
+        return Promise.resolve(rows.article ? [rows.article] : []);
+      if (sql.includes('FROM snippet'))
+        return Promise.resolve(rows.snippet ? [rows.snippet] : []);
+      if (sql.includes('FROM srs_card'))
+        return Promise.resolve(rows.card ? [rows.card] : []);
+      return Promise.resolve([]);
+    });
+    vi.spyOn(Obsidian, 'getNote').mockImplementation(
+      (reference: string) => ({ path: reference }) as TFile
+    );
+    return new ReviewManager(makePlugin(), repo);
+  }
+
+  it('returns the QueueRow for a due, non-dismissed, non-deleted article', async () => {
+    const manager = wireRow({
+      article: makeArticleRow({
+        id: 'a1',
+        reference: 'articles/a1.md',
+        due: YEAR_2000_MS,
+        due_fuzz: null,
+      }),
+    });
+
+    const row = await manager.getQueueRow('a1');
+
+    expect(row).not.toBeNull();
+    expect(row?.id).toBe('a1');
+    expect(row?.type).toBe('article');
+    expect(row?.due).toEqual(new Date(YEAR_2000_MS));
+    expect(row?.file.path).toBe('articles/a1.md');
+  });
+
+  it('resolves a snippet id', async () => {
+    const manager = wireRow({
+      snippet: makeSnippetRow({
+        id: 's1',
+        reference: 'snippets/s1.md',
+        due: YEAR_2000_MS,
+      }),
+    });
+    const row = await manager.getQueueRow('s1');
+    expect(row?.type).toBe('snippet');
+    expect(row?.id).toBe('s1');
+  });
+
+  it('resolves a card id', async () => {
+    const manager = wireRow({
+      card: makeCardRow({ id: 'c1', reference: 'cards/c1.md' }),
+    });
+    const row = await manager.getQueueRow('c1');
+    expect(row?.type).toBe('card');
+    expect(row?.id).toBe('c1');
+  });
+
+  it('returns null when the row is dismissed', async () => {
+    const manager = wireRow({
+      article: makeArticleRow({ id: 'a1', dismissed: 1 }),
+    });
+    expect(await manager.getQueueRow('a1')).toBeNull();
+  });
+
+  it('returns null when the row is deleted', async () => {
+    const manager = wireRow({
+      article: makeArticleRow({ id: 'a1', deleted: true }),
+    });
+    expect(await manager.getQueueRow('a1')).toBeNull();
+  });
+
+  it('returns null when the row has no due time', async () => {
+    const manager = wireRow({
+      article: makeArticleRow({ id: 'a1', due: null, dismissed: 1 }),
+    });
+    expect(await manager.getQueueRow('a1')).toBeNull();
+  });
+
+  it('returns null when no table has the id', async () => {
+    const manager = wireRow({});
+    expect(await manager.getQueueRow('missing')).toBeNull();
+  });
+
+  it('returns null when the note file cannot be resolved', async () => {
+    const repo = makeRepo();
+    vi.spyOn(repo, 'query').mockImplementation((sql: string) =>
+      Promise.resolve(
+        sql.includes('FROM article')
+          ? [makeArticleRow({ id: 'a1', reference: 'articles/a1.md' })]
+          : []
+      )
+    );
+    vi.spyOn(Obsidian, 'getNote').mockReturnValue(null);
+    const manager = new ReviewManager(makePlugin(), repo);
+    expect(await manager.getQueueRow('a1')).toBeNull();
   });
 });
 

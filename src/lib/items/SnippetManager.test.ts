@@ -67,6 +67,7 @@ function makeSimpleRepo(): SQLiteRepository {
     mutate: vi.fn().mockResolvedValue([[]]),
     _execSql: vi.fn(),
     handleFileChange: vi.fn(),
+    onDataChange: vi.fn(() => vi.fn()),
   } as unknown as SQLiteRepository;
 }
 
@@ -83,6 +84,7 @@ function makeRepoWithLastReview(
     mutate: vi.fn().mockResolvedValue([[]]),
     _execSql: vi.fn(),
     handleFileChange: vi.fn(),
+    onDataChange: vi.fn(() => vi.fn()),
   } as unknown as SQLiteRepository;
 }
 
@@ -167,6 +169,7 @@ async function makeSqlJsRepo(): Promise<{
     }),
     _execSql: vi.fn(),
     handleFileChange: vi.fn(),
+    onDataChange: vi.fn(() => vi.fn()),
   } as unknown as SQLiteRepository;
   return { repo, db };
 }
@@ -560,6 +563,7 @@ describe('fetchMany', () => {
       mutate: vi.fn(),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new SnippetManager({} as never, repo);
     const result = await manager.fetchMany();
@@ -717,6 +721,7 @@ describe('fetch', () => {
       mutate: vi.fn(),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new SnippetManager({} as never, repo);
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(null);
@@ -732,6 +737,7 @@ describe('fetch', () => {
           mutate: vi.fn(),
           _execSql: vi.fn(),
           handleFileChange: vi.fn(),
+          onDataChange: vi.fn(() => vi.fn()),
         } as unknown as SQLiteRepository;
         const manager = new SnippetManager({} as never, repo);
         await manager.fetch(id);
@@ -751,6 +757,7 @@ describe('fetch', () => {
       mutate: vi.fn(),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new SnippetManager(
       { app: makeApp(), settings: { fuzzReviewTimes: false } } as never,
@@ -793,6 +800,7 @@ describe('getDue', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
   }
 
@@ -881,6 +889,7 @@ describe('getDue', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -909,6 +918,7 @@ describe('getDue', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -935,6 +945,7 @@ describe('getDue', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -976,6 +987,7 @@ describe('getDue', () => {
       mutate: vi.fn(),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -994,6 +1006,7 @@ describe('getDue', () => {
       mutate: vi.fn(),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const plugin = {
       app: makeApp(),
@@ -1099,6 +1112,7 @@ describe('review', () => {
       mutate: vi.fn().mockRejectedValue(new Error('db error')),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new SnippetManager(
       { settings: { fuzzReviewTimes: false } } as never,
@@ -1234,6 +1248,7 @@ describe('fuzzing (getDue sort)', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1256,6 +1271,7 @@ describe('fuzzing (getDue sort)', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1280,6 +1296,7 @@ describe('fuzzing (getDue sort)', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1303,6 +1320,7 @@ describe('fuzzing (getDue sort)', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1326,6 +1344,7 @@ describe('fuzzing (getDue sort)', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const plugin = {
