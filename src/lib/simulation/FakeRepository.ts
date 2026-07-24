@@ -13,10 +13,12 @@ export class FakeRepository extends SQLJSRepository {
       dbFilePath,
       schema: '',
     });
-    // Stub db so mutate/query don't throw
+    // Stub db so mutate/query/save don't throw. `updateHook` is re-armed after
+    // every save (real sql.js drops it on export), so the stub must accept it.
     repo.db = {
       exec: vi.fn(() => []),
       export: vi.fn(() => new Uint8Array(8)),
+      updateHook: vi.fn(),
     } as unknown as (typeof repo)['db'];
     return repo;
   }

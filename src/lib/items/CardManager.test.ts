@@ -40,6 +40,7 @@ function makeRepo(): SQLiteRepository {
     mutate: vi.fn().mockResolvedValue([[]]),
     _execSql: vi.fn(),
     handleFileChange: vi.fn(),
+    onDataChange: vi.fn(() => vi.fn()),
   } as unknown as SQLiteRepository;
 }
 
@@ -811,6 +812,7 @@ describe('fetchMany', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     const result = await manager.fetchMany();
@@ -972,6 +974,7 @@ describe('fetch', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     const result = await manager.fetch(row.id);
@@ -1006,6 +1009,7 @@ describe('getDue', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
   }
 
@@ -1058,6 +1062,7 @@ describe('getDue', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const manager = new CardManager(makePlugin(), repo);
@@ -1074,6 +1079,7 @@ describe('getDue', () => {
       mutate: vi.fn(),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     const results = await manager.getDue();
@@ -1090,6 +1096,7 @@ describe('getDue', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     await manager.getDue(0, undefined, ['excluded-id']);
@@ -1125,6 +1132,7 @@ describe('getDue', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const manager = new CardManager(makePlugin(), repo);
@@ -1162,6 +1170,7 @@ describe('getDue', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
     const manager = new CardManager(makePlugin(), repo);
@@ -1189,6 +1198,7 @@ describe('review', () => {
             mutate: vi.fn().mockResolvedValue([[]]),
             _execSql: vi.fn(),
             handleFileChange: vi.fn(),
+            onDataChange: vi.fn(() => vi.fn()),
           } as unknown as SQLiteRepository;
           const manager = new CardManager(makePlugin(), repo);
           await manager.review(card, grade, new Date());
@@ -1235,6 +1245,7 @@ describe('review', () => {
             mutate: vi.fn().mockResolvedValue([[]]),
             _execSql: vi.fn(),
             handleFileChange: vi.fn(),
+            onDataChange: vi.fn(() => vi.fn()),
           } as unknown as SQLiteRepository;
           const manager = new CardManager(makePlugin(), repo);
           await manager.review(card, grade, new Date());
@@ -1287,6 +1298,7 @@ describe('review', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     await manager.review(card, Rating.Again, new Date());
@@ -1308,6 +1320,7 @@ describe('review', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     await expect(
@@ -1327,6 +1340,7 @@ describe('review', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     await manager.review(card, Rating.Good, new Date());
@@ -1364,6 +1378,7 @@ describe('review — FSRS settings', () => {
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
       handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
   }
 
