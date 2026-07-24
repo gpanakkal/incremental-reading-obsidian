@@ -200,6 +200,21 @@ export type FrontMatterUpdates = SafeOmit<PluginFrontMatter, 'tags'> & {
   tags?: string | string[];
 };
 
+export type DataChangeOp = 'insert' | 'update' | 'delete';
+
+/**
+ * Emitted by the repository after a write touches an item table. `ids` are the
+ * real UUID `id` values of the affected rows (resolved from sqlite's rowid),
+ * grouped into one event per (table, op) per logical write.
+ */
+export interface DataChangeEvent {
+  table: NoteType;
+  op: DataChangeOp;
+  ids: string[];
+}
+
+export type DataChangeListener = (event: DataChangeEvent) => void;
+
 export interface SQLiteRepository {
   query(query: string, params?: Primitive[]): RowTypes[] | Promise<RowTypes[]>;
   mutate(query: string, params?: Primitive[]): [][] | Promise<[][]>;
@@ -208,6 +223,10 @@ export interface SQLiteRepository {
     params?: Primitive[]
   ): RowTypes[][] | Promise<RowTypes[][]>;
   handleFileChange(file: TAbstractFile): Promise<void>;
+  /**
+   * Subscribe to row-level changes on item tables. Returns an unsubscribe fn.
+   */
+  onDataChange(listener: DataChangeListener): () => void;
 }
 
 export type SchedulingStrategy = 'priority' | 'fixed-interval';
