@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS article_review (
 CREATE TABLE IF NOT EXISTS snippet (
   id TEXT NOT NULL, -- UUID
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
-  parent TEXT DEFAULT NULL, -- null if it wasn't created from an article or snippet
+  parent TEXT DEFAULT NULL, -- UUID; null if it wasn't created from an article or snippet
   due INTEGER, -- unix timestamp
   due_fuzz INTEGER DEFAULT NULL, -- milliseconds to offset due time for intra-day review ordering
   interval INTEGER NOT NULL, -- the interval that was used to calculate `due`
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS srs_card (
   id TEXT NOT NULL, -- UUID
   -- source TEXT NOT NULL, -- use source property in the card instead so Obsidian updates it properly
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
-  parent TEXT DEFAULT NULL,
+  parent TEXT DEFAULT NULL, -- UUID; null if it wasn't created from an article or snippet
   created_at INTEGER NOT NULL, -- unix timestamp
   due INTEGER NOT NULL,
   dismissed INTEGER NOT NULL DEFAULT FALSE,

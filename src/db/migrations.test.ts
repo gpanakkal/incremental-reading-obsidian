@@ -675,12 +675,12 @@ describe('migration v6 — vault-relative references', () => {
     db.exec(`INSERT INTO article (id, reference, due, interval, priority)
       VALUES ('a1', 'articles/article.md', 1000, 86400000, 30)`);
     db.exec(`INSERT INTO snippet (id, reference, parent, due, interval, priority)
-      VALUES ('s1', 'snippets/snip.md', 'articles/article.md', 1000, 86400000, 20)`);
+      VALUES ('s1', 'snippets/snip.md', 'a1', 1000, 86400000, 20)`);
     db.exec(`INSERT INTO snippet (id, reference, parent, due, interval, priority)
       VALUES ('s2', 'snippets/snip-frag.md#h1', NULL, 1000, 86400000, 20)`);
     db.exec(`INSERT INTO srs_card
       (id, reference, parent, created_at, due, stability, difficulty, elapsed_days, scheduled_days, state)
-      VALUES ('c1', 'cards/card.md', 'articles/article.md', 0, 1000, 1.0, 1.0, 0.0, 1.0, 0)`);
+      VALUES ('c1', 'cards/card.md', 'a1', 0, 1000, 1.0, 1.0, 0.0, 1.0, 0)`);
   });
 
   it('prefixes article references with DATA_DIRECTORY/', () => {
@@ -711,21 +711,6 @@ describe('migration v6 — vault-relative references', () => {
     applyMigrations(db, migrations);
     const rows = selectAll(db, 'srs_card');
     expect(rows[0].reference).toBe(`${DATA_DIRECTORY}/cards/card.md`);
-  });
-
-  it('prefixes non-null snippet.parent with DATA_DIRECTORY/', () => {
-    applyMigrations(db, migrations);
-    const byId = Object.fromEntries(
-      selectAll(db, 'snippet').map((r) => [r.id, r])
-    );
-    expect(byId['s1'].parent).toBe(`${DATA_DIRECTORY}/articles/article.md`);
-    expect(byId['s2'].parent).toBeNull();
-  });
-
-  it('prefixes non-null srs_card.parent with DATA_DIRECTORY/', () => {
-    applyMigrations(db, migrations);
-    const rows = selectAll(db, 'srs_card');
-    expect(rows[0].parent).toBe(`${DATA_DIRECTORY}/articles/article.md`);
   });
 
   it('leaves row counts unchanged', () => {

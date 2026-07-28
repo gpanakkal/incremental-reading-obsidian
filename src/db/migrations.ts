@@ -320,13 +320,7 @@ export const migrations: Migration[] = [
         `UPDATE snippet SET reference = '${DATA_DIRECTORY}/' || reference WHERE reference NOT LIKE '${DATA_DIRECTORY}/%'`
       );
       db.exec(
-        `UPDATE snippet SET parent = '${DATA_DIRECTORY}/' || parent WHERE parent IS NOT NULL AND parent NOT LIKE '${DATA_DIRECTORY}/%'`
-      );
-      db.exec(
         `UPDATE srs_card SET reference = '${DATA_DIRECTORY}/' || reference WHERE reference NOT LIKE '${DATA_DIRECTORY}/%'`
-      );
-      db.exec(
-        `UPDATE srs_card SET parent = '${DATA_DIRECTORY}/' || parent WHERE parent IS NOT NULL AND parent NOT LIKE '${DATA_DIRECTORY}/%'`
       );
     },
   },
