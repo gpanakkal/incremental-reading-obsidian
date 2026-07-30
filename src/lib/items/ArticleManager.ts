@@ -142,7 +142,28 @@ export class ArticleManager extends ItemManager {
 
     // Re-associate if the file already carries an ir-id
     const existingId = frontmatter?.['ir-id'] as string | undefined;
-    if (existingId) {
+
+    const byRef = (await this.repo.query(
+      'SELECT id FROM article WHERE reference = $1',
+      [file.path]
+    )) as (ArticleRow | undefined)[];
+    const refMatch = byRef[0];
+
+    if (refMatch && refMatch.id === existingId) {
+      new Notice(
+        `Note is already an article; canceling import`,
+        ERROR_NOTICE_DURATION_MS
+      );
+      return null;
+    } else if (refMatch) {
+      // reference matches, but no ID or ID doesn't match
+      // TODO: option to choose any one of the rows matching the id/reference
+      new Notice(
+        `Another article is already at this file path; canceling import`,
+        ERROR_NOTICE_DURATION_MS
+      );
+      return null;
+    } else if (existingId) {
       const rows = await this.repo.query(
         'SELECT id FROM article WHERE id = $1',
         [existingId]
@@ -157,18 +178,6 @@ export class ArticleManager extends ItemManager {
           SUCCESS_NOTICE_DURATION_MS
         );
         return this.fetch(existingId);
-      }
-      // Orphaned ir-id: cancel if the file path is already registered
-      const byRef = await this.repo.query(
-        'SELECT id FROM article WHERE reference = $1',
-        [file.path]
-      );
-      if (byRef[0]) {
-        new Notice(
-          `Note is already registered as an article; canceling import`,
-          ERROR_NOTICE_DURATION_MS
-        );
-        return null;
       }
       // Orphaned id + no reference match: fall through to fresh import
     }
