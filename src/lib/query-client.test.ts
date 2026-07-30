@@ -13,6 +13,7 @@ function makeQueueRow(overrides: Partial<QueueRow> = {}): QueueRow {
     file: { path: 'articles/a1.md' } as TFile,
     due: new Date('2000-01-01T00:00:00Z'),
     reference: 'articles/a1.md',
+    parent: null,
     scheduling: { kind: 'priority', value: '3' },
     ...overrides,
   };
