@@ -261,6 +261,13 @@
   padding: var(--size-4-2);
 }
 
+.ir-queue-title {
+  padding: var(--size-4-2);
+  text-align: center;
+  font-size: var(--font-ui-larger);
+  font-weight: var(--font-semibold);
+}
+
 .ir-queue-row {
   display: flex;
   align-items: center;
@@ -270,7 +277,23 @@
   cursor: pointer;
 }
 
-.ir-queue-row:hover {
+/* Soft per-type row tint. Built from Obsidian's theme RGB triples rather than 
+   fixed colors so the tint stays subtle in both light and dark themes. */
+.ir-queue-row[data-type='article'] {
+  background-color: rgba(var(--color-blue-rgb), 0.2);
+}
+
+.ir-queue-row[data-type='snippet'] {
+  background-color: rgba(var(--color-yellow-rgb), 0.2);
+}
+
+.ir-queue-row[data-type='card'] {
+  background-color: rgba(var(--color-green-rgb), 0.2);
+}
+
+/* Hover must beat the type tints above, hence the matching attribute weight. */
+.ir-queue-row:hover,
+.ir-queue-row[data-type]:hover {
   background-color: var(--background-modifier-hover);
 }
 
@@ -295,9 +318,69 @@
   flex: 1;
 }
 
+/* Columns marked `content` take a fixed share instead of an equal one, so the
+   narrow columns (type, due, scheduling) stop claiming as much width as a file
+   path. The widths are per column key rather than intrinsic (`max-content`)
+   because the header row and the body rows are separate flex containers: only
+   a width both agree on keeps a label above its own column. Each is sized for
+   its header label as well as its values. */
+.ir-queue-cell[data-width='content'],
+.ir-queue-header-cell[data-width='content'] {
+  flex: 0 0 auto;
+}
+
+.ir-queue-cell[data-column='type'],
+.ir-queue-header-cell[data-column='type'] {
+  width: 3.5em;
+}
+
+.ir-queue-cell[data-column='due'],
+.ir-queue-header-cell[data-column='due'] {
+  width: 6em;
+}
+
+.ir-queue-cell[data-column='scheduling'],
+.ir-queue-header-cell[data-column='scheduling'] {
+  width: 11em;
+}
+
+/* Header labels must not be clipped by their column's width. */
+.ir-queue-header-cell {
+  white-space: nowrap;
+}
+
 .ir-queue-inline-label {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+}
+
+/* On the wide layout the header row already names this column, so the in-line
+   Source/Parent label would only be noise. The narrow layout re-shows it. */
+.ir-queue-origin-label {
+  display: none;
+}
+
+/* Every cell truncates rather than wrapping or widening its column; the full
+   text stays reachable through the cell's title tooltip. */
+.ir-queue-cell-value {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* A card's D/S/R triple. The values keep the normal cell type so they read
+   like every other scheduling value; only the D/S/R labels are demoted (via
+   .ir-queue-inline-label, shared with the Priority / Interval labels).
+   Tabular figures keep the numbers aligned down the column. */
+.ir-queue-card-memory {
+  display: flex;
+  gap: var(--size-2-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.ir-queue-card-memory-part {
+  white-space: nowrap;
 }
 
 /* HTML wrapper for the type icon (tooltip target); centers the SVG. */
@@ -342,6 +425,57 @@
 .ir-queue-pagination-indicator {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+}
+
+/* Narrow layout: portrait screens (phones) or any pane too cramped, including 
+   a narrow desktop side pane. Rows become two lines — type / due / reference 
+   on the first, the labelled Source-or-Parent and the scheduling value on the 
+   second — instead of squeezing every column. */
+@media (max-aspect-ratio: 1 / 1), (max-width: 720px) {
+  .ir-queue-row {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    row-gap: var(--size-2-1);
+    padding-top: var(--size-4-1);
+    padding-bottom: var(--size-4-1);
+  }
+
+  /* Force the wrap: the parent cell starts line two and the scheduling cell
+     follows it, so the first line holds only type, due, and reference. */
+  .ir-queue-cell[data-column='parent'] {
+    flex: 1 1 100%;
+    order: 1;
+  }
+
+  .ir-queue-cell[data-column='scheduling'] {
+    order: 2;
+    width: auto;
+    flex: 0 0 auto;
+  }
+
+  /* The header row cannot span a two-line body row, so its labels would no
+     longer sit above their columns. The in-line per-row labels replace it. */
+  .ir-queue-header {
+    display: none;
+  }
+
+  .ir-queue-origin-label {
+    display: inline;
+  }
+
+  /* Undo the left-truncation trick for this cell only: with the label now
+     rendered before the value, RTL would flip the two around each other. */
+  .ir-queue-cell[data-column='parent'] .ir-queue-cell-value {
+    direction: ltr;
+  }
+
+  /* Second-line values are supporting detail, so they read one step quieter
+     than the reference above them. */
+  .ir-queue-cell[data-column='parent'],
+  .ir-queue-cell[data-column='scheduling'] {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+  }
 }
 
 /* #endregion */

@@ -9,10 +9,13 @@ import {
   buildQueueColumns,
   QUEUE_COLUMN_HEADERS,
   QUEUE_COLUMN_ORDER,
+  queueCellTitles,
   renderQueueCells,
 } from './columns';
 import { QueuePagination } from './QueuePagination';
 import { QueueTable } from './QueueTable';
+
+const QUEUE_TABLE_TITLE = 'Upcoming';
 
 export function ReviewQueue() {
   const { plugin } = useReviewContext();
@@ -54,7 +57,9 @@ export function ReviewQueue() {
         columns={buildQueueColumns()}
         columnOrder={QUEUE_COLUMN_ORDER}
         columnHeaders={QUEUE_COLUMN_HEADERS}
+        title={QUEUE_TABLE_TITLE}
         renderCells={renderQueueCells}
+        cellTitles={queueCellTitles}
         isMobile={plugin.app.isMobile}
         onRowClick={handleRowClick}
       />

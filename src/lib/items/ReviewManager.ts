@@ -1,4 +1,5 @@
 import type {
+  QueueCardMemory,
   QueuePage,
   QueueRow,
   QueueScheduling,
@@ -19,7 +20,7 @@ import type {
   SnippetRow,
   SRSCardRow,
 } from '#/lib/types';
-import { getItemType, isArticle } from '#/lib/types';
+import { isArticle } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import type { TAbstractFile, TFile } from 'obsidian';
@@ -243,6 +244,67 @@ export default class ReviewManager {
         };
   }
 
+  /**
+   * Map every article and snippet id to its vault path, so a child row's
+   * `parent` id can be shown as a path. Fetched separately from the due rows
+   * because a parent need not itself be due.
+   */
+  async #getParentPaths(): Promise<Map<string, string>> {
+    const rows = (await this.#repo.query(
+      'SELECT id, reference FROM article UNION ALL SELECT id, reference FROM snippet'
+    )) as { id: string; reference: string }[] | null;
+    return new Map((rows ?? []).map((row) => [row.id, row.reference]));
+  }
+
+  /**
+   * Single-parent counterpart of {@link #getParentPaths}, for refreshing one
+   * queue row without loading the whole id → path map.
+   */
+  async #getParentPath(parentId: string | null): Promise<Map<string, string>> {
+    if (parentId === null) return new Map();
+    const rows = (await this.#repo.query(
+      'SELECT id, reference FROM article WHERE id = $1 ' +
+        'UNION ALL SELECT id, reference FROM snippet WHERE id = $1',
+      [parentId]
+    )) as { id: string; reference: string }[] | null;
+    return new Map((rows ?? []).map((row) => [row.id, row.reference]));
+  }
+
+  /**
+   * The FSRS memory state shown for a card.
+   */
+  cardMemory(row: SRSCardRow, now: Date = new Date()): QueueCardMemory {
+    const retrievability =
+      row.last_review === null
+        ? null
+        : this.cards
+            .getFsrs()
+            .get_retrievability(CardManager.rowToDisplay(row), now, false);
+    return {
+      difficulty: row.difficulty,
+      stability: row.stability,
+      retrievability,
+    };
+  }
+
+  /**
+   * The note an article was imported from. Articles have no `parent` field: their
+   * origin is the `source` frontmatter link written at import time, so it is
+   * read from the metadata cache (already in memory) and resolved to a vault
+   * path. An unresolvable link falls back to its own text, which is still more
+   * use than showing nothing.
+   */
+  #articleSource(file: TFile): string | null {
+    const source = Obsidian.getFrontMatter(file, this.app)?.source;
+    if (!source) return null;
+    const linkTarget = source.match(/\[\[([^\]|#]+)/)?.[1] ?? source;
+    const sourceFile = this.app.metadataCache.getFirstLinkpathDest(
+      linkTarget.trim(),
+      file.path
+    );
+    return sourceFile?.path ?? source;
+  }
+
   /** Build a QueueRow for an article, resolving its note or returning null. */
   #articleToQueueRow(row: ArticleRow): QueueRow | null {
     const file = Obsidian.getNote(row.reference, this.app);
@@ -253,12 +315,16 @@ export default class ReviewManager {
       file,
       due: row.due === null ? null : new Date(row.due + (row.due_fuzz ?? 0)),
       reference: row.reference,
+      parent: this.#articleSource(file),
       scheduling: ReviewManager.articleScheduling(row),
     };
   }
 
   /** Build a QueueRow for a snippet (always priority-scheduled). */
-  #snippetToQueueRow(row: SnippetRow): QueueRow | null {
+  #snippetToQueueRow(
+    row: SnippetRow,
+    parentPaths: Map<string, string>
+  ): QueueRow | null {
     const file = Obsidian.getNote(row.reference, this.app);
     if (!file) return null;
     return {
@@ -267,6 +333,7 @@ export default class ReviewManager {
       file,
       due: row.due === null ? null : new Date(row.due + (row.due_fuzz ?? 0)),
       reference: row.reference,
+      parent: (row.parent && parentPaths.get(row.parent)) || null,
       scheduling: {
         kind: 'priority',
         value: IRScheduler.toDisplayPriority(row.priority),
@@ -274,8 +341,11 @@ export default class ReviewManager {
     };
   }
 
-  /** Build a QueueRow for a card (no fuzz, no priority/interval scheduling). */
-  #cardToQueueRow(row: SRSCardRow): QueueRow | null {
+  /** Build a QueueRow for a card (no fuzz; scheduled by FSRS memory state). */
+  #cardToQueueRow(
+    row: SRSCardRow,
+    parentPaths: Map<string, string>
+  ): QueueRow | null {
     const file = Obsidian.getNote(row.reference, this.app);
     if (!file) return null;
     return {
@@ -284,7 +354,8 @@ export default class ReviewManager {
       file,
       due: new Date(row.due),
       reference: row.reference,
-      scheduling: { kind: 'none', value: null },
+      parent: (row.parent && parentPaths.get(row.parent)) || null,
+      scheduling: { kind: 'srs', value: this.cardMemory(row) },
     };
   }
 
@@ -296,16 +367,19 @@ export default class ReviewManager {
   async getQueue(subset?: QueueSubset): Promise<QueuePage> {
     const dueBy = subset?.date?.getTime() ?? Number.POSITIVE_INFINITY;
 
-    const [articleRows, snippetRows, cardRows] = await Promise.all([
-      this.articles.fetchMany({ dueBy }),
-      this.snippets.fetchMany({ dueBy }),
-      this.cards.fetchMany({ dueBy }),
-    ]);
+    const [articleRows, snippetRows, cardRows, parentPaths] = await Promise.all(
+      [
+        this.articles.fetchMany({ dueBy }),
+        this.snippets.fetchMany({ dueBy }),
+        this.cards.fetchMany({ dueBy }),
+        this.#getParentPaths(),
+      ]
+    );
 
     const rows: QueueRow[] = [
       ...articleRows.map((row) => this.#articleToQueueRow(row)),
-      ...snippetRows.map((row) => this.#snippetToQueueRow(row)),
-      ...cardRows.map((row) => this.#cardToQueueRow(row)),
+      ...snippetRows.map((row) => this.#snippetToQueueRow(row, parentPaths)),
+      ...cardRows.map((row) => this.#cardToQueueRow(row, parentPaths)),
     ].filter((row): row is QueueRow => row !== null);
 
     // `due` is already the fuzzed timestamp, so ordering by it is fuzz order;
@@ -355,18 +429,22 @@ export default class ReviewManager {
       await this.#repo.query('SELECT * FROM snippet WHERE id = $1', [id])
     )[0] as SnippetRow | undefined;
     if (snippetRow) {
-      return this.#includeInQueue(snippetRow)
-        ? this.#snippetToQueueRow(snippetRow)
-        : null;
+      if (!this.#includeInQueue(snippetRow)) return null;
+      return this.#snippetToQueueRow(
+        snippetRow,
+        await this.#getParentPath(snippetRow.parent)
+      );
     }
 
     const cardRow = (
       await this.#repo.query('SELECT * FROM srs_card WHERE id = $1', [id])
     )[0] as SRSCardRow | undefined;
     if (cardRow) {
-      return this.#includeInQueue(cardRow)
-        ? this.#cardToQueueRow(cardRow)
-        : null;
+      if (!this.#includeInQueue(cardRow)) return null;
+      return this.#cardToQueueRow(
+        cardRow,
+        await this.#getParentPath(cardRow.parent ?? null)
+      );
     }
 
     return null;
@@ -448,7 +526,7 @@ export default class ReviewManager {
   }
 
   async dismissItem(item: ReviewItem): Promise<void> {
-    const type: NoteType = getItemType(item);
+    const type = item.data.type;
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 1 WHERE id = $1`, [
       item.data.id,
@@ -456,7 +534,7 @@ export default class ReviewManager {
   }
 
   async unDismissItem(item: ReviewItem): Promise<void> {
-    const type: NoteType = getItemType(item);
+    const type = item.data.type;
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 0 WHERE id = $1`, [
       item.data.id,

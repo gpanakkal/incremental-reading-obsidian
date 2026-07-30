@@ -1,9 +1,22 @@
-import type { QueueRow } from '#/components/types';
+import type { QueueCardMemory, QueueRow } from '#/components/types';
 import { BrainCog, FileText, Scissors } from 'lucide-react';
 import type { ComponentChild } from 'preact';
 
 /** Keys of the renderable queue columns (`id`/`file` are never rendered). */
-export type QueueColumnKey = 'type' | 'due' | 'scheduling' | 'reference';
+export type QueueColumnKey =
+  | 'type'
+  | 'due'
+  | 'scheduling'
+  | 'reference'
+  | 'parent';
+
+/**
+ * How much horizontal space a column takes.
+ * - `content`: only as wide as the widest of its content and its header, so
+ *   short columns (type, due) stop wasting space on long-path rows.
+ * - `flexible`: shares the leftover width with the other flexible columns.
+ */
+export type QueueColumnWidth = 'content' | 'flexible';
 
 /**
  * Structural description of one queue-table column. Cell content is not
@@ -15,15 +28,18 @@ export interface QueueColumn {
   key: QueueColumnKey;
   /** Whether this column is shown when `app.isMobile` is true. */
   mobileVisible: boolean;
+  /** Horizontal sizing behaviour; defaults to `flexible` when omitted. */
+  width?: QueueColumnWidth;
   /** Optional extra class for the cell. */
   className?: string;
 }
 
-/** Display order for the queue: type, due, reference, then scheduling. */
+/** Display order for the queue: type, due, reference, parent, then scheduling. */
 export const QUEUE_COLUMN_ORDER: QueueColumnKey[] = [
   'type',
   'due',
   'reference',
+  'parent',
   'scheduling',
 ];
 
@@ -32,6 +48,7 @@ export const QUEUE_COLUMN_HEADERS: Partial<Record<QueueColumnKey, string>> = {
   type: 'Type',
   due: 'Due',
   reference: 'File',
+  parent: 'Source / Parent',
   scheduling: 'Scheduling',
 };
 
@@ -41,10 +58,23 @@ export const QUEUE_COLUMN_HEADERS: Partial<Record<QueueColumnKey, string>> = {
  */
 export function buildQueueColumns(): QueueColumn[] {
   return [
-    { key: 'due', mobileVisible: true },
-    { key: 'type', mobileVisible: false },
-    { key: 'scheduling', mobileVisible: false },
-    { key: 'reference', mobileVisible: true, className: 'ir-queue-reference' },
+    { key: 'due', mobileVisible: true, width: 'content' },
+    { key: 'type', mobileVisible: false, width: 'content' },
+    // Scheduling and parent stay visible on mobile: the narrow-layout CSS wraps
+    // them onto a second line rather than dropping them.
+    { key: 'scheduling', mobileVisible: true, width: 'content' },
+    {
+      key: 'reference',
+      mobileVisible: true,
+      width: 'flexible',
+      className: 'ir-queue-reference',
+    },
+    {
+      key: 'parent',
+      mobileVisible: true,
+      width: 'flexible',
+      className: 'ir-queue-reference',
+    },
   ];
 }
 
@@ -56,18 +86,21 @@ const TYPE_ICONS: Record<QueueRow['type'], typeof FileText> = {
 
 /**
  * Placeholder icons for each item type until dedicated ones are designed.
- * The `aria-label` must sit on an HTML wrapper, not the SVG itself: Obsidian's
- * tooltip handler calls `isShown()` (an HTMLElement-only augmentation) on
- * whichever element carries the label, and throws on SVG elements.
+ * The icon carries no label of its own: the enclosing cell is labelled with
+ * this row's type (see `queueCellTitles`), and a second label nested inside it
+ * would render a tooltip on top of the cell's own.
  */
 function typeIcon(type: QueueRow['type']): ComponentChild {
   const Icon = TYPE_ICONS[type];
   return (
-    <span className="ir-queue-type-icon" aria-label={type}>
+    <span className="ir-queue-type-icon">
       <Icon />
     </span>
   );
 }
+
+/** Placeholder for a cell with nothing to show. */
+const EMPTY_CELL = '—';
 
 /**
  * Format a due date as `2026/7/10` (local time, no zero padding). A null due
@@ -78,6 +111,15 @@ export function formatQueueDate(date: Date | null): string {
   return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
 }
 
+/**
+ * Human label for the origin column, which holds different things per type:
+ * an article's imported-from note is its source, while a snippet or card was
+ * extracted from a parent item (or a non-item note)
+ */
+export function originLabel(type: QueueRow['type']): string {
+  return type === 'article' ? 'Source' : 'Parent';
+}
+
 /** Human label for a row's scheduling kind, shown in-line beside the value. */
 function schedulingLabel(row: QueueRow): string {
   switch (row.scheduling.kind) {
@@ -85,17 +127,52 @@ function schedulingLabel(row: QueueRow): string {
       return 'Interval';
     case 'priority':
       return 'Priority';
-    case 'none':
+    case 'srs':
       return '';
   }
 }
 
 /**
- * Map a `QueueRow` to the displayed content of each column. `row.due` already
- * has `due_fuzz` folded in by `ReviewManager.getQueue`, so it only needs
- * formatting here. The scheduling value is labelled in-line per row (data is
- * heterogeneous: priority vs. interval); cards without a value render an em
- * dash.
+ * A card's memory state as label/value pairs, in D, S, R order. Retrievability
+ * is a probability so it gets two decimals; difficulty and stability are open
+ * scales where one decimal is enough to compare rows at a glance. A card that
+ * has never been reviewed has no retrievability.
+ */
+export function cardMemoryParts(
+  memory: QueueCardMemory
+): { label: string; value: string }[] {
+  return [
+    { label: 'D', value: memory.difficulty.toFixed(1) },
+    { label: 'S', value: memory.stability.toFixed(1) },
+    {
+      label: 'R',
+      value:
+        memory.retrievability === null
+          ? '--'
+          : memory.retrievability.toFixed(2),
+    },
+  ];
+}
+
+/**
+ * Plain-text memory state (`D 5.2 · S 12.4 · R 0.90`) for the cell's tooltip,
+ * which cannot hold the markup the cell itself uses.
+ */
+export function formatCardMemory(memory: QueueCardMemory): string {
+  return cardMemoryParts(memory)
+    .map((part) => `${part.label} ${part.value}`)
+    .join(' · ');
+}
+
+function schedulingText(row: QueueRow): string {
+  if (row.scheduling.kind === 'srs') {
+    return formatCardMemory(row.scheduling.value);
+  }
+  return `${schedulingLabel(row)} ${row.scheduling.value}`;
+}
+
+/**
+ * Map a `QueueRow` to the displayed content of each column
  */
 export function renderQueueCells(
   row: QueueRow
@@ -104,8 +181,15 @@ export function renderQueueCells(
     type: typeIcon(row.type),
     due: formatQueueDate(row.due),
     scheduling:
-      row.scheduling.value === null ? (
-        '—'
+      row.scheduling.kind === 'srs' ? (
+        <span className="ir-queue-card-memory">
+          {cardMemoryParts(row.scheduling.value).map((part) => (
+            <span key={part.label} className="ir-queue-card-memory-part">
+              <span className="ir-queue-inline-label">{part.label} </span>
+              {part.value}
+            </span>
+          ))}
+        </span>
       ) : (
         <span>
           <span className="ir-queue-inline-label">{schedulingLabel(row)} </span>
@@ -113,5 +197,28 @@ export function renderQueueCells(
         </span>
       ),
     reference: row.reference,
+    parent: (
+      <span>
+        <span className="ir-queue-inline-label ir-queue-origin-label">
+          {originLabel(row.type)}{' '}
+        </span>
+        {row.parent ?? EMPTY_CELL}
+      </span>
+    ),
+  };
+}
+
+/**
+ * Plain-text version of each cell, used as the cell's `title` so content the
+ * column is too narrow to show is still readable on hover. Kept separate from
+ * `renderQueueCells` because a title attribute cannot hold markup.
+ */
+export function queueCellTitles(row: QueueRow): Record<QueueColumnKey, string> {
+  return {
+    type: row.type,
+    due: formatQueueDate(row.due),
+    scheduling: schedulingText(row),
+    reference: row.reference,
+    parent: `${originLabel(row.type)} ${row.parent ?? EMPTY_CELL}`,
   };
 }
