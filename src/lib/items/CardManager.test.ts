@@ -75,6 +75,7 @@ function makeCardRow(overrides: Partial<SRSCardRow> = {}): SRSCardRow {
     state: State.New,
     dismissed: 0,
     deleted: false,
+    parent: null,
     ...overrides,
   };
 }
@@ -99,6 +100,7 @@ function makeCardDisplay(
     state: 'New',
     dismissed: false,
     deleted: false,
+    parent: null,
     ...overrides,
   };
 }
@@ -121,6 +123,7 @@ function makeCardBase(overrides: Partial<ISRSCard> = {}): ISRSCard {
     state: State.New,
     dismissed: false,
     deleted: false,
+    parent: null,
     ...overrides,
   };
 }
@@ -178,6 +181,7 @@ const cardRowArb: fc.Arbitrary<SRSCardRow> = fc.record<SRSCardRow>({
   state: stateArb,
   dismissed: fc.oneof(fc.constant(0 as 0), fc.constant(1 as 1)),
   deleted: fc.boolean(),
+  parent: fc.constant(null),
 });
 
 /** Valid delimiter pairs for testing getClozeGroupsPattern */
@@ -1674,7 +1678,10 @@ describe('review — FSRS settings', () => {
         retentionArb,
         async (cardOverrides, grade, retention) => {
           const unfuzzed = await runReview(
-            fsrsParamsWith({ enable_fuzz: false, request_retention: retention }),
+            fsrsParamsWith({
+              enable_fuzz: false,
+              request_retention: retention,
+            }),
             grade,
             REVIEW_TIME,
             cardOverrides
