@@ -2220,9 +2220,10 @@ describe('import', () => {
     it('re-associates with the existing DB record when ir-id matches', async () => {
       const EXISTING_ID = 'existing-article-id';
       const repo = makeSimpleRepo();
-      (repo.query as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
-        { id: EXISTING_ID },
-      ]);
+      // First query (by reference) returns nothing; second query (by id) matches
+      (repo.query as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: EXISTING_ID }]);
       const manager = new ArticleManager(makeImportPlugin(false), repo);
       vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
         'ir-id': EXISTING_ID,
@@ -2239,10 +2240,11 @@ describe('import', () => {
     it('cancels with a specific notice when ir-id is orphaned but reference is already in DB', async () => {
       const ORPHANED_ID = 'orphaned-id';
       const repo = makeSimpleRepo();
-      // First query (by id) returns nothing; second query (by reference) returns a match
+      // First query (by reference) matches another article; the by-id query is
+      // never reached because the reference collision cancels the import
       (repo.query as ReturnType<typeof vi.fn>)
-        .mockResolvedValueOnce([])
-        .mockResolvedValueOnce([{ id: 'some-other-id' }]);
+        .mockResolvedValueOnce([{ id: 'some-other-id' }])
+        .mockResolvedValueOnce([]);
       const manager = new ArticleManager(makeImportPlugin(false), repo);
       vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
         'ir-id': ORPHANED_ID,
