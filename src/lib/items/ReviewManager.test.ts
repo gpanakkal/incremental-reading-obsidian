@@ -121,6 +121,7 @@ function makeCardRow(overrides: Partial<SRSCardRow> = {}): SRSCardRow {
   return {
     id: 'card-1',
     reference: 'cards/test.md',
+    parent: null,
     due: Date.now() + 86_400_000,
     created_at: Date.now(),
     last_review: null,
@@ -221,6 +222,7 @@ function makeReviewCard(due: number): ReviewCard {
       last_review: undefined,
       dismissed: false,
       deleted: false,
+      parent: null,
       stability: 1,
       difficulty: 5,
       elapsed_days: 0,
