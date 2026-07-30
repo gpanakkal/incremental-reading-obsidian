@@ -17,17 +17,19 @@ export type EditState = EditCoordinates | EditingState;
 
 export type MarkdownController = ReturnType<typeof getMarkdownController>;
 
-/**
- * How an item is scheduled, for display in the review queue.
- * - `priority`: non-SRS items scheduled by priority (snippets always; articles
- *   without a fixed interval).
- * - `fixed-interval`: articles with a `fixed_interval_days` set.
- * - `none`: SRS cards, which are scheduled by the FSRS algorithm.
- */
 export type QueueScheduling =
   | { kind: 'priority'; value: string }
   | { kind: 'fixed-interval'; value: string }
-  | { kind: 'none'; value: null };
+  | { kind: 'srs'; value: QueueCardMemory };
+
+/**
+ * The three-factor model state for cards, shown in the scheduling column
+ */
+export interface QueueCardMemory {
+  difficulty: number;
+  stability: number;
+  retrievability: number | null;
+}
 
 /**
  * A unified, redacted view of a review-queue item. Internal/sensitive columns
@@ -46,6 +48,13 @@ export interface QueueRow {
    */
   due: Date | null;
   reference: string;
+  /**
+   * ID of the item that this item came from. For snippets and cards that is
+   * the parent article/snippet's vault path, resolved from the row's `parent`
+   * id; for articles it is the note they were imported from, resolved from
+   * their `source` frontmatter. Null when there is no such origin.
+   */
+  parent: string | null;
   scheduling: QueueScheduling;
 }
 

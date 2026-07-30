@@ -19,6 +19,16 @@ interface QueueTableProps {
   columnHeaders?: Partial<Record<QueueColumnKey, string>>;
   /** Maps a row to the displayed content of each column. */
   renderCells: (row: QueueRow) => Record<QueueColumnKey, ComponentChild>;
+  /**
+   * Maps a row to the plain-text tooltip of each column, applied as the cell's
+   * `aria-label` so text the column is too narrow to show is still readable on
+   * hover. `aria-label` rather than `title`: Obsidian renders its own themed
+   * tooltip for labelled elements, and a `title` would stack the browser's
+   * default tooltip on top of it. Omit to render no tooltips.
+   */
+  cellTitles?: (row: QueueRow) => Record<QueueColumnKey, string>;
+  /** Heading rendered above the table. Omit to render no title. */
+  title?: string;
   /** When true, only columns with `mobileVisible` are rendered. */
   isMobile: boolean;
   onRowClick: (row: QueueRow) => void;
@@ -50,6 +60,8 @@ export function QueueTable({
   columnOrder,
   columnHeaders,
   renderCells,
+  cellTitles,
+  title,
   isMobile,
   onRowClick,
 }: QueueTableProps) {
@@ -60,6 +72,7 @@ export function QueueTable({
 
   return (
     <div className="ir-queue-table" role="table">
+      {title && <div className="ir-queue-title">{title}</div>}
       {columnHeaders && (
         <div className="ir-queue-header" role="row">
           {visibleColumns.map((column) => (
@@ -67,6 +80,7 @@ export function QueueTable({
               key={column.key}
               className="ir-queue-header-cell"
               data-column={column.key}
+              data-width={column.width ?? 'flexible'}
               role="columnheader"
             >
               {columnHeaders[column.key] ?? ''}
@@ -76,10 +90,12 @@ export function QueueTable({
       )}
       {rows.map((row) => {
         const cells = renderCells(row);
+        const titles = cellTitles?.(row);
         return (
           <div
             key={row.id}
             className="ir-queue-row"
+            data-type={row.type}
             role="row"
             tabIndex={0}
             onClick={() => onRowClick(row)}
@@ -91,7 +107,9 @@ export function QueueTable({
                   column.className ? ` ${column.className}` : ''
                 }`}
                 data-column={column.key}
+                data-width={column.width ?? 'flexible'}
                 role="cell"
+                aria-label={titles?.[column.key]}
               >
                 <span className="ir-queue-cell-value">{cells[column.key]}</span>
                 <span className="ir-queue-cell-actions" />
