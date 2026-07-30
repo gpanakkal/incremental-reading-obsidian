@@ -10,6 +10,7 @@ export default class SRSCard implements ISRSCard {
   due: Date;
   dismissed: boolean;
   deleted: boolean;
+  parent: string | null;
   last_review?: Date;
   stability: number;
   difficulty: number;
@@ -26,6 +27,7 @@ export default class SRSCard implements ISRSCard {
     this.created_at = creationTime || new Date();
     this.dismissed = false;
     this.deleted = false;
+    this.parent = null;
     const card = createEmptyCard(this.created_at);
 
     ({

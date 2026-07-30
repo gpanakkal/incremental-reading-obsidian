@@ -71,6 +71,7 @@ export interface ISRSCard extends Card {
   created_at: Date;
   dismissed: boolean;
   deleted: boolean;
+  parent: string | null;
 }
 
 export interface ISRSCardDisplay extends SafeOmit<ISRSCard, 'state'> {
@@ -140,25 +141,21 @@ export type ReviewText = ReviewArticle | ReviewSnippet;
 export function isArticle(
   value: IArticleBase | ISnippetBase | ISRSCard
 ): value is IArticleBase {
-  return 'dismissed' in value && !('parent' in value);
+  return value.type === 'article';
 }
 
 export function isReviewArticle(value: ReviewItem): value is ReviewArticle {
-  return (
-    'dismissed' in value.data &&
-    !('parent' in value.data) &&
-    !('state' in value.data)
-  );
+  return value.data.type === 'article';
 }
 
 export function isSnippet(
   value: ISnippetBase | ISRSCard
 ): value is ISnippetBase {
-  return 'dismissed' in value;
+  return value.type === 'snippet';
 }
 
 export function isReviewSnippet(value: ReviewItem): value is ReviewSnippet {
-  return !isReviewCard(value) && 'parent' in value.data;
+  return value.data.type === 'snippet';
 }
 
 export function isReviewText(value: ReviewItem): value is ReviewText {
@@ -166,24 +163,14 @@ export function isReviewText(value: ReviewItem): value is ReviewText {
 }
 
 export function isSRSCard(value: ISnippetBase | ISRSCard): value is ISRSCard {
-  return 'state' in value;
+  return value.type === 'card';
 }
 
 export function isReviewCard(value: ReviewItem): value is ReviewCard {
-  return 'state' in value.data;
+  return value.data.type === 'card';
 }
 
 export type NoteType = ReviewItem['data']['type'];
-
-export function getItemType(item: ReviewItem): NoteType {
-  if (isReviewSnippet(item)) return 'snippet';
-  else if (isReviewCard(item)) return 'card';
-  else if (isReviewArticle(item)) return 'article';
-  else
-    throw new TypeError(
-      `Type not identified for item:\n${JSON.stringify(item)}`
-    );
-}
 
 /**
  * Frontmatter properties used by this plugin
