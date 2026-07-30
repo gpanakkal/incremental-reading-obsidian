@@ -16,6 +16,7 @@ import type {
 } from '#/lib/types';
 import fc from 'fast-check';
 import type { TAbstractFile, TFile } from 'obsidian';
+import { generatorParameters } from 'ts-fsrs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CardManager } from './CardManager';
 import ReviewManager from './ReviewManager';
@@ -39,8 +40,14 @@ function makeRepo(): SQLiteRepository {
 
 function makePlugin(appOverrides: Record<string, unknown> = {}) {
   return {
-    app: { ...appOverrides },
-    settings: { dayRolloverOffset: 4 },
+    app: {
+      metadataCache: {
+        getFileCache: vi.fn(() => null),
+        getFirstLinkpathDest: vi.fn(() => null),
+      },
+      ...appOverrides,
+    },
+    settings: { dayRolloverOffset: 4, fsrsParams: generatorParameters() },
     registerEvent: vi.fn(),
   } as never;
 }
@@ -397,8 +404,12 @@ describe('ReviewManager.getQueue', () => {
     articles?: ArticleRow[];
     snippets?: SnippetRow[];
     cards?: SRSCardRow[];
+    /** id → reference pairs the parent-path lookup query resolves. */
+    parents?: { id: string; reference: string }[];
   }) {
     const repo = makeRepo();
+    // The only raw query getQueue issues is the parent id → path lookup.
+    vi.mocked(repo.query).mockResolvedValue((rows.parents ?? []) as never);
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(manager.articles, 'fetchMany').mockResolvedValue(
       (rows.articles ?? []) as never
@@ -537,6 +548,160 @@ describe('ReviewManager.getQueue', () => {
     }
   });
 
+  it('resolves a snippet and card parent id to the parent note path', async () => {
+    const manager = wireQueue({
+      snippets: [
+        makeSnippetRow({
+          id: 's1',
+          reference: 'snippets/s1.md',
+          parent: 'a1',
+        }),
+      ],
+      cards: [
+        makeCardRow({ id: 'c1', reference: 'cards/c1.md', parent: 's1' }),
+      ],
+      parents: [
+        { id: 'a1', reference: 'articles/a1.md' },
+        { id: 's1', reference: 'snippets/s1.md' },
+      ],
+    });
+
+    const { rows: queue } = await manager.getQueue();
+    const byId = new Map(queue.map((row) => [row.id, row]));
+    expect(byId.get('s1')?.parent).toBe('articles/a1.md');
+    expect(byId.get('c1')?.parent).toBe('snippets/s1.md');
+  });
+
+  it("resolves an article's source frontmatter link to the note it was imported from", async () => {
+    const manager = wireQueue({
+      articles: [makeArticleRow({ id: 'a1', reference: 'articles/a1.md' })],
+    });
+    vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+      source: '[[Original Note]]',
+    } as never);
+    vi.spyOn(manager.app.metadataCache, 'getFirstLinkpathDest').mockReturnValue(
+      { path: 'notes/Original Note.md' } as TFile
+    );
+
+    const {
+      rows: [item],
+    } = await manager.getQueue();
+    expect(item.parent).toBe('notes/Original Note.md');
+  });
+
+  it('falls back to the raw source text when its link resolves to no note', async () => {
+    const manager = wireQueue({
+      articles: [makeArticleRow({ id: 'a1', reference: 'articles/a1.md' })],
+    });
+    vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+      source: 'https://example.com/article',
+    } as never);
+    vi.spyOn(manager.app.metadataCache, 'getFirstLinkpathDest').mockReturnValue(
+      null
+    );
+
+    const {
+      rows: [item],
+    } = await manager.getQueue();
+    expect(item.parent).toBe('https://example.com/article');
+  });
+
+  it('gives an article with no source frontmatter no source at all', async () => {
+    const manager = wireQueue({
+      articles: [makeArticleRow({ id: 'a1', reference: 'articles/a1.md' })],
+    });
+    vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue(undefined);
+
+    const {
+      rows: [item],
+    } = await manager.getQueue();
+    expect(item.parent).toBeNull();
+  });
+
+  it('maps a parent id with no surviving parent row to null, not the raw id', async () => {
+    const manager = wireQueue({
+      snippets: [
+        makeSnippetRow({
+          id: 's1',
+          reference: 'snippets/s1.md',
+          parent: 'gone',
+        }),
+      ],
+      parents: [],
+    });
+    const {
+      rows: [item],
+    } = await manager.getQueue();
+    expect(item.parent).toBeNull();
+  });
+
+  it('carries a card difficulty and stability into its scheduling cell', async () => {
+    const manager = wireQueue({
+      cards: [
+        makeCardRow({
+          id: 'c1',
+          reference: 'cards/c1.md',
+          difficulty: 6.5,
+          stability: 12.25,
+        }),
+      ],
+    });
+    const {
+      rows: [item],
+    } = await manager.getQueue();
+    expect(item.scheduling.kind).toBe('srs');
+    expect(item.scheduling.value).toMatchObject({
+      difficulty: 6.5,
+      stability: 12.25,
+    });
+  });
+
+  it('gives a never-reviewed card a null retrievability rather than a made-up one', async () => {
+    const manager = wireQueue({
+      cards: [
+        makeCardRow({ id: 'c1', reference: 'cards/c1.md', last_review: null }),
+      ],
+    });
+    const {
+      rows: [item],
+    } = await manager.getQueue();
+    expect(item.scheduling.value).toMatchObject({ retrievability: null });
+  });
+
+  it('derives a retrievability in [0, 1] for a reviewed card', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.double({ min: 0.1, max: 365, noNaN: true }),
+        fc.integer({ min: 0, max: 365 }),
+        async (stability, elapsedDays) => {
+          vi.restoreAllMocks();
+          const now = Date.now();
+          const manager = wireQueue({
+            cards: [
+              makeCardRow({
+                id: 'c1',
+                reference: 'cards/c1.md',
+                stability,
+                last_review: now - elapsedDays * MS_PER_DAY,
+                elapsed_days: elapsedDays,
+                state: 2,
+              }),
+            ],
+          });
+          const {
+            rows: [item],
+          } = await manager.getQueue();
+          const { retrievability } = item.scheduling.value as {
+            retrievability: number | null;
+          };
+          expect(retrievability).not.toBeNull();
+          expect(retrievability).toBeGreaterThanOrEqual(0);
+          expect(retrievability).toBeLessThanOrEqual(1);
+        }
+      )
+    );
+  });
+
   it('sorts rows with no due time after every dated row', async () => {
     const manager = wireQueue({
       articles: [
@@ -562,7 +727,7 @@ describe('ReviewManager.getQueue', () => {
       rows: [item],
     } = await manager.getQueue();
     expect(item.due?.getTime()).toBe(YEAR_2000_MS);
-    expect(item.scheduling).toEqual({ kind: 'none', value: null });
+    expect(item.scheduling.kind).toBe('srs');
   });
 
   it('shows an article its fixed interval when set, never its priority', async () => {
