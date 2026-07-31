@@ -136,7 +136,6 @@ export default class IncrementalReadingPlugin extends Plugin {
         // get the current folder from the open view, if any
         const fileView = this.app.workspace.getActiveFileView();
         const currentDirectory = fileView?.file?.parent?.path;
-        console.log({ currentDirectory });
         void this.reviewManager
           .createEmptyArticle(this.settings.defaultPriority, currentDirectory)
           .then((article) => void this.learn(article ?? undefined));
