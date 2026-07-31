@@ -9,7 +9,7 @@ export function ReviewTypeFilter() {
 
   return (
     <div className="ir-toggle">
-      <label className="ir-toggle-label">
+      <label className="ir-toggle-label" aria-label="Choose what to review">
         {showCardsOnly ? 'Cards only' : 'All items'}
         <div
           className={
@@ -18,7 +18,6 @@ export function ReviewTypeFilter() {
         >
           <input
             type="checkbox"
-            title="Choose what to review"
             checked={showCardsOnly}
             onChange={(e) => void actions.setCardsOnly(e.currentTarget.checked)}
           />
