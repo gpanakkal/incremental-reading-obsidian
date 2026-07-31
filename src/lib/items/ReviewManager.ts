@@ -139,8 +139,8 @@ export default class ReviewManager {
     return this.articles.import(file, priority, fixedIntervalDays, makeCopy);
   }
 
-  async createEmptyArticle(priority: number) {
-    return this.articles.create(priority);
+  async createEmptyArticle(priority: number, directory?: string) {
+    return this.articles.create(priority, directory);
   }
 
   async reviewArticle(

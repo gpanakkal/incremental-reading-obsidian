@@ -15,6 +15,7 @@ export interface IRPluginSettings {
   showImportDialog: boolean;
   reviewOnImport: boolean;
   copyOnImport: boolean;
+  createEmptyInCurrentFolder: boolean;
   dayRolloverOffset: number;
   showAdvancedImportCommands: boolean;
   showAdvancedImportMenuItems: boolean;
@@ -30,6 +31,7 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   showImportDialog: true,
   reviewOnImport: false,
   copyOnImport: false,
+  createEmptyInCurrentFolder: true,
   dayRolloverOffset: DAY_ROLLOVER_OFFSET_HOURS.DEFAULT,
   showAdvancedImportCommands: false,
   showAdvancedImportMenuItems: false,
@@ -104,6 +106,20 @@ export class IRSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.copyOnImport)
           .onChange(async (value) => {
             this.plugin.settings.copyOnImport = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Create empty articles in the current folder')
+      .setDesc(
+        `If disabled, empty articles will be created in "${DATA_DIRECTORY}/"`
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.createEmptyInCurrentFolder)
+          .onChange(async (value) => {
+            this.plugin.settings.createEmptyInCurrentFolder = value;
             await this.plugin.saveSettings();
           });
       });
