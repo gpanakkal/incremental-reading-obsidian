@@ -47,11 +47,13 @@ export class ObsidianHelpers {
       throw new Error(`File already exists at ${absolutePath}`);
     }
 
-    const folderPath = absolutePath.slice(0, absolutePath.lastIndexOf('/'));
-    if (!app.vault.getAbstractFileByPath(folderPath)) {
-      await app.vault.createFolder(folderPath);
+    const folderPrefixEnd = absolutePath.lastIndexOf('/');
+    if (folderPrefixEnd >= 0) {
+      const folderPath = absolutePath.slice(0, absolutePath.lastIndexOf('/'));
+      if (!app.vault.getAbstractFileByPath(folderPath)) {
+        await app.vault.createFolder(folderPath);
+      }
     }
-
     try {
       const file = await app.vault.create(absolutePath, '');
       return file;
@@ -194,6 +196,7 @@ export class ObsidianHelpers {
   }) {
     try {
       const fullPath = normalizePath(`${directory}/${fileName}`);
+      console.log({ fullPath });
       const file = await ObsidianHelpers.createFile(app, fullPath);
       await app.vault.append(file, content);
       if (frontmatter) {
