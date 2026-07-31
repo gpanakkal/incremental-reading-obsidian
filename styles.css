@@ -273,7 +273,7 @@
   align-items: center;
   gap: var(--size-4-3);
   padding: var(--size-2-3) var(--size-4-2);
-  border-bottom: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--divider-color);
   cursor: pointer;
 }
 
@@ -303,7 +303,7 @@
   align-items: center;
   gap: var(--size-4-3);
   padding: var(--size-2-3) var(--size-4-2);
-  border-bottom: 2px solid var(--background-modifier-border);
+  border-bottom: 2px solid var(--divider-color);
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   font-weight: var(--font-semibold);
