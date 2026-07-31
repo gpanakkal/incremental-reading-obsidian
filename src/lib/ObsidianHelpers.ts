@@ -196,7 +196,6 @@ export class ObsidianHelpers {
   }) {
     try {
       const fullPath = normalizePath(`${directory}/${fileName}`);
-      console.log({ fullPath });
       const file = await ObsidianHelpers.createFile(app, fullPath);
       await app.vault.append(file, content);
       if (frontmatter) {
