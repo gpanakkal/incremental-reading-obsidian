@@ -47,3 +47,13 @@ export function TextButton({
     </button>
   );
 }
+
+export function Separator() {
+  return (
+    <div
+      className="ir-bar-separator"
+      role="separator"
+      aria-orientation="vertical"
+    />
+  );
+}

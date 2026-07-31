@@ -95,6 +95,13 @@
   stroke-width: var(--icon-stroke);
 }
 
+.ir-bar-separator {
+  flex: 0 0 1px;
+  align-self: stretch;
+  margin-block: var(--size-2-2);
+  background-color: var(--background-modifier-border);
+}
+
 .ir-review-button {
   padding: 8px 16px;
   background-color: transparent;
