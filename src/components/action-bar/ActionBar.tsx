@@ -113,14 +113,14 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
           tooltip="Restore item to queue"
           handleClick={async () => await actions.unDismissItem(reviewItem)}
         >
-          <ArchiveRestore stroke="#b46000" />
+          <ArchiveRestore stroke="#b4a200" />
         </ButtonWithIcon>
       ) : (
         <ButtonWithIcon
           tooltip="Stop scheduling this item for review"
           handleClick={async () => await actions.dismissItem(reviewItem)}
         >
-          <Ban stroke="#b46000" />
+          <Ban stroke="#b4a200" />
         </ButtonWithIcon>
       )}
       <ButtonWithIcon
