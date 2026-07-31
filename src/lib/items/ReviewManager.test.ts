@@ -1182,7 +1182,7 @@ describe('ReviewManager delegation', () => {
       .spyOn(manager.articles, 'create')
       .mockResolvedValue(undefined as never);
     await manager.createEmptyArticle(25);
-    expect(spy).toHaveBeenCalledWith(25);
+    expect(spy).toHaveBeenCalledWith(25, undefined);
   });
 
   it('reviewArticle delegates to articles.review', async () => {
