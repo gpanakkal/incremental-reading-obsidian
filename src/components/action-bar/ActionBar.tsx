@@ -107,6 +107,23 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
 
   return (
     <>
+      <ButtonWithIcon
+        tooltip="Extract selected text to a new snippet"
+        handleClick={async () => {
+          await actions.createSnippet();
+        }}
+      >
+        <Scissors />
+      </ButtonWithIcon>
+      <ButtonWithIcon
+        tooltip="Create card"
+        handleClick={async () => {
+          await actions.createCard();
+        }}
+      >
+        <BrainCog />
+      </ButtonWithIcon>
+      <Separator />
       {isDismissed ? (
         <ButtonWithIcon
           tooltip="Restore item to queue"
@@ -129,23 +146,6 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
         }}
       >
         <Trash2 stroke="#990000" />
-      </ButtonWithIcon>
-      <Separator />
-      <ButtonWithIcon
-        tooltip="Extract selected text to a new snippet"
-        handleClick={async () => {
-          await actions.createSnippet();
-        }}
-      >
-        <Scissors />
-      </ButtonWithIcon>
-      <ButtonWithIcon
-        tooltip="Create card"
-        handleClick={async () => {
-          await actions.createCard();
-        }}
-      >
-        <BrainCog />
       </ButtonWithIcon>
     </>
   );
