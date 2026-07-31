@@ -25,9 +25,7 @@ import {
 import { useDispatch } from 'react-redux';
 import { Rating } from 'ts-fsrs';
 import { useReviewContext } from '../ReviewContext';
-import { ButtonWithIcon, TextButton } from './BarButtons';
-import { FixedIntervalField } from './FixedIntervalField';
-import { PriorityField } from './PriorityField';
+import { ButtonWithIcon, Separator, TextButton } from './BarButtons';
 import { ReviewTypeFilter } from './ReviewTypeFilter';
 import { TextScheduler } from './TextScheduler';
 
@@ -51,6 +49,7 @@ export function ActionBar() {
           >
             <House />
           </ButtonWithIcon>
+          <Separator />
           <ReviewTypeFilter />
           {currentItem && (
             <>
@@ -131,6 +130,7 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
       >
         <Trash2 stroke="#990000" />
       </ButtonWithIcon>
+      <Separator />
       <ButtonWithIcon
         tooltip="Extract selected text to a new snippet"
         handleClick={async () => {
