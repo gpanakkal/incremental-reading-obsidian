@@ -348,13 +348,18 @@ export class ArticleManager extends ItemManager {
   /**
    * Create a new empty article
    */
-  async create(priority: number) {
+  async create(priority: number, directory?: string) {
     try {
       const newNoteName = Obsidian.createTitle(
         `New article ${getDateString()}`
       );
 
       const id = crypto.randomUUID();
+
+      let targetDirectory = Obsidian.getDirectory('article');
+      if (directory && this.plugin.settings.createEmptyInCurrentFolder) {
+        targetDirectory = directory;
+      }
 
       const articleFile = await Obsidian.createNote({
         content: '',
@@ -363,7 +368,7 @@ export class ArticleManager extends ItemManager {
           created: new Date().toISOString(),
         },
         fileName: `${newNoteName}.md`,
-        directory: Obsidian.getDirectory('article'),
+        directory: targetDirectory,
         app: this.app,
       });
 
