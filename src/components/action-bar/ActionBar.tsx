@@ -27,6 +27,7 @@ import {
 import { useDispatch } from 'react-redux';
 import { Rating } from 'ts-fsrs';
 import { useReviewContext } from '../ReviewContext';
+import { ButtonWithIcon, TextButton } from './BarButtons';
 import { FixedIntervalField } from './FixedIntervalField';
 import { PriorityField } from './PriorityField';
 import { ReviewTypeFilter } from './ReviewTypeFilter';
@@ -290,55 +291,5 @@ function CardActions({ card }: { card: ReviewCard }) {
         </>
       )}
     </>
-  );
-}
-
-function ButtonWithIcon({
-  children,
-  handleClick,
-  disabled,
-  tooltip,
-  id,
-}: React.PropsWithChildren<{
-  handleClick: (e: MouseEvent) => Promise<void> | void;
-  disabled?: boolean;
-  tooltip?: string;
-  id?: string;
-}>) {
-  return (
-    <button
-      className="ir-review-button clickable-icon"
-      id={id}
-      onClick={(e) => void handleClick(e)}
-      title={tooltip}
-      disabled={disabled}
-    >
-      {children}
-    </button>
-  );
-}
-
-function TextButton({
-  children,
-  handleClick,
-  disabled,
-  tooltip,
-  id,
-}: React.PropsWithChildren<{
-  handleClick: (e: MouseEvent) => Promise<void> | void;
-  disabled?: boolean;
-  tooltip?: string;
-  id?: string;
-}>) {
-  return (
-    <button
-      className="ir-review-button"
-      id={id}
-      onClick={(e) => void handleClick(e)}
-      title={tooltip}
-      disabled={disabled}
-    >
-      {children}
-    </button>
   );
 }
