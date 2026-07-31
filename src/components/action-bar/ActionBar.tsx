@@ -51,6 +51,7 @@ export function ActionBar() {
           >
             <House />
           </ButtonWithIcon>
+          <ReviewTypeFilter />
           {currentItem && (
             <>
               {isReviewCard(currentItem) && <CardActions card={currentItem} />}
@@ -95,11 +96,7 @@ function HomeActions() {
  * - undo last review/dismissal
  */
 function GlobalActions() {
-  return (
-    <>
-      <ReviewTypeFilter />
-    </>
-  );
+  return <></>;
 }
 
 /**
