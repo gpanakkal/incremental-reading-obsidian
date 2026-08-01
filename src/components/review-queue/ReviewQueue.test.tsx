@@ -634,11 +634,34 @@ describe('ReviewQueue', () => {
     });
   });
 
-  it('does not error on an empty queue', () => {
-    wireQueue({ rows: [], totalRows: 0 });
+  describe('empty queue', () => {
+    it('keeps the title above the empty message', () => {
+      wireQueue({ rows: [], totalRows: 0 });
 
-    const container = mount(<ReviewQueue />);
+      const container = mount(<ReviewQueue />);
 
-    expect(container.textContent).toContain('Nothing due for review');
+      const panel = container.querySelector('.ir-queue-panel');
+      const title = panel?.querySelector('.ir-queue-title');
+      const placeholder = panel?.querySelector('.ir-review-placeholder');
+      if (!title || !placeholder) {
+        throw new Error('title or placeholder not rendered inside the panel');
+      }
+
+      expect(title.textContent).toBe('Upcoming');
+      expect(placeholder.textContent).toContain('Nothing due for review');
+      expect(
+        title.compareDocumentPosition(placeholder) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+    });
+
+    it('drops the controls, which have nothing to act on', () => {
+      wireQueue({ rows: [], totalRows: 0 });
+
+      const container = mount(<ReviewQueue />);
+
+      expect(container.querySelector('.ir-queue-controls')).toBeNull();
+      expect(container.querySelector('.ir-queue-table')).toBeNull();
+    });
   });
 });
