@@ -77,8 +77,16 @@ export function ReviewQueue() {
     );
   }
 
+  // An empty queue keeps the panel and its heading so the tab still names what
+  // it is showing, but drops the controls: there are no pages to move between
+  // and no dated items to bound the date field, so both would be inert.
   if (!data || data.totalRows === 0) {
-    return <div className="ir-review-placeholder">Nothing due for review.</div>;
+    return (
+      <div className="ir-queue-panel">
+        <div className="ir-queue-title">{QUEUE_TABLE_TITLE}</div>
+        <div className="ir-review-placeholder">Nothing due for review.</div>
+      </div>
+    );
   }
 
   const pageCount = Math.ceil(
