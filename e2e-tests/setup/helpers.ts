@@ -302,7 +302,7 @@ async function dismissFirstLaunchPrompts(
 const VAULT_WINDOW_URL = 'index.html';
 
 /** How long to wait for the settings window to be created after Escape. */
-const SETTINGS_WINDOW_TIMEOUT_MS = 15_000;
+const SETTINGS_WINDOW_TIMEOUT_MS = 5_000;
 /** After destroying it, how long to watch for a follow-up window. */
 const SETTINGS_WINDOW_SETTLE_MS = 500;
 const POLL_INTERVAL_MS = 50;
