@@ -1,5 +1,6 @@
 import { useAppSelector } from '#/hooks/useAppSelector';
-import { useCurrentItem } from '#/hooks/useReactQuery';
+import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
+import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import { setPage, setShowAnswer } from '#/lib/store';
 import type { ReviewItem, ReviewText } from '#/lib/types';
 import {
@@ -73,11 +74,30 @@ export function ActionBar() {
 
 function HomeActions() {
   const dispatch = useDispatch();
+  // The same slice the queue table asks for, so both read one cache entry
+  // under the ['queue', subset] key rather than each fetching the queue.
+  // React Query compares keys structurally, so the matching shape is enough.
+  const { data, isLoading } = useQueue({
+    slice: {
+      pageNumber: 0,
+      entriesPerPage: QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
+    },
+  });
+
+  // An empty queue is an empty *due* queue (getQueue returns only due items),
+  // so this is the same condition that puts "Nothing due for review" on the
+  // screen below, and the two cannot disagree. Held disabled while loading as
+  // well, since a button that starts a review of an unknown queue is worse
+  // than one that is briefly inert.
+  const nothingDue = isLoading || !data || data.totalRows === 0;
 
   return (
     <TextButton
-      tooltip="Start reviewing the queue"
+      tooltip={
+        nothingDue ? 'Nothing due for review' : 'Start reviewing the queue'
+      }
       id="begin-review-button"
+      disabled={nothingDue}
       handleClick={() => {
         dispatch(setPage('review'));
       }}
