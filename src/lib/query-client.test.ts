@@ -30,8 +30,18 @@ function makeManager(
   } as unknown as ReviewManager;
 }
 
-function seedQueue(key: unknown[], page: QueuePage) {
-  queryClient.setQueryData<QueuePage>(key, page);
+/**
+ * Seed a cached page. The queue's dated span defaults to unset, since these
+ * tests are about how rows and totals are patched; the tests that care about
+ * the span pass it explicitly.
+ */
+function seedQueue(key: unknown[], page: Omit<QueuePage, 'firstDue' | 'lastDue'> &
+  Partial<Pick<QueuePage, 'firstDue' | 'lastDue'>>) {
+  queryClient.setQueryData<QueuePage>(key, {
+    firstDue: null,
+    lastDue: null,
+    ...page,
+  });
 }
 
 const QUEUE_KEY = ['queue', { slice: { pageNumber: 0, entriesPerPage: 10 } }];
@@ -119,6 +129,35 @@ describe('applyQueueChange', () => {
 
     expect(queryClient.getQueryData<QueuePage>(KEY_A)?.rows).toEqual([]);
     expect(queryClient.getQueryData<QueuePage>(KEY_B)?.rows).toEqual([]);
+  });
+
+  it('keeps the queue span when patching a page', async () => {
+    // The span bounds the date field. This patch sees only cached pages, not
+    // the whole queue, so it cannot recompute the extent — dropping it would
+    // un-clamp the field until the next fetch, letting the user jump past the
+    // end again. A slightly stale bound is the safe direction to err in.
+    const firstDue = new Date(2026, 6, 10);
+    const lastDue = new Date(2026, 8, 4);
+    seedQueue(QUEUE_KEY, {
+      rows: [
+        makeQueueRow({ id: 'a1' }),
+        makeQueueRow({ id: 'a2', reference: 'articles/a2.md' }),
+      ],
+      totalRows: 2,
+      firstDue,
+      lastDue,
+    });
+    const manager = makeManager({ a1: null });
+
+    await applyQueueChange(
+      { table: 'article', op: 'update', ids: ['a1'] },
+      manager
+    );
+
+    const page = queryClient.getQueryData<QueuePage>(QUEUE_KEY);
+    expect(page?.rows.map((r) => r.id)).toEqual(['a2']);
+    expect(page?.firstDue).toEqual(firstDue);
+    expect(page?.lastDue).toEqual(lastDue);
   });
 
   it('invalidates the queue so order and totals reconcile', async () => {

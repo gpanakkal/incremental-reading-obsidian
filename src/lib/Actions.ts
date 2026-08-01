@@ -29,7 +29,7 @@ import {
   type ReviewSnippet,
   isReviewArticle,
 } from './types';
-import { getContentSlice, getEndOfToday } from './utils';
+import { getContentSlice, getEndOfDay } from './utils';
 
 /**
  * Coordinates review operations with store and query cache updates
@@ -175,7 +175,7 @@ export class Actions {
   };
 
   skipItem = (item: ReviewItem) => {
-    const resetTime = getEndOfToday(this.plugin.settings.dayRolloverOffset);
+    const resetTime = getEndOfDay(this.plugin.settings.dayRolloverOffset);
     this.plugin.store.dispatch(addSeenId({ id: item.data.id, resetTime }));
 
     new Notice(

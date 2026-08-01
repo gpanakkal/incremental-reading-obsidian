@@ -17,7 +17,7 @@ import type {
   SQLiteRepository,
   SnippetRow,
 } from '#/lib/types';
-import { getEndOfToday } from '#/lib/utils';
+import { getEndOfDay } from '#/lib/utils';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
@@ -845,7 +845,7 @@ describe('getDue', () => {
         async (nowMs, offset) => {
           vi.setSystemTime(nowMs);
 
-          const cutoff = getEndOfToday(offset);
+          const cutoff = getEndOfDay(offset);
           const rowAtCutoff = makeSnippetRow({ id: 'at-cutoff', due: cutoff });
           const rowAfterCutoff = makeSnippetRow({
             id: 'after-cutoff',

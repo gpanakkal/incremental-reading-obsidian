@@ -112,6 +112,34 @@ export function formatQueueDate(date: Date | null): string {
 }
 
 /**
+ * Format a span of review days the way {@link formatQueueDate} formats a
+ * single one, dropping the leading segments the end shares with the start:
+ * `2026/7/31 - 8/1`, `2026/8/2 - 3`, `2026/12/31 - 2027/1/1`. A span of one
+ * day is just that day.
+ *
+ * Eliding is left-anchored: a differing segment forces every segment after it
+ * to be shown, since `2026/8/2 - 3` only reads as August because the month was
+ * omitted. Comparing dates rather than formatted strings keeps that decision
+ * independent of how a segment happens to render.
+ */
+export function formatQueueDateRange(start: Date, end: Date): string {
+  const sameYear = start.getFullYear() === end.getFullYear();
+  const sameMonth = sameYear && start.getMonth() === end.getMonth();
+  if (sameMonth && start.getDate() === end.getDate()) {
+    return formatQueueDate(start);
+  }
+
+  const month = end.getMonth() + 1;
+  const day = end.getDate();
+  let tail: string;
+  if (!sameYear) tail = `${end.getFullYear()}/${month}/${day}`;
+  else if (!sameMonth) tail = `${month}/${day}`;
+  else tail = `${day}`;
+
+  return `${formatQueueDate(start)} - ${tail}`;
+}
+
+/**
  * Human label for the origin column, which holds different things per type:
  * an article's imported-from note is its source, while a snippet or card was
  * extracted from a parent item (or a non-item note)

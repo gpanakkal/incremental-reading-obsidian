@@ -11,16 +11,18 @@ import {
   clamp,
   compareDates,
   compareStrings,
+  currentReviewDay,
   deepCopy,
   deepMerge,
   generateId,
   getContentSlice,
   getDateString,
   getDateTimeStringUTC,
-  getEndOfToday,
+  getEndOfDay,
   intSequence,
   isInteger,
   isObject,
+  reviewDayOf,
   searchAll,
   sequenceSum,
 } from './utils';
@@ -311,7 +313,7 @@ describe('getDateString', () => {
   });
 });
 
-describe('getEndOfToday', () => {
+describe('getEndOfDay for the current day', () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -329,7 +331,7 @@ describe('getEndOfToday', () => {
           .filter((d) => !isNaN(d.getTime())),
         (offsetHours, now) => {
           vi.setSystemTime(now);
-          const result = getEndOfToday(offsetHours);
+          const result = getEndOfDay(offsetHours);
           const startOfToday = Date.parse(now.toDateString());
           expect(result).toBeGreaterThan(startOfToday);
         }
@@ -346,7 +348,7 @@ describe('getEndOfToday', () => {
     const rolloverMs = offsetHours * 60 * MS_PER_MINUTE;
     // set time to exactly start of today + rollover offset
     vi.setSystemTime(new Date(startOfToday + rolloverMs));
-    const result = getEndOfToday(offsetHours);
+    const result = getEndOfDay(offsetHours);
     expect(result).toBe(startOfToday + rolloverMs + MS_PER_DAY);
   });
 
@@ -357,7 +359,7 @@ describe('getEndOfToday', () => {
     const rolloverMs = offsetHours * 60 * MS_PER_MINUTE;
     // set time to 1ms before rollover
     vi.setSystemTime(new Date(startOfToday + rolloverMs - 1));
-    const result = getEndOfToday(offsetHours);
+    const result = getEndOfDay(offsetHours);
     expect(result).toBe(startOfToday + rolloverMs);
   });
 
@@ -370,12 +372,201 @@ describe('getEndOfToday', () => {
           .filter((d) => !isNaN(d.getTime())),
         (offsetHours, now) => {
           vi.setSystemTime(now);
-          const result = getEndOfToday(offsetHours);
+          const result = getEndOfDay(offsetHours);
           const startOfToday = Date.parse(now.toDateString());
           const rolloverMs = offsetHours * 60 * MS_PER_MINUTE;
           const candidate1 = startOfToday + rolloverMs;
           const candidate2 = candidate1 + MS_PER_DAY;
           expect([candidate1, candidate2]).toContain(result);
+        }
+      )
+    );
+  });
+});
+
+describe('reviewDayOf', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('names the day a mid-afternoon instant belongs to', () => {
+    expect(reviewDayOf(new Date(2024, 5, 15, 15, 0), 4)).toEqual(
+      new Date(2024, 5, 15)
+    );
+  });
+
+  it('assigns the small hours to the previous day under a positive offset', () => {
+    // +4h: review day 15 starts at 15 04:00, so 02:00 is still day 14.
+    expect(reviewDayOf(new Date(2024, 5, 15, 2, 0), 4)).toEqual(
+      new Date(2024, 5, 14)
+    );
+  });
+
+  it('assigns the late evening to the next day under a negative offset', () => {
+    // -5h: review day 16 starts at 15 19:00, so 20:00 already belongs to 16.
+    expect(reviewDayOf(new Date(2024, 5, 15, 20, 0), -5)).toEqual(
+      new Date(2024, 5, 16)
+    );
+  });
+
+  it('includes the opening boundary in the day it opens', () => {
+    // The instant a day starts belongs to that day, not the one before.
+    expect(reviewDayOf(new Date(2024, 5, 15, 4, 0), 4)).toEqual(
+      new Date(2024, 5, 15)
+    );
+  });
+
+  it('inverts getEndOfDay: the named day always contains the instant', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: -12, max: 12 }),
+        fc
+          .date({ min: new Date('2021-01-01'), max: new Date('2029-12-01') })
+          .filter((d) => !isNaN(d.getTime())),
+        (offsetHours, instant) => {
+          const day = reviewDayOf(instant, offsetHours);
+          const end = getEndOfDay(offsetHours, day);
+          expect(instant.getTime()).toBeLessThan(end);
+          expect(instant.getTime()).toBeGreaterThanOrEqual(end - MS_PER_DAY);
+        }
+      )
+    );
+  });
+});
+
+describe('currentReviewDay', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('names the review day the current time falls in', () => {
+    vi.useFakeTimers();
+    // 02:00 with a +4h offset is still the previous review day.
+    vi.setSystemTime(new Date(2024, 5, 15, 2, 0));
+    expect(currentReviewDay(4)).toEqual(new Date(2024, 5, 14));
+  });
+
+  it('advances once the rollover boundary has passed', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2024, 5, 15, 5, 0));
+    expect(currentReviewDay(4)).toEqual(new Date(2024, 5, 15));
+  });
+});
+
+describe('getEndOfDay with an explicit day', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('ends a +4h review day on the following morning', () => {
+    // Review day 15 runs 15 04:00 → 16 04:00.
+    expect(getEndOfDay(4, new Date(2024, 5, 15, 13, 45))).toBe(
+      new Date(2024, 5, 16, 4, 0, 0, 0).getTime()
+    );
+  });
+
+  it('ends a -5h review day on the same evening', () => {
+    // Review day 15 runs 14 19:00 → 15 19:00.
+    expect(getEndOfDay(-5, new Date(2024, 5, 15, 13, 45))).toBe(
+      new Date(2024, 5, 15, 19, 0, 0, 0).getTime()
+    );
+  });
+
+  it('ends the day at the next midnight when there is no offset', () => {
+    expect(getEndOfDay(0, new Date(2024, 5, 15, 13, 45))).toBe(
+      new Date(2024, 5, 16).getTime()
+    );
+  });
+
+  it('spans the named date at noon for any ordinary offset', () => {
+    // Whatever the offset, midday on D belongs to review day D.
+    fc.assert(
+      fc.property(fc.integer({ min: -11, max: 11 }), (offsetHours) => {
+        const noon = new Date(2024, 5, 15, 12).getTime();
+        const end = getEndOfDay(offsetHours, new Date(2024, 5, 15));
+        expect(end).toBeGreaterThan(noon);
+        expect(end - MS_PER_DAY).toBeLessThanOrEqual(noon);
+      })
+    );
+  });
+
+  it('never rolls forward past the named day, however late the time given', () => {
+    // The no-argument form advances past a rollover that has already passed.
+    // With an explicit day the question is calendrical, so it must not.
+    fc.assert(
+      fc.property(
+        fc.integer({ min: -12, max: 12 }),
+        fc.integer({ min: 0, max: 23 }),
+        (offsetHours, hour) => {
+          const day = new Date(2024, 5, 15, hour, 30);
+          expect(getEndOfDay(offsetHours, day)).toBe(
+            new Date(2024, 5, 15).getTime() +
+              offsetHours * 60 * MS_PER_MINUTE +
+              MS_PER_DAY
+          );
+        }
+      )
+    );
+  });
+
+  it('ignores the current time entirely', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2030, 0, 1));
+    expect(getEndOfDay(0, new Date(2024, 5, 15, 13, 45))).toBe(
+      new Date(2024, 5, 16).getTime()
+    );
+  });
+
+  it('normalizes across a month boundary', () => {
+    expect(getEndOfDay(4, new Date(2024, 5, 30, 9, 0))).toBe(
+      new Date(2024, 6, 1, 4, 0, 0, 0).getTime()
+    );
+  });
+
+  it('ends the day before D exactly where review day D begins', () => {
+    // How findPageForDate derives a day start. Under a +4h offset that is
+    // D 04:00, so an item due at D 02:00 belongs to the previous day.
+    const startOfDay15 = getEndOfDay(4, new Date(2024, 5, 14));
+    expect(startOfDay15).toBe(new Date(2024, 5, 15, 4, 0, 0, 0).getTime());
+    expect(startOfDay15).toBeGreaterThan(new Date(2024, 5, 15, 2, 0).getTime());
+  });
+
+  it('advances by roughly one day between consecutive dates', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: -12, max: 12 }),
+        fc
+          .date({ min: new Date('2020-01-01'), max: new Date('2030-12-01') })
+          .filter((d) => !isNaN(d.getTime())),
+        (offsetHours, date) => {
+          const next = new Date(
+            date.getFullYear(),
+            date.getMonth(),
+            date.getDate() + 1
+          );
+          const delta =
+            getEndOfDay(offsetHours, next) - getEndOfDay(offsetHours, date);
+          // DST transitions make a local day 23h or 25h long.
+          expect(delta).toBeGreaterThanOrEqual(23 * 60 * MS_PER_MINUTE);
+          expect(delta).toBeLessThanOrEqual(25 * 60 * MS_PER_MINUTE);
+        }
+      )
+    );
+  });
+
+  it('is invariant to the time of day within the same local date', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: -12, max: 12 }),
+        fc.integer({ min: 0, max: 23 }),
+        fc.integer({ min: 0, max: 23 }),
+        (offsetHours, hourA, hourB) => {
+          const a = new Date(2024, 5, 15, hourA, 30);
+          const b = new Date(2024, 5, 15, hourB, 30);
+          expect(getEndOfDay(offsetHours, a)).toBe(getEndOfDay(offsetHours, b));
         }
       )
     );

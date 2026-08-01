@@ -34,7 +34,12 @@ import type { Grade } from 'ts-fsrs';
 import IRScheduler from '../IRScheduler';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
-import { compareDates, compareFuzzedDue, compareStrings } from '../utils';
+import {
+  compareDates,
+  compareFuzzedDue,
+  compareStrings,
+  getEndOfDay,
+} from '../utils';
 import { ArticleManager } from './ArticleManager';
 import { CardManager } from './CardManager';
 import { SnippetManager } from './SnippetManager';
@@ -393,9 +398,24 @@ export default class ReviewManager {
         compareStrings(a.id, b.id)
     );
 
+    // The dated span of the whole queue, read off the sorted array before it
+    // is sliced. Rows are due-ascending with undated ones last, so the first
+    // row bounds the low end and the last *dated* row the high end. Scanned
+    // back by hand rather than with `findLast`, which is ES2023 and outside
+    // this project's ES2022 target.
+    const firstDue = rows[0]?.due ?? null;
+    let lastDue: Date | null = null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const { due } = rows[i];
+      if (due !== null) {
+        lastDue = due;
+        break;
+      }
+    }
+
     const slice = subset?.slice;
     const totalRows = rows.length;
-    if (!slice) return { rows, totalRows };
+    if (!slice) return { rows, totalRows, firstDue, lastDue };
 
     const lastPage = Math.max(
       0,
@@ -406,7 +426,44 @@ export default class ReviewManager {
     return {
       rows: rows.slice(start, start + slice.entriesPerPage),
       totalRows,
+      firstDue,
+      lastDue,
     };
+  }
+
+  /**
+   * Find the 0-based page holding the first queued item due on or after the
+   * start of `date`'s day, given a page size of `entriesPerPage`.
+   *
+   * Paging is uniform, so the page is just the row's rank divided by the page
+   * size. Resolving this here rather than in the client keeps queue ordering
+   * in one place ({@link getQueue}) and avoids shipping the whole queue to the
+   * UI, which only ever holds a single page.
+   *
+   * Returns the last page when nothing is due that late, and 0 for an empty
+   * queue.
+   */
+  async findPageForDate(date: Date, entriesPerPage: number): Promise<number> {
+    const { rows } = await this.getQueue();
+    const lastPage = Math.max(0, Math.ceil(rows.length / entriesPerPage) - 1);
+
+    // One review day ends where the next begins, so the start of `date`'s day
+    // is the end of the day before it.
+    const yesterday = new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate() - 1
+    );
+    const start = getEndOfDay(
+      this.plugin.settings.dayRolloverOffset,
+      yesterday
+    );
+    // Rows with no due time sort last and can never satisfy the jump.
+    const index = rows.findIndex(
+      (row) => row.due !== null && row.due.getTime() >= start
+    );
+    if (index === -1) return lastPage;
+    return Math.floor(index / entriesPerPage);
   }
 
   /**

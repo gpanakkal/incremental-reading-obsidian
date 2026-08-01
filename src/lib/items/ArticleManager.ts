@@ -26,7 +26,7 @@ import {
   generateId,
   getContentSlice,
   getDateString,
-  getEndOfToday,
+  getEndOfDay,
 } from '#/lib/utils';
 import type { TFile } from 'obsidian';
 import { Notice } from 'obsidian';
@@ -408,7 +408,7 @@ export class ArticleManager extends ItemManager {
     excludeIds?: string[]
   ): Promise<ReviewArticle[]> {
     const dueTime =
-      dueBy ?? getEndOfToday(this.plugin.settings.dayRolloverOffset);
+      dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
     let allExcluded = [...(excludeIds ?? [])];
     let due: ReviewArticle[] = [];
     try {
