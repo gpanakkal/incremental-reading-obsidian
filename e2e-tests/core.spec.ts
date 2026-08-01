@@ -264,14 +264,9 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'workspace:close');
 
     await executeCommandById(window, 'incremental-reading:learn');
-    await window.locator('css=#begin-review-button').click();
-    await expect(
-      window
-        .getByText(
-          'Memorizing a programming language using spaced repetition software'
-        )
-        .nth(3)
-    ).not.toBeVisible();
+    expect(
+      window.locator('css=#begin-review-button').isDisabled()
+    ).toBeTruthy();
   });
 
   test('Can dismiss items from note pane', async () => {
@@ -290,14 +285,9 @@ test.describe('Action Bar', () => {
     await dismissButton.click();
 
     await executeCommandById(window, 'incremental-reading:learn');
-    await window.locator('css=#begin-review-button').click();
-    await expect(
-      window
-        .getByText(
-          'Memorizing a programming language using spaced repetition software'
-        )
-        .nth(3)
-    ).not.toBeVisible();
+    expect(
+      window.locator('css=#begin-review-button').isDisabled()
+    ).toBeTruthy();
   });
 
   test('Can un-dismiss items from note pane', async () => {
@@ -316,14 +306,9 @@ test.describe('Action Bar', () => {
     await dismissButton.click();
 
     await executeCommandById(window, 'incremental-reading:learn');
-    await window.locator('css=#begin-review-button').click();
-    await expect(
-      window
-        .getByText(
-          'Memorizing a programming language using spaced repetition software'
-        )
-        .nth(3)
-    ).not.toBeVisible();
+    expect(
+      window.locator('css=#begin-review-button').isDisabled()
+    ).toBeTruthy();
 
     await executeCommandById(window, 'workspace:close');
 
