@@ -261,18 +261,35 @@
 
 /* #region Review queue table */
 
-.ir-queue-table {
-  flex: 1;
+/* Groups the heading, the controls, and the table they drive. A single border
+   around all three draws them as one object, so nothing divides them inside
+   it; the padding keeps the contents off that border. A column flex box, so
+   the fixed-height heading and controls sit above a table that takes the
+   remaining space. */
+.ir-queue-panel {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
-  overflow-y: auto;
-  padding: var(--size-4-2);
+  padding: var(--size-4-4);
+  border-radius: var(--radius-m);
 }
 
+.ir-queue-table {
+  flex: 1;
+  /* Flex items default to min-height: auto, which refuses to shrink below
+     content height and would push the panel open instead of scrolling. */
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Heads the panel, so it must not be squeezed when the table's rows compete
+   for height. */
 .ir-queue-title {
   padding: var(--size-4-2);
   text-align: center;
-  font-size: var(--font-ui-larger);
+  font-size: var(--font-ui-large);
   font-weight: var(--font-semibold);
+  flex: 0 0 auto;
 }
 
 .ir-queue-row {
@@ -420,18 +437,127 @@
   flex: 1;
 }
 
+/* The range label and date field on the left, the pagination centred, and an
+   empty flank on the right balancing the left one (see the flank rule below).
+
+   The bar sits between the heading and the table inside the panel's single
+   border, with nothing dividing it from either, and must not shrink when the
+   table's rows compete for the panel's height. */
+.ir-queue-controls {
+  --ir-queue-date-jump-width: 9.5em;
+
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-3);
+  padding: var(--size-2-3) var(--size-4-2);
+  flex: 0 0 auto;
+}
+
+/* The two sides flanking the pagination: the date controls on the left and an
+   empty box on the right. Equal shares of whatever the pagination leaves, so
+   it is centred on the bar itself rather than on the space left over — and it
+   stays centred as the label and field change width, with no width arithmetic
+   tying the two sides together. */
+.ir-queue-controls-flank {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-3);
+  /* Zero basis, so the two sides split the free space evenly instead of each
+     starting from its own content width. */
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.ir-queue-date-jump {
+  font-size: var(--font-ui-smaller);
+  flex: 0 0 var(--ir-queue-date-jump-width);
+  width: var(--ir-queue-date-jump-width);
+}
+
+/* A real flex box rather than `display: contents`: as a flank sibling it must
+   size and centre as one unit, which a flattened wrapper cannot do. */
 .ir-queue-pagination {
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: var(--size-4-3);
-  padding: var(--size-2-3) var(--size-4-2);
-  border-top: 1px solid var(--background-modifier-border);
+  flex: 0 0 auto;
 }
 
 .ir-queue-pagination-indicator {
   color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-size: var(--font-ui-medium);
+  text-align: center;
+  /* Wide enough that the text does not shift as the page number grows. */
+  min-width: 5em;
+}
+
+/* The review day(s) the visible page covers, reading up to the date field it
+   sits beside. Takes the flank's leftover width and truncates rather than
+   pushing the field around, so a two-date span cannot shift the bar. */
+.ir-queue-visible-range {
+  color: var(--text-muted);
+  font-size: var(--font-ui-normal);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Stands in for the table while a page loads, so it takes the table's place
+   in the panel's column rather than collapsing the border around it. */
+.ir-queue-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  flex: 1;
+  min-height: 0;
+}
+
+.ir-queue-spinner {
+  width: var(--size-4-8);
+  height: var(--size-4-8);
+  border: 2px solid var(--background-modifier-border);
+  border-top-color: var(--text-accent);
+  border-radius: 50%;
+  animation: ir-queue-spin 0.8s linear infinite;
+}
+
+@keyframes ir-queue-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Marks that the rows on screen are not the ones that were there a moment ago,
+   after a page change the user may not have caused directly — a date jump, or
+   one clamped to the last page, where nothing outside the table moves. Applied
+   to the table rather than each row so the browser animates a single layer.
+
+   The container fades as one; the rows do not animate individually, which would
+   cost a layer per row for a cue this brief. */
+.ir-queue-table-changed {
+  animation: ir-queue-rows-changed 0.15s ease-out;
+}
+
+@keyframes ir-queue-rows-changed {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Respect a reduced-motion preference: keep the indicator, drop the spin, and
+   let changed rows appear at full opacity rather than fading. */
+@media (prefers-reduced-motion: reduce) {
+  .ir-queue-spinner {
+    animation: none;
+  }
+
+  .ir-queue-table-changed {
+    animation: none;
+  }
 }
 
 /* Narrow layout: portrait screens (phones) or any pane too cramped, including 

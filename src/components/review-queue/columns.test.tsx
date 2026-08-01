@@ -12,6 +12,7 @@ import {
   cardMemoryParts,
   formatCardMemory,
   formatQueueDate,
+  formatQueueDateRange,
   originLabel,
   QUEUE_COLUMN_HEADERS,
   QUEUE_COLUMN_ORDER,
@@ -104,6 +105,95 @@ describe('formatQueueDate', () => {
   });
 });
 
+describe('formatQueueDateRange', () => {
+  it('renders a single-day span as that one day', () => {
+    const day = new Date(2026, 6, 31);
+    expect(formatQueueDateRange(day, new Date(2026, 6, 31))).toBe('2026/7/31');
+  });
+
+  it('omits the shared year when the span crosses a month', () => {
+    expect(
+      formatQueueDateRange(new Date(2026, 6, 31), new Date(2026, 7, 1))
+    ).toBe('2026/7/31 - 8/1');
+  });
+
+  it('omits the shared year and month when the span is within one month', () => {
+    expect(
+      formatQueueDateRange(new Date(2026, 7, 2), new Date(2026, 7, 3))
+    ).toBe('2026/8/2 - 3');
+  });
+
+  it('keeps the full end date when the span crosses a year', () => {
+    expect(
+      formatQueueDateRange(new Date(2026, 11, 31), new Date(2027, 0, 1))
+    ).toBe('2026/12/31 - 2027/1/1');
+  });
+
+  it('shows the month again when the day repeats in a later month', () => {
+    // Eliding is left-anchored: the month differs, so the day must be shown
+    // alongside it even though it matches the start's day.
+    expect(
+      formatQueueDateRange(new Date(2026, 6, 2), new Date(2026, 7, 2))
+    ).toBe('2026/7/2 - 8/2');
+  });
+
+  it('always opens with the start day formatted as the due column formats it', () => {
+    const dayArb = fc
+      .date({
+        min: new Date('2000-01-01T00:00:00Z'),
+        max: new Date('2099-12-31T23:59:59Z'),
+      })
+      .map(
+        (date) =>
+          new Date(date.getFullYear(), date.getMonth(), date.getDate())
+      );
+
+    fc.assert(
+      fc.property(dayArb, dayArb, (a, b) => {
+        // Ordering is the caller's job (rows are due-ascending); normalise so
+        // the property covers spans rather than restating that contract.
+        const [start, end] = a <= b ? [a, b] : [b, a];
+        const formatted = formatQueueDateRange(start, end);
+
+        expect(formatted.startsWith(formatQueueDate(start))).toBe(true);
+        // A span shows exactly one separator; a single day shows none.
+        const isSingleDay = start.getTime() === end.getTime();
+        expect(formatted.includes(' - ')).toBe(!isSingleDay);
+      })
+    );
+  });
+
+  it('elides only segments the end shares with the start', () => {
+    const dayArb = fc
+      .date({
+        min: new Date('2000-01-01T00:00:00Z'),
+        max: new Date('2099-12-31T23:59:59Z'),
+      })
+      .map(
+        (date) =>
+          new Date(date.getFullYear(), date.getMonth(), date.getDate())
+      );
+
+    fc.assert(
+      fc.property(dayArb, dayArb, (a, b) => {
+        const [start, end] = a <= b ? [a, b] : [b, a];
+        if (start.getTime() === end.getTime()) return;
+
+        const tail = formatQueueDateRange(start, end).split(' - ')[1];
+        // The tail keeps every segment from the first differing one onward,
+        // so its shape is fixed by which segments match.
+        const expected =
+          start.getFullYear() !== end.getFullYear()
+            ? `${end.getFullYear()}/${end.getMonth() + 1}/${end.getDate()}`
+            : start.getMonth() !== end.getMonth()
+              ? `${end.getMonth() + 1}/${end.getDate()}`
+              : `${end.getDate()}`;
+        expect(tail).toBe(expected);
+      })
+    );
+  });
+});
+
 describe('renderQueueCells', () => {
   it('produces content for every configured column key', () => {
     fc.assert(
@@ -166,7 +256,10 @@ describe('renderQueueCells', () => {
           className: string;
           children: VNode<{
             className: string;
-            children: [VNode<{ className: string; children: string[] }>, string];
+            children: [
+              VNode<{ className: string; children: string[] }>,
+              string,
+            ];
           }>[];
         }>;
         expect(cell.props.className).toBe('ir-queue-card-memory');
@@ -192,9 +285,7 @@ describe('renderQueueCells', () => {
           children: [VNode<{ className: string; children: string[] }>, string];
         }>;
         const [label, value] = cell.props.children;
-        expect(label.props.children.join('')).toBe(
-          `${originLabel(row.type)} `
-        );
+        expect(label.props.children.join('')).toBe(`${originLabel(row.type)} `);
         expect(value).toBe(row.parent ?? '—');
       })
     );
@@ -219,7 +310,11 @@ describe('renderQueueCells', () => {
 describe('formatCardMemory', () => {
   it('labels difficulty, stability, and retrievability as D, S, and R', () => {
     expect(
-      formatCardMemory({ difficulty: 5.23, stability: 12.4, retrievability: 0.9 })
+      formatCardMemory({
+        difficulty: 5.23,
+        stability: 12.4,
+        retrievability: 0.9,
+      })
     ).toBe('D 5.2 · S 12.4 · R 0.90');
   });
 

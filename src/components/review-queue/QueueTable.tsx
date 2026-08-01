@@ -27,10 +27,15 @@ interface QueueTableProps {
    * default tooltip on top of it. Omit to render no tooltips.
    */
   cellTitles?: (row: QueueRow) => Record<QueueColumnKey, string>;
-  /** Heading rendered above the table. Omit to render no title. */
-  title?: string;
   /** When true, only columns with `mobileVisible` are rendered. */
   isMobile: boolean;
+  /**
+   * When true, the table fades in to mark that its rows are not the ones that
+   * were just on screen. Purely presentational: the caller decides what counts
+   * as a change, and must also give the table a `key` that changes with it, or
+   * the node is reused and the animation does not replay.
+   */
+  changed?: boolean;
   onRowClick: (row: QueueRow) => void;
 }
 
@@ -48,11 +53,14 @@ function orderColumns(
 }
 
 /**
- * Pure, presentational review-queue table. Column structure comes from a
- * `QueueColumn[]` config and cell content from the `renderCells` callback, so
- * it has no per-column logic of its own. Each cell carries a hover-reveal
- * action slot (empty by default) so row actions can be added later with no
- * structural change.
+ * Pure, presentational review-queue table: header row and body rows only. The
+ * heading and the navigation controls are the container's to place, since they
+ * sit outside the table's scroll region and must stay put while it reloads.
+ *
+ * Column structure comes from a `QueueColumn[]` config and cell content from
+ * the `renderCells` callback, so it has no per-column logic of its own. Each
+ * cell carries a hover-reveal action slot (empty by default) so row actions
+ * can be added later with no structural change.
  */
 export function QueueTable({
   rows,
@@ -61,8 +69,8 @@ export function QueueTable({
   columnHeaders,
   renderCells,
   cellTitles,
-  title,
   isMobile,
+  changed = false,
   onRowClick,
 }: QueueTableProps) {
   const visibleColumns = orderColumns(
@@ -71,8 +79,10 @@ export function QueueTable({
   );
 
   return (
-    <div className="ir-queue-table" role="table">
-      {title && <div className="ir-queue-title">{title}</div>}
+    <div
+      className={`ir-queue-table${changed ? ' ir-queue-table-changed' : ''}`}
+      role="table"
+    >
       {columnHeaders && (
         <div className="ir-queue-header" role="row">
           {visibleColumns.map((column) => (

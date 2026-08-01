@@ -14,6 +14,7 @@ import type {
   SQLiteRepository,
   SRSCardRow,
 } from '#/lib/types';
+import { getEndOfDay } from '#/lib/utils';
 import fc from 'fast-check';
 import type { TAbstractFile, TFile } from 'obsidian';
 import { generatorParameters } from 'ts-fsrs';
@@ -33,6 +34,7 @@ function makeRepo(): SQLiteRepository {
     query: vi.fn().mockResolvedValue([]),
     mutate: vi.fn().mockResolvedValue([[]]),
     _execSql: vi.fn(),
+    transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
   } as unknown as SQLiteRepository;
@@ -240,6 +242,45 @@ function makeReviewCard(due: number): ReviewCard {
     },
     file: FAKE_FILE,
   };
+}
+
+/**
+ * Wire a manager whose queue holds one article per given due timestamp, with
+ * every reference resolving to a fake TFile.
+ */
+function wireDueAt(dueTimes: number[]) {
+  const repo = makeRepo();
+  vi.mocked(repo.query).mockResolvedValue([] as never);
+  const manager = new ReviewManager(makePlugin(), repo);
+  const articles = dueTimes.map((due, i) =>
+    makeArticleRow({
+      // padded so lexicographic id order matches numeric order on ties
+      id: `a${String(i).padStart(4, '0')}`,
+      reference: `articles/a${i}.md`,
+      due,
+      due_fuzz: null,
+    })
+  );
+  vi.spyOn(manager.articles, 'fetchMany').mockResolvedValue(articles as never);
+  vi.spyOn(manager.snippets, 'fetchMany').mockResolvedValue([] as never);
+  vi.spyOn(manager.cards, 'fetchMany').mockResolvedValue([] as never);
+  vi.spyOn(Obsidian, 'getNote').mockImplementation(
+    (reference: string) => ({ path: reference }) as TFile
+  );
+  return manager;
+}
+
+/**
+ * Start of `date`'s review day under the rollover offset `makePlugin` sets:
+ * the end of the review day before it.
+ */
+function startOfDay(date: Date) {
+  const yesterday = new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate() - 1
+  );
+  return getEndOfDay(4, yesterday);
 }
 
 // #endregion
@@ -805,7 +846,12 @@ describe('ReviewManager.getQueue', () => {
   it('returns an empty page when nothing is due', async () => {
     const manager = wireQueue({});
     const page = await manager.getQueue();
-    expect(page).toEqual({ rows: [], totalRows: 0 });
+    expect(page).toEqual({
+      rows: [],
+      totalRows: 0,
+      firstDue: null,
+      lastDue: null,
+    });
   });
 
   it('drops items whose note cannot be resolved', async () => {
@@ -961,8 +1007,250 @@ describe('ReviewManager.getQueue', () => {
       const page = await manager.getQueue({
         slice: { pageNumber: 3, entriesPerPage: 10 },
       });
-      expect(page).toEqual({ rows: [], totalRows: 0 });
+      expect(page).toEqual({
+        rows: [],
+        totalRows: 0,
+        firstDue: null,
+        lastDue: null,
+      });
     });
+
+    it('reports the whole queue span on every page, not the page span', async () => {
+      // The bounds exist so the date field can offer the queue's whole extent
+      // while holding only one page. A page-local span would shrink the field's
+      // reachable range to whatever happened to be on screen.
+      const manager = wireQueue({ articles: makeDueArticles(5) });
+
+      const whole = await manager.getQueue();
+      const pages = await Promise.all(
+        [0, 1, 2].map((pageNumber) =>
+          manager.getQueue({ slice: { pageNumber, entriesPerPage: 2 } })
+        )
+      );
+
+      const first = whole.rows[0].due?.getTime();
+      const last = whole.rows[whole.rows.length - 1].due?.getTime();
+      for (const page of pages) {
+        expect(page.firstDue?.getTime()).toBe(first);
+        expect(page.lastDue?.getTime()).toBe(last);
+      }
+    });
+  });
+
+  describe('span', () => {
+    it('spans from the earliest to the latest fuzzed due time', async () => {
+      // Read off the sorted queue, so the span is in fuzz order like the rows.
+      const manager = wireQueue({
+        articles: [
+          makeArticleRow({
+            id: 'a',
+            reference: 'articles/a.md',
+            due: 3000,
+            due_fuzz: -1500,
+          }),
+        ],
+        cards: [makeCardRow({ id: 'c', reference: 'cards/c.md', due: 2000 })],
+        snippets: [
+          makeSnippetRow({
+            id: 's',
+            reference: 'snippets/s.md',
+            due: 5000,
+            due_fuzz: 0,
+          }),
+        ],
+      });
+
+      const page = await manager.getQueue();
+
+      expect(page.firstDue?.getTime()).toBe(1500);
+      expect(page.lastDue?.getTime()).toBe(5000);
+    });
+
+    it('collapses the span to a single instant for a one-item queue', async () => {
+      const manager = wireQueue({
+        cards: [
+          makeCardRow({ id: 'c1', reference: 'cards/c1.md', due: YEAR_2000_MS }),
+        ],
+      });
+
+      const page = await manager.getQueue();
+
+      expect(page.firstDue?.getTime()).toBe(YEAR_2000_MS);
+      expect(page.lastDue?.getTime()).toBe(YEAR_2000_MS);
+    });
+
+    it('closes the span at the last dated row, ignoring undated ones', async () => {
+      // Undated rows sort last and carry no day, so they cannot bound the
+      // span — taking the final row outright would report a null max and
+      // leave the date field unbounded.
+      const manager = wireQueue({
+        articles: [
+          makeArticleRow({
+            id: 'undated',
+            reference: 'articles/undated.md',
+            due: null,
+          }),
+          makeArticleRow({
+            id: 'dated',
+            reference: 'articles/dated.md',
+            due: 4000,
+            due_fuzz: 0,
+          }),
+        ],
+      });
+
+      const page = await manager.getQueue();
+
+      expect(page.rows.map((r) => r.id)).toEqual(['dated', 'undated']);
+      expect(page.lastDue?.getTime()).toBe(4000);
+    });
+
+    it('has no span when every row is undated', async () => {
+      const manager = wireQueue({
+        articles: [
+          makeArticleRow({
+            id: 'u1',
+            reference: 'articles/u1.md',
+            due: null,
+          }),
+        ],
+      });
+
+      const page = await manager.getQueue();
+
+      expect(page.firstDue).toBeNull();
+      expect(page.lastDue).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findPageForDate — maps a date to the page holding the first item due on or
+// after the start of that day, under the same ordering getQueue applies.
+// ---------------------------------------------------------------------------
+
+describe('ReviewManager.findPageForDate', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('lands on the page holding the first item due on or after the date', async () => {
+    // 25 items, one per day from 2024-06-01, 10 per page.
+    const day0 = startOfDay(new Date(2024, 5, 1));
+    const manager = wireDueAt(
+      Array.from({ length: 25 }, (_, i) => day0 + i * MS_PER_DAY + 60_000)
+    );
+
+    // The item due 2024-06-13 is index 12 → page 1 (indices 10..19).
+    const page = await manager.findPageForDate(new Date(2024, 5, 13), 10);
+
+    expect(page).toBe(1);
+  });
+
+  it('treats the rollover offset as the day boundary, not midnight', async () => {
+    // makePlugin sets a +4h offset, so review day 13 runs 13 04:00 → 14 04:00.
+    // Items are given as literal wall-clock times rather than via startOfDay,
+    // so this pins the boundary itself and not just internal consistency.
+    const manager = wireDueAt([
+      new Date(2024, 5, 13, 2, 0).getTime(), // 02:00 — still day 12
+      new Date(2024, 5, 13, 6, 0).getTime(), // 06:00 — first of day 13
+      new Date(2024, 5, 14, 2, 0).getTime(), // 02:00 next — still day 13
+    ]);
+
+    // One entry per page, so the returned page IS the matched index.
+    await expect(
+      manager.findPageForDate(new Date(2024, 5, 13), 1)
+    ).resolves.toBe(1);
+  });
+
+  it('lands on the last page when nothing is due that late', async () => {
+    const day0 = startOfDay(new Date(2024, 5, 1));
+    const manager = wireDueAt(
+      Array.from({ length: 25 }, (_, i) => day0 + i * MS_PER_DAY + 60_000)
+    );
+
+    // 25 rows at 10 per page → pages 0..2.
+    const page = await manager.findPageForDate(new Date(2030, 0, 1), 10);
+
+    expect(page).toBe(2);
+  });
+
+  it('returns page 0 for an empty queue', async () => {
+    const manager = wireDueAt([]);
+
+    await expect(
+      manager.findPageForDate(new Date(2024, 5, 13), 10)
+    ).resolves.toBe(0);
+  });
+
+  it('includes an item due exactly at the start of the day (on or after)', async () => {
+    const target = new Date(2024, 5, 13);
+    // One item a moment before the day starts, one exactly at the boundary.
+    const manager = wireDueAt([startOfDay(target) - 1, startOfDay(target)]);
+
+    // Index 1 is the boundary item; at 1 per page that is page 1.
+    await expect(manager.findPageForDate(target, 1)).resolves.toBe(1);
+  });
+
+  it('skips rows with no due time rather than treating them as due', async () => {
+    const target = new Date(2024, 5, 13);
+    const repo = makeRepo();
+    vi.mocked(repo.query).mockResolvedValue([] as never);
+    const manager = new ReviewManager(makePlugin(), repo);
+    vi.spyOn(manager.articles, 'fetchMany').mockResolvedValue([
+      makeArticleRow({ id: 'a0', reference: 'a0.md', due: null }),
+      makeArticleRow({
+        id: 'a1',
+        reference: 'a1.md',
+        due: startOfDay(target),
+        due_fuzz: null,
+      }),
+    ] as never);
+    vi.spyOn(manager.snippets, 'fetchMany').mockResolvedValue([] as never);
+    vi.spyOn(manager.cards, 'fetchMany').mockResolvedValue([] as never);
+    vi.spyOn(Obsidian, 'getNote').mockImplementation(
+      (reference: string) => ({ path: reference }) as TFile
+    );
+
+    // Null-due rows sort last, so the dated row is index 0 → page 0. A null
+    // treated as the epoch would match first and still give 0, so use one
+    // entry per page: the dated row must be the match, not the null row.
+    await expect(manager.findPageForDate(target, 1)).resolves.toBe(0);
+  });
+
+  it('lands on the page whose slice contains the first item due on or after the date', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 40 }), // queue size
+        fc.integer({ min: 1, max: 10 }), // entries per page
+        fc.integer({ min: -5, max: 45 }), // target day offset
+        async (count, entriesPerPage, dayOffset) => {
+          // One item per day starting 2024-06-01, each due just after that
+          // day's start, so item i is the first due on or after day i.
+          const day0 = startOfDay(new Date(2024, 5, 1));
+          const manager = wireDueAt(
+            Array.from({ length: count }, (_, i) => day0 + i * MS_PER_DAY + 1)
+          );
+
+          const page = await manager.findPageForDate(
+            new Date(2024, 5, 1 + dayOffset),
+            entriesPerPage
+          );
+
+          // Closed form from the generators alone — no call back into the
+          // code under test. A target before day 0 matches item 0; one past
+          // the last item matches nothing and must clamp to the last page.
+          const lastPage = Math.ceil(count / entriesPerPage) - 1;
+          const matchedIndex = dayOffset < 0 ? 0 : dayOffset;
+          const expected =
+            matchedIndex > count - 1
+              ? lastPage
+              : Math.floor(matchedIndex / entriesPerPage);
+
+          expect(page).toBe(expected);
+        }
+      )
+    );
   });
 });
 

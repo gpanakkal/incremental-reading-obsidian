@@ -25,7 +25,7 @@ import type {
   SnippetRow,
   SQLiteRepository,
 } from '#/lib/types';
-import { compareFuzzedDue, getEndOfToday } from '#/lib/utils';
+import { compareFuzzedDue, getEndOfDay } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import {
@@ -138,7 +138,7 @@ export class SnippetManager extends ItemManager {
     excludeIds?: string[]
   ): Promise<ReviewSnippet[]> {
     const dueTime =
-      dueBy ?? getEndOfToday(this.plugin.settings.dayRolloverOffset);
+      dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
     let allExcluded = [...(excludeIds ?? [])];
     let due: ReviewSnippet[] = [];
     try {

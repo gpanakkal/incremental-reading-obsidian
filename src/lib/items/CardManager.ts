@@ -26,7 +26,7 @@ import {
 } from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
-import { getEndOfToday, searchAll } from '../utils';
+import { getEndOfDay, searchAll } from '../utils';
 import { ItemManager } from './ItemManager';
 import SRSCard from './SRSCard';
 import SRSCardReview from './SRSCardReview';
@@ -141,7 +141,7 @@ export class CardManager extends ItemManager {
     excludeIds?: string[]
   ): Promise<ReviewCard[]> {
     const dueTime =
-      dueBy ?? getEndOfToday(this.plugin.settings.dayRolloverOffset);
+      dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
     let allExcluded = [...(excludeIds ?? [])];
     let due: ReviewCard[] = [];
     try {

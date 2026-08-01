@@ -38,19 +38,63 @@ export function getDateString(date?: Date) {
 }
 
 /**
- * Get the rollover-adjusted end of day as a Unix timestamp.
+ * Get the rollover-adjusted end of a review day as a Unix timestamp.
+ *
+ * A review day begins at `midnight + offsetHours` on the calendar date it is
+ * named for and ends one day later: with a +4-hour offset, review day D runs
+ * from D 04:00 to D+1 04:00; with a -5-hour offset, from D-1 19:00 to D 19:00.
+ * Passing D-1 gives the start of review day D.
+ *
+ * @param day the review day to measure, as any time on its calendar date.
+ * @default the review day in progress
  */
-export function getEndOfToday(offsetHours: number) {
-  const date = new Date();
-  // get start of day in local time zone
-  const startOfToday = Date.parse(date.toDateString());
-  const rolloverOffsetMs = offsetHours * 60 * MS_PER_MINUTE;
-  let endOfDayLocal = startOfToday + rolloverOffsetMs;
-  if (Date.parse(date.toUTCString()) - startOfToday >= rolloverOffsetMs) {
-    // add a full day since we're past the rollover point
-    endOfDayLocal += MS_PER_DAY;
+export function getEndOfDay(offsetHours: number, day?: Date) {
+  const date = day ?? new Date();
+  // Built from date parts rather than `Date.parse(date.toDateString())`: the
+  // format `toDateString` emits is implementation-defined, and `Date.parse` on
+  // a non-ISO string is too. This plugin runs in both Electron and mobile
+  // webviews, which are separate engines.
+  const midnight = new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate()
+  ).getTime();
+  const boundary = midnight + offsetHours * 60 * MS_PER_MINUTE;
+
+  // The named day ends at the *next* boundary after the one that opens it.
+  if (day) return boundary + MS_PER_DAY;
+  // Once today's boundary has passed, the day in progress ends at the next one.
+  return date.getTime() >= boundary ? boundary + MS_PER_DAY : boundary;
+}
+
+/**
+ * Get the review day a given instant falls in, as a `Date` on that day's
+ * calendar date. The inverse of {@link getEndOfDay}: the returned day always
+ * satisfies `instant < getEndOfDay(offsetHours, day)`.
+ *
+ * Under a +4h offset an instant at 02:00 belongs to the previous review day;
+ * under a -5h offset one at 20:00 already belongs to the next.
+ */
+export function reviewDayOf(instant: Date, offsetHours: number) {
+  const day = new Date(
+    instant.getFullYear(),
+    instant.getMonth(),
+    instant.getDate()
+  );
+  // Before its own day's opening boundary, so it still belongs to the day
+  // before; past the next one, so it already belongs to the day after.
+  const millisIntoDay = instant.getTime() - day.getTime();
+  const offsetMs = offsetHours * 60 * MS_PER_MINUTE;
+  if (millisIntoDay < offsetMs) day.setDate(day.getDate() - 1);
+  else if (millisIntoDay >= offsetMs + MS_PER_DAY) {
+    day.setDate(day.getDate() + 1);
   }
-  return endOfDayLocal;
+  return day;
+}
+
+/** The review day now falls in. See {@link reviewDayOf}. */
+export function currentReviewDay(offsetHours: number) {
+  return reviewDayOf(new Date(), offsetHours);
 }
 
 /**

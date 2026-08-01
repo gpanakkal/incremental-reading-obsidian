@@ -74,10 +74,19 @@ export type QueueSubset = {
 /**
  * One page of the review queue. `totalRows` is the size of the whole subset
  * before slicing, so callers can derive the page count.
+ *
+ * `firstDue` and `lastDue` bound the whole subset, not the page: they are the
+ * due times of the earliest and latest dated rows across every page. They come
+ * back with the page because the queue is already sorted in full to slice it,
+ * so reading both ends is free — and because a separate bounds call could
+ * observe a different queue state than the page in view, letting the two
+ * disagree. Both are null when the subset holds no dated rows at all.
  */
 export interface QueuePage {
   rows: QueueRow[];
   totalRows: number;
+  firstDue: Date | null;
+  lastDue: Date | null;
 }
 
 /** For React components rendered inside Obsidian Modals */

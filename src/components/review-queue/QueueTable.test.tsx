@@ -328,23 +328,10 @@ describe('QueueTable', () => {
     ).toEqual(['article', 'snippet', 'card']);
   });
 
-  it('renders the given title above the table', () => {
-    const container = mount(
-      <QueueTable
-        rows={[article]}
-        columns={buildQueueColumns()}
-        title="Upcoming"
-        renderCells={stubRenderCells}
-        isMobile={false}
-        onRowClick={() => {}}
-      />
-    );
-    expect(container.querySelector('.ir-queue-title')?.textContent).toBe(
-      'Upcoming'
-    );
-  });
-
-  it('renders no title element when no title is given', () => {
+  it('renders no heading of its own', () => {
+    // The heading belongs to the container, which places it outside the panel
+    // holding the controls and this table. A heading rendered here as well
+    // would sit inside the scroll region and scroll away with the rows.
     const container = mount(
       <QueueTable
         rows={[article]}
@@ -439,5 +426,73 @@ describe('QueueTable', () => {
     expect(
       container.querySelector('.ir-queue-cell')?.getAttribute('data-width')
     ).toBe('flexible');
+  });
+
+  describe('changed', () => {
+    function mountTable(changed?: boolean) {
+      return mount(
+        <QueueTable
+          rows={[article]}
+          columns={buildQueueColumns()}
+          renderCells={stubRenderCells}
+          isMobile={false}
+          changed={changed}
+          onRowClick={() => {}}
+        />
+      );
+    }
+
+    it('marks the table when its rows are flagged as changed', () => {
+      const container = mountTable(true);
+
+      expect(
+        container
+          .querySelector('.ir-queue-table')
+          ?.classList.contains('ir-queue-table-changed')
+      ).toBe(true);
+    });
+
+    it('leaves the table unmarked when the rows did not change', () => {
+      const container = mountTable(false);
+
+      expect(
+        container
+          .querySelector('.ir-queue-table')
+          ?.classList.contains('ir-queue-table-changed')
+      ).toBe(false);
+    });
+
+    it('leaves the table unmarked by default', () => {
+      // The animation is opt-in: a caller that says nothing gets a still table.
+      const container = mountTable();
+
+      expect(
+        container
+          .querySelector('.ir-queue-table')
+          ?.classList.contains('ir-queue-table-changed')
+      ).toBe(false);
+    });
+
+    it('keeps the base table class when marked', () => {
+      // The marker is additive — the base class carries the scroll region and
+      // layout, so replacing it rather than adding to it would break the table.
+      const container = mountTable(true);
+
+      const table = container.querySelector('.ir-queue-table');
+      expect(table?.classList.contains('ir-queue-table')).toBe(true);
+      expect(table?.getAttribute('role')).toBe('table');
+    });
+
+    it('renders the same rows whether or not it is marked', () => {
+      // The flag is presentational: it must not touch what the table shows.
+      const marked = mountTable(true);
+      const unmarked = mountTable(false);
+
+      expect(marked.querySelectorAll('.ir-queue-row')).toHaveLength(1);
+      expect(unmarked.querySelectorAll('.ir-queue-row')).toHaveLength(1);
+      expect(marked.querySelector('.ir-queue-row')?.textContent).toBe(
+        unmarked.querySelector('.ir-queue-row')?.textContent
+      );
+    });
   });
 });

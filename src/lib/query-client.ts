@@ -253,6 +253,13 @@ async function patchQueuePages(
     queryClient.setQueryData<QueuePage>(queryKey, {
       rows,
       totalRows: Math.max(0, page.totalRows - removed),
+      // The span is carried forward rather than recomputed: it describes the
+      // whole queue, and this patch sees only the cached pages, so it cannot
+      // tell what the new extent is when a boundary item leaves. A slightly
+      // stale bound self-corrects on the next fetch; dropping it would
+      // un-clamp the date field in the meantime.
+      firstDue: page.firstDue,
+      lastDue: page.lastDue,
     });
   }
 }
