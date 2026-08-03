@@ -666,25 +666,65 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
     await focusVaultWindow(app);
   }
 
+  // Last gate before the test body runs.
+  //
+  // Deliberately after maximize and focus rather than right after boot: the
+  // settings window is created a few hundred ms into startup, so a check any
+  // earlier can pass and still leave one behind. Nothing above is allowed to
+  // hand back a workspace that shares the app with another window.
+  await assertVaultWindowIsAlone(app);
+
   return window;
 }
 
-/** Bring the vault window to the front so it receives keyboard input. */
+/**
+ * Bring the vault window to the front so it receives keyboard input.
+ *
+ * Verifies rather than assumes. A lone show()/focus() pair can be refused —
+ * another window still holding focus, or a window manager that has not finished
+ * mapping this one — and the previous version returned as though it had worked.
+ * Being wrong is expensive and hard to read later: Obsidian opens modals in
+ * whichever BrowserWindow is focused, so a lost focus race sends the quick
+ * switcher and the plugin's own modals to a window no assertion is watching.
+ *
+ * Warns rather than throws when focus never lands. `assertVaultWindowIsAlone`
+ * is the hard guard — with one window left there is nowhere else for a modal to
+ * go, so unfocused-but-alone is survivable and not worth failing a boot over.
+ */
 async function focusVaultWindow(app: ElectronApplication) {
+  const deadline = Date.now() + FOCUS_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    if (await tryFocusVaultWindow(app)) return true;
+    await wait(POLL_INTERVAL_MS);
+  }
+
+  console.warn(
+    `[openVault] The vault window did not take focus within ` +
+      `${FOCUS_TIMEOUT_MS}ms. Harmless while it is the only window open; if ` +
+      `tests start losing modals, suspect this first.`
+  );
+  return false;
+}
+
+/** One show/focus attempt. Reports whether the vault window ended up focused. */
+async function tryFocusVaultWindow(app: ElectronApplication) {
   try {
-    await app.evaluate(({ BrowserWindow }, urlFragment) => {
+    return await app.evaluate(({ BrowserWindow }, urlFragment) => {
       const vaultWindow = BrowserWindow.getAllWindows().find((candidate) =>
         candidate.webContents.getURL().includes(urlFragment)
       );
-      if (!vaultWindow) return;
+      if (!vaultWindow) return false;
       if (vaultWindow.isMinimized()) vaultWindow.restore();
       vaultWindow.show();
       vaultWindow.focus();
+      return vaultWindow.isFocused();
     }, VAULT_WINDOW_URL);
   } catch {
     // Focusing is best-effort; if the app is already tearing down there is
     // nothing to focus and the caller's own assertions should report the
     // failure, not this helper.
+    return false;
   }
 }
 
@@ -712,9 +752,12 @@ async function dismissFirstLaunchPrompts(
     // Dialog didn't appear - vault was previously trusted, continue
   }
 
-  // Close the community plugins modal if it appears
+  // Close the community plugins modal if it appears.
+  //
+  // Best-effort and bounded: on Obsidian 1.13 the trust click frequently goes
+  // straight to the settings window without ever raising an in-vault modal, so
+  // this timing out is an ordinary outcome rather than a failure.
   const enablePluginsModal = window.locator('.modal-bg');
-  let dismissedPluginsModal = false;
   try {
     await enablePluginsModal.waitFor({
       state: 'visible',
@@ -725,16 +768,20 @@ async function dismissFirstLaunchPrompts(
       state: 'hidden',
       timeout: OPTIONAL_ELEMENT_TIMEOUT_MS,
     });
-    dismissedPluginsModal = true;
   } catch {
     // Modal didn't appear, continue
   }
 
-  // Dismissing that modal is what spawns the settings window, so this wait is
-  // only reachable when the modal was actually shown.
-  if (dismissedPluginsModal) {
-    await closeSettingsWindow(app);
-  }
+  // Unconditional, because the modal is not what spawns the settings window.
+  //
+  // This used to be gated on having dismissed that modal, on the theory that
+  // dismissing it is what opens settings. On a loaded Ubuntu runner the modal
+  // never appeared within its bound, the gate skipped cleanup — and Obsidian
+  // opened the settings window anyway. It then held focus and received every
+  // modal the tests went on to open, including the plugin's own import modal,
+  // so tests timed out waiting on a `.modal-bg` that had in fact rendered, just
+  // in a window they were not watching.
+  await closeSettingsWindow(app);
 }
 
 /** Obsidian's vault window is the only one served from `index.html`. */
@@ -745,6 +792,22 @@ const SETTINGS_WINDOW_TIMEOUT_MS = 5_000;
 /** After destroying it, how long to watch for a follow-up window. */
 const SETTINGS_WINDOW_SETTLE_MS = 500;
 const POLL_INTERVAL_MS = 50;
+
+/**
+ * How long to keep clearing stray windows before failing the boot.
+ *
+ * A ceiling, not a cost: a healthy boot has no stray windows and pays one
+ * window listing. This only bounds how long a doomed one retries.
+ */
+const STRAY_WINDOW_TIMEOUT_MS = 5_000;
+
+/**
+ * How long to wait for the vault window to actually take OS focus.
+ *
+ * Short on purpose. Focus either lands within a frame or two of `focus()` or a
+ * window manager is refusing it, and waiting longer does not change which.
+ */
+const FOCUS_TIMEOUT_MS = 2_000;
 
 /**
  * Destroy the separate settings window and restore focus to the vault window.
@@ -763,10 +826,11 @@ const POLL_INTERVAL_MS = 50;
  *    settling into a visible window titled "Settings — <vault>". So we identify
  *    it by elimination (any window that is not the vault) rather than by title.
  *
- * Only call this when the community-plugins modal was actually dismissed:
- * on later launches of an already-trusted vault the modal never shows, no
- * settings window is ever created, and we would wait out the full timeout for
- * nothing.
+ * Called on every first launch, whether or not the community-plugins modal
+ * showed. Gating on that modal was the bug: when it failed to appear, cleanup
+ * was skipped and the settings window survived. The cost of running it for
+ * nothing is one `SETTINGS_WINDOW_TIMEOUT_MS` wait plus a warning, paid only on
+ * a first launch — cheap next to a stray window redirecting every later modal.
  */
 async function closeSettingsWindow(app: ElectronApplication) {
   const deadline = Date.now() + SETTINGS_WINDOW_TIMEOUT_MS;
@@ -859,5 +923,68 @@ async function closeNonVaultWindows(app: ElectronApplication) {
     // itself may go away while we poll. Report "nothing destroyed" and let the
     // caller decide whether to keep waiting.
     return 0;
+  }
+}
+
+/**
+ * URLs of every window that is not the vault window, for reporting.
+ *
+ * Reports none when there is no vault window to compare against: callers reach
+ * this only after `waitForBootedVaultWindow`, which already fails when the
+ * vault window never arrives, so inventing a failure here would only mask that
+ * one with a less specific message.
+ */
+async function listNonVaultWindows(app: ElectronApplication) {
+  try {
+    return await app.evaluate(({ BrowserWindow }, urlFragment) => {
+      const windows = BrowserWindow.getAllWindows();
+      const vaultWindow = windows.find((candidate) =>
+        candidate.webContents.getURL().includes(urlFragment)
+      );
+      if (!vaultWindow) return [];
+
+      return windows
+        .filter(
+          (candidate) => candidate !== vaultWindow && !candidate.isDestroyed()
+        )
+        .map((candidate) => candidate.webContents.getURL() || '<blank>');
+    }, VAULT_WINDOW_URL);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fail the boot unless the vault window is the only one left standing.
+ *
+ * A surviving second window is not cosmetic. Obsidian opens modals in whichever
+ * BrowserWindow holds focus, so one left behind silently redirects the quick
+ * switcher, the command palette, and the plugin's own modals away from the
+ * window under test — and every symptom of that surfaces later and elsewhere: a
+ * `.modal-bg` that never becomes visible, a `switcher:open` that returns true
+ * with nothing on screen, each reported against whichever helper looked first.
+ * Checking here names the cause while the cause is still on screen.
+ *
+ * Closes what it finds before giving up, so a window that merely arrived late
+ * gets handled rather than reported.
+ */
+async function assertVaultWindowIsAlone(app: ElectronApplication) {
+  const deadline = Date.now() + STRAY_WINDOW_TIMEOUT_MS;
+  let stray = await listNonVaultWindows(app);
+
+  while (stray.length > 0 && Date.now() < deadline) {
+    await closeNonVaultWindows(app);
+    await wait(POLL_INTERVAL_MS);
+    stray = await listNonVaultWindows(app);
+  }
+
+  if (stray.length > 0) {
+    throw new Error(
+      `Obsidian left ${stray.length} window(s) open besides the vault, and ` +
+        `they survived ${STRAY_WINDOW_TIMEOUT_MS}ms of close() attempts: ` +
+        `${stray.join(', ')}. Modals open in the focused window, so these ` +
+        `would take the quick switcher and the plugin's own modals away from ` +
+        `the window under test.`
+    );
   }
 }
