@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test';
 import type { App } from 'obsidian';
+import { waitForLayoutReady } from './setup/helpers';
 
 // Reusable functions to execute Obsidian operations in tests
 
@@ -40,6 +41,16 @@ export async function finalizeArticleImport(window: Page) {
  * @param path relative path using forward slashes. Do not enquote segments.
  */
 export async function openNote(window: Page, path: string) {
+  // Obsidian can still be booting (indexing the vault, loading plugins), and
+  // each of those can replace the renderer's execution context. Waiting for a
+  // ready workspace first keeps the evaluate() below from being destroyed
+  // mid-round-trip.
+  //
+  // Best-effort: if the page is already gone the app has died, and the quick
+  // switcher interaction below reports that far more legibly than a stack
+  // pointing at this guard.
+  await waitForLayoutReady(window).catch(() => {});
+
   // Register file-open listener before opening the quick switcher, because
   // the switcher can trigger navigation (destroying the execution context)
   // before evaluate() completes its round-trip — especially on macOS.
@@ -51,8 +62,14 @@ export async function openNote(window: Page, path: string) {
         workspace.offref(ref);
         resolve();
       });
-      // Safety: clean up listener if event never fires
-      setTimeout(() => workspace.offref(ref), NOTE_OPEN_TIMEOUT_MS);
+      // Safety: if the event never fires, resolve anyway so the caller falls
+      // through to the modal-hidden wait below, which fails in seconds with a
+      // readable error. Leaving this pending instead would hang the test until
+      // Playwright's 300s timeout.
+      setTimeout(() => {
+        workspace.offref(ref);
+        resolve();
+      }, NOTE_OPEN_TIMEOUT_MS);
     });
   });
 
