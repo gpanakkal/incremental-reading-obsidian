@@ -22,6 +22,50 @@ export const sandboxArg =
 
 export const shouldCleanup = process.env.E2E_CLEANUP === '1';
 
+/**
+ * Whether to keep Obsidian's windows off the desktop for this run.
+ *
+ * Defaults to off, so an ad-hoc `playwright test` still shows what it is doing.
+ * The `pnpm e2e*` scripts opt in, because a local suite run otherwise throws a
+ * popup on screen per test and steals focus mid-keystroke.
+ *
+ * Electron cannot run headless the way Chromium can — Obsidian creates its own
+ * `BrowserWindow`s and there is no launch flag to suppress them — so this works
+ * by preloading a main-process patch instead. See ./hide-windows.cjs.
+ */
+export const isHeadless = process.env.E2E_HEADLESS === '1';
+
+/**
+ * Preload the window-hiding patch into Electron's main process, which runs it
+ * before Obsidian's own entry point — the only moment early enough to intercept
+ * construction of the launcher window.
+ *
+ * Must be spelled `-r <path>` as two separate argv entries, matching how
+ * Playwright passes its own loader. The `--require=<path>` form is not a flag
+ * Electron recognizes, and an unrecognized `--`-flag makes it parse the whole
+ * command line in strict Node mode, where it then rejects every Chromium switch
+ * (including Playwright's own `--remote-debugging-port`) with "bad option" and
+ * fails to launch at all.
+ */
+const hideWindowsArg = isHeadless
+  ? ['-r', path.resolve('./e2e-tests/setup/hide-windows.cjs')]
+  : [];
+
+/**
+ * Chromium throttles timers, rAF, and painting in windows it believes are
+ * hidden or occluded — which, in this mode, is all of them. Left on, the
+ * renderer effectively stalls and tests time out waiting for UI that is never
+ * painted. These switches are what make a hidden window behave like a visible
+ * one.
+ */
+const noThrottlingArgs = isHeadless
+  ? [
+      '--disable-renderer-backgrounding',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-background-timer-throttling',
+    ]
+  : [];
+
 export async function createVaultCopy(
   prefix: string,
   subDirectory?: string,
@@ -72,10 +116,17 @@ export async function launchElectron(vaultPath: string) {
   return electron.launch({
     args: [
       ...sandboxArg,
+      ...hideWindowsArg,
+      ...noThrottlingArgs,
       `--user-data-dir=${userDataDir(vaultPath)}`,
       appPath,
       'open',
     ],
+    // Deliberately no `env`: Playwright's test workers run with
+    // ELECTRON_RUN_AS_NODE=1, and forwarding that to the child puts Electron in
+    // plain-Node mode, where it rejects every Chromium switch (including
+    // Playwright's own --remote-debugging-port) with "bad option" and never
+    // launches. Omitting the key lets Playwright supply a sanitized environment.
   });
 }
 
@@ -272,6 +323,16 @@ const OPTIONAL_ELEMENT_TIMEOUT_MS = 5000;
 const VAULT_WINDOW_TIMEOUT_MS = 10_000;
 
 /**
+ * Viewport used in place of maximizing when windows are hidden.
+ *
+ * Maximizing exists so the workspace is wide enough that Obsidian does not
+ * collapse the sidebars or wrap the toolbars the tests interact with. A fixed
+ * size buys the same thing and, unlike maximizing, is identical on every
+ * machine regardless of display resolution.
+ */
+const HEADLESS_VIEWPORT = { width: 1920, height: 1080 };
+
+/**
  * Resolve the live vault window, waiting for it to appear if necessary.
  *
  * Window handles captured during startup go stale: Obsidian creates and
@@ -357,18 +418,36 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
   // with "Execution context was destroyed".
   window = await waitForBootedVaultWindow(app, window);
 
-  // maximize the window
-  const maximizeButton = window.getByLabel('Maximize');
-  try {
-    await maximizeButton.click({ timeout: OPTIONAL_ELEMENT_TIMEOUT_MS });
-  } catch {
-    // Already maximized (Obsidian restores window state on reopen)
-  }
+  // Maximizing is about giving a *visible* window enough room for the layout
+  // under test. In headless mode the window is deliberately off-screen and its
+  // maximize() is a no-op, so the click can only ever cost a full timeout —
+  // set the viewport directly instead, which is what maximizing was buying us.
+  //
+  // Best-effort, like the maximize click it replaces. Obsidian can close and
+  // recreate windows during boot, and `waitForBootedVaultWindow` deliberately
+  // returns its handle rather than throwing when the app dies — so this can be
+  // reached holding a page that is already gone. Sizing the window is cosmetic;
+  // letting it throw here would replace the test's real failure with a
+  // "Target page, context or browser has been closed" pointing at this line.
+  if (isHeadless) {
+    await window.setViewportSize(HEADLESS_VIEWPORT).catch(() => {});
+  } else {
+    const maximizeButton = window.getByLabel('Maximize');
+    try {
+      await maximizeButton.click({ timeout: OPTIONAL_ELEMENT_TIMEOUT_MS });
+    } catch {
+      // Already maximized (Obsidian restores window state on reopen)
+    }
 
-  // Guarantee the vault window is the one receiving keyboard input. On a
-  // relaunch no settings window is created, but the vault window is not always
-  // focused either, so this runs on every path.
-  await focusVaultWindow(app);
+    // Guarantee the vault window is the one receiving keyboard input. On a
+    // relaunch no settings window is created, but the vault window is not
+    // always focused either, so this runs on every path.
+    //
+    // Skipped when headless: no window is on the desktop to focus, Playwright
+    // delivers input over CDP rather than through the OS, and the patched
+    // show()/focus() are no-ops.
+    await focusVaultWindow(app);
+  }
 
   return window;
 }
