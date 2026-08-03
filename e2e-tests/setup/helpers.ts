@@ -112,8 +112,21 @@ export function userDataDir(vaultPath: string) {
   return path.join(vaultPath, '.user-data');
 }
 
+/**
+ * Tail of Electron's stderr, kept per app so a boot failure can report what
+ * the process actually said before dying. Without this, an Electron that
+ * exits during startup surfaces only as a timeout with no cause attached.
+ */
+const stderrTails = new WeakMap<ElectronApplication, string[]>();
+const STDERR_TAIL_LINES = 20;
+
+/** The last thing Electron printed before it died, if anything. */
+export function lastStderr(app: ElectronApplication) {
+  return (stderrTails.get(app) ?? []).join('\n');
+}
+
 export async function launchElectron(vaultPath: string) {
-  return electron.launch({
+  const app = await electron.launch({
     args: [
       ...sandboxArg,
       ...hideWindowsArg,
@@ -128,17 +141,44 @@ export async function launchElectron(vaultPath: string) {
     // Playwright's own --remote-debugging-port) with "bad option" and never
     // launches. Omitting the key lets Playwright supply a sanitized environment.
   });
+
+  const tail: string[] = [];
+  stderrTails.set(app, tail);
+
+  const proc = app.process();
+  proc.stderr?.on('data', (chunk: Buffer) => {
+    tail.push(chunk.toString());
+    if (tail.length > STDERR_TAIL_LINES)
+      tail.splice(0, tail.length - STDERR_TAIL_LINES);
+  });
+
+  // Record the real OS-level exit separately from Playwright disposing its
+  // handle. The two are easy to confuse — `app.process()` throws in both
+  // cases — but only one of them means Obsidian actually died.
+  proc.on('exit', (code, signal) => {
+    exitedForReal.set(app, { code, signal });
+  });
+
+  return app;
 }
+
+/** OS-level exit, recorded only when the child process genuinely exits. */
+const exitedForReal = new WeakMap<
+  ElectronApplication,
+  { code: number | null; signal: NodeJS.Signals | null }
+>();
 
 /** Upper bound on waiting for a closed Electron process to report its exit. */
 const EXIT_TIMEOUT_MS = 10_000;
 
 /**
- * Whether the Electron process is gone.
+ * Whether the app is unusable — either the process exited or Playwright has
+ * disposed its handle.
  *
- * `app.process()` does not merely report a dead process — it throws once
- * Playwright has disposed the application handle, so the throw itself is a
- * positive signal that the app has exited.
+ * These are two different states and the distinction matters when diagnosing a
+ * failure: `app.process()` throws in both cases, so a throw does NOT prove the
+ * process died. Use `exitedForReal` to tell them apart; it is populated only
+ * from the child process's own 'exit' event.
  */
 function hasExited(app: ElectronApplication) {
   try {
@@ -248,7 +288,7 @@ export async function waitForLayoutReady(
   timeout = LAYOUT_READY_TIMEOUT_MS
 ) {
   await window.waitForFunction(
-    () => Boolean((window as Page & { app?: App }).app?.workspace?.layoutReady),
+    () => (window as Page & { app?: App }).app?.workspace?.layoutReady,
     undefined,
     { timeout, polling: LAYOUT_READY_POLL_MS }
   );
@@ -264,12 +304,26 @@ export async function waitForLayoutReady(
  * when we picked it can die while we watch it. Re-resolve by URL and try again
  * on the successor rather than failing the test.
  */
-async function waitForBootedVaultWindow(app: ElectronApplication, window: Page) {
+async function waitForBootedVaultWindow(
+  app: ElectronApplication,
+  window: Page
+) {
   const deadline = Date.now() + LAYOUT_READY_TIMEOUT_MS;
   let current = window;
 
   while (Date.now() < deadline) {
-    if (hasExited(app)) return current;
+    // The Electron process is gone, so no window will ever become ready. Say
+    // so here rather than returning a dead handle for the test to trip over.
+    if (hasExited(app)) {
+      const exit = exitedForReal.get(app);
+      throw new Error(
+        (exit
+          ? `Obsidian exited before the workspace was ready ` +
+            `(code=${exit.code} signal=${exit.signal}). `
+          : 'Lost the Electron debugger connection before the workspace was ' +
+            'ready. ') + `stderr: ${lastStderr(app) || '<none>'}`
+      );
+    }
 
     try {
       // Never pass 0: Playwright reads that as "no timeout", which would turn
@@ -300,7 +354,15 @@ async function waitForBootedVaultWindow(app: ElectronApplication, window: Page) 
     }
   }
 
-  return current;
+  // Out of budget without ever seeing a ready workspace. Returning `current`
+  // here would hand the caller a page that is very likely closed, and the
+  // failure would then surface on the test's first interaction — a stack
+  // pointing at `getByLabel(...).click()` for a vault that never booted.
+  // Fail where the problem actually is.
+  throw new Error(
+    `Obsidian did not reach layoutReady within ${LAYOUT_READY_TIMEOUT_MS}ms. ` +
+      `Last window url: ${current.isClosed() ? '<closed>' : current.url()}`
+  );
 }
 
 /** Whether a Playwright rejection is the page/context/browser having closed. */
@@ -355,7 +417,9 @@ async function waitForVaultWindow(
 
     const vaultWindow = app
       .windows()
-      .find((page) => !page.isClosed() && page.url().includes(VAULT_WINDOW_URL));
+      .find(
+        (page) => !page.isClosed() && page.url().includes(VAULT_WINDOW_URL)
+      );
 
     if (vaultWindow) {
       await vaultWindow.waitForLoadState('domcontentloaded');
@@ -553,7 +617,7 @@ const POLL_INTERVAL_MS = 50;
  */
 async function closeSettingsWindow(app: ElectronApplication) {
   const deadline = Date.now() + SETTINGS_WINDOW_TIMEOUT_MS;
-  let destroyedAny = false;
+  let closedAny = false;
 
   // Phase 1: wait for the window to appear, then destroy it.
   while (Date.now() < deadline) {
@@ -561,14 +625,14 @@ async function closeSettingsWindow(app: ElectronApplication) {
     // the full timeout would only delay the real failure the caller will hit.
     if (hasExited(app)) return;
 
-    if ((await destroyNonVaultWindows(app)) > 0) {
-      destroyedAny = true;
+    if ((await closeNonVaultWindows(app)) > 0) {
+      closedAny = true;
       break;
     }
     await wait(POLL_INTERVAL_MS);
   }
 
-  if (!destroyedAny) {
+  if (!closedAny) {
     // Not fatal: a future Obsidian version may stop opening this window, and
     // the tests are fine in that case. Warn so the cause of the added delay is
     // discoverable rather than silent.
@@ -584,19 +648,33 @@ async function closeSettingsWindow(app: ElectronApplication) {
   const settleDeadline = Date.now() + SETTINGS_WINDOW_SETTLE_MS;
   while (Date.now() < settleDeadline) {
     await wait(POLL_INTERVAL_MS);
-    await destroyNonVaultWindows(app);
+    await closeNonVaultWindows(app);
   }
 }
 
 /**
- * Destroys every window except the vault window in a single main-process round
- * trip, refocusing the vault window afterwards. Returns the number destroyed.
+ * Closes every window except the vault window in a single main-process round
+ * trip, refocusing the vault window afterwards. Returns the number closed.
  *
- * Uses `destroy()` rather than `close()` so the teardown cannot be delayed or
- * vetoed by the window's own `close` handlers, and so it works even while the
- * window is still `about:blank`.
+ * Uses `close()`, NOT `destroy()`. `destroy()` tears the window down
+ * synchronously, without running Obsidian's own teardown — and if Electron is
+ * still inside `openGuestWindow` wiring that window up, its lifecycle events
+ * then fire at handlers holding a now-dead reference:
+ *
+ *     TypeError: Object has been destroyed
+ *       at WebContents.emit (node:events)
+ *       at openGuestWindow (node:electron/js2c/browser_init)
+ *
+ * That lands in Obsidian's `uncaughtException` handler, which shows a modal
+ * error dialog and takes the whole app down — surfacing in tests as Obsidian
+ * dying before `layoutReady`, and later as "Target page, context or browser
+ * has been closed" on whatever the test touched first.
+ *
+ * Measured over repeated fresh-vault boots: `destroy()` killed the app in
+ * ~2/25 runs, `close()` in 0/25, and `close()` removes the settings window
+ * just as reliably (one `index.html` window left standing either way).
  */
-async function destroyNonVaultWindows(app: ElectronApplication) {
+async function closeNonVaultWindows(app: ElectronApplication) {
   try {
     return await app.evaluate(({ BrowserWindow }, urlFragment) => {
       const windows = BrowserWindow.getAllWindows();
@@ -604,13 +682,17 @@ async function destroyNonVaultWindows(app: ElectronApplication) {
         candidate.webContents.getURL().includes(urlFragment)
       );
       // Without a vault window we cannot tell which window to keep; wait for
-      // the next poll rather than risk destroying the vault itself.
+      // the next poll rather than risk closing the vault itself.
       if (!vaultWindow) return 0;
 
       const others = windows.filter(
         (candidate) => candidate !== vaultWindow && !candidate.isDestroyed()
       );
-      others.forEach((candidate) => candidate.destroy());
+      others.forEach((candidate) => {
+        // Re-check: closing an earlier window in this loop can trigger
+        // teardown of a dependent one.
+        if (!candidate.isDestroyed()) candidate.close();
+      });
 
       if (others.length > 0) {
         vaultWindow.show();
