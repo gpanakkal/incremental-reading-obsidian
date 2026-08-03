@@ -63,8 +63,17 @@ function hiddenOptions(options) {
     // A window that skips the taskbar cannot be tabbed to or clicked into by
     // accident while the suite runs.
     skipTaskbar: true,
-    // Never let a new window take the foreground on creation.
-    focusable: false,
+    // Deliberately NOT `focusable: false`. It looks like the natural way to
+    // stop a window taking the foreground, but on Windows it creates the
+    // window with WS_EX_NOACTIVATE, and Obsidian's boot gates on a window
+    // actually being activated once. With it set, Obsidian tears the window
+    // down and recreates it mid-boot (or never finishes booting at all), and
+    // the test is handed a handle to the corpse — surfacing later as "Target
+    // page, context or browser has been closed" on the test's first action.
+    //
+    // Foreground-stealing is already handled without it: `show` is routed to
+    // `showInactive` and `focus`/`moveTop` are stubbed out in
+    // `neutralizeWindow` below.
   };
 }
 
@@ -114,6 +123,53 @@ function neutralizeWindow(window) {
   window.on('restore', parkOffscreen);
   window.on('maximize', parkOffscreen);
 }
+
+/**
+ * Stop a main-process exception from putting a modal dialog on the desktop.
+ *
+ * Obsidian installs its own `uncaughtException` handler (see `main.js` in
+ * `.obsidian-unpacked`, "Source: https://github.com/electron/electron/...")
+ * which ends in `dialog.showErrorBox`. During a suite run that dialog blocks
+ * everything until somebody clicks OK.
+ *
+ * Adding our own listener is not enough: `process.on` *appends*, so Obsidian's
+ * handler still runs and still shows the box. The reliable interception point
+ * is `showErrorBox` itself, which we stub to a log line. It is stubbed on the
+ * real `electron` namespace (not the proxy) because Obsidian reaches it via a
+ * dynamic `import('electron')` inside the handler.
+ *
+ * The known trigger is a window being torn down while Electron is still inside
+ * `openGuestWindow` wiring it up, surfacing as "TypeError: Object has been
+ * destroyed". `destroyNonVaultWindows` in ./helpers.ts avoids provoking it;
+ * this is the backstop for anything that still slips through.
+ */
+electron.dialog.showErrorBox = (title, message) => {
+  console.error(`[hide-windows] suppressed error dialog: ${title}\n${message}`);
+};
+
+/**
+ * Keep Obsidian's auto-updater off the network.
+ *
+ * `main.js` calls `queueUpdate()` on every launch, which fetches release
+ * metadata from raw.githubusercontent.com and releases.obsidian.md before the
+ * workspace finishes booting. Across a repeat-each suite that is dozens of
+ * unauthenticated requests from one IP, and the responses land in exactly the
+ * window where tests are waiting on `layoutReady`.
+ *
+ * Nothing under test depends on the updater, so refuse the requests outright
+ * rather than letting real network conditions leak into test outcomes.
+ * Obsidian already treats a failed check as non-fatal — it logs and moves on.
+ */
+const UPDATE_HOSTS = ['releases.obsidian.md', 'raw.githubusercontent.com'];
+electron.app.whenReady().then(() => {
+  electron.session.defaultSession.webRequest.onBeforeRequest(
+    { urls: UPDATE_HOSTS.map((host) => `*://${host}/*`) },
+    (details, callback) => {
+      log('blocked updater request', details.url);
+      callback({ cancel: true });
+    }
+  );
+});
 
 const HiddenBrowserWindow = new Proxy(electron.BrowserWindow, {
   construct(target, args, newTarget) {
