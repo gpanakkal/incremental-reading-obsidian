@@ -40,15 +40,18 @@ export async function executeCommandById(window: Page, commandId: string) {
   }
 
   // Obsidian returns false when the command id does not exist, or when the
-  // command's `checkCallback` declines to run it — which is what happens if
-  // another modal already holds focus. Silently continuing turns that into a
-  // 30s timeout on whatever UI the command was supposed to open, reported
-  // against a line that is merely the first victim. Fail where the cause is.
+  // command's `checkCallback` declines to run it. Silently continuing turns
+  // that into a timeout on whatever UI the command was supposed to open,
+  // reported against a line that is merely the first victim.
+  //
+  // Note this is NOT sufficient to prove the command took effect. A `true` only
+  // means the callback ran; during boot, `switcher:open` returns true while the
+  // modal it opens never appears (see `openNote`). Callers that depend on a
+  // visible result must still verify it.
   if (!result) {
     throw new Error(
       `executeCommandById('${commandId}') returned false: the command either ` +
-        `does not exist or refused to run (commonly because another modal ` +
-        `still has focus).`
+        `does not exist or refused to run (e.g. its checkCallback declined).`
     );
   }
 
@@ -72,8 +75,40 @@ function isContextDestroyedError(error: unknown) {
  */
 const MODAL_TIMEOUT_MS = 15_000;
 
-/** Same reasoning, for the quick switcher specifically. */
-const SWITCHER_TIMEOUT_MS = 15_000;
+/**
+ * Overall budget for getting the quick switcher on screen, across retries.
+ *
+ * A ceiling, not a cost: `toPass` returns as soon as the switcher is visible,
+ * so a healthy run pays nothing for this and raising it never slows a passing
+ * test. It only decides how long a doomed one burns before reporting.
+ *
+ * 20s buys ~6 attempts at SWITCHER_RETRY_MS, against a boot-time race that
+ * resolves in one. The bound that matters is the 300s test timeout: the test
+ * that calls `openNote` most does so 3 times, so the worst case here is 60s —
+ * comfortably inside it, which keeps a genuine failure reporting as a switcher
+ * timeout with a usable stack instead of an opaque "test exceeded 300s".
+ */
+const SWITCHER_TIMEOUT_MS = 20_000;
+
+/**
+ * How long to wait for the suggestion list after typing into the switcher.
+ *
+ * Separate from the retry ceiling above: by this point the switcher is open and
+ * filled, and Obsidian renders matches within a frame or two. Nothing here is
+ * waiting out a boot race, so it keeps the ordinary short modal bound.
+ */
+const SUGGESTION_TIMEOUT_MS = MODAL_TIMEOUT_MS;
+
+/**
+ * Per-attempt wait for the switcher after issuing `switcher:open`.
+ *
+ * Deliberately short. When the command lands before Obsidian's modal layer is
+ * wired, the modal never appears at all — no amount of further waiting on that
+ * attempt helps, and the only thing that does is issuing the command again.
+ * Small enough that several attempts fit inside SWITCHER_TIMEOUT_MS, large
+ * enough to cover an attempt that genuinely worked but rendered slowly.
+ */
+const SWITCHER_RETRY_MS = 1_000;
 
 /**
  * Clicks the Import button in the priority modal and waits for the async
@@ -121,16 +156,54 @@ export async function openNote(window: Page, path: string) {
   // pointing at this guard.
   await waitForLayoutReady(window).catch(() => {});
 
-  // Register file-open listener before opening the quick switcher, because
-  // the switcher can trigger navigation (destroying the execution context)
-  // before evaluate() completes its round-trip — especially on macOS.
+  const quickSwitcher = window.getByPlaceholder('Find or create a note...');
+
+  // Issue `switcher:open` until the modal actually appears.
   //
-  // `.catch()` is attached immediately, not awaited later. If the context dies
-  // while this evaluate is in flight it rejects, and an unawaited rejection
-  // that only gets a handler further down is an unhandled rejection in the
+  // One call is not enough. `layoutReady` — which the guard above waits for —
+  // means the workspace has deserialized, not that the UI is interactive:
+  // Obsidian finishes wiring the modal layer and hotkey registry after it. In
+  // that window the command runs and *returns true* (so `executeCommandById`'s
+  // own check passes) while the modal it opens has nowhere to mount, and the
+  // switcher never appears.
+  //
+  // This is why the failures cluster on the first `openNote` of a test — the
+  // first interaction after `beforeEach` boots the vault. Tests whose first
+  // action is something else have already given Obsidian the time this needs.
+  //
+  // Reissuing is safe: if an earlier call did open the switcher, `toPass` stops
+  // at the visibility check without sending another command.
+  await expect(async () => {
+    if (await quickSwitcher.isVisible()) return;
+    await executeCommandById(window, 'switcher:open');
+    await quickSwitcher.waitFor({
+      state: 'visible',
+      timeout: SWITCHER_RETRY_MS,
+    });
+  }).toPass({ timeout: SWITCHER_TIMEOUT_MS });
+
+  await quickSwitcher.fill(path);
+
+  // Obsidian filters the suggestion list asynchronously. Pressing Enter before
+  // the list has caught up either opens the wrong note or creates a new one
+  // named after the query, so wait for a suggestion to exist first.
+  await window
+    .locator('.suggestion-item, .suggestion-empty')
+    .first()
+    .waitFor({ state: 'visible', timeout: SUGGESTION_TIMEOUT_MS });
+
+  // Register the file-open listener now: after the switcher is up, but before
+  // the keypress that navigates. Registering it earlier (before the retry loop
+  // above) would start its internal timeout while we were still trying to open
+  // the switcher at all, so a slow boot could burn the whole budget and let the
+  // promise resolve spuriously — reporting a note as opened that never was.
+  //
+  // `.catch()` is attached immediately rather than at the await below. If the
+  // context dies while this evaluate is in flight it rejects, and an unawaited
+  // rejection that only gets a handler later is an unhandled rejection in the
   // meantime — which Playwright surfaces as a worker-level error detached from
-  // any test. Swallowing it is correct: the waits below already report a note
-  // that failed to open, and they do it with a usable stack.
+  // any test. Swallowing it is correct: the modal-hidden wait below still
+  // reports a note that failed to open, with a usable stack.
   const fileOpenPromise = window
     .evaluate(() => {
       return new Promise<void>((resolve) => {
@@ -151,31 +224,6 @@ export async function openNote(window: Page, path: string) {
       });
     })
     .catch(() => {});
-
-  await executeCommandById(window, 'switcher:open');
-
-  const quickSwitcher = window.getByPlaceholder('Find or create a note...');
-
-  // Wait for the switcher to actually be on screen before typing into it.
-  //
-  // `fill()` auto-waits too, but it waits the full 30s default and then reports
-  // the failure against the fill — which is how a switcher that never opened
-  // shows up in CI as "locator.fill: Timeout 30000ms exceeded". A shorter,
-  // explicit wait fails faster and names the real problem.
-  await quickSwitcher.waitFor({
-    state: 'visible',
-    timeout: SWITCHER_TIMEOUT_MS,
-  });
-
-  await quickSwitcher.fill(path);
-
-  // Obsidian filters the suggestion list asynchronously. Pressing Enter before
-  // the list has caught up either opens the wrong note or creates a new one
-  // named after the query, so wait for a suggestion to exist first.
-  await window
-    .locator('.suggestion-item, .suggestion-empty')
-    .first()
-    .waitFor({ state: 'visible', timeout: SWITCHER_TIMEOUT_MS });
 
   await quickSwitcher.press('Enter');
 
