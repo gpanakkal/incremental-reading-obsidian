@@ -10,6 +10,14 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
+    // Well under the 300s test timeout. The default is 30s, which meant a
+    // single missing element burned 30s before reporting — and several of those
+    // in one test could push the whole test toward the timeout, where it fails
+    // as an opaque "test exceeded" instead of naming the element.
+    actionTimeout: 20_000,
+  },
+  expect: {
+    timeout: 15_000,
   },
   projects: [
     {

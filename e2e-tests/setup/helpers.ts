@@ -3,6 +3,7 @@ import {
   _electron as electron,
   type ElectronApplication,
 } from '@playwright/test';
+import { spawnSync, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import type { App } from 'obsidian';
 import * as path from 'path';
@@ -32,6 +33,11 @@ export const shouldCleanup = process.env.E2E_CLEANUP === '1';
  * Electron cannot run headless the way Chromium can — Obsidian creates its own
  * `BrowserWindow`s and there is no launch flag to suppress them — so this works
  * by preloading a main-process patch instead. See ./hide-windows.cjs.
+ *
+ * NOTE: CI runs *headed* (`e2e:headed`), so that preload — and with it the
+ * error-dialog suppression and updater blocking it also installs — is absent on
+ * exactly the machines that need it most. `applyStabilityPatches` below covers
+ * that gap for both modes.
  */
 export const isHeadless = process.env.E2E_HEADLESS === '1';
 
@@ -125,6 +131,73 @@ export function lastStderr(app: ElectronApplication) {
   return (stderrTails.get(app) ?? []).join('\n');
 }
 
+/**
+ * Neutralize the two main-process behaviours that can hang an unattended run:
+ * native modal dialogs, and the auto-updater's network calls.
+ *
+ * `hide-windows.cjs` already installs equivalent patches, but only on headless
+ * runs — and CI runs headed, so on CI nothing installs them. Rather than move
+ * the preload behind a second `-r` (Electron accepts only one; Playwright owns
+ * it), this reapplies the same protections over CDP on every run. Re-patching
+ * an already-patched main process is harmless.
+ *
+ * The tradeoff versus a preload is timing: this runs after Obsidian's `main.js`
+ * has started, so a dialog raised in the first moments of boot is still missed.
+ * That is acceptable — the failures this addresses come from dialogs raised
+ * mid-test and during teardown — and `closeElectron`'s timeout bounds the
+ * boot-time case by killing a process that will not close.
+ *
+ * Best-effort by design: a failure to patch is not worth failing the test over.
+ */
+async function applyStabilityPatches(app: ElectronApplication) {
+  try {
+    await app.evaluate(({ dialog, app: electronApp, session }, hosts) => {
+      // Obsidian's `uncaughtException` handler ends in `showErrorBox`, which is
+      // synchronous and modal: the main process then answers nothing, including
+      // Playwright's `app.close()`, until someone clicks OK. On CI that is
+      // nobody, so teardown hangs until the worker is killed — taking the
+      // results of every test that worker already ran with it.
+      dialog.showErrorBox = (title: string, message: string) => {
+        console.error(`[e2e] suppressed error dialog: ${title}\n${message}`);
+      };
+
+      // Same hazard, other entry point. A *Sync* message box blocks just as
+      // hard; answer with the default button instead of waiting for a click.
+      dialog.showMessageBoxSync = ((options: { defaultId?: number }) =>
+        options?.defaultId ?? 0) as typeof dialog.showMessageBoxSync;
+      dialog.showMessageBox = (async (options: { defaultId?: number }) => ({
+        response: options?.defaultId ?? 0,
+        checkboxChecked: false,
+      })) as unknown as typeof dialog.showMessageBox;
+
+      // `main.js` calls `queueUpdate()` on every launch, fetching release
+      // metadata before the workspace finishes booting. Across a full suite
+      // that is dozens of unauthenticated requests from one runner IP, landing
+      // in exactly the window where tests wait on `layoutReady`. Nothing under
+      // test depends on the updater, and Obsidian treats a failed check as
+      // non-fatal, so refuse them rather than letting network conditions leak
+      // into test outcomes.
+      const block = () =>
+        session.defaultSession.webRequest.onBeforeRequest(
+          { urls: hosts.map((host) => `*://${host}/*`) },
+          (_details, callback) => callback({ cancel: true })
+        );
+
+      // `whenReady` has usually already resolved by the time this runs; calling
+      // it again is safe and covers the case where it has not.
+      if (electronApp.isReady()) block();
+      else void electronApp.whenReady().then(block);
+    }, UPDATE_HOSTS);
+  } catch {
+    // The app can die during launch, and a version bump could rename any of
+    // these APIs. Neither is worth replacing the test's real failure with a
+    // stack pointing at this helper.
+  }
+}
+
+/** Hosts Obsidian's auto-updater contacts on every launch. */
+const UPDATE_HOSTS = ['releases.obsidian.md', 'raw.githubusercontent.com'];
+
 export async function launchElectron(vaultPath: string) {
   const app = await electron.launch({
     args: [
@@ -141,6 +214,8 @@ export async function launchElectron(vaultPath: string) {
     // Playwright's own --remote-debugging-port) with "bad option" and never
     // launches. Omitting the key lets Playwright supply a sanitized environment.
   });
+
+  await applyStabilityPatches(app);
 
   const tail: string[] = [];
   stderrTails.set(app, tail);
@@ -170,6 +245,38 @@ const exitedForReal = new WeakMap<
 
 /** Upper bound on waiting for a closed Electron process to report its exit. */
 const EXIT_TIMEOUT_MS = 10_000;
+
+/**
+ * Upper bound on `app.close()` itself.
+ *
+ * `close()` asks Electron to shut down gracefully, and a main process that is
+ * blocked cannot answer. The known blocker is a native modal error box: Obsidian
+ * ends its `uncaughtException` handler in `dialog.showErrorBox`, which is
+ * synchronous and modal, so the process sits there until somebody clicks OK —
+ * which, on a CI runner, is nobody.
+ *
+ * `applyStabilityPatches` stubs that out, but only from the moment it runs — a
+ * dialog raised earlier in boot still lands here — and a wedged main process
+ * has other ways to stop answering. This bound is the backstop.
+ *
+ * Without a bound here, that hang is absorbed by Playwright's *worker* teardown
+ * timeout instead, which kills the worker and discards the results of every test
+ * it had already run. Capping it converts a lost worker into one failed test.
+ */
+const CLOSE_TIMEOUT_MS = 20_000;
+
+/** Resolves to `true` on timeout, `false` if the promise settled in time. */
+async function raceTimeout(promise: Promise<unknown>, ms: number) {
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(true), ms);
+  });
+  try {
+    return await Promise.race([promise.then(() => false), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Whether the app is unusable — either the process exited or Playwright has
@@ -218,7 +325,23 @@ export async function closeElectron(app: ElectronApplication) {
 
   // A crashed app rejects here; the process is already gone, so fall through
   // to the exit wait rather than failing teardown.
-  await app.close().catch(() => {});
+  //
+  // Bounded, because a main process blocked in a modal dialog never answers the
+  // close request at all. See CLOSE_TIMEOUT_MS.
+  const closeHung = await raceTimeout(
+    app.close().catch(() => {}),
+    CLOSE_TIMEOUT_MS
+  );
+
+  if (closeHung) {
+    console.warn(
+      `[closeElectron] app.close() did not resolve within ` +
+        `${CLOSE_TIMEOUT_MS}ms; killing the process. This usually means the ` +
+        `main process is blocked in a native modal (e.g. Obsidian's error ` +
+        `box). stderr: ${lastStderr(app) || '<none>'}`
+    );
+    killProcessTree(proc);
+  }
 
   // After close() resolves, the process may have already exited without firing
   // the 'exit' event (observed in CI on Windows/Linux). Race the event listener
@@ -238,6 +361,36 @@ export async function closeElectron(app: ElectronApplication) {
       }, 100);
     }),
   ]);
+
+  // Last resort. A surviving Electron keeps a lock on the vault directory, so
+  // the cleanup step that follows in afterEach fails on Windows with EBUSY —
+  // and the next test's fresh-vault copy inherits a dirty user-data dir.
+  if (proc.exitCode === null) killProcessTree(proc);
+}
+
+/**
+ * Terminate Electron and its renderer children.
+ *
+ * `proc.kill()` alone is not enough on Windows: it signals only the top-level
+ * process, leaving the renderer and GPU children alive and still holding file
+ * handles inside the vault. `taskkill /T` walks the tree. On POSIX, SIGKILL to
+ * the process group does the same job.
+ */
+function killProcessTree(proc: ChildProcess) {
+  const { pid } = proc;
+  try {
+    if (process.platform === 'win32' && pid) {
+      spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], {
+        stdio: 'ignore',
+      });
+    } else {
+      proc.kill('SIGKILL');
+    }
+  } catch {
+    // Already gone, or we lack permission to signal it. Either way there is
+    // nothing further teardown can do, and throwing here would replace the
+    // test's real failure with a teardown error.
+  }
 }
 /**
  * Uses `Locator.evaluate` to click via DOM API directly.
