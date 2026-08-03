@@ -82,11 +82,15 @@ const MODAL_TIMEOUT_MS = 15_000;
  * so a healthy run pays nothing for this and raising it never slows a passing
  * test. It only decides how long a doomed one burns before reporting.
  *
- * 20s buys ~6 attempts at SWITCHER_RETRY_MS, against a boot-time race that
+ * 20s buys ~10 attempts at SWITCHER_RETRY_MS, against a boot-time race that
  * resolves in one. The bound that matters is the 300s test timeout: the test
  * that calls `openNote` most does so 3 times, so the worst case here is 60s —
  * comfortably inside it, which keeps a genuine failure reporting as a switcher
  * timeout with a usable stack instead of an opaque "test exceeded 300s".
+ *
+ * Raising this further is the wrong lever. A run that exhausts even half these
+ * attempts is not losing a race — the switcher is not going to open — and the
+ * useful response is a faster, more legible failure, not a longer one.
  */
 const SWITCHER_TIMEOUT_MS = 20_000;
 
@@ -107,8 +111,13 @@ const SUGGESTION_TIMEOUT_MS = MODAL_TIMEOUT_MS;
  * attempt helps, and the only thing that does is issuing the command again.
  * Small enough that several attempts fit inside SWITCHER_TIMEOUT_MS, large
  * enough to cover an attempt that genuinely worked but rendered slowly.
+ *
+ * Not lower than this. Each attempt also pays the 200ms renderer sleep inside
+ * `executeCommandById`, so shrinking it mostly buys more command dispatches per
+ * second at a UI that is not ready to receive them — which is load, not
+ * progress, on exactly the loaded runner where this fails.
  */
-const SWITCHER_RETRY_MS = 1_000;
+const SWITCHER_RETRY_MS = 1_500;
 
 /**
  * Clicks the Import button in the priority modal and waits for the async
@@ -141,6 +150,33 @@ export async function finalizeArticleImport(window: Page) {
 }
 
 /**
+ * Close any modal that is already on screen, so the quick switcher can open.
+ *
+ * Obsidian routes hotkeys and commands through the topmost modal: while one is
+ * up, `switcher:open` is declined and no amount of reissuing it helps. A stray
+ * modal therefore turns the retry loop in `openNote` into a 20s no-op that
+ * reports the switcher as the fault.
+ *
+ * Nothing here is load-bearing for a healthy run — normally no modal is open
+ * and this returns immediately after one cheap visibility check.
+ */
+async function dismissStrayModal(window: Page) {
+  const modal = window.locator('.modal-bg');
+  if (!(await modal.isVisible().catch(() => false))) return;
+
+  // Escape is how Obsidian's own modals close, and it works regardless of which
+  // modal it is — which matters because we cannot know what left it there.
+  await window.keyboard.press('Escape').catch(() => {});
+  await modal
+    .waitFor({ state: 'hidden', timeout: SWITCHER_RETRY_MS })
+    .catch(() => {
+      // Some modals refuse Escape. Say nothing and let the caller's retry
+      // budget run out against a real symptom rather than throwing from a
+      // best-effort cleanup.
+    });
+}
+
+/**
  * Opens a note in the current tab.
  * TODO: Make more resilient (e.g., handle if the note is already open)
  * @param path relative path using forward slashes. Do not enquote segments.
@@ -151,10 +187,12 @@ export async function openNote(window: Page, path: string) {
   // ready workspace first keeps the evaluate() below from being destroyed
   // mid-round-trip.
   //
-  // Best-effort: if the page is already gone the app has died, and the quick
-  // switcher interaction below reports that far more legibly than a stack
-  // pointing at this guard.
-  await waitForLayoutReady(window).catch(() => {});
+  // Deliberately NOT swallowed. This used to be `.catch(() => {})` on the
+  // theory that a dead page reports better downstream — but a workspace that
+  // never reaches `layoutReady` sends us into the retry loop below, which then
+  // burns its entire budget issuing a command that cannot work, and reports the
+  // switcher as the fault. Failing here names the actual problem.
+  await waitForLayoutReady(window);
 
   const quickSwitcher = window.getByPlaceholder('Find or create a note...');
 
@@ -173,8 +211,13 @@ export async function openNote(window: Page, path: string) {
   //
   // Reissuing is safe: if an earlier call did open the switcher, `toPass` stops
   // at the visibility check without sending another command.
+  //
+  // A modal already on screen is not safe to type into, though: it swallows the
+  // hotkey layer, so `switcher:open` is declined and we would retry against a
+  // modal that is never going away on its own. Dismiss it first.
   await expect(async () => {
     if (await quickSwitcher.isVisible()) return;
+    await dismissStrayModal(window);
     await executeCommandById(window, 'switcher:open');
     await quickSwitcher.waitFor({
       state: 'visible',
