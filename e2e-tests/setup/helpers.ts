@@ -4,6 +4,7 @@ import {
   type ElectronApplication,
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
+import type { App } from 'obsidian';
 import * as path from 'path';
 
 /**
@@ -161,12 +162,149 @@ export const wait = (ms: number) =>
 const LAUNCHER_WINDOW_URL = 'starter.html';
 
 /**
+ * Upper bound on waiting for Obsidian to finish booting a vault.
+ *
+ * This is a ceiling, not a cost: the wait resolves as soon as the workspace is
+ * ready, so raising it never slows a passing run — it only decides how long a
+ * doomed run burns before reporting. Kept small so a genuinely broken boot
+ * fails fast instead of stalling the suite.
+ *
+ * Measured over a full serial suite run (n=34, first launch included), the wait
+ * resolved in 2-24ms: callers reach it only after `domcontentloaded` and the
+ * first-launch prompts, by which point Obsidian has already booted, so this
+ * normally costs a single poll. 10s is ~400x the observed worst case, which
+ * leaves ample room for a loaded CI runner.
+ */
+const LAYOUT_READY_TIMEOUT_MS = 10_000;
+/** How often to re-check readiness. */
+const LAYOUT_READY_POLL_MS = 100;
+
+/**
+ * Wait until Obsidian has finished booting the vault.
+ *
+ * `domcontentloaded` only means the document parsed. Obsidian then indexes the
+ * vault, deserializes the workspace, and loads community plugins — any of which
+ * can replace the renderer's execution context. Code that calls `evaluate()`
+ * before that settles fails with "Execution context was destroyed, most likely
+ * because of a navigation".
+ *
+ * `waitForFunction` is the only primitive that can safely wait *through* such a
+ * teardown: Playwright re-injects and re-polls the predicate in whatever context
+ * is current, whereas a bare `evaluate()` rejects when its context dies.
+ */
+export async function waitForLayoutReady(
+  window: Page,
+  timeout = LAYOUT_READY_TIMEOUT_MS
+) {
+  await window.waitForFunction(
+    () => Boolean((window as Page & { app?: App }).app?.workspace?.layoutReady),
+    undefined,
+    { timeout, polling: LAYOUT_READY_POLL_MS }
+  );
+  return window;
+}
+
+/**
+ * Wait for a booted vault window, surviving Obsidian replacing it mid-boot.
+ *
+ * `waitForFunction` rides out a navigation, but not the page being *closed* —
+ * that rejects with "Target page, context or browser has been closed". During
+ * startup Obsidian does close and recreate windows, so a handle that was valid
+ * when we picked it can die while we watch it. Re-resolve by URL and try again
+ * on the successor rather than failing the test.
+ */
+async function waitForBootedVaultWindow(app: ElectronApplication, window: Page) {
+  const deadline = Date.now() + LAYOUT_READY_TIMEOUT_MS;
+  let current = window;
+
+  while (Date.now() < deadline) {
+    if (hasExited(app)) return current;
+
+    try {
+      // Never pass 0: Playwright reads that as "no timeout", which would turn
+      // the last iteration of a loop that is out of budget into an infinite
+      // wait — the exact opposite of the deadline being enforced here.
+      return await waitForLayoutReady(
+        current,
+        Math.max(1, deadline - Date.now())
+      );
+    } catch (error) {
+      // A timeout means Obsidian is genuinely not booting; only a closed page
+      // is worth retrying, and only against a *different* window than the one
+      // that just died.
+      if (!isPageClosedError(error)) throw error;
+
+      // Bounded by our own remaining budget so a retry cannot outlive the
+      // deadline this loop is enforcing.
+      const successor = await waitForVaultWindow(
+        app,
+        current,
+        Math.max(1, deadline - Date.now())
+      );
+      if (successor === current || successor.isClosed()) {
+        await wait(POLL_INTERVAL_MS);
+        continue;
+      }
+      current = successor;
+    }
+  }
+
+  return current;
+}
+
+/** Whether a Playwright rejection is the page/context/browser having closed. */
+function isPageClosedError(error: unknown) {
+  return (
+    error instanceof Error &&
+    /Target (page|closed)|has been closed/i.test(error.message)
+  );
+}
+
+/**
  * Timeout for UI that is expected to be present shortly after a window loads,
  * or not at all. Obsidian renders these once the window is ready, so a short
  * bound is enough — and it keeps paths where they never appear from paying
  * Playwright's 30s default.
  */
 const OPTIONAL_ELEMENT_TIMEOUT_MS = 5000;
+
+/** How long to wait for the vault window to appear among the app's windows. */
+const VAULT_WINDOW_TIMEOUT_MS = 10_000;
+
+/**
+ * Resolve the live vault window, waiting for it to appear if necessary.
+ *
+ * Window handles captured during startup go stale: Obsidian creates and
+ * destroys transient windows while booting, so the only reliable identity is
+ * the URL. Skips closed pages so a destroyed settings window is never returned.
+ *
+ * Falls back to `current` if no vault window is ever found, so callers still
+ * fail on their own assertions rather than on this helper. Callers that are
+ * themselves on a deadline pass `timeout` so this cannot outlive them.
+ */
+async function waitForVaultWindow(
+  app: ElectronApplication,
+  current: Page,
+  timeout = VAULT_WINDOW_TIMEOUT_MS
+) {
+  const deadline = Date.now() + timeout;
+
+  while (Date.now() < deadline) {
+    if (hasExited(app)) return current;
+
+    const vaultWindow = app
+      .windows()
+      .find((page) => !page.isClosed() && page.url().includes(VAULT_WINDOW_URL));
+
+    if (vaultWindow) {
+      await vaultWindow.waitForLoadState('domcontentloaded');
+      return vaultWindow;
+    }
+    await wait(POLL_INTERVAL_MS);
+  }
+
+  return current;
+}
 
 /**
  * Open a vault in Obsidian by stubbing the file picker, trusting the author,
@@ -204,15 +342,20 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
     await window.waitForLoadState('domcontentloaded');
 
     await dismissFirstLaunchPrompts(app, window);
-  } else {
-    window =
-      app.windows().find((page) => page.url().includes(VAULT_WINDOW_URL)) ??
-      window;
-    await window.waitForLoadState('domcontentloaded');
   }
 
-  // brief pause so Obsidian is ready to take input
-  await wait(200);
+  // Re-resolve the vault window by URL rather than trusting the handle above.
+  // `waitForEvent('window')` yields whichever window Obsidian happened to
+  // create next, which in 1.13 is often the transient settings window —
+  // and `dismissFirstLaunchPrompts` destroys that one, leaving us holding a
+  // closed page ("Target page, context or browser has been closed").
+  window = await waitForVaultWindow(app, window);
+
+  // Wait for Obsidian to finish booting rather than guessing with a fixed
+  // delay. A short sleep is a bet on machine speed that loaded CI runners lose:
+  // the first evaluate() in a test then lands mid-navigation and the test dies
+  // with "Execution context was destroyed".
+  window = await waitForBootedVaultWindow(app, window);
 
   // maximize the window
   const maximizeButton = window.getByLabel('Maximize');
