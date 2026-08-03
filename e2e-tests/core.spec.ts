@@ -26,14 +26,28 @@ test.beforeEach(async () => {
   vaultPath = await createVaultCopy('core');
   app = await launchElectron(vaultPath);
   window = await openVault(app, vaultPath);
+
+  // Auto-dismiss renderer dialogs (alert/confirm/beforeunload) for the whole
+  // test, not just teardown. Registered here because a handler attached in
+  // afterEach is already too late: an unhandled `beforeunload` blocks the
+  // window from closing, which is one of the ways teardown hangs. Playwright
+  // auto-dismisses only while no handler is registered, so this must stay
+  // registered for the lifetime of the page rather than being added late.
+  window.on('dialog', (dialog) => {
+    void dialog.dismiss().catch(() => {});
+  });
 });
 
 test.afterEach(async () => {
-  // Dismiss open dialogs during shutdown
-  window?.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
   if (app) await closeElectron(app);
   if (shouldCleanup) {
-    await fs.rm(vaultPath, { recursive: true, force: true });
+    // Best-effort. On Windows a surviving Electron child can still hold a
+    // handle inside the vault, and an EBUSY here would fail an otherwise
+    // passing test during cleanup. The vault dir is disposable — the next run
+    // makes a fresh copy — so a leftover is not worth failing over.
+    await fs
+      .rm(vaultPath, { recursive: true, force: true, maxRetries: 3 })
+      .catch(() => {});
   }
 });
 
