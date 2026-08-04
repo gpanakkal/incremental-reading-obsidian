@@ -68,6 +68,21 @@ interface IREditorProps {
   placeholder?: string;
 }
 
+/**
+ * Whether a document change originated in this editor and so belongs on disk.
+ *
+ * `updateEditorContent` pushes freshly fetched file text in as a full-document
+ * replacement, which reaches `onUpdate` looking exactly like typing. Writing
+ * that back would save content the editor was *handed* into whichever note the
+ * editor is currently pointed at, so any moment where the displayed text and
+ * the target note disagree becomes an overwrite of the target. Content that
+ * came from disk never needs to be written to disk, so it is skipped.
+ */
+export function isPersistableChange(update: ViewUpdate): boolean {
+  if (!update.docChanged) return false;
+  return !update.transactions.some((tr) => tr.annotation(isExternalSync));
+}
+
 export function IREditor({
   item,
   editorRef,
@@ -93,8 +108,16 @@ export function IREditor({
   // genuine external modification (apply).
   const lastSavedContentRef = useRef<string>(value ?? '');
 
+  // The current-item query refetches on an interval and after every mutation,
+  // so `item` is a new object — with a possibly renamed TFile — on many
+  // renders even though its id, and therefore this mount, stays the same.
+  // Saves must land on the latest one.
+  useEffect(() => {
+    itemRef.current = item;
+  }, [item]);
+
   const handleChange = async (update: ViewUpdate) => {
-    if (!update.docChanged) return;
+    if (!isPersistableChange(update)) return;
 
     const docText = update.state.doc.toString();
     // TODO: don't save if changes occurred outside review
@@ -233,7 +256,7 @@ export function IREditor({
       const controller = getMarkdownController(
         reviewView,
         () => editor.editor,
-        itemRef.current
+        () => itemRef.current
       );
       try {
         editor = new CustomEditor(app, elRef.current, controller);
@@ -364,10 +387,7 @@ export function IREditor({
 
       const view = internalRef.current;
       const currentDoc = view.state.doc.toString();
-      if (
-        currentDoc !== value &&
-        value !== lastSavedContentRef.current
-      ) {
+      if (currentDoc !== value && value !== lastSavedContentRef.current) {
         const newContent = value ?? '';
         const newLength = newContent.length;
         // Clamp each range's anchor and head to the new document length.

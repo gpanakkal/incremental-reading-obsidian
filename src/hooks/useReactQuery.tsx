@@ -5,6 +5,7 @@ import {
   currentItemQueryFn,
   invalidateCurrentItemQuery,
 } from '#/lib/query-client';
+import type { ReviewItem } from '#/lib/types';
 import { useQuery } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import { useAppSelector } from './useAppSelector';
@@ -53,11 +54,22 @@ export function useCurrentItem() {
   return result;
 }
 
-export function useCurrentItemFileText() {
+/**
+ * The current item's file text, together with the item it was read from.
+ * The text is cached per item id, so the returned `item` is always the one
+ * this render keyed the fetch on; pairing the text with an item taken from
+ * anywhere else (a prop, an earlier render) can put one item's content in
+ * front of another item's file, and the review editor writes back what it
+ * displays.
+ */
+export function useCurrentItemFileText(): {
+  item: ReviewItem | null;
+  text: string | undefined;
+} {
   const { plugin } = useReviewContext();
   const { data: currentItem } = useCurrentItem();
 
-  return useQuery({
+  const { data: text } = useQuery({
     enabled: !!currentItem,
     queryKey: ['item', currentItem?.data.id, 'file-text'],
     queryFn: async () => {
@@ -65,4 +77,6 @@ export function useCurrentItemFileText() {
       return plugin.app.vault.read(currentItem.file);
     },
   });
+
+  return { item: currentItem ?? null, text };
 }

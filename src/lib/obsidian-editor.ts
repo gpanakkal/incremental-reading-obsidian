@@ -126,10 +126,15 @@ export function getVimPlugin(cm: EditorView): unknown {
   );
 }
 
+/**
+ * `getCurrentItem` is read on every access rather than captured: the item is
+ * refetched on an interval and can come back with a renamed file, and Obsidian
+ * resolves links and embeds against whatever `file`/`path` report at the time.
+ */
 export const getMarkdownController = (
   view: ReviewView,
   getEditor: () => Editor,
-  currentItem: ReviewItem
+  getCurrentItem: () => ReviewItem
 ) => {
   return {
     ...view,
@@ -149,10 +154,10 @@ export const getMarkdownController = (
       return getEditor();
     },
     get file() {
-      return currentItem?.file;
+      return getCurrentItem()?.file;
     },
     get path() {
-      return currentItem?.file.path;
+      return getCurrentItem()?.file.path;
     },
   };
 };

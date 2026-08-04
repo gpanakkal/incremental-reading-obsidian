@@ -1,6 +1,6 @@
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { useCurrentItemFileText } from '#/hooks/useReactQuery';
-import { isReviewCard, type ReviewItem } from '#/lib/types';
+import { isReviewCard } from '#/lib/types';
 import type { EditorView } from '@codemirror/view';
 import { CardViewer } from './CardViewer';
 import { IREditor } from './IREditor';
@@ -11,12 +11,13 @@ import { IREditor } from './IREditor';
  * - loading spinner?
  * - error element
  */
-export default function ReviewItem({ item }: { item: ReviewItem }) {
+export default function ReviewItem() {
   const showAnswer = useAppSelector((state) => state.showAnswer);
 
-  const { data: fileText } = useCurrentItemFileText();
+  const { item, text: fileText } = useCurrentItemFileText();
 
-  if (!fileText) return <></>;
+  if (!item || !fileText)
+    return <div className="ir-review-placeholder">Nothing due for review.</div>;
   return (
     <>
       {isReviewCard(item) && !showAnswer ? (
