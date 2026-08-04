@@ -1,5 +1,4 @@
 import { useAppSelector } from '#/hooks/useAppSelector';
-import { useCurrentItem } from '#/hooks/useReactQuery';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { queryClient } from '#/lib/query-client';
 import type IncrementalReadingPlugin from '#/main';
@@ -33,18 +32,7 @@ function ReviewInterface() {
   return (
     <div className={'ir-review-interface view-content'}>
       <ActionBar />
-      {page === 'home' ? <ReviewHome /> : <ReviewItemView />}
+      {page === 'home' ? <ReviewHome /> : <ReviewItem />}
     </div>
-  );
-}
-
-/** The single-item review flow, reached by clicking a queue row. */
-function ReviewItemView() {
-  const { data: item } = useCurrentItem();
-
-  return item ? (
-    <ReviewItem item={item} />
-  ) : (
-    <div className="ir-review-placeholder">Nothing due for review.</div>
   );
 }

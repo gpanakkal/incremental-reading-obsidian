@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
+import { isPersistableChange } from '#/components/IREditor';
 import { isExternalSync } from '#/lib/extensions/SnippetHighlightExtension';
 import { EditorSelection, EditorState } from '@codemirror/state';
-import { EditorView } from '@codemirror/view';
+import { EditorView, type ViewUpdate } from '@codemirror/view';
 import fc from 'fast-check';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -11,6 +12,32 @@ import { afterEach, describe, expect, it } from 'vitest';
 function makeView(doc: string): EditorView {
   const state = EditorState.create({ doc });
   return new EditorView({ state, parent: document.body });
+}
+
+/**
+ * Capture the ViewUpdate produced by `dispatch`, the same object IREditor's
+ * `onUpdate` override receives.
+ */
+function captureUpdate(
+  doc: string,
+  dispatch: (view: EditorView) => void
+): ViewUpdate {
+  let captured: ViewUpdate | null = null;
+  const view = new EditorView({
+    state: EditorState.create({
+      doc,
+      extensions: [
+        EditorView.updateListener.of((update) => {
+          captured = update;
+        }),
+      ],
+    }),
+    parent: document.body,
+  });
+  dispatch(view);
+  view.destroy();
+  if (captured === null) throw new Error('no ViewUpdate was produced');
+  return captured;
 }
 
 /**
@@ -39,6 +66,85 @@ function dispatchFullReplacement(view: EditorView, newContent: string): void {
 }
 
 // #endregion
+
+describe('isPersistableChange keeps fetched content from being written back', () => {
+  it('rejects the full-document replacement updateEditorContent dispatches', () => {
+    // The regression: this replacement carries text fetched for whichever item
+    // is current now, while the editor still saves to the item it mounted
+    // with. Persisting it overwrites that item's note with the other's text.
+    const update = captureUpdate('article body', (view) =>
+      dispatchFullReplacement(view, 'card body {{answer}}')
+    );
+
+    expect(isPersistableChange(update)).toBe(false);
+  });
+
+  it('accepts a change the user typed', () => {
+    const update = captureUpdate('article body', (view) =>
+      view.dispatch({
+        changes: { from: 12, insert: ' extended' },
+        userEvent: 'input.type',
+      })
+    );
+
+    expect(isPersistableChange(update)).toBe(true);
+  });
+
+  it('accepts a user edit that arrives without a userEvent annotation', () => {
+    // Editor commands and plugin-issued edits often carry no userEvent. They
+    // are still this editor's own content and must reach disk.
+    const update = captureUpdate('article body', (view) =>
+      view.dispatch({ changes: { from: 0, insert: '# ' } })
+    );
+
+    expect(isPersistableChange(update)).toBe(true);
+  });
+
+  it('rejects a selection-only update', () => {
+    const update = captureUpdate('article body', (view) =>
+      view.dispatch({ selection: EditorSelection.cursor(3) })
+    );
+
+    expect(isPersistableChange(update)).toBe(false);
+  });
+
+  it('rejects any replacement carrying the external-sync annotation, whatever the content (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc
+          .tuple(
+            fc.string({ minLength: 0, maxLength: 200 }),
+            fc.string({ minLength: 0, maxLength: 200 })
+          )
+          .filter(([initial, incoming]) => initial !== incoming),
+        async ([initial, incoming]) => {
+          const update = captureUpdate(initial, (view) =>
+            dispatchFullReplacement(view, incoming)
+          );
+
+          // Every value pushed in from outside is already on disk, so none of
+          // them may be saved — regardless of which item's file it came from.
+          expect(isPersistableChange(update)).toBe(false);
+        }
+      )
+    );
+  });
+
+  it('accepts every unannotated document change (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ minLength: 1, maxLength: 100 }),
+        async (inserted) => {
+          const update = captureUpdate('doc', (view) =>
+            view.dispatch({ changes: { from: 0, insert: inserted } })
+          );
+
+          expect(isPersistableChange(update)).toBe(true);
+        }
+      )
+    );
+  });
+});
 
 describe('updateEditorContent preserves cursor position', () => {
   afterEach(() => {
