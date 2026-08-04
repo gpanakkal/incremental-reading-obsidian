@@ -528,8 +528,9 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * Add a ArticleReview and update the due date and interval
-   * TODO: combine the operations into a transaction
+   * Add an ArticleReview and update the due date and interval in a transaction.
+   * @returns the id of the inserted `article_review` row
+   * @throws if either write fails, leaving the db unchanged
    */
   async review(
     article: IArticleBase,
@@ -543,21 +544,20 @@ export class ArticleManager extends ItemManager {
     const newFuzz = this.plugin.settings.fuzzTextReviews
       ? IRScheduler.getDueFuzz()
       : article.due_fuzz;
+    const reviewId = crypto.randomUUID();
 
-    try {
-      await Promise.all([
-        this.repo.mutate(
-          'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
-          [crypto.randomUUID(), article.id, reviewed]
-        ),
-        this.repo.mutate(
-          `UPDATE article SET dismissed = 0, due = $1, interval = $2, due_fuzz = $3 WHERE id = $4`,
-          [nextDueTime, nextInterval, newFuzz, article.id]
-        ),
-      ]);
-    } catch (error) {
-      console.error(error);
-    }
+    await this.repo.transaction(async () => {
+      await this.repo.mutate(
+        'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
+        [reviewId, article.id, reviewed]
+      );
+      await this.repo.mutate(
+        `UPDATE article SET dismissed = 0, due = $1, interval = $2, due_fuzz = $3 WHERE id = $4`,
+        [nextDueTime, nextInterval, newFuzz, article.id]
+      );
+    });
+
+    return reviewId;
   }
 
   /**

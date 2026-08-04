@@ -63,6 +63,12 @@ export class SQLJSRepository implements SQLiteRepository {
    * grouped by note type then op. Flushed to listeners once the write finishes.
    */
   #pendingChanges = new Map<NoteType, Map<DataChangeOp, Set<string>>>();
+  /**
+   * How many {@link transaction} calls are currently open. Only the outermost
+   * one issues BEGIN/COMMIT/ROLLBACK; a non-zero depth also tells `mutate` to
+   * defer saving and change notification to that outermost call.
+   */
+  #txDepth = 0;
 
   /**
    * Use .start to instantiate
@@ -153,15 +159,77 @@ export class SQLJSRepository implements SQLiteRepository {
 
   /**
    * Execute a write query
+   *
+   * Unlike {@link query}, a failed write throws rather than resolving to an
+   * empty result: callers cannot otherwise distinguish a rejected write from
+   * one that legitimately returned no rows, and {@link transaction} needs the
+   * failure to decide whether to roll back.
    * @param query
    * @returns an empty array on success
+   * @throws if the statement fails
    */
   mutate(query: string, params: Primitive[] = []) {
+    if (this.#txDepth > 0) {
+      // Inside a transaction the caller owns commit/rollback, so changes are
+      // buffered and flushed there — a statement that is later rolled back
+      // must not notify listeners or reach disk.
+      return this._execSql(query, params, { throwOnError: true }) as [][];
+    }
+
     this.#pendingChanges.clear();
-    const result = this._execSql(query, params);
+    const result = this._execSql(query, params, { throwOnError: true });
     this.#flushChanges();
     void this.save();
     return result as [][];
+  }
+
+  /**
+   * Run `work` inside a SQLite transaction,rolling back if it throws.
+   *
+   * Statements issued by `work` skip the per-statement save and change
+   * notification that {@link mutate} normally performs; both happen once, after
+   * a successful commit, so subscribers never observe rolled-back rows and the
+   * database file is written once per transaction rather than once per
+   * statement.
+   *
+   * Transactions do not nest: a `transaction` call made while another is open
+   * joins the outer one, which alone commits or rolls back. SQLite has no
+   * nested transactions, and savepoints would let an inner failure be swallowed
+   * while the outer transaction still commits.
+   * @returns whatever `work` resolves to
+   * @throws whatever `work` throws, after rolling back
+   */
+  async transaction<T>(work: () => T | Promise<T>): Promise<T> {
+    if (!this.db) throw new Error('Database was not initialized on repository');
+
+    if (this.#txDepth > 0) {
+      this.#txDepth++;
+      try {
+        return await work();
+      } finally {
+        this.#txDepth--;
+      }
+    }
+
+    this.#pendingChanges.clear();
+    this.db.exec('BEGIN');
+    this.#txDepth++;
+    let result: T;
+    try {
+      result = await work();
+    } catch (error) {
+      this.#txDepth--;
+      this.db.exec('ROLLBACK');
+      // Rolled-back rows were never durable, so their buffered change events
+      // must not reach listeners.
+      this.#pendingChanges.clear();
+      throw error;
+    }
+    this.#txDepth--;
+    this.db.exec('COMMIT');
+    this.#flushChanges();
+    await this.save();
+    return result;
   }
 
   /**
@@ -232,12 +300,19 @@ export class SQLJSRepository implements SQLiteRepository {
    * Execute one or more queries and return an array of objects corresponding to table rows.
    * Use `query` or `mutate` methods above instead where possible.
    *
-   *  TODO:
-   * - handle errors better?
    * @param query
+   * @param params
+   * @param options `throwOnError` rethrows a failed statement instead of
+   * resolving to an empty result. Reads leave it off, so the many `query`
+   * callers keep their empty-array fallback; writes turn it on, since a
+   * silently dropped write is indistinguishable from an empty result set.
    * @returns an array where each top-level element is the result of a query
    */
-  _execSql(query: string, params: Primitive[] = []) {
+  _execSql(
+    query: string,
+    params: Primitive[] = [],
+    options?: { throwOnError?: boolean }
+  ) {
     // console.log({ query, params });
     try {
       const results = this.db?.exec(query, this.coerceParams(params));
@@ -254,6 +329,7 @@ export class SQLJSRepository implements SQLiteRepository {
           platform: Platform.isMobile ? 'mobile' : 'desktop',
         });
       }
+      if (options?.throwOnError) throw error;
       return [[]];
     }
   }

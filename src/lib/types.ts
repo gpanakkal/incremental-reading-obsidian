@@ -204,10 +204,19 @@ export type DataChangeListener = (event: DataChangeEvent) => void;
 
 export interface SQLiteRepository {
   query(query: string, params?: Primitive[]): RowTypes[] | Promise<RowTypes[]>;
+  /** @throws if the statement fails */
   mutate(query: string, params?: Primitive[]): [][] | Promise<[][]>;
+  /**
+   * Run `work` in a transaction, committing on success and rolling back if it
+   * throws. Change notifications and the save to disk happen once, after the
+   * commit. Nested calls join the outermost transaction.
+   * @throws whatever `work` throws, after rolling back
+   */
+  transaction<T>(work: () => T | Promise<T>): Promise<T>;
   _execSql(
     query: string,
-    params?: Primitive[]
+    params?: Primitive[],
+    options?: { throwOnError?: boolean }
   ): RowTypes[][] | Promise<RowTypes[][]>;
   handleFileChange(file: TAbstractFile): Promise<void>;
   /**

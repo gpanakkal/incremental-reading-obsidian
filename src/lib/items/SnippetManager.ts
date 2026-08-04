@@ -586,8 +586,9 @@ export class SnippetManager extends ItemManager {
   }
 
   /**
-   * Add a SnippetReview and update the due date and interval
-   * TODO: combine the operations into a transaction
+   * Add a SnippetReview and update the due date and interval in a transaction.
+   * @returns the id of the inserted `snippet_review` row
+   * @throws if either write fails, leaving the db unchanged
    */
   async review(
     snippet: ISnippetBase,
@@ -601,21 +602,20 @@ export class SnippetManager extends ItemManager {
     const newFuzz = this.plugin.settings.fuzzTextReviews
       ? IRScheduler.getDueFuzz()
       : snippet.due_fuzz;
+    const reviewId = crypto.randomUUID();
 
-    try {
-      await Promise.all([
-        this.repo.mutate(
-          'INSERT INTO snippet_review (id, snippet_id, review_time) VALUES ($1, $2, $3)',
-          [crypto.randomUUID(), snippet.id, reviewed]
-        ),
-        this.repo.mutate(
-          `UPDATE snippet SET dismissed = 0, due = $1, interval = $2, due_fuzz = $3 WHERE id = $4`,
-          [nextDueTime, nextInterval, newFuzz, snippet.id]
-        ),
-      ]);
-    } catch (error) {
-      console.error(error);
-    }
+    await this.repo.transaction(async () => {
+      await this.repo.mutate(
+        'INSERT INTO snippet_review (id, snippet_id, review_time) VALUES ($1, $2, $3)',
+        [reviewId, snippet.id, reviewed]
+      );
+      await this.repo.mutate(
+        `UPDATE snippet SET dismissed = 0, due = $1, interval = $2, due_fuzz = $3 WHERE id = $4`,
+        [nextDueTime, nextInterval, newFuzz, snippet.id]
+      );
+    });
+
+    return reviewId;
   }
 
   /**
