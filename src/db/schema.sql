@@ -86,8 +86,8 @@ CREATE INDEX IF NOT EXISTS srs_card_due ON srs_card(due);
 CREATE TABLE IF NOT EXISTS srs_card_review (
   id TEXT NOT NULL, -- UUID
   card_id TEXT NOT NULL REFERENCES srs_card(id),
-  due INTEGER NOT NULL,
-  review INTEGER NOT NULL,
+  due INTEGER NOT NULL, -- time it was due
+  review INTEGER NOT NULL, -- actual time of review
   stability REAL NOT NULL,
   difficulty REAL NOT NULL,
   elapsed_days REAL NOT NULL,
