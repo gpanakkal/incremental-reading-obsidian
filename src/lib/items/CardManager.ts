@@ -493,15 +493,19 @@ export class CardManager extends ItemManager {
       }
     );
 
-    try {
-      const { nextCard, reviewLog } = recordLog;
-      const storedCard = (
-        await this.repo.query(`SELECT * FROM srs_card WHERE id = $1`, [card.id])
-      )[0] as SRSCardRow;
-      if (!storedCard) {
-        throw new Error(`No card found with id ${card.id}`);
-      }
+    const { nextCard, reviewLog } = recordLog;
+    const storedCard = (
+      await this.repo.query(`SELECT * FROM srs_card WHERE id = $1`, [card.id])
+    )[0] as SRSCardRow;
+    if (!storedCard) {
+      throw new Error(`No card found with id ${card.id}`);
+    }
 
+    const reviewRow = SRSCardReview.displayToRow(
+      new SRSCardReview(card.id, reviewLog)
+    );
+
+    await this.repo.transaction(async () => {
       const updatedCard = CardManager.baseToRow(nextCard);
       let updateQuery = `UPDATE srs_card SET `;
       const columnUpdateSegments = [
@@ -535,9 +539,6 @@ export class CardManager extends ItemManager {
         `rating, state) VALUES ` +
         `($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`;
 
-      const reviewRow = SRSCardReview.displayToRow(
-        new SRSCardReview(card.id, reviewLog)
-      );
       const insertParams = [
         reviewRow.id,
         reviewRow.card_id,
@@ -552,8 +553,8 @@ export class CardManager extends ItemManager {
         reviewRow.state,
       ];
       await this.repo.mutate(insertQuery, insertParams);
-    } catch (error) {
-      console.error(error);
-    }
+    });
+
+    return reviewRow.id;
   }
 }
