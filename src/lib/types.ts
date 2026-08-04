@@ -107,7 +107,7 @@ export type RowTypes =
   | SnippetRow
   | ISnippetReview
   | SRSCardRow
-  | ISRSCardReview;
+  | SRSCardReviewRow;
 
 export interface TableNameToRowType extends Record<TableName, RowTypes> {
   article: ArticleRow;
@@ -115,7 +115,7 @@ export interface TableNameToRowType extends Record<TableName, RowTypes> {
   snippet: SnippetRow;
   snippet_review: ISnippetReview;
   srs_card: SRSCardRow;
-  srs_card_review: ISRSCardReview;
+  srs_card_review: SRSCardReviewRow;
 }
 
 export type ReviewArticle = {
