@@ -39,6 +39,7 @@ function makeRepo(): SQLiteRepository {
     query: vi.fn().mockResolvedValue([]),
     mutate: vi.fn().mockResolvedValue([[]]),
     _execSql: vi.fn(),
+    transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
   } as unknown as SQLiteRepository;
@@ -815,6 +816,7 @@ describe('fetchMany', () => {
       query: vi.fn().mockResolvedValue(rows),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
@@ -977,6 +979,7 @@ describe('fetch', () => {
       query: vi.fn().mockResolvedValue([row]),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
@@ -1012,6 +1015,7 @@ describe('getDue', () => {
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
@@ -1065,6 +1069,7 @@ describe('getDue', () => {
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
@@ -1082,6 +1087,7 @@ describe('getDue', () => {
       query: vi.fn().mockRejectedValue(new Error('db error')),
       mutate: vi.fn(),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
@@ -1099,6 +1105,7 @@ describe('getDue', () => {
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
@@ -1135,6 +1142,7 @@ describe('getDue', () => {
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
@@ -1173,6 +1181,7 @@ describe('getDue', () => {
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
@@ -1201,6 +1210,7 @@ describe('review', () => {
             query: vi.fn().mockResolvedValue([storedRow]),
             mutate: vi.fn().mockResolvedValue([[]]),
             _execSql: vi.fn(),
+            transaction: vi.fn(async (work: () => unknown) => work()),
             handleFileChange: vi.fn(),
             onDataChange: vi.fn(() => vi.fn()),
           } as unknown as SQLiteRepository;
@@ -1248,6 +1258,7 @@ describe('review', () => {
             query: vi.fn().mockResolvedValue([storedRow]),
             mutate: vi.fn().mockResolvedValue([[]]),
             _execSql: vi.fn(),
+            transaction: vi.fn(async (work: () => unknown) => work()),
             handleFileChange: vi.fn(),
             onDataChange: vi.fn(() => vi.fn()),
           } as unknown as SQLiteRepository;
@@ -1301,6 +1312,7 @@ describe('review', () => {
       query: vi.fn().mockResolvedValue([storedRow]),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
@@ -1316,21 +1328,22 @@ describe('review', () => {
     expect(params[7]).toBe(priorLapses + 1);
   });
 
-  it('logs the error and does not throw when the stored card is not found', async () => {
+  it('throws without writing when the stored card is not found', async () => {
     const card = makeCardDisplay();
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const repo = {
       query: vi.fn().mockResolvedValue([]),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
-    await expect(
-      manager.review(card, Rating.Good, new Date())
-    ).resolves.not.toThrow();
-    expect(consoleSpy).toHaveBeenCalled();
+    // The caller records an undo entry only if this resolves, so a missing
+    // card must surface as a rejection rather than a silent no-op.
+    await expect(manager.review(card, Rating.Good, new Date())).rejects.toThrow(
+      `No card found with id ${card.id}`
+    );
     // When storedCard is not found, no UPDATE or INSERT should be issued
     const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls;
     expect(mutateCalls).toHaveLength(0);
@@ -1343,6 +1356,7 @@ describe('review', () => {
       query: vi.fn().mockResolvedValue([storedRow]),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
@@ -1381,6 +1395,7 @@ describe('review — FSRS settings', () => {
       query: vi.fn().mockResolvedValue([storedRow]),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
