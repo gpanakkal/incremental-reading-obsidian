@@ -1,7 +1,77 @@
-/* Hide titles for transcluded snippets/cards */
-.internal-embed[alt*='ir-hide-title'] .markdown-embed-title {
+/* #region Transcluded snippets/cards */
+
+/* Flatten the tree inline to fit onto the same line in lists */
+.internal-embed[alt*='ir-hide-title'],
+.internal-embed[alt*='ir-hide-title']
+  :is(.markdown-embed-content, .markdown-preview-view, p),
+.internal-embed[alt*='ir-hide-title'] .markdown-preview-section > div,
+/* Gated on the min-height Obsidian writes once its first render pass has
+   measured: the preview renderer measures the sizer to decide what is on
+   screen, and an inline box measures zero, so flipping it any earlier renders
+   the embed empty. */
+.internal-embed[alt*='ir-hide-title']
+  .markdown-preview-sizer[style*='min-height'] {
+  display: inline;
+}
+
+/* The embed's own title and the transcluded note's inline title and properties
+   have nowhere to sit in inline flow — each would interrupt the sentence.
+
+   `.markdown-preview-pusher` stays visible on purpose: it is part of what the
+   renderer measures, and hiding it is not free the way it looks. */
+.internal-embed[alt*='ir-hide-title'] .markdown-embed-title,
+.internal-embed[alt*='ir-hide-title'] .mod-header,
+.internal-embed[alt*='ir-hide-title'] .mod-footer {
   display: none;
 }
+
+/* Keep Obsidian's accent rule, which now marks the run of transcluded text
+   rather than bounding a block.
+
+   No border declaration here on purpose: `.markdown-embed` already sets
+   `border-inline-start: var(--embed-border-start, …)`, so the rule follows
+   whatever the active theme uses for embeds. */
+.internal-embed[alt*='ir-hide-title'] {
+  padding-inline-start: var(--size-4-2);
+  padding-block: 0.2em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* The open-in-tab button is absolutely positioned against a box that no longer
+   has corners to pin it to, so it flows as an icon after the snippet instead. */
+.internal-embed[alt*='ir-hide-title'] .markdown-embed-link {
+  display: inline-flex;
+  position: static;
+  vertical-align: middle;
+  padding: 0 var(--size-2-1);
+}
+
+/* Obsidian indents embedded content by 1.5rem to sit clear of the accent rule.
+   That reads as a pull quote, and the `padding-inline-start` above already
+   spaces the text off the rule at inline scale.
+
+   The `> ` chain is load-bearing: the indent comes from
+   `.inline-embed > .markdown-embed-content > .markdown-preview-view`, so a
+   descendant selector here would only tie its specificity and win on source
+   order alone. */
+.internal-embed[alt*='ir-hide-title'] .markdown-embed-content,
+.internal-embed[alt*='ir-hide-title']
+  > .markdown-embed-content
+  > .markdown-preview-view {
+  padding: 0;
+  /* Set to 100% for a scrollable embed box. An inline box has no height to
+     fill, and leaving it set makes the host line measure wrong. */
+  height: auto;
+}
+
+/* `.markdown-preview-view` sets its own font size and line height, so a
+   transclusion inside a heading would otherwise render at body size. */
+.internal-embed[alt*='ir-hide-title'] .markdown-preview-view {
+  font-size: inherit;
+  line-height: inherit;
+}
+/* #endregion */
 
 .workspace-leaf-content[data-type='incremental-reading-review'] .view-content {
   /* to match vanilla styling */
