@@ -26,7 +26,10 @@
 }
 
 /* Keep Obsidian's accent rule, which now marks the run of transcluded text
-   rather than bounding a block.
+   rather than bounding a block. Used only where the transclusion has no host
+   block to hang the rule off — a standalone `![[…]]`, which CodeMirror renders
+   as its own widget outside any `.cm-line`. There every fragment starts at the
+   same x, so painting per fragment is exact.
 
    No border declaration here on purpose: `.markdown-embed` already sets
    `border-inline-start: var(--embed-border-start, …)`, so the rule follows
@@ -36,15 +39,55 @@
   padding-block: 0.2em;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
+
+  /* Hand the open-in-tab button's containing block to the host line, so
+     Obsidian's own `top: 4px; inset-inline-end: 4px` lands on one predictable
+     corner.
+ */
+  position: static;
 }
 
-/* The open-in-tab button is absolutely positioned against a box that no longer
-   has corners to pin it to, so it flows as an icon after the snippet instead. */
-.internal-embed[alt*='ir-hide-title'] .markdown-embed-link {
-  display: inline-flex;
-  position: static;
-  vertical-align: middle;
-  padding: 0 var(--size-2-1);
+/* `.cm-line` is already relative in Live Preview. The reading-view hosts are
+   not, so promote them — but only the ones holding a transclusion, since this
+   changes what every absolutely positioned descendant resolves against. */
+.markdown-rendered
+  :is(p, h1, h2, h3, h4, h5, h6, li):has(
+    > .internal-embed[alt*='ir-hide-title']
+  ) {
+  position: relative;
+}
+
+/* Wherever the transclusion does have a host block, paint the rule on the host
+   instead, and drop the per-fragment border below.
+
+   `background-origin: content-box` is the only primitive that resolves to the
+   host's content edge without anyone having to know that padding, so the rule
+   lands in one place no matter how the bullet measures. */
+.markdown-source-view.mod-cm6
+  .cm-line:has(> .internal-embed[alt*='ir-hide-title']),
+.markdown-rendered
+  :is(p, h1, h2, h3, h4, h5, h6, li):has(
+    > .internal-embed[alt*='ir-hide-title']
+  ) {
+  background-image: linear-gradient(
+    var(--interactive-accent),
+    var(--interactive-accent)
+  );
+  background-repeat: no-repeat;
+  background-size: 2px 100%;
+  background-position: 0 0;
+  background-origin: content-box;
+}
+
+.markdown-source-view.mod-cm6
+  .cm-line:has(> .internal-embed[alt*='ir-hide-title'])
+  > .internal-embed[alt*='ir-hide-title'],
+.markdown-rendered
+  :is(p, h1, h2, h3, h4, h5, h6, li):has(
+    > .internal-embed[alt*='ir-hide-title']
+  )
+  > .internal-embed[alt*='ir-hide-title'] {
+  border-inline-start: none;
 }
 
 /* Obsidian indents embedded content by 1.5rem to sit clear of the accent rule.
