@@ -62,13 +62,15 @@
 
    `background-origin: content-box` is the only primitive that resolves to the
    host's content edge without anyone having to know that padding, so the rule
-   lands in one place no matter how the bullet measures. */
+   lands in one place no matter how the bullet measures.
+
+   Except where a `<br>` starts the transclusion on its own line (Reading view) */
 .markdown-source-view.mod-cm6
   .cm-line:has(> .internal-embed[alt*='ir-hide-title']),
 .markdown-rendered
   :is(p, h1, h2, h3, h4, h5, h6, li):has(
     > .internal-embed[alt*='ir-hide-title']
-  ) {
+  ):not(:has(> br + .internal-embed[alt*='ir-hide-title'])) {
   background-image: linear-gradient(
     var(--interactive-accent),
     var(--interactive-accent)
@@ -85,7 +87,7 @@
 .markdown-rendered
   :is(p, h1, h2, h3, h4, h5, h6, li):has(
     > .internal-embed[alt*='ir-hide-title']
-  )
+  ):not(:has(> br + .internal-embed[alt*='ir-hide-title']))
   > .internal-embed[alt*='ir-hide-title'] {
   border-inline-start: none;
 }
