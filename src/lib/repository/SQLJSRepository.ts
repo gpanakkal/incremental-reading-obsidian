@@ -69,6 +69,12 @@ export class SQLJSRepository implements SQLiteRepository {
    * defer saving and change notification to that outermost call.
    */
   #txDepth = 0;
+  /**
+   * Set when a `modify` event for the database file arrives while a
+   * transaction is open, so the reload it asks for can run once that
+   * transaction settles. See {@link handleFileChange}.
+   */
+  #reloadPending = false;
 
   /**
    * Use .start to instantiate
@@ -130,7 +136,21 @@ export class SQLJSRepository implements SQLiteRepository {
     if (this.pendingSaveCount > 0) {
       return;
     }
+    // A reload replaces `this.db` wholesale, which would orphan an open
+    // transaction: its BEGIN belongs to the database being discarded, so the
+    // writes made so far vanish, later ones land outside any transaction, and
+    // the COMMIT fails on a database that never started one. Hold the reload
+    // until the transaction settles — {@link transaction} runs it then.
+    if (this.#txDepth > 0) {
+      this.#reloadPending = true;
+      return;
+    }
 
+    await this.#reloadFromDisk();
+  }
+
+  /** Reload the database file, reporting rather than throwing on failure. */
+  async #reloadFromDisk() {
     try {
       await this.reloadDb();
       await this.onReloadFromDisk?.();
@@ -144,6 +164,18 @@ export class SQLJSRepository implements SQLiteRepository {
         console.error(error);
       }
     }
+  }
+
+  /**
+   * Run a reload that arrived while a transaction was open. Left unawaited to
+   * match how Obsidian dispatches the `modify` event that asks for it: the
+   * transaction is finished either way, and its caller should not wait on a
+   * full re-read of the database file.
+   */
+  #runPendingReload() {
+    if (!this.#reloadPending) return;
+    this.#reloadPending = false;
+    void this.#reloadFromDisk();
   }
 
   /**
@@ -196,6 +228,10 @@ export class SQLJSRepository implements SQLiteRepository {
    * joins the outer one, which alone commits or rolls back. SQLite has no
    * nested transactions, and savepoints would let an inner failure be swallowed
    * while the outer transaction still commits.
+   *
+   * A reload asked for while the transaction was open — by Obsidian Sync
+   * rewriting the database file, say — is held back and run once it settles,
+   * so an external write cannot swap the database out mid-transaction.
    * @returns whatever `work` resolves to
    * @throws whatever `work` throws, after rolling back
    */
@@ -223,12 +259,14 @@ export class SQLJSRepository implements SQLiteRepository {
       // Rolled-back rows were never durable, so their buffered change events
       // must not reach listeners.
       this.#pendingChanges.clear();
+      this.#runPendingReload();
       throw error;
     }
     this.#txDepth--;
     this.db.exec('COMMIT');
     this.#flushChanges();
     await this.save();
+    this.#runPendingReload();
     return result;
   }
 

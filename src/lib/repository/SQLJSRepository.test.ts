@@ -150,6 +150,24 @@ function articleIds(repo: SQLJSRepository): string[] {
   );
 }
 
+let emptyDbBytes: Uint8Array | null = null;
+
+/**
+ * Bytes of an empty database at the current schema. Executing the schema costs
+ * far more than deserializing the result, and the property below needs a fresh
+ * database per run.
+ */
+async function getEmptyDbBytes(): Promise<Uint8Array> {
+  if (emptyDbBytes) return emptyDbBytes;
+
+  const SQL = await getSharedSql();
+  const db = new SQL.Database();
+  db.exec(getSharedSchema());
+  emptyDbBytes = db.export();
+  db.close();
+  return emptyDbBytes;
+}
+
 const remoteDbCache = new Map<string, Uint8Array>();
 
 /**
@@ -162,8 +180,7 @@ async function remoteDbBytes(ids: readonly string[]): Promise<Uint8Array> {
   if (cached) return cached;
 
   const SQL = await getSharedSql();
-  const db = new SQL.Database();
-  db.exec(getSharedSchema());
+  const db = new SQL.Database(await getEmptyDbBytes());
   for (const id of ids)
     db.exec(INSERT_ARTICLE_SQL, articleRow(id) as SqlValue[]);
   const bytes = db.export();
@@ -218,10 +235,11 @@ class SyncedTestRepository extends SQLJSRepository {
       schema,
     });
     repo.#sqlStatic = SQL;
-    repo.db = new SQL.Database();
-    repo.db.exec(schema);
+    // The file starts out as a valid empty database, so a reload always finds
+    // one, and memory starts out matching it.
+    repo.diskBytes = await getEmptyDbBytes();
+    repo.db = new SQL.Database(repo.diskBytes);
     repo.registerUpdateHook();
-    await repo.save(); // seed the file, so a reload always finds a valid db
     return repo;
   }
 
@@ -249,7 +267,12 @@ class SyncedTestRepository extends SQLJSRepository {
     } as TAbstractFile);
   }
 
-  /** Release the parked read so the reload it belongs to runs to completion. */
+  /**
+   * Release the parked read so the reload it belongs to runs to completion.
+   * A reload the repository held back because a transaction is open has not
+   * issued its read yet, so there is nothing to release and this just waits
+   * out the `modify` handler.
+   */
   async landSync(): Promise<void> {
     // The reload awaits the WASM loader before it reads the file; let those
     // microtasks drain so the read is really parked before releasing it.
@@ -261,9 +284,22 @@ class SyncedTestRepository extends SQLJSRepository {
     this.#inFlightSync = null;
   }
 
-  /** Finish a reload still in flight, so a run ends in a settled state. */
+  /**
+   * Release every read still parked, including one issued by a reload that was
+   * held back until a transaction settled, so a run ends in a settled state.
+   */
   async settleSync(): Promise<void> {
-    if (this.#inFlightSync) await this.landSync();
+    for (let idle = 0; idle < 5; ) {
+      if (this.#parkedReads.length > 0) {
+        this.#parkedReads.shift()?.();
+        idle = 0;
+      } else {
+        idle++;
+      }
+      await Promise.resolve();
+    }
+    await this.#inFlightSync;
+    this.#inFlightSync = null;
   }
 
   /**
@@ -682,6 +718,72 @@ describe('transaction', () => {
 
     expect(events).toEqual([{ table: 'article', op: 'update', ids: ['a1'] }]);
   });
+
+  // A nested call joins the outer transaction, so its writes inherit the same
+  // deferral: nothing reaches disk or listeners until the outermost commits.
+  it("defers a nested transaction's writes to the outermost commit", async () => {
+    const { repo: savingRepo } = await makeSavingRepo();
+    const writeBinary = savingRepo.app.vault.adapter.writeBinary as ReturnType<
+      typeof vi.fn
+    >;
+    const events: DataChangeEvent[] = [];
+    savingRepo.onDataChange((e) => events.push(e));
+
+    await savingRepo.transaction(async () => {
+      await savingRepo.transaction(async () => {
+        savingRepo.mutate(
+          `INSERT INTO article (id, reference, due, interval, priority)
+           VALUES ($1, $2, $3, $4, $5)`,
+          ['a1', 'articles/a1.md', Date.now(), 86_400_000, 30]
+        );
+      });
+      // the inner call returned, but the outer transaction is still open
+      expect(events).toEqual([]);
+      expect(writeBinary).not.toHaveBeenCalled();
+    });
+
+    expect(events).toEqual([{ table: 'article', op: 'insert', ids: ['a1'] }]);
+    expect(writeBinary).toHaveBeenCalledTimes(1);
+  });
+
+  // Miscounting the open-transaction depth leaves the repository permanently
+  // convinced a transaction is running, silently dropping every later write.
+  it('restores normal per-write behavior after a nested transaction commits', async () => {
+    const events: DataChangeEvent[] = [];
+    await repo.transaction(async () => {
+      await repo.transaction(async () => {
+        insertArticle(repo, 'a1');
+      });
+    });
+    repo.onDataChange((e) => events.push(e));
+
+    repo.mutate(`UPDATE article SET priority = $1 WHERE id = $2`, [40, 'a1']);
+
+    expect(events).toEqual([{ table: 'article', op: 'update', ids: ['a1'] }]);
+  });
+
+  it('restores normal per-write behavior after a transaction rolls back', async () => {
+    insertArticle(repo, 'a1', 30);
+    await expect(
+      repo.transaction(async () => {
+        throw new Error('aborted');
+      })
+    ).rejects.toThrow('aborted');
+    const events: DataChangeEvent[] = [];
+    repo.onDataChange((e) => events.push(e));
+
+    repo.mutate(`UPDATE article SET priority = $1 WHERE id = $2`, [40, 'a1']);
+
+    expect(events).toEqual([{ table: 'article', op: 'update', ids: ['a1'] }]);
+  });
+
+  it('rejects when the database is not initialized', async () => {
+    repo.db = null;
+
+    await expect(repo.transaction(async () => 'never')).rejects.toThrow(
+      'Database was not initialized on repository'
+    );
+  });
 });
 
 // On a vault with Obsidian Sync running, a second writer rewrites the database
@@ -790,6 +892,46 @@ describe('external sync while a transaction is open', () => {
     ).rejects.toThrow('caller aborted');
 
     expect(articleIds(repo)).not.toContain('local-1');
+  });
+
+  // Holding a reload back must not mean dropping it — the peer's rows still
+  // have to arrive once the transaction is out of the way. Asserted on the
+  // rollback path, where nothing was saved and the file still holds them.
+  it('applies a held-back sync reload once the transaction settles', async () => {
+    const repo = await SyncedTestRepository.create();
+
+    await expect(
+      repo.transaction(async () => {
+        insertArticleRow(repo, 'local-1');
+        repo.beginSync(await remoteDbBytes(['remote-1']));
+        await repo.landSync();
+        throw new Error('caller aborted');
+      })
+    ).rejects.toThrow('caller aborted');
+
+    await repo.settleSync();
+
+    expect(articleIds(repo)).toEqual(['remote-1']);
+  });
+
+  // The depth counter that holds the reload back is shared with nested calls,
+  // so a reload that arrives inside one must survive until the outermost ends.
+  it('holds a sync reload back for the whole of a nested transaction', async () => {
+    const repo = await SyncedTestRepository.create();
+
+    await repo.transaction(async () => {
+      await repo.transaction(async () => {
+        repo.beginSync(await remoteDbBytes(['remote-1']));
+        await repo.landSync();
+        insertArticleRow(repo, 'local-1');
+      });
+      insertArticleRow(repo, 'local-2');
+    });
+
+    expect(articleIds(repo)).toEqual(
+      expect.arrayContaining(['local-1', 'local-2'])
+    );
+    await repo.settleSync();
   });
 
   it('stays writable after a sync reload interrupts a transaction', async () => {
