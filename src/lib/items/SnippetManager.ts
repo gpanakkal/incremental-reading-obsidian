@@ -462,7 +462,7 @@ export class SnippetManager extends ItemManager {
     // For articles/snippets with a DB entry, use the existing parent ID query
     if (parentEntry) {
       const results = (await this.repo.query(
-        'SELECT * FROM snippet WHERE parent = $1 AND start_offset IS NOT NULL AND end_offset IS NOT NULL',
+        'SELECT * FROM snippet WHERE parent = $1 AND start_offset IS NOT NULL AND end_offset IS NOT NULL AND deleted = FALSE',
         [parentEntry.id]
       )) as SnippetRow[];
 
