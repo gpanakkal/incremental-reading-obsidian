@@ -1,6 +1,7 @@
 import type { Actions } from '#/lib/Actions';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type ReviewManager from '#/lib/items/ReviewManager';
+import { queryClient } from '#/lib/query-client';
 import { setReviewViewSaving } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
@@ -53,6 +54,7 @@ export function ReviewContextProvider({
 
     await withReviewViewSave(async () => {
       await Obsidian.editNote(reviewView.app, item.file, () => newContent);
+      queryClient.setQueryData(['item', item.data.id, 'file-text'], newContent);
     });
     // Save body-relative highlight offsets
     for (const h of highlights) {
