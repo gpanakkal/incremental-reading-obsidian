@@ -1,7 +1,8 @@
+import IncrementalReadingPlugin from '#/main';
 import { Annotation, RangeSetBuilder, StateEffect } from '@codemirror/state';
 import type { DecorationSet, EditorView, ViewUpdate } from '@codemirror/view';
 import { Decoration, ViewPlugin } from '@codemirror/view';
-import { type TFile } from 'obsidian';
+import { EventRef, type TFile } from 'obsidian';
 import type ReviewManager from '../items/ReviewManager';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type {
@@ -43,6 +44,8 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     private isReviewInterface: boolean = false;
     // keep track of if the ViewPlugin was destroyed
     private destroyed: boolean = false;
+    private highlightsChangedRef: EventRef | null = null;
+    private plugin: IncrementalReadingPlugin | null = null;
 
     constructor(view: EditorView) {
       const { info } = Obsidian.getFileInfoFromState(view.state);
@@ -53,6 +56,16 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       // More reliable than getActiveViewOfType, which reflects focus at a point
       // in time and can be wrong when the editor is rebuilt by a React effect.
       this.isReviewInterface = view.state.facet(isReviewInterfaceFacet);
+
+      this.plugin = view.state.facet(irPluginFacet);
+      this.highlightsChangedRef =
+        this.plugin?.app.workspace.on(
+          'ir-highlights-changed',
+          (...args: unknown[]) => {
+            if (args[0] !== this.file?.path) return;
+            view.dispatch({ effects: refreshHighlightsEffect.of(null) });
+          }
+        ) ?? null;
 
       // Load highlights asynchronously
       void this.loadHighlights(view);
@@ -294,6 +307,11 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
     destroy() {
       this.destroyed = true;
+      if (this.highlightsChangedRef) {
+        this.plugin?.app.workspace.offref(this.highlightsChangedRef);
+        this.highlightsChangedRef = null;
+      }
+
       if (this.persistTimeout) {
         clearTimeout(this.persistTimeout);
         this.persistTimeout = null;
