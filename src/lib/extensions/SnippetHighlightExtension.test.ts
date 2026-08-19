@@ -56,17 +56,49 @@ function makeReviewManager(filePath = FILE_PATH): FakeReviewManager {
   };
 }
 
+type FakeEventRef = { name: string; callback: (...args: unknown[]) => unknown };
+
 type FakePlugin = {
   reviewManager: FakeReviewManager | null;
-  app: { workspace: { openLinkText: ReturnType<typeof vi.fn> } };
+  app: {
+    workspace: {
+      openLinkText: ReturnType<typeof vi.fn>;
+      on: ReturnType<typeof vi.fn>;
+      offref: ReturnType<typeof vi.fn>;
+      /** Drive the handlers registered via `on`, as Obsidian's trigger does. */
+      trigger: (name: string, ...args: unknown[]) => void;
+    };
+  };
 };
 
+/**
+ * The plugin subscribes to 'ir-highlights-changed' in its constructor, so
+ * on/offref must exist on every fake — a missing one throws there, and
+ * CodeMirror responds by dropping the ViewPlugin entirely.
+ */
 function makePlugin(
   reviewManager: FakeReviewManager | null = null
 ): FakePlugin {
+  const handlers = new Map<string, Set<(...args: unknown[]) => unknown>>();
   return {
     reviewManager,
-    app: { workspace: { openLinkText: vi.fn() } },
+    app: {
+      workspace: {
+        openLinkText: vi.fn(),
+        on: vi.fn((name: string, callback: (...args: unknown[]) => unknown) => {
+          const forName = handlers.get(name) ?? new Set();
+          forName.add(callback);
+          handlers.set(name, forName);
+          return { name, callback } satisfies FakeEventRef;
+        }),
+        offref: vi.fn((ref: FakeEventRef) => {
+          handlers.get(ref.name)?.delete(ref.callback);
+        }),
+        trigger: (name: string, ...args: unknown[]) => {
+          handlers.get(name)?.forEach((callback) => callback(...args));
+        },
+      },
+    },
   };
 }
 
@@ -756,11 +788,7 @@ describe('click event handler', () => {
   });
 
   it('does not throw when highlight span with data-snippet-ref is clicked', () => {
-    const openLinkText = vi.fn();
-    const irPlugin: FakePlugin = {
-      reviewManager: makeReviewManager(),
-      app: { workspace: { openLinkText } },
-    };
+    const irPlugin = makePlugin(makeReviewManager());
     const view = makeView('hello', irPlugin);
     const span = document.createElement('span');
     span.className = 'ir-snippet-highlight';
@@ -1268,5 +1296,55 @@ describe('mutant-killing: absoluteEnd boundary check (> vs >=)', () => {
     const plugin = view.plugin(snippetHighlightExtension);
     expect(plugin!.decorations.size).toBe(0);
     view.destroy();
+  });
+});
+
+describe('ir-highlights-changed subscription', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  /** A view with one highlight already painted for FILE_PATH. */
+  function makePaintedView() {
+    const rm = makeReviewManager();
+    rm.snippets.offsetTracker.loadHighlights(FILE_PATH, [makeHighlight()]);
+    const irPlugin = makePlugin(rm);
+    stubFileInfo(FILE_PATH, 'article');
+    // Never resolves, so the constructor's load can't overwrite the tracker.
+    rm.getSnippetHighlights.mockReturnValue(new Promise(() => {}));
+    const view = makeView('hello world!!', irPlugin);
+    view.dispatch({ effects: refreshHighlightsEffect.of(null) });
+    return { view, irPlugin, rm };
+  }
+
+  it('repaints from the tracker when the event names the file it shows', () => {
+    const { view, irPlugin, rm } = makePaintedView();
+    expect(view.plugin(snippetHighlightExtension)!.decorations.size).toBe(1);
+
+    // What undoing a snippet creation does: drop the highlight, then announce it.
+    // The view must repaint itself — nothing dispatches into it directly.
+    rm.snippets.offsetTracker.removeHighlight(FILE_PATH, 'h1');
+    irPlugin.app.workspace.trigger('ir-highlights-changed', FILE_PATH);
+
+    expect(view.plugin(snippetHighlightExtension)!.decorations.size).toBe(0);
+    view.destroy();
+  });
+
+  it('ignores the event when it names a different file', () => {
+    const { view, irPlugin, rm } = makePaintedView();
+    rm.snippets.offsetTracker.removeHighlight(FILE_PATH, 'h1');
+    irPlugin.app.workspace.trigger('ir-highlights-changed', 'notes/other.md');
+    expect(view.plugin(snippetHighlightExtension)!.decorations.size).toBe(1);
+    view.destroy();
+  });
+
+  it('releases the subscription it created when destroyed', () => {
+    const { view, irPlugin } = makePaintedView();
+    const ref = irPlugin.app.workspace.on.mock.results[0].value as unknown;
+
+    view.destroy();
+
+    expect(irPlugin.app.workspace.offref).toHaveBeenCalledWith(ref);
+    expect(() =>
+      irPlugin.app.workspace.trigger('ir-highlights-changed', FILE_PATH)
+    ).not.toThrow();
   });
 });
