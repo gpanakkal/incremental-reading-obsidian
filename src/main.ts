@@ -80,7 +80,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         }
         if (checking) return true;
 
-        void this.reviewManager.createSnippet(editor, view);
+        void this.actions.createSnippet();
       },
     });
 
@@ -91,20 +91,16 @@ export default class IncrementalReadingPlugin extends Plugin {
       checkCallback: (checking) => {
         if (!this.reviewManager) return false;
 
+        const view =
+          this.getActiveReviewView() ??
+          this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view) return false;
+
         const editor = this.app.workspace.activeEditor?.editor;
         if (!editor) return false;
         if (checking) return true;
 
-        const reviewView = this.getActiveReviewView();
-        if (reviewView) {
-          void this.reviewManager.createCard(editor, reviewView);
-        }
-
-        const markdownView =
-          this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (markdownView) {
-          void this.reviewManager.createCard(editor, markdownView);
-        }
+        void this.actions.createCard();
       },
     });
 
