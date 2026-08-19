@@ -1,4 +1,4 @@
-import IncrementalReadingPlugin from '#/main';
+import type IncrementalReadingPlugin from '#/main';
 import { Annotation, RangeSetBuilder, StateEffect } from '@codemirror/state';
 import type { DecorationSet, EditorView, ViewUpdate } from '@codemirror/view';
 import { Decoration, ViewPlugin } from '@codemirror/view';
