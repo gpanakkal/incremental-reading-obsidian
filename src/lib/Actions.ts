@@ -101,7 +101,8 @@ export class Actions {
 
   reviewSnippet = async (snippet: ReviewSnippet, nextInterval?: number) => {
     try {
-      await this.plugin.reviewManager.reviewSnippet(
+      const beforeReview = { ...snippet.data };
+      const reviewId = await this.plugin.reviewManager.reviewSnippet(
         snippet.data,
         Date.now(),
         nextInterval
@@ -117,6 +118,18 @@ export class Actions {
         );
       }
       this.getNext();
+      this.pushUndo({
+        item: snippet,
+        description: `reviewing "${snippet.file.basename}"`,
+        undo: async () => {
+          await this.plugin.reviewManager.snippets.undoReview(
+            beforeReview,
+            reviewId
+          );
+          await invalidateItemQuery(snippet.data.id);
+          this.getNext();
+        },
+      });
     } catch (error) {
       console.error(error);
     }
