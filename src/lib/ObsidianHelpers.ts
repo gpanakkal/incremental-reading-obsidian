@@ -279,6 +279,21 @@ export class ObsidianHelpers {
     return normalizePath(`${dir}/${fileName}`);
   }
 
+  static findEmbeds(app: App, parent: TFile, target: TFile) {
+    const { metadataCache } = app;
+    const embeds = metadataCache.getFileCache(parent)?.embeds;
+    if (!embeds) return null;
+    const match = embeds.find((embed) => {
+      const linkPath = metadataCache.getFirstLinkpathDest(
+        embed.link,
+        parent.path
+      )?.path;
+      console.log({ embed, linkPath, targetPath: target.path });
+      return linkPath === target.path;
+    });
+    return match ?? null;
+  }
+
   static isDuplicate(fileName: string, noteType: NoteType, app: App) {
     return !!app.vault.getAbstractFileByPath(
       this.getTargetPath(fileName, noteType)
