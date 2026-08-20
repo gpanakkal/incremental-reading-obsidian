@@ -619,6 +619,34 @@ export class SnippetManager extends ItemManager {
   }
 
   /**
+   * Reset the snippet and remove all reviews from the specified one onwards
+   */
+  async undoReview(originalSnippet: ISnippetBase, reviewId: string) {
+    await this.repo.transaction(async () => {
+      const reviewRow = (
+        await this.repo.query(`SELECT * FROM snippet_review WHERE id = $1`, [
+          reviewId,
+        ])
+      )[0] as ISnippetReview;
+      if (!reviewRow)
+        throw new Error(`No snippet review found with ID "${reviewId}"`);
+      await this.repo.mutate(
+        `DELETE FROM snippet_review WHERE snippet_id = $1 AND (id = $2 OR review_time > $3)`,
+        [originalSnippet.id, reviewId, reviewRow.review_time]
+      );
+      await this.repo.mutate(
+        `UPDATE snippet SET dismissed = $1, due = $2, interval = $3, due_fuzz = $4 WHERE id = $5`,
+        [
+          originalSnippet.dismissed,
+          originalSnippet.due,
+          originalSnippet.interval,
+          originalSnippet.due_fuzz,
+          originalSnippet.id,
+        ]
+      );
+    });
+  }
+  /**
    * Change the priority of a snippet and recalculate its next due date
    */
   async reprioritize(snippet: ISnippetBase, newPriority: number) {
