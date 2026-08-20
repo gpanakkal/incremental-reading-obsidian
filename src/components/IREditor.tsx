@@ -367,10 +367,10 @@ export function IREditor({
               error
             );
           }
-          elRef.current?.removeChild(elRef.current?.children[0]);
-          internalRef.current = null;
-          if (editorRef) editorRef.current = null;
         }
+        elRef.current?.removeChild(elRef.current?.children[0]);
+        internalRef.current = null;
+        if (editorRef) editorRef.current = null;
       };
       return cleanupEffect;
     };
