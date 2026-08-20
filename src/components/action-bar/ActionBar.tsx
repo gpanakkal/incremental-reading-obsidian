@@ -1,5 +1,6 @@
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
+import type { ActionStackEntry } from '#/lib/Actions';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import { setPage, setShowAnswer } from '#/lib/store';
 import type { ReviewItem, ReviewText } from '#/lib/types';
@@ -22,7 +23,9 @@ import {
   Scissors,
   SkipForward,
   Trash2,
+  Undo2,
 } from 'lucide-react';
+import { useSyncExternalStore } from 'react';
 import { useDispatch } from 'react-redux';
 import { Rating } from 'ts-fsrs';
 import { useReviewContext } from '../ReviewContext';
@@ -52,6 +55,7 @@ export function ActionBar() {
           </ButtonWithIcon>
           <Separator />
           <ReviewTypeFilter />
+          <UndoAction />
           {currentItem && (
             <>
               {isReviewCard(currentItem) && <CardActions card={currentItem} />}
@@ -112,10 +116,44 @@ function HomeActions() {
  * - always render ActionBar once a global action exists
  * - forward/back (or use the view header)
  * - view queue
- * - undo last review/dismissal
  */
 function GlobalActions() {
   return <></>;
+}
+
+/**
+ * Reverses the most recent undoable action.
+ *
+ * The stack lives on the `Actions` instance rather than in the store, since its
+ * entries hold closures, so it announces its own changes and this subscribes.
+ * Rendering off the store instead would miss the actions that change no store
+ * state — creating a snippet, notably.
+ */
+function UndoAction() {
+  const { actions } = useReviewContext();
+  // The top entry, not the stack: `push`/`pop` mutate the array in place, so
+  // its reference never changes and every snapshot would compare equal. The
+  // entry is a fresh object per action and is all this button renders, so its
+  // identity changes exactly when the button's appearance should.
+  const lastAction: ActionStackEntry | undefined = useSyncExternalStore(
+    actions.subscribe,
+    () => actions.undoStack[actions.undoStack.length - 1]
+  );
+
+  return (
+    <ButtonWithIcon
+      tooltip={
+        lastAction ? `Undo ${lastAction.description}` : 'Nothing to undo'
+      }
+      id="undo-button"
+      disabled={lastAction === undefined}
+      handleClick={async () => {
+        await actions.undo();
+      }}
+    >
+      <Undo2 />
+    </ButtonWithIcon>
+  );
 }
 
 /**

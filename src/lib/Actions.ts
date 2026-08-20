@@ -31,14 +31,26 @@ import {
 } from './types';
 import { getContentSlice, getEndOfDay } from './utils';
 
+export type ActionStackEntry = {
+  item: ReviewItem;
+  description: string;
+  undo: () => void | Promise<void>;
+};
+
 /**
  * Coordinates review operations with store and query cache updates
  */
 export class Actions {
   plugin: IncrementalReadingPlugin;
+  undoStack: ActionStackEntry[];
+  emitter;
+  subscribe;
 
   constructor(plugin: IncrementalReadingPlugin) {
     this.plugin = plugin;
+    this.undoStack = [];
+    this.emitter = this.createEmitter();
+    this.subscribe = this.emitter.subscribe;
   }
 
   /** Call this after reviewing, skipping, dismissing, or deleting an open item */
@@ -53,7 +65,8 @@ export class Actions {
 
   reviewArticle = async (article: ReviewArticle, nextInterval?: number) => {
     try {
-      await this.plugin.reviewManager.reviewArticle(
+      const beforeReview = { ...article.data };
+      const reviewId = await this.plugin.reviewManager.reviewArticle(
         article.data,
         Date.now(),
         nextInterval
@@ -69,6 +82,18 @@ export class Actions {
         );
       }
       this.getNext();
+      this.pushUndo({
+        item: article,
+        description: `reviewing "${article.file.basename}"`,
+        undo: async () => {
+          await this.plugin.reviewManager.articles.undoReview(
+            beforeReview,
+            reviewId
+          );
+          await invalidateItemQuery(article.data.id);
+          this.getNext();
+        },
+      });
     } catch (error) {
       console.error(error);
     }
@@ -223,5 +248,39 @@ export class Actions {
     } else if (cardsOnly && currentItem.data.type !== 'card') {
       this.getNext();
     }
+  };
+
+  createEmitter() {
+    const listeners = new Set<() => void>();
+    return {
+      subscribe(fn: () => void) {
+        listeners.add(fn);
+        return () => void listeners.delete(fn);
+      },
+      emit() {
+        listeners.forEach((fn) => fn());
+      },
+    };
+  }
+
+  /**
+   * Record an undoable action. Every push goes through here: the stack is a
+   * plain array subscribers cannot watch, so a push that skips the emit leaves
+   * the undo button showing the action before it.
+   */
+  pushUndo = (entry: ActionStackEntry) => {
+    this.undoStack.push(entry);
+    this.emitter.emit();
+  };
+
+  undo = async () => {
+    const actionEntry = this.undoStack.pop();
+    if (actionEntry === undefined) return;
+    // Emitted before the reversal runs, not after: the entry is already off the
+    // stack, and an undo that throws partway would otherwise leave subscribers
+    // reading an entry that is no longer there.
+    this.emitter.emit();
+    await actionEntry.undo();
+    new Notice(`Undid ${actionEntry.description}`, SUCCESS_NOTICE_DURATION_MS);
   };
 }
