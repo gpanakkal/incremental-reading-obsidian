@@ -56,10 +56,6 @@ function makeReviewItem(basename: string, pathOverride?: string): ReviewItem {
 
 // #endregion
 
-// ---------------------------------------------------------------------------
-// skipItem — Notice message
-// ---------------------------------------------------------------------------
-
 describe('Actions.skipItem — Notice message', () => {
   let NoticeMock: ReturnType<typeof vi.fn>;
 
@@ -121,10 +117,6 @@ describe('Actions.skipItem — Notice message', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// dismissItem — Notice message
-// ---------------------------------------------------------------------------
-
 describe('Actions.dismissItem — Notice message', () => {
   let NoticeMock: ReturnType<typeof vi.fn>;
 
@@ -176,10 +168,6 @@ describe('Actions.dismissItem — Notice message', () => {
     expect(message).toContain('...');
   });
 });
-
-// ---------------------------------------------------------------------------
-// unDismissItem — Notice message
-// ---------------------------------------------------------------------------
 
 describe('Actions.unDismissItem — Notice message', () => {
   let NoticeMock: ReturnType<typeof vi.fn>;
@@ -241,10 +229,6 @@ describe('Actions.unDismissItem — Notice message', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// skipItem — dispatch
-// ---------------------------------------------------------------------------
-
 describe('Actions.skipItem — dispatch', () => {
   let NoticeMock: ReturnType<typeof vi.fn>;
 
@@ -266,10 +250,6 @@ describe('Actions.skipItem — dispatch', () => {
     expect(plugin.store.dispatch).toHaveBeenCalledTimes(2);
   });
 });
-
-// ---------------------------------------------------------------------------
-// dismissItem — dispatch
-// ---------------------------------------------------------------------------
 
 describe('Actions.dismissItem — dispatch', () => {
   let NoticeMock: ReturnType<typeof vi.fn>;
@@ -305,10 +285,6 @@ describe('Actions.dismissItem — dispatch', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// unDismissItem — dispatch
-// ---------------------------------------------------------------------------
-
 describe('Actions.unDismissItem — dispatch', () => {
   let NoticeMock: ReturnType<typeof vi.fn>;
 
@@ -340,5 +316,95 @@ describe('Actions.unDismissItem — dispatch', () => {
     const actions = new Actions(plugin);
     await actions.unDismissItem(makeReviewItem('my-article'));
     expect(plugin.store.dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe('Actions — undo stack notifications', () => {
+  let NoticeMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    NoticeMock = vi.fn();
+    vi.stubGlobal('Notice', NoticeMock);
+    vi.spyOn(store, 'getState').mockReturnValue({
+      currentItemId: null,
+    } as never);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('notifies subscribers when a skip is recorded', () => {
+    // Regression: the stack was pushed to directly, so subscribers heard
+    // nothing and the undo button kept showing the action before it.
+    const actions = new Actions(makePlugin());
+    const listener = vi.fn();
+    actions.subscribe(listener);
+
+    actions.skipItem(makeReviewItem('my-article'));
+
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('notifies subscribers when a dismissal is recorded', async () => {
+    const actions = new Actions(makePlugin());
+    const listener = vi.fn();
+    actions.subscribe(listener);
+
+    await actions.dismissItem(makeReviewItem('my-article'));
+
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('notifies subscribers when an action is undone', async () => {
+    const actions = new Actions(makePlugin());
+    actions.skipItem(makeReviewItem('my-article'));
+    const listener = vi.fn();
+    actions.subscribe(listener);
+
+    await actions.undo();
+
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not notify when there is nothing to undo', async () => {
+    const actions = new Actions(makePlugin());
+    const listener = vi.fn();
+    actions.subscribe(listener);
+
+    await actions.undo();
+
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('notifies even when the reversal itself throws', async () => {
+    // The entry is already off the stack by then, so subscribers must not be
+    // left reading an entry that is no longer there.
+    const actions = new Actions(makePlugin());
+    actions.pushUndo({
+      item: makeReviewItem('my-article'),
+      description: 'doing something reversible',
+      undo: () => {
+        throw new Error('reversal failed');
+      },
+    });
+    const listener = vi.fn();
+    actions.subscribe(listener);
+
+    await expect(actions.undo()).rejects.toThrow('reversal failed');
+
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops notifying after unsubscribe', () => {
+    const actions = new Actions(makePlugin());
+    const listener = vi.fn();
+    const unsubscribe = actions.subscribe(listener);
+
+    unsubscribe();
+    actions.skipItem(makeReviewItem('my-article'));
+
+    expect(listener).not.toHaveBeenCalled();
   });
 });
