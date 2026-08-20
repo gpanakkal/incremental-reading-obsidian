@@ -120,9 +120,9 @@ export function IREditor({
     if (!isPersistableChange(update)) return;
 
     const docText = update.state.doc.toString();
+    lastSavedContentRef.current = docText;
     // TODO: don't save if changes occurred outside review
     await saveNote(itemRef.current, docText);
-    lastSavedContentRef.current = docText;
   };
 
   // extend the MarkdownEditor extracted from Obsidian
