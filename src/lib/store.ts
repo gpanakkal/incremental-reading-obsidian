@@ -103,6 +103,10 @@ const seenIdsSlice = createSlice({
       }
       state.ids[id] = true;
     },
+    removeSeenId: (state, action: PayloadAction<{ id: string }>) => {
+      const { id } = action.payload;
+      delete state.ids[id];
+    },
     resetSeenIds: (_state, action: PayloadAction<number>) => ({
       ids: {},
       resetTime: action.payload,
@@ -122,7 +126,7 @@ const seenIdsSlice = createSlice({
   },
 });
 
-export const { addSeenId, resetSeenIds } = seenIdsSlice.actions;
+export const { addSeenId, removeSeenId, resetSeenIds } = seenIdsSlice.actions;
 export const { getSeenIds } = seenIdsSlice.selectors;
 
 /**
