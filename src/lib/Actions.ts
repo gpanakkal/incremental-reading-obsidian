@@ -179,6 +179,16 @@ export class Actions {
     await this.plugin.reviewManager.dismissItem(item);
     await invalidateItemQuery(item.data.id);
 
+    this.pushUndo({
+      item,
+      description: `dismissing "${item.file.basename}"`,
+      undo: async () => {
+        await this.plugin.reviewManager.unDismissItem(item);
+        await invalidateItemQuery(item.data.id);
+        this.getNext();
+      },
+    });
+
     new Notice(
       `Dismissed "${getContentSlice(item.file.basename, CONTENT_TITLE_SLICE_LENGTH, true)}"`
     );
