@@ -9,10 +9,12 @@ import {
   SUCCESS_NOTICE_DURATION_MS,
 } from './constants';
 import IRScheduler from './IRScheduler';
+import { ObsidianHelpers } from './ObsidianHelpers';
 import {
   fetchCurrentItem,
   invalidateCurrentItemQuery,
   invalidateItemQuery,
+  queryClient,
 } from './query-client';
 import {
   addSeenId,
@@ -314,7 +316,95 @@ export class Actions {
       this.plugin.getActiveReviewView() ??
       this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
     if (!view) return null;
+
+    const sourceFile = view.file;
+    if (!sourceFile) return null;
+
     const result = await this.plugin.reviewManager.createCard(editor, view);
+
+    if (result) {
+      const { reviewCard, line } = result;
+
+      this.pushUndo({
+        item: result.reviewCard,
+        description: `creating card "${result.reviewCard.file.basename}"`,
+        undo: async () => {
+          // restore the original text
+          const before = await this.plugin.app.vault.read(sourceFile);
+          const after = await ObsidianHelpers.editNote(
+            this.plugin.app,
+            sourceFile,
+            (data) => {
+              const cardEmbed = ObsidianHelpers.findEmbeds(
+                this.plugin.app,
+                sourceFile,
+                reviewCard.file
+              );
+
+              if (!cardEmbed) return data;
+
+              const startOffset = cardEmbed.position.start.offset;
+              const endOffset = cardEmbed.position.end.offset;
+
+              const prefix = data.slice(0, startOffset);
+              const replacement = data.slice(startOffset, endOffset);
+              console.log({ replacement, line });
+              const suffix = data.slice(endOffset);
+              return prefix + line + suffix;
+            }
+          );
+
+          console.log(
+            '[undo] write changed:',
+            before !== after,
+            before.length,
+            '→',
+            after.length
+          );
+
+          // remove the card file and row
+          const success = await this.plugin.reviewManager.cards.delete(
+            reviewCard.data.id
+          );
+
+          const { parent } = reviewCard.data;
+          console.log(
+            '[undo] parent id:',
+            parent,
+            'current:',
+            store.getState().currentItemId
+          );
+          if (parent) {
+            const key = ['item', parent, 'file-text'];
+            const q0 = queryClient.getQueryCache().find({ queryKey: key });
+            console.log(
+              '[undo] before:',
+              !!q0,
+              '| len:',
+              (q0?.state.data as string)?.length,
+              '| updatedAt:',
+              q0?.state.dataUpdatedAt,
+              '| observers:',
+              q0?.observers.length
+            );
+
+            await invalidateItemQuery(parent);
+
+            const q1 = queryClient.getQueryCache().find({ queryKey: key });
+            console.log(
+              '[undo] after:',
+              '| len:',
+              (q1?.state.data as string)?.length,
+              '| updatedAt:',
+              q1?.state.dataUpdatedAt,
+              '| stale:',
+              q1?.isStale()
+            );
+          }
+        },
+      });
+    }
+
     return result;
   };
 

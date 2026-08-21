@@ -2,6 +2,7 @@ import type {
   ISRSCard,
   ISRSCardDisplay,
   ReviewCard,
+  SRSCardReviewRow,
   SRSCardRow,
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
@@ -187,17 +188,15 @@ export class CardManager extends ItemManager {
       this.app
     );
     const selectionBounds = Obsidian.getSelectionWithBounds(editor);
-    const bounds = selectionBounds
-      ? ([
-          selectionBounds.start.ch - start,
-          selectionBounds.end.ch - start,
-        ] as const)
-      : null;
-
-    if (!bounds) {
+    if (!selectionBounds) {
       new Notice('Text must be selected', ERROR_NOTICE_DURATION_MS);
       return;
     }
+
+    const bounds = [
+      selectionBounds.start.ch - start,
+      selectionBounds.end.ch - start,
+    ] as const;
 
     try {
       const withDelimiters = this.delimitText(line, bounds)[0];
@@ -221,7 +220,13 @@ export class CardManager extends ItemManager {
       );
       // move the cursor to the next block
       editor.setSelection({ line: lineNumber + 1, ch: 0 });
-      return reviewCard;
+      return {
+        reviewCard,
+        line,
+        lineNumber,
+        start,
+        end,
+      };
     } catch (error) {
       if (error instanceof Error) {
         console.error(error);
@@ -299,6 +304,29 @@ export class CardManager extends ItemManager {
     }
   }
 
+  /**
+   * Drop a card's row and delete its note
+   */
+  async delete(id: string) {
+    try {
+      const row = (
+        await this.repo.query(`SELECT * FROM srs_card WHERE id = $1`, [id])
+      )[0] as SRSCardRow | null;
+      if (!row) throw new Error(`No card was found with ID "${id}"`);
+
+      const file = Obsidian.getNote(row.reference, this.app);
+      if (file) {
+        // delete the card file
+        await this.plugin.app.fileManager.promptForFileDeletion(file);
+      }
+
+      // remove the row entirely
+      await this.repo.mutate(`DELETE FROM srs_card WHERE id = $1`, [id]);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
   /**
    * If text is selected, adds cloze deletion delimiters around the selection
    * and removes them elsewhere.
