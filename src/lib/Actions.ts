@@ -266,16 +266,45 @@ export class Actions {
   createSnippet = async (firstReview?: number) => {
     const editor = this.plugin.app.workspace.activeEditor?.editor;
     if (!editor) return null;
+
     const view =
       this.plugin.getActiveReviewView() ??
       this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
     if (!view) return null;
-    const result = await this.plugin.reviewManager.createSnippet(
+
+    const parentFile = view.file;
+    if (!parentFile) return null;
+
+    const snippet = await this.plugin.reviewManager.createSnippet(
       editor,
       view,
       firstReview
     );
-    return result;
+
+    if (snippet !== null) {
+      this.pushUndo({
+        item: snippet,
+        description: `creating snippet "${snippet.file.basename}"`,
+        undo: async () => {
+          const success = await this.plugin.reviewManager.snippets.delete(
+            snippet.data.id
+          );
+          if (!success) return;
+
+          this.plugin.reviewManager.snippets.offsetTracker.removeHighlight(
+            parentFile.path,
+            snippet.data.id
+          );
+
+          // trigger a re-paint so the highlight disappears
+          this.plugin.app.workspace.trigger(
+            'ir-highlights-changed',
+            parentFile.path
+          );
+        },
+      });
+    }
+    return snippet;
   };
 
   createCard = async () => {
