@@ -16,6 +16,7 @@ import {
 } from './query-client';
 import {
   addSeenId,
+  removeSeenId,
   resetCurrentItem,
   resetTypesToReview,
   setTypesToReview,
@@ -216,6 +217,14 @@ export class Actions {
     const resetTime = getEndOfDay(this.plugin.settings.dayRolloverOffset);
     this.plugin.store.dispatch(addSeenId({ id: item.data.id, resetTime }));
 
+    this.pushUndo({
+      item,
+      description: `skipping "${item.file.basename}"`,
+      undo: () => {
+        this.plugin.store.dispatch(removeSeenId({ id: item.data.id }));
+        this.getNext();
+      },
+    });
     new Notice(
       `Skipping ${getContentSlice(item.file.basename, CONTENT_TITLE_SLICE_LENGTH + 5, true)} until next session`
     );
