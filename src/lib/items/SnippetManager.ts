@@ -382,6 +382,31 @@ export class SnippetManager extends ItemManager {
     }
   }
 
+  /**
+   * Delete snippet file and mark row as deleted.
+   */
+  async delete(id: string) {
+    try {
+      const row = (
+        await this.repo.query(`SELECT * FROM snippet WHERE id = $1`, [id])
+      )[0] as SnippetRow | null;
+      if (!row) throw new Error(`No snippet was found with ID "${id}"`);
+
+      const file = Obsidian.getNote(row.reference, this.app);
+      if (file) {
+        // delete the snippet file
+        await this.plugin.app.fileManager.promptForFileDeletion(file);
+      }
+
+      // remove the row entirely
+      await this.repo.mutate(`DELETE FROM snippet WHERE id = $1`, [id]);
+
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   async fetch(id: string): Promise<ReviewSnippet | null> {
     const query = `SELECT * FROM snippet WHERE id = $1`;
     const result = await this.repo.query(query, [id]);
