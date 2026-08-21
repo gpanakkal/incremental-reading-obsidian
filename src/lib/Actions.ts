@@ -167,11 +167,33 @@ export class Actions {
   };
 
   gradeCard = async (card: ReviewCard, grade: Grade) => {
-    await this.plugin.reviewManager.reviewCard(card.data, grade);
-    new Notice(`Graded as: ${Rating[grade]}`);
-    if (card.data.dismissed) {
+    const reviewRowId = await this.plugin.reviewManager.reviewCard(
+      card.data,
+      grade
+    );
+    const wasDismissed = card.data.dismissed;
+    if (wasDismissed) {
       await this.unDismissItem(card);
     }
+
+    this.pushUndo({
+      item: card,
+      description: `grading "${card.file.basename}" ${Rating[grade]}`,
+      undo: async () => {
+        await this.plugin.reviewManager.cards.rollbackBeforeReview(
+          card.data,
+          reviewRowId
+        );
+        if (wasDismissed) {
+          await this.dismissItem(card);
+        }
+
+        await invalidateItemQuery(card.data.id);
+        this.getNext();
+      },
+    });
+
+    new Notice(`Graded as: ${Rating[grade]}`);
     this.getNext();
   };
 

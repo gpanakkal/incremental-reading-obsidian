@@ -557,4 +557,54 @@ export class CardManager extends ItemManager {
 
     return reviewRow.id;
   }
+
+  async rollbackBeforeReview(card: ISRSCardDisplay, reviewRowId: string) {
+    const reviewRow = (
+      await this.repo.query(
+        `SELECT * FROM srs_card_review WHERE id = $1 AND card_id = $2`,
+        [reviewRowId, card.id]
+      )
+    )[0] as SRSCardReviewRow | undefined;
+    if (!reviewRow) {
+      throw new Error(
+        `No card review found with id ${reviewRowId} for card ${card.id}`
+      );
+    }
+
+    const rolledBackCard = this.getFsrs().rollback(card, reviewRow);
+    await this.repo.transaction(async () => {
+      // update the card row
+      const updatedCard = CardManager.baseToRow({ ...card, ...rolledBackCard });
+      let updateQuery = `UPDATE srs_card SET `;
+      const columnUpdateSegments = [
+        `due = $1, last_review = $2`,
+        `stability = $3, difficulty = $4`,
+        `elapsed_days = $5`,
+        `scheduled_days = $6`,
+        `reps = $7, lapses = $8`,
+        `state = $9, dismissed = 0`,
+      ];
+      updateQuery += columnUpdateSegments.join(', ');
+      updateQuery += ` WHERE id = $10`;
+      const updateParams = [
+        updatedCard.due,
+        updatedCard.last_review,
+        updatedCard.stability,
+        updatedCard.difficulty,
+        updatedCard.elapsed_days,
+        updatedCard.scheduled_days,
+        updatedCard.reps,
+        updatedCard.lapses,
+        updatedCard.state,
+        card.id,
+      ];
+      await this.repo.mutate(updateQuery, updateParams);
+
+      // delete the specified review and all following reviews for this card
+      await this.repo.mutate(
+        `DELETE FROM srs_card_review WHERE card_id = $1 AND review >= $2`,
+        [card.id, reviewRow.review]
+      );
+    });
+  }
 }
