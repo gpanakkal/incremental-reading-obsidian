@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
 
-import { isPersistableChange } from '#/components/IREditor';
+import {
+  computeMinimalChange,
+  isPersistableChange,
+} from '#/components/IREditor';
 import { isExternalSync } from '#/lib/extensions/SnippetHighlightExtension';
 import { EditorSelection, EditorState } from '@codemirror/state';
 import { EditorView, type ViewUpdate } from '@codemirror/view';
 import fc from 'fast-check';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 // #region HELPERS
 
@@ -44,36 +47,332 @@ function captureUpdate(
  * Mirror of the updateEditorContent dispatch in IREditor.tsx.
  * Keep in sync with that implementation.
  */
-function dispatchFullReplacement(view: EditorView, newContent: string): void {
-  const newLength = newContent.length;
-  const clampedSelection = EditorSelection.create(
-    view.state.selection.ranges.map((r) =>
-      EditorSelection.range(
-        Math.min(r.anchor, newLength),
-        Math.min(r.head, newLength)
-      )
-    ),
-    view.state.selection.mainIndex
-  );
+function dispatchExternalSync(view: EditorView, newContent: string): void {
+  const change = computeMinimalChange(view.state.doc.toString(), newContent);
+  if (!change) return;
   const { scrollTop, scrollLeft } = view.scrollDOM;
   view.dispatch({
-    changes: { from: 0, to: view.state.doc.length, insert: newContent },
-    selection: clampedSelection,
+    changes: change,
     annotations: isExternalSync.of(true),
   });
   view.scrollDOM.scrollTop = scrollTop;
   view.scrollDOM.scrollLeft = scrollLeft;
 }
 
+/**
+ * Models the full updateEditorContent guard:
+ *   skip if value === currentDoc  (no change at all)
+ *   skip if value === lastSaved   (stale echo of our own save)
+ *   apply otherwise               (genuine external change)
+ *
+ * Returns true if the replacement was applied, false if skipped.
+ */
+function conditionalReplacement(
+  view: EditorView,
+  value: string,
+  lastSavedContent: string
+): boolean {
+  if (view.state.doc.toString() === value) return false;
+  if (value === lastSavedContent) return false;
+  dispatchExternalSync(view, value);
+  return true;
+}
+
+/** Applies a change the way CodeMirror's ChangeSet does, for round-tripping. */
+function applyChange(
+  current: string,
+  change: { from: number; to: number; insert: string }
+): string {
+  return (
+    current.slice(0, change.from) + change.insert + current.slice(change.to)
+  );
+}
+
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
+
+/** True when position `i` falls between the two halves of a surrogate pair. */
+function splitsSurrogatePair(text: string, i: number): boolean {
+  return (
+    isHighSurrogate(text.charCodeAt(i - 1)) &&
+    isLowSurrogate(text.charCodeAt(i))
+  );
+}
+
+/**
+ * A document built from a shared head, a differing middle, and a shared tail —
+ * the shape every real external sync takes, since a note edited elsewhere keeps
+ * most of its text.
+ */
+const localEditArb = fc
+  .record({
+    head: fc.string({ minLength: 1, maxLength: 60 }),
+    tail: fc.string({ minLength: 1, maxLength: 60 }),
+    oldMiddle: fc.string({ minLength: 1, maxLength: 30 }),
+    newMiddle: fc.string({ minLength: 1, maxLength: 30 }),
+  })
+  // The middles must differ at both ends, or the algorithm legitimately
+  // absorbs the matching characters into the shared prefix/suffix and the
+  // exact boundary assertions below would not hold.
+  .filter(
+    ({ oldMiddle, newMiddle }) =>
+      oldMiddle[0] !== newMiddle[0] &&
+      oldMiddle[oldMiddle.length - 1] !== newMiddle[newMiddle.length - 1]
+  );
+
 // #endregion
 
+describe('computeMinimalChange narrows a whole-document swap to the differing span', () => {
+  it('returns null when the incoming text already matches the document', () => {
+    expect(computeMinimalChange('same text', 'same text')).toBeNull();
+  });
+
+  it('returns null for two empty strings', () => {
+    expect(computeMinimalChange('', '')).toBeNull();
+  });
+
+  it('reports the exact span when a card line is undone out of the middle of a note', () => {
+    const before = 'intro\ncard line\noutro';
+    const after = 'intro\noutro';
+
+    expect(computeMinimalChange(before, after)).toEqual({
+      from: 6,
+      to: 16,
+      insert: '',
+    });
+  });
+
+  it('reports an insertion as a zero-width replacement at the insertion point', () => {
+    expect(computeMinimalChange('ab', 'aXb')).toEqual({
+      from: 1,
+      to: 1,
+      insert: 'X',
+    });
+  });
+
+  it('replaces the whole document when nothing at all is shared', () => {
+    expect(computeMinimalChange('abc', 'xyz')).toEqual({
+      from: 0,
+      to: 3,
+      insert: 'xyz',
+    });
+  });
+
+  it('reconstructs the incoming text exactly (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ unit: 'binary', maxLength: 120 }),
+        fc.string({ unit: 'binary', maxLength: 120 }),
+        async (current, next) => {
+          const change = computeMinimalChange(current, next);
+          // A null result must mean the texts already match; anything else
+          // would silently drop an external edit.
+          if (change === null) {
+            expect(current).toBe(next);
+            return;
+          }
+          expect(applyChange(current, change)).toBe(next);
+        }
+      ),
+      { numRuns: 500 }
+    );
+  });
+
+  it('keeps from and to inside the current document and in order (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ unit: 'binary', maxLength: 120 }),
+        fc.string({ unit: 'binary', maxLength: 120 }),
+        async (current, next) => {
+          const change = computeMinimalChange(current, next);
+          if (change === null) return;
+          expect(change.from).toBeGreaterThanOrEqual(0);
+          expect(change.to).toBeGreaterThanOrEqual(change.from);
+          expect(change.to).toBeLessThanOrEqual(current.length);
+        }
+      ),
+      { numRuns: 500 }
+    );
+  });
+
+  it('leaves the shared head and tail outside the changed span (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        localEditArb,
+        async ({ head, tail, oldMiddle, newMiddle }) => {
+          const current = head + oldMiddle + tail;
+          const next = head + newMiddle + tail;
+
+          const change = computeMinimalChange(current, next);
+
+          // Anything less than this and the scroll anchor — a position in the
+          // head — would fall inside the deleted range and collapse.
+          expect(change).not.toBeNull();
+          expect(change!.from).toBeGreaterThanOrEqual(head.length);
+          expect(change!.to).toBeLessThanOrEqual(
+            head.length + oldMiddle.length
+          );
+        }
+      ),
+      { numRuns: 300 }
+    );
+  });
+
+  it('never places a boundary inside a surrogate pair (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ unit: 'binary', maxLength: 80 }),
+        fc.string({ unit: 'binary', maxLength: 80 }),
+        async (current, next) => {
+          const change = computeMinimalChange(current, next);
+          if (change === null) return;
+          // A boundary inside an astral character hands CodeMirror a position
+          // that is not a valid cursor location.
+          expect(splitsSurrogatePair(current, change.from)).toBe(false);
+          expect(splitsSurrogatePair(current, change.to)).toBe(false);
+        }
+      ),
+      { numRuns: 500 }
+    );
+  });
+
+  it('widens past a shared astral character rather than splitting it', () => {
+    // Both strings start with the same emoji, so a naive scan would stop the
+    // prefix between its two code units.
+    const change = computeMinimalChange('\u{1F600}a', '\u{1F600}b');
+
+    expect(change).toEqual({ from: 2, to: 3, insert: 'b' });
+  });
+
+  it('widens when the two texts share only the leading half of a pair', () => {
+    // \u{1F600} and \u{1F601} share their high surrogate but differ in the low
+    // one, so the scan would otherwise cut the pair in half.
+    const change = computeMinimalChange('\u{1F600}', '\u{1F601}');
+
+    expect(change).not.toBeNull();
+    expect(change!.from).toBe(0);
+    expect(applyChange('\u{1F600}', change!)).toBe('\u{1F601}');
+  });
+
+  it('widens when the two texts share only the trailing half of a pair', () => {
+    // \u{1F600} is D83D DE00 and \u{1FA00} is D83E DE00: the suffix scan matches
+    // the shared low surrogate and stops mid-pair, putting the boundary between
+    // the halves of the character still in the document.
+    const change = computeMinimalChange('\u{1F600}', '\u{1FA00}');
+
+    expect(change).toEqual({ from: 0, to: 2, insert: '\u{1FA00}' });
+  });
+
+  it('handles astral characters that share either surrogate half (property-based)', async () => {
+    // Emoji drawn at random almost never share a surrogate half, so a pool of
+    // characters chosen to share one or the other is needed to reach the
+    // boundary adjustments at all. D83D DE00 / D83E DE00 share the low half;
+    // D83D DE00 / D83D DE01 share the high half.
+    const astralText = fc
+      .array(
+        fc.constantFrom(
+          '\u{1F600}',
+          '\u{1FA00}',
+          '\u{1F601}',
+          '\u{1F9A0}',
+          'a',
+          '\n'
+        ),
+        { maxLength: 12 }
+      )
+      .map((chars) => chars.join(''));
+
+    await fc.assert(
+      fc.asyncProperty(astralText, astralText, async (current, next) => {
+        const change = computeMinimalChange(current, next);
+        if (change === null) {
+          expect(current).toBe(next);
+          return;
+        }
+        expect(applyChange(current, change)).toBe(next);
+        expect(splitsSurrogatePair(current, change.from)).toBe(false);
+        expect(splitsSurrogatePair(current, change.to)).toBe(false);
+      }),
+      { numRuns: 1000 }
+    );
+  });
+});
+
+describe('updateEditorContent keeps CodeMirror scroll anchor mappable', () => {
+  // CodeMirror holds the viewport still by remapping the position of the line
+  // at the top of the screen through the ChangeSet. These tests assert on that
+  // mapping directly: jsdom has no layout, so scrollTop itself proves nothing.
+
+  const makeDoc = (lines: number, marker = 'body') =>
+    Array.from({ length: lines }, (_, i) => `line ${i} ${marker}`).join('\n');
+
+  it('maps a viewport-top anchor to itself when the edit is below it', () => {
+    const before = makeDoc(60);
+    const after = before.replace('line 50 body', 'line 50 edited elsewhere');
+    const anchorPos = before.indexOf('line 30 body');
+
+    const update = captureUpdate(before, (view) =>
+      dispatchExternalSync(view, after)
+    );
+
+    // The regression: a full-document replacement collapsed this to 0, and the
+    // next measure pass scrolled line 0 back under the viewport top.
+    expect(update.changes.mapPos(anchorPos, -1)).toBe(anchorPos);
+  });
+
+  it('maps a viewport-top anchor onto the same line when the edit is above it', () => {
+    const before = makeDoc(60);
+    const after = before.replace('line 10 body', 'line 10 body\ninserted line');
+    const anchorPos = before.indexOf('line 30 body');
+
+    const update = captureUpdate(before, (view) =>
+      dispatchExternalSync(view, after)
+    );
+
+    const mapped = update.changes.mapPos(anchorPos, -1);
+
+    // The anchor shifts by the inserted text, which is exactly what lets
+    // CodeMirror adjust scrollTop so the line stays put on screen.
+    expect(mapped).toBe(anchorPos + '\ninserted line'.length);
+    expect(after.slice(mapped, mapped + 'line 30 body'.length)).toBe(
+      'line 30 body'
+    );
+  });
+
+  it('maps an anchor at any untouched position to itself (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        localEditArb.chain((edit) =>
+          fc.record({
+            edit: fc.constant(edit),
+            // Any position within the shared head, where a scroll anchor above
+            // the edit would sit.
+            anchorPos: fc.integer({ min: 0, max: edit.head.length }),
+          })
+        ),
+        async ({ edit, anchorPos }) => {
+          const { head, tail, oldMiddle, newMiddle } = edit;
+          const current = head + oldMiddle + tail;
+
+          const update = captureUpdate(current, (view) =>
+            dispatchExternalSync(view, head + newMiddle + tail)
+          );
+
+          expect(update.changes.mapPos(anchorPos, -1)).toBe(anchorPos);
+        }
+      ),
+      { numRuns: 200 }
+    );
+  });
+});
+
 describe('isPersistableChange keeps fetched content from being written back', () => {
-  it('rejects the full-document replacement updateEditorContent dispatches', () => {
-    // The regression: this replacement carries text fetched for whichever item
-    // is current now, while the editor still saves to the item it mounted
-    // with. Persisting it overwrites that item's note with the other's text.
+  it('rejects the change updateEditorContent dispatches', () => {
+    // The regression: this carries text fetched for whichever item is current
+    // now, while the editor still saves to the item it mounted with.
+    // Persisting it overwrites that item's note with the other's text.
     const update = captureUpdate('article body', (view) =>
-      dispatchFullReplacement(view, 'card body {{answer}}')
+      dispatchExternalSync(view, 'card body {{answer}}')
     );
 
     expect(isPersistableChange(update)).toBe(false);
@@ -108,7 +407,7 @@ describe('isPersistableChange keeps fetched content from being written back', ()
     expect(isPersistableChange(update)).toBe(false);
   });
 
-  it('rejects any replacement carrying the external-sync annotation, whatever the content (property-based)', async () => {
+  it('rejects any sync carrying the external-sync annotation, whatever the content (property-based)', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc
@@ -119,7 +418,7 @@ describe('isPersistableChange keeps fetched content from being written back', ()
           .filter(([initial, incoming]) => initial !== incoming),
         async ([initial, incoming]) => {
           const update = captureUpdate(initial, (view) =>
-            dispatchFullReplacement(view, incoming)
+            dispatchExternalSync(view, incoming)
           );
 
           // Every value pushed in from outside is already on disk, so none of
@@ -147,55 +446,87 @@ describe('isPersistableChange keeps fetched content from being written back', ()
 });
 
 describe('updateEditorContent preserves cursor position', () => {
-  afterEach(() => {
-    // Views are destroyed at the end of each test; nothing global to clean up.
-  });
-
-  it('preserves cursor at position 5 after replacement with equal-length content', () => {
-    const view = makeView('hello world'); // length 11
-    view.dispatch({ selection: EditorSelection.cursor(5) });
-    expect(view.state.selection.main.head).toBe(5); // precondition
-
-    dispatchFullReplacement(view, 'HELLO WORLD');
-
-    // Bug: resets to 0. Fix: maps cursor through changes → stays at 5.
-    expect(view.state.selection.main.head).toBe(5);
-    view.destroy();
-  });
-
-  it('preserves selection range [2, 7] after replacement with longer content', () => {
-    const view = makeView('abcdefghij'); // length 10
-    view.dispatch({ selection: EditorSelection.range(2, 7) });
-    expect(view.state.selection.main.anchor).toBe(2); // precondition
-    expect(view.state.selection.main.head).toBe(7); // precondition
-
-    dispatchFullReplacement(view, 'abcdefghijklmno'); // length 15
-
-    // Bug: both reset to 0. Fix: selection maps through changes.
-    expect(view.state.selection.main.anchor).toBe(2);
-    expect(view.state.selection.main.head).toBe(7);
-    view.destroy();
-  });
-
-  it('preserves cursor when replacement content is identical to current doc', () => {
-    const view = makeView('hello');
+  it('leaves a cursor sitting before the edit exactly where it was', () => {
+    const view = makeView('intro\ncard line\noutro');
     view.dispatch({ selection: EditorSelection.cursor(3) });
 
-    dispatchFullReplacement(view, 'hello');
+    dispatchExternalSync(view, 'intro\noutro');
 
-    expect(view.state.doc.toString()).toBe('hello');
     expect(view.state.selection.main.head).toBe(3);
     view.destroy();
   });
 
-  it('preserves cursor at an arbitrary position after replacement with arbitrary content (property-based)', async () => {
+  it('shifts a cursor sitting after the edit by the length the edit removed', () => {
+    const before = 'intro\ncard line\noutro';
+    const view = makeView(before);
+    const cursor = before.indexOf('outro') + 2;
+    view.dispatch({ selection: EditorSelection.cursor(cursor) });
+
+    dispatchExternalSync(view, 'intro\noutro');
+
+    // 'card line\n' (10 chars) disappeared from above the cursor, so the
+    // cursor must move back by 10 to stay on the same character.
+    expect(view.state.selection.main.head).toBe(cursor - 10);
+    expect(
+      view.state.doc.toString().slice(0, view.state.selection.main.head)
+    ).toBe('intro\nou');
+    view.destroy();
+  });
+
+  it('keeps a selection range anchored to the same characters across an edit above it', () => {
+    const before = 'HEAD\nmiddle\nTAIL';
+    const view = makeView(before);
+    const anchor = before.indexOf('TAIL');
+    view.dispatch({ selection: EditorSelection.range(anchor, anchor + 4) });
+
+    dispatchExternalSync(view, 'HEAD\nmiddle text\nTAIL');
+
+    const { from, to } = view.state.selection.main;
+    expect(view.state.doc.toString().slice(from, to)).toBe('TAIL');
+    view.destroy();
+  });
+
+  it('keeps the cursor on the same character for any edit above it (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        localEditArb,
+        async ({ head, tail, oldMiddle, newMiddle }) => {
+          const current = head + oldMiddle + tail;
+          const view = makeView(current);
+          // Cursor in the tail, i.e. below the edit.
+          const cursor = head.length + oldMiddle.length + tail.length;
+          view.dispatch({ selection: EditorSelection.cursor(cursor) });
+
+          dispatchExternalSync(view, head + newMiddle + tail);
+
+          expect(view.state.selection.main.head).toBe(
+            head.length + newMiddle.length + tail.length
+          );
+          view.destroy();
+        }
+      ),
+      { numRuns: 200 }
+    );
+  });
+
+  it('clamps the cursor into the document when the incoming text is empty', () => {
+    const view = makeView('hello world');
+    view.dispatch({ selection: EditorSelection.cursor(6) });
+
+    dispatchExternalSync(view, '');
+
+    expect(view.state.doc.toString()).toBe('');
+    expect(view.state.selection.main.head).toBe(0);
+    view.destroy();
+  });
+
+  it('leaves the cursor inside the document for any incoming text (property-based)', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.string({ minLength: 2, maxLength: 200 }).chain((initial) =>
           fc.record({
             initialContent: fc.constant(initial),
-            cursorPos: fc.integer({ min: 1, max: initial.length }),
-            // filter ensures newContent !== initial so the early-return guard does not fire
+            cursorPos: fc.integer({ min: 0, max: initial.length }),
             newContent: fc
               .string({ minLength: 0, maxLength: 200 })
               .filter((s) => s !== initial),
@@ -205,45 +536,19 @@ describe('updateEditorContent preserves cursor position', () => {
           const view = makeView(initialContent);
           view.dispatch({ selection: EditorSelection.cursor(cursorPos) });
 
-          dispatchFullReplacement(view, newContent);
+          dispatchExternalSync(view, newContent);
 
-          // A correct implementation maps the cursor through the ChangeSet.
-          // A full deletion maps any position to 0 (the insertion point), so the
-          // cursor should land at min(cursorPos, newContent.length).
-          const expectedHead = Math.min(cursorPos, newContent.length);
-          // Bug: head is always 0 for any cursorPos > 0 when newContent.length >= 1.
-          expect(view.state.selection.main.head).toBe(expectedHead);
-
+          expect(view.state.doc.toString()).toBe(newContent);
+          expect(view.state.selection.main.head).toBeGreaterThanOrEqual(0);
+          expect(view.state.selection.main.head).toBeLessThanOrEqual(
+            newContent.length
+          );
           view.destroy();
         }
       )
     );
   });
 });
-
-// ---------------------------------------------------------------------------
-// Helper that mirrors the full updateEditorContent guard logic, including the
-// lastSavedContent check. Keep in sync with IREditor.tsx updateEditorContent.
-// ---------------------------------------------------------------------------
-
-/**
- * Models the full updateEditorContent guard:
- *   skip if value === currentDoc  (no change at all)
- *   skip if value === lastSaved   (stale echo of our own save)
- *   apply otherwise               (genuine external change)
- *
- * Returns true if the replacement was applied, false if skipped.
- */
-function conditionalReplacement(
-  view: EditorView,
-  value: string,
-  lastSavedContent: string
-): boolean {
-  if (view.state.doc.toString() === value) return false;
-  if (value === lastSavedContent) return false;
-  dispatchFullReplacement(view, value);
-  return true;
-}
 
 describe('updateEditorContent skips stale own-save echoes and applies genuine external changes', () => {
   it('does not apply a replacement when the fetched value equals the last saved content (own-save echo)', () => {
@@ -332,139 +637,12 @@ describe('updateEditorContent restores scrollDOM scroll position after replaceme
           // Ensure the dispatch actually fires (content must differ from current doc).
           const content =
             newContent !== initialContent ? newContent : newContent + '\x00';
-          dispatchFullReplacement(view, content);
+          dispatchExternalSync(view, content);
 
-          // A correct implementation saves scroll before dispatch and restores it
-          // after. Assert the final observable state, not the call sequence —
-          // using the getter confirms the value that actually stuck.
+          // Keeping scrollTop equal to the value CodeMirror recorded at its
+          // last measure is what stops it discarding the scroll anchor.
           expect(view.scrollDOM.scrollTop).toBe(scrollTop);
           expect(view.scrollDOM.scrollLeft).toBe(scrollLeft);
-
-          view.destroy();
-        }
-      )
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Edge cases for dispatchFullReplacement cursor/selection clamping
-// ---------------------------------------------------------------------------
-
-describe('updateEditorContent clamps cursor to empty replacement content', () => {
-  it('clamps cursor to 0 when replacement content is empty string', () => {
-    const view = makeView('hello world');
-    view.dispatch({ selection: EditorSelection.cursor(6) });
-    expect(view.state.selection.main.head).toBe(6); // precondition
-
-    dispatchFullReplacement(view, '');
-
-    expect(view.state.doc.toString()).toBe('');
-    expect(view.state.selection.main.head).toBe(0);
-    view.destroy();
-  });
-
-  it('clamps cursor to 0 when replacement content is empty string (property-based)', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.string({ minLength: 1, maxLength: 200 }).chain((initial) =>
-          fc.record({
-            initialContent: fc.constant(initial),
-            cursorPos: fc.integer({ min: 0, max: initial.length }),
-          })
-        ),
-        async ({ initialContent, cursorPos }) => {
-          const view = makeView(initialContent);
-          view.dispatch({ selection: EditorSelection.cursor(cursorPos) });
-
-          dispatchFullReplacement(view, '');
-
-          expect(view.state.doc.toString()).toBe('');
-          // Any cursor position clamped to min(pos, 0) === 0.
-          expect(view.state.selection.main.head).toBe(0);
-
-          view.destroy();
-        }
-      )
-    );
-  });
-});
-
-describe('updateEditorContent clamps selection endpoints independently', () => {
-  // Note: jsdom's EditorView enforces allowMultipleSelections=false, so only
-  // single-range selections are possible in this environment. Multi-range
-  // behavior in dispatchFullReplacement is a trivial extension of the
-  // single-range map — if clamping is correct for one range it is correct
-  // for N (same Math.min per endpoint logic applied by the .map() call).
-
-  it('clamps only the out-of-bounds head of a range when anchor is within bounds', () => {
-    // Range [3, 9] in a 10-char doc. Replacement is 6 chars.
-    // anchor=3 fits (3 <= 6), head=9 does not (9 > 6) → head clamped to 6.
-    const view = makeView('0123456789'); // length 10
-    view.dispatch({ selection: EditorSelection.range(3, 9) });
-
-    dispatchFullReplacement(view, '012345'); // length 6
-
-    expect(view.state.selection.main.anchor).toBe(3);
-    expect(view.state.selection.main.head).toBe(6);
-    view.destroy();
-  });
-
-  it('clamps both anchor and head when both exceed the new document length (property-based)', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        // initial doc long enough for an out-of-bounds range
-        fc.string({ minLength: 10, maxLength: 200 }).chain((initial) =>
-          fc.record({
-            initialContent: fc.constant(initial),
-            // anchor and head both well beyond any possible newContent
-            anchor: fc.integer({ min: Math.ceil(initial.length * 0.8), max: initial.length }),
-            head: fc.integer({ min: Math.ceil(initial.length * 0.8), max: initial.length }),
-            // newContent is short so both anchor and head exceed its length
-            newContent: fc.string({ minLength: 0, maxLength: Math.floor(initial.length * 0.7) }),
-          })
-        ),
-        async ({ initialContent, anchor, head, newContent }) => {
-          const view = makeView(initialContent);
-          view.dispatch({ selection: EditorSelection.range(anchor, head) });
-
-          dispatchFullReplacement(view, newContent);
-
-          const newLen = newContent.length;
-          expect(view.state.selection.main.anchor).toBe(Math.min(anchor, newLen));
-          expect(view.state.selection.main.head).toBe(Math.min(head, newLen));
-
-          view.destroy();
-        }
-      )
-    );
-  });
-
-  it('leaves anchor and head unchanged when both fit within the new document length (property-based)', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.string({ minLength: 10, maxLength: 200 }).chain((initial) =>
-          fc.string({ minLength: initial.length, maxLength: initial.length + 100 })
-            .filter((s) => s !== initial)
-            .chain((newContent) =>
-              fc.record({
-                initialContent: fc.constant(initial),
-                newContent: fc.constant(newContent),
-                // anchor and head both well within the new (longer) content
-                anchor: fc.integer({ min: 0, max: initial.length }),
-                head: fc.integer({ min: 0, max: initial.length }),
-              })
-            )
-        ),
-        async ({ initialContent, newContent, anchor, head }) => {
-          const view = makeView(initialContent);
-          view.dispatch({ selection: EditorSelection.range(anchor, head) });
-
-          dispatchFullReplacement(view, newContent);
-
-          // Both endpoints fit — no clamping should occur.
-          expect(view.state.selection.main.anchor).toBe(anchor);
-          expect(view.state.selection.main.head).toBe(head);
 
           view.destroy();
         }
@@ -484,7 +662,11 @@ describe('updateEditorContent skips when currentDoc already equals the incoming 
 
     // value === currentDoc, so conditionalReplacement must short-circuit
     // before reaching the `value === lastSaved` check.
-    const applied = conditionalReplacement(view, currentContent, 'something else');
+    const applied = conditionalReplacement(
+      view,
+      currentContent,
+      'something else'
+    );
 
     expect(applied).toBe(false);
     expect(view.state.doc.toString()).toBe(currentContent);
@@ -519,7 +701,7 @@ describe('updateEditorContent skips when currentDoc already equals the incoming 
 });
 
 describe('updateEditorContent applies genuine external changes (property-based)', () => {
-  it('applies replacement and clamps cursor when value differs from both currentDoc and lastSaved (property-based)', async () => {
+  it('applies the change when value differs from both currentDoc and lastSaved (property-based)', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.string({ minLength: 0, maxLength: 100 }).chain((editorContent) =>
@@ -535,7 +717,10 @@ describe('updateEditorContent applies genuine external changes (property-based)'
                     editorContent: fc.constant(editorContent),
                     lastSaved: fc.constant(lastSaved),
                     externalValue: fc.constant(externalValue),
-                    cursorPos: fc.integer({ min: 0, max: Math.max(editorContent.length, 0) }),
+                    cursorPos: fc.integer({
+                      min: 0,
+                      max: Math.max(editorContent.length, 0),
+                    }),
                   })
                 )
             )
@@ -545,14 +730,19 @@ describe('updateEditorContent applies genuine external changes (property-based)'
           const clampedCursor = Math.min(cursorPos, editorContent.length);
           view.dispatch({ selection: EditorSelection.cursor(clampedCursor) });
 
-          const applied = conditionalReplacement(view, externalValue, lastSaved);
+          const applied = conditionalReplacement(
+            view,
+            externalValue,
+            lastSaved
+          );
 
           // Must have applied the change.
           expect(applied).toBe(true);
           expect(view.state.doc.toString()).toBe(externalValue);
           // Cursor must land within the new document bounds.
-          const expectedHead = Math.min(clampedCursor, externalValue.length);
-          expect(view.state.selection.main.head).toBe(expectedHead);
+          expect(view.state.selection.main.head).toBeLessThanOrEqual(
+            externalValue.length
+          );
           view.destroy();
         }
       ),
