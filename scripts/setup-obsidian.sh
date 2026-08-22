@@ -10,7 +10,8 @@
 # USAGE (ci)    : ./scripts/setup-obsidian.sh --ci
 #
 # Environment Variables
-#   OBSIDIAN_VERSION  Specify a fixed version (e.g., 1.8.10). If not set, uses latest
+#   OBSIDIAN_VERSION  Specify a fixed version (e.g., 1.8.10). If not set, uses the
+#                     latest desktop version from the repo's desktop-releases.json
 #   OBSIDIAN_PATH     Override the path to local Obsidian installation
 #
 set -euo pipefail
@@ -74,6 +75,18 @@ else
   tmp_dir="$(mktemp -d)"
   version="${OBSIDIAN_VERSION:-latest}"
 
+  if [[ "$version" == "latest" ]]; then
+    # GitHub's "latest release" can be mobile-only (v1.13.8 shipped just an .apk),
+    # so resolve the newest desktop version from the repo's own manifest instead.
+    version="$(gh api -H 'Accept: application/vnd.github.raw' \
+      repos/obsidianmd/obsidian-releases/contents/desktop-releases.json \
+      --jq .latestVersion)"
+    [[ -n "$version" ]] || {
+      echo "❌ Could not resolve latest Obsidian desktop version" >&2
+      exit 1
+    }
+  fi
+
   if [[ "$PLATFORM" == "macos" ]]; then
     # macOS: universal DMG works for both Intel and Apple Silicon
     pattern="Obsidian-*.dmg"
@@ -92,13 +105,8 @@ else
     echo "⏬ Downloading Obsidian ($version) AppImage for $arch via gh CLI"
   fi
 
-  if [[ "$version" == "latest" ]]; then
-    gh release download -R obsidianmd/obsidian-releases \
-      --pattern "$pattern" --dir "$tmp_dir"
-  else
-    gh release download -R obsidianmd/obsidian-releases \
-      --pattern "$pattern" --dir "$tmp_dir" --tag "v${version}"
-  fi
+  gh release download -R obsidianmd/obsidian-releases \
+    --pattern "$pattern" --dir "$tmp_dir" --tag "v${version}"
 
   # On x86_64, remove the arm64 AppImage if both were downloaded
   if [[ "$PLATFORM" == "linux" && "$arch" == "x86_64" ]]; then

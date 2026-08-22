@@ -20,7 +20,8 @@
 
 .NOTES
     Environment Variables:
-      OBSIDIAN_VERSION  - Specify a fixed version (e.g., 1.8.10). If not set, uses latest
+      OBSIDIAN_VERSION  - Specify a fixed version (e.g., 1.8.10). If not set, uses the
+                          latest desktop version from the repo's desktop-releases.json
       OBSIDIAN_PATH     - Override the path to local Obsidian installation
 #>
 
@@ -81,7 +82,19 @@ else {
 
     $version = $env:OBSIDIAN_VERSION
     if (-not $version) {
-        $version = "latest"
+        # GitHub's "latest release" can be mobile-only (v1.13.8 shipped just an .apk),
+        # so resolve the newest desktop version from the repo's own manifest instead.
+        $manifestVersion = & gh api -H "Accept: application/vnd.github.raw" "repos/obsidianmd/obsidian-releases/contents/desktop-releases.json" --jq ".latestVersion"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to resolve latest Obsidian desktop version"
+            exit 1
+        }
+        $version = ($manifestVersion | Select-Object -First 1)
+        if ($version) { $version = $version.Trim() }
+        if (-not $version) {
+            Write-Error "Could not resolve latest Obsidian desktop version"
+            exit 1
+        }
     }
 
     Write-Host "Downloading Obsidian ($version) via gh CLI" -ForegroundColor Yellow
@@ -89,15 +102,10 @@ else {
     # Download the Windows installer (.exe)
     $pattern = "Obsidian-*.exe"
 
-    if ($version -eq "latest") {
-        & gh release download -R obsidianmd/obsidian-releases --pattern $pattern --dir $tmpDir
-    }
-    else {
-        & gh release download -R obsidianmd/obsidian-releases --pattern $pattern --dir $tmpDir --tag "v$version"
-    }
+    & gh release download -R obsidianmd/obsidian-releases --pattern $pattern --dir $tmpDir --tag "v$version"
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to download Obsidian"
+        Write-Error "Failed to download Obsidian (v$version)"
         exit 1
     }
 
