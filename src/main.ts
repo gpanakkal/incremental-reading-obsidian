@@ -161,6 +161,17 @@ export default class IncrementalReadingPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: 'undo',
+      name: 'Undo last action',
+      checkCallback: (checking: boolean) => {
+        if (!this.reviewManager) return false;
+        if (checking) return true;
+
+        void this.actions.undo();
+      },
+    });
+
     initReviewCommands(this);
 
     this.registerEvent(

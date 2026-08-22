@@ -448,7 +448,10 @@ export class Actions {
 
   undo = async () => {
     const actionEntry = this.undoStack.pop();
-    if (actionEntry === undefined) return;
+    if (actionEntry === undefined) {
+      new Notice(`Nothing to undo!`, SUCCESS_NOTICE_DURATION_MS);
+      return;
+    }
     // Emitted before the reversal runs, not after: the entry is already off the
     // stack, and an undo that throws partway would otherwise leave subscribers
     // reading an entry that is no longer there.
