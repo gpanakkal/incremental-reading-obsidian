@@ -83,6 +83,65 @@ export function isPersistableChange(update: ViewUpdate): boolean {
   return !update.transactions.some((tr) => tr.annotation(isExternalSync));
 }
 
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
+
+/**
+ * The narrowest replacement that turns `current` into `next`, or `null` when
+ * they already match.
+ *
+ * CodeMirror holds the viewport still across a document change by remembering
+ * the line at the top of the screen and re-locating it afterwards: `ViewState`
+ * saves `scrollAnchorPos = changes.mapPos(anchor.from, -1)`, then the next
+ * measure pass shifts `scrollDOM.scrollTop` by however far that line moved. A
+ * `{from: 0, to: doc.length}` replacement deletes the anchor along with the
+ * rest of the document, so `mapPos` collapses it to 0 and the measure pass
+ * dutifully scrolls line 0 back under the viewport top — the jump to the top of
+ * the note. That correction lands on the next animation frame, which is why
+ * restoring `scrollTop` by hand right after the dispatch cannot prevent it.
+ *
+ * Trimming the shared prefix and suffix leaves the anchor outside the changed
+ * range, where it maps to itself. It also lets the selection map correctly
+ * instead of collapsing, and spares undo history and decorations from a
+ * needless rebuild.
+ */
+export function computeMinimalChange(
+  current: string,
+  next: string
+): { from: number; to: number; insert: string } | null {
+  if (current === next) return null;
+
+  const shorter = Math.min(current.length, next.length);
+  let prefix = 0;
+  while (
+    prefix < shorter &&
+    current.charCodeAt(prefix) === next.charCodeAt(prefix)
+  ) {
+    prefix++;
+  }
+  let suffix = 0;
+  while (
+    suffix < shorter - prefix &&
+    current.charCodeAt(current.length - 1 - suffix) ===
+      next.charCodeAt(next.length - 1 - suffix)
+  ) {
+    suffix++;
+  }
+
+  // Both boundaries are code-unit offsets, so either can land between the
+  // halves of a surrogate pair and hand CodeMirror a position inside an
+  // astral character. Widening the changed range by one unit swallows the pair
+  // whole; it can never underflow, since `charCodeAt` off either end is NaN.
+  if (isHighSurrogate(current.charCodeAt(prefix - 1))) prefix--;
+  if (isLowSurrogate(current.charCodeAt(current.length - suffix))) suffix--;
+
+  return {
+    from: prefix,
+    to: current.length - suffix,
+    insert: next.slice(prefix, next.length - suffix),
+  };
+}
+
 export function IREditor({
   item,
   editorRef,
@@ -387,31 +446,26 @@ export function IREditor({
 
       const view = internalRef.current;
       const currentDoc = view.state.doc.toString();
-      if (currentDoc !== value && value !== lastSavedContentRef.current) {
-        const newContent = value ?? '';
-        const newLength = newContent.length;
-        // Clamp each range's anchor and head to the new document length.
-        // We can't use selection.map(changes) here because a full-document
-        // replacement maps every position inside the deleted span to 0 via
-        // mapPos — which would lose the cursor position entirely.
-        const clampedSelection = EditorSelection.create(
-          view.state.selection.ranges.map((r) =>
-            EditorSelection.range(
-              Math.min(r.anchor, newLength),
-              Math.min(r.head, newLength)
-            )
-          ),
-          view.state.selection.mainIndex
-        );
-        const { scrollTop, scrollLeft } = view.scrollDOM;
-        view.dispatch({
-          changes: { from: 0, to: view.state.doc.length, insert: newContent },
-          selection: clampedSelection,
-          annotations: isExternalSync.of(true),
-        });
-        view.scrollDOM.scrollTop = scrollTop;
-        view.scrollDOM.scrollLeft = scrollLeft;
-      }
+      if (currentDoc === value || value === lastSavedContentRef.current) return;
+
+      const change = computeMinimalChange(currentDoc, value ?? '');
+      if (!change) return;
+
+      // No `selection` is passed: with the change narrowed to the span that
+      // actually differs, CodeMirror's own mapping moves the cursor by exactly
+      // the amount the text before it grew or shrank.
+      const { scrollTop, scrollLeft } = view.scrollDOM;
+      view.dispatch({
+        changes: change,
+        annotations: isExternalSync.of(true),
+      });
+      // The scroll anchor is only honoured while `scrollDOM.scrollTop` still
+      // agrees with the value CodeMirror recorded at its last measure; a
+      // disagreement of more than a pixel makes it discard the anchor. Putting
+      // back whatever the DOM rewrite disturbed is what keeps the correction
+      // above armed.
+      view.scrollDOM.scrollTop = scrollTop;
+      view.scrollDOM.scrollLeft = scrollLeft;
     },
     [value]
   );

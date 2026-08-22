@@ -139,8 +139,9 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         // Non-user changes include:
         //   - isExternalSync: IREditor's value prop update after React Query invalidation
         //   - Obsidian's cross-pane sync when the same file is open in multiple panes
-        // In both cases the ChangeSet represents a full replacement, not the actual
-        // edit, so we can't map positions from it.
+        // Neither ChangeSet describes the edit a user made here — the sync one is
+        // a diff against text that arrived already saved, and the cross-pane one
+        // is a full replacement — so we don't map positions from either.
         const hasUserEvent = update.transactions.some(
           (tr) =>
             tr.isUserEvent('input') ||
