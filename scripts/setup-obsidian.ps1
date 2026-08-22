@@ -102,7 +102,8 @@ else {
     # Download the Windows installer (.exe)
     $pattern = "Obsidian-*.exe"
 
-    & gh release download -R obsidianmd/obsidian-releases --pattern $pattern --dir $tmpDir --tag "v$version"
+    # NB: gh takes the tag as a positional arg; there is no --tag flag.
+    & gh release download "v$version" -R obsidianmd/obsidian-releases --pattern $pattern --dir $tmpDir
 
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Failed to download Obsidian (v$version)"

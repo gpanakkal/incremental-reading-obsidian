@@ -105,8 +105,9 @@ else
     echo "⏬ Downloading Obsidian ($version) AppImage for $arch via gh CLI"
   fi
 
-  gh release download -R obsidianmd/obsidian-releases \
-    --pattern "$pattern" --dir "$tmp_dir" --tag "v${version}"
+  # NB: gh takes the tag as a positional arg; there is no --tag flag.
+  gh release download "v${version}" -R obsidianmd/obsidian-releases \
+    --pattern "$pattern" --dir "$tmp_dir"
 
   # On x86_64, remove the arm64 AppImage if both were downloaded
   if [[ "$PLATFORM" == "linux" && "$arch" == "x86_64" ]]; then
