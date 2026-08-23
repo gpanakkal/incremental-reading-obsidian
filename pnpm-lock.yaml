@@ -36,8 +36,8 @@ importers:
         specifier: 1.13.0
         version: 1.13.0
       ts-fsrs:
-        specifier: 4.6.1
-        version: 4.6.1
+        specifier: 5.4.1
+        version: 5.4.1
     devDependencies:
       '@codemirror/commands':
         specifier: 6.8.1
@@ -3905,9 +3905,9 @@ packages:
     resolution: {integrity: sha512-q5W7tVM71e2xjHZTlgfTDoPF/SmqKG5hddq9SzR49CH2hayqRKJtQ4mtRlSxKaJlR/+9rEM+mnBHf7I2/BQcpQ==}
     engines: {node: '>=6.10'}
 
-  ts-fsrs@4.6.1:
-    resolution: {integrity: sha512-Etf4uHPpiY9I//T1QmH6AO25xo1orcFOh/chl5bDFbHR5Wyh4JK3wSbvR15iMgPg7B13DFyrSIY8/MwZnGlOng==}
-    engines: {node: '>=18.0.0'}
+  ts-fsrs@5.4.1:
+    resolution: {integrity: sha512-mOp9+oexJexBTkwjg/jQI1aSUQRLIAvbimeKHLSmVdNJPwObugFNKmZkoggH5d6kZ0uaWLboP1Al1DnXAfIb9w==}
+    engines: {node: '>=20.0.0'}
 
   tsconfig-paths@3.15.0:
     resolution: {integrity: sha512-2Ac2RgzDe/cn48GvOe3M+o82pEFewD3UPbyoUHHdKasHwJKjds4fLXWf/Ux5kATBKN20oaFGu+jbElp1pos0mg==}
@@ -8403,7 +8403,7 @@ snapshots:
 
   ts-dedent@2.2.0: {}
 
-  ts-fsrs@4.6.1: {}
+  ts-fsrs@5.4.1: {}
 
   tsconfig-paths@3.15.0:
     dependencies:
