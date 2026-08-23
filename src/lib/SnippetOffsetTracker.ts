@@ -1,5 +1,5 @@
-import type { ISnippetBase } from './types';
 import type { ChangeSet } from '@codemirror/state';
+import type { ISnippetBase } from './types';
 
 /**
  * Service for tracking snippet highlights and updating their offsets in real-time
@@ -28,14 +28,6 @@ export class SnippetOffsetTracker {
    * @param highlights The snippet highlights for this file
    */
   loadHighlights(filePath: string, highlights: SnippetHighlight[]) {
-    // console.log(
-    //   `[SnippetOffsetTracker] Loading ${highlights.length} highlights for ${filePath}`,
-    //   highlights.map((h) => ({
-    //     id: h.id.slice(0, 8),
-    //     start: h.start_offset,
-    //     end: h.end_offset,
-    //   }))
-    // );
     this.highlightCache.set(filePath, highlights);
   }
 
@@ -73,16 +65,8 @@ export class SnippetOffsetTracker {
   ) {
     const highlights = this.highlightCache.get(filePath);
     if (!highlights || highlights.length === 0) {
-      // console.log(
-      //   `[SnippetOffsetTracker] No highlights cached for ${filePath}, skipping offset update`
-      // );
       return;
     }
-
-    // console.log(
-    //   `[SnippetOffsetTracker] Updating ${highlights.length} highlights for ${filePath}`,
-    //   { oldBodyStart, newBodyStart }
-    // );
 
     for (const highlight of highlights) {
       // Convert body-relative to absolute positions in old document
@@ -100,10 +84,6 @@ export class SnippetOffsetTracker {
       // Ensure end is always at least start + 1 to prevent zero-width highlights
       // (which become invisible and effectively destroy the snippet highlight)
       const newEnd = Math.max(newStart + 1, newAbsoluteEnd - newBodyStart);
-
-      // console.log(
-      //   `[SnippetOffsetTracker] Highlight update: (${highlight.start_offset}, ${highlight.end_offset}) -> (${newStart}, ${newEnd})`
-      // );
 
       highlight.start_offset = newStart;
       highlight.end_offset = newEnd;

@@ -351,7 +351,6 @@ export class SQLJSRepository implements SQLiteRepository {
     params: Primitive[] = [],
     options?: { throwOnError?: boolean }
   ) {
-    // console.log({ query, params });
     try {
       const results = this.db?.exec(query, this.coerceParams(params));
       if (!results || !results.length) return [[]];
@@ -778,7 +777,6 @@ export class SQLJSRepository implements SQLiteRepository {
       const sql = await initSqlJs({
         wasmBinary: wasmBinary as unknown as ArrayBuffer,
       });
-      // console.log('Incremental Reading - WASM initialized successfully');
       return sql;
     } catch (error) {
       console.error('Incremental Reading - Failed to initialize WASM:', error);

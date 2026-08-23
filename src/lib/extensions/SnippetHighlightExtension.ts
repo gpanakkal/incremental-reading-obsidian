@@ -154,9 +154,6 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           if (!this.isReviewInterface) {
             // Standard editor: cross-pane sync → reload from DB.
             // The other pane (which owns the edit) has already persisted.
-            // console.log(
-            //   `[SnippetHighlightExtension] External file sync in standard editor, reloading from DB`
-            // );
             void this.reloadHighlightsFromDB(update.view, reviewManager);
           }
           // Review interface: the shared snippetTracker already has correct

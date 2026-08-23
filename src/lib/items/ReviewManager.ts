@@ -604,7 +604,6 @@ export default class ReviewManager {
    */
   async handleExternalRename(file: TAbstractFile, oldPath: string) {
     const newPath = file.path;
-    // console.log(`file rename detected: ${oldPath} -> ${newPath}`);
     const concreteFile = this.app.vault.getFileByPath(newPath);
     if (!concreteFile) {
       throw new Error(`Failed to find a file at ${newPath}`);
@@ -623,7 +622,6 @@ export default class ReviewManager {
       }
     );
     if (!type) {
-      // console.log(`Found no matching IR tags; ignoring`);
       return;
     }
 
@@ -648,7 +646,6 @@ export default class ReviewManager {
         [file.path, oldPath]
       );
     }
-    // console.log(`Reference updated to ${newReference}`);
   }
 
   /**

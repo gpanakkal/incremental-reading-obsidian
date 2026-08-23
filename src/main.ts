@@ -251,7 +251,6 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on('rename', (file, oldPath) => {
         if (!this.reviewManager) {
-          // console.log('Review manager not ready; returning');
           return;
         }
         void this.reviewManager
@@ -265,7 +264,6 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on('delete', (file) => {
         if (!this.reviewManager) {
-          // console.log('Review manager not ready; returning');
           return;
         }
         void this.reviewManager
@@ -320,7 +318,6 @@ export default class IncrementalReadingPlugin extends Plugin {
         this.registerEvent(
           this.app.vault.on('create', (file) => {
             if (!this.reviewManager) {
-              // console.log('Review manager not ready; returning');
               return;
             }
             void this.reviewManager

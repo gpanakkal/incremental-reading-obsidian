@@ -348,18 +348,9 @@ export class Actions {
 
               const prefix = data.slice(0, startOffset);
               const replacement = data.slice(startOffset, endOffset);
-              console.log({ replacement, line });
               const suffix = data.slice(endOffset);
               return prefix + line + suffix;
             }
-          );
-
-          console.log(
-            '[undo] write changed:',
-            before !== after,
-            before.length,
-            '→',
-            after.length
           );
 
           // remove the card file and row
@@ -368,38 +359,13 @@ export class Actions {
           );
 
           const { parent } = reviewCard.data;
-          console.log(
-            '[undo] parent id:',
-            parent,
-            'current:',
-            store.getState().currentItemId
-          );
           if (parent) {
             const key = ['item', parent, 'file-text'];
             const q0 = queryClient.getQueryCache().find({ queryKey: key });
-            console.log(
-              '[undo] before:',
-              !!q0,
-              '| len:',
-              (q0?.state.data as string)?.length,
-              '| updatedAt:',
-              q0?.state.dataUpdatedAt,
-              '| observers:',
-              q0?.observers.length
-            );
 
             await invalidateItemQuery(parent);
 
             const q1 = queryClient.getQueryCache().find({ queryKey: key });
-            console.log(
-              '[undo] after:',
-              '| len:',
-              (q1?.state.data as string)?.length,
-              '| updatedAt:',
-              q1?.state.dataUpdatedAt,
-              '| stale:',
-              q1?.isStale()
-            );
           }
         },
       });

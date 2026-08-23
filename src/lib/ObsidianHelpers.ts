@@ -288,7 +288,6 @@ export class ObsidianHelpers {
         embed.link,
         parent.path
       )?.path;
-      console.log({ embed, linkPath, targetPath: target.path });
       return linkPath === target.path;
     });
     return match ?? null;

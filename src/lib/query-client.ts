@@ -124,18 +124,13 @@ export async function invalidateCacheOnMatch(
 ) {
   // Skip cache invalidation if the modification came from the review view itself
   if (store.getState().isReviewViewSaving) {
-    // console.log('review view is saving; skipping invalidation');
     return;
   }
 
   const currentItem = await fetchCurrentItem(reviewManager);
   if (!currentItem || currentItem.file.path !== file.path) {
-    // console.log(
-    //   `modified file doesn't match current item; skipping invalidation`
-    // );
     return;
   }
-  // console.log('invalidating item cache');
 
   await invalidateItemQuery(currentItem.data.id);
 }
