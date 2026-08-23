@@ -332,4 +332,22 @@ export const migrations: Migration[] = [
       addColumnIfNotExists(db, 'snippet', 'due_fuzz', 'INTEGER DEFAULT NULL');
     },
   },
+  {
+    version: 8,
+    description: 'Add learning_steps field for FSRS-6 cards',
+    up: (db) => {
+      addColumnIfNotExists(
+        db,
+        'srs_card',
+        'learning_steps',
+        'INTEGER NOT NULL DEFAULT 0'
+      );
+      addColumnIfNotExists(
+        db,
+        'srs_card_review',
+        'learning_steps',
+        'INTEGER NOT NULL DEFAULT 0'
+      );
+    },
+  },
 ];

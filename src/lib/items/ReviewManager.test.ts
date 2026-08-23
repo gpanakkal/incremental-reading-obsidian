@@ -236,6 +236,7 @@ function makeReviewCard(due: number): ReviewCard {
       difficulty: 5,
       elapsed_days: 0,
       scheduled_days: 1,
+      learning_steps: 0,
       reps: 0,
       lapses: 0,
       state: 'New',
@@ -1069,7 +1070,11 @@ describe('ReviewManager.getQueue', () => {
     it('collapses the span to a single instant for a one-item queue', async () => {
       const manager = wireQueue({
         cards: [
-          makeCardRow({ id: 'c1', reference: 'cards/c1.md', due: YEAR_2000_MS }),
+          makeCardRow({
+            id: 'c1',
+            reference: 'cards/c1.md',
+            due: YEAR_2000_MS,
+          }),
         ],
       });
 

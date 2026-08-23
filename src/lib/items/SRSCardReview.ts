@@ -11,6 +11,7 @@ export default class SRSCardReview implements ISRSCardReview {
   elapsed_days: number;
   last_elapsed_days: number;
   scheduled_days: number;
+  learning_steps: number;
   rating: number;
   state: State;
 
@@ -25,6 +26,7 @@ export default class SRSCardReview implements ISRSCardReview {
       elapsed_days: this.elapsed_days,
       last_elapsed_days: this.last_elapsed_days,
       scheduled_days: this.scheduled_days,
+      learning_steps: this.learning_steps,
       rating: this.rating,
       state: this.state,
     } = reviewLog);

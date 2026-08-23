@@ -16,6 +16,7 @@ export default class SRSCard implements ISRSCard {
   difficulty: number;
   elapsed_days: number;
   scheduled_days: number;
+  learning_steps: number;
   reps: number;
   lapses: number;
   state: State;
@@ -36,6 +37,7 @@ export default class SRSCard implements ISRSCard {
       difficulty: this.difficulty,
       elapsed_days: this.elapsed_days,
       scheduled_days: this.scheduled_days,
+      learning_steps: this.learning_steps,
       reps: this.reps,
       lapses: this.lapses,
       state: this.state,

@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS srs_card (
   difficulty REAL NOT NULL,
   elapsed_days REAL NOT NULL,
   scheduled_days REAL NOT NULL,
+  learning_steps INTEGER NOT NULL DEFAULT 0,
   reps INTEGER NOT NULL DEFAULT 0,
   lapses INTEGER NOT NULL DEFAULT 0,
   state INTEGER NOT NULL,
@@ -93,10 +94,11 @@ CREATE TABLE IF NOT EXISTS srs_card_review (
   elapsed_days REAL NOT NULL,
   last_elapsed_days REAL NOT NULL,
   scheduled_days REAL NOT NULL,
+  learning_steps INTEGER NOT NULL DEFAULT 0,
   rating INTEGER NOT NULL,
   state INTEGER NOT NULL,
   CHECK(state >= 0 AND state <= 3),
   CHECK(rating >= 0 AND rating <= 4)
 );
 
-PRAGMA user_version = 7;
+PRAGMA user_version = 8;

@@ -284,14 +284,15 @@ export class CardManager extends ItemManager {
         card.difficulty,
         card.elapsed_days,
         card.scheduled_days,
+        card.learning_steps,
         card.reps,
         card.lapses,
         card.state,
       ];
       await this.repo.mutate(
         `INSERT INTO srs_card (id, reference, parent, created_at, due, last_review, ` +
-          `stability, difficulty, elapsed_days, scheduled_days, reps, lapses, state) ` +
-          `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          `stability, difficulty, elapsed_days, scheduled_days, learning_steps, reps, lapses, state) ` +
+          `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
         params
       );
 
@@ -541,11 +542,12 @@ export class CardManager extends ItemManager {
         `stability = $3, difficulty = $4`,
         `elapsed_days = $5`,
         `scheduled_days = $6`,
-        `reps = $7, lapses = $8`,
-        `state = $9, dismissed = 0`,
+        `learning_steps = $7`,
+        `reps = $8, lapses = $9`,
+        `state = $10, dismissed = 0`,
       ];
       updateQuery += columnUpdateSegments.join(', ');
-      updateQuery += ` WHERE id = $10`;
+      updateQuery += ` WHERE id = $11`;
       const updateParams = [
         updatedCard.due,
         updatedCard.last_review,
@@ -553,6 +555,7 @@ export class CardManager extends ItemManager {
         updatedCard.difficulty,
         updatedCard.elapsed_days,
         updatedCard.scheduled_days,
+        updatedCard.learning_steps,
         updatedCard.reps,
         updatedCard.lapses,
         updatedCard.state,
@@ -564,8 +567,8 @@ export class CardManager extends ItemManager {
         `INSERT INTO srs_card_review ` +
         `(id, card_id, due, review, stability, difficulty, ` +
         `elapsed_days, last_elapsed_days, scheduled_days, ` +
-        `rating, state) VALUES ` +
-        `($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`;
+        `learning_steps, rating, state) VALUES ` +
+        `($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`;
 
       const insertParams = [
         reviewRow.id,
@@ -577,6 +580,7 @@ export class CardManager extends ItemManager {
         reviewRow.elapsed_days,
         reviewRow.last_elapsed_days,
         reviewRow.scheduled_days,
+        reviewRow.learning_steps,
         reviewRow.rating,
         reviewRow.state,
       ];
@@ -609,11 +613,12 @@ export class CardManager extends ItemManager {
         `stability = $3, difficulty = $4`,
         `elapsed_days = $5`,
         `scheduled_days = $6`,
-        `reps = $7, lapses = $8`,
-        `state = $9, dismissed = 0`,
+        `learning_steps = $7`,
+        `reps = $8, lapses = $9`,
+        `state = $10, dismissed = 0`,
       ];
       updateQuery += columnUpdateSegments.join(', ');
-      updateQuery += ` WHERE id = $10`;
+      updateQuery += ` WHERE id = $11`;
       const updateParams = [
         updatedCard.due,
         updatedCard.last_review,
@@ -621,6 +626,7 @@ export class CardManager extends ItemManager {
         updatedCard.difficulty,
         updatedCard.elapsed_days,
         updatedCard.scheduled_days,
+        updatedCard.learning_steps,
         updatedCard.reps,
         updatedCard.lapses,
         updatedCard.state,

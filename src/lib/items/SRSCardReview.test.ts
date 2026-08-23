@@ -1,8 +1,8 @@
+import type { ISRSCardReview, SRSCardReviewRow } from '#/lib/types';
 import fc from 'fast-check';
 import type { ReviewLog } from 'ts-fsrs';
 import { Rating, State } from 'ts-fsrs';
 import { describe, expect, it } from 'vitest';
-import type { ISRSCardReview, SRSCardReviewRow } from '#/lib/types';
 import SRSCardReview from './SRSCardReview';
 
 // #region HELPERS
@@ -48,6 +48,7 @@ const reviewLogArb: fc.Arbitrary<ReviewLog> = fc.record({
   elapsed_days: fc.integer(),
   last_elapsed_days: fc.integer(),
   scheduled_days: fc.integer(),
+  learning_steps: fc.nat({ max: 5 }),
   review: dateArb,
 });
 
@@ -75,6 +76,7 @@ const cardReviewRowArb: fc.Arbitrary<SRSCardReviewRow> = fc.record({
   elapsed_days: fc.integer(),
   last_elapsed_days: fc.integer(),
   scheduled_days: fc.integer(),
+  learning_steps: fc.nat({ max: 5 }),
 });
 
 /** Arbitrary for any ISRSCardReview (the display-shape representation). */
@@ -101,6 +103,7 @@ const cardReviewDisplayArb: fc.Arbitrary<ISRSCardReview> = fc.record({
   elapsed_days: fc.integer(),
   last_elapsed_days: fc.integer(),
   scheduled_days: fc.integer(),
+  learning_steps: fc.nat({ max: 5 }),
 });
 
 // #endregion
@@ -242,7 +245,11 @@ describe('SRSCardReview.displayToRow', () => {
   it('does not mutate its input display (property-based)', () => {
     fc.assert(
       fc.property(cardReviewDisplayArb, (display) => {
-        const snapshot = { ...display, due: display.due, review: display.review };
+        const snapshot = {
+          ...display,
+          due: display.due,
+          review: display.review,
+        };
         SRSCardReview.displayToRow(display);
         expect(display).toEqual(snapshot);
       })
