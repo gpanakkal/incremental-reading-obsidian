@@ -35,7 +35,7 @@ class ReadingModeActionBarController {
     const container = view.previewMode.containerEl;
     if (this.barEl && container.contains(this.barEl)) return;
     this.unmount();
-    const bar = document.createElement('div');
+    const bar = createDiv();
     bar.className = 'ir-action-bar ir-action-bar-panel ir-reading-mode-bar';
     renderStandaloneActionBarDOM(file, this.plugin, bar);
     container.prepend(bar);

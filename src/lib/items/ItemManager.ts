@@ -81,7 +81,7 @@ export class ItemManager {
     row: SnippetRow | SRSCardRow | ArticleRow;
     table: TableName;
   } | null> {
-    let row: RowTypes | null = (
+    let row: SRSCardRow | SnippetRow | ArticleRow | null = (
       await this.repo.query('SELECT * FROM srs_card WHERE id = $1', [id])
     )[0] as SRSCardRow | null;
     if (row) {

@@ -22,18 +22,11 @@ export class Markdown {
   }
 
   static countFootnoteRefs(text: string) {
-    const appearances: string[] = [];
-    const counts: Record<string, number> = {};
-    const footnoteMatches = text.matchAll(FOOTNOTE_REFERENCE_PATTERN);
-    const matches = [...footnoteMatches];
-    matches.forEach((match) => {
+    const counts = new Map<string, number>();
+    for (const match of text.matchAll(FOOTNOTE_REFERENCE_PATTERN)) {
       const name = match[1];
-      if (!counts.hasOwnProperty(name)) {
-        counts[name] = 0;
-        appearances.push(name);
-      }
-      counts[name] += 1;
-    });
-    return appearances.map((name) => ({ name, count: counts[name] }));
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    return [...counts].map(([name, count]) => ({ name, count }));
   }
 }

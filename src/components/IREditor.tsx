@@ -7,30 +7,24 @@ import {
   setShowAnswerEffect,
   type ReviewCallbacks,
 } from '#/lib/extensions';
-import type { ExtractedMobileToolbar } from '#/lib/obsidian-editor';
-import {
+import { type ExtractedMobileToolbar,
   getBaseMarkdownExtensions,
   getMarkdownController,
-  setInsertMode,
-} from '#/lib/obsidian-editor';
+  setInsertMode } from '#/lib/obsidian-editor';
 import { isEditing, setShowAnswer } from '#/lib/store';
-import type {
-  ReviewArticle,
-  ReviewCard,
-  ReviewItem,
-  ReviewSnippet,
-} from '#/lib/types';
-import { isReviewArticle } from '#/lib/types';
-import { insertBlankLine } from '@codemirror/commands';
-import type { Extension } from '@codemirror/state';
-import { EditorSelection, Prec } from '@codemirror/state';
-import type { ViewUpdate } from '@codemirror/view';
 import {
+  type ReviewArticle,
+  type ReviewCard,
+  type ReviewItem,
+  type ReviewSnippet, isReviewArticle 
+} from '#/lib/types';
+import { insertBlankLine } from '@codemirror/commands';
+import { type Extension, EditorSelection, Prec  } from '@codemirror/state';
+import { type ViewUpdate,
   EditorView,
   keymap,
   placeholder as placeholderExt,
-  scrollPastEnd,
-} from '@codemirror/view';
+  scrollPastEnd } from '@codemirror/view';
 import { Platform } from 'obsidian';
 import {
   createPortal,
@@ -360,7 +354,7 @@ export function IREditor({
       if (isReviewArticle(item)) {
         const cmSizer = cm.dom.querySelector('.cm-sizer');
         if (cmSizer) {
-          titleContainer = document.createElement('div');
+          titleContainer = createDiv();
           cmSizer.prepend(titleContainer);
           setTitlePortalEl(titleContainer);
         }

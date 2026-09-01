@@ -227,15 +227,9 @@ function renderReviewModeActions(
           async (newPriority) => {
             try {
               if (noteType === 'article') {
-                await reviewManager.reprioritize(
-                  item.data as ReviewArticle['data'],
-                  newPriority
-                );
+                await reviewManager.reprioritize(item.data, newPriority);
               } else if (noteType === 'snippet') {
-                await reviewManager.reprioritize(
-                  item.data as ReviewSnippet['data'],
-                  newPriority
-                );
+                await reviewManager.reprioritize(item.data, newPriority);
               }
               new Notice(
                 `Priority set to ${newPriority / 10}`,

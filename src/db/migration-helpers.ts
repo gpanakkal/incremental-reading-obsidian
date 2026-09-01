@@ -1,4 +1,4 @@
-import type { BindParams, Database, SqlValue } from 'sql.js';
+import type { Database, SqlValue } from 'sql.js';
 
 /**
  * Database migrations for schema changes
@@ -183,12 +183,7 @@ export function recreateTable<
 
     db.exec(newSchema);
 
-    assertColumnsAccountedFor(
-      db,
-      tableName,
-      columnMap as Record<string, string>,
-      defaultedColumns
-    );
+    assertColumnsAccountedFor(db, tableName, columnMap, defaultedColumns);
 
     const newCols = Object.keys(columnMap);
 
@@ -208,9 +203,9 @@ export function recreateTable<
           >;
           const rowValues = newCols.map((col) => {
             const src = columnMap[col as keyof typeof columnMap];
-            return (transformed[src ?? col] ?? null) as SqlValue;
+            return transformed[src ?? col] ?? null;
           });
-          db.run(insertSql, rowValues as BindParams);
+          db.run(insertSql, rowValues);
         }
       }
     } else {

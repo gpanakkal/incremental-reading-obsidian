@@ -25,7 +25,7 @@ export function setupHarnessLifecycle(
     vi.useFakeTimers();
     vi.setSystemTime(FIXED_NOW);
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
-    vi.spyOn(crypto, 'randomUUID').mockReturnValue(FIXED_UUID as ReturnType<typeof crypto.randomUUID>);
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue(FIXED_UUID);
 
     store.dispatch(resetSession());
     queryClient.clear();
