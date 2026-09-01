@@ -6,29 +6,29 @@ import type {
   QueueSubset,
 } from '#/components/types';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '#/lib/constants';
-import type {
-  ArticleRow,
-  IArticleBase,
-  ISnippetBase,
-  ISRSCardDisplay,
-  NoteType,
-  PluginFrontMatter,
-  ReviewArticle,
-  ReviewCard,
-  ReviewItem,
-  ReviewSnippet,
-  SnippetRow,
-  SRSCardRow,
+import {
+  type ArticleRow,
+  type IArticleBase,
+  type ISnippetBase,
+  type ISRSCardDisplay,
+  type NoteType,
+  type PluginFrontMatter,
+  type ReviewArticle,
+  type ReviewCard,
+  type ReviewItem,
+  type ReviewSnippet,
+  type SnippetRow,
+  type SRSCardRow,
+  isArticle,
 } from '#/lib/types';
-import { isArticle } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
-import type { TAbstractFile, TFile } from 'obsidian';
 import {
   type App,
   type Editor,
   type MarkdownView,
-  normalizePath,
+  type TAbstractFile,
+  type TFile,
 } from 'obsidian';
 import type { Grade } from 'ts-fsrs';
 import IRScheduler from '../IRScheduler';
@@ -632,10 +632,14 @@ export default class ReviewManager {
     if (table === 'snippet') {
       const parent = (row as SnippetRow).parent;
       if (parent) {
-        this.snippets.offsetTracker.removeHighlight(
-          normalizePath(parent),
-          row.id
-        );
+        const parentRow = await this.articles.findById(parent);
+        if (!parentRow) {
+          return;
+        }
+        const parentPath = parentRow.row.reference;
+        this.snippets.offsetTracker.removeHighlight(parentPath, row.id);
+        // trigger a re-paint so the highlight disappears
+        this.plugin.app.workspace.trigger('ir-highlights-changed', parentPath);
       }
     }
     await this.#repo.mutate(

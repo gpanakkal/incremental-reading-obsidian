@@ -8,8 +8,12 @@ import type {
   TableName,
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
-import type { App, TAbstractFile, TFile } from 'obsidian';
-import { normalizePath } from 'obsidian';
+import {
+  type App,
+  type TAbstractFile,
+  type TFile,
+  normalizePath,
+} from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
 
@@ -66,6 +70,34 @@ export class ItemManager {
     }
 
     row = await this.findArticle(file);
+    if (row) {
+      return { row, table: 'article' };
+    }
+
+    return null;
+  }
+
+  async findById(id: string): Promise<{
+    row: SnippetRow | SRSCardRow | ArticleRow;
+    table: TableName;
+  } | null> {
+    let row: RowTypes | null = (
+      await this.repo.query('SELECT * FROM srs_card WHERE id = $1', [id])
+    )[0] as SRSCardRow | null;
+    if (row) {
+      return { row, table: 'srs_card' };
+    }
+
+    row = (
+      await this.repo.query('SELECT * FROM snippet WHERE id = $1', [id])
+    )[0] as SnippetRow | null;
+    if (row) {
+      return { row, table: 'snippet' };
+    }
+
+    row = (
+      await this.repo.query('SELECT * FROM article WHERE id = $1', [id])
+    )[0] as ArticleRow | null;
     if (row) {
       return { row, table: 'article' };
     }
