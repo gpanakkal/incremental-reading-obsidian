@@ -6,9 +6,9 @@ const FSRS_5_DEFAULT_WEIGHTS = Object.freeze([
   0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315, 2.9898,
 ]);
 
-describe.skip('FSRS-5 to 6 weight migrations', () => {
+describe('FSRS-5 to 6 weight migrations', () => {
   // see https://github.com/open-spaced-repetition/ts-fsrs/issues/485#issuecomment-5447972074
-  it('clamp w[19] to 0.01 when short-term scheduling is on', () => {
+  it.fails('clamp w[19] to 0.01 when short-term scheduling is on', () => {
     const converted = generatorParameters({
       w: FSRS_5_DEFAULT_WEIGHTS,
     });
@@ -31,11 +31,12 @@ describe.skip('FSRS-5 to 6 weight migrations', () => {
       reconverted,
       fromFsrs: fromFsrs.parameters.w,
     });
+
     expect(converted.w[19]).toBe(0);
     expect(convertedShortTerm.w[19]).not.toBe(0);
   });
 
-  it('reset w[19] to 0 when short-term scheduling is turned off', () => {
+  it.fails('reset w[19] to 0 when short-term scheduling is turned off', () => {
     const convertedShortTerm = fsrs(
       generatorParameters({
         enable_short_term: true,
