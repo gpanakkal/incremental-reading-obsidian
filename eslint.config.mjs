@@ -7,32 +7,19 @@ import { defineConfig, globalIgnores } from 'eslint/config';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
-const LINT_TARGETS = ['*/*.{ts,tsx}'];
-const TEST_FILES = ['**/*.test.ts', '**/*.spec.ts', 'e2e-tests/**'];
+const LINT_TARGETS = ['**/*.{ts,tsx}'];
+const TEST_FILES = ['**/*.{test,spec}.{ts,tsx}', 'e2e-tests/**/*.{ts,tsx}'];
 
 export default defineConfig([
-  { files: LINT_TARGETS, ...js.configs.recommended },
-  ...tseslint.configs.recommendedTypeChecked.map((c) => ({
-    files: LINT_TARGETS,
-    ...c,
-  })),
-  { files: LINT_TARGETS, ...react.configs.flat.recommended },
-  { files: LINT_TARGETS, ...reactHooks.configs.flat.recommended },
-  ...obsidianmd.configs.recommended,
-  {
-    files: TEST_FILES,
-    languageOptions: {
-      globals: {
-        ...globals.node,
-      },
-    },
-    rules: {
-      'import/no-nodejs-modules': 'off',
-    },
-  },
-  globalIgnores(['**/node_modules/', '**/main.js']),
   {
     files: LINT_TARGETS,
+    extends: [
+      js.configs.recommended,
+      tseslint.configs.recommendedTypeChecked,
+      react.configs.flat.recommended,
+      reactHooks.configs.flat.recommended,
+      obsidianmd.configs.recommended,
+    ],
     languageOptions: {
       globals: {
         ...globals.browser,
@@ -87,4 +74,24 @@ export default defineConfig([
       'react/react-in-jsx-scope': ['off'],
     },
   },
+  {
+    files: TEST_FILES,
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+      sourceType: 'module',
+      parser: tsparser,
+      parserOptions: {
+        ecmaFeatures: {
+          jsx: true,
+        },
+        projectService: true,
+      },
+    },
+    rules: {
+      'import/no-nodejs-modules': 'off',
+    },
+  },
+  globalIgnores(['**/node_modules/', '**/main.js']),
 ]);
