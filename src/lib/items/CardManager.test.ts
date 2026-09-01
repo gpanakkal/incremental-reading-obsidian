@@ -14,10 +14,22 @@ import type {
   SRSCardRow,
 } from '#/lib/types';
 import fc from 'fast-check';
+import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
+import { resolve } from 'path';
+import type { Database, SqlJsStatic } from 'sql.js';
+import initSqlJs from 'sql.js';
 import type { FSRSParameters, Grade } from 'ts-fsrs';
 import { fsrs, generatorParameters, Rating, State } from 'ts-fsrs';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { CardManager } from './CardManager';
 
 // #region HELPERS
@@ -55,7 +67,13 @@ function makePlugin(appOverrides: Record<string, unknown> = {}) {
       fileManager: { processFrontMatter: async () => undefined },
       ...appOverrides,
     },
-    settings: { dayRolloverOffset: 4 },
+    // getFsrs() runs the weight migration, which dereferences
+    // settings.fsrsParams.w, so any test that reviews a card needs a
+    // fully-formed parameter set here. The generated defaults are already
+    // normalized, so the migration finds nothing to rewrite and saveSettings
+    // is never reached.
+    settings: { dayRolloverOffset: 4, fsrsParams: generatorParameters() },
+    saveSettings: vi.fn().mockResolvedValue(undefined),
   } as never;
 }
 
@@ -149,6 +167,26 @@ function lastQueryCall(repo: SQLiteRepository): [string, unknown[]] {
   ][];
   return calls[calls.length - 1];
 }
+
+/**
+ * Positions in the params array passed alongside the `UPDATE srs_card SET ...`
+ * statement issued by review() and rollbackBeforeReview(). Both build the same
+ * column list, so both share these. Keeping them in one place means inserting a
+ * column mid-list is a single edit here instead of a hunt for magic indices.
+ */
+const UPDATE_PARAM = {
+  due: 0,
+  lastReview: 1,
+  stability: 2,
+  difficulty: 3,
+  elapsedDays: 4,
+  scheduledDays: 5,
+  learningSteps: 6,
+  reps: 7,
+  lapses: 8,
+  state: 9,
+  id: 10,
+} as const;
 
 /** Arbitrary covering all 4 numeric State values */
 const stateArb = fc.constantFrom(
@@ -1235,17 +1273,18 @@ describe('review', () => {
           expect(updateSql).toMatch(/difficulty = \$4/i);
           expect(updateSql).toMatch(/elapsed_days = \$5/i);
           expect(updateSql).toMatch(/scheduled_days = \$6/i);
-          expect(updateSql).toMatch(/reps = \$7/i);
-          expect(updateSql).toMatch(/lapses = \$8/i);
-          expect(updateSql).toMatch(/state = \$9/i);
+          expect(updateSql).toMatch(/learning_steps = \$7/i);
+          expect(updateSql).toMatch(/reps = \$8/i);
+          expect(updateSql).toMatch(/lapses = \$9/i);
+          expect(updateSql).toMatch(/state = \$10/i);
           expect(updateSql).toMatch(/dismissed = 0/i);
-          expect(updateSql).toMatch(/WHERE id = \$10/i);
+          expect(updateSql).toMatch(/WHERE id = \$11/i);
           // Segments must be joined with ", " — verify boundary between adjacent segment pairs
           // Without the joiner: "...last_review = $2stability = $3..."
           // With it: "...last_review = $2, stability = $3..."
           expect(updateSql).toMatch(/last_review = \$2, stability = \$3/i);
           // Verify the WHERE clause targets the right card
-          expect(updateParams[9]).toBe(card.id);
+          expect(updateParams[UPDATE_PARAM.id]).toBe(card.id);
         }
       )
     );
@@ -1329,7 +1368,7 @@ describe('review', () => {
       sql.includes('UPDATE srs_card SET')
     )!;
     const params = updateCall[1] as unknown[];
-    expect(params[7]).toBe(priorLapses + 1);
+    expect(params[UPDATE_PARAM.lapses]).toBe(priorLapses + 1);
   });
 
   it('throws without writing when the stored card is not found', async () => {
@@ -1429,10 +1468,6 @@ describe('review — FSRS settings', () => {
     return insert[1];
   }
 
-  // From the UPDATE srs_card SET column ordering in CardManager.review():
-  const DUE_PARAM = 0; // due = $1 (ms timestamp)
-  const SCHEDULED_DAYS_PARAM = 5; // scheduled_days = $6
-
   /**
    * Run a single review against the given fsrs params and return the scheduling
    * outputs the plugin persists. A fresh (New-state) card is used unless
@@ -1451,8 +1486,8 @@ describe('review — FSRS settings', () => {
     await manager.review(card, grade, reviewTime);
     const params = updateParamsFrom(repo);
     return {
-      due: params[DUE_PARAM] as number,
-      scheduledDays: params[SCHEDULED_DAYS_PARAM] as number,
+      due: params[UPDATE_PARAM.due] as number,
+      scheduledDays: params[UPDATE_PARAM.scheduledDays] as number,
       reviewInsertParams: reviewInsertParamsFrom(repo),
       repo,
     };
@@ -1811,7 +1846,7 @@ describe('review — FSRS settings', () => {
             REVIEW_TIME
           )[grade];
 
-          const cardDue = updateParamsFrom(repo)[DUE_PARAM] as number;
+          const cardDue = updateParamsFrom(repo)[UPDATE_PARAM.due] as number;
           const insert = reviewInsertParamsFrom(repo);
           // srs_card_review INSERT column order: id, card_id, due (index 2), ...
           const logDue = insert[2] as number;
@@ -1821,5 +1856,258 @@ describe('review — FSRS settings', () => {
         }
       )
     );
+  });
+});
+
+describe('review — against the production schema', () => {
+  // #region REAL-DB HELPERS
+
+  /**
+   * The mock repos above assert the SQL as *text*, so a statement that is
+   * well-formed as a string but invalid as SQL — a reused `$N` placeholder, a
+   * column list shorter than its VALUES list — passes them and fails only in a
+   * real vault. These tests run the same statements through sql.js loaded from
+   * the production schema.sql, so malformed SQL surfaces as a thrown error.
+   */
+  let SQL: SqlJsStatic;
+
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  /** Fixed instant so FSRS scheduling is reproducible run to run. */
+  const REVIEW_AT = new Date('2026-01-01T00:00:00.000Z');
+  const TEN_MINUTES_MS = 10 * 60 * 1000;
+
+  /**
+   * A repo backed by a real in-memory database. Params are coerced exactly as
+   * SQLJSRepository.coerceParams does, so placeholder binding behaves the same
+   * way it does in production.
+   */
+  function makeRealRepo(db: Database): SQLiteRepository {
+    const run = (sql: string, params: unknown[] = []) => {
+      const bound = params.map((param) => {
+        if (typeof param === 'boolean') return Number(param);
+        if (param === undefined) return null;
+        return param;
+      });
+      const results = db.exec(sql, bound as never);
+      if (!results.length) return [];
+      const { columns, values } = results[0];
+      return values.map((row) =>
+        Object.fromEntries(columns.map((col, i) => [col, row[i]]))
+      );
+    };
+    return {
+      query: vi.fn().mockImplementation(run),
+      mutate: vi.fn().mockImplementation((sql: string, params: unknown[]) => {
+        run(sql, params);
+        return [[]];
+      }),
+      _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
+      handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
+    } as unknown as SQLiteRepository;
+  }
+
+  /** A database at the current production schema with one card row in it. */
+  function makeDbWithCard(overrides: Partial<SRSCardRow> = {}): {
+    db: Database;
+    row: SRSCardRow;
+  } {
+    const db = new SQL.Database();
+    db.exec(readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8'));
+    const row = makeCardRow({
+      created_at: REVIEW_AT.getTime(),
+      due: REVIEW_AT.getTime(),
+      ...overrides,
+    });
+    db.exec(
+      `INSERT INTO srs_card
+        (id, reference, parent, created_at, due, dismissed, deleted, last_review,
+         stability, difficulty, elapsed_days, scheduled_days, learning_steps,
+         reps, lapses, state)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+      [
+        row.id,
+        row.reference,
+        row.parent,
+        row.created_at,
+        row.due,
+        row.dismissed,
+        Number(row.deleted),
+        row.last_review,
+        row.stability,
+        row.difficulty,
+        row.elapsed_days,
+        row.scheduled_days,
+        row.learning_steps,
+        row.reps,
+        row.lapses,
+        row.state,
+      ] as never
+    );
+    return { db, row };
+  }
+
+  /** Read the single card row back out as the display shape review() expects. */
+  function readCard(db: Database, id: string): ISRSCardDisplay {
+    const { columns, values } = db.exec(
+      `SELECT * FROM srs_card WHERE id = $1`,
+      [id] as never
+    )[0];
+    const row = Object.fromEntries(
+      columns.map((col, i) => [col, values[0][i]])
+    ) as unknown as SRSCardRow;
+    return CardManager.rowToDisplay(row);
+  }
+
+  /** Read all review-log rows for a card, oldest first. */
+  function readReviewLogs(db: Database, cardId: string) {
+    const results = db.exec(
+      `SELECT * FROM srs_card_review WHERE card_id = $1 ORDER BY review ASC`,
+      [cardId] as never
+    );
+    if (!results.length) return [];
+    const { columns, values } = results[0];
+    return values.map((row) =>
+      Object.fromEntries(columns.map((col, i) => [col, row[i]]))
+    );
+  }
+
+  /** Starting scheduling states a card can be in when it comes up for review. */
+  const startingCardArb = fc
+    .record({
+      state: stateArb,
+      reps: fc.nat({ max: 100 }),
+      lapses: fc.nat({ max: 50 }),
+      learning_steps: fc.nat({ max: 2 }),
+    })
+    .map(({ state, reps, lapses, learning_steps }) => ({
+      state,
+      reps,
+      lapses,
+      learning_steps,
+      // New cards carry zeroed FSRS memory state; anything else has been seen
+      // at least once, so give it a plausible stability/difficulty pair.
+      stability: state === State.New ? 0 : 2.5,
+      difficulty: state === State.New ? 0 : 5.2,
+    }));
+
+  const anyGradeArb = fc.constantFrom<Grade>(
+    Rating.Again,
+    Rating.Hard,
+    Rating.Good,
+    Rating.Easy
+  );
+
+  // #endregion
+
+  it('executes both write statements without a SQL error, for every grade and starting state', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        anyGradeArb,
+        startingCardArb,
+        async (grade, overrides) => {
+          const { db } = makeDbWithCard(overrides);
+          const manager = new CardManager(makePlugin(), makeRealRepo(db));
+
+          await manager.review(readCard(db, 'card-1'), grade, REVIEW_AT);
+
+          db.close();
+        }
+      )
+    );
+  });
+
+  it('writes exactly one review-log row per review', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        anyGradeArb,
+        startingCardArb,
+        async (grade, overrides) => {
+          const { db } = makeDbWithCard(overrides);
+          const manager = new CardManager(makePlugin(), makeRealRepo(db));
+
+          await manager.review(readCard(db, 'card-1'), grade, REVIEW_AT);
+
+          expect(readReviewLogs(db, 'card-1')).toHaveLength(1);
+          db.close();
+        }
+      )
+    );
+  });
+
+  it('persists the FSRS-computed due date and state onto the stored card', async () => {
+    const { db } = makeDbWithCard();
+    const manager = new CardManager(makePlugin(), makeRealRepo(db));
+    const before = readCard(db, 'card-1');
+    const expected = fsrs(generatorParameters()).repeat(before, REVIEW_AT)[
+      Rating.Good
+    ];
+
+    await manager.review(before, Rating.Good, REVIEW_AT);
+
+    const after = readCard(db, 'card-1');
+    expect(after.due.getTime()).toBe(expected.card.due.getTime());
+    expect(State[after.state]).toBe(expected.card.state);
+    db.close();
+  });
+
+  it('advances learning_steps on the stored card when FSRS moves it to the next step', async () => {
+    const { db } = makeDbWithCard();
+    const manager = new CardManager(makePlugin(), makeRealRepo(db));
+    const before = readCard(db, 'card-1');
+    // A New card graded Good moves from learning step 0 to step 1.
+    const expected = fsrs(generatorParameters()).repeat(before, REVIEW_AT)[
+      Rating.Good
+    ].card.learning_steps;
+    expect(expected).toBe(1);
+
+    await manager.review(before, Rating.Good, REVIEW_AT);
+
+    expect(readCard(db, 'card-1').learning_steps).toBe(expected);
+    db.close();
+  });
+
+  it('stores the pre-review learning_steps on the review log', async () => {
+    const { db } = makeDbWithCard({ learning_steps: 1, state: State.Learning });
+    const manager = new CardManager(makePlugin(), makeRealRepo(db));
+    const before = readCard(db, 'card-1');
+    // ReviewLog.learning_steps records the step the card was on *before* the
+    // grade was applied — that is what rollback() restores from.
+    const expected = fsrs(generatorParameters()).repeat(before, REVIEW_AT)[
+      Rating.Good
+    ].log.learning_steps;
+
+    await manager.review(before, Rating.Good, REVIEW_AT);
+
+    expect(readReviewLogs(db, 'card-1')[0].learning_steps).toBe(expected);
+    db.close();
+  });
+
+  it('graduates a card out of Learning across two persisted reviews', async () => {
+    // The regression this whole column exists to prevent: if learning_steps is
+    // not round-tripped through the database, the card reloads at step 0 every
+    // time and Good re-schedules it minutes out forever instead of graduating.
+    const { db } = makeDbWithCard();
+    const manager = new CardManager(makePlugin(), makeRealRepo(db));
+
+    await manager.review(readCard(db, 'card-1'), Rating.Good, REVIEW_AT);
+    const afterFirst = readCard(db, 'card-1');
+    expect(afterFirst.state).toBe('Learning');
+
+    await manager.review(
+      afterFirst,
+      Rating.Good,
+      new Date(REVIEW_AT.getTime() + TEN_MINUTES_MS)
+    );
+
+    expect(readCard(db, 'card-1').state).toBe('Review');
+    db.close();
   });
 });
