@@ -5,21 +5,25 @@ import {
 import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { fetchByFile, invalidateCacheOnMatch } from '#/lib/query-client';
-import type { NoteType, ReviewCard } from '#/lib/types';
 import {
+  type NoteType,
+  type ReviewArticle,
+  type ReviewCard,
+  type ReviewItem,
+  type ReviewSnippet,
   isReviewArticle,
   isReviewCard,
   isReviewSnippet,
-  type ReviewArticle,
-  type ReviewItem,
-  type ReviewSnippet,
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
-import { StateEffect, StateField, type Extension } from '@codemirror/state';
-import type { EditorView, Panel } from '@codemirror/view';
-import { showPanel, ViewPlugin } from '@codemirror/view';
-import type { App, EventRef, TFile } from 'obsidian';
-import { Notice } from 'obsidian';
+import { type Extension, StateEffect, StateField } from '@codemirror/state';
+import {
+  type EditorView,
+  type Panel,
+  showPanel,
+  ViewPlugin,
+} from '@codemirror/view';
+import { type App, type EventRef, type TFile, Notice } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
 
 /**
@@ -96,7 +100,7 @@ function createActionBarPanel(
   app: App
 ): (view: EditorView) => Panel {
   return (view: EditorView): Panel => {
-    const dom = document.createElement('div');
+    const dom = createDiv();
     dom.className = 'ir-action-bar ir-action-bar-panel';
 
     // Initial render
@@ -377,7 +381,7 @@ function createButton(
   label: string,
   onClick: () => void | Promise<void>
 ): HTMLButtonElement {
-  const btn = document.createElement('button');
+  const btn = createEl('button');
   btn.className = 'ir-review-button';
   btn.textContent = label;
   btn.addEventListener('click', (e) => {
@@ -399,11 +403,11 @@ function createPriorityInput(
   resetValue: number,
   editorView: EditorView
 ): HTMLElement {
-  const container = document.createElement('label');
+  const container = createEl('label');
   container.className = 'ir-priority-label';
   container.textContent = 'Priority';
 
-  const input = document.createElement('input');
+  const input = createEl('input');
   input.id = 'ir-priority-input';
   input.className = 'ir-priority-input';
   input.type = 'text';
