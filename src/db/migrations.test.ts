@@ -10,7 +10,7 @@ import type { SafeOmit } from '#/lib/utility-types';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
-import type { Database, SqlJsStatic } from 'sql.js';
+import type { Database, SqlJsStatic, SqlValue } from 'sql.js';
 import initSqlJs from 'sql.js';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -68,6 +68,24 @@ function columnNames(db: Database, table: string): string[] {
 // ---------------------------------------------------------------------------
 // Pre-migration schemas (the state before each migration was introduced)
 // ---------------------------------------------------------------------------
+
+/**
+ * The indexes every real database has carried since before migration v1 —
+ * `schema.sql` has declared all nine since commit `5015c5d`, which predates the
+ * migration chain. Fixtures include them so that a migration which silently
+ * drops an index is not mistaken for one that never had it.
+ */
+const LEGACY_INDEXES = `
+  CREATE INDEX article_uuid ON article(id);
+  CREATE INDEX article_reference ON article(reference);
+  CREATE INDEX article_due ON article(due);
+  CREATE INDEX snippet_uuid ON snippet(id);
+  CREATE INDEX snippet_reference ON snippet(reference);
+  CREATE INDEX snippet_due ON snippet(due);
+  CREATE INDEX srs_card_uuid ON srs_card(id);
+  CREATE INDEX srs_card_reference ON srs_card(reference);
+  CREATE INDEX srs_card_due ON srs_card(due);
+`;
 
 /** Schema state before migration v1 (no start_offset / end_offset on snippet) */
 const SCHEMA_V0 = `
@@ -130,6 +148,7 @@ const SCHEMA_V0 = `
     CHECK(state >= 0 AND state <= 3),
     CHECK(rating >= 0 AND rating <= 4)
   );
+  ${LEGACY_INDEXES}
   PRAGMA user_version = 0;
 `;
 
@@ -215,6 +234,7 @@ const SCHEMA_V5 = `
     CHECK(state >= 0 AND state <= 3),
     CHECK(rating >= 0 AND rating <= 4)
   );
+  ${LEGACY_INDEXES}
   PRAGMA user_version = 5;
 `;
 
@@ -283,6 +303,7 @@ const SCHEMA_V2 = `
     CHECK(state >= 0 AND state <= 3),
     CHECK(rating >= 0 AND rating <= 4)
   );
+  ${LEGACY_INDEXES}
   PRAGMA user_version = 2;
 `;
 
@@ -515,6 +536,46 @@ describe('applyMigrations — transaction safety', () => {
     // version must not have advanced
     expect(getSchemaVersion(db)).toBe(98);
   });
+
+  it('rethrows when a migration throws a non-Error value', () => {
+    const db = makeDb(SCHEMA_V0);
+    const badMigration = {
+      version: 99,
+      description: 'throws a bare string',
+      up: () => {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        throw 'simulated failure';
+      },
+    };
+    db.exec('PRAGMA user_version = 98');
+    expect(() => applyMigrations(db, [badMigration])).toThrow(
+      'Migration 99 failed: simulated failure'
+    );
+    expect(getSchemaVersion(db)).toBe(98);
+  });
+
+  it('preserves the original error as cause', () => {
+    const db = makeDb(SCHEMA_V0);
+    const original = new Error('simulated failure');
+    const badMigration = {
+      version: 99,
+      description: 'intentionally broken migration',
+      up: () => {
+        throw original;
+      },
+    };
+    db.exec('PRAGMA user_version = 98');
+
+    let caught: unknown;
+    try {
+      applyMigrations(db, [badMigration]);
+    } catch (error: unknown) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).cause).toBe(original);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -615,7 +676,10 @@ describe('recreateTable', () => {
         fixed_interval_days: 'fixed_interval_days',
         scroll_top: 'scroll_top',
       },
-      (row) => ({ ...row, interval: (row.due as number) * 2 }) as never
+      {
+        transformRow: (row) =>
+          ({ ...row, interval: (row.due as number) * 2 }) as never,
+      }
     );
 
     const rows = selectAll(db, 'article');
@@ -658,6 +722,320 @@ describe('recreateTable', () => {
       fixed_interval_days: 'fixed_interval_days',
       scroll_top: 'scroll_top',
     });
+    const fkResult = db.exec('PRAGMA foreign_keys');
+    expect(fkResult[0].values[0][0]).toBe(1);
+  });
+
+  /** Explicitly declared indexes on a table, excluding UNIQUE auto-indexes */
+  function indexesOn(db: Database, table: string): string[] {
+    const result = db.exec(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL
+       ORDER BY name`,
+      [table]
+    );
+    if (!result.length) return [];
+    return result[0].values.map((row) => row[0] as string);
+  }
+
+  /** The identity column map for `tableSchema` */
+  const identityMap = {
+    id: 'id',
+    reference: 'reference',
+    due: 'due',
+    priority: 'priority',
+    dismissed: 'dismissed',
+    fixed_interval_days: 'fixed_interval_days',
+    scroll_top: 'scroll_top',
+  };
+
+  it('carries every index across the rebuild', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(
+          fc.constantFrom(
+            'id',
+            'reference',
+            'due',
+            'priority',
+            'dismissed',
+            'scroll_top'
+          ),
+          { minLength: 1, maxLength: 6 }
+        ),
+        (indexedColumns) => {
+          const db = makeDb(tableSchema);
+          const names = indexedColumns.map((col) => `article_${col}_idx`);
+          indexedColumns.forEach((col, i) => {
+            db.exec(`CREATE INDEX ${names[i]} ON article(${col})`);
+          });
+
+          recreateTable(db, 'article', tableSchema, identityMap);
+
+          expect(indexesOn(db, 'article')).toEqual([...names].sort());
+        }
+      ),
+      { numRuns: 25 }
+    );
+  });
+
+  it('leaves no index behind on the dropped temporary table', () => {
+    const db = makeDb(tableSchema);
+    db.exec('CREATE INDEX article_due_idx ON article(due)');
+
+    recreateTable(db, 'article', tableSchema, identityMap);
+
+    expect(indexesOn(db, 'article_old')).toEqual([]);
+  });
+
+  it('keeps a carried index usable for queries', () => {
+    const db = makeDb(tableSchema);
+    db.exec('CREATE INDEX article_due_idx ON article(due)');
+    db.exec(
+      `INSERT INTO article (id, reference, due, priority) VALUES ('a', 'a.md', 500, 10)`
+    );
+
+    recreateTable(db, 'article', tableSchema, identityMap);
+
+    const plan = db.exec(
+      'EXPLAIN QUERY PLAN SELECT id FROM article WHERE due = 500'
+    );
+    expect(String(plan[0].values[0].join(' '))).toContain('article_due_idx');
+  });
+
+  it('lets the new schema redeclare an index of the same name', () => {
+    const db = makeDb(tableSchema);
+    db.exec('CREATE INDEX article_lookup ON article(due)');
+
+    recreateTable(
+      db,
+      'article',
+      `${tableSchema}
+       CREATE INDEX article_lookup ON article(priority);`,
+      identityMap
+    );
+
+    const sql = db.exec(
+      `SELECT sql FROM sqlite_master WHERE name = 'article_lookup'`
+    );
+    expect(String(sql[0].values[0][0])).toContain('article(priority)');
+  });
+
+  it('throws when the new schema declares a column with no stated source', () => {
+    const db = makeDb(tableSchema);
+
+    expect(() =>
+      recreateTable(
+        db,
+        'article',
+        `CREATE TABLE article (
+          id TEXT NOT NULL,
+          reference TEXT NOT NULL UNIQUE,
+          due INTEGER,
+          priority INTEGER NOT NULL,
+          dismissed INTEGER DEFAULT 0,
+          fixed_interval_days INTEGER NULL,
+          scroll_top INTEGER NOT NULL DEFAULT 0,
+          deleted INTEGER NOT NULL DEFAULT 0
+        );`,
+        identityMap
+      )
+    ).toThrow(
+      'recreateTable(article): no source for column(s) deleted. ' +
+        'Add them to columnMap, or list them in defaultedColumns to accept the column default.'
+    );
+  });
+
+  it('accepts a column with no source once it is declared defaulted', () => {
+    const db = makeDb(tableSchema);
+    db.exec(
+      `INSERT INTO article (id, reference, due, priority) VALUES ('a', 'a.md', 500, 10)`
+    );
+
+    recreateTable(
+      db,
+      'article',
+      `CREATE TABLE article (
+        id TEXT NOT NULL,
+        reference TEXT NOT NULL UNIQUE,
+        due INTEGER,
+        priority INTEGER NOT NULL,
+        dismissed INTEGER DEFAULT 0,
+        fixed_interval_days INTEGER NULL,
+        scroll_top INTEGER NOT NULL DEFAULT 0,
+        deleted INTEGER NOT NULL DEFAULT 7
+      );`,
+      identityMap,
+      { defaultedColumns: ['deleted'] }
+    );
+
+    expect(selectAll(db, 'article')[0].deleted).toBe(7);
+  });
+
+  it('throws when columnMap names a column the new schema does not declare', () => {
+    const db = makeDb(tableSchema);
+
+    expect(() =>
+      recreateTable(db, 'article', tableSchema, {
+        ...identityMap,
+        interval: 'interval',
+        deleted: 'deleted',
+      })
+    ).toThrow(
+      'recreateTable(article): columnMap names column(s) interval, deleted, ' +
+        'which the new schema does not declare.'
+    );
+  });
+
+  it('names every unaccounted column in the error, not just the first', () => {
+    const db = makeDb(tableSchema);
+
+    expect(() =>
+      recreateTable(
+        db,
+        'article',
+        `CREATE TABLE article (
+          id TEXT NOT NULL,
+          reference TEXT NOT NULL UNIQUE,
+          due INTEGER,
+          priority INTEGER NOT NULL,
+          dismissed INTEGER DEFAULT 0,
+          fixed_interval_days INTEGER NULL,
+          scroll_top INTEGER NOT NULL DEFAULT 0,
+          deleted INTEGER NOT NULL DEFAULT 0,
+          due_fuzz INTEGER DEFAULT NULL
+        );`,
+        identityMap
+      )
+    ).toThrow('no source for column(s) deleted, due_fuzz.');
+  });
+
+  it('rebuilds a table that has no indexes at all', () => {
+    const db = makeDb('CREATE TABLE plain (id TEXT NOT NULL, value INTEGER);');
+    db.exec(`INSERT INTO plain (id, value) VALUES ('a', 1)`);
+
+    recreateTable(
+      db,
+      'plain',
+      'CREATE TABLE plain (id TEXT NOT NULL, value INTEGER);',
+      {
+        id: 'id',
+        value: 'value',
+      }
+    );
+
+    expect(selectAll(db, 'plain')).toEqual([{ id: 'a', value: 1 }]);
+    expect(indexesOn(db, 'plain')).toEqual([]);
+  });
+
+  it('reports the index it could not restore when the rebuild drops its column', () => {
+    const db = makeDb(tableSchema);
+    db.exec('CREATE INDEX article_scroll_idx ON article(scroll_top)');
+
+    let caught: unknown;
+    try {
+      recreateTable(
+        db,
+        'article',
+        `CREATE TABLE article (
+          id TEXT NOT NULL,
+          reference TEXT NOT NULL UNIQUE,
+          due INTEGER,
+          priority INTEGER NOT NULL,
+          dismissed INTEGER DEFAULT 0,
+          fixed_interval_days INTEGER NULL
+        );`,
+        {
+          id: 'id',
+          reference: 'reference',
+          due: 'due',
+          priority: 'priority',
+          dismissed: 'dismissed',
+          fixed_interval_days: 'fixed_interval_days',
+        }
+      );
+    } catch (error: unknown) {
+      caught = error;
+    }
+
+    expect((caught as Error).message).toBe(
+      'recreateTable(article): could not restore index article_scroll_idx. ' +
+        'If the rebuild drops a column the index covers, redeclare or omit it in newSchema.'
+    );
+    expect((caught as Error).cause).toBeInstanceOf(Error);
+  });
+
+  /** A parent table with a child that has a foreign key onto it */
+  function makeRelatedDb(): Database {
+    const db = makeDb(`
+      CREATE TABLE article (id TEXT NOT NULL PRIMARY KEY, due INTEGER);
+      CREATE TABLE article_review (
+        id TEXT NOT NULL,
+        article_id TEXT NOT NULL REFERENCES article(id)
+      );`);
+    db.exec(`INSERT INTO article (id, due) VALUES ('a', 1)`);
+    db.exec(`INSERT INTO article_review (id, article_id) VALUES ('r', 'a')`);
+    // recreateTable leaves enforcement on when it returns, so the realistic
+    // starting state for any rebuild after the first is ON
+    db.exec('PRAGMA foreign_keys = ON');
+    return db;
+  }
+
+  const parentSchema =
+    'CREATE TABLE article (id TEXT NOT NULL PRIMARY KEY, due INTEGER);';
+
+  it('leaves child foreign keys pointing at the rebuilt table', () => {
+    const db = makeRelatedDb();
+
+    recreateTable(db, 'article', parentSchema, { id: 'id', due: 'due' });
+
+    // SQLite rewrites REFERENCES clauses to follow a RENAME, which would leave
+    // the child pointing at the dropped temporary table
+    const childSchema = db.exec(
+      `SELECT sql FROM sqlite_master WHERE name = 'article_review'`
+    );
+    expect(String(childSchema[0].values[0][0])).toContain(
+      'REFERENCES article(id)'
+    );
+  });
+
+  it('leaves no foreign key violations behind', () => {
+    const db = makeRelatedDb();
+
+    recreateTable(db, 'article', parentSchema, { id: 'id', due: 'due' });
+
+    expect(db.exec('PRAGMA foreign_key_check')).toEqual([]);
+  });
+
+  it('lets the child table still accept rows after the rebuild', () => {
+    const db = makeRelatedDb();
+
+    recreateTable(db, 'article', parentSchema, { id: 'id', due: 'due' });
+    db.exec('PRAGMA foreign_keys = ON');
+
+    expect(() =>
+      db.exec(`INSERT INTO article_review (id, article_id) VALUES ('r2', 'a')`)
+    ).not.toThrow();
+  });
+
+  it('restores PRAGMA legacy_alter_table after the rebuild', () => {
+    const db = makeDb(tableSchema);
+
+    recreateTable(db, 'article', tableSchema, identityMap);
+
+    expect(db.exec('PRAGMA legacy_alter_table')[0].values[0][0]).toBe(0);
+  });
+
+  it('restores PRAGMA foreign_keys = ON when the rebuild throws', () => {
+    const db = makeDb(tableSchema);
+
+    expect(() =>
+      recreateTable(db, 'article', tableSchema, {
+        ...identityMap,
+        interval: 'interval',
+      })
+    ).toThrow();
+
     const fkResult = db.exec('PRAGMA foreign_keys');
     expect(fkResult[0].values[0][0]).toBe(1);
   });
@@ -924,6 +1302,150 @@ describe('migration v8 — add learning_steps to card tables', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Migration v9 tests
+// ---------------------------------------------------------------------------
+
+/** A database migrated as far as v8, i.e. everything before v9 */
+function makeDbAtV8(): Database {
+  const db = makeDb(SCHEMA_V0);
+  applyMigrations(
+    db,
+    migrations.filter((m) => m.version < 9)
+  );
+  return db;
+}
+
+function insertArticle(db: Database, id: string, reference: string): void {
+  db.exec(
+    `INSERT INTO article (id, reference, due, interval, priority)
+     VALUES ('${id}', '${reference}', 1000, 86400000, 30)`
+  );
+}
+
+describe('migration v9 — key item tables and cascade review deletes', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDbAtV8();
+  });
+
+  it('makes id the primary key on every item table', () => {
+    applyMigrations(db, migrations);
+
+    for (const table of ['article', 'snippet', 'srs_card']) {
+      const pkColumns = db
+        .exec(`PRAGMA table_info(${table})`)[0]
+        .values.filter((row) => (row[5] as number) > 0)
+        .map((row) => row[1] as string);
+      expect(pkColumns).toEqual(['id']);
+    }
+  });
+
+  it('preserves item rows across the rebuild', () => {
+    insertArticle(db, 'a1', 'articles/a1.md');
+
+    applyMigrations(db, migrations);
+
+    const rows = selectAll(db, 'article');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe('a1');
+    expect(rows[0].reference).toBe('articles/a1.md');
+  });
+
+  it('deletes review rows along with the item they belong to', () => {
+    insertArticle(db, 'a1', 'articles/a1.md');
+    db.exec(
+      `INSERT INTO article_review (id, article_id, review_time)
+       VALUES ('r1', 'a1', 1000)`
+    );
+
+    applyMigrations(db, migrations);
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec(`DELETE FROM article WHERE id = 'a1'`);
+
+    expect(selectAll(db, 'article_review')).toEqual([]);
+  });
+
+  it('lets a review row be written once enforcement is on', () => {
+    insertArticle(db, 'a1', 'articles/a1.md');
+
+    applyMigrations(db, migrations);
+    db.exec('PRAGMA foreign_keys = ON');
+
+    expect(() =>
+      db.exec(
+        `INSERT INTO article_review (id, article_id, review_time)
+         VALUES ('r1', 'a1', 1000)`
+      )
+    ).not.toThrow();
+  });
+
+  it('repoints a review table left aimed at a dropped temporary table', () => {
+    // the shape v3-v5 left behind before the rename was suppressed
+    db.exec(`
+      DROP TABLE article_review;
+      CREATE TABLE article_review (
+        id TEXT NOT NULL,
+        article_id TEXT NOT NULL REFERENCES article_old(id),
+        review_time INTEGER NOT NULL
+      );`);
+    insertArticle(db, 'a1', 'articles/a1.md');
+    db.exec(
+      `INSERT INTO article_review (id, article_id, review_time)
+       VALUES ('r1', 'a1', 1000)`
+    );
+
+    applyMigrations(db, migrations);
+
+    const childSchema = db.exec(
+      `SELECT sql FROM sqlite_master WHERE name = 'article_review'`
+    );
+    expect(String(childSchema[0].values[0][0])).toContain(
+      'REFERENCES article(id)'
+    );
+    expect(selectAll(db, 'article_review')).toHaveLength(1);
+  });
+
+  it('rebuilds without rewriting child references when enforcement starts on', () => {
+    // `PRAGMA foreign_keys` is a no-op inside a transaction, so a rebuild
+    // cannot suspend enforcement for itself — applyMigrations must do it
+    db.exec('PRAGMA foreign_keys = ON');
+
+    applyMigrations(db, migrations);
+
+    const childSchema = db.exec(
+      `SELECT sql FROM sqlite_master WHERE name = 'article_review'`
+    );
+    expect(String(childSchema[0].values[0][0])).not.toContain('article_old');
+  });
+
+  it('leaves foreign key enforcement as it found it', () => {
+    db.exec('PRAGMA foreign_keys = ON');
+
+    applyMigrations(db, migrations);
+
+    expect(db.exec('PRAGMA foreign_keys')[0].values[0][0]).toBe(1);
+  });
+
+  it('does not switch enforcement on for a caller that had it off', () => {
+    db.exec('PRAGMA foreign_keys = OFF');
+
+    applyMigrations(db, migrations);
+
+    expect(db.exec('PRAGMA foreign_keys')[0].values[0][0]).toBe(0);
+  });
+
+  it('fails without committing when duplicate ids block the primary key', () => {
+    insertArticle(db, 'a1', 'articles/a1.md');
+    insertArticle(db, 'a1', 'articles/duplicate.md');
+
+    expect(() => applyMigrations(db, migrations)).toThrow('Migration 9 failed');
+    expect(getSchemaVersion(db)).toBe(8);
+    expect(selectAll(db, 'article')).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Schema version consistency
 // ---------------------------------------------------------------------------
 
@@ -958,4 +1480,161 @@ describe('schema version consistency', () => {
       expect(migration.description.trim().length).toBeGreaterThan(0);
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// Fresh vs migrated schema parity
+// ---------------------------------------------------------------------------
+
+/**
+ * A database built by `schema.sql` and one built by replaying migrations over a
+ * legacy database must end up structurally identical, or the two lineages
+ * diverge silently — every later migration is written against one shape and
+ * applied to both.
+ *
+ * Column *position* is deliberately excluded from the comparison. SQLite's
+ * `ALTER TABLE ADD COLUMN` can only append, so any column that schema.sql
+ * places mid-table is ordered differently in a migrated database. That drift is
+ * inert because every read path maps by name (`formatResult`, `recreateTable`);
+ * a differing column set, type, nullability, or default is not.
+ */
+describe('fresh vs migrated schema parity', () => {
+  type ColumnSpec = {
+    name: string;
+    type: string;
+    notnull: number;
+    dflt_value: SqlValue;
+    pk: number;
+  };
+
+  /** Column metadata for a table, keyed by name so ordering can't affect it */
+  function columnSpecs(
+    db: Database,
+    table: string
+  ): Record<string, ColumnSpec> {
+    const result = db.exec(`PRAGMA table_info(${table})`);
+    if (!result.length) return {};
+    return Object.fromEntries(
+      result[0].values.map((row) => [
+        row[1] as string,
+        {
+          name: row[1] as string,
+          type: row[2] as string,
+          notnull: row[3] as number,
+          dflt_value: row[4],
+          pk: row[5] as number,
+        },
+      ])
+    );
+  }
+
+  /**
+   * Names of schema objects of the given type, excluding SQLite's internal
+   * `sqlite_*` objects (autoindexes backing UNIQUE constraints are implied by
+   * the column specs, so comparing them adds nothing).
+   */
+  function objectNames(db: Database, type: 'table' | 'index'): string[] {
+    const result = db.exec(
+      `SELECT name FROM sqlite_master
+       WHERE type = '${type}' AND name NOT LIKE 'sqlite_%'
+       ORDER BY name`
+    );
+    if (!result.length) return [];
+    return result[0].values.map((row) => row[0] as string);
+  }
+
+  /** Every table's column specs, keyed by table name */
+  function schemaShape(
+    db: Database
+  ): Record<string, Record<string, ColumnSpec>> {
+    return Object.fromEntries(
+      objectNames(db, 'table').map((table) => [table, columnSpecs(db, table)])
+    );
+  }
+
+  /** Legacy starting points a real vault's database could still be at */
+  const legacySchemas: [label: string, schema: string][] = [
+    ['v0', SCHEMA_V0],
+    ['v2', SCHEMA_V2],
+    ['v5', SCHEMA_V5],
+  ];
+
+  let fresh: Database;
+
+  beforeEach(() => {
+    fresh = makeDb(schemaSQL);
+  });
+
+  it.each(legacySchemas)(
+    'migrating a %s database creates the same tables as schema.sql',
+    (_label, legacySchema) => {
+      const migrated = makeDb(legacySchema);
+      applyMigrations(migrated, migrations);
+
+      expect(objectNames(migrated, 'table')).toEqual(
+        objectNames(fresh, 'table')
+      );
+    }
+  );
+
+  it.each(legacySchemas)(
+    'migrating a %s database gives every table the same columns as schema.sql',
+    (_label, legacySchema) => {
+      const migrated = makeDb(legacySchema);
+      applyMigrations(migrated, migrations);
+
+      expect(schemaShape(migrated)).toEqual(schemaShape(fresh));
+    }
+  );
+
+  it.each(legacySchemas)(
+    'migrating a %s database creates the same indexes as schema.sql',
+    (_label, legacySchema) => {
+      const migrated = makeDb(legacySchema);
+      applyMigrations(migrated, migrations);
+
+      expect(objectNames(migrated, 'index')).toEqual(
+        objectNames(fresh, 'index')
+      );
+    }
+  );
+
+  /**
+   * Foreign keys per table, as `child.column -> parent.column`. A table rebuild
+   * renames the original out of the way, and SQLite follows that rename into
+   * every REFERENCES clause that named it — so a child can end up pointing at a
+   * temporary table that no longer exists.
+   */
+  function foreignKeys(db: Database): Record<string, string[]> {
+    return Object.fromEntries(
+      objectNames(db, 'table').map((table) => {
+        const result = db.exec(`PRAGMA foreign_key_list(${table})`);
+        if (!result.length) return [table, []];
+        const { columns, values } = result[0];
+        const idx = (name: string) => columns.indexOf(name);
+        return [
+          table,
+          values
+            .map(
+              (row) =>
+                `${String(row[idx('from')])} -> ` +
+                `${String(row[idx('table')])}.${String(row[idx('to')])} ` +
+                `ON DELETE ${String(row[idx('on_delete')])} ` +
+                `ON UPDATE ${String(row[idx('on_update')])}`
+            )
+            .sort(),
+        ];
+      })
+    );
+  }
+
+  it.each(legacySchemas)(
+    'migrating a %s database keeps every foreign key pointed where schema.sql points it',
+    (_label, legacySchema) => {
+      const migrated = makeDb(legacySchema);
+      applyMigrations(migrated, migrations);
+
+      expect(foreignKeys(migrated)).toEqual(foreignKeys(fresh));
+    }
+  );
 });
