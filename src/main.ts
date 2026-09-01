@@ -1,5 +1,11 @@
-import type { App, TFile, WorkspaceLeaf } from 'obsidian';
-import { MarkdownView, Notice, Plugin } from 'obsidian';
+import {
+  type App,
+  type TFile,
+  type WorkspaceLeaf,
+  MarkdownView,
+  Notice,
+  Plugin,
+} from 'obsidian';
 import type { SyncPluginInstance } from 'obsidian-typings';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
 import databaseSchema from './db/schema.sql';
@@ -12,8 +18,10 @@ import {
   registerSnippetHighlightPostProcessor,
 } from './lib/extensions/SnippetHighlightPostProcessor';
 import ReviewManager from './lib/items/ReviewManager';
-import type { ExtractedMarkdownEditor } from './lib/obsidian-editor';
-import { getEditorClass } from './lib/obsidian-editor';
+import {
+  type ExtractedMarkdownEditor,
+  getEditorClass,
+} from './lib/obsidian-editor';
 import {
   applyQueueChange,
   invalidateCacheOnMatch,
@@ -22,8 +30,11 @@ import {
 } from './lib/query-client';
 import { SQLJSRepository } from './lib/repository/SQLJSRepository';
 import { initReviewCommands } from './lib/review-commands';
-import type { IRPluginSettings } from './lib/settings';
-import { DEFAULT_SETTINGS, IRSettingTab } from './lib/settings';
+import {
+  type IRPluginSettings,
+  DEFAULT_SETTINGS,
+  IRSettingTab,
+} from './lib/settings';
 import { setCurrentItemId, setPage, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
 import { ImportModal } from './views/ImportModal';
