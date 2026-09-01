@@ -197,7 +197,10 @@ export default class IncrementalReadingPlugin extends Plugin {
               .setIcon(PLACEHOLDER_PLUGIN_ICON)
               .setSection('incremental-reading')
               .onClick(async () => {
-                await this.importArticle(file, { copyOnImport: true });
+                await this.importArticle(file, {
+                  copyOnImport: true,
+                  showImportDialog: false,
+                });
               });
           });
 
@@ -207,7 +210,10 @@ export default class IncrementalReadingPlugin extends Plugin {
               .setIcon(PLACEHOLDER_PLUGIN_ICON)
               .setSection('incremental-reading')
               .onClick(async () => {
-                await this.importArticle(file, { copyOnImport: false });
+                await this.importArticle(file, {
+                  copyOnImport: false,
+                  showImportDialog: false,
+                });
               });
           });
 
@@ -476,7 +482,10 @@ export default class IncrementalReadingPlugin extends Plugin {
           if (!fileView?.file) return false;
 
           if (checking) return true;
-          void this.importArticle(fileView.file, { copyOnImport: true });
+          void this.importArticle(fileView.file, {
+            copyOnImport: true,
+            showImportDialog: false,
+          });
         },
       });
 
@@ -493,7 +502,10 @@ export default class IncrementalReadingPlugin extends Plugin {
           if (!fileView?.file) return false;
 
           if (checking) return true;
-          void this.importArticle(fileView.file, { copyOnImport: false });
+          void this.importArticle(fileView.file, {
+            copyOnImport: false,
+            showImportDialog: false,
+          });
         },
       });
 
