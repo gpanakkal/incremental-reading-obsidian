@@ -1,4 +1,3 @@
-/* eslint-disable obsidianmd/no-tfile-tfolder-cast -- this is a test file */
 import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
@@ -586,7 +585,7 @@ describe('getDue', () => {
     await manager.getDue(0, undefined, [rowA.id]);
 
     // The first query call's params should contain the pre-excluded ID
-    const firstCallParams = queryCalls[0] as unknown[];
+    const firstCallParams = queryCalls[0];
     expect(firstCallParams).toContain(rowA.id);
   });
 

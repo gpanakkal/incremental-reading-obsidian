@@ -1,4 +1,3 @@
-/* eslint-disable obsidianmd/no-tfile-tfolder-cast -- this is a test file */
 import {
   CARD_ANSWER_REPLACEMENT,
   CLOZE_DELIMITERS,
@@ -197,12 +196,7 @@ const stateArb = fc.constantFrom(
 );
 
 /** Arbitrary covering all StateType string values */
-const stateTypeArb = fc.constantFrom(
-  'New',
-  'Learning',
-  'Review',
-  'Relearning'
-) as fc.Arbitrary<'New' | 'Learning' | 'Review' | 'Relearning'>;
+const stateTypeArb = fc.constantFrom('New', 'Learning', 'Review', 'Relearning');
 
 /** Arbitrary for a valid SRSCardRow */
 const cardRowArb: fc.Arbitrary<SRSCardRow> = fc.record<SRSCardRow>({
@@ -222,7 +216,7 @@ const cardRowArb: fc.Arbitrary<SRSCardRow> = fc.record<SRSCardRow>({
   reps: fc.integer({ min: 0, max: 10000 }),
   lapses: fc.integer({ min: 0, max: 10000 }),
   state: stateArb,
-  dismissed: fc.oneof(fc.constant(0 as 0), fc.constant(1 as 1)),
+  dismissed: fc.oneof(fc.constant(0 as const), fc.constant(1 as const)),
   deleted: fc.boolean(),
   parent: fc.constant(null),
 });
@@ -1104,9 +1098,7 @@ describe('getDue', () => {
     const repo = {
       query: vi.fn().mockImplementation((_sql: string, params: unknown[]) => {
         callCount++;
-        const excluded = params.filter(
-          (p) => typeof p === 'string'
-        ) as string[];
+        const excluded = params.filter((p) => typeof p === 'string');
         return [rowA, rowB].filter((r) => !excluded.includes(r.id));
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
@@ -1367,7 +1359,7 @@ describe('review', () => {
     const updateCall = mutateCalls.find(([sql]) =>
       sql.includes('UPDATE srs_card SET')
     )!;
-    const params = updateCall[1] as unknown[];
+    const params = updateCall[1];
     expect(params[UPDATE_PARAM.lapses]).toBe(priorLapses + 1);
   });
 

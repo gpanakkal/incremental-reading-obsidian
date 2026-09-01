@@ -144,7 +144,7 @@ export class CardManager extends ItemManager {
     const dueTime =
       dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
     let allExcluded = [...(excludeIds ?? [])];
-    let due: ReviewCard[] = [];
+    let due: ReviewCard[];
     try {
       // keep fetching until all fetched rows have a note
       let lastMissingNotes = 0;
@@ -413,7 +413,7 @@ export class CardManager extends ItemManager {
     } catch (error) {
       if (error instanceof Error) {
         const refMessage = `\nThis error occurred in "${reviewCard.data.reference}"`;
-        throw new Error(error.message + refMessage);
+        throw new Error(error.message + refMessage, { cause: error });
       }
     }
   }
@@ -427,7 +427,7 @@ export class CardManager extends ItemManager {
     ) {
       throw new Error(
         `Delimiters cannot start or end with spaces, letters, or digits. ` +
-          `Received "${delimiters}"`
+          `Received "${delimiters.join(', ')}"`
       );
     }
     const currentGroupsPattern = CardManager.getClozeGroupsPattern(delimiters);

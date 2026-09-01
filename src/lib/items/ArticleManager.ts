@@ -141,7 +141,7 @@ export class ArticleManager extends ItemManager {
     }
 
     // Re-associate if the file already carries an ir-id
-    const existingId = frontmatter?.['ir-id'] as string | undefined;
+    const existingId = frontmatter?.['ir-id'];
 
     const byRef = (await this.repo.query(
       'SELECT id FROM article WHERE reference = $1',
@@ -246,7 +246,7 @@ export class ArticleManager extends ItemManager {
     }
 
     // Re-associate if the source already carries an ir-id with a matching DB row
-    const existingId = frontmatter?.['ir-id'] as string | undefined;
+    const existingId = frontmatter?.['ir-id'];
     if (existingId) {
       const rows = await this.repo.query(
         'SELECT id FROM article WHERE id = $1',
@@ -410,7 +410,7 @@ export class ArticleManager extends ItemManager {
     const dueTime =
       dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
     let allExcluded = [...(excludeIds ?? [])];
-    let due: ReviewArticle[] = [];
+    let due: ReviewArticle[];
     try {
       // keep fetching until all fetched rows have a note
       let lastMissingNotes = 0;

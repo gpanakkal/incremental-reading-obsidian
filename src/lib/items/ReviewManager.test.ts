@@ -1,4 +1,3 @@
-/* eslint-disable obsidianmd/no-tfile-tfolder-cast -- this is a test file */
 import { DATA_DIRECTORY, MS_PER_DAY } from '#/lib/constants';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {

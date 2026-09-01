@@ -1,4 +1,4 @@
-import { ReviewArticle, ReviewText } from '#/lib/types';
+import type { ReviewArticle, ReviewText } from '#/lib/types';
 import { SchedulingModal } from '#/views/SchedulingModal';
 import { CalendarSync } from 'lucide-react';
 import { useReviewContext } from '../ReviewContext';

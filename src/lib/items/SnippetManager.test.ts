@@ -1,4 +1,3 @@
-/* eslint-disable obsidianmd/no-tfile-tfolder-cast -- this is a test file */
 import {
   DAY_ROLLOVER_OFFSET_HOURS,
   DEFAULT_PRIORITY,
@@ -938,7 +937,7 @@ describe('getDue', () => {
     const manager = new SnippetManager(plugin, repo);
     await manager.getDue(0, undefined, [rowA.id]);
 
-    const firstCallParams = queryCalls[0] as unknown[];
+    const firstCallParams = queryCalls[0];
     expect(firstCallParams).toContain(rowA.id);
   });
 

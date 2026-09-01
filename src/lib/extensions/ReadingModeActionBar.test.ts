@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-/* eslint-disable obsidianmd/no-tfile-tfolder-cast -- test file */
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import * as ActionBarExtension from '#/lib/extensions/ActionBarExtension';
 import ReviewView from '#/views/ReviewView';

@@ -165,7 +165,7 @@ export class IRSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Skip home screen')
-      .setDesc('Jump to the first due item when running the Learn hotkey.')
+      .setDesc('Jump to the first due item when opening review.')
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.skipHomeScreen)
@@ -206,7 +206,7 @@ export class IRSettingTab extends PluginSettingTab {
           });
       });
 
-    new Setting(containerEl).setName('Spaced Repetition').setHeading();
+    new Setting(containerEl).setName('Spaced repetition').setHeading();
 
     new Setting(containerEl)
       .setName('Targeted retention')
@@ -261,7 +261,7 @@ export class IRSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Enable short-term card scheduling')
       .setDesc(
-        `Schedule cards for next review in a few minutes in some cases where the user chooses a review grade below Easy. Recommended: off.`
+        `Schedule cards for next review in a few minutes in some cases where the user chooses a review grade below easy.`
       )
       .addToggle((toggle) => {
         toggle

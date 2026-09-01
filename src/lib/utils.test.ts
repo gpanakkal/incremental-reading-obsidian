@@ -54,7 +54,7 @@ describe('deepMerge', () => {
     // Covers the else branch at line 99-101: val1 is an object, val2 is NOT
     const obj1 = { key: { nested: 42 } };
     const obj2 = { key: 'replaced' } as const;
-    const result = deepMerge(obj1, obj2 as any);
+    const result = deepMerge(obj1, obj2 as object);
     expect(result.key).toBe('replaced');
   });
 

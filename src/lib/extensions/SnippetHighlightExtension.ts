@@ -2,7 +2,7 @@ import type IncrementalReadingPlugin from '#/main';
 import { Annotation, RangeSetBuilder, StateEffect } from '@codemirror/state';
 import type { DecorationSet, EditorView, ViewUpdate } from '@codemirror/view';
 import { Decoration, ViewPlugin } from '@codemirror/view';
-import { EventRef, type TFile } from 'obsidian';
+import type { EventRef, TFile } from 'obsidian';
 import type ReviewManager from '../items/ReviewManager';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type {

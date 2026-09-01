@@ -24,12 +24,12 @@ import {
   setTypesToReview,
   store,
 } from './store';
-import type { ReviewText } from './types';
 import {
   type ReviewArticle,
   type ReviewCard,
   type ReviewItem,
   type ReviewSnippet,
+  type ReviewText,
   isReviewArticle,
 } from './types';
 import { getContentSlice, getEndOfDay } from './utils';
@@ -330,8 +330,8 @@ export class Actions {
         description: `creating card "${result.reviewCard.file.basename}"`,
         undo: async () => {
           // restore the original text
-          const before = await this.plugin.app.vault.read(sourceFile);
-          const after = await ObsidianHelpers.editNote(
+          await this.plugin.app.vault.read(sourceFile);
+          await ObsidianHelpers.editNote(
             this.plugin.app,
             sourceFile,
             (data) => {
@@ -347,25 +347,23 @@ export class Actions {
               const endOffset = cardEmbed.position.end.offset;
 
               const prefix = data.slice(0, startOffset);
-              const replacement = data.slice(startOffset, endOffset);
+              data.slice(startOffset, endOffset);
               const suffix = data.slice(endOffset);
               return prefix + line + suffix;
             }
           );
 
           // remove the card file and row
-          const success = await this.plugin.reviewManager.cards.delete(
-            reviewCard.data.id
-          );
+          await this.plugin.reviewManager.cards.delete(reviewCard.data.id);
 
           const { parent } = reviewCard.data;
           if (parent) {
             const key = ['item', parent, 'file-text'];
-            const q0 = queryClient.getQueryCache().find({ queryKey: key });
+            queryClient.getQueryCache().find({ queryKey: key });
 
             await invalidateItemQuery(parent);
 
-            const q1 = queryClient.getQueryCache().find({ queryKey: key });
+            queryClient.getQueryCache().find({ queryKey: key });
           }
         },
       });
@@ -392,7 +390,7 @@ export class Actions {
   createEmitter() {
     const listeners = new Set<() => void>();
     return {
-      subscribe(fn: () => void) {
+      subscribe: (fn: () => void) => {
         listeners.add(fn);
         return () => void listeners.delete(fn);
       },

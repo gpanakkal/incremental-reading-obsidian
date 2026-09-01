@@ -1,12 +1,7 @@
 // @vitest-environment jsdom
 
-// Obsidian's `createEl` global — present in the Obsidian runtime but absent
-// in test environments. Polyfill it before any module under test is loaded.
-(globalThis as Record<string, unknown>)['createEl'] = <
-  K extends keyof HTMLElementTagNameMap,
->(
-  tag: K
-): HTMLElementTagNameMap[K] => document.createElement(tag);
+// The Obsidian DOM globals this module needs (`createDiv`, `activeDocument`)
+// are installed by src/test/obsidian-globals.setup.ts via setupFiles.
 
 import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
 import {

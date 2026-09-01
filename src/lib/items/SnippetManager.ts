@@ -140,7 +140,7 @@ export class SnippetManager extends ItemManager {
     const dueTime =
       dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
     let allExcluded = [...(excludeIds ?? [])];
-    let due: ReviewSnippet[] = [];
+    let due: ReviewSnippet[];
     try {
       // keep fetching until all fetched rows have a note
       let lastMissingNotes = 0;
@@ -402,7 +402,7 @@ export class SnippetManager extends ItemManager {
       await this.repo.mutate(`DELETE FROM snippet WHERE id = $1`, [id]);
 
       return true;
-    } catch (e) {
+    } catch (_e) {
       return false;
     }
   }

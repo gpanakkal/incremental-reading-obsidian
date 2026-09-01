@@ -165,9 +165,12 @@ export function applyMigrations(
       migration.up(db);
       db.exec(`PRAGMA user_version = ${migration.version}`);
       db.exec('COMMIT');
-    } catch (error) {
+    } catch (error: unknown) {
       db.exec('ROLLBACK');
-      throw new Error(`Migration ${migration.version} failed: ${error}`);
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`Migration ${migration.version} failed: ${reason}`, {
+        cause: error,
+      });
     }
   }
 

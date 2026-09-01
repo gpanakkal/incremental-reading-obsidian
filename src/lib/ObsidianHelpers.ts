@@ -1,5 +1,5 @@
 import type { EditorState } from '@codemirror/state';
-import { EditorView } from '@codemirror/view';
+import type { EditorView } from '@codemirror/view';
 import type {
   App,
   DataWriteOptions,
@@ -18,12 +18,12 @@ import {
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
   FORBIDDEN_TITLE_CHARS,
+  FRONTMATTER_PATTERN,
   INVALID_TITLE_MESSAGE,
   SNIPPET_DIRECTORY,
   SNIPPET_TAG,
   SOURCE_TAG,
 } from './constants';
-import { FRONTMATTER_PATTERN } from './constants.js';
 import { Markdown } from './Markdown';
 import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
 import { binarySearch, generateId } from './utils';

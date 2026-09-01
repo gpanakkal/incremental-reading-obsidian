@@ -1,4 +1,3 @@
-/* eslint-disable obsidianmd/no-tfile-tfolder-cast -- test file */
 import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
@@ -14,7 +13,7 @@ import {
 } from '#/lib/constants';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import type { NoteType, PluginFrontMatter } from '#/lib/types';
-import { EditorState } from '@codemirror/state';
+import type { EditorState } from '@codemirror/state';
 import fc from 'fast-check';
 import type {
   App,
