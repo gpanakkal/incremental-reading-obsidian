@@ -720,11 +720,6 @@ describe('migration v6 — vault-relative references', () => {
     expect(selectAll(db, 'srs_card')).toHaveLength(1);
   });
 
-  it('advances schema version to 7', () => {
-    applyMigrations(db, migrations);
-    expect(getSchemaVersion(db)).toBe(7);
-  });
-
   it('leaves non-reference columns unchanged after prefixing', () => {
     applyMigrations(db, migrations);
     const articles = selectAll(db, 'article');
@@ -741,5 +736,226 @@ describe('migration v6 — vault-relative references', () => {
     expect(cards[0].due).toBe(1000);
     expect(cards[0].stability).toBe(1.0);
     expect(cards[0].difficulty).toBe(1.0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration v8 tests
+// ---------------------------------------------------------------------------
+
+/**
+ * A database at exactly schema v7, produced by replaying migrations 1-7 rather
+ * than hardcoding a seventh literal schema. Rows are inserted by the caller
+ * afterwards, so migration v6's reference rewrite never touches them.
+ */
+function makeDbAtV7(): Database {
+  const db = makeDb(SCHEMA_V0);
+  applyMigrations(
+    db,
+    migrations.filter((m) => m.version < 8)
+  );
+  return db;
+}
+
+/** Column values a v7 srs_card row can hold, respecting its CHECK constraints. */
+const v7CardArb = fc.record({
+  created_at: fc.integer({ min: 0, max: 4_102_444_800_000 }),
+  due: fc.integer({ min: 0, max: 4_102_444_800_000 }),
+  dismissed: fc.constantFrom(0, 1),
+  deleted: fc.constantFrom(0, 1),
+  last_review: fc.oneof(
+    fc.integer({ min: 0, max: 4_102_444_800_000 }),
+    fc.constant(null)
+  ),
+  stability: fc.double({ min: 0, max: 36500, noNaN: true }),
+  difficulty: fc.double({ min: 0, max: 10, noNaN: true }),
+  elapsed_days: fc.double({ min: 0, max: 36500, noNaN: true }),
+  scheduled_days: fc.double({ min: 0, max: 36500, noNaN: true }),
+  reps: fc.nat({ max: 10000 }),
+  lapses: fc.nat({ max: 10000 }),
+  state: fc.constantFrom(0, 1, 2, 3),
+});
+
+/** The columns `v7CardArb` generates. */
+type V7CardColumns = {
+  created_at: number;
+  due: number;
+  dismissed: number;
+  deleted: number;
+  last_review: number | null;
+  stability: number;
+  difficulty: number;
+  elapsed_days: number;
+  scheduled_days: number;
+  reps: number;
+  lapses: number;
+  state: number;
+};
+
+/** Those columns plus the identifying ones the arbitrary leaves fixed. */
+type V7Card = { id: string; reference: string } & V7CardColumns;
+
+function makeV7CardValues(id: string, card: V7CardColumns): V7Card {
+  return { id, reference: `${DATA_DIRECTORY}/cards/${id}.md`, ...card };
+}
+
+function insertV7Card(db: Database, card: V7Card): void {
+  db.exec(
+    `INSERT INTO srs_card
+      (id, reference, parent, created_at, due, dismissed, deleted, last_review,
+       stability, difficulty, elapsed_days, scheduled_days, reps, lapses, state)
+     VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+    [
+      card.id,
+      card.reference,
+      card.created_at,
+      card.due,
+      card.dismissed,
+      card.deleted,
+      card.last_review,
+      card.stability,
+      card.difficulty,
+      card.elapsed_days,
+      card.scheduled_days,
+      card.reps,
+      card.lapses,
+      card.state,
+    ] as never
+  );
+}
+
+describe('migration v8 — add learning_steps to card tables', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDbAtV7();
+  });
+
+  it('adds learning_steps to srs_card', () => {
+    applyMigrations(db, migrations);
+    expect(columnNames(db, 'srs_card')).toContain('learning_steps');
+  });
+
+  it('adds learning_steps to srs_card_review', () => {
+    applyMigrations(db, migrations);
+    expect(columnNames(db, 'srs_card_review')).toContain('learning_steps');
+  });
+
+  it('leaves a v7 database at the version declared by the last migration', () => {
+    applyMigrations(db, migrations);
+    expect(getSchemaVersion(db)).toBe(
+      migrations[migrations.length - 1].version
+    );
+  });
+
+  it('reports no work to do when run a second time', () => {
+    applyMigrations(db, migrations);
+    expect(applyMigrations(db, migrations)).toBe(false);
+  });
+
+  it('backfills learning_steps to 0 on pre-existing cards in any scheduling state', () => {
+    fc.assert(
+      fc.property(v7CardArb, (card) => {
+        const fresh = makeDbAtV7();
+        insertV7Card(fresh, makeV7CardValues('c1', card));
+
+        applyMigrations(fresh, migrations);
+
+        const rows = selectAll(fresh, 'srs_card');
+        expect(rows).toHaveLength(1);
+        expect(rows[0].learning_steps).toBe(0);
+        fresh.close();
+      })
+    );
+  });
+
+  it('preserves every pre-existing card column value', () => {
+    fc.assert(
+      fc.property(v7CardArb, (card) => {
+        const fresh = makeDbAtV7();
+        const inserted = makeV7CardValues('c1', card);
+        insertV7Card(fresh, inserted);
+
+        applyMigrations(fresh, migrations);
+
+        const [row] = selectAll(fresh, 'srs_card');
+        // Every column the row had at v7 must survive untouched; only the new
+        // column may appear.
+        for (const [column, value] of Object.entries(inserted)) {
+          expect(row[column]).toBe(value);
+        }
+        fresh.close();
+      })
+    );
+  });
+
+  it('backfills learning_steps to 0 on pre-existing review logs', () => {
+    insertV7Card(
+      db,
+      makeV7CardValues('c1', {
+        created_at: 0,
+        due: 1000,
+        dismissed: 0,
+        deleted: 0,
+        last_review: null,
+        stability: 1,
+        difficulty: 1,
+        elapsed_days: 0,
+        scheduled_days: 1,
+        reps: 0,
+        lapses: 0,
+        state: 0,
+      })
+    );
+    db.exec(
+      `INSERT INTO srs_card_review
+        (id, card_id, due, review, stability, difficulty, elapsed_days,
+         last_elapsed_days, scheduled_days, rating, state)
+       VALUES ('r1', 'c1', 1000, 500, 1.0, 1.0, 0.0, 0.0, 1.0, 3, 1)`
+    );
+
+    applyMigrations(db, migrations);
+
+    const [row] = selectAll(db, 'srs_card_review');
+    expect(row.learning_steps).toBe(0);
+    expect(row.rating).toBe(3);
+    expect(row.state).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Schema version consistency
+// ---------------------------------------------------------------------------
+
+describe('schema version consistency', () => {
+  /** The version a freshly-created database declares via schema.sql. */
+  function declaredSchemaVersion(): number {
+    const match = schemaSQL.match(/PRAGMA\s+user_version\s*=\s*(\d+)/i);
+    if (!match) throw new Error('schema.sql declares no user_version');
+    return Number(match[1]);
+  }
+
+  it('declares the same version in schema.sql as the last migration', () => {
+    expect(declaredSchemaVersion()).toBe(
+      migrations[migrations.length - 1].version
+    );
+  });
+
+  it('brings a legacy database up to the version a fresh one declares', () => {
+    const db = makeDb(SCHEMA_V0);
+    applyMigrations(db, migrations);
+    expect(getSchemaVersion(db)).toBe(declaredSchemaVersion());
+  });
+
+  it('numbers migrations consecutively from 1', () => {
+    expect(migrations.map((m) => m.version)).toEqual(
+      migrations.map((_, i) => i + 1)
+    );
+  });
+
+  it('gives every migration a non-empty description', () => {
+    for (const migration of migrations) {
+      expect(migration.description.trim().length).toBeGreaterThan(0);
+    }
   });
 });
