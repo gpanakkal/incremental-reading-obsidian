@@ -149,19 +149,6 @@ export default class IncrementalReadingPlugin extends Plugin {
     }
 
     this.addCommand({
-      // TODO: remove after done testing
-      id: 'list-entries',
-      name: '(dev) list articles, snippets and cards',
-      callback: async () => {
-        if (!this.reviewManager) {
-          new Notice(`Plugin still loading`);
-          return;
-        }
-        await this.reviewManager._logItems();
-      },
-    });
-
-    this.addCommand({
       id: 'undo',
       name: 'Undo last action',
       checkCallback: (checking: boolean) => {

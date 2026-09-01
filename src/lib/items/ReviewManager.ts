@@ -555,33 +555,6 @@ export default class ReviewManager {
     return row;
   }
 
-  async _logItems() {
-    const articles = await this.articles.fetchMany({
-      includeDismissed: true,
-      includeDeleted: true,
-    });
-    const snippets = await this.snippets.fetchMany({
-      includeDismissed: true,
-      includeDeleted: true,
-    });
-    const cards = await this.cards.fetchMany({
-      includeDismissed: true,
-      includeDeleted: true,
-    });
-
-    if (!articles && !snippets && !cards) {
-      // eslint-disable-next-line no-console
-      console.log('No entries found');
-      return;
-    }
-    // eslint-disable-next-line no-console
-    console.table(articles.map((el) => ArticleManager.rowToDisplay(el)));
-    // eslint-disable-next-line no-console
-    console.table(snippets.map((el) => SnippetManager.rowToDisplay(el)));
-    // eslint-disable-next-line no-console
-    console.table(cards.map((el) => CardManager.rowToDisplay(el)));
-  }
-
   async dismissItem(item: ReviewItem): Promise<void> {
     const type = item.data.type;
     const table = type === 'card' ? 'srs_card' : type;
