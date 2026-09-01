@@ -1,6 +1,7 @@
 import type IncrementalReadingPlugin from '#/main';
 import { PluginSettingTab, Setting, type App } from 'obsidian';
-import { FSRSParameters, generatorParameters } from 'ts-fsrs';
+import type { FSRSParameters, StepUnit } from 'ts-fsrs';
+import { generatorParameters } from 'ts-fsrs';
 import {
   DATA_DIRECTORY,
   DAY_ROLLOVER_OFFSET_HOURS,
@@ -208,6 +209,22 @@ export class IRSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName('Spaced Repetition').setHeading();
 
     new Setting(containerEl)
+      .setName('Targeted retention')
+      .setDesc(
+        `The card recall score (out of 1) to aim for. Card reviews will be scheduled to target this score. 0.9 is optimal in most cases.`
+      )
+      .addSlider((slider) => {
+        slider
+          .setLimits(0.8, 0.95, 0.01)
+          .setValue(this.plugin.settings.fsrsParams.request_retention)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.fsrsParams.request_retention = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
       .setName('Fuzz review intervals')
       .setDesc(
         `Add controlled randomness to subsequent card reviews. Does not affect articles or snippets.`
@@ -217,6 +234,26 @@ export class IRSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.fsrsParams.enable_fuzz)
           .onChange(async (value) => {
             this.plugin.settings.fsrsParams.enable_fuzz = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Maximum review interval')
+      .setDesc(
+        `Soft ceiling on the time between card reviews. Fuzzing can exceed this limit slightly. Default: 36,500 days.`
+      )
+      .addText((text) => {
+        text
+          .setValue(this.plugin.settings.fsrsParams.maximum_interval.toString())
+          .onChange(async (value) => {
+            const asNum = Number.parseInt(value);
+            if (Number.isNaN(asNum)) {
+              // reject the change and restore previous value
+              return;
+            }
+
+            this.plugin.settings.fsrsParams.maximum_interval = asNum;
             await this.plugin.saveSettings();
           });
       });
@@ -236,37 +273,49 @@ export class IRSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName('Targeted retention')
+      .setName('Learning steps')
       .setDesc(
-        `The card recall score (out of 1) to aim for. Card reviews will be scheduled to target this score. 0.9 is optimal in most cases.`
+        `FSRS learning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas. Default: 1m, 10m`
       )
-      .addSlider((slider) => {
-        slider
-          .setLimits(0.8, 0.95, 0.01)
-          .setValue(this.plugin.settings.fsrsParams.request_retention)
-          .setDynamicTooltip()
+      .addText((text) => {
+        text
+          .setValue(this.plugin.settings.fsrsParams.learning_steps.join(', '))
           .onChange(async (value) => {
-            this.plugin.settings.fsrsParams.request_retention = value;
+            const parsed = value.split(',').map((el) => el.trim());
+            const isValid =
+              (parsed.length === 1 && parsed[0] === '') ||
+              parsed.every((el) => /^[1-9]\d*[mhd]$/.test(el));
+            if (!isValid) {
+              new Notice(`Learning steps were not formatted properly!`);
+              return;
+            }
+
+            this.plugin.settings.fsrsParams.learning_steps =
+              parsed as StepUnit[];
             await this.plugin.saveSettings();
           });
       });
 
     new Setting(containerEl)
-      .setName('Maximum review interval')
+      .setName('Relearning steps')
       .setDesc(
-        `Soft ceiling on the time between card reviews. Fuzzing can exceed this limit slightly. Default: 36,500 days (~10 years).`
+        `FSRS relearning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas. Default: 10m`
       )
       .addText((text) => {
         text
-          .setValue(this.plugin.settings.fsrsParams.maximum_interval.toString())
+          .setValue(this.plugin.settings.fsrsParams.relearning_steps.join(', '))
           .onChange(async (value) => {
-            const asNum = Number.parseInt(value);
-            if (Number.isNaN(asNum)) {
-              // reject the change and restore previous value
+            const parsed = value.split(',').map((el) => el.trim());
+            const isValid =
+              (parsed.length === 1 && parsed[0] === '') ||
+              parsed.every((el) => /^[1-9]\d*[mhd]$/.test(el));
+            if (!isValid) {
+              new Notice(`Relearning steps were not formatted properly!`);
               return;
             }
 
-            this.plugin.settings.fsrsParams.maximum_interval = asNum;
+            this.plugin.settings.fsrsParams.relearning_steps =
+              parsed as StepUnit[];
             await this.plugin.saveSettings();
           });
       });
