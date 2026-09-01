@@ -86,6 +86,11 @@ export default defineConfig([
       'no-prototype-builtins': 'off',
       '@typescript-eslint/no-empty-function': 'off',
       '@typescript-eslint/consistent-type-imports': 'error',
+      // Default fixer folds a value import into a sibling `import type` from the
+      // same module, dragging runtime bindings under `import type` and erasing
+      // them at compile time. `prefer-inline` merges the other direction, into a
+      // value import with inline `type` markers.
+      'import-x/no-duplicates': ['error', { 'prefer-inline': true }],
       '@typescript-eslint/no-inferrable-types': 'off',
       '@typescript-eslint/no-empty-interface': 'off',
       '@typescript-eslint/no-deprecated': 'warn',
