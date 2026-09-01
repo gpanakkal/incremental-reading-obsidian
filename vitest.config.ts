@@ -14,6 +14,7 @@ export default defineConfig({
     },
   },
   test: {
+    setupFiles: ['./src/test/obsidian-globals.setup.ts'],
     exclude: [
       '**/node_modules/**',
       '**/e2e-tests/**',

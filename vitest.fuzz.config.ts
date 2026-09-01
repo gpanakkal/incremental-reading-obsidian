@@ -8,7 +8,12 @@ const testTimeout = 20_000 + fcNumRuns * 20;
 const sharedResolve = (baseConfig as { resolve?: object }).resolve ?? {};
 
 const sharedProjectConfig = {
-  setupFiles: ['./src/test/fuzz.setup.ts'],
+  // Projects replace `setupFiles` rather than merging with the base config's,
+  // so the Obsidian DOM shim has to be repeated here.
+  setupFiles: [
+    './src/test/obsidian-globals.setup.ts',
+    './src/test/fuzz.setup.ts',
+  ],
   testTimeout: testTimeout,
   hookTimeout: 30_000,
   env: {
