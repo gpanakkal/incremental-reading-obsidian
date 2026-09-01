@@ -107,6 +107,9 @@ export default defineConfig([
         projectService: true,
       },
     },
+    rules: {
+      'import-x/no-named-as-default-member': 'off',
+    },
   },
   globalIgnores(['**/node_modules/', '**/main.js']),
 ]);
