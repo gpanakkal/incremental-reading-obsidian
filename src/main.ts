@@ -355,8 +355,8 @@ export default class IncrementalReadingPlugin extends Plugin {
   onunload() {}
 
   async loadSettings() {
-    const saved = (await this.loadData()) as object;
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+    const saved = (await this.loadData()) as Partial<IRPluginSettings> | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, saved ?? {});
   }
 
   getActiveReviewView(): ReviewView | null {
