@@ -1,7 +1,8 @@
-import type { Locator, Page } from '@playwright/test';
 import {
   _electron as electron,
   type ElectronApplication,
+  type Locator,
+  type Page,
 } from '@playwright/test';
 import { spawnSync, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs/promises';
@@ -92,7 +93,6 @@ export async function createVaultCopy(
   // refresh the plugin files from the project root.
   const pluginDir = path.join(
     vaultPath,
-    // eslint-disable-next-line obsidianmd/hardcoded-config-path -- test file, ignore
     '.obsidian/plugins/incremental-reading'
   );
   await fs.mkdir(pluginDir, { recursive: true });
@@ -165,7 +165,7 @@ async function applyStabilityPatches(app: ElectronApplication) {
       // hard; answer with the default button instead of waiting for a click.
       dialog.showMessageBoxSync = ((options: { defaultId?: number }) =>
         options?.defaultId ?? 0) as typeof dialog.showMessageBoxSync;
-      dialog.showMessageBox = (async (options: { defaultId?: number }) => ({
+      dialog.showMessageBox = ((options: { defaultId?: number }) => ({
         response: options?.defaultId ?? 0,
         checkboxChecked: false,
       })) as unknown as typeof dialog.showMessageBox;
@@ -613,20 +613,35 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
   const isFirstLaunch = window.url().includes(LAUNCHER_WINDOW_URL);
 
   if (isFirstLaunch) {
-    await window.getByRole('button', { name: 'Open' }).click();
+    // This click destroys the page it is clicking. The picker stub above is
+    // synchronous, so Obsidian opens the vault and tears down starter.html
+    // inside the click handler while Playwright's input round-trip is still in
+    // flight. `noWaitAfter` skips the post-action navigation wait, but the
+    // dispatch itself still loses the race on a loaded runner, so a closed
+    // target here is the success path — the vault window below is the proof
+    // that the click landed.
+    try {
+      await window
+        .getByRole('button', { name: 'Open' })
+        .click({ noWaitAfter: true });
+    } catch (error) {
+      if (!isPageClosedError(error)) throw error;
+    }
 
-    // Wait for the vault window to open after selecting the vault
-    window = await app.waitForEvent('window');
-    await window.waitForLoadState('domcontentloaded');
+    // Resolve the vault window by URL before dismissing anything. The prompts
+    // render in the *vault* window, not the launcher, and probing them on a
+    // stale handle fails silently: `dismissFirstLaunchPrompts` treats a missing
+    // prompt as "already dismissed", so the trust dialog survives and every
+    // later test runs against a vault whose plugins never loaded.
+    window = await waitForVaultWindow(app, window);
 
     await dismissFirstLaunchPrompts(app, window);
   }
 
-  // Re-resolve the vault window by URL rather than trusting the handle above.
-  // `waitForEvent('window')` yields whichever window Obsidian happened to
-  // create next, which in 1.13 is often the transient settings window —
-  // and `dismissFirstLaunchPrompts` destroys that one, leaving us holding a
-  // closed page ("Target page, context or browser has been closed").
+  // Re-resolve once more: `dismissFirstLaunchPrompts` destroys the transient
+  // settings window Obsidian 1.13 opens, and if the handle above happened to be
+  // that window we would now be holding a closed page ("Target page, context or
+  // browser has been closed").
   window = await waitForVaultWindow(app, window);
 
   // Wait for Obsidian to finish booting rather than guessing with a fixed
