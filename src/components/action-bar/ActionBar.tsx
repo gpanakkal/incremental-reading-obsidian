@@ -3,7 +3,6 @@ import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import { setPage, setShowAnswer } from '#/lib/store';
-import type { ReviewItem, ReviewText } from '#/lib/types';
 import {
   isReviewArticle,
   isReviewCard,
@@ -11,7 +10,9 @@ import {
   isReviewText,
   type ReviewArticle,
   type ReviewCard,
+  type ReviewItem,
   type ReviewSnippet,
+  type ReviewText,
 } from '#/lib/types';
 import {
   ArchiveRestore,
@@ -290,7 +291,7 @@ function CardActions({ card }: { card: ReviewCard }) {
               dispatch(setShowAnswer(true));
             }}
           >
-            <Eye />
+            <Eye stroke="#00a700" />
           </ButtonWithIcon>
           <ButtonWithIcon
             tooltip="Skip for current review session"
