@@ -450,6 +450,7 @@ export class SQLJSRepository implements SQLiteRepository {
       this.#sql ||= await this.loadWasm();
       this.db = new this.#sql.Database();
       this.db.exec(this.#schema);
+      this.db.exec('PRAGMA foreign_keys = ON');
       this.registerUpdateHook();
       return this.db;
     } catch (error) {
@@ -507,6 +508,7 @@ export class SQLJSRepository implements SQLiteRepository {
       // Use browser-compatible Uint8Array instead of Node.js Buffer
       // for mobile compatibility
       this.db = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
+      this.db.exec('PRAGMA foreign_keys = ON');
       this.registerUpdateHook();
       const result = this.db.exec('PRAGMA integrity_check');
       const status = result[0]?.values[0]?.[0] as string;

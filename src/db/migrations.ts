@@ -83,20 +83,22 @@ export const migrations: Migration[] = [
             fixed_interval_days: 'fixed_interval_days',
             scroll_top: 'scroll_top',
           },
-          (
-            row: SafeOmit<
-              TableNameToRowType['article'],
-              'interval' | 'deleted' | 'due_fuzz'
-            >
-          ) => {
-            const lastReviewTime = latestReviewByArticle[row.id];
-            const computed =
-              lastReviewTime && row.due ? row.due - lastReviewTime : 0;
+          {
+            transformRow: (
+              row: SafeOmit<
+                TableNameToRowType['article'],
+                'interval' | 'deleted' | 'due_fuzz'
+              >
+            ) => {
+              const lastReviewTime = latestReviewByArticle[row.id];
+              const computed =
+                lastReviewTime && row.due ? row.due - lastReviewTime : 0;
 
-            // ensure the interval is positive
-            const interval =
-              computed > 0 ? computed : TEXT_BASE_REVIEW_INTERVAL;
-            return { ...row, interval };
+              // ensure the interval is positive
+              const interval =
+                computed > 0 ? computed : TEXT_BASE_REVIEW_INTERVAL;
+              return { ...row, interval };
+            },
           }
         );
       })();
@@ -143,18 +145,20 @@ export const migrations: Migration[] = [
             start_offset: 'start_offset',
             end_offset: 'end_offset',
           },
-          (
-            row: SafeOmit<
-              TableNameToRowType['snippet'],
-              'interval' | 'deleted' | 'due_fuzz'
-            >
-          ) => {
-            const lastReviewTime = latestReviewBySnippet[row.id];
-            const computed =
-              lastReviewTime && row.due ? row.due - lastReviewTime : 0;
-            const interval =
-              computed > 0 ? computed : TEXT_BASE_REVIEW_INTERVAL;
-            return { ...row, interval };
+          {
+            transformRow: (
+              row: SafeOmit<
+                TableNameToRowType['snippet'],
+                'interval' | 'deleted' | 'due_fuzz'
+              >
+            ) => {
+              const lastReviewTime = latestReviewBySnippet[row.id];
+              const computed =
+                lastReviewTime && row.due ? row.due - lastReviewTime : 0;
+              const interval =
+                computed > 0 ? computed : TEXT_BASE_REVIEW_INTERVAL;
+              return { ...row, interval };
+            },
           }
         );
       })();
@@ -228,7 +232,8 @@ export const migrations: Migration[] = [
           fixed_interval_days: 'fixed_interval_days',
           dismissed: 'dismissed',
           scroll_top: 'scroll_top',
-        }
+        },
+        { defaultedColumns: ['deleted'] }
       );
 
       recreateTable(
@@ -263,7 +268,8 @@ export const migrations: Migration[] = [
           scroll_top: 'scroll_top',
           start_offset: 'start_offset',
           end_offset: 'end_offset',
-        }
+        },
+        { defaultedColumns: ['deleted'] }
       );
 
       recreateTable(
@@ -304,7 +310,8 @@ export const migrations: Migration[] = [
           reps: 'reps',
           lapses: 'lapses',
           state: 'state',
-        }
+        },
+        { defaultedColumns: ['deleted'] }
       );
     },
   },
@@ -348,6 +355,211 @@ export const migrations: Migration[] = [
         'learning_steps',
         'INTEGER NOT NULL DEFAULT 0'
       );
+    },
+  },
+  {
+    version: 9,
+    description:
+      'Key item tables on id, cascade review deletes, and restore lost indexes',
+    up: (db) => {
+      // Foreign key enforcement needs a unique parent key, so `id` becomes a
+      // PRIMARY KEY on every item table. Without it SQLite rejects any write
+      // touching a review table with "foreign key mismatch".
+      //
+      // The parents are rebuilt first: a rebuild renames the original out of
+      // the way, and a child rebuilt beforehand would be pointing at whichever
+      // name existed at the time.
+      recreateTable(
+        db,
+        'article',
+        `CREATE TABLE article (
+          id TEXT NOT NULL PRIMARY KEY, -- UUID
+          reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
+          due INTEGER, -- unix timestamp
+          due_fuzz INTEGER DEFAULT NULL, -- milliseconds to offset due time for intra-day review ordering
+          interval INTEGER NOT NULL, -- the interval that was used to calculate \`due\`
+          priority INTEGER NOT NULL, -- used when manual interval is null
+          fixed_interval_days INTEGER NULL,
+          dismissed INTEGER NOT NULL DEFAULT FALSE,
+          deleted INTEGER NOT NULL DEFAULT FALSE,
+          scroll_top INTEGER NOT NULL DEFAULT 0,
+          CHECK(interval > 0),
+          CHECK(priority >= 10 AND priority <= 50),
+          CHECK(fixed_interval_days > 0),
+          CHECK(dismissed = FALSE OR dismissed = TRUE),
+          CHECK(deleted = FALSE OR deleted = TRUE),
+          CHECK(due IS NOT NULL OR dismissed = TRUE)
+        );`,
+        {
+          id: 'id',
+          reference: 'reference',
+          due: 'due',
+          due_fuzz: 'due_fuzz',
+          interval: 'interval',
+          priority: 'priority',
+          fixed_interval_days: 'fixed_interval_days',
+          dismissed: 'dismissed',
+          deleted: 'deleted',
+          scroll_top: 'scroll_top',
+        }
+      );
+
+      recreateTable(
+        db,
+        'snippet',
+        `CREATE TABLE snippet (
+          id TEXT NOT NULL PRIMARY KEY, -- UUID
+          reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
+          parent TEXT DEFAULT NULL, -- UUID; null if it wasn't created from an article or snippet
+          due INTEGER, -- unix timestamp
+          due_fuzz INTEGER DEFAULT NULL, -- milliseconds to offset due time for intra-day review ordering
+          interval INTEGER NOT NULL, -- the interval that was used to calculate \`due\`
+          priority INTEGER NOT NULL,
+          dismissed INTEGER NOT NULL DEFAULT FALSE,
+          deleted INTEGER NOT NULL DEFAULT FALSE,
+          scroll_top INTEGER NOT NULL DEFAULT 0,
+          start_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
+          end_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
+          CHECK(interval > 0),
+          CHECK(priority >= 10 AND priority <= 50),
+          CHECK(dismissed = FALSE OR dismissed = TRUE),
+          CHECK(deleted = FALSE OR deleted = TRUE),
+          CHECK(due IS NOT NULL OR dismissed = TRUE)
+        );`,
+        {
+          id: 'id',
+          reference: 'reference',
+          parent: 'parent',
+          due: 'due',
+          due_fuzz: 'due_fuzz',
+          interval: 'interval',
+          priority: 'priority',
+          dismissed: 'dismissed',
+          deleted: 'deleted',
+          scroll_top: 'scroll_top',
+          start_offset: 'start_offset',
+          end_offset: 'end_offset',
+        }
+      );
+
+      recreateTable(
+        db,
+        'srs_card',
+        `CREATE TABLE srs_card (
+          id TEXT NOT NULL PRIMARY KEY, -- UUID
+          reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
+          parent TEXT DEFAULT NULL, -- UUID; null if it wasn't created from an article or snippet
+          created_at INTEGER NOT NULL, -- unix timestamp
+          due INTEGER NOT NULL,
+          dismissed INTEGER NOT NULL DEFAULT FALSE,
+          deleted INTEGER NOT NULL DEFAULT FALSE,
+          last_review INTEGER,
+          stability REAL NOT NULL,
+          difficulty REAL NOT NULL,
+          elapsed_days REAL NOT NULL,
+          scheduled_days REAL NOT NULL,
+          learning_steps INTEGER NOT NULL DEFAULT 0,
+          reps INTEGER NOT NULL DEFAULT 0,
+          lapses INTEGER NOT NULL DEFAULT 0,
+          state INTEGER NOT NULL,
+          CHECK(state >= 0 AND state <= 3),
+          CHECK(dismissed = FALSE OR dismissed = TRUE),
+          CHECK(deleted = FALSE OR deleted = TRUE)
+        );`,
+        {
+          id: 'id',
+          reference: 'reference',
+          parent: 'parent',
+          created_at: 'created_at',
+          due: 'due',
+          dismissed: 'dismissed',
+          deleted: 'deleted',
+          last_review: 'last_review',
+          stability: 'stability',
+          difficulty: 'difficulty',
+          elapsed_days: 'elapsed_days',
+          scheduled_days: 'scheduled_days',
+          learning_steps: 'learning_steps',
+          reps: 'reps',
+          lapses: 'lapses',
+          state: 'state',
+        }
+      );
+
+      // Rebuilding the review tables restates their REFERENCES clauses, which
+      // both adds the cascade and repairs databases whose clauses were left
+      // pointing at a `*_old` temporary table by the rebuilds in v3-v5.
+      recreateTable(
+        db,
+        'article_review',
+        `CREATE TABLE article_review (
+          id TEXT NOT NULL PRIMARY KEY, -- UUID
+          article_id TEXT NOT NULL REFERENCES article(id) ON DELETE CASCADE,
+          review_time INTEGER NOT NULL
+        );`,
+        { id: 'id', article_id: 'article_id', review_time: 'review_time' }
+      );
+
+      recreateTable(
+        db,
+        'snippet_review',
+        `CREATE TABLE snippet_review (
+          id TEXT NOT NULL PRIMARY KEY, -- UUID
+          snippet_id TEXT NOT NULL REFERENCES snippet(id) ON DELETE CASCADE,
+          review_time INTEGER NOT NULL
+        );`,
+        { id: 'id', snippet_id: 'snippet_id', review_time: 'review_time' }
+      );
+
+      recreateTable(
+        db,
+        'srs_card_review',
+        `CREATE TABLE srs_card_review (
+          id TEXT NOT NULL PRIMARY KEY, -- UUID
+          card_id TEXT NOT NULL REFERENCES srs_card(id) ON DELETE CASCADE,
+          due INTEGER NOT NULL, -- time it was due
+          review INTEGER NOT NULL, -- actual time of review
+          stability REAL NOT NULL,
+          difficulty REAL NOT NULL,
+          elapsed_days REAL NOT NULL,
+          last_elapsed_days REAL NOT NULL,
+          scheduled_days REAL NOT NULL,
+          learning_steps INTEGER NOT NULL DEFAULT 0,
+          rating INTEGER NOT NULL,
+          state INTEGER NOT NULL,
+          CHECK(state >= 0 AND state <= 3),
+          CHECK(rating >= 0 AND rating <= 4)
+        );`,
+        {
+          id: 'id',
+          card_id: 'card_id',
+          due: 'due',
+          review: 'review',
+          stability: 'stability',
+          difficulty: 'difficulty',
+          elapsed_days: 'elapsed_days',
+          last_elapsed_days: 'last_elapsed_days',
+          scheduled_days: 'scheduled_days',
+          learning_steps: 'learning_steps',
+          rating: 'rating',
+          state: 'state',
+        }
+      );
+
+      // `recreateTable` carries across whatever indexes a table already has, so
+      // these statements are only reached by databases that lost theirs to the
+      // rebuilds in v3-v5 — those tables arrive here with nothing to carry.
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS article_uuid ON article(id);
+        CREATE INDEX IF NOT EXISTS article_reference ON article(reference);
+        CREATE INDEX IF NOT EXISTS article_due ON article(due);
+        CREATE INDEX IF NOT EXISTS snippet_uuid ON snippet(id);
+        CREATE INDEX IF NOT EXISTS snippet_reference ON snippet(reference);
+        CREATE INDEX IF NOT EXISTS snippet_due ON snippet(due);
+        CREATE INDEX IF NOT EXISTS srs_card_uuid ON srs_card(id);
+        CREATE INDEX IF NOT EXISTS srs_card_reference ON srs_card(reference);
+        CREATE INDEX IF NOT EXISTS srs_card_due ON srs_card(due);
+      `);
     },
   },
 ];

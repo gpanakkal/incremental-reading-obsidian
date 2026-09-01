@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS article (
-  id TEXT NOT NULL, -- UUID
+  id TEXT NOT NULL PRIMARY KEY, -- UUID
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
   due INTEGER, -- unix timestamp
   due_fuzz INTEGER DEFAULT NULL, -- milliseconds to offset due time for intra-day review ordering
@@ -22,13 +22,13 @@ CREATE INDEX IF NOT EXISTS article_reference ON article(reference);
 CREATE INDEX IF NOT EXISTS article_due ON article(due);
 
 CREATE TABLE IF NOT EXISTS article_review (
-  id TEXT NOT NULL, -- UUID
-  article_id TEXT NOT NULL REFERENCES article(id),
+  id TEXT NOT NULL PRIMARY KEY, -- UUID
+  article_id TEXT NOT NULL REFERENCES article(id) ON DELETE CASCADE,
   review_time INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS snippet (
-  id TEXT NOT NULL, -- UUID
+  id TEXT NOT NULL PRIMARY KEY, -- UUID
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
   parent TEXT DEFAULT NULL, -- UUID; null if it wasn't created from an article or snippet
   due INTEGER, -- unix timestamp
@@ -52,13 +52,13 @@ CREATE INDEX IF NOT EXISTS snippet_reference ON snippet(reference);
 CREATE INDEX IF NOT EXISTS snippet_due ON snippet(due);
 
 CREATE TABLE IF NOT EXISTS snippet_review (
-  id TEXT NOT NULL, -- UUID
-  snippet_id TEXT NOT NULL REFERENCES snippet(id),
+  id TEXT NOT NULL PRIMARY KEY, -- UUID
+  snippet_id TEXT NOT NULL REFERENCES snippet(id) ON DELETE CASCADE,
   review_time INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS srs_card (
-  id TEXT NOT NULL, -- UUID
+  id TEXT NOT NULL PRIMARY KEY, -- UUID
   -- source TEXT NOT NULL, -- use source property in the card instead so Obsidian updates it properly
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
   parent TEXT DEFAULT NULL, -- UUID; null if it wasn't created from an article or snippet
@@ -85,8 +85,8 @@ CREATE INDEX IF NOT EXISTS srs_card_reference ON srs_card(reference);
 CREATE INDEX IF NOT EXISTS srs_card_due ON srs_card(due);
 
 CREATE TABLE IF NOT EXISTS srs_card_review (
-  id TEXT NOT NULL, -- UUID
-  card_id TEXT NOT NULL REFERENCES srs_card(id),
+  id TEXT NOT NULL PRIMARY KEY, -- UUID
+  card_id TEXT NOT NULL REFERENCES srs_card(id) ON DELETE CASCADE,
   due INTEGER NOT NULL, -- time it was due
   review INTEGER NOT NULL, -- actual time of review
   stability REAL NOT NULL,
@@ -101,4 +101,4 @@ CREATE TABLE IF NOT EXISTS srs_card_review (
   CHECK(rating >= 0 AND rating <= 4)
 );
 
-PRAGMA user_version = 8;
+PRAGMA user_version = 9;
