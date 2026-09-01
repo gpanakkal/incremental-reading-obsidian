@@ -25,7 +25,7 @@ export interface IRPluginSettings {
   fsrsParams: FSRSParameters;
 }
 
-const FSRS_PARAMETER_DEFAULTS = generatorParameters();
+const FSRS_PARAMETER_DEFAULTS = Object.freeze(generatorParameters());
 
 export const DEFAULT_SETTINGS: IRPluginSettings = {
   defaultPriority: DEFAULT_PRIORITY,

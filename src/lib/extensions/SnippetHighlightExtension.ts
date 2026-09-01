@@ -40,7 +40,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
     decorations: DecorationSet;
     private file: TFile | null;
     private highlightsLoaded: boolean = false;
-    private persistTimeout: ReturnType<typeof setTimeout> | null = null;
+    private persistTimeout: number | null = null;
     private isReviewInterface: boolean = false;
     // keep track of if the ViewPlugin was destroyed
     private destroyed: boolean = false;
@@ -184,7 +184,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           const highlights = reviewManager.snippets.offsetTracker.getHighlights(
             this.file.path
           );
-          this.schedulePersist(reviewManager, this.file, highlights);
+          this.schedulePersist(reviewManager, highlights);
         }
       }
 
@@ -224,13 +224,12 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
     private schedulePersist(
       reviewManager: ReviewManager,
-      file: TFile,
       highlights: SnippetHighlight[]
     ) {
       if (this.persistTimeout) {
-        clearTimeout(this.persistTimeout);
+        window.clearTimeout(this.persistTimeout);
       }
-      this.persistTimeout = setTimeout(() => {
+      this.persistTimeout = window.setTimeout(() => {
         void this.persistHighlights(reviewManager, highlights);
       }, 2000); // 2 second debounce
     }
@@ -311,7 +310,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       }
 
       if (this.persistTimeout) {
-        clearTimeout(this.persistTimeout);
+        window.clearTimeout(this.persistTimeout);
         this.persistTimeout = null;
       }
     }

@@ -208,7 +208,7 @@ export async function getDomOffsets(
   }
 
   const component = new Component();
-  const dummyElement = createEl('div');
+  const dummyElement = createDiv();
   await MarkdownPreviewView.render(
     app,
     stringToRender,
@@ -254,7 +254,10 @@ export async function getDomOffsets(
 
 /** Collect all Text nodes in the current section */
 export function collectTextNodes(container: HTMLElement): Text[] {
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const walker = activeDocument.createTreeWalker(
+    container,
+    NodeFilter.SHOW_TEXT
+  );
   const nodes: Text[] = [];
   let node: Node | null;
   while ((node = walker.nextNode())) {
@@ -281,11 +284,11 @@ export function wrapDomRange(
   if (!startPos || !endPos) return;
 
   try {
-    const range = document.createRange();
+    const range = activeDocument.createRange();
     range.setStart(startPos.node, startPos.offset);
     range.setEnd(endPos.node, endPos.offset);
 
-    const span = document.createElement('span');
+    const span = activeDocument.createSpan();
     span.className = 'ir-snippet-highlight';
     span.setAttribute('data-snippet-id', highlight.id);
     span.setAttribute('data-snippet-ref', highlight.reference);

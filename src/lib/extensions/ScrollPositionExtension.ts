@@ -124,9 +124,9 @@ export const scrollPositionExtension = ViewPlugin.define(
           const widget = contentDOM.querySelector('.metadata-container');
           if (widget) {
             observer.disconnect();
-            clearTimeout(timeoutId);
+            window.clearTimeout(timeoutId);
             // Give the widget a moment to finish layout
-            requestAnimationFrame(() => {
+            window.requestAnimationFrame(() => {
               void restoreScrollPosition();
             });
           }
@@ -146,8 +146,8 @@ export const scrollPositionExtension = ViewPlugin.define(
       };
 
       // Start the scroll restoration process
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
           waitForPropertiesAndRestore()
             .then(() => {
               // Add scroll listener with AbortController for clean lifecycle
@@ -167,7 +167,7 @@ export const scrollPositionExtension = ViewPlugin.define(
         abortController?.abort();
         mutationObserver?.disconnect();
         if (scrollTimeout !== undefined) {
-          clearTimeout(scrollTimeout);
+          window.clearTimeout(scrollTimeout);
         }
       },
     };

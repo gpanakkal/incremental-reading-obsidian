@@ -1,4 +1,3 @@
-/* eslint-disable obsidianmd/no-tfile-tfolder-cast -- test file */
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { scrollPositionExtension } from '#/lib/extensions/ScrollPositionExtension';
 import { irPluginFacet } from '#/lib/extensions/irPluginFacet';
@@ -13,7 +12,8 @@ type PluginFactory = (view: MockView) => { destroy(): void };
  * ViewPlugin.define stores the factory as `.create` on the returned instance.
  */
 function extractFactory(): PluginFactory {
-  return (scrollPositionExtension as unknown as { create: PluginFactory }).create;
+  return (scrollPositionExtension as unknown as { create: PluginFactory })
+    .create;
 }
 
 interface MockView {
@@ -40,8 +40,16 @@ function makeReviewManager(scrollPos?: { top: number; left: number } | null) {
   };
 }
 
-function makePlugin(reviewManager: ReturnType<typeof makeReviewManager> | null | undefined = undefined) {
-  return { reviewManager: reviewManager !== undefined ? reviewManager : makeReviewManager() };
+function makePlugin(
+  reviewManager:
+    | ReturnType<typeof makeReviewManager>
+    | null
+    | undefined = undefined
+) {
+  return {
+    reviewManager:
+      reviewManager !== undefined ? reviewManager : makeReviewManager(),
+  };
 }
 
 /**
@@ -51,15 +59,17 @@ function makePlugin(reviewManager: ReturnType<typeof makeReviewManager> | null |
  *                            Pass `null` to simulate no widget (triggers MutationObserver path).
  *                            Pass an Element-like object to simulate an already-rendered widget.
  */
-function makeView(opts: {
-  info?: object | null;
-  file?: TFile | null;
-  plugin?: ReturnType<typeof makePlugin> | null;
-  noteType?: string | null;
-  scrollTop?: number;
-  scrollLeft?: number;
-  propertiesWidget?: Element | null;
-} = {}): MockView {
+function makeView(
+  opts: {
+    info?: object | null;
+    file?: TFile | null;
+    plugin?: ReturnType<typeof makePlugin> | null;
+    noteType?: string | null;
+    scrollTop?: number;
+    scrollLeft?: number;
+    propertiesWidget?: Element | null;
+  } = {}
+): MockView {
   const {
     file = makeTFile(),
     info,
@@ -78,9 +88,11 @@ function makeView(opts: {
 
   const view: MockView = {
     state: {
-      facet: vi.fn().mockImplementation((facetDef: unknown) =>
-        facetDef === irPluginFacet ? plugin : null
-      ),
+      facet: vi
+        .fn()
+        .mockImplementation((facetDef: unknown) =>
+          facetDef === irPluginFacet ? plugin : null
+        ),
     },
     contentDOM: {
       querySelector: vi.fn().mockReturnValue(propertiesWidget),
@@ -109,8 +121,10 @@ function makeView(opts: {
  */
 function makeFakeMutationObserver() {
   let callback: MutationCallback | null = null;
-  let observerInstance: { observe: () => void; disconnect: ReturnType<typeof vi.fn> } | null =
-    null;
+  let observerInstance: {
+    observe: () => void;
+    disconnect: ReturnType<typeof vi.fn>;
+  } | null = null;
 
   const disconnect = vi.fn();
   const observe = vi.fn();
@@ -140,19 +154,18 @@ let factory: PluginFactory;
 
 beforeEach(() => {
   vi.useFakeTimers();
-  // requestAnimationFrame / cancelAnimationFrame are browser APIs — not
-  // available in the node test environment. Stub them to use setTimeout(0)
-  // so vi.runAllTimersAsync() can drive them deterministically.
-  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) =>
-    setTimeout(() => cb(0), 0)
-  );
-  vi.stubGlobal('cancelAnimationFrame', (id: number) => clearTimeout(id));
-
-  // window.setTimeout is used by restoreScrollPosition for the isRestoring guard.
-  // In the node env, `window` is not defined. Stub it to use global setTimeout.
+  // The extension schedules everything through `window` — Obsidian's lint rules
+  // require `window.setTimeout` / `window.requestAnimationFrame` so the browser
+  // (number-returning) overloads win over Node's Timeout objects. `window` does
+  // not exist in the node test environment, so stub the four members it uses.
+  // The animation-frame shims fall back to setTimeout(0) so vi.runAllTimersAsync()
+  // can drive them deterministically.
   vi.stubGlobal('window', {
     setTimeout: (cb: () => void, ms: number) => setTimeout(cb, ms),
     clearTimeout: (id: number) => clearTimeout(id),
+    requestAnimationFrame: (cb: FrameRequestCallback) =>
+      setTimeout(() => cb(0), 0),
+    cancelAnimationFrame: (id: number) => clearTimeout(id),
   });
 
   // MutationObserver is also a browser API. Provide a no-op stub by default so
@@ -279,12 +292,14 @@ describe('properties widget already present on mount', () => {
    * for '.metadata-container', null for any other selector.
    * This allows killing mutants that change the selector string.
    */
-  function makeViewWithSelectorAwareDOM(opts: Parameters<typeof makeView>[0] & { widgetHeight?: number } = {}) {
+  function makeViewWithSelectorAwareDOM(
+    opts: Parameters<typeof makeView>[0] & { widgetHeight?: number } = {}
+  ) {
     const { widgetHeight = 60, ...viewOpts } = opts;
     const widget = makeWidgetElement(widgetHeight);
     const view = makeView({ ...viewOpts, propertiesWidget: null });
-    (view.contentDOM.querySelector as ReturnType<typeof vi.fn>).mockImplementation(
-      (selector: string) => selector === '.metadata-container' ? widget : null
+    view.contentDOM.querySelector.mockImplementation((selector: string) =>
+      selector === '.metadata-container' ? widget : null
     );
     return { view, widget };
   }
@@ -329,8 +344,8 @@ describe('properties widget already present on mount', () => {
     });
 
     // Override querySelector: return widget only when called with the exact selector
-    (view.contentDOM.querySelector as ReturnType<typeof vi.fn>).mockImplementation(
-      (selector: string) => (selector === '.metadata-container' ? widget : null)
+    view.contentDOM.querySelector.mockImplementation((selector: string) =>
+      selector === '.metadata-container' ? widget : null
     );
 
     factory(view as never);
@@ -397,7 +412,12 @@ describe('handleScroll', () => {
    * `.metadata-container` string literal mutant (line 59) is killed —
    * if the selector changes to "" the widget won't be found and height = 0.
    */
-  function makeViewForScroll(opts: { height: number; scrollTop: number; scrollLeft: number; reviewManager: ReturnType<typeof makeReviewManager> }): MockView {
+  function makeViewForScroll(opts: {
+    height: number;
+    scrollTop: number;
+    scrollLeft: number;
+    reviewManager: ReturnType<typeof makeReviewManager>;
+  }): MockView {
     const widget = {
       getBoundingClientRect: vi.fn().mockReturnValue({ height: opts.height }),
     } as unknown as Element;
@@ -407,8 +427,8 @@ describe('handleScroll', () => {
       scrollLeft: opts.scrollLeft,
       propertiesWidget: null,
     });
-    (view.contentDOM.querySelector as ReturnType<typeof vi.fn>).mockImplementation(
-      (selector: string) => selector === '.metadata-container' ? widget : null
+    view.contentDOM.querySelector.mockImplementation((selector: string) =>
+      selector === '.metadata-container' ? widget : null
     );
     return view;
   }
@@ -416,13 +436,21 @@ describe('handleScroll', () => {
   async function getScrollHandler(view: MockView): Promise<() => void> {
     factory(view as never);
     await vi.runAllTimersAsync();
-    const call = view.scrollDOM.addEventListener.mock.calls[0] as [string, () => void];
+    const call = view.scrollDOM.addEventListener.mock.calls[0] as [
+      string,
+      () => void,
+    ];
     return call[1];
   }
 
   it('saves body-relative scroll position (scrollTop minus frontmatter height)', async () => {
     const reviewManager = makeReviewManager(null);
-    const view = makeViewForScroll({ height: 100, scrollTop: 250, scrollLeft: 10, reviewManager });
+    const view = makeViewForScroll({
+      height: 100,
+      scrollTop: 250,
+      scrollLeft: 10,
+      reviewManager,
+    });
     const scrollHandler = await getScrollHandler(view);
     scrollHandler();
 
@@ -434,7 +462,12 @@ describe('handleScroll', () => {
 
   it('clamps bodyRelativeTop to 0 when scrollTop < frontmatter height', async () => {
     const reviewManager = makeReviewManager(null);
-    const view = makeViewForScroll({ height: 300, scrollTop: 50, scrollLeft: 0, reviewManager });
+    const view = makeViewForScroll({
+      height: 300,
+      scrollTop: 50,
+      scrollLeft: 0,
+      reviewManager,
+    });
     const scrollHandler = await getScrollHandler(view);
     scrollHandler();
 
@@ -475,10 +508,16 @@ describe('handleScroll', () => {
     await vi.runAllTimersAsync();
 
     // After setup, make getFileInfoFromState return null (simulates file closed)
-    vi.spyOn(Obsidian, 'getFileInfoFromState').mockReturnValue({ info: null, editorView: null });
+    vi.spyOn(Obsidian, 'getFileInfoFromState').mockReturnValue({
+      info: null,
+      editorView: null,
+    });
     void file; // referenced for clarity
 
-    const call = view.scrollDOM.addEventListener.mock.calls[0] as [string, () => void];
+    const call = view.scrollDOM.addEventListener.mock.calls[0] as [
+      string,
+      () => void,
+    ];
     const scrollHandler = call[1];
     scrollHandler();
 
@@ -601,7 +640,7 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     await vi.advanceTimersByTimeAsync(10);
 
     // Now simulate the widget appearing
-    (view.contentDOM.querySelector as ReturnType<typeof vi.fn>).mockReturnValue(fakeWidget);
+    view.contentDOM.querySelector.mockReturnValue(fakeWidget);
     triggerMutation();
 
     // Flush the requestAnimationFrame queued inside the observer callback
@@ -631,7 +670,7 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     factory(view as never);
     await vi.advanceTimersByTimeAsync(10);
 
-    (view.contentDOM.querySelector as ReturnType<typeof vi.fn>).mockReturnValue(fakeWidget);
+    view.contentDOM.querySelector.mockReturnValue(fakeWidget);
     triggerMutation();
     await vi.runAllTimersAsync();
 
@@ -671,13 +710,15 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     factory(view as never);
     await vi.advanceTimersByTimeAsync(10);
 
-    (view.contentDOM.querySelector as ReturnType<typeof vi.fn>).mockReturnValue(fakeWidget);
+    view.contentDOM.querySelector.mockReturnValue(fakeWidget);
     triggerMutation();
     await vi.runAllTimersAsync();
 
-    const calls = (view.contentDOM.querySelector as ReturnType<typeof vi.fn>).mock.calls;
+    const calls = view.contentDOM.querySelector.mock.calls;
     // Both the initial check and the observer check use '.metadata-container'
-    expect(calls.every((call) => (call as [string])[0] === '.metadata-container')).toBe(true);
+    expect(
+      calls.every((call) => (call as [string])[0] === '.metadata-container')
+    ).toBe(true);
   });
 
   it('calls restoreScrollPosition immediately when observer fires (before 300ms fallback)', async () => {
@@ -697,7 +738,7 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     factory(view as never);
     await vi.advanceTimersByTimeAsync(10); // through rAFs
 
-    (view.contentDOM.querySelector as ReturnType<typeof vi.fn>).mockReturnValue(fakeWidget);
+    view.contentDOM.querySelector.mockReturnValue(fakeWidget);
     triggerMutation();
 
     // Advance LESS than 300ms — restore should still have happened via observer (not fallback)
@@ -751,7 +792,7 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     factory(view as never);
     await vi.advanceTimersByTimeAsync(10);
 
-    (view.contentDOM.querySelector as ReturnType<typeof vi.fn>).mockReturnValue(fakeWidget);
+    view.contentDOM.querySelector.mockReturnValue(fakeWidget);
     triggerMutation();
     await vi.runAllTimersAsync();
 
