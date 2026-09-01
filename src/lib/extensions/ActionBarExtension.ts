@@ -109,6 +109,16 @@ function createActionBarPanel(
     return {
       dom,
       top: !app.isMobile,
+      mount() {
+        dom.parentElement?.classList.add('ir-action-bar-host');
+      },
+      destroy() {
+        const host = dom.parentElement;
+        dom.remove();
+        if (host && !host.querySelector('.ir-action-bar')) {
+          host.classList.remove('ir-action-bar-host');
+        }
+      },
       update(update) {
         // Re-render if state changed
         const prevState = update.startState.field(actionBarStateField);

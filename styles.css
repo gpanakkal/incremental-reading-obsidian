@@ -49,11 +49,13 @@
 
 /* `.cm-line` is already relative in Live Preview. The reading-view hosts are
    not, so promote them — but only the ones holding a transclusion, since this
-   changes what every absolutely positioned descendant resolves against. */
-.markdown-rendered
-  :is(p, h1, h2, h3, h4, h5, h6, li):has(
-    > .internal-embed[alt*='ir-hide-title']
-  ) {
+   changes what every absolutely positioned descendant resolves against.
+
+   `.ir-transclusion-host` is stamped by TransclusionHostPostProcessor, which
+   answers `:has(> .internal-embed[alt*='ir-hide-title'])` once at render time
+   rather than leaving every p/h1-h6/li in the note flagged for :has
+   invalidation. */
+.markdown-rendered .ir-transclusion-host {
   position: relative;
 }
 
@@ -64,13 +66,18 @@
    host's content edge without anyone having to know that padding, so the rule
    lands in one place no matter how the bullet measures.
 
-   Except where a `<br>` starts the transclusion on its own line (Reading view) */
+   Except where a `<br>` starts the transclusion on its own line (Reading view),
+   which the post-processor encodes by withholding `.ir-transclusion-rule`.
+
+   The Live Preview branch keeps its `:has()`: the host is a `.cm-line`
+   CodeMirror owns and rebuilds, and the transclusion is a widget whose child
+   elements arrive after the update that created the line — so a marker class
+   would have to be reapplied from a MutationObserver, which costs more than
+   the selector does. It is also the cheap shape of `:has()`: a child
+   combinator over the viewport-rendered lines only, not a whole document. */
 .markdown-source-view.mod-cm6
   .cm-line:has(> .internal-embed[alt*='ir-hide-title']),
-.markdown-rendered
-  :is(p, h1, h2, h3, h4, h5, h6, li):has(
-    > .internal-embed[alt*='ir-hide-title']
-  ):not(:has(> br + .internal-embed[alt*='ir-hide-title'])) {
+.markdown-rendered .ir-transclusion-rule {
   background-image: linear-gradient(
     var(--interactive-accent),
     var(--interactive-accent)
@@ -81,13 +88,12 @@
   background-origin: content-box;
 }
 
-.markdown-source-view.mod-cm6
-  .cm-line:has(> .internal-embed[alt*='ir-hide-title'])
-  > .internal-embed[alt*='ir-hide-title'],
+/* No `:has()` on either branch: the child combinator already implies it.
+   `X:has(> Y) > Y` and `X > Y` select the same elements, since a Y reached
+   through `> Y` satisfies its own host's `:has(> Y)` by construction. */
+.markdown-source-view.mod-cm6 .cm-line > .internal-embed[alt*='ir-hide-title'],
 .markdown-rendered
-  :is(p, h1, h2, h3, h4, h5, h6, li):has(
-    > .internal-embed[alt*='ir-hide-title']
-  ):not(:has(> br + .internal-embed[alt*='ir-hide-title']))
+  .ir-transclusion-rule
   > .internal-embed[alt*='ir-hide-title'] {
   border-inline-start: none;
 }
@@ -193,8 +199,10 @@
   margin-bottom: calc(var(--ir-mobile-toolbar-height, 0px));
 }
 
-/* Override Obsidian's cm-panels-top border when it contains our action bar */
-.cm-panels-top:has(.ir-action-bar) {
+/* Override Obsidian's cm-panels-top border when it contains our action bar.
+   The class is added by the panel's mount() hook in ActionBarExtension, since
+   the panel container is CodeMirror's element and other plugins can share it. */
+.cm-panels-top.ir-action-bar-host {
   border-bottom: none;
 }
 

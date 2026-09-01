@@ -17,6 +17,7 @@ import {
   registerHighlightRefreshListener,
   registerSnippetHighlightPostProcessor,
 } from './lib/extensions/SnippetHighlightPostProcessor';
+import { registerTransclusionHostPostProcessor } from './lib/extensions/TransclusionHostPostProcessor';
 import ReviewManager from './lib/items/ReviewManager';
 import {
   type ExtractedMarkdownEditor,
@@ -314,6 +315,9 @@ export default class IncrementalReadingPlugin extends Plugin {
         // Register post-processor for reading mode snippet highlights
         registerSnippetHighlightPostProcessor(this);
         registerHighlightRefreshListener(this);
+
+        // Mark reading mode transclusion hosts for styles.css
+        registerTransclusionHostPostProcessor(this);
 
         // Register action bar for reading mode standalone notes
         registerReadingModeActionBar(this);
