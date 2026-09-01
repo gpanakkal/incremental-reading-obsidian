@@ -1,8 +1,7 @@
 import { ImportModalContent } from '#/components/ImportModalContent';
 import type { SchedulingStrategy } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
-import type { TFile } from 'obsidian';
-import { Modal } from 'obsidian';
+import { type TFile, Modal } from 'obsidian';
 import { render } from 'preact';
 
 export class ImportModal extends Modal {
@@ -31,14 +30,7 @@ export class ImportModal extends Modal {
       strategy === 'priority'
         ? [value, null]
         : [plugin.settings.defaultPriority, value];
-    const importedArticle = await plugin.reviewManager.importArticle(
-      file,
-      ...props,
-      makeCopy
-    );
-    if (importedArticle && plugin.settings.reviewOnImport) {
-      await plugin.learn(importedArticle);
-    }
+    await plugin.reviewManager.importArticle(file, ...props, makeCopy);
   }
 
   onOpen() {

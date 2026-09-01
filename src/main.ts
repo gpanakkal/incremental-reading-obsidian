@@ -452,22 +452,18 @@ export default class IncrementalReadingPlugin extends Plugin {
     opts?: {
       showImportDialog?: boolean;
       copyOnImport?: boolean;
-      reviewOnImport?: boolean;
     }
   ) {
     const merged = { ...this.settings, ...(opts ?? {}) };
     if (merged.showImportDialog) {
       new ImportModal(this, file, merged.copyOnImport).open();
     } else {
-      const article = await this.reviewManager.importArticle(
+      await this.reviewManager.importArticle(
         file,
         this.settings.defaultPriority,
         null,
         merged.copyOnImport
       );
-      if (article && merged.reviewOnImport) {
-        await this.learn(article);
-      }
     }
   }
 
