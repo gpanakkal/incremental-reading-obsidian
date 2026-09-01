@@ -23,7 +23,7 @@
       "react-types": ["./node_modules/@types/react/"],
       "#/*": ["./src/*"]
     },
-    "lib": ["DOM", "ES5", "ES6", "ES7", "ES2021"]
+    "lib": ["DOM", "ES2022"]
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "e2e-tests/**/*.ts", "vitest.config.ts", "playwright.config.ts"]
 }
