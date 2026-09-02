@@ -37,3 +37,6 @@ reports/
 
 # Task reviews (branch-scoped, ephemeral)
 reviews/
+
+# Temporary test artifacts
+src/test/temp/
