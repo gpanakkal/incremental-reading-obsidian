@@ -1,4 +1,5 @@
 import react from '@eslint-react/eslint-plugin';
+import css from '@eslint/css';
 import js from '@eslint/js';
 import tsparser from '@typescript-eslint/parser';
 import { importX } from 'eslint-plugin-import-x';
@@ -14,6 +15,7 @@ const TEST_FILES = [
   'e2e-tests/**/*.{ts,tsx}',
   // Test-only scaffolding (mocks, fixtures, setup files) — never bundled.
   'src/test/**/*.{ts,tsx}',
+  'src/lib/simulation/**/*.{ts,tsx}',
 ];
 
 export default defineConfig([
@@ -114,7 +116,37 @@ export default defineConfig([
     },
     rules: {
       'import-x/no-named-as-default-member': 'off',
+      '@typescript-eslint/require-await': 'off',
     },
   },
-  globalIgnores(['**/node_modules/', '**/main.js']),
+  // CSS rides on ESLint's Languages API — core ESLint has no CSS parser, so
+  // this block carries its own `language` rather than inheriting from above.
+  {
+    files: ['**/*.css'],
+    plugins: { css },
+    language: 'css/css',
+    extends: [css.configs.recommended],
+    rules: {
+      // Obsidian's theme owns most of the custom properties this file reads
+      // (`--text-muted`, `--size-4-2`, …). The default resolves `var()` against
+      // the same file only, so all of them read as undefined. `true` keeps
+      // property-name validation and drops value checks on `var()` declarations.
+      'css/no-invalid-properties': ['error', { allowUnknownVariables: true }],
+      // Baseline gates on Safari/Firefox support. This plugin only ever runs in
+      // Obsidian's Electron/Chromium, so every hit is a false positive by
+      // construction — e.g. the deliberate `box-decoration-break` in styles.css.
+      'css/use-baseline': 'off',
+    },
+  },
+  globalIgnores([
+    '**/node_modules/',
+    '**/main.js',
+    // Generated and vendored CSS: keeps editor lint-on-open and a bare
+    // `eslint .` off files nobody hand-writes.
+    '**/coverage/',
+    '**/reports/',
+    '**/test-vault/',
+    '**/test-vaults/',
+    '**/test-results/',
+  ]),
 ]);
