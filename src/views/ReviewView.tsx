@@ -5,8 +5,7 @@ import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import { resetSession, type ReviewPage } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
-import type { IconName, TFile, WorkspaceLeaf } from 'obsidian';
-import { FileView } from 'obsidian';
+import { type IconName, type TFile, type WorkspaceLeaf, FileView  } from 'obsidian';
 import { render } from 'preact';
 
 export default class ReviewView extends FileView {

@@ -165,7 +165,7 @@ async function applyStabilityPatches(app: ElectronApplication) {
       // hard; answer with the default button instead of waiting for a click.
       dialog.showMessageBoxSync = ((options: { defaultId?: number }) =>
         options?.defaultId ?? 0) as typeof dialog.showMessageBoxSync;
-      dialog.showMessageBox = ((options: { defaultId?: number }) => ({
+      dialog.showMessageBox = (async (options: { defaultId?: number }) => ({
         response: options?.defaultId ?? 0,
         checkboxChecked: false,
       })) as unknown as typeof dialog.showMessageBox;
