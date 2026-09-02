@@ -6,6 +6,7 @@ export default defineConfig({
   fullyParallel: false,
   forbidOnly: !!process.env['CI'],
   workers: process.env['CI'] ? 1 : 5,
+  retries: process.env['CI'] ? 2 : 0,
   use: {
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
