@@ -1,11 +1,8 @@
 # Obsidian Incremental Reading
 
-> [!NOTE]
-> This plugin is in early development. The core feature set is implemented, but expect bugs and feature limitations (see [Known limitations](#known-limitations-and-issues)).
+[Obsidian](https://obsidian.md) plugin that enables incremental reading, a powerful, low-friction workflow for learning from texts.
 
-This is a plugin for [Obsidian](https://obsidian.md) that enables incremental reading, a powerful, low-friction workflow for learning from texts.
-
-It combines spaced repetition (using [FSRS](https://github.com/open-spaced-repetition/awesome-fsrs/wiki/The-Algorithm)) and a priority-based queuing system to allow users to:
+It combines spaced repetition using [FSRS](https://github.com/open-spaced-repetition/awesome-fsrs/wiki/The-Algorithm) and a priority-based queuing system to allow users to:
 
 - Easily build understanding through a divide-and-conquer approach that provides repeated exposures to learning material.
 - Learn several subjects in parallel without having to manually schedule and keep track of their progress.
@@ -17,15 +14,11 @@ For technical details, see [terminology](#terminology) and [how the incremental 
 
 ## Setup
 
-### 1. Install and enable BRAT
+### 1. Installation
 
-Go to **Settings → Community plugins** → turn on community plugins (if you haven't already) → **Browse** → search for BRAT.
+In Obsidian, go to **Settings → Community plugins** → enable community plugins if you haven't already → **Browse** → search for "incremental reading" → install and enable.
 
-### 2. Install Incremental Reading
-
-In the installed plugins list, open BRAT's settings → **Add beta plugin** → paste the link: https://github.com/gpanakkal/incremental-reading-obsidian → select "Latest version" in the dropdown, and confirm.
-
-### 3. Configure Obsidian Sync
+### 2. Configure Obsidian Sync
 
 If you don't use Sync, skip this step.
 
