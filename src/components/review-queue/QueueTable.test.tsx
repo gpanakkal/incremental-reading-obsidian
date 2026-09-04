@@ -130,24 +130,25 @@ describe('QueueTable', () => {
     expect(onRowClick).toHaveBeenCalledWith(article);
   });
 
-  // The narrow layout wraps scheduling and parent onto a second line in CSS
-  // rather than dropping them, so mobile keeps every column but the type icon.
-  it('on mobile renders every column marked mobileVisible', () => {
+  // Columns given here rather than taken from buildQueueColumns(), so the
+  // filtering is checked against a known mix rather than against whichever
+  // flags the shipped configuration happens to carry (which columns.test.tsx
+  // covers on its own).
+  it('on mobile renders only the columns marked mobileVisible', () => {
     const container = mount(
       <QueueTable
         rows={[article]}
-        columns={buildQueueColumns()}
+        columns={[
+          { key: 'type', mobileVisible: true },
+          { key: 'parent', mobileVisible: false },
+          { key: 'reference', mobileVisible: true },
+        ]}
         renderCells={stubRenderCells}
         isMobile={true}
         onRowClick={() => {}}
       />
     );
-    expect(renderedColumnKeys(container)).toEqual(
-      buildQueueColumns()
-        .filter((column) => column.mobileVisible)
-        .map((column) => column.key)
-    );
-    expect(renderedColumnKeys(container)).not.toContain('type');
+    expect(renderedColumnKeys(container)).toEqual(['type', 'reference']);
   });
 
   it('on desktop renders all configured columns', () => {
@@ -216,20 +217,20 @@ describe('QueueTable', () => {
     const container = mount(
       <QueueTable
         rows={[article]}
-        columns={buildQueueColumns()}
-        columnOrder={['type', 'reference', 'due', 'parent', 'scheduling']}
+        columns={[
+          { key: 'type', mobileVisible: true },
+          { key: 'due', mobileVisible: true },
+          { key: 'parent', mobileVisible: false },
+          { key: 'reference', mobileVisible: true },
+        ]}
+        columnOrder={['reference', 'parent', 'due', 'type']}
         renderCells={stubRenderCells}
         isMobile={true}
         onRowClick={() => {}}
       />
     );
-    // `type` is dropped as not mobileVisible; the rest keep the given order.
-    expect(renderedColumnKeys(container)).toEqual([
-      'reference',
-      'due',
-      'parent',
-      'scheduling',
-    ]);
+    // `parent` is dropped as not mobileVisible; the rest keep the given order.
+    expect(renderedColumnKeys(container)).toEqual(['reference', 'due', 'type']);
   });
 
   it('renders no header row when columnHeaders is omitted', () => {

@@ -18,6 +18,7 @@ import {
   QUEUE_COLUMN_ORDER,
   queueCellTitles,
   renderQueueCells,
+  splitReferencePath,
 } from './columns';
 
 // #region HELPERS
@@ -58,6 +59,30 @@ const schedulingArb: fc.Arbitrary<QueueScheduling> = fc.oneof(
   ),
   cardMemoryArb.map((value): QueueScheduling => ({ kind: 'srs', value }))
 );
+
+/** The folder-prefix span, or `false` where the reference has no separator. */
+type ReferencePrefix =
+  | VNode<{ className: string; children: VNode<{ children: string }> }>
+  | false;
+
+/** The reference cell's vnode: the folder prefix, then the file name. */
+type ReferenceCell = VNode<{
+  className: string;
+  children: [ReferencePrefix, VNode<{ className: string; children: string }>];
+}>;
+
+/**
+ * Every string rendered under a vnode, in order — so a test can assert what a
+ * cell reads as without restating how its parts happen to be nested.
+ */
+function renderedText(node: unknown): string {
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(renderedText).join('');
+  if (typeof node === 'object' && node !== null && 'props' in node) {
+    return renderedText((node as VNode<{ children?: unknown }>).props.children);
+  }
+  return '';
+}
 
 const queueRowArb: fc.Arbitrary<QueueRow> = fc.record({
   id: fc.string({ minLength: 1 }),
@@ -144,8 +169,7 @@ describe('formatQueueDateRange', () => {
         max: new Date('2099-12-31T23:59:59Z'),
       })
       .map(
-        (date) =>
-          new Date(date.getFullYear(), date.getMonth(), date.getDate())
+        (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate())
       );
 
     fc.assert(
@@ -170,8 +194,7 @@ describe('formatQueueDateRange', () => {
         max: new Date('2099-12-31T23:59:59Z'),
       })
       .map(
-        (date) =>
-          new Date(date.getFullYear(), date.getMonth(), date.getDate())
+        (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate())
       );
 
     fc.assert(
@@ -206,10 +229,55 @@ describe('renderQueueCells', () => {
     );
   });
 
-  it('passes the reference through unchanged', () => {
+  it('splits the reference into a folder prefix and the file name', () => {
+    const cell = renderQueueCells(
+      makeQueueRow({ reference: 'incremental-reading/snippets/s1.md' })
+    ).reference as ReferenceCell;
+    expect(cell.props.className).toBe('ir-queue-path');
+    const [dir, name] = cell.props.children;
+    // Each half is its own box because CSS can only ellipsize one end of one
+    // box, and this column elides both: the prefix's head and the name's tail.
+    expect(dir).toMatchObject({ props: { className: 'ir-queue-path-dir' } });
+    expect(name).toMatchObject({ props: { className: 'ir-queue-path-name' } });
+    expect(renderedText(name)).toBe('s1.md');
+  });
+
+  // The separator never shrinks, so on its own it holds its width while the
+  // prefix spends its floor on the ellipsis and whatever still fits beside it —
+  // a stray folder character (`…s/`). Carried by the prefix it wins that space,
+  // and a prefix squeezed to nothing reads `…/`.
+  it('ends the folder prefix with the separator rather than standing it apart', () => {
+    const cell = renderQueueCells(
+      makeQueueRow({ reference: 'incremental-reading/snippets/s1.md' })
+    ).reference as ReferenceCell;
+    const [dir] = cell.props.children;
+    expect(renderedText(dir)).toBe('incremental-reading/snippets/');
+  });
+
+  // A separator is bidi-neutral, and a neutral trailing the right-to-left
+  // prefix box is reordered to its front: `snippets/` would read `/snippets`.
+  it('isolates the folder prefix, which now ends in a neutral character', () => {
+    const cell = renderQueueCells(makeQueueRow({ reference: 'snippets/s1.md' }))
+      .reference as ReferenceCell;
+    const [dir] = cell.props.children;
+    expect(dir).toMatchObject({ props: { children: { type: 'bdi' } } });
+  });
+
+  it('renders a folderless reference as the file name alone, with no stray separator', () => {
+    const cell = renderQueueCells(makeQueueRow({ reference: 's1.md' }))
+      .reference as ReferenceCell;
+    const [dir, name] = cell.props.children;
+    expect(dir).toBe(false);
+    expect(name).toMatchObject({
+      props: { className: 'ir-queue-path-name', children: 's1.md' },
+    });
+  });
+
+  it('shows the whole reference across its parts, dropping no character of it', () => {
     fc.assert(
       fc.property(queueRowArb, (row) => {
-        expect(renderQueueCells(row).reference).toBe(row.reference);
+        const cell = renderQueueCells(row).reference as ReferenceCell;
+        expect(renderedText(cell)).toBe(row.reference);
       })
     );
   });
@@ -356,6 +424,38 @@ describe('originLabel', () => {
   });
 });
 
+describe('splitReferencePath', () => {
+  it('splits at the last separator, keeping every folder in the prefix', () => {
+    expect(splitReferencePath('incremental-reading/snippets/s1.md')).toEqual({
+      dir: 'incremental-reading/snippets',
+      name: 's1.md',
+    });
+  });
+
+  it('gives a path with no folder an empty prefix', () => {
+    expect(splitReferencePath('s1.md')).toEqual({ dir: '', name: 's1.md' });
+  });
+
+  // The point of the split: the name half is what stays anchored on screen, so
+  // it must never carry a folder along with it.
+  it('leaves the name half free of separators, whatever the path', () => {
+    fc.assert(
+      fc.property(fc.string(), (path) => {
+        expect(splitReferencePath(path).name).not.toContain('/');
+      })
+    );
+  });
+
+  it('rejoins to the original path, so no character is dropped or duplicated', () => {
+    fc.assert(
+      fc.property(fc.string(), (path) => {
+        const { dir, name } = splitReferencePath(path);
+        expect(path.includes('/') ? `${dir}/${name}` : name).toBe(path);
+      })
+    );
+  });
+});
+
 describe('queueCellTitles', () => {
   it('produces a plain-text title for every configured column', () => {
     fc.assert(
@@ -452,6 +552,20 @@ describe('queue column configuration', () => {
   it('orders exactly the configured columns, with no key missing or unknown', () => {
     const configured = buildQueueColumns().map((column) => column.key);
     expect([...QUEUE_COLUMN_ORDER].sort()).toEqual([...configured].sort());
+  });
+
+  // A phone row is two lines: the metadata line, then the reference. Each path
+  // column costs a line of its own in the narrow layout, so the origin column
+  // is the one dropped rather than the third line it would cost.
+  it('keeps every column but the origin one on mobile', () => {
+    const mobileVisible = new Map(
+      buildQueueColumns().map((column) => [column.key, column.mobileVisible])
+    );
+    expect(mobileVisible.get('type')).toBe(true);
+    expect(mobileVisible.get('due')).toBe(true);
+    expect(mobileVisible.get('scheduling')).toBe(true);
+    expect(mobileVisible.get('reference')).toBe(true);
+    expect(mobileVisible.get('parent')).toBe(false);
   });
 
   it('sizes the short columns to their content and the path columns flexibly', () => {

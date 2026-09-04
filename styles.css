@@ -263,6 +263,57 @@
   flex-direction: column;
 }
 
+/* Takes exactly the height the action bar leaves and passes it down to the
+   queue panel, so the table scrolls inside it.
+
+   Load-bearing, not cosmetic: with no bounded height here the panel grows to
+   its content, and `flex: 1` on the table resolves against that grown parent
+   instead of the viewport — so the table never overflows and never scrolls.
+   The overspill also pushes the action bar past the bottom of the screen,
+   where `.view-content`'s `overflow: hidden` leaves it unreachable. */
+.ir-review-home {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Obsidian floats the sidebar and menu buttons over the top of the leaf on
+   phones. `--view-top-spacing` is zeroed for this view (above) so editor text
+   can scroll *under* them, but the home screen does not scroll as a whole, so
+   its heading has to start below them instead.
+
+   `--view-top-spacing-markdown` is Obsidian's own clearance for exactly this
+   — `safe-area-inset-top + view-header-height + 16px`, so 8px more room than
+   `--view-top-spacing` asks for. It is declared independently of the variable
+   zeroed above rather than derived from it, so the zeroing does not reach it. */
+.is-phone
+  .mod-root
+  .workspace-leaf-content[data-type='incremental-reading-review']
+  .ir-review-home {
+  padding-top: var(
+    --view-top-spacing-markdown,
+    var(--safe-area-inset-top, 0px)
+  );
+}
+
+/* The home screen's single action, so it reads as the call to action rather
+   than as one more control in the bar. */
+#begin-review-button {
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-weight: var(--font-medium);
+}
+
+#begin-review-button:hover:not(:disabled) {
+  background-color: var(--interactive-accent-hover);
+}
+
+#begin-review-button:disabled {
+  background-color: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
 .ir-review-interface .ir-editor,
 .ir-review-interface .markdown-preview-view {
   flex: 1;
@@ -385,8 +436,11 @@
 .ir-queue-panel {
   display: flex;
   flex-direction: column;
+  /* Fills the home screen and hands that bounded height to the table, which is
+     what lets the table scroll rather than grow. */
+  flex: 1;
   min-height: 0;
-  padding: var(--size-4-4);
+  padding-inline: var(--size-4-4);
   border-radius: var(--radius-m);
 }
 
@@ -431,10 +485,26 @@
   background-color: rgba(var(--color-green-rgb), 0.2);
 }
 
-/* Hover must beat the type tints above, hence the matching attribute weight. */
-.ir-queue-row:hover,
-.ir-queue-row[data-type]:hover {
-  background-color: var(--background-modifier-hover);
+/* Hover must beat the type tints above, hence the matching attribute weight.
+
+   Gated on a pointer that can actually hover. A touch device has none, so it
+   fakes one: a tap leaves `:hover` on the element it landed on and holds it
+   there until the next tap somewhere else. Paging the table swaps a whole new
+   set of rows in under that stale point, and the row that mounts there opens
+   greyed over its type tint and stays greyed — the tap that caused it having
+   been aimed at a pager button that is no longer under the finger.
+
+   `:active` below covers what touch loses: a press still shows the row react. */
+@media (hover: hover) {
+  .ir-queue-row:hover,
+  .ir-queue-row[data-type]:hover {
+    background-color: var(--background-modifier-hover);
+  }
+}
+
+.ir-queue-row:active,
+.ir-queue-row[data-type]:active {
+  background-color: var(--background-modifier-active-hover);
 }
 
 /* Header row mirrors the row layout so labels align with their columns. */
@@ -536,21 +606,80 @@
   transition: opacity 0.15s ease;
 }
 
-.ir-queue-row:hover .ir-queue-cell-actions,
+@media (hover: hover) {
+  .ir-queue-row:hover .ir-queue-cell-actions {
+    opacity: 1;
+  }
+}
+
 .ir-queue-row:focus-within .ir-queue-cell-actions {
   opacity: 1;
 }
 
-/* Reference truncates on the LEFT (keeps the path end / filename visible)
-   without introducing horizontal scroll. */
+/* Both path columns truncate rather than introducing horizontal scroll; how
+   they truncate differs per column below. */
 .ir-queue-reference .ir-queue-cell-value {
-  direction: rtl;
-  text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
   flex: 1;
+}
+
+/* Parent truncates on the LEFT (keeps the path end / filename visible). */
+.ir-queue-cell[data-column='parent'] .ir-queue-cell-value {
+  direction: rtl;
+  text-align: left;
+}
+
+/* Reference holds a path split into two halves rather than one run of text, so
+   it lays them out in a row instead of ellipsizing the value as a whole. */
+.ir-queue-cell[data-column='reference'] .ir-queue-cell-value {
+  display: flex;
+}
+
+/* A path elided from both ends, so the start of the file name is always on
+   screen: the folder prefix loses its head, the file name loses its tail. */
+.ir-queue-path {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+}
+
+/* `direction: rtl` moves the overflow — and with it the ellipsis — to the start
+   of the box, while `text-align: left` keeps the run itself against the left
+   edge. The prefix carries its own trailing separator, which is bidi-neutral,
+   so its text is isolated by a `bdi` (see `referencePath`) rather than relying
+   on the run beginning and ending in strong-LTR characters.
+
+   The outsized shrink factor is what makes the prefix, not the file name, the
+   half that gives up width: flex weights shrinkage by factor × base size, so
+   100 against the name's 1 drains the prefix almost to nothing first.
+
+   The floor holds the ellipsis and the separator behind it, and deliberately
+   no more: room for one further glyph is room for a stray folder character
+   ahead of the separator (`…s/`), since `text-overflow` fills whatever space
+   it is given. Without a floor at all the prefix shrinks past the point where
+   its ellipsis can be drawn, and the row opens on a bare `/` reading as an
+   absolute path. */
+.ir-queue-path-dir {
+  direction: rtl;
+  text-align: left;
+  flex: 0 100 auto;
+  min-width: 1em;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+}
+
+.ir-queue-path-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /* The range label and date field on the left, the pagination centred, and an
@@ -676,11 +805,53 @@
   }
 }
 
-/* Narrow layout: portrait screens (phones) or any pane too cramped, including 
-   a narrow desktop side pane. Rows become two lines — type / due / reference 
-   on the first, the labelled Source-or-Parent and the scheduling value on the 
-   second — instead of squeezing every column. */
+/* Narrow layout: portrait screens (phones) or any pane too cramped, including
+   a narrow desktop side pane. Rows become a small card instead of squeezing
+   every column: a metadata line (type icon, due date, scheduling value) above
+   the reference, which gets a line of its own so a path has the row's full
+   width to spend.
+
+   On mobile that is the whole row, two lines. A narrow desktop pane still
+   renders the Source-or-Parent column (`mobileVisible` is driven by
+   `app.isMobile`, not by width), which lands on a third line below. */
 @media (max-aspect-ratio: 1 / 1), (max-width: 720px) {
+  /* Hand the panel's side padding to the table, which is the scroll container.
+     Padding on the panel would put the strip beside the rows *outside* the
+     scroller, and a drag started there would find no scrollable ancestor and
+     move nothing. Inside it, the same strip is a thumb-sized place to scroll
+     from that never lands on a row and navigates away. */
+  .ir-queue-panel {
+    padding-inline: 0;
+  }
+
+  .ir-queue-table {
+    padding-inline: var(--size-4-4);
+  }
+
+  /* Let the bar break into two rows — the date controls above the pager —
+     rather than squeezing both onto one line. Wrapping, not a second media
+     query, so the break happens exactly when the two no longer fit: flex
+     decides line breaks from each item's content width, before any shrinking. */
+  .ir-queue-controls {
+    flex-wrap: wrap;
+    justify-content: center;
+    row-gap: var(--size-2-3);
+  }
+
+  /* The empty right-hand flank exists only to balance the left one so the pager
+     sits centred. Once the rows can stack, `justify-content` centres them and
+     it has nothing left to do — and left in, it would wrap onto a third row. */
+  .ir-queue-controls-flank[aria-hidden='true'] {
+    display: none;
+  }
+
+  /* Content-width basis rather than the wide layout's zero basis: a zero-basis
+     item always "fits", so the bar could never overflow and never wrap. */
+  .ir-queue-controls-flank {
+    flex: 0 1 auto;
+    justify-content: center;
+  }
+
   .ir-queue-row {
     flex-wrap: wrap;
     align-items: flex-start;
@@ -689,25 +860,49 @@
     padding-bottom: var(--size-4-1);
   }
 
-  /* Force the wrap: the parent cell starts line two and the scheduling cell
-     follows it, so the first line holds only type, due, and reference. */
+  /* Force the wrap: a full-width basis cannot share a line, so each path column
+     opens one. Explicit order rather than source order, because scheduling is
+     the last cell in the DOM and would otherwise trail the paths instead of
+     joining the metadata line ahead of them. */
+  .ir-queue-cell[data-column='reference'],
   .ir-queue-cell[data-column='parent'] {
     flex: 1 1 100%;
+  }
+
+  .ir-queue-cell[data-column='reference'] {
     order: 1;
   }
 
-  .ir-queue-cell[data-column='scheduling'] {
+  .ir-queue-cell[data-column='parent'] {
     order: 2;
+  }
+
+  /* Both are sized on the wide layout to fit their header label, which the
+     narrow layout hides — so they shrink to their values and stop padding the
+     metadata line out. Due keeps its width: it is what lines the dates up down
+     the list, and the whole column is one date wide already. */
+  .ir-queue-cell[data-column='scheduling'],
+  .ir-queue-cell[data-column='type'] {
     width: auto;
     flex: 0 0 auto;
   }
 
-  /* The header row cannot span a two-line body row, so its labels would no
+  /* The icon is sized off `--icon-size`, not off the font, so the demotion the
+     rule below applies to this line would otherwise leave an 18px glyph
+     towering over 12px text. */
+  .ir-queue-cell[data-column='type'] {
+    --icon-size: var(--icon-xs);
+  }
+
+  /* The header row cannot span a multi-line body row, so its labels would no
      longer sit above their columns. The in-line per-row labels replace it. */
   .ir-queue-header {
     display: none;
   }
 
+  /* With the header gone, the in-line label is the only thing naming this
+     column. Rendered only where the column itself is: a narrow desktop pane,
+     never mobile, which drops the column outright. */
   .ir-queue-origin-label {
     display: inline;
   }
@@ -718,12 +913,35 @@
     direction: ltr;
   }
 
-  /* Second-line values are supporting detail, so they read one step quieter
-     than the reference above them. */
-  .ir-queue-cell[data-column='parent'],
-  .ir-queue-cell[data-column='scheduling'] {
+  /* The reference is what the row *is*; everything else describes it. So the
+     metadata line and the origin line both read one step quieter than the
+     reference between them, which carries the row on its own. */
+  .ir-queue-cell[data-column='type'],
+  .ir-queue-cell[data-column='due'],
+  .ir-queue-cell[data-column='scheduling'],
+  .ir-queue-cell[data-column='parent'] {
     color: var(--text-muted);
     font-size: var(--font-ui-smaller);
+  }
+
+  /* The rule above lands those lines on exactly the size and colour
+     `.ir-queue-inline-label` uses to set itself apart, so Parent/Priority/D-S-R
+     stop reading as labels at all.
+
+     The size axis cannot be restored: `--font-ui-smaller` is the smallest UI
+     step Obsidian defines, and going under it would cost more legibility than
+     it buys separation. So the label trades size for weight and colour.
+
+     It takes the *stronger* end of both — the opposite of the wide layout,
+     where a label is the quieter half. Demoting it here would mean a third
+     rung below `--text-muted`, and `--text-faint` against a tinted row is too
+     dim to read at 12px. Promoting instead keeps both halves legible and costs
+     nothing: the value is still set apart, and these lines as a whole still
+     read under the reference beside them, which is 4px larger. */
+  .ir-queue-cell[data-column='parent'] .ir-queue-inline-label,
+  .ir-queue-cell[data-column='scheduling'] .ir-queue-inline-label {
+    color: var(--text-normal);
+    font-weight: var(--font-normal);
   }
 }
 

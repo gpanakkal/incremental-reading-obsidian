@@ -59,9 +59,7 @@ export const QUEUE_COLUMN_HEADERS: Partial<Record<QueueColumnKey, string>> = {
 export function buildQueueColumns(): QueueColumn[] {
   return [
     { key: 'due', mobileVisible: true, width: 'content' },
-    { key: 'type', mobileVisible: false, width: 'content' },
-    // Scheduling and parent stay visible on mobile: the narrow-layout CSS wraps
-    // them onto a second line rather than dropping them.
+    { key: 'type', mobileVisible: true, width: 'content' },
     { key: 'scheduling', mobileVisible: true, width: 'content' },
     {
       key: 'reference',
@@ -69,9 +67,13 @@ export function buildQueueColumns(): QueueColumn[] {
       width: 'flexible',
       className: 'ir-queue-reference',
     },
+    // The only column dropped on mobile. The narrow-layout CSS gives each path
+    // column a line of its own, so keeping this one would cost a third line per
+    // row — too much of a phone screen for the column the row's own reference
+    // most often repeats. Every other column shares the line above it.
     {
       key: 'parent',
-      mobileVisible: true,
+      mobileVisible: false,
       width: 'flexible',
       className: 'ir-queue-reference',
     },
@@ -101,6 +103,59 @@ function typeIcon(type: QueueRow['type']): ComponentChild {
 
 /** Placeholder for a cell with nothing to show. */
 const EMPTY_CELL = '—';
+
+/**
+ * Split a vault path into its folder prefix and its file name, so the two can
+ * be elided from opposite ends. The separator belongs to neither half: which
+ * one renders it is {@link referencePath}'s to decide. A path with no folder
+ * has an empty prefix.
+ */
+export function splitReferencePath(path: string): {
+  dir: string;
+  name: string;
+} {
+  const cut = path.lastIndexOf('/');
+  if (cut === -1) return { dir: '', name: path };
+  return { dir: path.slice(0, cut), name: path.slice(cut + 1) };
+}
+
+/**
+ * A path rendered as two independently truncating halves, so the *start of the
+ * file name* survives however narrow the column gets:
+ * `…-reading/snippets/The horrific comple…`.
+ *
+ * Two spans rather than one, because `text-overflow: ellipsis` elides one end
+ * of one box: the prefix is laid out right-to-left so its ellipsis lands on the
+ * left, the name left-to-right so its ellipsis lands on the right. CSS gives
+ * the prefix the larger shrink factor, so it is the half that gives up width.
+ *
+ * The separator rides along at the end of the prefix rather than standing
+ * between the halves, so that it is the last thing the prefix gives up. A
+ * separator of its own never shrinks, so a prefix squeezed to its floor spent
+ * that floor on the ellipsis and whatever still fit beside it, opening the row
+ * on a stray folder character: `…s/note`. Inside the prefix the separator wins
+ * that space instead, and the floor reads `…/note`.
+ *
+ * The prefix is bidi-isolated because it now ends in one: a separator is a
+ * neutral character, and a neutral trailing a right-to-left box is reordered to
+ * the front of it — `snippets/` would render as `/snippets`.
+ *
+ * Rendered on `path.includes('/')` rather than on a non-empty `dir`, so that a
+ * root-level `/note` keeps its leading separator.
+ */
+function referencePath(path: string): ComponentChild {
+  const { dir, name } = splitReferencePath(path);
+  return (
+    <span className="ir-queue-path">
+      {path.includes('/') && (
+        <span className="ir-queue-path-dir">
+          <bdi>{`${dir}/`}</bdi>
+        </span>
+      )}
+      <span className="ir-queue-path-name">{name}</span>
+    </span>
+  );
+}
 
 /**
  * Format a due date as `2026/7/10` (local time, no zero padding). A null due
@@ -224,7 +279,7 @@ export function renderQueueCells(
           {row.scheduling.value}
         </span>
       ),
-    reference: row.reference,
+    reference: referencePath(row.reference),
     parent: (
       <span>
         <span className="ir-queue-inline-label ir-queue-origin-label">
