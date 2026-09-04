@@ -757,33 +757,150 @@ describe('schedulePersist and destroy', () => {
 describe('click event handler', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('does nothing when click target has no .ir-snippet-highlight ancestor', () => {
+  /**
+   * Append a highlight span inside the editor's contentDOM.
+   *
+   * It must live there, not on document.body: CodeMirror binds its handlers to
+   * contentDOM and drops any event whose target is not a descendant of it
+   * (`eventBelongsToEditor`), so a detached span silently never reaches the
+   * plugin's handlers.
+   */
+  function makeHighlightSpan(
+    view: EditorView,
+    ref: string | null = 'snippets/a.md'
+  ): HTMLElement {
+    const span = document.createElement('span');
+    span.className = 'ir-snippet-highlight';
+    span.setAttribute('data-snippet-id', 'h1');
+    if (ref !== null) span.setAttribute('data-snippet-ref', ref);
+    view.contentDOM.appendChild(span);
+    return span;
+  }
+
+  function dispatchOn(
+    target: HTMLElement,
+    type: 'click' | 'auxclick' | 'mousedown',
+    init: MouseEventInit = {}
+  ): MouseEvent {
+    const event = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    target.dispatchEvent(event);
+    return event;
+  }
+
+  /**
+   * Run `body` against a live view with one highlight span, then tear both down.
+   * Returns the openLinkText spy so assertions read as one line per case.
+   */
+  function withHighlight(
+    body: (ctx: { view: EditorView; span: HTMLElement }) => void
+  ): ReturnType<typeof vi.fn> {
     const irPlugin = makePlugin(makeReviewManager());
     const view = makeView('hello', irPlugin);
-    const plain = document.createElement('span');
-    document.body.appendChild(plain);
-    const event = new MouseEvent('click', { bubbles: true, cancelable: true });
-    Object.defineProperty(event, 'target', {
-      value: plain,
-      configurable: true,
+    const span = makeHighlightSpan(view);
+    try {
+      body({ view, span });
+    } finally {
+      span.remove();
+      view.destroy();
+    }
+    return irPlugin.app.workspace.openLinkText;
+  }
+
+  it('plain click opens the snippet in the active leaf', () => {
+    const openLinkText = withHighlight(({ span }) => {
+      dispatchOn(span, 'click');
     });
-    expect(() => view.contentDOM.dispatchEvent(event)).not.toThrow();
-    document.body.removeChild(plain);
+    expect(openLinkText).toHaveBeenCalledWith('snippets/a.md', '', false);
+  });
+
+  it.each([
+    ['ctrlKey', { ctrlKey: true }],
+    ['metaKey', { metaKey: true }],
+  ])('%s click opens the snippet in a new tab', (_name, init) => {
+    const openLinkText = withHighlight(({ span }) => {
+      dispatchOn(span, 'click', init);
+    });
+    expect(openLinkText).toHaveBeenCalledWith('snippets/a.md', '', 'tab');
+  });
+
+  it('middle click opens the snippet in a new tab', () => {
+    const openLinkText = withHighlight(({ span }) => {
+      dispatchOn(span, 'auxclick', { button: 1 });
+    });
+    expect(openLinkText).toHaveBeenCalledWith('snippets/a.md', '', 'tab');
+  });
+
+  it('mod+alt click opens the snippet in a split', () => {
+    const openLinkText = withHighlight(({ span }) => {
+      dispatchOn(span, 'click', { ctrlKey: true, altKey: true });
+    });
+    expect(openLinkText).toHaveBeenCalledWith('snippets/a.md', '', 'split');
+  });
+
+  it('mod+alt+shift click opens the snippet in a new window', () => {
+    const openLinkText = withHighlight(({ span }) => {
+      dispatchOn(span, 'click', {
+        ctrlKey: true,
+        altKey: true,
+        shiftKey: true,
+      });
+    });
+    expect(openLinkText).toHaveBeenCalledWith('snippets/a.md', '', 'window');
+  });
+
+  it('right click does not navigate — auxclick fires for it too', () => {
+    const openLinkText = withHighlight(({ span }) => {
+      dispatchOn(span, 'auxclick', { button: 2 });
+    });
+    expect(openLinkText).not.toHaveBeenCalled();
+  });
+
+  it('middle mousedown on a highlight is defaultPrevented, suppressing autoscroll', () => {
+    let event!: MouseEvent;
+    withHighlight(({ span }) => {
+      event = dispatchOn(span, 'mousedown', { button: 1 });
+    });
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('middle mousedown outside a highlight keeps its default action', () => {
+    const view = makeView('hello', makePlugin(makeReviewManager()));
+    const plain = document.createElement('span');
+    view.contentDOM.appendChild(plain);
+
+    const event = dispatchOn(plain, 'mousedown', { button: 1 });
+
+    expect(event.defaultPrevented).toBe(false);
+    plain.remove();
     view.destroy();
   });
 
-  it('does not navigate when highlight span lacks data-snippet-ref', () => {
-    const rm = makeReviewManager();
-    const irPlugin = makePlugin(rm);
+  it('does not navigate when the highlight lacks data-snippet-ref', () => {
+    const irPlugin = makePlugin(makeReviewManager());
     const view = makeView('hello', irPlugin);
-    const span = document.createElement('span');
-    span.className = 'ir-snippet-highlight';
-    // No data-snippet-ref attribute
-    document.body.appendChild(span);
-    const event = new MouseEvent('click', { bubbles: true, cancelable: true });
-    Object.defineProperty(event, 'target', { value: span, configurable: true });
-    expect(() => view.contentDOM.dispatchEvent(event)).not.toThrow();
-    document.body.removeChild(span);
+    const span = makeHighlightSpan(view, null);
+
+    dispatchOn(span, 'click');
+
+    expect(irPlugin.app.workspace.openLinkText).not.toHaveBeenCalled();
+    span.remove();
+    view.destroy();
+  });
+
+  it('does nothing when the click target has no .ir-snippet-highlight ancestor', () => {
+    const irPlugin = makePlugin(makeReviewManager());
+    const view = makeView('hello', irPlugin);
+    const plain = document.createElement('span');
+    view.contentDOM.appendChild(plain);
+
+    dispatchOn(plain, 'click');
+
+    expect(irPlugin.app.workspace.openLinkText).not.toHaveBeenCalled();
+    plain.remove();
     view.destroy();
   });
 

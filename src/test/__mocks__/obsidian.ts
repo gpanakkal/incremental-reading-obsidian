@@ -25,6 +25,22 @@ export class Component {}
 export class MarkdownRenderer {}
 export const Platform = { isMobile: false, isDesktop: true };
 
+/**
+ * Mirrors Obsidian's Keymap.isModEvent: Mod-click (Ctrl on Win/Linux, Cmd on
+ * macOS) or a middle click opens a tab, +Alt splits, +Alt+Shift opens a window.
+ */
+export class Keymap {
+  static isModEvent(
+    evt?: MouseEvent | KeyboardEvent | TouchEvent | null
+  ): 'tab' | 'split' | 'window' | boolean {
+    if (!evt) return false;
+    const mod = evt.ctrlKey || evt.metaKey;
+    if (mod && evt.altKey) return evt.shiftKey ? 'window' : 'split';
+    const isMiddleClick = 'button' in evt && evt.button === 1;
+    return mod || isMiddleClick ? 'tab' : false;
+  }
+}
+
 export class MarkdownPreviewView {
   static async render(
     _app: unknown,

@@ -15,6 +15,10 @@ import { DATABASE_FILE_PATH, PLACEHOLDER_PLUGIN_ICON } from './lib/constants';
 import { createIRExtensions } from './lib/extensions';
 import { registerReadingModeActionBar } from './lib/extensions/ReadingModeActionBar';
 import {
+  MIDDLE_MOUSE_BUTTON,
+  openSnippetFromEvent,
+} from './lib/extensions/SnippetHighlightExtension';
+import {
   registerHighlightRefreshListener,
   registerSnippetHighlightPostProcessor,
 } from './lib/extensions/SnippetHighlightPostProcessor';
@@ -335,20 +339,32 @@ export default class IncrementalReadingPlugin extends Plugin {
           })
         );
 
-        // Delegated click handler for highlights in reading mode.
-        // The CM extension's eventHandlers.click covers edit mode;
-        // this covers reading mode rendered HTML.
-        this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-          const target = evt.target as HTMLElement;
-          const highlight = target.closest('.ir-snippet-highlight');
-          if (!highlight) return;
-          const snippetRef = highlight.getAttribute('data-snippet-ref');
-          if (!snippetRef) return;
+        // Delegated handlers for highlights in reading mode.
+        // The CM extension's eventHandlers cover edit mode;
+        // these cover reading mode rendered HTML.
+        const openHighlightInReadingMode = (evt: MouseEvent) => {
+          const target = evt.target as HTMLElement | null;
           // Skip if inside a CM editor — the CM extension handles that
-          if (target.closest('.cm-editor')) return;
+          if (target?.closest('.cm-editor')) return;
+          openSnippetFromEvent(this, evt);
+        };
+
+        this.registerDomEvent(document, 'click', openHighlightInReadingMode);
+
+        // Middle click fires auxclick, not click. Right-click fires auxclick
+        // too, so restrict this to the middle button.
+        this.registerDomEvent(document, 'auxclick', (evt: MouseEvent) => {
+          if (evt.button !== MIDDLE_MOUSE_BUTTON) return;
+          openHighlightInReadingMode(evt);
+        });
+
+        // Suppress the middle-click default action (autoscroll / primary-paste)
+        // over a highlight so the auxclick above is a clean navigation.
+        this.registerDomEvent(document, 'mousedown', (evt: MouseEvent) => {
+          if (evt.button !== MIDDLE_MOUSE_BUTTON) return;
+          const target = evt.target as HTMLElement | null;
+          if (!target?.closest('.ir-snippet-highlight')) return;
           evt.preventDefault();
-          evt.stopPropagation();
-          void this.app.workspace.openLinkText(snippetRef, '');
         });
       } catch (error) {
         console.error(error);

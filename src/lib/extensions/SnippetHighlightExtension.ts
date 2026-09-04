@@ -1,8 +1,13 @@
 import type IncrementalReadingPlugin from '#/main';
 import { Annotation, RangeSetBuilder, StateEffect } from '@codemirror/state';
-import type { DecorationSet, EditorView, ViewUpdate } from '@codemirror/view';
-import { Decoration, ViewPlugin } from '@codemirror/view';
-import type { EventRef, TFile } from 'obsidian';
+import {
+  Decoration,
+  ViewPlugin,
+  type DecorationSet,
+  type EditorView,
+  type ViewUpdate,
+} from '@codemirror/view';
+import { Keymap, type EventRef, type TFile } from 'obsidian';
 import type ReviewManager from '../items/ReviewManager';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type {
@@ -25,12 +30,48 @@ export const isExternalSync = Annotation.define<boolean>();
  */
 export const refreshHighlightsEffect = StateEffect.define<null>();
 
+/** `MouseEvent.button` value for the middle mouse button. */
+export const MIDDLE_MOUSE_BUTTON = 1;
+
+/**
+ * Open the snippet whose highlight the event targeted, honoring the modifier
+ * keys the same way Obsidian's own links do.
+ *
+ * `Keymap.isModEvent` maps Ctrl/Cmd-click and middle-click to `'tab'`,
+ * Ctrl/Cmd+Alt to `'split'`, and Ctrl/Cmd+Alt+Shift to `'window'`. A plain
+ * click yields `false`, which `openLinkText` reads as "reuse the active leaf".
+ *
+ * @returns true when the event targeted a highlight and was consumed.
+ */
+export function openSnippetFromEvent(
+  plugin: IncrementalReadingPlugin,
+  event: MouseEvent
+): boolean {
+  const target = event.target as HTMLElement | null;
+  const highlight = target?.closest('.ir-snippet-highlight');
+  if (!highlight) return false;
+
+  const snippetRef = highlight.getAttribute('data-snippet-ref');
+  if (!snippetRef) return false;
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  void plugin.app.workspace.openLinkText(
+    snippetRef,
+    '',
+    Keymap.isModEvent(event)
+  );
+  return true;
+}
+
 /**
  * CodeMirror extension that renders snippet highlights as decorations.
  *
  * Features:
  * - Renders highlights on text ranges from which snippets were extracted
- * - Highlights are clickable - clicking navigates to the snippet note in another tab
+ * - Highlights are clickable - clicking navigates to the snippet note, in the
+ *   active tab or in a new tab/split/window depending on the modifier keys
  *
  * Note: All offsets in the tracker are body-relative (excluding frontmatter).
  * Conversion to absolute positions happens only at render time.
@@ -320,28 +361,30 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
 
     eventHandlers: {
       click: (event: MouseEvent, view: EditorView) => {
-        const target = event.target as HTMLElement;
-        const highlight = target.closest('.ir-snippet-highlight');
-
-        if (!highlight) {
-          return false;
-        }
-
-        const snippetRef = highlight.getAttribute('data-snippet-ref');
-        if (!snippetRef) {
-          return false;
-        }
-
-        // Navigate to the snippet note
         const plugin = view.state.facet(irPluginFacet);
-        if (plugin) {
-          event.preventDefault();
-          event.stopPropagation();
+        if (!plugin) return false;
+        return openSnippetFromEvent(plugin, event);
+      },
 
-          void plugin.app.workspace.openLinkText(snippetRef, '');
-          return true;
-        }
+      // A middle click never fires `click` — browsers emit `auxclick` for every
+      // non-primary button — so it needs its own handler. Right-click emits
+      // auxclick too, hence the button check: without it, opening the context
+      // menu on a highlight would navigate away.
+      auxclick: (event: MouseEvent, view: EditorView) => {
+        if (event.button !== MIDDLE_MOUSE_BUTTON) return false;
+        const plugin = view.state.facet(irPluginFacet);
+        if (!plugin) return false;
+        return openSnippetFromEvent(plugin, event);
+      },
 
+      // Middle-mousedown starts autoscroll on Windows and pastes the primary
+      // selection on Linux. Claim it so the auxclick that follows is a clean
+      // navigation rather than a navigation plus an unwanted default action.
+      mousedown: (event: MouseEvent) => {
+        if (event.button !== MIDDLE_MOUSE_BUTTON) return false;
+        const target = event.target as HTMLElement | null;
+        if (!target?.closest('.ir-snippet-highlight')) return false;
+        event.preventDefault();
         return false;
       },
     },
