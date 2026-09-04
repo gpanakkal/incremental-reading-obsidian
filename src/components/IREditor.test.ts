@@ -3,6 +3,7 @@
 import {
   computeMinimalChange,
   isPersistableChange,
+  reconcileIncomingValue,
 } from '#/components/IREditor';
 import { isExternalSync } from '#/lib/extensions/SnippetHighlightExtension';
 import { EditorSelection, EditorState } from '@codemirror/state';
@@ -60,20 +61,25 @@ function dispatchExternalSync(view: EditorView, newContent: string): void {
 }
 
 /**
- * Models the full updateEditorContent guard:
- *   skip if value === currentDoc  (no change at all)
- *   skip if value === lastSaved   (stale echo of our own save)
- *   apply otherwise               (genuine external change)
+ * The updateEditorContent branch, driven by the real reconcileIncomingValue:
+ *   skip if value echoes one of our own in-flight saves (consumes it)
+ *   skip if value === currentDoc (no change at all)
+ *   apply otherwise (genuine external change)
  *
+ * `pendingSaves` is mutated in place, exactly as the component's ref is.
  * Returns true if the replacement was applied, false if skipped.
  */
 function conditionalReplacement(
   view: EditorView,
   value: string,
-  lastSavedContent: string
+  pendingSaves: string[]
 ): boolean {
-  if (view.state.doc.toString() === value) return false;
-  if (value === lastSavedContent) return false;
+  if (
+    reconcileIncomingValue(view.state.doc.toString(), value, pendingSaves) ===
+    'skip'
+  ) {
+    return false;
+  }
   dispatchExternalSync(view, value);
   return true;
 }
@@ -561,7 +567,7 @@ describe('updateEditorContent skips stale own-save echoes and applies genuine ex
     const view = makeView(editorContent);
     view.dispatch({ selection: EditorSelection.cursor(11) }); // cursor at end
 
-    const applied = conditionalReplacement(view, lastSaved, lastSaved);
+    const applied = conditionalReplacement(view, lastSaved, [lastSaved]);
 
     expect(applied).toBe(false);
     expect(view.state.doc.toString()).toBe(editorContent);
@@ -577,7 +583,7 @@ describe('updateEditorContent skips stale own-save echoes and applies genuine ex
     const view = makeView('hello world');
     view.dispatch({ selection: EditorSelection.cursor(5) });
 
-    const applied = conditionalReplacement(view, externalChange, lastSaved);
+    const applied = conditionalReplacement(view, externalChange, [lastSaved]);
 
     expect(applied).toBe(true);
     expect(view.state.doc.toString()).toBe(externalChange);
@@ -605,12 +611,105 @@ describe('updateEditorContent skips stale own-save echoes and applies genuine ex
 
           // Stale fetch returns the last-saved content.
           // conditionalReplacement (the fixed guard) must skip.
-          const applied = conditionalReplacement(view, lastSaved, lastSaved);
+          const applied = conditionalReplacement(view, lastSaved, [lastSaved]);
 
           expect(applied).toBe(false);
           expect(view.state.doc.toString()).toBe(editorContent);
           expect(view.state.selection.main.head).toBe(cursorPos);
           view.destroy();
+        }
+      )
+    );
+  });
+
+  it('skips the echo of an earlier save still round-tripping when a newer save is pending (the swallowed-write bug)', () => {
+    // The pasted paragraph's disk write ("para") is still in flight when the
+    // next keystroke saves ("para x"); both are unacknowledged.
+    const pending = ['para', 'para x'];
+    const view = makeView('para x'); // editor already shows the newer text
+    view.dispatch({ selection: EditorSelection.cursor('para x'.length) });
+
+    // The slow paste-write echoes back first, carrying the OLDER "para".
+    const applied = conditionalReplacement(view, 'para', pending);
+
+    // A single-slot "last saved" guard (holding only "para x") would treat this
+    // as external and delete the " x". It must be recognised as our own echo.
+    expect(applied).toBe(false);
+    expect(view.state.doc.toString()).toBe('para x');
+    expect(view.state.selection.main.head).toBe('para x'.length);
+    // The consumed echo is removed; the newer save stays pending for its echo.
+    expect(pending).toEqual(['para x']);
+    view.destroy();
+  });
+
+  it('still applies a genuine external edit while our own saves are in flight', () => {
+    const pending = ['para', 'para x'];
+    const view = makeView('para x');
+    view.dispatch({ selection: EditorSelection.cursor('para x'.length) });
+
+    // Content we never wrote — edited in another pane — is not in the list.
+    const applied = conditionalReplacement(view, 'para y', pending);
+
+    expect(applied).toBe(true);
+    expect(view.state.doc.toString()).toBe('para y');
+    // No pending save is consumed by an unrelated external edit.
+    expect(pending).toEqual(['para', 'para x']);
+    view.destroy();
+  });
+});
+
+describe('reconcileIncomingValue consumes each own-save echo exactly once', () => {
+  it('skips and removes the matched save, leaving the rest pending', () => {
+    const pending = ['a', 'ab', 'abc'];
+    expect(reconcileIncomingValue('abc', 'ab', pending)).toBe('skip');
+    expect(pending).toEqual(['a', 'abc']);
+  });
+
+  it('removes only one occurrence when the same content was saved twice', () => {
+    // Type x, delete x, type x again → "hello" is saved twice. Two echoes come
+    // back; each must consume exactly one entry, so a later doc-advancing state
+    // is not misread as a third echo.
+    const pending = ['hello', 'hello'];
+    expect(reconcileIncomingValue('hello!', 'hello', pending)).toBe('skip');
+    expect(pending).toEqual(['hello']);
+    expect(reconcileIncomingValue('hello!', 'hello', pending)).toBe('skip');
+    expect(pending).toEqual([]);
+    // A third identical value has nothing left to match and, with the doc moved
+    // on, is treated as an external edit.
+    expect(reconcileIncomingValue('hello!', 'hello', pending)).toBe('apply');
+  });
+
+  it('applies content that was never saved and leaves the pending list intact', () => {
+    const pending = ['a', 'b'];
+    expect(reconcileIncomingValue('a', 'external', pending)).toBe('apply');
+    expect(pending).toEqual(['a', 'b']);
+  });
+
+  it('skips when value equals currentDoc even with nothing pending', () => {
+    const pending: string[] = [];
+    expect(reconcileIncomingValue('same', 'same', pending)).toBe('skip');
+    expect(pending).toEqual([]);
+  });
+
+  it('never applies an echo of any in-flight save, and consumes one entry (property-based)', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.string({ maxLength: 40 }), { minLength: 1, maxLength: 8 }),
+        fc.string({ maxLength: 60 }),
+        fc.nat(),
+        (saves, currentDoc, pick) => {
+          // The incoming value is one of the in-flight saves — its own echo.
+          const echo = saves[pick % saves.length];
+          const pending = [...saves];
+          const before = pending.length;
+
+          const result = reconcileIncomingValue(currentDoc, echo, pending);
+
+          // An echo of one of our writes is never applied over the document,
+          // whatever the document has since become...
+          expect(result).toBe('skip');
+          // ...and exactly one matching entry is consumed.
+          expect(pending.length).toBe(before - 1);
         }
       )
     );
@@ -660,13 +759,11 @@ describe('updateEditorContent skips when currentDoc already equals the incoming 
     const view = makeView(currentContent);
     view.dispatch({ selection: EditorSelection.cursor(5) });
 
-    // value === currentDoc, so conditionalReplacement must short-circuit
-    // before reaching the `value === lastSaved` check.
-    const applied = conditionalReplacement(
-      view,
-      currentContent,
-      'something else'
-    );
+    // value === currentDoc, so conditionalReplacement must skip even though the
+    // pending list holds an unrelated save that will never match.
+    const applied = conditionalReplacement(view, currentContent, [
+      'something else',
+    ]);
 
     expect(applied).toBe(false);
     expect(view.state.doc.toString()).toBe(currentContent);
@@ -687,8 +784,8 @@ describe('updateEditorContent skips when currentDoc already equals the incoming 
           const clampedCursor = Math.min(cursorPos, content.length);
           view.dispatch({ selection: EditorSelection.cursor(clampedCursor) });
 
-          // value === currentDoc → must always skip, no matter what lastSaved is.
-          const applied = conditionalReplacement(view, content, lastSaved);
+          // value === currentDoc → must always skip, whatever the pending list holds.
+          const applied = conditionalReplacement(view, content, [lastSaved]);
 
           expect(applied).toBe(false);
           expect(view.state.doc.toString()).toBe(content);
@@ -730,11 +827,9 @@ describe('updateEditorContent applies genuine external changes (property-based)'
           const clampedCursor = Math.min(cursorPos, editorContent.length);
           view.dispatch({ selection: EditorSelection.cursor(clampedCursor) });
 
-          const applied = conditionalReplacement(
-            view,
-            externalValue,
-            lastSaved
-          );
+          const applied = conditionalReplacement(view, externalValue, [
+            lastSaved,
+          ]);
 
           // Must have applied the change.
           expect(applied).toBe(true);

@@ -136,6 +136,46 @@ export function computeMinimalChange(
   };
 }
 
+/**
+ * How many unacknowledged saves `pendingSaves` may hold. In normal use each
+ * entry is consumed the moment its echo returns, so the list stays a handful
+ * deep; the cap only stops a save whose echo never arrives (e.g. the disk write
+ * threw) from leaking forever.
+ */
+const MAX_PENDING_SAVES = 50;
+
+/**
+ * Decide what `updateEditorContent` should do with an incoming `value`, given
+ * the editor's current document and the contents this editor has saved but not
+ * yet seen echoed back.
+ *
+ * `saveNote` writes the document to disk and primes the file-text query with
+ * that same string, which returns to this component as a fresh `value`. That
+ * echo is our own content and must never be re-applied. A single "last saved"
+ * string cannot recognise it: a slow write — a pasted paragraph — can still be
+ * round-tripping when the next keystroke saves, so two or more of our writes
+ * are in flight at once and an older echo can arrive after the document has
+ * been typed past it. Keeping every unacknowledged save lets any matching
+ * `value` be spotted as an echo — skipped, and consumed so a later identical
+ * string is not mistaken for the same echo twice.
+ *
+ * A genuine external edit is one this editor never wrote, so it is absent from
+ * `pendingSaves` and reaches `'apply'`.
+ */
+export function reconcileIncomingValue(
+  currentDoc: string,
+  value: string,
+  pendingSaves: string[]
+): 'apply' | 'skip' {
+  const echoIndex = pendingSaves.indexOf(value);
+  if (echoIndex !== -1) {
+    pendingSaves.splice(echoIndex, 1);
+    return 'skip';
+  }
+  if (currentDoc === value) return 'skip';
+  return 'apply';
+}
+
 export function IREditor({
   item,
   editorRef,
@@ -156,10 +196,13 @@ export function IREditor({
   const { saveNote } = useReviewContext();
   const store = useAppStore();
   const showAnswer = useAppSelector((state) => state.showAnswer);
-  // Tracks the content of the last successful save. updateEditorContent uses
-  // this to distinguish a stale re-fetch of our own write (skip) from a
-  // genuine external modification (apply).
-  const lastSavedContentRef = useRef<string>(value ?? '');
+  // Contents this editor has saved but not yet seen echoed back through the
+  // file-text query. updateEditorContent consults it to tell a stale re-fetch
+  // of one of our own writes (skip) from a genuine external modification
+  // (apply). It must hold every unacknowledged save, not just the latest: a
+  // slow write can still be round-tripping when the next keystroke saves, and
+  // that older echo would otherwise look external and roll back the newer text.
+  const pendingSavesRef = useRef<string[]>([]);
 
   // The current-item query refetches on an interval and after every mutation,
   // so `item` is a new object — with a possibly renamed TFile — on many
@@ -173,7 +216,13 @@ export function IREditor({
     if (!isPersistableChange(update)) return;
 
     const docText = update.state.doc.toString();
-    lastSavedContentRef.current = docText;
+    // Record this write so updateEditorContent recognises saveNote's echo of it
+    // as our own rather than an external edit. Each entry is normally consumed
+    // as its echo arrives; the cap only bounds a leak from an echo that never
+    // returns.
+    const pending = pendingSavesRef.current;
+    pending.push(docText);
+    if (pending.length > MAX_PENDING_SAVES) pending.shift();
     // TODO: don't save if changes occurred outside review
     await saveNote(itemRef.current, docText);
   };
@@ -440,9 +489,20 @@ export function IREditor({
 
       const view = internalRef.current;
       const currentDoc = view.state.doc.toString();
-      if (currentDoc === value || value === lastSavedContentRef.current) return;
+      const next = value ?? '';
+      // An incoming `value` matching one of our own in-flight saves is that
+      // save's echo, not an external edit — applying it would roll the document
+      // back over text typed since (the swallowed write). reconcileIncomingValue
+      // consumes the matched echo and tells us to skip; a real external change
+      // is absent from the pending list and reaches 'apply'.
+      if (
+        reconcileIncomingValue(currentDoc, next, pendingSavesRef.current) ===
+        'skip'
+      ) {
+        return;
+      }
 
-      const change = computeMinimalChange(currentDoc, value ?? '');
+      const change = computeMinimalChange(currentDoc, next);
       if (!change) return;
 
       // No `selection` is passed: with the change narrowed to the span that
