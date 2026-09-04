@@ -5,6 +5,7 @@ import {
   MarkdownView,
   Notice,
   Plugin,
+  TFolder,
 } from 'obsidian';
 import type { SyncPluginInstance } from 'obsidian-typings';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
@@ -255,7 +256,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     // listen for file renames to update references in db
     this.registerEvent(
       this.app.vault.on('rename', (file, oldPath) => {
-        if (!this.reviewManager) {
+        if (!this.reviewManager || file instanceof TFolder) {
           return;
         }
         void this.reviewManager
