@@ -73,17 +73,35 @@ export class SnippetOffsetTracker {
       const absoluteStart = highlight.start_offset + oldBodyStart;
       const absoluteEnd = highlight.end_offset + oldBodyStart;
 
+      // Association controls which side of inserted text a mapped position
+      // sticks to. mapPos(pos, 1) stays with content to the RIGHT of the change
+      // boundary; mapPos(pos, -1) stays with content to the LEFT.
+      //
+      // Live (non-zero-length) highlights use INWARD association (start=1,
+      // end=-1) so typing exactly at a boundary doesn't extend the highlight.
+      //
+      // A highlight that has already collapsed to zero length is invisible
+      // (buildDecorations skips it) but is kept so undoing the erasure can bring
+      // it back. Re-expansion only works if re-inserted text lands INSIDE the
+      // range, so a collapsed highlight uses OUTWARD association (start=-1,
+      // end=1): its start stays left of the insertion and its end stays right.
+      const isCollapsed = highlight.start_offset === highlight.end_offset;
+      const startAssoc = isCollapsed ? -1 : 1;
+      const endAssoc = isCollapsed ? 1 : -1;
+
       // mapPos transforms position through ALL changes atomically
-      // assoc=1 means "if at change boundary, stay with content to the right"
-      // assoc=-1 means "stay with content to the left"
-      const newAbsoluteStart = changes.mapPos(absoluteStart, 1);
-      const newAbsoluteEnd = changes.mapPos(absoluteEnd, -1);
+      const newAbsoluteStart = changes.mapPos(absoluteStart, startAssoc);
+      const newAbsoluteEnd = changes.mapPos(absoluteEnd, endAssoc);
 
       // Convert back to body-relative offsets in new document
       const newStart = Math.max(0, newAbsoluteStart - newBodyStart);
-      // Ensure end is always at least start + 1 to prevent zero-width highlights
-      // (which become invisible and effectively destroy the snippet highlight)
-      const newEnd = Math.max(newStart + 1, newAbsoluteEnd - newBodyStart);
+      // Allow zero-length highlights. Erasing the entire highlighted range
+      // collapses it to zero length, which hides it (buildDecorations skips
+      // ranges where start >= end) without destroying the record — so deleting
+      // a highlight's text removes the highlight, and undo can restore it.
+      // Clamping to `newStart` (not `newStart + 1`) also prevents inverted
+      // ranges when the mapped end would fall before the start.
+      const newEnd = Math.max(newStart, newAbsoluteEnd - newBodyStart);
 
       highlight.start_offset = newStart;
       highlight.end_offset = newEnd;

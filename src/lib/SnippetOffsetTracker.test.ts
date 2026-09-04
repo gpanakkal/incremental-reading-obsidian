@@ -1,8 +1,10 @@
 import { ChangeSet, Text } from '@codemirror/state';
 import * as fc from 'fast-check';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { SnippetOffsetTracker } from './SnippetOffsetTracker';
-import type { SnippetHighlight } from './SnippetOffsetTracker';
+import {
+  SnippetOffsetTracker,
+  type SnippetHighlight,
+} from './SnippetOffsetTracker';
 
 function createHighlight(
   id: string,
@@ -50,8 +52,10 @@ describe('SnippetOffsetTracker', () => {
       expect(updated[1].end_offset).toBe(50);
     });
 
-    it('should prevent zero-width highlights when entire snippet content is deleted', () => {
-      // Scenario: Snippet spans 100-200, and we delete exactly that range
+    it('should collapse a highlight to zero length when its entire content is deleted', () => {
+      // Scenario: Snippet spans 100-200, and we delete exactly that range.
+      // The highlight should collapse to zero length so it disappears from the
+      // view rather than lingering as a length-1 zombie over unrelated text.
       const highlight = createHighlight('1', 100, 200);
       tracker.loadHighlights(filePath, [highlight]);
 
@@ -62,10 +66,51 @@ describe('SnippetOffsetTracker', () => {
       tracker.updateOffsetsWithMapping(filePath, changes, 0, 0);
 
       const updated = tracker.getHighlights(filePath);
-      // When entire content is deleted, start and end would both map to 100
-      // But we should ensure end_offset = start_offset + 1 minimum
-      expect(updated[0].end_offset).toBeGreaterThan(updated[0].start_offset);
-      expect(updated[0].end_offset).toBe(updated[0].start_offset + 1);
+      // Both endpoints map to the deletion point → zero-length (invisible) range.
+      expect(updated[0].start_offset).toBe(100);
+      expect(updated[0].end_offset).toBe(100);
+    });
+
+    it('should collapse to zero length when the final remaining character is deleted', () => {
+      // Regression: previously a highlight could shrink to length 1 but never
+      // below, so deleting the last character left a stuck length-1 highlight.
+      const highlight = createHighlight('1', 10, 11); // one character left
+      tracker.loadHighlights(filePath, [highlight]);
+
+      const oldDoc = Text.of(['x'.repeat(100)]);
+      const changes = ChangeSet.of({ from: 10, to: 11 }, oldDoc.length);
+
+      tracker.updateOffsetsWithMapping(filePath, changes, 0, 0);
+
+      const updated = tracker.getHighlights(filePath);
+      expect(updated[0].start_offset).toBe(10);
+      expect(updated[0].end_offset).toBe(10); // collapsed, not forced to 11
+    });
+
+    it('should restore a collapsed highlight when the erasure is undone', () => {
+      // Erase the whole highlight, then undo. The zero-length record must
+      // re-expand to cover the re-inserted text.
+      const highlight = createHighlight('1', 10, 15); // "hello"
+      tracker.loadHighlights(filePath, [highlight]);
+
+      // Delete the 5 highlighted chars → collapses to [10, 10]
+      const oldDoc = Text.of(['x'.repeat(100)]);
+      const deletion = ChangeSet.of({ from: 10, to: 15 }, oldDoc.length);
+      tracker.updateOffsetsWithMapping(filePath, deletion, 0, 0);
+
+      let updated = tracker.getHighlights(filePath);
+      expect(updated[0].start_offset).toBe(10);
+      expect(updated[0].end_offset).toBe(10);
+
+      // Undo: CodeMirror re-inserts the 5 chars at position 10
+      const collapsedDoc = Text.of(['x'.repeat(95)]);
+      const undo = ChangeSet.of({ from: 10, insert: 'hello' }, collapsedDoc.length);
+      tracker.updateOffsetsWithMapping(filePath, undo, 0, 0);
+
+      updated = tracker.getHighlights(filePath);
+      // Outward association re-expands the collapsed range over the restored text
+      expect(updated[0].start_offset).toBe(10);
+      expect(updated[0].end_offset).toBe(15);
     });
 
     it('should maintain proper offsets when content is deleted before snippet', () => {
