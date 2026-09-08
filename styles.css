@@ -27,12 +27,22 @@
 
 /* Declared on `body`, not `:root`: Obsidian sets `--accent-h/s/l` on `body`,
    and a `var()` nested inside a custom property is substituted against the
-   element the property is declared on. At `:root` the accent lookup would miss
-   and silently resolve to the fallbacks below, pinning the tint to Obsidian's
-   stock purple no matter what accent the user picked. The fallbacks stay for
-   themes that drop the variables entirely. */
+   element the property is declared on. At `:root` the accent lookup below would
+   miss and silently resolve to its fallbacks, pinning the rule to Obsidian's
+   stock accent no matter what the user picked. The fallbacks stay for themes
+   that drop the variables entirely.
+
+   One hue feeds both values, so the tint and the rule are the same color read
+   at two strengths. The tint takes that hue at full saturation behind a low
+   alpha; the rule borrows the saturation, lightness and full opacity of the
+   accent it replaces, so it stays the vanilla accent rule re-hued rather than a
+   second color sitting beside it. */
 body {
-  --ir-transclusion-tint: hsla(26 100% 50% / 0.1);
+  --ir-transclusion-hue: 26;
+  --ir-transclusion-tint: hsl(var(--ir-transclusion-hue) 100% 50% / 0.1);
+  --ir-transclusion-rule-color: hsl(
+    var(--ir-transclusion-hue) var(--accent-s, 80%) var(--accent-l, 68%)
+  );
 }
 
 /* Keep Obsidian's accent rule, which now marks the run of transcluded text
@@ -41,12 +51,15 @@ body {
    as its own widget outside any `.cm-line`. There every fragment starts at the
    same x, so painting per fragment is exact.
 
-   No border declaration here on purpose: `.markdown-embed` already sets
-   `border-inline-start: var(--embed-border-start, …)`, so the rule follows
-   whatever the active theme uses for embeds. */
+   Only the color is declared here: `.markdown-embed` already sets
+   `border-inline-start: var(--embed-border-start, …)`, so the rule keeps
+   whatever width and style the active theme gives embeds, and only stops
+   carrying the theme's accent — which would leave a standalone transclusion
+   ruled in a different color from the gradient below. */
 .internal-embed[alt*='ir-hide-title'] {
   padding-inline-start: var(--size-4-2);
   padding-block: 0.2em;
+  border-inline-start-color: var(--ir-transclusion-rule-color);
 
   /* Marks the transcluded run as plugin content. Kept translucent so it
      composites over whatever the theme paints behind it, and so the accent
@@ -99,8 +112,8 @@ body {
   .cm-line:has(> .internal-embed[alt*='ir-hide-title']),
 .markdown-rendered .ir-transclusion-rule {
   background-image: linear-gradient(
-    var(--interactive-accent),
-    var(--interactive-accent)
+    var(--ir-transclusion-rule-color),
+    var(--ir-transclusion-rule-color)
   );
   background-repeat: no-repeat;
   background-size: 2px 100%;
