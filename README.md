@@ -10,7 +10,7 @@ It combines spaced repetition using [FSRS](https://github.com/open-spaced-repeti
 
 Since this is integrated directly into Obsidian, your learning materials, snippets, and cards live alongside or even within your notes, making it convenient to work with all kinds of information.
 
-For technical details, see [terminology](#terminology) and [how the incremental reading works in this plugin](#how-incremental-reading-works-in-this-plugin).
+For technical details, see [terminology](#terminology) and [how incremental reading works in this plugin](#how-incremental-reading-works-in-this-plugin).
 
 ## Setup
 
