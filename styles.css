@@ -25,6 +25,16 @@
   display: none;
 }
 
+/* Declared on `body`, not `:root`: Obsidian sets `--accent-h/s/l` on `body`,
+   and a `var()` nested inside a custom property is substituted against the
+   element the property is declared on. At `:root` the accent lookup would miss
+   and silently resolve to the fallbacks below, pinning the tint to Obsidian's
+   stock purple no matter what accent the user picked. The fallbacks stay for
+   themes that drop the variables entirely. */
+body {
+  --ir-transclusion-tint: hsla(26 100% 50% / 0.1);
+}
+
 /* Keep Obsidian's accent rule, which now marks the run of transcluded text
    rather than bounding a block. Used only where the transclusion has no host
    block to hang the rule off — a standalone `![[…]]`, which CodeMirror renders
@@ -37,6 +47,16 @@
 .internal-embed[alt*='ir-hide-title'] {
   padding-inline-start: var(--size-4-2);
   padding-block: 0.2em;
+
+  /* Marks the transcluded run as plugin content. Kept translucent so it
+     composites over whatever the theme paints behind it, and so the accent
+     rule below still reads through where the two overlap — a transclusion
+     that opens its host block starts at the same x as the rule. */
+  background-color: var(--ir-transclusion-tint);
+  border-radius: var(--radius-s);
+
+  /* Paints the tint and the padding onto every wrapped fragment rather than
+     stretching one box across the whole run. */
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 
