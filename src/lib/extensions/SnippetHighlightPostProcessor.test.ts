@@ -1215,6 +1215,52 @@ describe('registerSnippetHighlightPostProcessor', () => {
     expect(el.querySelector('span.ir-snippet-highlight')).toBeNull();
   });
 
+  it('does not throw when the section lineEnd runs past cachedRead line count', async () => {
+    // Regression: cachedRead ("hello" = 1 line) can be shorter than the line
+    // range sectionInfo reports. The sectionLength loop indexed lines[i] up to
+    // lineEnd (5) and read `undefined.length`, throwing and blanking the
+    // reading-mode render for any article with a highlight.
+    const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
+      .ObsidianHelpers;
+    vi.spyOn(ObsidianHelpers, 'isSourceNote').mockReturnValue(false);
+    vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
+    vi.spyOn(ObsidianHelpers, 'getBodyStartOffset').mockReturnValue(0);
+
+    const fileContent = 'hello';
+    const highlight = makeHighlight({ start_offset: 0, end_offset: 5 });
+    const reviewManager = {
+      getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
+      snippets: {
+        offsetTracker: { getHighlights: vi.fn().mockReturnValue([highlight]) },
+      },
+    };
+    // lineEnd deliberately beyond the single line of `fileContent`.
+    const getSectionInfo = vi
+      .fn()
+      .mockReturnValue({ lineStart: 0, lineEnd: 5, text: fileContent });
+    const plugin = {
+      registerMarkdownPostProcessor: vi.fn(),
+      app: {
+        vault: {
+          getFileByPath: vi.fn().mockReturnValue({ path: 'a.md' }),
+          cachedRead: vi.fn().mockResolvedValue(fileContent),
+        },
+        workspace: { on: vi.fn().mockReturnValue({}) },
+      },
+      reviewManager,
+    };
+    registerSnippetHighlightPostProcessor(plugin as never);
+    const processor = (
+      plugin.registerMarkdownPostProcessor as ReturnType<typeof vi.fn>
+    ).mock.calls[0][0] as (el: HTMLElement, ctx: unknown) => Promise<void>;
+    const el = document.createElement('div');
+    el.textContent = 'hello';
+
+    await expect(
+      processor(el, { sourcePath: 'a.md', getSectionInfo })
+    ).resolves.toBeUndefined();
+  });
+
   it('injects a highlight span when everything aligns', async () => {
     const ObsidianHelpers = (await import('#/lib/ObsidianHelpers'))
       .ObsidianHelpers;

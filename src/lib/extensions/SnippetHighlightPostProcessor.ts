@@ -61,7 +61,11 @@ export function registerSnippetHighlightPostProcessor(
 
       let sectionLength = 0;
       for (let i = sectionInfo.lineStart; i <= sectionInfo.lineEnd; i += 1) {
-        sectionLength += lines[i].length;
+        // Guard like the sectionAbsoluteStart loop above: `lines` comes from
+        // cachedRead, but lineStart/lineEnd index into sectionInfo.text, so a
+        // section whose lineEnd runs past cachedRead's line count would read
+        // `undefined.length` and throw, aborting the reading-mode render.
+        sectionLength += lines[i]?.length ?? 0;
       }
       const sectionBodyRelativeEnd = sectionBodyRelativeStart + sectionLength;
       // getSectionInfo().text returns raw Markdown for the entire file
