@@ -1,6 +1,8 @@
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { scrollPositionExtension } from '#/lib/extensions/ScrollPositionExtension';
 import { irPluginFacet } from '#/lib/extensions/irPluginFacet';
+import { EditorView } from '@codemirror/view';
+import type { StateEffect } from '@codemirror/state';
 import type { TFile } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -17,26 +19,41 @@ function extractFactory(): PluginFactory {
 }
 
 interface MockView {
-  state: { facet: ReturnType<typeof vi.fn> };
+  state: {
+    facet: ReturnType<typeof vi.fn>;
+    doc: { length: number };
+  };
   contentDOM: {
     querySelector: ReturnType<typeof vi.fn>;
   };
   scrollDOM: {
-    scrollTop: number;
-    scrollLeft: number;
-    scrollTo: ReturnType<typeof vi.fn>;
+    getBoundingClientRect: ReturnType<typeof vi.fn>;
     addEventListener: ReturnType<typeof vi.fn>;
   };
+  posAtCoords: ReturnType<typeof vi.fn>;
+  dispatch: ReturnType<typeof vi.fn>;
 }
 
 function makeTFile(): TFile {
   return { path: 'ir-data/articles/test.md' } as TFile;
 }
 
-function makeReviewManager(scrollPos?: { top: number; left: number } | null) {
+/** A sentinel effect so we can assert exactly what was dispatched. */
+const FAKE_EFFECT = { sentinel: 'scrollIntoView' } as unknown as StateEffect<unknown>;
+
+/**
+ * Replace EditorView.scrollIntoView with a spy returning FAKE_EFFECT, so tests
+ * can assert the clamped position passed to it without depending on the opaque
+ * StateEffect it normally returns. Restored by vi.restoreAllMocks().
+ */
+function spyScrollIntoView() {
+  return vi.spyOn(EditorView, 'scrollIntoView').mockReturnValue(FAKE_EFFECT);
+}
+
+function makeReviewManager(offset?: number | null) {
   return {
     saveScrollPosition: vi.fn().mockResolvedValue(undefined),
-    loadScrollPosition: vi.fn().mockResolvedValue(scrollPos ?? null),
+    loadScrollPosition: vi.fn().mockResolvedValue(offset ?? null),
   };
 }
 
@@ -58,6 +75,9 @@ function makePlugin(
  * @param propertiesWidget  - the element returned by `.querySelector('.metadata-container')`.
  *                            Pass `null` to simulate no widget (triggers MutationObserver path).
  *                            Pass an Element-like object to simulate an already-rendered widget.
+ * @param topOffset         - document character offset that posAtCoords resolves the
+ *                            top-visible point to (drives what handleScroll saves).
+ * @param docLength         - document length, used to exercise restore clamping.
  */
 function makeView(
   opts: {
@@ -65,8 +85,8 @@ function makeView(
     file?: TFile | null;
     plugin?: ReturnType<typeof makePlugin> | null;
     noteType?: string | null;
-    scrollTop?: number;
-    scrollLeft?: number;
+    topOffset?: number;
+    docLength?: number;
     propertiesWidget?: Element | null;
   } = {}
 ): MockView {
@@ -75,8 +95,8 @@ function makeView(
     info,
     plugin = makePlugin(),
     noteType = 'article',
-    scrollTop = 0,
-    scrollLeft = 0,
+    topOffset = 0,
+    docLength = 100000,
     propertiesWidget = null,
   } = opts;
 
@@ -93,16 +113,17 @@ function makeView(
         .mockImplementation((facetDef: unknown) =>
           facetDef === irPluginFacet ? plugin : null
         ),
+      doc: { length: docLength },
     },
     contentDOM: {
       querySelector: vi.fn().mockReturnValue(propertiesWidget),
     },
     scrollDOM: {
-      scrollTop,
-      scrollLeft,
-      scrollTo: vi.fn(),
+      getBoundingClientRect: vi.fn().mockReturnValue({ left: 0, top: 0 }),
       addEventListener: vi.fn(),
     },
+    posAtCoords: vi.fn().mockReturnValue(topOffset),
+    dispatch: vi.fn(),
   };
 
   vi.spyOn(Obsidian, 'getFileInfoFromState').mockReturnValue({
@@ -142,6 +163,11 @@ function makeFakeMutationObserver() {
   }
 
   return { MockMO, triggerMutation, disconnect, observe };
+}
+
+/** A widget stub whose presence drives the "already rendered" restore path. */
+function makeWidgetElement(): Element {
+  return {} as unknown as Element;
 }
 
 // #endregion
@@ -278,38 +304,22 @@ describe('early return — no reviewManager', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Normal path — properties widget already rendered on mount
+// Restore — properties widget already rendered on mount
 // ---------------------------------------------------------------------------
-describe('properties widget already present on mount', () => {
-  function makeWidgetElement(height = 60): Element {
-    return {
-      getBoundingClientRect: vi.fn().mockReturnValue({ height }),
-    } as unknown as Element;
-  }
-
-  /**
-   * Build a view whose querySelector is selector-aware: returns the widget only
-   * for '.metadata-container', null for any other selector.
-   * This allows killing mutants that change the selector string.
-   */
-  function makeViewWithSelectorAwareDOM(
-    opts: Parameters<typeof makeView>[0] & { widgetHeight?: number } = {}
-  ) {
-    const { widgetHeight = 60, ...viewOpts } = opts;
-    const widget = makeWidgetElement(widgetHeight);
-    const view = makeView({ ...viewOpts, propertiesWidget: null });
+describe('restore on mount (properties widget present)', () => {
+  function makeViewWithWidget(
+    opts: Parameters<typeof makeView>[0] = {}
+  ): MockView {
+    const widget = makeWidgetElement();
+    const view = makeView({ ...opts, propertiesWidget: null });
     view.contentDOM.querySelector.mockImplementation((selector: string) =>
       selector === '.metadata-container' ? widget : null
     );
-    return { view, widget };
+    return view;
   }
 
   it('registers a scrollend listener after the rAF chain and restore', async () => {
-    const reviewManager = makeReviewManager(null);
-    const view = makeView({
-      plugin: makePlugin(reviewManager),
-      propertiesWidget: makeWidgetElement(),
-    });
+    const view = makeViewWithWidget({ plugin: makePlugin(makeReviewManager(null)) });
     factory(view as never);
 
     expect(view.scrollDOM.addEventListener).not.toHaveBeenCalled();
@@ -324,10 +334,7 @@ describe('properties widget already present on mount', () => {
 
   it('calls loadScrollPosition once on mount', async () => {
     const reviewManager = makeReviewManager(null);
-    const view = makeView({
-      plugin: makePlugin(reviewManager),
-      propertiesWidget: makeWidgetElement(),
-    });
+    const view = makeViewWithWidget({ plugin: makePlugin(reviewManager) });
     factory(view as never);
     await vi.runAllTimersAsync();
 
@@ -336,103 +343,87 @@ describe('properties widget already present on mount', () => {
 
   it('queries for .metadata-container by the exact selector string', async () => {
     const widget = makeWidgetElement();
-    // Make querySelector selector-aware: only return the widget for the expected selector
     const reviewManager = makeReviewManager(null);
     const view = makeView({
       plugin: makePlugin(reviewManager),
-      propertiesWidget: null, // start null so we can control per-selector
-    });
-
-    // Override querySelector: return widget only when called with the exact selector
-    view.contentDOM.querySelector.mockImplementation((selector: string) =>
-      selector === '.metadata-container' ? widget : null
-    );
-
-    factory(view as never);
-    await vi.runAllTimersAsync();
-
-    // loadScrollPosition was called, which means the widget was found via the correct selector
-    expect(reviewManager.loadScrollPosition).toHaveBeenCalled();
-  });
-
-  it('calls scrollTo with stored top + frontmatter height', async () => {
-    const storedPos = { top: 200, left: 5 };
-    const reviewManager = makeReviewManager(storedPos);
-    const { view } = makeViewWithSelectorAwareDOM({
-      plugin: makePlugin(reviewManager),
-      widgetHeight: 80,
-    });
-    factory(view as never);
-    await vi.runAllTimersAsync();
-
-    expect(view.scrollDOM.scrollTo).toHaveBeenCalledWith({
-      top: 280, // 200 + 80
-      left: 5,
-      behavior: 'auto',
-    });
-  });
-
-  it('does not call scrollTo when loadScrollPosition returns null', async () => {
-    const reviewManager = makeReviewManager(null);
-    const view = makeView({
-      plugin: makePlugin(reviewManager),
-      propertiesWidget: makeWidgetElement(),
-    });
-    factory(view as never);
-    await vi.runAllTimersAsync();
-
-    expect(view.scrollDOM.scrollTo).not.toHaveBeenCalled();
-  });
-
-  it('uses 0 for frontmatter height when no .metadata-container present', async () => {
-    const storedPos = { top: 150, left: 3 };
-    const reviewManager = makeReviewManager(storedPos);
-    const view = makeView({
-      plugin: makePlugin(reviewManager),
-      propertiesWidget: null, // falls through to MutationObserver + 300ms timeout
-    });
-    // For this sub-test we want the timeout to fire (no widget ever appears)
-    factory(view as never);
-    await vi.runAllTimersAsync();
-
-    expect(view.scrollDOM.scrollTo).toHaveBeenCalledWith({
-      top: 150, // 0 frontmatter height
-      left: 3,
-      behavior: 'auto',
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// handleScroll — saves scroll position to reviewManager
-// ---------------------------------------------------------------------------
-describe('handleScroll', () => {
-  /**
-   * Build a view with a selector-aware querySelector so that the
-   * `.metadata-container` string literal mutant (line 59) is killed —
-   * if the selector changes to "" the widget won't be found and height = 0.
-   */
-  function makeViewForScroll(opts: {
-    height: number;
-    scrollTop: number;
-    scrollLeft: number;
-    reviewManager: ReturnType<typeof makeReviewManager>;
-  }): MockView {
-    const widget = {
-      getBoundingClientRect: vi.fn().mockReturnValue({ height: opts.height }),
-    } as unknown as Element;
-    const view = makeView({
-      plugin: makePlugin(opts.reviewManager),
-      scrollTop: opts.scrollTop,
-      scrollLeft: opts.scrollLeft,
       propertiesWidget: null,
     });
     view.contentDOM.querySelector.mockImplementation((selector: string) =>
       selector === '.metadata-container' ? widget : null
     );
-    return view;
-  }
 
+    factory(view as never);
+    await vi.runAllTimersAsync();
+
+    // loadScrollPosition ran, which means the widget was found via the selector
+    expect(reviewManager.loadScrollPosition).toHaveBeenCalled();
+  });
+
+  it('scrolls the stored offset to the top of the viewport', async () => {
+    const spy = spyScrollIntoView();
+    const view = makeViewWithWidget({
+      plugin: makePlugin(makeReviewManager(200)),
+    });
+    factory(view as never);
+    await vi.runAllTimersAsync();
+
+    expect(spy).toHaveBeenCalledWith(200, { y: 'start' });
+    expect(view.dispatch).toHaveBeenCalledWith({ effects: FAKE_EFFECT });
+  });
+
+  it('restores an offset of 0 (a note scrolled to the very top)', async () => {
+    const spy = spyScrollIntoView();
+    const view = makeViewWithWidget({
+      plugin: makePlugin(makeReviewManager(0)),
+    });
+    factory(view as never);
+    await vi.runAllTimersAsync();
+
+    expect(spy).toHaveBeenCalledWith(0, { y: 'start' });
+    expect(view.dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('clamps a stored offset past the end of the document to doc length', async () => {
+    const spy = spyScrollIntoView();
+    const view = makeViewWithWidget({
+      plugin: makePlugin(makeReviewManager(999999)),
+      docLength: 500,
+    });
+    factory(view as never);
+    await vi.runAllTimersAsync();
+
+    expect(spy).toHaveBeenCalledWith(500, { y: 'start' });
+  });
+
+  it('does not dispatch a scroll when loadScrollPosition returns null', async () => {
+    const spy = spyScrollIntoView();
+    const view = makeViewWithWidget({
+      plugin: makePlugin(makeReviewManager(null)),
+    });
+    factory(view as never);
+    await vi.runAllTimersAsync();
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(view.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('restores via the 300ms fallback when no properties widget appears', async () => {
+    const spy = spyScrollIntoView();
+    const view = makeView({
+      plugin: makePlugin(makeReviewManager(150)),
+      propertiesWidget: null, // no widget ever (e.g. the IREditor)
+    });
+    factory(view as never);
+    await vi.runAllTimersAsync();
+
+    expect(spy).toHaveBeenCalledWith(150, { y: 'start' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleScroll — saves the top-visible character offset
+// ---------------------------------------------------------------------------
+describe('handleScroll', () => {
   async function getScrollHandler(view: MockView): Promise<() => void> {
     factory(view as never);
     await vi.runAllTimersAsync();
@@ -443,82 +434,56 @@ describe('handleScroll', () => {
     return call[1];
   }
 
-  it('saves body-relative scroll position (scrollTop minus frontmatter height)', async () => {
+  it('saves the offset posAtCoords resolves for the top-left visible point', async () => {
     const reviewManager = makeReviewManager(null);
-    const view = makeViewForScroll({
-      height: 100,
-      scrollTop: 250,
-      scrollLeft: 10,
-      reviewManager,
-    });
-    const scrollHandler = await getScrollHandler(view);
-    scrollHandler();
-
-    expect(reviewManager.saveScrollPosition).toHaveBeenCalledWith(
-      expect.anything(),
-      { top: 150, left: 10 }
-    );
-  });
-
-  it('clamps bodyRelativeTop to 0 when scrollTop < frontmatter height', async () => {
-    const reviewManager = makeReviewManager(null);
-    const view = makeViewForScroll({
-      height: 300,
-      scrollTop: 50,
-      scrollLeft: 0,
-      reviewManager,
-    });
-    const scrollHandler = await getScrollHandler(view);
-    scrollHandler();
-
-    expect(reviewManager.saveScrollPosition).toHaveBeenCalledWith(
-      expect.anything(),
-      { top: 0, left: 0 }
-    );
-  });
-
-  it('saves full scrollTop when no metadata-container present (frontmatter height = 0)', async () => {
-    const reviewManager = makeReviewManager(null);
-    // querySelector returns null for any selector → height = 0
     const view = makeView({
       plugin: makePlugin(reviewManager),
-      scrollTop: 80,
-      scrollLeft: 5,
-      propertiesWidget: null,
+      topOffset: 1234,
+      propertiesWidget: makeWidgetElement(),
     });
     const scrollHandler = await getScrollHandler(view);
     scrollHandler();
 
+    expect(view.posAtCoords).toHaveBeenLastCalledWith(
+      { x: 1, y: 1 },
+      false
+    );
     expect(reviewManager.saveScrollPosition).toHaveBeenCalledWith(
       expect.anything(),
-      { top: 80, left: 5 }
+      1234
     );
+  });
+
+  it('offsets the probe point by 1px inside the scroller rect', async () => {
+    const reviewManager = makeReviewManager(null);
+    const view = makeView({
+      plugin: makePlugin(reviewManager),
+      topOffset: 7,
+      propertiesWidget: makeWidgetElement(),
+    });
+    // Scroller not at the viewport origin: probe must track its rect.
+    view.scrollDOM.getBoundingClientRect.mockReturnValue({ left: 40, top: 90 });
+    const scrollHandler = await getScrollHandler(view);
+    scrollHandler();
+
+    expect(view.posAtCoords).toHaveBeenLastCalledWith({ x: 41, y: 91 }, false);
   });
 
   it('does not save when info is unavailable on scroll (getFileInfoFromState returns null)', async () => {
     const reviewManager = makeReviewManager(null);
-    const file = makeTFile();
-    // Set up view with valid info for the factory initialization
     const view = makeView({
       plugin: makePlugin(reviewManager),
-      propertiesWidget: null,
+      propertiesWidget: makeWidgetElement(),
     });
 
-    factory(view as never);
-    await vi.runAllTimersAsync();
+    const scrollHandler = await getScrollHandler(view);
 
     // After setup, make getFileInfoFromState return null (simulates file closed)
     vi.spyOn(Obsidian, 'getFileInfoFromState').mockReturnValue({
       info: null,
       editorView: null,
     });
-    void file; // referenced for clarity
 
-    const call = view.scrollDOM.addEventListener.mock.calls[0] as [
-      string,
-      () => void,
-    ];
-    const scrollHandler = call[1];
     scrollHandler();
 
     expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
@@ -526,78 +491,69 @@ describe('handleScroll', () => {
 });
 
 // ---------------------------------------------------------------------------
-// restoreScrollPosition — isRestoring guard
+// isRestoring guard — the programmatic restore must not re-save
 // ---------------------------------------------------------------------------
 describe('isRestoring guard', () => {
-  it('sets isRestoring back to false after 200ms timeout', async () => {
-    const storedPos = { top: 100, left: 0 };
-    const reviewManager = makeReviewManager(storedPos);
-    const view = makeView({
-      plugin: makePlugin(reviewManager),
-      propertiesWidget: {
-        getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-      } as unknown as Element,
+  function makeRestoringView(): MockView {
+    return makeView({
+      plugin: makePlugin(makeReviewManager(100)),
+      topOffset: 42,
+      propertiesWidget: makeWidgetElement(),
     });
+  }
+
+  it('dispatches the restore and then registers the scroll listener', async () => {
+    spyScrollIntoView();
+    const view = makeRestoringView();
     factory(view as never);
     await vi.runAllTimersAsync();
 
-    // scrollTo was called (restore happened) → isRestoring was set true → 200ms timer set
-    expect(view.scrollDOM.scrollTo).toHaveBeenCalled();
-    // The scroll listener should now be registered (isRestoring timer cleared by runAllTimersAsync)
+    expect(view.dispatch).toHaveBeenCalled();
     expect(view.scrollDOM.addEventListener).toHaveBeenCalled();
   });
 
-  it('allows saving scroll position after isRestoring resets to false (200ms elapsed)', async () => {
-    const storedPos = { top: 100, left: 0 };
-    const reviewManager = makeReviewManager(storedPos);
+  it('allows saving after isRestoring resets (200ms elapsed)', async () => {
+    spyScrollIntoView();
+    const reviewManager = makeReviewManager(100);
     const view = makeView({
       plugin: makePlugin(reviewManager),
-      propertiesWidget: {
-        getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-      } as unknown as Element,
+      topOffset: 42,
+      propertiesWidget: makeWidgetElement(),
     });
     factory(view as never);
-
-    // Run all timers: rAFs, restore, isRestoring 200ms timer, scroll listener registration
     await vi.runAllTimersAsync();
 
-    // Now isRestoring is false — fire the scroll handler and expect save to happen
-    const calls = view.scrollDOM.addEventListener.mock.calls;
-    expect(calls.length).toBeGreaterThan(0);
-    const scrollHandler = (calls[0] as [string, () => void])[1];
+    const scrollHandler = (
+      view.scrollDOM.addEventListener.mock.calls[0] as [string, () => void]
+    )[1];
     scrollHandler();
 
     expect(reviewManager.saveScrollPosition).toHaveBeenCalledTimes(1);
   });
 
-  it('does not save scroll position while isRestoring is true (within the 200ms window)', async () => {
-    const storedPos = { top: 100, left: 0 };
-    const reviewManager = makeReviewManager(storedPos);
-    const widget = {
-      getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-    } as unknown as Element;
+  it('does not save while isRestoring is true (within the 200ms window)', async () => {
+    spyScrollIntoView();
+    const reviewManager = makeReviewManager(100);
     const view = makeView({
       plugin: makePlugin(reviewManager),
-      propertiesWidget: widget,
+      topOffset: 42,
+      propertiesWidget: makeWidgetElement(),
     });
     factory(view as never);
 
-    // Advance through both rAFs + the async loadScrollPosition + scrollTo + addEventListener.
-    // The 200ms isRestoring guard is NOT cleared yet (we stop before 200ms).
+    // Advance through both rAFs + async load + dispatch + addEventListener,
+    // but stop before the 200ms isRestoring guard clears.
     await vi.advanceTimersByTimeAsync(5); // rAF 1
     await vi.advanceTimersByTimeAsync(5); // rAF 2
-    // flush the waitForPropertiesAndRestore promise chain
     await Promise.resolve();
     await Promise.resolve();
 
-    // The scroll listener was registered; now trigger it while isRestoring is still true
     const calls = view.scrollDOM.addEventListener.mock.calls;
     if (calls.length > 0) {
       const scrollHandler = (calls[0] as [string, () => void])[1];
       scrollHandler();
       expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
     }
-    // Clean up remaining timers
     await vi.runAllTimersAsync();
   });
 });
@@ -620,11 +576,10 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     );
   });
 
-  it('calls restoreScrollPosition when observer fires and widget appears', async () => {
-    const reviewManager = makeReviewManager({ top: 50, left: 0 });
-    const fakeWidget = {
-      getBoundingClientRect: vi.fn().mockReturnValue({ height: 20 }),
-    } as unknown as Element;
+  it('restores when the observer fires and the widget appears', async () => {
+    const spy = spyScrollIntoView();
+    const reviewManager = makeReviewManager(50);
+    const fakeWidget = makeWidgetElement();
 
     const { MockMO, triggerMutation } = makeFakeMutationObserver();
     vi.stubGlobal('MutationObserver', MockMO);
@@ -635,33 +590,21 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     });
 
     factory(view as never);
+    await vi.advanceTimersByTimeAsync(10); // through rAFs → observer created
 
-    // Advance through both rAFs so the MutationObserver is created
-    await vi.advanceTimersByTimeAsync(10);
-
-    // Now simulate the widget appearing
     view.contentDOM.querySelector.mockReturnValue(fakeWidget);
     triggerMutation();
-
-    // Flush the requestAnimationFrame queued inside the observer callback
     await vi.runAllTimersAsync();
 
     expect(reviewManager.loadScrollPosition).toHaveBeenCalled();
-    expect(view.scrollDOM.scrollTo).toHaveBeenCalledWith({
-      top: 70, // 50 + 20
-      left: 0,
-      behavior: 'auto',
-    });
+    expect(spy).toHaveBeenCalledWith(50, { y: 'start' });
   });
 
   it('disconnects observer when widget appears via mutation', async () => {
     const { MockMO, triggerMutation, disconnect } = makeFakeMutationObserver();
     vi.stubGlobal('MutationObserver', MockMO);
 
-    const fakeWidget = {
-      getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-    } as unknown as Element;
-
+    const fakeWidget = makeWidgetElement();
     const view = makeView({
       plugin: makePlugin(makeReviewManager(null)),
       propertiesWidget: null,
@@ -678,7 +621,7 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
   });
 
   it('falls back to restoring after 300ms if no widget ever appears', async () => {
-    const reviewManager = makeReviewManager({ top: 50, left: 0 });
+    const reviewManager = makeReviewManager(50);
     const { MockMO } = makeFakeMutationObserver();
     vi.stubGlobal('MutationObserver', MockMO);
 
@@ -688,7 +631,6 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     });
 
     factory(view as never);
-    // Widget never appears — let the 300ms fallback fire
     await vi.runAllTimersAsync();
 
     expect(reviewManager.loadScrollPosition).toHaveBeenCalled();
@@ -698,10 +640,7 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     const { MockMO, triggerMutation } = makeFakeMutationObserver();
     vi.stubGlobal('MutationObserver', MockMO);
 
-    const fakeWidget = {
-      getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-    } as unknown as Element;
-
+    const fakeWidget = makeWidgetElement();
     const view = makeView({
       plugin: makePlugin(makeReviewManager(null)),
       propertiesWidget: null,
@@ -715,37 +654,9 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     await vi.runAllTimersAsync();
 
     const calls = view.contentDOM.querySelector.mock.calls;
-    // Both the initial check and the observer check use '.metadata-container'
     expect(
       calls.every((call) => (call as [string])[0] === '.metadata-container')
     ).toBe(true);
-  });
-
-  it('calls restoreScrollPosition immediately when observer fires (before 300ms fallback)', async () => {
-    const reviewManager = makeReviewManager({ top: 50, left: 0 });
-    const fakeWidget = {
-      getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-    } as unknown as Element;
-
-    const { MockMO, triggerMutation } = makeFakeMutationObserver();
-    vi.stubGlobal('MutationObserver', MockMO);
-
-    const view = makeView({
-      plugin: makePlugin(reviewManager),
-      propertiesWidget: null,
-    });
-
-    factory(view as never);
-    await vi.advanceTimersByTimeAsync(10); // through rAFs
-
-    view.contentDOM.querySelector.mockReturnValue(fakeWidget);
-    triggerMutation();
-
-    // Advance LESS than 300ms — restore should still have happened via observer (not fallback)
-    await vi.advanceTimersByTimeAsync(50);
-
-    expect(reviewManager.loadScrollPosition).toHaveBeenCalled();
-    await vi.runAllTimersAsync();
   });
 
   it('does nothing when observer fires but widget is still not present', async () => {
@@ -759,15 +670,12 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     });
 
     factory(view as never);
-    await vi.advanceTimersByTimeAsync(10); // through rAFs
+    await vi.advanceTimersByTimeAsync(10);
 
-    // querySelector still returns null — widget hasn't appeared
-    // Trigger the observer anyway (simulates a different DOM mutation)
     triggerMutation();
     await vi.advanceTimersByTimeAsync(10);
 
-    // restoreScrollPosition should NOT have been called yet
-    // (the if(widget) branch was false, so we skip the disconnect/restore)
+    // restore not yet reached (the if(widget) branch was false)
     expect(reviewManager.loadScrollPosition).not.toHaveBeenCalled();
 
     // 300ms fallback still runs and calls restore
@@ -780,10 +688,7 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     vi.stubGlobal('MutationObserver', MockMO);
 
     const reviewManager = makeReviewManager(null);
-    const fakeWidget = {
-      getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-    } as unknown as Element;
-
+    const fakeWidget = makeWidgetElement();
     const view = makeView({
       plugin: makePlugin(reviewManager),
       propertiesWidget: null,
@@ -796,7 +701,7 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     triggerMutation();
     await vi.runAllTimersAsync();
 
-    // loadScrollPosition called exactly once (not twice — fallback didn't fire separately)
+    // loadScrollPosition called exactly once (fallback didn't fire separately)
     expect(reviewManager.loadScrollPosition).toHaveBeenCalledTimes(1);
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
@@ -809,9 +714,7 @@ describe('destroy()', () => {
   it('aborts the AbortController (prevents further scroll listener firing)', async () => {
     const view = makeView({
       plugin: makePlugin(makeReviewManager(null)),
-      propertiesWidget: {
-        getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-      } as unknown as Element,
+      propertiesWidget: makeWidgetElement(),
     });
     const instance = factory(view as never);
     await vi.runAllTimersAsync();
@@ -829,9 +732,7 @@ describe('destroy()', () => {
   it('does not throw when destroyed before rAF chain completes', () => {
     const view = makeView({
       plugin: makePlugin(makeReviewManager(null)),
-      propertiesWidget: {
-        getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-      } as unknown as Element,
+      propertiesWidget: makeWidgetElement(),
     });
     const instance = factory(view as never);
     // Destroy immediately — AbortController and MutationObserver not yet created
@@ -871,73 +772,59 @@ describe('destroy()', () => {
   });
 
   it('clears the isRestoring timeout on destroy so it does not fire after teardown', async () => {
-    const storedPos = { top: 100, left: 0 };
+    spyScrollIntoView();
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
     const view = makeView({
-      plugin: makePlugin(makeReviewManager(storedPos)),
-      propertiesWidget: {
-        getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-      } as unknown as Element,
+      plugin: makePlugin(makeReviewManager(100)),
+      propertiesWidget: makeWidgetElement(),
     });
     const instance = factory(view as never);
 
     // Let the restore happen (sets scrollTimeout) but don't clear the 200ms guard yet
     await vi.advanceTimersByTimeAsync(10); // through rAFs
     await Promise.resolve(); // flush loadScrollPosition
-    await Promise.resolve(); // flush scrollTo + setTimeout
+    await Promise.resolve(); // flush dispatch + setTimeout
 
     instance.destroy();
 
-    // clearTimeout should have been called with the scrollTimeout id
     expect(clearTimeoutSpy).toHaveBeenCalled();
 
-    // Advancing past 200ms should not cause errors or stale isRestoring state
     await vi.runAllTimersAsync();
   });
 
   it('does not call clearTimeout when no restore occurred (scrollTimeout is undefined)', async () => {
-    // When loadScrollPosition returns null, scrollTimeout is never set (no isRestoring guard needed).
-    // If stryker mutates `if (scrollTimeout !== undefined)` to `if (true)`,
-    // clearTimeout(undefined) would be called. We verify clearTimeout is NOT called
-    // in this path by checking call count.
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
 
     const view = makeView({
       plugin: makePlugin(makeReviewManager(null)), // null = no stored position → no scrollTimeout
-      propertiesWidget: {
-        getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-      } as unknown as Element,
+      propertiesWidget: makeWidgetElement(),
     });
     const instance = factory(view as never);
     await vi.runAllTimersAsync();
 
-    // No restore happened, so scrollTimeout is undefined
     const beforeCount = clearTimeoutSpy.mock.calls.length;
     instance.destroy();
-    // clearTimeout should not have been called for scrollTimeout (it's undefined)
     const afterCount = clearTimeoutSpy.mock.calls.length;
     expect(afterCount - beforeCount).toBe(0);
   });
 
   it('does not call observer.disconnect if no MutationObserver was created (widget present on mount)', async () => {
-    // When the properties widget is already present, no MutationObserver is created.
-    // destroy() calls mutationObserver?.disconnect() — with optional chaining this is safe.
-    // If the optional chaining is removed (mutated to .disconnect()), it would throw here.
     const { MockMO, disconnect } = makeFakeMutationObserver();
     vi.stubGlobal('MutationObserver', MockMO);
 
+    const widget = makeWidgetElement();
     const view = makeView({
       plugin: makePlugin(makeReviewManager(null)),
-      propertiesWidget: {
-        getBoundingClientRect: vi.fn().mockReturnValue({ height: 0 }),
-      } as unknown as Element,
+      propertiesWidget: null,
     });
+    view.contentDOM.querySelector.mockImplementation((selector: string) =>
+      selector === '.metadata-container' ? widget : null
+    );
     const instance = factory(view as never);
     await vi.runAllTimersAsync();
 
     // Widget was present on mount — MutationObserver was never created
     expect(() => instance.destroy()).not.toThrow();
-    // The disconnect from our fake observer should NOT have been called
     expect(disconnect).not.toHaveBeenCalled();
   });
 });

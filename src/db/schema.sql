@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS article (
   fixed_interval_days INTEGER NULL,
   dismissed INTEGER NOT NULL DEFAULT FALSE,
   deleted INTEGER NOT NULL DEFAULT FALSE,
-  scroll_top INTEGER NOT NULL DEFAULT 0,
+  scroll_top INTEGER NOT NULL DEFAULT 0, -- top-visible document character offset (0 = unset)
   CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(fixed_interval_days > 0),
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS snippet (
   priority INTEGER NOT NULL,
   dismissed INTEGER NOT NULL DEFAULT FALSE,
   deleted INTEGER NOT NULL DEFAULT FALSE,
-  scroll_top INTEGER NOT NULL DEFAULT 0,
+  scroll_top INTEGER NOT NULL DEFAULT 0, -- top-visible document character offset (0 = unset)
   start_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
   end_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
   CHECK(interval > 0),

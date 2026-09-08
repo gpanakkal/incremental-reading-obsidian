@@ -1,4 +1,4 @@
-import { ViewPlugin } from '@codemirror/view';
+import { EditorView, ViewPlugin } from '@codemirror/view';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import { irPluginFacet } from './irPluginFacet';
 
@@ -10,9 +10,12 @@ import { irPluginFacet } from './irPluginFacet';
  * - On scroll: Saves position to database (debounced via scrollend event)
  * - Only activates for files with ir-* tags
  *
- * The scroll position is stored as a body-relative value (excluding frontmatter).
- * In the standard note view (which shows frontmatter), we adjust by the frontmatter
- * widget height when saving/restoring.
+ * The position is stored as a **document character offset** (the top-visible
+ * position), not a pixel offset: a logical anchor survives viewport-width
+ * changes (mobile <-> desktop), content re-layout, and the frontmatter widget,
+ * all of which move a raw pixel value to the wrong place. Restore scrolls that
+ * position to the top of the viewport via CodeMirror, which maps it through the
+ * current layout and never scrolls past the end of the content.
  */
 export const scrollPositionExtension = ViewPlugin.define(
   (view) => {
@@ -44,67 +47,48 @@ export const scrollPositionExtension = ViewPlugin.define(
       const reviewManager = plugin.reviewManager;
       if (!reviewManager) return;
 
-      /**
-       * Get the height of the frontmatter/properties widget if visible.
-       * Returns 0 if not present (e.g., in IREditor which hides frontmatter).
-       */
-      const getFrontmatterHeight = (): number => {
-        const propertiesWidget = view.contentDOM.querySelector(
-          '.metadata-container'
-        );
-        if (propertiesWidget) {
-          return propertiesWidget.getBoundingClientRect().height;
-        }
-        return 0;
+      // Character offset of the document position at the top edge of the
+      // viewport. `precise: false` makes posAtCoords clamp to the nearest
+      // position (never null), so a point above or below the content resolves
+      // to the document start or end rather than failing.
+      const topVisibleOffset = (): number => {
+        const rect = view.scrollDOM.getBoundingClientRect();
+        return view.posAtCoords({ x: rect.left + 1, y: rect.top + 1 }, false);
       };
 
       // Save scroll position handler
-      // Subtracts frontmatter height so we store body-relative position
       const handleScroll = () => {
         if (isRestoring) return;
 
         const { info } = Obsidian.getFileInfoFromState(view.state);
         if (!info || !info.file) return;
 
-        const scroller = view.scrollDOM;
-        const frontmatterHeight = getFrontmatterHeight();
-
-        // Store body-relative scroll position (subtract frontmatter height)
-        const bodyRelativeTop = Math.max(
-          0,
-          scroller.scrollTop - frontmatterHeight
-        );
-        const currentPos = {
-          top: bodyRelativeTop,
-          left: scroller.scrollLeft,
-        };
-
-        void reviewManager.saveScrollPosition(info.file, currentPos);
+        void reviewManager.saveScrollPosition(info.file, topVisibleOffset());
       };
 
-      // Restore scroll position after properties widget has rendered
-      // Adds frontmatter height to convert from body-relative to absolute position
+      // Restore scroll position after properties widget has rendered.
       const restoreScrollPosition = async () => {
-        const storedScrollPos = await reviewManager.loadScrollPosition(file);
-        if (storedScrollPos) {
-          isRestoring = true;
-          const frontmatterHeight = getFrontmatterHeight();
+        const offset = await reviewManager.loadScrollPosition(file);
+        if (offset === null) return;
 
-          // Convert body-relative position to absolute (add frontmatter height)
-          view.scrollDOM.scrollTo({
-            top: storedScrollPos.top + frontmatterHeight,
-            left: storedScrollPos.left,
-            behavior: 'auto',
-          });
-          scrollTimeout = window.setTimeout(() => {
-            isRestoring = false;
-          }, 200);
-        }
+        isRestoring = true;
+        // Clamp to the live document so a stale or externally-shortened note can
+        // never scroll past its end into the trailing padding (no text on screen).
+        const pos = Math.min(Math.max(0, offset), view.state.doc.length);
+        view.dispatch({
+          effects: EditorView.scrollIntoView(pos, { y: 'start' }),
+        });
+        scrollTimeout = window.setTimeout(() => {
+          isRestoring = false;
+        }, 200);
       };
 
-      // Wait for the properties widget to be fully rendered before restoring scroll.
-      // The properties widget is an embedded block (cm-embed-block) that renders
-      // asynchronously after the initial document load.
+      // Wait for the properties widget to be fully rendered before restoring
+      // scroll. In a standard note pane the widget (cm-embed-block) renders
+      // asynchronously after the initial load and inserts height above the body;
+      // restoring before it lays out would leave the target position off the top
+      // of the viewport. The IREditor hides frontmatter, so no widget appears and
+      // the fallback timeout drives the restore.
       const waitForPropertiesAndRestore = async () => {
         const contentDOM = view.contentDOM;
 

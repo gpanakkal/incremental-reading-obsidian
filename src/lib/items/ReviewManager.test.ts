@@ -2075,7 +2075,7 @@ describe('ReviewManager.saveScrollPosition', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(null);
-    await manager.saveScrollPosition(FAKE_FILE, { top: 100, left: 0 });
+    await manager.saveScrollPosition(FAKE_FILE, 100);
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 
@@ -2083,27 +2083,27 @@ describe('ReviewManager.saveScrollPosition', () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('card');
-    await manager.saveScrollPosition(FAKE_FILE, { top: 100, left: 0 });
+    await manager.saveScrollPosition(FAKE_FILE, 100);
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 
   it.each(['article', 'snippet'] as const)(
-    'mutates %s table with rounded scroll_top',
+    'mutates %s table with the rounded offset in scroll_top',
     async (noteType) => {
       await fc.assert(
         fc.asyncProperty(
           fc.float({ min: 0, max: 10000, noNaN: true }),
-          async (top) => {
+          async (offset) => {
             vi.restoreAllMocks();
             const repo = makeRepo();
             const manager = new ReviewManager(makePlugin(), repo);
             vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(noteType);
-            await manager.saveScrollPosition(FAKE_FILE, { top, left: 0 });
+            await manager.saveScrollPosition(FAKE_FILE, offset);
             const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
               .calls[0] as [string, unknown[]];
             expect(sql).toContain(`UPDATE ${noteType}`);
             expect(sql).toContain('scroll_top');
-            expect(params[0]).toBe(Math.round(top));
+            expect(params[0]).toBe(Math.round(offset));
           }
         )
       );
@@ -2145,7 +2145,7 @@ describe('ReviewManager.loadScrollPosition', () => {
     expect(result).toBeNull();
   });
 
-  it('returns null when article row scroll_top is 0', async () => {
+  it('returns null when article row scroll_top is 0 (unset)', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
@@ -2156,7 +2156,7 @@ describe('ReviewManager.loadScrollPosition', () => {
     expect(result).toBeNull();
   });
 
-  it('returns {top, left:0} when article row has scroll_top > 0', async () => {
+  it('returns the offset when article row has scroll_top > 0', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.integer({ min: 1, max: 100000 }),
@@ -2169,7 +2169,7 @@ describe('ReviewManager.loadScrollPosition', () => {
             makeArticleRow({ scroll_top: scrollTop }) as never
           );
           const result = await manager.loadScrollPosition(FAKE_FILE);
-          expect(result).toEqual({ top: scrollTop, left: 0 });
+          expect(result).toBe(scrollTop);
         }
       )
     );
@@ -2184,7 +2184,7 @@ describe('ReviewManager.loadScrollPosition', () => {
     expect(result).toBeNull();
   });
 
-  it('returns null when snippet row scroll_top is 0', async () => {
+  it('returns null when snippet row scroll_top is 0 (unset)', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
@@ -2195,7 +2195,7 @@ describe('ReviewManager.loadScrollPosition', () => {
     expect(result).toBeNull();
   });
 
-  it('returns {top, left:0} when snippet row has scroll_top > 0', async () => {
+  it('returns the offset when snippet row has scroll_top > 0', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.integer({ min: 1, max: 100000 }),
@@ -2208,7 +2208,7 @@ describe('ReviewManager.loadScrollPosition', () => {
             makeSnippetRow({ scroll_top: scrollTop }) as never
           );
           const result = await manager.loadScrollPosition(FAKE_FILE);
-          expect(result).toEqual({ top: scrollTop, left: 0 });
+          expect(result).toBe(scrollTop);
         }
       )
     );

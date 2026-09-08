@@ -695,27 +695,31 @@ export default class ReviewManager {
     );
   }
   /**
-   * Save scroll position to database for the article or snippet
+   * Save the scroll anchor (top-visible character offset) for an article or
+   * snippet. Cards are excluded.
+   *
+   * The `scroll_top` column now holds a document character offset rather than the
+   * pixel offset it originally stored — a logical anchor survives viewport-width
+   * and layout changes. Legacy pixel values self-correct: a row written before
+   * this change restores to the wrong spot once, then the next scroll overwrites
+   * it with a real character offset.
    */
-  async saveScrollPosition(
-    file: TFile,
-    scrollInfo: { top: number; left: number }
-  ) {
+  async saveScrollPosition(file: TFile, offset: number) {
     const noteType = await Obsidian.getNoteType(file, this.app);
     if (!noteType || noteType === 'card') return;
 
     await this.#repo.mutate(
       `UPDATE ${noteType} SET scroll_top = $1 WHERE reference = $2`,
-      [Math.round(scrollInfo.top), file.path]
+      [Math.round(offset), file.path]
     );
   }
 
   /**
-   * Load scroll position from database for the article or snippet
+   * Load the saved scroll anchor (character offset) for an article or snippet.
+   * Returns `null` when nothing is stored (`0`) or the note is not an
+   * article/snippet.
    */
-  async loadScrollPosition(
-    file: TFile
-  ): Promise<{ top: number; left: number } | null> {
+  async loadScrollPosition(file: TFile): Promise<number | null> {
     const noteType = await Obsidian.getNoteType(file, this.app);
 
     let row: ArticleRow | SnippetRow | null = null;
@@ -725,8 +729,8 @@ export default class ReviewManager {
       row = await this.snippets.findSnippet(file);
     }
 
-    if (row && row.scroll_top > 0) {
-      return { top: row.scroll_top, left: 0 };
+    if (row && typeof row.scroll_top === 'number' && row.scroll_top > 0) {
+      return row.scroll_top;
     }
 
     return null;
