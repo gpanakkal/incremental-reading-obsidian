@@ -33,6 +33,13 @@ export class ExtractedMarkdownEditor {
   buildLocalExtensions(): Extension[] {
     return [];
   }
+  /** Opens Obsidian's native find bar. `search` is built in the base constructor. */
+  showSearch(_replace?: boolean): void {}
+  /**
+   * Obsidian's own teardown. Destroys the CodeMirror view, closes the editor
+   * suggest, and pops the keymap scope the find bar pushes while open.
+   */
+  destroy(): void {}
   owner: MarkdownView | null;
   app: ExtractedApp;
   editor: Editor;
@@ -136,9 +143,16 @@ export const getMarkdownController = (
   getEditor: () => Editor,
   getCurrentItem: () => ReviewItem
 ) => {
-  return {
+  const controller = {
     ...view,
-    showSearch: () => {},
+    /**
+     * Obsidian's `editor:open-search` command only checks that `showSearch` is a
+     * function, then calls it — so a stub here makes Ctrl+F a silent no-op.
+     * Mirrors `MarkdownView.showSearch`: the find bar lives on the edit mode, so
+     * this forwards to it. Safe before `editMode` is assigned; it runs on user
+     * action, long after construction.
+     */
+    showSearch: (replace = false) => controller.editMode?.showSearch(replace),
     toggleMode: () => {},
     onMarkdownScroll: () => {},
     syncScroll: () => {}, // Prevent "syncScroll is not a function" error
@@ -160,4 +174,5 @@ export const getMarkdownController = (
       return getCurrentItem()?.file.path;
     },
   };
+  return controller;
 };

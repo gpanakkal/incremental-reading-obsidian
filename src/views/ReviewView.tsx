@@ -8,6 +8,19 @@ import type IncrementalReadingPlugin from '#/main';
 import { type IconName, type TFile, type WorkspaceLeaf, FileView  } from 'obsidian';
 import { render } from 'preact';
 
+/**
+ * Refocus the last-focused element when the review tab is reactivated, without
+ * scrolling it into view. `HTMLElement.focus()` scrolls the element into the
+ * viewport by default, which would yank the editor to the top-most focusable
+ * element (the title editor / action bar) on every tab switch — the reported
+ * "jumps to top" bug. `preventScroll` keeps the current scroll position.
+ */
+export function refocusWithoutScroll(el: Element | null): void {
+  if (el instanceof HTMLElement) {
+    el.focus({ preventScroll: true });
+  }
+}
+
 export default class ReviewView extends FileView {
   static #viewType = 'incremental-reading-review';
   #reviewManager: ReviewManager;
@@ -92,6 +105,38 @@ export default class ReviewView extends FileView {
   clear(): void {}
 
   /**
+   * `editor:open-search` tries `workspace.activeEditor` first, then falls back to
+   * `activeLeaf.view`. The former is only set once the CodeMirror editor takes
+   * focus, so this covers Ctrl+F right after the tab is activated, and on pages
+   * with no editor mounted (home screen, queue, un-revealed cards).
+   *
+   * Must stay a prototype method: `getMarkdownController` spreads `...view`, which
+   * would copy a class-field arrow as an own property and shadow the controller's
+   * own forwarder.
+   */
+  showSearch(replace = false): void {
+    this.activeEditor?.showSearch(replace);
+  }
+
+  /**
+   * Publish the review editor as the workspace's active editor.
+   *
+   * For a real markdown view Obsidian resolves `workspace.activeEditor` as
+   * `_activeEditor ?? getActiveViewOfType(MarkdownView)` — from the *active view*,
+   * not from DOM focus. That is why Ctrl+F works in a note the instant its tab
+   * opens. This view is not a MarkdownView, so it has to publish itself, and doing
+   * that only from the CodeMirror focus handler left `editor:open-search` with
+   * nothing to find until the user clicked into the text.
+   *
+   * `Workspace.setActiveLeaf` nulls the workspace's editor on every leaf switch,
+   * so this has to run again each time the tab is reactivated.
+   */
+  setActiveEditor(owner: ExtractedMarkdownEditor['owner']): void {
+    this.activeEditor = owner;
+    this.app.workspace.activeEditor = owner;
+  }
+
+  /**
    * Get selected text from the rendered markdown content.
    * This allows snippet creation from ReviewView
    */
@@ -129,8 +174,11 @@ export default class ReviewView extends FileView {
 
     this.registerEvent(
       this.app.workspace.on('active-leaf-change', (leaf) => {
-        if (leaf === this.leaf && this.#lastFocusedEl instanceof HTMLElement) {
-          this.#lastFocusedEl.focus();
+        if (leaf === this.leaf) {
+          refocusWithoutScroll(this.#lastFocusedEl);
+          // Reclaim the workspace editor slot that setActiveLeaf just cleared,
+          // so the search commands resolve without waiting for a click.
+          this.setActiveEditor(this.activeEditor);
         }
       })
     );

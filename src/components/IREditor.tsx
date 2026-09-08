@@ -7,7 +7,8 @@ import {
   setShowAnswerEffect,
   type ReviewCallbacks,
 } from '#/lib/extensions';
-import { type ExtractedMobileToolbar,
+import { type ExtractedMarkdownEditor,
+  type ExtractedMobileToolbar,
   getBaseMarkdownExtensions,
   getMarkdownController,
   setInsertMode } from '#/lib/obsidian-editor';
@@ -368,6 +369,13 @@ export function IREditor({
         controller.editMode = editor;
         editor.set(value ?? '');
 
+        // Publish immediately rather than waiting on the focus handler below.
+        // Obsidian's search commands read workspace.activeEditor, so leaving this
+        // until the first click made Ctrl+F a no-op at the start of every review.
+        reviewView.setActiveEditor(
+          controller as unknown as ExtractedMarkdownEditor['owner']
+        );
+
         if (editorRef) editorRef.current = cm;
       } catch (error) {
         console.error('Error creating editor:', error);
@@ -452,25 +460,45 @@ export function IREditor({
               error
             );
           }
+        }
 
-          try {
-            if (reviewView.activeEditor === (controller as unknown)) {
-              reviewView.activeEditor = null;
-            }
+        // Both references must be dropped on every platform: `ReviewView.showSearch`
+        // forwards to `activeEditor`, so a stale controller here would open the find
+        // bar inside the detached editor of an unmounted item.
+        try {
+          if (reviewView.activeEditor === (controller as unknown)) {
+            reviewView.activeEditor = null;
+          }
 
-            if ((app.workspace.activeEditor as unknown) === controller) {
-              app.workspace.activeEditor = null;
+          if ((app.workspace.activeEditor as unknown) === controller) {
+            app.workspace.activeEditor = null;
+            if (Platform.isMobile) {
               (app.mobileToolbar as ExtractedMobileToolbar)?.update();
               reviewView.contentEl.removeClass('is-mobile-editing');
             }
-          } catch (error) {
-            console.warn(
-              'Incremental Reading - Error during mobile cleanup:',
-              error
-            );
           }
+        } catch (error) {
+          console.warn(
+            'Incremental Reading - Error clearing the active editor:',
+            error
+          );
         }
-        elRef.current?.removeChild(elRef.current?.children[0]);
+
+        // Obsidian's teardown. Pops the keymap scope the find bar pushes while open
+        // (Enter/Escape/F3/Mod+G would otherwise stay captured globally), closes the
+        // editor suggest, and destroys the CodeMirror view.
+        try {
+          editor.destroy();
+        } catch (error) {
+          console.warn(
+            'Incremental Reading - Error destroying the editor:',
+            error
+          );
+        }
+
+        // `cm.destroy()` may already have detached its own nodes, so remove whatever
+        // of the editor host is left rather than indexing a fixed child.
+        elRef.current?.firstElementChild?.remove();
         internalRef.current = null;
         if (editorRef) editorRef.current = null;
       };
