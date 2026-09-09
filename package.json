@@ -1,6 +1,6 @@
 {
 	"name": "incremental-reading-obsidian",
-	"version": "0.6.0",
+	"version": "0.6.1",
 	"description": "Leverage spaced repetition to incrementally build understanding and retain knowledge.",
 	"main": "main.js",
 	"type": "module",
@@ -20,7 +20,7 @@
 		"e2e:repeat": "pnpm run build && cross-env E2E_CLEANUP=1 E2E_HEADLESS=1 pnpm exec playwright test --project e2e --repeat-each 10",
 		"format": "prettier --write \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\" && eslint --fix \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\"",
 		"lint": "eslint \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\"",
-		"version": "node version-bump.mjs && git add manifest.json versions.json",
+		"version": "node version-bump.mjs && git add manifest.json versions.json package.json",
 		"preinstall": "npx only-allow pnpm"
 	},
 	"keywords": [],
