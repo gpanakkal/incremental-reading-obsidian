@@ -215,21 +215,76 @@ body {
   margin-inline-end: auto;
 }
 
-/* Mobile: Move action bar to bottom using flex order */
+/* Mobile: Move action bar to bottom using flex order.
+
+   The bar has to clear the Obsidian navbar, whose footprint is measured live
+   into `--ir-mobile-toolbar-height` by `configureNavbarPosition` in main.ts.
+   That whole distance is the bar's own margin here; the one host that pays
+   part of it for us is handled in the next rule. */
 .is-mobile .ir-action-bar {
   order: 1;
-  margin-bottom: calc(
+  margin-bottom: var(--ir-mobile-toolbar-height, 0px);
+  /* Same duration and curve Obsidian gives `.mobile-navbar`, so the bar and the
+     navbar read as one moving surface. Deliberately not disabled under
+     `prefers-reduced-motion`: Obsidian animates the navbar unconditionally, so
+     dropping ours would make the bar jump ahead of it. */
+  transition: margin-bottom 0.3s ease-out;
+}
+
+/* In edit mode the bar is a CodeMirror panel, and Obsidian already lifts the
+   panel container itself:
+
+     .markdown-source-view.mod-cm6 .cm-panels.cm-panels-bottom {
+       margin-bottom: var(--safe-area-inset-bottom);
+     }
+
+   so the bar owes only the remainder. Clamped because the host's share can
+   exceed the navbar's footprint (a 34px iPhone inset against a hidden navbar),
+   and a negative margin would hang the bar off the bottom edge.
+
+   `.ir-action-bar-host` is stamped on the panel container by the panel's
+   mount() hook in ActionBarExtension — CodeMirror owns that element, so the
+   class is what tells us the lift below it is ours to account for. */
+.is-mobile .cm-panels-bottom.ir-action-bar-host .ir-action-bar {
+  margin-bottom: max(
+    0px,
     var(--ir-mobile-toolbar-height, 0px) - var(--safe-area-inset-bottom, 0px)
   );
+}
+
+/* The host's share has to travel on the same curve as the bar's, or the two
+   halves of the lift retract at different rates and the bar stutters. */
+.is-mobile .cm-panels.cm-panels-bottom.ir-action-bar-host {
+  transition: margin-bottom 0.3s ease-out;
 }
 
 .is-mobile .ir-review-interface {
   --view-top-spacing: 0;
 }
 
-/* Margin works differently in review since there's no div.cm-panels-bottom */
-.is-mobile .ir-review-interface .ir-action-bar {
-  margin-bottom: calc(var(--ir-mobile-toolbar-height, 0px));
+/* Scrolling down a note makes Obsidian hide the navbar: it puts `is-hidden-nav`
+   on <body> and slides `.mobile-navbar` off the bottom edge, leaving the strip
+   it covered free for the note to use.
+
+   Retracting the lift, rather than sliding the bar down over it by a transform,
+   is what hands that strip back. The lift is margin, and in edit mode the bar
+   is a CodeMirror panel — a flex item of `.cm-editor` — so the margin is height
+   the panel takes off `.cm-scroller`. A transform would move the bar without
+   giving any of it back, and the vacated strip would sit there as bare panel
+   background instead of note text.
+
+   Every part of the lift has to go, which is why the panel host is named here
+   too: its `--safe-area-inset-bottom` share is invisible while the navbar is up
+   but would otherwise strand the bar that far short of the bottom edge — 34px
+   on a notched iPhone and under `app.emulateMobile(true)`, 0 elsewhere.
+
+   Reaching all the way down is deliberate: `is-hidden-nav` only appears when
+   the `autoFullScreen` setting is on, and Obsidian drops its own bottom fade
+   mask in the same state. */
+.is-mobile.is-hidden-nav .ir-action-bar,
+.is-mobile.is-hidden-nav .cm-panels.cm-panels-bottom.ir-action-bar-host,
+.is-mobile.is-hidden-nav .cm-panels-bottom.ir-action-bar-host .ir-action-bar {
+  margin-bottom: 0;
 }
 
 /* Override Obsidian's cm-panels-top border when it contains our action bar.
