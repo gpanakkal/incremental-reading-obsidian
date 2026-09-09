@@ -5,21 +5,17 @@ import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import { resetSession, type ReviewPage } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
-import { type IconName, type TFile, type WorkspaceLeaf, FileView  } from 'obsidian';
+import {
+  FileView,
+  WorkspaceWindow,
+  type IconName,
+  type TFile,
+  type WorkspaceLeaf,
+} from 'obsidian';
 import { render } from 'preact';
 
-/**
- * Refocus the last-focused element when the review tab is reactivated, without
- * scrolling it into view. `HTMLElement.focus()` scrolls the element into the
- * viewport by default, which would yank the editor to the top-most focusable
- * element (the title editor / action bar) on every tab switch — the reported
- * "jumps to top" bug. `preventScroll` keeps the current scroll position.
- */
-export function refocusWithoutScroll(el: Element | null): void {
-  if (el instanceof HTMLElement) {
-    el.focus({ preventScroll: true });
-  }
-}
+/** Shown whenever the review tab is not displaying an item. */
+export const REVIEW_VIEW_DEFAULT_TITLE = 'Incremental reading';
 
 export default class ReviewView extends FileView {
   static #viewType = 'incremental-reading-review';
@@ -35,6 +31,10 @@ export default class ReviewView extends FileView {
    * Set this before opening the view to jump to a specific item.
    */
   initialItem: ReviewItem | null = null;
+  /**
+   * The page as of the last store notification, kept only to spot page
+   * *changes*. Read the store for the current page — see {@link getDisplayText}.
+   */
   #page: ReviewPage;
 
   constructor(
@@ -68,15 +68,24 @@ export default class ReviewView extends FileView {
   }
 
   /**
-   * Call when fetching a new item or changing page
+   * Push the current title into every place Obsidian caches it.
+   * Call when fetching a new item or changing page.
+   *
+   * Obsidian only refreshes these on leaf and layout changes, and moving between
+   * the home screen and an item is neither, so they have to be poked by hand.
+   * `updateHeader` re-reads {@link getDisplayText} for the tab header, its
+   * tooltip and the mobile tab-group header; `updateTitle` recomputes
+   * `document.title`, which is what the OS taskbar shows. A popout retitles its
+   * own window instead — the same branch Obsidian's `setActiveLeaf` takes.
    */
   setTitle() {
-    if (this.file && this.#page === 'review') {
-      this.leaf.tabHeaderInnerTitleEl.setText(this.file.basename);
-      this.titleEl.setText(this.file.basename);
+    this.titleEl.setText(this.getDisplayText());
+    this.leaf.updateHeader();
+    const container = this.leaf.getContainer();
+    if (container instanceof WorkspaceWindow) {
+      container.updateTitle();
     } else {
-      this.leaf.tabHeaderInnerTitleEl.setText('Incremental reading');
-      this.titleEl.setText('Incremental reading');
+      this.app.workspace.updateTitle();
     }
   }
 
@@ -88,8 +97,27 @@ export default class ReviewView extends FileView {
     return ReviewView.viewType;
   }
 
+  /**
+   * The single source of truth for this tab's name. Obsidian reads it for the
+   * tab header, the OS taskbar title (`Workspace.updateTitle` ->
+   * `document.title`), the mobile tab switcher's card labels, the tab context
+   * menu and the serialized layout — so the page check belongs here, not only in
+   * {@link setTitle}. Returning the file basename unconditionally is what leaked
+   * the current item's name onto the taskbar and the iOS tab switcher while the
+   * home screen was showing.
+   *
+   * Reads the page from the store rather than {@link #page}, which exists only to
+   * detect page *changes*: Obsidian calls this from paths the store subscription
+   * does not drive, and a title read must never lag the state it describes.
+   *
+   * A file with an empty basename falls back too, rather than leaving the tab
+   * and the taskbar blank.
+   */
   getDisplayText(): string {
-    return this.file?.basename || 'Incremental reading';
+    const { page } = this.plugin.store.getState();
+    return page === 'review' && this.file?.basename
+      ? this.file.basename
+      : REVIEW_VIEW_DEFAULT_TITLE;
   }
 
   getIcon(): IconName {
@@ -137,6 +165,22 @@ export default class ReviewView extends FileView {
   }
 
   /**
+   * Refocus the last-focused element when the review tab is reactivated, without
+   * scrolling it into view. `HTMLElement.focus()` scrolls the element into the
+   * viewport by default, which would yank the editor to the top-most focusable
+   * element (the title editor / action bar) on every tab switch — the reported
+   * "jumps to top" bug. `preventScroll` keeps the current scroll position.
+   *
+   * Takes the element rather than reading `#lastFocusedEl`, so the DOM behaviour
+   * stays exercisable on its own.
+   */
+  refocusWithoutScroll(el: Element | null): void {
+    if (el instanceof HTMLElement) {
+      el.focus({ preventScroll: true });
+    }
+  }
+
+  /**
    * Get selected text from the rendered markdown content.
    * This allows snippet creation from ReviewView
    */
@@ -175,7 +219,7 @@ export default class ReviewView extends FileView {
     this.registerEvent(
       this.app.workspace.on('active-leaf-change', (leaf) => {
         if (leaf === this.leaf) {
-          refocusWithoutScroll(this.#lastFocusedEl);
+          this.refocusWithoutScroll(this.#lastFocusedEl);
           // Reclaim the workspace editor slot that setActiveLeaf just cleared,
           // so the search commands resolve without waiting for a click.
           this.setActiveEditor(this.activeEditor);

@@ -33,7 +33,21 @@ export class Plugin {}
 export class PluginSettingTab {}
 export class Setting {}
 export class Modal {}
-export class FileView {}
+export class FileView {
+  /**
+   * Cleanups handed to `Component.register`. Exposed so tests can run them and
+   * assert that a view releases its subscriptions on unload.
+   */
+  readonly registered: (() => unknown)[] = [];
+
+  register(cb: () => unknown) {
+    this.registered.push(cb);
+  }
+}
+/** Popout window container; `ReviewView.setTitle` branches on `instanceof` it. */
+export class WorkspaceWindow {
+  updateTitle() {}
+}
 export class MarkdownView {}
 export class Component {}
 export class MarkdownRenderer {}
