@@ -530,6 +530,40 @@ export class SnippetManager extends ItemManager {
   }
 
   /**
+   * Re-read every cached file's highlights from the database and tell open
+   * views to redraw them.
+   *
+   * Called after the database file is replaced by another device's copy —
+   * Obsidian Sync delivering a snippet taken elsewhere, say. That swap discards
+   * the rows the tracker was built from without passing through any of the
+   * paths that normally keep it current, so its entries describe a database
+   * that no longer exists: a snippet the other device added is missing, and one
+   * it deleted lingers. The reload names no files, so every tracked path is
+   * refreshed; the tracker holds an entry for each note whose highlights have
+   * been read this session, which is exactly the set that can be on screen.
+   */
+  async refreshAllHighlights() {
+    for (const path of this.offsetTracker.getTrackedPaths()) {
+      const file = this.app.vault.getFileByPath(path);
+      if (!file) {
+        // The note was deleted on the other device. Drop the entry so a later
+        // note reusing the path does not inherit its highlights.
+        this.offsetTracker.invalidateCache(path);
+        continue;
+      }
+
+      // getHighlights caches what it finds, but returns early without touching
+      // the tracker for a note that no longer has highlights to look up (its
+      // article row was deleted, its source tag removed). Writing the result
+      // back covers that case, so a stale entry can never survive the refresh.
+      const highlights = await this.getHighlights(file);
+      this.offsetTracker.loadHighlights(path, highlights);
+
+      this.plugin.app.workspace.trigger('ir-highlights-changed', path);
+    }
+  }
+
+  /**
    * Reload or append snippet highlights into the tracker after a new snippet
    * is created, then dispatch a refresh effect so the CodeMirror extension
    * rebuilds decorations.

@@ -504,6 +504,73 @@ describe('SnippetOffsetTracker', () => {
     });
   });
 
+  describe('getTrackedPaths', () => {
+    it('should return no paths for a tracker that has loaded nothing', () => {
+      expect(tracker.getTrackedPaths()).toEqual([]);
+    });
+
+    it('should return every loaded path, including paths cached as having no highlights', () => {
+      fc.assert(
+        fc.property(
+          fc.uniqueArray(fc.string({ minLength: 1 }), {
+            minLength: 1,
+            maxLength: 8,
+          }),
+          // maxLength 0 is allowed on purpose: a note read from the database
+          // and found to have no snippets is still tracked, and must still be
+          // refreshed when the database is replaced.
+          fc.array(fc.array(highlightArb, { maxLength: 5 }), { maxLength: 8 }),
+          (paths, highlightLists) => {
+            const t = new SnippetOffsetTracker();
+            for (const [index, path] of paths.entries()) {
+              t.loadHighlights(path, highlightLists[index] ?? []);
+            }
+            expect(t.getTrackedPaths().sort()).toEqual([...paths].sort());
+          }
+        )
+      );
+    });
+
+    it('should report a path once no matter how many times it is loaded', () => {
+      tracker.loadHighlights('a.md', [createHighlight('1', 0, 5)]);
+      tracker.loadHighlights('a.md', [createHighlight('2', 6, 9)]);
+      expect(tracker.getTrackedPaths()).toEqual(['a.md']);
+    });
+
+    it('should stop reporting paths dropped by invalidateCache and clearAll', () => {
+      tracker.loadHighlights('a.md', [createHighlight('1', 0, 5)]);
+      tracker.loadHighlights('b.md', [createHighlight('2', 0, 5)]);
+
+      tracker.invalidateCache('a.md');
+      expect(tracker.getTrackedPaths()).toEqual(['b.md']);
+
+      tracker.clearAll();
+      expect(tracker.getTrackedPaths()).toEqual([]);
+    });
+
+    it('should report the new path after a rename, not the old one', () => {
+      tracker.loadHighlights('old.md', [createHighlight('1', 0, 10)]);
+      tracker.renameFile('old.md', 'new.md');
+      expect(tracker.getTrackedPaths()).toEqual(['new.md']);
+    });
+
+    it('should return a snapshot, so every path is still visited when the cache is emptied mid-iteration', () => {
+      // refreshAllHighlights() invalidates entries while walking this result;
+      // handing back the live key iterator would skip paths.
+      tracker.loadHighlights('a.md', [createHighlight('1', 0, 5)]);
+      tracker.loadHighlights('b.md', [createHighlight('2', 0, 5)]);
+      tracker.loadHighlights('c.md', [createHighlight('3', 0, 5)]);
+
+      const visited: string[] = [];
+      for (const path of tracker.getTrackedPaths()) {
+        visited.push(path);
+        tracker.invalidateCache(path);
+      }
+
+      expect(visited).toEqual(['a.md', 'b.md', 'c.md']);
+    });
+  });
+
   describe('updateHighlight', () => {
     it('should update start and end offsets of the matching highlight', () => {
       const h = createHighlight('abc', 10, 20);

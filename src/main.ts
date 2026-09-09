@@ -414,7 +414,16 @@ export default class IncrementalReadingPlugin extends Plugin {
         );
         this.unload();
       },
-      onReloadFromDisk: async () => invalidateCurrentItemQuery(),
+      onReloadFromDisk: async () => {
+        await invalidateCurrentItemQuery();
+        // Item text is re-fetched above, but snippet highlights are cached
+        // separately in the offset tracker and are just as stale: the rows they
+        // came from went out with the replaced database. The event that
+        // normally refreshes them is raised by whichever device took the
+        // snippet, and events do not cross devices, so raise it here.
+        if (!this.reviewManager) return;
+        await this.reviewManager.refreshAllHighlights();
+      },
     });
     // listen for sync updates to the database and re-read the file
     this.registerEvent(

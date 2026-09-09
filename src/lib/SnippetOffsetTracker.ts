@@ -49,6 +49,18 @@ export class SnippetOffsetTracker {
   }
 
   /**
+   * Every file path holding a cache entry, including those cached as having no
+   * highlights — an empty entry still means "this file was read from the
+   * database", so it goes stale exactly like a populated one.
+   *
+   * Returns a snapshot rather than the live key iterator so a caller can reload
+   * or invalidate entries while walking the result.
+   */
+  getTrackedPaths(): string[] {
+    return [...this.highlightCache.keys()];
+  }
+
+  /**
    * Update highlight offsets using CodeMirror's position mapping.
    * This correctly handles multiple changes in a single transaction (e.g., undo).
    *

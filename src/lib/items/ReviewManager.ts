@@ -106,6 +106,14 @@ export default class ReviewManager {
   }
 
   /**
+   * Re-read cached snippet highlights from the database and notify open views.
+   * Used when the database is replaced by a synced copy from another device.
+   */
+  async refreshAllHighlights() {
+    return await this.snippets.refreshAllHighlights();
+  }
+
+  /**
    * Update snippet offsets in the database.
    * Used to persist offset changes after document edits.
    * @param startOffset Body-relative start offset

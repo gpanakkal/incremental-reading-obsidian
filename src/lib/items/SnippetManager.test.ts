@@ -1965,6 +1965,201 @@ describe('getHighlights for a note with a database entry', () => {
   });
 });
 
+describe('refreshAllHighlights', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The article id the fake database gives to the article note at `path`. */
+  const articleIdFor = (path: string) => `article-for-${path}`;
+
+  /**
+   * A manager whose vault resolves only `existingPaths` (defaulting to every
+   * path in `rowsByPath`) and whose database answers the parent-id query for
+   * each article note from `rowsByPath`, applying the same offset/deleted
+   * filter the real statement does.
+   */
+  function makeRefreshManager(params: {
+    rowsByPath: Record<string, SnippetRow[]>;
+    existingPaths?: string[];
+    noteTypeFor?: (path: string) => 'article' | 'snippet' | null;
+  }) {
+    const existing = new Set(
+      params.existingPaths ?? Object.keys(params.rowsByPath)
+    );
+    const noteTypeFor = params.noteTypeFor ?? (() => 'article' as const);
+    const rowsByArticleId = new Map(
+      Object.entries(params.rowsByPath).map(([path, rows]) => [
+        articleIdFor(path),
+        rows,
+      ])
+    );
+
+    vi.spyOn(Obsidian, 'getNoteType').mockImplementation((file) =>
+      Promise.resolve(noteTypeFor(file.path))
+    );
+    // Kept false so a note whose database entry is gone falls all the way
+    // through getHighlights, which is the case that returns without caching.
+    vi.spyOn(Obsidian, 'isSourceNote').mockReturnValue(false);
+
+    const query = vi
+      .fn()
+      .mockImplementation((sql: string, sqlParams: unknown[]) => {
+        if (sql.includes('FROM article')) {
+          return [{ id: articleIdFor(sqlParams[0] as string) }];
+        }
+        if (sql.includes('WHERE parent = $1')) {
+          const rows = rowsByArticleId.get(sqlParams[0] as string) ?? [];
+          return rows.filter(
+            (row) =>
+              row.start_offset !== null &&
+              row.end_offset !== null &&
+              !row.deleted
+          );
+        }
+        return [];
+      });
+    const repo = {
+      query,
+      mutate: vi.fn().mockResolvedValue([[]]),
+      _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
+      handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
+    } as unknown as SQLiteRepository;
+
+    const trigger = vi.fn();
+    const app = {
+      ...makeApp(),
+      vault: {
+        getFileByPath: (path: string) =>
+          existing.has(path) ? ({ path } as TFile) : null,
+      },
+      workspace: { trigger },
+    };
+
+    return {
+      manager: new SnippetManager({ app } as never, repo),
+      query,
+      trigger,
+    };
+  }
+
+  /** Paths of the notes `ir-highlights-changed` was raised for, in order. */
+  const notifiedPaths = (trigger: ReturnType<typeof vi.fn>) =>
+    (trigger.mock.calls as [string, string][])
+      .filter(([event]) => event === 'ir-highlights-changed')
+      .map(([, path]) => path);
+
+  it('replaces every tracked note’s cached highlights with what the database now holds, and announces each one', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uniqueArray(
+          fc.record({
+            path: fc.string({ minLength: 1 }),
+            rows: fc.array(snippetRowArb, { maxLength: 4 }),
+            // What the tracker wrongly believes before the refresh: the rows
+            // of the database that was just replaced.
+            stale: fc.array(snippetRowArb, { maxLength: 4 }),
+          }),
+          { selector: (entry) => entry.path, minLength: 1, maxLength: 5 }
+        ),
+        async (notes) => {
+          const rowsByPath = Object.fromEntries(
+            notes.map(({ path, rows }) => [path, rows])
+          );
+          const { manager, trigger } = makeRefreshManager({ rowsByPath });
+          for (const { path, stale } of notes) {
+            manager.offsetTracker.loadHighlights(
+              path,
+              stale
+                .map((row) => SnippetManager.rowToHighlight(row))
+                .filter((h) => h !== null)
+            );
+          }
+
+          await manager.refreshAllHighlights();
+
+          for (const { path, rows } of notes) {
+            const expected = rows
+              .filter(
+                (row) =>
+                  row.start_offset !== null &&
+                  row.end_offset !== null &&
+                  !row.deleted
+              )
+              .map((row) => SnippetManager.rowToHighlight(row));
+            expect(manager.offsetTracker.getHighlights(path)).toEqual(expected);
+          }
+          expect(notifiedPaths(trigger).sort()).toEqual(
+            notes.map(({ path }) => path).sort()
+          );
+        }
+      )
+    );
+  });
+
+  it('drops the entry for a note deleted on the other device, and leaves the rest refreshed', async () => {
+    const kept = 'articles/kept.md';
+    const gone = 'articles/gone.md';
+    const row = makeSnippetRow({
+      id: 'snippet-a',
+      parent: articleIdFor(kept),
+      start_offset: 3,
+      end_offset: 9,
+    });
+    const { manager, trigger } = makeRefreshManager({
+      rowsByPath: { [kept]: [row], [gone]: [] },
+      existingPaths: [kept],
+    });
+    manager.offsetTracker.loadHighlights(kept, []);
+    manager.offsetTracker.loadHighlights(gone, [
+      SnippetManager.rowToHighlight(
+        makeSnippetRow({ id: 'ghost', start_offset: 0, end_offset: 2 })
+      )!,
+    ]);
+
+    await manager.refreshAllHighlights();
+
+    expect(manager.offsetTracker.getHighlights(kept)).toEqual([
+      SnippetManager.rowToHighlight(row),
+    ]);
+    // Cleared outright rather than emptied, so a later note reusing the path
+    // does not inherit the dead note's highlights.
+    expect(manager.offsetTracker.getTrackedPaths()).toEqual([kept]);
+    expect(notifiedPaths(trigger)).toEqual([kept]);
+  });
+
+  it('clears the cached highlights of a note whose database entry is gone', async () => {
+    // The other device deleted the article itself, so getHighlights finds no
+    // entry to query and returns without writing to the tracker.
+    const path = 'articles/unimported.md';
+    const { manager, trigger } = makeRefreshManager({
+      rowsByPath: { [path]: [] },
+      noteTypeFor: () => null,
+    });
+    manager.offsetTracker.loadHighlights(path, [
+      SnippetManager.rowToHighlight(
+        makeSnippetRow({ id: 'stale', start_offset: 0, end_offset: 4 })
+      )!,
+    ]);
+
+    await manager.refreshAllHighlights();
+
+    expect(manager.offsetTracker.getHighlights(path)).toEqual([]);
+    expect(notifiedPaths(trigger)).toEqual([path]);
+  });
+
+  it('reads nothing and announces nothing when no note has been tracked yet', async () => {
+    const { manager, query, trigger } = makeRefreshManager({ rowsByPath: {} });
+
+    await manager.refreshAllHighlights();
+
+    expect(query).not.toHaveBeenCalled();
+    expect(trigger).not.toHaveBeenCalled();
+  });
+});
+
 describe('repointSource', () => {
   const NEW_SOURCE = { path: 'articles/copy.md' } as TFile;
 
