@@ -15,14 +15,14 @@ import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import type { NoteType, PluginFrontMatter } from '#/lib/types';
 import type { EditorState } from '@codemirror/state';
 import fc from 'fast-check';
-import type {
-  App,
-  Editor,
-  EditorPosition,
-  FrontMatterCache,
-  TFile,
+import {
+  type App,
+  type Editor,
+  type EditorPosition,
+  type FrontMatterCache,
+  type TFile,
+  normalizePath,
 } from 'obsidian';
-import { normalizePath } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #region HELPERS
@@ -879,6 +879,114 @@ describe('isSourceNote', () => {
       } as unknown as App['metadataCache'],
     });
     expect(ObsidianHelpers.isSourceNote(makeTFile(), app)).toBe(false);
+  });
+});
+
+describe('parseLinkTarget', () => {
+  it('takes the target of a wikilink, dropping alias and subpath', () => {
+    expect(ObsidianHelpers.parseLinkTarget('[[notes/Foo]]')).toBe('notes/Foo');
+    expect(ObsidianHelpers.parseLinkTarget('[[notes/Foo|Foo]]')).toBe(
+      'notes/Foo'
+    );
+    expect(ObsidianHelpers.parseLinkTarget('[[notes/Foo#Heading]]')).toBe(
+      'notes/Foo'
+    );
+  });
+
+  it('takes the target of a markdown link, decoded and without its subpath', () => {
+    expect(ObsidianHelpers.parseLinkTarget('[Foo](notes/My%20Foo.md)')).toBe(
+      'notes/My Foo.md'
+    );
+    expect(ObsidianHelpers.parseLinkTarget('[Foo](<notes/My Foo.md>)')).toBe(
+      'notes/My Foo.md'
+    );
+    expect(ObsidianHelpers.parseLinkTarget('[Foo](notes/Foo.md#Head)')).toBe(
+      'notes/Foo.md'
+    );
+  });
+
+  it('returns anything else trimmed, so a bare path still resolves', () => {
+    expect(ObsidianHelpers.parseLinkTarget('  notes/Foo.md  ')).toBe(
+      'notes/Foo.md'
+    );
+    expect(ObsidianHelpers.parseLinkTarget('https://example.com')).toBe(
+      'https://example.com'
+    );
+  });
+
+  it('never returns a string carrying link syntax for a well-formed link', () => {
+    fc.assert(
+      fc.property(
+        fc.stringMatching(/^[A-Za-z0-9 /-]{1,20}$/),
+        fc.boolean(),
+        (target, wiki) => {
+          const link = wiki ? `[[${target}|alias]]` : `[alias](${target})`;
+          const parsed = ObsidianHelpers.parseLinkTarget(link);
+          expect(parsed).toBe(target.trim());
+        }
+      )
+    );
+  });
+});
+
+describe('getSourceFile', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  /** An app whose cache reports `source` and resolves links to `dest`. */
+  function makeSourceApp(source: unknown, dest: TFile | null): App {
+    return makeApp({
+      metadataCache: {
+        getFileCache: vi.fn().mockReturnValue({ frontmatter: { source } }),
+        getFirstLinkpathDest: vi.fn().mockReturnValue(dest),
+      } as unknown as App['metadataCache'],
+    });
+  }
+
+  it('resolves the link in the source property', () => {
+    const dest = makeTFile({ path: 'notes/origin.md', basename: 'origin' });
+    const app = makeSourceApp('[[notes/origin|origin]]', dest);
+
+    expect(ObsidianHelpers.getSourceFile(makeTFile(), app)).toBe(dest);
+    expect(app.metadataCache.getFirstLinkpathDest).toHaveBeenCalledWith(
+      'notes/origin',
+      expect.any(String)
+    );
+  });
+
+  it('returns null when the note has no source property', () => {
+    const app = makeApp({
+      metadataCache: {
+        getFileCache: vi.fn().mockReturnValue({ frontmatter: {} }),
+        getFirstLinkpathDest: vi.fn(),
+      } as unknown as App['metadataCache'],
+    });
+
+    expect(ObsidianHelpers.getSourceFile(makeTFile(), app)).toBeNull();
+    expect(app.metadataCache.getFirstLinkpathDest).not.toHaveBeenCalled();
+  });
+
+  it('returns null when the source is not a link to a note', () => {
+    // a clipped article keeps the URL it came from in the same property
+    const app = makeSourceApp('https://example.com/post', null);
+
+    expect(ObsidianHelpers.getSourceFile(makeTFile(), app)).toBeNull();
+  });
+
+  it('returns null for a non-string source, rather than resolving it', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.constant(undefined),
+          fc.constant(null),
+          fc.integer(),
+          fc.array(fc.string())
+        ),
+        (source) => {
+          const app = makeSourceApp(source, makeTFile());
+          expect(ObsidianHelpers.getSourceFile(makeTFile(), app)).toBeNull();
+        }
+      )
+    );
   });
 });
 

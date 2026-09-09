@@ -22,6 +22,7 @@ import {
   INVALID_TITLE_MESSAGE,
   SNIPPET_DIRECTORY,
   SNIPPET_TAG,
+  SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
 } from './constants';
 import { Markdown } from './Markdown';
@@ -167,6 +168,42 @@ export class ObsidianHelpers {
       }
     );
     return type;
+  }
+
+  /**
+   * The link target of a wikilink or a markdown link, stripped of its alias
+   * and any subpath. Anything else is returned as-is, which is what a bare
+   * path — hand-written, or left behind by an older version — needs.
+   */
+  static parseLinkTarget(link: string): string {
+    const wikilink = link.match(/\[\[([^\]|#]+)/)?.[1];
+    if (wikilink) return wikilink.trim();
+
+    const markdown = link.match(/\]\(<?([^)>]+)>?\)/)?.[1];
+    if (markdown) {
+      return decodeURIComponent(markdown.split('#')[0]).trim();
+    }
+
+    return link.trim();
+  }
+
+  /**
+   * The note a `source` property points at, or null when the property is
+   * missing or resolves nowhere — an external URL, say, or a link to a note
+   * that has since been deleted.
+   *
+   * This is the plugin's own record of where an item came from, written when
+   * the item was created. Prefer it over `metadataCache.resolvedLinks` for
+   * provenance: the link index is rebuilt asynchronously and need not have
+   * caught up with a note written moments ago.
+   */
+  static getSourceFile(file: TFile, app: App): TFile | null {
+    const source = this.getFrontMatter(file, app)?.[SOURCE_PROPERTY_NAME];
+    if (typeof source !== 'string') return null;
+    return app.metadataCache.getFirstLinkpathDest(
+      this.parseLinkTarget(source),
+      file.path
+    );
   }
 
   /**

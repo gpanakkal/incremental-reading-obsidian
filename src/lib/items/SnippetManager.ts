@@ -31,9 +31,9 @@ import type ReviewView from '#/views/ReviewView';
 import {
   normalizePath,
   Notice,
-  TFile,
   type Editor,
   type MarkdownView,
+  type TFile,
 } from 'obsidian';
 import { refreshHighlightsEffect } from '../extensions';
 import { ArticleManager } from './ArticleManager';
@@ -61,6 +61,25 @@ export class SnippetManager extends ItemManager {
       type: 'snippet',
       due: snippetRow.due !== null ? new Date(snippetRow.due) : null,
       dismissed: Boolean(snippetRow.dismissed),
+    };
+  }
+
+  /**
+   * Narrow a row to a highlight, or null if it has no offsets to render.
+   * A snippet without offsets predates offset tracking or was taken from a
+   * view that could not report a selection range.
+   */
+  static rowToHighlight(snippetRow: SnippetRow): SnippetHighlight | null {
+    if (snippetRow.start_offset == null || snippetRow.end_offset == null) {
+      return null;
+    }
+    return {
+      ...snippetRow,
+      type: 'snippet',
+      dismissed: Boolean(snippetRow.dismissed),
+      start_offset: snippetRow.start_offset,
+      end_offset: snippetRow.end_offset,
+      parent: snippetRow.parent ?? '',
     };
   }
 
@@ -491,23 +510,18 @@ export class SnippetManager extends ItemManager {
         [parentEntry.id]
       )) as SnippetRow[];
 
-      const highlights = results.map((r) => ({
-        ...r,
-        type: 'snippet' as const,
-        dismissed: Boolean(r.dismissed),
-        start_offset: r.start_offset!,
-        end_offset: r.end_offset!,
-        parent: r.parent!,
-      }));
+      const highlights = results
+        .map((r) => SnippetManager.rowToHighlight(r))
+        .filter((h): h is SnippetHighlight => h !== null);
 
       this.offsetTracker.loadHighlights(parentFile.path, highlights);
       return highlights;
     }
 
-    // For source notes (or any note without a DB entry), find snippets via backlinks
+    // For source notes (or any note without a DB entry), find snippets by the
+    // source property that names this note
     if (Obsidian.isSourceNote(parentFile, this.app)) {
-      const highlights =
-        await this.getSnippetHighlightsViaBacklinks(parentFile);
+      const highlights = await this.getOrphanSnippetHighlights(parentFile);
       this.offsetTracker.loadHighlights(parentFile.path, highlights);
       return highlights;
     }
@@ -535,22 +549,14 @@ export class SnippetManager extends ItemManager {
       await this.getHighlights(parentFile);
     } else {
       const snippetRow = await this.findSnippet(snippetFile);
-      if (
-        snippetRow &&
-        snippetRow.start_offset != null &&
-        snippetRow.end_offset != null
-      ) {
+      const highlight = snippetRow
+        ? SnippetManager.rowToHighlight(snippetRow)
+        : null;
+      if (highlight) {
         const existing = this.offsetTracker.getHighlights(parentFile.path);
         this.offsetTracker.loadHighlights(parentFile.path, [
           ...existing,
-          {
-            ...snippetRow,
-            type: 'snippet' as const,
-            dismissed: Boolean(snippetRow.dismissed),
-            start_offset: snippetRow.start_offset,
-            end_offset: snippetRow.end_offset,
-            parent: snippetRow.parent ?? '',
-          },
+          highlight,
         ]);
       }
     }
@@ -560,43 +566,98 @@ export class SnippetManager extends ItemManager {
   }
 
   /**
-   * Find snippet highlights for a source note by scanning Obsidian's resolved backlinks.
-   * For each file that links to the source and is tagged as a snippet, look up its
-   * offsets in the DB.
+   * Find snippet highlights for a note that has no database entry of its own,
+   * by way of the snippets that name it as their source.
    */
-  private async getSnippetHighlightsViaBacklinks(
+  private async getOrphanSnippetHighlights(
     sourceFile: TFile
   ): Promise<SnippetHighlight[]> {
-    const resolvedLinks = this.app.metadataCache.resolvedLinks;
-    const highlights: SnippetHighlight[] = [];
+    const rows = await this.findOrphanSnippetsFrom(sourceFile);
+    return rows
+      .map((row) => SnippetManager.rowToHighlight(row))
+      .filter((h): h is SnippetHighlight => h !== null);
+  }
 
-    for (const [linkingFilePath, links] of Object.entries(resolvedLinks)) {
-      if (!(sourceFile.path in links)) continue;
+  /**
+   * Snippet rows taken from `file` that belong to no item.
+   *
+   * A snippet taken from a note that is not itself an item has nothing but its
+   * `source` property tying it to that note. That property is the plugin's own
+   * record, written when the snippet was made, so it is read from each
+   * parentless row rather than from `metadataCache.resolvedLinks`: the link
+   * index resolves asynchronously and does not reliably carry links that live
+   * in frontmatter, which is where every snippet keeps its source.
+   *
+   * Snippets that already have a parent are skipped: they belong to that item
+   * even while their note still points here, which is what keeps a copy import
+   * from leaving highlights behind on the note it copied.
+   */
+  private async findOrphanSnippetsFrom(file: TFile): Promise<SnippetRow[]> {
+    const rows = ((await this.repo.query(
+      'SELECT * FROM snippet WHERE parent IS NULL AND deleted = FALSE'
+    )) ?? []) as SnippetRow[];
 
-      const linkingFile = this.app.vault.getAbstractFileByPath(linkingFilePath);
-      if (!linkingFile || !(linkingFile instanceof TFile)) continue;
-      if ((await Obsidian.getNoteType(linkingFile, this.app)) !== 'snippet')
-        continue;
+    return rows.filter((row) => {
+      const snippetFile = Obsidian.getNote(row.reference, this.app);
+      if (!snippetFile) return false;
+      return Obsidian.getSourceFile(snippetFile, this.app)?.path === file.path;
+    });
+  }
 
-      const snippetRow = await this.findSnippet(linkingFile);
-      if (
-        !snippetRow ||
-        snippetRow.start_offset == null ||
-        snippetRow.end_offset == null
-      )
-        continue;
+  /**
+   * Hand every parentless snippet taken from `parentFile` to the item now
+   * backing that note.
+   *
+   * Snippets made before the note was imported carry no parent id, so the
+   * moment the note gains a database entry the parent-id lookup in
+   * {@link getHighlights} stops finding them and their highlights vanish.
+   * @returns the adopted rows, carrying their new parent
+   */
+  async adoptOrphans(
+    parentFile: TFile,
+    parentId: string
+  ): Promise<SnippetRow[]> {
+    const orphans = await this.findOrphanSnippetsFrom(parentFile);
 
-      highlights.push({
-        ...snippetRow,
-        type: 'snippet' as const,
-        dismissed: Boolean(snippetRow.dismissed),
-        start_offset: snippetRow.start_offset,
-        end_offset: snippetRow.end_offset,
-        parent: snippetRow.parent ?? '',
-      });
+    // Chunked so a note with a very large number of snippets cannot blow the
+    // statement's parameter limit; the parent id takes one slot per chunk.
+    const chunkSize = MAX_SQL_QUERY_PARAMS - 1;
+    for (let i = 0; i < orphans.length; i += chunkSize) {
+      const chunk = orphans.slice(i, i + chunkSize);
+      const placeholders = chunk.map((_, j) => `$${j + 2}`).join(', ');
+      await this.repo.mutate(
+        `UPDATE snippet SET parent = $1 WHERE id IN (${placeholders})`,
+        [parentId, ...chunk.map((row) => row.id)]
+      );
     }
 
-    return highlights;
+    return orphans.map((row) => ({ ...row, parent: parentId }));
+  }
+
+  /**
+   * Rewrite the `source` property of each snippet note to link to `newSource`,
+   * so it reads as though the snippet had been taken from that note.
+   *
+   * Uses the callback form of `updateFrontMatter` to leave tags untouched.
+   */
+  async repointSource(snippetRows: SnippetRow[], newSource: TFile) {
+    for (const row of snippetRows) {
+      const snippetFile = Obsidian.getNote(row.reference, this.app);
+      if (!snippetFile) continue;
+
+      const sourceLink = Obsidian.generateMarkdownLink(
+        newSource,
+        snippetFile,
+        this.app
+      );
+      await Obsidian.updateFrontMatter(
+        snippetFile,
+        (frontmatter) => {
+          frontmatter[SOURCE_PROPERTY_NAME] = sourceLink;
+        },
+        this.app
+      );
+    }
   }
 
   protected async getLastReview(snippet: ISnippetBase) {

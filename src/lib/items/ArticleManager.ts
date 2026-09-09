@@ -20,6 +20,7 @@ import type {
   IArticleBase,
   IArticleReview,
   ReviewArticle,
+  SnippetRow,
 } from '#/lib/types';
 import {
   compareFuzzedDue,
@@ -28,8 +29,7 @@ import {
   getDateString,
   getEndOfDay,
 } from '#/lib/utils';
-import type { TFile } from 'obsidian';
-import { Notice } from 'obsidian';
+import { type TFile, Notice } from 'obsidian';
 import { ItemManager } from './ItemManager';
 
 const IMPORT_BLOCKED_TAGS = new Set([SNIPPET_TAG, CARD_TAG]);
@@ -124,6 +124,41 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
+   * Adopt the snippets taken from a note before it became an article, then
+   * bring any view of that note in line with their new owner.
+   *
+   * An in-place import leaves the snippets where they are, so the note keeps
+   * its highlights — they are simply reached by parent id from here on.
+   * @param articleFile the copy, when importing as one. The copy takes
+   * ownership: the snippets are re-pointed at it and their highlights move
+   * with them, so the note that was copied loses its own.
+   * @returns the adopted rows, so a caller can report how many changed hands
+   */
+  private async claimSnippets(
+    noteFile: TFile,
+    articleId: string,
+    articleFile?: TFile
+  ): Promise<SnippetRow[]> {
+    const snippets = this.plugin.reviewManager?.snippets;
+    if (!snippets) return [];
+
+    const adopted = await snippets.adoptOrphans(noteFile, articleId);
+    if (adopted.length === 0) return adopted;
+
+    if (articleFile) {
+      await snippets.repointSource(adopted, articleFile);
+      snippets.offsetTracker.loadHighlights(noteFile.path, []);
+    } else {
+      // Reload under the new parent id so the tracker holds the same
+      // highlights the backlink lookup used to supply.
+      await snippets.getHighlights(noteFile);
+    }
+
+    this.app.workspace.trigger('ir-highlights-changed', noteFile.path);
+    return adopted;
+  }
+
+  /**
    * Import a note directly
    */
   private async importInPlace(
@@ -150,6 +185,9 @@ export class ArticleManager extends ItemManager {
     const refMatch = byRef[0];
 
     if (refMatch && refMatch.id === existingId) {
+      // Nothing left to import, but re-running it on an article is the only
+      // way a user can repair snippets stranded by an earlier import.
+      await this.claimSnippets(file, refMatch.id);
       new Notice(
         `Note is already an article; canceling import`,
         ERROR_NOTICE_DURATION_MS
@@ -173,6 +211,7 @@ export class ArticleManager extends ItemManager {
           'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
           [file.path, existingId]
         );
+        await this.claimSnippets(file, existingId);
         new Notice(
           `Linked "${file.basename}" to existing article with the same ID`,
           SUCCESS_NOTICE_DURATION_MS
@@ -201,6 +240,8 @@ export class ArticleManager extends ItemManager {
         fixedIntervalDays,
       ]
     );
+
+    await this.claimSnippets(file, id);
 
     const titleSlice = getContentSlice(
       file.basename,
@@ -257,6 +298,9 @@ export class ArticleManager extends ItemManager {
           'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
           [file.path, existingId]
         );
+        // No copy was made — the record now points at this note, so its
+        // snippets are adopted in place rather than handed to a copy.
+        await this.claimSnippets(file, existingId);
         new Notice(
           `Linked "${file.basename}" to existing article with the same ID`,
           SUCCESS_NOTICE_DURATION_MS
@@ -328,18 +372,31 @@ export class ArticleManager extends ItemManager {
       ]
     );
 
+    const adopted = await this.claimSnippets(file, id, articleFile);
+
     const titleSlice = getContentSlice(
       articleFile.basename,
       CONTENT_TITLE_SLICE_LENGTH,
       true
     );
 
+    let snippetMigratedNotice = '';
+    if (adopted.length > 0) {
+      const snippetMigrationCount =
+        adopted.length === 1
+          ? '1 snippet now refers'
+          : `${adopted.length} snippets now refer`;
+
+      snippetMigratedNotice = `; ${snippetMigrationCount} to the copy`;
+    }
+
     const schedulingString =
       fixedIntervalDays === null
         ? `priority ${IRScheduler.toDisplayPriority(priority)}`
         : `fixed interval of ${fixedIntervalDays} days`;
     new Notice(
-      `Imported "${titleSlice}" with ${schedulingString}`,
+      `Imported "${titleSlice}" with ${schedulingString}` +
+        snippetMigratedNotice,
       SUCCESS_NOTICE_DURATION_MS
     );
     return this.fetch(id);

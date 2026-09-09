@@ -302,12 +302,7 @@ export default class ReviewManager {
   #articleSource(file: TFile): string | null {
     const source = Obsidian.getFrontMatter(file, this.app)?.source;
     if (!source) return null;
-    const linkTarget = source.match(/\[\[([^\]|#]+)/)?.[1] ?? source;
-    const sourceFile = this.app.metadataCache.getFirstLinkpathDest(
-      linkTarget.trim(),
-      file.path
-    );
-    return sourceFile?.path ?? source;
+    return Obsidian.getSourceFile(file, this.app)?.path ?? source;
   }
 
   /** Build a QueueRow for an article, resolving its note or returning null. */

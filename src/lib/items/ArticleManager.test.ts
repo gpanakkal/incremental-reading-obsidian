@@ -20,15 +20,18 @@ import type {
   ArticleRow,
   IArticleBase,
   IArticleReview,
+  SnippetRow,
   SQLiteRepository,
 } from '#/lib/types';
 import { getEndOfDay } from '#/lib/utils';
+// The mock the vitest config aliases `obsidian` to — imported by path so its
+// recorded notices are visible to the type checker as well as at runtime.
+import { Notice } from '#/test/__mocks__/obsidian';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
 import { resolve } from 'path';
-import type { Database } from 'sql.js';
-import initSqlJs from 'sql.js';
+import initSqlJs, { type Database } from 'sql.js';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ArticleManager } from './ArticleManager';
@@ -103,6 +106,67 @@ function makeImportPlugin(copyOnImport: boolean) {
     },
     settings: { copyOnImport, defaultPriority: DEFAULT_PRIORITY },
   } as never;
+}
+
+/**
+ * Stand-in for the SnippetManager that ArticleManager reaches through the
+ * plugin during an import. `adopted` is what the backlink scan is pretending
+ * to have found.
+ */
+function makeSnippetsStub(adopted: SnippetRow[] = []) {
+  return {
+    adoptOrphans: vi.fn().mockResolvedValue(adopted),
+    repointSource: vi.fn().mockResolvedValue(undefined),
+    getHighlights: vi.fn().mockResolvedValue([]),
+    offsetTracker: { loadHighlights: vi.fn() },
+  };
+}
+
+/**
+ * Like {@link makeImportPlugin}, but with the review manager wired up, so the
+ * import actually reaches the snippet-adoption step.
+ */
+function makeImportPluginWithSnippets(
+  copyOnImport: boolean,
+  snippets: ReturnType<typeof makeSnippetsStub>
+) {
+  return {
+    app: {
+      ...makeApp(),
+      vault: { cachedRead: vi.fn().mockResolvedValue('# Content') },
+      workspace: { trigger: vi.fn() },
+    },
+    settings: { copyOnImport, defaultPriority: DEFAULT_PRIORITY },
+    reviewManager: { snippets },
+  } as never;
+}
+
+/** A snippet row shaped like one the backlink scan would return. */
+function makeAdoptedRow(index: number): SnippetRow {
+  return {
+    id: `snippet-${index}`,
+    reference: `snippets/snippet-${index}.md`,
+    parent: null,
+    due: Date.now(),
+    due_fuzz: null,
+    interval: TEXT_BASE_REVIEW_INTERVAL,
+    priority: DEFAULT_PRIORITY,
+    dismissed: 0,
+    deleted: false,
+    scroll_top: 0,
+    start_offset: index,
+    end_offset: index + 5,
+  };
+}
+
+/** The id the import wrote in its `INSERT INTO article` statement. */
+function insertedArticleId(repo: SQLiteRepository): string {
+  const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls as [
+    string,
+    unknown[],
+  ][];
+  const insert = calls.find(([sql]) => sql.includes('INSERT INTO article'));
+  return insert![1][0] as string;
 }
 
 /** Returns the [sql, params] tuple from the latest call to repo.query */
@@ -2292,6 +2356,282 @@ describe('import', () => {
 
       const [sql] = lastMutateCall(repo);
       expect(sql).toContain('INSERT INTO article');
+    });
+  });
+
+  describe('snippets that predate the import', () => {
+    /** 0–4 snippets, so both the "none found" and "some found" paths run. */
+    const adoptedRowsArb = fc
+      .integer({ min: 0, max: 4 })
+      .map((count) =>
+        Array.from({ length: count }, (_, i) => makeAdoptedRow(i))
+      );
+
+    it('still imports when the review manager is not available yet', async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.boolean(), async (makeCopy) => {
+          // The import path can be reached before the plugin finishes wiring
+          // up its managers; adoption is skipped rather than throwing.
+          const consoleError = vi
+            .spyOn(console, 'error')
+            .mockImplementation(() => undefined);
+          const repo = makeSimpleRepo();
+          const manager = new ArticleManager(makeImportPlugin(makeCopy), repo);
+
+          await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, makeCopy);
+
+          expect(consoleError).not.toHaveBeenCalled();
+          const [sql] = lastMutateCall(repo);
+          expect(sql).toContain('INSERT INTO article');
+          consoleError.mockRestore();
+        })
+      );
+    });
+
+    describe('in place', () => {
+      it('gives the new article every snippet taken from the note', async () => {
+        const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
+        const repo = makeSimpleRepo();
+        const manager = new ArticleManager(
+          makeImportPluginWithSnippets(false, snippets),
+          repo
+        );
+
+        await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+        expect(snippets.adoptOrphans).toHaveBeenCalledWith(
+          IMPORT_FILE,
+          insertedArticleId(repo)
+        );
+      });
+
+      it('repaints the note only when snippets were adopted', async () => {
+        await fc.assert(
+          fc.asyncProperty(adoptedRowsArb, async (adopted) => {
+            const snippets = makeSnippetsStub(adopted);
+            const plugin = makeImportPluginWithSnippets(false, snippets);
+            const manager = new ArticleManager(plugin, makeSimpleRepo());
+
+            await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+            const trigger = (
+              plugin as unknown as {
+                app: { workspace: { trigger: ReturnType<typeof vi.fn> } };
+              }
+            ).app.workspace.trigger;
+            if (adopted.length === 0) {
+              expect(snippets.getHighlights).not.toHaveBeenCalled();
+              expect(trigger).not.toHaveBeenCalled();
+            } else {
+              // reloaded under the new parent id, then repainted
+              expect(snippets.getHighlights).toHaveBeenCalledWith(IMPORT_FILE);
+              expect(trigger).toHaveBeenCalledWith(
+                'ir-highlights-changed',
+                IMPORT_FILE.path
+              );
+            }
+          })
+        );
+      });
+
+      it('never re-points the snippet notes, which still describe the same file', async () => {
+        const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
+        const manager = new ArticleManager(
+          makeImportPluginWithSnippets(false, snippets),
+          makeSimpleRepo()
+        );
+
+        await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+        expect(snippets.repointSource).not.toHaveBeenCalled();
+      });
+
+      it('adopts for the linked record when the note carries a known ir-id', async () => {
+        const EXISTING_ID = 'existing-article-id';
+        const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
+        const repo = makeSimpleRepo();
+        (repo.query as ReturnType<typeof vi.fn>)
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ id: EXISTING_ID }]);
+        const manager = new ArticleManager(
+          makeImportPluginWithSnippets(false, snippets),
+          repo
+        );
+        vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+          'ir-id': EXISTING_ID,
+        } as never);
+
+        await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+        expect(snippets.adoptOrphans).toHaveBeenCalledWith(
+          IMPORT_FILE,
+          EXISTING_ID
+        );
+      });
+
+      it('repairs stranded snippets when re-run on a note that is already an article', async () => {
+        const EXISTING_ID = 'existing-article-id';
+        const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
+        const repo = makeSimpleRepo();
+        // the reference is already registered, under the note's own ir-id
+        (repo.query as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+          { id: EXISTING_ID },
+        ]);
+        const manager = new ArticleManager(
+          makeImportPluginWithSnippets(false, snippets),
+          repo
+        );
+        vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+          'ir-id': EXISTING_ID,
+        } as never);
+
+        const result = await manager.import(
+          IMPORT_FILE,
+          DEFAULT_PRIORITY,
+          null,
+          false
+        );
+
+        expect(result).toBeNull();
+        expect(snippets.adoptOrphans).toHaveBeenCalledWith(
+          IMPORT_FILE,
+          EXISTING_ID
+        );
+      });
+    });
+
+    describe('as a copy', () => {
+      it('gives the copy every snippet taken from the original note', async () => {
+        const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
+        const repo = makeSimpleRepo();
+        const manager = new ArticleManager(
+          makeImportPluginWithSnippets(true, snippets),
+          repo
+        );
+
+        await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, true);
+
+        expect(snippets.adoptOrphans).toHaveBeenCalledWith(
+          IMPORT_FILE,
+          insertedArticleId(repo)
+        );
+      });
+
+      it('re-points the adopted snippets at the copy and clears the original note, only when there were some', async () => {
+        await fc.assert(
+          fc.asyncProperty(adoptedRowsArb, async (adopted) => {
+            const snippets = makeSnippetsStub(adopted);
+            const plugin = makeImportPluginWithSnippets(true, snippets);
+            const manager = new ArticleManager(plugin, makeSimpleRepo());
+
+            await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, true);
+
+            const trigger = (
+              plugin as unknown as {
+                app: { workspace: { trigger: ReturnType<typeof vi.fn> } };
+              }
+            ).app.workspace.trigger;
+            if (adopted.length === 0) {
+              expect(snippets.repointSource).not.toHaveBeenCalled();
+              expect(
+                snippets.offsetTracker.loadHighlights
+              ).not.toHaveBeenCalled();
+              expect(trigger).not.toHaveBeenCalled();
+            } else {
+              expect(snippets.repointSource).toHaveBeenCalledWith(
+                adopted,
+                COPY_FILE
+              );
+              // the original note keeps no highlights: they moved to the copy
+              expect(
+                snippets.offsetTracker.loadHighlights
+              ).toHaveBeenCalledWith(IMPORT_FILE.path, []);
+              expect(trigger).toHaveBeenCalledWith(
+                'ir-highlights-changed',
+                IMPORT_FILE.path
+              );
+            }
+          })
+        );
+      });
+
+      it('does not reload highlights for the note it copied', async () => {
+        const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
+        const manager = new ArticleManager(
+          makeImportPluginWithSnippets(true, snippets),
+          makeSimpleRepo()
+        );
+
+        await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, true);
+
+        expect(snippets.getHighlights).not.toHaveBeenCalled();
+      });
+
+      it('says in the notice how many snippets moved to the copy', async () => {
+        await fc.assert(
+          fc.asyncProperty(adoptedRowsArb, async (adopted) => {
+            Notice.reset();
+            const snippets = makeSnippetsStub(adopted);
+            const manager = new ArticleManager(
+              makeImportPluginWithSnippets(true, snippets),
+              makeSimpleRepo()
+            );
+
+            await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, true);
+
+            const message = Notice.messages.at(-1)!;
+            expect(message).toContain(`Imported "${IMPORT_FILE.basename}"`);
+            if (adopted.length === 0) {
+              // an import that moved nothing reads as it always has
+              expect(message).not.toContain('the copy');
+            } else if (adopted.length === 1) {
+              expect(message).toContain('1 snippet now refers to the copy');
+            } else {
+              expect(message).toContain(
+                `${adopted.length} snippets now refer to the copy`
+              );
+            }
+          })
+        );
+      });
+
+      it('leaves the in-place notice alone, where nothing changed hands', async () => {
+        Notice.reset();
+        const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
+        const manager = new ArticleManager(
+          makeImportPluginWithSnippets(false, snippets),
+          makeSimpleRepo()
+        );
+
+        await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+        expect(Notice.messages.at(-1)).not.toContain('the copy');
+      });
+
+      it('adopts in place when the ir-id links the note to an existing record instead of copying', async () => {
+        const EXISTING_ID = 'existing-article-id';
+        const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
+        const repo = makeSimpleRepo();
+        (repo.query as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+          { id: EXISTING_ID },
+        ]);
+        const manager = new ArticleManager(
+          makeImportPluginWithSnippets(true, snippets),
+          repo
+        );
+        vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+          'ir-id': EXISTING_ID,
+        } as never);
+
+        await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, true);
+
+        expect(snippets.adoptOrphans).toHaveBeenCalledWith(
+          IMPORT_FILE,
+          EXISTING_ID
+        );
+        // no copy was made, so nothing to re-point at
+        expect(snippets.repointSource).not.toHaveBeenCalled();
+      });
     });
   });
 

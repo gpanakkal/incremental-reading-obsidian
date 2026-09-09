@@ -1,11 +1,13 @@
 import {
   DAY_ROLLOVER_OFFSET_HOURS,
   DEFAULT_PRIORITY,
+  MAX_SQL_QUERY_PARAMS,
   MAXIMUM_PRIORITY,
   MINIMUM_PRIORITY,
   MS_PER_DAY,
   MS_PER_YEAR,
   SNIPPET_TAG,
+  SOURCE_PROPERTY_NAME,
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
@@ -13,16 +15,15 @@ import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   ISnippetBase,
   ISnippetReview,
-  SQLiteRepository,
   SnippetRow,
+  SQLiteRepository,
 } from '#/lib/types';
 import { getEndOfDay } from '#/lib/utils';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
 import { resolve } from 'path';
-import type { Database } from 'sql.js';
-import initSqlJs from 'sql.js';
+import initSqlJs, { type Database } from 'sql.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SnippetManager } from './SnippetManager';
 
@@ -1532,5 +1533,594 @@ describe('reprioritize', () => {
         }
       )
     );
+  });
+});
+
+// #region ORPHAN HELPERS
+/**
+ * A snippet as the orphan lookup meets it: a row in the database, a note that
+ * may or may not still be in the vault, and a `source` property that resolves
+ * to the note being imported, to some other note, or to nothing at all.
+ *
+ * `source` is the resolution result rather than the raw property text, since
+ * turning the text into a file is `ObsidianHelpers.getSourceFile`'s job and is
+ * tested there.
+ */
+type OrphanSpec = {
+  exists: boolean;
+  source: 'target' | 'elsewhere' | null;
+  parent: string | null;
+  deleted: boolean;
+  start_offset: number | null;
+  end_offset: number | null;
+};
+
+const orphanSpecArb: fc.Arbitrary<OrphanSpec> = fc.record({
+  exists: fc.boolean(),
+  source: fc.constantFrom<OrphanSpec['source']>('target', 'elsewhere', null),
+  parent: fc.oneof(fc.uuid(), fc.constant(null)),
+  deleted: fc.boolean(),
+  start_offset: fc.oneof(fc.integer({ min: 0 }), fc.constant(null)),
+  end_offset: fc.oneof(fc.integer({ min: 0 }), fc.constant(null)),
+});
+
+const ELSEWHERE_PATH = 'notes/elsewhere.md';
+
+/** Turn the arbitrary's raw records into rows with distinct ids and paths. */
+function toOrphanRows(specs: OrphanSpec[]): SnippetRow[] {
+  return specs.map((spec, i) =>
+    makeSnippetRow({
+      id: `snippet-${i}`,
+      reference: `snippets/snippet-${i}.md`,
+      parent: spec.parent,
+      deleted: spec.deleted,
+      start_offset: spec.start_offset,
+      end_offset: spec.end_offset,
+    })
+  );
+}
+
+/**
+ * Stub the two `Obsidian` lookups the orphan scan makes of each candidate
+ * row's note: whether the note is still there, and what its source resolves to.
+ */
+function wireOrphanNotes(
+  rows: SnippetRow[],
+  specs: OrphanSpec[],
+  targetPath: string
+) {
+  const specByPath = new Map(rows.map((row, i) => [row.reference, specs[i]]));
+
+  vi.spyOn(Obsidian, 'getNote').mockImplementation((reference) => {
+    const spec = specByPath.get(reference);
+    if (spec && !spec.exists) return null;
+    // Files outside the candidate set (e.g. a snippet note being rewritten)
+    return { path: reference } as TFile;
+  });
+  vi.spyOn(Obsidian, 'getSourceFile').mockImplementation((file) => {
+    const spec = specByPath.get(file.path);
+    if (!spec || spec.source === null) return null;
+    return {
+      path: spec.source === 'target' ? targetPath : ELSEWHERE_PATH,
+    } as TFile;
+  });
+}
+
+/** Put the rows in the snippet table of a real sql.js database. */
+function insertOrphanRows(db: Database, rows: SnippetRow[]) {
+  for (const row of rows) {
+    db.exec(
+      `INSERT INTO snippet
+         (id, reference, parent, due, interval, priority, deleted, start_offset, end_offset)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        row.id,
+        row.reference,
+        row.parent,
+        row.due,
+        row.interval,
+        row.priority,
+        Number(row.deleted),
+        row.start_offset,
+        row.end_offset,
+      ]
+    );
+  }
+}
+
+/**
+ * Seed a real database and wire the note lookups, so the manager under test
+ * runs the orphan query's `WHERE` clause rather than a mock's approximation.
+ */
+function seedOrphans(
+  db: Database,
+  repo: SQLiteRepository,
+  specs: OrphanSpec[],
+  targetPath: string
+) {
+  const rows = toOrphanRows(specs);
+  insertOrphanRows(db, rows);
+  wireOrphanNotes(rows, specs, targetPath);
+  return {
+    manager: new SnippetManager({ app: makeApp() } as never, repo),
+    rows,
+  };
+}
+
+/** The rows the orphan lookup is expected to find for the target note. */
+function expectedOrphans(specs: OrphanSpec[], rows: SnippetRow[]) {
+  return rows.filter(
+    (_, i) =>
+      specs[i].parent === null &&
+      !specs[i].deleted &&
+      specs[i].exists &&
+      specs[i].source === 'target'
+  );
+}
+
+/**
+ * A repo that answers the orphan query with `rows` and records writes, for the
+ * cases about statement shape rather than about which rows qualify.
+ */
+function makeOrphanRepoStub(rows: SnippetRow[]): SQLiteRepository {
+  return {
+    query: vi
+      .fn()
+      .mockImplementation((sql: string) =>
+        sql.includes('parent IS NULL') ? rows : []
+      ),
+    mutate: vi.fn().mockResolvedValue([[]]),
+    _execSql: vi.fn(),
+    transaction: vi.fn(async (work: () => unknown) => work()),
+    handleFileChange: vi.fn(),
+    onDataChange: vi.fn(() => vi.fn()),
+  } as unknown as SQLiteRepository;
+}
+
+/** All ids passed to `UPDATE snippet SET parent`, across every chunk. */
+function adoptedIdsFromMutates(repo: SQLiteRepository) {
+  const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls as [
+    string,
+    unknown[],
+  ][];
+  return calls
+    .filter(([sql]) => sql.includes('UPDATE snippet SET parent'))
+    .flatMap(([, params]) => params.slice(1) as string[]);
+}
+// #endregion
+
+describe('rowToHighlight', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns null exactly when either offset is missing', async () => {
+    await fc.assert(
+      fc.asyncProperty(snippetRowArb, async (row) => {
+        const result = SnippetManager.rowToHighlight(row);
+        const renderable = row.start_offset !== null && row.end_offset !== null;
+        expect(result === null).toBe(!renderable);
+      })
+    );
+  });
+
+  it('passes offsets through and normalizes dismissed and a null parent', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        snippetRowArb.filter(
+          (row) => row.start_offset !== null && row.end_offset !== null
+        ),
+        async (row) => {
+          const highlight = SnippetManager.rowToHighlight(row)!;
+          expect(highlight.type).toBe('snippet');
+          expect(highlight.start_offset).toBe(row.start_offset);
+          expect(highlight.end_offset).toBe(row.end_offset);
+          expect(highlight.dismissed).toBe(Boolean(row.dismissed));
+          expect(highlight.parent).toBe(row.parent ?? '');
+          expect(highlight.id).toBe(row.id);
+          expect(highlight.reference).toBe(row.reference);
+        }
+      )
+    );
+  });
+});
+
+describe('adoptOrphans', () => {
+  const TARGET = { path: 'notes/parent.md' } as TFile;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** A spec that qualifies, so a test can vary one field away from it. */
+  const QUALIFYING: OrphanSpec = {
+    exists: true,
+    source: 'target',
+    parent: null,
+    deleted: false,
+    start_offset: 0,
+    end_offset: 5,
+  };
+
+  it('claims every parentless snippet taken from the note, and nothing else', async () => {
+    const { repo, db } = await makeSqlJsRepo();
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(orphanSpecArb, { maxLength: 8 }),
+        fc.uuid(),
+        async (specs, parentId) => {
+          db.exec('DELETE FROM snippet');
+          (repo.mutate as ReturnType<typeof vi.fn>).mockClear();
+          const { manager, rows } = seedOrphans(db, repo, specs, TARGET.path);
+
+          const adopted = await manager.adoptOrphans(TARGET, parentId);
+
+          const expected = expectedOrphans(specs, rows);
+          expect(adopted.map((row) => row.id).sort()).toEqual(
+            expected.map((row) => row.id).sort()
+          );
+          expect(adoptedIdsFromMutates(repo).sort()).toEqual(
+            expected.map((row) => row.id).sort()
+          );
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('persists the new parent, so the note keeps its highlights on the next read', async () => {
+    const { repo, db } = await makeSqlJsRepo();
+    const { manager } = seedOrphans(db, repo, [QUALIFYING], TARGET.path);
+
+    await manager.adoptOrphans(TARGET, 'article-1');
+
+    const stored = db.exec('SELECT parent FROM snippet WHERE id = $1', [
+      'snippet-0',
+    ]);
+    expect(stored[0].values[0][0]).toBe('article-1');
+  });
+
+  it('returns the adopted rows carrying the new parent id', async () => {
+    const { repo, db } = await makeSqlJsRepo();
+    await fc.assert(
+      fc.asyncProperty(fc.uuid(), async (parentId) => {
+        db.exec('DELETE FROM snippet');
+        const { manager } = seedOrphans(
+          db,
+          repo,
+          [{ ...QUALIFYING, start_offset: 3, end_offset: 9 }],
+          TARGET.path
+        );
+
+        const adopted = await manager.adoptOrphans(TARGET, parentId);
+
+        expect(adopted).toHaveLength(1);
+        expect(adopted[0].parent).toBe(parentId);
+        // the rest of the row is untouched
+        expect(adopted[0].start_offset).toBe(3);
+        expect(adopted[0].end_offset).toBe(9);
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('writes no update when nothing qualifies', async () => {
+    const { repo, db } = await makeSqlJsRepo();
+    const { manager } = seedOrphans(
+      db,
+      repo,
+      [
+        { ...QUALIFYING, parent: 'some-other-article' },
+        { ...QUALIFYING, source: 'elsewhere' },
+        { ...QUALIFYING, deleted: true },
+        { ...QUALIFYING, exists: false },
+      ],
+      TARGET.path
+    );
+
+    const adopted = await manager.adoptOrphans(TARGET, 'article-1');
+
+    expect(adopted).toEqual([]);
+    expect(adoptedIdsFromMutates(repo)).toEqual([]);
+  });
+
+  it('targets the ids by placeholder, with the parent id first', async () => {
+    const specs = [QUALIFYING, QUALIFYING];
+    const rows = toOrphanRows(specs);
+    wireOrphanNotes(rows, specs, TARGET.path);
+    const repo = makeOrphanRepoStub(rows);
+    const manager = new SnippetManager({ app: makeApp() } as never, repo);
+
+    await manager.adoptOrphans(TARGET, 'article-1');
+
+    const [sql, params] = lastMutateCall(repo);
+    expect(sql).toMatch(
+      /UPDATE snippet SET parent = \$1 WHERE id IN \(\$2, \$3\)/i
+    );
+    expect(params[0]).toBe('article-1');
+    expect(params.slice(1)).toEqual(['snippet-0', 'snippet-1']);
+  });
+
+  it('splits the update into as few chunks as the parameter limit allows, with no empty statement', async () => {
+    // One update can carry the parent id plus MAX_SQL_QUERY_PARAMS - 1 ids.
+    // The counts straddle an exact chunk boundary, where an off-by-one would
+    // emit a trailing `IN ()` — a syntax error in SQLite.
+    const chunkSize = MAX_SQL_QUERY_PARAMS - 1;
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(chunkSize, chunkSize + 1),
+        async (orphanCount) => {
+          const specs = Array.from({ length: orphanCount }, () => QUALIFYING);
+          const rows = toOrphanRows(specs);
+          wireOrphanNotes(rows, specs, TARGET.path);
+          const repo = makeOrphanRepoStub(rows);
+          const manager = new SnippetManager({ app: makeApp() } as never, repo);
+
+          const adopted = await manager.adoptOrphans(TARGET, 'article-1');
+
+          const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock
+            .calls as [string, unknown[]][];
+          expect(calls).toHaveLength(Math.ceil(orphanCount / chunkSize));
+          for (const [, params] of calls) {
+            expect(params.length).toBeGreaterThan(1);
+            expect(params.length).toBeLessThanOrEqual(MAX_SQL_QUERY_PARAMS);
+          }
+          // every orphan is claimed exactly once
+          expect(new Set(adoptedIdsFromMutates(repo)).size).toBe(orphanCount);
+          expect(adopted).toHaveLength(orphanCount);
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('reads the source property rather than Obsidian’s link index', async () => {
+    // resolvedLinks is rebuilt asynchronously and does not reliably carry
+    // frontmatter links, so a lookup that consulted it would find nothing here.
+    const specs = [QUALIFYING];
+    const rows = toOrphanRows(specs);
+    wireOrphanNotes(rows, specs, TARGET.path);
+    const repo = makeOrphanRepoStub(rows);
+    const manager = new SnippetManager(
+      { app: { ...makeApp(), metadataCache: { resolvedLinks: {} } } } as never,
+      repo
+    );
+
+    const adopted = await manager.adoptOrphans(TARGET, 'article-1');
+
+    expect(adopted.map((row) => row.id)).toEqual(['snippet-0']);
+  });
+});
+
+describe('getHighlights for a note with a database entry', () => {
+  const ARTICLE = { path: 'articles/imported.md' } as TFile;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** An article note whose snippets are reached by parent id, not backlinks. */
+  function makeArticleManager(rows: SnippetRow[]) {
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
+    // isSourceNote would still be true for a note that had snippets taken from
+    // it before the import; the parent-id lookup must win regardless.
+    vi.spyOn(Obsidian, 'isSourceNote').mockReturnValue(true);
+
+    const repo = {
+      query: vi.fn().mockImplementation((sql: string) => {
+        if (sql.includes('FROM article')) return [{ id: 'article-1' }];
+        if (sql.includes('WHERE parent = $1')) return rows;
+        return [];
+      }),
+      mutate: vi.fn().mockResolvedValue([[]]),
+      _execSql: vi.fn(),
+      transaction: vi.fn(async (work: () => unknown) => work()),
+      handleFileChange: vi.fn(),
+      onDataChange: vi.fn(() => vi.fn()),
+    } as unknown as SQLiteRepository;
+
+    return {
+      manager: new SnippetManager({ app: makeApp() } as never, repo),
+      repo,
+    };
+  }
+
+  it('queries by the parent id and caches the highlights under the note path', async () => {
+    const rows = [
+      makeSnippetRow({
+        id: 'snippet-a',
+        parent: 'article-1',
+        start_offset: 2,
+        end_offset: 8,
+      }),
+    ];
+    const { manager, repo } = makeArticleManager(rows);
+
+    const highlights = await manager.getHighlights(ARTICLE);
+
+    expect(highlights.map((h) => h.id)).toEqual(['snippet-a']);
+    expect(manager.offsetTracker.getHighlights(ARTICLE.path)).toEqual(
+      highlights
+    );
+    const [sql, params] = lastQueryCall(repo);
+    expect(sql).toMatch(/WHERE parent = \$1/i);
+    expect(params[0]).toBe('article-1');
+  });
+
+  it('skips rows that have no offsets to render', async () => {
+    const rows = [
+      makeSnippetRow({ id: 'no-offsets', parent: 'article-1' }),
+      makeSnippetRow({
+        id: 'renderable',
+        parent: 'article-1',
+        start_offset: 0,
+        end_offset: 4,
+      }),
+    ];
+    const { manager } = makeArticleManager(rows);
+
+    const highlights = await manager.getHighlights(ARTICLE);
+
+    expect(highlights.map((h) => h.id)).toEqual(['renderable']);
+  });
+});
+
+describe('repointSource', () => {
+  const NEW_SOURCE = { path: 'articles/copy.md' } as TFile;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('sets the source property of every snippet note whose file still exists', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.boolean(), { minLength: 1, maxLength: 6 }),
+        async (fileExists) => {
+          const rows = fileExists.map((_, i) =>
+            makeSnippetRow({
+              id: `snippet-${i}`,
+              reference: `snippets/${i}.md`,
+            })
+          );
+          vi.spyOn(Obsidian, 'getNote').mockImplementation((reference) => {
+            const index = rows.findIndex((row) => row.reference === reference);
+            return fileExists[index] ? ({ path: reference } as TFile) : null;
+          });
+          vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue(
+            '[[copy]]'
+          );
+          const updateSpy = vi
+            .spyOn(Obsidian, 'updateFrontMatter')
+            .mockResolvedValue(undefined as never);
+          const manager = new SnippetManager(
+            { app: makeApp() } as never,
+            makeSimpleRepo()
+          );
+
+          await manager.repointSource(rows, NEW_SOURCE);
+
+          expect(updateSpy).toHaveBeenCalledTimes(
+            fileExists.filter(Boolean).length
+          );
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('writes the link the snippet would have had if taken from the new source', async () => {
+    const row = makeSnippetRow({ reference: 'snippets/one.md' });
+    const snippetFile = { path: row.reference } as TFile;
+    vi.spyOn(Obsidian, 'getNote').mockReturnValue(snippetFile);
+    const linkSpy = vi
+      .spyOn(Obsidian, 'generateMarkdownLink')
+      .mockReturnValue('[[articles/copy|copy]]');
+    const updateSpy = vi
+      .spyOn(Obsidian, 'updateFrontMatter')
+      .mockResolvedValue(undefined as never);
+    const manager = new SnippetManager(
+      { app: makeApp() } as never,
+      makeSimpleRepo()
+    );
+
+    await manager.repointSource([row], NEW_SOURCE);
+
+    // linked to the new source, from the snippet note
+    expect(linkSpy).toHaveBeenCalledWith(
+      NEW_SOURCE,
+      snippetFile,
+      expect.anything()
+    );
+    const updates = updateSpy.mock.calls[0][1] as (
+      frontmatter: Record<string, unknown>
+    ) => void;
+    const frontmatter: Record<string, unknown> = { tags: [SNIPPET_TAG] };
+    updates(frontmatter);
+    expect(frontmatter[SOURCE_PROPERTY_NAME]).toBe('[[articles/copy|copy]]');
+    // rewriting the source must not disturb the note's tags
+    expect(frontmatter.tags).toEqual([SNIPPET_TAG]);
+  });
+});
+
+describe('getHighlights for a note with no database entry', () => {
+  const SOURCE = { path: 'notes/source.md' } as TFile;
+  let repo: SQLiteRepository;
+  let db: Database;
+
+  beforeEach(async () => {
+    ({ repo, db } = await makeSqlJsRepo());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * The source-note branch is only reached for a note with no DB row. Backed
+   * by a real database so the orphan query's own filters decide which rows
+   * reach the highlight mapping.
+   */
+  function makeSourceNoteManager(specs: OrphanSpec[], isSource = true) {
+    db.exec('DELETE FROM snippet');
+    const { manager } = seedOrphans(db, repo, specs, SOURCE.path);
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(null);
+    vi.spyOn(Obsidian, 'isSourceNote').mockReturnValue(isSource);
+    return { manager };
+  }
+
+  const RENDERABLE: OrphanSpec = {
+    exists: true,
+    source: 'target',
+    parent: null,
+    deleted: false,
+    start_offset: 4,
+    end_offset: 12,
+  };
+
+  it('returns highlights for parentless snippets taken from the note', async () => {
+    const { manager } = makeSourceNoteManager([RENDERABLE]);
+
+    const highlights = await manager.getHighlights(SOURCE);
+
+    expect(highlights.map((h) => h.id)).toEqual(['snippet-0']);
+    expect(manager.offsetTracker.getHighlights(SOURCE.path)).toHaveLength(1);
+  });
+
+  it('omits snippets that already belong to an item, so a copy import does not leave highlights behind', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.uuid(), async (parentId) => {
+        const { manager } = makeSourceNoteManager([
+          { ...RENDERABLE, parent: parentId },
+        ]);
+
+        const highlights = await manager.getHighlights(SOURCE);
+
+        expect(highlights).toEqual([]);
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('omits snippets taken from some other note', async () => {
+    const { manager } = makeSourceNoteManager([
+      { ...RENDERABLE, source: 'elsewhere' },
+    ]);
+
+    expect(await manager.getHighlights(SOURCE)).toEqual([]);
+  });
+
+  it('omits snippets with no recorded offsets', async () => {
+    const { manager } = makeSourceNoteManager([
+      { ...RENDERABLE, start_offset: null, end_offset: null },
+    ]);
+
+    expect(await manager.getHighlights(SOURCE)).toEqual([]);
+  });
+
+  it('returns nothing for a note that is neither an item nor a source', async () => {
+    const { manager } = makeSourceNoteManager([RENDERABLE], false);
+
+    expect(await manager.getHighlights(SOURCE)).toEqual([]);
   });
 });

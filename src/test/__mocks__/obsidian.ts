@@ -7,7 +7,21 @@
 export const normalizePath = (path: string) => path;
 
 export class Notice {
-  constructor(_message: string, _duration?: number) {}
+  /**
+   * Every notice raised since the last {@link Notice.reset}, so tests can
+   * assert on messages that are otherwise invisible: a notice is the only
+   * output of several code paths. Call `Notice.reset()` in `beforeEach` —
+   * nothing clears it automatically.
+   */
+  static readonly messages: string[] = [];
+
+  static reset() {
+    Notice.messages.length = 0;
+  }
+
+  constructor(message: string, _duration?: number) {
+    Notice.messages.push(message);
+  }
 }
 
 // CodeMirror state field stubs — imported by ObsidianHelpers but not called in tests
