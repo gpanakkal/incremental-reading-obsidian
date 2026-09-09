@@ -1,15 +1,9 @@
 import type IncrementalReadingPlugin from '#/main';
 import { MarkdownView } from 'obsidian';
-import type { Grade } from 'ts-fsrs';
-import { Rating } from 'ts-fsrs';
-import {
-  CONTENT_TITLE_SLICE_LENGTH,
-  ERROR_NOTICE_DURATION_MS,
-  MS_PER_DAY,
-  SUCCESS_NOTICE_DURATION_MS,
-} from './constants';
+import { type Grade, Rating } from 'ts-fsrs';
+import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from './constants';
 import IRScheduler from './IRScheduler';
-import { ObsidianHelpers } from './ObsidianHelpers';
+import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import {
   fetchCurrentItem,
   invalidateCurrentItemQuery,
@@ -78,10 +72,9 @@ export class Actions {
         await this.unDismissItem(article);
       }
       if (nextInterval) {
-        new Notice(
+        Obsidian.notify(
           `Next article review manually scheduled for ` +
-            `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`,
-          SUCCESS_NOTICE_DURATION_MS
+            `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`
         );
       }
       this.getNext();
@@ -114,10 +107,9 @@ export class Actions {
         await this.unDismissItem(snippet);
       }
       if (nextInterval) {
-        new Notice(
+        Obsidian.notify(
           `Next snippet review manually scheduled for ` +
-            `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`,
-          SUCCESS_NOTICE_DURATION_MS
+            `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`
         );
       }
       this.getNext();
@@ -147,15 +139,9 @@ export class Actions {
     try {
       await this.plugin.reviewManager.reprioritize(item.data, priority);
       await invalidateItemQuery(item.data.id);
-      new Notice(
-        `Priority set to ${priority / 10}`,
-        SUCCESS_NOTICE_DURATION_MS
-      );
+      Obsidian.notify(`Priority set to ${priority / 10}`);
     } catch (_error) {
-      new Notice(
-        `Failed to update priority for "${item.data.reference}"`,
-        ERROR_NOTICE_DURATION_MS
-      );
+      Obsidian.notify(`Failed to update priority for "${item.data.reference}"`);
     }
   };
 
@@ -195,7 +181,7 @@ export class Actions {
       },
     });
 
-    new Notice(`Graded as: ${Rating[grade]}`);
+    Obsidian.notify(`Graded as: ${Rating[grade]}`);
     this.getNext();
   };
 
@@ -213,9 +199,12 @@ export class Actions {
       },
     });
 
-    new Notice(
-      `Dismissed "${getContentSlice(item.file.basename, CONTENT_TITLE_SLICE_LENGTH, true)}"`
+    const itemTitle = getContentSlice(
+      item.file.basename,
+      CONTENT_TITLE_SLICE_LENGTH,
+      true
     );
+    Obsidian.notify(`Dismissed "${itemTitle}"`);
     const { currentItemId } = store.getState();
     if (item.data.id === currentItemId) {
       this.getNext();
@@ -231,9 +220,12 @@ export class Actions {
       this.getNext();
     }
 
-    new Notice(
-      `Restored "${getContentSlice(item.file.basename, CONTENT_TITLE_SLICE_LENGTH, true)}" to queue`
+    const itemTitle = getContentSlice(
+      item.file.basename,
+      CONTENT_TITLE_SLICE_LENGTH,
+      true
     );
+    Obsidian.notify(`Restored "${itemTitle}" to queue`);
   };
 
   /**
@@ -259,9 +251,12 @@ export class Actions {
         this.getNext();
       },
     });
-    new Notice(
-      `Skipping ${getContentSlice(item.file.basename, CONTENT_TITLE_SLICE_LENGTH + 5, true)} until next session`
+    const itemTitle = getContentSlice(
+      item.file.basename,
+      CONTENT_TITLE_SLICE_LENGTH + 5,
+      true
     );
+    Obsidian.notify(`Skipping ${itemTitle} until next session`);
     this.getNext();
   };
 
@@ -331,27 +326,23 @@ export class Actions {
         undo: async () => {
           // restore the original text
           await this.plugin.app.vault.read(sourceFile);
-          await ObsidianHelpers.editNote(
-            this.plugin.app,
-            sourceFile,
-            (data) => {
-              const cardEmbed = ObsidianHelpers.findEmbeds(
-                this.plugin.app,
-                sourceFile,
-                reviewCard.file
-              );
+          await Obsidian.editNote(this.plugin.app, sourceFile, (data) => {
+            const cardEmbed = Obsidian.findEmbeds(
+              this.plugin.app,
+              sourceFile,
+              reviewCard.file
+            );
 
-              if (!cardEmbed) return data;
+            if (!cardEmbed) return data;
 
-              const startOffset = cardEmbed.position.start.offset;
-              const endOffset = cardEmbed.position.end.offset;
+            const startOffset = cardEmbed.position.start.offset;
+            const endOffset = cardEmbed.position.end.offset;
 
-              const prefix = data.slice(0, startOffset);
-              data.slice(startOffset, endOffset);
-              const suffix = data.slice(endOffset);
-              return prefix + line + suffix;
-            }
-          );
+            const prefix = data.slice(0, startOffset);
+            data.slice(startOffset, endOffset);
+            const suffix = data.slice(endOffset);
+            return prefix + line + suffix;
+          });
 
           // remove the card file and row
           await this.plugin.reviewManager.cards.delete(reviewCard.data.id);
@@ -413,7 +404,7 @@ export class Actions {
   undo = async () => {
     const actionEntry = this.undoStack.pop();
     if (actionEntry === undefined) {
-      new Notice(`Nothing to undo!`, SUCCESS_NOTICE_DURATION_MS);
+      Obsidian.notify(`Nothing to undo!`);
       return;
     }
     // Emitted before the reversal runs, not after: the entry is already off the
@@ -421,6 +412,6 @@ export class Actions {
     // reading an entry that is no longer there.
     this.emitter.emit();
     await actionEntry.undo();
-    new Notice(`Undid ${actionEntry.description}`, SUCCESS_NOTICE_DURATION_MS);
+    Obsidian.notify(`Undid ${actionEntry.description}`);
   };
 }

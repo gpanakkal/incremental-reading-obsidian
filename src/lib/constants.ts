@@ -16,8 +16,8 @@ export const ARTICLE_TAG = 'ir-article';
 export const SOURCE_TAG = 'ir-source';
 export const SOURCE_PROPERTY_NAME = 'source';
 
-export const ERROR_NOTICE_DURATION_MS = 8000;
-export const SUCCESS_NOTICE_DURATION_MS = 5000;
+export const NOTICE_SCALED_DURATION_PER_WORD_MS = 750;
+export const NOTICE_MIN_DURATION_MS = 5000;
 
 /** characters that should never be permitted in note titles */
 export const FORBIDDEN_TITLE_CHARS = new Set(`#^[]|*"\\/<>:?\n`.split(''));

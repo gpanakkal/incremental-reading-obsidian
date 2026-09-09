@@ -1,12 +1,10 @@
 import {
   DEFAULT_PRIORITY,
-  ERROR_NOTICE_DURATION_MS,
   MAX_SQL_QUERY_PARAMS,
   REVIEW_COUNT_FOR_PRIORITY_SCALING,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
-  SUCCESS_NOTICE_DURATION_MS,
   TEXT_BASE_REVIEW_INTERVAL,
   TEXT_REVIEW_INTERVALS,
 } from '#/lib/constants';
@@ -30,7 +28,6 @@ import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import {
   normalizePath,
-  Notice,
   type Editor,
   type MarkdownView,
   type TFile,
@@ -217,16 +214,13 @@ export class SnippetManager extends ItemManager {
     const currentFile = view.file;
 
     if (!currentFile) {
-      new Notice(
-        `Snipping not supported from ${view.getViewType()}`,
-        ERROR_NOTICE_DURATION_MS
-      );
+      Obsidian.notify(`Snipping not supported from ${view.getViewType()}`);
       return null;
     }
 
     const selection = editor.getSelection() || view.getSelection();
     if (!selection) {
-      new Notice('Text must be selected', ERROR_NOTICE_DURATION_MS);
+      Obsidian.notify('Text must be selected');
       return null;
     }
     const snippetFile = await Obsidian.createFromText(
@@ -383,19 +377,12 @@ export class SnippetManager extends ItemManager {
         offsets?.end ?? null,
       ]);
 
-      // TODO: verify this correctly catches failed inserts
-      new Notice(
-        `snippet created: ${snippetFile.basename}`,
-        SUCCESS_NOTICE_DURATION_MS
-      );
+      Obsidian.notify(`snippet created: ${snippetFile.basename}`);
 
       const result = await this.fetch(id);
       return result;
     } catch (error) {
-      new Notice(
-        `Failed to save snippet to db: ${snippetFile.basename}`,
-        ERROR_NOTICE_DURATION_MS
-      );
+      Obsidian.notify(`Failed to save snippet to db: ${snippetFile.basename}`);
       console.error(error);
       return null;
     }

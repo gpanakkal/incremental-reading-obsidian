@@ -3,7 +3,6 @@ import {
   type TFile,
   type WorkspaceLeaf,
   MarkdownView,
-  Notice,
   Plugin,
   TFolder,
 } from 'obsidian';
@@ -28,6 +27,7 @@ import {
   type ExtractedMarkdownEditor,
   getEditorClass,
 } from './lib/obsidian-editor';
+import { ObsidianHelpers as Obsidian } from './lib/ObsidianHelpers';
 import {
   applyQueueChange,
   invalidateCacheOnMatch,
@@ -295,10 +295,10 @@ export default class IncrementalReadingPlugin extends Plugin {
         }
 
         if (!this.verifySyncSettings) {
-          new Notice(
+          Obsidian.notify(
             `Incremental reading: please enable "sync all other types"` +
               ` before using the plugin`,
-            0
+            true
           );
         }
 
@@ -368,9 +368,9 @@ export default class IncrementalReadingPlugin extends Plugin {
         });
       } catch (error) {
         console.error(error);
-        new Notice(
+        Obsidian.notify(
           `Failed to initialize plugin. See the console for details.`,
-          0
+          true
         );
         this.unload();
       }
@@ -407,10 +407,10 @@ export default class IncrementalReadingPlugin extends Plugin {
           'Incremental Reading - Migration verification failed:',
           error.errors
         );
-        new Notice(
+        Obsidian.notify(
           `Incremental reading: database migration failed. ` +
             `Check the console for details.`,
-          0
+          true
         );
         this.unload();
       },

@@ -7,17 +7,20 @@ import type {
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
-import type { TFile } from 'obsidian';
-import { Notice, type Editor, type MarkdownView } from 'obsidian';
-import type { Grade, StateType } from 'ts-fsrs';
-import { fsrs, generatorParameters, State } from 'ts-fsrs';
+import { type Editor, type MarkdownView, type TFile } from 'obsidian';
+import {
+  type Grade,
+  type StateType,
+  fsrs,
+  generatorParameters,
+  State,
+} from 'ts-fsrs';
 import {
   CARD_ANSWER_REPLACEMENT,
   CARD_TAG,
   CLOZE_DELIMITER_PATTERN,
   CLOZE_DELIMITERS,
   CLOZE_GROUPS_PATTERN,
-  ERROR_NOTICE_DURATION_MS,
   literal,
   MAX_SQL_QUERY_PARAMS,
   MS_PER_DAY,
@@ -177,7 +180,7 @@ export class CardManager extends ItemManager {
   async create(editor: Editor, view: MarkdownView | ReviewView) {
     const currentFile = view.file;
     if (!currentFile) {
-      new Notice(`A Markdown file must be active`, ERROR_NOTICE_DURATION_MS);
+      Obsidian.notify(`A Markdown file must be active`);
       return null;
     }
 
@@ -189,7 +192,7 @@ export class CardManager extends ItemManager {
     );
     const selectionBounds = Obsidian.getSelectionWithBounds(editor);
     if (!selectionBounds) {
-      new Notice('Text must be selected', ERROR_NOTICE_DURATION_MS);
+      Obsidian.notify('Text must be selected');
       return;
     }
 
@@ -231,7 +234,7 @@ export class CardManager extends ItemManager {
       if (error instanceof Error) {
         console.error(error);
       }
-      new Notice(`Failed to create card`, ERROR_NOTICE_DURATION_MS);
+      Obsidian.notify(`Failed to create card`);
       return null;
     }
   }

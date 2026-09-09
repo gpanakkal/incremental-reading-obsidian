@@ -1,7 +1,3 @@
-import {
-  ERROR_NOTICE_DURATION_MS,
-  SUCCESS_NOTICE_DURATION_MS,
-} from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { fetchByFile, invalidateCacheOnMatch } from '#/lib/query-client';
@@ -23,7 +19,7 @@ import {
   showPanel,
   ViewPlugin,
 } from '@codemirror/view';
-import { type App, type EventRef, type TFile, Notice } from 'obsidian';
+import { type App, type EventRef, type TFile } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
 
 /**
@@ -231,12 +227,9 @@ function renderReviewModeActions(
               } else if (noteType === 'snippet') {
                 await reviewManager.reprioritize(item.data, newPriority);
               }
-              new Notice(
-                `Priority set to ${newPriority / 10}`,
-                SUCCESS_NOTICE_DURATION_MS
-              );
+              Obsidian.notify(`Priority set to ${newPriority / 10}`);
             } catch (error) {
-              new Notice(`Failed to update priority`, ERROR_NOTICE_DURATION_MS);
+              Obsidian.notify(`Failed to update priority`);
               console.error(error);
             }
           },
@@ -323,25 +316,25 @@ export function renderStandaloneActionBarDOM(
             await reviewManager.getReviewItemFromFile(file);
 
           if (!item) {
-            new Notice('Item not found in database', ERROR_NOTICE_DURATION_MS);
+            Obsidian.notify('Item not found in database');
             return;
           }
 
           const isDismissed = item.data.dismissed;
           if (isDismissed) {
             await reviewManager.unDismissItem(item);
-            new Notice('Item restored to queue', SUCCESS_NOTICE_DURATION_MS);
+            Obsidian.notify('Item restored to queue');
             updateButtonLabel(false);
           } else {
             await reviewManager.dismissItem(item);
-            new Notice('Item dismissed', SUCCESS_NOTICE_DURATION_MS);
+            Obsidian.notify('Item dismissed');
             updateButtonLabel(true);
           }
 
           await invalidateCacheOnMatch(item.file, reviewManager);
         } catch (error) {
           console.error('Failed to toggle dismiss status:', error);
-          new Notice('Failed to update item', ERROR_NOTICE_DURATION_MS);
+          Obsidian.notify('Failed to update item');
         }
       };
     } catch (error) {

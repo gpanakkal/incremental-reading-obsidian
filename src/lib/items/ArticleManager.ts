@@ -3,12 +3,10 @@ import {
   CARD_TAG,
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
-  ERROR_NOTICE_DURATION_MS,
   INVALID_TITLE_MESSAGE,
   MAX_SQL_QUERY_PARAMS,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
-  SUCCESS_NOTICE_DURATION_MS,
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
@@ -29,7 +27,7 @@ import {
   getDateString,
   getEndOfDay,
 } from '#/lib/utils';
-import { type TFile, Notice } from 'obsidian';
+import { type TFile } from 'obsidian';
 import { ItemManager } from './ItemManager';
 
 const IMPORT_BLOCKED_TAGS = new Set([SNIPPET_TAG, CARD_TAG]);
@@ -114,10 +112,7 @@ export class ArticleManager extends ItemManager {
       }
       return await this.importInPlace(file, priority, fixedIntervalDays);
     } catch (error) {
-      new Notice(
-        `Failed to import article "${file.name}"`,
-        ERROR_NOTICE_DURATION_MS
-      );
+      Obsidian.notify(`Failed to import article "${file.name}"`);
       console.error(error);
       return null;
     }
@@ -168,10 +163,7 @@ export class ArticleManager extends ItemManager {
   ) {
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
     if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
-      new Notice(
-        `Note contains a snippet or card tag; canceling import`,
-        ERROR_NOTICE_DURATION_MS
-      );
+      Obsidian.notify(`Note contains a snippet or card tag; canceling import`);
       return null;
     }
 
@@ -188,17 +180,13 @@ export class ArticleManager extends ItemManager {
       // Nothing left to import, but re-running it on an article is the only
       // way a user can repair snippets stranded by an earlier import.
       await this.claimSnippets(file, refMatch.id);
-      new Notice(
-        `Note is already an article; canceling import`,
-        ERROR_NOTICE_DURATION_MS
-      );
+      Obsidian.notify(`Note is already an article; canceling import`);
       return null;
     } else if (refMatch) {
       // reference matches, but no ID or ID doesn't match
       // TODO: option to choose any one of the rows matching the id/reference
-      new Notice(
-        `Another article is already at this file path; canceling import`,
-        ERROR_NOTICE_DURATION_MS
+      Obsidian.notify(
+        `Another article is already at this file path; canceling import`
       );
       return null;
     } else if (existingId) {
@@ -212,9 +200,8 @@ export class ArticleManager extends ItemManager {
           [file.path, existingId]
         );
         await this.claimSnippets(file, existingId);
-        new Notice(
-          `Linked "${file.basename}" to existing article with the same ID`,
-          SUCCESS_NOTICE_DURATION_MS
+        Obsidian.notify(
+          `Linked "${file.basename}" to existing article with the same ID`
         );
         return this.fetch(existingId);
       }
@@ -252,10 +239,8 @@ export class ArticleManager extends ItemManager {
       fixedIntervalDays === null
         ? `priority ${IRScheduler.toDisplayPriority(priority)}`
         : `fixed interval of ${fixedIntervalDays} days`;
-    new Notice(
-      `Imported "${titleSlice}" with ${schedulingString}`,
-      SUCCESS_NOTICE_DURATION_MS
-    );
+
+    Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
     return this.fetch(id);
   }
 
@@ -269,9 +254,8 @@ export class ArticleManager extends ItemManager {
   ) {
     // check if the file is inside the plugin's data directory
     if (file.path.startsWith(DATA_DIRECTORY)) {
-      new Notice(
-        `Note is already in the plugin data folder; canceling import`,
-        ERROR_NOTICE_DURATION_MS
+      Obsidian.notify(
+        `Note is already in the plugin data folder; canceling import`
       );
       return null;
     }
@@ -279,10 +263,7 @@ export class ArticleManager extends ItemManager {
     const content = await this.app.vault.cachedRead(file);
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
     if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
-      new Notice(
-        `Note contains a snippet or card tag; canceling import`,
-        ERROR_NOTICE_DURATION_MS
-      );
+      Obsidian.notify(`Note contains a snippet or card tag; canceling import`);
       return null;
     }
 
@@ -301,22 +282,25 @@ export class ArticleManager extends ItemManager {
         // No copy was made — the record now points at this note, so its
         // snippets are adopted in place rather than handed to a copy.
         await this.claimSnippets(file, existingId);
-        new Notice(
-          `Linked "${file.basename}" to existing article with the same ID`,
-          SUCCESS_NOTICE_DURATION_MS
+        Obsidian.notify(
+          `Linked "${file.basename}" to existing article with the same ID`
         );
         return this.fetch(existingId);
       }
       // Orphaned ir-id: warn but proceed with creating the copy
-      new Notice(
-        `Warning: source note has article metadata but no matching record; creating copy`,
-        0
+      Obsidian.notify(
+        `Warning: source note has article metadata but no ` +
+          `matching record; creating copy`,
+        true
       );
     }
 
     // check if an article with this name already exists
     if (Obsidian.isDuplicate(file.name, 'article', this.app)) {
-      new Notice(`Warning: article with name already exists "${file.name}"`, 0);
+      Obsidian.notify(
+        `Warning: article with name already exists "${file.name}"`,
+        true
+      );
     }
 
     let importFileName = file.name;
@@ -394,10 +378,10 @@ export class ArticleManager extends ItemManager {
       fixedIntervalDays === null
         ? `priority ${IRScheduler.toDisplayPriority(priority)}`
         : `fixed interval of ${fixedIntervalDays} days`;
-    new Notice(
+
+    Obsidian.notify(
       `Imported "${titleSlice}" with ${schedulingString}` +
-        snippetMigratedNotice,
-      SUCCESS_NOTICE_DURATION_MS
+        snippetMigratedNotice
     );
     return this.fetch(id);
   }
@@ -453,7 +437,7 @@ export class ArticleManager extends ItemManager {
       const result = await this.fetch(id);
       return result;
     } catch (error) {
-      new Notice(`Failed to create empty article`, ERROR_NOTICE_DURATION_MS);
+      Obsidian.notify(`Failed to create empty article`);
       console.error(error);
       return null;
     }
@@ -652,7 +636,7 @@ export class ArticleManager extends ItemManager {
   async rename(article: ReviewArticle, newName: string) {
     const sanitized = Obsidian.sanitizeForTitle(newName, true);
     if (sanitized !== newName) {
-      new Notice(INVALID_TITLE_MESSAGE, ERROR_NOTICE_DURATION_MS);
+      Obsidian.notify(INVALID_TITLE_MESSAGE);
       return;
     }
 
@@ -717,10 +701,8 @@ export class ArticleManager extends ItemManager {
       );
     } catch (e) {
       if (e instanceof Error) {
-        new Notice(
-          `Failed to set fixed interval for "${article.reference}":` +
-            e.message,
-          ERROR_NOTICE_DURATION_MS
+        Obsidian.notify(
+          `Failed to set fixed interval for "${article.reference}":` + e.message
         );
       }
       console.error(e);
@@ -748,7 +730,7 @@ export class ArticleManager extends ItemManager {
         [newDueTime, newInterval, article.id]
       );
     } catch (_e) {
-      new Notice(
+      Obsidian.notify(
         `Failed to disable fixed interval for article ${article.reference}`
       );
     }

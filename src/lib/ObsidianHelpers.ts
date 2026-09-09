@@ -22,6 +22,8 @@ import {
   FORBIDDEN_TITLE_CHARS,
   FRONTMATTER_PATTERN,
   INVALID_TITLE_MESSAGE,
+  NOTICE_MIN_DURATION_MS,
+  NOTICE_SCALED_DURATION_PER_WORD_MS,
   SNIPPET_DIRECTORY,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
@@ -466,5 +468,18 @@ export class ObsidianHelpers {
         el.tagName === 'INPUT' ||
         el.tagName === 'TEXTAREA')
     );
+  }
+
+  /**
+   * Create an Obsidian Notice, scaling the visibility duration to the number
+   * of words in the message.
+   */
+  static notify(message: string, persist?: boolean) {
+    const wordCount = message.split(' ').length;
+    const duration = Math.max(
+      NOTICE_MIN_DURATION_MS,
+      wordCount * NOTICE_SCALED_DURATION_PER_WORD_MS
+    );
+    new Notice(message, persist ? 0 : duration);
   }
 }
