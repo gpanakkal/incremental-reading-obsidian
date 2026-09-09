@@ -166,33 +166,41 @@ describe('getBodyStartOffset', () => {
 // sanitizeForTitle
 // ---------------------------------------------------------------------------
 describe('sanitizeForTitle', () => {
-  it('replaces forbidden characters with a single space (not empty string)', () => {
-    // Mutant: return ' ' → return "" — the space must be present, not empty
+  it('deletes a forbidden character rather than replacing it with a space', () => {
+    // Mutant: return '' → return ' ' — 'a#b' must not gain a separator
     const result = ObsidianHelpers.sanitizeForTitle('a#b', false);
-    // '#' is forbidden; gets replaced with space, giving 'a b'
-    expect(result).toBe('a b');
+    expect(result).toBe('ab');
   });
 
-  it('removes forbidden characters by replacing with space', () => {
-    const forbiddenChars = [...FORBIDDEN_TITLE_CHARS];
+  it('replaces a forbidden whitespace character with a space', () => {
+    // Mutant: return ' ' → return '' — words either side would run together
+    const result = ObsidianHelpers.sanitizeForTitle('line one\nline two', false);
+    expect(result).toBe('line one line two');
+  });
+
+  it('deletes non-whitespace forbidden chars and spaces out whitespace ones', () => {
     fc.assert(
       fc.property(
-        fc.constantFrom(...forbiddenChars),
-        fc.string({ minLength: 1 }).filter((s) => {
-          // ensure the suffix contains at least one non-forbidden, non-whitespace char
-          // so the replacement space is visible in the trimmed result
-          return /[^\s#^[\]|*"\\/<>:?\n]/.test(s);
-        }),
-        (forbidden, suffix) => {
-          const input = `a${forbidden}${suffix}`;
-          const result = ObsidianHelpers.sanitizeForTitle(input, false);
-          forbiddenChars.forEach((ch) => {
-            expect(result).not.toContain(ch);
-          });
-          // The space replacement must be present between 'a' and the suffix content
-          expect(result).toContain(' ');
+        fc.constantFrom(...[...FORBIDDEN_TITLE_CHARS]),
+        (forbidden) => {
+          const result = ObsidianHelpers.sanitizeForTitle(
+            `a${forbidden}b`,
+            false
+          );
+          expect(result).toBe(/\s/.test(forbidden) ? 'a b' : 'ab');
         }
       )
+    );
+  });
+
+  it('leaves no forbidden character in the output', () => {
+    fc.assert(
+      fc.property(fc.string(), fc.boolean(), (text, checkFinalChar) => {
+        const result = ObsidianHelpers.sanitizeForTitle(text, checkFinalChar);
+        [...FORBIDDEN_TITLE_CHARS].forEach((ch) => {
+          expect(result).not.toContain(ch);
+        });
+      })
     );
   });
 
@@ -210,6 +218,11 @@ describe('sanitizeForTitle', () => {
 
   it('checkFinalChar=true removes trailing space', () => {
     expect(ObsidianHelpers.sanitizeForTitle('hello ', true)).toBe('hello');
+  });
+
+  it('checkFinalChar=true removes leading whitespace', () => {
+    // Mutant: cleaned.trim() → cleaned — a rename to '  hello' must be rejected
+    expect(ObsidianHelpers.sanitizeForTitle('  hello', true)).toBe('hello');
   });
 
   it('checkFinalChar=true removes trailing period', () => {
@@ -264,10 +277,10 @@ describe('sanitizeForTitle', () => {
     expect(result.length).toBe(300);
   });
 
-  it('returns a whitespace-only string for input containing only forbidden chars', () => {
+  it('returns a blank string for input containing only forbidden chars', () => {
     const input = [...FORBIDDEN_TITLE_CHARS].join('');
     const result = ObsidianHelpers.sanitizeForTitle(input, false);
-    // All forbidden chars become spaces; the last space is preserved as the trailing char
+    // Every forbidden char is deleted except the newline, which becomes a space
     expect(result.trim()).toBe('');
     // No forbidden chars remain
     [...FORBIDDEN_TITLE_CHARS].forEach((c) => expect(result).not.toContain(c));
@@ -353,6 +366,35 @@ describe('createTitle', () => {
     const allForbidden = [...FORBIDDEN_TITLE_CHARS].join('');
     const title = ObsidianHelpers.createTitle(allForbidden);
     expect(title).not.toContain(' - ');
+  });
+
+  it('keeps only the label of an inline link in the content segment', () => {
+    const title = ObsidianHelpers.createTitle(
+      'See [my site](www.example.com) now'
+    );
+    expect(title.split(' - ')[0]).toBe('See my site now');
+  });
+
+  it('strips a footnote reference from the content segment', () => {
+    const title = ObsidianHelpers.createTitle('A claim[^1] worth reviewing');
+    expect(title.split(' - ')[0]).toBe('A claim worth reviewing');
+  });
+
+  it('keeps only the alias of an aliased wikilink in the content segment', () => {
+    const title = ObsidianHelpers.createTitle('About [[Some Note|the alias]]');
+    expect(title.split(' - ')[0]).toBe('About the alias');
+  });
+
+  it('keeps the target of a plain wikilink in the content segment', () => {
+    const title = ObsidianHelpers.createTitle('About [[Some Note]]');
+    expect(title.split(' - ')[0]).toBe('About Some Note');
+  });
+
+  it('measures the slice length after links are stripped', () => {
+    // A link whose target alone exceeds the slice length still yields its label
+    const url = `www.example.com/${'a'.repeat(CONTENT_TITLE_SLICE_LENGTH)}`;
+    const title = ObsidianHelpers.createTitle(`[short label](${url})`);
+    expect(title.split(' - ')[0]).toBe('short label');
   });
 
   it('preserves a trailing period in the content segment (checkFinalChar=false)', () => {

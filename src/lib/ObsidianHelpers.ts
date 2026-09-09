@@ -1,15 +1,17 @@
 import type { EditorState } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import type {
-  App,
-  DataWriteOptions,
-  Editor,
-  EditorPosition,
-  FrontMatterCache,
-  MarkdownFileInfo,
-  TFile,
+import {
+  type App,
+  type DataWriteOptions,
+  type Editor,
+  type EditorPosition,
+  type FrontMatterCache,
+  type MarkdownFileInfo,
+  type TFile,
+  editorEditorField,
+  editorInfoField,
+  normalizePath,
 } from 'obsidian';
-import { editorEditorField, editorInfoField, normalizePath } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
@@ -82,7 +84,9 @@ export class ObsidianHelpers {
           if (' .'.includes(char)) return '';
         }
         if (FORBIDDEN_TITLE_CHARS.has(char)) {
-          return ' ';
+          // whitespace becomes a space so the words around it stay separated;
+          // every other forbidden char is dropped
+          return /\s/.test(char) ? ' ' : '';
         } else return char;
       })
       .join('');
@@ -104,7 +108,7 @@ export class ObsidianHelpers {
     const segments = [];
     if (content) {
       const sanitized = this.sanitizeForTitle(
-        content,
+        Markdown.stripLinks(content),
         false,
         CONTENT_TITLE_SLICE_LENGTH
       );

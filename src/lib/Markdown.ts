@@ -9,8 +9,48 @@ const FOOTNOTE_REFERENCE_PATTERN = /\[\^([\w\d]+)\](?!:)/g;
 
 // const INLINE_FOOTNOTE_PATTERN = /\^\[([\w\d]+)\]/g;
 
+/** Embedded note: `![[target]]`, `![[target#heading|alias]]` */
+const EMBED_PATTERN = /!\[\[([^\]|]*)(?:\|([^\]]*))?\]\]/g;
+
+/** Wikilink: `[[target]]`, `[[target|alias]]` */
+const WIKILINK_PATTERN = /\[\[([^\]|]*)(?:\|([^\]]*))?\]\]/g;
+
+/** Image, inline or by reference: `![alt](url)`, `![alt][ref]` */
+const IMAGE_PATTERN = /!\[([^\]]*)\](?:\([^)]*\)|\[[^\]]*\])/g;
+
+/** Link, inline or by reference: `[label](url)`, `[label][ref]` */
+const LINK_PATTERN = /\[([^\]]*)\](?:\([^)]*\)|\[[^\]]*\])/g;
+
+/** Keeps the label of a pattern that captures one. `replace` types its
+ * replacer's groups as `any`, so they are annotated here rather than inline. */
+const keepLabel = (_match: string, label: string) => label;
+
+/** Keeps the alias of a wikilink-shaped pattern, or its target when it has
+ * no alias. An empty alias — `[[Note|]]` — stays empty. */
+const keepAliasOrTarget = (_match: string, target: string, alias?: string) =>
+  alias ?? target;
+
 /** Utilities for parsing Obsidian-flavored Markdown */
 export class Markdown {
+  /**
+   * Replace every link with its label, dropping the target and the syntax.
+   * `[my site](www.example.com)` becomes `my site`, `[[Note|alias]]` becomes
+   * `alias`, and `[[Note]]` becomes `Note`. Footnote references carry no
+   * label worth keeping, so they are removed outright.
+   */
+  static stripLinks(text: string) {
+    // Footnote references go first: removing them also stops an adjacent pair
+    // like `[^1][^2]` from being read as a reference link.
+    // Images and embeds go next: an image inside a link is the one nesting
+    // Markdown allows, and unwrapping it leaves an ordinary link behind.
+    return text
+      .replace(FOOTNOTE_REFERENCE_PATTERN, '')
+      .replace(EMBED_PATTERN, keepAliasOrTarget)
+      .replace(IMAGE_PATTERN, keepLabel)
+      .replace(WIKILINK_PATTERN, keepAliasOrTarget)
+      .replace(LINK_PATTERN, keepLabel);
+  }
+
   /**
    * Remove leading spaces, bullet point or number, and checkbox if any
    */

@@ -229,3 +229,141 @@ describe('countFootnoteRefs', () => {
     );
   });
 });
+
+describe('stripLinks', () => {
+  describe('inline links', () => {
+    it('keeps the label and drops the target', () => {
+      expect(Markdown.stripLinks('See [my site](www.example.com) now')).toBe(
+        'See my site now'
+      );
+    });
+
+    it('keeps the alt text of an image', () => {
+      expect(Markdown.stripLinks('![a diagram](diagram.png)')).toBe(
+        'a diagram'
+      );
+    });
+
+    it('keeps the alt text of an image given by reference', () => {
+      expect(Markdown.stripLinks('a ![a diagram][ref] b')).toBe(
+        'a a diagram b'
+      );
+    });
+
+    it('strips a link whose target contains spaces and punctuation', () => {
+      expect(
+        Markdown.stripLinks('[label](https://example.com/a,b (x)')
+      ).not.toContain('https');
+    });
+
+    it('leaves nothing behind for an empty label', () => {
+      expect(Markdown.stripLinks('a[](url)b')).toBe('ab');
+    });
+
+    it('strips every link in a string, not only the first', () => {
+      // Kills the missing-/g mutant
+      expect(Markdown.stripLinks('[one](a) and [two](b)')).toBe('one and two');
+    });
+
+    it('unwraps an image nested inside a link', () => {
+      // The only nesting Markdown permits; needs more than one pass
+      expect(Markdown.stripLinks('[![alt](img.png)](www.example.com)')).toBe(
+        'alt'
+      );
+    });
+  });
+
+  describe('wikilinks', () => {
+    it('keeps the target of a plain wikilink', () => {
+      expect(Markdown.stripLinks('About [[Some Note]] here')).toBe(
+        'About Some Note here'
+      );
+    });
+
+    it('keeps the alias and drops the target when one is present', () => {
+      expect(Markdown.stripLinks('About [[Some Note|the alias]]')).toBe(
+        'About the alias'
+      );
+    });
+
+    it('keeps an empty alias rather than falling back to the target', () => {
+      // Kills the `alias ?? target` → `alias || target` mutant
+      expect(Markdown.stripLinks('a[[Some Note|]]b')).toBe('ab');
+    });
+
+    it('strips the embed prefix of an embedded note', () => {
+      expect(Markdown.stripLinks('![[Some Note]]')).toBe('Some Note');
+    });
+
+    it('keeps the alias of an embedded note', () => {
+      expect(Markdown.stripLinks('![[Some Note|the alias]]')).toBe('the alias');
+    });
+
+    it('keeps a heading reference as part of the target', () => {
+      expect(Markdown.stripLinks('[[Some Note#A Heading]]')).toBe(
+        'Some Note#A Heading'
+      );
+    });
+
+    it('strips every wikilink in a string', () => {
+      expect(Markdown.stripLinks('[[one]] and [[two|2]]')).toBe('one and 2');
+    });
+  });
+
+  describe('reference links', () => {
+    it('keeps the label and drops the reference', () => {
+      expect(Markdown.stripLinks('See [my site][ref] now')).toBe(
+        'See my site now'
+      );
+    });
+  });
+
+  describe('footnote references', () => {
+    it('removes a footnote reference outright, label and all', () => {
+      expect(Markdown.stripLinks('a claim[^1] and another[^note]')).toBe(
+        'a claim and another'
+      );
+    });
+
+    it('removes an adjacent pair rather than reading it as a reference link', () => {
+      // Without the footnote pass, `[^1][^2]` matches the reference-link shape
+      expect(Markdown.stripLinks('a claim[^1][^2] here')).toBe(
+        'a claim here'
+      );
+    });
+
+    it('leaves a footnote definition alone', () => {
+      // A definition is `[^1]:`; only references are stripped
+      expect(Markdown.stripLinks('[^1]: the footnote text')).toBe(
+        '[^1]: the footnote text'
+      );
+    });
+  });
+
+  describe('non-links', () => {
+    it('returns a string containing no brackets unchanged', () => {
+      fc.assert(
+        fc.property(
+          fc.string().filter((s) => !/[[\]]/.test(s)),
+          (text) => {
+            expect(Markdown.stripLinks(text)).toBe(text);
+          }
+        )
+      );
+    });
+
+    it('leaves a checkbox alone', () => {
+      expect(Markdown.stripLinks('- [x] done item')).toBe('- [x] done item');
+    });
+
+    it('leaves an unclosed bracket alone', () => {
+      expect(Markdown.stripLinks('a [not a link b')).toBe('a [not a link b');
+    });
+
+    it('leaves bracketed text with no target alone', () => {
+      expect(Markdown.stripLinks('an [aside] mid-sentence')).toBe(
+        'an [aside] mid-sentence'
+      );
+    });
+  });
+});
