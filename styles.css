@@ -801,10 +801,41 @@ body {
   min-width: 0;
 }
 
+/* Holds the text box and the button that opens the calendar, and is what the
+   popup measures itself against — so the popup lines up with the pair rather
+   than with the box alone. */
+.ir-queue-date-jump-anchor {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-1);
+  flex: 0 0 auto;
+}
+
 .ir-queue-date-jump {
   font-size: var(--font-ui-smaller);
   flex: 0 0 var(--ir-queue-date-jump-width);
   width: var(--ir-queue-date-jump-width);
+}
+
+/* Chromium's own picker button. Hidden because the picker behind it is the
+   thing this plugin replaced: it accepts no page CSS, so it cannot be made to
+   match the calendar beside it, and on iOS its WebKit counterpart came with
+   Reset and confirm buttons that did nothing. Clicking the text portion of a
+   date input does not raise the picker, so removing this button — together
+   with the alt+down handler in `DateJumpField` and the read-only box on
+   mobile — leaves no way to reach it. */
+.ir-queue-date-jump::-webkit-calendar-picker-indicator {
+  display: none;
+}
+
+.ir-queue-date-jump-trigger {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+.ir-queue-date-jump-trigger .ir-calendar-icon {
+  width: var(--icon-s);
+  height: var(--icon-s);
 }
 
 /* A real flex box rather than `display: contents`: as a flank sibling it must
@@ -1030,6 +1061,246 @@ body {
   .ir-queue-cell[data-column='scheduling'] .ir-queue-inline-label {
     color: var(--text-normal);
     font-weight: var(--font-normal);
+  }
+}
+
+/* #endregion */
+
+/* #region Date picker calendar */
+
+/* The plugin's own month calendar, standing in for the one the browser draws
+   for a date input. Chromium and WebKit each render their own, neither accepts
+   page CSS, and WebKit's on iOS dropped the adjacent-month days and added
+   Reset and confirm buttons that did nothing — so the two platforms could not
+   be made to agree until the calendar was ours.
+
+   Positioned from script (see `CalendarPopup`), which supplies `top` and
+   `left`. Fixed to the viewport rather than to the controls bar: the review
+   view's `.view-content` is `overflow: hidden` and would clip an in-flow
+   popup, and viewport coordinates are what let the script clamp it on a narrow
+   screen without walking offset parents. */
+.ir-calendar {
+  /* One square per day at full size. The grid sizes itself from this one
+     number, and gives it up evenly when the popup runs out of room. */
+  --ir-calendar-cell: 2rem;
+  /* Kept off both viewport edges by this much. Mirrors `VIEWPORT_MARGIN` in
+     `CalendarPopup`, which uses it for `top` and `left`. */
+  --ir-calendar-gutter: 8px;
+
+  position: fixed;
+  z-index: var(--layer-popover);
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-3);
+  padding: var(--size-4-2);
+
+  /* Sized from the grid, then capped at the viewport.
+
+     Both halves are load-bearing. Without the cap, a fixed box with `left` set
+     and no width resolves to whatever space is left to its right, and a grid
+     that does not fit simply spills out of the background it is drawn on —
+     which is what happened on a narrow pane, where the last column and the
+     Saturday header ran off the screen.
+
+     And the cap has to be against the viewport rather than against that
+     leftover space, or the width would depend on `left` while the script's
+     clamp computes `left` from the width. */
+  box-sizing: border-box;
+  width: max-content;
+  max-width: calc(100vw - 2 * var(--ir-calendar-gutter));
+  background-color: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-s);
+  font-size: var(--font-ui-smaller);
+
+  /* Until `CalendarPopup` has measured it and written `top` and `left`, so it
+     is never seen in the viewport's corner for a frame. `visibility` rather
+     than `display: none`, which would leave the popup with no box and so
+     nothing to measure. */
+  visibility: hidden;
+}
+
+.ir-calendar-placed {
+  visibility: visible;
+}
+
+.ir-calendar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--size-2-3);
+}
+
+/* Truncates rather than pushing the arrows apart, so a long month name cannot
+   widen the popup past the grid underneath it. */
+.ir-calendar-month {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+}
+
+.ir-calendar-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Square and never squeezed, so the two arrows balance the month name
+     between them however wide that name grows. */
+  flex: 0 0 auto;
+  width: var(--ir-calendar-cell);
+  height: var(--ir-calendar-cell);
+  padding: 0;
+  background-color: transparent;
+  box-shadow: none;
+  border: none;
+  border-radius: var(--clickable-icon-radius);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+/* Reached when the whole neighbouring month falls outside the queue's range,
+   so there is nothing to page to. */
+.ir-calendar-nav:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+/* `align-items` set rather than left at `stretch`, so each day keeps the
+   height its own aspect ratio gives it instead of being pulled to the row's. */
+.ir-calendar-week {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-1);
+}
+
+/* Shrinkable, and `min-width: 0` so it may go below the width of its own
+   label. Seven rigid columns are what burst out of the popup on a narrow
+   pane; giving all seven the same shrink factor lets the grid narrow evenly
+   and stay aligned with the header above it. */
+.ir-calendar-weekday {
+  flex: 1 1 var(--ir-calendar-cell);
+  min-width: 0;
+  color: var(--text-faint);
+  text-align: center;
+  text-transform: uppercase;
+  /* The two-letter abbreviations are dense enough to read as one word without
+     it, and the tracking is what makes them read as a header row instead. */
+  letter-spacing: 0.06em;
+}
+
+.ir-calendar-day {
+  /* See `.ir-calendar-weekday`: the columns shrink together. */
+  flex: 1 1 var(--ir-calendar-cell);
+  min-width: 0;
+  /* Height follows the width the row actually settled on, rather than being
+     pinned to the full cell size. A fixed height stays put while the columns
+     narrow, which on a phone left every day taller than it was wide. */
+  aspect-ratio: 1;
+  /* Centres the digit in the square itself rather than leaning on the button's
+     own default text layout, which differs between the two engines. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background-color: transparent;
+  box-shadow: none;
+  border: none;
+  border-radius: var(--radius-s);
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  /* Keeps the columns aligned: without it a row of 1s is visibly narrower
+     than a row of 8s in most proportional UI fonts. */
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background-color 0.1s ease,
+    color 0.1s ease;
+}
+
+/* The days either side of the month, which fill the first and last weeks. Both
+   native pickers break this convention — Chromium draws them like any other
+   day, iOS omits them entirely — and it is the whole reason they are here: a
+   grid that stops mid-week reads as truncated. */
+.ir-calendar-day[data-outside-month] {
+  color: var(--text-faint);
+}
+
+/* Outside the queue's range, so nothing is due there and jumping to it would
+   land back where the user already is. */
+.ir-calendar-day[aria-disabled='true'] {
+  color: var(--text-faint);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Ringed rather than filled, so it can still be told apart once it is also the
+   selected day and the fill below takes it over. */
+.ir-calendar-day[data-today] {
+  box-shadow: inset 0 0 0 1px var(--text-accent);
+  color: var(--text-accent);
+  font-weight: var(--font-semibold);
+}
+
+/* Last, so it wins over every rule above: a selected day is a selected day
+   whichever month it belongs to and whether or not it is today. */
+.ir-calendar-day[aria-selected='true'] {
+  background-color: var(--interactive-accent);
+  box-shadow: none;
+  color: var(--text-on-accent);
+  font-weight: var(--font-semibold);
+}
+
+.ir-calendar-day:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  /* Inset, so the ring stays inside the cell and does not overlap its
+     neighbours in a grid this tightly packed. */
+  outline-offset: -2px;
+}
+
+/* Gated the same way the queue rows' hover is: on a touch screen a hover state
+   sticks to the last thing tapped until something else is. */
+@media (hover: hover) {
+  .ir-calendar-day:hover:not([aria-disabled='true']):not(
+      [aria-selected='true']
+    ) {
+    background-color: var(--background-modifier-hover);
+  }
+
+  .ir-calendar-nav:hover:not(:disabled) {
+    background-color: var(--background-modifier-hover);
+    color: var(--text-normal);
+  }
+}
+
+/* The touch counterpart to the hover above, and the only feedback a tap gets
+   before the popup closes. */
+.ir-calendar-day:active:not([aria-disabled='true']) {
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+/* Ruled off from the grid: these two act on the calendar as a whole, not on
+   the day under the pointer. */
+.ir-calendar-footer {
+  display: flex;
+  gap: var(--size-2-3);
+  padding-top: var(--size-2-3);
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.ir-calendar-action {
+  flex: 1 1 0;
+  padding: var(--size-2-2) var(--size-4-1);
+  font-size: var(--font-ui-smaller);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ir-calendar-day {
+    transition: none;
   }
 }
 

@@ -22,9 +22,11 @@ import {
   intSequence,
   isInteger,
   isObject,
+  isSameDay,
   reviewDayOf,
   searchAll,
   sequenceSum,
+  startOfDay,
 } from './utils';
 
 const safeStringKey = () => fc.stringMatching(/^[a-zA-Z$][a-zA-Z0-9$_]*$/);
@@ -381,6 +383,123 @@ describe('getEndOfDay for the current day', () => {
         }
       )
     );
+  });
+});
+
+describe('startOfDay', () => {
+  const anyInstant = fc.date({
+    min: new Date('1970-01-01'),
+    max: new Date('2200-12-31'),
+    noInvalidDate: true,
+  });
+
+  it('lands on midnight', () => {
+    fc.assert(
+      fc.property(anyInstant, (instant) => {
+        const day = startOfDay(instant);
+        expect(day.getHours()).toBe(0);
+        expect(day.getMinutes()).toBe(0);
+        expect(day.getSeconds()).toBe(0);
+        expect(day.getMilliseconds()).toBe(0);
+      })
+    );
+  });
+
+  it('keeps the calendar date it was given', () => {
+    fc.assert(
+      fc.property(anyInstant, (instant) => {
+        const day = startOfDay(instant);
+        expect(day.getFullYear()).toBe(instant.getFullYear());
+        expect(day.getMonth()).toBe(instant.getMonth());
+        expect(day.getDate()).toBe(instant.getDate());
+      })
+    );
+  });
+
+  it('never moves an instant forward past its own day', () => {
+    fc.assert(
+      fc.property(anyInstant, (instant) => {
+        expect(startOfDay(instant).getTime()).toBeLessThanOrEqual(
+          instant.getTime()
+        );
+      })
+    );
+  });
+
+  it('is idempotent', () => {
+    fc.assert(
+      fc.property(anyInstant, (instant) => {
+        const once = startOfDay(instant);
+        expect(startOfDay(once).getTime()).toBe(once.getTime());
+      })
+    );
+  });
+
+  it('does not mutate the date it is given', () => {
+    fc.assert(
+      fc.property(anyInstant, (instant) => {
+        const before = instant.getTime();
+        startOfDay(instant);
+        expect(instant.getTime()).toBe(before);
+      })
+    );
+  });
+});
+
+describe('isSameDay', () => {
+  const anyInstant = fc.date({
+    min: new Date('1970-01-01'),
+    max: new Date('2200-12-31'),
+    noInvalidDate: true,
+  });
+
+  it('holds for any instant against itself', () => {
+    fc.assert(
+      fc.property(anyInstant, (instant) => {
+        expect(isSameDay(instant, instant)).toBe(true);
+      })
+    );
+  });
+
+  it('holds for an instant and its own midnight', () => {
+    fc.assert(
+      fc.property(anyInstant, (instant) => {
+        expect(isSameDay(instant, startOfDay(instant))).toBe(true);
+      })
+    );
+  });
+
+  it('does not depend on the order of its arguments', () => {
+    fc.assert(
+      fc.property(anyInstant, anyInstant, (a, b) => {
+        expect(isSameDay(a, b)).toBe(isSameDay(b, a));
+      })
+    );
+  });
+
+  it('agrees with comparing the two midnights', () => {
+    fc.assert(
+      fc.property(anyInstant, anyInstant, (a, b) => {
+        expect(isSameDay(a, b)).toBe(
+          startOfDay(a).getTime() === startOfDay(b).getTime()
+        );
+      })
+    );
+  });
+
+  it('separates the same date in different years and months', () => {
+    // A day-of-month-only comparison would call all three of these the same
+    // day, which is exactly the bug that would light up the wrong cell in a
+    // calendar showing a month either side of the one selected.
+    expect(isSameDay(new Date(2026, 6, 15), new Date(2027, 6, 15))).toBe(false);
+    expect(isSameDay(new Date(2026, 6, 15), new Date(2026, 7, 15))).toBe(false);
+    expect(isSameDay(new Date(2026, 6, 15), new Date(2026, 6, 16))).toBe(false);
+  });
+
+  it('holds across two times on one day', () => {
+    expect(
+      isSameDay(new Date(2026, 6, 15, 0, 0), new Date(2026, 6, 15, 23, 59))
+    ).toBe(true);
   });
 });
 

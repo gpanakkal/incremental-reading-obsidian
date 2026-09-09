@@ -73,7 +73,9 @@ function wireQueue({
     reviewManager,
   } as never);
   vi.spyOn(ReactQuery, 'useQueue').mockReturnValue({
-    data: isLoading ? dataWhileLoading && { ...page, ...dataWhileLoading } : page,
+    data: isLoading
+      ? dataWhileLoading && { ...page, ...dataWhileLoading }
+      : page,
     isLoading,
   } as never);
   return { findPageForDate };
@@ -252,8 +254,11 @@ describe('ReviewQueue', () => {
     const focusable = [
       ...container.querySelectorAll('.ir-queue-controls button, input'),
     ];
-    const [date, prev, next] = focusable;
+    // The calendar trigger belongs to the date field and sits with it, so tab
+    // reaches both before it reaches the pager.
+    const [date, openCalendar, prev, next] = focusable;
     expect(date).toBe(dateInput(container));
+    expect(openCalendar.className).toContain('ir-queue-date-jump-trigger');
     expect(prev.textContent).toBe('<');
     expect(next.textContent).toBe('>');
   });
@@ -385,9 +390,10 @@ describe('ReviewQueue', () => {
         '.ir-queue-visible-range, .ir-queue-controls button, input'
       ),
     ];
-    const [label, date, prev, next] = parts;
+    const [label, date, openCalendar, prev, next] = parts;
     expect(label.className).toContain('ir-queue-visible-range');
     expect(date).toBe(dateInput(container));
+    expect(openCalendar.className).toContain('ir-queue-date-jump-trigger');
     expect(prev.textContent).toBe('<');
     expect(next.textContent).toBe('>');
   });
@@ -433,8 +439,7 @@ describe('ReviewQueue', () => {
 
     expect(title.textContent).toBe('Upcoming');
     expect(
-      title.compareDocumentPosition(controls) &
-        Node.DOCUMENT_POSITION_FOLLOWING
+      title.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
   });
 

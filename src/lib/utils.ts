@@ -38,6 +38,27 @@ export function getDateString(date?: Date) {
 }
 
 /**
+ * Get local midnight on a date's own calendar day.
+ *
+ * Built from date parts rather than by zeroing the time fields, which is what
+ * makes it correct across a daylight-saving transition: on a day whose
+ * midnight does not exist, the constructor lands on the hour the clock jumps
+ * to, while `setHours(0, 0, 0, 0)` would land on the previous day.
+ */
+export function startOfDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+/** Whether two instants fall on the same calendar date, in local time. */
+export function isSameDay(a: Date, b: Date) {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+/**
  * Get the rollover-adjusted end of a review day as a Unix timestamp.
  *
  * A review day begins at `midnight + offsetHours` on the calendar date it is
@@ -50,15 +71,12 @@ export function getDateString(date?: Date) {
  */
 export function getEndOfDay(offsetHours: number, day?: Date) {
   const date = day ?? new Date();
-  // Built from date parts rather than `Date.parse(date.toDateString())`: the
-  // format `toDateString` emits is implementation-defined, and `Date.parse` on
-  // a non-ISO string is too. This plugin runs in both Electron and mobile
-  // webviews, which are separate engines.
-  const midnight = new Date(
-    date.getFullYear(),
-    date.getMonth(),
-    date.getDate()
-  ).getTime();
+  // `startOfDay` builds from date parts rather than parsing
+  // `date.toDateString()`: the format `toDateString` emits is
+  // implementation-defined, and `Date.parse` on a non-ISO string is too. This
+  // plugin runs in both Electron and mobile webviews, which are separate
+  // engines.
+  const midnight = startOfDay(date).getTime();
   const boundary = midnight + offsetHours * 60 * MS_PER_MINUTE;
 
   // The named day ends at the *next* boundary after the one that opens it.
@@ -76,11 +94,7 @@ export function getEndOfDay(offsetHours: number, day?: Date) {
  * under a -5h offset one at 20:00 already belongs to the next.
  */
 export function reviewDayOf(instant: Date, offsetHours: number) {
-  const day = new Date(
-    instant.getFullYear(),
-    instant.getMonth(),
-    instant.getDate()
-  );
+  const day = startOfDay(instant);
   // Before its own day's opening boundary, so it still belongs to the day
   // before; past the next one, so it already belongs to the day after.
   const millisIntoDay = instant.getTime() - day.getTime();

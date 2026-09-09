@@ -6,6 +6,13 @@ import { DateJumpField } from './DateJumpField';
 
 // #region HELPERS
 
+/**
+ * The review day the field is told is today. Fixed, so nothing here depends on
+ * the clock — and distinct from the dates the tests enter, so a "Today" that
+ * silently read `new Date()` would be visible.
+ */
+const TODAY = new Date(2026, 6, 15);
+
 /** Render a component into a detached jsdom container and return it. */
 function mount(node: ComponentChild): HTMLElement {
   const container = document.createElement('div');
@@ -14,8 +21,55 @@ function mount(node: ComponentChild): HTMLElement {
   return container;
 }
 
+/**
+ * Let Preact's queued re-render land. State updates are scheduled on a
+ * microtask, so nothing an event handler sets is in the DOM until this
+ * resolves.
+ */
+async function flush() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 function dateInput(container: HTMLElement): HTMLInputElement {
   return container.querySelector('input[type="date"]') as HTMLInputElement;
+}
+
+/**
+ * The text box, whatever type it carries. Mobile swaps `type="date"` for
+ * `type="text"` to be rid of WebKit's picker, so tests that are about the box
+ * itself rather than about it being a date input look it up by class.
+ */
+function field(container: HTMLElement): HTMLInputElement {
+  return container.querySelector('.ir-queue-date-jump') as HTMLInputElement;
+}
+
+/** The button that opens the calendar. */
+function trigger(container: HTMLElement): HTMLButtonElement {
+  return container.querySelector(
+    '.ir-queue-date-jump-trigger'
+  ) as HTMLButtonElement;
+}
+
+/**
+ * The calendar, when it is open. Looked up in the document rather than in the
+ * field's own container: it is portalled out to `<body>`.
+ */
+function calendar(): HTMLElement | null {
+  return document.querySelector('.ir-calendar');
+}
+
+/** A day cell in the open calendar, by the date its label ends with. */
+function calendarDay(label: string): HTMLButtonElement {
+  const match = Array.from(
+    document.querySelectorAll<HTMLButtonElement>('.ir-calendar-day')
+  ).find((day) => day.getAttribute('aria-label')?.endsWith(label));
+  if (!match) throw new Error(`No day cell for ${label}`);
+  return match;
+}
+
+function click(element: HTMLElement) {
+  element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
 /** Set the input's value and commit it, as picking a date does. */
@@ -51,7 +105,7 @@ describe('DateJumpField', () => {
 
   it('reports the entered date as a local Date at midnight', () => {
     const onJump = vi.fn();
-    const container = mount(<DateJumpField onJump={onJump} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={onJump} />);
 
     enterDate(container, '2026-07-13');
 
@@ -66,7 +120,7 @@ describe('DateJumpField', () => {
 
   it('does not report a jump when the field is cleared', () => {
     const onJump = vi.fn();
-    const container = mount(<DateJumpField onJump={onJump} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={onJump} />);
 
     enterDate(container, '');
 
@@ -75,7 +129,7 @@ describe('DateJumpField', () => {
 
   it('reports exactly one jump per date pick', () => {
     const onJump = vi.fn();
-    const container = mount(<DateJumpField onJump={onJump} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={onJump} />);
 
     enterDate(container, '2026-07-13');
 
@@ -87,7 +141,7 @@ describe('DateJumpField', () => {
     // means, so the field listens only for `input`. A trailing `change` from
     // the same pick must not double-jump.
     const onJump = vi.fn();
-    const container = mount(<DateJumpField onJump={onJump} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={onJump} />);
 
     enterDate(container, '2026-07-13');
     dateInput(container).dispatchEvent(new Event('change', { bubbles: true }));
@@ -97,7 +151,7 @@ describe('DateJumpField', () => {
 
   it('reports a jump again when the same date is re-picked', () => {
     const onJump = vi.fn();
-    const container = mount(<DateJumpField onJump={onJump} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={onJump} />);
 
     // Jump to a date, page away manually, then re-pick the same date to get
     // back. The second pick must still jump.
@@ -109,7 +163,7 @@ describe('DateJumpField', () => {
 
   it('reports a new jump when the date changes again', () => {
     const onJump = vi.fn();
-    const container = mount(<DateJumpField onJump={onJump} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={onJump} />);
 
     enterDate(container, '2026-07-13');
     enterDate(container, '2026-07-20');
@@ -124,7 +178,7 @@ describe('DateJumpField', () => {
     // and enter is how a keyboard user says "go" — without this the typed date
     // is simply ignored.
     const onJump = vi.fn();
-    const container = mount(<DateJumpField onJump={onJump} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={onJump} />);
 
     typeDate(container, '2026-07-13');
     pressKey(container, 'Enter');
@@ -142,7 +196,11 @@ describe('DateJumpField', () => {
     // page in view may not be the first page holding that day's items.
     const onJump = vi.fn();
     const container = mount(
-      <DateJumpField value={new Date(2026, 7, 1)} onJump={onJump} />
+      <DateJumpField
+        today={TODAY}
+        value={new Date(2026, 7, 1)}
+        onJump={onJump}
+      />
     );
 
     pressKey(container, 'Enter');
@@ -157,7 +215,11 @@ describe('DateJumpField', () => {
     // Repeated enters are repeated explicit requests, not one debounced one.
     const onJump = vi.fn();
     const container = mount(
-      <DateJumpField value={new Date(2026, 7, 1)} onJump={onJump} />
+      <DateJumpField
+        today={TODAY}
+        value={new Date(2026, 7, 1)}
+        onJump={onJump}
+      />
     );
 
     pressKey(container, 'Enter');
@@ -168,7 +230,7 @@ describe('DateJumpField', () => {
 
   it('does not report a jump on enter when the field is empty', () => {
     const onJump = vi.fn();
-    const container = mount(<DateJumpField onJump={onJump} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={onJump} />);
 
     pressKey(container, 'Enter');
 
@@ -178,7 +240,11 @@ describe('DateJumpField', () => {
   it('does not report a jump for keys other than enter', () => {
     const onJump = vi.fn();
     const container = mount(
-      <DateJumpField value={new Date(2026, 7, 1)} onJump={onJump} />
+      <DateJumpField
+        today={TODAY}
+        value={new Date(2026, 7, 1)}
+        onJump={onJump}
+      />
     );
 
     pressKey(container, 'ArrowUp');
@@ -195,7 +261,7 @@ describe('DateJumpField', () => {
     // reported again for the same reason a re-pick is: the jump is idempotent,
     // and suppressing it would also suppress a genuine second request.
     const onJump = vi.fn();
-    const container = mount(<DateJumpField onJump={onJump} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={onJump} />);
 
     enterDate(container, '2026-07-13');
     pressKey(container, 'Enter');
@@ -210,11 +276,15 @@ describe('DateJumpField', () => {
     // Commit a date, let the parent move the view elsewhere, then press enter
     // on the field's own value again. The second request must reach the parent.
     const onJump = vi.fn();
-    const container = mount(<DateJumpField onJump={onJump} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={onJump} />);
 
     enterDate(container, '2026-07-13');
     render(
-      <DateJumpField value={new Date(2026, 6, 20)} onJump={onJump} />,
+      <DateJumpField
+        today={TODAY}
+        value={new Date(2026, 6, 20)}
+        onJump={onJump}
+      />,
       container
     );
     pressKey(container, 'Enter');
@@ -226,7 +296,11 @@ describe('DateJumpField', () => {
 
   it('shows the date it is given', () => {
     const container = mount(
-      <DateJumpField value={new Date(2026, 6, 13)} onJump={() => {}} />
+      <DateJumpField
+        today={TODAY}
+        value={new Date(2026, 6, 13)}
+        onJump={() => {}}
+      />
     );
 
     expect(dateInput(container).value).toBe('2026-07-13');
@@ -235,25 +309,37 @@ describe('DateJumpField', () => {
   it('formats a single-digit month and day with leading zeroes', () => {
     // A bare `${month}` would render 2026-3-4, which a date input rejects.
     const container = mount(
-      <DateJumpField value={new Date(2026, 2, 4)} onJump={() => {}} />
+      <DateJumpField
+        today={TODAY}
+        value={new Date(2026, 2, 4)}
+        onJump={() => {}}
+      />
     );
 
     expect(dateInput(container).value).toBe('2026-03-04');
   });
 
   it('renders empty when given no date', () => {
-    const container = mount(<DateJumpField onJump={() => {}} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={() => {}} />);
 
     expect(dateInput(container).value).toBe('');
   });
 
   it('reflects a new date pushed from the parent', () => {
     const container = mount(
-      <DateJumpField value={new Date(2026, 6, 13)} onJump={() => {}} />
+      <DateJumpField
+        today={TODAY}
+        value={new Date(2026, 6, 13)}
+        onJump={() => {}}
+      />
     );
 
     render(
-      <DateJumpField value={new Date(2026, 6, 20)} onJump={() => {}} />,
+      <DateJumpField
+        today={TODAY}
+        value={new Date(2026, 6, 20)}
+        onJump={() => {}}
+      />,
       container
     );
 
@@ -261,7 +347,7 @@ describe('DateJumpField', () => {
   });
 
   it('is labelled for screen readers and tooltips', () => {
-    const container = mount(<DateJumpField onJump={() => {}} />);
+    const container = mount(<DateJumpField today={TODAY} onJump={() => {}} />);
 
     expect(dateInput(container).getAttribute('aria-label')).toBeTruthy();
   });
@@ -272,6 +358,7 @@ describe('DateJumpField', () => {
       // the spinner arrows at the boundary.
       const container = mount(
         <DateJumpField
+          today={TODAY}
           min={new Date(2026, 6, 1)}
           max={new Date(2026, 6, 31)}
           onJump={() => {}}
@@ -284,7 +371,9 @@ describe('DateJumpField', () => {
     });
 
     it('sets no min or max when the queue has no bounds', () => {
-      const container = mount(<DateJumpField onJump={() => {}} />);
+      const container = mount(
+        <DateJumpField today={TODAY} onJump={() => {}} />
+      );
 
       const input = dateInput(container);
       expect(input.hasAttribute('min')).toBe(false);
@@ -296,7 +385,11 @@ describe('DateJumpField', () => {
       // never rewrites it — so the clamp has to happen here.
       const onJump = vi.fn();
       const container = mount(
-        <DateJumpField max={new Date(2026, 6, 31)} onJump={onJump} />
+        <DateJumpField
+          today={TODAY}
+          max={new Date(2026, 6, 31)}
+          onJump={onJump}
+        />
       );
 
       enterDate(container, '2026-09-15');
@@ -310,7 +403,11 @@ describe('DateJumpField', () => {
     it('reports the min when an earlier date is entered', () => {
       const onJump = vi.fn();
       const container = mount(
-        <DateJumpField min={new Date(2026, 6, 1)} onJump={onJump} />
+        <DateJumpField
+          today={TODAY}
+          min={new Date(2026, 6, 1)}
+          onJump={onJump}
+        />
       );
 
       enterDate(container, '2026-01-05');
@@ -325,6 +422,7 @@ describe('DateJumpField', () => {
       const onJump = vi.fn();
       const container = mount(
         <DateJumpField
+          today={TODAY}
           min={new Date(2026, 6, 1)}
           max={new Date(2026, 6, 31)}
           onJump={onJump}
@@ -344,6 +442,7 @@ describe('DateJumpField', () => {
       const onJump = vi.fn();
       const container = mount(
         <DateJumpField
+          today={TODAY}
           min={new Date(2026, 6, 1)}
           max={new Date(2026, 6, 31)}
           onJump={onJump}
@@ -365,7 +464,11 @@ describe('DateJumpField', () => {
       // bound falls.
       const onJump = vi.fn();
       const container = mount(
-        <DateJumpField max={new Date(2026, 6, 31, 18, 30)} onJump={onJump} />
+        <DateJumpField
+          today={TODAY}
+          max={new Date(2026, 6, 31, 18, 30)}
+          onJump={onJump}
+        />
       );
 
       enterDate(container, '2026-07-31');
@@ -385,6 +488,7 @@ describe('DateJumpField', () => {
       // and the field would keep displaying the rejected date.
       const container = mount(
         <DateJumpField
+          today={TODAY}
           value={new Date(2026, 6, 31)}
           max={new Date(2026, 6, 31)}
           onJump={() => {}}
@@ -401,6 +505,7 @@ describe('DateJumpField', () => {
       // lands back on the bound.
       const container = mount(
         <DateJumpField
+          today={TODAY}
           value={new Date(2026, 6, 31)}
           max={new Date(2026, 6, 31)}
           onJump={() => {}}
@@ -415,7 +520,11 @@ describe('DateJumpField', () => {
 
     it('leaves the displayed value of an in-range entry alone', () => {
       const container = mount(
-        <DateJumpField max={new Date(2026, 6, 31)} onJump={() => {}} />
+        <DateJumpField
+          today={TODAY}
+          max={new Date(2026, 6, 31)}
+          onJump={() => {}}
+        />
       );
 
       enterDate(container, '2026-07-13');
@@ -428,7 +537,11 @@ describe('DateJumpField', () => {
       // an out-of-range date can arrive.
       const onJump = vi.fn();
       const container = mount(
-        <DateJumpField max={new Date(2026, 6, 31)} onJump={onJump} />
+        <DateJumpField
+          today={TODAY}
+          max={new Date(2026, 6, 31)}
+          onJump={onJump}
+        />
       );
 
       typeDate(container, '2026-09-15');
@@ -444,6 +557,7 @@ describe('DateJumpField', () => {
       const onJump = vi.fn();
       const container = mount(
         <DateJumpField
+          today={TODAY}
           min={new Date(2026, 6, 1)}
           max={new Date(2026, 6, 31)}
           onJump={onJump}
@@ -453,6 +567,323 @@ describe('DateJumpField', () => {
       enterDate(container, '');
 
       expect(onJump).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('calendar', () => {
+    it('renders the calendar outside the field’s own subtree', async () => {
+      // The bug this guards: nested in the controls bar, the calendar was both
+      // clipped by `.view-content`'s `overflow: hidden` and positioned against
+      // an Obsidian ancestor that establishes a containing block, which put it
+      // hundreds of pixels away from the field it belongs to. `position:
+      // fixed` only means the viewport when nothing above it has a transform,
+      // filter, or `contain` — and under `<body>` nothing can.
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} onJump={() => {}} />
+      );
+
+      click(trigger(container));
+      await flush();
+
+      const popup = calendar();
+      expect(popup).not.toBeNull();
+      expect(container.contains(popup)).toBe(false);
+      expect(popup?.parentElement).toBe(document.body);
+    });
+
+    it('takes the calendar back out of the document when it closes', async () => {
+      // A portalled node is not removed by unmounting the field's own subtree,
+      // so a leak here would leave dead calendars stacked under `<body>`.
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} onJump={() => {}} />
+      );
+
+      click(trigger(container));
+      await flush();
+      click(trigger(container));
+      await flush();
+
+      expect(document.querySelectorAll('.ir-calendar')).toHaveLength(0);
+    });
+
+    it('opens the calendar from the trigger', async () => {
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} onJump={() => {}} />
+      );
+
+      expect(calendar()).toBeNull();
+      click(trigger(container));
+      await flush();
+
+      expect(calendar()).not.toBeNull();
+    });
+
+    it('closes the calendar from the trigger', async () => {
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} onJump={() => {}} />
+      );
+
+      click(trigger(container));
+      await flush();
+      click(trigger(container));
+      await flush();
+
+      expect(calendar()).toBeNull();
+    });
+
+    it('closes the calendar as soon as a day is picked', async () => {
+      // The headline iOS defect: WebKit's picker stayed up after a tap, and
+      // the calendar has to close on the press that chose a day, not later.
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} onJump={() => {}} />
+      );
+
+      click(trigger(container));
+      await flush();
+      click(calendarDay('July 20, 2026'));
+      await flush();
+
+      expect(calendar()).toBeNull();
+    });
+
+    it('reports the day picked in the calendar', async () => {
+      const onJump = vi.fn();
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} onJump={onJump} />
+      );
+
+      click(trigger(container));
+      await flush();
+      click(calendarDay('July 20, 2026'));
+
+      expect(onJump).toHaveBeenCalledTimes(1);
+      const [jumped] = onJump.mock.calls[0] as [Date];
+      expect(jumped.getTime()).toBe(new Date(2026, 6, 20).getTime());
+    });
+
+    it('reports a second day picked after reopening the calendar', async () => {
+      // The other half of the iOS defect: the first pick landed, and every
+      // pick after it was swallowed because the picker and the box it mirrored
+      // had gone out of step.
+      const onJump = vi.fn();
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} onJump={onJump} />
+      );
+
+      click(trigger(container));
+      await flush();
+      click(calendarDay('July 20, 2026'));
+      await flush();
+
+      click(trigger(container));
+      await flush();
+      click(calendarDay('July 22, 2026'));
+
+      expect(onJump).toHaveBeenCalledTimes(2);
+      const [second] = onJump.mock.calls[1] as [Date];
+      expect(second.getDate()).toBe(22);
+    });
+
+    it('opens the calendar on alt+down instead of the browser’s picker', async () => {
+      // Chromium's shortcut for the picker this replaced. Left alone, the one
+      // control the plugin cannot style is a keystroke away.
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} onJump={() => {}} />
+      );
+
+      dateInput(container).dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          altKey: true,
+          bubbles: true,
+        })
+      );
+      await flush();
+
+      expect(calendar()).not.toBeNull();
+    });
+
+    it('does not report a jump when alt+down opens the calendar', async () => {
+      const onJump = vi.fn();
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} onJump={onJump} />
+      );
+
+      dateInput(container).dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          altKey: true,
+          bubbles: true,
+        })
+      );
+      await flush();
+
+      expect(onJump).not.toHaveBeenCalled();
+    });
+
+    it('closes the calendar on escape', async () => {
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} onJump={() => {}} />
+      );
+
+      click(trigger(container));
+      await flush();
+      calendarDay('July 15, 2026').dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+      );
+      await flush();
+
+      expect(calendar()).toBeNull();
+    });
+
+    it('hands the queue’s bounds to the calendar', async () => {
+      const container = mount(
+        <DateJumpField
+          today={TODAY}
+          value={TODAY}
+          min={new Date(2026, 6, 10)}
+          max={new Date(2026, 6, 20)}
+          onJump={() => {}}
+        />
+      );
+
+      click(trigger(container));
+      await flush();
+
+      expect(calendarDay('July 21, 2026').getAttribute('aria-disabled')).toBe(
+        'true'
+      );
+      expect(calendarDay('July 9, 2026').getAttribute('aria-disabled')).toBe(
+        'true'
+      );
+    });
+
+    it('clamps a day the calendar reports past the end', async () => {
+      // Only "Today" can name a day outside the range — the grid's own cells
+      // are inert there — and it is clamped for the same reason a typed date
+      // is: every date past the end resolves to the last page.
+      const onJump = vi.fn();
+      const container = mount(
+        <DateJumpField
+          today={new Date(2026, 8, 1)}
+          value={TODAY}
+          max={new Date(2026, 6, 31)}
+          onJump={onJump}
+        />
+      );
+
+      click(trigger(container));
+      await flush();
+      click(
+        Array.from(
+          document.querySelectorAll<HTMLButtonElement>('.ir-calendar-action')
+        ).find((button) => button.textContent === 'Today') as HTMLButtonElement
+      );
+
+      expect(onJump).toHaveBeenCalledTimes(1);
+      const [jumped] = onJump.mock.calls[0] as [Date];
+      expect(jumped.getMonth()).toBe(6);
+      expect(jumped.getDate()).toBe(31);
+    });
+
+    it('returns focus to the trigger when the calendar closes', async () => {
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} onJump={() => {}} />
+      );
+
+      click(trigger(container));
+      await flush();
+      click(calendarDay('July 20, 2026'));
+      await flush();
+
+      expect(document.activeElement).toBe(trigger(container));
+    });
+  });
+
+  describe('mobile', () => {
+    it('keeps a real date input on desktop', () => {
+      const container = mount(
+        <DateJumpField today={TODAY} isMobile={false} onJump={() => {}} />
+      );
+
+      expect(field(container).type).toBe('date');
+    });
+
+    it('leaves the text box writable on desktop', () => {
+      const container = mount(
+        <DateJumpField today={TODAY} isMobile={false} onJump={() => {}} />
+      );
+
+      expect(field(container).readOnly).toBe(false);
+    });
+
+    it('uses a plain text box on mobile, which has no picker at all', () => {
+      // The bug this guards: WebKit raises its own date picker on any tap of a
+      // date input — read-only included, which was tried first and did not
+      // stop it. There is no way to decline the picker, so the only fix is a
+      // control WebKit has no picker for.
+      const container = mount(
+        <DateJumpField today={TODAY} isMobile onJump={() => {}} />
+      );
+
+      expect(field(container).type).not.toBe('date');
+      expect(container.querySelector('input[type="date"]')).toBeNull();
+    });
+
+    it('makes the text box read-only on mobile', () => {
+      // Nothing to type there, and read-only is what keeps the on-screen
+      // keyboard down when the box is tapped.
+      const container = mount(
+        <DateJumpField today={TODAY} isMobile onJump={() => {}} />
+      );
+
+      expect(field(container).readOnly).toBe(true);
+    });
+
+    it('still shows the date it is given on mobile', () => {
+      // The text box carries the same `yyyy-mm-dd` the date input did, which
+      // is what `jumpTo` parses.
+      const container = mount(
+        <DateJumpField
+          today={TODAY}
+          value={new Date(2026, 3, 19)}
+          isMobile
+          onJump={() => {}}
+        />
+      );
+
+      expect(field(container).value).toBe('2026-04-19');
+    });
+
+    it('opens the calendar when the read-only box is tapped', async () => {
+      // The box cannot be typed into on a phone, so a tap on it can only mean
+      // "let me pick a date".
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} isMobile onJump={() => {}} />
+      );
+
+      click(field(container));
+      await flush();
+
+      expect(calendar()).not.toBeNull();
+    });
+
+    it('leaves a click on the text box alone on desktop', async () => {
+      // Clicking a segment there means "edit this segment"; a calendar
+      // appearing over it would be in the way.
+      const container = mount(
+        <DateJumpField
+          today={TODAY}
+          value={TODAY}
+          isMobile={false}
+          onJump={() => {}}
+        />
+      );
+
+      click(dateInput(container));
+      await flush();
+
+      expect(calendar()).toBeNull();
     });
   });
 });

@@ -173,8 +173,14 @@ export function ReviewQueue() {
           <VisibleRangeLabel range={visibleRange} />
           <DateJumpField
             value={visibleDay}
+            // The review day in progress, not the calendar day: under a +4h
+            // rollover the current review day at 01:00 is yesterday's date,
+            // and a "Today" that jumped to the calendar day would contradict
+            // every date the table beside it shows.
+            today={currentReviewDay(plugin.settings.dayRolloverOffset)}
             min={minDay}
             max={maxDay}
+            isMobile={plugin.app.isMobile}
             onJump={handleJumpToDate}
           />
         </div>
