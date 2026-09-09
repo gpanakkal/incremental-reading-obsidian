@@ -43,7 +43,6 @@ export default class ReviewView extends FileView {
     reviewManager: ReviewManager
   ) {
     super(leaf);
-    this.allowNoFile = true;
     this.plugin = plugin;
     this.#reviewManager = reviewManager;
     this.#page = plugin.store.getState().page;
