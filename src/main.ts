@@ -447,8 +447,17 @@ export default class IncrementalReadingPlugin extends Plugin {
     );
   }
 
+  /**
+   * Focus an existing unfocused review tab if one exists, or open review if
+   * no such tab exists. If the review tab is already focused, toggle between
+   * the home screen or item review.
+   * @param initialItem
+   * @param newLeaf whether we're opening review in a new tab or in the one
+   * from which the command was executed
+   */
   async learn(initialItem?: ReviewItem, newLeaf: boolean = true) {
     const openReviewLeaf: WorkspaceLeaf | null = this.getOpenReviewLeaf();
+    const alreadyActive = openReviewLeaf === this.getActiveReviewView()?.leaf;
     const leaf =
       openReviewLeaf ?? this.app.workspace.getLeaf(newLeaf ? 'tab' : false);
 
@@ -460,6 +469,10 @@ export default class IncrementalReadingPlugin extends Plugin {
     // view keeps its page (e.g. mid-review) regardless of skipHomeScreen.
     if (!openReviewLeaf) {
       store.dispatch(setPage(this.settings.skipHomeScreen ? 'review' : 'home'));
+    } else if (alreadyActive) {
+      // review is open and focused, so toggle between home and item review pages
+      const currentPage = store.getState().page;
+      store.dispatch(setPage(currentPage === 'home' ? 'review' : 'home'));
     }
     // Set the initial item on the view if provided
     if (initialItem) {
