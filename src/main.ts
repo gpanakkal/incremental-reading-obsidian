@@ -12,6 +12,7 @@ import databaseSchema from './db/schema.sql';
 import { Actions } from './lib/Actions';
 import { DATABASE_FILE_PATH, PLACEHOLDER_PLUGIN_ICON } from './lib/constants';
 import { createIRExtensions } from './lib/extensions';
+import { registerFileExplorerActiveFileClick } from './lib/extensions/FileExplorerActiveFileClick';
 import { registerReadingModeActionBar } from './lib/extensions/ReadingModeActionBar';
 import {
   MIDDLE_MOUSE_BUTTON,
@@ -326,6 +327,10 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         // Register action bar for reading mode standalone notes
         registerReadingModeActionBar(this);
+
+        // Make the reviewed note openable from the file explorer, which
+        // otherwise swallows a plain click on the active file's row
+        registerFileExplorerActiveFileClick(this);
 
         // listen for file creations and handle, especially restored item notes
         this.registerEvent(

@@ -463,3 +463,43 @@ test.describe('Extracting snippets', () => {
     ).toBeInViewport();
   });
 });
+
+test.describe('File explorer', () => {
+  test('opens the note under review in a new tab', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
+
+    // The review view is a FileView holding the item under review, so the item
+    // is the workspace's active file and the explorer marks its row
+    // `is-active`. That is precisely the row whose plain left click Obsidian
+    // swallows, on the assumption the file is already on screen as a note.
+    await executeCommandById(window, 'file-explorer:reveal-active-file');
+    const activeRow = window.locator('.nav-file-title.is-active');
+    await expect(activeRow).toHaveAttribute(
+      'data-path',
+      new RegExp(`${ARTICLE_TITLE}\\.md$`)
+    );
+
+    await activeRow.click();
+
+    // The note opened as a note, in a tab of its own, and the review tab is
+    // still there rather than having been navigated away.
+    await expect(
+      window.locator(
+        '.workspace-leaf.mod-active .workspace-leaf-content[data-type="markdown"]'
+      )
+    ).toBeVisible();
+    await expect(
+      window.locator(
+        `.workspace-leaf-content[data-type="incremental-reading-review"]`
+      )
+    ).toHaveCount(1);
+  });
+});
