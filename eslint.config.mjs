@@ -28,6 +28,18 @@ export default defineConfig([
     extends: [obsidianmd.configs.recommended],
     rules: {
       'obsidianmd/no-nodejs-modules': 'error',
+      // `obsidian-typings` declares Obsidian's undocumented window globals, four
+      // of which `obsidian` also exports. Reaching for one of those without an
+      // import type-checks clean and runs fine inside Obsidian, then dies with a
+      // ReferenceError under Vitest, where the module alias is the only source.
+      // `no-undef` is off below (TS owns that job), so this rule is what is left.
+      'no-restricted-globals': [
+        'error',
+        ...['Notice', 'moment', 'request', 'requestUrl'].map((name) => ({
+          name,
+          message: `Import ${name} from 'obsidian'; the ambient global is absent under Vitest.`,
+        })),
+      ],
     },
   },
   {
