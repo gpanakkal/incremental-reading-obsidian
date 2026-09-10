@@ -1,5 +1,5 @@
 import type IncrementalReadingPlugin from '#/main';
-import { PluginSettingTab, Setting, type App } from 'obsidian';
+import { Notice, PluginSettingTab, Setting, type App } from 'obsidian';
 import {
   generatorParameters,
   type FSRSParameters,

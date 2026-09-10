@@ -11,6 +11,7 @@ import {
   editorEditorField,
   editorInfoField,
   normalizePath,
+  Notice,
 } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
