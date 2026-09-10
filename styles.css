@@ -1181,6 +1181,13 @@ body {
 .ir-calendar-grid {
   touch-action: pan-y;
   overflow: hidden;
+  /* A mouse drag pages the month too, and dragging across a grid of text
+     otherwise sweeps a selection along behind the cursor — 42 highlighted
+     numbers, left standing once the month has moved. Prefixed as well, for
+     the iOS versions Obsidian still runs on, where it also takes away the
+     magnifier a long press on a day would raise. */
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* Carries all three months and is the only thing that moves — one transform
@@ -1329,10 +1336,22 @@ body {
 }
 
 /* The touch counterpart to the hover above, and the only feedback a tap gets
-   before the popup closes. */
-.ir-calendar-day:active:not([aria-disabled='true']) {
-  background-color: var(--interactive-accent);
-  color: var(--text-on-accent);
+   before the popup closes.
+
+   Deliberately not the accent fill the selected day wears: a day being held is
+   not a day that has been chosen, and painting the two alike left a finger
+   resting mid-swipe looking as though it had already picked something. The
+   same tint the queue rows use when pressed, and strong enough to read on a
+   phone, where there is no hover state before it.
+
+   Driven by the attribute rather than by `:active` because the script has to
+   be able to call the press off the moment a drag begins — and because the
+   engine keeps `:active` on the node, which the re-render that pages the month
+   can hand to the month arriving. See `PRESSED_ATTRIBUTE` in `CalendarPopup`. */
+.ir-calendar-day[data-pressed]:not([aria-disabled='true']):not(
+    [aria-selected='true']
+  ) {
+  background-color: var(--background-modifier-active-hover);
 }
 
 /* Ruled off from the grid: these two act on the calendar as a whole, not on

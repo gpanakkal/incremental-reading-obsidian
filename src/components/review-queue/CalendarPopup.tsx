@@ -19,18 +19,27 @@ const DAYS_PER_WEEK = 7;
 const VIEWPORT_MARGIN = 8;
 
 /**
- * The least a finger must travel across the grid to page the month, in px.
- * Far enough that the slide off a tap cannot reach it, and the floor under the
- * proportional threshold below for the case where the panel measures zero —
- * which is every case under a test runner with no layout engine.
+ * How far a drag must travel across the grid to page the month on release, in
+ * px. Under it the track springs back, so a hesitant drag is a look rather
+ * than a move.
+ *
+ * A fixed distance rather than a share of the panel's width. A CSS pixel is
+ * the closest thing a web view has to a real-world unit — a phone and a tablet
+ * both scale their viewport so that one comes out at roughly the same size
+ * under a thumb — whereas a share of the panel asks for a longer drag on
+ * whichever screen draws the calendar wider, and the calendar is drawn from
+ * `rem`, so that is a matter of the reader's font size as much as their
+ * device. The distance is also about a third shorter than the quarter-panel it
+ * replaces, which read as the month being magnetised to where it started.
  */
-const SWIPE_THRESHOLD = 40;
+const COMMIT_DISTANCE = 42;
 
 /**
- * The share of a month's width a drag must cover to commit on release. Under
- * it the track springs back, so a hesitant drag is a look rather than a move.
+ * The most of a panel's width the distance above may claim. Only reached on a
+ * popup squeezed by a narrow screen, where a fifth of the month is already a
+ * long way to drag and a fixed distance could ask for more grid than there is.
  */
-const COMMIT_FRACTION = 0.25;
+const MAX_COMMIT_FRACTION = 0.2;
 
 /**
  * How far a finger must move before the gesture is called horizontal or
@@ -55,6 +64,16 @@ const PANEL_OFFSETS = [-1, 0, 1];
  * thing that has to know the duration.
  */
 const SETTLING_CLASS = 'ir-calendar-track-settling';
+
+/**
+ * Marks the day a pointer is currently held on, which the stylesheet tints.
+ *
+ * Owned here rather than left to `:active`, which cannot tell a press from the
+ * first moment of a swipe and which the engine keeps on the node itself — and
+ * the nodes either grid shares with the next month survive the re-render that
+ * pages it, carrying the tint into a month the finger never pressed on.
+ */
+const PRESSED_ATTRIBUTE = 'data-pressed';
 
 // Spelled out rather than derived from `Intl.DateTimeFormat`. Nothing else in
 // the plugin formats dates by locale — `formatQueueDate` in `columns.tsx`
@@ -164,6 +183,19 @@ function weeksOf(month: Date) {
 }
 
 /**
+ * How far a drag must travel to page the month, for a panel `width` px wide.
+ *
+ * Read once per gesture, from the width measured when the pointer went down.
+ */
+export function commitThreshold(width: number) {
+  const cap = width * MAX_COMMIT_FRACTION;
+  // A panel of no width is one nothing has laid out: every box under a test
+  // runner, and the popup itself for the frame before it is placed. There is
+  // no share of it to take, so the distance stands on its own.
+  return cap > 0 ? Math.min(COMMIT_DISTANCE, cap) : COMMIT_DISTANCE;
+}
+
+/**
  * Whether `day` falls outside `[min, max]`. Both bounds are compared on the
  * calendar day, so a bound carrying a time of day cannot rule out its own day.
  */
@@ -212,7 +244,7 @@ export function CalendarPopup({
    */
   const focusPendingRef = useRef(true);
   const trackRef = useRef<HTMLDivElement>(null);
-  /** The gesture in progress, while a finger is still down on the grid. */
+  /** The gesture in progress, while a pointer is still down on the grid. */
   const dragRef = useRef<{
     x: number;
     y: number;
@@ -226,10 +258,22 @@ export function CalendarPopup({
    */
   const settleFromRef = useRef<number | null>(null);
   /**
-   * Whether the gesture that just ended paged the month. A swipe finishes with
-   * the finger over some day, and the click that follows would pick it.
+   * Whether the gesture that just ended was a drag rather than a tap — which
+   * is to say whether it ever settled on an axis, since nothing below the
+   * axis lock moves anything. A drag finishes with the pointer over some day,
+   * and both the click the engine sends afterwards and the focus that comes
+   * with it would otherwise be taken for a choice. It holds for a drag that
+   * sprang back as much as for one that paged: once the grid has moved under
+   * the finger, letting go is a cancel.
    */
-  const swipedRef = useRef(false);
+  const draggedRef = useRef(false);
+  /**
+   * The day currently marked as pressed, so the mark can be lifted off the
+   * same node later. Written onto the node rather than held in state: this is
+   * feedback on a press, and routing it through a render would rebuild all
+   * three months' worth of cells on every touch.
+   */
+  const pressedDayRef = useRef<HTMLElement | null>(null);
 
   /**
    * Place the popup under its anchor, clamped inside the viewport and flipped
@@ -411,23 +455,39 @@ export function CalendarPopup({
     track.style.removeProperty('transform');
   }
 
+  /**
+   * Move the pressed mark to `day`, or lift it off with null.
+   *
+   * Only ever one day carries it, and it is taken off before any state change
+   * that could page the month: two grids a month apart share the days in the
+   * week they overlap on, so the node under the finger is one the re-render
+   * may well keep — mark and all.
+   */
+  function markPressed(day: HTMLElement | null) {
+    pressedDayRef.current?.removeAttribute(PRESSED_ATTRIBUTE);
+    pressedDayRef.current = day;
+    day?.setAttribute(PRESSED_ATTRIBUTE, '');
+  }
+
   function cancelDrag() {
     dragRef.current = null;
+    markPressed(null);
     settleTrack();
   }
 
   function handlePointerDown(event: PointerEvent) {
     // Cleared here rather than after the click it suppresses, so a gesture the
     // browser never follows with a click cannot leave the next tap swallowed.
-    swipedRef.current = false;
+    draggedRef.current = false;
+    dragRef.current = null;
     const track = trackRef.current;
-    // Touch only. A mouse drag across the grid is a selection attempt, not a
-    // gesture, and the month arrows are the pointer's way to page.
-    if (event.pointerType !== 'touch' || !track) {
-      dragRef.current = null;
-      return;
-    }
+    // The primary button only: a right or middle press is after a context
+    // menu or a paste, and moving the month under one would be a surprise.
+    // Touch reports zero here, so this costs a finger nothing.
+    if (event.button > 0 || !track) return;
 
+    // Every modality drags — finger, mouse and pen alike. The month arrows
+    // stay where they are for anyone who would rather click to page.
     dragRef.current = {
       x: event.clientX,
       y: event.clientY,
@@ -439,12 +499,24 @@ export function CalendarPopup({
       offset: 0,
     };
 
-    // Keeps the gesture alive when the finger wanders off the grid, which for
-    // a swipe that spans the popup it very often does.
-    const target = event.currentTarget as HTMLElement;
-    if (event.pointerId != null && target.setPointerCapture) {
-      target.setPointerCapture(event.pointerId);
-    }
+    const target = event.target as HTMLElement | null;
+    markPressed(target?.closest<HTMLElement>('.ir-calendar-day') ?? null);
+  }
+
+  /**
+   * Route the rest of the gesture to the grid, wherever the pointer wanders —
+   * which for a swipe that spans the popup it very often does.
+   *
+   * Taken at the axis lock rather than at the press, because capture also
+   * retargets the click the engine sends on release: from the press it would
+   * land every ordinary click on the grid instead of on the day aimed at.
+   * By the time an axis is locked the gesture is a drag, and that click is one
+   * being suppressed anyway.
+   */
+  function capturePointer(event: PointerEvent) {
+    const grid = event.currentTarget as HTMLElement;
+    if (event.pointerId == null || !grid.setPointerCapture) return;
+    grid.setPointerCapture(event.pointerId);
   }
 
   function handlePointerMove(event: PointerEvent) {
@@ -463,6 +535,12 @@ export function CalendarPopup({
         return;
       }
       drag.axis = Math.abs(acrossX) > Math.abs(acrossY) ? 'x' : 'y';
+      // The press is over. What the pointer is doing now is a gesture, and the
+      // day it started from must stop answering as though it were being
+      // chosen — a mark still standing when the month pages is one the new
+      // month inherits.
+      markPressed(null);
+      if (drag.axis === 'x') capturePointer(event);
     }
     if (drag.axis === 'y') return;
 
@@ -477,15 +555,23 @@ export function CalendarPopup({
   function handlePointerUp() {
     const drag = dragRef.current;
     dragRef.current = null;
-    // Only a horizontal gesture ever moves the track, so anything else has
-    // nothing to put back — and adding the settle transition for a plain tap
-    // would leave it armed for the drag after it.
-    if (!drag || drag.axis !== 'x') return;
+    markPressed(null);
+    // A gesture that never locked an axis never moved anything, so it is a tap
+    // and the click after it is the user's choice of day. Returning here is
+    // also what keeps the settle transition off a plain tap, which would
+    // otherwise leave it armed for the drag after it.
+    if (!drag || drag.axis === 'undecided') return;
 
-    // Proportional to the panel, so the gesture asks for the same share of the
-    // month's width on any screen, with a floor for the case where the panel
-    // cannot be measured at all.
-    const threshold = Math.max(SWIPE_THRESHOLD, drag.width * COMMIT_FRACTION);
+    // Anything past the axis lock ends as a cancel rather than a choice,
+    // whether or not it goes on to page the month: the grid has moved under
+    // the pointer, and the day it happens to be over on release is not one
+    // that was aimed at.
+    draggedRef.current = true;
+    // Only a horizontal gesture ever moves the track, so a vertical one has
+    // nothing to put back.
+    if (drag.axis !== 'x') return;
+
+    const threshold = commitThreshold(drag.width);
     const months = drag.offset < 0 ? 1 : -1;
 
     if (Math.abs(drag.offset) < threshold || !canPage(months)) {
@@ -493,8 +579,6 @@ export function CalendarPopup({
       return;
     }
 
-    // The gesture ends over a day, and releasing there would otherwise pick it.
-    swipedRef.current = true;
     // The month changes now, not when the animation ends: the state is what
     // the rest of the component reads, and leaving it behind the transition
     // would mean a keystroke landing on a month that is on its way out. What
@@ -587,15 +671,23 @@ export function CalendarPopup({
         className="ir-calendar-grid"
         role="grid"
         onKeyDown={handleGridKeyDown}
-        // Pointer events rather than touch ones: they carry the modality in
-        // `pointerType`, so the gesture belongs to touchscreens rather than to
-        // a platform, and a touchscreen laptop gets it too.
+        // Pointer events rather than touch ones: one set of handlers covers
+        // the finger, the mouse and the pen, so dragging the month is the same
+        // gesture on a phone and on a desktop rather than a mobile feature
+        // that happens to be reachable on a touchscreen laptop.
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        // A finger lifted outside the grid, or a gesture the browser took over
-        // — either way there is no swipe to finish, and the track goes back.
+        // A pointer lifted outside the grid, or a gesture the browser took
+        // over — either way there is no drag to finish, and the track goes back.
         onPointerCancel={cancelDrag}
+        // A press that leaves without letting go: a mouse button held down
+        // and taken off the calendar before it travelled far enough to be a
+        // drag, whose release lands somewhere this never hears about. The
+        // gesture itself is left alone — a drag is captured by the time it can
+        // leave, and boundary events are held back until it ends — but the
+        // mark has to come off, or the day it was on stays lit indefinitely.
+        onPointerLeave={() => markPressed(null)}
       >
         {/* Outside the track, so the weekday names hold still while the days
             slide under them — the labels are the same in every month, and
@@ -677,11 +769,13 @@ export function CalendarPopup({
                               : -1
                           }
                           onClick={() => {
-                            // The click that ends a swipe. Swallowed once, so
-                            // paging the month does not also pick whichever
-                            // day the finger happened to come to rest on.
-                            if (swipedRef.current) {
-                              swipedRef.current = false;
+                            // The click that ends a drag. Swallowed once, so
+                            // a gesture that moved the grid — whether it went
+                            // on to page the month or sprang back to it —
+                            // does not also pick whichever day the pointer
+                            // happened to come to rest on.
+                            if (draggedRef.current) {
+                              draggedRef.current = false;
                               return;
                             }
                             choose(day);
@@ -690,17 +784,21 @@ export function CalendarPopup({
                           // other way — a click, or focus restored by the
                           // browser.
                           //
-                          // Confined to the month on screen, which is what
-                          // stops a press on a day from either side of it
-                          // paging the grid. Pressing a mouse button focuses
-                          // the day under it, so an unguarded sync moved the
-                          // whole month while the button was still down; that
-                          // jump belongs on release, with every other action.
-                          // Guarded against the focused day as well, so the
-                          // focus the effect above just moved does not set the
-                          // state that moved it all over again.
+                          // Confined to the month on screen and to the days
+                          // that month owns, which is what stops a press on a
+                          // day from either side of it paging the grid.
+                          // Pressing a mouse button focuses the day under it,
+                          // so an unguarded sync moved the whole month while
+                          // the button was still down — under a drag, out from
+                          // under the drag itself. That jump belongs on
+                          // release, with every other action. Guarded against
+                          // the focused day as well, so the focus the effect
+                          // above just moved does not set the state that moved
+                          // it all over again, and against a drag, whose own
+                          // release is what decides the month.
                           onFocus={() => {
-                            if (!isCurrentMonth) return;
+                            if (!isCurrentMonth || isOutsideMonth) return;
+                            if (draggedRef.current) return;
                             if (!isSameDay(day, focusedDay)) setFocusedDay(day);
                           }}
                         >

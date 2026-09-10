@@ -4,12 +4,19 @@ import fc from 'fast-check';
 import type { ComponentChild } from 'preact';
 import { render } from 'preact';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { buildMonthGrid, CalendarPopup } from './CalendarPopup';
+import {
+  buildMonthGrid,
+  CalendarPopup,
+  commitThreshold,
+} from './CalendarPopup';
 
 // #region HELPERS
 
 /** A fixed review day, so nothing here depends on the clock. */
 const TODAY = new Date(2026, 6, 15);
+
+/** Where every gesture here starts. Well inside a popup of any size. */
+const ORIGIN = { x: 200, y: 200 };
 
 /** Render a component into a detached jsdom container and return it. */
 function mount(node: ComponentChild): HTMLElement {
@@ -183,23 +190,38 @@ function drag(
   const grid = container.ownerDocument.querySelector(
     '.ir-calendar-grid'
   ) as HTMLElement;
-  const origin = { x: 200, y: 200 };
-  // Pressed on the day under the finger when one is named, so the click a real
-  // gesture ends with can be modelled too.
-  (from ?? grid).dispatchEvent(
-    pointerEvent('pointerdown', { ...origin, pointerType })
-  );
+  press(container, { pointerType, from });
   // Halfway, then all the way, so the axis is decided on the path rather than
   // in one jump.
   for (const fraction of [0.5, 1]) {
     grid.dispatchEvent(
       pointerEvent('pointermove', {
-        x: origin.x + acrossX * fraction,
-        y: origin.y + acrossY * fraction,
+        x: ORIGIN.x + acrossX * fraction,
+        y: ORIGIN.y + acrossY * fraction,
         pointerType,
       })
     );
   }
+}
+
+/**
+ * Put a pointer down and hold it there. Pressed on the day named when there is
+ * one, so both the mark a held day wears and the click a real gesture ends
+ * with can be modelled.
+ */
+function press(
+  container: HTMLElement,
+  {
+    pointerType = 'touch',
+    from,
+  }: { pointerType?: string; from?: HTMLElement } = {}
+) {
+  const grid = container.ownerDocument.querySelector(
+    '.ir-calendar-grid'
+  ) as HTMLElement;
+  (from ?? grid).dispatchEvent(
+    pointerEvent('pointerdown', { ...ORIGIN, pointerType })
+  );
 }
 
 /**
@@ -215,11 +237,63 @@ function moveTo(
   ) as HTMLElement;
   grid.dispatchEvent(
     pointerEvent('pointermove', {
-      x: 200 + acrossX,
-      y: 200 + acrossY,
+      x: ORIGIN.x + acrossX,
+      y: ORIGIN.y + acrossY,
       pointerType: 'touch',
     })
   );
+}
+
+/** Hand the gesture to the browser, as a scroll taking it over would. */
+function cancel(container: HTMLElement) {
+  const grid = container.ownerDocument.querySelector(
+    '.ir-calendar-grid'
+  ) as HTMLElement;
+  grid.dispatchEvent(
+    pointerEvent('pointercancel', { ...ORIGIN, pointerType: 'touch' })
+  );
+}
+
+/** Take the pointer off the grid, still held down. */
+function leave(container: HTMLElement, pointerType = 'mouse') {
+  const grid = container.ownerDocument.querySelector(
+    '.ir-calendar-grid'
+  ) as HTMLElement;
+  grid.dispatchEvent(pointerEvent('pointerleave', { ...ORIGIN, pointerType }));
+}
+
+/** The days wearing the mark a held one gets, across all three months. */
+function pressedDays(container: HTMLElement): HTMLButtonElement[] {
+  return allDayButtons(container).filter((day) =>
+    day.hasAttribute('data-pressed')
+  );
+}
+
+/**
+ * Report a laid-out width for the strip of months, which jsdom — having no
+ * layout engine — otherwise measures as zero. It is the width the commit
+ * distance is capped against.
+ */
+function measureTrack(container: HTMLElement, width: number) {
+  Object.defineProperty(track(container), 'offsetWidth', {
+    value: width,
+    configurable: true,
+  });
+}
+
+/**
+ * Whether a drag of `acrossX` px pages a calendar whose months measure `width`
+ * across. Mounts and tears down its own popup, since the two it compares
+ * cannot be on screen at once.
+ */
+async function pages({ width, acrossX }: { width: number; acrossX: number }) {
+  const container = mount(<CalendarPopup {...makeProps()} />);
+  measureTrack(container, width);
+  swipe(container, { acrossX });
+  await flush();
+  const paged = monthLabel(container) !== 'July 2026';
+  document.body.innerHTML = '';
+  return paged;
 }
 
 /** Lift the finger, ending whatever gesture is in progress. */
@@ -358,6 +432,69 @@ describe('buildMonthGrid', () => {
   });
 });
 
+describe('commitThreshold', () => {
+  // Any panel a layout engine could report, from the unmeasured zero up past
+  // the widest screen the popup could be opened on. Whole pixels, because the
+  // only source of these is `offsetWidth`, which rounds to them — a fractional
+  // width small enough to be interesting here is one no engine can produce.
+  const anyWidth = fc.integer({ min: 0, max: 4000 });
+
+  it('always asks for some travel', () => {
+    // A threshold of zero would page the month on the first pixel of a drag,
+    // which is every gesture that touches the grid at all.
+    fc.assert(
+      fc.property(anyWidth, (width) => {
+        expect(commitThreshold(width)).toBeGreaterThan(0);
+      })
+    );
+  });
+
+  it('never asks for more than a fifth of a panel it can measure', () => {
+    // The cap is what keeps the gesture possible on a popup squeezed onto a
+    // narrow screen, where the fixed distance could be most of the month.
+    fc.assert(
+      fc.property(
+        anyWidth.filter((width) => width > 0),
+        (width) => {
+          expect(commitThreshold(width)).toBeLessThanOrEqual(width * 0.2);
+        }
+      )
+    );
+  });
+
+  it('never asks for more than the fixed distance, however wide the panel', () => {
+    // The point of the change. A share of the month asked for a longer drag on
+    // whichever screen drew the calendar wider; this bound is what makes the
+    // gesture the same flick of the thumb on a phone and on a tablet.
+    fc.assert(
+      fc.property(anyWidth, (width) => {
+        expect(commitThreshold(width)).toBeLessThanOrEqual(commitThreshold(0));
+      })
+    );
+  });
+
+  it('asks no more of a narrow panel than of a wide one', () => {
+    // Only the cap moves with the width, and it only ever gives ground.
+    fc.assert(
+      fc.property(anyWidth, anyWidth, (a, b) => {
+        const [narrow, wide] = a < b ? [a, b] : [b, a];
+        // Zero is the unmeasured panel below, which is not on this scale.
+        if (narrow === 0) return;
+        expect(commitThreshold(narrow)).toBeLessThanOrEqual(
+          commitThreshold(wide)
+        );
+      })
+    );
+  });
+
+  it('asks the full distance of a panel nothing has measured', () => {
+    // Zero is what every box reports before it is laid out, and under a test
+    // runner with no layout engine at all. There is no share of it to cap
+    // against, so the fixed distance has to stand on its own.
+    expect(commitThreshold(0)).toBe(commitThreshold(4000));
+  });
+});
+
 describe('CalendarPopup', () => {
   afterEach(() => {
     document.body.innerHTML = '';
@@ -402,16 +539,21 @@ describe('CalendarPopup', () => {
     }
   });
 
-  it('does not page the month when a day either side of it takes focus', () => {
+  it('does not page the month when a day either side of it takes focus', async () => {
     // The bug this guards: pressing a mouse button focuses the day under it,
     // and the cursor sync that followed moved the whole grid to that day's
-    // month while the button was still down. Every other action here happens
-    // on release, and so must this one.
+    // month while the button was still down — under a drag, out from under the
+    // drag itself. Every other action here happens on release, and so must
+    // this one.
+    //
+    // Awaited, because the sync runs through state: an assertion made in the
+    // same tick passes whether or not the month is on its way out.
     const container = mount(
       <CalendarPopup {...makeProps({ value: new Date(2026, 6, 15) })} />
     );
 
     dayNamed(container, 'June 30, 2026').focus();
+    await flush();
 
     expect(monthLabel(container)).toBe('July 2026');
   });
@@ -734,15 +876,31 @@ describe('CalendarPopup', () => {
       expect(monthLabel(container)).toBe('July 2026');
     });
 
-    it('ignores a drag made with a mouse', async () => {
-      // A pointer has the month arrows. Dragging across the grid with one is a
-      // selection attempt, and paging under it would be a surprise.
+    it('pages for a drag made with a mouse', async () => {
+      // Paging by dragging is not a mobile feature that a touchscreen laptop
+      // happens to reach: a mouse drags the month exactly as a finger does,
+      // and the arrows stay there for anyone who would rather click.
       const container = mount(<CalendarPopup {...makeProps()} />);
 
       swipe(container, { acrossX: -80, pointerType: 'mouse' });
       await flush();
 
-      expect(monthLabel(container)).toBe('July 2026');
+      expect(monthLabel(container)).toBe('August 2026');
+    });
+
+    it('does not pick the day a mouse drag comes to rest on', async () => {
+      // The press that starts a mouse drag lands on a day and the release
+      // lands on another, and a click between the two is the engine's default
+      // reading of that. It is a drag, not a choice.
+      const onSelect = vi.fn();
+      const container = mount(<CalendarPopup {...makeProps({ onSelect })} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      swipe(container, { acrossX: -80, pointerType: 'mouse', from: day });
+      await flush();
+      click(day);
+
+      expect(onSelect).not.toHaveBeenCalled();
     });
 
     it('stops at the last month the queue reaches', async () => {
@@ -792,6 +950,37 @@ describe('CalendarPopup', () => {
 
       expect(onSelect).not.toHaveBeenCalled();
       expect(monthLabel(container)).toBe('August 2026');
+    });
+
+    it('does not pick the day a drag that sprang back rested on', async () => {
+      // A drag short of the commit distance puts the month back where it was.
+      // It must not take the day under the finger with it and close the popup:
+      // the grid moved, which makes the release a cancel rather than a choice.
+      const onSelect = vi.fn();
+      const container = mount(<CalendarPopup {...makeProps({ onSelect })} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      swipe(container, { acrossX: -20, from: day });
+      await flush();
+      click(day);
+
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(monthLabel(container)).toBe('July 2026');
+    });
+
+    it('does not pick the day a mostly vertical drag rested on', async () => {
+      // Scrolling the queue behind the popup starts on some day and ends on
+      // another. Once a gesture has an axis it is a gesture, whichever axis
+      // that turned out to be.
+      const onSelect = vi.fn();
+      const container = mount(<CalendarPopup {...makeProps({ onSelect })} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      swipe(container, { acrossX: 0, acrossY: -60, from: day });
+      await flush();
+      click(day);
+
+      expect(onSelect).not.toHaveBeenCalled();
     });
 
     it('still picks the day a tap lands on', async () => {
@@ -929,12 +1118,12 @@ describe('CalendarPopup', () => {
       expect(track(container).style.transform).toBe('');
     });
 
-    it('does not move for a drag made with a mouse', () => {
+    it('follows a mouse while it moves', () => {
       const container = mount(<CalendarPopup {...makeProps()} />);
 
       drag(container, { acrossX: -60, pointerType: 'mouse' });
 
-      expect(track(container).style.transform).toBe('');
+      expect(track(container).style.transform).toBe('translateX(-60px)');
     });
 
     it('gives only a little where there is no month to pull in', () => {
@@ -1009,6 +1198,119 @@ describe('CalendarPopup', () => {
         'ir-calendar-track-settling'
       );
       expect(track(container).style.transform).toBe('translateX(-30px)');
+    });
+  });
+
+  describe('press feedback', () => {
+    it('marks the day a pointer is held on', () => {
+      // The only feedback a tap gets before the popup closes. The stylesheet
+      // tints the mark; what matters here is that exactly one day wears it.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      press(container, { from: day });
+
+      expect(pressedDays(container)).toEqual([day]);
+    });
+
+    it('lifts the mark as soon as the pointer starts to drag', () => {
+      // The bug this guards: a day held part-way through a swipe wore the same
+      // fill as the selected day, so the calendar looked as though the finger
+      // had already chosen something it had not. A mark still standing when
+      // the month pages is worse — the two grids share the days of the week
+      // they overlap on, so the node under the finger survives the re-render
+      // and carries the tint into a month nobody pressed on.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      drag(container, { acrossX: -30, from: day });
+
+      expect(pressedDays(container)).toEqual([]);
+    });
+
+    it('lifts the mark for a vertical drag too', () => {
+      // A finger scrolling the queue behind the popup is not choosing a day
+      // either, even though the calendar itself holds still.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      drag(container, { acrossX: 0, acrossY: -60, from: day });
+
+      expect(pressedDays(container)).toEqual([]);
+    });
+
+    it('lifts the mark when the pointer is released', () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      press(container, { from: day });
+      release(container);
+
+      expect(pressedDays(container)).toEqual([]);
+    });
+
+    it('lifts the mark when the browser takes the gesture over', () => {
+      // No release is coming, so nothing else would ever take it off.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      press(container, { from: day });
+      cancel(container);
+
+      expect(pressedDays(container)).toEqual([]);
+    });
+
+    it('lifts the mark when a held pointer leaves the grid', () => {
+      // A mouse button held down and taken off the calendar releases somewhere
+      // the grid never hears about, so nothing else would take it off.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      press(container, { pointerType: 'mouse', from: day });
+      leave(container);
+
+      expect(pressedDays(container)).toEqual([]);
+    });
+
+    it('moves the mark rather than leaving the last one behind', () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+      const first = dayNamed(container, 'July 20, 2026');
+      const second = dayNamed(container, 'July 21, 2026');
+
+      press(container, { from: first });
+      press(container, { from: second });
+
+      expect(pressedDays(container)).toEqual([second]);
+    });
+
+    it('marks nothing when the press lands between the days', () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      press(container);
+
+      expect(pressedDays(container)).toEqual([]);
+    });
+  });
+
+  describe('commit distance', () => {
+    it('asks the same travel of a wide calendar as of a narrow one', async () => {
+      // A quarter of the month's width asked for a longer drag on whichever
+      // screen drew the calendar wider — and the calendar is drawn from `rem`,
+      // so that was a matter of the reader's font size as much as their
+      // device. The same 50px pages either.
+      expect(await pages({ width: 240, acrossX: -50 })).toBe(true);
+      expect(await pages({ width: 480, acrossX: -50 })).toBe(true);
+    });
+
+    it('holds the month for a drag short of it, whatever the width', async () => {
+      expect(await pages({ width: 240, acrossX: -30 })).toBe(false);
+      expect(await pages({ width: 480, acrossX: -30 })).toBe(false);
+    });
+
+    it('takes less of a calendar too narrow to give the full distance', async () => {
+      // A fifth of the panel, where the fixed distance would be most of the
+      // month and the drag could run out of grid before it ever committed.
+      expect(await pages({ width: 100, acrossX: -25 })).toBe(true);
     });
   });
 
