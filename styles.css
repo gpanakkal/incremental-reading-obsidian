@@ -840,20 +840,68 @@ body {
 }
 
 /* A real flex box rather than `display: contents`: as a flank sibling it must
-   size and centre as one unit, which a flattened wrapper cannot do. */
+   size and centre as one unit, which a flattened wrapper cannot do.
+
+   Tighter than the bar's own gap: each end button belongs beside the step
+   button it extends, and at the bar's spacing four arrows read as four
+   unrelated controls rather than two pairs around the page number. */
 .ir-queue-pagination {
   display: flex;
   align-items: center;
-  gap: var(--size-4-3);
+  gap: var(--size-2-2);
   flex: 0 0 auto;
 }
 
+/* Narrower than a review button elsewhere. Four of them share the bar with the
+   date controls, and at the standalone button's 16px flanks the pager alone
+   would outgrow a phone's width. */
+.ir-queue-pagination .ir-review-button {
+  padding: var(--size-2-2) var(--size-4-2);
+}
+
 .ir-queue-pagination-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--size-2-2);
+  /* The number sits between two pairs of arrows and needs more air than the
+     pairs give each other, or it reads as another button. */
+  margin-inline: var(--size-2-2);
   color: var(--text-muted);
   font-size: var(--font-ui-medium);
   text-align: center;
   /* Wide enough that the text does not shift as the page number grows. */
   min-width: 5em;
+}
+
+/* Qualified by the element, and not for emphasis: Obsidian styles text boxes
+   through `input[type='text'], input[type='search'], …`, which outweighs a
+   bare class. Everything below that the app also sets — the 30px height, the
+   `4px 8px` padding, the font size — is only reached from a selector that
+   carries the element too.
+
+   `height: auto` is what centres the digits. The app's fixed height leaves the
+   text to sit wherever it lands inside a box taller than the line; released,
+   the box is its own line box plus equal padding above and below, so centred
+   is the only thing it can be. It lands at much the same height as before
+   (15px × 1.3, plus the padding and border), and the pager's flex row centres
+   the box itself against the arrows.
+
+   The width is left to the `size` attribute — one character per digit the
+   largest page number needs — rather than fixed here for a page count no queue
+   has yet. */
+input.ir-queue-page-input {
+  width: auto;
+  min-width: 2ch;
+  height: auto;
+  padding: var(--size-2-2) var(--size-2-3);
+  font-size: var(--font-ui-medium);
+  line-height: var(--line-height-tight);
+  text-align: center;
+}
+
+.ir-queue-page-total {
+  white-space: nowrap;
 }
 
 /* The review day(s) the visible page covers, reading up to the date field it

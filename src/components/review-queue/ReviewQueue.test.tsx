@@ -93,6 +93,19 @@ function enterDate(container: HTMLElement, value: string) {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
+/**
+ * The pager's indicator read back as a whole, e.g. `3 of 3`. The page number
+ * is a text box, so it is a value rather than text and cannot be read off the
+ * indicator's `textContent`.
+ */
+function pageIndicator(container: HTMLElement): string {
+  const page = container.querySelector<HTMLInputElement>(
+    '.ir-queue-page-input'
+  );
+  const total = container.querySelector('.ir-queue-page-total')?.textContent;
+  return `${page?.value} ${total}`;
+}
+
 /** The visible-range label's text, or null when it is not rendered. */
 function rangeLabel(container: HTMLElement): string | null {
   return (
@@ -193,9 +206,7 @@ describe('ReviewQueue', () => {
     expect(date.getDate()).toBe(13);
     expect(entriesPerPage).toBe(QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE);
     // The reported page 2 is displayed 1-based as the third of three.
-    expect(
-      container.querySelector('.ir-queue-pagination-indicator')?.textContent
-    ).toBe('3 of 3');
+    expect(pageIndicator(container)).toBe('3 of 3');
   });
 
   it('navigates when the day already in view is re-entered', async () => {
@@ -218,9 +229,7 @@ describe('ReviewQueue', () => {
     const [date] = findPageForDate.mock.calls[0] as [Date];
     expect(date.getMonth()).toBe(7);
     expect(date.getDate()).toBe(1);
-    expect(
-      container.querySelector('.ir-queue-pagination-indicator')?.textContent
-    ).toBe('1 of 6');
+    expect(pageIndicator(container)).toBe('1 of 6');
   });
 
   it('ignores a stale lookup that resolves after a newer one', async () => {
@@ -241,9 +250,7 @@ describe('ReviewQueue', () => {
     await flush();
 
     // 101 rows at 20 per page → 6 pages; page 4 shows as "5 of 6".
-    expect(
-      container.querySelector('.ir-queue-pagination-indicator')?.textContent
-    ).toBe('5 of 6');
+    expect(pageIndicator(container)).toBe('5 of 6');
   });
 
   it('places the date field before the previous-page button', () => {
@@ -255,12 +262,18 @@ describe('ReviewQueue', () => {
       ...container.querySelectorAll('.ir-queue-controls button, input'),
     ];
     // The calendar trigger belongs to the date field and sits with it, so tab
-    // reaches both before it reaches the pager.
-    const [date, openCalendar, prev, next] = focusable;
-    expect(date).toBe(dateInput(container));
-    expect(openCalendar.className).toContain('ir-queue-date-jump-trigger');
-    expect(prev.textContent).toBe('<');
-    expect(next.textContent).toBe('>');
+    // reaches both before it reaches the pager, and reaches the pager's own
+    // controls in the order they are laid out.
+    expect(focusable.map((el) => el.getAttribute('aria-label'))).toEqual([
+      'Jump to date',
+      'Open calendar',
+      'First page',
+      'Previous page',
+      'Page number',
+      'Next page',
+      'Last page',
+    ]);
+    expect(focusable[0]).toBe(dateInput(container));
   });
 
   it('shows the review day the visible page opens on', () => {
@@ -390,12 +403,12 @@ describe('ReviewQueue', () => {
         '.ir-queue-visible-range, .ir-queue-controls button, input'
       ),
     ];
-    const [label, date, openCalendar, prev, next] = parts;
+    const [label, date, openCalendar, first, prev] = parts;
     expect(label.className).toContain('ir-queue-visible-range');
     expect(date).toBe(dateInput(container));
     expect(openCalendar.className).toContain('ir-queue-date-jump-trigger');
+    expect(first.textContent).toBe('<<');
     expect(prev.textContent).toBe('<');
-    expect(next.textContent).toBe('>');
   });
 
   it('balances the pagination with an equal flank on each side', () => {
