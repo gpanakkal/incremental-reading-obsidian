@@ -440,10 +440,55 @@ body {
   line-height: var(--line-height-tight);
 }
 
+/* The highlight behind the blanked answer comes from Obsidian, not from here:
+   `.markdown-rendered mark` sets `background-color: var(--text-highlight-bg)`,
+   and a descendant selector outranks a lone class whatever the source order, so
+   a `background-color` declared here never reaches the screen. Anything that
+   wants to match this highlight has to read the same variable. */
 .ir-hidden-answer {
-  background-color: yellow;
   padding: 2px 4px;
   border-radius: 2px;
+}
+
+/* The revealed answer's afterglow. While the card is blanked, `.ir-hidden-answer`
+   marks where the answer will appear; revealing it swaps the rendered card for an
+   editor, taking that cue with it. This puts the cue back on the answer text —
+   which is a different length than the placeholder, so it is re-applied to a range
+   found in the document rather than inherited — and fades it out, leaving the
+   answer to read as ordinary note text. Applied by AnswerRevealExtension, which
+   also drops it once the fade is done.
+
+   Background only: padding here would reflow the line inside CodeMirror. */
+.ir-revealed-answer {
+  border-radius: 2px;
+  animation: ir-answer-reveal-fade 1s ease-out forwards;
+}
+
+/* `--text-highlight-bg` is read here, at the point of use, rather than aliased to
+   a plugin variable first: Obsidian declares it on `body`, and a `var()` nested
+   inside a custom property is substituted against the element that property is
+   declared on. Aliasing it in `:root` looks up the token on `<html>`, finds
+   nothing, and leaves the animation with no background at all — the same trap the
+   `--ir-transclusion-*` block at the top of this file documents. Substituting on
+   the animating element instead inherits the value from `body` as intended. */
+@keyframes ir-answer-reveal-fade {
+  from {
+    background-color: var(--text-highlight-bg);
+  }
+
+  to {
+    background-color: transparent;
+  }
+}
+
+/* Reduced motion: keep the cue, since it is the whole point of the highlight,
+   but cut it instead of fading it. The decoration is removed on a timer either
+   way, so it still clears itself. */
+@media (prefers-reduced-motion: reduce) {
+  .ir-revealed-answer {
+    animation: none;
+    background-color: var(--text-highlight-bg);
+  }
 }
 
 .ir-card-viewer > :first-child {

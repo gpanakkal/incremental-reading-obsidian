@@ -21,6 +21,9 @@ const config = {
     '**/.*',
     '/*.*',
     '!vitest.config.ts',
+    // AnswerRevealExtension.test.ts reads the stylesheet to check that the fade
+    // it schedules lasts as long as the animation it is waiting on.
+    '!styles.css',
   ],
   checkers: ['typescript'],
   tsconfigFile: 'tsconfig.stryker.json',

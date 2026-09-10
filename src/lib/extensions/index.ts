@@ -1,6 +1,7 @@
 import type IncrementalReadingPlugin from '#/main';
 import type { Extension } from '@codemirror/state';
 import { actionBarExtension } from './ActionBarExtension';
+import { answerRevealExtension } from './AnswerRevealExtension';
 import { irPluginFacet } from './irPluginFacet';
 import { scrollPositionExtension } from './ScrollPositionExtension';
 import { snippetHighlightExtension } from './SnippetHighlightExtension';
@@ -13,6 +14,11 @@ export {
   setShowAnswerEffect,
   type ReviewCallbacks,
 } from './ActionBarExtension';
+export {
+  answerRevealExtension,
+  clearAnswerRevealEffect,
+  findRevealedAnswerRange,
+} from './AnswerRevealExtension';
 export { irPluginFacet, isReviewInterfaceFacet } from './irPluginFacet';
 export {
   isExternalSync,
@@ -39,6 +45,9 @@ export function createIRExtensions(
 
     // Snippet highlight decorations with click navigation
     snippetHighlightExtension,
+
+    // Fading highlight on a card's answer at the moment it is revealed
+    answerRevealExtension,
 
     // Action bar panel for IR notes
     actionBarExtension,
