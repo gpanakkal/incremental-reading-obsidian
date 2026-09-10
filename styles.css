@@ -822,8 +822,9 @@ body {
    match the calendar beside it, and on iOS its WebKit counterpart came with
    Reset and confirm buttons that did nothing. Clicking the text portion of a
    date input does not raise the picker, so removing this button — together
-   with the alt+down handler in `DateJumpField` and the read-only box on
-   mobile — leaves no way to reach it. */
+   with the alt+down handler in `DateJumpField` — leaves no way to reach it.
+   WebKit's needs nothing here: this box is desktop-only, and a control that
+   is not rendered has no picker to raise. */
 .ir-queue-date-jump::-webkit-calendar-picker-indicator {
   display: none;
 }

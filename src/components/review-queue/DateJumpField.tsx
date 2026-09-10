@@ -46,8 +46,9 @@ interface DateJumpFieldProps {
   /** Latest selectable date. Omitted when the queue has no upper bound. */
   max?: Date;
   /**
-   * Whether the plugin is running on a phone or tablet. Makes the text box
-   * read-only, which is what stops iOS opening its own picker over ours.
+   * Whether the plugin is running on a phone or tablet. Leaves out the text
+   * box, so the calendar button is the whole control — see the note below on
+   * why the box has no place there.
    */
   isMobile?: boolean;
   /** Called with local midnight of the entered date, clamped to [min, max]. */
@@ -68,22 +69,23 @@ function toInputValue(date: Date) {
  * Picking a date from the calendar jumps; so does pressing enter in the text
  * box, which additionally covers re-requesting the date already displayed.
  *
- * The calendar is the plugin's own (see `CalendarPopup`) and the browser's is
- * deliberately suppressed. Chromium and WebKit each draw their own, neither
- * accepts page CSS, and WebKit's on iOS came with Reset and confirm buttons
- * that did nothing. The two engines open theirs by different routes, so
- * closing them off takes three separate measures:
+ * On mobile the box is left out altogether and the calendar button is the
+ * whole control. A segmented date input cannot be typed into on a phone, so
+ * the calendar was already the only way to name a date there; what the box
+ * added was a fixed slice of a controls bar that has none to spare, spent
+ * restating a date the range label beside it already gives — and that label,
+ * being the only thing on the bar that yields, is what got truncated to pay
+ * for it. Leaving it out is also what finally closes off WebKit's own picker,
+ * which it raises on any tap of a date input, read-only included, with no way
+ * to decline: a read-only *text* box was the fix before this one, and no box
+ * at all needs no fix.
  *
- * - The picker indicator is hidden in CSS, which is Chromium's click target.
- * - Chromium's alt+down shortcut is intercepted in `handleKeyDown` below.
- * - On mobile the box is a read-only *text* input rather than a date one.
- *   Nothing weaker works: WebKit raises the picker on any tap of a date input,
- *   read-only included, and there is no way to decline it. Only a control it
- *   has no picker for is safe. Nothing is lost, since the segmented box cannot
- *   be typed into on a phone anyway — the calendar is the only way in either
- *   way. It costs the platform's prettier rendering of the date, so the box
- *   reads `2026-04-19` there rather than `Apr 19, 2026`, which is in any case
- *   closer to how the queue's own columns write dates.
+ * Chromium's picker is still there to suppress on desktop. It accepts no page
+ * CSS, so it cannot be made to match the calendar beside it, and it opens by
+ * two routes:
+ *
+ * - The picker indicator is hidden in CSS, which is its click target.
+ * - Its alt+down shortcut is intercepted in `handleKeyDown` below.
  *
  * Dates outside `[min, max]` are clamped to the nearest bound. The `min`/`max`
  * attributes alone are not enough: they are *validation only* — a browser
@@ -207,30 +209,26 @@ export function DateJumpField({
 
   return (
     <div className="ir-queue-date-jump-anchor" ref={anchorRef}>
-      <input
-        // A plain text box on mobile: WebKit raises its own picker on any tap
-        // of a date input, and read-only does not stop it. See the note above.
-        type={isMobile ? 'text' : 'date'}
-        className="ir-queue-date-jump"
-        aria-label="Jump to date"
-        value={value ? toInputValue(value) : ''}
-        min={min ? toInputValue(min) : undefined}
-        max={max ? toInputValue(max) : undefined}
-        // Keeps the on-screen keyboard down as well, since there is nothing to
-        // type: on mobile the calendar is the only way to name a date.
-        readOnly={isMobile}
-        // `onInput` rather than `onChange`: plain Preact treats `onChange` as
-        // the DOM `change` event while preact/compat rewrites it to `input`, so
-        // its meaning depends on whether compat is in the module graph.
-        // `onInput` is the `input` event in both, and a date input emits it once
-        // per committed value — one jump per date the user picks.
-        onInput={handleInput}
-        onKeyDown={handleKeyDown}
-        // With the box read-only there is nothing else a tap on it could mean.
-        onClick={(event) => {
-          if (isMobile && !isOpen) openCalendar(event.currentTarget);
-        }}
-      />
+      {/* Desktop only. See the note above: on a phone this box could not be
+          typed into, said nothing the range label beside it does not, and cost
+          that label the width it needed to say it. */}
+      {!isMobile && (
+        <input
+          type="date"
+          className="ir-queue-date-jump"
+          aria-label="Jump to date"
+          value={value ? toInputValue(value) : ''}
+          min={min ? toInputValue(min) : undefined}
+          max={max ? toInputValue(max) : undefined}
+          // `onInput` rather than `onChange`: plain Preact treats `onChange` as
+          // the DOM `change` event while preact/compat rewrites it to `input`,
+          // so its meaning depends on whether compat is in the module graph.
+          // `onInput` is the `input` event in both, and a date input emits it
+          // once per committed value — one jump per date the user picks.
+          onInput={handleInput}
+          onKeyDown={handleKeyDown}
+        />
+      )}
       <button
         type="button"
         className="clickable-icon ir-queue-date-jump-trigger"

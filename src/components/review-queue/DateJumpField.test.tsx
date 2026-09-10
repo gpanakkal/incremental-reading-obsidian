@@ -36,9 +36,9 @@ function dateInput(container: HTMLElement): HTMLInputElement {
 }
 
 /**
- * The text box, whatever type it carries. Mobile swaps `type="date"` for
- * `type="text"` to be rid of WebKit's picker, so tests that are about the box
- * itself rather than about it being a date input look it up by class.
+ * The text box, found by class rather than by type — so a test can ask what
+ * type it carries, or whether there is a box at all, without the lookup
+ * having assumed the answer.
  */
 function field(container: HTMLElement): HTMLInputElement {
   return container.querySelector('.ir-queue-date-jump') as HTMLInputElement;
@@ -817,55 +817,49 @@ describe('DateJumpField', () => {
       expect(field(container).readOnly).toBe(false);
     });
 
-    it('uses a plain text box on mobile, which has no picker at all', () => {
-      // The bug this guards: WebKit raises its own date picker on any tap of a
-      // date input — read-only included, which was tried first and did not
-      // stop it. There is no way to decline the picker, so the only fix is a
-      // control WebKit has no picker for.
+    it('shows no text box at all on mobile', () => {
+      // It could not be typed into there — a segmented date input takes no
+      // keyboard on a phone — so all it did was restate the date the range
+      // label beside it already gives, out of a controls bar narrow enough
+      // that the label was truncated to make room. Its absence is also what
+      // finally rules out WebKit's own picker, which any tap of a date input
+      // raises, read-only included, with no way to decline.
       const container = mount(
         <DateJumpField today={TODAY} isMobile onJump={() => {}} />
       );
 
-      expect(field(container).type).not.toBe('date');
-      expect(container.querySelector('input[type="date"]')).toBeNull();
+      expect(container.querySelector('.ir-queue-date-jump')).toBeNull();
+      expect(container.querySelector('input')).toBeNull();
     });
 
-    it('makes the text box read-only on mobile', () => {
-      // Nothing to type there, and read-only is what keeps the on-screen
-      // keyboard down when the box is tapped.
-      const container = mount(
-        <DateJumpField today={TODAY} isMobile onJump={() => {}} />
-      );
-
-      expect(field(container).readOnly).toBe(true);
-    });
-
-    it('still shows the date it is given on mobile', () => {
-      // The text box carries the same `yyyy-mm-dd` the date input did, which
-      // is what `jumpTo` parses.
-      const container = mount(
-        <DateJumpField
-          today={TODAY}
-          value={new Date(2026, 3, 19)}
-          isMobile
-          onJump={() => {}}
-        />
-      );
-
-      expect(field(container).value).toBe('2026-04-19');
-    });
-
-    it('opens the calendar when the read-only box is tapped', async () => {
-      // The box cannot be typed into on a phone, so a tap on it can only mean
-      // "let me pick a date".
+    it('still offers the calendar on mobile', async () => {
+      // With the box gone the trigger is the only way in, so it has to be
+      // there and it has to open.
       const container = mount(
         <DateJumpField today={TODAY} value={TODAY} isMobile onJump={() => {}} />
       );
 
-      click(field(container));
+      click(trigger(container));
       await flush();
 
       expect(calendar()).not.toBeNull();
+    });
+
+    it('still reports a day picked on mobile', async () => {
+      // The whole jump path there now runs through the calendar, with no box
+      // left to read a value back out of.
+      const onJump = vi.fn();
+      const container = mount(
+        <DateJumpField today={TODAY} value={TODAY} isMobile onJump={onJump} />
+      );
+
+      click(trigger(container));
+      await flush();
+      click(calendarDay('July 20, 2026'));
+
+      expect(onJump).toHaveBeenCalledTimes(1);
+      const [jumped] = onJump.mock.calls[0] as [Date];
+      expect(jumped.getTime()).toBe(new Date(2026, 6, 20).getTime());
     });
 
     it('leaves a click on the text box alone on desktop', async () => {
