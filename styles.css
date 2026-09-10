@@ -1169,6 +1169,58 @@ body {
   cursor: default;
 }
 
+/* Horizontal drags are the plugin's to interpret — a swipe across the grid
+   pages the month (see `CalendarPopup`) — while vertical ones stay the
+   browser's, so a finger that starts on the calendar can still scroll the page
+   behind it. Declaring this is also what stops iOS treating a sideways drag
+   from the screen edge as a back gesture mid-swipe.
+
+   The clip is what makes the two neighbouring months scenery: they sit a full
+   panel to either side and are only ever seen through this window, as far in
+   as the finger has pulled them. */
+.ir-calendar-grid {
+  touch-action: pan-y;
+  overflow: hidden;
+}
+
+/* Carries all three months and is the only thing that moves — one transform
+   for the whole strip, rather than three that have to agree. */
+.ir-calendar-track {
+  position: relative;
+}
+
+/* The neighbours are taken out of flow and parked a panel to either side.
+
+   Out of flow is the load-bearing half: the popup sizes itself with
+   `width: max-content`, so a track that laid all three months out in a row
+   would report three months wide and take the popup with it. Only the month on
+   screen is in flow, so the popup measures exactly one. */
+.ir-calendar-month-panel[data-panel='-1'],
+.ir-calendar-month-panel[data-panel='1'] {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: 0;
+  width: 100%;
+  /* Beyond the clip until a drag brings them in, and untouchable while there:
+     a gesture that ends over one of these must not pick a day the user was
+     never really looking at. */
+  pointer-events: none;
+}
+
+.ir-calendar-month-panel[data-panel='-1'] {
+  transform: translateX(-100%);
+}
+
+.ir-calendar-month-panel[data-panel='1'] {
+  transform: translateX(100%);
+}
+
+/* Set only while the track is travelling to rest, so it follows the finger
+   exactly during a drag and eases only once it is let go. */
+.ir-calendar-track-settling {
+  transition: transform 180ms ease-out;
+}
+
 /* `align-items` set rather than left at `stretch`, so each day keeps the
    height its own aspect ratio gives it instead of being pulled to the row's. */
 .ir-calendar-week {
@@ -1300,6 +1352,14 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .ir-calendar-day {
+    transition: none;
+  }
+
+  /* The month still changes on release — that is state, not decoration, and
+     it is committed before this rule is ever consulted. Dropping the
+     transition only takes the travel out, leaving the new month already in
+     place. */
+  .ir-calendar-track-settling {
     transition: none;
   }
 }

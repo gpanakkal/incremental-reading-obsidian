@@ -56,13 +56,33 @@ function makeProps(overrides: Partial<PopupProps> = {}): PopupProps {
 }
 
 /**
- * The popup is portalled to `<body>`, so it is never inside the container it
- * was mounted from — every lookup goes through the owning document instead.
+ * The days of the month actually on screen.
+ *
+ * Two lookups in one: the popup is portalled to `<body>`, so nothing is inside
+ * the container it was mounted from; and the grid renders the neighbouring
+ * months either side of the visible one, which repeat some of the same dates.
+ * Only the centre panel is what a user can see or reach.
  */
 function dayButtons(container: HTMLElement): HTMLButtonElement[] {
   return Array.from(
+    container.ownerDocument.querySelectorAll(
+      "[data-panel='0'] .ir-calendar-day"
+    )
+  );
+}
+
+/** Every day rendered, including the two months parked off screen. */
+function allDayButtons(container: HTMLElement): HTMLButtonElement[] {
+  return Array.from(
     container.ownerDocument.querySelectorAll('.ir-calendar-day')
   );
+}
+
+/** The strip carrying the three months, which is what a drag moves. */
+function track(container: HTMLElement): HTMLElement {
+  return container.ownerDocument.querySelector(
+    '.ir-calendar-track'
+  ) as HTMLElement;
 }
 
 /** The day cell carrying a given accessible name, e.g. `July 16, 2026`. */
@@ -101,6 +121,113 @@ function action(container: HTMLElement, text: string): HTMLButtonElement {
 
 function click(element: HTMLElement) {
   element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
+/**
+ * A pointer event at a point, carrying a modality.
+ *
+ * Built from `MouseEvent` rather than `PointerEvent`, which jsdom does not
+ * construct. The component reads only `pointerType` and the client
+ * coordinates, and a `MouseEvent` of the right type reaches the same listener.
+ */
+function pointerEvent(
+  type: string,
+  { x, y, pointerType }: { x: number; y: number; pointerType: string }
+) {
+  const event = new MouseEvent(type, { bubbles: true, clientX: x, clientY: y });
+  Object.defineProperty(event, 'pointerType', { value: pointerType });
+  return event;
+}
+
+/**
+ * Drag across the grid from a fixed origin and lift. Positive `acrossX` drags
+ * rightwards.
+ */
+function swipe(
+  container: HTMLElement,
+  {
+    acrossX,
+    acrossY = 0,
+    pointerType = 'touch',
+    from,
+  }: {
+    acrossX: number;
+    acrossY?: number;
+    pointerType?: string;
+    from?: HTMLElement;
+  }
+) {
+  drag(container, { acrossX, acrossY, pointerType, from });
+  release(container);
+}
+
+/**
+ * Press and move, without letting go. The moves matter: the gesture reads its
+ * direction and its distance from the path, not from where the finger lifts,
+ * so a press-and-release alone is a tap however far apart the two points are.
+ */
+function drag(
+  container: HTMLElement,
+  {
+    acrossX,
+    acrossY = 0,
+    pointerType = 'touch',
+    from,
+  }: {
+    acrossX: number;
+    acrossY?: number;
+    pointerType?: string;
+    from?: HTMLElement;
+  }
+) {
+  const grid = container.ownerDocument.querySelector(
+    '.ir-calendar-grid'
+  ) as HTMLElement;
+  const origin = { x: 200, y: 200 };
+  // Pressed on the day under the finger when one is named, so the click a real
+  // gesture ends with can be modelled too.
+  (from ?? grid).dispatchEvent(
+    pointerEvent('pointerdown', { ...origin, pointerType })
+  );
+  // Halfway, then all the way, so the axis is decided on the path rather than
+  // in one jump.
+  for (const fraction of [0.5, 1]) {
+    grid.dispatchEvent(
+      pointerEvent('pointermove', {
+        x: origin.x + acrossX * fraction,
+        y: origin.y + acrossY * fraction,
+        pointerType,
+      })
+    );
+  }
+}
+
+/**
+ * Move the finger to a point, without pressing first. Used to hold it still,
+ * or to continue a drag already under way.
+ */
+function moveTo(
+  container: HTMLElement,
+  { acrossX, acrossY = 0 }: { acrossX: number; acrossY?: number }
+) {
+  const grid = container.ownerDocument.querySelector(
+    '.ir-calendar-grid'
+  ) as HTMLElement;
+  grid.dispatchEvent(
+    pointerEvent('pointermove', {
+      x: 200 + acrossX,
+      y: 200 + acrossY,
+      pointerType: 'touch',
+    })
+  );
+}
+
+/** Lift the finger, ending whatever gesture is in progress. */
+function release(container: HTMLElement, pointerType = 'touch') {
+  const grid = container.ownerDocument.querySelector(
+    '.ir-calendar-grid'
+  ) as HTMLElement;
+  grid.dispatchEvent(pointerEvent('pointerup', { x: 0, y: 0, pointerType }));
 }
 
 /** Press a key on whatever currently holds focus. */
@@ -273,6 +400,37 @@ describe('CalendarPopup', () => {
     for (const day of outside) {
       expect(day.getAttribute('aria-label')).not.toContain('July');
     }
+  });
+
+  it('does not page the month when a day either side of it takes focus', () => {
+    // The bug this guards: pressing a mouse button focuses the day under it,
+    // and the cursor sync that followed moved the whole grid to that day's
+    // month while the button was still down. Every other action here happens
+    // on release, and so must this one.
+    const container = mount(
+      <CalendarPopup {...makeProps({ value: new Date(2026, 6, 15) })} />
+    );
+
+    dayNamed(container, 'June 30, 2026').focus();
+
+    expect(monthLabel(container)).toBe('July 2026');
+  });
+
+  it('still reports a day either side of the month once released', () => {
+    // The press must do nothing; the click that follows must still jump.
+    const onSelect = vi.fn();
+    const container = mount(
+      <CalendarPopup
+        {...makeProps({ value: new Date(2026, 6, 15), onSelect })}
+      />
+    );
+    const day = dayNamed(container, 'June 30, 2026');
+
+    day.focus();
+    click(day);
+
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(selectedDay(onSelect).getTime()).toBe(midnight(2026, 5, 30));
   });
 
   it('reports a day from a neighbouring month like any other', () => {
@@ -533,6 +691,324 @@ describe('CalendarPopup', () => {
       );
 
       expect(navButtons(container).previous.disabled).toBe(false);
+    });
+  });
+
+  describe('swipe', () => {
+    it('pages forward when the grid is dragged left', async () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      swipe(container, { acrossX: -80 });
+      await flush();
+
+      expect(monthLabel(container)).toBe('August 2026');
+    });
+
+    it('pages back when the grid is dragged right', async () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      swipe(container, { acrossX: 80 });
+      await flush();
+
+      expect(monthLabel(container)).toBe('June 2026');
+    });
+
+    it('ignores a drag too short to be meant', async () => {
+      // A finger slides a little on the way off a tap. That is a tap.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      swipe(container, { acrossX: -12 });
+      await flush();
+
+      expect(monthLabel(container)).toBe('July 2026');
+    });
+
+    it('ignores a drag that is mostly vertical', async () => {
+      // Scrolling the queue behind the popup drifts sideways; that must not
+      // page the month out from under the finger.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      swipe(container, { acrossX: -60, acrossY: 90 });
+      await flush();
+
+      expect(monthLabel(container)).toBe('July 2026');
+    });
+
+    it('ignores a drag made with a mouse', async () => {
+      // A pointer has the month arrows. Dragging across the grid with one is a
+      // selection attempt, and paging under it would be a surprise.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      swipe(container, { acrossX: -80, pointerType: 'mouse' });
+      await flush();
+
+      expect(monthLabel(container)).toBe('July 2026');
+    });
+
+    it('stops at the last month the queue reaches', async () => {
+      // The same bound the forward arrow stops at, so the two ways of paging
+      // agree.
+      const container = mount(
+        <CalendarPopup
+          {...makeProps({
+            value: new Date(2026, 6, 15),
+            max: new Date(2026, 6, 31),
+          })}
+        />
+      );
+
+      swipe(container, { acrossX: -80 });
+      await flush();
+
+      expect(monthLabel(container)).toBe('July 2026');
+    });
+
+    it('stops at the first month the queue reaches', async () => {
+      const container = mount(
+        <CalendarPopup
+          {...makeProps({
+            value: new Date(2026, 6, 15),
+            min: new Date(2026, 6, 1),
+          })}
+        />
+      );
+
+      swipe(container, { acrossX: 80 });
+      await flush();
+
+      expect(monthLabel(container)).toBe('July 2026');
+    });
+
+    it('does not pick the day the finger comes to rest on', async () => {
+      // A swipe ends over some day, and the click that follows it would
+      // otherwise select that day as well as paging the month.
+      const onSelect = vi.fn();
+      const container = mount(<CalendarPopup {...makeProps({ onSelect })} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      swipe(container, { acrossX: -80, from: day });
+      await flush();
+      click(day);
+
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(monthLabel(container)).toBe('August 2026');
+    });
+
+    it('still picks the day a tap lands on', async () => {
+      // The guard above must cost nothing when the finger did not travel.
+      const onSelect = vi.fn();
+      const container = mount(<CalendarPopup {...makeProps({ onSelect })} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      swipe(container, { acrossX: 0, from: day });
+      await flush();
+      click(day);
+
+      expect(onSelect).toHaveBeenCalledTimes(1);
+      expect(selectedDay(onSelect).getTime()).toBe(midnight(2026, 6, 20));
+    });
+
+    it('picks normally on the tap after a swipe that produced no click', async () => {
+      // A drag often ends without the browser synthesising a click at all, so
+      // the suppression cannot rely on one arriving to clear it. The next
+      // gesture's own press is what clears it, and that tap must go through.
+      const onSelect = vi.fn();
+      const container = mount(<CalendarPopup {...makeProps({ onSelect })} />);
+
+      swipe(container, { acrossX: -80 });
+      await flush();
+
+      const day = dayNamed(container, 'August 20, 2026');
+      // A tap is the same gesture with no travel.
+      swipe(container, { acrossX: 0, from: day });
+      click(day);
+
+      expect(onSelect).toHaveBeenCalledTimes(1);
+      expect(selectedDay(onSelect).getTime()).toBe(midnight(2026, 7, 20));
+    });
+
+    it('does not page when the browser takes the gesture over', async () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+      const grid = container.ownerDocument.querySelector(
+        '.ir-calendar-grid'
+      ) as HTMLElement;
+
+      grid.dispatchEvent(
+        pointerEvent('pointerdown', { x: 200, y: 200, pointerType: 'touch' })
+      );
+      grid.dispatchEvent(
+        pointerEvent('pointercancel', { x: 200, y: 200, pointerType: 'touch' })
+      );
+      grid.dispatchEvent(
+        pointerEvent('pointerup', { x: 120, y: 200, pointerType: 'touch' })
+      );
+      await flush();
+
+      expect(monthLabel(container)).toBe('July 2026');
+    });
+  });
+
+  describe('dragging', () => {
+    it('renders the months either side of the one on screen', () => {
+      // There has to be something to pull into view; a drag cannot reveal a
+      // month that is not rendered yet.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+      const doc = container.ownerDocument;
+
+      expect(doc.querySelector("[data-panel='-1']")).not.toBeNull();
+      expect(doc.querySelector("[data-panel='1']")).not.toBeNull();
+      expect(allDayButtons(container)).toHaveLength(42 * 3);
+    });
+
+    it('hides the months either side from assistive technology', () => {
+      // They are scenery. Left exposed they would triple the grid and read out
+      // dates nobody is looking at.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+      const doc = container.ownerDocument;
+
+      expect(
+        doc.querySelector("[data-panel='-1']")?.getAttribute('aria-hidden')
+      ).toBe('true');
+      expect(
+        doc.querySelector("[data-panel='1']")?.getAttribute('aria-hidden')
+      ).toBe('true');
+      expect(
+        doc.querySelector("[data-panel='0']")?.getAttribute('aria-hidden')
+      ).toBe('false');
+    });
+
+    it('offers only one tab stop across all three months', () => {
+      // The neighbouring panels repeat some of the same dates, so an unscoped
+      // roving tabindex would put a second stop on a month off screen.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      const stops = allDayButtons(container).filter(
+        (day) => day.tabIndex === 0
+      );
+
+      expect(stops).toHaveLength(1);
+    });
+
+    it('follows the finger while it moves', () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      drag(container, { acrossX: -30 });
+
+      expect(track(container).style.transform).toBe('translateX(-30px)');
+    });
+
+    it('stops where the finger stops', () => {
+      // The whole point of tracking the drag rather than waiting for release:
+      // a finger held still leaves the month held still.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      drag(container, { acrossX: -30 });
+      moveTo(container, { acrossX: -30 });
+
+      expect(track(container).style.transform).toBe('translateX(-30px)');
+    });
+
+    it('keeps following a finger that turns back', () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      drag(container, { acrossX: -60 });
+      moveTo(container, { acrossX: -10 });
+
+      expect(track(container).style.transform).toBe('translateX(-10px)');
+    });
+
+    it('does not move for a drag that is mostly vertical', () => {
+      // The axis is decided once, on the first movement worth reading, and
+      // never revisited — so a scroll that wavers cannot start dragging the
+      // month halfway through.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      drag(container, { acrossX: -60, acrossY: 90 });
+      moveTo(container, { acrossX: -120, acrossY: 90 });
+
+      expect(track(container).style.transform).toBe('');
+    });
+
+    it('does not move for a drag made with a mouse', () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      drag(container, { acrossX: -60, pointerType: 'mouse' });
+
+      expect(track(container).style.transform).toBe('');
+    });
+
+    it('gives only a little where there is no month to pull in', () => {
+      // Past the end of the queue the track answers the finger, at a quarter
+      // of its travel, rather than either sticking or revealing an empty month.
+      const container = mount(
+        <CalendarPopup
+          {...makeProps({
+            value: new Date(2026, 6, 15),
+            max: new Date(2026, 6, 31),
+          })}
+        />
+      );
+
+      drag(container, { acrossX: -40 });
+
+      expect(track(container).style.transform).toBe('translateX(-10px)');
+    });
+
+    it('springs back when the finger lifts short of the threshold', () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      drag(container, { acrossX: -12 });
+      expect(track(container).style.transform).toBe('translateX(-12px)');
+
+      release(container);
+
+      expect(track(container).style.transform).toBe('');
+      expect(track(container).classList).toContain(
+        'ir-calendar-track-settling'
+      );
+      expect(monthLabel(container)).toBe('July 2026');
+    });
+
+    it('settles into the committed month when the finger lifts past it', async () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      swipe(container, { acrossX: -80 });
+      await flush();
+
+      expect(monthLabel(container)).toBe('August 2026');
+      // At rest again: the layout effect puts the track back where the finger
+      // left it and then releases it, so what is left behind is the resting
+      // position plus the transition that carried it there.
+      expect(track(container).style.transform).toBe('');
+      expect(track(container).classList).toContain(
+        'ir-calendar-track-settling'
+      );
+    });
+
+    it('does not arm the settle transition for a plain tap', () => {
+      // Left armed, the next drag would ease along behind the finger instead
+      // of tracking it.
+      const container = mount(<CalendarPopup {...makeProps()} />);
+      const day = dayNamed(container, 'July 20, 2026');
+
+      swipe(container, { acrossX: 0, from: day });
+
+      expect(track(container).classList).not.toContain(
+        'ir-calendar-track-settling'
+      );
+    });
+
+    it('tracks the next drag from rest rather than easing into it', async () => {
+      const container = mount(<CalendarPopup {...makeProps()} />);
+
+      swipe(container, { acrossX: -80 });
+      await flush();
+      drag(container, { acrossX: -30 });
+
+      expect(track(container).classList).not.toContain(
+        'ir-calendar-track-settling'
+      );
+      expect(track(container).style.transform).toBe('translateX(-30px)');
     });
   });
 
