@@ -8,6 +8,7 @@ import {
   executeCommandById,
   finalizeArticleImport,
   openNote,
+  reviewTitle,
   selectParagraph,
 } from './helpers';
 import {
@@ -21,6 +22,16 @@ import {
 let app: ElectronApplication;
 let window: Page;
 let vaultPath: string;
+
+/**
+ * The article most tests below import, as it is named once imported.
+ *
+ * Not the same string the tests hand to `openNote`: that one is a prefix the
+ * quick switcher resolves, while this is the note's full basename, which is
+ * what the review pane displays.
+ */
+const ARTICLE_TITLE =
+  'Memorizing a programming language using spaced repetition software';
 
 test.beforeEach(async () => {
   vaultPath = await createVaultCopy('core');
@@ -88,7 +99,7 @@ test.describe('Article Importing', () => {
       window.getByRole('button', { name: 'Mark as reviewed' })
     ).toBeVisible();
     await expect(
-      window.getByText('Curse of dimensionality - Wikipedia').nth(1)
+      reviewTitle(window, 'Curse of dimensionality - Wikipedia')
     ).toBeVisible();
   });
 
@@ -111,13 +122,7 @@ test.describe('Article Importing', () => {
     await expect(
       window.getByRole('button', { name: 'Mark as reviewed' })
     ).toBeVisible();
-    await expect(
-      window
-        .getByText(
-          'Memorizing a programming language using spaced repetition software'
-        )
-        .nth(5)
-    ).toBeInViewport();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeInViewport();
   });
 
   test('can import Markdown from the command palette', async () => {
@@ -135,13 +140,7 @@ test.describe('Article Importing', () => {
     await expect(
       window.getByRole('button', { name: 'Mark as reviewed' })
     ).toBeVisible();
-    await expect(
-      window
-        .getByText(
-          'Memorizing a programming language using spaced repetition software'
-        )
-        .nth(5)
-    ).toBeVisible();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
   });
 });
 
@@ -161,45 +160,21 @@ test.describe('Action Bar', () => {
 
     // show cards only
     await toggle.check();
-    await expect(
-      window
-        .getByText(
-          'Memorizing a programming language using spaced repetition software'
-        )
-        .nth(5)
-    ).not.toBeVisible();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).not.toBeVisible();
 
     // show all items
     await toggle.uncheck();
-    await expect(
-      window
-        .getByText(
-          'Memorizing a programming language using spaced repetition software'
-        )
-        .nth(5)
-    ).toBeVisible();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
 
     // test again using the plugin command
 
     // show cards only
     await executeCommandById(window, 'incremental-reading:toggle-cards-only');
-    await expect(
-      window
-        .getByText(
-          'Memorizing a programming language using spaced repetition software'
-        )
-        .nth(5)
-    ).not.toBeVisible();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).not.toBeVisible();
 
     // show all items
     await executeCommandById(window, 'incremental-reading:toggle-cards-only');
-    await expect(
-      window
-        .getByText(
-          'Memorizing a programming language using spaced repetition software'
-        )
-        .nth(5)
-    ).toBeVisible();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
   });
 
   test('Can review articles', async () => {
@@ -218,13 +193,7 @@ test.describe('Action Bar', () => {
 
     await executeCommandById(window, 'incremental-reading:learn');
     await window.locator('css=#begin-review-button').click();
-    await expect(
-      window
-        .getByText(
-          'Memorizing a programming language using spaced repetition software'
-        )
-        .nth(3)
-    ).not.toBeVisible();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).not.toBeVisible();
   });
 
   test('Can skip items', async () => {
@@ -249,13 +218,7 @@ test.describe('Action Bar', () => {
 
     await executeCommandById(window, 'incremental-reading:learn');
     await window.locator('css=#begin-review-button').click();
-    await expect(
-      window
-        .getByText(
-          'Memorizing a programming language using spaced repetition software'
-        )
-        .nth(5)
-    ).toBeVisible();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
   });
 
   test('Can dismiss items from review UI', async () => {

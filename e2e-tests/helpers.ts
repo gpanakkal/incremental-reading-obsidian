@@ -278,6 +278,31 @@ export async function openNote(window: Page, path: string) {
 }
 
 /**
+ * The title of the item currently open in the review pane.
+ *
+ * Scoped to `.ir-title` — the review pane's own inline title, rendered by
+ * `TitleEditor` from the item's basename — rather than searching the document
+ * for the title text. The same string also sits in the window titlebar, in a
+ * tab header per open tab, in a `.view-header-title` per leaf, and in the
+ * source note's own `.inline-title`, so a document-wide `getByText` returns
+ * seven elements of which six are not the review pane. Four of those six can
+ * never be visible (the inactive leaf is display:none, and the review view
+ * replaces its header row with the action bar) and two are always-visible tab
+ * headers, which is what makes indexing into the list so treacherous: `.nth()`
+ * off by one either way is vacuously true or impossible, never wrong loudly.
+ *
+ * Nor is the ordering stable. `ReviewView.setTitle` fills the review leaf's
+ * `view-header-title` after the pane renders, so the list grows from six to
+ * seven mid-assertion; an index that resolved correctly did so by winning a
+ * render race, not because it named the review pane.
+ *
+ * @param title the item's expected name, matched as a substring
+ */
+export function reviewTitle(window: Page, title: string) {
+  return window.locator('.ir-title', { hasText: title });
+}
+
+/**
  * Select a paragraph by text match and wait for Obsidian to catch up
  * TODO: see if Obsidian emits an event we can listen for instead
  * @param window
