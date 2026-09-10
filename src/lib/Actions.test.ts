@@ -3,6 +3,10 @@ import { CONTENT_TITLE_SLICE_LENGTH } from '#/lib/constants';
 import { store } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import IncrementalReadingPlugin from '#/main';
+// The Vitest alias points `obsidian` at this same file, so the class imported
+// here is the one `ObsidianHelpers.notify` constructs — importing it by path is
+// what gives TS the mock's `messages`/`reset`, which the real class lacks.
+import { Notice } from '#/test/__mocks__/obsidian';
 import type { TFile } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -57,31 +61,27 @@ function makeReviewItem(basename: string, pathOverride?: string): ReviewItem {
 // #endregion
 
 describe('Actions.skipItem — Notice message', () => {
-  let NoticeMock: ReturnType<typeof vi.fn>;
-
   beforeEach(() => {
-    NoticeMock = vi.fn();
-    vi.stubGlobal('Notice', NoticeMock);
+    Notice.reset();
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
   it('Notice contains the file basename', () => {
     const actions = new Actions(makePlugin());
     actions.skipItem(makeReviewItem('my-article'));
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toContain('my-article');
   });
 
   it('Notice contains "until next session"', () => {
     const actions = new Actions(makePlugin());
     actions.skipItem(makeReviewItem('my-article'));
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toContain('until next session');
   });
 
@@ -90,8 +90,8 @@ describe('Actions.skipItem — Notice message', () => {
     const item = makeReviewItem('note', 'folder-a/subfolder/note.md');
     const actions = new Actions(makePlugin());
     actions.skipItem(item);
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toContain('note');
     expect(message).not.toContain('folder-a');
     expect(message).not.toContain('subfolder');
@@ -101,8 +101,8 @@ describe('Actions.skipItem — Notice message', () => {
     const longName = 'a'.repeat(CONTENT_TITLE_SLICE_LENGTH + 20);
     const actions = new Actions(makePlugin());
     actions.skipItem(makeReviewItem(longName));
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toContain('...');
   });
 
@@ -111,41 +111,37 @@ describe('Actions.skipItem — Notice message', () => {
     const name = 'a'.repeat(CONTENT_TITLE_SLICE_LENGTH + 5);
     const actions = new Actions(makePlugin());
     actions.skipItem(makeReviewItem(name));
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).not.toContain('...');
   });
 });
 
 describe('Actions.dismissItem — Notice message', () => {
-  let NoticeMock: ReturnType<typeof vi.fn>;
-
   beforeEach(() => {
-    NoticeMock = vi.fn();
-    vi.stubGlobal('Notice', NoticeMock);
+    Notice.reset();
     vi.spyOn(store, 'getState').mockReturnValue({
       currentItemId: null,
     } as never);
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
   it('Notice contains the file basename', async () => {
     const actions = new Actions(makePlugin());
     await actions.dismissItem(makeReviewItem('my-article'));
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toContain('my-article');
   });
 
   it('Notice matches Dismissed "..." format', async () => {
     const actions = new Actions(makePlugin());
     await actions.dismissItem(makeReviewItem('my-article'));
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toMatch(/^Dismissed ".*"$/);
   });
 
@@ -153,8 +149,8 @@ describe('Actions.dismissItem — Notice message', () => {
     const item = makeReviewItem('note', 'folder-a/subfolder/note.md');
     const actions = new Actions(makePlugin());
     await actions.dismissItem(item);
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toContain('note');
     expect(message).not.toContain('folder-a');
   });
@@ -163,49 +159,45 @@ describe('Actions.dismissItem — Notice message', () => {
     const longName = 'a'.repeat(CONTENT_TITLE_SLICE_LENGTH + 20);
     const actions = new Actions(makePlugin());
     await actions.dismissItem(makeReviewItem(longName));
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toContain('...');
   });
 });
 
 describe('Actions.unDismissItem — Notice message', () => {
-  let NoticeMock: ReturnType<typeof vi.fn>;
-
   beforeEach(() => {
-    NoticeMock = vi.fn();
-    vi.stubGlobal('Notice', NoticeMock);
+    Notice.reset();
     vi.spyOn(store, 'getState').mockReturnValue({
       currentItemId: null,
     } as never);
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
   it('Notice contains the file basename', async () => {
     const actions = new Actions(makePlugin());
     await actions.unDismissItem(makeReviewItem('my-article'));
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toContain('my-article');
   });
 
   it('Notice contains "to queue"', async () => {
     const actions = new Actions(makePlugin());
     await actions.unDismissItem(makeReviewItem('my-article'));
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toContain('to queue');
   });
 
   it('Notice matches Restored "..." to queue format', async () => {
     const actions = new Actions(makePlugin());
     await actions.unDismissItem(makeReviewItem('my-article'));
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toMatch(/^Restored ".*" to queue$/);
   });
 
@@ -213,8 +205,8 @@ describe('Actions.unDismissItem — Notice message', () => {
     const item = makeReviewItem('note', 'folder-a/subfolder/note.md');
     const actions = new Actions(makePlugin());
     await actions.unDismissItem(item);
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toContain('note');
     expect(message).not.toContain('folder-a');
   });
@@ -223,22 +215,18 @@ describe('Actions.unDismissItem — Notice message', () => {
     const longName = 'a'.repeat(CONTENT_TITLE_SLICE_LENGTH + 20);
     const actions = new Actions(makePlugin());
     await actions.unDismissItem(makeReviewItem(longName));
-    expect(NoticeMock).toHaveBeenCalledTimes(1);
-    const [message] = NoticeMock.mock.calls[0] as [string];
+    expect(Notice.messages).toHaveLength(1);
+    const [message] = Notice.messages;
     expect(message).toContain('...');
   });
 });
 
 describe('Actions.skipItem — dispatch', () => {
-  let NoticeMock: ReturnType<typeof vi.fn>;
-
   beforeEach(() => {
-    NoticeMock = vi.fn();
-    vi.stubGlobal('Notice', NoticeMock);
+    Notice.reset();
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -252,15 +240,11 @@ describe('Actions.skipItem — dispatch', () => {
 });
 
 describe('Actions.dismissItem — dispatch', () => {
-  let NoticeMock: ReturnType<typeof vi.fn>;
-
   beforeEach(() => {
-    NoticeMock = vi.fn();
-    vi.stubGlobal('Notice', NoticeMock);
+    Notice.reset();
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -286,15 +270,11 @@ describe('Actions.dismissItem — dispatch', () => {
 });
 
 describe('Actions.unDismissItem — dispatch', () => {
-  let NoticeMock: ReturnType<typeof vi.fn>;
-
   beforeEach(() => {
-    NoticeMock = vi.fn();
-    vi.stubGlobal('Notice', NoticeMock);
+    Notice.reset();
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -320,18 +300,14 @@ describe('Actions.unDismissItem — dispatch', () => {
 });
 
 describe('Actions — undo stack notifications', () => {
-  let NoticeMock: ReturnType<typeof vi.fn>;
-
   beforeEach(() => {
-    NoticeMock = vi.fn();
-    vi.stubGlobal('Notice', NoticeMock);
+    Notice.reset();
     vi.spyOn(store, 'getState').mockReturnValue({
       currentItemId: null,
     } as never);
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
