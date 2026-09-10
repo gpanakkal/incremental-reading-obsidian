@@ -82,6 +82,12 @@ function makeTitleReceiver(
     file,
     plugin: { store: { getState: () => state } },
     titleEl: { setText: vi.fn() },
+    // The two halves of the view header FileView keeps in step from `loadFile`:
+    // the folder breadcrumb (`titleParentEl`, filled by `renderBreadcrumbs`) and
+    // the name (`titleEl`). Stubbed on the receiver because the obsidian mock's
+    // `FileView` has neither.
+    titleParentEl: { empty: vi.fn() },
+    renderBreadcrumbs: vi.fn(),
     leaf: { updateHeader: vi.fn(), getContainer: () => container },
     app: { workspace: { updateTitle: vi.fn() } },
     /** Move between the home screen and an item, as the store would. */
@@ -289,6 +295,48 @@ describe('ReviewView.refocusWithoutScroll', () => {
   });
 });
 
+describe('ReviewView.currentItemName', () => {
+  it('names the item on the review page and nothing on the home screen', () => {
+    fc.assert(
+      fc.property(fc.string({ minLength: 1 }), (basename) => {
+        const receiver = makeTitleReceiver('review', makeFile(basename));
+        expect(asView(receiver).currentItemName()).toBe(basename);
+
+        receiver.setPage('home');
+
+        expect(asView(receiver).currentItemName()).toBeNull();
+      })
+    );
+  });
+
+  it('reports no item when the queue has handed over none', () => {
+    fc.assert(
+      fc.property(fc.constantFrom(null, makeFile('')), (file) => {
+        const view = asView(makeTitleReceiver('review', file));
+
+        expect(view.currentItemName()).toBeNull();
+      })
+    );
+  });
+
+  it('separates an item named after the plugin from having no item at all', () => {
+    // getDisplayText answers the same string in both cases, so a caller that
+    // needs to know whether an item is showing — renderTitleParent — cannot
+    // infer it from the title, and must ask here instead.
+    const withItem = makeTitleReceiver(
+      'review',
+      makeFile(REVIEW_VIEW_DEFAULT_TITLE)
+    );
+    const withoutItem = makeTitleReceiver('home', null);
+
+    expect(asView(withItem).getDisplayText()).toBe(
+      asView(withoutItem).getDisplayText()
+    );
+    expect(asView(withItem).currentItemName()).toBe(REVIEW_VIEW_DEFAULT_TITLE);
+    expect(asView(withoutItem).currentItemName()).toBeNull();
+  });
+});
+
 describe('ReviewView.getDisplayText', () => {
   // Obsidian derives the tab header, the OS window title, the mobile tab
   // switcher labels and the saved layout from this one method.
@@ -356,6 +404,53 @@ describe('ReviewView.getDisplayText', () => {
   });
 });
 
+describe('ReviewView.renderTitleParent', () => {
+  it('redraws the folder breadcrumb for the item being reviewed', () => {
+    // FileView draws the breadcrumb only from loadFile, which setFile bypasses,
+    // so nothing repointed it after startup: the header named each new item in
+    // turn while still showing the folder of whichever item the saved workspace
+    // layout restored — an article under sources/ shown beneath cards/.
+    fc.assert(
+      fc.property(fc.string({ minLength: 1 }), (basename) => {
+        const receiver = makeTitleReceiver('review', makeFile(basename));
+
+        asView(receiver).renderTitleParent();
+
+        expect(receiver.renderBreadcrumbs).toHaveBeenCalledTimes(1);
+        expect(receiver.titleParentEl.empty).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('clears the breadcrumb on the home screen, which names no item', () => {
+    // `file` stays pointed at the last item here, so rendering it would put a
+    // folder path next to a title that is deliberately not about that item.
+    fc.assert(
+      fc.property(fileArb, (file) => {
+        const receiver = makeTitleReceiver('home', file);
+
+        asView(receiver).renderTitleParent();
+
+        expect(receiver.titleParentEl.empty).toHaveBeenCalledTimes(1);
+        expect(receiver.renderBreadcrumbs).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('clears the breadcrumb when no item is loaded', () => {
+    fc.assert(
+      fc.property(pageArb, fc.constantFrom(null, makeFile('')), (page, file) => {
+        const receiver = makeTitleReceiver(page, file);
+
+        asView(receiver).renderTitleParent();
+
+        expect(receiver.titleParentEl.empty).toHaveBeenCalledTimes(1);
+        expect(receiver.renderBreadcrumbs).not.toHaveBeenCalled();
+      })
+    );
+  });
+});
+
 describe('ReviewView.setTitle', () => {
   it('pushes the current title to the view header, the tab header and the window title', () => {
     fc.assert(
@@ -386,6 +481,30 @@ describe('ReviewView.setTitle', () => {
       REVIEW_VIEW_DEFAULT_TITLE
     );
     expect(receiver.app.workspace.updateTitle).toHaveBeenCalledTimes(2);
+  });
+
+  it('redraws the folder breadcrumb on the same call that sets the name', () => {
+    // Both halves of the view header have to describe one item. FileView keeps
+    // them in step inside loadFile; this view never goes through it, so leaving
+    // the breadcrumb out here is what let the header name one item and point at
+    // another item's folder.
+    const receiver = makeTitleReceiver('review', makeFile('Security Principles'));
+
+    asView(receiver).setTitle();
+
+    expect(receiver.renderBreadcrumbs).toHaveBeenCalledTimes(1);
+    expect(receiver.titleEl.setText).toHaveBeenCalledWith('Security Principles');
+  });
+
+  it('clears the folder breadcrumb once a review returns to the home screen', () => {
+    const receiver = makeTitleReceiver('review', makeFile('Chunking'));
+    asView(receiver).setTitle();
+
+    receiver.setPage('home');
+    asView(receiver).setTitle();
+
+    expect(receiver.renderBreadcrumbs).toHaveBeenCalledTimes(1);
+    expect(receiver.titleParentEl.empty).toHaveBeenCalledTimes(1);
   });
 
   it('retitles the popout window instead of the main one when the tab is popped out', () => {
@@ -424,6 +543,17 @@ describe('ReviewView.setFile', () => {
         expect(receiver.app.workspace.updateTitle).toHaveBeenCalledTimes(1);
       })
     );
+  });
+
+  it('repoints the folder breadcrumb when the queue swaps in the next item', () => {
+    // The reported symptom, from the user's side: consecutive items live in
+    // different folders (sources/ vs cards/), and only the name was following
+    // along.
+    const receiver = makeTitleReceiver('review', makeFile('Security Principles'));
+
+    asView(receiver).setFile(makeFile('Chunking'));
+
+    expect(receiver.renderBreadcrumbs).toHaveBeenCalledTimes(1);
   });
 
   it('drops back to the plugin name when the queue hands over no file', () => {

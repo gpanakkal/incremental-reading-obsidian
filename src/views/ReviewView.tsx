@@ -76,8 +76,11 @@ export default class ReviewView extends FileView {
    * tooltip and the mobile tab-group header; `updateTitle` recomputes
    * `document.title`, which is what the OS taskbar shows. A popout retitles its
    * own window instead — the same branch Obsidian's `setActiveLeaf` takes.
+   *
+   * The breadcrumb goes first, matching the order `FileView.loadFile` uses.
    */
   setTitle() {
+    this.renderTitleParent();
     this.titleEl.setText(this.getDisplayText());
     this.leaf.updateHeader();
     const container = this.leaf.getContainer();
@@ -97,6 +100,28 @@ export default class ReviewView extends FileView {
   }
 
   /**
+   * The name of the item this tab is displaying, or `null` when it is showing
+   * anything else. Everything the header says about the current item — the name
+   * in {@link getDisplayText} and the folder path in {@link renderTitleParent} —
+   * keys off this one answer, so the two can never end up describing different
+   * items.
+   *
+   * `file` legitimately stays pointed at the last item while the home screen is
+   * up, so the page is what decides, not the file alone. A file with an empty
+   * basename counts as no item, rather than leaving the tab and the taskbar
+   * blank.
+   *
+   * Reads the page from the store rather than {@link #page}, which exists only to
+   * detect page *changes*: Obsidian calls this from paths the store subscription
+   * does not drive, and a title read must never lag the state it describes.
+   */
+  currentItemName(): string | null {
+    const { page } = this.plugin.store.getState();
+    if (page !== 'review') return null;
+    return this.file?.basename || null;
+  }
+
+  /**
    * The single source of truth for this tab's name. Obsidian reads it for the
    * tab header, the OS taskbar title (`Workspace.updateTitle` ->
    * `document.title`), the mobile tab switcher's card labels, the tab context
@@ -104,19 +129,33 @@ export default class ReviewView extends FileView {
    * {@link setTitle}. Returning the file basename unconditionally is what leaked
    * the current item's name onto the taskbar and the iOS tab switcher while the
    * home screen was showing.
-   *
-   * Reads the page from the store rather than {@link #page}, which exists only to
-   * detect page *changes*: Obsidian calls this from paths the store subscription
-   * does not drive, and a title read must never lag the state it describes.
-   *
-   * A file with an empty basename falls back too, rather than leaving the tab
-   * and the taskbar blank.
    */
   getDisplayText(): string {
-    const { page } = this.plugin.store.getState();
-    return page === 'review' && this.file?.basename
-      ? this.file.basename
-      : REVIEW_VIEW_DEFAULT_TITLE;
+    return this.currentItemName() ?? REVIEW_VIEW_DEFAULT_TITLE;
+  }
+
+  /**
+   * Redraw the folder breadcrumb that sits left of the title in the view header.
+   *
+   * `FileView` fills `titleParentEl` from `file.parent.path` in
+   * `renderBreadcrumbs`, and calls it from exactly two places: `loadFile` and its
+   * vault-rename handler. {@link setFile} assigns `this.file` directly and never
+   * goes through `loadFile`, so without this the breadcrumb stays frozen at
+   * whatever the last real `loadFile` drew — in practice the item the saved
+   * workspace layout restored on startup, since `FileView.setState` is the only
+   * thing that ever calls it here. The header then names the current item while
+   * pointing at a different item's folder, and the breadcrumb's reveal-in-file-
+   * explorer click opens that wrong folder.
+   *
+   * Emptied rather than rendered when no item is showing, to match
+   * {@link getDisplayText} falling back to the plugin name on the home screen.
+   */
+  renderTitleParent(): void {
+    if (this.currentItemName()) {
+      this.renderBreadcrumbs();
+    } else {
+      this.titleParentEl.empty();
+    }
   }
 
   getIcon(): IconName {
