@@ -52,6 +52,10 @@ export class Actions {
 
   /** Call this after reviewing, skipping, dismissing, or deleting an open item */
   getNext = () => {
+    // The one place that knows an item was *finished* rather than merely taken
+    // off screen. `SessionTracker` cannot read that off the store — see its
+    // `finish` — so it is told here, on the path every finishing action ends on.
+    this.plugin.sessionTracker?.finish();
     this.plugin.store.dispatch(resetCurrentItem());
   };
 

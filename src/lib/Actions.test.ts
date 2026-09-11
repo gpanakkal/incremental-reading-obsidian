@@ -384,3 +384,33 @@ describe('Actions — undo stack notifications', () => {
     expect(listener).not.toHaveBeenCalled();
   });
 });
+
+describe('Actions.getNext', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('tells the session tracker the item is finished', () => {
+    // The tracker cannot read "finished" off the store, and the close that
+    // races this one is indistinguishable there — see `SessionTracker.finish`.
+    const plugin = makePlugin();
+    const finish = vi.fn();
+    Object.assign(plugin, { sessionTracker: { finish } });
+    const actions = new Actions(plugin);
+
+    actions.getNext();
+
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(plugin.store.dispatch).toHaveBeenCalled();
+  });
+
+  it('still advances when no session tracker is running', () => {
+    // `onload` wires the tracker up after the review manager, so an action can
+    // land before it exists.
+    const plugin = makePlugin();
+    const actions = new Actions(plugin);
+
+    expect(() => actions.getNext()).not.toThrow();
+    expect(plugin.store.dispatch).toHaveBeenCalled();
+  });
+});

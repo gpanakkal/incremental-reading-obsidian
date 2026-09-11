@@ -2,7 +2,7 @@
 
 import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
-import type { ReviewPage } from '#/lib/store';
+import { resetSession, store, type ReviewPage } from '#/lib/store';
 import type IncrementalReadingPlugin from '#/main';
 // The mock is what `obsidian` resolves to at runtime (see vitest.config.ts), so
 // importing it by path is the same module — but with the stub's own surface
@@ -16,7 +16,7 @@ import {
 import ReviewView, { REVIEW_VIEW_DEFAULT_TITLE } from '#/views/ReviewView';
 import fc from 'fast-check';
 import { WorkspaceWindow, type TFile, type WorkspaceLeaf } from 'obsidian';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #region HELPERS
 
@@ -241,10 +241,121 @@ function unload(view: ReviewView): void {
   registered.forEach((cleanup) => cleanup());
 }
 
+/**
+ * `isLastReviewTab` reads only the workspace's leaves of its own type and the
+ * leaf it is mounted in, so a bare receiver is enough.
+ */
+function callIsLastReviewTab(openLeaves: WorkspaceLeaf[], leaf: WorkspaceLeaf) {
+  const getLeavesOfType = vi.fn((_type: string): WorkspaceLeaf[] => openLeaves);
+  const result = ReviewView.prototype.isLastReviewTab.call({
+    app: { workspace: { getLeavesOfType } },
+    leaf,
+  } as unknown as ReviewView) as boolean;
+  return { result, getLeavesOfType };
+}
+
+const makeLeaf = () => ({}) as WorkspaceLeaf;
+
+/**
+ * Receiver for `resumeUnclaimedSession`, which reaches only the plugin's resume
+ * and the real store. The store is the module's own, so the page it lands on is
+ * read back from there.
+ */
+function makeResumeReceiver({
+  resumed = true,
+  initialItem = null,
+}: { resumed?: boolean; initialItem?: unknown } = {}) {
+  const resumeSession = vi.fn((): Promise<boolean> => Promise.resolve(resumed));
+  const receiver = {
+    initialItem,
+    plugin: { resumeSession, store },
+  };
+  return { receiver, resumeSession };
+}
+
+function callResumeUnclaimedSession(
+  receiver: ReturnType<typeof makeResumeReceiver>['receiver']
+): Promise<void> {
+  return ReviewView.prototype.resumeUnclaimedSession.call(
+    receiver as unknown as ReviewView
+  ) as Promise<void>;
+}
+
 // #endregion
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe('ReviewView.resumeUnclaimedSession', () => {
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  it('lands a reopened tab back on the item it was closed on', async () => {
+    // Reopening a closed tab, or restoring one with the workspace, mounts the
+    // view without going through `learn`: nothing else will put it on the item.
+    const { receiver } = makeResumeReceiver({ resumed: true });
+
+    await callResumeUnclaimedSession(receiver);
+
+    expect(store.getState().page).toBe('review');
+  });
+
+  it('leaves the tab on the home screen when there is nothing to resume', async () => {
+    const { receiver } = makeResumeReceiver({ resumed: false });
+
+    await callResumeUnclaimedSession(receiver);
+
+    expect(store.getState().page).toBe('home');
+  });
+
+  it('says nothing about the page for a tab opened on an explicit item', async () => {
+    // `learn(item)` sets the item and the page itself, after the view mounts.
+    const { receiver, resumeSession } = makeResumeReceiver({
+      resumed: true,
+      initialItem: { data: { id: 'item-1' } },
+    });
+
+    await callResumeUnclaimedSession(receiver);
+
+    expect(resumeSession).not.toHaveBeenCalled();
+    expect(store.getState().page).toBe('home');
+  });
+});
+
+describe('ReviewView.isLastReviewTab', () => {
+  it('reports the only review tab open as the last one', () => {
+    const leaf = makeLeaf();
+
+    expect(callIsLastReviewTab([leaf], leaf).result).toBe(true);
+  });
+
+  it('reports a split pane as not the last while its twin is open', () => {
+    // Closing one half of a split must leave the other on its item: the review
+    // session is one shared store, so ending it here empties it for both.
+    const leaf = makeLeaf();
+
+    expect(callIsLastReviewTab([leaf, makeLeaf()], leaf).result).toBe(false);
+  });
+
+  it('still sees the twin once the workspace has dropped the closing leaf', () => {
+    // Obsidian may detach before or after calling onClose; only the leaves that
+    // remain matter either way.
+    expect(callIsLastReviewTab([makeLeaf()], makeLeaf()).result).toBe(false);
+  });
+
+  it('is the last tab when the workspace has already dropped it and none remain', () => {
+    expect(callIsLastReviewTab([], makeLeaf()).result).toBe(true);
+  });
+
+  it('counts review tabs, not tabs in general', () => {
+    const leaf = makeLeaf();
+
+    const { getLeavesOfType } = callIsLastReviewTab([leaf], leaf);
+
+    expect(getLeavesOfType).toHaveBeenCalledWith(ReviewView.viewType);
+  });
 });
 
 describe('ReviewView.showSearch', () => {

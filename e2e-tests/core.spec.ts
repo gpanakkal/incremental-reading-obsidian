@@ -321,11 +321,12 @@ test.describe('Action Bar', () => {
     await priorityInput.press('Enter');
     await expect(priorityInput).toHaveValue('4.9');
 
-    // re-open the review interface to verify the changes persisted
+    // re-open the review interface to verify the changes persisted. No begin
+    // review step: the tab was closed on this item, so reopening lands straight
+    // back on it rather than on the home screen.
     await executeCommandById(window, 'workspace:close');
 
     await executeCommandById(window, 'incremental-reading:learn');
-    await window.locator('css=#begin-review-button').click();
     const priorityInput2 = window.getByRole('textbox', { name: 'Priority' });
     await expect(priorityInput2).toHaveValue('4.9');
   });
@@ -501,5 +502,34 @@ test.describe('File explorer', () => {
         `.workspace-leaf-content[data-type="incremental-reading-review"]`
       )
     ).toHaveCount(1);
+  });
+});
+
+test.describe('Review session', () => {
+  test('reopens on the item the tab was closed on', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
+
+    await executeCommandById(window, 'workspace:close');
+    await expect(reviewTitle(window, ARTICLE_TITLE)).not.toBeVisible();
+
+    // Obsidian's own reopen, which mounts the view without going through the
+    // plugin's Learn command — so the view is what has to resume the session.
+    await executeCommandById(window, 'workspace:undo-close-pane');
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
+
+    // And again through Learn, which resumes before the view mounts and picks
+    // the page itself. The home screen is for opening review with nothing in
+    // progress, so a carried-over item skips it.
+    await executeCommandById(window, 'workspace:close');
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
   });
 });

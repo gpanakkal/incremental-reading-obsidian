@@ -5,7 +5,7 @@ import {
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
-import { resetSession, type ReviewPage } from '#/lib/store';
+import { resetSession, setPage, type ReviewPage } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import {
@@ -242,8 +242,31 @@ export default class ReviewView extends FileView {
     return selection.toString();
   }
 
+  /**
+   * Land a newly mounted tab on the item this device left off on.
+   *
+   * For the mounts that do not come through {@link IncrementalReadingPlugin.learn}
+   * — reopening a closed tab, and a tab restored with the workspace — which
+   * reach the item through nobody: with the session emptied by the close, the
+   * queue would hand the view whatever is at the top and the remembered item
+   * would be written over by the tab that was meant to return to it.
+   *
+   * Says nothing when `learn` opened the tab: it resumed the session before
+   * the view mounted, so {@link IncrementalReadingPlugin.resumeSession} reports
+   * nothing left to resume and `learn` picks the page itself, home screen
+   * setting included.
+   */
+  async resumeUnclaimedSession(): Promise<void> {
+    if (this.initialItem) return;
+    if (!(await this.plugin.resumeSession())) return;
+    this.plugin.store.dispatch(setPage('review'));
+  }
+
   async onOpen() {
     await super.onOpen();
+    // Before the interface renders: mounting it first would fetch the top of
+    // the queue against the empty session and dispatch that as the current item.
+    await this.resumeUnclaimedSession();
     if (this.initialItem) {
       this.setFile(this.initialItem.file);
     }
@@ -277,11 +300,38 @@ export default class ReviewView extends FileView {
     );
   }
 
+  /**
+   * Whether this is the only review tab left, and so the one whose close ends
+   * the review session.
+   *
+   * Asked because the session is one shared store, not a thing each tab owns: a
+   * split view is two `ReviewView`s over the same state, and `resetSession`
+   * from either of them empties it for both. Works whichever side of the
+   * workspace's own bookkeeping this runs on — a leaf already dropped is simply
+   * not among the ones that remain.
+   */
+  isLastReviewTab(): boolean {
+    return this.app.workspace
+      .getLeavesOfType(ReviewView.viewType)
+      .every((leaf) => leaf === this.leaf);
+  }
+
   async onClose() {
     await super.onClose();
     render(null, this.contentEl);
     this.activeEditor = null;
     this.#lastFocusedEl = null;
+    // Another review tab is still open and still on its item: the session
+    // belongs to it now, and ending it here would send that tab back to the
+    // home screen and drop what it was reading.
+    if (!this.isLastReviewTab()) return;
+    // The last tab out records what it was showing, so the tab closed last is
+    // the one remembered — an item to come back to, or nothing at all if it had
+    // already left review. That also keeps the `resetSession` below, which is
+    // indistinguishable from leaving review for the home screen, from
+    // discarding an item the user is coming back to. Reopening review resumes
+    // there; see `Plugin.resumeSession`.
+    this.plugin.sessionTracker?.commit();
     this.plugin.store.dispatch(resetSession());
   }
 

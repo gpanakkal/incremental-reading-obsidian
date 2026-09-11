@@ -32,6 +32,13 @@ import {
 } from './lib/obsidian-editor';
 import { ObsidianHelpers as Obsidian } from './lib/ObsidianHelpers';
 import {
+  type IRPluginData,
+  type ReviewSession,
+  getDeviceId,
+  parsePluginData,
+  sessionItemId,
+} from './lib/plugin-data';
+import {
   applyQueueChange,
   invalidateCacheOnMatch,
   invalidateCurrentItemQuery,
@@ -39,18 +46,18 @@ import {
 } from './lib/query-client';
 import { SQLJSRepository } from './lib/repository/SQLJSRepository';
 import { initReviewCommands } from './lib/review-commands';
-import {
-  type IRPluginSettings,
-  DEFAULT_SETTINGS,
-  IRSettingTab,
-} from './lib/settings';
+import { SessionTracker } from './lib/SessionTracker';
+import { type IRPluginSettings, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, setPage, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
 import { ImportModal } from './views/ImportModal';
 import ReviewView from './views/ReviewView';
 
 export default class IncrementalReadingPlugin extends Plugin {
+  /** Everything persisted to `data.json`; `settings` is this object's own half. */
+  data!: IRPluginData;
   settings!: IRPluginSettings;
+  sessionTracker?: SessionTracker;
   reviewManager!: ReviewManager;
   store!: typeof store;
   actions!: Actions;
@@ -250,6 +257,14 @@ export default class IncrementalReadingPlugin extends Plugin {
         this.store = store;
         await this.initReviewManager();
         this.actions = new Actions(this);
+        // Nothing is resumed here: a review tab restored with the workspace
+        // resumes itself as it mounts (`ReviewView.resumeUnclaimedSession`),
+        // which is the only moment that knows a tab is actually coming back.
+        // Reading the pointer any earlier would put `page` on an item no tab is
+        // showing, and the first visit to the home screen would then read as
+        // leaving review and discard it. Until a tab mounts, the pointer simply
+        // stays on disk, held by the tracker.
+        this.startSessionTracking();
         this.registerView(
           ReviewView.viewType,
           (leaf) => new ReviewView(leaf, this, this.reviewManager)
@@ -325,8 +340,10 @@ export default class IncrementalReadingPlugin extends Plugin {
   onunload() {}
 
   async loadSettings() {
-    const saved = (await this.loadData()) as Partial<IRPluginSettings> | null;
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, saved ?? {});
+    this.data = parsePluginData(await this.loadData());
+    // The same object, not a copy: every `plugin.settings.x = y; saveSettings()`
+    // call site keeps working, and its edit is already in what gets written.
+    this.settings = this.data.settings;
   }
 
   getActiveReviewView(): ReviewView | null {
@@ -339,7 +356,82 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    await this.saveData(this.data);
+  }
+
+  /**
+   * Persist (or drop) the item review left off on. Writes the whole file, since
+   * that is all `saveData` can do — hence the single shared {@link data}.
+   */
+  async saveSession(session: ReviewSession | null) {
+    this.data.session = session;
+    await this.saveData(this.data);
+  }
+
+  /**
+   * Put the item review last had open back into the store, and report whether
+   * there is one. Does nothing once review already has an item.
+   *
+   * The pointer outlives the review tab, so this runs both at startup and when
+   * the tab is reopened — closing it is somewhere to come back to. It is only as
+   * good as the database, though: the item may have been deleted, or the row may
+   * have arrived from another device's sync, so it is resolved before it is
+   * trusted and dropped when it no longer resolves.
+   *
+   * The page is left to the caller — startup opens straight onto the item, while
+   * {@link learn} keeps its usual home-screen choice.
+   */
+  async resumeSession(): Promise<boolean> {
+    if (store.getState().currentItemId) return false;
+
+    // Tracking owns the pointer once it is running: a departure it has not
+    // written out yet is still a departure, while `data.json` would still name
+    // the item for another `SESSION_CLEAR_DELAY`. Only startup, which runs
+    // before tracking begins, reads the file.
+    const itemId = this.sessionTracker
+      ? this.sessionTracker.itemId
+      : sessionItemId(this.data.session, getDeviceId(this.app));
+    if (!itemId) return false;
+
+    const item = await this.reviewManager.getReviewItemFromId(itemId);
+    // A dismissed item is not coming back into review, and the pointer can name
+    // one: dismissing runs a database write first, so a tab closed in the
+    // moments after the click records the item still on screen.
+    if (!item || item.data.dismissed) {
+      await this.saveSession(null);
+      return false;
+    }
+    store.dispatch(setCurrentItemId(itemId));
+    return true;
+  }
+
+  /** Keep `data.json` in step with the item review is showing. */
+  private startSessionTracking() {
+    const deviceId = getDeviceId(this.app);
+    this.sessionTracker = new SessionTracker({
+      store,
+      deviceId,
+      initialItemId: sessionItemId(this.data.session, deviceId),
+      save: (session) => this.saveSession(session),
+    });
+    this.register(this.sessionTracker.start());
+    // Quitting empties the review session the same way leaving it does; stop
+    // mirroring before any of that teardown can be written out.
+    this.registerEvent(
+      this.app.workspace.on('quit', () => this.sessionTracker?.suspend())
+    );
+  }
+
+  /**
+   * Overridden rather than handled in {@link onunload}: `Component.unload`
+   * tears down children — the review view among them — around that call, and
+   * the view's teardown empties the review session. Suspending here runs before
+   * any of it, so an unload can neither clear the remembered item nor let a
+   * clear already on the timer through.
+   */
+  override unload() {
+    this.sessionTracker?.suspend();
+    super.unload();
   }
 
   private async initReviewManager() {
@@ -398,6 +490,9 @@ export default class IncrementalReadingPlugin extends Plugin {
   async learn(initialItem?: ReviewItem, newLeaf: boolean = true) {
     const openReviewLeaf: WorkspaceLeaf | null = this.getOpenReviewLeaf();
     const alreadyActive = openReviewLeaf === this.getActiveReviewView()?.leaf;
+    // A tab closed mid-review keeps its item; put it back before the view mounts
+    // so review resumes there rather than at the top of the queue.
+    const resumed = initialItem ? false : await this.resumeSession();
     const leaf =
       openReviewLeaf ?? this.app.workspace.getLeaf(newLeaf ? 'tab' : false);
 
@@ -408,7 +503,11 @@ export default class IncrementalReadingPlugin extends Plugin {
     // Only pick the landing page when instantiating a fresh view; an existing
     // view keeps its page (e.g. mid-review) regardless of skipHomeScreen.
     if (!openReviewLeaf) {
-      store.dispatch(setPage(this.settings.skipHomeScreen ? 'review' : 'home'));
+      // An item carried over from a closed tab is where the user already was,
+      // so it opens on that item whatever the home-screen setting says: the
+      // setting is about opening review with nothing in progress.
+      const landOnItem = resumed || this.settings.skipHomeScreen;
+      store.dispatch(setPage(landOnItem ? 'review' : 'home'));
     } else if (alreadyActive) {
       // review is open and focused, so toggle between home and item review pages
       const currentPage = store.getState().page;
