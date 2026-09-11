@@ -341,8 +341,50 @@ body {
 
 .ir-priority-input,
 .ir-fixed-interval-input {
+  /* The action bar is a horizontally scrolling flex row, so on a narrow screen
+     its items are squeezed down to their automatic minimum size before the
+     overflow starts scrolling. Obsidian gives every mobile text input
+     `width: 100%`, which leaves this one nothing to resist that squeeze with:
+     it collapses until only its own padding is left. Trimming the padding
+     therefore made the field *narrower* rather than roomier — the padding was
+     the entire width.
+
+     Opting out of shrinking is the fix. `max-width` then decides the size,
+     since a flex base size of `100%` clamps down to it. */
+  flex-shrink: 0;
   max-width: 40px;
   text-align: center;
+}
+
+/* Bare divs wrapping the label. They are flex items of the bar, which sets no
+   `align-items` and so stretches them to its full height, while the label
+   inside is only as tall as its content and parks at the top of that stretched
+   box. Desktop hides this, the bar being about as tall as the label; mobile's
+   taller icon buttons open a visible gap. */
+.ir-priority-container,
+.ir-fixed-interval-container {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+/* Obsidian's own `input[type='text']` rule draws height, padding and radius
+   from the `--input-*` tokens, and `.is-mobile` on <body> retargets all three
+   for touch: height 30px -> --touch-size-m (44px), radius 5px -> --touch-radius-m
+   (44px, i.e. a full pill), padding `4px 8px` -> `4px var(--size-4-4)` (16px).
+   A field holding at most three characters ("9.9") cannot absorb that.
+
+   Retargeting the tokens on the element, rather than overriding height/padding/
+   radius directly, keeps Obsidian's rule in charge and wins on inheritance
+   distance alone — hence no `!important` and no selector arms race. The height
+   lands on --touch-size-xs (30px), which is about what the bar's icon buttons
+   already measure on mobile, so the row stays level. */
+.is-mobile .ir-priority-input,
+.is-mobile .ir-fixed-interval-input {
+  --input-height: var(--touch-size-xs);
+  --input-radius: var(--radius-s);
+  --input-padding: var(--size-4-1) var(--size-2-2);
+  max-width: 40px;
 }
 
 .ir-review-interface {
