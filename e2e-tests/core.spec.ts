@@ -39,15 +39,10 @@ test.beforeEach(async () => {
   app = await launchElectron(vaultPath);
   window = await openVault(app, vaultPath);
 
-  // Auto-dismiss renderer dialogs (alert/confirm/beforeunload) for the whole
-  // test, not just teardown. Registered here because a handler attached in
-  // afterEach is already too late: an unhandled `beforeunload` blocks the
-  // window from closing, which is one of the ways teardown hangs. Playwright
-  // auto-dismisses only while no handler is registered, so this must stay
-  // registered for the lifetime of the page rather than being added late.
-  window.on('dialog', (dialog) => {
-    void dialog.dismiss().catch(() => {});
-  });
+  // Renderer dialogs are answered by `launchElectron`, for every window rather
+  // than just this one. Re-registering here would answer each dialog twice —
+  // and answer `beforeunload` with "stay open", which is the opposite of what
+  // teardown needs.
 });
 
 test.afterEach(async () => {

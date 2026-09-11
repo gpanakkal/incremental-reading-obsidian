@@ -198,6 +198,55 @@ async function applyStabilityPatches(app: ElectronApplication) {
 /** Hosts Obsidian's auto-updater contacts on every launch. */
 const UPDATE_HOSTS = ['releases.obsidian.md', 'raw.githubusercontent.com'];
 
+/**
+ * Answer renderer dialogs — `alert`, `confirm`, `beforeunload` — ourselves, for
+ * every window this app opens.
+ *
+ * Playwright auto-dismisses a dialog only while no 'dialog' listener is
+ * registered, and it answers with a fire-and-forget CDP call. Obsidian raises a
+ * `beforeunload` on its vault window as it quits, so that call is made at the
+ * exact moment the session is going away — and when it loses that race the
+ * rejection has no owner:
+ *
+ *     Error: Protocol error (Page.handleJavaScriptDialog):
+ *     Internal server error, session closed.
+ *
+ * Playwright attributes that to whichever test is running, which fails a test
+ * whose body has already passed and reports it as a 300s timeout in a teardown
+ * that took milliseconds. Answering the dialog ourselves gives the rejection an
+ * owner; it still loses the same race, and a caught rejection is a non-event.
+ *
+ * Registered at launch, not in `afterEach`: auto-dismissal is in force from the
+ * moment a window exists, so a handler added at teardown has already been
+ * beaten to the dialog that provokes this.
+ *
+ * Every window, not just the vault window — Obsidian also opens a launcher and
+ * a transient settings window, and both outlive their own `beforeunload`.
+ */
+function answerRendererDialogs(app: ElectronApplication) {
+  const answer = (page: Page) => {
+    page.on('dialog', (dialog) => {
+      // `beforeunload` is asking whether to go ahead with the unload, and it is
+      // raised only while something is already trying to close the window, so
+      // accept it. Dismissing would ask the window to *stay*, leaving
+      // `app.close()` waiting on a window that will never go away.
+      //
+      // Anything else keeps Playwright's default answer, so registering this
+      // handler does not quietly change how a test body's own dialogs behave.
+      const answered =
+        dialog.type() === 'beforeunload' ? dialog.accept() : dialog.dismiss();
+
+      // The window is often gone before the answer arrives. That is the normal
+      // path here, not a failure: the dialog dies with the page either way.
+      void answered.catch(() => {});
+    });
+  };
+
+  // `windows()` covers windows that already exist; the event covers the rest.
+  app.on('window', answer);
+  app.windows().forEach(answer);
+}
+
 export async function launchElectron(vaultPath: string) {
   const app = await electron.launch({
     args: [
@@ -216,6 +265,7 @@ export async function launchElectron(vaultPath: string) {
   });
 
   await applyStabilityPatches(app);
+  answerRendererDialogs(app);
 
   const tail: string[] = [];
   stderrTails.set(app, tail);
