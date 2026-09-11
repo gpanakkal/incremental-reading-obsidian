@@ -1,5 +1,7 @@
 import {
   type App,
+  type Menu,
+  type TAbstractFile,
   type TFile,
   type WorkspaceLeaf,
   MarkdownView,
@@ -180,74 +182,12 @@ export default class IncrementalReadingPlugin extends Plugin {
     initReviewCommands(this);
 
     this.registerEvent(
-      this.app.workspace.on('file-menu', (menu, abstractFile) => {
-        const file = this.app.vault.getFileByPath(abstractFile.path);
-        if (file && this.reviewManager) {
-          menu.addSections(['incremental-reading']);
-          menu.addItem((item) => {
-            item
-              .setTitle('Import article')
-              .setIcon(PLACEHOLDER_PLUGIN_ICON)
-              .setSection('incremental-reading')
-              .onClick(async () => {
-                await this.importArticle(file);
-              });
-          });
-
-          if (!this.settings.showAdvancedImportMenuItems) {
-            return;
-          }
-
-          menu.addItem((item) => {
-            item
-              .setTitle('Import a copy')
-              .setIcon(PLACEHOLDER_PLUGIN_ICON)
-              .setSection('incremental-reading')
-              .onClick(async () => {
-                await this.importArticle(file, {
-                  copyOnImport: true,
-                  showImportDialog: false,
-                });
-              });
-          });
-
-          menu.addItem((item) => {
-            item
-              .setTitle('Import in place')
-              .setIcon(PLACEHOLDER_PLUGIN_ICON)
-              .setSection('incremental-reading')
-              .onClick(async () => {
-                await this.importArticle(file, {
-                  copyOnImport: false,
-                  showImportDialog: false,
-                });
-              });
-          });
-
-          menu.addItem((item) => {
-            item
-              .setTitle('Open import dialog...')
-              .setIcon(PLACEHOLDER_PLUGIN_ICON)
-              .setSection('incremental-reading')
-              .onClick(async () => {
-                await this.importArticle(file, { showImportDialog: true });
-              });
-          });
-
-          menu.addItem((item) => {
-            item
-              .setTitle('Quick import')
-              .setIcon(PLACEHOLDER_PLUGIN_ICON)
-              .setSection('incremental-reading')
-              .onClick(async () => {
-                await this.importArticle(file, { showImportDialog: false });
-              });
-          });
-        } else {
-          // TODO: entire folder imports
-          // const folder = this.app.vault.getFolderByPath(abstractFile.path);
+      this.app.workspace.on(
+        'file-menu',
+        (menu, abstractFile, _source, leaf) => {
+          this.addIRMenuItems(menu, abstractFile, leaf);
         }
-      })
+      )
     );
 
     // Invalidate review item cache when the current item's file is modified externally
@@ -489,6 +429,91 @@ export default class IncrementalReadingPlugin extends Plugin {
     }
 
     await this.app.workspace.revealLeaf(leaf);
+  }
+
+  /**
+   * Offer to import a note as an article, wherever Obsidian raises a file menu.
+   *
+   * Skipped in the review tab, whose menu {@link ReviewView.addFileMenuItems}
+   * raises: the note showing there is already an item, so the entries would
+   * offer to import what the user is in the middle of reviewing. Keyed on the
+   * leaf's view rather than on the menu's `source`, because a plain note's own
+   * ⋮ and tab-header menus report those same sources and do want the entries.
+   */
+  addIRMenuItems(
+    menu: Menu,
+    abstractFile: TAbstractFile,
+    leaf?: WorkspaceLeaf | null
+  ): void {
+    if (leaf?.view instanceof ReviewView) return;
+
+    const file = this.app.vault.getFileByPath(abstractFile.path);
+    if (!file || !this.reviewManager) {
+      // TODO: entire folder imports
+      // const folder = this.app.vault.getFolderByPath(abstractFile.path);
+      return;
+    }
+
+    menu.addSections(['incremental-reading']);
+    menu.addItem((item) => {
+      item
+        .setTitle('Import article')
+        .setIcon(PLACEHOLDER_PLUGIN_ICON)
+        .setSection('incremental-reading')
+        .onClick(async () => {
+          await this.importArticle(file);
+        });
+    });
+
+    if (!this.settings.showAdvancedImportMenuItems) {
+      return;
+    }
+
+    menu.addItem((item) => {
+      item
+        .setTitle('Import a copy')
+        .setIcon(PLACEHOLDER_PLUGIN_ICON)
+        .setSection('incremental-reading')
+        .onClick(async () => {
+          await this.importArticle(file, {
+            copyOnImport: true,
+            showImportDialog: false,
+          });
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle('Import in place')
+        .setIcon(PLACEHOLDER_PLUGIN_ICON)
+        .setSection('incremental-reading')
+        .onClick(async () => {
+          await this.importArticle(file, {
+            copyOnImport: false,
+            showImportDialog: false,
+          });
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle('Open import dialog...')
+        .setIcon(PLACEHOLDER_PLUGIN_ICON)
+        .setSection('incremental-reading')
+        .onClick(async () => {
+          await this.importArticle(file, { showImportDialog: true });
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle('Quick import')
+        .setIcon(PLACEHOLDER_PLUGIN_ICON)
+        .setSection('incremental-reading')
+        .onClick(async () => {
+          await this.importArticle(file, { showImportDialog: false });
+        });
+    });
   }
 
   async importArticle(

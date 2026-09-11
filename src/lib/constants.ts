@@ -111,3 +111,31 @@ export const CURRENT_ITEM_REFETCH_TIME = 1000 * 5;
 export const MAX_SQL_QUERY_PARAMS = 999;
 
 export const QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE = 20;
+/**
+ * The sections Obsidian's view header builds its `more-options` menu from, in
+ * render order, copied from `ItemView.onMoreOptions`.
+ *
+ * `Menu.sort` walks this list and emits each section's items in the order they
+ * were added, so a section — not the order `addItem` was called in — is what
+ * decides where an entry lands. `pane` is second, ahead of the `open` section
+ * holding Split right and Split down, which is where a view's own actions
+ * belong and why Kanban's board actions sit at the top of its menu.
+ *
+ * Needed because {@link ReviewView.showMoreOptionsMenu} builds the menu itself
+ * on desktop, where {@link ReviewView.onOpen} hides `headerEl` and Obsidian
+ * therefore never draws the button that would have built it.
+ */
+export const MORE_OPTIONS_SECTIONS: string[] = [
+  'close',
+  'pane',
+  'open',
+  'action',
+  'find',
+  'info',
+  'info.copy',
+  'view',
+  'view.linked',
+  'system',
+  '',
+  'danger',
+];

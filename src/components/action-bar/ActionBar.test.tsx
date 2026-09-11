@@ -3,8 +3,7 @@ import { ReviewContextProvider } from '#/components/ReviewContext';
 import type { QueuePage } from '#/components/types';
 import * as ReactQuery from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
-import type { ComponentChild } from 'preact';
-import { render } from 'preact';
+import { type ComponentChild, render } from 'preact';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActionBar } from './ActionBar';
 
@@ -44,6 +43,48 @@ function wireQueue({
   vi.spyOn(ReactQuery, 'useCurrentItem').mockReturnValue({
     data: undefined,
   } as never);
+}
+
+/**
+ * Put an item on screen, which is the state {@link ItemActions} — and the ⋮
+ * button inside it — renders in. A card is the cheapest of the four: the other
+ * types drag in the scheduler alongside.
+ */
+function wireCurrentItem(): void {
+  reduxState.page = 'review';
+  vi.spyOn(ReactQuery, 'useCurrentItem').mockReturnValue({
+    data: { data: { type: 'card', dismissed: false } },
+  } as never);
+}
+
+/**
+ * Mount the bar inside the context it has in the app. Every page of it past the
+ * home screen reads the context — the ⋮ button takes the platform off the
+ * plugin and hands the view the button to anchor its menu to — so the bar is
+ * not mounted bare here.
+ */
+function mountBar({
+  isMobile = false,
+  showMoreOptionsMenu = vi.fn(),
+  actions = makeActions(),
+}: {
+  isMobile?: boolean;
+  showMoreOptionsMenu?: () => void;
+  actions?: ReturnType<typeof makeActions>;
+} = {}): HTMLElement {
+  return mount(
+    <ReviewContextProvider
+      plugin={{ actions, app: { isMobile } } as never}
+      reviewView={{ showMoreOptionsMenu } as never}
+      reviewManager={{} as never}
+    >
+      <ActionBar />
+    </ReviewContextProvider>
+  );
+}
+
+function moreOptionsButton(container: HTMLElement): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>('#more-options-button');
 }
 
 function beginReviewButton(container: HTMLElement): HTMLButtonElement {
@@ -98,8 +139,8 @@ function mountReviewBar(actions: ReturnType<typeof makeActions>): HTMLElement {
   } as never);
   return mount(
     <ReviewContextProvider
-      plugin={{ actions } as never}
-      reviewView={{} as never}
+      plugin={{ actions, app: { isMobile: false } } as never}
+      reviewView={{ showMoreOptionsMenu: vi.fn() } as never}
       reviewManager={{} as never}
     >
       <ActionBar />
@@ -125,6 +166,7 @@ vi.mock('lucide-react', () => ({
   ArchiveRestore: () => null,
   Ban: () => null,
   Check: () => null,
+  EllipsisVertical: () => null,
   Eye: () => null,
   House: () => null,
   Scissors: () => null,
@@ -163,7 +205,7 @@ describe('ActionBar', () => {
     it('is enabled when the queue holds due items', () => {
       wireQueue({ totalRows: 3 });
 
-      const container = mount(<ActionBar />);
+      const container = mountBar();
 
       expect(beginReviewButton(container).disabled).toBe(false);
     });
@@ -171,7 +213,7 @@ describe('ActionBar', () => {
     it('is disabled when nothing is due', () => {
       wireQueue({ totalRows: 0 });
 
-      const container = mount(<ActionBar />);
+      const container = mountBar();
 
       expect(beginReviewButton(container).disabled).toBe(true);
     });
@@ -181,7 +223,7 @@ describe('ActionBar', () => {
       // the empty-review placeholder, so the button waits for the count.
       wireQueue({ isLoading: true, hasData: false });
 
-      const container = mount(<ActionBar />);
+      const container = mountBar();
 
       expect(beginReviewButton(container).disabled).toBe(true);
     });
@@ -189,7 +231,7 @@ describe('ActionBar', () => {
     it('does not navigate to the review page when nothing is due', () => {
       wireQueue({ totalRows: 0 });
 
-      const container = mount(<ActionBar />);
+      const container = mountBar();
       beginReviewButton(container).click();
 
       expect(dispatch).not.toHaveBeenCalled();
@@ -198,7 +240,7 @@ describe('ActionBar', () => {
     it('navigates to the review page when items are due', () => {
       wireQueue({ totalRows: 3 });
 
-      const container = mount(<ActionBar />);
+      const container = mountBar();
       beginReviewButton(container).click();
 
       expect(dispatch).toHaveBeenCalledWith(
@@ -209,7 +251,7 @@ describe('ActionBar', () => {
     it('explains why it is unavailable when nothing is due', () => {
       wireQueue({ totalRows: 0 });
 
-      const container = mount(<ActionBar />);
+      const container = mountBar();
 
       expect(beginReviewButton(container).getAttribute('aria-label')).toBe(
         'Nothing due for review'
@@ -335,6 +377,45 @@ describe('ActionBar', () => {
 
       expect(undoButton(container).disabled).toBe(false);
       expect(actions.listeners.size).toBe(1);
+    });
+  });
+
+  describe('more options button', () => {
+    it('opens the file menu anchored to itself', () => {
+      // The view positions the menu under the element it is handed, the way
+      // Obsidian's own header button does, so the button has to pass itself.
+      const showMoreOptionsMenu = vi.fn();
+      wireCurrentItem();
+      const container = mountBar({ showMoreOptionsMenu });
+      const button = moreOptionsButton(container);
+
+      button?.click();
+
+      expect(showMoreOptionsMenu).toHaveBeenCalledWith(button);
+    });
+
+    it('stays hidden until an item is on screen', () => {
+      // It sits in ItemActions: everything the menu offers is about the note
+      // being reviewed, so there is nothing for it to act on before one is up —
+      // on the home screen or on the review page between items.
+      wireQueue();
+
+      expect(moreOptionsButton(mountBar())).toBeNull();
+
+      document.body.innerHTML = '';
+      reduxState.page = 'review';
+
+      expect(moreOptionsButton(mountBar())).toBeNull();
+    });
+
+    it('stays out of the way on mobile, where Obsidian draws its own', () => {
+      // ReviewView only hides `headerEl` on desktop; on mobile the real ⋮ is
+      // still in the view header, and a second one would duplicate it.
+      wireCurrentItem();
+
+      const container = mountBar({ isMobile: true });
+
+      expect(moreOptionsButton(container)).toBeNull();
     });
   });
 });

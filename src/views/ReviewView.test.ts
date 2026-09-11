@@ -4,6 +4,15 @@ import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import type { ReviewPage } from '#/lib/store';
 import type IncrementalReadingPlugin from '#/main';
+// The mock is what `obsidian` resolves to at runtime (see vitest.config.ts), so
+// importing it by path is the same module — but with the stub's own surface
+// visible to TypeScript, which is where the recorded menu contents live.
+import {
+  FileView,
+  Menu,
+  Platform,
+  type MenuItem,
+} from '#/test/__mocks__/obsidian';
 import ReviewView, { REVIEW_VIEW_DEFAULT_TITLE } from '#/views/ReviewView';
 import fc from 'fast-check';
 import { WorkspaceWindow, type TFile, type WorkspaceLeaf } from 'obsidian';
@@ -129,6 +138,103 @@ function makeView(store: ReturnType<typeof makeFakeStore>): ReviewView {
   );
 }
 
+/**
+ * Receiver for the menu methods, carrying the app surfaces they reach for.
+ * Its prototype is set for the same reason {@link makeTitleReceiver} sets one,
+ * and with the added effect that `super.onPaneMenu` resolves to the mock's
+ * `FileView` — standing in for the tab-level entries Obsidian contributes there.
+ */
+function makeMenuReceiver({
+  page = 'review',
+  file = makeFile('Chapter 1'),
+}: { page?: ReviewPage; file?: TFile | null } = {}) {
+  const openFile = vi.fn();
+  const revealInFolder = vi.fn();
+  const leaf = { id: 'review-leaf' };
+  const receiver = {
+    file,
+    leaf,
+    plugin: { store: { getState: () => ({ page }) } },
+    app: {
+      workspace: {
+        trigger: vi.fn(),
+        getLeaf: vi.fn(() => ({ openFile })),
+      },
+      fileManager: {
+        promptForFileRename: vi.fn(),
+        promptForDeletion: vi.fn(),
+      },
+      internalPlugins: {
+        getEnabledPluginById: vi.fn(() => ({ revealInFolder })),
+      },
+    },
+  };
+  Object.setPrototypeOf(receiver, ReviewView.prototype);
+  return {
+    view: receiver as unknown as ReviewView,
+    app: receiver.app,
+    leaf,
+    file,
+    openFile,
+    revealInFolder,
+  };
+}
+
+/** Build a menu the way Obsidian's header does, and let the view fill it. */
+function paneMenu(view: ReviewView, source = 'more-options'): Menu {
+  const menu = new Menu();
+  view.onPaneMenu(menu as never, source);
+  return menu;
+}
+
+function itemTitled(menu: Menu, title: string): MenuItem | undefined {
+  return menu.items.find((item) => item.title === title);
+}
+
+/** Fire an entry's callback the way clicking it would. */
+function click(item: MenuItem | undefined): void {
+  if (!item) throw new Error('menu entry not present');
+  item.callback?.(new MouseEvent('click'));
+}
+
+/** The arguments of the one `workspace.trigger` call for `name`. */
+function triggered(
+  app: ReturnType<typeof makeMenuReceiver>['app'],
+  name: string
+): unknown[] | undefined {
+  return app.workspace.trigger.mock.calls.find(
+    (call: unknown[]) => call[0] === name
+  );
+}
+
+/** The menu `showMoreOptionsMenu` built, taken from the event it fired. */
+function shownMenu(app: ReturnType<typeof makeMenuReceiver>['app']): Menu {
+  const call = triggered(app, 'leaf-menu');
+  if (!call) throw new Error('the menu was never handed to leaf-menu');
+  return call[1] as Menu;
+}
+
+/**
+ * Run one assertion against a chosen platform. `Platform` is a plain object in
+ * the mock, so nothing restores it automatically.
+ */
+function onPlatform(isMobile: boolean, run: () => void): void {
+  const previous = Platform.isMobile;
+  Platform.isMobile = isMobile;
+  try {
+    run();
+  } finally {
+    Platform.isMobile = previous;
+  }
+}
+
+/** A button with a known box, since jsdom measures every element as zero. */
+function makeAnchor(rect: { x: number; bottom: number; width: number }) {
+  const button = document.createElement('button');
+  button.getBoundingClientRect = () => rect as DOMRect;
+  return button;
+}
+
 /** Cleanups the view handed to `Component.register`, run on unload. */
 function unload(view: ReviewView): void {
   const { registered } = view as unknown as { registered: (() => unknown)[] };
@@ -189,7 +295,9 @@ describe('ReviewView.showSearch', () => {
 
     const activeEditor = makeActiveEditor();
     const view = { activeEditor } as unknown as ReviewView;
-    expect(Object.prototype.hasOwnProperty.call(view, 'showSearch')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(view, 'showSearch')).toBe(
+      false
+    );
     expect({ ...view }).not.toHaveProperty('showSearch');
   });
 
@@ -286,10 +394,7 @@ describe('ReviewView.refocusWithoutScroll', () => {
 
   it('does nothing for a non-HTMLElement (e.g. an SVG element)', () => {
     // #lastFocusedEl is typed Element; only HTMLElement has focus() with options.
-    const svg = document.createElementNS(
-      'http://www.w3.org/2000/svg',
-      'svg'
-    );
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     // jsdom SVGElement lacks a focus method; the guard must skip it, not throw.
     expect(() => callRefocusWithoutScroll(svg)).not.toThrow();
   });
@@ -439,14 +544,18 @@ describe('ReviewView.renderTitleParent', () => {
 
   it('clears the breadcrumb when no item is loaded', () => {
     fc.assert(
-      fc.property(pageArb, fc.constantFrom(null, makeFile('')), (page, file) => {
-        const receiver = makeTitleReceiver(page, file);
+      fc.property(
+        pageArb,
+        fc.constantFrom(null, makeFile('')),
+        (page, file) => {
+          const receiver = makeTitleReceiver(page, file);
 
-        asView(receiver).renderTitleParent();
+          asView(receiver).renderTitleParent();
 
-        expect(receiver.titleParentEl.empty).toHaveBeenCalledTimes(1);
-        expect(receiver.renderBreadcrumbs).not.toHaveBeenCalled();
-      })
+          expect(receiver.titleParentEl.empty).toHaveBeenCalledTimes(1);
+          expect(receiver.renderBreadcrumbs).not.toHaveBeenCalled();
+        }
+      )
     );
   });
 });
@@ -488,12 +597,17 @@ describe('ReviewView.setTitle', () => {
     // them in step inside loadFile; this view never goes through it, so leaving
     // the breadcrumb out here is what let the header name one item and point at
     // another item's folder.
-    const receiver = makeTitleReceiver('review', makeFile('Security Principles'));
+    const receiver = makeTitleReceiver(
+      'review',
+      makeFile('Security Principles')
+    );
 
     asView(receiver).setTitle();
 
     expect(receiver.renderBreadcrumbs).toHaveBeenCalledTimes(1);
-    expect(receiver.titleEl.setText).toHaveBeenCalledWith('Security Principles');
+    expect(receiver.titleEl.setText).toHaveBeenCalledWith(
+      'Security Principles'
+    );
   });
 
   it('clears the folder breadcrumb once a review returns to the home screen', () => {
@@ -549,7 +663,10 @@ describe('ReviewView.setFile', () => {
     // The reported symptom, from the user's side: consecutive items live in
     // different folders (sources/ vs cards/), and only the name was following
     // along.
-    const receiver = makeTitleReceiver('review', makeFile('Security Principles'));
+    const receiver = makeTitleReceiver(
+      'review',
+      makeFile('Security Principles')
+    );
 
     asView(receiver).setFile(makeFile('Chunking'));
 
@@ -620,5 +737,227 @@ describe('ReviewView page subscription', () => {
     store.dispatchPage('review');
 
     expect(setTitle).not.toHaveBeenCalled();
+  });
+});
+
+/** Every source Obsidian opens a view's pane menu from. */
+const menuSourceArb = fc.constantFrom(
+  'more-options',
+  'tab-header',
+  'sidebar-context-menu'
+);
+
+describe('ReviewView.onPaneMenu', () => {
+  it("puts the view's own entries in the section that renders first", () => {
+    // Menu.sort groups by section instead of following the order entries were
+    // added, and `pane` precedes `open` — where Split right and Split down land
+    // — in the order the view header registers.
+    const { view } = makeMenuReceiver();
+
+    const menu = paneMenu(view);
+
+    expect(itemTitled(menu, 'Open in new tab')?.section).toBe('pane');
+  });
+
+  it("opens the item's note in a markdown tab of its own", () => {
+    // The review tab keeps reviewing; the note opens beside it, which is the
+    // whole point of the entry.
+    const { view, app, file, openFile } = makeMenuReceiver();
+
+    click(itemTitled(paneMenu(view), 'Open in new tab'));
+
+    expect(app.workspace.getLeaf).toHaveBeenCalledWith('tab');
+    expect(openFile).toHaveBeenCalledWith(file, { active: true });
+  });
+
+  it('offers the rename and delete that FileView leaves out', () => {
+    const { view } = makeMenuReceiver();
+
+    const menu = paneMenu(view);
+
+    expect(itemTitled(menu, 'Rename...')?.section).toBe('action');
+    expect(itemTitled(menu, 'Delete')?.section).toBe('danger');
+    // Obsidian paints warning entries red, as it does for deleting a note.
+    expect(itemTitled(menu, 'Delete')?.warning).toBe(true);
+  });
+
+  it('renames and deletes the note the tab is showing', () => {
+    const { view, app, file } = makeMenuReceiver();
+    const menu = paneMenu(view);
+
+    click(itemTitled(menu, 'Rename...'));
+    click(itemTitled(menu, 'Delete'));
+
+    expect(app.fileManager.promptForFileRename).toHaveBeenCalledWith(file);
+    expect(app.fileManager.promptForDeletion).toHaveBeenCalledWith(file);
+  });
+
+  it('fires file-menu, which is where the rest of the menu comes from', () => {
+    // Move file to, Bookmark, Copy path, Reveal in navigation and every
+    // community plugin's entries all arrive on this event. FileView never fires
+    // it, which is what left the menu looking broken.
+    fc.assert(
+      fc.property(menuSourceArb, (source) => {
+        const { view, app, leaf, file } = makeMenuReceiver();
+
+        const menu = paneMenu(view, source);
+
+        expect(triggered(app, 'file-menu')).toEqual([
+          'file-menu',
+          menu,
+          file,
+          source,
+          leaf,
+        ]);
+      })
+    );
+  });
+
+  it('delegates to FileView for the tab-level entries', () => {
+    // Split right, Split down, and Close and Pin on a phone come from there.
+    const onPaneMenu = vi.spyOn(FileView.prototype, 'onPaneMenu');
+    const { view } = makeMenuReceiver();
+
+    const menu = paneMenu(view, 'tab-header');
+
+    expect(onPaneMenu).toHaveBeenCalledWith(menu, 'tab-header');
+  });
+
+  it('greys out the split entries, which would duplicate the review tab', () => {
+    // They belong to ItemView, so there is no way to leave them unadded — they
+    // have to be found afterwards and switched off. Found by title, since the
+    // entry another class added exposes nothing else to key on.
+    vi.spyOn(FileView.prototype, 'onPaneMenu').mockImplementation((menu) => {
+      for (const title of ['Split right', 'Split down', 'Pin']) {
+        menu.addItem((item) => item.setTitle(title).setSection('open'));
+      }
+    });
+    const { view } = makeMenuReceiver();
+
+    const menu = paneMenu(view);
+
+    expect(itemTitled(menu, 'Split right')?.disabled).toBe(true);
+    expect(itemTitled(menu, 'Split down')?.disabled).toBe(true);
+    // Everything else ItemView contributes is left alone.
+    expect(itemTitled(menu, 'Pin')?.disabled).toBe(false);
+  });
+
+  it('says nothing about a file the tab is not showing', () => {
+    // `file` legitimately still points at the last item while the home screen
+    // is up, so a menu built from it alone would rename or delete a note the
+    // tab is not displaying.
+    fc.assert(
+      fc.property(pageArb, fileArb, menuSourceArb, (page, file, source) => {
+        fc.pre(page !== 'review' || !file?.basename);
+        const { view, app } = makeMenuReceiver({ page, file });
+
+        const menu = paneMenu(view, source);
+
+        expect(menu.items).toHaveLength(0);
+        expect(triggered(app, 'file-menu')).toBeUndefined();
+      })
+    );
+  });
+
+  it("adds a reveal entry only where Obsidian's file explorer does not", () => {
+    // The file explorer contributes Reveal file in navigation to every
+    // `file-menu`, but its handler is guarded by `!Platform.isMobile`, so
+    // adding ours unconditionally would list the action twice on desktop.
+    const { view } = makeMenuReceiver();
+
+    onPlatform(true, () => {
+      expect(
+        itemTitled(paneMenu(view), 'Reveal file in navigation')?.section
+      ).toBe('pane');
+    });
+    onPlatform(false, () => {
+      expect(
+        itemTitled(paneMenu(view), 'Reveal file in navigation')
+      ).toBeUndefined();
+    });
+  });
+
+  it("reveals the item's note in the file explorer", () => {
+    const { view, file, revealInFolder } = makeMenuReceiver();
+
+    onPlatform(true, () => {
+      click(itemTitled(paneMenu(view), 'Reveal file in navigation'));
+    });
+
+    expect(revealInFolder).toHaveBeenCalledWith(file);
+  });
+});
+
+describe('ReviewView.showMoreOptionsMenu', () => {
+  it("registers the section order Obsidian's view header uses", () => {
+    // Copied from ItemView.onMoreOptions. Order is what decides where every
+    // entry lands, so a menu built by hand has to declare the same one.
+    const { view, app } = makeMenuReceiver();
+
+    view.showMoreOptionsMenu(makeAnchor({ x: 0, bottom: 0, width: 0 }));
+
+    expect(shownMenu(app).sections).toEqual([
+      'close',
+      'pane',
+      'open',
+      'action',
+      'find',
+      'info',
+      'info.copy',
+      'view',
+      'view.linked',
+      'system',
+      '',
+      'danger',
+    ]);
+  });
+
+  it('groups the copy entries into a submenu, as the header does', () => {
+    const { view, app } = makeMenuReceiver();
+
+    view.showMoreOptionsMenu(makeAnchor({ x: 0, bottom: 0, width: 0 }));
+
+    expect(shownMenu(app).submenuConfigs['info.copy']).toEqual({
+      title: 'Copy path',
+      icon: 'lucide-clipboard',
+    });
+  });
+
+  it('fires leaf-menu, which is what adds Open in new window', () => {
+    const { view, app, leaf } = makeMenuReceiver();
+
+    view.showMoreOptionsMenu(makeAnchor({ x: 0, bottom: 0, width: 0 }));
+
+    expect(triggered(app, 'leaf-menu')?.slice(2)).toEqual([leaf]);
+  });
+
+  it('carries the file entries the header button would have shown', () => {
+    // The desktop button stands in for a header Obsidian never draws here, so
+    // it has to arrive at the same menu.
+    const { view, app } = makeMenuReceiver();
+
+    view.showMoreOptionsMenu(makeAnchor({ x: 0, bottom: 0, width: 0 }));
+
+    expect(itemTitled(shownMenu(app), 'Open in new tab')).toBeDefined();
+    expect(itemTitled(shownMenu(app), 'Rename...')).toBeDefined();
+  });
+
+  it('hangs the menu under the button it was given', () => {
+    // Anchored the way ItemView.onMoreOptions anchors it: left-aligned under
+    // the button, overlapping it, and parented to it so the button reads as
+    // active while the menu is open.
+    const { view, app } = makeMenuReceiver();
+    const anchor = makeAnchor({ x: 120, bottom: 48, width: 24 });
+
+    view.showMoreOptionsMenu(anchor);
+
+    expect(shownMenu(app).parentEl).toBe(anchor);
+    expect(shownMenu(app).shownAt).toEqual({
+      x: 120,
+      y: 48,
+      width: 24,
+      overlap: true,
+      left: true,
+    });
   });
 });

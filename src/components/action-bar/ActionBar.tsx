@@ -19,6 +19,7 @@ import {
   ArchiveRestore,
   Ban,
   Check,
+  EllipsisVertical,
   Eye,
   House,
   Scissors,
@@ -113,10 +114,10 @@ function HomeActions() {
 }
 
 /**
+ * Actions that belong to the tab rather than to the item inside it.
+ *
  * TODO:
- * - always render ActionBar once a global action exists
  * - forward/back (or use the view header)
- * - view queue
  */
 function GlobalActions() {
   return <></>;
@@ -161,7 +162,7 @@ function UndoAction() {
  * Actions common to articles, snippets, and cards
  */
 function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
-  const { actions } = useReviewContext();
+  const { actions, plugin, reviewView } = useReviewContext();
   const isDismissed = reviewItem.data.dismissed;
 
   return (
@@ -206,6 +207,25 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
       >
         <Trash2 stroke="#990000" />
       </ButtonWithIcon>
+      {/* Obsidian draws its own ⋮ in the view header, which ReviewView hides on
+  desktop, but not mobile. */}
+      {!plugin.app.isMobile && (
+        <ButtonWithIcon
+          tooltip="More options"
+          id="more-options-button"
+          handleClick={(e) => {
+            // Anchors the menu under the button, the way Obsidian's own header
+            // button anchors it. Read synchronously: `currentTarget` is null once
+            // the event finishes dispatching.
+            const button = e.currentTarget;
+            if (button instanceof HTMLElement) {
+              reviewView.showMoreOptionsMenu(button);
+            }
+          }}
+        >
+          <EllipsisVertical />
+        </ButtonWithIcon>
+      )}
     </>
   );
 }

@@ -1,5 +1,8 @@
 import { createReviewInterface } from '#/components/ReviewInterface';
-import { PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
+import {
+  MORE_OPTIONS_SECTIONS,
+  PLACEHOLDER_PLUGIN_ICON,
+} from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import { resetSession, type ReviewPage } from '#/lib/store';
@@ -7,6 +10,9 @@ import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import {
   FileView,
+  Menu,
+  MenuItem,
+  Platform,
   WorkspaceWindow,
   type IconName,
   type TFile,
@@ -100,11 +106,11 @@ export default class ReviewView extends FileView {
   }
 
   /**
-   * The name of the item this tab is displaying, or `null` when it is showing
-   * anything else. Everything the header says about the current item — the name
-   * in {@link getDisplayText} and the folder path in {@link renderTitleParent} —
-   * keys off this one answer, so the two can never end up describing different
-   * items.
+   * The item this tab is displaying, or `null` when it is showing anything else.
+   * Everything that speaks for the current item — the name in
+   * {@link getDisplayText}, the folder path in {@link renderTitleParent}, the
+   * file entries in {@link onPaneMenu} — keys off this one answer, so they can
+   * never end up describing different items.
    *
    * `file` legitimately stays pointed at the last item while the home screen is
    * up, so the page is what decides, not the file alone. A file with an empty
@@ -115,10 +121,15 @@ export default class ReviewView extends FileView {
    * detect page *changes*: Obsidian calls this from paths the store subscription
    * does not drive, and a title read must never lag the state it describes.
    */
-  currentItemName(): string | null {
+  currentItemFile(): TFile | null {
     const { page } = this.plugin.store.getState();
     if (page !== 'review') return null;
-    return this.file?.basename || null;
+    return this.file?.basename ? this.file : null;
+  }
+
+  /** The name of the item this tab is displaying — see {@link currentItemFile}. */
+  currentItemName(): string | null {
+    return this.currentItemFile()?.basename ?? null;
   }
 
   /**
@@ -274,10 +285,157 @@ export default class ReviewView extends FileView {
     this.plugin.store.dispatch(resetSession());
   }
 
-  /* TODO: add file options */
-  // onPaneMenu(menu: Menu, source: 'more-options' | 'tab-header' | string): void {
-  //   super.onPaneMenu(menu, source);
-  // }
+  /**
+   * Populate the file context menu — the ⋮ button in the view header on mobile,
+   * the action bar's stand-in for it on desktop, and the tab header's
+   * right-click menu on both.
+   *
+   * `FileView` does not implement this. The class that does is the editable file
+   * view below it in the hierarchy, which every markdown tab uses, so a plain
+   * `FileView` subclass inherits only `ItemView`'s tab-level entries — Split
+   * right and Split down on desktop, Close and Pin on a phone. Missing with it
+   * are rename, delete, and the `file-menu` event that every core and community
+   * plugin listens on to contribute its own entries, which is why the menu looks
+   * broken rather than merely short. Firing that event here is what fills it.
+   *
+   * The three steps read top to bottom but do not render that way: `Menu.sort`
+   * groups by section, following {@link MORE_OPTIONS_SECTIONS}. What puts this
+   * view's own entries above Split right is their `pane` section, not the order
+   * they were added in.
+   */
+  onPaneMenu(menu: Menu, source: string): void {
+    this.addViewMenuItems(menu);
+    super.onPaneMenu(menu, source);
+
+    // Disable duplicating the review tab for now
+    for (const item of menu.items) {
+      if (
+        item instanceof MenuItem &&
+        (item.titleEl.textContent === 'Split right' ||
+          item.titleEl.textContent === 'Split down')
+      ) {
+        item.setDisabled(true);
+      }
+    }
+    this.addFileMenuItems(menu, source);
+  }
+
+  /**
+   * The review tab's own menu entries, which render above everything Obsidian
+   * and other plugins add.
+   *
+   * This is the extension point: add entries here, each carrying
+   * `.setSection('pane')`, and they join the top group in the order written.
+   */
+  addViewMenuItems(menu: Menu): void {
+    const file = this.currentItemFile();
+    if (!file) return;
+
+    menu.addItem((item) =>
+      item
+        .setTitle('Open in new tab')
+        .setIcon('lucide-file-plus')
+        .setSection('pane')
+        .onClick(() => {
+          void this.app.workspace
+            .getLeaf('tab')
+            .openFile(file, { active: true });
+        })
+    );
+
+    // Obsidian's file explorer contributes "Reveal file in navigation" to every
+    // `file-menu` it sees, but its handler is guarded by `!Platform.isMobile`,
+    // so only desktop gets it. Adding ours unconditionally would list the
+    // action twice there.
+    if (Platform.isMobile) {
+      menu.addItem((item) =>
+        item
+          .setTitle('Reveal file in navigation')
+          .setIcon('lucide-folder-open')
+          .setSection('pane')
+          .onClick(() => {
+            this.app.internalPlugins
+              .getEnabledPluginById('file-explorer')
+              ?.revealInFolder(file);
+          })
+      );
+    }
+  }
+
+  /**
+   * Everything a markdown tab's menu offers for the file it is showing: rename
+   * and delete, which the view owns, then the `file-menu` event, which is where
+   * the rest of the menu comes from — Move file to, Bookmark, Copy path, Reveal
+   * in navigation, and whatever community plugins add.
+   *
+   * `source` is passed through untouched because handlers branch on it; the
+   * file explorer's own reveal entry, for one, skips its own context menu that
+   * way.
+   *
+   * Guarded on {@link currentItemFile} rather than `file`, which stays pointed
+   * at the last item while the home screen is up: a menu offering to rename or
+   * delete a note the tab is not showing would act on the wrong file.
+   */
+  addFileMenuItems(menu: Menu, source: string): void {
+    const file = this.currentItemFile();
+    if (!file) return;
+
+    menu.addItem((item) =>
+      item
+        .setTitle('Rename...')
+        .setIcon('lucide-edit-3')
+        .setSection('action')
+        .onClick(() => {
+          void this.app.fileManager.promptForFileRename(file);
+        })
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle('Delete')
+        .setIcon('lucide-trash-2')
+        .setSection('danger')
+        .setWarning(true)
+        .onClick(() => {
+          void this.app.fileManager.promptForDeletion(file);
+        })
+    );
+
+    this.app.workspace.trigger('file-menu', menu, file, source, this.leaf);
+  }
+
+  /**
+   * Open the file context menu from a caller of our own.
+   *
+   * Obsidian builds this menu in `ItemView.onMoreOptions`, wired to the ⋮ button
+   * it draws in `headerEl` — which {@link onOpen} hides on desktop, where the
+   * action bar takes the header's place. The action bar's ⋮ calls this instead,
+   * and it mirrors that method step for step: same sections, same submenu
+   * grouping, same `leaf-menu` event, anchored under the button the same way, so
+   * the menu desktop gets is the one mobile gets natively.
+   */
+  showMoreOptionsMenu(anchorEl: HTMLElement): void {
+    const menu = new Menu().addSections(MORE_OPTIONS_SECTIONS);
+    menu.setSectionSubmenu('info.copy', {
+      title: 'Copy path',
+      icon: 'lucide-clipboard',
+    });
+    menu.setSectionSubmenu('view.linked', {
+      title: 'Open linked view',
+      icon: 'lucide-link',
+    });
+
+    this.onPaneMenu(menu, 'more-options');
+    this.app.workspace.trigger('leaf-menu', menu, this.leaf);
+
+    const rect = anchorEl.getBoundingClientRect();
+    menu.setParentElement(anchorEl).showAtPosition({
+      x: rect.x,
+      y: rect.bottom,
+      width: rect.width,
+      overlap: true,
+      left: true,
+    });
+  }
 
   /* TODO: investigate how to use this */
   async onLoadFile(file: TFile): Promise<void> {
