@@ -24,7 +24,6 @@ import {
   House,
   Scissors,
   SkipForward,
-  Trash2,
   Undo2,
 } from 'lucide-react';
 import { useSyncExternalStore } from 'react';
@@ -199,14 +198,6 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
           <Ban stroke="#b4a200" />
         </ButtonWithIcon>
       )}
-      <ButtonWithIcon
-        tooltip="Delete this item and its note"
-        handleClick={async () => {
-          await actions.deleteItem(reviewItem);
-        }}
-      >
-        <Trash2 stroke="#990000" />
-      </ButtonWithIcon>
       {/* Obsidian draws its own ⋮ in the view header, which ReviewView hides on
   desktop, but not mobile. */}
       {!plugin.app.isMobile && (
