@@ -124,7 +124,6 @@ async function settle() {
 vi.mock('lucide-react', () => ({
   ArchiveRestore: () => null,
   Ban: () => null,
-  BrainCog: () => null,
   Check: () => null,
   Eye: () => null,
   House: () => null,

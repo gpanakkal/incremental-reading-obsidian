@@ -1,3 +1,4 @@
+import { CardCog } from '#/components/icons/CardCog';
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
@@ -17,7 +18,6 @@ import {
 import {
   ArchiveRestore,
   Ban,
-  BrainCog,
   Check,
   Eye,
   House,
@@ -180,7 +180,7 @@ function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
           await actions.createCard();
         }}
       >
-        <BrainCog />
+        <CardCog />
       </ButtonWithIcon>
       <Separator />
       {isDismissed ? (

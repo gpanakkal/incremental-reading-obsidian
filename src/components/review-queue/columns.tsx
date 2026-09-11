@@ -1,6 +1,7 @@
+import { CardCog } from '#/components/icons/CardCog';
 import type { QueueCardMemory, QueueRow } from '#/components/types';
-import { BrainCog, FileText, Scissors } from 'lucide-react';
-import type { ComponentChild } from 'preact';
+import { FileText, Scissors } from 'lucide-react';
+import type { ComponentChild, ComponentType } from 'preact';
 
 /** Keys of the renderable queue columns (`id`/`file` are never rendered). */
 export type QueueColumnKey =
@@ -80,17 +81,16 @@ export function buildQueueColumns(): QueueColumn[] {
   ];
 }
 
-const TYPE_ICONS: Record<QueueRow['type'], typeof FileText> = {
+const TYPE_ICONS: Record<QueueRow['type'], ComponentType> = {
   article: FileText,
   snippet: Scissors,
-  card: BrainCog,
+  card: CardCog,
 };
 
 /**
- * Placeholder icons for each item type until dedicated ones are designed.
- * The icon carries no label of its own: the enclosing cell is labelled with
- * this row's type (see `queueCellTitles`), and a second label nested inside it
- * would render a tooltip on top of the cell's own.
+ * Icon for each item type. The icon carries no label of its own: the enclosing
+ * cell is labelled with this row's type (see `queueCellTitles`), and a second
+ * label nested inside it would render a tooltip on top of the cell's own.
  */
 function typeIcon(type: QueueRow['type']): ComponentChild {
   const Icon = TYPE_ICONS[type];

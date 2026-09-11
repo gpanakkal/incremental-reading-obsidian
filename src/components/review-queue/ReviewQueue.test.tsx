@@ -135,7 +135,6 @@ async function flush() {
 // the instance rendering here (see the react→preact aliasing TODO in
 // vitest.config.ts). The icons are incidental to this component's behavior.
 vi.mock('lucide-react', () => ({
-  BrainCog: () => null,
   FileText: () => null,
   Scissors: () => null,
 }));
