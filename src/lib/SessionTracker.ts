@@ -95,15 +95,68 @@ export class SessionTracker {
   }
 
   /**
-   * Stop writing, permanently.
+   * Stop writing, permanently, and settle what is owed. Resolves once the last
+   * write has landed, so a quit can wait on it.
    *
    * Call before anything tears the review session down — app quit, plugin
-   * unload — so that nothing that teardown pushes through the store, and no
-   * clear already sitting on the timer, can land after the user has left.
+   * unload — so that nothing teardown pushes through the store can land after
+   * the user has left.
+   *
+   * A clear already on the timer is flushed rather than dropped. Everything
+   * teardown sends arrives *after* this point — {@link commit} and the store
+   * listener both stop here — so a timer still running was put there by the
+   * user leaving the item, by finishing the last one due or by going back to
+   * the home screen. Dropping it would leave `data.json` naming an item review
+   * had already left and resume onto it next launch, which is the whole of what
+   * the delay was protecting against, inverted.
    */
-  suspend(): void {
+  suspend(): Promise<void> {
     this.#suspended = true;
+    if (this.#timer !== null) {
+      this.#cancelPendingClear();
+      this.#clear();
+    }
+    return this.#pending;
+  }
+
+  /**
+   * Drop the pointer: what it named is gone, or is no longer something review
+   * will show.
+   *
+   * Told from `Plugin.resumeSession`, which resolves the pointer against the
+   * database and is the only thing that can find that out. Routed through here
+   * rather than written straight to the file so that {@link itemId} stops
+   * offering the dead id back on the next resume.
+   */
+  forget(): void {
+    if (this.#suspended) return;
     this.#cancelPendingClear();
+    this.#clear();
+  }
+
+  /**
+   * Drop the pointer if — and only if — it is the one naming `itemId`.
+   *
+   * For the things that happen to an item while no review tab is open, where
+   * the store has no current item to match against and so nothing else
+   * notices: dismissing a note from its own action bar is the one that
+   * prompted this. `resumeSession` would catch it on the way back in, since it
+   * resolves the pointer before trusting it, but only after `data.json` has
+   * spent the interval naming an item nothing will show. Kept truthful at the
+   * point of the change instead.
+   *
+   * Deliberately not {@link finish}: that says review moved on from the item it
+   * was showing, which is a different claim and would lift a hold covering some
+   * other tab's item.
+   */
+  forgetIf(itemId: string): void {
+    if (this.#suspended) return;
+    if (this.#persisted !== itemId) return;
+    // Left on the timer like any other departure rather than written out here.
+    // Review may be showing the item as it is dismissed, in which case the
+    // advance that follows names the next one before the clear lands and the
+    // two coalesce into the single write every advance makes.
+    this.#scheduleClear();
   }
 
   /**

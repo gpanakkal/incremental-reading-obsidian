@@ -290,7 +290,7 @@ describe('SessionTracker', () => {
     store.dispatch(resetSession());
     // Quitting right after the close cancels anything still on the timer, so
     // the departure has to have been written by the close itself.
-    tracker.suspend();
+    void tracker.suspend();
     await settle();
 
     expect(saved).toEqual([{ deviceId: DEVICE, itemId: 'item-1' }, null]);
@@ -302,7 +302,7 @@ describe('SessionTracker', () => {
 
     openItem('item-1');
     await flush();
-    tracker.suspend();
+    void tracker.suspend();
     // Quitting closes the tabs too, and reaches them in its own order: by the
     // time one of them commits, the session may already have been emptied.
     store.dispatch(resetSession());
@@ -433,7 +433,7 @@ describe('SessionTracker', () => {
 
     openItem('item-1');
     await flush();
-    tracker.suspend();
+    void tracker.suspend();
     // What quitting pushes through the store on its way out.
     store.dispatch(resetSession());
     await settle();
@@ -442,16 +442,175 @@ describe('SessionTracker', () => {
     stop();
   });
 
-  it('cancels a clear that was already pending when suspended', async () => {
+  it('writes out a clear that was already pending when suspended', async () => {
+    // Going back to the home screen is a departure, and quitting inside the
+    // delay must not undo it: everything teardown sends arrives after the
+    // suspend, so a timer still running was the user leaving the item.
     const { tracker, saved, stop } = makeTracker();
 
     openItem('item-1');
     await flush();
     store.dispatch(setPage('home'));
-    tracker.suspend();
+    void tracker.suspend();
     await settle();
 
+    expect(saved).toEqual([{ deviceId: DEVICE, itemId: 'item-1' }, null]);
+    stop();
+  });
+
+  it('writes out the last item finished when suspended before the next arrives', async () => {
+    // Reviewing the last item due and quitting on the "nothing due" screen
+    // inside the delay — the pointer has to go, or review resumes on an item
+    // the user is done with.
+    const { tracker, saved, stop } = makeTracker();
+
+    openItem('item-1');
+    await flush();
+    tracker.finish();
+    store.dispatch(resetCurrentItem());
+    void tracker.suspend();
+    await settle();
+
+    expect(saved).toEqual([{ deviceId: DEVICE, itemId: 'item-1' }, null]);
+    stop();
+  });
+
+  it('resolves suspending only once the write it settles has landed', async () => {
+    // The quit hands this to `Tasks.addPromise`, so the app waits for
+    // `data.json` rather than closing over a half-finished save.
+    let release = () => {};
+    const save = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    const tracker = new SessionTracker({
+      store,
+      deviceId: DEVICE,
+      save,
+      initialItemId: 'item-1',
+    });
+    const stop = tracker.start();
+    openItem('item-1');
+    store.dispatch(setPage('home'));
+
+    const settled = vi.fn();
+    void tracker.suspend().then(settled);
+    await flush();
+    expect(settled).not.toHaveBeenCalled();
+
+    release();
+    await flush();
+
+    expect(settled).toHaveBeenCalled();
+    stop();
+  });
+
+  it('has nothing to settle when nothing was pending', async () => {
+    const { tracker, saved, stop } = makeTracker();
+
+    openItem('item-1');
+    await flush();
+    await expect(tracker.suspend()).resolves.toBeUndefined();
+
     expect(saved).toEqual([{ deviceId: DEVICE, itemId: 'item-1' }]);
+    stop();
+  });
+
+  it('erases a pointer it is told to forget', async () => {
+    // The resume found the item gone from the database.
+    const { tracker, saved, stop } = makeTracker('item-1');
+
+    tracker.forget();
+    await flush();
+
+    expect(saved).toEqual([null]);
+    stop();
+  });
+
+  it('stops offering a forgotten pointer back', async () => {
+    // The whole reason this goes through the tracker: writing straight to the
+    // file would leave it holding the dead id for the next resume to read.
+    const { tracker, stop } = makeTracker('item-1');
+
+    tracker.forget();
+
+    expect(tracker.itemId).toBeNull();
+    stop();
+  });
+
+  it('erases a pointer whose item is dismissed with no tab open', async () => {
+    // Dismissing a note from its own action bar: no review tab, so the store
+    // has no current item to match it against and nothing else notices.
+    const { tracker, saved, stop } = makeTracker('item-1');
+
+    tracker.forgetIf('item-1');
+    await settle();
+
+    expect(saved).toEqual([null]);
+    stop();
+  });
+
+  it('leaves a pointer to a different item alone', async () => {
+    const { tracker, save, stop } = makeTracker('item-1');
+
+    tracker.forgetIf('item-2');
+    await settle();
+
+    expect(save).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it('coalesces with the advance when the item dismissed is on screen', async () => {
+    // Dismissing from inside review ends on `getNext`, so the next item names
+    // the pointer before the clear lands: one write, as on every other advance.
+    const { tracker, saved, stop } = makeTracker();
+
+    openItem('item-1');
+    await flush();
+    tracker.forgetIf('item-1');
+    tracker.finish();
+    store.dispatch(resetCurrentItem());
+    store.dispatch(setCurrentItemId('item-2'));
+    await settle();
+
+    expect(saved).toEqual([
+      { deviceId: DEVICE, itemId: 'item-1' },
+      { deviceId: DEVICE, itemId: 'item-2' },
+    ]);
+    stop();
+  });
+
+  it('writes nothing to forget an item once suspended', async () => {
+    const { tracker, save, stop } = makeTracker('item-1');
+
+    void tracker.suspend();
+    tracker.forgetIf('item-1');
+    await settle();
+
+    expect(save).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it('writes nothing to forget a pointer it never had', async () => {
+    const { tracker, save, stop } = makeTracker();
+
+    tracker.forget();
+    await flush();
+
+    expect(save).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it('writes nothing to forget once suspended', async () => {
+    const { tracker, save, stop } = makeTracker('item-1');
+
+    void tracker.suspend();
+    tracker.forget();
+    await flush();
+
+    expect(save).not.toHaveBeenCalled();
     stop();
   });
 

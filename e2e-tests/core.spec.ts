@@ -10,6 +10,7 @@ import {
   openNote,
   reviewTitle,
   selectParagraph,
+  setPluginSetting,
 } from './helpers';
 import {
   closeElectron,
@@ -531,5 +532,60 @@ test.describe('Review session', () => {
     await executeCommandById(window, 'workspace:close');
     await executeCommandById(window, 'incremental-reading:learn');
     await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
+  });
+
+  test('lands on the home screen when the remembered item is dismissed elsewhere', async () => {
+    // Dismissing from the note's own pane happens with no review tab open, so
+    // the plugin has no current item to match the dismissal against — the
+    // remembered pointer is the only thing still naming it.
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
+
+    await executeCommandById(window, 'workspace:close');
+    const dismissButton = window.getByRole('button', { name: 'Dismiss' });
+    await expect(dismissButton).toBeInViewport();
+    await dismissButton.click();
+
+    // Nothing is scheduling that item any more, so review opens with nothing in
+    // progress: the home screen, this vault's setting being the default.
+    await executeCommandById(window, 'incremental-reading:learn');
+
+    await expect(window.locator('css=#begin-review-button')).toBeVisible();
+  });
+
+  test('honours the skipped home screen on a tab Obsidian reopens', async () => {
+    // Obsidian's own reopen never reaches the Learn command, which is the only
+    // other place the setting is applied — so with nothing left to resume, the
+    // view has to apply it itself or the tab lands on the queue table.
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await setPluginSetting(window, 'skipHomeScreen', true);
+
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
+
+    // Back to the home screen, which drops the remembered item: reopening is
+    // then review opening with nothing in progress, which is what the setting
+    // is about.
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(window.locator('css=#begin-review-button')).toBeVisible();
+
+    await executeCommandById(window, 'workspace:close');
+    await executeCommandById(window, 'workspace:undo-close-pane');
+
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
+    await expect(window.locator('css=#begin-review-button')).toHaveCount(0);
   });
 });

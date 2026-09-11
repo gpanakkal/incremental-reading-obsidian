@@ -320,3 +320,35 @@ export async function selectParagraph(
   // wait for Obsidian
   await window.waitForTimeout(waitMs);
 }
+
+/**
+ * Flip one of the plugin's settings from inside the running app.
+ *
+ * In memory only — no `saveSettings` — because that is where everything reads
+ * it from, and writing `data.json` here would also have to be undone before the
+ * next command picked it back up.
+ */
+export async function setPluginSetting(
+  window: Page,
+  key: string,
+  value: unknown
+) {
+  await waitForLayoutReady(window);
+  await window.evaluate(
+    ([settingKey, settingValue]) => {
+      const plugins = (
+        window as Page & {
+          app: App & {
+            plugins: {
+              plugins: Record<string, { settings: Record<string, unknown> }>;
+            };
+          };
+        }
+      ).app.plugins.plugins;
+      const plugin = plugins['incremental-reading'];
+      if (!plugin) throw new Error('incremental-reading plugin is not loaded');
+      plugin.settings[settingKey] = settingValue;
+    },
+    [key, value] as [string, unknown]
+  );
+}

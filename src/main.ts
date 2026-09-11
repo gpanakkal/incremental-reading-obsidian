@@ -398,7 +398,11 @@ export default class IncrementalReadingPlugin extends Plugin {
     // one: dismissing runs a database write first, so a tab closed in the
     // moments after the click records the item still on screen.
     if (!item || item.data.dismissed) {
-      await this.saveSession(null);
+      // Through tracking where it is running, so that its own idea of what is
+      // on disk goes with the pointer; straight to the file at startup, which
+      // is the only time there is no tracker to tell.
+      if (this.sessionTracker) this.sessionTracker.forget();
+      else await this.saveSession(null);
       return false;
     }
     store.dispatch(setCurrentItemId(itemId));
@@ -416,9 +420,14 @@ export default class IncrementalReadingPlugin extends Plugin {
     });
     this.register(this.sessionTracker.start());
     // Quitting empties the review session the same way leaving it does; stop
-    // mirroring before any of that teardown can be written out.
+    // mirroring before any of that teardown can be written out. The write that
+    // suspending settles goes on the quit's own task list, so the app waits for
+    // `data.json` rather than closing over a half-finished save.
     this.registerEvent(
-      this.app.workspace.on('quit', () => this.sessionTracker?.suspend())
+      this.app.workspace.on('quit', (tasks) => {
+        const suspended = this.sessionTracker?.suspend();
+        if (suspended) tasks.addPromise(suspended);
+      })
     );
   }
 
@@ -426,11 +435,14 @@ export default class IncrementalReadingPlugin extends Plugin {
    * Overridden rather than handled in {@link onunload}: `Component.unload`
    * tears down children — the review view among them — around that call, and
    * the view's teardown empties the review session. Suspending here runs before
-   * any of it, so an unload can neither clear the remembered item nor let a
-   * clear already on the timer through.
+   * any of it, so an unload cannot clear the remembered item.
+   *
+   * The write it settles is left to finish on its own — unlike the quit above,
+   * nothing here can be made to wait, and the app is still running to complete
+   * it.
    */
   override unload() {
-    this.sessionTracker?.suspend();
+    void this.sessionTracker?.suspend();
     super.unload();
   }
 
@@ -496,13 +508,18 @@ export default class IncrementalReadingPlugin extends Plugin {
     const leaf =
       openReviewLeaf ?? this.app.workspace.getLeaf(newLeaf ? 'tab' : false);
 
-    await leaf.setViewState({
-      type: ReviewView.viewType,
-      active: true,
-    });
-    // Only pick the landing page when instantiating a fresh view; an existing
-    // view keeps its page (e.g. mid-review) regardless of skipHomeScreen.
-    if (!openReviewLeaf) {
+    // Everything the interface reads is settled before the view mounts:
+    // `setViewState` runs `onOpen`, which renders against the store as it finds
+    // it, and `resetSession` left `page` on 'home' when the last tab closed.
+    // Choosing afterwards paints the queue table for a frame first.
+    if (initialItem) {
+      store.dispatch(setCurrentItemId(initialItem.data.id));
+      // An explicit item always lands in review, never on the home screen
+      store.dispatch(setPage('review'));
+    } else if (!openReviewLeaf) {
+      // Only pick the landing page when instantiating a fresh view; an existing
+      // view keeps its page (e.g. mid-review) regardless of skipHomeScreen.
+      //
       // An item carried over from a closed tab is where the user already was,
       // so it opens on that item whatever the home-screen setting says: the
       // setting is about opening review with nothing in progress.
@@ -513,18 +530,22 @@ export default class IncrementalReadingPlugin extends Plugin {
       const currentPage = store.getState().page;
       store.dispatch(setPage(currentPage === 'home' ? 'review' : 'home'));
     }
-    // Set the initial item on the view if provided
+
+    await leaf.setViewState({
+      type: ReviewView.viewType,
+      active: true,
+    });
+
     if (initialItem) {
+      // Kept for the file the view shows; the item itself is already in the
+      // store, which is what stopped the mount above from resuming over it.
       if (!openReviewLeaf) {
         (leaf.view as ReviewView).initialItem = initialItem;
       }
-      store.dispatch(setCurrentItemId(initialItem.data.id));
-      // An explicit item always lands in review, never on the home screen
-      store.dispatch(setPage('review'));
-    } else {
-      // If the view was already open, invalidate the query to trigger a refetch
+    } else if (openReviewLeaf) {
+      // The view was already open, so invalidate the query to trigger a refetch.
       // This ensures the new initial item is displayed immediately
-      if (openReviewLeaf) await invalidateCurrentItemQuery();
+      await invalidateCurrentItemQuery();
     }
 
     await this.app.workspace.revealLeaf(leaf);

@@ -1,5 +1,5 @@
 import type { ReviewSession } from '#/lib/plugin-data';
-import { resetSession, store } from '#/lib/store';
+import { resetSession, setPage, store, type ReviewPage } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import IncrementalReadingPlugin from '#/main';
 // The Vitest alias points `obsidian` at this same file, so the `Menu` built
@@ -117,14 +117,16 @@ function makeResumeReceiver({
 } = {}) {
   const saveSession = vi.fn(() => Promise.resolve());
   const getReviewItemFromId = vi.fn(() => Promise.resolve(item));
+  const forget = vi.fn();
   const receiver = {
     data: { session },
     app: { loadLocalStorage: vi.fn(() => DEVICE), saveLocalStorage: vi.fn() },
     reviewManager: { getReviewItemFromId },
-    sessionTracker: tracked === undefined ? undefined : { itemId: tracked },
+    sessionTracker:
+      tracked === undefined ? undefined : { itemId: tracked, forget },
     saveSession,
   };
-  return { receiver, saveSession, getReviewItemFromId };
+  return { receiver, saveSession, getReviewItemFromId, forget };
 }
 
 /** Run `resumeSession` against a bare receiver. */
@@ -145,7 +147,20 @@ function makeLearnReceiver({
   resumed = false,
   skipHomeScreen = false,
 }: { resumed?: boolean; skipHomeScreen?: boolean } = {}) {
-  const leaf = { setViewState: vi.fn(() => Promise.resolve()), view: {} };
+  /**
+   * What the store said as the view mounted. `setViewState` runs `onOpen`,
+   * which renders the interface against the store as it finds it, so this is
+   * the page the user actually sees first — not the one left behind at the end.
+   */
+  const pageAtMount: { page?: ReviewPage; itemId?: string | null } = {};
+  const leaf = {
+    setViewState: vi.fn(() => {
+      pageAtMount.page = store.getState().page;
+      pageAtMount.itemId = store.getState().currentItemId;
+      return Promise.resolve();
+    }),
+    view: {},
+  };
   const receiver = {
     settings: { skipHomeScreen },
     getOpenReviewLeaf: vi.fn(() => null),
@@ -158,17 +173,22 @@ function makeLearnReceiver({
       },
     },
   };
-  return { receiver, leaf };
+  return { receiver, leaf, pageAtMount };
 }
 
-/** Run `learn` against a bare receiver, with no explicit item. */
+/** Run `learn` against a bare receiver. */
 function learn(
-  receiver: ReturnType<typeof makeLearnReceiver>['receiver']
+  receiver: ReturnType<typeof makeLearnReceiver>['receiver'],
+  initialItem?: ReviewItem
 ): Promise<void> {
   return IncrementalReadingPlugin.prototype.learn.call(
-    receiver as unknown as IncrementalReadingPlugin
+    receiver as unknown as IncrementalReadingPlugin,
+    initialItem
   ) as Promise<void>;
 }
+
+/** Only the id is read off an item handed to `learn`. */
+const item = (id: string) => ({ data: { id } }) as unknown as ReviewItem;
 
 // #endregion
 
@@ -286,6 +306,62 @@ describe('IncrementalReadingPlugin.learn', () => {
       leaf.setViewState.mock.invocationCallOrder[0]
     );
   });
+
+  it('has the page settled before the view mounts', async () => {
+    // `resetSession` left the page on 'home' when the last tab closed, and the
+    // mount renders against whatever it finds: choosing afterwards shows the
+    // queue table for a frame before the item replaces it.
+    const { receiver, pageAtMount } = makeLearnReceiver({
+      resumed: false,
+      skipHomeScreen: true,
+    });
+    store.dispatch(setPage('home'));
+
+    await learn(receiver);
+
+    expect(pageAtMount.page).toBe('review');
+  });
+
+  it('has a resumed item on the page before the view mounts', async () => {
+    const { receiver, pageAtMount } = makeLearnReceiver({ resumed: true });
+    store.dispatch(setPage('home'));
+
+    await learn(receiver);
+
+    expect(pageAtMount.page).toBe('review');
+  });
+
+  it('still lands on the home screen before the view mounts', async () => {
+    // The same guarantee the other way: nothing to resume and the setting off.
+    const { receiver, pageAtMount } = makeLearnReceiver({ resumed: false });
+    store.dispatch(setPage('review'));
+
+    await learn(receiver);
+
+    expect(pageAtMount.page).toBe('home');
+    expect(store.getState().page).toBe('home');
+  });
+
+  it('has an explicit item in the store before the view mounts', async () => {
+    // Otherwise the mount finds an empty session and resumes the remembered
+    // item over it — see `ReviewView.resumeUnclaimedSession`, whose guard is
+    // this dispatch.
+    const { receiver, pageAtMount } = makeLearnReceiver({ skipHomeScreen: false });
+
+    await learn(receiver, item('item-9'));
+
+    expect(pageAtMount.itemId).toBe('item-9');
+    expect(pageAtMount.page).toBe('review');
+  });
+
+  it('does not go looking for a session when handed an item', async () => {
+    const { receiver } = makeLearnReceiver();
+
+    await learn(receiver, item('item-9'));
+
+    expect(receiver.resumeSession).not.toHaveBeenCalled();
+    expect(store.getState().currentItemId).toBe('item-9');
+  });
 });
 
 describe('IncrementalReadingPlugin.resumeSession', () => {
@@ -334,13 +410,37 @@ describe('IncrementalReadingPlugin.resumeSession', () => {
 
   it('drops a pointer that no longer resolves', async () => {
     // The item was deleted, here or on another device.
-    const { receiver, saveSession } = makeResumeReceiver({
+    const { receiver, forget } = makeResumeReceiver({
       tracked: 'item-1',
       item: null,
     });
 
     await expect(resumeSession(receiver)).resolves.toBe(false);
     expect(store.getState().currentItemId).toBeNull();
+    expect(forget).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops it through tracking, not around it', async () => {
+    // Writing straight to the file would leave the tracker holding the dead id
+    // and handing it back on the next resume.
+    const { receiver, saveSession } = makeResumeReceiver({
+      tracked: 'item-1',
+      item: null,
+    });
+
+    await resumeSession(receiver);
+
+    expect(saveSession).not.toHaveBeenCalled();
+  });
+
+  it('drops an unresolvable pointer straight to disk at startup', async () => {
+    // Before tracking begins there is nothing to tell, so the file is it.
+    const { receiver, saveSession } = makeResumeReceiver({
+      session: { deviceId: DEVICE, itemId: 'item-1' },
+      item: null,
+    });
+
+    await expect(resumeSession(receiver)).resolves.toBe(false);
     expect(saveSession).toHaveBeenCalledWith(null);
   });
 
@@ -348,14 +448,14 @@ describe('IncrementalReadingPlugin.resumeSession', () => {
     // Dismissing writes to the database first, so a tab closed in the moments
     // after the click records the item still on screen. Nothing is scheduling
     // it any more, so review must not reopen on it.
-    const { receiver, saveSession } = makeResumeReceiver({
+    const { receiver, forget } = makeResumeReceiver({
       tracked: 'item-1',
       item: { data: { id: 'item-1', dismissed: 1 } } as unknown as ReviewItem,
     });
 
     await expect(resumeSession(receiver)).resolves.toBe(false);
     expect(store.getState().currentItemId).toBeNull();
-    expect(saveSession).toHaveBeenCalledWith(null);
+    expect(forget).toHaveBeenCalledTimes(1);
   });
 
   it('leaves an item review is already showing alone', async () => {

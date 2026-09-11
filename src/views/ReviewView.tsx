@@ -251,14 +251,24 @@ export default class ReviewView extends FileView {
    * queue would hand the view whatever is at the top and the remembered item
    * would be written over by the tab that was meant to return to it.
    *
-   * Says nothing when `learn` opened the tab: it resumed the session before
-   * the view mounted, so {@link IncrementalReadingPlugin.resumeSession} reports
-   * nothing left to resume and `learn` picks the page itself, home screen
-   * setting included.
+   * Says nothing when `learn` opened the tab: it settles both the item and the
+   * page before the view mounts, so {@link IncrementalReadingPlugin.resumeSession}
+   * reports nothing left to resume and every branch below agrees with what it
+   * already chose.
    */
   async resumeUnclaimedSession(): Promise<void> {
     if (this.initialItem) return;
-    if (!(await this.plugin.resumeSession())) return;
+    if (await this.plugin.resumeSession()) {
+      this.plugin.store.dispatch(setPage('review'));
+      return;
+    }
+    // Nothing to come back to, so this is review opening with nothing in
+    // progress — the case the home-screen setting is about. `learn` applies it
+    // to the tabs it opens; these mounts have nobody else to.
+    if (!this.plugin.settings.skipHomeScreen) return;
+    // Not while another review tab is up: the page is one shared store, so this
+    // would move that tab too, off whatever it was already showing.
+    if (!this.isOnlyReviewTab()) return;
     this.plugin.store.dispatch(setPage('review'));
   }
 
@@ -301,16 +311,17 @@ export default class ReviewView extends FileView {
   }
 
   /**
-   * Whether this is the only review tab left, and so the one whose close ends
-   * the review session.
+   * Whether this is the only review tab there is — the one whose close ends the
+   * review session, and the only one free to choose the page on the way in.
    *
    * Asked because the session is one shared store, not a thing each tab owns: a
    * split view is two `ReviewView`s over the same state, and `resetSession`
    * from either of them empties it for both. Works whichever side of the
-   * workspace's own bookkeeping this runs on — a leaf already dropped is simply
-   * not among the ones that remain.
+   * workspace's own bookkeeping this runs on — a leaf already dropped, or one
+   * whose view is still being constructed, is simply not among those counted,
+   * and either way leaves this tab alone in the answer.
    */
-  isLastReviewTab(): boolean {
+  isOnlyReviewTab(): boolean {
     return this.app.workspace
       .getLeavesOfType(ReviewView.viewType)
       .every((leaf) => leaf === this.leaf);
@@ -324,7 +335,7 @@ export default class ReviewView extends FileView {
     // Another review tab is still open and still on its item: the session
     // belongs to it now, and ending it here would send that tab back to the
     // home screen and drop what it was reading.
-    if (!this.isLastReviewTab()) return;
+    if (!this.isOnlyReviewTab()) return;
     // The last tab out records what it was showing, so the tab closed last is
     // the one remembered — an item to come back to, or nothing at all if it had
     // already left review. That also keeps the `resetSession` below, which is

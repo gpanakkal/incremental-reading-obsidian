@@ -564,6 +564,11 @@ export default class ReviewManager {
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 1 WHERE id = $1`, [
       item.data.id,
     ]);
+    // Here rather than in `Actions.dismissItem`, because the note's own action
+    // bar dismisses through this method directly and never reaches `Actions` —
+    // and that is precisely the case with no review tab open, where nothing
+    // else is watching the item the session still points at.
+    this.plugin.sessionTracker?.forgetIf(item.data.id);
   }
 
   async unDismissItem(item: ReviewItem): Promise<void> {

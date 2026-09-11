@@ -242,12 +242,12 @@ function unload(view: ReviewView): void {
 }
 
 /**
- * `isLastReviewTab` reads only the workspace's leaves of its own type and the
+ * `isOnlyReviewTab` reads only the workspace's leaves of its own type and the
  * leaf it is mounted in, so a bare receiver is enough.
  */
-function callIsLastReviewTab(openLeaves: WorkspaceLeaf[], leaf: WorkspaceLeaf) {
+function callIsOnlyReviewTab(openLeaves: WorkspaceLeaf[], leaf: WorkspaceLeaf) {
   const getLeavesOfType = vi.fn((_type: string): WorkspaceLeaf[] => openLeaves);
-  const result = ReviewView.prototype.isLastReviewTab.call({
+  const result = ReviewView.prototype.isOnlyReviewTab.call({
     app: { workspace: { getLeavesOfType } },
     leaf,
   } as unknown as ReviewView) as boolean;
@@ -257,20 +257,29 @@ function callIsLastReviewTab(openLeaves: WorkspaceLeaf[], leaf: WorkspaceLeaf) {
 const makeLeaf = () => ({}) as WorkspaceLeaf;
 
 /**
- * Receiver for `resumeUnclaimedSession`, which reaches only the plugin's resume
- * and the real store. The store is the module's own, so the page it lands on is
- * read back from there.
+ * Receiver for `resumeUnclaimedSession`, which reaches the plugin's resume, the
+ * home-screen setting, the count of open review tabs, and the real store. The
+ * store is the module's own, so the page it lands on is read back from there.
  */
 function makeResumeReceiver({
   resumed = true,
   initialItem = null,
-}: { resumed?: boolean; initialItem?: unknown } = {}) {
+  skipHomeScreen = false,
+  onlyTab = true,
+}: {
+  resumed?: boolean;
+  initialItem?: unknown;
+  skipHomeScreen?: boolean;
+  onlyTab?: boolean;
+} = {}) {
   const resumeSession = vi.fn((): Promise<boolean> => Promise.resolve(resumed));
+  const isOnlyReviewTab = vi.fn(() => onlyTab);
   const receiver = {
     initialItem,
-    plugin: { resumeSession, store },
+    isOnlyReviewTab,
+    plugin: { resumeSession, store, settings: { skipHomeScreen } },
   };
-  return { receiver, resumeSession };
+  return { receiver, resumeSession, isOnlyReviewTab };
 }
 
 function callResumeUnclaimedSession(
@@ -311,7 +320,8 @@ describe('ReviewView.resumeUnclaimedSession', () => {
   });
 
   it('says nothing about the page for a tab opened on an explicit item', async () => {
-    // `learn(item)` sets the item and the page itself, after the view mounts.
+    // `learn(item)` puts the item in the store before the view mounts, and the
+    // field is set right after; either one is enough to stand back.
     const { receiver, resumeSession } = makeResumeReceiver({
       resumed: true,
       initialItem: { data: { id: 'item-1' } },
@@ -322,37 +332,79 @@ describe('ReviewView.resumeUnclaimedSession', () => {
     expect(resumeSession).not.toHaveBeenCalled();
     expect(store.getState().page).toBe('home');
   });
-});
 
-describe('ReviewView.isLastReviewTab', () => {
-  it('reports the only review tab open as the last one', () => {
-    const leaf = makeLeaf();
+  it('skips the home screen on a restored tab with nothing to resume', async () => {
+    // Obsidian's own reopen, and a tab restored with the workspace, never reach
+    // `learn` — so nothing else applies the setting to them.
+    const { receiver } = makeResumeReceiver({
+      resumed: false,
+      skipHomeScreen: true,
+    });
 
-    expect(callIsLastReviewTab([leaf], leaf).result).toBe(true);
+    await callResumeUnclaimedSession(receiver);
+
+    expect(store.getState().page).toBe('review');
   });
 
-  it('reports a split pane as not the last while its twin is open', () => {
+  it('leaves the page alone while another review tab is open', async () => {
+    // The page is one shared store: skipping the home screen here would move
+    // the tab that is already up, off whatever it was showing.
+    const { receiver } = makeResumeReceiver({
+      resumed: false,
+      skipHomeScreen: true,
+      onlyTab: false,
+    });
+
+    await callResumeUnclaimedSession(receiver);
+
+    expect(store.getState().page).toBe('home');
+  });
+
+  it('restores the item ahead of the home-screen setting', async () => {
+    // Both branches land on review, so the tab count is what tells them apart:
+    // a resumed item is not the setting's business and is never held back by it.
+    const { receiver, isOnlyReviewTab } = makeResumeReceiver({
+      resumed: true,
+      skipHomeScreen: true,
+      onlyTab: false,
+    });
+
+    await callResumeUnclaimedSession(receiver);
+
+    expect(store.getState().page).toBe('review');
+    expect(isOnlyReviewTab).not.toHaveBeenCalled();
+  });
+});
+
+describe('ReviewView.isOnlyReviewTab', () => {
+  it('reports the only review tab open as the only one', () => {
+    const leaf = makeLeaf();
+
+    expect(callIsOnlyReviewTab([leaf], leaf).result).toBe(true);
+  });
+
+  it('reports a split pane as not alone while its twin is open', () => {
     // Closing one half of a split must leave the other on its item: the review
     // session is one shared store, so ending it here empties it for both.
     const leaf = makeLeaf();
 
-    expect(callIsLastReviewTab([leaf, makeLeaf()], leaf).result).toBe(false);
+    expect(callIsOnlyReviewTab([leaf, makeLeaf()], leaf).result).toBe(false);
   });
 
   it('still sees the twin once the workspace has dropped the closing leaf', () => {
-    // Obsidian may detach before or after calling onClose; only the leaves that
-    // remain matter either way.
-    expect(callIsLastReviewTab([makeLeaf()], makeLeaf()).result).toBe(false);
+    // Obsidian may detach before or after calling onClose, and a leaf being
+    // mounted has no view to count yet; only the leaves that remain matter.
+    expect(callIsOnlyReviewTab([makeLeaf()], makeLeaf()).result).toBe(false);
   });
 
-  it('is the last tab when the workspace has already dropped it and none remain', () => {
-    expect(callIsLastReviewTab([], makeLeaf()).result).toBe(true);
+  it('is alone when the workspace has already dropped it and none remain', () => {
+    expect(callIsOnlyReviewTab([], makeLeaf()).result).toBe(true);
   });
 
   it('counts review tabs, not tabs in general', () => {
     const leaf = makeLeaf();
 
-    const { getLeavesOfType } = callIsLastReviewTab([leaf], leaf);
+    const { getLeavesOfType } = callIsOnlyReviewTab([leaf], leaf);
 
     expect(getLeavesOfType).toHaveBeenCalledWith(ReviewView.viewType);
   });

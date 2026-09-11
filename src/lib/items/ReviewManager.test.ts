@@ -1799,6 +1799,32 @@ describe('ReviewManager.dismissItem and unDismissItem', () => {
     }
   );
 
+  it('drops a remembered session pointing at the dismissed item', async () => {
+    // The note's own action bar dismisses through here and never reaches
+    // `Actions`, and it does so with no review tab open — so the session
+    // pointer is the only thing left naming the item.
+    const repo = makeRepo();
+    const plugin = makePlugin();
+    const forgetIf = vi.fn();
+    Object.assign(plugin, { sessionTracker: { forgetIf } });
+    const manager = new ReviewManager(plugin, repo);
+    const item = makeReviewItem('article');
+
+    await manager.dismissItem(item);
+
+    expect(forgetIf).toHaveBeenCalledWith(item.data.id);
+  });
+
+  it('dismisses without a session tracker running', async () => {
+    // Dismissals can land before `onload` finishes wiring tracking up.
+    const repo = makeRepo();
+    const manager = new ReviewManager(makePlugin(), repo);
+    const item = makeReviewItem('article');
+
+    await expect(manager.dismissItem(item)).resolves.toBeUndefined();
+    expect(repo.mutate).toHaveBeenCalled();
+  });
+
   it.each([
     ['article', 'article'],
     ['snippet', 'snippet'],
