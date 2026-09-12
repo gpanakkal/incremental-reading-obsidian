@@ -65,11 +65,12 @@ export function useCurrentItem() {
 export function useCurrentItemFileText(): {
   item: ReviewItem | null;
   text: string | undefined;
+  isLoading: boolean;
 } {
   const { plugin } = useReviewContext();
-  const { data: currentItem } = useCurrentItem();
+  const { data: currentItem, isLoading: itemLoading } = useCurrentItem();
 
-  const { data: text } = useQuery({
+  const { data: text, isLoading: textLoading } = useQuery({
     enabled: !!currentItem,
     queryKey: ['item', currentItem?.data.id, 'file-text'],
     queryFn: async () => {
@@ -78,5 +79,15 @@ export function useCurrentItemFileText(): {
     },
   });
 
-  return { item: currentItem ?? null, text };
+  return {
+    item: currentItem ?? null,
+    text,
+    // Both flags, because each query is only ever loading on its own leg of
+    // the chain: the item is still being resolved, or it has been and its file
+    // is still being read. The text query is disabled until an item exists and
+    // a disabled query never reports loading, so an absent item cannot leave
+    // this stuck true — once the item resolves to null, neither leg is loading
+    // and the caller is free to say nothing is due.
+    isLoading: itemLoading || textLoading,
+  };
 }

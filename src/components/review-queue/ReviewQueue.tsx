@@ -1,3 +1,4 @@
+import { LoadingSpinner } from '#/components/LoadingSpinner';
 import { useReviewContext } from '#/components/ReviewContext';
 import type { QueueRow } from '#/components/types';
 import { useQueue } from '#/hooks/useReactQuery';
@@ -66,15 +67,7 @@ export function ReviewQueue() {
   // First load has nothing to frame the spinner with; later page changes do,
   // and must keep the controls mounted (see below).
   if (isLoading && !data) {
-    return (
-      <div
-        className="ir-queue-loading"
-        role="status"
-        aria-label="Loading queue"
-      >
-        <div className="ir-queue-spinner" />
-      </div>
-    );
+    return <LoadingSpinner label="Loading queue" />;
   }
 
   // An empty queue keeps the panel and its heading so the tab still names what
@@ -196,13 +189,7 @@ export function ReviewQueue() {
         // query reports loading again. Only the table is swapped out; the
         // date field and pagination stay put, since replacing the controls
         // the user just acted on is disorienting.
-        <div
-          className="ir-queue-loading"
-          role="status"
-          aria-label="Loading queue"
-        >
-          <div className="ir-queue-spinner" />
-        </div>
+        <LoadingSpinner label="Loading queue" />
       ) : (
         <QueueTable
           // Fades the table in when, and only when, the page changed under the

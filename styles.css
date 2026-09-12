@@ -196,6 +196,52 @@ body {
   font-weight: 500;
 }
 
+/* Stands in for whatever is still loading — the queue table, the item being
+   reviewed — and takes that slot's place in the column rather than collapsing
+   the border or the action bar around it. */
+.ir-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  flex: 1;
+  min-height: 0;
+}
+
+.ir-spinner {
+  width: var(--size-4-16);
+  height: var(--size-4-16);
+  border: 2px solid var(--background-modifier-border);
+  border-top-color: var(--text-accent);
+  border-radius: 50%;
+  /* Spins from the moment it mounts but is not shown until the delay on the
+     second animation elapses. Most waits here are a warm query settling or a
+     read of a file Obsidian already has cached, and they finish well inside
+     that window; without the delay every item change during review would flash
+     a spinner for a frame or two. Deliberately CSS rather than a timer in each
+     caller, so no component has to schedule or clear one.
+
+     `forwards` is what holds the opacity at 1 afterwards — the element keeps
+     animating (the spin never ends), so the fill applies to the appear
+     animation alone and the two do not fight over different properties. */
+  animation:
+    ir-spin 0.8s linear infinite,
+    ir-spinner-appear 0.1s linear 0.15s forwards;
+  opacity: 0;
+}
+
+@keyframes ir-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ir-spinner-appear {
+  to {
+    opacity: 1;
+  }
+}
+
 .ir-action-bar {
   display: flex;
   gap: 8px;
@@ -1003,32 +1049,6 @@ input.ir-queue-page-input {
   text-overflow: ellipsis;
   flex: 1 1 auto;
   min-width: 0;
-}
-
-/* Stands in for the table while a page loads, so it takes the table's place
-   in the panel's column rather than collapsing the border around it. */
-.ir-queue-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  flex: 1;
-  min-height: 0;
-}
-
-.ir-queue-spinner {
-  width: var(--size-4-8);
-  height: var(--size-4-8);
-  border: 2px solid var(--background-modifier-border);
-  border-top-color: var(--text-accent);
-  border-radius: 50%;
-  animation: ir-queue-spin 0.8s linear infinite;
-}
-
-@keyframes ir-queue-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 /* Marks that the rows on screen are not the ones that were there a moment ago,

@@ -4,17 +4,25 @@ import { isReviewCard } from '#/lib/types';
 import type { EditorView } from '@codemirror/view';
 import { CardViewer } from './CardViewer';
 import { IREditor } from './IREditor';
+import { LoadingSpinner } from './LoadingSpinner';
 
 /**
  * TODO:
  * - indicate if the item is a snippet, card, or article
- * - loading spinner?
  * - error element
  */
 export default function ReviewItem() {
   const showAnswer = useAppSelector((state) => state.showAnswer);
 
-  const { item, text: fileText } = useCurrentItemFileText();
+  const { item, text: fileText, isLoading } = useCurrentItemFileText();
+
+  // Loading comes first, and is its own screen rather than a missing item: the
+  // item and its file text settle as two separate queries, and moving between
+  // items reads the next file while the previous item is still cached, so there
+  // is always a window where there is no text to show yet. Falling through to
+  // the placeholder in that window told the user their queue was empty every
+  // time it was merely unread — including on the first open of the tab.
+  if (isLoading) return <LoadingSpinner label="Loading review item" />;
 
   if (!item || !fileText)
     return <div className="ir-review-placeholder">Nothing due for review.</div>;

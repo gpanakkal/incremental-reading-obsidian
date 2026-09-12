@@ -159,7 +159,7 @@ describe('ReviewQueue', () => {
 
     const container = mount(<ReviewQueue />);
 
-    expect(container.querySelector('.ir-queue-loading')).not.toBeNull();
+    expect(container.querySelector('.ir-loading')).not.toBeNull();
   });
 
   it('does not show the spinner once the queue has loaded', () => {
@@ -167,7 +167,7 @@ describe('ReviewQueue', () => {
 
     const container = mount(<ReviewQueue />);
 
-    expect(container.querySelector('.ir-queue-loading')).toBeNull();
+    expect(container.querySelector('.ir-loading')).toBeNull();
   });
 
   it('keeps the date field and pagination mounted while a later page loads', () => {
@@ -181,7 +181,7 @@ describe('ReviewQueue', () => {
 
     const container = mount(<ReviewQueue />);
 
-    expect(container.querySelector('.ir-queue-loading')).not.toBeNull();
+    expect(container.querySelector('.ir-loading')).not.toBeNull();
     expect(dateInput(container)).not.toBeNull();
     expect(container.querySelector('.ir-queue-pagination')).not.toBeNull();
   });
@@ -496,7 +496,7 @@ describe('ReviewQueue', () => {
     const panel = container.querySelector('.ir-queue-panel');
     expect(panel?.querySelector('.ir-queue-title')).not.toBeNull();
     expect(panel?.querySelector('.ir-queue-controls')).not.toBeNull();
-    expect(panel?.querySelector('.ir-queue-loading')).not.toBeNull();
+    expect(panel?.querySelector('.ir-loading')).not.toBeNull();
     expect(panel?.querySelector('.ir-queue-table')).toBeNull();
   });
 
