@@ -16,6 +16,22 @@ export const queryClient = new QueryClient({
   },
 });
 
+/**
+ * The cache key for the item review is showing.
+ *
+ * Keyed by the id rather than shared by every item, because react-query hands
+ * back a key's cached value the instant a component asks for it: under one
+ * constant key, moving between items serves the *previous* item as settled data
+ * until a refetch lands, and the review pane paints it. The id in the key makes
+ * that a cache miss instead, so a new item can only ever arrive as loading.
+ *
+ * `null` is not an identity — it means "whatever comes next", and its entry ends
+ * up holding whatever the last advance resolved to. Only `useCurrentItem` may
+ * read it, and only under the rule documented there.
+ */
+export const currentItemQueryKey = (id: string | null) =>
+  ['current-review-item', id] as const;
+
 // #region Queries for use outside React only
 // see useReactQuery.tsx for React queries
 
@@ -24,17 +40,27 @@ export async function fetchCurrentItem(
   reviewManager: ReviewManager
 ): Promise<ReviewItem | null> {
   const { currentItemId } = store.getState();
+  // Hoisted out of the query function so this never reads or creates the `null`
+  // entry, which belongs to the review hook's advance and holds the next item
+  // rather than the nothing this branch means.
+  if (currentItemId === null) return null;
   return queryClient.fetchQuery({
-    queryKey: ['current-review-item'],
-    queryFn: async () => {
-      if (currentItemId === null) return null;
-      return reviewManager.getReviewItemFromId(currentItemId);
-    },
+    queryKey: currentItemQueryKey(currentItemId),
+    queryFn: async () => reviewManager.getReviewItemFromId(currentItemId),
   });
 }
 
-export const getCurrentItemSync = (): ReviewItem | undefined =>
-  queryClient.getQueryData(['current-review-item']);
+/**
+ * The item on screen, or nothing while review is between items — which the
+ * commands that call this already treat as "not applicable right now", and is
+ * the honest answer: acting on the item an advance just finished with is the
+ * same mistake as rendering it.
+ */
+export const getCurrentItemSync = (): ReviewItem | undefined => {
+  const { currentItemId } = store.getState();
+  if (currentItemId === null) return undefined;
+  return queryClient.getQueryData(currentItemQueryKey(currentItemId));
+};
 
 export async function fetchById(
   itemId: string,
@@ -61,11 +87,24 @@ export async function fetchByFile(
 
 // #region Functions used inside and outside React
 
+/**
+ * Resolve the item a {@link currentItemQueryKey} names, picking the next one in
+ * the queue when the key names none.
+ *
+ * Takes the id rather than reading it back off the store, so it stays a
+ * function of the key it is fetching for. Read here, a fetch started for one
+ * item could finish after the user has picked another and write that other
+ * item's data into this item's cache entry.
+ */
 export const currentItemQueryFn = async (
-  reviewManager: ReviewManager
+  reviewManager: ReviewManager,
+  currentItemId: string | null
 ): Promise<ReviewItem | null> => {
-  const { currentItemId } = store.getState();
-  if (currentItemId) {
+  // `null`, not falsiness: the key's absent id is null and nothing else, and
+  // every other reader of it says so too. Under a truthiness check an id that
+  // is merely falsy would quietly advance past the item it names instead of
+  // looking it up and coming back empty.
+  if (currentItemId !== null) {
     return reviewManager.getReviewItemFromId(currentItemId);
   }
   return fetchNextItem(reviewManager);
@@ -156,17 +195,20 @@ export function updateQueryCache<T extends ReviewItem, D extends T['data']>(
   if (typeof updates === 'function') {
     queryClient.setQueryData(['item', id], updates);
     if (id === currentItemId)
-      queryClient.setQueryData(['current-review-item'], updates);
+      queryClient.setQueryData(currentItemQueryKey(currentItemId), updates);
   } else {
     queryClient.setQueryData(['item', id], (prev: T) => ({
       ...prev,
       data: deepMerge(prev.data, updates),
     }));
     if (id === currentItemId)
-      queryClient.setQueryData(['current-review-item'], (prev: T) => ({
-        ...prev,
-        data: deepMerge(prev.data, updates),
-      }));
+      queryClient.setQueryData(
+        currentItemQueryKey(currentItemId),
+        (prev: T) => ({
+          ...prev,
+          data: deepMerge(prev.data, updates),
+        })
+      );
   }
 }
 /**
@@ -276,6 +318,10 @@ async function fetchNextItem(
 
   if (nextItem) {
     queryClient.setQueryData(['item', nextItem.data.id], nextItem);
+    // Seed the key the dispatch below is about to move the view onto. Without
+    // it the advance costs two fetches: this one, and a second for the id it
+    // has just resolved, which the view would sit through a second spinner for.
+    queryClient.setQueryData(currentItemQueryKey(nextItem.data.id), nextItem);
 
     // update card delimiters
     if (isReviewCard(nextItem)) {

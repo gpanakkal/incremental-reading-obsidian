@@ -3,6 +3,7 @@ import type { QueueSubset } from '#/components/types';
 import { CURRENT_ITEM_REFETCH_TIME } from '#/lib/constants';
 import {
   currentItemQueryFn,
+  currentItemQueryKey,
   invalidateCurrentItemQuery,
 } from '#/lib/query-client';
 import type { ReviewItem } from '#/lib/types';
@@ -21,19 +22,47 @@ export function useQueue(subset: QueueSubset) {
   });
 }
 
-export function useCurrentItem() {
+/**
+ * The item review is showing, or nothing while it is still being resolved.
+ *
+ * Narrower than the query result it is built from, deliberately: the two fields
+ * here are corrected below for the cache holding an item the store has already
+ * moved off, and the rest of a react-query result would go on describing the
+ * uncorrected query — `isSuccess` true beside an undefined `data`. Spreading
+ * the result would also read every one of its fields, which is how react-query
+ * decides what to re-render on, and so would wake this hook on each five-second
+ * refetch whether or not the item changed.
+ */
+export function useCurrentItem(): {
+  data: ReviewItem | null | undefined;
+  isLoading: boolean;
+} {
   const { reviewManager, reviewView } = useReviewContext();
-  // subscribe to currentItemId so that this is re-fetched when it changes
+  // In the key, not merely subscribed to: see `currentItemQueryKey`. Picking a
+  // different item has to be a different query, or react-query answers with the
+  // one before it.
   const currentItemId = useAppSelector((state) => state.currentItemId);
-  const result = useQuery({
+  const query = useQuery({
     refetchInterval: CURRENT_ITEM_REFETCH_TIME,
-    queryKey: ['current-review-item'],
-    queryFn: async () => {
-      const item = await currentItemQueryFn(reviewManager);
-      return item;
-    },
+    queryKey: currentItemQueryKey(currentItemId),
+    queryFn: async () => currentItemQueryFn(reviewManager, currentItemId),
   });
 
+  // A null id is review between items: the queue has not named the next one
+  // yet, so the entry under that key is whatever the *last* advance resolved
+  // to — the item just finished — and returning it would put it straight back
+  // on screen. The one value it can be trusted for is `null`, which is the
+  // advance having come back empty and is how an exhausted queue reports
+  // itself; treating that as unresolved would leave the empty queue spinning.
+  const advancing = currentItemId === null && query.data !== null;
+
+  const data = advancing ? undefined : query.data;
+  const isLoading = advancing || query.isLoading;
+
+  // Still needed with the id in the key, for the one transition the key cannot
+  // drive: arriving back on the `null` key with a cached, still-fresh advance
+  // in it, where react-query would otherwise serve it without refetching and
+  // leave `advancing` above stuck true.
   useEffect(() => {
     void invalidateCurrentItemQuery();
   }, [currentItemId]);
@@ -43,15 +72,15 @@ export function useCurrentItem() {
       if (reviewView.file) {
         await reviewView.onUnloadFile(reviewView.file);
       }
-      reviewView.setFile(result.data?.file ?? null);
-      if (result.data?.file) {
-        await reviewView.onLoadFile(result.data?.file);
+      reviewView.setFile(data?.file ?? null);
+      if (data?.file) {
+        await reviewView.onLoadFile(data.file);
       }
     }
     void viewHandleFileChange();
-  }, [result.data?.file, reviewView]);
+  }, [data?.file, reviewView]);
 
-  return result;
+  return { data, isLoading };
 }
 
 /**

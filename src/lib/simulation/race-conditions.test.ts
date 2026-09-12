@@ -1,5 +1,9 @@
 import type ReviewManager from '#/lib/items/ReviewManager';
-import { invalidateCacheOnMatch, queryClient } from '#/lib/query-client';
+import {
+  currentItemQueryKey,
+  invalidateCacheOnMatch,
+  queryClient,
+} from '#/lib/query-client';
 import { setCurrentItemId, setReviewViewSaving, store } from '#/lib/store';
 import type { IArticleBase, ReviewArticle } from '#/lib/types';
 import fc from 'fast-check';
@@ -16,11 +20,13 @@ import {
 
 // #region HELPERS
 const DB_PATH = 'ir-user-data.sqlite';
+/** The item every harness below opens review on, and so the id in its cache key. */
+const ARTICLE_ID = 'article-1';
 const ARTICLE_PATH = 'articles/article.md';
 
 function makeArticleData(overrides: Partial<IArticleBase> = {}): IArticleBase {
   return {
-    id: 'article-1',
+    id: ARTICLE_ID,
     type: 'article',
     reference: ARTICLE_PATH,
     due: FIXED_NOW,
@@ -155,14 +161,14 @@ describe('RC2: isReviewViewSaving timing gap — spurious cache invalidation', (
     (h) => {
       harness = h;
     },
-    { initialItemId: 'article-1' }
+    { initialItemId: ARTICLE_ID }
   );
 
   it('invalidateCacheOnMatch proceeds and invalidates when flag is false (spurious invalidation window)', async () => {
     const { fakeRM } = harness;
     const item = makeReviewArticle();
     fakeRM.setNextItem(item);
-    queryClient.setQueryData(['current-review-item'], item);
+    queryClient.setQueryData(currentItemQueryKey(ARTICLE_ID), item);
 
     // Flag is already false — this is the state after withReviewViewSave's finally block
     store.dispatch(setReviewViewSaving(false));
@@ -177,7 +183,9 @@ describe('RC2: isReviewViewSaving timing gap — spurious cache invalidation', (
     await p;
 
     // The cache was invalidated — this is the spurious invalidation window
-    const cacheState = queryClient.getQueryState(['current-review-item']);
+    const cacheState = queryClient.getQueryState(
+      currentItemQueryKey(ARTICLE_ID)
+    );
     expect(cacheState?.isInvalidated).toBe(true);
   });
 
@@ -185,7 +193,7 @@ describe('RC2: isReviewViewSaving timing gap — spurious cache invalidation', (
     const { fakeRM } = harness;
     const item = makeReviewArticle();
     fakeRM.setNextItem(item);
-    queryClient.setQueryData(['current-review-item'], item);
+    queryClient.setQueryData(currentItemQueryKey(ARTICLE_ID), item);
 
     // Flag is true — withReviewViewSave is still active
     store.dispatch(setReviewViewSaving(true));
@@ -193,7 +201,9 @@ describe('RC2: isReviewViewSaving timing gap — spurious cache invalidation', (
     await invalidateCacheOnMatch(asFile({ path: ARTICLE_PATH }), asRM(fakeRM));
 
     // Cache must NOT be invalidated — the guard correctly prevented it
-    const cacheState = queryClient.getQueryState(['current-review-item']);
+    const cacheState = queryClient.getQueryState(
+      currentItemQueryKey(ARTICLE_ID)
+    );
     expect(cacheState?.isInvalidated).toBeFalsy();
     expect(fakeRM.fetchCallCount).toBe(0);
   });
@@ -202,14 +212,16 @@ describe('RC2: isReviewViewSaving timing gap — spurious cache invalidation', (
     const { fakeRM } = harness;
     const item = makeReviewArticle();
     fakeRM.setNextItem(item);
-    queryClient.setQueryData(['current-review-item'], item);
+    queryClient.setQueryData(currentItemQueryKey(ARTICLE_ID), item);
 
     store.dispatch(setReviewViewSaving(false));
 
     // Modify event is for the DB file, not the article file
     await invalidateCacheOnMatch(asFile({ path: DB_PATH }), asRM(fakeRM));
 
-    const cacheState = queryClient.getQueryState(['current-review-item']);
+    const cacheState = queryClient.getQueryState(
+      currentItemQueryKey(ARTICLE_ID)
+    );
     expect(cacheState?.isInvalidated).toBeFalsy();
   });
 });
@@ -225,7 +237,7 @@ describe('RC3: mid-creation invalidation during multi-step snippet creation', ()
     (h) => {
       harness = h;
     },
-    { initialItemId: 'article-1' }
+    { initialItemId: ARTICLE_ID }
   );
 
   // Scenario: article is the current review item. User extracts a snippet from it.
@@ -247,7 +259,10 @@ describe('RC3: mid-creation invalidation during multi-step snippet creation', ()
     // Article is being reviewed. No snippets yet.
     const articlePreCreation = makeReviewArticle();
     fakeRM.setNextItem(articlePreCreation);
-    queryClient.setQueryData(['current-review-item'], articlePreCreation);
+    queryClient.setQueryData(
+      currentItemQueryKey(ARTICLE_ID),
+      articlePreCreation
+    );
 
     // Step 1: vault.create(snippetFile) — path is the new snippet, not the article
     await invalidateCacheOnMatch(
@@ -255,7 +270,7 @@ describe('RC3: mid-creation invalidation during multi-step snippet creation', ()
       asRM(fakeRM)
     );
     expect(
-      queryClient.getQueryState(['current-review-item'])?.isInvalidated
+      queryClient.getQueryState(currentItemQueryKey(ARTICLE_ID))?.isInvalidated
     ).toBeFalsy();
 
     // Step 2: vault.processFrontMatter(snippetFile) — still snippet path, no match
@@ -264,7 +279,7 @@ describe('RC3: mid-creation invalidation during multi-step snippet creation', ()
       asRM(fakeRM)
     );
     expect(
-      queryClient.getQueryState(['current-review-item'])?.isInvalidated
+      queryClient.getQueryState(currentItemQueryKey(ARTICLE_ID))?.isInvalidated
     ).toBeFalsy();
 
     // Step 3: vault.processFrontMatter(articleFile) — path MATCHES current item
@@ -272,7 +287,7 @@ describe('RC3: mid-creation invalidation during multi-step snippet creation', ()
     // The cache is invalidated with stale (pre-creation) data — this is the race window.
     await invalidateCacheOnMatch(asFile({ path: ARTICLE_PATH }), asRM(fakeRM));
     expect(
-      queryClient.getQueryState(['current-review-item'])?.isInvalidated
+      queryClient.getQueryState(currentItemQueryKey(ARTICLE_ID))?.isInvalidated
     ).toBe(true);
 
     // Step 4: repo.mutate(INSERT snippet) fires, then void save() triggers a DB modify.
@@ -283,17 +298,20 @@ describe('RC3: mid-creation invalidation during multi-step snippet creation', ()
     // side effect, even though the path check then causes an early return.
     await invalidateCacheOnMatch(asFile({ path: DB_PATH }), asRM(fakeRM));
     expect(
-      queryClient.getQueryState(['current-review-item'])?.isInvalidated
+      queryClient.getQueryState(currentItemQueryKey(ARTICLE_ID))?.isInvalidated
     ).toBeFalsy();
 
     // After the UI refetches (simulated by reseeding the cache), the article now has the snippet.
     // The next article-path modify (e.g. if another edit happens) sees the updated state.
     const articlePostCreation = makeReviewArticle({ scroll_top: 1 }); // same id, different state
     fakeRM.setNextItem(articlePostCreation);
-    queryClient.setQueryData(['current-review-item'], articlePostCreation);
+    queryClient.setQueryData(
+      currentItemQueryKey(ARTICLE_ID),
+      articlePostCreation
+    );
     await invalidateCacheOnMatch(asFile({ path: ARTICLE_PATH }), asRM(fakeRM));
     expect(
-      queryClient.getQueryState(['current-review-item'])?.isInvalidated
+      queryClient.getQueryState(currentItemQueryKey(ARTICLE_ID))?.isInvalidated
     ).toBe(true);
   });
 
@@ -307,13 +325,13 @@ describe('RC3: mid-creation invalidation during multi-step snippet creation', ()
         fc.array(fc.boolean(), { minLength: 1, maxLength: 5 }),
         async (extraSnippetWrites, matchArticleFlags) => {
           // Reset to a clean current-item state for each property run
-          store.dispatch(setCurrentItemId('article-1'));
+          store.dispatch(setCurrentItemId(ARTICLE_ID));
           queryClient.clear();
 
           const localRM = new FakeReviewManager();
           const item = makeReviewArticle();
           localRM.setNextItem(item);
-          queryClient.setQueryData(['current-review-item'], item);
+          queryClient.setQueryData(currentItemQueryKey(ARTICLE_ID), item);
 
           // Snippet file writes (non-matching) — must not invalidate
           for (let i = 0; i < extraSnippetWrites; i++) {
@@ -324,7 +342,8 @@ describe('RC3: mid-creation invalidation during multi-step snippet creation', ()
               )
             ).resolves.toBeUndefined();
             expect(
-              queryClient.getQueryState(['current-review-item'])?.isInvalidated
+              queryClient.getQueryState(currentItemQueryKey(ARTICLE_ID))
+                ?.isInvalidated
             ).toBeFalsy();
           }
 
@@ -356,14 +375,14 @@ describe('RC4: handleFileChange and invalidateCacheOnMatch run concurrently', ()
     (h) => {
       harness = h;
     },
-    { initialItemId: 'article-1' }
+    { initialItemId: ARTICLE_ID }
   );
 
   it('both handlers complete without throwing and cache is invalidated', async () => {
     const { fakeRepo, fakeRM } = harness;
     const item = makeReviewArticle();
     fakeRM.setNextItem(item);
-    queryClient.setQueryData(['current-review-item'], item);
+    queryClient.setQueryData(currentItemQueryKey(ARTICLE_ID), item);
 
     const reloadGate = makeGate();
     const reloadSpy = vi
@@ -393,7 +412,9 @@ describe('RC4: handleFileChange and invalidateCacheOnMatch run concurrently', ()
     await expect(Promise.all([h1, h2])).resolves.not.toThrow();
 
     expect(reloadSpy).toHaveBeenCalledTimes(1);
-    const cacheState = queryClient.getQueryState(['current-review-item']);
+    const cacheState = queryClient.getQueryState(
+      currentItemQueryKey(ARTICLE_ID)
+    );
     expect(cacheState?.isInvalidated).toBe(true);
   });
 
@@ -410,12 +431,12 @@ describe('RC4: handleFileChange and invalidateCacheOnMatch run concurrently', ()
           queryClient.clear();
           store.dispatch({
             type: 'currentItemId/setCurrentItemId',
-            payload: 'article-1',
+            payload: ARTICLE_ID,
           });
 
           const item = makeReviewArticle();
           fakeRM.setNextItem(item);
-          queryClient.setQueryData(['current-review-item'], item);
+          queryClient.setQueryData(currentItemQueryKey(ARTICLE_ID), item);
 
           const reloadGate = makeGate();
           const reloadSpy = vi
@@ -449,7 +470,9 @@ describe('RC4: handleFileChange and invalidateCacheOnMatch run concurrently', ()
           await Promise.all([h1, h2]);
 
           expect(reloadSpy).toHaveBeenCalledTimes(1);
-          const cacheState = queryClient.getQueryState(['current-review-item']);
+          const cacheState = queryClient.getQueryState(
+            currentItemQueryKey(ARTICLE_ID)
+          );
           expect(cacheState?.isInvalidated).toBe(true);
         }
       ),
