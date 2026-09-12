@@ -1,8 +1,17 @@
 import type { QueuePage, QueueRow } from '#/components/types';
+import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type ReviewManager from './items/ReviewManager';
-import { applyQueueChange, queryClient } from './query-client';
+import {
+  applyQueueChange,
+  currentItemQueryFn,
+  currentItemQueryKey,
+  getCurrentItemSync,
+  queryClient,
+} from './query-client';
+import { resetSession, setCurrentItemId, store } from './store';
+import type { ReviewItem } from './types';
 
 // #region HELPERS
 
@@ -20,9 +29,7 @@ function makeQueueRow(overrides: Partial<QueueRow> = {}): QueueRow {
 }
 
 /** A ReviewManager stub whose getQueueRow returns the queued map. */
-function makeManager(
-  resolved: Record<string, QueueRow | null>
-): ReviewManager {
+function makeManager(resolved: Record<string, QueueRow | null>): ReviewManager {
   return {
     getQueueRow: vi.fn((id: string) =>
       Promise.resolve(id in resolved ? resolved[id] : null)
@@ -35,8 +42,11 @@ function makeManager(
  * tests are about how rows and totals are patched; the tests that care about
  * the span pass it explicitly.
  */
-function seedQueue(key: unknown[], page: Omit<QueuePage, 'firstDue' | 'lastDue'> &
-  Partial<Pick<QueuePage, 'firstDue' | 'lastDue'>>) {
+function seedQueue(
+  key: unknown[],
+  page: Omit<QueuePage, 'firstDue' | 'lastDue'> &
+    Partial<Pick<QueuePage, 'firstDue' | 'lastDue'>>
+) {
   queryClient.setQueryData<QueuePage>(key, {
     firstDue: null,
     lastDue: null,
@@ -45,6 +55,31 @@ function seedQueue(key: unknown[], page: Omit<QueuePage, 'firstDue' | 'lastDue'>
 }
 
 const QUEUE_KEY = ['queue', { slice: { pageNumber: 0, entriesPerPage: 10 } }];
+
+function makeReviewItem(id: string): ReviewItem {
+  return {
+    data: { id, type: 'article' },
+    file: { path: `articles/${id}.md` } as TFile,
+  } as ReviewItem;
+}
+
+/** A ReviewManager stub whose queue holds exactly `item`, or nothing. */
+function makeDueManager(item: ReviewItem | null): ReviewManager {
+  const all = item ? [item] : [];
+  return {
+    getDue: vi.fn().mockResolvedValue({
+      all,
+      cards: [],
+      snippets: [],
+      articles: all,
+    }),
+  } as unknown as ReviewManager;
+}
+
+/** Two ids that are never equal — the cases about moving between items. */
+const twoIdsArb = fc
+  .tuple(fc.string(), fc.string())
+  .filter(([a, b]) => a !== b);
 // #endregion
 
 describe('applyQueueChange', () => {
@@ -55,7 +90,12 @@ describe('applyQueueChange', () => {
 
   it('replaces an updated row in place and keeps totalRows', async () => {
     seedQueue(QUEUE_KEY, {
-      rows: [makeQueueRow({ id: 'a1', scheduling: { kind: 'priority', value: '3' } })],
+      rows: [
+        makeQueueRow({
+          id: 'a1',
+          scheduling: { kind: 'priority', value: '3' },
+        }),
+      ],
       totalRows: 1,
     });
     const updated = makeQueueRow({
@@ -170,7 +210,10 @@ describe('applyQueueChange', () => {
       manager
     );
 
-    expect(spy).toHaveBeenCalledWith({ queryKey: ['queue'], refetchType: 'all' });
+    expect(spy).toHaveBeenCalledWith({
+      queryKey: ['queue'],
+      refetchType: 'all',
+    });
   });
 
   it('invalidates without patching on insert (position unknown)', async () => {
@@ -185,6 +228,113 @@ describe('applyQueueChange', () => {
     );
 
     expect(getQueueRow).not.toHaveBeenCalled();
-    expect(spy).toHaveBeenCalledWith({ queryKey: ['queue'], refetchType: 'all' });
+    expect(spy).toHaveBeenCalledWith({
+      queryKey: ['queue'],
+      refetchType: 'all',
+    });
+  });
+});
+
+describe('getCurrentItemSync', () => {
+  afterEach(() => {
+    queryClient.clear();
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  it('reads the entry belonging to the id the store names', () => {
+    fc.assert(
+      fc.property(fc.string(), (id) => {
+        queryClient.clear();
+        const item = makeReviewItem(id);
+        queryClient.setQueryData(currentItemQueryKey(id), item);
+        store.dispatch(setCurrentItemId(id));
+
+        expect(getCurrentItemSync()).toBe(item);
+      })
+    );
+  });
+
+  it('finds nothing once the store has moved to another item', () => {
+    // The commands this feeds act on whatever it returns — dismiss, skip, grade
+    // — so serving the outgoing item's cache entry would aim them at the item
+    // the user has just navigated away from. Every one of them treats an absent
+    // item as "not applicable", which is the right answer for a moment when
+    // review is not settled on anything.
+    fc.assert(
+      fc.property(twoIdsArb, ([cachedId, pickedId]) => {
+        queryClient.clear();
+        queryClient.setQueryData(
+          currentItemQueryKey(cachedId),
+          makeReviewItem(cachedId)
+        );
+        store.dispatch(setCurrentItemId(pickedId));
+
+        expect(getCurrentItemSync()).toBeUndefined();
+      })
+    );
+  });
+
+  it('finds nothing while review is between items', () => {
+    // A null id is the window an advance opens, and the entry under that key is
+    // the item it has just finished with — the one case where a cache hit is
+    // exactly the wrong answer.
+    const item = makeReviewItem('finished');
+    queryClient.setQueryData(currentItemQueryKey(null), item);
+    store.dispatch(setCurrentItemId(null));
+
+    expect(getCurrentItemSync()).toBeUndefined();
+  });
+});
+
+describe('currentItemQueryFn', () => {
+  afterEach(() => {
+    queryClient.clear();
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  it('resolves the id it was handed, not the one the store holds', async () => {
+    // The id comes in as an argument so this stays a function of the key it is
+    // fetching for. Were it read off the store, a fetch started for one item
+    // could finish after the user picked another and write that other item's
+    // data into this item's cache entry.
+    await fc.assert(
+      fc.asyncProperty(twoIdsArb, async ([keyedId, storeId]) => {
+        const item = makeReviewItem(keyedId);
+        const getReviewItemFromId = vi.fn().mockResolvedValue(item);
+        store.dispatch(setCurrentItemId(storeId));
+
+        const resolved = await currentItemQueryFn(
+          { getReviewItemFromId } as unknown as ReviewManager,
+          keyedId
+        );
+
+        expect(resolved).toBe(item);
+        expect(getReviewItemFromId).toHaveBeenCalledWith(keyedId);
+      })
+    );
+  });
+
+  it('caches the advanced-to item under its own key', async () => {
+    // The advance names the next item and moves the store onto it in one go, so
+    // without this seed the view lands on a key it has nothing for and refetches
+    // what was just read — a second spinner for an item already in hand.
+    const item = makeReviewItem('next-1');
+
+    const resolved = await currentItemQueryFn(makeDueManager(item), null);
+
+    expect(resolved).toBe(item);
+    expect(store.getState().currentItemId).toBe('next-1');
+    expect(queryClient.getQueryData(currentItemQueryKey('next-1'))).toBe(item);
+  });
+
+  it('leaves the store empty-handed when the queue is exhausted', async () => {
+    // The other end of the advance, and what tells an empty queue apart from one
+    // still being resolved: a null id with a resolved null beside it.
+    const resolved = await currentItemQueryFn(makeDueManager(null), null);
+
+    expect(resolved).toBeNull();
+    expect(store.getState().currentItemId).toBeNull();
   });
 });
