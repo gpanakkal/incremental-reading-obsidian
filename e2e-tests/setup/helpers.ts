@@ -247,7 +247,53 @@ function answerRendererDialogs(app: ElectronApplication) {
   app.windows().forEach(answer);
 }
 
+/**
+ * Version of the Obsidian build the suite actually drives, read from the
+ * unpacked bundle rather than from whatever the installer meant to fetch.
+ *
+ * `setup-obsidian` reaches a build three ways — downloading one, honouring
+ * `OBSIDIAN_PATH`, or discovering an installed Flatpak/Snap/AppImage — and only
+ * the download path knows a version number to print. The unpacked bundle is the
+ * one place all three converge, and it is what `appPath` loads.
+ *
+ * Worth stating on every run because CI resolves `latest` at install time:
+ * two runs of the same commit can legitimately test different Obsidian
+ * versions, and a first-launch flow that changed between them surfaces as an
+ * unexplained failure with nothing in the log to date it.
+ *
+ * Best-effort, like the patches above. A bundle this can't read is one Electron
+ * cannot launch either, and the launch below reports that far better than a
+ * thrown `ENOENT` from a logging helper would.
+ */
+async function obsidianVersion() {
+  try {
+    const manifest = await fs.readFile(
+      path.join(path.dirname(appPath), 'package.json'),
+      'utf8'
+    );
+    return (JSON.parse(manifest) as { version?: string }).version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/** Guard so the version is announced once per worker, not once per launch. */
+let announcedVersion = false;
+
+async function announceObsidianVersion() {
+  if (announcedVersion) return;
+  // Set before awaiting: a second launch must not slip past while the first is
+  // still reading the manifest.
+  announcedVersion = true;
+
+  console.log(`[e2e] Testing against Obsidian ${await obsidianVersion()}`);
+}
+
 export async function launchElectron(vaultPath: string) {
+  // Before the launch, not after: a build that fails to start is exactly when
+  // the version matters most, and this way it is on the log either way.
+  await announceObsidianVersion();
+
   const app = await electron.launch({
     args: [
       ...sandboxArg,
