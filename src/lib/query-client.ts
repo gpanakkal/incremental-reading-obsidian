@@ -1,5 +1,5 @@
 import type { QueuePage, QueueRow } from '#/components/types';
-import { QueryClient } from '@tanstack/react-query';
+import { type Query, QueryClient } from '@tanstack/react-query';
 import type { TAbstractFile, TFile } from 'obsidian';
 import { CLOZE_DELIMITERS, QUERY_STALE_TIME } from './constants';
 import type ReviewManager from './items/ReviewManager';
@@ -23,7 +23,9 @@ export const queryClient = new QueryClient({
  * back a key's cached value the instant a component asks for it: under one
  * constant key, moving between items serves the *previous* item as settled data
  * until a refetch lands, and the review pane paints it. The id in the key makes
- * that a cache miss instead, so a new item can only ever arrive as loading.
+ * that a cache miss instead, so a new item can only ever arrive as loading —
+ * including one review has shown before, whose entry
+ * {@link startItemCacheEviction} dropped when review left it.
  *
  * `null` is not an identity — it means "whatever comes next", and its entry ends
  * up holding whatever the last advance resolved to. Only `useCurrentItem` may
@@ -31,6 +33,86 @@ export const queryClient = new QueryClient({
  */
 export const currentItemQueryKey = (id: string | null) =>
   ['current-review-item', id] as const;
+
+// #region Cache lifetime
+
+/**
+ * Drop everything cached for an item once review moves off it, until the
+ * returned cleanup is called. Hand that to `Plugin.register`.
+ *
+ * Left alone, an item's entries outlive it by react-query's whole `gcTime`, and
+ * nothing keeps them current meanwhile: the invalidations that follow a write
+ * only reach the item review is on. Coming back inside that window — from the
+ * queue table, `learn`, a resumed session — serves the item as it was when
+ * review left it, as settled data rather than loading, and whatever acts on it
+ * acts on that: an article reviewed and reopened a moment later would be
+ * reviewed again from its pre-review state. Evicted, the way back is a miss.
+ *
+ * Watches the store rather than wrapping any one of those paths, since each of
+ * them ends in `currentItemId`; and evicts in the cache rather than guarding
+ * each reader, so the hooks, `getCurrentItemSync` and `fetchCurrentItem` all
+ * find the same nothing.
+ *
+ * The `null` entry belongs to no item and is left to `useCurrentItem`.
+ */
+export function startItemCacheEviction(): () => void {
+  const cache = queryClient.getQueryCache();
+  /** Cancels each wait on an entry that was still held when its item was left. */
+  const waits = new Set<() => void>();
+  let shownId = store.getState().currentItemId;
+
+  /**
+   * Remove `query` unless something still holds it, and say whether it is done
+   * with: removed, or kept because review is back on `id`.
+   *
+   * Held is watched or fetching. Review's hooks go on watching the item they
+   * left until they re-render onto the next one, and a query removed under a
+   * watcher strands it on an entry the cache no longer has. Removing one
+   * mid-fetch cancels the fetch, rejecting whoever awaits it through
+   * `fetchQuery` — `setCardsOnly` would never get as far as its toggle.
+   */
+  const tryRemove = (query: Query, id: string): boolean => {
+    if (store.getState().currentItemId === id) return true;
+    if (query.getObserversCount() > 0 || query.state.fetchStatus !== 'idle') {
+      return false;
+    }
+    cache.remove(query);
+    return true;
+  };
+
+  /** Remove `query` now, or once nothing holds it any more. */
+  const release = (query: Query, id: string) => {
+    if (tryRemove(query, id)) return;
+    function stopWaiting() {
+      unsubscribe();
+      waits.delete(stopWaiting);
+    }
+    const unsubscribe = cache.subscribe((event) => {
+      if (event.query !== query) return;
+      if (event.type === 'removed' || tryRemove(query, id)) stopWaiting();
+    });
+    waits.add(stopWaiting);
+  };
+
+  const unsubscribeStore = store.subscribe(() => {
+    const { currentItemId } = store.getState();
+    if (currentItemId === shownId) return;
+    const leftId = shownId;
+    shownId = currentItemId;
+    if (leftId === null) return;
+    const entries = [
+      ...cache.findAll({ queryKey: currentItemQueryKey(leftId) }),
+      ...cache.findAll({ queryKey: ['item', leftId] }),
+    ];
+    for (const query of entries) release(query, leftId);
+  });
+
+  return () => {
+    unsubscribeStore();
+    for (const stopWaiting of waits) stopWaiting();
+  };
+}
+// #endregion
 
 // #region Queries for use outside React only
 // see useReactQuery.tsx for React queries
