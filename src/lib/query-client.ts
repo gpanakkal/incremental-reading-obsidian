@@ -108,11 +108,6 @@ export async function invalidateCurrentItemQuery() {
   await Promise.all(queries);
 }
 
-export async function refetchCurrentItem() {
-  return queryClient.refetchQueries({
-    queryKey: ['current-review-item'],
-  });
-}
 /**
  * Invalidates the React Query cache when the passed file is also open in
  * review. Used to keep review in sync with other editor panes.
