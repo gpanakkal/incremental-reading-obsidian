@@ -4,8 +4,7 @@ import type { TAbstractFile, TFile } from 'obsidian';
 import { CLOZE_DELIMITERS, QUERY_STALE_TIME } from './constants';
 import type ReviewManager from './items/ReviewManager';
 import { getSeenIds, resetCurrentItem, setCurrentItemId, store } from './store';
-import type { DataChangeEvent } from './types';
-import { isReviewCard, type ReviewItem } from './types';
+import { type DataChangeEvent, isReviewCard, type ReviewItem } from './types';
 import type { DeepPartial } from './utility-types';
 import { deepMerge } from './utils';
 
@@ -277,7 +276,8 @@ async function fetchNextItem(
     typesToInclude: typesToReview,
   });
   const nextItem: ReviewItem | null =
-    result.all.filter(({ data }) => !(data.id in seenIds))[0] ?? null;
+    result.all.filter(({ data }) => !Object.hasOwn(seenIds, data.id))[0] ??
+    null;
 
   if (nextItem) {
     queryClient.setQueryData(['item', nextItem.data.id], nextItem);
