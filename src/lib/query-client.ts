@@ -318,9 +318,11 @@ async function fetchNextItem(
 
   if (nextItem) {
     queryClient.setQueryData(['item', nextItem.data.id], nextItem);
-    // Seed the key the dispatch below is about to move the view onto. Without
-    // it the advance costs two fetches: this one, and a second for the id it
-    // has just resolved, which the view would sit through a second spinner for.
+    // Seed the key the dispatch below is about to move the view onto, so it
+    // lands on this item rather than on a miss and a second spinner. The item
+    // is still read twice: `useCurrentItem` invalidates on every id change, so
+    // it refetches straight away, but behind the seeded data instead of in
+    // place of it.
     queryClient.setQueryData(currentItemQueryKey(nextItem.data.id), nextItem);
 
     // update card delimiters
