@@ -43,6 +43,7 @@ import {
   invalidateCacheOnMatch,
   invalidateCurrentItemQuery,
   resetCurrentOnMatch,
+  startItemCacheEviction,
 } from './lib/query-client';
 import { SQLJSRepository } from './lib/repository/SQLJSRepository';
 import { initReviewCommands } from './lib/review-commands';
@@ -265,6 +266,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         // leaving review and discard it. Until a tab mounts, the pointer simply
         // stays on disk, held by the tracker.
         this.startSessionTracking();
+        this.register(startItemCacheEviction());
         this.registerView(
           ReviewView.viewType,
           (leaf) => new ReviewView(leaf, this, this.reviewManager)

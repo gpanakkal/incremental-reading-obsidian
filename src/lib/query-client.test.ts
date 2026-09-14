@@ -1,7 +1,9 @@
 import type { QueuePage, QueueRow } from '#/components/types';
+import { type QueryKey, QueryObserver } from '@tanstack/react-query';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MS_PER_DAY } from './constants';
 import type ReviewManager from './items/ReviewManager';
 import {
   applyQueueChange,
@@ -9,8 +11,16 @@ import {
   currentItemQueryKey,
   getCurrentItemSync,
   queryClient,
+  startItemCacheEviction,
 } from './query-client';
-import { resetSession, setCurrentItemId, store } from './store';
+import {
+  addSeenId,
+  resetSession,
+  type ReviewPage,
+  setCurrentItemId,
+  setPage,
+  store,
+} from './store';
 import type { ReviewItem } from './types';
 
 // #region HELPERS
@@ -80,6 +90,27 @@ function makeDueManager(item: ReviewItem | null): ReviewManager {
 const twoIdsArb = fc
   .tuple(fc.string(), fc.string())
   .filter(([a, b]) => a !== b);
+
+/** An item review is on, and where it goes instead: another item, or none. */
+const leaveArb = fc
+  .tuple(fc.string(), fc.option(fc.string(), { nil: null }))
+  .filter(([left, next]) => left !== next);
+
+/** A clean cache and store, as at plugin load. */
+function resetCacheAndStore() {
+  queryClient.clear();
+  store.dispatch(resetSession());
+}
+
+/** A watcher on `queryKey` that never fetches, standing in for a mounted hook. */
+function watch(queryKey: QueryKey): () => void {
+  return new QueryObserver(queryClient, { queryKey, enabled: false }).subscribe(
+    () => {}
+  );
+}
+
+const isCached = (queryKey: QueryKey) =>
+  queryClient.getQueryCache().find({ queryKey, exact: true }) !== undefined;
 // #endregion
 
 describe('applyQueueChange', () => {
@@ -329,6 +360,46 @@ describe('currentItemQueryFn', () => {
     expect(queryClient.getQueryData(currentItemQueryKey('next-1'))).toBe(item);
   });
 
+  it('advances past items already seen this session', async () => {
+    // Skipped items stay due, so the queue hands them back; the advance has to
+    // pass over them to the first one this session has not shown yet. Ids are
+    // UUIDs because that is all the item managers ever mint.
+    const queueArb = fc.uniqueArray(fc.tuple(fc.uuid(), fc.boolean()), {
+      selector: ([id]) => id,
+      minLength: 1,
+      maxLength: 5,
+    });
+    await fc.assert(
+      fc.asyncProperty(queueArb, async (queue) => {
+        resetCacheAndStore();
+        const resetTime = Date.now() + MS_PER_DAY;
+        for (const [id, seen] of queue) {
+          if (seen) store.dispatch(addSeenId({ id, resetTime }));
+        }
+        const due = queue.map(([id]) => makeReviewItem(id));
+        const getDue = vi
+          .fn()
+          .mockResolvedValue({
+            all: due,
+            cards: [],
+            snippets: [],
+            articles: due,
+          });
+
+        const resolved = await currentItemQueryFn(
+          { getDue } as unknown as ReviewManager,
+          null
+        );
+
+        const firstUnseen = due.find((_, i) => !queue[i][1]) ?? null;
+        expect(resolved).toBe(firstUnseen);
+        expect(store.getState().currentItemId).toBe(
+          firstUnseen?.data.id ?? null
+        );
+      })
+    );
+  });
+
   it('leaves the store empty-handed when the queue is exhausted', async () => {
     // The other end of the advance, and what tells an empty queue apart from one
     // still being resolved: a null id with a resolved null beside it.
@@ -336,5 +407,296 @@ describe('currentItemQueryFn', () => {
 
     expect(resolved).toBeNull();
     expect(store.getState().currentItemId).toBeNull();
+  });
+});
+
+describe('startItemCacheEviction', () => {
+  afterEach(() => {
+    resetCacheAndStore();
+    vi.restoreAllMocks();
+  });
+
+  it("drops an item's entries exactly when review moves off it", () => {
+    // Modelled over whole sessions rather than single moves, because what it
+    // must get right is the history: an item left once and then come back to
+    // has still been left, an item never left keeps its entries through any
+    // number of moves among the others, and a dispatch that leaves the id
+    // where it was — the same id again, or another slice changing — is no
+    // move at all. The `null` entry is the advance's, not an item's, and is
+    // never dropped.
+    const moveArb = (ids: string[]) =>
+      fc.oneof(
+        fc.record({ to: fc.option(fc.constantFrom(...ids), { nil: null }) }),
+        fc.record({ page: fc.constantFrom<ReviewPage>('home', 'review') })
+      );
+    const sessionArb = fc
+      .uniqueArray(fc.string(), { minLength: 1, maxLength: 4 })
+      .chain((ids) =>
+        fc.record({
+          ids: fc.constant(ids),
+          shownAtStart: fc.option(fc.constantFrom(...ids), { nil: null }),
+          moves: fc.array(moveArb(ids), { maxLength: 10 }),
+          subKey: fc.array(fc.jsonValue(), { maxLength: 3 }),
+        })
+      );
+
+    fc.assert(
+      fc.property(sessionArb, ({ ids, shownAtStart, moves, subKey }) => {
+        resetCacheAndStore();
+        store.dispatch(setCurrentItemId(shownAtStart));
+        const keysOf = (id: string): QueryKey[] => [
+          currentItemQueryKey(id),
+          ['item', id],
+          ['item', id, ...subKey],
+        ];
+        for (const id of ids) {
+          for (const key of keysOf(id)) queryClient.setQueryData(key, id);
+        }
+        queryClient.setQueryData(currentItemQueryKey(null), 'advance');
+
+        const left = new Set<string>();
+        let shown = shownAtStart;
+        const stop = startItemCacheEviction();
+        try {
+          for (const move of moves) {
+            if ('page' in move) {
+              store.dispatch(setPage(move.page));
+              continue;
+            }
+            store.dispatch(setCurrentItemId(move.to));
+            if (shown !== null && shown !== move.to) left.add(shown);
+            shown = move.to;
+          }
+          // Nothing here was watched or fetching, so nothing is left waiting.
+          expect(queryClient.getQueryCache().hasListeners()).toBe(false);
+        } finally {
+          stop();
+        }
+
+        for (const id of ids) {
+          for (const key of keysOf(id)) {
+            expect(queryClient.getQueryData(key)).toBe(
+              left.has(id) ? undefined : id
+            );
+          }
+        }
+        expect(queryClient.getQueryData(currentItemQueryKey(null))).toBe(
+          'advance'
+        );
+      })
+    );
+  });
+
+  it('keeps what an advance cached for the item it moves review onto', async () => {
+    // The advance seeds the next item's entries and then moves the store onto
+    // it. Whatever review was on before is left, but the item it arrives at
+    // is not, so the seed has to be there when the view lands on it.
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.option(fc.string(), { nil: null }),
+        async (nextId, shownBefore) => {
+          fc.pre(nextId !== shownBefore);
+          resetCacheAndStore();
+          store.dispatch(setCurrentItemId(shownBefore));
+          const next = makeReviewItem(nextId);
+          const stop = startItemCacheEviction();
+          try {
+            await currentItemQueryFn(makeDueManager(next), null);
+          } finally {
+            stop();
+          }
+
+          expect(queryClient.getQueryData(currentItemQueryKey(nextId))).toBe(
+            next
+          );
+          expect(queryClient.getQueryData(['item', nextId])).toBe(next);
+        }
+      )
+    );
+  });
+
+  it("waits for a left item's last watcher to let go before dropping it", () => {
+    // Review's hooks are still watching the item they have just left until
+    // they re-render onto the next one. Removing the entry under them would
+    // strand them on a query the cache no longer holds.
+    fc.assert(
+      fc.property(
+        leaveArb,
+        fc.integer({ min: 1, max: 3 }),
+        fc.boolean(),
+        ([leftId, nextId], watcherCount, watchText) => {
+          resetCacheAndStore();
+          store.dispatch(setCurrentItemId(leftId));
+          const key = watchText
+            ? ['item', leftId, 'file-text']
+            : currentItemQueryKey(leftId);
+          queryClient.setQueryData(key, 'cached');
+          const unwatches = Array.from({ length: watcherCount }, () =>
+            watch(key)
+          );
+          const stop = startItemCacheEviction();
+          try {
+            store.dispatch(setCurrentItemId(nextId));
+            for (const unwatch of unwatches) {
+              expect(isCached(key)).toBe(true);
+              unwatch();
+            }
+
+            expect(isCached(key)).toBe(false);
+            expect(queryClient.getQueryCache().hasListeners()).toBe(false);
+          } finally {
+            stop();
+          }
+        }
+      )
+    );
+  });
+
+  it('goes on waiting while other entries come and go', () => {
+    // The cache reports every entry's changes to every listener; a wait has to
+    // tell its own entry's release apart from any other entry being removed.
+    fc.assert(
+      fc.property(
+        leaveArb,
+        fc.array(fc.jsonValue(), { minLength: 1, maxLength: 3 }),
+        ([leftId, nextId], otherKey) => {
+          const key = currentItemQueryKey(leftId);
+          fc.pre(JSON.stringify(otherKey) !== JSON.stringify(key));
+          resetCacheAndStore();
+          store.dispatch(setCurrentItemId(leftId));
+          queryClient.setQueryData(key, 'cached');
+          const unwatch = watch(key);
+          const stop = startItemCacheEviction();
+          try {
+            store.dispatch(setCurrentItemId(nextId));
+            queryClient.setQueryData(otherKey, 'other');
+            queryClient.removeQueries({ queryKey: otherKey, exact: true });
+            unwatch();
+
+            expect(isCached(key)).toBe(false);
+          } finally {
+            stop();
+          }
+        }
+      )
+    );
+  });
+
+  it('lets a fetch running on a left item finish before dropping it', async () => {
+    // Removing a query cancels its fetch, and whoever is awaiting that fetch
+    // through `fetchQuery` is rejected with the cancellation instead of its
+    // result — `setCardsOnly` would never get as far as applying its toggle.
+    await fc.assert(
+      fc.asyncProperty(leaveArb, fc.boolean(), async ([leftId, nextId], ok) => {
+        resetCacheAndStore();
+        store.dispatch(setCurrentItemId(leftId));
+        const outcome = ok ? makeReviewItem(leftId) : new Error('read failed');
+        let settle = () => {};
+        const stop = startItemCacheEviction();
+        try {
+          const fetched = queryClient
+            .fetchQuery({
+              queryKey: currentItemQueryKey(leftId),
+              queryFn: () =>
+                new Promise<ReviewItem>((resolve, reject) => {
+                  settle = () =>
+                    ok
+                      ? resolve(outcome as ReviewItem)
+                      : reject(outcome as Error);
+                }),
+            })
+            .then(
+              (value) => ({ value }),
+              (error: unknown) => ({ error })
+            );
+
+          store.dispatch(setCurrentItemId(nextId));
+          expect(isCached(currentItemQueryKey(leftId))).toBe(true);
+          settle();
+
+          expect(await fetched).toEqual(
+            ok ? { value: outcome } : { error: outcome }
+          );
+          expect(isCached(currentItemQueryKey(leftId))).toBe(false);
+          expect(queryClient.getQueryCache().hasListeners()).toBe(false);
+        } finally {
+          stop();
+        }
+      })
+    );
+  });
+
+  it('keeps an entry review comes back to before it was let go', () => {
+    fc.assert(
+      fc.property(leaveArb, ([leftId, nextId]) => {
+        resetCacheAndStore();
+        store.dispatch(setCurrentItemId(leftId));
+        const key = currentItemQueryKey(leftId);
+        queryClient.setQueryData(key, 'cached');
+        const unwatch = watch(key);
+        const stop = startItemCacheEviction();
+        try {
+          store.dispatch(setCurrentItemId(nextId));
+          store.dispatch(setCurrentItemId(leftId));
+          unwatch();
+
+          expect(queryClient.getQueryData(key)).toBe('cached');
+          expect(queryClient.getQueryCache().hasListeners()).toBe(false);
+        } finally {
+          stop();
+        }
+      })
+    );
+  });
+
+  it('stops waiting on an entry once something else removes it', () => {
+    fc.assert(
+      fc.property(leaveArb, ([leftId, nextId]) => {
+        resetCacheAndStore();
+        store.dispatch(setCurrentItemId(leftId));
+        const key = currentItemQueryKey(leftId);
+        queryClient.setQueryData(key, 'cached');
+        const unwatch = watch(key);
+        const stop = startItemCacheEviction();
+        try {
+          store.dispatch(setCurrentItemId(nextId));
+          queryClient.removeQueries({ queryKey: key, exact: true });
+
+          expect(queryClient.getQueryCache().hasListeners()).toBe(false);
+        } finally {
+          unwatch();
+          stop();
+        }
+      })
+    );
+  });
+
+  it('drops nothing, now or pending, once cleaned up', () => {
+    // Cleanup runs on plugin unload, and the review view's teardown empties the
+    // store after it: nothing it does on the way out should touch the cache.
+    fc.assert(
+      fc.property(leaveArb, fc.string(), ([leftId, nextId], watchedId) => {
+        fc.pre(watchedId !== nextId && watchedId !== leftId);
+        resetCacheAndStore();
+        store.dispatch(setCurrentItemId(watchedId));
+        const watchedKey = currentItemQueryKey(watchedId);
+        const leftKey = currentItemQueryKey(leftId);
+        queryClient.setQueryData(watchedKey, 'watched');
+        queryClient.setQueryData(leftKey, 'left');
+        const unwatch = watch(watchedKey);
+        const stop = startItemCacheEviction();
+
+        store.dispatch(setCurrentItemId(nextId));
+        stop();
+        expect(queryClient.getQueryCache().hasListeners()).toBe(false);
+        unwatch();
+        store.dispatch(setCurrentItemId(leftId));
+        store.dispatch(setCurrentItemId(nextId));
+
+        expect(queryClient.getQueryData(watchedKey)).toBe('watched');
+        expect(queryClient.getQueryData(leftKey)).toBe('left');
+      })
+    );
   });
 });
