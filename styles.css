@@ -80,6 +80,30 @@ body {
   position: static;
 }
 
+/* Blocks escape the inline flattening above: a block box inside an inline
+   chain is hoisted into an anonymous block whose containing block is the host
+   <p>/<li>/.cm-line, not the flattened chain — so neither the
+   `padding-inline-start` above nor any ancestor's width reaches it, and it
+   starts at the host's content edge, which is exactly where the accent rule is
+   painted. Offset it by hand to the same value.
+
+   `> div >` is load-bearing twice over. Only a top-level block escapes; block
+   flow resumes inside it, so nested lists and fenced code already sit right and
+   a descendant selector would indent them a second time. And `:not(p)` rather
+   than a tag list, because `p` is the one child the flattening turns inline —
+   everything else is by definition still a block that escaped, including
+   wrappers like `.table-wrapper` that a tag list would miss.
+
+   The margin sits outside the inline fragments, so the tint does not paint
+   behind it. That is the cost of not making these boxes inline-block, which
+   would shrink-wrap code blocks and tables to their content. */
+.internal-embed[alt*='ir-hide-title']
+  .markdown-preview-section
+  > div
+  > :not(p) {
+  margin-inline-start: var(--size-4-2);
+}
+
 /* `.cm-line` is already relative in Live Preview. The reading-view hosts are
    not, so promote them — but only the ones holding a transclusion, since this
    changes what every absolutely positioned descendant resolves against.
