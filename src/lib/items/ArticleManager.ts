@@ -614,7 +614,7 @@ export class ArticleManager extends ItemManager {
       if (!reviewRow)
         throw new Error(`No article review found with ID "${reviewId}"`);
       await this.repo.mutate(
-        `DELETE FROM article_review WHERE article_id = $1 AND (id = $2 OR review_time > $3`,
+        `DELETE FROM article_review WHERE article_id = $1 AND (id = $2 OR review_time > $3)`,
         [originalArticle.id, reviewId, reviewRow.review_time]
       );
       await this.repo.mutate(
