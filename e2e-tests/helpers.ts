@@ -322,6 +322,278 @@ export async function selectParagraph(
 }
 
 /**
+ * Import a note from the vault as an article, starting from wherever the
+ * workspace is: opens the note in the active tab first, since the import
+ * command reads the active file.
+ *
+ * @param path passed to {@link openNote}
+ */
+export async function importArticle(window: Page, path: string) {
+  await openNote(window, path);
+  await executeCommandById(window, 'incremental-reading:import-article');
+  await finalizeArticleImport(window);
+}
+
+/** The review tab's view type, as `ReviewView.viewType` registers it. */
+export const REVIEW_VIEW_TYPE = 'incremental-reading-review';
+
+/** What the review tab calls itself when it is not showing an item. */
+export const REVIEW_VIEW_DEFAULT_TITLE = 'Incremental reading';
+
+/**
+ * The ephemeral-state key a review tab files its place under on history
+ * entries. Mirrors `REVIEW_PLACE_KEY` in `src/lib/review-history.ts`; the e2e
+ * suite runs against the built bundle and cannot import from `src/`.
+ */
+const REVIEW_PLACE_KEY = 'incrementalReadingPlace';
+
+/** One entry of a leaf's back or forward stack, reduced to what tests read. */
+export type HistoryEntrySnapshot = {
+  title: string;
+  /** View type the entry reopens. */
+  type: string | null;
+  /** The review place filed on the entry, or `null` for anything else. */
+  place: { page: string; itemId: string | null } | null;
+};
+
+/** The active tab and the plugin's store, read in one round trip. */
+export type LeafSnapshot = {
+  viewType: string | null;
+  /** `view.getDisplayText()`: what the tab header and taskbar show. */
+  displayText: string | null;
+  /** Text of the active tab header's title. */
+  tabHeaderTitle: string | null;
+  /** Vault path of `view.file`, or `null` when the view holds none. */
+  file: string | null;
+  page: string;
+  currentItemId: string | null;
+  back: HistoryEntrySnapshot[];
+  forward: HistoryEntrySnapshot[];
+};
+
+type TestWindow = Page & {
+  app: App & {
+    plugins: {
+      plugins: Record<
+        string,
+        {
+          store: {
+            getState(): { page: string; currentItemId: string | null };
+            subscribe(listener: () => void): () => void;
+          };
+          settings: Record<string, unknown>;
+        }
+      >;
+    };
+    emulateMobile(on: boolean): void;
+    isMobile: boolean;
+    mobileNavbar: {
+      backButtonEl: HTMLElement;
+      forwardButtonEl: HTMLElement;
+    } | null;
+  };
+};
+
+/** Snapshot the active leaf, its history stacks, and the review store. */
+export async function leafSnapshot(window: Page): Promise<LeafSnapshot> {
+  return await window.evaluate((placeKey) => {
+    const { app } = window as unknown as TestWindow;
+    const plugin = app.plugins.plugins['incremental-reading'];
+    if (!plugin) throw new Error('incremental-reading plugin is not loaded');
+    const leaf = app.workspace.getMostRecentLeaf() as unknown as {
+      view: {
+        getViewType(): string;
+        getDisplayText(): string;
+        file?: { path: string } | null;
+      } | null;
+      tabHeaderInnerTitleEl?: HTMLElement;
+      history: {
+        backHistory: {
+          title: string;
+          state?: { type?: string };
+          eState?: Record<string, unknown>;
+        }[];
+        forwardHistory: {
+          title: string;
+          state?: { type?: string };
+          eState?: Record<string, unknown>;
+        }[];
+      };
+    };
+    const describe = (entry: {
+      title: string;
+      state?: { type?: string };
+      eState?: Record<string, unknown>;
+    }) => ({
+      title: entry.title,
+      type: entry.state?.type ?? null,
+      place:
+        (entry.eState?.[placeKey] as
+          | { page: string; itemId: string | null }
+          | undefined) ?? null,
+    });
+    const { page, currentItemId } = plugin.store.getState();
+    return {
+      viewType: leaf.view?.getViewType() ?? null,
+      displayText: leaf.view?.getDisplayText() ?? null,
+      tabHeaderTitle: leaf.tabHeaderInnerTitleEl?.textContent ?? null,
+      file: leaf.view?.file?.path ?? null,
+      page,
+      currentItemId,
+      back: leaf.history.backHistory.map(describe),
+      forward: leaf.history.forwardHistory.map(describe),
+    };
+  }, REVIEW_PLACE_KEY);
+}
+
+/** An item as review shows it: its database id and its note's basename. */
+export type ShownItem = { id: string; title: string };
+
+/**
+ * Wait for the active tab to settle on an item in review, and report which.
+ *
+ * Settled means every copy of "which item" agrees: the store, the view's file,
+ * and the title the tab shows — plus the item's own title rendered in the pane.
+ */
+export async function waitForReviewItem(window: Page): Promise<ShownItem> {
+  let shown: ShownItem | null = null;
+  await expect(async () => {
+    const snapshot = await leafSnapshot(window);
+    expect(snapshot.viewType).toBe(REVIEW_VIEW_TYPE);
+    expect(snapshot.page).toBe('review');
+    expect(snapshot.currentItemId).not.toBeNull();
+    expect(snapshot.file).not.toBeNull();
+    const title = basename(snapshot.file ?? '');
+    expect(snapshot.displayText).toBe(title);
+    shown = { id: snapshot.currentItemId ?? '', title };
+  }).toPass({ timeout: 15_000 });
+  const item = shown as unknown as ShownItem;
+  await expect(reviewTitle(window, item.title)).toBeVisible();
+  return item;
+}
+
+/**
+ * Assert the active tab is review, on `item`, with the store, the view's file,
+ * the tab title and the pane's own title all naming it.
+ */
+export async function expectReviewOn(window: Page, item: ShownItem) {
+  await expect
+    .poll(async () => {
+      const s = await leafSnapshot(window);
+      return {
+        viewType: s.viewType,
+        page: s.page,
+        currentItemId: s.currentItemId,
+        displayText: s.displayText,
+        tabHeaderTitle: s.tabHeaderTitle,
+        fileBasename: s.file === null ? null : basename(s.file),
+      };
+    })
+    .toEqual({
+      viewType: REVIEW_VIEW_TYPE,
+      page: 'review',
+      currentItemId: item.id,
+      displayText: item.title,
+      tabHeaderTitle: item.title,
+      fileBasename: item.title,
+    });
+  await expect(reviewTitle(window, item.title)).toBeVisible();
+}
+
+/** Assert the active tab is review, showing its home screen. */
+export async function expectReviewHome(window: Page) {
+  await expect
+    .poll(async () => {
+      const s = await leafSnapshot(window);
+      return {
+        viewType: s.viewType,
+        page: s.page,
+        displayText: s.displayText,
+      };
+    })
+    .toEqual({
+      viewType: REVIEW_VIEW_TYPE,
+      page: 'home',
+      displayText: REVIEW_VIEW_DEFAULT_TITLE,
+    });
+  await expect(window.locator('css=#begin-review-button')).toBeVisible();
+  await expect(window.locator('.ir-queue-row').first()).toBeVisible();
+}
+
+function basename(path: string) {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  return name.endsWith('.md') ? name.slice(0, -'.md'.length) : name;
+}
+
+/**
+ * Open a vault file in the active tab itself — the tab navigating, as a link
+ * followed inside it does — rather than wherever the quick switcher decides.
+ */
+export async function openFileInActiveLeaf(window: Page, path: string) {
+  await window.evaluate(async (filePath) => {
+    const { app } = window as unknown as TestWindow;
+    const file = app.vault.getFileByPath(filePath);
+    if (!file) throw new Error(`No such file: ${filePath}`);
+    const leaf = app.workspace.getMostRecentLeaf();
+    if (!leaf) throw new Error('No active leaf');
+    await leaf.openFile(file);
+  }, path);
+}
+
+/**
+ * Collect every Obsidian notice shown from now on, for asserting that nothing
+ * like "tab is busy" went by. Returns a reader for what has been seen so far.
+ */
+export async function watchNotices(window: Page) {
+  await window.evaluate(() => {
+    const w = window as unknown as { __irNotices?: string[] };
+    w.__irNotices = [];
+    new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        mutation.addedNodes.forEach((node) => {
+          if (node instanceof HTMLElement && node.matches('.notice')) {
+            w.__irNotices?.push(node.textContent ?? '');
+          }
+        });
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  return async () =>
+    await window.evaluate(
+      () => (window as unknown as { __irNotices?: string[] }).__irNotices ?? []
+    );
+}
+
+/**
+ * Turn Obsidian's mobile emulation on or off. Obsidian reloads the renderer to
+ * apply it, which also reloads every plugin, so this waits for the reloaded
+ * workspace and plugin rather than returning into the old page.
+ */
+export async function emulateMobile(window: Page, on: boolean) {
+  const reloaded = window.waitForEvent('domcontentloaded');
+  await window
+    .evaluate((value) => {
+      (window as unknown as TestWindow).app.emulateMobile(value);
+    }, on)
+    .catch((error: unknown) => {
+      if (!isContextDestroyedError(error)) throw error;
+    });
+  await reloaded;
+  await waitForLayoutReady(window);
+  await window.waitForFunction(
+    (value) => {
+      const { app } = window as unknown as TestWindow;
+      return (
+        app?.isMobile === value &&
+        !!app.plugins?.plugins?.['incremental-reading']?.store
+      );
+    },
+    on,
+    { timeout: 15_000 }
+  );
+}
+
+/**
  * Flip one of the plugin's settings from inside the running app.
  *
  * In memory only — no `saveSettings` — because that is where everything reads
