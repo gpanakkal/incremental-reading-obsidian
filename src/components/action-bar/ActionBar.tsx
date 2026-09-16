@@ -8,7 +8,6 @@ import {
   isReviewArticle,
   isReviewCard,
   isReviewSnippet,
-  isReviewText,
   type ReviewArticle,
   type ReviewCard,
   type ReviewItem,
@@ -42,6 +41,7 @@ export function ActionBar() {
   return (
     <div className="ir-action-bar" tabIndex={-1}>
       {/* setting a tabIndex makes the action bar focusable */}
+      <GlobalActions />
       {page === 'home' ? (
         <HomeActions />
       ) : (
@@ -59,20 +59,17 @@ export function ActionBar() {
           <UndoAction />
           {currentItem && (
             <>
-              {isReviewCard(currentItem) && <CardActions card={currentItem} />}
-              {isReviewText(currentItem) && <TextActions text={currentItem} />}
               {isReviewArticle(currentItem) && (
                 <ArticleActions article={currentItem} />
               )}
               {isReviewSnippet(currentItem) && (
                 <SnippetActions snippet={currentItem} />
               )}
-              <ItemActions reviewItem={currentItem} />
+              {isReviewCard(currentItem) && <CardActions card={currentItem} />}
             </>
           )}
         </>
       )}
-      <GlobalActions />
     </div>
   );
 }
@@ -157,163 +154,207 @@ function UndoAction() {
   );
 }
 
-/**
- * Actions common to articles, snippets, and cards
- */
-function ItemActions({ reviewItem }: { reviewItem: ReviewItem }) {
-  const { actions, plugin, reviewView } = useReviewContext();
-  const isDismissed = reviewItem.data.dismissed;
-
+function ArticleActions({ article }: { article: ReviewArticle }) {
   return (
     <>
-      <ButtonWithIcon
-        tooltip="Extract selected text to a new snippet"
-        handleClick={async () => {
-          await actions.createSnippet();
-        }}
-      >
-        <Scissors />
-      </ButtonWithIcon>
-      <ButtonWithIcon
-        tooltip="Create card"
-        handleClick={async () => {
-          await actions.createCard();
-        }}
-      >
-        <CardCog />
-      </ButtonWithIcon>
+      <MarkReviewedAction text={article} />
+      <SkipAction item={article} />
+      <ExtractSnippetAction />
+      <CreateCardAction />
       <Separator />
-      {isDismissed ? (
-        <ButtonWithIcon
-          tooltip="Restore item to queue"
-          handleClick={async () => await actions.unDismissItem(reviewItem)}
-        >
-          <ArchiveRestore stroke="#b4a200" />
-        </ButtonWithIcon>
-      ) : (
-        <ButtonWithIcon
-          tooltip="Stop scheduling this item for review"
-          handleClick={async () => await actions.dismissItem(reviewItem)}
-        >
-          <Ban stroke="#b4a200" />
-        </ButtonWithIcon>
-      )}
-      {/* Obsidian draws its own ⋮ in the view header, which ReviewView hides on
-  desktop, but not mobile. */}
-      {!plugin.app.isMobile && (
-        <ButtonWithIcon
-          tooltip="More options"
-          id="more-options-button"
-          handleClick={(e) => {
-            // Anchors the menu under the button, the way Obsidian's own header
-            // button anchors it. Read synchronously: `currentTarget` is null once
-            // the event finishes dispatching.
-            const button = e.currentTarget;
-            if (button instanceof HTMLElement) {
-              reviewView.showMoreOptionsMenu(button);
-            }
-          }}
-        >
-          <EllipsisVertical />
-        </ButtonWithIcon>
-      )}
+      <TextScheduler text={article} />
+      <Separator />
+      <DismissAction item={article} />
+      <MoreOptionsAction />
     </>
   );
 }
 
-/**
- * Actions shared by articles and snippets.
- * TODO:
- * - overflow menu
- */
-function TextActions({ text }: { text: ReviewText }) {
-  const { actions } = useReviewContext();
-
+function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
   return (
     <>
-      <ButtonWithIcon
-        tooltip="Mark as reviewed"
-        handleClick={async () => await actions.review(text)}
-      >
-        <Check stroke="#00a700" />
-      </ButtonWithIcon>
-      <ButtonWithIcon
-        tooltip="Skip for current review session"
-        handleClick={() => {
-          actions.skipItem(text);
-        }}
-      >
-        <SkipForward />
-      </ButtonWithIcon>
-      <TextScheduler text={text} />
+      <MarkReviewedAction text={snippet} />
+      <SkipAction item={snippet} />
+      <ExtractSnippetAction />
+      <CreateCardAction />
+      <Separator />
+      <TextScheduler text={snippet} />
+      <Separator />
+      <DismissAction item={snippet} />
+      <MoreOptionsAction />
     </>
   );
-}
-
-/**
- * TODO:
- * - manual scheduling
- */
-function ArticleActions({ article: _article }: { article: ReviewArticle }) {
-  return <></>;
-}
-
-function SnippetActions({ snippet: _snippet }: { snippet: ReviewSnippet }) {
-  return <></>;
 }
 
 function CardActions({ card }: { card: ReviewCard }) {
-  const dispatch = useDispatch();
   const showAnswer = useAppSelector((state) => state.showAnswer);
-  const { actions } = useReviewContext();
 
   return (
     <>
       {showAnswer ? (
-        <>
-          <ButtonWithIcon
-            handleClick={async () =>
-              await actions.gradeCard(card, Rating.Again)
-            }
-          >
-            🔁 Forgot
-          </ButtonWithIcon>
-          <ButtonWithIcon
-            handleClick={async () => await actions.gradeCard(card, Rating.Hard)}
-          >
-            👎 Hard
-          </ButtonWithIcon>
-          <ButtonWithIcon
-            handleClick={async () => await actions.gradeCard(card, Rating.Good)}
-          >
-            👍 Good
-          </ButtonWithIcon>
-          <ButtonWithIcon
-            handleClick={async () => await actions.gradeCard(card, Rating.Easy)}
-          >
-            ✅ Easy
-          </ButtonWithIcon>
-        </>
+        <GradeActions card={card} />
       ) : (
         <>
-          <ButtonWithIcon
-            tooltip="Show answer"
-            handleClick={() => {
-              dispatch(setShowAnswer(true));
-            }}
-          >
-            <Eye stroke="#00a700" />
-          </ButtonWithIcon>
-          <ButtonWithIcon
-            tooltip="Skip for current review session"
-            handleClick={() => {
-              actions.skipItem(card);
-            }}
-          >
-            <SkipForward />
-          </ButtonWithIcon>
+          <ShowAnswerAction />
+          <SkipAction item={card} />
         </>
       )}
+      <ExtractSnippetAction />
+      <CreateCardAction />
+      <Separator />
+      <DismissAction item={card} />
+      <MoreOptionsAction />
     </>
+  );
+}
+
+function MarkReviewedAction({ text }: { text: ReviewText }) {
+  const { actions } = useReviewContext();
+
+  return (
+    <ButtonWithIcon
+      tooltip="Mark reviewed"
+      handleClick={async () => await actions.review(text)}
+    >
+      <Check stroke="#00a700" />
+    </ButtonWithIcon>
+  );
+}
+
+function SkipAction({ item }: { item: ReviewItem }) {
+  const { actions } = useReviewContext();
+
+  return (
+    <ButtonWithIcon
+      tooltip="Skip for current review session"
+      handleClick={() => {
+        actions.skipItem(item);
+      }}
+    >
+      <SkipForward />
+    </ButtonWithIcon>
+  );
+}
+
+function ShowAnswerAction() {
+  const dispatch = useDispatch();
+
+  return (
+    <ButtonWithIcon
+      tooltip="Show answer"
+      handleClick={() => {
+        dispatch(setShowAnswer(true));
+      }}
+    >
+      <Eye stroke="#00a700" />
+    </ButtonWithIcon>
+  );
+}
+
+function GradeActions({ card }: { card: ReviewCard }) {
+  const { actions } = useReviewContext();
+
+  return (
+    <>
+      <ButtonWithIcon
+        handleClick={async () => await actions.gradeCard(card, Rating.Again)}
+      >
+        🔁 Forgot
+      </ButtonWithIcon>
+      <ButtonWithIcon
+        handleClick={async () => await actions.gradeCard(card, Rating.Hard)}
+      >
+        👎 Hard
+      </ButtonWithIcon>
+      <ButtonWithIcon
+        handleClick={async () => await actions.gradeCard(card, Rating.Good)}
+      >
+        👍 Good
+      </ButtonWithIcon>
+      <ButtonWithIcon
+        handleClick={async () => await actions.gradeCard(card, Rating.Easy)}
+      >
+        ✅ Easy
+      </ButtonWithIcon>
+    </>
+  );
+}
+
+function ExtractSnippetAction() {
+  const { actions } = useReviewContext();
+
+  return (
+    <ButtonWithIcon
+      tooltip="Extract selected text to a new snippet"
+      handleClick={async () => {
+        await actions.createSnippet();
+      }}
+    >
+      <Scissors />
+    </ButtonWithIcon>
+  );
+}
+
+function CreateCardAction() {
+  const { actions } = useReviewContext();
+
+  return (
+    <ButtonWithIcon
+      tooltip="Create card"
+      handleClick={async () => {
+        await actions.createCard();
+      }}
+    >
+      <CardCog />
+    </ButtonWithIcon>
+  );
+}
+
+/**
+ * Dismisses the item, or restores it to the queue if it's already dismissed.
+ */
+function DismissAction({ item }: { item: ReviewItem }) {
+  const { actions } = useReviewContext();
+
+  return item.data.dismissed ? (
+    <ButtonWithIcon
+      tooltip="Restore item to queue"
+      handleClick={async () => await actions.unDismissItem(item)}
+    >
+      <ArchiveRestore stroke="#b4a200" />
+    </ButtonWithIcon>
+  ) : (
+    <ButtonWithIcon
+      tooltip="Stop scheduling this item for review"
+      handleClick={async () => await actions.dismissItem(item)}
+    >
+      <Ban stroke="#b4a200" />
+    </ButtonWithIcon>
+  );
+}
+
+function MoreOptionsAction() {
+  const { plugin, reviewView } = useReviewContext();
+
+  // Obsidian draws its own ⋮ in the view header, which ReviewView hides on
+  // desktop, but not mobile.
+  if (plugin.app.isMobile) return null;
+
+  return (
+    <ButtonWithIcon
+      tooltip="More options"
+      id="more-options-button"
+      handleClick={(e) => {
+        // Anchors the menu under the button, the way Obsidian's own header
+        // button anchors it. Read synchronously: `currentTarget` is null once
+        // the event finishes dispatching.
+        const button = e.currentTarget;
+        if (button instanceof HTMLElement) {
+          reviewView.showMoreOptionsMenu(button);
+        }
+      }}
+    >
+      <EllipsisVertical />
+    </ButtonWithIcon>
   );
 }

@@ -92,7 +92,7 @@ test.describe('Article Importing', () => {
     await window.locator('css=#begin-review-button').click();
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Mark as reviewed' })
+      window.getByRole('button', { name: 'Mark reviewed' })
     ).toBeVisible();
     await expect(
       reviewTitle(window, 'Curse of dimensionality - Wikipedia')
@@ -116,7 +116,7 @@ test.describe('Article Importing', () => {
 
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Mark as reviewed' })
+      window.getByRole('button', { name: 'Mark reviewed' })
     ).toBeVisible();
     await expect(reviewTitle(window, ARTICLE_TITLE)).toBeInViewport();
   });
@@ -134,7 +134,7 @@ test.describe('Article Importing', () => {
 
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Mark as reviewed' })
+      window.getByRole('button', { name: 'Mark reviewed' })
     ).toBeVisible();
     await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
   });
@@ -183,7 +183,7 @@ test.describe('Action Bar', () => {
     await finalizeArticleImport(window);
     await executeCommandById(window, 'incremental-reading:learn');
     await window.locator('css=#begin-review-button').click();
-    await window.getByRole('button', { name: 'Mark as reviewed' }).click();
+    await window.getByRole('button', { name: 'Mark reviewed' }).click();
 
     await executeCommandById(window, 'workspace:close');
 
@@ -356,7 +356,7 @@ test.describe('Extracting snippets', () => {
 
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Mark as reviewed' })
+      window.getByRole('button', { name: 'Mark reviewed' })
     ).toBeVisible();
 
     await selectParagraph(
@@ -399,7 +399,7 @@ test.describe('Extracting snippets', () => {
 
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Mark as reviewed' })
+      window.getByRole('button', { name: 'Mark reviewed' })
     ).toBeInViewport();
 
     // Extract the second paragraph
@@ -416,7 +416,7 @@ test.describe('Extracting snippets', () => {
     await window.waitForTimeout(300);
     // look for the action bar to confirm we're in review
     await expect(
-      window.getByRole('button', { name: 'Mark as reviewed' })
+      window.getByRole('button', { name: 'Mark reviewed' })
     ).toBeInViewport();
 
     // Make sure the first line is absent so we know we're looking at the new snippet
