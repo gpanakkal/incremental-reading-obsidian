@@ -405,8 +405,8 @@ describe('disableFixedInterval', () => {
             await manager.disableFixedInterval(article, priority);
 
             const [sql, params] = lastMutateCall(repo);
-            expect(sql).toMatch(/WHERE id = \$3/i);
-            expect(params[2]).toBe(id);
+            expect(sql).toMatch(/WHERE id = \$4/i);
+            expect(params[3]).toBe(id);
           }
         )
       );
