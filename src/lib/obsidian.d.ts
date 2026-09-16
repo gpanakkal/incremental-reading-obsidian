@@ -34,3 +34,14 @@ declare module 'obsidian' {
     renderBreadcrumbs(): void;
   }
 }
+
+declare module 'obsidian-typings' {
+  /**
+   * Declared empty by `obsidian-typings`. `onLeafChange` re-reads the active
+   * leaf's history into the back and forward buttons' `aria-disabled`, and is
+   * otherwise called only from the navbar's own `active-leaf-change` handler.
+   */
+  interface MobileNavbar {
+    onLeafChange(): void;
+  }
+}

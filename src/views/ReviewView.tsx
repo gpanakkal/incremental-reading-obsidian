@@ -5,7 +5,21 @@ import {
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
-import { resetSession, setPage, type ReviewPage } from '#/lib/store';
+import {
+  actionsToReach,
+  isDestination,
+  placeOf,
+  placeToEphemeralState,
+  readPlace,
+  samePlace,
+  type ReviewPlace,
+} from '#/lib/review-history';
+import {
+  resetCurrentItem,
+  resetSession,
+  setPage,
+  type ReviewPage,
+} from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import {
@@ -16,8 +30,10 @@ import {
   WorkspaceWindow,
   type IconName,
   type TFile,
+  type ViewStateResult,
   type WorkspaceLeaf,
 } from 'obsidian';
+import type { WorkspaceLeafHistoryState } from 'obsidian-typings';
 import { render } from 'preact';
 
 /** Shown whenever the review tab is not displaying an item. */
@@ -42,6 +58,26 @@ export default class ReviewView extends FileView {
    * *changes*. Read the store for the current page — see {@link getDisplayText}.
    */
   #page: ReviewPage;
+  /**
+   * The place as of the last store notification, kept to spot place changes and
+   * to describe the place being left when one happens — by the time the store
+   * notifies, it already names the next. See {@link trackPlace}.
+   */
+  #place: ReviewPlace;
+  /**
+   * Whether place changes go into this tab's back history: only between a
+   * finished {@link onOpen} and the start of {@link onClose}. Before, the page and
+   * item are still being settled for the tab rather than chosen by the user;
+   * after, closing empties the session, which is not the user going anywhere.
+   */
+  #open = false;
+  /** Set while a history entry is being applied, which must not record itself. */
+  #applyingHistory = false;
+  /**
+   * The entry this tab pushed most recently, for taking it back off when review
+   * returns to its place before settling anywhere else — see {@link trackPlace}.
+   */
+  #lastRecorded: WorkspaceLeafHistoryState | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -52,8 +88,10 @@ export default class ReviewView extends FileView {
     this.plugin = plugin;
     this.#reviewManager = reviewManager;
     this.#page = plugin.store.getState().page;
+    this.#place = placeOf(plugin.store.getState());
 
     const unsub = plugin.store.subscribe(() => {
+      this.trackPlace(placeOf(plugin.store.getState()));
       const currentPage = plugin.store.getState().page;
       if (currentPage !== this.#page) {
         this.#page = plugin.store.getState().page;
@@ -122,7 +160,15 @@ export default class ReviewView extends FileView {
    * does not drive, and a title read must never lag the state it describes.
    */
   currentItemFile(): TFile | null {
-    const { page } = this.plugin.store.getState();
+    return this.itemFileOn(this.plugin.store.getState().page);
+  }
+
+  /**
+   * The item `file` stands for with review on `page` — the rule behind
+   * {@link currentItemFile}, for describing a page other than the store's: the
+   * one a history entry is being written for.
+   */
+  itemFileOn(page: ReviewPage): TFile | null {
     if (page !== 'review') return null;
     return this.file?.basename ? this.file : null;
   }
@@ -171,6 +217,168 @@ export default class ReviewView extends FileView {
 
   getIcon(): IconName {
     return PLACEHOLDER_PLUGIN_ICON;
+  }
+
+  /**
+   * Record leaving a place in this tab's back history, the way following a link
+   * records leaving a note. Called on every store notification.
+   *
+   * Obsidian records history only when a leaf's view state changes, and moving
+   * between the home screen and items changes nothing it can see: the view type
+   * stays put and `file` is assigned directly (see {@link setFile}). So the entry
+   * is written here, through the same `recordHistory` Obsidian's web viewer uses
+   * for its own in-page navigation.
+   *
+   * The entry has to describe the place being left, and by now the store names
+   * the next one; hence {@link historyEntryFor} takes the place rather than
+   * reading it. Nothing else has caught up yet — `file` follows the item from a
+   * render effect, and the editor has not re-rendered — so the rest of the view
+   * still describes the place being left too.
+   *
+   * Review between items is never recorded (see `isDestination`). An advance
+   * that comes back to the item it left — undo lands there — would otherwise
+   * leave that item on top of the back stack, making the next back a step that
+   * goes nowhere, so the entry is taken back off. Only while it is still the top
+   * entry and still this tab's: anything pushed since means the user has moved
+   * on.
+   */
+  trackPlace(next: ReviewPlace): void {
+    const left = this.#place;
+    if (samePlace(left, next)) return;
+    this.#place = next;
+    if (!this.#open || this.#applyingHistory) return;
+
+    if (isDestination(left)) {
+      const entry = this.historyEntryFor(left);
+      this.leaf.recordHistory(entry);
+      this.#lastRecorded = entry;
+      return;
+    }
+
+    const { backHistory } = this.leaf.history;
+    const top = backHistory[backHistory.length - 1];
+    const lastRecordedPlace = readPlace(this.#lastRecorded?.eState);
+    if (
+      top === this.#lastRecorded &&
+      lastRecordedPlace !== null &&
+      samePlace(lastRecordedPlace, next)
+    ) {
+      backHistory.pop();
+      this.#lastRecorded = null;
+      this.leaf.trigger('history-change');
+    }
+  }
+
+  /**
+   * The history entry for `place`, in the shape `WorkspaceLeaf.getHistoryState`
+   * gives Obsidian's own entries.
+   *
+   * The title is what the tab showed there, worked out from `place` rather than
+   * {@link getDisplayText}, which reads the store; it goes in the view state too,
+   * since that copy is what Obsidian compares to drop an entry repeating the one
+   * before it.
+   */
+  historyEntryFor(place: ReviewPlace): WorkspaceLeafHistoryState {
+    const title =
+      this.itemFileOn(place.page)?.basename ?? REVIEW_VIEW_DEFAULT_TITLE;
+    return {
+      title,
+      icon: this.getIcon(),
+      state: { ...this.leaf.getViewState(), title },
+      eState: placeToEphemeralState(place),
+    };
+  }
+
+  /**
+   * Obsidian snapshots this for the entry it records when the tab navigates to
+   * another view, and for the current place when back or forward leaves it —
+   * which is what brings review back to its page and item on the return trip.
+   *
+   * Not for a tab being closed. Obsidian snapshots that too, for reopening the
+   * tab, and hands it back the same way; but a reopened tab resumes like a
+   * restored one (see {@link resumeUnclaimedSession}), and a place carried over
+   * would overrule it — putting a tab closed on the home screen back there
+   * despite the setting to skip it. `WorkspaceLeaf.detach` takes the leaf out of
+   * its parent before snapshotting, and nothing else snapshots a detached leaf.
+   */
+  getEphemeralState(): Record<string, unknown> {
+    const eState = super.getEphemeralState();
+    if (!this.leaf.parent) return eState;
+    return {
+      ...eState,
+      ...placeToEphemeralState(placeOf(this.plugin.store.getState())),
+    };
+  }
+
+  /**
+   * Return to the place a history entry names, when it names one. Everything
+   * else Obsidian passes here — a link's `subpath`, `focusLeaf`'s `{ focus }` —
+   * means nothing to review.
+   */
+  setEphemeralState(state: unknown): void {
+    super.setEphemeralState(state);
+    const place = readPlace(state);
+    if (place) this.goToPlace(place);
+  }
+
+  /**
+   * Put review on `place` without recording the move: it is a move through
+   * history, which Obsidian has already accounted for.
+   *
+   * Only the store moves. The item query, the cache eviction, the view's `file`
+   * and title, and the session tracker all follow the store, exactly as they do
+   * when an item is picked from the queue — so no path back gets to leave them
+   * disagreeing with it.
+   */
+  goToPlace(place: ReviewPlace): void {
+    const { store } = this.plugin;
+    this.#lastRecorded = null;
+    this.#applyingHistory = true;
+    try {
+      for (const action of actionsToReach(store.getState(), place)) {
+        store.dispatch(action);
+      }
+    } finally {
+      this.#applyingHistory = false;
+    }
+    if (place.itemId !== null) void this.leaveIfGone(place.itemId);
+  }
+
+  /**
+   * Move review on to the next item when the one history brought it back to no
+   * longer exists, as deleting an item in review does. History outlives items:
+   * one deleted since it was recorded would otherwise sit in review as an empty
+   * pane.
+   *
+   * Unless review has already moved off it by the time the lookup returns.
+   */
+  async leaveIfGone(itemId: string): Promise<void> {
+    const item = await this.#reviewManager.getReviewItemFromId(itemId);
+    if (item) return;
+    const { store } = this.plugin;
+    if (store.getState().currentItemId !== itemId) return;
+    this.#applyingHistory = true;
+    try {
+      store.dispatch(resetCurrentItem());
+    } finally {
+      this.#applyingHistory = false;
+    }
+  }
+
+  /**
+   * `FileView.setState` loads the file the state names, and here that file is
+   * not the view's to choose: it follows the item in the store, through
+   * {@link setFile}. A file loaded from a history entry or the saved layout
+   * overrides that until the item's file next changes — which never comes when
+   * the entry is the home screen, left with some other item's file still loaded
+   * — and the tab then names one item while showing another.
+   */
+  async setState(state: unknown, result: ViewStateResult): Promise<void> {
+    // Spreading `null` gives `{}`; spreading a string would give its characters.
+    const rest: Record<string, unknown> =
+      typeof state === 'object' ? { ...state } : {};
+    delete rest.file;
+    await super.setState(rest, result);
   }
 
   // For extending TextFileView/MarkdownView. If implemented incorrectly, can
@@ -308,6 +516,26 @@ export default class ReviewView extends FileView {
         }
       })
     );
+
+    this.registerEvent(
+      this.leaf.on('history-change', () => this.refreshMobileNavbar())
+    );
+    this.#open = true;
+  }
+
+  /**
+   * Bring the mobile navbar's back and forward buttons up to date with the
+   * active tab's history.
+   *
+   * The navbar re-reads history only on `active-leaf-change`, which a markdown
+   * tab raises each time it loads a file. Review raises it for none of the moves
+   * it records — the file stays the same between the home screen and an item, and
+   * is never loaded by Obsidian otherwise — nor when back and forward move between
+   * its own entries, so without this the buttons stay greyed out over a history
+   * they could walk. The navbar exists only on mobile.
+   */
+  refreshMobileNavbar(): void {
+    this.app.mobileNavbar?.onLeafChange();
   }
 
   /**
@@ -328,6 +556,7 @@ export default class ReviewView extends FileView {
   }
 
   async onClose() {
+    this.#open = false;
     await super.onClose();
     render(null, this.contentEl);
     this.activeEditor = null;

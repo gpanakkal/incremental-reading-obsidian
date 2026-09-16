@@ -382,6 +382,13 @@ async function patchQueuePages(
 
 /**
  * Get next due item, reset item state, and update card delimiters
+ *
+ * Hands the item to review only while review is still waiting for one. An
+ * advance takes a database round trip, and the user can pick an item in the
+ * meantime — back or forward, the queue table, `learn` — whereupon this one
+ * finishing would move review off the item they chose. Its result then goes no
+ * further than its own `null` entry, which `useCurrentItem` never shows as
+ * settled: nothing is seeded for an item review is not going to.
  */
 async function fetchNextItem(
   reviewManager: ReviewManager
@@ -397,6 +404,14 @@ async function fetchNextItem(
   const nextItem: ReviewItem | null =
     result.all.filter(({ data }) => !Object.hasOwn(seenIds, data.id))[0] ??
     null;
+  if (!isAwaitingNextItem()) return nextItem;
+
+  // update card delimiters
+  if (nextItem && isReviewCard(nextItem)) {
+    await reviewManager.cards.updateDelimiters(nextItem, CLOZE_DELIMITERS);
+    // Again, past the write's await.
+    if (!isAwaitingNextItem()) return nextItem;
+  }
 
   if (nextItem) {
     queryClient.setQueryData(['item', nextItem.data.id], nextItem);
@@ -406,13 +421,13 @@ async function fetchNextItem(
     // it refetches straight away, but behind the seeded data instead of in
     // place of it.
     queryClient.setQueryData(currentItemQueryKey(nextItem.data.id), nextItem);
-
-    // update card delimiters
-    if (isReviewCard(nextItem)) {
-      await reviewManager.cards.updateDelimiters(nextItem, CLOZE_DELIMITERS);
-    }
   }
   store.dispatch(setCurrentItemId(nextItem?.data.id ?? null));
   return nextItem;
+}
+
+/** Whether review is between items, with nobody having picked one yet. */
+function isAwaitingNextItem(): boolean {
+  return store.getState().currentItemId === null;
 }
 // #endregion

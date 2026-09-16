@@ -3,7 +3,7 @@ import { type QueryKey, QueryObserver } from '@tanstack/react-query';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MS_PER_DAY } from './constants';
+import { CLOZE_DELIMITERS, MS_PER_DAY } from './constants';
 import type ReviewManager from './items/ReviewManager';
 import {
   applyQueueChange,
@@ -21,7 +21,7 @@ import {
   setPage,
   store,
 } from './store';
-import type { ReviewItem } from './types';
+import type { NoteType, ReviewItem } from './types';
 
 // #region HELPERS
 
@@ -85,6 +85,55 @@ function makeDueManager(item: ReviewItem | null): ReviewManager {
     }),
   } as unknown as ReviewManager;
 }
+
+/** An item of any of the three types, under `id`. */
+function makeTypedItem(id: string, type: NoteType): ReviewItem {
+  return {
+    data: { id, type },
+    file: { path: `${type}s/${id}.md` } as TFile,
+  } as ReviewItem;
+}
+
+/** What `getDue` resolves to for a queue holding exactly `item`, or nothing. */
+function dueResult(item: ReviewItem | null) {
+  const all = item ? [item] : [];
+  return { all, cards: [], snippets: [], articles: all };
+}
+
+/** A promise held open until `resolve` is called, for pausing at an await. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve: (value: T) => void = () => {};
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+/**
+ * A ReviewManager stub for an advance onto a card, holding the delimiter write
+ * open: `writeStarted` settles once the write is under way, and the write
+ * itself finishes when `finishWrite` is called.
+ */
+function makeCardWriteManager(card: ReviewItem) {
+  const started = deferred<void>();
+  const written = deferred<void>();
+  const updateDelimiters = vi.fn(() => {
+    started.resolve();
+    return written.promise;
+  });
+  const manager = {
+    getDue: vi.fn().mockResolvedValue(dueResult(card)),
+    cards: { updateDelimiters },
+  } as unknown as ReviewManager;
+  return {
+    manager,
+    updateDelimiters,
+    writeStarted: started.promise,
+    finishWrite: () => written.resolve(),
+  };
+}
+
+const noteTypeArb = fc.constantFrom<NoteType>('article', 'snippet', 'card');
 
 /** Two ids that are never equal — the cases about moving between items. */
 const twoIdsArb = fc
@@ -408,6 +457,171 @@ describe('currentItemQueryFn', () => {
     expect(resolved).toBeNull();
     expect(store.getState().currentItemId).toBeNull();
   });
+
+  it('asks the queue to pass over items already seen this session', async () => {
+    // The queue reads one item at a time (`getDue`'s default limit), so a seen
+    // item it is not told to exclude comes back in place of the unseen ones
+    // behind it, and dropping it afterwards leaves nothing: an exhausted queue
+    // with items still due.
+    const queueArb = fc.uniqueArray(fc.tuple(fc.uuid(), fc.boolean()), {
+      selector: ([id]) => id,
+      minLength: 1,
+      maxLength: 5,
+    });
+    await fc.assert(
+      fc.asyncProperty(queueArb, async (queue) => {
+        resetCacheAndStore();
+        const resetTime = Date.now() + MS_PER_DAY;
+        for (const [id, seen] of queue) {
+          if (seen) store.dispatch(addSeenId({ id, resetTime }));
+        }
+        const due = queue.map(([id]) => makeReviewItem(id));
+        const getDue = vi.fn(({ excludeIds = [] }: { excludeIds?: string[] }) =>
+          Promise.resolve(
+            dueResult(
+              due.find((item) => !excludeIds.includes(item.data.id)) ?? null
+            )
+          )
+        );
+
+        const resolved = await currentItemQueryFn(
+          { getDue } as unknown as ReviewManager,
+          null
+        );
+
+        const firstUnseen = due.find((_, i) => !queue[i][1]) ?? null;
+        expect(resolved).toBe(firstUnseen);
+        expect(store.getState().currentItemId).toBe(
+          firstUnseen?.data.id ?? null
+        );
+      })
+    );
+  });
+
+  it('leaves review on an item picked while the queue was being read', async () => {
+    // Back, forward, the queue table and `learn` all pick an item without
+    // waiting for an advance in flight. The pick is the user's; the advance
+    // finishing after it must neither move review off it nor seed entries for
+    // an item review is not going to.
+    const nextArb = fc.option(
+      fc
+        .tuple(fc.string(), noteTypeArb)
+        .map(([id, type]) => makeTypedItem(id, type)),
+      { nil: null }
+    );
+    await fc.assert(
+      fc.asyncProperty(nextArb, fc.string(), async (next, pickedId) => {
+        resetCacheAndStore();
+        const due = deferred<ReturnType<typeof dueResult>>();
+        const updateDelimiters = vi.fn(async () => {});
+        const manager = {
+          getDue: vi.fn(() => due.promise),
+          cards: { updateDelimiters },
+        } as unknown as ReviewManager;
+
+        const advance = currentItemQueryFn(manager, null);
+        store.dispatch(setCurrentItemId(pickedId));
+        const dispatch = vi.spyOn(store, 'dispatch');
+        try {
+          due.resolve(dueResult(next));
+
+          expect(await advance).toBe(next);
+          expect(dispatch).not.toHaveBeenCalled();
+        } finally {
+          dispatch.mockRestore();
+        }
+        expect(store.getState().currentItemId).toBe(pickedId);
+        expect(updateDelimiters).not.toHaveBeenCalled();
+        if (next) {
+          expect(
+            queryClient.getQueryData(['item', next.data.id])
+          ).toBeUndefined();
+          expect(
+            queryClient.getQueryData(currentItemQueryKey(next.data.id))
+          ).toBeUndefined();
+        }
+      })
+    );
+  });
+
+  it("leaves review on an item picked while a card's delimiters were written", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.string(), fc.string(), async (cardId, pickedId) => {
+        resetCacheAndStore();
+        const card = makeTypedItem(cardId, 'card');
+        const { manager, writeStarted, finishWrite } =
+          makeCardWriteManager(card);
+
+        const advance = currentItemQueryFn(manager, null);
+        await writeStarted;
+        store.dispatch(setCurrentItemId(pickedId));
+        const dispatch = vi.spyOn(store, 'dispatch');
+        try {
+          finishWrite();
+
+          expect(await advance).toBe(card);
+          expect(dispatch).not.toHaveBeenCalled();
+        } finally {
+          dispatch.mockRestore();
+        }
+        expect(store.getState().currentItemId).toBe(pickedId);
+        // Nothing seeded for a card review is not going to: eviction only
+        // drops items review has left, so a seed would sit in the cache.
+        expect(isCached(['item', cardId])).toBe(false);
+        expect(isCached(currentItemQueryKey(cardId))).toBe(false);
+      })
+    );
+  });
+
+  it('hands a card to review once its delimiters are written', async () => {
+    // Review only moves onto the card after the write, so the card is never
+    // on screen with the delimiters it had before.
+    await fc.assert(
+      fc.asyncProperty(fc.string(), async (cardId) => {
+        resetCacheAndStore();
+        const card = makeTypedItem(cardId, 'card');
+        const { manager, updateDelimiters, writeStarted, finishWrite } =
+          makeCardWriteManager(card);
+
+        const advance = currentItemQueryFn(manager, null);
+        await writeStarted;
+
+        expect(updateDelimiters).toHaveBeenCalledWith(card, CLOZE_DELIMITERS);
+        expect(store.getState().currentItemId).toBeNull();
+
+        finishWrite();
+
+        expect(await advance).toBe(card);
+        expect(store.getState().currentItemId).toBe(cardId);
+        expect(queryClient.getQueryData(currentItemQueryKey(cardId))).toBe(
+          card
+        );
+        expect(queryClient.getQueryData(['item', cardId])).toBe(card);
+      })
+    );
+  });
+
+  it('writes no delimiters for an article or a snippet', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.constantFrom<NoteType>('article', 'snippet'),
+        async (id, type) => {
+          resetCacheAndStore();
+          const item = makeTypedItem(id, type);
+          const updateDelimiters = vi.fn(async () => {});
+          const manager = {
+            getDue: vi.fn().mockResolvedValue(dueResult(item)),
+            cards: { updateDelimiters },
+          } as unknown as ReviewManager;
+
+          expect(await currentItemQueryFn(manager, null)).toBe(item);
+          expect(updateDelimiters).not.toHaveBeenCalled();
+          expect(store.getState().currentItemId).toBe(id);
+        }
+      )
+    );
+  });
 });
 
 describe('startItemCacheEviction', () => {
@@ -502,6 +716,9 @@ describe('startItemCacheEviction', () => {
           const next = makeReviewItem(nextId);
           const stop = startItemCacheEviction();
           try {
+            // Review leaves the item before asking for the next, as `getNext`
+            // does: an advance only moves a review that is waiting for one.
+            store.dispatch(setCurrentItemId(null));
             await currentItemQueryFn(makeDueManager(next), null);
           } finally {
             stop();

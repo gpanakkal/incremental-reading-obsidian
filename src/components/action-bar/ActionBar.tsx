@@ -1,5 +1,6 @@
 import { CardCog } from '#/components/icons/CardCog';
 import { useAppSelector } from '#/hooks/useAppSelector';
+import { useLeafHistory } from '#/hooks/useLeafHistory';
 import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
@@ -16,6 +17,8 @@ import {
 } from '#/lib/types';
 import {
   ArchiveRestore,
+  ArrowLeft,
+  ArrowRight,
   Ban,
   Check,
   EllipsisVertical,
@@ -110,13 +113,45 @@ function HomeActions() {
 }
 
 /**
- * Actions that belong to the tab rather than to the item inside it.
+ * Actions that belong to the tab rather than to the item inside it: back and
+ * forward through the tab's history.
  *
- * TODO:
- * - forward/back (or use the view header)
+ * Desktop only. They stand in for the arrows Obsidian draws at the start of the
+ * view header, which `ReviewView` hides on desktop — so they lead the bar, as
+ * the ⋮ standing in for the header's closes it. Mobile keeps its header, and the
+ * navbar's own buttons besides.
  */
 function GlobalActions() {
-  return <></>;
+  const { plugin, reviewView } = useReviewContext();
+  const { leaf } = reviewView;
+  const { canGoBack, canGoForward } = useLeafHistory(leaf);
+  if (plugin.app.isMobile) return null;
+
+  return (
+    <>
+      <ButtonWithIcon
+        tooltip="Navigate back"
+        id="navigate-back-button"
+        disabled={!canGoBack}
+        handleClick={async () => {
+          await leaf.history.back();
+        }}
+      >
+        <ArrowLeft />
+      </ButtonWithIcon>
+      <ButtonWithIcon
+        tooltip="Navigate forward"
+        id="navigate-forward-button"
+        disabled={!canGoForward}
+        handleClick={async () => {
+          await leaf.history.forward();
+        }}
+      >
+        <ArrowRight />
+      </ButtonWithIcon>
+      <Separator />
+    </>
+  );
 }
 
 /**

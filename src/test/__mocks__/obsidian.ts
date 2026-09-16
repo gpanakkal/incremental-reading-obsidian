@@ -44,6 +44,34 @@ export class FileView {
     this.registered.push(cb);
   }
 
+  /** Event refs handed to `Component.registerEvent`, in registration order. */
+  readonly registeredEvents: unknown[] = [];
+
+  registerEvent(ref: unknown) {
+    this.registeredEvents.push(ref);
+  }
+
+  registerDomEvent(
+    el: HTMLElement,
+    type: string,
+    callback: (evt: Event) => unknown
+  ) {
+    el.addEventListener(type, callback);
+  }
+
+  async onOpen(): Promise<void> {}
+  async onClose(): Promise<void> {}
+
+  /**
+   * No-ops, as `View`'s are in Obsidian. `FileView.setState` also loads the
+   * file the state names; tests spy here to see what reaches it.
+   */
+  async setState(_state: unknown, _result: unknown): Promise<void> {}
+  getEphemeralState(): Record<string, unknown> {
+    return {};
+  }
+  setEphemeralState(_state: unknown): void {}
+
   /**
    * A no-op, as it is in Obsidian: `FileView` inherits `ItemView`'s
    * implementation, which contributes only tab-level entries and nothing about

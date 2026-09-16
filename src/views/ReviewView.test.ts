@@ -1,8 +1,27 @@
 // @vitest-environment jsdom
 
+import * as ReviewInterface from '#/components/ReviewInterface';
+import { PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
-import { resetSession, store, type ReviewPage } from '#/lib/store';
+import {
+  isDestination,
+  placeOf,
+  placeToEphemeralState,
+  readPlace,
+  REVIEW_PLACE_KEY,
+  samePlace,
+  type ReviewPlace,
+} from '#/lib/review-history';
+import {
+  resetCurrentItem,
+  resetSession,
+  setCurrentItemId,
+  setPage,
+  setShowAnswer,
+  store,
+  type ReviewPage,
+} from '#/lib/store';
 import type IncrementalReadingPlugin from '#/main';
 // The mock is what `obsidian` resolves to at runtime (see vitest.config.ts), so
 // importing it by path is the same module — but with the stub's own surface
@@ -16,6 +35,7 @@ import {
 import ReviewView, { REVIEW_VIEW_DEFAULT_TITLE } from '#/views/ReviewView';
 import fc from 'fast-check';
 import { WorkspaceWindow, type TFile, type WorkspaceLeaf } from 'obsidian';
+import type { WorkspaceLeafHistoryState } from 'obsidian-typings';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #region HELPERS
@@ -289,6 +309,137 @@ function callResumeUnclaimedSession(
     receiver as unknown as ReviewView
   ) as Promise<void>;
 }
+
+/** Any item id the store can hold, the empty string included. */
+const itemIdArb = fc.string();
+/** Every place review can be on, between items included. */
+const placeArb: fc.Arbitrary<ReviewPlace> = fc.oneof(
+  fc.constant<ReviewPlace>({ page: 'home', itemId: null }),
+  fc.record<ReviewPlace>({
+    page: fc.constant('review'),
+    itemId: fc.option(itemIdArb, { nil: null }),
+  })
+);
+/** The places a history entry can be written for. */
+const destinationArb: fc.Arbitrary<ReviewPlace> = fc.oneof(
+  fc.constant<ReviewPlace>({ page: 'home', itemId: null }),
+  fc.record<ReviewPlace>({ page: fc.constant('review'), itemId: itemIdArb })
+);
+/** Everything the store's page and item can be, without the normalising. */
+const storeStateArb = fc.record({
+  page: pageArb,
+  currentItemId: fc.option(itemIdArb, { nil: null }),
+});
+
+/**
+ * Put the real store on `place` in a single place change: the item first, which
+ * changes no place while the home screen is up, then the page. The home screen
+ * keeps whatever item the store holds, as the home button does.
+ */
+function moveStore(place: ReviewPlace): void {
+  if (place.page === 'review' || place.itemId !== null) {
+    store.dispatch(setCurrentItemId(place.itemId));
+  }
+  store.dispatch(setPage(place.page));
+}
+
+/**
+ * A leaf with the surface review's history reaches for. `recordHistory` pushes
+ * the entry it is given, as Obsidian's does for one that is not a repeat of the
+ * top entry; `getViewState` answers with a title from the store, as Obsidian's
+ * reads `getDisplayText` — which by the time an entry is written already names
+ * the next place.
+ */
+function makeHistoryLeaf() {
+  const listeners: Record<string, (() => void)[]> = {};
+  const history = {
+    backHistory: [] as WorkspaceLeafHistoryState[],
+    forwardHistory: [] as WorkspaceLeafHistoryState[],
+  };
+  return {
+    history,
+    recordHistory: vi.fn((entry: WorkspaceLeafHistoryState) => {
+      history.backHistory.push(entry);
+    }),
+    getViewState: vi.fn(() => ({
+      type: ReviewView.viewType,
+      state: { file: 'Articles/Chapter 1.md' },
+      icon: PLACEHOLDER_PLUGIN_ICON,
+      title: 'Title for the place already arrived at',
+    })),
+    on: (name: string, callback: () => void) => {
+      (listeners[name] ??= []).push(callback);
+      return { name, callback };
+    },
+    trigger: vi.fn((name: string) => {
+      listeners[name]?.forEach((callback) => callback());
+    }),
+  };
+}
+
+/**
+ * Construct a view over the real store and run its `onOpen`, which is what
+ * starts it recording. The interface is not rendered: nothing here reads it,
+ * and mounting it would fetch.
+ *
+ * Unload the view when done, or its store subscription outlives the test and
+ * records into a leaf nobody reads.
+ */
+async function openHistoryView({
+  file = null,
+  resume = async () => {},
+  mobileNavbar = { onLeafChange: vi.fn() },
+  itemExists = true,
+}: {
+  file?: TFile | null;
+  /** Stands in for the page and item a mounting tab settles on. */
+  resume?: () => Promise<void>;
+  mobileNavbar?: { onLeafChange: () => void } | null;
+  itemExists?: boolean;
+} = {}) {
+  vi.spyOn(ReviewInterface, 'createReviewInterface').mockReturnValue(
+    null as never
+  );
+  // Page changes retitle the tab, which reaches header elements the obsidian
+  // mock's FileView does not have. The title paths have tests of their own.
+  vi.spyOn(ReviewView.prototype, 'setTitle').mockImplementation(() => {});
+  const resumeUnclaimedSession = vi
+    .spyOn(ReviewView.prototype, 'resumeUnclaimedSession')
+    .mockImplementation(resume);
+  const leaf = makeHistoryLeaf();
+  const reviewManager = {
+    getReviewItemFromId: vi.fn(async (id: string) =>
+      itemExists ? { data: { id } } : null
+    ),
+  };
+  const sessionTracker = { commit: vi.fn() };
+  const view = new ReviewView(
+    leaf as unknown as WorkspaceLeaf,
+    { store, sessionTracker } as unknown as IncrementalReadingPlugin,
+    reviewManager as unknown as ReviewManager
+  );
+  Object.assign(view, {
+    leaf,
+    file,
+    contentEl: document.createElement('div'),
+    app: {
+      isMobile: true,
+      mobileNavbar,
+      workspace: { on: () => ({}), getLeavesOfType: () => [leaf] },
+    },
+  });
+  await view.onOpen();
+  resumeUnclaimedSession.mockRestore();
+  return { view, leaf, reviewManager, sessionTracker, mobileNavbar };
+}
+
+/** The places a leaf's back stack holds, oldest first. */
+function backPlaces(leaf: ReturnType<typeof makeHistoryLeaf>) {
+  return leaf.history.backHistory.map((entry) => readPlace(entry.eState));
+}
+
+/** Let a lookup `leaveIfGone` started settle. */
+const flushLookups = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 // #endregion
 
@@ -1122,5 +1273,668 @@ describe('ReviewView.showMoreOptionsMenu', () => {
       overlap: true,
       left: true,
     });
+  });
+});
+
+describe('ReviewView history recording', () => {
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  it('records the place review leaves, not the one it arrives at', async () => {
+    // Back has to return to where the user was. By the time the store notifies,
+    // it already names where they are going.
+    await fc.assert(
+      fc.asyncProperty(destinationArb, placeArb, async (from, to) => {
+        fc.pre(!samePlace(from, to));
+        store.dispatch(resetSession());
+        moveStore(from);
+        const { view, leaf } = await openHistoryView();
+        try {
+          moveStore(to);
+
+          expect(leaf.recordHistory).toHaveBeenCalledTimes(1);
+          expect(backPlaces(leaf)).toEqual([from]);
+        } finally {
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('never records review between items, which is nowhere to come back to', async () => {
+    await fc.assert(
+      fc.asyncProperty(placeArb, async (to) => {
+        store.dispatch(resetSession());
+        moveStore({ page: 'review', itemId: null });
+        const { view, leaf } = await openHistoryView();
+        try {
+          moveStore(to);
+
+          expect(leaf.recordHistory).not.toHaveBeenCalled();
+        } finally {
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('records nothing for dispatches that leave review where it is', async () => {
+    // The store notifies on every dispatch. Revealing a card's answer, or the
+    // queue settling on an item behind the home screen, goes nowhere.
+    await fc.assert(
+      fc.asyncProperty(
+        destinationArb,
+        fc.boolean(),
+        itemIdArb,
+        async (from, showAnswer, idBehindHome) => {
+          store.dispatch(resetSession());
+          moveStore(from);
+          const { view, leaf } = await openHistoryView();
+          try {
+            store.dispatch(setShowAnswer(showAnswer));
+            if (from.page === 'home') {
+              store.dispatch(setCurrentItemId(idBehindHome));
+            }
+
+            expect(leaf.recordHistory).not.toHaveBeenCalled();
+          } finally {
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('keeps a back stack of every place left, taking back an entry review returns to before settling', async () => {
+    // A walk over single store dispatches, against the rule stated as a stack:
+    // leaving a place pushes it; arriving from between items at the place just
+    // pushed takes it back off, because a back step to where the user already is
+    // goes nowhere.
+    const stepArb = fc.oneof(
+      pageArb.map((page) => setPage(page)),
+      fc.option(itemIdArb, { nil: null }).map((id) => setCurrentItemId(id)),
+      fc.constant(resetCurrentItem()),
+      fc.boolean().map((shown) => setShowAnswer(shown))
+    );
+    await fc.assert(
+      fc.asyncProperty(
+        storeStateArb,
+        fc.array(stepArb, { maxLength: 16 }),
+        async (initial, steps) => {
+          store.dispatch(resetSession());
+          store.dispatch(setCurrentItemId(initial.currentItemId));
+          store.dispatch(setPage(initial.page));
+          const { view, leaf } = await openHistoryView();
+          const expected: ReviewPlace[] = [];
+          let topIsLastPushed = false;
+          let pops = 0;
+          try {
+            let place = placeOf(store.getState());
+            for (const step of steps) {
+              store.dispatch(step);
+              const next = placeOf(store.getState());
+              if (samePlace(place, next)) continue;
+              const top = expected[expected.length - 1];
+              if (isDestination(place)) {
+                expected.push(place);
+                topIsLastPushed = true;
+              } else if (topIsLastPushed && top && samePlace(top, next)) {
+                expected.pop();
+                topIsLastPushed = false;
+                pops += 1;
+              }
+              place = next;
+            }
+
+            expect(backPlaces(leaf)).toEqual(expected);
+            expect(leaf.trigger).toHaveBeenCalledTimes(pops);
+            leaf.trigger.mock.calls.forEach(([name]) =>
+              expect(name).toBe('history-change')
+            );
+          } finally {
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('takes back the entry for an item review advances straight back onto', async () => {
+    // Undo does this: review leaves the item, and the queue hands it back.
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(destinationArb),
+        itemIdArb,
+        async (earlier, id) => {
+          store.dispatch(resetSession());
+          const { view, leaf } = await openHistoryView();
+          try {
+            const older = earlier.map((place) => ({
+              title: 'older',
+              icon: PLACEHOLDER_PLUGIN_ICON,
+              state: {},
+              eState: placeToEphemeralState(place),
+            }));
+            leaf.history.backHistory.push(...older);
+            // Leaving the home screen for the item records the home screen.
+            moveStore({ page: 'review', itemId: id });
+
+            store.dispatch(resetCurrentItem());
+            store.dispatch(setCurrentItemId(id));
+
+            expect(backPlaces(leaf)).toEqual([
+              ...earlier,
+              { page: 'home', itemId: null },
+            ]);
+            expect(leaf.history.backHistory.slice(0, older.length)).toEqual(
+              older
+            );
+            expect(leaf.trigger).toHaveBeenCalledTimes(1);
+            expect(leaf.trigger).toHaveBeenCalledWith('history-change');
+          } finally {
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('leaves an entry something else has since been pushed over', async () => {
+    // Whatever went on top is the user having moved on; the entry below it is
+    // still somewhere they were.
+    store.dispatch(setCurrentItemId('a'));
+    store.dispatch(setPage('review'));
+    const { view, leaf } = await openHistoryView();
+    try {
+      store.dispatch(resetCurrentItem());
+      const pushedOver = {
+        title: 'Some note',
+        icon: 'lucide-file',
+        state: {},
+        eState: placeToEphemeralState({ page: 'review', itemId: 'a' }),
+      };
+      leaf.history.backHistory.push(pushedOver);
+
+      store.dispatch(setCurrentItemId('a'));
+
+      expect(leaf.history.backHistory).toHaveLength(2);
+      expect(leaf.history.backHistory[1]).toBe(pushedOver);
+      expect(leaf.trigger).not.toHaveBeenCalled();
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('leaves an entry for the same place that it did not push itself', async () => {
+    // Obsidian drops an entry that repeats the one on top. The one on top then
+    // is not this tab's latest, and the user did go there.
+    store.dispatch(setCurrentItemId('a'));
+    store.dispatch(setPage('review'));
+    const { view, leaf } = await openHistoryView();
+    try {
+      const existing = {
+        title: 'a',
+        icon: PLACEHOLDER_PLUGIN_ICON,
+        state: {},
+        eState: placeToEphemeralState({ page: 'review', itemId: 'a' }),
+      };
+      leaf.history.backHistory.push(existing);
+      leaf.recordHistory.mockImplementation(() => {});
+
+      store.dispatch(resetCurrentItem());
+      store.dispatch(setCurrentItemId('a'));
+
+      expect(leaf.history.backHistory).toEqual([existing]);
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('records nothing for the page and item a tab settles on while it opens', async () => {
+    // Resuming a session or skipping the home screen is the tab arriving, not
+    // the user leaving the home screen for an item.
+    const { view, leaf } = await openHistoryView({
+      resume: async () => {
+        store.dispatch(setCurrentItemId('resumed'));
+        store.dispatch(setPage('review'));
+      },
+    });
+    try {
+      expect(leaf.recordHistory).not.toHaveBeenCalled();
+
+      store.dispatch(setPage('home'));
+
+      expect(backPlaces(leaf)).toEqual([{ page: 'review', itemId: 'resumed' }]);
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('records nothing before it has opened', () => {
+    // Obsidian constructs the next view before closing the one it replaces,
+    // whose close then empties the session under the new one.
+    store.dispatch(setCurrentItemId('a'));
+    store.dispatch(setPage('review'));
+    vi.spyOn(ReviewView.prototype, 'setTitle').mockImplementation(() => {});
+    const leaf = makeHistoryLeaf();
+    const view = new ReviewView(
+      leaf as unknown as WorkspaceLeaf,
+      { store } as unknown as IncrementalReadingPlugin,
+      {} as ReviewManager
+    );
+    try {
+      store.dispatch(resetSession());
+
+      expect(leaf.recordHistory).not.toHaveBeenCalled();
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('records nothing for the session its own close empties', async () => {
+    // Closing the last review tab resets the session, which lands on the home
+    // screen without the user having gone there.
+    store.dispatch(setCurrentItemId('a'));
+    store.dispatch(setPage('review'));
+    const { view, leaf, sessionTracker } = await openHistoryView();
+    try {
+      await view.onClose();
+
+      expect(sessionTracker.commit).toHaveBeenCalled();
+      expect(store.getState().page).toBe('home');
+      expect(leaf.recordHistory).not.toHaveBeenCalled();
+    } finally {
+      unload(view);
+    }
+  });
+});
+
+describe('ReviewView.historyEntryFor', () => {
+  it('describes the place with what the tab showed there', async () => {
+    // The title shows in the long-press history menu, and goes into the view
+    // state as well, which Obsidian compares to drop a repeated entry.
+    await fc.assert(
+      fc.asyncProperty(placeArb, fileArb, async (place, file) => {
+        store.dispatch(resetSession());
+        const { view, leaf } = await openHistoryView({ file });
+        try {
+          const entry = view.historyEntryFor(place);
+
+          const title =
+            place.page === 'review' && file?.basename
+              ? file.basename
+              : REVIEW_VIEW_DEFAULT_TITLE;
+          expect(entry).toEqual({
+            title,
+            icon: PLACEHOLDER_PLUGIN_ICON,
+            state: { ...leaf.getViewState(), title },
+            eState: { [REVIEW_PLACE_KEY]: place },
+          });
+        } finally {
+          unload(view);
+        }
+      })
+    );
+  });
+});
+
+describe('ReviewView.getEphemeralState', () => {
+  it("files the store's place alongside what FileView reports", () => {
+    fc.assert(
+      fc.property(storeStateArb, (state) => {
+        vi.spyOn(FileView.prototype, 'getEphemeralState').mockReturnValue({
+          scroll: 12,
+        });
+        store.dispatch(setCurrentItemId(state.currentItemId));
+        store.dispatch(setPage(state.page));
+        const view = makeView(store as never);
+        Object.assign(view, { leaf: { parent: {} } });
+        try {
+          const eState = view.getEphemeralState();
+
+          expect(eState).toEqual({
+            scroll: 12,
+            [REVIEW_PLACE_KEY]: placeOf(state),
+          });
+          expect(readPlace(eState)).toEqual(placeOf(state));
+        } finally {
+          unload(view);
+          vi.restoreAllMocks();
+        }
+      })
+    );
+  });
+
+  it('leaves the place out for a tab being closed, which resumes when reopened', () => {
+    // Detaching takes the leaf out of its parent before Obsidian snapshots what
+    // reopening the tab restores; the reopened tab's own resume decides instead.
+    fc.assert(
+      fc.property(
+        storeStateArb,
+        fc.constantFrom(null, undefined),
+        (state, parent) => {
+          vi.spyOn(FileView.prototype, 'getEphemeralState').mockReturnValue({
+            scroll: 12,
+          });
+          store.dispatch(setCurrentItemId(state.currentItemId));
+          store.dispatch(setPage(state.page));
+          const view = makeView(store as never);
+          Object.assign(view, { leaf: { parent } });
+          try {
+            expect(view.getEphemeralState()).toEqual({ scroll: 12 });
+          } finally {
+            unload(view);
+            vi.restoreAllMocks();
+          }
+        }
+      )
+    );
+  });
+});
+
+describe('ReviewView.setEphemeralState', () => {
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  it('brings review back to the place a history entry names, without recording the move', async () => {
+    await fc.assert(
+      fc.asyncProperty(storeStateArb, placeArb, async (initial, target) => {
+        store.dispatch(resetSession());
+        store.dispatch(setCurrentItemId(initial.currentItemId));
+        store.dispatch(setPage(initial.page));
+        const { view, leaf } = await openHistoryView();
+        try {
+          view.setEphemeralState(placeToEphemeralState(target));
+
+          const state = store.getState();
+          expect(placeOf(state)).toEqual(target);
+          if (target.page === 'home') {
+            // The home screen leaves the item where it was.
+            expect(state.currentItemId).toBe(initial.currentItemId);
+          }
+          expect(leaf.recordHistory).not.toHaveBeenCalled();
+        } finally {
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('hides the answer of a card it brings review back to', async () => {
+    store.dispatch(setCurrentItemId('card'));
+    store.dispatch(setPage('review'));
+    store.dispatch(setShowAnswer(true));
+    const { view } = await openHistoryView();
+    try {
+      view.setEphemeralState(
+        placeToEphemeralState({ page: 'review', itemId: 'other card' })
+      );
+
+      expect(store.getState().showAnswer).toBe(false);
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('leaves review alone for ephemeral state that names no place', async () => {
+    // A link's subpath, `focusLeaf`'s focus flag: Obsidian hands any view these.
+    const noPlaceArb = fc.oneof(
+      fc.anything().filter((value) => readPlace(value) === null),
+      fc.constant({ focus: true }),
+      fc.constant({ subpath: '#Heading' })
+    );
+    await fc.assert(
+      fc.asyncProperty(noPlaceArb, async (eState) => {
+        store.dispatch(resetSession());
+        store.dispatch(setCurrentItemId('a'));
+        store.dispatch(setPage('review'));
+        const { view, reviewManager } = await openHistoryView();
+        const before = store.getState();
+        try {
+          view.setEphemeralState(eState);
+
+          expect(store.getState()).toBe(before);
+          expect(reviewManager.getReviewItemFromId).not.toHaveBeenCalled();
+        } finally {
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('passes the ephemeral state on to FileView', async () => {
+    const { view } = await openHistoryView();
+    const setOnFileView = vi.spyOn(FileView.prototype, 'setEphemeralState');
+    const eState = {
+      focus: true,
+      ...placeToEphemeralState({ page: 'home', itemId: null }),
+    };
+    try {
+      view.setEphemeralState(eState);
+
+      expect(setOnFileView).toHaveBeenCalledWith(eState);
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('checks that an item it returns to still exists, and only for an item', async () => {
+    await fc.assert(
+      fc.asyncProperty(placeArb, async (target) => {
+        store.dispatch(resetSession());
+        const { view, reviewManager } = await openHistoryView();
+        try {
+          view.setEphemeralState(placeToEphemeralState(target));
+
+          if (target.itemId === null) {
+            expect(reviewManager.getReviewItemFromId).not.toHaveBeenCalled();
+          } else {
+            expect(reviewManager.getReviewItemFromId).toHaveBeenCalledWith(
+              target.itemId
+            );
+          }
+        } finally {
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('goes back to recording once the entry is applied', async () => {
+    // Only the move through history itself goes unrecorded; the user leaving
+    // the place it brought them to is a move like any other.
+    await fc.assert(
+      fc.asyncProperty(destinationArb, placeArb, async (target, next) => {
+        fc.pre(!samePlace(target, next));
+        store.dispatch(resetSession());
+        const { view, leaf } = await openHistoryView();
+        try {
+          view.setEphemeralState(placeToEphemeralState(target));
+          moveStore(next);
+
+          expect(backPlaces(leaf)).toEqual([target]);
+        } finally {
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('keeps an entry the user moved through history past from being taken back off', async () => {
+    // Moving through history accounts for the entry. Were it still this tab's
+    // latest, the queue later handing over that item would pop an entry that is
+    // no longer the one this tab pushed.
+    store.dispatch(setCurrentItemId('a'));
+    store.dispatch(setPage('review'));
+    const { view, leaf } = await openHistoryView();
+    try {
+      store.dispatch(resetCurrentItem());
+      view.setEphemeralState(
+        placeToEphemeralState({ page: 'review', itemId: null })
+      );
+
+      store.dispatch(setCurrentItemId('a'));
+
+      expect(backPlaces(leaf)).toEqual([{ page: 'review', itemId: 'a' }]);
+      expect(leaf.trigger).not.toHaveBeenCalled();
+    } finally {
+      unload(view);
+    }
+  });
+});
+
+describe('ReviewView.leaveIfGone', () => {
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  it('moves review on from an item history returned to that no longer exists', async () => {
+    const { view, leaf } = await openHistoryView({ itemExists: false });
+    try {
+      view.setEphemeralState(
+        placeToEphemeralState({ page: 'review', itemId: 'deleted' })
+      );
+      await flushLookups();
+
+      expect(placeOf(store.getState())).toEqual({
+        page: 'review',
+        itemId: null,
+      });
+      expect(leaf.recordHistory).not.toHaveBeenCalled();
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('goes back to recording once it has moved review on', async () => {
+    const { view, leaf } = await openHistoryView({ itemExists: false });
+    try {
+      view.setEphemeralState(
+        placeToEphemeralState({ page: 'review', itemId: 'deleted' })
+      );
+      await flushLookups();
+      store.dispatch(setCurrentItemId('next'));
+
+      store.dispatch(setPage('home'));
+
+      expect(backPlaces(leaf)).toEqual([{ page: 'review', itemId: 'next' }]);
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('stays on an item that still exists', async () => {
+    const { view } = await openHistoryView({ itemExists: true });
+    try {
+      view.setEphemeralState(
+        placeToEphemeralState({ page: 'review', itemId: 'a' })
+      );
+      await flushLookups();
+
+      expect(store.getState().currentItemId).toBe('a');
+    } finally {
+      unload(view);
+    }
+  });
+
+  it('leaves review alone once it has moved off the missing item', async () => {
+    const { view } = await openHistoryView({ itemExists: false });
+    try {
+      store.dispatch(setCurrentItemId('deleted'));
+      const lookup = view.leaveIfGone('deleted');
+      store.dispatch(setCurrentItemId('picked meanwhile'));
+      await lookup;
+
+      expect(store.getState().currentItemId).toBe('picked meanwhile');
+    } finally {
+      unload(view);
+    }
+  });
+});
+
+describe('ReviewView.setState', () => {
+  it('hands FileView everything but the file, which follows the store', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(
+          fc.anything(),
+          fc.record(
+            { file: fc.string(), other: fc.anything() },
+            { requiredKeys: [] }
+          )
+        ),
+        async (state) => {
+          const setOnFileView = vi
+            .spyOn(FileView.prototype, 'setState')
+            .mockResolvedValue(undefined);
+          const view = makeView(makeFakeStore('home'));
+          const result = { history: false };
+          try {
+            await view.setState(state, result);
+
+            const expected: Record<string, unknown> =
+              typeof state === 'object' && state !== null ? { ...state } : {};
+            delete expected.file;
+            expect(setOnFileView).toHaveBeenCalledTimes(1);
+            const [handed, handedResult] = setOnFileView.mock.calls[0] ?? [];
+            expect(handed).toEqual(expected);
+            expect(handed).not.toHaveProperty('file');
+            expect(handedResult).toBe(result);
+          } finally {
+            unload(view);
+            vi.restoreAllMocks();
+          }
+        }
+      )
+    );
+  });
+});
+
+describe('ReviewView.setState, given no state object', () => {
+  it('hands FileView an empty state rather than the pieces of a primitive', async () => {
+    // Spread, a string comes apart into one key per character.
+    for (const state of ['file', 42, true, null, undefined]) {
+      const setOnFileView = vi
+        .spyOn(FileView.prototype, 'setState')
+        .mockResolvedValue(undefined);
+      const view = makeView(makeFakeStore('home'));
+      try {
+        await view.setState(state, { history: false });
+
+        expect(setOnFileView.mock.calls[0]?.[0]).toEqual({});
+      } finally {
+        unload(view);
+        vi.restoreAllMocks();
+      }
+    }
+  });
+});
+
+describe('ReviewView.refreshMobileNavbar', () => {
+  it("re-reads the navbar's buttons each time the tab's history changes", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.nat({ max: 5 }), async (changes) => {
+        const mobileNavbar = { onLeafChange: vi.fn() };
+        const { view, leaf } = await openHistoryView({ mobileNavbar });
+        try {
+          for (let i = 0; i < changes; i++) leaf.trigger('history-change');
+
+          expect(mobileNavbar.onLeafChange).toHaveBeenCalledTimes(changes);
+        } finally {
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('does nothing where there is no navbar, as on desktop', async () => {
+    const { view, leaf } = await openHistoryView({ mobileNavbar: null });
+    try {
+      expect(() => leaf.trigger('history-change')).not.toThrow();
+    } finally {
+      unload(view);
+    }
   });
 });
