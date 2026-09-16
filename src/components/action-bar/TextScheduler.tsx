@@ -2,7 +2,7 @@ import type { ReviewArticle, ReviewText } from '#/lib/types';
 import { SchedulingModal } from '#/views/SchedulingModal';
 import { CalendarSync } from 'lucide-react';
 import { useReviewContext } from '../ReviewContext';
-import { ButtonWithIcon, Separator } from './BarButtons';
+import { ButtonWithIcon } from './BarButtons';
 import { FixedIntervalField } from './FixedIntervalField';
 import { PriorityField } from './PriorityField';
 
@@ -47,7 +47,6 @@ export function TextScheduler({ text }: { text: ReviewText }) {
       >
         <CalendarSync />
       </ButtonWithIcon>
-      <Separator />
     </>
   );
 }

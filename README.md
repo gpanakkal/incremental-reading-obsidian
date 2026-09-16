@@ -49,7 +49,7 @@ Go to **Settings → Sync** → enable **Sync all other types**. Repeat this on 
 Once you've imported some material, begin a study session by selecting the **Incremental reading** button in the left ribbon (or perform **Incremental Reading: Learn** from the command palette).
 
 1. The first item in the queue will be shown to you. Read as much as you like, extracting interesting or important passages to snippets as you go.
-2. Select **Mark as reviewed** when you want to move on to the next item. Don't worry about losing track of the active item; it will be shown to you again in the future.
+2. Select **Mark reviewed** when you want to move on to the next item. Don't worry about losing track of the active item; it will be shown to you again in the future.
 
 > [!tip]
 > If you don't want to see an item again, select **Dismiss from future review** instead.

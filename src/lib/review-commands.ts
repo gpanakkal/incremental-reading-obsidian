@@ -1,7 +1,6 @@
 import type IncrementalReadingPlugin from '#/main';
 import { SchedulingModal } from '#/views/SchedulingModal';
-import type { Grade } from 'ts-fsrs';
-import { Rating } from 'ts-fsrs';
+import { type Grade, Rating } from 'ts-fsrs';
 import { Actions } from './Actions';
 import { getCurrentItemSync } from './query-client';
 import { cardsOnly, setShowAnswer, store } from './store';
@@ -13,7 +12,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
 
   plugin.addCommand({
     id: 'mark-review',
-    name: 'Review: show answer/mark as reviewed',
+    name: 'Review: show answer/mark reviewed',
     // hotkeys: [{ key: 'A', modifiers: ['Alt'] }],
     checkCallback: (checking) => {
       const view = plugin.getActiveReviewView();

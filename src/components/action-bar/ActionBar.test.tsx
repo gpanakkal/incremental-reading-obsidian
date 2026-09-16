@@ -3,7 +3,10 @@ import { ReviewContextProvider } from '#/components/ReviewContext';
 import type { QueuePage } from '#/components/types';
 import * as ReactQuery from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
+import { setPage, setShowAnswer } from '#/lib/store';
+import type { NoteType, ReviewItem } from '#/lib/types';
 import { type ComponentChild, render } from 'preact';
+import { Rating } from 'ts-fsrs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActionBar } from './ActionBar';
 
@@ -46,8 +49,7 @@ function wireQueue({
 }
 
 /**
- * Put an item on screen, which is the state {@link ItemActions} — and the ⋮
- * button inside it — renders in. A card is the cheapest of the four: the other
+ * Put an item on screen, which is the state the ⋮ button renders in. A card is the cheapest of the four: the other
  * types drag in the scheduler alongside.
  */
 function wireCurrentItem(): void {
@@ -120,6 +122,13 @@ function makeActions() {
       return () => void listeners.delete(fn);
     },
     setCardsOnly: vi.fn(),
+    createSnippet: vi.fn(),
+    createCard: vi.fn(),
+    dismissItem: vi.fn(),
+    unDismissItem: vi.fn(),
+    review: vi.fn(),
+    skipItem: vi.fn(),
+    gradeCard: vi.fn(),
     undo: vi.fn(() => {
       undoStack.pop();
       emit();
@@ -148,6 +157,80 @@ function mountReviewBar(actions: ReturnType<typeof makeActions>): HTMLElement {
   );
 }
 
+const ITEM_TYPES: NoteType[] = ['article', 'snippet', 'card'];
+const TEXT_TYPES: NoteType[] = ['article', 'snippet'];
+const GRADES = [
+  ['Forgot', Rating.Again],
+  ['Hard', Rating.Hard],
+  ['Good', Rating.Good],
+  ['Easy', Rating.Easy],
+] as const;
+
+/**
+ * An item carrying only what the bar reads: `type` and `dismissed` pick the
+ * buttons, and the scheduler reads `id` and `priority`. A null
+ * `fixed_interval_days` keeps articles on the priority field, as snippets are.
+ */
+function makeItem(
+  type: NoteType,
+  { dismissed = false }: { dismissed?: boolean } = {}
+): ReviewItem {
+  return {
+    data: {
+      id: `${type}-id`,
+      type,
+      dismissed,
+      priority: 50,
+      fixed_interval_days: null,
+    },
+    file: {},
+  } as never;
+}
+
+/** Mount the review page with `item` on screen. */
+function mountItemBar(
+  item: ReviewItem,
+  {
+    showAnswer = false,
+    actions = makeActions(),
+  }: { showAnswer?: boolean; actions?: ReturnType<typeof makeActions> } = {}
+): HTMLElement {
+  reduxState.page = 'review';
+  reduxState.showAnswer = showAnswer;
+  vi.spyOn(ReactQuery, 'useCurrentItem').mockReturnValue({
+    data: item,
+  } as never);
+  return mountBar({ actions });
+}
+
+/** The button carrying `label` as its tooltip, or null when there is none. */
+function queryButton(
+  container: HTMLElement,
+  label: string
+): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>(
+    `button[aria-label="${label}"]`
+  );
+}
+
+function getButton(container: HTMLElement, label: string): HTMLButtonElement {
+  const found = queryButton(container, label);
+  if (!found) throw new Error(`"${label}" button not rendered`);
+  return found;
+}
+
+/** Grade buttons carry no tooltip, so they are found by their text. */
+function queryGradeButton(
+  container: HTMLElement,
+  grade: string
+): HTMLButtonElement | null {
+  return (
+    Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes(grade)
+    ) ?? null
+  );
+}
+
 /**
  * Let preact catch up. Long enough to cover the deferred effect that subscribes
  * (preact falls back to a 100ms timeout when no frame is painted), and awaited
@@ -165,6 +248,7 @@ async function settle() {
 vi.mock('lucide-react', () => ({
   ArchiveRestore: () => null,
   Ban: () => null,
+  CalendarSync: () => null,
   Check: () => null,
   EllipsisVertical: () => null,
   Eye: () => null,
@@ -256,6 +340,20 @@ describe('ActionBar', () => {
       expect(beginReviewButton(container).getAttribute('aria-label')).toBe(
         'Nothing due for review'
       );
+    });
+  });
+
+  describe('home button', () => {
+    it('returns to the home screen', () => {
+      reduxState.page = 'review';
+      vi.spyOn(ReactQuery, 'useCurrentItem').mockReturnValue({
+        data: undefined,
+      } as never);
+      const container = mountBar();
+
+      getButton(container, 'Go to home screen').click();
+
+      expect(dispatch).toHaveBeenCalledWith(setPage('home'));
     });
   });
 
@@ -395,7 +493,7 @@ describe('ActionBar', () => {
     });
 
     it('stays hidden until an item is on screen', () => {
-      // It sits in ItemActions: everything the menu offers is about the note
+      // Every item type offers it: everything the menu offers is about the note
       // being reviewed, so there is nothing for it to act on before one is up —
       // on the home screen or on the review page between items.
       wireQueue();
@@ -416,6 +514,182 @@ describe('ActionBar', () => {
       const container = mountBar({ isMobile: true });
 
       expect(moreOptionsButton(container)).toBeNull();
+    });
+  });
+
+  describe('actions on any item', () => {
+    // Every type gets these whatever the card's reveal state, so the matrix
+    // includes a revealed answer for texts too, which the store can hold for
+    // an instant between items.
+    const screens = ITEM_TYPES.flatMap((type) =>
+      [false, true].map((showAnswer) => ({ type, showAnswer }))
+    );
+
+    describe.each(screens)(
+      'on a $type (answer shown: $showAnswer)',
+      (screen) => {
+        it('extracts the selection to a new snippet', () => {
+          const actions = makeActions();
+          const container = mountItemBar(makeItem(screen.type), {
+            ...screen,
+            actions,
+          });
+
+          getButton(
+            container,
+            'Extract selected text to a new snippet'
+          ).click();
+
+          expect(actions.createSnippet).toHaveBeenCalledTimes(1);
+        });
+
+        it('creates a card', () => {
+          const actions = makeActions();
+          const container = mountItemBar(makeItem(screen.type), {
+            ...screen,
+            actions,
+          });
+
+          getButton(container, 'Create card').click();
+
+          expect(actions.createCard).toHaveBeenCalledTimes(1);
+        });
+
+        it('stops scheduling an item that is still scheduled', () => {
+          const actions = makeActions();
+          const item = makeItem(screen.type);
+          const container = mountItemBar(item, { ...screen, actions });
+
+          expect(queryButton(container, 'Restore item to queue')).toBeNull();
+          getButton(container, 'Stop scheduling this item for review').click();
+
+          expect(actions.dismissItem).toHaveBeenCalledWith(item);
+        });
+
+        it('restores a dismissed item to the queue', () => {
+          const actions = makeActions();
+          const item = makeItem(screen.type, { dismissed: true });
+          const container = mountItemBar(item, { ...screen, actions });
+
+          expect(
+            queryButton(container, 'Stop scheduling this item for review')
+          ).toBeNull();
+          getButton(container, 'Restore item to queue').click();
+
+          expect(actions.unDismissItem).toHaveBeenCalledWith(item);
+        });
+
+        it('offers the more options menu', () => {
+          const container = mountItemBar(makeItem(screen.type), screen);
+
+          expect(moreOptionsButton(container)).not.toBeNull();
+        });
+      }
+    );
+  });
+
+  describe.each(TEXT_TYPES)('actions on a %s', (type) => {
+    it('marks it as reviewed', () => {
+      const actions = makeActions();
+      const item = makeItem(type);
+      const container = mountItemBar(item, { actions });
+
+      getButton(container, 'Mark reviewed').click();
+
+      expect(actions.review).toHaveBeenCalledWith(item);
+    });
+
+    it('skips it for the session', () => {
+      const actions = makeActions();
+      const item = makeItem(type);
+      const container = mountItemBar(item, { actions });
+
+      getButton(container, 'Skip for current review session').click();
+
+      expect(actions.skipItem).toHaveBeenCalledWith(item);
+    });
+
+    it('offers to change its scheduling strategy', () => {
+      const container = mountItemBar(makeItem(type));
+
+      expect(
+        queryButton(container, 'Change scheduling strategy')
+      ).not.toBeNull();
+    });
+
+    it('offers nothing that only makes sense for a card', () => {
+      // Checked with the answer shown as well, so grades can't slip in on a
+      // text through a reveal state it has no use for.
+      for (const showAnswer of [false, true]) {
+        const container = mountItemBar(makeItem(type), { showAnswer });
+
+        expect(queryButton(container, 'Show answer')).toBeNull();
+        for (const [grade] of GRADES) {
+          expect(queryGradeButton(container, grade)).toBeNull();
+        }
+        document.body.innerHTML = '';
+      }
+    });
+  });
+
+  describe('actions on a card', () => {
+    it('offers nothing that only makes sense for a text', () => {
+      for (const showAnswer of [false, true]) {
+        const container = mountItemBar(makeItem('card'), { showAnswer });
+
+        expect(queryButton(container, 'Mark reviewed')).toBeNull();
+        expect(queryButton(container, 'Change scheduling strategy')).toBeNull();
+        document.body.innerHTML = '';
+      }
+    });
+
+    describe('before the answer is shown', () => {
+      it('reveals the answer', () => {
+        const container = mountItemBar(makeItem('card'));
+
+        getButton(container, 'Show answer').click();
+
+        expect(dispatch).toHaveBeenCalledWith(setShowAnswer(true));
+      });
+
+      it('skips the card for the session', () => {
+        const actions = makeActions();
+        const card = makeItem('card');
+        const container = mountItemBar(card, { actions });
+
+        getButton(container, 'Skip for current review session').click();
+
+        expect(actions.skipItem).toHaveBeenCalledWith(card);
+      });
+
+      it('holds back the grades', () => {
+        const container = mountItemBar(makeItem('card'));
+
+        for (const [grade] of GRADES) {
+          expect(queryGradeButton(container, grade)).toBeNull();
+        }
+      });
+    });
+
+    describe('once the answer is shown', () => {
+      it.each(GRADES)('grades the card %s', (grade, rating) => {
+        const actions = makeActions();
+        const card = makeItem('card');
+        const container = mountItemBar(card, { showAnswer: true, actions });
+
+        queryGradeButton(container, grade)?.click();
+
+        expect(actions.gradeCard).toHaveBeenCalledWith(card, rating);
+      });
+
+      it('stops offering to reveal or skip', () => {
+        const container = mountItemBar(makeItem('card'), { showAnswer: true });
+
+        expect(queryButton(container, 'Show answer')).toBeNull();
+        expect(
+          queryButton(container, 'Skip for current review session')
+        ).toBeNull();
+      });
     });
   });
 });
