@@ -5,6 +5,7 @@ import * as ReactQuery from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
 import { setPage, setShowAnswer } from '#/lib/store';
 import type { NoteType, ReviewItem } from '#/lib/types';
+import fc from 'fast-check';
 import { type ComponentChild, render } from 'preact';
 import { Rating } from 'ts-fsrs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -69,15 +70,17 @@ function mountBar({
   isMobile = false,
   showMoreOptionsMenu = vi.fn(),
   actions = makeActions(),
+  leaf = makeLeaf(),
 }: {
   isMobile?: boolean;
   showMoreOptionsMenu?: () => void;
   actions?: ReturnType<typeof makeActions>;
+  leaf?: ReturnType<typeof makeLeaf>;
 } = {}): HTMLElement {
   return mount(
     <ReviewContextProvider
       plugin={{ actions, app: { isMobile } } as never}
-      reviewView={{ showMoreOptionsMenu } as never}
+      reviewView={{ showMoreOptionsMenu, leaf } as never}
       reviewManager={{} as never}
     >
       <ActionBar />
@@ -95,6 +98,33 @@ function beginReviewButton(container: HTMLElement): HTMLButtonElement {
   );
   if (!button) throw new Error('begin review button not rendered');
   return button;
+}
+
+type Direction = 'back' | 'forward';
+
+function queryNavigateButton(
+  container: HTMLElement,
+  direction: Direction
+): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>(
+    `#navigate-${direction}-button`
+  );
+}
+
+function navigateButton(
+  container: HTMLElement,
+  direction: Direction
+): HTMLButtonElement {
+  const button = queryNavigateButton(container, direction);
+  if (!button) throw new Error(`navigate ${direction} button not rendered`);
+  return button;
+}
+
+/** The bar's top-level children, in the order they are laid out. */
+function barChildren(container: HTMLElement): Element[] {
+  const bar = container.querySelector('.ir-action-bar');
+  if (!bar) throw new Error('action bar not rendered');
+  return Array.from(bar.children);
 }
 
 function undoButton(container: HTMLElement): HTMLButtonElement {
@@ -140,6 +170,33 @@ function makeActions() {
   };
 }
 
+/**
+ * Stand-in for the tab's leaf covering what the navigation buttons touch: the
+ * two history stacks, mutated in place as Obsidian's are, and `history-change`.
+ * `listeners` is exposed so a test can check a subscription is let go of, and
+ * `emitHistoryChange` raises the event the way a push or a move does.
+ */
+function makeLeaf({ back = 0, forward = 0 } = {}) {
+  const listeners = new Set<() => void>();
+  return {
+    history: {
+      backHistory: Array.from({ length: back }, () => ({})),
+      forwardHistory: Array.from({ length: forward }, () => ({})),
+      back: vi.fn(async () => {}),
+      forward: vi.fn(async () => {}),
+    },
+    listeners,
+    on: (name: string, fn: () => void) => {
+      if (name === 'history-change') listeners.add(fn);
+      return fn;
+    },
+    offref: (ref: () => void) => void listeners.delete(ref),
+    emitHistoryChange: () => {
+      listeners.forEach((fn) => fn());
+    },
+  };
+}
+
 /** Mount the bar on the review page, where the undo button lives. */
 function mountReviewBar(actions: ReturnType<typeof makeActions>): HTMLElement {
   reduxState.page = 'review';
@@ -149,7 +206,7 @@ function mountReviewBar(actions: ReturnType<typeof makeActions>): HTMLElement {
   return mount(
     <ReviewContextProvider
       plugin={{ actions, app: { isMobile: false } } as never}
-      reviewView={{ showMoreOptionsMenu: vi.fn() } as never}
+      reviewView={{ showMoreOptionsMenu: vi.fn(), leaf: makeLeaf() } as never}
       reviewManager={{} as never}
     >
       <ActionBar />
@@ -247,6 +304,8 @@ async function settle() {
 // vitest.config.ts). The icons are incidental to this component's behavior.
 vi.mock('lucide-react', () => ({
   ArchiveRestore: () => null,
+  ArrowLeft: () => null,
+  ArrowRight: () => null,
   Ban: () => null,
   CalendarSync: () => null,
   Check: () => null,
@@ -475,6 +534,156 @@ describe('ActionBar', () => {
 
       expect(undoButton(container).disabled).toBe(false);
       expect(actions.listeners.size).toBe(1);
+    });
+  });
+
+  describe('navigation buttons', () => {
+    const pages = ['home', 'review'] as const;
+    const pageArb = fc.constantFrom(...pages);
+    const lengthArb = fc.nat({ max: 3 });
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      wireQueue();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('lead the bar on desktop, on the home screen and in review', async () => {
+      // They stand in for the arrows at the start of the view header, which
+      // ReviewView hides on desktop, so they come before anything else.
+      for (const page of pages) {
+        reduxState.page = page;
+        const container = mountBar();
+        await settle();
+
+        const [back, forward, separator, next] = barChildren(container);
+        expect(back.id).toBe('navigate-back-button');
+        expect(forward.id).toBe('navigate-forward-button');
+        expect(separator.getAttribute('role')).toBe('separator');
+        if (page === 'home') {
+          expect(next.id).toBe('begin-review-button');
+        } else {
+          expect(next.getAttribute('aria-label')).toBe('Go to home screen');
+        }
+        render(null, container);
+      }
+    });
+
+    it('stay off the bar on mobile, where the header keeps its own', async () => {
+      for (const page of pages) {
+        reduxState.page = page;
+        const container = mountBar({ isMobile: true });
+        await settle();
+
+        expect(queryNavigateButton(container, 'back')).toBeNull();
+        expect(queryNavigateButton(container, 'forward')).toBeNull();
+        expect(barChildren(container)[0].getAttribute('role')).not.toBe(
+          'separator'
+        );
+        render(null, container);
+      }
+    });
+
+    it('are enabled exactly when the tab has history that way', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          pageArb,
+          lengthArb,
+          lengthArb,
+          async (page, back, forward) => {
+            reduxState.page = page;
+            const leaf = makeLeaf({ back, forward });
+            const container = mountBar({ leaf });
+            try {
+              await settle();
+
+              expect(navigateButton(container, 'back').disabled).toBe(
+                back === 0
+              );
+              expect(navigateButton(container, 'forward').disabled).toBe(
+                forward === 0
+              );
+            } finally {
+              render(null, container);
+              container.remove();
+            }
+          }
+        ),
+        { numRuns: 30 }
+      );
+    });
+
+    it('say where they go, whether or not they can', async () => {
+      for (const length of [0, 1]) {
+        const container = mountBar({
+          leaf: makeLeaf({ back: length, forward: length }),
+        });
+        await settle();
+
+        expect(
+          navigateButton(container, 'back').getAttribute('aria-label')
+        ).toBe('Navigate back');
+        expect(
+          navigateButton(container, 'forward').getAttribute('aria-label')
+        ).toBe('Navigate forward');
+        render(null, container);
+      }
+    });
+
+    it('move through the tab history once per click', async () => {
+      const leaf = makeLeaf({ back: 1, forward: 1 });
+      const container = mountBar({ leaf });
+      await settle();
+
+      navigateButton(container, 'back').click();
+
+      expect(leaf.history.back).toHaveBeenCalledTimes(1);
+      expect(leaf.history.forward).not.toHaveBeenCalled();
+
+      navigateButton(container, 'forward').click();
+
+      expect(leaf.history.forward).toHaveBeenCalledTimes(1);
+      expect(leaf.history.back).toHaveBeenCalledTimes(1);
+    });
+
+    it('do nothing when clicked with nowhere to go', async () => {
+      const leaf = makeLeaf({ back: 0, forward: 0 });
+      const container = mountBar({ leaf });
+      await settle();
+
+      navigateButton(container, 'back').click();
+      navigateButton(container, 'forward').click();
+
+      expect(leaf.history.back).not.toHaveBeenCalled();
+      expect(leaf.history.forward).not.toHaveBeenCalled();
+    });
+
+    it('follow the tab history as it changes, with no other re-render', async () => {
+      // Recording a place pushes onto the leaf's stacks without touching the
+      // store, so only history-change can bring the buttons up to date.
+      const leaf = makeLeaf();
+      const container = mountBar({ leaf });
+      await settle();
+      expect(navigateButton(container, 'back').disabled).toBe(true);
+      expect(navigateButton(container, 'forward').disabled).toBe(true);
+
+      leaf.history.backHistory.push({});
+      leaf.emitHistoryChange();
+      await settle();
+
+      expect(navigateButton(container, 'back').disabled).toBe(false);
+      expect(navigateButton(container, 'forward').disabled).toBe(true);
+
+      leaf.history.forwardHistory.push({});
+      leaf.history.backHistory.pop();
+      leaf.emitHistoryChange();
+      await settle();
+
+      expect(navigateButton(container, 'back').disabled).toBe(true);
+      expect(navigateButton(container, 'forward').disabled).toBe(false);
     });
   });
 
