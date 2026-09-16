@@ -725,9 +725,9 @@ export class ArticleManager extends ItemManager {
         : article.due;
 
       await this.repo.mutate(
-        `UPDATE article SET fixed_interval_days = NULL, due = $1, interval = $2 ` +
-          `WHERE id = $3`,
-        [newDueTime, newInterval, article.id]
+        `UPDATE article SET fixed_interval_days = NULL, due = $1, interval = $2, ` +
+          `priority = $3 WHERE id = $4`,
+        [newDueTime, newInterval, newPriority, article.id]
       );
     } catch (_e) {
       Obsidian.notify(
