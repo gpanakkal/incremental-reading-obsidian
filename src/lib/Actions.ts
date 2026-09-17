@@ -260,7 +260,7 @@ export class Actions {
       CONTENT_TITLE_SLICE_LENGTH + 5,
       true
     );
-    Obsidian.notify(`Skipping ${itemTitle} until next session`);
+    Obsidian.notify(`Skipping ${itemTitle}`);
     this.getNext();
   };
 

@@ -77,12 +77,12 @@ describe('Actions.skipItem — Notice message', () => {
     expect(message).toContain('my-article');
   });
 
-  it('Notice contains "until next session"', () => {
+  it('Notice names the skipped item and nothing more', () => {
+    // A skip lasts until rollover or a restart, which no short phrase states
+    // accurately, so the notice makes no promise about when the item returns.
     const actions = new Actions(makePlugin());
     actions.skipItem(makeReviewItem('my-article'));
-    expect(Notice.messages).toHaveLength(1);
-    const [message] = Notice.messages;
-    expect(message).toContain('until next session');
+    expect(Notice.messages).toEqual(['Skipping my-article']);
   });
 
   it('does not leak folder name from multi-segment path into Notice', () => {

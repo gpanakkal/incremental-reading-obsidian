@@ -15,6 +15,7 @@ import {
 } from './query-client';
 import {
   addSeenId,
+  resetSeenIds,
   resetSession,
   type ReviewPage,
   setCurrentItemId,
@@ -149,6 +150,8 @@ const leaveArb = fc
 function resetCacheAndStore() {
   queryClient.clear();
   store.dispatch(resetSession());
+  // Skips outlive a session, so the reset above leaves them in place.
+  store.dispatch(resetSeenIds(0));
 }
 
 /** A watcher on `queryKey` that never fetches, standing in for a mounted hook. */

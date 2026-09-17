@@ -1,7 +1,14 @@
-import type { EditCoordinates, EditState } from '#/components/types';
-import { EditingState } from '#/components/types';
-import type { PayloadAction } from '@reduxjs/toolkit';
-import { configureStore, createAction, createSlice } from '@reduxjs/toolkit';
+import {
+  type EditCoordinates,
+  type EditState,
+  EditingState,
+} from '#/components/types';
+import {
+  type PayloadAction,
+  configureStore,
+  createAction,
+  createSlice,
+} from '@reduxjs/toolkit';
 import type { NoteType } from './types';
 
 export const resetSession = createAction('resetSession');
@@ -72,8 +79,7 @@ export const typesToReviewSlice = createSlice({
     builder.addCase(resetSession, () => defaultTypesToReview);
   },
   selectors: {
-    // Returns the ids, treating them as empty if the reset time has passed.
-    // Actual state reset happens lazily on the next addSeenId dispatch.
+    // Whether cards are the only item type selected for review.
     cardsOnly: (state): boolean =>
       Object.keys(state).length === 1 && 'card' in state,
   },
@@ -88,7 +94,7 @@ type SeenIdsState = {
   resetTime: number;
 };
 
-// Track which items have been skipped during a session, resetting at rollover
+// Track which items have been skipped since last plugin launch
 const seenIdsSlice = createSlice({
   name: 'seenIds',
   initialState: { ids: {}, resetTime: 0 } as SeenIdsState,
@@ -111,12 +117,6 @@ const seenIdsSlice = createSlice({
       ids: {},
       resetTime: action.payload,
     }),
-  },
-  extraReducers: (builder) => {
-    builder.addCase(resetSession, (state) => ({
-      ids: {},
-      resetTime: state.resetTime,
-    }));
   },
   selectors: {
     // Returns the ids, treating them as empty if the reset time has passed.
