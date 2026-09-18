@@ -1,8 +1,15 @@
 import { Actions } from '#/lib/Actions';
 import { CONTENT_TITLE_SLICE_LENGTH } from '#/lib/constants';
-import { store } from '#/lib/store';
-import type { ReviewItem } from '#/lib/types';
+import {
+  addCompletedReview,
+  removeCompletedReview,
+  resetCurrentItem,
+  store,
+} from '#/lib/store';
+import type { NoteType, ReviewCard, ReviewItem, ReviewText } from '#/lib/types';
+import { getEndOfDay } from '#/lib/utils';
 import IncrementalReadingPlugin from '#/main';
+import fc from 'fast-check';
 // The Vitest alias points `obsidian` at this same file, so the class imported
 // here is the one `ObsidianHelpers.notify` constructs — importing it by path is
 // what gives TS the mock's `messages`/`reset`, which the real class lacks.
@@ -57,6 +64,98 @@ function makeReviewItem(basename: string, pathOverride?: string): ReviewItem {
     file: makeTFile(basename, pathOverride),
   } as unknown as ReviewItem;
 }
+
+/**
+ * A plugin whose review writes all resolve to `reviewId`, and whose reversals
+ * of them all run `reverse` — enough to follow what the review actions tell the
+ * store without a database behind them.
+ */
+function makeReviewingPlugin({
+  reviewId,
+  dayRolloverOffset,
+  reverse = vi.fn().mockResolvedValue(undefined),
+}: {
+  reviewId: string;
+  dayRolloverOffset: number;
+  reverse?: () => Promise<void>;
+}) {
+  return {
+    store: { dispatch: vi.fn() },
+    settings: { dayRolloverOffset },
+    reviewManager: {
+      reviewArticle: vi.fn().mockResolvedValue(reviewId),
+      reviewSnippet: vi.fn().mockResolvedValue(reviewId),
+      reviewCard: vi.fn().mockResolvedValue(reviewId),
+      dismissItem: vi.fn().mockResolvedValue(undefined),
+      unDismissItem: vi.fn().mockResolvedValue(undefined),
+      articles: { undoReview: reverse },
+      snippets: { undoReview: reverse },
+      cards: { rollbackBeforeReview: reverse },
+    },
+    app: {
+      workspace: {
+        activeEditor: null,
+        getActiveViewOfType: vi.fn().mockReturnValue(null),
+      },
+    },
+  } as unknown as IncrementalReadingPlugin & {
+    store: { dispatch: ReturnType<typeof vi.fn> };
+  };
+}
+
+function makeTypedItem<T extends ReviewItem>(
+  type: NoteType,
+  { id, dismissed }: { id: string; dismissed: boolean }
+): T {
+  return {
+    data: { id, type, dismissed, reference: `${id}.md` },
+    file: makeTFile(id),
+  } as unknown as T;
+}
+
+/** Everything handed to `store.dispatch`, in order. */
+function dispatched(plugin: { store: { dispatch: ReturnType<typeof vi.fn> } }) {
+  return plugin.store.dispatch.mock.calls.map(([action]) => action as unknown);
+}
+
+/**
+ * Review the item the way the action bar does, whichever kind it is: a text is
+ * marked reviewed, a card graded.
+ */
+async function reviewWith(
+  actions: Actions,
+  item: ReviewItem,
+  { grade, nextInterval }: { grade: 1 | 2 | 3 | 4; nextInterval?: number }
+) {
+  if (item.data.type === 'card') {
+    await actions.gradeCard(item as ReviewCard, grade);
+  } else {
+    await actions.review(item as ReviewText, nextInterval);
+  }
+}
+
+const noteTypeArb = fc.constantFrom<NoteType>('article', 'snippet', 'card');
+
+/** Clock readings whose end of day still fits in a `Date`. */
+const nowArb = fc.integer({ min: 0, max: 8_639_000_000_000_000 });
+
+/** Every rollover offset the setting could be saved with, and then some. */
+const rolloverOffsetArb = fc.integer({ min: -48, max: 48 });
+
+const reviewCaseArb = fc.record({
+  type: noteTypeArb,
+  reviewId: fc.string(),
+  itemId: fc.string(),
+  dismissed: fc.boolean(),
+  currentItemId: fc.option(fc.string(), { nil: null }),
+  dayRolloverOffset: rolloverOffsetArb,
+  now: nowArb,
+  grade: fc.constantFrom<1 | 2 | 3 | 4>(1, 2, 3, 4),
+  nextInterval: fc.option(fc.integer({ min: 1 }), { nil: undefined }),
+});
+
+type ReviewCase =
+  typeof reviewCaseArb extends fc.Arbitrary<infer T> ? T : never;
 
 // #endregion
 
@@ -412,5 +511,106 @@ describe('Actions.getNext', () => {
 
     expect(() => actions.getNext()).not.toThrow();
     expect(plugin.store.dispatch).toHaveBeenCalled();
+  });
+});
+
+describe('Actions — completed reviews', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** Put the case's clock and current item in place, and return its plugin. */
+  function wireCase(c: ReviewCase, reverse?: () => Promise<void>) {
+    Notice.reset();
+    vi.restoreAllMocks();
+    vi.setSystemTime(c.now);
+    vi.spyOn(store, 'getState').mockReturnValue({
+      currentItemId: c.currentItemId,
+    } as never);
+    const plugin = makeReviewingPlugin({
+      reviewId: c.reviewId,
+      dayRolloverOffset: c.dayRolloverOffset,
+      reverse,
+    });
+    const item = makeTypedItem(c.type, {
+      id: c.itemId,
+      dismissed: c.dismissed,
+    });
+    return { plugin, item, actions: new Actions(plugin) };
+  }
+
+  it('counts each review under its type, stamped with the end of the day, before advancing', async () => {
+    // Advancing past the last item due is what brings up the summary, so the
+    // review has to be in the store by then or the summary misses it.
+    await fc.assert(
+      fc.asyncProperty(reviewCaseArb, async (c) => {
+        const { plugin, item, actions } = wireCase(c);
+
+        await reviewWith(actions, item, c);
+
+        const actionsSent = dispatched(plugin);
+        const recorded = actionsSent.filter((a) =>
+          addCompletedReview.match(a as never)
+        );
+        expect(recorded).toEqual([
+          addCompletedReview({
+            reviewId: c.reviewId,
+            type: c.type,
+            resetTime: getEndOfDay(c.dayRolloverOffset),
+          }),
+        ]);
+        const advance = actionsSent.findIndex((a) =>
+          resetCurrentItem.match(a as never)
+        );
+        expect(advance).toBeGreaterThan(actionsSent.indexOf(recorded[0]));
+      })
+    );
+  });
+
+  it('takes back the review it counted once that review is undone', async () => {
+    await fc.assert(
+      fc.asyncProperty(reviewCaseArb, async (c) => {
+        const { plugin, item, actions } = wireCase(c);
+        await reviewWith(actions, item, c);
+        plugin.store.dispatch.mockClear();
+
+        await actions.undo();
+
+        const removed = dispatched(plugin).filter((a) =>
+          removeCompletedReview.match(a as never)
+        );
+        expect(removed).toEqual([
+          removeCompletedReview({ reviewId: c.reviewId }),
+        ]);
+      })
+    );
+  });
+
+  it('keeps counting a review whose reversal failed', async () => {
+    // The review is still in the database, so it still happened.
+    await fc.assert(
+      fc.asyncProperty(reviewCaseArb, async (c) => {
+        const failure = new Error('reversal failed');
+        const { plugin, item, actions } = wireCase(
+          c,
+          vi.fn().mockRejectedValue(failure)
+        );
+        await reviewWith(actions, item, c);
+        plugin.store.dispatch.mockClear();
+
+        await expect(actions.undo()).rejects.toBe(failure);
+
+        expect(
+          dispatched(plugin).some((a) =>
+            removeCompletedReview.match(a as never)
+          )
+        ).toBe(false);
+      })
+    );
   });
 });

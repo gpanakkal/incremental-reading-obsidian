@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as CardViewerModule from './CardViewer';
 import * as IREditorModule from './IREditor';
 import ReviewItem from './ReviewItem';
+import * as ReviewSummaryModule from './ReviewSummary';
 
 // #region HELPERS
 
@@ -74,15 +75,16 @@ function wireItem({
     .spyOn(CardViewerModule, 'CardViewer')
     .mockReturnValue(<></>);
   const editor = vi.spyOn(IREditorModule, 'IREditor').mockReturnValue(<></>);
-  return { cardViewer, editor };
+  // Stubbed for the same reason: it reads the store and queries of its own,
+  // and all this component decides is whether it is what shows.
+  const summary = vi
+    .spyOn(ReviewSummaryModule, 'ReviewSummary')
+    .mockReturnValue(<></>);
+  return { cardViewer, editor, summary };
 }
 
 function spinner(container: HTMLElement): HTMLElement | null {
   return container.querySelector('.ir-loading');
-}
-
-function placeholder(container: HTMLElement): HTMLElement | null {
-  return container.querySelector('.ir-review-placeholder');
 }
 
 /** Every item shape the component can be handed, plus the absence of one. */
@@ -128,7 +130,7 @@ describe('ReviewItem', () => {
         fc.option(loadedTextArb, { nil: undefined }),
         fc.boolean(),
         (itemSpec, text, showAnswer) => {
-          const { cardViewer, editor } = wireItem({
+          const { cardViewer, editor, summary } = wireItem({
             item: itemSpec && makeItem(itemSpec),
             text,
             isLoading: true,
@@ -138,7 +140,7 @@ describe('ReviewItem', () => {
           const container = mount(<ReviewItem />);
 
           expect(spinner(container)).not.toBeNull();
-          expect(placeholder(container)).toBeNull();
+          expect(summary).not.toHaveBeenCalled();
           expect(cardViewer).not.toHaveBeenCalled();
           expect(editor).not.toHaveBeenCalled();
         }
@@ -161,10 +163,11 @@ describe('ReviewItem', () => {
     );
   });
 
-  it('says nothing is due once the queries settle with no item to show', () => {
+  it('shows the session summary once the queries settle with no item to show', () => {
     // The honest empty state: not loading, and nothing came back. Only
     // reachable after both queries have finished, which is what makes the
-    // claim true rather than premature.
+    // claim true rather than premature. The summary says "nothing due" itself
+    // when there was no session to sum up.
     fc.assert(
       fc.property(
         itemArb,
@@ -174,7 +177,7 @@ describe('ReviewItem', () => {
           // Narrow to the settled-and-empty cases; the loaded ones are the
           // subject of the two tests below.
           fc.pre(itemSpec === null || text === undefined);
-          const { cardViewer, editor } = wireItem({
+          const { cardViewer, editor, summary } = wireItem({
             item: itemSpec && makeItem(itemSpec),
             text,
             isLoading: false,
@@ -183,9 +186,7 @@ describe('ReviewItem', () => {
 
           const container = mount(<ReviewItem />);
 
-          expect(placeholder(container)?.textContent).toBe(
-            'Nothing due for review.'
-          );
+          expect(summary).toHaveBeenCalledTimes(1);
           expect(spinner(container)).toBeNull();
           expect(cardViewer).not.toHaveBeenCalled();
           expect(editor).not.toHaveBeenCalled();

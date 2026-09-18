@@ -23,6 +23,34 @@ export function useQueue(subset: QueueSubset) {
 }
 
 /**
+ * Look items up by id, in the order the ids were given.
+ *
+ * Ids naming nothing are left out rather than kept as holes: an id held in the
+ * store can outlive its item — deleted from the vault, say — and a caller
+ * listing items has nothing to show for one that is gone.
+ *
+ * Keyed apart from `['item', id]`, which review evicts as it moves off each
+ * item, so a list naming an item review has left does not drop out from under
+ * the caller.
+ */
+export function useReviewItems(ids: string[]) {
+  const { reviewManager } = useReviewContext();
+  return useQuery({
+    queryKey: ['review-items', ids],
+    queryFn: async () => {
+      const items: ReviewItem[] = [];
+      // One at a time, the way the queue patch in query-client.ts resolves its
+      // ids, rather than handing the database a burst of concurrent reads.
+      for (const id of ids) {
+        const item = await reviewManager.getReviewItemFromId(id);
+        if (item) items.push(item);
+      }
+      return items;
+    },
+  });
+}
+
+/**
  * The item review is showing, or nothing while it is still being resolved.
  *
  * Narrower than the query result it is built from, deliberately: the two fields
