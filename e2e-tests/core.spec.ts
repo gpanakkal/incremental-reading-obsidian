@@ -192,6 +192,37 @@ test.describe('Action Bar', () => {
     await expect(reviewTitle(window, ARTICLE_TITLE)).not.toBeVisible();
   });
 
+  test('sums up the session once the queue runs out, and closes the tab from there', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await window.getByRole('button', { name: 'Mark as reviewed' }).click();
+
+    const summary = window.locator('.ir-review-summary');
+    await expect(
+      summary.getByRole('heading', { name: 'Review complete' })
+    ).toBeVisible();
+    await expect(summary.getByText('1 review completed')).toBeVisible();
+    await expect(
+      summary
+        .locator('.ir-review-summary-count', { hasText: 'Articles' })
+        .locator('dd')
+    ).toHaveText('1');
+
+    await summary.getByRole('button', { name: 'Close review tab' }).click();
+    await expect(
+      window.locator(
+        'div.workspace-tab-header[aria-label="Incremental reading"]'
+      )
+    ).toHaveCount(0);
+  });
+
   test('Can skip items', async () => {
     await openNote(
       window,
@@ -209,7 +240,13 @@ test.describe('Action Bar', () => {
     await expect(skipButton).toBeInViewport();
     await skipButton.click();
 
-    await expect(window.getByText('Nothing due for review.')).toBeVisible();
+    const summary = window.locator('.ir-review-summary');
+    await expect(
+      summary.getByRole('heading', { name: 'Review complete' })
+    ).toBeVisible();
+    await expect(
+      summary.getByRole('listitem').filter({ hasText: ARTICLE_TITLE })
+    ).toBeVisible();
     await executeCommandById(window, 'workspace:close');
 
     await executeCommandById(window, 'incremental-reading:learn');

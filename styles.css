@@ -226,6 +226,106 @@ body {
   font-style: italic;
 }
 
+/* Centred while it fits, scrolling from the top once a long skipped list makes
+   it taller than the pane. Auto margins on the ends do the centring rather than
+   `justify-content: center`, which pushes overflow past the top edge where it
+   cannot be scrolled back to. */
+.ir-review-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--size-4-4);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--size-4-6) var(--size-4-4);
+  text-align: center;
+}
+
+.ir-review-summary > :first-child {
+  margin-top: auto;
+}
+
+.ir-review-summary > :last-child {
+  margin-bottom: auto;
+}
+
+.ir-review-summary-heading {
+  margin-bottom: 0;
+}
+
+.ir-review-summary-total {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.ir-review-summary-counts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--size-4-3);
+  margin: 0;
+}
+
+/* Number above label: `dd` follows `dt` in the markup, as a description list
+   requires, so the order is flipped visually instead. */
+.ir-review-summary-count {
+  display: flex;
+  flex-direction: column-reverse;
+  min-width: 6em;
+  padding: var(--size-4-2) var(--size-4-4);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+}
+
+.ir-review-summary-count dt {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.ir-review-summary-count dd {
+  margin: 0;
+  font-size: var(--font-ui-large);
+  font-weight: var(--font-semibold);
+}
+
+.ir-review-summary-skipped {
+  width: 100%;
+  max-width: 32em;
+  text-align: start;
+}
+
+.ir-review-summary-skipped h3 {
+  margin: 0 0 var(--size-4-2);
+  font-size: var(--font-ui-medium);
+}
+
+.ir-review-summary-skipped ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ir-review-summary-skipped li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--size-4-2);
+  padding: var(--size-4-1) 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ir-review-summary-skipped-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ir-review-summary-skipped-type {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
 .ir-review-error {
   display: flex;
   align-items: center;

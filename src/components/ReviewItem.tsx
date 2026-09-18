@@ -5,6 +5,7 @@ import type { EditorView } from '@codemirror/view';
 import { CardViewer } from './CardViewer';
 import { IREditor } from './IREditor';
 import { LoadingSpinner } from './LoadingSpinner';
+import { ReviewSummary } from './ReviewSummary';
 
 /**
  * TODO:
@@ -24,8 +25,7 @@ export default function ReviewItem() {
   // time it was merely unread — including on the first open of the tab.
   if (isLoading) return <LoadingSpinner label="Loading review item" />;
 
-  if (!item || !fileText)
-    return <div className="ir-review-placeholder">Nothing due for review.</div>;
+  if (!item || !fileText) return <ReviewSummary />;
   return (
     <>
       {isReviewCard(item) && !showAnswer ? (

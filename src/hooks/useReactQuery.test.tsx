@@ -7,7 +7,7 @@ import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { render } from 'preact';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { useCurrentItemFileText } from './useReactQuery';
+import { useCurrentItemFileText, useReviewItems } from './useReactQuery';
 
 // #region HELPERS
 
@@ -345,5 +345,81 @@ describe('useCurrentItemFileText', () => {
 
     expect(result.item).toBeNull();
     expect(result.isLoading).toBe(false);
+  });
+});
+
+describe('useReviewItems', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Ids to look up, against a database holding items for `storedIds`. The ids
+   * asked for mix ones the database holds with ones it does not, in any order
+   * and with repeats — an id held in the store can outlive its item.
+   */
+  const lookupArb = fc.uniqueArray(fc.string()).chain((storedIds) =>
+    fc.record({
+      storedIds: fc.constant(storedIds),
+      ids: fc.array(
+        storedIds.length
+          ? fc.oneof(fc.constantFrom(...storedIds), fc.string())
+          : fc.string()
+      ),
+    })
+  );
+
+  /** Render the hook for `ids` and hand back the query it built. */
+  function buildQuery(ids: string[], storedIds: string[]) {
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+    optionsSeen = [];
+    cache = new Map();
+
+    const stored = new Map(storedIds.map((id) => [id, makeItem(id)]));
+    const getReviewItemFromId = vi.fn(
+      async (id: string) => stored.get(id) ?? null
+    );
+    vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
+      reviewManager: { getReviewItemFromId },
+    } as never);
+
+    function Probe() {
+      useReviewItems(ids);
+      return null;
+    }
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(<Probe />, container);
+
+    const options = queryOptions('review-items');
+    const run = options.queryFn as () => Promise<ReviewItem[]>;
+    return { options, run, stored, getReviewItemFromId };
+  }
+
+  it('keys the lookup on the ids asked for, apart from the entries review evicts', () => {
+    fc.assert(
+      fc.property(lookupArb, ({ ids, storedIds }) => {
+        const { options } = buildQuery(ids, storedIds);
+
+        expect(options.queryKey).toEqual(['review-items', ids]);
+      })
+    );
+  });
+
+  it('resolves the ids that name an item, in the order asked, leaving out the rest', async () => {
+    await fc.assert(
+      fc.asyncProperty(lookupArb, async ({ ids, storedIds }) => {
+        const { run, stored, getReviewItemFromId } = buildQuery(ids, storedIds);
+
+        const items = await run();
+
+        const expected = ids.flatMap((id) => stored.get(id) ?? []);
+        expect(items).toHaveLength(expected.length);
+        items.forEach((item, i) => expect(item).toBe(expected[i]));
+        expect(getReviewItemFromId.mock.calls).toEqual(ids.map((id) => [id]));
+      })
+    );
   });
 });

@@ -11,7 +11,9 @@ import {
   queryClient,
 } from './query-client';
 import {
+  addCompletedReview,
   addSeenId,
+  removeCompletedReview,
   removeSeenId,
   resetCurrentItem,
   resetTypesToReview,
@@ -19,6 +21,7 @@ import {
   store,
 } from './store';
 import {
+  type NoteType,
   type ReviewArticle,
   type ReviewCard,
   type ReviewItem,
@@ -59,6 +62,25 @@ export class Actions {
     this.plugin.store.dispatch(resetCurrentItem());
   };
 
+  /**
+   * Count a finished review toward the session summary.
+   *
+   * Call before {@link getNext}: advancing past the last item due is what puts
+   * the summary on screen, and it must not render without the review that
+   * emptied the queue.
+   */
+  recordReview = (reviewId: string, type: NoteType) => {
+    const resetTime = getEndOfDay(this.plugin.settings.dayRolloverOffset);
+    this.plugin.store.dispatch(
+      addCompletedReview({ reviewId, type, resetTime })
+    );
+  };
+
+  /** Take back a review counted by {@link recordReview}, once it is undone. */
+  unrecordReview = (reviewId: string) => {
+    this.plugin.store.dispatch(removeCompletedReview({ reviewId }));
+  };
+
   review = async (item: ReviewText, nextInterval?: number) => {
     if (isReviewArticle(item)) return this.reviewArticle(item, nextInterval);
     return this.reviewSnippet(item, nextInterval);
@@ -72,6 +94,7 @@ export class Actions {
         Date.now(),
         nextInterval
       );
+      this.recordReview(reviewId, 'article');
       if (article.data.dismissed) {
         await this.unDismissItem(article);
       }
@@ -90,6 +113,7 @@ export class Actions {
             beforeReview,
             reviewId
           );
+          this.unrecordReview(reviewId);
           await invalidateItemQuery(article.data.id);
           this.getNext();
         },
@@ -107,6 +131,7 @@ export class Actions {
         Date.now(),
         nextInterval
       );
+      this.recordReview(reviewId, 'snippet');
       if (snippet.data.dismissed) {
         await this.unDismissItem(snippet);
       }
@@ -125,6 +150,7 @@ export class Actions {
             beforeReview,
             reviewId
           );
+          this.unrecordReview(reviewId);
           await invalidateItemQuery(snippet.data.id);
           this.getNext();
         },
@@ -163,6 +189,7 @@ export class Actions {
       card.data,
       grade
     );
+    this.recordReview(reviewRowId, 'card');
     const wasDismissed = card.data.dismissed;
     if (wasDismissed) {
       await this.unDismissItem(card);
@@ -176,6 +203,7 @@ export class Actions {
           card.data,
           reviewRowId
         );
+        this.unrecordReview(reviewRowId);
         if (wasDismissed) {
           await this.dismissItem(card);
         }
