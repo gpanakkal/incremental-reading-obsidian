@@ -60,7 +60,15 @@ export class Actions {
     // off screen. `SessionTracker` cannot read that off the store — see its
     // `finish` — so it is told here, on the path every finishing action ends on.
     this.plugin.sessionTracker?.finish();
+    const { currentItemId } = store.getState();
     this.plugin.store.dispatch(resetCurrentItem());
+
+    // The reset is what normally refetches: it changes the id `useCurrentItem`
+    // keys on, and the hook asks the queue for the next item off that. Called
+    // with review already holding no item — the completion screen above all —
+    // it changes nothing, so nothing refetches and the advance landed only when
+    // the `CURRENT_ITEM_REFETCH_TIME` poll next came around. Ask directly.
+    if (currentItemId === null) void invalidateCurrentItemQuery();
   };
 
   /**
