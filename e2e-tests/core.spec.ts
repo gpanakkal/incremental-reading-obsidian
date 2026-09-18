@@ -6,11 +6,14 @@ import test, {
 import * as fs from 'node:fs/promises';
 import {
   executeCommandById,
+  expectReviewOn,
   finalizeArticleImport,
+  leafSnapshot,
   openNote,
   reviewTitle,
   selectParagraph,
   setPluginSetting,
+  waitForReviewItem,
 } from './helpers';
 import {
   closeElectron,
@@ -221,6 +224,41 @@ test.describe('Action Bar', () => {
         'div.workspace-tab-header[aria-label="Incremental reading"]'
       )
     ).toHaveCount(0);
+  });
+
+  test('undoing the last review from the summary goes back to the item', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    const item = await waitForReviewItem(window);
+    await window.getByRole('button', { name: 'Mark reviewed' }).click();
+
+    const summary = window.locator('.ir-review-summary');
+    await expect(
+      summary.getByRole('heading', { name: 'Review complete' })
+    ).toBeVisible();
+
+    await window.locator('css=#undo-button').click();
+
+    // Bounded, and bounded well inside `CURRENT_ITEM_REFETCH_TIME`: the
+    // summary is the one place review holds no item at all, so asking the
+    // queue for the next one changes nothing there and the item used to come
+    // back only when the five-second poll next looked at the queue. Getting
+    // back to it now takes naming it, which is immediate.
+    await expect
+      .poll(async () => (await leafSnapshot(window)).currentItemId, {
+        timeout: 1_500,
+        intervals: [50],
+      })
+      .toBe(item.id);
+    await expectReviewOn(window, item);
+    await expect(summary).toHaveCount(0);
   });
 
   test('Can skip items', async () => {
