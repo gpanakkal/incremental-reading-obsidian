@@ -8,15 +8,17 @@ export function ButtonWithIcon({
   disabled,
   tooltip,
   id,
+  className,
 }: React.PropsWithChildren<{
   handleClick: (e: MouseEvent) => Promise<void> | void;
   disabled?: boolean;
   tooltip?: string;
   id?: string;
+  className?: string;
 }>) {
   return (
     <button
-      className="ir-review-button clickable-icon"
+      className={withClass('ir-review-button clickable-icon', className)}
       id={id}
       onClick={(e) => void handleClick(e)}
       aria-label={tooltip}
@@ -52,12 +54,16 @@ export function TextButton({
   );
 }
 
-export function Separator() {
+export function Separator({ className }: { className?: string }) {
   return (
     <div
-      className="ir-bar-separator"
+      className={withClass('ir-bar-separator', className)}
       role="separator"
       aria-orientation="vertical"
     />
   );
+}
+
+function withClass(base: string, extra: string | undefined): string {
+  return extra ? `${base} ${extra}` : base;
 }
