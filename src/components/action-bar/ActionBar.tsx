@@ -120,6 +120,9 @@ function HomeActions() {
  * view header, which `ReviewView` hides on desktop — so they lead the bar, as
  * the ⋮ standing in for the header's closes it. Mobile keeps its header, and the
  * navbar's own buttons besides.
+ *
+ * Like the header's arrows, they hold the bar's start edge while the rest of it
+ * centers. `ir-bar-nav` is what exempts them from the centering in styles.css.
  */
 function GlobalActions() {
   const { plugin, reviewView } = useReviewContext();
@@ -132,6 +135,7 @@ function GlobalActions() {
       <ButtonWithIcon
         tooltip="Navigate back"
         id="navigate-back-button"
+        className="ir-bar-nav"
         disabled={!canGoBack}
         handleClick={async () => {
           await leaf.history.back();
@@ -142,6 +146,7 @@ function GlobalActions() {
       <ButtonWithIcon
         tooltip="Navigate forward"
         id="navigate-forward-button"
+        className="ir-bar-nav"
         disabled={!canGoForward}
         handleClick={async () => {
           await leaf.history.forward();
@@ -149,7 +154,7 @@ function GlobalActions() {
       >
         <ArrowRight />
       </ButtonWithIcon>
-      <Separator />
+      <Separator className="ir-bar-nav" />
     </>
   );
 }

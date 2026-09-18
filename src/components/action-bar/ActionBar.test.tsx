@@ -572,6 +572,26 @@ describe('ActionBar', () => {
       }
     });
 
+    it('carry the class styles.css pins to the start edge, and nothing after them does', async () => {
+      // The bar centers its contents with auto margins on its ends. The nav
+      // group is exempted by this class, so a missing class leaves the arrows
+      // floating in the middle, and a stray one strands an action at the start.
+      for (const page of pages) {
+        reduxState.page = page;
+        const container = mountBar();
+        await settle();
+
+        const [back, forward, separator, ...rest] = barChildren(container);
+        for (const el of [back, forward, separator]) {
+          expect(el.classList.contains('ir-bar-nav')).toBe(true);
+        }
+        for (const el of rest) {
+          expect(el.classList.contains('ir-bar-nav')).toBe(false);
+        }
+        render(null, container);
+      }
+    });
+
     it('stay off the bar on mobile, where the header keeps its own', async () => {
       for (const page of pages) {
         reduxState.page = page;

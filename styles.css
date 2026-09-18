@@ -292,7 +292,11 @@ body {
   scrollbar-width: none;
 }
 
-.ir-action-bar > :first-child {
+/* Desktop's back/forward group (`.ir-bar-nav`) holds the start edge, as the
+   view header arrows it replaces do, so the leading auto margin skips past it
+   and the rest of the bar centers in the space that remains. */
+.ir-action-bar > :first-child:not(.ir-bar-nav),
+.ir-action-bar > .ir-bar-nav + :not(.ir-bar-nav) {
   margin-inline-start: auto;
 }
 

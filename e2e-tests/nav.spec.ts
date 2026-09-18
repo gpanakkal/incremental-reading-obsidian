@@ -391,6 +391,44 @@ test.describe('Review history navigation', () => {
     await expect(forwardButton).toBeEnabled();
   });
 
+  test('action bar back and forward buttons hold the start edge while the rest centers', async () => {
+    await importTwoArticles();
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expectReviewHome(window);
+
+    // Read in one pass inside the page, so no reflow lands between the boxes.
+    // The bar is found through its back button: item notes open in other leaves
+    // carry action bars of their own, without one.
+    const layout = await window.evaluate(() => {
+      const bar = document.querySelector('#navigate-back-button')?.parentElement;
+      if (!bar?.matches('.ir-action-bar')) {
+        throw new Error('review action bar not rendered');
+      }
+      const box = (sel: string) => {
+        const el = bar.querySelector(`:scope > ${sel}`);
+        if (!el) throw new Error(`${sel} not rendered`);
+        return el.getBoundingClientRect();
+      };
+      const style = getComputedStyle(bar);
+      const barBox = bar.getBoundingClientRect();
+      return {
+        contentLeft: barBox.left + parseFloat(style.paddingLeft),
+        contentRight: barBox.right - parseFloat(style.paddingRight),
+        gap: parseFloat(style.columnGap),
+        back: box('#navigate-back-button'),
+        separator: box('.ir-bar-separator'),
+        begin: box('#begin-review-button'),
+      };
+    });
+
+    expect(layout.back.left).toBeCloseTo(layout.contentLeft, 0);
+    // Centered in what the nav group leaves, not in the whole bar.
+    const spaceBefore = layout.begin.left - layout.separator.right - layout.gap;
+    const spaceAfter = layout.contentRight - layout.begin.right;
+    expect(spaceBefore).toBeGreaterThan(0);
+    expect(spaceBefore).toBeCloseTo(spaceAfter, 0);
+  });
+
   test('mobile navbar back and forward buttons follow the tab history', async () => {
     await emulateMobile(window, true);
     noticesSeen = await watchNotices(window);
