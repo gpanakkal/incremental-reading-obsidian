@@ -292,6 +292,42 @@ test.describe('Action Bar', () => {
     await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
   });
 
+  test('undoing the last skip from the summary goes back to the item', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    const item = await waitForReviewItem(window);
+    await window
+      .getByRole('button', { name: 'Skip for current review session' })
+      .click();
+
+    const summary = window.locator('.ir-review-summary');
+    await expect(
+      summary.getByRole('heading', { name: 'Review complete' })
+    ).toBeVisible();
+
+    await window.locator('css=#undo-button').click();
+
+    // Bounded, and bounded well inside `CURRENT_ITEM_REFETCH_TIME`: the
+    // summary is the one place review holds no item at all, so asking the
+    // queue for the next one changes nothing there and the unskipped item came
+    // back only when the five-second poll next looked at the queue.
+    await expect
+      .poll(async () => (await leafSnapshot(window)).currentItemId, {
+        timeout: 1_500,
+        intervals: [50],
+      })
+      .toBe(item.id);
+    await expectReviewOn(window, item);
+    await expect(summary).toHaveCount(0);
+  });
+
   test('Can dismiss items from review UI', async () => {
     await openNote(
       window,
@@ -315,6 +351,40 @@ test.describe('Action Bar', () => {
     expect(
       window.locator('css=#begin-review-button').isDisabled()
     ).toBeTruthy();
+  });
+
+  test('undoing the last dismissal from the summary goes back to the item', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    const item = await waitForReviewItem(window);
+    await window
+      .getByRole('button', { name: 'Stop scheduling this item for review' })
+      .click();
+
+    const summary = window.locator('.ir-review-summary');
+    await expect(summary).toBeVisible();
+
+    await window.locator('css=#undo-button').click();
+
+    // Bounded well inside `CURRENT_ITEM_REFETCH_TIME`, as for the undone skip
+    // above: on the summary review holds no item, so asking the queue for the
+    // next one changes nothing and the restored item came back only when the
+    // five-second poll next looked.
+    await expect
+      .poll(async () => (await leafSnapshot(window)).currentItemId, {
+        timeout: 1_500,
+        intervals: [50],
+      })
+      .toBe(item.id);
+    await expectReviewOn(window, item);
+    await expect(summary).toHaveCount(0);
   });
 
   test('Can dismiss items from note pane', async () => {

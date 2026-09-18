@@ -66,11 +66,11 @@ export class Actions {
   /**
    * Put review back on `item`: its turn is being given back, not finished.
    *
-   * Undoing a review ends here rather than on {@link getNext}, which asks the
+   * Undoing an action ends here rather than on {@link getNext}, which asks the
    * queue for whatever is due next instead. That lands on the item only by
-   * coincidence — the rollback makes it due again, and usually first — and only
-   * from another item, where the advance is a store transition at all. On the
-   * completion screen the store already holds no item, so the same dispatch
+   * coincidence — the reversal makes it eligible again, and usually first — and
+   * only from another item, where the advance is a store transition at all. On
+   * the completion screen the store already holds no item, so the same dispatch
    * changes nothing and nothing refetches: the summary sat there until
    * `CURRENT_ITEM_REFETCH_TIME` came around and the poll happened to pick the
    * item back up.
@@ -241,6 +241,9 @@ export class Actions {
   };
 
   dismissItem = async (item: ReviewItem) => {
+    // Check if it was being reviewed to conditionally navigate review back to
+    // item upon undoing, since items can also be dismissed outside review
+    const wasBeingReviewed = item.data.id === store.getState().currentItemId;
     await this.plugin.reviewManager.dismissItem(item);
     await invalidateItemQuery(item.data.id);
 
@@ -250,7 +253,7 @@ export class Actions {
       undo: async () => {
         await this.plugin.reviewManager.unDismissItem(item);
         await invalidateItemQuery(item.data.id);
-        this.getNext();
+        if (wasBeingReviewed) this.returnToItem(item);
       },
     });
 
@@ -260,8 +263,7 @@ export class Actions {
       true
     );
     Obsidian.notify(`Dismissed "${itemTitle}"`);
-    const { currentItemId } = store.getState();
-    if (item.data.id === currentItemId) {
+    if (wasBeingReviewed) {
       this.getNext();
     }
   };
@@ -303,7 +305,7 @@ export class Actions {
       description: `skipping "${item.file.basename}"`,
       undo: () => {
         this.plugin.store.dispatch(removeSeenId({ id: item.data.id }));
-        this.getNext();
+        this.returnToItem(item);
       },
     });
     const itemTitle = getContentSlice(

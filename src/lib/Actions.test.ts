@@ -1,8 +1,10 @@
 import { Actions } from '#/lib/Actions';
 import { CONTENT_TITLE_SLICE_LENGTH } from '#/lib/constants';
+import { invalidateCurrentItemQuery } from '#/lib/query-client';
 import {
   addCompletedReview,
   removeCompletedReview,
+  removeSeenId,
   resetCurrentItem,
   setCurrentItemId,
   store,
@@ -533,6 +535,37 @@ describe('Actions.getNext', () => {
     expect(() => actions.getNext()).not.toThrow();
     expect(plugin.store.dispatch).toHaveBeenCalled();
   });
+
+  it('asks for the next item itself when review is already holding none', () => {
+    // The reset is what normally refetches, by changing the id the current-item
+    // query is keyed on. Between items — the completion screen, most of all —
+    // the id is already null, so the reset changes nothing, nothing refetches,
+    // and the advance landed only when the `CURRENT_ITEM_REFETCH_TIME` poll
+    // next came around.
+    vi.spyOn(store, 'getState').mockReturnValue({
+      currentItemId: null,
+    } as never);
+    vi.mocked(invalidateCurrentItemQuery).mockClear();
+    const actions = new Actions(makePlugin());
+
+    actions.getNext();
+
+    expect(invalidateCurrentItemQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the refetch to the id change when review is on an item', () => {
+    // There the reset does change the id, and the hook refetches off that. A
+    // second invalidation here would read the queue twice per advance.
+    vi.spyOn(store, 'getState').mockReturnValue({
+      currentItemId: 'item-1',
+    } as never);
+    vi.mocked(invalidateCurrentItemQuery).mockClear();
+    const actions = new Actions(makePlugin());
+
+    actions.getNext();
+
+    expect(invalidateCurrentItemQuery).not.toHaveBeenCalled();
+  });
 });
 
 describe('Actions — completed reviews', () => {
@@ -671,6 +704,122 @@ describe('Actions — undo of a review', () => {
         expect(
           dispatched(plugin).some((a) => setCurrentItemId.match(a as never))
         ).toBe(false);
+      })
+    );
+  });
+});
+
+describe('Actions — undo of a skip', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('puts review back on the item whose skip it reverses, from wherever review has got to', async () => {
+    // Including the completion screen, where the store already holds no item:
+    // asking the queue for the next one dispatches nothing that changes there,
+    // so the summary stayed up until the refetch interval happened to pick the
+    // item back up.
+    await fc.assert(
+      fc.asyncProperty(reviewCaseArb, async (c) => {
+        const { plugin, item, actions } = wireCase(c);
+        actions.skipItem(item);
+        plugin.store.dispatch.mockClear();
+
+        await actions.undo();
+
+        const sent = dispatched(plugin);
+        const arrival = sent.findIndex((a) =>
+          setCurrentItemId.match(a as never)
+        );
+        expect(sent[arrival]).toEqual(setCurrentItemId(c.itemId));
+        // The skip comes off first: arriving at an item review still counts as
+        // seen would put it straight back behind the next advance.
+        expect(sent[0]).toEqual(removeSeenId({ id: c.itemId }));
+        // Then the reset, which drops the per-item state on the way in the way
+        // arriving from the queue does; and the arrival last, so nothing takes
+        // review off the item again.
+        expect(sent[arrival - 1]).toEqual(resetCurrentItem());
+        expect(sent.slice(arrival + 1)).toEqual([]);
+      })
+    );
+  });
+
+  it('does not count the undo as an item finished', async () => {
+    // Returning to the item is the opposite of finishing one — telling the
+    // tracker otherwise closes the item's own segment as review arrives on it.
+    await fc.assert(
+      fc.asyncProperty(reviewCaseArb, async (c) => {
+        const { plugin, item, actions } = wireCase(c);
+        const finish = vi.fn();
+        Object.assign(plugin, { sessionTracker: { finish } });
+        actions.skipItem(item);
+        finish.mockClear();
+
+        await actions.undo();
+
+        expect(finish).not.toHaveBeenCalled();
+      })
+    );
+  });
+});
+
+describe('Actions — undo of a dismissal', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('puts review back on the item whose dismissal took it off screen', async () => {
+    // Including from the completion screen, where the store already holds no
+    // item: see the undo of a review.
+    await fc.assert(
+      fc.asyncProperty(reviewCaseArb, async (c) => {
+        const { plugin, item, actions } = wireCase({
+          ...c,
+          currentItemId: c.itemId,
+        });
+        await actions.dismissItem(item);
+        plugin.store.dispatch.mockClear();
+
+        await actions.undo();
+
+        const sent = dispatched(plugin);
+        const arrival = sent.findIndex((a) =>
+          setCurrentItemId.match(a as never)
+        );
+        expect(sent[arrival]).toEqual(setCurrentItemId(c.itemId));
+        expect(sent[arrival - 1]).toEqual(resetCurrentItem());
+        expect(sent.slice(arrival + 1)).toEqual([]);
+      })
+    );
+  });
+
+  it('leaves review where it is when the dismissal never took it off an item', async () => {
+    // An item dismissed from somewhere other than review — the queue table, a
+    // command run against another note — never interrupted review, so undoing
+    // it must not pull review off whatever it is on now.
+    await fc.assert(
+      fc.asyncProperty(reviewCaseArb, async (c) => {
+        const elsewhere = `${c.itemId}-other`;
+        const { plugin, item, actions } = wireCase({
+          ...c,
+          currentItemId: elsewhere,
+        });
+        await actions.dismissItem(item);
+        plugin.store.dispatch.mockClear();
+
+        await actions.undo();
+
+        expect(dispatched(plugin)).toEqual([]);
       })
     );
   });
