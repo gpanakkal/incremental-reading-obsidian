@@ -17,6 +17,7 @@ import {
   removeSeenId,
   resetCurrentItem,
   resetTypesToReview,
+  setCurrentItemId,
   setTypesToReview,
   store,
 } from './store';
@@ -60,6 +61,28 @@ export class Actions {
     // `finish` — so it is told here, on the path every finishing action ends on.
     this.plugin.sessionTracker?.finish();
     this.plugin.store.dispatch(resetCurrentItem());
+  };
+
+  /**
+   * Put review back on `item`: its turn is being given back, not finished.
+   *
+   * Undoing a review ends here rather than on {@link getNext}, which asks the
+   * queue for whatever is due next instead. That lands on the item only by
+   * coincidence — the rollback makes it due again, and usually first — and only
+   * from another item, where the advance is a store transition at all. On the
+   * completion screen the store already holds no item, so the same dispatch
+   * changes nothing and nothing refetches: the summary sat there until
+   * `CURRENT_ITEM_REFETCH_TIME` came around and the poll happened to pick the
+   * item back up.
+   *
+   * The reset goes first, so arriving drops the per-item state the way arriving
+   * from the queue does — an undone grade puts the card back with its answer
+   * hidden. The session tracker is told nothing: it mirrors the item arrived
+   * at, and that lifts any hold over the one left.
+   */
+  returnToItem = (item: ReviewItem) => {
+    this.plugin.store.dispatch(resetCurrentItem());
+    this.plugin.store.dispatch(setCurrentItemId(item.data.id));
   };
 
   /**
@@ -115,7 +138,7 @@ export class Actions {
           );
           this.unrecordReview(reviewId);
           await invalidateItemQuery(article.data.id);
-          this.getNext();
+          this.returnToItem(article);
         },
       });
     } catch (error) {
@@ -152,7 +175,7 @@ export class Actions {
           );
           this.unrecordReview(reviewId);
           await invalidateItemQuery(snippet.data.id);
-          this.getNext();
+          this.returnToItem(snippet);
         },
       });
     } catch (error) {
@@ -209,7 +232,7 @@ export class Actions {
         }
 
         await invalidateItemQuery(card.data.id);
-        this.getNext();
+        this.returnToItem(card);
       },
     });
 

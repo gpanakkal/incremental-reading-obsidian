@@ -4,6 +4,7 @@ import {
   addCompletedReview,
   removeCompletedReview,
   resetCurrentItem,
+  setCurrentItemId,
   store,
 } from '#/lib/store';
 import type { NoteType, ReviewCard, ReviewItem, ReviewText } from '#/lib/types';
@@ -156,6 +157,26 @@ const reviewCaseArb = fc.record({
 
 type ReviewCase =
   typeof reviewCaseArb extends fc.Arbitrary<infer T> ? T : never;
+
+/** Put the case's clock and current item in place, and return its plugin. */
+function wireCase(c: ReviewCase, reverse?: () => Promise<void>) {
+  Notice.reset();
+  vi.restoreAllMocks();
+  vi.setSystemTime(c.now);
+  vi.spyOn(store, 'getState').mockReturnValue({
+    currentItemId: c.currentItemId,
+  } as never);
+  const plugin = makeReviewingPlugin({
+    reviewId: c.reviewId,
+    dayRolloverOffset: c.dayRolloverOffset,
+    reverse,
+  });
+  const item = makeTypedItem(c.type, {
+    id: c.itemId,
+    dismissed: c.dismissed,
+  });
+  return { plugin, item, actions: new Actions(plugin) };
+}
 
 // #endregion
 
@@ -524,26 +545,6 @@ describe('Actions — completed reviews', () => {
     vi.restoreAllMocks();
   });
 
-  /** Put the case's clock and current item in place, and return its plugin. */
-  function wireCase(c: ReviewCase, reverse?: () => Promise<void>) {
-    Notice.reset();
-    vi.restoreAllMocks();
-    vi.setSystemTime(c.now);
-    vi.spyOn(store, 'getState').mockReturnValue({
-      currentItemId: c.currentItemId,
-    } as never);
-    const plugin = makeReviewingPlugin({
-      reviewId: c.reviewId,
-      dayRolloverOffset: c.dayRolloverOffset,
-      reverse,
-    });
-    const item = makeTypedItem(c.type, {
-      id: c.itemId,
-      dismissed: c.dismissed,
-    });
-    return { plugin, item, actions: new Actions(plugin) };
-  }
-
   it('counts each review under its type, stamped with the end of the day, before advancing', async () => {
     // Advancing past the last item due is what brings up the summary, so the
     // review has to be in the store by then or the summary misses it.
@@ -609,6 +610,66 @@ describe('Actions — completed reviews', () => {
           dispatched(plugin).some((a) =>
             removeCompletedReview.match(a as never)
           )
+        ).toBe(false);
+      })
+    );
+  });
+});
+
+describe('Actions — undo of a review', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('puts review back on the item whose review it reverses, from wherever review has got to', async () => {
+    // Including the completion screen, where the store already holds no item:
+    // asking the queue for the next one dispatches nothing that changes there,
+    // so the summary stayed up until the refetch interval happened to pick the
+    // item back up.
+    await fc.assert(
+      fc.asyncProperty(reviewCaseArb, async (c) => {
+        const { plugin, item, actions } = wireCase(c);
+        await reviewWith(actions, item, c);
+        plugin.store.dispatch.mockClear();
+
+        await actions.undo();
+
+        const sent = dispatched(plugin);
+        const arrival = sent.findIndex((a) =>
+          setCurrentItemId.match(a as never)
+        );
+        expect(sent[arrival]).toEqual(setCurrentItemId(c.itemId));
+        // Preceded by the reset, which drops the per-item state on the way in
+        // the way arriving from the queue does — a card's answer goes back to
+        // hidden; and last, so nothing takes review off the item again.
+        expect(sent[arrival - 1]).toEqual(resetCurrentItem());
+        expect(sent.slice(arrival + 1)).toEqual([]);
+      })
+    );
+  });
+
+  it('leaves review where it is when the reversal fails', async () => {
+    // The review is still in the database, so the item's turn has not come
+    // back and review must not go to it.
+    await fc.assert(
+      fc.asyncProperty(reviewCaseArb, async (c) => {
+        const failure = new Error('reversal failed');
+        const { plugin, item, actions } = wireCase(
+          c,
+          vi.fn().mockRejectedValue(failure)
+        );
+        await reviewWith(actions, item, c);
+        plugin.store.dispatch.mockClear();
+
+        await expect(actions.undo()).rejects.toBe(failure);
+
+        expect(
+          dispatched(plugin).some((a) => setCurrentItemId.match(a as never))
         ).toBe(false);
       })
     );
