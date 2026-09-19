@@ -770,6 +770,11 @@ body {
   align-items: center;
 }
 
+.ir-scheduling-modal .modal-button-container {
+  flex-direction: row;
+  margin-bottom: 0;
+}
+
 .ir-scheduling-tooltip {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
