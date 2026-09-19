@@ -391,42 +391,93 @@ test.describe('Review history navigation', () => {
     await expect(forwardButton).toBeEnabled();
   });
 
-  test('action bar back and forward buttons hold the start edge while the rest centers', async () => {
-    await importTwoArticles();
-    await executeCommandById(window, 'incremental-reading:learn');
-    await expectReviewHome(window);
-
-    // Read in one pass inside the page, so no reflow lands between the boxes.
-    // The bar is found through its back button: item notes open in other leaves
-    // carry action bars of their own, without one.
-    const layout = await window.evaluate(() => {
-      const bar = document.querySelector('#navigate-back-button')?.parentElement;
-      if (!bar?.matches('.ir-action-bar')) {
-        throw new Error('review action bar not rendered');
-      }
-      const box = (sel: string) => {
-        const el = bar.querySelector(`:scope > ${sel}`);
-        if (!el) throw new Error(`${sel} not rendered`);
+  /**
+   * Read the bar's geometry in one pass inside the page, so no reflow lands
+   * between the boxes. The bar is found through its back button: item notes
+   * open in other leaves carry action bars of their own, without one.
+   *
+   * `startOffset` and `endOffset` are how far the outer zones' contents sit
+   * from the bar's own content edges, and `centerOffset` how far the middle
+   * zone's midpoint sits from the bar's — signed, so a middle zone pushed right
+   * by the wider leading group reads positive.
+   *
+   * `before` and `after` are the space on either side of the middle zone, over
+   * and above the `gap` the bar puts between any two of its children. They are
+   * not equal to each other on a wide bar and are not meant to be: the leading
+   * zone carries five controls against the trailing zone's one, and it is the
+   * zone boxes that match, not what they hold.
+   */
+  async function barLayout() {
+    return await window.evaluate(() => {
+      const bar = document
+        .querySelector('#navigate-back-button')
+        ?.closest('.ir-action-bar');
+      if (!bar) throw new Error('review action bar not rendered');
+      const zone = (name: string) => {
+        const el = bar.querySelector(`:scope > .ir-bar-${name}`);
+        if (!el) throw new Error(`${name} zone not rendered`);
+        return el;
+      };
+      const edgeOf = (el: Element | null, what: string) => {
+        if (!el) throw new Error(`${what} not rendered`);
         return el.getBoundingClientRect();
       };
+
       const style = getComputedStyle(bar);
       const barBox = bar.getBoundingClientRect();
+      const contentLeft = barBox.left + parseFloat(style.paddingLeft);
+      const contentRight = barBox.right - parseFloat(style.paddingRight);
+      const gap = parseFloat(style.columnGap);
+
+      const lead = zone('lead');
+      const trail = zone('trail');
+      const center = zone('center').getBoundingClientRect();
+      const leadFirst = edgeOf(lead.firstElementChild, 'leading zone content');
+      const leadLast = edgeOf(lead.lastElementChild, 'leading zone content');
+      const trailFirst = edgeOf(trail.firstElementChild, 'the ⋮');
+
       return {
-        contentLeft: barBox.left + parseFloat(style.paddingLeft),
-        contentRight: barBox.right - parseFloat(style.paddingRight),
-        gap: parseFloat(style.columnGap),
-        back: box('#navigate-back-button'),
-        separator: box('.ir-bar-separator'),
-        begin: box('#begin-review-button'),
+        startOffset: leadFirst.left - contentLeft,
+        endOffset: contentRight - trailFirst.right,
+        centerOffset:
+          (center.left + center.right) / 2 - (contentLeft + contentRight) / 2,
+        before: center.left - leadLast.right - gap,
+        after: trailFirst.left - center.right - gap,
       };
     });
+  }
 
-    expect(layout.back.left).toBeCloseTo(layout.contentLeft, 0);
-    // Centered in what the nav group leaves, not in the whole bar.
-    const spaceBefore = layout.begin.left - layout.separator.right - layout.gap;
-    const spaceAfter = layout.contentRight - layout.begin.right;
-    expect(spaceBefore).toBeGreaterThan(0);
-    expect(spaceBefore).toBeCloseTo(spaceAfter, 0);
+  test('action bar centers the item actions on the bar, between the edges the other two zones hold', async () => {
+    await importTwoArticles();
+    await beginReview();
+
+    const wide = await barLayout();
+    // The session actions hold the start edge and the ⋮ holds the end edge.
+    expect(wide.startOffset).toBeCloseTo(0, 0);
+    expect(wide.endOffset).toBeCloseTo(0, 0);
+    // What the three zones are for: the item actions land on the bar's own
+    // midpoint, rather than on the midpoint of what the leading group leaves.
+    // Half the leading zone's width is what this would be off by without it.
+    expect(wide.centerOffset).toBeCloseTo(0, 0);
+    expect(wide.before).toBeGreaterThan(0);
+    expect(wide.after).toBeGreaterThan(0);
+
+    // Narrow enough and there is no space left to hand out: the outer zones
+    // stop at their contents, the three meet, and the bar scrolls from there.
+    // This is the mobile layout, reached here by width alone.
+    const { width, height } = window.viewportSize() ?? {
+      width: 1920,
+      height: 1080,
+    };
+    await window.setViewportSize({ width: 420, height });
+    await expect
+      .poll(async () => (await barLayout()).before)
+      .toBeLessThanOrEqual(1);
+    const narrow = await barLayout();
+    expect(narrow.after).toBeLessThanOrEqual(1);
+    expect(narrow.startOffset).toBeCloseTo(0, 0);
+
+    await window.setViewportSize({ width, height });
   });
 
   test('mobile navbar back and forward buttons follow the tab history', async () => {

@@ -54,10 +54,10 @@ export function TextButton({
   );
 }
 
-export function Separator({ className }: { className?: string }) {
+export function Separator() {
   return (
     <div
-      className={withClass('ir-bar-separator', className)}
+      className="ir-bar-separator"
       role="separator"
       aria-orientation="vertical"
     />

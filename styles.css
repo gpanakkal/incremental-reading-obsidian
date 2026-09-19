@@ -382,8 +382,11 @@ body {
 }
 
 .ir-action-bar {
+  /* Inherited by the zones below, so the bar and the rows inside it space their
+     buttons alike from one value. */
+  --ir-bar-gap: 8px;
   display: flex;
-  gap: 8px;
+  gap: var(--ir-bar-gap);
   min-height: 50px;
   padding: 10px 15px;
   background: var(--background-secondary);
@@ -392,15 +395,45 @@ body {
   scrollbar-width: none;
 }
 
-/* Desktop's back/forward group (`.ir-bar-nav`) holds the start edge, as the
-   view header arrows it replaces do, so the leading auto margin skips past it
-   and the rest of the bar centers in the space that remains. */
-.ir-action-bar > :first-child:not(.ir-bar-nav),
-.ir-action-bar > .ir-bar-nav + :not(.ir-bar-nav) {
+/* The review bar lays out in three zones: `.ir-bar-lead` holds the start edge,
+   `.ir-bar-trail` the end edge, and `.ir-bar-center` carries the item's own
+   actions between them.
+
+   The two outer zones grow from an empty basis, which is what lands the middle
+   zone on the bar's own midpoint: equal `flex-grow` from `flex-basis: 0` makes
+   both outer boxes the same width whatever they hold, so the leading group —
+   far the wider of the two, against a lone ⋮ — no longer pushes the item
+   actions to the right of centre.
+
+   Neither outer zone shrinks past its contents, since `min-width` stays at its
+   `auto` default. A bar too narrow to hold everything therefore packs the three
+   zones against each other, the space between them gone, and scrolls from
+   there. That is the mobile layout, and it needs no query of its own. */
+.ir-bar-lead,
+.ir-bar-center,
+.ir-bar-trail {
+  display: flex;
+  gap: var(--ir-bar-gap);
+}
+
+.ir-bar-lead,
+.ir-bar-trail {
+  flex: 1 1 0;
+}
+
+.ir-bar-trail {
+  justify-content: flex-end;
+}
+
+/* A bar built as a flat row of buttons — the ones the editing and reading views
+   put on a note, rather than the review bar above — centers what it holds
+   between a pair of auto margins. The review bar's outer zones opt out: they
+   place themselves, and an auto margin on either would undo it. */
+.ir-action-bar > :first-child:not(.ir-bar-lead) {
   margin-inline-start: auto;
 }
 
-.ir-action-bar > :last-child {
+.ir-action-bar > :last-child:not(.ir-bar-trail) {
   margin-inline-end: auto;
 }
 
