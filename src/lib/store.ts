@@ -9,7 +9,7 @@ import {
   createAction,
   createSlice,
 } from '@reduxjs/toolkit';
-import type { NoteType } from './types';
+import { NOTE_TYPES, type NoteType } from './types';
 
 export const resetSession = createAction('resetSession');
 export const resetCurrentItem = createAction('resetCurrentItem');
@@ -58,22 +58,21 @@ export const showAnswerSlice = createSlice({
 
 export const { setShowAnswer } = showAnswerSlice.actions;
 
-const defaultTypesToReview = Object.freeze({
-  article: true,
-  snippet: true,
-  card: true,
-});
+// Derived from NOTE_TYPES rather than spelled out, so a fourth item type is
+// reviewable the moment it exists.
+const defaultTypesToReview = Object.freeze(
+  Object.fromEntries(NOTE_TYPES.map((type) => [type, true]))
+) as Partial<Record<NoteType, true>>;
 
 export const typesToReviewSlice = createSlice({
   name: 'typesToReview',
-  initialState: defaultTypesToReview as Partial<Record<NoteType, true>>,
+  initialState: defaultTypesToReview,
   reducers: {
-    setTypesToReview: (_, action: PayloadAction<NoteType[]>) =>
+    setTypesToReview: (_, action: PayloadAction<readonly NoteType[]>) =>
       action.payload.reduce(
         (acc, el) => Object.assign(acc, { [el]: true }),
         {} as Partial<Record<NoteType, true>>
       ),
-    resetTypesToReview: (_) => defaultTypesToReview,
   },
   extraReducers: (builder) => {
     builder.addCase(resetSession, () => defaultTypesToReview);
@@ -85,8 +84,7 @@ export const typesToReviewSlice = createSlice({
   },
 });
 
-export const { setTypesToReview, resetTypesToReview } =
-  typesToReviewSlice.actions;
+export const { setTypesToReview } = typesToReviewSlice.actions;
 export const { cardsOnly } = typesToReviewSlice.selectors;
 
 /**

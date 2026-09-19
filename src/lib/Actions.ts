@@ -16,12 +16,12 @@ import {
   removeCompletedReview,
   removeSeenId,
   resetCurrentItem,
-  resetTypesToReview,
   setCurrentItemId,
   setTypesToReview,
   store,
 } from './store';
 import {
+  NOTE_TYPES,
   type NoteType,
   type ReviewArticle,
   type ReviewCard,
@@ -429,16 +429,41 @@ export class Actions {
   };
 
   setCardsOnly = async (cardsOnly: boolean) => {
+    await this.setReviewTypes(cardsOnly ? ['card'] : NOTE_TYPES);
+  };
+
+  /**
+   * Flip one item type in or out of review, leaving the others as they are.
+   * Turning the last one off is allowed: review then has nothing to draw from
+   * and shows the summary, which the filter stays visible above.
+   */
+  toggleReviewType = async (type: NoteType) => {
+    const { typesToReview } = store.getState();
+    // Rebuilt from NOTE_TYPES rather than from the current keys, so the set
+    // keeps its canonical order however it was last written.
+    await this.setReviewTypes(
+      NOTE_TYPES.filter((t) =>
+        t === type ? !typesToReview[t] : typesToReview[t]
+      )
+    );
+  };
+
+  /**
+   * Narrow or widen what review draws from, and move off the current item when
+   * the change excludes its type — otherwise the filter would leave an item on
+   * screen that it says is no longer being reviewed.
+   *
+   * The item is read *before* the dispatch: afterwards the current-item query
+   * is already keyed on the new filter, and fetching through it would advance
+   * the queue as a side effect of asking what is on screen.
+   */
+  private setReviewTypes = async (types: readonly NoteType[]) => {
     const currentItem = await fetchCurrentItem(this.plugin.reviewManager);
-    if (cardsOnly) {
-      this.plugin.store.dispatch(setTypesToReview(['card']));
-    } else {
-      this.plugin.store.dispatch(resetTypesToReview());
-    }
+    this.plugin.store.dispatch(setTypesToReview(types));
 
     if (currentItem === null) {
       await invalidateCurrentItemQuery();
-    } else if (cardsOnly && currentItem.data.type !== 'card') {
+    } else if (!types.includes(currentItem.data.type)) {
       this.getNext();
     }
   };

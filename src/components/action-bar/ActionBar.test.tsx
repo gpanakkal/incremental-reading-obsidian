@@ -311,6 +311,7 @@ vi.mock('lucide-react', () => ({
   Check: () => null,
   EllipsisVertical: () => null,
   Eye: () => null,
+  FileText: () => null,
   House: () => null,
   Scissors: () => null,
   SkipForward: () => null,

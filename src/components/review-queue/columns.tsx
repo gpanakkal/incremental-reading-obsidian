@@ -1,7 +1,6 @@
-import { CardCog } from '#/components/icons/CardCog';
+import { TYPE_ICONS } from '#/components/icons/typeIcons';
 import type { QueueCardMemory, QueueRow } from '#/components/types';
-import { FileText, Scissors } from 'lucide-react';
-import type { ComponentChild, ComponentType } from 'preact';
+import type { ComponentChild } from 'preact';
 
 /** Keys of the renderable queue columns (`id`/`file` are never rendered). */
 export type QueueColumnKey =
@@ -80,12 +79,6 @@ export function buildQueueColumns(): QueueColumn[] {
     },
   ];
 }
-
-const TYPE_ICONS: Record<QueueRow['type'], ComponentType> = {
-  article: FileText,
-  snippet: Scissors,
-  card: CardCog,
-};
 
 /**
  * Icon for each item type. The icon carries no label of its own: the enclosing
