@@ -213,6 +213,12 @@ export interface DataChangeEvent {
 
 export type DataChangeListener = (event: DataChangeEvent) => void;
 
+/** One write, as passed to {@link SQLiteRepository.mutate}. */
+export interface MutationStatement {
+  query: string;
+  params?: Primitive[];
+}
+
 export interface SQLiteRepository {
   query(query: string, params?: Primitive[]): RowTypes[] | Promise<RowTypes[]>;
   /** @throws if the statement fails */
@@ -224,6 +230,17 @@ export interface SQLiteRepository {
    * @throws whatever `work` throws, after rolling back
    */
   transaction<T>(work: () => T | Promise<T>): Promise<T>;
+  /**
+   * Run `statements` in order, `chunkSize` at a time, each chunk in its own
+   * transaction, yielding to the event loop after each. A failing statement
+   * rolls back its chunk and stops the run; earlier chunks stay committed.
+   * @throws {RangeError} if `chunkSize` is not a positive integer
+   * @throws whatever the failing statement throws
+   */
+  bulkMutate(
+    statements: readonly MutationStatement[],
+    chunkSize?: number
+  ): Promise<void>;
   _execSql(
     query: string,
     params?: Primitive[],
