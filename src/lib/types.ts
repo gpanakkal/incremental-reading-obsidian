@@ -173,6 +173,17 @@ export function isReviewCard(value: ReviewItem): value is ReviewCard {
 export type NoteType = ReviewItem['data']['type'];
 
 /**
+ * Every item type, in the order a reading session produces them: an article
+ * yields snippets, and a snippet yields cards. Anything laying the types out
+ * for the user follows it, so the queue and the review filter agree.
+ */
+export const NOTE_TYPES = [
+  'article',
+  'snippet',
+  'card',
+] as const satisfies readonly NoteType[];
+
+/**
  * Frontmatter properties used by this plugin
  */
 export type PluginFrontMatter = {

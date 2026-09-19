@@ -144,7 +144,7 @@ test.describe('Article Importing', () => {
 });
 
 test.describe('Action Bar', () => {
-  test('Can toggle cards-only mode', async () => {
+  test('Can filter which item types are reviewed', async () => {
     await openNote(
       window,
       'sources/Memorizing a programming language using spaced repetition'
@@ -155,17 +155,19 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'incremental-reading:learn');
     await window.locator('css=#begin-review-button').click();
 
-    const toggle = window.locator('.ir-toggle-label > .checkbox-container');
+    const articleToggle = window.locator('css=#ir-type-filter-article');
 
-    // show cards only
-    await toggle.check();
+    // stop reviewing articles
+    await articleToggle.click();
+    await expect(articleToggle).toHaveAttribute('aria-pressed', 'false');
     await expect(reviewTitle(window, ARTICLE_TITLE)).not.toBeVisible();
 
-    // show all items
-    await toggle.uncheck();
+    // review articles again
+    await articleToggle.click();
+    await expect(articleToggle).toHaveAttribute('aria-pressed', 'true');
     await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
 
-    // test again using the plugin command
+    // the cards-only command drives the same filter
 
     // show cards only
     await executeCommandById(window, 'incremental-reading:toggle-cards-only');

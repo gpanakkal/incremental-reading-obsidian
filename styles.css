@@ -484,10 +484,15 @@ body {
 }
 
 .ir-action-bar .clickable-icon svg.lucide,
-.ir-queue-type-icon svg.lucide {
+.ir-queue-type-icon svg.lucide,
+.ir-type-filter svg.lucide {
   height: var(--icon-size);
   width: var(--icon-size);
   stroke-width: var(--icon-stroke);
+}
+
+.ir-type-filter svg.lucide {
+  --icon-stroke: 1.25px;
 }
 
 .ir-bar-separator {
@@ -526,6 +531,99 @@ body {
 
 .ir-toggle {
   align-content: center;
+}
+
+/* The item-type filter reads as one field rather than three bar buttons, so it
+   borrows the `--input-*` tokens Obsidian draws the priority box beside it
+   with.
+
+   `--icon-size` is retargeted on the container rather than set on the icons:
+   the rule above already sizes every bar icon off it, so one knob here drops
+   the three toggles a step below the bar's other icons and keeps them there
+   wherever those move. */
+.ir-type-filter {
+  --icon-size: var(--icon-s);
+  --icon-stroke: var(--icon-s-stroke-width);
+  display: flex;
+  align-items: center;
+  /* The bar sets no `align-items`, so a bare flex item stretches to its full
+     height; the priority box handles this on its own wrapper. Centering keeps
+     the filter level with the taller icon buttons on mobile. */
+  align-self: center;
+  flex-shrink: 0;
+  gap: var(--size-2-1);
+  padding: var(--size-2-1);
+  background-color: var(--background-modifier-form-field);
+  border: var(--input-border-width) solid var(--background-modifier-border);
+  border-radius: var(--input-radius);
+}
+
+/* Two classes, not one. Obsidian's `button:not(.clickable-icon)` paints every
+   button a face — background colour and shadow — and outranks a lone plugin
+   class, so a single-class rule here loses the transparent background it asks
+   for. Its `height: var(--input-height)` is overridden for the same reason:
+   these are icons in a row, not full-height fields. */
+.ir-type-filter .ir-type-filter-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: auto;
+  padding: var(--size-2-2);
+  border-radius: var(--radius-s);
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+/* Each toggle carries its type's own tint — the one the queue table gives that
+   type's rows, so an article reads blue in both places. The triple is named
+   here and mixed below, which keeps the enabled and hover washes to one rule
+   apiece rather than three each.
+
+   Declaring it on the button is what makes it resolve: a `var()` nested inside
+   a custom property is substituted against the element the property is declared
+   on, and Obsidian puts `--color-*-rgb` on `body`, which the button inherits
+   from. The same line on `:root` would find nothing and render as transparent.
+   See the `--ir-transclusion-*` block at the top of this file. */
+.ir-type-filter .ir-type-filter-toggle[data-type='article'] {
+  --ir-type-tint-rgb: var(--color-blue-rgb);
+}
+
+.ir-type-filter .ir-type-filter-toggle[data-type='snippet'] {
+  --ir-type-tint-rgb: var(--color-yellow-rgb);
+}
+
+.ir-type-filter .ir-type-filter-toggle[data-type='card'] {
+  --ir-type-tint-rgb: var(--color-green-rgb);
+}
+
+/* Enabled: the type's wash behind the icon, at the row tint's own alpha. The
+   glyph goes back to normal text rather than taking the tint's hue — yellow on
+   yellow is barely legible, and "on" is already carried by the wash. */
+.ir-type-filter .ir-type-filter-toggle.is-enabled {
+  background-color: rgba(var(--ir-type-tint-rgb), 0.2);
+  color: var(--text-normal);
+}
+
+/* Attribute weight to match the tints above, as the queue rows' own hover does.
+   Gated on a pointer that can hover: a touch device fakes one and leaves
+   `:hover` on whatever a tap landed on, which would strand a toggle grey over
+   its tint until the next tap elsewhere. */
+@media (hover: hover) {
+  .ir-type-filter .ir-type-filter-toggle:hover,
+  .ir-type-filter .ir-type-filter-toggle[data-type]:hover {
+    background-color: var(--background-modifier-hover);
+    color: var(--text-muted);
+  }
+
+  .ir-type-filter .ir-type-filter-toggle.is-enabled[data-type]:hover {
+    background-color: rgba(var(--ir-type-tint-rgb), 0.35);
+    color: var(--text-normal);
+  }
 }
 
 .ir-priority-input,
@@ -574,6 +672,14 @@ body {
   --input-radius: var(--radius-s);
   --input-padding: var(--size-4-1) var(--size-2-2);
   max-width: 40px;
+}
+
+/* `.is-mobile` retargets `--input-radius` to a full pill, which the filter
+   borrows along with the rest of the field's tokens — and a pill around three
+   square icons reads as a stray button. Same climb-down the priority input
+   makes above, so the two boxes keep matching corners on mobile. */
+.is-mobile .ir-type-filter {
+  --input-radius: var(--radius-s);
 }
 
 .ir-review-interface {

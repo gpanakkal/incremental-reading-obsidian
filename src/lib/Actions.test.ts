@@ -1,6 +1,9 @@
 import { Actions } from '#/lib/Actions';
 import { CONTENT_TITLE_SLICE_LENGTH } from '#/lib/constants';
-import { invalidateCurrentItemQuery } from '#/lib/query-client';
+import {
+  fetchCurrentItem,
+  invalidateCurrentItemQuery,
+} from '#/lib/query-client';
 import {
   addCompletedReview,
   removeCompletedReview,
@@ -9,9 +12,15 @@ import {
   setCurrentItemId,
   store,
 } from '#/lib/store';
-import type { NoteType, ReviewCard, ReviewItem, ReviewText } from '#/lib/types';
+import {
+  NOTE_TYPES,
+  type NoteType,
+  type ReviewCard,
+  type ReviewItem,
+  type ReviewText,
+} from '#/lib/types';
 import { getEndOfDay } from '#/lib/utils';
-import IncrementalReadingPlugin from '#/main';
+import type IncrementalReadingPlugin from '#/main';
 import fc from 'fast-check';
 // The Vitest alias points `obsidian` at this same file, so the class imported
 // here is the one `ObsidianHelpers.notify` constructs — importing it by path is
@@ -138,6 +147,58 @@ async function reviewWith(
 }
 
 const noteTypeArb = fc.constantFrom<NoteType>('article', 'snippet', 'card');
+
+/** Every set of types the filter can be left in, the empty one included. */
+const typesToReviewArb: fc.Arbitrary<Partial<Record<NoteType, true>>> = fc
+  .subarray([...NOTE_TYPES])
+  .map((types) =>
+    types.reduce(
+      (acc, type) => Object.assign(acc, { [type]: true }),
+      {} as Partial<Record<NoteType, true>>
+    )
+  );
+
+/**
+ * Stage the state a filter change reads — which types are on, and what is on
+ * screen — and hand back the plugin, the actions, and a stubbed `getNext`.
+ *
+ * The plugin's `dispatch` is a spy, so the real store never moves and state the
+ * action reads has to be put in place here rather than dispatched. Mocks are
+ * reset per call: a property runs this many times over, and `afterEach` fires
+ * once per `it`.
+ */
+function wireTypeFilter({
+  typesToReview,
+  currentItem,
+}: {
+  typesToReview: Partial<Record<NoteType, true>>;
+  currentItem: ReviewItem | null;
+}) {
+  vi.restoreAllMocks();
+  vi.spyOn(store, 'getState').mockReturnValue({ typesToReview } as never);
+  vi.mocked(fetchCurrentItem).mockResolvedValue(currentItem);
+  vi.mocked(invalidateCurrentItemQuery).mockClear();
+  // `makePlugin` hands back the plugin type, which hides the spy behind
+  // `store.dispatch`; these tests read the dispatches back out of it.
+  const plugin = makePlugin() as unknown as IncrementalReadingPlugin & {
+    store: { dispatch: ReturnType<typeof vi.fn> };
+  };
+  const actions = new Actions(plugin);
+  // Stubbed rather than left to run: the real advance dispatches and reaches
+  // the session tracker, and its dispatches would land in the same spy the
+  // filter's own dispatch is read out of.
+  const getNext = vi.spyOn(actions, 'getNext').mockImplementation(() => {});
+  return { plugin, actions, getNext };
+}
+
+/** The types the one `setTypesToReview` dispatch carried. */
+function dispatchedTypes(plugin: {
+  store: { dispatch: ReturnType<typeof vi.fn> };
+}): NoteType[] {
+  const calls = dispatched(plugin) as { payload: NoteType[] }[];
+  expect(calls).toHaveLength(1);
+  return calls[0].payload;
+}
 
 /** Clock readings whose end of day still fits in a `Date`. */
 const nowArb = fc.integer({ min: 0, max: 8_639_000_000_000_000 });
@@ -822,5 +883,178 @@ describe('Actions — undo of a dismissal', () => {
         expect(dispatched(plugin)).toEqual([]);
       })
     );
+  });
+});
+
+describe('Actions.setCardsOnly', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('narrows review to cards alone', async () => {
+    const { plugin, actions } = wireTypeFilter({
+      typesToReview: { article: true, snippet: true, card: true },
+      currentItem: null,
+    });
+
+    await actions.setCardsOnly(true);
+
+    expect(dispatchedTypes(plugin)).toEqual(['card']);
+  });
+
+  it('restores every type when turned off', async () => {
+    // Starting from cards-only rather than from the full set: the widening is
+    // the whole behavior, and starting at the answer would pass on a no-op.
+    const { plugin, actions } = wireTypeFilter({
+      typesToReview: { card: true },
+      currentItem: null,
+    });
+
+    await actions.setCardsOnly(false);
+
+    expect(dispatchedTypes(plugin)).toEqual([...NOTE_TYPES]);
+  });
+});
+
+describe('Actions.toggleReviewType', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('turns the named type off when it was on, and on when it was off', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        typesToReviewArb,
+        noteTypeArb,
+        async (typesToReview, toggled) => {
+          const { plugin, actions } = wireTypeFilter({
+            typesToReview,
+            currentItem: null,
+          });
+
+          await actions.toggleReviewType(toggled);
+
+          expect(dispatchedTypes(plugin).includes(toggled)).toBe(
+            !typesToReview[toggled]
+          );
+        }
+      )
+    );
+  });
+
+  it('leaves every other type as it found it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        typesToReviewArb,
+        noteTypeArb,
+        async (typesToReview, toggled) => {
+          const { plugin, actions } = wireTypeFilter({
+            typesToReview,
+            currentItem: null,
+          });
+
+          await actions.toggleReviewType(toggled);
+
+          const next = dispatchedTypes(plugin);
+          for (const type of NOTE_TYPES) {
+            if (type === toggled) continue;
+            expect(next.includes(type)).toBe(Boolean(typesToReview[type]));
+          }
+        }
+      )
+    );
+  });
+
+  it('keeps the types in reading order however they were last written', async () => {
+    // The filter lays its toggles out in this order; a set rebuilt from its own
+    // keys instead would drift out of it as types were turned on and off.
+    await fc.assert(
+      fc.asyncProperty(
+        typesToReviewArb,
+        noteTypeArb,
+        async (typesToReview, toggled) => {
+          const { plugin, actions } = wireTypeFilter({
+            typesToReview,
+            currentItem: null,
+          });
+
+          await actions.toggleReviewType(toggled);
+
+          const next = dispatchedTypes(plugin);
+          expect(next).toEqual(
+            NOTE_TYPES.filter((type) => next.includes(type))
+          );
+        }
+      )
+    );
+  });
+
+  it('moves review off the item on screen when its type stops being reviewed', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        typesToReviewArb,
+        noteTypeArb,
+        noteTypeArb,
+        async (typesToReview, toggled, onScreen) => {
+          const { plugin, actions, getNext } = wireTypeFilter({
+            typesToReview,
+            currentItem: makeTypedItem(onScreen, {
+              id: 'on-screen',
+              dismissed: false,
+            }),
+          });
+
+          await actions.toggleReviewType(toggled);
+
+          const stillReviewed = dispatchedTypes(plugin).includes(onScreen);
+          expect(getNext).toHaveBeenCalledTimes(stillReviewed ? 0 : 1);
+          // The advance is its own refetch; a second reads the queue twice.
+          expect(invalidateCurrentItemQuery).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('refetches when review is holding no item, whichever way the filter moved', async () => {
+    // Nothing on screen means nothing to advance past and no id to change, so
+    // without this the new filter landed only on the next poll.
+    await fc.assert(
+      fc.asyncProperty(
+        typesToReviewArb,
+        noteTypeArb,
+        async (typesToReview, toggled) => {
+          const { actions, getNext } = wireTypeFilter({
+            typesToReview,
+            currentItem: null,
+          });
+
+          await actions.toggleReviewType(toggled);
+
+          expect(invalidateCurrentItemQuery).toHaveBeenCalledTimes(1);
+          expect(getNext).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('reads what is on screen before the filter changes', async () => {
+    // Afterwards the current-item query is keyed on the new filter, so asking
+    // it what is on screen would advance the queue as a side effect.
+    const { plugin, actions } = wireTypeFilter({
+      typesToReview: { article: true, snippet: true, card: true },
+      currentItem: null,
+    });
+    const order: string[] = [];
+    vi.mocked(fetchCurrentItem).mockImplementation(async () => {
+      order.push('fetch');
+      return null;
+    });
+    plugin.store.dispatch.mockImplementation(() => {
+      order.push('dispatch');
+    });
+
+    await actions.toggleReviewType('card');
+
+    expect(order).toEqual(['fetch', 'dispatch']);
   });
 });
