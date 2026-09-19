@@ -133,6 +133,27 @@ function undoButton(container: HTMLElement): HTMLButtonElement {
   return button;
 }
 
+function typeFilter(container: HTMLElement): HTMLElement {
+  const filter = container.querySelector<HTMLElement>('.ir-type-filter');
+  if (!filter) throw new Error('type filter not rendered');
+  return filter;
+}
+
+type Zone = 'lead' | 'center' | 'trail';
+
+/** One of the bar's three layout zones. */
+function zone(container: HTMLElement, name: Zone): HTMLElement {
+  const bar = container.querySelector('.ir-action-bar');
+  if (!bar) throw new Error('action bar not rendered');
+  const el = bar.querySelector<HTMLElement>(`:scope > .ir-bar-${name}`);
+  if (!el) throw new Error(`${name} zone not rendered`);
+  return el;
+}
+
+function zoneChildren(container: HTMLElement, name: Zone): Element[] {
+  return Array.from(zone(container, name).children);
+}
+
 /**
  * Stand-in for `Actions` covering what the undo button touches: an array
  * mutated in place, and an emit after each mutation. `listeners` is exposed so
@@ -213,6 +234,9 @@ function mountReviewBar(actions: ReturnType<typeof makeActions>): HTMLElement {
     </ReviewContextProvider>
   );
 }
+
+/** The two pages the bar renders, which it lays out differently. */
+const PAGES = ['home', 'review'] as const;
 
 const ITEM_TYPES: NoteType[] = ['article', 'snippet', 'card'];
 const TEXT_TYPES: NoteType[] = ['article', 'snippet'];
@@ -539,8 +563,7 @@ describe('ActionBar', () => {
   });
 
   describe('navigation buttons', () => {
-    const pages = ['home', 'review'] as const;
-    const pageArb = fc.constantFrom(...pages);
+    const pageArb = fc.constantFrom(...PAGES);
     const lengthArb = fc.nat({ max: 3 });
 
     beforeEach(() => {
@@ -555,17 +578,21 @@ describe('ActionBar', () => {
     it('lead the bar on desktop, on the home screen and in review', async () => {
       // They stand in for the arrows at the start of the view header, which
       // ReviewView hides on desktop, so they come before anything else.
-      for (const page of pages) {
+      for (const page of PAGES) {
         reduxState.page = page;
         const container = mountBar();
         await settle();
 
-        const [back, forward, separator, next] = barChildren(container);
+        const [back, forward, next] = zoneChildren(container, 'lead');
         expect(back.id).toBe('navigate-back-button');
         expect(forward.id).toBe('navigate-forward-button');
-        expect(separator.getAttribute('role')).toBe('separator');
+        // In review the session's own actions follow them in the same zone. The
+        // home screen has none, and its one button sits in the middle zone.
         if (page === 'home') {
-          expect(next.id).toBe('begin-review-button');
+          expect(next).toBeUndefined();
+          expect(zoneChildren(container, 'center')).toEqual([
+            beginReviewButton(container),
+          ]);
         } else {
           expect(next.getAttribute('aria-label')).toBe('Go to home screen');
         }
@@ -573,37 +600,14 @@ describe('ActionBar', () => {
       }
     });
 
-    it('carry the class styles.css pins to the start edge, and nothing after them does', async () => {
-      // The bar centers its contents with auto margins on its ends. The nav
-      // group is exempted by this class, so a missing class leaves the arrows
-      // floating in the middle, and a stray one strands an action at the start.
-      for (const page of pages) {
-        reduxState.page = page;
-        const container = mountBar();
-        await settle();
-
-        const [back, forward, separator, ...rest] = barChildren(container);
-        for (const el of [back, forward, separator]) {
-          expect(el.classList.contains('ir-bar-nav')).toBe(true);
-        }
-        for (const el of rest) {
-          expect(el.classList.contains('ir-bar-nav')).toBe(false);
-        }
-        render(null, container);
-      }
-    });
-
     it('stay off the bar on mobile, where the header keeps its own', async () => {
-      for (const page of pages) {
+      for (const page of PAGES) {
         reduxState.page = page;
         const container = mountBar({ isMobile: true });
         await settle();
 
         expect(queryNavigateButton(container, 'back')).toBeNull();
         expect(queryNavigateButton(container, 'forward')).toBeNull();
-        expect(barChildren(container)[0].getAttribute('role')).not.toBe(
-          'separator'
-        );
         render(null, container);
       }
     });
@@ -705,6 +709,135 @@ describe('ActionBar', () => {
 
       expect(navigateButton(container, 'back').disabled).toBe(true);
       expect(navigateButton(container, 'forward').disabled).toBe(false);
+    });
+  });
+
+  describe('layout zones', () => {
+    // The bar is three zones wide: the actions that act on the review session
+    // at the start edge, the item's own actions in the middle, the ⋮ at the end
+    // edge. styles.css centers the middle zone on the bar by giving the outer
+    // two equal width, which holds only while all three are in the DOM — so the
+    // zones are asserted present even on the pages that leave them empty.
+    beforeEach(() => {
+      vi.useFakeTimers();
+      wireQueue();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('are all three there, in order, on every page', async () => {
+      for (const page of PAGES) {
+        for (const isMobile of [false, true]) {
+          reduxState.page = page;
+          const container = mountBar({ isMobile });
+          await settle();
+
+          expect(barChildren(container).map((el) => el.className)).toEqual([
+            'ir-bar-lead',
+            'ir-bar-center',
+            'ir-bar-trail',
+          ]);
+          render(null, container);
+        }
+      }
+    });
+
+    it('put the session actions at the start edge in review', async () => {
+      wireCurrentItem();
+      const container = mountBar();
+      await settle();
+
+      expect(zoneChildren(container, 'lead')).toEqual([
+        navigateButton(container, 'back'),
+        navigateButton(container, 'forward'),
+        getButton(container, 'Go to home screen'),
+        typeFilter(container),
+        undoButton(container),
+      ]);
+    });
+
+    it('keep the same session actions on mobile, where the arrows are absent', async () => {
+      wireCurrentItem();
+      const container = mountBar({ isMobile: true });
+      await settle();
+
+      expect(zoneChildren(container, 'lead')).toEqual([
+        getButton(container, 'Go to home screen'),
+        typeFilter(container),
+        undoButton(container),
+      ]);
+    });
+
+    it('hold the arrows alone at the start edge on the home screen', async () => {
+      // Nothing there acts on a review session, and the begin-review button is
+      // the middle zone's whole contents.
+      for (const isMobile of [false, true]) {
+        reduxState.page = 'home';
+        const container = mountBar({ isMobile });
+        await settle();
+
+        expect(zoneChildren(container, 'lead')).toEqual(
+          isMobile
+            ? []
+            : [
+                navigateButton(container, 'back'),
+                navigateButton(container, 'forward'),
+              ]
+        );
+        expect(zoneChildren(container, 'center')).toEqual([
+          beginReviewButton(container),
+        ]);
+        render(null, container);
+      }
+    });
+
+    it('give the end edge the ⋮ and nothing else', async () => {
+      wireCurrentItem();
+      const container = mountBar();
+      await settle();
+
+      expect(zoneChildren(container, 'trail')).toEqual([
+        moreOptionsButton(container),
+      ]);
+    });
+
+    it('keep the ⋮ out of the middle zone it used to trail', async () => {
+      // It belongs to the view rather than to the item, and the item actions
+      // are what the middle zone centers — a ⋮ left among them would drag that
+      // center off by half its width.
+      wireCurrentItem();
+      const container = mountBar();
+      await settle();
+
+      const center = zone(container, 'center');
+      expect(center.querySelector('#more-options-button')).toBeNull();
+      expect(zoneChildren(container, 'center')[0]).toBe(
+        getButton(container, 'Show answer')
+      );
+    });
+
+    it('leave the end edge empty wherever there is no ⋮', async () => {
+      // Mobile keeps Obsidian's own header ⋮, the home screen has no item
+      // behind one, and neither does review before the first item arrives.
+      const empty = [
+        { page: 'review' as const, isMobile: true, withItem: true },
+        { page: 'review' as const, isMobile: false, withItem: false },
+        { page: 'home' as const, isMobile: false, withItem: false },
+      ];
+      for (const { page, isMobile, withItem } of empty) {
+        // Re-stubbed per case: `wireCurrentItem` leaves a spy behind, and the
+        // cases without an item have to be seen without the previous one's.
+        wireQueue();
+        reduxState.page = page;
+        if (withItem) wireCurrentItem();
+        const container = mountBar({ isMobile });
+        await settle();
+
+        expect(zoneChildren(container, 'trail')).toEqual([]);
+        render(null, container);
+      }
     });
   });
 

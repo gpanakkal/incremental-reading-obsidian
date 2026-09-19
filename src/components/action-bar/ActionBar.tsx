@@ -36,43 +36,58 @@ import { ButtonWithIcon, Separator, TextButton } from './BarButtons';
 import { ReviewTypeFilter } from './ReviewTypeFilter';
 import { TextScheduler } from './TextScheduler';
 
+/**
+ * The bar holds three zones, and every one of them is rendered on every page,
+ * empty or not: styles.css gives the two outer zones equal width, which is what
+ * puts the middle one on the bar's own midpoint rather than on the midpoint of
+ * whatever the leading group leaves over. A zone dropped when it has nothing in
+ * it would take that guarantee with it.
+ *
+ * Leading zone: the actions that act on the review session rather than on the
+ * item in it — the tab's history, home, the type filter, undo. Middle: the
+ * item's own actions. Trailing: the ⋮, which belongs to the view.
+ */
 export function ActionBar() {
   const page = useAppSelector((state) => state.page);
   const { data: currentItem } = useCurrentItem();
   const dispatch = useDispatch();
+  const itemActions = page !== 'home' && currentItem;
 
   return (
     <div className="ir-action-bar" tabIndex={-1}>
       {/* setting a tabIndex makes the action bar focusable */}
-      <GlobalActions />
-      {page === 'home' ? (
-        <HomeActions />
-      ) : (
-        <>
-          <ButtonWithIcon
-            tooltip="Go to home screen"
-            handleClick={() => {
-              dispatch(setPage('home'));
-            }}
-          >
-            <House />
-          </ButtonWithIcon>
-          <Separator />
-          <ReviewTypeFilter />
-          <UndoAction />
-          {currentItem && (
-            <>
-              {isReviewArticle(currentItem) && (
-                <ArticleActions article={currentItem} />
-              )}
-              {isReviewSnippet(currentItem) && (
-                <SnippetActions snippet={currentItem} />
-              )}
-              {isReviewCard(currentItem) && <CardActions card={currentItem} />}
-            </>
-          )}
-        </>
-      )}
+      <div className="ir-bar-lead">
+        <GlobalActions />
+        {page !== 'home' && (
+          <>
+            <ButtonWithIcon
+              tooltip="Go to home screen"
+              handleClick={() => {
+                dispatch(setPage('home'));
+              }}
+            >
+              <House />
+            </ButtonWithIcon>
+            <ReviewTypeFilter />
+            <UndoAction />
+          </>
+        )}
+      </div>
+      <div className="ir-bar-center">
+        {page === 'home' && <HomeActions />}
+        {itemActions && (
+          <>
+            {isReviewArticle(currentItem) && (
+              <ArticleActions article={currentItem} />
+            )}
+            {isReviewSnippet(currentItem) && (
+              <SnippetActions snippet={currentItem} />
+            )}
+            {isReviewCard(currentItem) && <CardActions card={currentItem} />}
+          </>
+        )}
+      </div>
+      <div className="ir-bar-trail">{itemActions && <MoreOptionsAction />}</div>
     </div>
   );
 }
@@ -121,8 +136,8 @@ function HomeActions() {
  * the ⋮ standing in for the header's closes it. Mobile keeps its header, and the
  * navbar's own buttons besides.
  *
- * Like the header's arrows, they hold the bar's start edge while the rest of it
- * centers. `ir-bar-nav` is what exempts them from the centering in styles.css.
+ * Like the header's arrows, they hold the bar's start edge, at the head of the
+ * leading zone.
  */
 function GlobalActions() {
   const { plugin, reviewView } = useReviewContext();
@@ -135,7 +150,6 @@ function GlobalActions() {
       <ButtonWithIcon
         tooltip="Navigate back"
         id="navigate-back-button"
-        className="ir-bar-nav"
         disabled={!canGoBack}
         handleClick={async () => {
           await leaf.history.back();
@@ -146,7 +160,6 @@ function GlobalActions() {
       <ButtonWithIcon
         tooltip="Navigate forward"
         id="navigate-forward-button"
-        className="ir-bar-nav"
         disabled={!canGoForward}
         handleClick={async () => {
           await leaf.history.forward();
@@ -154,7 +167,6 @@ function GlobalActions() {
       >
         <ArrowRight />
       </ButtonWithIcon>
-      <Separator className="ir-bar-nav" />
     </>
   );
 }
@@ -205,7 +217,6 @@ function ArticleActions({ article }: { article: ReviewArticle }) {
       <TextScheduler text={article} />
       <Separator />
       <DismissAction item={article} />
-      <MoreOptionsAction />
     </>
   );
 }
@@ -221,7 +232,6 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
       <TextScheduler text={snippet} />
       <Separator />
       <DismissAction item={snippet} />
-      <MoreOptionsAction />
     </>
   );
 }
@@ -243,7 +253,6 @@ function CardActions({ card }: { card: ReviewCard }) {
       <CreateCardAction />
       <Separator />
       <DismissAction item={card} />
-      <MoreOptionsAction />
     </>
   );
 }
