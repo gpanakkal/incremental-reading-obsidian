@@ -109,6 +109,13 @@ export const QUERY_STALE_TIME = MS_PER_MINUTE;
 export const CURRENT_ITEM_REFETCH_TIME = 1000 * 5;
 
 export const MAX_SQL_QUERY_PARAMS = 999;
+/**
+ * Statements per transaction in `SQLiteRepository.bulkMutate`. Each chunk
+ * costs one full database export and file write, so larger chunks save fewer
+ * times; smaller ones keep each transaction brief and yield to other work
+ * sooner.
+ */
+export const BATCHED_MUTATION_CHUNK_SIZE = 20;
 
 export const QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE = 20;
 /**

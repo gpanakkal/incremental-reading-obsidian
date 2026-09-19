@@ -7,6 +7,7 @@ import {
 import { migrations } from '#/db/migrations';
 import {
   BACKUP_DIRECTORY,
+  BATCHED_MUTATION_CHUNK_SIZE,
   DATA_DIRECTORY,
   LOG_DIRECTORY,
   TABLE_NAMES,
@@ -15,6 +16,7 @@ import type {
   DataChangeEvent,
   DataChangeListener,
   DataChangeOp,
+  MutationStatement,
   NoteType,
   RowTypes,
   SQLiteRepository,
@@ -268,6 +270,48 @@ export class SQLJSRepository implements SQLiteRepository {
     await this.save();
     this.#runPendingReload();
     return result;
+  }
+
+  /**
+   * Run many writes, in order, as a series of short transactions.
+   *
+   * Every {@link mutate} outside a transaction saves the whole database file,
+   * so hundreds of them rewrite it hundreds of times. A single transaction
+   * around them all saves once, but stays open for the entire run, and any
+   * unrelated write made meanwhile — a review grade, say — would join it and
+   * share its commit or rollback. Chunking keeps both costs down: each chunk
+   * of `chunkSize` statements commits, saves and notifies once, then yields a
+   * macrotask so other work runs between chunks, outside any transaction.
+   *
+   * Called inside an open {@link transaction}, the chunks join it instead, so
+   * nothing commits until it does and the yields hold it open.
+   * @param statements run in order; do any async work before calling, since
+   * none can happen inside the transactions
+   * @param chunkSize most statements per transaction
+   * @throws {RangeError} if `chunkSize` is not a positive integer, before
+   * anything is written
+   * @throws whatever the first failing statement throws, after rolling back
+   * its chunk. Earlier chunks stay committed; later ones never run.
+   */
+  async bulkMutate(
+    statements: readonly MutationStatement[],
+    chunkSize: number = BATCHED_MUTATION_CHUNK_SIZE
+  ): Promise<void> {
+    if (!Number.isInteger(chunkSize) || chunkSize < 1) {
+      throw new RangeError(
+        `chunkSize must be a positive integer, got ${chunkSize}`
+      );
+    }
+
+    for (let start = 0; start < statements.length; start += chunkSize) {
+      const chunk = statements.slice(start, start + chunkSize);
+      await this.transaction(() => {
+        for (const { query, params } of chunk) this.mutate(query, params);
+      });
+      // The plugin's own `window`, not `activeWindow`: a popout closing
+      // mid-run would drop its timers and leave the run suspended for good.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    }
   }
 
   /**

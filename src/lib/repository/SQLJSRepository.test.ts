@@ -1,4 +1,5 @@
-import type { DataChangeEvent } from '#/lib/types';
+import { BATCHED_MUTATION_CHUNK_SIZE } from '#/lib/constants';
+import type { DataChangeEvent, MutationStatement, NoteType } from '#/lib/types';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { App, TAbstractFile } from 'obsidian';
@@ -321,6 +322,141 @@ class SyncedTestRepository extends SQLJSRepository {
     db.close();
     return (result[0]?.values ?? []).map((row) => row[0] as string);
   }
+}
+
+// --- bulkMutate ---
+
+type ItemTable = 'article' | 'snippet' | 'srs_card';
+
+const ITEM_TABLES: readonly ItemTable[] = ['article', 'snippet', 'srs_card'];
+
+const NOTE_TYPE_BY_TABLE: Readonly<Record<ItemTable, NoteType>> = {
+  article: 'article',
+  snippet: 'snippet',
+  srs_card: 'card',
+};
+
+/** One queue-item row a generated `bulkMutate` call inserts. */
+interface RowWrite {
+  table: ItemTable;
+  id: string;
+}
+
+function insertStatement({ table, id }: RowWrite): MutationStatement {
+  switch (table) {
+    case 'article':
+      return { query: INSERT_ARTICLE_SQL, params: articleRow(id) };
+    case 'snippet':
+      return {
+        query: `INSERT INTO snippet (id, reference, due, interval, priority)
+          VALUES ($1, $2, $3, $4, $5)`,
+        params: [id, `snippets/${id}.md`, FIXED_DUE, 86_400_000, 30],
+      };
+    case 'srs_card':
+      return {
+        query: `INSERT INTO srs_card (id, reference, created_at, due, stability,
+            difficulty, elapsed_days, scheduled_days, reps, lapses, state)
+          VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 0, 0, 0)`,
+        params: [id, `cards/${id}.md`, FIXED_DUE, FIXED_DUE],
+      };
+  }
+}
+
+/**
+ * Rows to insert, unique by id so no two collide. Ids may hold any character
+ * but NUL: sql.js binds a string with its length but reads one back as a C
+ * string, so an id with a NUL in it would not survive the round trip.
+ */
+const rowWritesArb = (constraints: { minLength?: number } = {}) =>
+  fc.uniqueArray(
+    fc.record({
+      table: fc.constantFrom(...ITEM_TABLES),
+      id: fc.string({ unit: 'binary' }).filter((id) => !id.includes('\0')),
+    }),
+    { selector: (write) => write.id, maxLength: 60, ...constraints }
+  );
+
+/** Every valid chunk size, or `undefined` to take the default. */
+const chunkSizeArb = fc.option(
+  fc.oneof(
+    fc.maxSafeNat().map((n) => n + 1),
+    // integral doubles past the safe range still pass `Number.isInteger`
+    fc.double({ min: 2 ** 53, noNaN: true, noDefaultInfinity: true })
+  ),
+  { nil: undefined }
+);
+
+/** Statements that fail however they are run. */
+const failingStatementArb = fc.constantFrom<MutationStatement>(
+  { query: 'INSERT INTO nonexistent_table VALUES (1)' },
+  { query: 'not a statement' },
+  // violates the priority CHECK constraint
+  {
+    query: INSERT_ARTICLE_SQL,
+    params: ['bulk-fail', 'articles/bulk-fail.md', FIXED_DUE, 86_400_000, 5],
+  }
+);
+
+/**
+ * A repository over a fresh empty database, and a spy on the file write each
+ * save ends in.
+ */
+async function makeBulkRepo() {
+  const SQL = await getSharedSql();
+  const repo = SavingTestRepository.createReal(
+    getSharedSchema(),
+    new SQL.Database(await getEmptyDbBytes())
+  );
+  const writeBinary = vi.spyOn(repo.app.vault.adapter, 'writeBinary');
+  return { repo, writeBinary };
+}
+
+/** `items` split into consecutive runs of `size`. */
+function chunksOf<T>(items: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let start = 0; start < items.length; start += size) {
+    chunks.push(items.slice(start, start + size));
+  }
+  return chunks;
+}
+
+/** The events one committed chunk of inserts should produce, in flush order. */
+function insertEventsFor(chunk: readonly RowWrite[]): DataChangeEvent[] {
+  const idsByNoteType = new Map<NoteType, string[]>();
+  for (const { table, id } of chunk) {
+    const noteType = NOTE_TYPE_BY_TABLE[table];
+    idsByNoteType.set(noteType, [...(idsByNoteType.get(noteType) ?? []), id]);
+  }
+  return [...idsByNoteType].map(([table, ids]) => ({
+    table,
+    op: 'insert',
+    ids,
+  }));
+}
+
+/** Ids in each item table, in the order they were inserted. */
+function idsByTable(repo: SQLJSRepository): Record<ItemTable, string[]> {
+  const read = (table: ItemTable) =>
+    (
+      repo.query(`SELECT id FROM ${table} ORDER BY rowid`) as { id: string }[]
+    ).map((row) => row.id);
+  return {
+    article: read('article'),
+    snippet: read('snippet'),
+    srs_card: read('srs_card'),
+  };
+}
+
+function expectedIdsByTable(
+  writes: readonly RowWrite[]
+): Record<ItemTable, string[]> {
+  const idsIn = (table: ItemTable) =>
+    writes.filter((write) => write.table === table).map((write) => write.id);
+  return {
+    article: idsIn('article'),
+    snippet: idsIn('snippet'),
+    srs_card: idsIn('srs_card'),
+  };
 }
 // #endregion
 
@@ -782,6 +918,188 @@ describe('transaction', () => {
 
     await expect(repo.transaction(async () => 'never')).rejects.toThrow(
       'Database was not initialized on repository'
+    );
+  });
+});
+
+describe('bulkMutate', () => {
+  beforeEach(() => {
+    // Yields through `window.setTimeout`, which this node environment lacks.
+    vi.stubGlobal('window', globalThis);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('writes every statement in order, however they are chunked', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        rowWritesArb(),
+        chunkSizeArb,
+        async (writes, chunkSize) => {
+          const { repo } = await makeBulkRepo();
+          try {
+            await repo.bulkMutate(writes.map(insertStatement), chunkSize);
+
+            expect(idsByTable(repo)).toEqual(expectedIdsByTable(writes));
+          } finally {
+            repo.db?.close();
+          }
+        }
+      )
+    );
+  });
+
+  // Each save exports the whole database and rewrites its file, so saving per
+  // statement turns a large import into hundreds of full rewrites.
+  it('saves once per chunk of at most chunkSize statements', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        rowWritesArb(),
+        chunkSizeArb,
+        async (writes, chunkSize) => {
+          const { repo, writeBinary } = await makeBulkRepo();
+          try {
+            await repo.bulkMutate(writes.map(insertStatement), chunkSize);
+
+            const size = chunkSize ?? BATCHED_MUTATION_CHUNK_SIZE;
+            expect(writeBinary).toHaveBeenCalledTimes(
+              chunksOf(writes, size).length
+            );
+          } finally {
+            repo.db?.close();
+          }
+        }
+      )
+    );
+  });
+
+  it("notifies listeners as each chunk commits, with that chunk's rows", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        rowWritesArb(),
+        chunkSizeArb,
+        async (writes, chunkSize) => {
+          const { repo } = await makeBulkRepo();
+          try {
+            const events: DataChangeEvent[] = [];
+            repo.onDataChange((event) => events.push(event));
+
+            await repo.bulkMutate(writes.map(insertStatement), chunkSize);
+
+            const size = chunkSize ?? BATCHED_MUTATION_CHUNK_SIZE;
+            expect(events).toEqual(
+              chunksOf(writes, size).flatMap(insertEventsFor)
+            );
+          } finally {
+            repo.db?.close();
+          }
+        }
+      )
+    );
+  });
+
+  it('on a failing statement, rolls back its chunk, keeps earlier chunks, and skips the rest', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await fc.assert(
+      fc.asyncProperty(
+        rowWritesArb().chain((writes) =>
+          fc.tuple(fc.constant(writes), fc.nat({ max: writes.length }))
+        ),
+        failingStatementArb,
+        chunkSizeArb,
+        async ([writes, failAt], failing, chunkSize) => {
+          const { repo, writeBinary } = await makeBulkRepo();
+          try {
+            const events: DataChangeEvent[] = [];
+            repo.onDataChange((event) => events.push(event));
+            const statements = writes.map(insertStatement);
+            statements.splice(failAt, 0, failing);
+            const size = chunkSize ?? BATCHED_MUTATION_CHUNK_SIZE;
+            // every chunk that ends before the failing statement
+            const committed = writes.slice(0, Math.floor(failAt / size) * size);
+
+            const error = await repo.bulkMutate(statements, chunkSize).then(
+              () => null,
+              (e: unknown) => e
+            );
+
+            expect(error).toBeInstanceOf(Error);
+            expect(idsByTable(repo)).toEqual(expectedIdsByTable(committed));
+            expect(writeBinary).toHaveBeenCalledTimes(
+              chunksOf(committed, size).length
+            );
+            expect(events).toEqual(
+              chunksOf(committed, size).flatMap(insertEventsFor)
+            );
+          } finally {
+            repo.db?.close();
+          }
+        }
+      )
+    );
+  });
+
+  // Why each chunk is its own transaction with a yield after it: one held open
+  // across the run would take in any unrelated write made meanwhile — a review
+  // grade, say — and roll it back along with a failed chunk.
+  it('lets other work run between chunks, outside any transaction', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { repo } = await makeRepo();
+    let idsSeenBetweenChunks: string[] | null = null;
+
+    const run = repo.bulkMutate(
+      [
+        { query: INSERT_ARTICLE_SQL, params: articleRow('a1') },
+        { query: INSERT_ARTICLE_SQL, params: articleRow('a2') },
+        { query: INSERT_ARTICLE_SQL, params: articleRow('a3') },
+        { query: 'INSERT INTO nonexistent_table VALUES (1)' },
+      ],
+      2
+    );
+    setTimeout(() => {
+      idsSeenBetweenChunks = articleIds(repo);
+      insertArticleRow(repo, 'unrelated');
+    }, 0);
+
+    await expect(run).rejects.toThrow();
+    expect(idsSeenBetweenChunks).toEqual(['a1', 'a2']);
+    expect(articleIds(repo).sort()).toEqual(['a1', 'a2', 'unrelated']);
+  });
+
+  it('rejects a chunk size that is not a positive integer, writing nothing', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        rowWritesArb(),
+        fc.oneof(
+          fc.integer({ max: 0 }),
+          // fractions, NaN, ±Infinity, -0
+          fc.double().filter((n) => !(Number.isInteger(n) && n >= 1))
+        ),
+        async (writes, chunkSize) => {
+          const { repo, writeBinary } = await makeBulkRepo();
+          try {
+            const error = await repo
+              .bulkMutate(writes.map(insertStatement), chunkSize)
+              .then(
+                () => null,
+                (e: unknown) => e
+              );
+
+            expect(error).toBeInstanceOf(RangeError);
+            // names the argument and the value it refused
+            expect((error as RangeError).message).toContain('chunkSize');
+            expect((error as RangeError).message).toContain(String(chunkSize));
+            expect(idsByTable(repo)).toEqual(expectedIdsByTable([]));
+            expect(writeBinary).not.toHaveBeenCalled();
+          } finally {
+            repo.db?.close();
+          }
+        }
+      )
     );
   });
 });
