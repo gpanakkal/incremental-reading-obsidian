@@ -205,20 +205,22 @@ test.describe('Action Bar', () => {
     await finalizeArticleImport(window);
     await executeCommandById(window, 'incremental-reading:learn');
     await window.locator('css=#begin-review-button').click();
-    await window.getByRole('button', { name: 'Mark as reviewed' }).click();
+    await window.getByRole('button', { name: 'Mark reviewed' }).click();
 
     const summary = window.locator('.ir-review-summary');
     await expect(
       summary.getByRole('heading', { name: 'Review complete' })
     ).toBeVisible();
-    await expect(summary.getByText('1 review completed')).toBeVisible();
+    await expect(summary.getByText('1 item reviewed')).toBeVisible();
+    // Singular, because the row's label is pluralized by its own count and
+    // exactly one article was reviewed here.
     await expect(
       summary
-        .locator('.ir-review-summary-count', { hasText: 'Articles' })
+        .locator('.ir-review-summary-count', { hasText: 'Article' })
         .locator('dd')
     ).toHaveText('1');
 
-    await summary.getByRole('button', { name: 'Close review tab' }).click();
+    await summary.getByRole('button', { name: 'Close tab' }).click();
     await expect(
       window.locator(
         'div.workspace-tab-header[aria-label="Incremental reading"]'
@@ -287,9 +289,17 @@ test.describe('Action Bar', () => {
     ).toBeVisible();
     await executeCommandById(window, 'workspace:close');
 
+    // A skip outlives the review tab that made it: the skipped ids belong to
+    // the plugin's store, not the view, and only a fresh plugin launch or the
+    // day rolling over clears them. So reopening review finds the queue still
+    // empty, with the item still named among the skipped rather than served
+    // again.
     await executeCommandById(window, 'incremental-reading:learn');
     await window.locator('css=#begin-review-button').click();
-    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
+    await expect(
+      summary.getByRole('listitem').filter({ hasText: ARTICLE_TITLE })
+    ).toBeVisible();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toHaveCount(0);
   });
 
   test('undoing the last skip from the summary goes back to the item', async () => {
