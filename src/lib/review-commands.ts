@@ -1,15 +1,12 @@
 import type IncrementalReadingPlugin from '#/main';
 import { SchedulingModal } from '#/views/SchedulingModal';
 import { type Grade, Rating } from 'ts-fsrs';
-import { Actions } from './Actions';
 import { getCurrentItemSync } from './query-client';
 import { cardsOnly, setShowAnswer, store } from './store';
 import { isReviewCard, isReviewText } from './types';
 
 /** Commands corresponding to buttons on the action bar */
 export function initReviewCommands(plugin: IncrementalReadingPlugin) {
-  const actions = new Actions(plugin);
-
   plugin.addCommand({
     id: 'mark-review',
     name: 'Review: show answer/mark reviewed',
@@ -26,7 +23,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       if (checking) return true;
 
       if (isCard) void store.dispatch(setShowAnswer(true));
-      else void actions.review(currentItem);
+      else void plugin.actions.review(currentItem);
     },
   });
 
@@ -40,7 +37,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       const item = getCurrentItemSync();
       if (!item) return false;
       if (checking) return true;
-      void actions.skipItem(item);
+      void plugin.actions.skipItem(item);
     },
   });
 
@@ -54,7 +51,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       const item = getCurrentItemSync();
       if (!item || item.data.dismissed) return false;
       if (checking) return true;
-      void actions.dismissItem(item);
+      void plugin.actions.dismissItem(item);
     },
   });
 
@@ -68,7 +65,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       const item = getCurrentItemSync();
       if (!item || !item.data.dismissed) return false;
       if (checking) return true;
-      void actions.unDismissItem(item);
+      void plugin.actions.unDismissItem(item);
     },
   });
 
@@ -93,7 +90,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       if (!view) return false;
       if (checking) return true;
       const showCardsOnly = cardsOnly(store.getState());
-      void actions.setCardsOnly(!showCardsOnly);
+      void plugin.actions.setCardsOnly(!showCardsOnly);
     },
   });
 
@@ -104,7 +101,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
     const item = getCurrentItemSync();
     if (!item || !isReviewCard(item)) return false;
     if (checking) return true;
-    void actions.gradeCard(item, grade);
+    void plugin.actions.gradeCard(item, grade);
   };
 
   plugin.addCommand({
