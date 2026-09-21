@@ -1,10 +1,18 @@
 /* #region Transcluded snippets/cards */
 
-/* Flatten the tree inline to fit onto the same line in lists */
+/* Flatten the tree inline to fit onto the same line in lists.
+
+   `:not(.mod-ui)` keeps the chrome sections out of the flattening entirely, so
+   the `display: none` below is left to decide them. Without it they would be
+   flattened to `inline` by this rule — which beats that one on the `div` alone
+   — and survive as zero-width inline boxes: invisible today only because
+   Obsidian happens to hide what is inside them. */
 .internal-embed[alt*='ir-hide-title'],
 .internal-embed[alt*='ir-hide-title']
   :is(.markdown-embed-content, .markdown-preview-view, p),
-.internal-embed[alt*='ir-hide-title'] .markdown-preview-section > div,
+.internal-embed[alt*='ir-hide-title']
+  .markdown-preview-section
+  > div:not(.mod-ui),
 /* Gated on the min-height Obsidian writes once its first render pass has
    measured: the preview renderer measures the sizer to decide what is on
    screen, and an inline box measures zero, so flipping it any earlier renders
@@ -14,14 +22,24 @@
   display: inline;
 }
 
-/* The embed's own title and the transcluded note's inline title and properties
-   have nowhere to sit in inline flow — each would interrupt the sentence.
+/* The embed's own title and every chrome section the transcluded note brings —
+   inline title, properties, the raw frontmatter block, the footer — have
+   nowhere to sit in inline flow. Each would interrupt the sentence, and each
+   is a block box, so even emptied it would break the line it sits on.
+
+   `.mod-ui` rather than a list of the three: it is Obsidian's own marker for
+   "this section is chrome, not document content", stamped alongside
+   `.mod-header`, `.mod-footer` and `.mod-frontmatter` as each is created, and
+   Obsidian's own stylesheet reads it that way (`> div:not(.mod-ui)` is how it
+   asks for the first real section). A name list would have to grow with theirs;
+   this does not, and it is what keeps `.mod-frontmatter` — which arrives only
+   when the note has properties, so only on real cards — out of the flow.
 
    `.markdown-preview-pusher` stays visible on purpose: it is part of what the
-   renderer measures, and hiding it is not free the way it looks. */
+   renderer measures, and hiding it is not free the way it looks. It carries no
+   `.mod-ui`, so this rule leaves it alone. */
 .internal-embed[alt*='ir-hide-title'] .markdown-embed-title,
-.internal-embed[alt*='ir-hide-title'] .mod-header,
-.internal-embed[alt*='ir-hide-title'] .mod-footer {
+.internal-embed[alt*='ir-hide-title'] .mod-ui {
   display: none;
 }
 
@@ -94,12 +112,23 @@ body {
    same reason: padding is inside the tinted box, so the gap beside the block
    is filled rather than punched out of the run.
 
-   `display: block` costs no inline flow here. Every wrapper holds exactly one
-   element, and the one this selects already broke the line by containing a
-   block; this only gives that break a box. `.el-p > p` is the sole wrapper
-   whose content can stay in the sentence, which is precisely what
-   `:has(> :not(p))` excludes. `.markdown-preview-pusher` has no children and
-   so never matches; `.mod-header` matches but is display:none above.
+   `display: block` costs no inline flow here. Every wrapper this selects holds
+   exactly one element and already broke the line by containing a block; this
+   only gives that break a box. `.el-p > p` is the sole wrapper whose content
+   can stay in the sentence, which is precisely what `:has(> :not(p))`
+   excludes. `.markdown-preview-pusher` has no children and so never matches.
+
+   `:not(.mod-ui)` is load-bearing, and not merely a tidy-up of what the hide
+   rule above already covers: `:has()` takes the specificity of its argument,
+   so `… > div:has(> :not(p))` outweighs `… .mod-ui` by that one element
+   selector and would hand `display: block` back to the very sections that rule
+   means to remove. Both are chrome holding a block child — `.mod-header` wraps
+   `.inline-title`, `.mod-frontmatter` wraps the raw YAML `<pre>` — so both
+   matched, and a block box breaks the line it is on whether or not anything
+   inside it is visible: that is the empty first line above a card embed, with
+   the text pushed below the bullet. Excluding them here rather than reordering
+   or inflating the hide rule keeps the two rules talking about different
+   elements instead of racing over the same ones.
 
    The `:has()` is the affordable shape, like the one further down: its
    subjects are the wrappers inside transclusions that are actually rendered,
@@ -109,7 +138,7 @@ body {
    question. */
 .internal-embed[alt*='ir-hide-title']
   .markdown-preview-section
-  > div:has(> :not(p)) {
+  > div:not(.mod-ui):has(> :not(p)) {
   display: block;
   padding-inline-start: var(--size-4-2);
 

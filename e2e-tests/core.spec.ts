@@ -741,3 +741,72 @@ test.describe('Review session', () => {
     await expect(window.locator('css=#begin-review-button')).toHaveCount(0);
   });
 });
+
+test.describe('Card embeds', () => {
+  /** The list item this test turns into a card, as it reads in the source. */
+  const BULLET_TEXT =
+    'Explain the security functions: Confidentiality, Integrity and Availability (CIA).';
+
+  test('leave no blank line above their text', async () => {
+    await openNote(window, 'sources/Security Principles');
+    await selectParagraph(window, BULLET_TEXT);
+    await executeCommandById(window, 'incremental-reading:create-card');
+    await executeCommandById(window, 'markdown:toggle-preview');
+
+    const embed = window.locator(
+      '.markdown-reading-view .internal-embed[alt*="ir-hide-title"].is-loaded'
+    );
+    await expect(embed).toBeVisible();
+
+    // Measured rather than asserted on a class or a height, because the bug
+    // this covers is a cascade accident with no name in the DOM: a chrome
+    // section inside the embed — the hidden inline title, the frontmatter
+    // block — picking up `display: block`, which splits the inline chain and
+    // pushes the transcluded text onto a line of its own. Nothing in the
+    // markup says so; only where the text lands does.
+    //
+    // The reference is where the embed itself starts, not the top of its host
+    // block: a card need not open its block — delete the newline above one and
+    // it continues the preceding sentence — so "the block's first line" is a
+    // fact about this fixture, while "the line the embed starts on" is the
+    // invariant. `getClientRects()[0]` is that line: an inline box reports one
+    // rect per line fragment, and the first is where the run begins.
+    //
+    // Polled because `.is-loaded` lands before the transcluded markdown is in
+    // the tree: the embed renders an empty second content wrapper alongside
+    // the real one, so a `p` read too early can be the empty one.
+    await expect(async () => {
+      const layout = await embed.evaluate((el) => {
+        // The first paragraph that is actually laid out. The embed keeps a
+        // second, display:none content wrapper whose `p` measures zero.
+        const paragraph = Array.from(el.querySelectorAll('p')).find(
+          (candidate) => candidate.getBoundingClientRect().height > 0
+        );
+        const start = el.getClientRects()[0];
+        if (!paragraph || !start) return null;
+
+        return {
+          startTop: start.top,
+          // Its top edge is its first line box even when the run wraps, which
+          // is the line the text is supposed to begin on.
+          textTop: paragraph.getBoundingClientRect().top,
+          lineHeight: Number.parseFloat(
+            getComputedStyle(el.parentElement as HTMLElement).lineHeight
+          ),
+          // The run's own tint, which has to survive the fix: painted on the
+          // inline fragments so it can cover part of a line.
+          tint: getComputedStyle(el).backgroundColor,
+        };
+      });
+
+      expect(layout).not.toBeNull();
+      expect(layout!.lineHeight).toBeGreaterThan(0);
+      // Half a line of slack: enough for the run's own box and the text's line
+      // box to differ, far less than the full line a break costs.
+      expect(Math.abs(layout!.textTop - layout!.startTop)).toBeLessThan(
+        layout!.lineHeight / 2
+      );
+      expect(layout!.tint).not.toBe('rgba(0, 0, 0, 0)');
+    }).toPass({ timeout: 30_000 });
+  });
+});
