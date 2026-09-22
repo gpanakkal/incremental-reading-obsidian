@@ -36,6 +36,23 @@ export class ExtractedMarkdownEditor {
   /** Opens Obsidian's native find bar. `search` is built in the base constructor. */
   showSearch(_replace?: boolean): void {}
   /**
+   * Whether live preview rendering is off — raw markdown instead of rendered
+   * inline. Seeded in the base constructor from the `livePreview` vault config,
+   * so an editor built while the global setting is on starts `false`.
+   *
+   * Assignable before the first {@link set}, which is what builds the CodeMirror
+   * state: `getDynamicExtensions` reads it there to decide whether to include
+   * the live preview plugin and the `is-live-preview` class. Afterwards it has
+   * to be changed through {@link toggleSource}, which reconfigures both.
+   */
+  sourceMode: boolean;
+  /**
+   * Obsidian's own source-mode switch. Flips {@link sourceMode}, reconfigures the
+   * dynamic extensions around the new value, and redraws. This is what
+   * `MarkdownView.setState` calls when a tab's `source` state changes.
+   */
+  toggleSource(): void {}
+  /**
    * Obsidian's own teardown. Destroys the CodeMirror view, closes the editor
    * suggest, and pops the keymap scope the find bar pushes while open.
    */

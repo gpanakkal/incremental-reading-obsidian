@@ -150,10 +150,30 @@ function makeFakeStore(initial: ReviewPage) {
   };
 }
 
-function makeView(store: ReturnType<typeof makeFakeStore>): ReviewView {
+/**
+ * The slice of `plugin.app` the constructor reaches for: the vault config that
+ * seeds {@link ReviewView.sourceMode}. Every construction needs it, so it is
+ * shared rather than restated at each one.
+ */
+function makePluginApp(livePreview = true) {
+  return {
+    vault: {
+      getConfig: (key: string) =>
+        key === 'livePreview' ? livePreview : undefined,
+    },
+  };
+}
+
+function makeView(
+  store: ReturnType<typeof makeFakeStore>,
+  livePreview = true
+): ReviewView {
   return new ReviewView(
     {} as WorkspaceLeaf,
-    { store } as unknown as IncrementalReadingPlugin,
+    {
+      store,
+      app: makePluginApp(livePreview),
+    } as unknown as IncrementalReadingPlugin,
     {} as ReviewManager
   );
 }
@@ -164,16 +184,43 @@ function makeView(store: ReturnType<typeof makeFakeStore>): ReviewView {
  * and with the added effect that `super.onPaneMenu` resolves to the mock's
  * `FileView` — standing in for the tab-level entries Obsidian contributes there.
  */
+/**
+ * The editor `IREditor` publishes while an item is on screen, seen the way the
+ * view sees it: as the controller sitting in `activeEditor`, with the editor
+ * itself on its `editMode`. `toggleSource` flips the editor's own flag, which
+ * is the half of the switch Obsidian owns.
+ */
+function makeMountedEditor(sourceMode = false) {
+  const editMode = {
+    sourceMode,
+    toggleSource: vi.fn(() => {
+      editMode.sourceMode = !editMode.sourceMode;
+    }),
+  };
+  return { editMode };
+}
+
 function makeMenuReceiver({
   page = 'review',
   file = makeFile('Chapter 1'),
-}: { page?: ReviewPage; file?: TFile | null } = {}) {
+  editor = null,
+  sourceMode = false,
+}: {
+  page?: ReviewPage;
+  file?: TFile | null;
+  /** The mounted review editor, or `null` for a page that has none. */
+  editor?: ReturnType<typeof makeMountedEditor> | null;
+  /** The mode the tab is already in, as the constructor would have left it. */
+  sourceMode?: boolean;
+} = {}) {
   const openFile = vi.fn();
   const revealInFolder = vi.fn();
   const leaf = { id: 'review-leaf' };
   const receiver = {
     file,
     leaf,
+    activeEditor: editor,
+    sourceMode,
     plugin: { store: { getState: () => ({ page }) } },
     app: {
       workspace: {
@@ -195,6 +242,7 @@ function makeMenuReceiver({
     app: receiver.app,
     leaf,
     file,
+    editor,
     openFile,
     revealInFolder,
   };
@@ -415,7 +463,11 @@ async function openHistoryView({
   const sessionTracker = { commit: vi.fn() };
   const view = new ReviewView(
     leaf as unknown as WorkspaceLeaf,
-    { store, sessionTracker } as unknown as IncrementalReadingPlugin,
+    {
+      store,
+      sessionTracker,
+      app: makePluginApp(),
+    } as unknown as IncrementalReadingPlugin,
     reviewManager as unknown as ReviewManager
   );
   Object.assign(view, {
@@ -1202,6 +1254,104 @@ describe('ReviewView.onPaneMenu', () => {
   });
 });
 
+describe('ReviewView source mode', () => {
+  it("opens reading the way a note does, seeded from the vault's live preview setting", () => {
+    // Obsidian seeds every markdown editor from this same config, and source
+    // mode is its inverse: live preview on means source mode off.
+    fc.assert(
+      fc.property(pageArb, fc.boolean(), (page, livePreview) => {
+        const view = makeView(makeFakeStore(page), livePreview);
+
+        expect(view.sourceMode).toBe(!livePreview);
+      })
+    );
+  });
+
+  it('switches the editor on screen rather than waiting for the next item', () => {
+    const editor = makeMountedEditor(false);
+    const { view } = makeMenuReceiver({ editor, sourceMode: false });
+
+    view.toggleSourceMode();
+
+    expect(editor.editMode.toggleSource).toHaveBeenCalledTimes(1);
+    expect(editor.editMode.sourceMode).toBe(true);
+  });
+
+  it('remembers the choice with no editor mounted, for the editor still to come', () => {
+    // `ReviewItem` keys the editor on the item id, so every advance through the
+    // queue builds a fresh one; a card still asking its question has none at
+    // all. The flag has to survive both, or the toggle lasts one item.
+    const { view } = makeMenuReceiver({ editor: null, sourceMode: false });
+
+    view.toggleSourceMode();
+
+    expect(view.sourceMode).toBe(true);
+  });
+
+  it('lands back where it started after an even number of toggles', () => {
+    fc.assert(
+      fc.property(fc.boolean(), fc.nat({ max: 12 }), (sourceMode, toggles) => {
+        const editor = makeMountedEditor(sourceMode);
+        const { view } = makeMenuReceiver({ editor, sourceMode });
+
+        for (let i = 0; i < toggles; i++) view.toggleSourceMode();
+
+        const flipped = toggles % 2 === 1;
+        expect(view.sourceMode).toBe(flipped ? !sourceMode : sourceMode);
+        // The tab and the editor it is driving must never disagree, or the menu
+        // would show a checkmark the text on screen contradicts.
+        expect(editor.editMode.sourceMode).toBe(view.sourceMode);
+      })
+    );
+  });
+});
+
+describe('ReviewView source mode menu entry', () => {
+  it("carries Obsidian's own title, icon and section", () => {
+    // The entry stands in for the one a markdown tab's menu has, so it has to
+    // read as that entry — `pane` is also what puts it above Split right.
+    const { view } = makeMenuReceiver({ editor: makeMountedEditor() });
+
+    const item = itemTitled(paneMenu(view), 'Source mode');
+
+    expect(item?.icon).toBe('lucide-code-2');
+    expect(item?.section).toBe('pane');
+  });
+
+  it('is absent on a page with no editor to act on', () => {
+    // Obsidian hides it in reading view for the same reason. Here that is a
+    // card still asking its question: rendered markdown, no editor.
+    const { view } = makeMenuReceiver({ editor: null });
+
+    expect(itemTitled(paneMenu(view), 'Source mode')).toBeUndefined();
+  });
+
+  it('is checked exactly when source mode is on', () => {
+    fc.assert(
+      fc.property(fc.boolean(), (sourceMode) => {
+        const { view } = makeMenuReceiver({
+          editor: makeMountedEditor(sourceMode),
+          sourceMode,
+        });
+
+        expect(itemTitled(paneMenu(view), 'Source mode')?.checked).toBe(
+          sourceMode
+        );
+      })
+    );
+  });
+
+  it('switches the mode when clicked', () => {
+    const editor = makeMountedEditor(false);
+    const { view } = makeMenuReceiver({ editor, sourceMode: false });
+
+    click(itemTitled(paneMenu(view), 'Source mode'));
+
+    expect(view.sourceMode).toBe(true);
+    expect(editor.editMode.toggleSource).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('ReviewView.showMoreOptionsMenu', () => {
   it("registers the section order Obsidian's view header uses", () => {
     // Copied from ItemView.onMoreOptions. Order is what decides where every
@@ -1520,7 +1670,7 @@ describe('ReviewView history recording', () => {
     const leaf = makeHistoryLeaf();
     const view = new ReviewView(
       leaf as unknown as WorkspaceLeaf,
-      { store } as unknown as IncrementalReadingPlugin,
+      { store, app: makePluginApp() } as unknown as IncrementalReadingPlugin,
       {} as ReviewManager
     );
     try {
