@@ -367,6 +367,14 @@ export function IREditor({
         cm.scrollDOM.classList.add('ir-review-scroller');
         internalRef.current = cm;
         controller.editMode = editor;
+        // Before `set`, which is what builds the CodeMirror state: the base
+        // constructor seeds `sourceMode` from the vault config, and `set` reads
+        // it through `getDynamicExtensions` to decide whether the live preview
+        // plugin is in the state at all. Assigning after would need a
+        // `toggleSource` to reconfigure the state that was just built. The tab
+        // holds the flag because this editor is rebuilt for every item — see
+        // `ReviewView.sourceMode`.
+        editor.sourceMode = reviewView.sourceMode;
         editor.set(value ?? '');
 
         // Publish immediately rather than waiting on the focus handler below.

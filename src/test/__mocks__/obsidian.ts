@@ -94,6 +94,7 @@ export class MenuItem {
   section = '';
   disabled = false;
   warning = false;
+  checked: boolean | null = null;
   callback: ((evt: unknown) => unknown) | null = null;
   /**
    * Stands in for the `.menu-item-title` element Obsidian exposes, which is the
@@ -123,6 +124,14 @@ export class MenuItem {
   }
   setWarning(warning: boolean) {
     this.warning = warning;
+    return this;
+  }
+  /**
+   * Obsidian renders a checkmark for `true` and reserves the slot for `false`,
+   * so the two are not the same entry; `null` opts out of the slot entirely.
+   */
+  setChecked(checked: boolean | null) {
+    this.checked = checked;
     return this;
   }
   onClick(cb: (evt: unknown) => unknown) {

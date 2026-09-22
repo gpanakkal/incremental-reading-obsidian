@@ -29,6 +29,7 @@ import {
   Platform,
   WorkspaceWindow,
   type IconName,
+  type MarkdownEditView,
   type TFile,
   type ViewStateResult,
   type WorkspaceLeaf,
@@ -74,6 +75,20 @@ export default class ReviewView extends FileView {
   /** Set while a history entry is being applied, which must not record itself. */
   #applyingHistory = false;
   /**
+   * Whether the review editor renders raw markdown rather than live preview.
+   *
+   * Lives on the tab rather than on the editor because the editor does not
+   * outlive the item: `ReviewItem` keys `IREditor` on the item's id, so every
+   * advance through the queue builds a fresh one, which would seed itself from
+   * the vault config again and drop the choice made two items ago.
+   *
+   * Seeded from that config — the value Obsidian seeds every markdown editor
+   * from — so a review tab opens reading the way a note does. Taken once, at
+   * construction, as a markdown tab's editor takes it: changing the global
+   * setting leaves the tabs already open alone.
+   */
+  sourceMode: boolean;
+  /**
    * The entry this tab pushed most recently, for taking it back off when review
    * returns to its place before settling anywhere else — see {@link trackPlace}.
    */
@@ -89,6 +104,7 @@ export default class ReviewView extends FileView {
     this.#reviewManager = reviewManager;
     this.#page = plugin.store.getState().page;
     this.#place = placeOf(plugin.store.getState());
+    this.sourceMode = !plugin.app.vault.getConfig('livePreview');
 
     const unsub = plugin.store.subscribe(() => {
       this.trackPlace(placeOf(plugin.store.getState()));
@@ -438,6 +454,32 @@ export default class ReviewView extends FileView {
   }
 
   /**
+   * Switch the review editor between raw markdown and live preview.
+   *
+   * Two halves, because the flag outlives any one editor: the tab remembers the
+   * choice for the editors items still to come, and the editor on screen is
+   * switched in place. `toggleSource` is Obsidian's own switch, and reads the
+   * editor's own flag rather than this one, so it is called rather than handed
+   * a value — exactly as `MarkdownView.setState` does it.
+   */
+  toggleSourceMode(): void {
+    this.sourceMode = !this.sourceMode;
+    this.reviewEditor()?.toggleSource();
+  }
+
+  /**
+   * The review editor on screen, or `null` when the page has none — the home
+   * screen, the queue, and a card still asking its question, which is rendered
+   * markdown rather than an editor.
+   *
+   * `activeEditor` is the controller `IREditor` publishes when it mounts and
+   * drops when it unmounts, so it tracks exactly that.
+   */
+  reviewEditor(): MarkdownEditView | null {
+    return this.activeEditor?.editMode ?? null;
+  }
+
+  /**
    * Get selected text from the rendered markdown content.
    * This allows snippet creation from ReviewView
    */
@@ -620,6 +662,25 @@ export default class ReviewView extends FileView {
   addViewMenuItems(menu: Menu): void {
     const file = this.currentItemFile();
     if (!file) return;
+
+    // Obsidian adds this entry only while a markdown tab is editing, and leaves
+    // it out in reading view, where there is no editor for it to act on. The
+    // same condition here is an editor being mounted: a card still asking its
+    // question is rendered markdown, not an editor, and the entry would do
+    // nothing visible. Title, icon and section are Obsidian's own, so the
+    // review tab's entry reads as the one users already know.
+    if (this.reviewEditor()) {
+      menu.addItem((item) =>
+        item
+          .setTitle('Source mode')
+          .setIcon('lucide-code-2')
+          .setSection('pane')
+          .setChecked(this.sourceMode)
+          .onClick(() => {
+            this.toggleSourceMode();
+          })
+      );
+    }
 
     menu.addItem((item) =>
       item
