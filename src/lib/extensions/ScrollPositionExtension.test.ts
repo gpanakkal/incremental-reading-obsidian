@@ -1,8 +1,9 @@
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { scrollPositionExtension } from '#/lib/extensions/ScrollPositionExtension';
 import { irPluginFacet } from '#/lib/extensions/irPluginFacet';
-import { EditorView } from '@codemirror/view';
 import type { StateEffect } from '@codemirror/state';
+import { EditorView } from '@codemirror/view';
+import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -18,10 +19,24 @@ function extractFactory(): PluginFactory {
     .create;
 }
 
+interface MockLine {
+  number: number;
+  from: number;
+  to: number;
+  text: string;
+}
+
+interface MockDoc {
+  length: number;
+  lines: number;
+  line: (number: number) => MockLine;
+  lineAt: (pos: number) => MockLine;
+}
+
 interface MockView {
   state: {
     facet: ReturnType<typeof vi.fn>;
-    doc: { length: number };
+    doc: MockDoc;
   };
   contentDOM: {
     querySelector: ReturnType<typeof vi.fn>;
@@ -31,7 +46,51 @@ interface MockView {
     addEventListener: ReturnType<typeof vi.fn>;
   };
   posAtCoords: ReturnType<typeof vi.fn>;
+  coordsAtPos: ReturnType<typeof vi.fn>;
+  moveVertically: ReturnType<typeof vi.fn>;
   dispatch: ReturnType<typeof vi.fn>;
+}
+
+/** Height of every row in the mock document, in pixels. */
+const LINE_HEIGHT = 24;
+
+/**
+ * A document of one row per line, with the offsets CodeMirror would give it.
+ *
+ * Only the members the anchor walk reads are modelled. Lines are separated by
+ * a single newline, so `to` is the position after the last character of a line
+ * and `from` of the next line is one past it.
+ */
+function makeDoc(lines: string[]): MockDoc {
+  const starts: number[] = [];
+  let at = 0;
+  for (const text of lines) {
+    starts.push(at);
+    at += text.length + 1;
+  }
+  const line = (number: number): MockLine => ({
+    number,
+    from: starts[number - 1] ?? 0,
+    to: (starts[number - 1] ?? 0) + (lines[number - 1] ?? '').length,
+    text: lines[number - 1] ?? '',
+  });
+  return {
+    length: Math.max(0, at - 1),
+    lines: lines.length,
+    line,
+    lineAt: (pos: number) => {
+      const index = lines.findIndex(
+        (text, i) => pos >= starts[i] && pos <= starts[i] + text.length
+      );
+      return line(index === -1 ? lines.length : index + 1);
+    },
+  };
+}
+
+/** A single-line document, for tests that only care about offsets. */
+function makeSingleLineDoc(length: number): MockDoc {
+  const only: MockLine = { number: 1, from: 0, to: length, text: '' };
+  return { length, lines: 1, line: () => only, lineAt: () => only };
 }
 
 function makeTFile(): TFile {
@@ -39,7 +98,9 @@ function makeTFile(): TFile {
 }
 
 /** A sentinel effect so we can assert exactly what was dispatched. */
-const FAKE_EFFECT = { sentinel: 'scrollIntoView' } as unknown as StateEffect<unknown>;
+const FAKE_EFFECT = {
+  sentinel: 'scrollIntoView',
+} as unknown as StateEffect<unknown>;
 
 /**
  * Replace EditorView.scrollIntoView with a spy returning FAKE_EFFECT, so tests
@@ -87,6 +148,8 @@ function makeView(
     noteType?: string | null;
     topOffset?: number;
     docLength?: number;
+    docLines?: string[];
+    firstLineTop?: number;
     propertiesWidget?: Element | null;
   } = {}
 ): MockView {
@@ -97,8 +160,12 @@ function makeView(
     noteType = 'article',
     topOffset = 0,
     docLength = 100000,
+    docLines,
+    firstLineTop = 2,
     propertiesWidget = null,
   } = opts;
+
+  const doc = docLines ? makeDoc(docLines) : makeSingleLineDoc(docLength);
 
   // When `info` is explicitly provided use it; otherwise derive it from `file`.
   // Passing `file: null` produces { file: null, app: {} } (info is non-null but file is null)
@@ -113,7 +180,7 @@ function makeView(
         .mockImplementation((facetDef: unknown) =>
           facetDef === irPluginFacet ? plugin : null
         ),
-      doc: { length: docLength },
+      doc,
     },
     contentDOM: {
       querySelector: vi.fn().mockReturnValue(propertiesWidget),
@@ -123,6 +190,26 @@ function makeView(
       addEventListener: vi.fn(),
     },
     posAtCoords: vi.fn().mockReturnValue(topOffset),
+    // Each line is one row, stacked from `firstLineTop` down. A negative
+    // `firstLineTop` puts the first rows above the top edge of the viewport,
+    // which is what the anchor walk exists to step over.
+    coordsAtPos: vi.fn().mockImplementation((pos: number) => {
+      const top = firstLineTop + (doc.lineAt(pos).number - 1) * LINE_HEIGHT;
+      return { top, bottom: top + LINE_HEIGHT, left: 0, right: 10 };
+    }),
+    // Honours `forward`, so a walk that steps the wrong way stalls here the
+    // way it would in the editor rather than quietly reading the same.
+    moveVertically: vi
+      .fn()
+      .mockImplementation((range: { head: number }, forward: boolean) => {
+        const line = doc.lineAt(range.head);
+        const number = forward ? line.number + 1 : line.number - 1;
+        const head =
+          number >= 1 && number <= doc.lines
+            ? doc.line(number).from
+            : range.head;
+        return { head, from: head, to: head };
+      }),
     dispatch: vi.fn(),
   };
 
@@ -319,7 +406,9 @@ describe('restore on mount (properties widget present)', () => {
   }
 
   it('registers a scrollend listener after the rAF chain and restore', async () => {
-    const view = makeViewWithWidget({ plugin: makePlugin(makeReviewManager(null)) });
+    const view = makeViewWithWidget({
+      plugin: makePlugin(makeReviewManager(null)),
+    });
     factory(view as never);
 
     expect(view.scrollDOM.addEventListener).not.toHaveBeenCalled();
@@ -444,10 +533,7 @@ describe('handleScroll', () => {
     const scrollHandler = await getScrollHandler(view);
     scrollHandler();
 
-    expect(view.posAtCoords).toHaveBeenLastCalledWith(
-      { x: 1, y: 1 },
-      false
-    );
+    expect(view.posAtCoords).toHaveBeenLastCalledWith({ x: 1, y: 1 }, false);
     expect(reviewManager.saveScrollPosition).toHaveBeenCalledWith(
       expect.anything(),
       1234
@@ -487,6 +573,175 @@ describe('handleScroll', () => {
     scrollHandler();
 
     expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The anchor walk — a saved position has to be one the reader can see
+// ---------------------------------------------------------------------------
+describe('anchor walk', () => {
+  /** Run one scroll and report the offset it saved. */
+  async function scrollAndSave(
+    opts: Parameters<typeof makeView>[0] & {
+      reviewManager: ReturnType<typeof makeReviewManager>;
+    }
+  ): Promise<{ offset: number | undefined; view: MockView }> {
+    const { reviewManager, ...viewOpts } = opts;
+    const view = makeView({
+      ...viewOpts,
+      plugin: makePlugin(reviewManager),
+      propertiesWidget: makeWidgetElement(),
+    });
+    factory(view as never);
+    await vi.runAllTimersAsync();
+    const [, handleScroll] = view.scrollDOM.addEventListener.mock.calls[0] as [
+      string,
+      () => void,
+    ];
+    handleScroll();
+    const call = reviewManager.saveScrollPosition.mock.calls.at(-1) as
+      | [unknown, number]
+      | undefined;
+    return { offset: call?.[1], view };
+  }
+
+  // 'first line' is line 1 (0-10), the empty line 2 is 11, 'second line' is
+  // line 3 (12-23). The scroller's rect top is 0, so the probe point — and
+  // the edge a row has to reach to count as visible — is y = 1.
+  const LINES = ['first line', '', 'second line'];
+
+  it('saves the hit-tested position when its row is on screen', async () => {
+    const reviewManager = makeReviewManager(null);
+    const { offset } = await scrollAndSave({
+      reviewManager,
+      docLines: LINES,
+      firstLineTop: 2,
+      topOffset: 3,
+    });
+
+    expect(offset).toBe(3);
+  });
+
+  it('steps past a position on a row the reader has already scrolled off', async () => {
+    const reviewManager = makeReviewManager(null);
+    // Chromium answers a point inside the empty line with the end of the line
+    // above it, which owns the nearest text node: offset 10 is `first line`'s
+    // end, and that row has just left the viewport.
+    const { offset } = await scrollAndSave({
+      reviewManager,
+      docLines: LINES,
+      firstLineTop: -23,
+      topOffset: 10,
+    });
+
+    expect(offset).toBe(11);
+  });
+
+  it('keeps stepping while whole rows sit above the edge', async () => {
+    const reviewManager = makeReviewManager(null);
+    const { offset } = await scrollAndSave({
+      reviewManager,
+      docLines: LINES,
+      firstLineTop: -47,
+      topOffset: 0,
+    });
+
+    expect(offset).toBe(12);
+  });
+
+  it('steps off a row with only a sliver showing', async () => {
+    const reviewManager = makeReviewManager(null);
+    // Half a pixel of `first line` is left on screen: too little for the
+    // reader to be reading it, and restore would pull the whole row back.
+    const { offset } = await scrollAndSave({
+      reviewManager,
+      docLines: LINES,
+      firstLineTop: -23.5,
+      topOffset: 5,
+    });
+
+    expect(offset).toBe(11);
+  });
+
+  it('keeps a row with more than a pixel showing', async () => {
+    const reviewManager = makeReviewManager(null);
+    const { offset } = await scrollAndSave({
+      reviewManager,
+      docLines: LINES,
+      firstLineTop: -20,
+      topOffset: 5,
+    });
+
+    expect(offset).toBe(5);
+  });
+
+  it('stops at the last row instead of walking off the document', async () => {
+    const reviewManager = makeReviewManager(null);
+    const { offset } = await scrollAndSave({
+      reviewManager,
+      docLines: ['only line'],
+      firstLineTop: -30,
+      topOffset: 4,
+    });
+
+    expect(offset).toBe(4);
+  });
+
+  it('saves the hit-tested position when the row cannot be measured', async () => {
+    const reviewManager = makeReviewManager(null);
+    const view = makeView({
+      plugin: makePlugin(reviewManager),
+      propertiesWidget: makeWidgetElement(),
+      docLines: LINES,
+      firstLineTop: -23,
+      topOffset: 10,
+    });
+    // An unrendered position has no coordinates; the hit test's answer is all
+    // there is to go on.
+    view.coordsAtPos.mockReturnValue(null);
+    factory(view as never);
+    await vi.runAllTimersAsync();
+    const [, handleScroll] = view.scrollDOM.addEventListener.mock.calls[0] as [
+      string,
+      () => void,
+    ];
+    handleScroll();
+
+    expect(reviewManager.saveScrollPosition).toHaveBeenCalledWith(
+      expect.anything(),
+      10
+    );
+  });
+
+  it('never saves a position on a row above the edge, wherever the hit test lands', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 6 }),
+        fc.integer({ min: -140, max: 20 }),
+        fc.integer({ min: 0, max: 5 }),
+        async (lineCount, firstLineTop, hitLine) => {
+          const docLines = Array.from({ length: lineCount }, (_, i) =>
+            i % 2 === 0 ? `line ${i}` : ''
+          );
+          const doc = makeDoc(docLines);
+          const line = doc.line(Math.min(hitLine + 1, doc.lines));
+          const reviewManager = makeReviewManager(null);
+          const { offset } = await scrollAndSave({
+            reviewManager,
+            docLines,
+            firstLineTop,
+            topOffset: line.from,
+          });
+
+          expect(offset).not.toBeUndefined();
+          const saved = doc.lineAt(offset as number);
+          const bottom = firstLineTop + saved.number * LINE_HEIGHT;
+          // Either the saved row is on screen, or the walk ran out of document
+          // and kept the last row it could reach.
+          expect(bottom > 1 || saved.number === doc.lines).toBe(true);
+        }
+      )
+    );
   });
 });
 

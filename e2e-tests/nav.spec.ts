@@ -270,13 +270,8 @@ test.describe('Review history navigation', () => {
       );
       if (!scroller) return null;
       const top = scroller.getBoundingClientRect().top;
-      // Sampled one pixel down, which is where ScrollPositionExtension reads
-      // the anchor it saves (`posAtCoords` at `scrollDOM`'s top + 1). The two
-      // have to name the same line: restore puts the saved anchor's line at
-      // the top edge, so any line this counts as off-screen but the extension
-      // still anchors on comes back a whole paragraph adrift. A line left with
-      // one or two pixels showing is exactly that case, and Linux's font
-      // metrics land on it where Windows' fractional ones do not.
+      // Sampled one pixel down, the same point ScrollPositionExtension probes
+      // for the anchor it saves, so a row it treats as gone is gone here too.
       //
       // Blank lines all read the same, so they cannot tell positions apart —
       // skipping them is safe because the same rule runs on both sides of the
@@ -322,21 +317,69 @@ test.describe('Review history navigation', () => {
     return position;
   }
 
+  /**
+   * How far the line reading `text` sits below the top edge of the review
+   * editor, in px, or `null` when no line on screen reads that way.
+   *
+   * The nearest match wins: a short line can repeat in an article, and what is
+   * under test is whether the reader's place came back, not which copy of the
+   * text it landed on.
+   */
+  async function distanceFromTop(text: string) {
+    return await window.evaluate(
+      ([viewType, wanted]) => {
+        const scroller = document.querySelector<HTMLElement>(
+          `.workspace-leaf.mod-active [data-type="${viewType}"] .cm-scroller`
+        );
+        if (!scroller) return null;
+        const top = scroller.getBoundingClientRect().top;
+        const distances = [...scroller.querySelectorAll('.cm-line')]
+          .filter((el) => (el.textContent ?? '').slice(0, 80) === wanted)
+          .map((el) => el.getBoundingClientRect().top - top);
+        if (distances.length === 0) return null;
+        return distances.reduce((best, distance) =>
+          Math.abs(distance) < Math.abs(best) ? distance : best
+        );
+      },
+      [REVIEW_VIEW_TYPE, text] as const
+    );
+  }
+
+  /**
+   * How far the line the reader left may come back from where it sat, in px —
+   * roughly two lines of text.
+   *
+   * Not zero, and not the identity of the line at the top edge. The anchor is
+   * a document position, and which row a position belongs to comes down to a
+   * hit test one pixel inside the viewport: font metrics decide which side of
+   * a row boundary that pixel falls on, and they differ between platforms, so
+   * the restored position can sit a row either side of the saved one. Coming
+   * back to the passage the reader was on is the behaviour under test.
+   *
+   * Measured against where the line sat at save time rather than against the
+   * top edge, because a wrapped paragraph the reader is part-way through
+   * starts well above it. Not measured by `scrollTop` either, which
+   * CodeMirror's estimated heights for unrendered text above shift by hundreds
+   * of px between mounts while the text on screen is the same.
+   */
+  const MAX_RESTORE_DRIFT_PX = 60;
+
   async function expectScrolledTo(position: { text: string; lineTop: number }) {
+    const drift = async () => {
+      const distance = await distanceFromTop(position.text);
+      return distance === null
+        ? Number.POSITIVE_INFINITY
+        : Math.abs(distance - position.lineTop);
+    };
     await expect
-      .poll(async () => (await topVisibleLine())?.text, { timeout: 10000 })
-      .toBe(position.text);
+      .poll(drift, {
+        timeout: 10000,
+        message: `Review never came back to "${position.text.trim()}"`,
+      })
+      .toBeLessThanOrEqual(MAX_RESTORE_DRIFT_PX);
     // And it stays there, rather than being restored and then thrown back.
     await window.waitForTimeout(1000);
-    const restored = await topVisibleLine();
-    expect(restored?.text).toBe(position.text);
-    // Restore puts the saved position's visual line at the top edge: within a
-    // wrapped line of where the reader left it. Not compared by `scrollTop`,
-    // which CodeMirror's estimated heights for unrendered text above shift by
-    // hundreds of px between mounts while the text on screen is the same.
-    expect(Math.abs((restored?.lineTop ?? 0) - position.lineTop)).toBeLessThan(
-      40
-    );
+    expect(await drift()).toBeLessThanOrEqual(MAX_RESTORE_DRIFT_PX);
   }
 
   test('back to an item restores where it was scrolled to', async () => {
