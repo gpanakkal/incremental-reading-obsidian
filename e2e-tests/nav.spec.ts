@@ -270,10 +270,21 @@ test.describe('Review history navigation', () => {
       );
       if (!scroller) return null;
       const top = scroller.getBoundingClientRect().top;
-      // Blank lines all read the same, so they cannot tell positions apart.
+      // Sampled one pixel down, which is where ScrollPositionExtension reads
+      // the anchor it saves (`posAtCoords` at `scrollDOM`'s top + 1). The two
+      // have to name the same line: restore puts the saved anchor's line at
+      // the top edge, so any line this counts as off-screen but the extension
+      // still anchors on comes back a whole paragraph adrift. A line left with
+      // one or two pixels showing is exactly that case, and Linux's font
+      // metrics land on it where Windows' fractional ones do not.
+      //
+      // Blank lines all read the same, so they cannot tell positions apart —
+      // skipping them is safe because the same rule runs on both sides of the
+      // round trip, and the anchor keeps its distance from the first line that
+      // does have text.
       const line = [...scroller.querySelectorAll('.cm-line')].find(
         (el) =>
-          el.getBoundingClientRect().bottom > top + 2 &&
+          el.getBoundingClientRect().bottom > top + 1 &&
           (el.textContent ?? '').trim() !== ''
       );
       return {
@@ -447,7 +458,21 @@ test.describe('Review history navigation', () => {
     });
   }
 
+  /**
+   * A bar wide enough that both outer zones can grow past what the leading
+   * group holds, which is the only condition under which the middle zone can
+   * sit on the bar's midpoint at all.
+   *
+   * Pinned rather than inherited from the window. CI runs headed
+   * (`E2E_HEADLESS=0`), where the window is only as big as the runner's
+   * desktop allows — about 1024px wide, which leaves the bar too narrow for
+   * the wide-bar assertions below to describe. A layout test has to name the
+   * width it is about rather than take whatever the host happens to give it.
+   */
+  const WIDE_VIEWPORT = { width: 1600, height: 900 };
+
   test('action bar centers the item actions on the bar, between the edges the other two zones hold', async () => {
+    await window.setViewportSize(WIDE_VIEWPORT);
     await importTwoArticles();
     await beginReview();
 
@@ -465,19 +490,13 @@ test.describe('Review history navigation', () => {
     // Narrow enough and there is no space left to hand out: the outer zones
     // stop at their contents, the three meet, and the bar scrolls from there.
     // This is the mobile layout, reached here by width alone.
-    const { width, height } = window.viewportSize() ?? {
-      width: 1920,
-      height: 1080,
-    };
-    await window.setViewportSize({ width: 420, height });
+    await window.setViewportSize({ width: 420, height: WIDE_VIEWPORT.height });
     await expect
       .poll(async () => (await barLayout()).before)
       .toBeLessThanOrEqual(1);
     const narrow = await barLayout();
     expect(narrow.after).toBeLessThanOrEqual(1);
     expect(narrow.startOffset).toBeCloseTo(0, 0);
-
-    await window.setViewportSize({ width, height });
   });
 
   test('mobile navbar back and forward buttons follow the tab history', async () => {

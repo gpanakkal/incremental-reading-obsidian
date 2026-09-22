@@ -465,11 +465,21 @@ export async function waitForReviewItem(window: Page): Promise<ShownItem> {
     expect(snapshot.file).not.toBeNull();
     const title = basename(snapshot.file ?? '');
     expect(snapshot.displayText).toBe(title);
+    // Inside the retry, not after it. This helper takes whichever item the
+    // store names, so it can otherwise latch onto a transitional one: opening
+    // an item from the home screen flips `page` to 'review' a beat before
+    // `currentItemId` and `file` stop naming the item review held last, and
+    // those four agree with each other throughout. Settling there and only
+    // then asking the pane would pin the assertion to an item the DOM is
+    // already navigating away from, which can never become true — a hard
+    // failure on a loaded runner where that beat is wide enough to be read.
+    //
+    // The short timeout is what makes the retry work: at the suite's 15s
+    // default a single stale read would spend the whole budget here.
+    await expect(reviewTitle(window, title)).toBeVisible({ timeout: 1000 });
     shown = { id: snapshot.currentItemId ?? '', title };
   }).toPass({ timeout: 15_000 });
-  const item = shown as unknown as ShownItem;
-  await expect(reviewTitle(window, item.title)).toBeVisible();
-  return item;
+  return shown as unknown as ShownItem;
 }
 
 /**
