@@ -215,7 +215,7 @@ export class SessionTracker {
    *
    * Leaves the clear on its usual timer, so advancing to the next item still
    * writes once rather than writing a null in between. Called from
-   * `Actions.getNext`, which every finishing action ends on.
+   * `Actions._getNext`, which every finishing action ends on.
    */
   finish(): void {
     this.#holding = false;

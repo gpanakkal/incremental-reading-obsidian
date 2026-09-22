@@ -50,67 +50,9 @@ export class Actions {
   constructor(plugin: IncrementalReadingPlugin) {
     this.plugin = plugin;
     this.undoStack = [];
-    this.emitter = this.createEmitter();
+    this.emitter = this._createEmitter();
     this.subscribe = this.emitter.subscribe;
   }
-
-  /** Call this after reviewing, skipping, dismissing, or deleting an open item */
-  getNext = () => {
-    // The one place that knows an item was *finished* rather than merely taken
-    // off screen. `SessionTracker` cannot read that off the store — see its
-    // `finish` — so it is told here, on the path every finishing action ends on.
-    this.plugin.sessionTracker?.finish();
-    const { currentItemId } = store.getState();
-    this.plugin.store.dispatch(resetCurrentItem());
-
-    // The reset is what normally refetches: it changes the id `useCurrentItem`
-    // keys on, and the hook asks the queue for the next item off that. Called
-    // with review already holding no item — the completion screen above all —
-    // it changes nothing, so nothing refetches and the advance landed only when
-    // the `CURRENT_ITEM_REFETCH_TIME` poll next came around. Ask directly.
-    if (currentItemId === null) void invalidateCurrentItemQuery();
-  };
-
-  /**
-   * Put review back on `item`: its turn is being given back, not finished.
-   *
-   * Undoing an action ends here rather than on {@link getNext}, which asks the
-   * queue for whatever is due next instead. That lands on the item only by
-   * coincidence — the reversal makes it eligible again, and usually first — and
-   * only from another item, where the advance is a store transition at all. On
-   * the completion screen the store already holds no item, so the same dispatch
-   * changes nothing and nothing refetches: the summary sat there until
-   * `CURRENT_ITEM_REFETCH_TIME` came around and the poll happened to pick the
-   * item back up.
-   *
-   * The reset goes first, so arriving drops the per-item state the way arriving
-   * from the queue does — an undone grade puts the card back with its answer
-   * hidden. The session tracker is told nothing: it mirrors the item arrived
-   * at, and that lifts any hold over the one left.
-   */
-  returnToItem = (item: ReviewItem) => {
-    this.plugin.store.dispatch(resetCurrentItem());
-    this.plugin.store.dispatch(setCurrentItemId(item.data.id));
-  };
-
-  /**
-   * Count a finished review toward the session summary.
-   *
-   * Call before {@link getNext}: advancing past the last item due is what puts
-   * the summary on screen, and it must not render without the review that
-   * emptied the queue.
-   */
-  recordReview = (reviewId: string, type: NoteType) => {
-    const resetTime = getEndOfDay(this.plugin.settings.dayRolloverOffset);
-    this.plugin.store.dispatch(
-      addCompletedReview({ reviewId, type, resetTime })
-    );
-  };
-
-  /** Take back a review counted by {@link recordReview}, once it is undone. */
-  unrecordReview = (reviewId: string) => {
-    this.plugin.store.dispatch(removeCompletedReview({ reviewId }));
-  };
 
   review = async (item: ReviewText, nextInterval?: number) => {
     if (isReviewArticle(item)) return this.reviewArticle(item, nextInterval);
@@ -125,7 +67,7 @@ export class Actions {
         Date.now(),
         nextInterval
       );
-      this.recordReview(reviewId, 'article');
+      this._recordReview(reviewId, 'article');
       if (article.data.dismissed) {
         await this.unDismissItem(article);
       }
@@ -135,8 +77,8 @@ export class Actions {
             `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`
         );
       }
-      this.getNext();
-      this.pushUndo({
+      this._getNext();
+      this._pushUndo({
         item: article,
         description: `reviewing "${article.file.basename}"`,
         undo: async () => {
@@ -144,9 +86,9 @@ export class Actions {
             beforeReview,
             reviewId
           );
-          this.unrecordReview(reviewId);
+          this._unrecordReview(reviewId);
           await invalidateItemQuery(article.data.id);
-          this.returnToItem(article);
+          this._returnToItem(article);
         },
       });
     } catch (error) {
@@ -162,7 +104,7 @@ export class Actions {
         Date.now(),
         nextInterval
       );
-      this.recordReview(reviewId, 'snippet');
+      this._recordReview(reviewId, 'snippet');
       if (snippet.data.dismissed) {
         await this.unDismissItem(snippet);
       }
@@ -172,8 +114,8 @@ export class Actions {
             `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`
         );
       }
-      this.getNext();
-      this.pushUndo({
+      this._getNext();
+      this._pushUndo({
         item: snippet,
         description: `reviewing "${snippet.file.basename}"`,
         undo: async () => {
@@ -181,9 +123,9 @@ export class Actions {
             beforeReview,
             reviewId
           );
-          this.unrecordReview(reviewId);
+          this._unrecordReview(reviewId);
           await invalidateItemQuery(snippet.data.id);
-          this.returnToItem(snippet);
+          this._returnToItem(snippet);
         },
       });
     } catch (error) {
@@ -220,13 +162,13 @@ export class Actions {
       card.data,
       grade
     );
-    this.recordReview(reviewRowId, 'card');
+    this._recordReview(reviewRowId, 'card');
     const wasDismissed = card.data.dismissed;
     if (wasDismissed) {
       await this.unDismissItem(card);
     }
 
-    this.pushUndo({
+    this._pushUndo({
       item: card,
       description: `grading "${card.file.basename}" ${Rating[grade]}`,
       undo: async () => {
@@ -234,18 +176,18 @@ export class Actions {
           card.data,
           reviewRowId
         );
-        this.unrecordReview(reviewRowId);
+        this._unrecordReview(reviewRowId);
         if (wasDismissed) {
           await this.dismissItem(card);
         }
 
         await invalidateItemQuery(card.data.id);
-        this.returnToItem(card);
+        this._returnToItem(card);
       },
     });
 
     Obsidian.notify(`Graded as: ${Rating[grade]}`);
-    this.getNext();
+    this._getNext();
   };
 
   dismissItem = async (item: ReviewItem) => {
@@ -255,13 +197,13 @@ export class Actions {
     await this.plugin.reviewManager.dismissItem(item);
     await invalidateItemQuery(item.data.id);
 
-    this.pushUndo({
+    this._pushUndo({
       item,
       description: `dismissing "${item.file.basename}"`,
       undo: async () => {
         await this.plugin.reviewManager.unDismissItem(item);
         await invalidateItemQuery(item.data.id);
-        if (wasBeingReviewed) this.returnToItem(item);
+        if (wasBeingReviewed) this._returnToItem(item);
       },
     });
 
@@ -272,7 +214,7 @@ export class Actions {
     );
     Obsidian.notify(`Dismissed "${itemTitle}"`);
     if (wasBeingReviewed) {
-      this.getNext();
+      this._getNext();
     }
   };
 
@@ -282,7 +224,7 @@ export class Actions {
     const { currentItemId } = store.getState();
     if (currentItemId === null) {
       // TODO: set the now-undismissed item as the current one?
-      this.getNext();
+      this._getNext();
     }
 
     const itemTitle = getContentSlice(
@@ -300,7 +242,7 @@ export class Actions {
     await this.plugin.app.fileManager.promptForFileDeletion(item.file);
     const { currentItemId } = store.getState();
     if (item.data.id === currentItemId) {
-      this.getNext();
+      this._getNext();
     }
   };
 
@@ -308,12 +250,12 @@ export class Actions {
     const resetTime = getEndOfDay(this.plugin.settings.dayRolloverOffset);
     this.plugin.store.dispatch(addSeenId({ id: item.data.id, resetTime }));
 
-    this.pushUndo({
+    this._pushUndo({
       item,
       description: `skipping "${item.file.basename}"`,
       undo: () => {
         this.plugin.store.dispatch(removeSeenId({ id: item.data.id }));
-        this.returnToItem(item);
+        this._returnToItem(item);
       },
     });
     const itemTitle = getContentSlice(
@@ -322,7 +264,7 @@ export class Actions {
       true
     );
     Obsidian.notify(`Skipping ${itemTitle}`);
-    this.getNext();
+    this._getNext();
   };
 
   createSnippet = async (firstReview?: number) => {
@@ -344,7 +286,7 @@ export class Actions {
     );
 
     if (snippet !== null) {
-      this.pushUndo({
+      this._pushUndo({
         item: snippet,
         description: `creating snippet "${snippet.file.basename}"`,
         undo: async () => {
@@ -385,7 +327,7 @@ export class Actions {
     if (result) {
       const { reviewCard, line } = result;
 
-      this.pushUndo({
+      this._pushUndo({
         item: result.reviewCard,
         description: `creating card "${result.reviewCard.file.basename}"`,
         undo: async () => {
@@ -429,7 +371,7 @@ export class Actions {
   };
 
   setCardsOnly = async (cardsOnly: boolean) => {
-    await this.setReviewTypes(cardsOnly ? ['card'] : NOTE_TYPES);
+    await this._setReviewTypes(cardsOnly ? ['card'] : NOTE_TYPES);
   };
 
   /**
@@ -441,11 +383,84 @@ export class Actions {
     const { typesToReview } = store.getState();
     // Rebuilt from NOTE_TYPES rather than from the current keys, so the set
     // keeps its canonical order however it was last written.
-    await this.setReviewTypes(
+    await this._setReviewTypes(
       NOTE_TYPES.filter((t) =>
         t === type ? !typesToReview[t] : typesToReview[t]
       )
     );
+  };
+
+  undo = async () => {
+    const actionEntry = this.undoStack.pop();
+    if (actionEntry === undefined) {
+      Obsidian.notify(`Nothing to undo!`);
+      return;
+    }
+    // Emitted before the reversal runs, not after: the entry is already off the
+    // stack, and an undo that throws partway would otherwise leave subscribers
+    // reading an entry that is no longer there.
+    this.emitter.emit();
+    await actionEntry.undo();
+    Obsidian.notify(`Undid ${actionEntry.description}`);
+  };
+
+  // #region HELPERS
+  /** Call this after reviewing, skipping, dismissing, or deleting an open item */
+  _getNext = () => {
+    // The one place that knows an item was *finished* rather than merely taken
+    // off screen. `SessionTracker` cannot read that off the store — see its
+    // `finish` — so it is told here, on the path every finishing action ends on.
+    this.plugin.sessionTracker?.finish();
+    const { currentItemId } = store.getState();
+    this.plugin.store.dispatch(resetCurrentItem());
+
+    // The reset is what normally refetches: it changes the id `useCurrentItem`
+    // keys on, and the hook asks the queue for the next item off that. Called
+    // with review already holding no item — the completion screen above all —
+    // it changes nothing, so nothing refetches and the advance landed only when
+    // the `CURRENT_ITEM_REFETCH_TIME` poll next came around. Ask directly.
+    if (currentItemId === null) void invalidateCurrentItemQuery();
+  };
+
+  /**
+   * Put review back on `item`: its turn is being given back, not finished.
+   *
+   * Undoing an action ends here rather than on {@link _getNext}, which asks the
+   * queue for whatever is due next instead. That lands on the item only by
+   * coincidence — the reversal makes it eligible again, and usually first — and
+   * only from another item, where the advance is a store transition at all. On
+   * the completion screen the store already holds no item, so the same dispatch
+   * changes nothing and nothing refetches: the summary sat there until
+   * `CURRENT_ITEM_REFETCH_TIME` came around and the poll happened to pick the
+   * item back up.
+   *
+   * The reset goes first, so arriving drops the per-item state the way arriving
+   * from the queue does — an undone grade puts the card back with its answer
+   * hidden. The session tracker is told nothing: it mirrors the item arrived
+   * at, and that lifts any hold over the one left.
+   */
+  _returnToItem = (item: ReviewItem) => {
+    this.plugin.store.dispatch(resetCurrentItem());
+    this.plugin.store.dispatch(setCurrentItemId(item.data.id));
+  };
+
+  /**
+   * Count a finished review toward the session summary.
+   *
+   * Call before {@link _getNext}: advancing past the last item due is what puts
+   * the summary on screen, and it must not render without the review that
+   * emptied the queue.
+   */
+  _recordReview = (reviewId: string, type: NoteType) => {
+    const resetTime = getEndOfDay(this.plugin.settings.dayRolloverOffset);
+    this.plugin.store.dispatch(
+      addCompletedReview({ reviewId, type, resetTime })
+    );
+  };
+
+  /** Take back a review counted by {@link _recordReview}, once it is undone. */
+  _unrecordReview = (reviewId: string) => {
+    this.plugin.store.dispatch(removeCompletedReview({ reviewId }));
   };
 
   /**
@@ -457,18 +472,18 @@ export class Actions {
    * is already keyed on the new filter, and fetching through it would advance
    * the queue as a side effect of asking what is on screen.
    */
-  private setReviewTypes = async (types: readonly NoteType[]) => {
+  private _setReviewTypes = async (types: readonly NoteType[]) => {
     const currentItem = await fetchCurrentItem(this.plugin.reviewManager);
     this.plugin.store.dispatch(setTypesToReview(types));
 
     if (currentItem === null) {
       await invalidateCurrentItemQuery();
     } else if (!types.includes(currentItem.data.type)) {
-      this.getNext();
+      this._getNext();
     }
   };
 
-  createEmitter() {
+  _createEmitter() {
     const listeners = new Set<() => void>();
     return {
       subscribe: (fn: () => void) => {
@@ -486,22 +501,9 @@ export class Actions {
    * plain array subscribers cannot watch, so a push that skips the emit leaves
    * the undo button showing the action before it.
    */
-  pushUndo = (entry: ActionStackEntry) => {
+  _pushUndo = (entry: ActionStackEntry) => {
     this.undoStack.push(entry);
     this.emitter.emit();
   };
-
-  undo = async () => {
-    const actionEntry = this.undoStack.pop();
-    if (actionEntry === undefined) {
-      Obsidian.notify(`Nothing to undo!`);
-      return;
-    }
-    // Emitted before the reversal runs, not after: the entry is already off the
-    // stack, and an undo that throws partway would otherwise leave subscribers
-    // reading an entry that is no longer there.
-    this.emitter.emit();
-    await actionEntry.undo();
-    Obsidian.notify(`Undid ${actionEntry.description}`);
-  };
+  // #endregion
 }
