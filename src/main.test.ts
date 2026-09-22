@@ -1,4 +1,5 @@
 import type { ReviewSession } from '#/lib/plugin-data';
+import { queryClient } from '#/lib/query-client';
 import { resetSession, setPage, store, type ReviewPage } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import IncrementalReadingPlugin from '#/main';
@@ -190,6 +191,80 @@ function learn(
 /** Only the id is read off an item handed to `learn`. */
 const item = (id: string) => ({ data: { id } }) as unknown as ReviewItem;
 
+/**
+ * Bare receiver for `followMovedNotes`, over a database holding one article at
+ * `one.md` and a vault holding its note — at `moved/one.md` when `moved`.
+ * `indexingSignal` false stands for an Obsidian without `onCleanCache`, which
+ * falls back to the `resolved` event; `finishIndexing` fires whichever it used.
+ */
+function makeFollowReceiver({ moved = true, indexingSignal = true } = {}) {
+  const unloaders: (() => void)[] = [];
+  let whenIndexed: (() => void) | undefined;
+  const note = { path: moved ? 'moved/one.md' : 'one.md' } as TFile;
+  const repo = {
+    query: vi.fn((sql: string, params: unknown[]) =>
+      sql.includes('FROM article') && params[0] === 0
+        ? [{ rowid: 1, id: 'a', reference: 'one.md', deleted: 0 }]
+        : []
+    ),
+    mutate: vi.fn(),
+    transaction: vi.fn((work: () => Promise<void>) => work()),
+  };
+  const refreshAllHighlights = vi.fn(() => Promise.resolve());
+  const resolvedRef = { event: 'resolved' };
+  const metadataCache = {
+    getFileCache: vi.fn(() => ({ frontmatter: { 'ir-id': 'a' } })),
+    onCleanCache: indexingSignal
+      ? vi.fn((callback: () => void) => {
+          whenIndexed = callback;
+        })
+      : undefined,
+    on: vi.fn((_name: string, callback: () => void) => {
+      whenIndexed = callback;
+      return resolvedRef;
+    }),
+    offref: vi.fn(),
+  };
+  const receiver = {
+    register: vi.fn((unloader: () => void) => unloaders.push(unloader)),
+    registerEvent: vi.fn(),
+    reviewManager: { refreshAllHighlights },
+    app: {
+      vault: {
+        getFileByPath: vi.fn((path: string) =>
+          path === note.path ? note : null
+        ),
+        getMarkdownFiles: vi.fn(() => [note]),
+      },
+      metadataCache,
+    },
+  };
+  return {
+    receiver,
+    repo,
+    metadataCache,
+    resolvedRef,
+    refreshAllHighlights,
+    finishIndexing: () => whenIndexed?.(),
+    unload: () => unloaders.forEach((unloader) => unloader()),
+  };
+}
+
+/** Run `followMovedNotes` against a bare receiver. */
+function followMovedNotes({
+  receiver,
+  repo,
+}: ReturnType<typeof makeFollowReceiver>) {
+  (
+    IncrementalReadingPlugin.prototype as unknown as {
+      followMovedNotes(repo: unknown): void;
+    }
+  ).followMovedNotes.call(receiver, repo);
+}
+
+/** Give a scan that was never going to start long enough to show it didn't. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
 // #endregion
 
 afterEach(() => {
@@ -346,7 +421,9 @@ describe('IncrementalReadingPlugin.learn', () => {
     // Otherwise the mount finds an empty session and resumes the remembered
     // item over it — see `ReviewView.resumeUnclaimedSession`, whose guard is
     // this dispatch.
-    const { receiver, pageAtMount } = makeLearnReceiver({ skipHomeScreen: false });
+    const { receiver, pageAtMount } = makeLearnReceiver({
+      skipHomeScreen: false,
+    });
 
     await learn(receiver, item('item-9'));
 
@@ -467,5 +544,114 @@ describe('IncrementalReadingPlugin.resumeSession', () => {
 
     await expect(resumeSession(receiver)).resolves.toBe(false);
     expect(getReviewItemFromId).not.toHaveBeenCalled();
+  });
+});
+
+describe('IncrementalReadingPlugin.followMovedNotes', () => {
+  beforeEach(() => {
+    // The scan yields through `window`; Node, like WebKit, has no idle callback
+    vi.stubGlobal('window', globalThis);
+    store.dispatch(resetSession());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('waits for Obsidian to finish indexing before looking for moved notes', async () => {
+    const follow = makeFollowReceiver();
+
+    followMovedNotes(follow);
+    await settle();
+    expect(follow.repo.query).not.toHaveBeenCalled();
+
+    follow.finishIndexing();
+    await vi.waitFor(() =>
+      expect(follow.repo.mutate).toHaveBeenLastCalledWith(expect.any(String), [
+        'moved/one.md',
+        'a',
+        expect.any(String),
+      ])
+    );
+  });
+
+  it('waits for the resolved event where Obsidian has no onCleanCache', async () => {
+    const follow = makeFollowReceiver({ indexingSignal: false });
+
+    followMovedNotes(follow);
+    await settle();
+    expect(follow.metadataCache.on).toHaveBeenCalledWith(
+      'resolved',
+      expect.any(Function)
+    );
+    expect(follow.repo.query).not.toHaveBeenCalled();
+
+    follow.finishIndexing();
+
+    await vi.waitFor(() => expect(follow.repo.transaction).toHaveBeenCalled());
+    // `resolved` fires again on every later change; one scan is enough
+    expect(follow.metadataCache.offref).toHaveBeenCalledWith(
+      follow.resolvedRef
+    );
+  });
+
+  it('refreshes highlights and the item on screen once notes have moved', async () => {
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+    const follow = makeFollowReceiver();
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+
+    await vi.waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({
+        queryKey: ['current-review-item'],
+      })
+    );
+    expect(follow.refreshAllHighlights).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves highlights and review alone when nothing moved', async () => {
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+    const follow = makeFollowReceiver({ moved: false });
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+    await vi.waitFor(() =>
+      expect(follow.receiver.app.vault.getFileByPath).toHaveBeenCalled()
+    );
+    await settle();
+
+    expect(follow.refreshAllHighlights).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it('abandons the scan when the plugin unloads', async () => {
+    const follow = makeFollowReceiver();
+
+    followMovedNotes(follow);
+    follow.unload();
+    follow.finishIndexing();
+    await settle();
+
+    expect(follow.repo.query).not.toHaveBeenCalled();
+    expect(follow.repo.mutate).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed scan rather than letting it escape', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failure = new Error('disk full');
+    const follow = makeFollowReceiver();
+    follow.repo.transaction.mockRejectedValue(failure);
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+
+    await vi.waitFor(() =>
+      expect(error).toHaveBeenCalledWith(
+        'Incremental Reading - failed to follow moved notes:',
+        failure
+      )
+    );
+    expect(follow.refreshAllHighlights).not.toHaveBeenCalled();
   });
 });

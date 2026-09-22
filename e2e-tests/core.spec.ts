@@ -4,6 +4,7 @@ import test, {
   type Page,
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import {
   executeCommandById,
   expectReviewOn,
@@ -862,5 +863,77 @@ test.describe('Frontmatter', () => {
 
     await toggleReviewSourceMode(window);
     await expectFrontmatterHidden(window);
+  });
+});
+
+test.describe('Moved notes', () => {
+  /** Article rows as the running plugin's database holds them. */
+  const articleRows = (page: Page) =>
+    page.evaluate(() => {
+      const plugin = (
+        window as unknown as {
+          app: {
+            plugins: {
+              plugins: Record<
+                string,
+                | {
+                    reviewManager?: {
+                      repo: {
+                        query(sql: string): { id: string; reference: string }[];
+                        pendingSaveCount: number;
+                      };
+                    };
+                  }
+                | undefined
+              >;
+            };
+          };
+        }
+      ).app.plugins.plugins['incremental-reading'];
+      const repo = plugin?.reviewManager?.repo;
+      return {
+        rows: repo?.query('SELECT id, reference FROM article') ?? [],
+        pendingSaves: repo?.pendingSaveCount ?? 0,
+      };
+    });
+
+  test('follows a note that moved while Obsidian was closed', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+
+    let imported = { id: '', reference: '' };
+    await expect(async () => {
+      const { rows, pendingSaves } = await articleRows(window);
+      expect(rows).toHaveLength(1);
+      // Quitting under a database write would lose the row being tested
+      expect(pendingSaves).toBe(0);
+      imported = rows[0];
+      const note = await fs.readFile(
+        path.join(vaultPath, imported.reference),
+        'utf8'
+      );
+      expect(note).toContain(imported.id);
+    }).toPass();
+    await closeElectron(app);
+
+    // A move made behind Obsidian's back, as a file manager, git, or another
+    // sync tool would make it: Obsidian only ever sees a new file
+    const movedPath = `moved while closed/${path.posix.basename(imported.reference)}`;
+    await fs.mkdir(path.join(vaultPath, 'moved while closed'));
+    await fs.rename(
+      path.join(vaultPath, imported.reference),
+      path.join(vaultPath, movedPath)
+    );
+
+    app = await launchElectron(vaultPath);
+    window = await openVault(app, vaultPath);
+
+    await expect
+      .poll(async () => (await articleRows(window)).rows)
+      .toEqual([{ id: imported.id, reference: movedPath }]);
   });
 });

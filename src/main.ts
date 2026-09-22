@@ -26,6 +26,7 @@ import {
 } from './lib/extensions/SnippetHighlightPostProcessor';
 import { registerTransclusionHostPostProcessor } from './lib/extensions/TransclusionHostPostProcessor';
 import ReviewManager from './lib/items/ReviewManager';
+import { scanForMovedNotes } from './lib/moved-note-scan';
 import {
   type ExtractedMarkdownEditor,
   getEditorClass,
@@ -206,7 +207,9 @@ export default class IncrementalReadingPlugin extends Plugin {
       )
     );
 
-    // listen for file renames to update references in db
+    // listen for file renames to update references in db. Renames before the
+    // review manager exists, and moves made while Obsidian was closed, are
+    // caught by `followMovedNotes` instead.
     this.registerEvent(
       this.app.vault.on('rename', (file, oldPath) => {
         if (!this.reviewManager || file instanceof TFolder) {
@@ -483,6 +486,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       })
     );
     this.reviewManager = new ReviewManager(this, repo);
+    this.followMovedNotes(repo);
 
     // Keep the review-queue table live: when a row on a cached page changes,
     // patch (or drop) it and reconcile order/totals. Unsubscribe on unload.
@@ -491,6 +495,61 @@ export default class IncrementalReadingPlugin extends Plugin {
         void applyQueueChange(event, this.reviewManager);
       })
     );
+  }
+
+  /**
+   * Point the database back at notes that moved while no rename handler was
+   * listening: with Obsidian closed, or during startup before
+   * {@link reviewManager} existed. See {@link scanForMovedNotes}.
+   *
+   * Obsidian is still indexing when the layout becomes ready, and a note that
+   * moved has no cached frontmatter to be found by until it is re-indexed, so
+   * the scan waits for the metadata cache to settle.
+   */
+  private followMovedNotes(repo: SQLiteRepository) {
+    const controller = new AbortController();
+    this.register(() => controller.abort());
+    const { vault, metadataCache } = this.app;
+
+    const scan = () => {
+      scanForMovedNotes({
+        repo,
+        vault,
+        metadataCache,
+        signal: controller.signal,
+      })
+        .then(async (moved) => {
+          if (moved.length === 0) return;
+          // Highlights are cached by note path, and review may be showing one
+          // of the notes that moved
+          await this.reviewManager.refreshAllHighlights();
+          await invalidateCurrentItemQuery();
+        })
+        .catch((error: unknown) => {
+          console.error(
+            'Incremental Reading - failed to follow moved notes:',
+            error
+          );
+        });
+    };
+
+    // `onCleanCache` runs its callback once nothing is left to parse and every
+    // link has resolved. Obsidian presents the whole vault to the cache before
+    // the layout is ready, so by now it cannot report clean early.
+    if (typeof metadataCache.onCleanCache === 'function') {
+      metadataCache.onCleanCache(scan);
+      return;
+    }
+    // `onCleanCache` is undocumented, so fall back to the official event that
+    // says the same thing. Scanning straight away instead would read a moved
+    // note before its frontmatter was cached and quietly pass it over. The
+    // trade is that `resolved` has to fire: on a vault indexed before the
+    // plugin loaded it never does, and the scan waits for the next launch.
+    const ref = metadataCache.on('resolved', () => {
+      metadataCache.offref(ref);
+      scan();
+    });
+    this.registerEvent(ref);
   }
 
   /**
