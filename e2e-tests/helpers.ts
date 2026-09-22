@@ -337,6 +337,44 @@ export async function importArticle(window: Page, path: string) {
 /** The review tab's view type, as `ReviewView.viewType` registers it. */
 export const REVIEW_VIEW_TYPE = 'incremental-reading-review';
 
+/**
+ * Set Settings -> Editor -> "Default editing mode", which is the `livePreview`
+ * vault config underneath.
+ *
+ * Every markdown editor seeds its own `sourceMode` from that config when it is
+ * constructed — the review editor, and the throwaway one the plugin extracts
+ * Obsidian's editor extensions from — so this has to be called before review
+ * opens for it to be the mode review opens in.
+ */
+export async function setDefaultEditingMode(
+  window: Page,
+  mode: 'live-preview' | 'source'
+) {
+  await window.evaluate((livePreview) => {
+    (window as unknown as TestWindow).app.vault.setConfig(
+      'livePreview',
+      livePreview
+    );
+  }, mode === 'live-preview');
+}
+
+/**
+ * Flip the review tab between source mode and live preview, as the "Source
+ * mode" entry in its ⋮ menu does.
+ */
+export async function toggleReviewSourceMode(window: Page) {
+  await window.evaluate((viewType) => {
+    const { app } = window as unknown as TestWindow;
+    const view = app.workspace.getLeavesOfType(viewType)[0]?.view as
+      | { toggleSourceMode?: () => void }
+      | undefined;
+    if (!view?.toggleSourceMode) {
+      throw new Error('No review tab open to toggle');
+    }
+    view.toggleSourceMode();
+  }, REVIEW_VIEW_TYPE);
+}
+
 /** What the review tab calls itself when it is not showing an item. */
 export const REVIEW_VIEW_DEFAULT_TITLE = 'Incremental reading';
 

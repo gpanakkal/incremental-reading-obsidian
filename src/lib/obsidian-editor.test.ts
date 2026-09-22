@@ -1,13 +1,17 @@
 // @vitest-environment jsdom
 
 import {
+  ensurePropertiesExtension,
+  getBaseMarkdownExtensions,
   getMarkdownController,
+  type ExtractedEditMode,
   type ExtractedMarkdownEditor,
 } from '#/lib/obsidian-editor';
 import type { ReviewItem } from '#/lib/types';
 import type ReviewView from '#/views/ReviewView';
+import type { Extension } from '@codemirror/state';
 import fc from 'fast-check';
-import type { Editor } from 'obsidian';
+import type { App, Editor } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // #region HELPERS
@@ -65,6 +69,42 @@ const viewPropsArb = fc.dictionary(
   ),
   fc.anything()
 );
+
+/**
+ * Obsidian's edit mode, as far as `ensurePropertiesExtension` can see it:
+ * `getDynamicExtensions` builds the properties extension lazily, and only on
+ * the `!sourceMode` branch — the same condition the real implementation uses,
+ * and the reason an editor opened straight into source mode never gets one.
+ */
+function makeLazyEditMode(sourceMode: boolean) {
+  const editMode = {
+    sourceMode,
+    getDynamicExtensions: vi.fn(() => {
+      if (!editMode.sourceMode) {
+        editMode.propertiesExtension ??= [{}] as Extension[];
+      }
+      return [] as Extension[];
+    }),
+  } as ExtractedEditMode & {
+    getDynamicExtensions: ReturnType<typeof vi.fn>;
+  };
+  return editMode;
+}
+
+/** An app whose only embedded markdown component carries `editMode`. */
+function makeEmbedApp(editMode: ExtractedEditMode | undefined) {
+  const md = {
+    load: vi.fn(),
+    unload: vi.fn(),
+    showEditor: vi.fn(),
+    editable: false,
+    editMode,
+  };
+  const app = {
+    embedRegistry: { embedByExtension: { md: vi.fn(() => md) } },
+  } as unknown as App;
+  return { app, md };
+}
 
 // #endregion
 
@@ -245,5 +285,91 @@ describe('getMarkdownController', () => {
       expect(controller.scroll).toBe(1);
       expect(controller.editMode).toBeNull();
     });
+  });
+});
+
+describe('ensurePropertiesExtension', () => {
+  it('builds the frontmatter-hiding extension on an editor that starts in source mode', () => {
+    // The reported bug: with "Default editing mode" set to Source every editor
+    // starts `sourceMode` true, so Obsidian never builds the extension and
+    // review renders the note's raw YAML.
+    const editMode = makeLazyEditMode(true);
+
+    ensurePropertiesExtension(editMode);
+
+    expect(editMode.propertiesExtension).toBeDefined();
+  });
+
+  it('leaves the editing mode as it found it', () => {
+    fc.assert(
+      fc.property(fc.boolean(), (sourceMode) => {
+        const editMode = makeLazyEditMode(sourceMode);
+
+        ensurePropertiesExtension(editMode);
+
+        expect(editMode.sourceMode).toBe(sourceMode);
+      })
+    );
+  });
+
+  it('restores the editing mode when building throws', () => {
+    const editMode: ExtractedEditMode = {
+      sourceMode: true,
+      getDynamicExtensions: () => {
+        throw new Error('boom');
+      },
+    };
+
+    expect(() => ensurePropertiesExtension(editMode)).toThrow('boom');
+    expect(editMode.sourceMode).toBe(true);
+  });
+
+  it('keeps the extension an editor has already built rather than rebuilding it', () => {
+    const editMode = makeLazyEditMode(false);
+    const existing = [{}] as Extension[];
+    editMode.propertiesExtension = existing;
+
+    ensurePropertiesExtension(editMode);
+
+    expect(editMode.propertiesExtension).toBe(existing);
+    expect(editMode.getDynamicExtensions).not.toHaveBeenCalled();
+  });
+
+  it('does nothing on an edit mode that exposes no extension builder', () => {
+    const editMode: ExtractedEditMode = { sourceMode: true };
+
+    expect(() => ensurePropertiesExtension(editMode)).not.toThrow();
+    expect(editMode.propertiesExtension).toBeUndefined();
+  });
+});
+
+describe('getBaseMarkdownExtensions', () => {
+  it('hands back the frontmatter-hiding extension whatever mode the vault defaults to', () => {
+    fc.assert(
+      fc.property(fc.boolean(), (sourceMode) => {
+        // Editors seed `sourceMode` from the `livePreview` vault config, so this
+        // stands in for both settings of "Default editing mode".
+        const editMode = makeLazyEditMode(sourceMode);
+        const { app } = makeEmbedApp(editMode);
+
+        const extensions = getBaseMarkdownExtensions(app);
+
+        expect(extensions).toEqual([editMode.propertiesExtension]);
+      })
+    );
+  });
+
+  it('unloads the throwaway editor it built the extension with', () => {
+    const { app, md } = makeEmbedApp(makeLazyEditMode(true));
+
+    getBaseMarkdownExtensions(app);
+
+    expect(md.unload).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns nothing, rather than throwing, when no edit mode is exposed', () => {
+    const { app } = makeEmbedApp(undefined);
+
+    expect(getBaseMarkdownExtensions(app)).toEqual([]);
   });
 });

@@ -7,8 +7,23 @@ import type { App, Editor, MarkdownView } from 'obsidian';
 import type { EmbedMarkdownComponent, MobileToolbar } from 'obsidian-typings';
 import type { ReviewItem } from './types';
 
-interface ExtractedEditMode {
+export interface ExtractedEditMode {
+  /**
+   * Obsidian's frontmatter extension: hides the raw YAML block, and in a real
+   * note pane stands the properties widget in its place. Built lazily inside
+   * {@link ExtractedEditMode.getDynamicExtensions}, and only on its
+   * `!sourceMode` branch, so an editor that has never been in live preview
+   * does not have one. See {@link ensurePropertiesExtension}.
+   */
   propertiesExtension?: Extension[];
+  /** @see ExtractedMarkdownEditor.sourceMode */
+  sourceMode?: boolean;
+  /**
+   * The half of the extension set Obsidian rebuilds whenever the editing mode
+   * or a vault setting changes. Calling it is what builds
+   * {@link ExtractedEditMode.propertiesExtension}.
+   */
+  getDynamicExtensions?: () => Extension[];
 }
 
 interface ExtractedEmbedMarkdownComponent extends EmbedMarkdownComponent {
@@ -98,6 +113,35 @@ export function getEditorClass(app: App): typeof ExtractedMarkdownEditor {
   }
 }
 /**
+ * Builds `editMode`'s properties extension whatever editing mode it is in.
+ *
+ * Obsidian builds that extension lazily inside `getDynamicExtensions`, and only
+ * where `sourceMode` is false — a note pane is meant to show raw YAML in source
+ * mode. Every editor seeds `sourceMode` from the `livePreview` vault config, so
+ * with "Default editing mode" set to Source the throwaway editor below never
+ * reaches that branch and has no extension to hand over, and review renders the
+ * note's frontmatter. Review has no use for the YAML in either mode, so the
+ * flag is flipped for the length of one call and the extension gets built
+ * either way.
+ *
+ * Only the caching side effect is wanted; the returned extensions belong to the
+ * throwaway editor and are discarded. The extension itself still honours the
+ * `propertiesInDocument` setting, so a user who has asked to see raw properties
+ * keeps seeing them.
+ */
+export function ensurePropertiesExtension(editMode: ExtractedEditMode): void {
+  if (editMode.propertiesExtension || !editMode.getDynamicExtensions) return;
+
+  const { sourceMode } = editMode;
+  editMode.sourceMode = false;
+  try {
+    editMode.getDynamicExtensions();
+  } finally {
+    editMode.sourceMode = sourceMode;
+  }
+}
+
+/**
  * Get base extensions that would be used in a standard MarkdownEditor
  */
 
@@ -114,6 +158,7 @@ export function getBaseMarkdownExtensions(app: App) {
     let extensions: Extension[] = [];
 
     if (editMode) {
+      ensurePropertiesExtension(editMode);
       if (editMode.propertiesExtension) {
         try {
           extensions.push(editMode.propertiesExtension);

@@ -8,11 +8,14 @@ import {
   executeCommandById,
   expectReviewOn,
   finalizeArticleImport,
+  importArticle,
   leafSnapshot,
   openNote,
   reviewTitle,
   selectParagraph,
+  setDefaultEditingMode,
   setPluginSetting,
+  toggleReviewSourceMode,
   waitForReviewItem,
 } from './helpers';
 import {
@@ -808,5 +811,56 @@ test.describe('Card embeds', () => {
       );
       expect(layout!.tint).not.toBe('rgba(0, 0, 0, 0)');
     }).toPass({ timeout: 30_000 });
+  });
+});
+
+test.describe('Frontmatter', () => {
+  /** The note the import writes `ir-id` and `tags` into, as a quick-switcher prefix. */
+  const SOURCE_NOTE =
+    'sources/Memorizing a programming language using spaced repetition';
+
+  /**
+   * Assert the note's properties are off screen while its body is on it.
+   *
+   * `ir-id` is written by the import and lives only in the note's YAML, so it
+   * appears in the editor exactly when the frontmatter is being rendered. The
+   * line count is what keeps that from passing vacuously on an editor that has
+   * not drawn anything yet.
+   */
+  async function expectFrontmatterHidden(window: Page) {
+    const editor = window.locator('.ir-review-scroller');
+    await expect(editor).toBeVisible();
+    await expect(editor.locator('.cm-line').first()).toBeVisible();
+    await expect(editor).not.toContainText('ir-id');
+  }
+
+  test('stays hidden when the vault opens editors in source mode', async () => {
+    // Obsidian builds the extension that hides frontmatter only on an editor
+    // that is in live preview, so with this setting the plugin used to have
+    // none to install and review rendered the raw YAML.
+    await setDefaultEditingMode(window, 'source');
+
+    await importArticle(window, SOURCE_NOTE);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await waitForReviewItem(window);
+
+    await expectFrontmatterHidden(window);
+  });
+
+  test('stays hidden across a switch into source mode and back', async () => {
+    await setDefaultEditingMode(window, 'live-preview');
+
+    await importArticle(window, SOURCE_NOTE);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await waitForReviewItem(window);
+    await expectFrontmatterHidden(window);
+
+    await toggleReviewSourceMode(window);
+    await expectFrontmatterHidden(window);
+
+    await toggleReviewSourceMode(window);
+    await expectFrontmatterHidden(window);
   });
 });
