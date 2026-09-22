@@ -15,7 +15,6 @@ import {
 } from 'vitest';
 import {
   type Holder,
-  IDLE_TIMEOUT_MS,
   ITEM_TABLES,
   type ItemLocation,
   type ItemTable,
@@ -29,7 +28,6 @@ import {
   isStranded,
   resolveMoves,
   scanForMovedNotes,
-  yieldToHost,
 } from './moved-note-scan';
 
 // #region HELPERS
@@ -59,6 +57,14 @@ class TestRepository extends SQLJSRepository {
   }
 
   protected override async save() {}
+
+  /**
+   * The real transaction, still reachable once a spy has taken over the
+   * instance's own `transaction`: `super` resolves past it on the prototype.
+   */
+  openTransaction<T>(work: () => T | Promise<T>): Promise<T> {
+    return super.transaction(work);
+  }
 }
 
 function insertItem(repo: TestRepository, row: StoredRow) {
@@ -398,6 +404,20 @@ function wire(world: ScanWorld, onYield?: (count: number) => void) {
       now: fakeClock(),
     },
   };
+}
+
+/**
+ * Run `sql` in the window the write guard covers: after the scan has read which
+ * rows hold its targets, before its transaction opens. The only moment a live
+ * handler can take a path the plan was already made against.
+ */
+function raceTheWrite(run: ReturnType<typeof wire>, sql: string) {
+  run.transaction.mockImplementationOnce(
+    <T>(work: () => T | Promise<T>): Promise<T> => {
+      run.repo.mutate(sql);
+      return run.repo.openTransaction(work);
+    }
+  );
 }
 
 const article = (id: string, reference: string): StoredRow => ({
@@ -1266,6 +1286,63 @@ describe('scanForMovedNotes', () => {
     ]);
   });
 
+  it('holds back only the move whose target another row took before the write', async () => {
+    const run = wire(
+      handWorld(
+        [
+          article('a', 'one.md'),
+          article('c', 'three.md'),
+          article('d', 'four.md'),
+        ],
+        [
+          { path: 'two.md', frontmatter: { 'ir-id': 'a' } },
+          { path: 'three.md', frontmatter: { 'ir-id': 'c' } },
+          { path: 'five.md', frontmatter: { 'ir-id': 'd' } },
+        ]
+      )
+    );
+    raceTheWrite(run, `UPDATE article SET reference = 'two.md' WHERE id = 'c'`);
+
+    const moved = await scanForMovedNotes(run.deps);
+
+    // d still lands; a is held back rather than taking every move down with it
+    expect(moved).toEqual([
+      { table: 'article', id: 'd', from: 'four.md', to: 'five.md' },
+    ]);
+    expect(
+      readLocations(run.repo).map((row) => [row.id, row.reference])
+    ).toEqual([
+      ['a', 'one.md'],
+      ['c', 'two.md'],
+      ['d', 'five.md'],
+    ]);
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('reached these paths first'),
+      [{ table: 'article', id: 'a', from: 'one.md', to: 'two.md' }]
+    );
+  });
+
+  it('never leaves a held-back row parked on a spot no note can be at', async () => {
+    const run = wire(
+      handWorld(
+        [article('a', 'one.md'), article('c', 'three.md')],
+        [
+          { path: 'two.md', frontmatter: { 'ir-id': 'a' } },
+          { path: 'three.md', frontmatter: { 'ir-id': 'c' } },
+        ]
+      )
+    );
+    raceTheWrite(run, `UPDATE article SET reference = 'two.md' WHERE id = 'c'`);
+
+    await scanForMovedNotes(run.deps);
+
+    // A `NOT EXISTS` guard on the landing statement alone would strand `a`
+    // here, live and pointing at its parking spot
+    for (const row of readLocations(run.repo)) {
+      expect(row.reference).not.toMatch(/^\/ir-/);
+    }
+  });
+
   it('warns about notes it could not follow for a reason other than being gone', async () => {
     const run = wire(
       handWorld(
@@ -1491,46 +1568,5 @@ describe('scanForMovedNotes', () => {
 
     expect(moved).toHaveLength(1);
     expect(console.warn).not.toHaveBeenCalled();
-  });
-});
-
-describe('yieldToHost', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.useRealTimers();
-  });
-
-  const settled = async (promise: Promise<void>) => {
-    let done = false;
-    void promise.then(() => (done = true));
-    await Promise.resolve();
-    await Promise.resolve();
-    return done;
-  };
-
-  it('waits for an idle period, or the idle timeout, where the host has them', async () => {
-    const idle = vi.fn<(cb: () => void, options: object) => number>();
-    vi.stubGlobal('window', { requestIdleCallback: idle });
-
-    const yielded = yieldToHost();
-
-    expect(await settled(yielded)).toBe(false);
-    expect(idle).toHaveBeenCalledWith(expect.any(Function), {
-      timeout: IDLE_TIMEOUT_MS,
-    });
-    idle.mock.calls[0][0]();
-    expect(await settled(yielded)).toBe(true);
-  });
-
-  it('falls back to the next macrotask where the host has no idle callbacks', async () => {
-    vi.useFakeTimers();
-    // Node, like WebKit, has no requestIdleCallback
-    vi.stubGlobal('window', globalThis);
-
-    const yielded = yieldToHost();
-
-    expect(await settled(yielded)).toBe(false);
-    await vi.advanceTimersByTimeAsync(0);
-    expect(await settled(yielded)).toBe(true);
   });
 });

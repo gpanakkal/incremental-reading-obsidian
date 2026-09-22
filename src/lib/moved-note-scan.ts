@@ -4,6 +4,7 @@ import {
   type TFile,
   type Vault,
 } from 'obsidian';
+import { yieldToHost } from './pacing';
 import type { SQLiteRepository } from './types';
 
 export const ITEM_TABLES = ['article', 'snippet', 'srs_card'] as const;
@@ -227,26 +228,8 @@ export const PAGE_SIZE = 500;
 /** How long the scan works before handing the thread back. */
 export const SLICE_MS = 5;
 
-/** Longest a slice waits for the host to go idle before running anyway. */
-export const IDLE_TIMEOUT_MS = 100;
-
 /** Most paths named in one `IN (…)`, well under SQLite's parameter limit. */
 const PARAM_BATCH = 500;
-
-/**
- * Let everything else waiting on the thread go first: Obsidian's own work, the
- * editor, other plugins. Waits for an idle period, or the next macrotask where
- * the host has none — WebKit, so iOS, lacks `requestIdleCallback`.
- */
-export function yieldToHost(): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof window.requestIdleCallback === 'function') {
-      window.requestIdleCallback(() => resolve(), { timeout: IDLE_TIMEOUT_MS });
-    } else {
-      window.setTimeout(resolve, 0);
-    }
-  });
-}
 
 /**
  * Hand the thread back once a slice's worth of work has piled up, and report
@@ -449,41 +432,75 @@ export async function scanForMovedNotes({
 
   // Guarded on the row being where the scan read it: a live handler may have
   // moved or deleted it since, and its word is newer
-  await repo.transaction(async () => {
+  const landed = await repo.transaction(async () => {
+    // Holders were read before the transaction opened. Read them again inside
+    // it, where nothing else can commit, and hold back any move whose target
+    // some other row has taken meanwhile. Landing on a taken path fails
+    // `UNIQUE`, and that one failure would roll back every other move with it;
+    // held back here, the rest still land and this one is followed next scan.
+    //
+    // The check cannot move to the parking pass below, which is what a plain
+    // `NOT EXISTS` on the landing statement amounts to: a row that then failed
+    // to land would be left sitting on its parking spot, pointing at a path no
+    // note will ever be at. Nothing may park unless it is known to have
+    // somewhere to go.
+    const taken = await holdersOf(
+      repo,
+      relocations.map(({ to }) => to)
+    );
+    const ours = new Set([...relocations, ...evicted].map(rowKey));
+    const landing = relocations.filter(({ to }) =>
+      (taken.get(to) ?? []).every((holder) => ours.has(rowKey(holder)))
+    );
+    const wanted = new Set(landing.map(({ to }) => to));
+
     // Tombstones step aside first: nothing can land on a path one still names.
     // Guarded on it being the same deleted row at the same path, so a restore
     // that got in first keeps both its row and the reference it was given.
     for (const row of evicted) {
+      if (!wanted.has(row.reference)) continue;
       await repo.mutate(
         `UPDATE ${row.table} SET reference = $1
          WHERE id = $2 AND reference = $3 AND deleted = 1`,
         [evictedSpot(row), row.id, row.reference]
       );
     }
-    for (const move of relocations) {
+    for (const move of landing) {
       await repo.mutate(
         `UPDATE ${move.table} SET reference = $1
          WHERE id = $2 AND reference = $3 AND deleted = 0`,
         [parkingSpot(move), move.id, move.from]
       );
     }
-    for (const move of relocations) {
+    for (const move of landing) {
       await repo.mutate(
         `UPDATE ${move.table} SET reference = $1
          WHERE id = $2 AND reference = $3`,
         [move.to, move.id, parkingSpot(move)]
       );
     }
+    return landing;
   });
+
+  const held = new Set(landed.map(rowKey));
+  const beaten = relocations.filter((move) => !held.has(rowKey(move)));
+  if (beaten.length > 0) {
+    console.warn(
+      'Incremental Reading - another row reached these paths first:',
+      beaten
+    );
+  }
   // Bookkeeping rather than a problem to act on: the row, its schedule and its
   // history are all untouched, and only a path it had no note at is gone. Said
   // at debug level so support can see it happened without nagging the user
   // about a repair they neither asked for nor need to think about.
-  if (evicted.length > 0) {
+  const landedOn = new Set(landed.map(({ to }) => to));
+  const freed = evicted.filter((row) => landedOn.has(row.reference));
+  if (freed.length > 0) {
     console.debug(
       'Incremental Reading - freed paths held by deleted items:',
-      evicted
+      freed
     );
   }
-  return relocations;
+  return landed;
 }
