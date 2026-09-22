@@ -219,6 +219,14 @@ export interface MutationStatement {
   params?: Primitive[];
 }
 
+/** How {@link SQLiteRepository.bulkMutate} paces a run. */
+export interface BulkMutateOptions {
+  /** How long to keep writing before committing a chunk and yielding. */
+  sliceMs?: number;
+  /** The clock {@link sliceMs} is measured on. */
+  now?: () => number;
+}
+
 export interface SQLiteRepository {
   query(query: string, params?: Primitive[]): RowTypes[] | Promise<RowTypes[]>;
   /** @throws if the statement fails */
@@ -231,15 +239,15 @@ export interface SQLiteRepository {
    */
   transaction<T>(work: () => T | Promise<T>): Promise<T>;
   /**
-   * Run `statements` in order, `chunkSize` at a time, each chunk in its own
-   * transaction, yielding to the event loop after each. A failing statement
+   * Run `statements` in order, a slice of work at a time, each chunk in its own
+   * transaction, handing the thread back between them. A failing statement
    * rolls back its chunk and stops the run; earlier chunks stay committed.
-   * @throws {RangeError} if `chunkSize` is not a positive integer
+   * @throws {RangeError} if `sliceMs` is not a positive, finite number
    * @throws whatever the failing statement throws
    */
   bulkMutate(
     statements: readonly MutationStatement[],
-    chunkSize?: number
+    options?: BulkMutateOptions
   ): Promise<void>;
   _execSql(
     query: string,

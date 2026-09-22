@@ -1,4 +1,4 @@
-import { BATCHED_MUTATION_CHUNK_SIZE } from '#/lib/constants';
+import { BATCHED_MUTATION_SLICE_MS } from '#/lib/constants';
 import type { DataChangeEvent, MutationStatement, NoteType } from '#/lib/types';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
@@ -377,14 +377,24 @@ const rowWritesArb = (constraints: { minLength?: number } = {}) =>
   );
 
 /** Every valid chunk size, or `undefined` to take the default. */
-const chunkSizeArb = fc.option(
+const sliceMsArb = fc.option(
   fc.oneof(
     fc.maxSafeNat().map((n) => n + 1),
-    // integral doubles past the safe range still pass `Number.isInteger`
     fc.double({ min: 2 ** 53, noNaN: true, noDefaultInfinity: true })
   ),
   { nil: undefined }
 );
+
+/**
+ * `bulkMutate` options that make a chunk exactly `sliceMs` statements, so a run
+ * is reproducible and the chunk boundaries a test expects are the ones it gets.
+ * The clock advances a tick a reading, and the budget is read once as a chunk
+ * opens and once after each statement in it.
+ */
+function pace(sliceMs?: number) {
+  let tick = 0;
+  return { sliceMs, now: () => tick++ };
+}
 
 /** Statements that fail however they are run. */
 const failingStatementArb = fc.constantFrom<MutationStatement>(
@@ -935,69 +945,57 @@ describe('bulkMutate', () => {
 
   it('writes every statement in order, however they are chunked', async () => {
     await fc.assert(
-      fc.asyncProperty(
-        rowWritesArb(),
-        chunkSizeArb,
-        async (writes, chunkSize) => {
-          const { repo } = await makeBulkRepo();
-          try {
-            await repo.bulkMutate(writes.map(insertStatement), chunkSize);
+      fc.asyncProperty(rowWritesArb(), sliceMsArb, async (writes, sliceMs) => {
+        const { repo } = await makeBulkRepo();
+        try {
+          await repo.bulkMutate(writes.map(insertStatement), pace(sliceMs));
 
-            expect(idsByTable(repo)).toEqual(expectedIdsByTable(writes));
-          } finally {
-            repo.db?.close();
-          }
+          expect(idsByTable(repo)).toEqual(expectedIdsByTable(writes));
+        } finally {
+          repo.db?.close();
         }
-      )
+      })
     );
   });
 
   // Each save exports the whole database and rewrites its file, so saving per
   // statement turns a large import into hundreds of full rewrites.
-  it('saves once per chunk of at most chunkSize statements', async () => {
+  it('saves once per chunk of at most a slice of statements', async () => {
     await fc.assert(
-      fc.asyncProperty(
-        rowWritesArb(),
-        chunkSizeArb,
-        async (writes, chunkSize) => {
-          const { repo, writeBinary } = await makeBulkRepo();
-          try {
-            await repo.bulkMutate(writes.map(insertStatement), chunkSize);
+      fc.asyncProperty(rowWritesArb(), sliceMsArb, async (writes, sliceMs) => {
+        const { repo, writeBinary } = await makeBulkRepo();
+        try {
+          await repo.bulkMutate(writes.map(insertStatement), pace(sliceMs));
 
-            const size = chunkSize ?? BATCHED_MUTATION_CHUNK_SIZE;
-            expect(writeBinary).toHaveBeenCalledTimes(
-              chunksOf(writes, size).length
-            );
-          } finally {
-            repo.db?.close();
-          }
+          const size = sliceMs ?? BATCHED_MUTATION_SLICE_MS;
+          expect(writeBinary).toHaveBeenCalledTimes(
+            chunksOf(writes, size).length
+          );
+        } finally {
+          repo.db?.close();
         }
-      )
+      })
     );
   });
 
   it("notifies listeners as each chunk commits, with that chunk's rows", async () => {
     await fc.assert(
-      fc.asyncProperty(
-        rowWritesArb(),
-        chunkSizeArb,
-        async (writes, chunkSize) => {
-          const { repo } = await makeBulkRepo();
-          try {
-            const events: DataChangeEvent[] = [];
-            repo.onDataChange((event) => events.push(event));
+      fc.asyncProperty(rowWritesArb(), sliceMsArb, async (writes, sliceMs) => {
+        const { repo } = await makeBulkRepo();
+        try {
+          const events: DataChangeEvent[] = [];
+          repo.onDataChange((event) => events.push(event));
 
-            await repo.bulkMutate(writes.map(insertStatement), chunkSize);
+          await repo.bulkMutate(writes.map(insertStatement), pace(sliceMs));
 
-            const size = chunkSize ?? BATCHED_MUTATION_CHUNK_SIZE;
-            expect(events).toEqual(
-              chunksOf(writes, size).flatMap(insertEventsFor)
-            );
-          } finally {
-            repo.db?.close();
-          }
+          const size = sliceMs ?? BATCHED_MUTATION_SLICE_MS;
+          expect(events).toEqual(
+            chunksOf(writes, size).flatMap(insertEventsFor)
+          );
+        } finally {
+          repo.db?.close();
         }
-      )
+      })
     );
   });
 
@@ -1010,19 +1008,19 @@ describe('bulkMutate', () => {
           fc.tuple(fc.constant(writes), fc.nat({ max: writes.length }))
         ),
         failingStatementArb,
-        chunkSizeArb,
-        async ([writes, failAt], failing, chunkSize) => {
+        sliceMsArb,
+        async ([writes, failAt], failing, sliceMs) => {
           const { repo, writeBinary } = await makeBulkRepo();
           try {
             const events: DataChangeEvent[] = [];
             repo.onDataChange((event) => events.push(event));
             const statements = writes.map(insertStatement);
             statements.splice(failAt, 0, failing);
-            const size = chunkSize ?? BATCHED_MUTATION_CHUNK_SIZE;
+            const size = sliceMs ?? BATCHED_MUTATION_SLICE_MS;
             // every chunk that ends before the failing statement
             const committed = writes.slice(0, Math.floor(failAt / size) * size);
 
-            const error = await repo.bulkMutate(statements, chunkSize).then(
+            const error = await repo.bulkMutate(statements, pace(sliceMs)).then(
               () => null,
               (e: unknown) => e
             );
@@ -1058,7 +1056,7 @@ describe('bulkMutate', () => {
         { query: INSERT_ARTICLE_SQL, params: articleRow('a3') },
         { query: 'INSERT INTO nonexistent_table VALUES (1)' },
       ],
-      2
+      pace(2)
     );
     setTimeout(() => {
       idsSeenBetweenChunks = articleIds(repo);
@@ -1070,20 +1068,20 @@ describe('bulkMutate', () => {
     expect(articleIds(repo).sort()).toEqual(['a1', 'a2', 'unrelated']);
   });
 
-  it('rejects a chunk size that is not a positive integer, writing nothing', async () => {
+  it('rejects a slice that is not a positive, finite number, writing nothing', async () => {
     await fc.assert(
       fc.asyncProperty(
         rowWritesArb(),
         fc.oneof(
-          fc.integer({ max: 0 }),
-          // fractions, NaN, ±Infinity, -0
-          fc.double().filter((n) => !(Number.isInteger(n) && n >= 1))
+          // zero, negatives and -0
+          fc.double({ max: 0, noNaN: true, noDefaultInfinity: true }),
+          fc.constantFrom(NaN, Infinity, -Infinity)
         ),
-        async (writes, chunkSize) => {
+        async (writes, sliceMs) => {
           const { repo, writeBinary } = await makeBulkRepo();
           try {
             const error = await repo
-              .bulkMutate(writes.map(insertStatement), chunkSize)
+              .bulkMutate(writes.map(insertStatement), pace(sliceMs))
               .then(
                 () => null,
                 (e: unknown) => e
@@ -1091,8 +1089,8 @@ describe('bulkMutate', () => {
 
             expect(error).toBeInstanceOf(RangeError);
             // names the argument and the value it refused
-            expect((error as RangeError).message).toContain('chunkSize');
-            expect((error as RangeError).message).toContain(String(chunkSize));
+            expect((error as RangeError).message).toContain('sliceMs');
+            expect((error as RangeError).message).toContain(String(sliceMs));
             expect(idsByTable(repo)).toEqual(expectedIdsByTable([]));
             expect(writeBinary).not.toHaveBeenCalled();
           } finally {
@@ -1101,6 +1099,44 @@ describe('bulkMutate', () => {
         }
       )
     );
+  });
+
+  // Every yield costs a frame or more, and nothing is waiting on the thread
+  // once the last chunk has committed
+  it('hands the thread back between chunks, but not after the last', async () => {
+    const { repo } = await makeBulkRepo();
+    try {
+      let macrotaskRan = false;
+      setTimeout(() => (macrotaskRan = true), 0);
+
+      await repo.bulkMutate(
+        [insertStatement({ table: 'article', id: 'a1' })],
+        pace(1)
+      );
+
+      // One statement is one chunk: a trailing yield would have let the timer
+      // above go first
+      expect(macrotaskRan).toBe(false);
+    } finally {
+      repo.db?.close();
+    }
+  });
+
+  // A budget is a duration, so unlike the statement count it replaced it has no
+  // reason to be a whole number
+  it('accepts a fractional slice', async () => {
+    const { repo } = await makeBulkRepo();
+    try {
+      await repo.bulkMutate([insertStatement({ table: 'article', id: 'a1' })], {
+        sliceMs: 0.5,
+      });
+
+      expect(idsByTable(repo)).toEqual(
+        expectedIdsByTable([{ table: 'article', id: 'a1' }])
+      );
+    } finally {
+      repo.db?.close();
+    }
   });
 });
 

@@ -7,12 +7,14 @@ import {
 import { migrations } from '#/db/migrations';
 import {
   BACKUP_DIRECTORY,
-  BATCHED_MUTATION_CHUNK_SIZE,
+  BATCHED_MUTATION_SLICE_MS,
   DATA_DIRECTORY,
   LOG_DIRECTORY,
   TABLE_NAMES,
 } from '#/lib/constants';
+import { yieldToHost } from '#/lib/pacing';
 import type {
+  BulkMutateOptions,
   DataChangeEvent,
   DataChangeListener,
   DataChangeOp,
@@ -30,8 +32,11 @@ import {
   type Plugin,
   type TAbstractFile,
 } from 'obsidian';
-import type { BindParams, Database, QueryExecResult } from 'sql.js';
-import initSqlJs from 'sql.js';
+import initSqlJs, {
+  type BindParams,
+  type Database,
+  type QueryExecResult,
+} from 'sql.js';
 // @ts-ignore - WASM imported as base64 string via custom esbuild plugin.
 // Points at the binary shipped with the installed sql.js package so the bundled
 // WASM stays in lockstep with the sql.js version in node_modules.
@@ -283,34 +288,47 @@ export class SQLJSRepository implements SQLiteRepository {
    * of `chunkSize` statements commits, saves and notifies once, then yields a
    * macrotask so other work runs between chunks, outside any transaction.
    *
+   * Chunks are measured in time, not statements: a statement costs a small
+   * fraction of a millisecond while a yield costs a frame or more, so a chunk
+   * of a fixed few statements would spend the run waiting rather than writing.
+   *
    * Called inside an open {@link transaction}, the chunks join it instead, so
    * nothing commits until it does and the yields hold it open.
    * @param statements run in order; do any async work before calling, since
    * none can happen inside the transactions
-   * @param chunkSize most statements per transaction
-   * @throws {RangeError} if `chunkSize` is not a positive integer, before
+   * @param options `sliceMs` is how long to keep writing before committing a
+   * chunk and yielding; `now` is the clock it is measured on
+   * @throws {RangeError} if `sliceMs` is not a positive, finite number, before
    * anything is written
    * @throws whatever the first failing statement throws, after rolling back
    * its chunk. Earlier chunks stay committed; later ones never run.
    */
   async bulkMutate(
     statements: readonly MutationStatement[],
-    chunkSize: number = BATCHED_MUTATION_CHUNK_SIZE
+    {
+      sliceMs = BATCHED_MUTATION_SLICE_MS,
+      now = () => performance.now(),
+    }: BulkMutateOptions = {}
   ): Promise<void> {
-    if (!Number.isInteger(chunkSize) || chunkSize < 1) {
+    if (!Number.isFinite(sliceMs) || sliceMs <= 0) {
       throw new RangeError(
-        `chunkSize must be a positive integer, got ${chunkSize}`
+        `sliceMs must be a positive, finite number, got ${sliceMs}`
       );
     }
 
-    for (let start = 0; start < statements.length; start += chunkSize) {
-      const chunk = statements.slice(start, start + chunkSize);
+    let next = 0;
+    while (next < statements.length) {
+      const started = now();
       await this.transaction(() => {
-        for (const { query, params } of chunk) this.mutate(query, params);
+        while (next < statements.length) {
+          const { query, params } = statements[next++];
+          this.mutate(query, params);
+          if (now() - started >= sliceMs) break;
+        }
       });
-      // The plugin's own `window`, not `activeWindow`: a popout closing
-      // mid-run would drop its timers and leave the run suspended for good.
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      // Nothing after the last chunk is waiting on the thread being free, so
+      // only the gaps between chunks are paid for
+      if (next < statements.length) await yieldToHost();
     }
   }
 
