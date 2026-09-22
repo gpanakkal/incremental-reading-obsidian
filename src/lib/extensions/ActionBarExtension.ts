@@ -100,7 +100,7 @@ function createActionBarPanel(
     dom.className = 'ir-action-bar ir-action-bar-panel';
 
     // Initial render
-    renderActionBar(view, dom, noteType);
+    let teardown = renderActionBar(view, dom, noteType);
 
     return {
       dom,
@@ -109,6 +109,7 @@ function createActionBarPanel(
         dom.parentElement?.classList.add('ir-action-bar-host');
       },
       destroy() {
+        teardown();
         const host = dom.parentElement;
         dom.remove();
         if (host && !host.querySelector('.ir-action-bar')) {
@@ -130,21 +131,28 @@ function createActionBarPanel(
           const { file } = info;
           if (!file) return;
 
-          renderActionBar(update.view, dom, noteType);
+          teardown();
+          teardown = renderActionBar(update.view, dom, noteType);
         }
       },
     };
   };
 }
 
+/** Teardown for a bar that subscribed to nothing. */
+const noTeardown = () => {};
+
 /**
  * Render the action bar contents based on context.
+ *
+ * @returns a teardown for whatever the rendered bar subscribed to. Call it
+ * before re-rendering into the same container, and when the bar goes away.
  */
 function renderActionBar(
   view: EditorView,
   container: HTMLElement,
   noteType: NoteType
-) {
+): () => void {
   const state = view.state.field(actionBarStateField);
   const plugin = view.state.facet(irPluginFacet);
 
@@ -153,10 +161,10 @@ function renderActionBar(
   if (state.isReviewMode) {
     // Review mode: use callbacks from ReviewContext
     renderReviewModeActions(view, container, noteType, state);
-  } else {
-    // Standalone mode: basic actions via ReviewManager
-    renderStandaloneModeActions(view, container, plugin);
+    return noTeardown;
   }
+  // Standalone mode: basic actions via ReviewManager
+  return renderStandaloneModeActions(view, container, plugin);
 }
 
 /**
@@ -175,10 +183,10 @@ function renderReviewModeActions(
     if (state.showAnswer) {
       // Grade buttons
       const grades = [
-        { label: '🔁 Again', grade: 1 },
-        { label: '👎 Hard', grade: 2 },
-        { label: '👍 Good', grade: 3 },
-        { label: '✅ Easy', grade: 4 },
+        { label: 'ðŸ” Again', grade: 1 },
+        { label: 'ðŸ‘Ž Hard', grade: 2 },
+        { label: 'ðŸ‘ Good', grade: 3 },
+        { label: 'âœ… Easy', grade: 4 },
       ];
 
       for (const { label, grade } of grades) {
@@ -273,24 +281,37 @@ function renderReviewModeActions(
 /**
  * Render actions for standalone mode (normal Obsidian tabs).
  * Can be called from both CodeMirror panel (edit mode) and reading mode DOM injection.
+ *
+ * @returns a teardown that stops watching the item. Call it whenever this DOM
+ * is discarded or re-rendered, or the bar goes on reacting to writes for a
+ * button that is no longer on screen.
  */
 export function renderStandaloneActionBarDOM(
   file: TFile,
   plugin: IncrementalReadingPlugin,
   container: HTMLElement
-): void {
+): () => void {
   const { reviewManager } = plugin;
-  if (!reviewManager) return;
+  if (!reviewManager) return noTeardown;
 
   // Create dismiss button with loading state, then fetch actual status
   const dismissToggleBtn = createButton('Loading...', async () => {});
   dismissToggleBtn.disabled = true;
   container.appendChild(dismissToggleBtn);
 
+  let disposed = false;
+  let unsubscribe: (() => void) | null = null;
+  const dispose = () => {
+    disposed = true;
+    unsubscribe?.();
+    unsubscribe = null;
+  };
+
   // Fetch dismissed status and update button
   void (async () => {
     try {
       const item = await reviewManager.getReviewItemFromFile(file);
+      if (disposed) return;
 
       if (!item) {
         dismissToggleBtn.textContent = 'Not in database';
@@ -304,6 +325,29 @@ export function renderStandaloneActionBarDOM(
 
       updateButtonLabel(item.data.dismissed);
       dismissToggleBtn.disabled = false;
+
+      // This DOM outlives the single read above. The edit-mode bar is a
+      // CodeMirror panel built once per editor and kept across switches to
+      // reading mode and back, so a label painted from one read is whatever
+      // was true when the editor was created â€” or when this button was last
+      // clicked. Anything else that dismisses or restores the item (the
+      // reading-mode bar, review, the queue table, a command) leaves it
+      // describing the wrong action, while the click handler below re-reads
+      // and does the right one. Re-read on every write touching this row so
+      // the label keeps naming the action a click would actually take.
+      const watchedId = item.data.id;
+      unsubscribe = reviewManager.repo.onDataChange((event) => {
+        if (!event.ids.includes(watchedId)) return;
+        void (async () => {
+          const current = await reviewManager.getReviewItemFromFile(file);
+          // A row that has gone (deleted, or the note untagged) leaves the
+          // last known label alone: the click handler re-reads before acting
+          // and reports for itself, which beats a button relabelled by a
+          // lookup that found nothing.
+          if (disposed || !current) return;
+          updateButtonLabel(current.data.dismissed);
+        })();
+      });
 
       // Set up click handler with current item reference
       dismissToggleBtn.onclick = async (e) => {
@@ -355,20 +399,24 @@ export function renderStandaloneActionBarDOM(
     }
   });
   container.appendChild(openInReviewBtn);
+
+  return dispose;
 }
 
 /**
  * Render actions for standalone mode (normal Obsidian tabs) from a CodeMirror EditorView.
+ *
+ * @returns the bar's teardown, or a no-op when there was nothing to render.
  */
 function renderStandaloneModeActions(
   view: EditorView,
   container: HTMLElement,
   plugin: IncrementalReadingPlugin | null
-) {
-  if (!plugin) return;
+): () => void {
+  if (!plugin) return noTeardown;
   const { info } = Obsidian.getFileInfoFromState(view.state);
-  if (!info?.file) return;
-  renderStandaloneActionBarDOM(info.file, plugin, container);
+  if (!info?.file) return noTeardown;
+  return renderStandaloneActionBarDOM(info.file, plugin, container);
 }
 
 /**
@@ -472,7 +520,7 @@ function createPriorityInput(
 /**
  * ViewPlugin that resolves the note type once per file and writes it into
  * actionBarStateField via setNoteTypeEffect. Keeping this out of compute()
- * ensures compute stays a pure state→value function with no side effects.
+ * ensures compute stays a pure stateâ†’value function with no side effects.
  */
 const noteTypePlugin = ViewPlugin.define((view) => {
   let destroyed = false;
@@ -532,7 +580,7 @@ const noteTypePlugin = ViewPlugin.define((view) => {
  * Facet for conditionally showing the action bar panel.
  * Only shows for files with IR tags when NOT in review mode.
  * In review mode, the React ActionBar component handles the UI instead.
- * Pure state→panel derivation; all async work lives in noteTypePlugin.
+ * Pure stateâ†’panel derivation; all async work lives in noteTypePlugin.
  */
 const actionBarPanelFacet = showPanel.compute(
   [actionBarStateField],

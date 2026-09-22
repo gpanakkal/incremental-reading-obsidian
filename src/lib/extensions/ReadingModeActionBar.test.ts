@@ -79,7 +79,7 @@ function makePlugin(leaves: FakeLeaf[] = []) {
 
 describe('registerReadingModeActionBar', () => {
   beforeEach(() => {
-    vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => {});
+    vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => () => {});
     vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
   });
 
@@ -142,7 +142,7 @@ describe('registerReadingModeActionBar', () => {
     it.each(['source', 'live', '', 'other'])(
       'does not mount for mode %j (not "preview")',
       (mode) => {
-        vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => {});
+        vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => () => {});
         vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue('article');
         const leaf = makeMarkdownLeaf({ mode });
         const plugin = makePlugin([leaf]);
@@ -204,7 +204,7 @@ describe('registerReadingModeActionBar', () => {
     it.each(['article', 'snippet', 'card'] as const)(
       'mounts for NoteType %j',
       async (noteType) => {
-        vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => {});
+        vi.spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM').mockImplementation(() => () => {});
         vi.spyOn(ObsidianHelpers, 'getNoteType').mockResolvedValue(noteType);
         const containerEl = makeContainerEl();
         const leaf = makeMarkdownLeaf({ containerEl });

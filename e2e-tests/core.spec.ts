@@ -1,6 +1,7 @@
 import test, {
   expect,
   type ElectronApplication,
+  type Locator,
   type Page,
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
@@ -455,6 +456,38 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'incremental-reading:learn');
     await window.locator('css=#begin-review-button').click();
     await expect(window.locator('.ir-title')).toBeVisible();
+  });
+
+  test('keeps the note pane label current after a change made in reading mode', async () => {
+    // The edit-mode bar is a CodeMirror panel, built once and kept while the
+    // leaf switches to reading mode and back — so a label read once at build
+    // time describes whatever was true then, not what a click would now do.
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+
+    const editBar = window.locator('css=.markdown-source-view .ir-action-bar');
+    const readingBar = window.locator('css=.ir-reading-mode-bar');
+    // `exact`, or "Dismiss" also matches the "Un-dismiss" it turns into.
+    const dismiss = (bar: Locator) =>
+      bar.getByRole('button', { name: 'Dismiss', exact: true });
+    const unDismiss = (bar: Locator) =>
+      bar.getByRole('button', { name: 'Un-dismiss', exact: true });
+
+    await dismiss(editBar).click();
+    await expect(unDismiss(editBar)).toBeVisible();
+
+    await executeCommandById(window, 'markdown:toggle-preview');
+    await unDismiss(readingBar).click();
+    await expect(dismiss(readingBar)).toBeVisible();
+
+    await executeCommandById(window, 'markdown:toggle-preview');
+
+    await expect(dismiss(editBar)).toBeVisible();
+    await expect(unDismiss(editBar)).toHaveCount(0);
   });
 
   test('Can change priority from the review pane', async () => {

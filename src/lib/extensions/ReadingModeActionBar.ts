@@ -6,6 +6,7 @@ import { renderStandaloneActionBarDOM } from './ActionBarExtension';
 
 class ReadingModeActionBarController {
   private barEl: HTMLElement | null = null;
+  private teardown: (() => void) | null = null;
 
   constructor(
     private readonly leaf: WorkspaceLeaf,
@@ -37,12 +38,14 @@ class ReadingModeActionBarController {
     this.unmount();
     const bar = createDiv();
     bar.className = 'ir-action-bar ir-action-bar-panel ir-reading-mode-bar';
-    renderStandaloneActionBarDOM(file, this.plugin, bar);
+    this.teardown = renderStandaloneActionBarDOM(file, this.plugin, bar);
     container.prepend(bar);
     this.barEl = bar;
   }
 
   unmount(): void {
+    this.teardown?.();
+    this.teardown = null;
     this.barEl?.remove();
     this.barEl = null;
   }
