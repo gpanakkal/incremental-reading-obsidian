@@ -1,3 +1,4 @@
+import { EditorSelection } from '@codemirror/state';
 import { EditorView, ViewPlugin } from '@codemirror/view';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import { irPluginFacet } from './irPluginFacet';
@@ -51,9 +52,45 @@ export const scrollPositionExtension = ViewPlugin.define(
       // viewport. `precise: false` makes posAtCoords clamp to the nearest
       // position (never null), so a point above or below the content resolves
       // to the document start or end rather than failing.
+      //
+      // Hit-testing a point that close to the edge can answer with a position
+      // the reader has already scrolled past: the empty lines between
+      // paragraphs hold no text node of their own to hit, so a point inside
+      // one can resolve to the end of the line above it, and font metrics
+      // decide which side of a row boundary the sample falls on. The same
+      // scroll position then answers differently per platform — Ubuntu CI
+      // restored a line higher than Windows and macOS, on every attempt.
+      // Restore puts the row an anchor sits on back at the top edge, so
+      // keeping one of those answers drags a whole line of already-read text
+      // back on screen every time the reader returns to the item. Walk down a
+      // visual line at a time until the anchor is a position that is really
+      // showing; `moveVertically` steps by rendered rows, so it lands inside a
+      // wrapped paragraph rather than skipping to the next one.
       const topVisibleOffset = (): number => {
         const rect = view.scrollDOM.getBoundingClientRect();
-        return view.posAtCoords({ x: rect.left + 1, y: rect.top + 1 }, false);
+        const edge = rect.top + 1;
+        /**
+         * Whether the row holding `pos` has scrolled off the top edge.
+         *
+         * False for a position with no coordinates: an unrendered position
+         * cannot be placed, so the hit test's answer is all there is to go on.
+         */
+        const hasScrolledPast = (pos: number): boolean => {
+          const coords = view.coordsAtPos(pos);
+          return !!coords && coords.bottom <= edge;
+        };
+
+        let pos = view.posAtCoords({ x: rect.left + 1, y: edge }, false);
+        while (hasScrolledPast(pos)) {
+          const next = view.moveVertically(
+            EditorSelection.cursor(pos),
+            true
+          ).head;
+          // The last row has nowhere below it to step to.
+          if (next <= pos) break;
+          pos = next;
+        }
+        return pos;
       };
 
       // Save scroll position handler
