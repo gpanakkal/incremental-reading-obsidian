@@ -110,12 +110,15 @@ export const CURRENT_ITEM_REFETCH_TIME = 1000 * 5;
 
 export const MAX_SQL_QUERY_PARAMS = 999;
 /**
- * Statements per transaction in `SQLiteRepository.bulkMutate`. Each chunk
- * costs one full database export and file write, so larger chunks save fewer
- * times; smaller ones keep each transaction brief and yield to other work
- * sooner.
+ * How long `SQLiteRepository.bulkMutate` spends writing before committing a
+ * chunk and handing the thread back. Each chunk costs one full database export
+ * and file write, and each yield costs a frame or more, so a longer slice saves
+ * and waits fewer times; a shorter one keeps each transaction brief and lets
+ * other work run sooner. Measured in time rather than statements because a
+ * statement costs a small fraction of a millisecond: a chunk of a fixed few
+ * would spend the run waiting rather than writing.
  */
-export const BATCHED_MUTATION_CHUNK_SIZE = 20;
+export const BATCHED_MUTATION_SLICE_MS = 8;
 
 export const QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE = 20;
 /**
