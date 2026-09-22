@@ -160,7 +160,7 @@ const typesToReviewArb: fc.Arbitrary<Partial<Record<NoteType, true>>> = fc
 
 /**
  * Stage the state a filter change reads — which types are on, and what is on
- * screen — and hand back the plugin, the actions, and a stubbed `getNext`.
+ * screen — and hand back the plugin, the actions, and a stubbed `_getNext`.
  *
  * The plugin's `dispatch` is a spy, so the real store never moves and state the
  * action reads has to be put in place here rather than dispatched. Mocks are
@@ -187,7 +187,7 @@ function wireTypeFilter({
   // Stubbed rather than left to run: the real advance dispatches and reaches
   // the session tracker, and its dispatches would land in the same spy the
   // filter's own dispatch is read out of.
-  const getNext = vi.spyOn(actions, 'getNext').mockImplementation(() => {});
+  const getNext = vi.spyOn(actions, '_getNext').mockImplementation(() => {});
   return { plugin, actions, getNext };
 }
 
@@ -417,7 +417,7 @@ describe('Actions.skipItem — dispatch', () => {
     const plugin = makePlugin();
     const actions = new Actions(plugin);
     actions.skipItem(makeReviewItem('my-article'));
-    // skipItem calls dispatch(addSeenId) directly, then getNext() calls dispatch(resetCurrentItem)
+    // skipItem calls dispatch(addSeenId) directly, then _getNext() calls dispatch(resetCurrentItem)
     expect(plugin.store.dispatch).toHaveBeenCalledTimes(2);
   });
 });
@@ -431,7 +431,7 @@ describe('Actions.dismissItem — dispatch', () => {
     vi.restoreAllMocks();
   });
 
-  it('calls store.dispatch (getNext) when the dismissed item is the current item', async () => {
+  it('calls store.dispatch (_getNext) when the dismissed item is the current item', async () => {
     vi.spyOn(store, 'getState').mockReturnValue({
       currentItemId: 'item-1',
     } as never);
@@ -461,7 +461,7 @@ describe('Actions.unDismissItem — dispatch', () => {
     vi.restoreAllMocks();
   });
 
-  it('calls store.dispatch (getNext) when currentItemId is null', async () => {
+  it('calls store.dispatch (_getNext) when currentItemId is null', async () => {
     vi.spyOn(store, 'getState').mockReturnValue({
       currentItemId: null,
     } as never);
@@ -541,7 +541,7 @@ describe('Actions — undo stack notifications', () => {
     // The entry is already off the stack by then, so subscribers must not be
     // left reading an entry that is no longer there.
     const actions = new Actions(makePlugin());
-    actions.pushUndo({
+    actions._pushUndo({
       item: makeReviewItem('my-article'),
       description: 'doing something reversible',
       undo: () => {
@@ -568,7 +568,7 @@ describe('Actions — undo stack notifications', () => {
   });
 });
 
-describe('Actions.getNext', () => {
+describe('Actions._getNext', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -581,7 +581,7 @@ describe('Actions.getNext', () => {
     Object.assign(plugin, { sessionTracker: { finish } });
     const actions = new Actions(plugin);
 
-    actions.getNext();
+    actions._getNext();
 
     expect(finish).toHaveBeenCalledTimes(1);
     expect(plugin.store.dispatch).toHaveBeenCalled();
@@ -593,7 +593,7 @@ describe('Actions.getNext', () => {
     const plugin = makePlugin();
     const actions = new Actions(plugin);
 
-    expect(() => actions.getNext()).not.toThrow();
+    expect(() => actions._getNext()).not.toThrow();
     expect(plugin.store.dispatch).toHaveBeenCalled();
   });
 
@@ -609,7 +609,7 @@ describe('Actions.getNext', () => {
     vi.mocked(invalidateCurrentItemQuery).mockClear();
     const actions = new Actions(makePlugin());
 
-    actions.getNext();
+    actions._getNext();
 
     expect(invalidateCurrentItemQuery).toHaveBeenCalledTimes(1);
   });
@@ -623,7 +623,7 @@ describe('Actions.getNext', () => {
     vi.mocked(invalidateCurrentItemQuery).mockClear();
     const actions = new Actions(makePlugin());
 
-    actions.getNext();
+    actions._getNext();
 
     expect(invalidateCurrentItemQuery).not.toHaveBeenCalled();
   });

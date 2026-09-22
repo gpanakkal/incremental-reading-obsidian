@@ -719,7 +719,7 @@ describe('startItemCacheEviction', () => {
           const next = makeReviewItem(nextId);
           const stop = startItemCacheEviction();
           try {
-            // Review leaves the item before asking for the next, as `getNext`
+            // Review leaves the item before asking for the next, as `_getNext`
             // does: an advance only moves a review that is waiting for one.
             store.dispatch(setCurrentItemId(null));
             await currentItemQueryFn(makeDueManager(next), null);

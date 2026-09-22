@@ -563,7 +563,7 @@ describe('SessionTracker', () => {
   });
 
   it('coalesces with the advance when the item dismissed is on screen', async () => {
-    // Dismissing from inside review ends on `getNext`, so the next item names
+    // Dismissing from inside review ends on `_getNext`, so the next item names
     // the pointer before the clear lands: one write, as on every other advance.
     const { tracker, saved, stop } = makeTracker();
 
