@@ -1,12 +1,30 @@
-import type { SVGAttributes } from 'preact';
+import { CornerPlus, IconSvg, type IconProps } from './IconSvg';
 
 /**
- * Flash-card-with-a-gear icon, for the "card" item type and the create-card
- * action.
+ * Lucide's 8-spoke gear cluster, reused across `calendar-cog`, `file-cog` and
+ * friends, unchanged and centred on (18, 18).
+ */
+function Gear() {
+  return (
+    <>
+      <path d="m15.228 16.852-.923-.383" />
+      <path d="m15.228 19.148-.923.383" />
+      <path d="m16.47 14.305.382.923" />
+      <path d="m16.852 20.772-.383.924" />
+      <path d="m19.148 15.228.383-.923" />
+      <path d="m19.53 21.696-.382-.924" />
+      <path d="m20.772 16.852.924-.383" />
+      <path d="m20.772 19.148.924.383" />
+      <circle cx="18" cy="18" r="3" />
+    </>
+  );
+}
+
+/**
+ * Flash-card-with-a-gear icon, for the "card" item type.
  *
  * Lucide has no `card-cog`, so this composes one: the card is a portrait
- * rounded rect, and the gear is the 8-spoke cluster Lucide reuses across
- * `calendar-cog`, `file-cog` and friends, unchanged and centred on (18, 18).
+ * rounded rect, and the gear is Lucide's own (see `Gear`).
  *
  * Two details are load-bearing at the 16-18px the queue table and action bar
  * actually render at:
@@ -19,44 +37,32 @@ import type { SVGAttributes } from 'preact';
  *   corner under the gear's centre, so half the gear breaks past the card's
  *   edge instead of reading as noise inside it, and leaves the whole glyph
  *   optically the same size as the `FileText` and `Scissors` it sits beside.
- *
- * Rendered attributes mirror lucide-react's own output, including the `lucide`
- * class that `styles.css` sizes icons through, so this drops in wherever a
- * Lucide icon does. It intentionally does not import from `lucide-react`:
- * component tests mock that module wholesale (its `useContext` resolves
- * against a second Preact copy), which would leave `createLucideIcon`
- * undefined here.
- *
- * No `aria-label`: the icon is unlabelled by design, since its container
- * carries the label (see `queueCellTitles` and `ButtonWithIcon`).
  */
-export function CardCog(props: SVGAttributes<SVGSVGElement>) {
+export function CardCog(props: IconProps) {
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width={24}
-      height={24}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="lucide lucide-card-cog"
-      aria-hidden="true"
-      {...props}
-    >
+    <IconSvg name="card-cog" {...props}>
       <path d="M4 6v12" />
       <path d="M18 13.5V5a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5.5" />
-      <path d="m15.228 16.852-.923-.383" />
-      <path d="m15.228 19.148-.923.383" />
-      <path d="m16.47 14.305.382.923" />
-      <path d="m16.852 20.772-.383.924" />
-      <path d="m19.148 15.228.383-.923" />
-      <path d="m19.53 21.696-.382-.924" />
-      <path d="m20.772 16.852.924-.383" />
-      <path d="m20.772 19.148.924.383" />
-      <circle cx="18" cy="18" r="3" />
-    </svg>
+      <Gear />
+    </IconSvg>
+  );
+}
+
+/**
+ * `CardCog` with a plus in the corner, for the create-card action, so it
+ * reads differently from the type filter's plain `CardCog` beside it.
+ *
+ * The card's top-right corner gives way to the plus: its top edge stops at
+ * x13 and its right edge survives only as the stub between plus and gear.
+ */
+export function CardCogPlus(props: IconProps) {
+  return (
+    <IconSvg name="card-cog-plus" {...props}>
+      <path d="M4 6v12" />
+      <path d="M13 3H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5.5" />
+      <path d="M18 11v2.5" />
+      <Gear />
+      <CornerPlus />
+    </IconSvg>
   );
 }

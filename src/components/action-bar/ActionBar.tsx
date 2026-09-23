@@ -1,4 +1,5 @@
-import { CardCog } from '#/components/icons/CardCog';
+import { CardCogPlus } from '#/components/icons/CardCog';
+import { ScissorsPlus } from '#/components/icons/ScissorsPlus';
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { useLeafHistory } from '#/hooks/useLeafHistory';
 import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
@@ -24,7 +25,6 @@ import {
   EllipsisVertical,
   Eye,
   House,
-  Scissors,
   SkipForward,
   Undo2,
 } from 'lucide-react';
@@ -339,7 +339,7 @@ function ExtractSnippetAction() {
         await actions.createSnippet();
       }}
     >
-      <Scissors />
+      <ScissorsPlus />
     </ButtonWithIcon>
   );
 }
@@ -354,7 +354,7 @@ function CreateCardAction() {
         await actions.createCard();
       }}
     >
-      <CardCog />
+      <CardCogPlus />
     </ButtonWithIcon>
   );
 }
