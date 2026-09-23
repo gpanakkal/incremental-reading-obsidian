@@ -358,8 +358,66 @@ const EXIT_TIMEOUT_MS = 10_000;
  * Without a bound here, that hang is absorbed by Playwright's *worker* teardown
  * timeout instead, which kills the worker and discards the results of every test
  * it had already run. Capping it converts a lost worker into one failed test.
+ *
+ * A backstop only. The routine reason a close used to reach it — Obsidian never
+ * quitting on macOS — is fixed in `quitWhenWindowsClose`, so reaching this now
+ * means something is genuinely wrong.
  */
 const CLOSE_TIMEOUT_MS = 20_000;
+
+/**
+ * Upper bound on installing the quit patch below.
+ *
+ * The patch exists to make the close that follows resolve; it must not become a
+ * new way for teardown to hang. A main process that cannot answer this cannot
+ * answer `app.close()` either, and that case is already handled — by a bounded
+ * close and a kill.
+ */
+const QUIT_PATCH_TIMEOUT_MS = 2_000;
+
+/**
+ * Make Obsidian quit when its last window closes, for the duration of teardown.
+ *
+ * Without this, `app.close()` never resolves on macOS — every time, not
+ * occasionally. `app.quit()` is not one atomic operation here. Playwright's
+ * close handler evaluates it while the vault window is still open, so Electron
+ * takes the `WindowList::CloseAllWindows()` branch; Obsidian's own `close`
+ * handler lets the renderer run `beforeunload` and flush state first, and
+ * Electron reads that deferral as the close being cancelled, which clears the
+ * internal `is_quitting_` flag. The first `app.quit()` is abandoned there —
+ * traced on Windows, `before-quit` fires and `will-quit` never does.
+ *
+ * What actually ends the process is the window closing ~200ms later and
+ * `app.quit()` being called a *second* time, now with an empty window list,
+ * which is the branch that reaches shutdown. The only caller making that second
+ * call is Obsidian's own handler:
+ *
+ *     app.on('window-all-closed', () => { isDarwin || app.quit() })
+ *
+ * On macOS that short-circuits, nothing re-enters the quit, and the app sits
+ * there with zero windows until the close timeout kills it — 20s per test, ~13
+ * minutes of a 21-minute suite. Re-adding the quit gives the second call back.
+ *
+ * Installed at teardown rather than at launch so a test body still sees the
+ * platform's real window lifecycle: on macOS an app legitimately outlives its
+ * last window, and only teardown wants that to be fatal. Registering it here
+ * also stacks harmlessly on Windows and Linux, where Obsidian's handler runs
+ * first and `Browser::Quit()` returns early for the already-quitting app.
+ *
+ * Best-effort, like the launch patches: an app that cannot be reached over CDP
+ * is one the bounded close and kill below will deal with anyway.
+ */
+async function quitWhenWindowsClose(app: ElectronApplication) {
+  try {
+    await app.evaluate(({ app: electronApp }) => {
+      electronApp.on('window-all-closed', () => electronApp.quit());
+    });
+  } catch {
+    // The app is gone, mid-crash, or never finished booting. Nothing to patch,
+    // and throwing here would replace the test's real failure with a teardown
+    // error pointing at this helper.
+  }
+}
 
 /** Resolves to `true` on timeout, `false` if the promise settled in time. */
 async function raceTimeout(promise: Promise<unknown>, ms: number) {
@@ -410,6 +468,10 @@ export async function closeElectron(app: ElectronApplication) {
     return;
   }
 
+  // Must precede close(): on macOS this is what lets the close resolve at all,
+  // and the quit it hooks is provoked by the close itself.
+  await raceTimeout(quitWhenWindowsClose(app), QUIT_PATCH_TIMEOUT_MS);
+
   // Register 'exit' listener before calling close() so we don't miss the event.
   const exited = new Promise<void>((resolve) => {
     if (proc.exitCode !== null) {
@@ -432,9 +494,10 @@ export async function closeElectron(app: ElectronApplication) {
   if (closeHung) {
     console.warn(
       `[closeElectron] app.close() did not resolve within ` +
-        `${CLOSE_TIMEOUT_MS}ms; killing the process. This usually means the ` +
-        `main process is blocked in a native modal (e.g. Obsidian's error ` +
-        `box). stderr: ${lastStderr(app) || '<none>'}`
+        `${CLOSE_TIMEOUT_MS}ms; killing the process. Either the main process ` +
+        `is blocked in a native modal (e.g. Obsidian's error box), or it is ` +
+        `alive with no windows and nothing left to quit it — see ` +
+        `quitWhenWindowsClose. stderr: ${lastStderr(app) || '<none>'}`
     );
     killProcessTree(proc);
   }
