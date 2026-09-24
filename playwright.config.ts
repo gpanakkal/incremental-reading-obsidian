@@ -25,6 +25,15 @@ export default defineConfig({
       name: 'e2e',
       testDir: './e2e-tests',
       testMatch: '*.spec.ts',
+      testIgnore: 'mobile.spec.ts',
+    },
+    {
+      // The Obsidian Android app on an emulator or device over adb. Needs one
+      // attached (`adb devices`) and the APK from
+      // scripts/setup-obsidian-android.sh.
+      name: 'e2e-android',
+      testDir: './e2e-tests',
+      testMatch: 'mobile.spec.ts',
     },
     {
       name: 'e2e-setup',

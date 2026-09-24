@@ -90,3 +90,78 @@ jobs:
           name: e2e-results-${{ matrix.os }}
           path: e2e-tests/test-results/
           retention-days: 7
+
+  # The real Obsidian Android app on an emulator. There is no iOS job: the iOS
+  # app is App Store-only, and the iOS Simulator runs only builds compiled for
+  # it, which Obsidian does not publish.
+  e2e-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ANDROID_API_LEVEL: 34
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+
+      - name: Download Obsidian APK
+        run: bash ./scripts/setup-obsidian-android.sh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Hardware acceleration; without it the x86_64 emulator is too slow to
+      # boot inside the job's timeout.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Cache AVD
+        id: avd-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-${{ env.ANDROID_API_LEVEL }}-google_apis-x86_64
+
+      # First run on a cache miss: boot once, snapshot, and save that, so later
+      # runs start from the snapshot instead of a cold boot.
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ env.ANDROID_API_LEVEL }}
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Run e2e (Android)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ env.ANDROID_API_LEVEL }}
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: pnpm run e2e:android
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-results-android
+          path: e2e-tests/test-results/
+          retention-days: 7

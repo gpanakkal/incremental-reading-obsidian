@@ -13,6 +13,7 @@
 		"e2e:setup": "pnpm run build && pnpm exec playwright test --project e2e-setup",
 		"e2e": "pnpm run build && cross-env E2E_CLEANUP=1 E2E_HEADLESS=1 pnpm exec playwright test --project e2e",
 		"e2e:headed": "pnpm run build && cross-env E2E_CLEANUP=1 E2E_HEADLESS=0 pnpm exec playwright test --project e2e",
+		"e2e:android": "pnpm run build && cross-env E2E_CLEANUP=1 pnpm exec playwright test --project e2e-android",
 		"e2e:ui": "pnpm run build && cross-env E2E_CLEANUP=1 pnpm exec playwright test --ui --project e2e",
 		"e2e:keep-vaults": "pnpm run build && cross-env E2E_CLEANUP=0 E2E_HEADLESS=1 pnpm exec playwright test --project e2e",
 		"e2e:codegen": "pnpm exec concurrently -k --timings \"pnpm run dev\" \"pnpm exec wait-on main.js && pnpm exec tsx e2e-tests/setup/codegen.ts\"",

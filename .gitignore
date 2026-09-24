@@ -24,6 +24,7 @@ data.json
 
 # E2E Tests
 .obsidian-unpacked
+.obsidian-android
 e2e-tests/setup/test-vault/.obsidian/plugins
 e2e-tests/test-results/
 e2e-tests/test-vaults/
