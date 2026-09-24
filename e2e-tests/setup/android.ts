@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { App } from 'obsidian';
 import {
+  isPageClosedError,
   projectRoot,
   sourceVaultPath,
   wait,
@@ -29,11 +30,11 @@ export const OBSIDIAN_PACKAGE = 'md.obsidian';
 export const apkPath = path.resolve('./.obsidian-android/Obsidian.apk');
 
 /**
- * Shared storage, where Obsidian looks for a vault named in an
- * `obsidian://open?vault=` link. It scans only the top level, so vaults go
- * directly under it.
+ * Shared storage, where the test vaults go. Spelled out rather than `/sdcard`
+ * because Obsidian is handed this path too, and it compares vault paths as
+ * strings.
  */
-const DEVICE_STORAGE = '/sdcard';
+const DEVICE_STORAGE = '/storage/emulated/0';
 
 /** Plugin files pushed into each vault, fresh from the build. */
 const PLUGIN_FILES = ['main.js', 'manifest.json', 'styles.css'];
@@ -44,6 +45,12 @@ const PLUGIN_FILES = ['main.js', 'manifest.json', 'styles.css'];
  * app.js before the vault even starts indexing.
  */
 const VAULT_BOOT_TIMEOUT_MS = 90_000;
+/**
+ * Cold starts to try before giving up. The first start after an install can
+ * tear its WebView down a few seconds in; the page Playwright attached to then
+ * closes for good, and only a new process has a new one.
+ */
+const LAUNCH_ATTEMPTS = 3;
 /** How long the app's old WebView gets to disappear after a force-stop. */
 const STOP_TIMEOUT_MS = 10_000;
 const OPTIONAL_ELEMENT_TIMEOUT_MS = 5_000;
@@ -103,8 +110,8 @@ export async function connectAndroidDevice() {
  *
  * `-g` grants every runtime permission up front, so no system dialog opens over
  * the app. "All files access" is not a runtime permission, though — it is an
- * app op, granted separately — and without it Obsidian cannot list shared
- * storage, so an `obsidian://open?vault=` link finds no vault there.
+ * app op, granted separately — and without it Obsidian refuses to open a
+ * vault by absolute path, which is how `openAndroidVault` opens every one.
  */
 export async function installObsidian(device: AndroidDevice) {
   try {
@@ -193,12 +200,8 @@ function hasObsidianWebView(device: AndroidDevice) {
 }
 
 /**
- * Cold-start Obsidian straight into the named vault and return its WebView as
- * a page, once the vault has booted and the plugin has loaded.
- *
- * The vault is opened with an `obsidian://open?vault=` link rather than through
- * the vault chooser: on launch Obsidian looks for a folder by that name in
- * shared storage and opens it, which skips every screen the chooser has.
+ * Cold-start Obsidian into the vault `pushVaultCopy` named and return its
+ * WebView as a page, once the vault has booted and the plugin has loaded.
  *
  * `onConsole` sees the WebView's console from the moment Playwright attaches,
  * which is before the plugin loads, so a plugin that fails to load says why.
@@ -208,13 +211,39 @@ export async function openAndroidVault(
   name: string,
   onConsole?: (line: string) => void
 ) {
-  await stopObsidian(device);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await launchIntoVault(device, name, onConsole);
+    } catch (error) {
+      if (!isPageClosedError(error) || attempt >= LAUNCH_ATTEMPTS) throw error;
+    }
+  }
+}
 
-  const uri = `obsidian://open?vault=${encodeURIComponent(name)}`;
-  await device.shell(
-    `am start -W -a android.intent.action.VIEW -d ${shellQuote(uri)} ` +
-      OBSIDIAN_PACKAGE
-  );
+/**
+ * One cold start. The vault is opened by selecting it from inside the page,
+ * because neither way in from outside works for a folder Obsidian has never
+ * seen:
+ *
+ * - An `obsidian://open?vault=` link only searches the app's own storage and
+ *   the external folders already opened once, by name.
+ * - The vault chooser's "Open folder as vault" goes through Android's native
+ *   folder picker, which is outside the WebView and out of Playwright's reach.
+ *
+ * What Obsidian does on every start is reopen the vault stored under
+ * `mobile-selected-vault` in localStorage, and a value with a `/` in it is an
+ * absolute path on the device — the same thing the folder picker stores. Set
+ * that and reload, and the start-up after the reload opens the vault. These
+ * are the internals of Obsidian's mobile start-up (read from the APK's
+ * app.js), not a documented API.
+ */
+async function launchIntoVault(
+  device: AndroidDevice,
+  name: string,
+  onConsole?: (line: string) => void
+) {
+  await stopObsidian(device);
+  await device.shell(`am start -W -n ${OBSIDIAN_PACKAGE}/.MainActivity`);
 
   const webView = await device.webView(
     { pkg: OBSIDIAN_PACKAGE },
@@ -226,6 +255,20 @@ export async function openAndroidVault(
       onConsole(`[${message.type()}] ${message.text()}`);
     });
   }
+
+  // The app's own origin, where its localStorage lives, rather than whatever
+  // blank page the WebView holds before the app loads.
+  await window.waitForFunction(
+    () => location.protocol === 'http:' && document.readyState === 'complete',
+    undefined,
+    { timeout: VAULT_BOOT_TIMEOUT_MS, polling: POLL_INTERVAL_MS }
+  );
+  await window.evaluate((vaultPath) => {
+    localStorage.setItem('mobile-selected-vault', vaultPath);
+    // Deferred so this evaluate returns before the page goes away under it.
+    setTimeout(() => location.reload(), 0);
+  }, `${DEVICE_STORAGE}/${name}`);
+
   await waitForLayoutReady(window, VAULT_BOOT_TIMEOUT_MS);
 
   await trustVaultPlugins(window);
