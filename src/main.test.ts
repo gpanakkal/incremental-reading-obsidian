@@ -8,6 +8,7 @@ import IncrementalReadingPlugin from '#/main';
 // stub's recorded `items`, which the real class does not expose.
 import { Menu, type MenuItem } from '#/test/__mocks__/obsidian';
 import ReviewView from '#/views/ReviewView';
+import fc from 'fast-check';
 import type { TFile, WorkspaceLeaf } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -33,17 +34,28 @@ function makeReceiver({
   advanced = false,
   file = makeFile() as TFile | null,
   imported = true,
+  frontmatter = undefined as Record<string, unknown> | undefined,
 } = {}) {
   const importArticle = vi.fn();
+  const goToContext = vi.fn().mockResolvedValue(undefined);
   const receiver = {
     settings: { showAdvancedImportMenuItems: advanced },
     // Truthy stands for a plugin that finished loading; the menu is suppressed
     // until then, since importing needs the manager.
     reviewManager: imported ? {} : undefined,
-    app: { vault: { getFileByPath: vi.fn(() => file) } },
+    app: {
+      vault: { getFileByPath: vi.fn(() => file) },
+      // The cached frontmatter of `file`, and of nothing else.
+      metadataCache: {
+        getFileCache: vi.fn((f: TFile) =>
+          f === file && frontmatter !== undefined ? { frontmatter } : null
+        ),
+      },
+    },
     importArticle,
+    actions: { goToContext },
   };
-  return { receiver, importArticle, file };
+  return { receiver, importArticle, goToContext, file };
 }
 
 /**
@@ -340,6 +352,45 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
     const menu = raiseMenu(receiver);
 
     expect(menu.items).toHaveLength(0);
+  });
+
+  it("offers the context of a note that carries an item's id, and of no other", () => {
+    fc.assert(
+      fc.property(
+        fc.option(
+          fc.dictionary(
+            fc.constantFrom('ir-id', 'tags', 'source', 'other'),
+            fc.oneof(fc.string(), fc.integer(), fc.constant(null))
+          ),
+          { nil: undefined }
+        ),
+        fc.boolean(),
+        (frontmatter, withLeaf) => {
+          const { receiver } = makeReceiver({ frontmatter });
+
+          const menu = raiseMenu(receiver, withLeaf ? otherLeaf() : undefined);
+
+          const entry = menu.items.find((i) => i.title === 'Go to context');
+          if (typeof frontmatter?.['ir-id'] === 'string') {
+            expect(entry?.section).toBe('incremental-reading');
+            expect(entry?.icon).toBe('lucide-locate');
+          } else {
+            expect(entry).toBeUndefined();
+          }
+        }
+      )
+    );
+  });
+
+  it('goes to the context of the note the menu was raised on', () => {
+    const { receiver, goToContext, file } = makeReceiver({
+      frontmatter: { 'ir-id': 'abc' },
+    });
+    const menu = raiseMenu(receiver);
+
+    click(menu.items.find((i) => i.title === 'Go to context'));
+
+    expect(goToContext).toHaveBeenCalledExactlyOnceWith(file);
   });
 });
 

@@ -1,5 +1,6 @@
 import { EditorSelection } from '@codemirror/state';
 import { EditorView, ViewPlugin } from '@codemirror/view';
+import { clearPositioned, wasPositioned } from '../ephemeral-position';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import { irPluginFacet } from './irPluginFacet';
 
@@ -38,6 +39,10 @@ export const scrollPositionExtension = ViewPlugin.define(
     if (!plugin || !file || !app) {
       return { destroy() {} };
     }
+
+    // This is a fresh load of `file`: a mark left from positioning whatever the
+    // view showed before says nothing about where this note should open.
+    clearPositioned(info);
 
     // keep track of if the ViewPlugin was destroyed
     let destroyed = false;
@@ -104,9 +109,13 @@ export const scrollPositionExtension = ViewPlugin.define(
       };
 
       // Restore scroll position after properties widget has rendered.
+      //
+      // Not when the note was opened to a particular place — a link's heading,
+      // a search or backlinks result, go-to-context, back/forward. Obsidian has
+      // already scrolled there by now, and restoring would scroll away from it.
       const restoreScrollPosition = async () => {
         const offset = await reviewManager.loadScrollPosition(file);
-        if (offset === null) return;
+        if (offset === null || wasPositioned(info)) return;
 
         isRestoring = true;
         // Clamp to the live document so a stale or externally-shortened note can

@@ -1,5 +1,6 @@
 import { Actions } from '#/lib/Actions';
 import { CONTENT_TITLE_SLICE_LENGTH } from '#/lib/constants';
+import * as itemContext from '#/lib/item-context';
 import {
   fetchCurrentItem,
   invalidateCurrentItemQuery,
@@ -15,11 +16,12 @@ import {
 import {
   NOTE_TYPES,
   type NoteType,
+  type ReviewArticle,
   type ReviewCard,
   type ReviewItem,
   type ReviewText,
 } from '#/lib/types';
-import { getEndOfDay } from '#/lib/utils';
+import { getContentSlice, getEndOfDay } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import fc from 'fast-check';
 // The Vitest alias points `obsidian` at this same file, so the class imported
@@ -239,6 +241,109 @@ function wireCase(c: ReviewCase, reverse?: () => Promise<void>) {
     dismissed: c.dismissed,
   });
   return { plugin, item, actions: new Actions(plugin) };
+}
+
+/**
+ * A plugin for `goToContext`: the database hands back `item` for any note,
+ * views are registered for `registered` extensions, and whatever gets opened
+ * is recorded.
+ */
+function wireGoToContext({
+  item,
+  registered = ['md'],
+}: {
+  item: ReviewItem | null;
+  registered?: string[];
+}) {
+  const openFile = vi.fn().mockResolvedValue(undefined);
+  const getLeaf = vi.fn(() => ({ openFile }));
+  const openWithDefaultApp = vi.fn();
+  const getReviewItemFromFile = vi.fn().mockResolvedValue(item);
+  const plugin = {
+    reviewManager: { getReviewItemFromFile },
+    app: {
+      workspace: { getLeaf },
+      viewRegistry: {
+        isExtensionRegistered: (ext: string) => registered.includes(ext),
+      },
+      openWithDefaultApp,
+    },
+  } as unknown as IncrementalReadingPlugin;
+  return {
+    plugin,
+    openFile,
+    getLeaf,
+    openWithDefaultApp,
+    getReviewItemFromFile,
+  };
+}
+
+/** A vault file of any extension, some with a view registered, some not. */
+const vaultFileArb = fc
+  .record({
+    name: fc.string(),
+    extension: fc.constantFrom('md', 'pdf', 'canvas', 'html', 'zip', ''),
+  })
+  .map(
+    ({ name, extension }) =>
+      ({
+        basename: name,
+        extension,
+        path: `notes/${name}.${extension}`,
+      }) as unknown as TFile
+  );
+
+/** Every set of extensions a vault could have views registered for. */
+const registeredArb = fc.subarray(['md', 'pdf', 'canvas', 'html', 'zip']);
+
+const contextArb = fc.option(
+  fc.record({
+    file: vaultFileArb,
+    eState: fc.option(
+      fc.record({
+        match: fc.record({
+          content: fc.string(),
+          matches: fc.array(fc.tuple(fc.nat(), fc.nat()), {
+            minLength: 1,
+            maxLength: 1,
+          }),
+        }),
+      }),
+      { nil: null }
+    ),
+  }),
+  { nil: null }
+);
+
+/**
+ * Assert that `file` opened exactly once, the way following a link to it
+ * would: in a new active tab at `eState` if a view takes its extension, else
+ * in the system's default app.
+ */
+function expectOpened(
+  wired: ReturnType<typeof wireGoToContext>,
+  registered: string[],
+  file: TFile,
+  eState: unknown
+) {
+  if (registered.includes(file.extension)) {
+    expect(wired.openWithDefaultApp).not.toHaveBeenCalled();
+    expect(wired.getLeaf).toHaveBeenCalledExactlyOnceWith('tab');
+    expect(wired.openFile).toHaveBeenCalledOnce();
+    expect(wired.openFile.mock.calls[0]).toStrictEqual([
+      file,
+      eState ? { active: true, eState } : { active: true },
+    ]);
+  } else {
+    expect(wired.getLeaf).not.toHaveBeenCalled();
+    expect(wired.openWithDefaultApp).toHaveBeenCalledExactlyOnceWith(file.path);
+  }
+}
+
+/** Assert that nothing was opened anywhere. */
+function expectNothingOpened(wired: ReturnType<typeof wireGoToContext>) {
+  expect(wired.getLeaf).not.toHaveBeenCalled();
+  expect(wired.openWithDefaultApp).not.toHaveBeenCalled();
 }
 
 // #endregion
@@ -1056,5 +1161,139 @@ describe('Actions.toggleReviewType', () => {
     await actions.toggleReviewType('card');
 
     expect(order).toEqual(['fetch', 'dispatch']);
+  });
+});
+
+describe('Actions.goToContext', () => {
+  beforeEach(() => {
+    Notice.reset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Titles long enough, some of them, for the notice to cut them short. */
+  const basenameArb = fc.string({
+    maxLength: CONTENT_TITLE_SLICE_LENGTH * 2,
+    size: 'max',
+  });
+
+  const titleOf = (basename: string) =>
+    getContentSlice(basename, CONTENT_TITLE_SLICE_LENGTH, true);
+
+  it('says a note with no item row is not an item, and opens nothing', async () => {
+    await fc.assert(
+      fc.asyncProperty(basenameArb, async (basename) => {
+        vi.restoreAllMocks();
+        Notice.reset();
+        const file = makeTFile(basename);
+        const resolve = vi.spyOn(itemContext, 'resolveItemContext');
+        const find = vi.spyOn(itemContext, 'findArticleSource');
+        const wired = wireGoToContext({ item: null });
+
+        await new Actions(wired.plugin).goToContext(file);
+
+        expect(wired.getReviewItemFromFile).toHaveBeenCalledWith(file);
+        expect(resolve).not.toHaveBeenCalled();
+        expect(find).not.toHaveBeenCalled();
+        expectNothingOpened(wired);
+        expect(Notice.messages).toEqual([
+          `"${titleOf(basename)}" is not an incremental reading item`,
+        ]);
+      })
+    );
+  });
+
+  it('opens the context of a snippet or card, at its location when known, or says there is none', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<NoteType>('snippet', 'card'),
+        basenameArb,
+        contextArb,
+        registeredArb,
+        async (type, basename, context, registered) => {
+          vi.restoreAllMocks();
+          Notice.reset();
+          const itemFile = makeTFile(basename);
+          const item = {
+            data: { id: 'item-1', type },
+            file: itemFile,
+          } as unknown as ReviewItem;
+          const resolve = vi
+            .spyOn(itemContext, 'resolveItemContext')
+            .mockResolvedValue(context);
+          const wired = wireGoToContext({ item, registered });
+
+          await new Actions(wired.plugin).goToContext(itemFile);
+
+          expect(wired.getReviewItemFromFile).toHaveBeenCalledWith(itemFile);
+          expect(resolve).toHaveBeenCalledWith(
+            wired.plugin.app,
+            wired.plugin.reviewManager,
+            item
+          );
+          if (context === null) {
+            expect(Notice.messages).toEqual([
+              `"${titleOf(basename)}" has no parent or local source to open`,
+            ]);
+            expectNothingOpened(wired);
+            return;
+          }
+          expect(Notice.messages).toEqual([]);
+          expectOpened(wired, registered, context.file, context.eState);
+        }
+      )
+    );
+  });
+
+  it("opens an article's source the way Obsidian opens a vault file, or says why it cannot", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        basenameArb,
+        fc.oneof(
+          vaultFileArb.map((file) => ({ file })),
+          fc.constantFrom(
+            { file: null, reason: 'none' as const },
+            { file: null, reason: 'outside-vault' as const }
+          )
+        ),
+        registeredArb,
+        async (basename, source, registered) => {
+          vi.restoreAllMocks();
+          Notice.reset();
+          const itemFile = makeTFile(basename);
+          const article = {
+            data: { id: 'item-1', type: 'article' },
+            file: itemFile,
+          } as unknown as ReviewArticle;
+          const find = vi
+            .spyOn(itemContext, 'findArticleSource')
+            .mockReturnValue(source);
+          const resolve = vi.spyOn(itemContext, 'resolveItemContext');
+          const wired = wireGoToContext({ item: article, registered });
+
+          await new Actions(wired.plugin).goToContext(itemFile);
+
+          expect(find).toHaveBeenCalledExactlyOnceWith(
+            wired.plugin.app,
+            article
+          );
+          expect(resolve).not.toHaveBeenCalled();
+          if (source.file === null) {
+            const title = titleOf(basename);
+            expect(Notice.messages).toEqual([
+              source.reason === 'none'
+                ? `"${title}" has no source`
+                : `The source of "${title}" is outside the vault`,
+            ]);
+            expectNothingOpened(wired);
+            return;
+          }
+          expect(Notice.messages).toEqual([]);
+          expectOpened(wired, registered, source.file, null);
+        }
+      )
+    );
   });
 });

@@ -13,6 +13,7 @@ import type { SyncPluginInstance } from 'obsidian-typings';
 import databaseSchema from './db/schema.sql';
 import { Actions } from './lib/Actions';
 import { DATABASE_FILE_PATH, PLACEHOLDER_PLUGIN_ICON } from './lib/constants';
+import { recordEphemeralState } from './lib/ephemeral-position';
 import { createIRExtensions } from './lib/extensions';
 import { registerFileExplorerActiveFileClick } from './lib/extensions/FileExplorerActiveFileClick';
 import { registerReadingModeActionBar } from './lib/extensions/ReadingModeActionBar';
@@ -277,6 +278,9 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         // Register global CodeMirror extensions for IR notes
         this.registerEditorExtension(createIRExtensions(this));
+        // Lets scroll restore stand aside for a note opened to a particular
+        // place, which Obsidian tells the view only through this method.
+        this.register(recordEphemeralState(MarkdownView.prototype));
 
         // Register post-processor for reading mode snippet highlights
         registerSnippetHighlightPostProcessor(this);
@@ -646,6 +650,22 @@ export default class IncrementalReadingPlugin extends Plugin {
         });
     });
 
+    // Menus are built synchronously, so the database cannot be asked here. An
+    // `ir-id` is the cached mark of an item's note; `goToContext` checks the
+    // row and says so when there is none, as for a copy of an item's note.
+    if (
+      typeof Obsidian.getFrontMatter(file, this.app)?.['ir-id'] === 'string'
+    ) {
+      menu.addItem((item) => {
+        item
+          .setTitle('Go to context')
+          .setIcon('lucide-locate')
+          .setSection('incremental-reading')
+          .onClick(async () => {
+            await this.actions.goToContext(file);
+          });
+      });
+    }
     if (!this.settings.showAdvancedImportMenuItems) {
       return;
     }

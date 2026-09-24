@@ -152,4 +152,16 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
     // hotkeys: [{ key: '4', modifiers: ['Alt'] }],
     checkCallback: (checking) => gradeCommandCb(checking, Rating.Easy),
   });
+
+  plugin.addCommand({
+    id: 'go-to-context',
+    name: 'Go to context',
+    checkCallback: (checking) => {
+      const file = plugin.getActiveReviewView()?.currentItemFile();
+      if (!file) return false;
+      if (checking) return true;
+
+      void plugin.actions.goToContext(file);
+    },
+  });
 }

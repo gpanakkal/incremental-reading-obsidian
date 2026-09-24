@@ -694,6 +694,16 @@ export default class ReviewView extends FileView {
         })
     );
 
+    menu.addItem((item) =>
+      item
+        .setTitle('Go to context')
+        .setIcon('lucide-locate')
+        .setSection('pane')
+        .onClick(() => {
+          void this.plugin.actions.goToContext(file);
+        })
+    );
+
     // Obsidian's file explorer contributes "Reveal file in navigation" to every
     // `file-menu` it sees, but its handler is guarded by `!Platform.isMobile`,
     // so only desktop gets it. Adding ours unconditionally would list the

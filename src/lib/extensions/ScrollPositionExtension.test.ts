@@ -1,4 +1,9 @@
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import {
+  POSITIONAL_ESTATE_KEYS,
+  isPositionalEState,
+  markEState,
+} from '#/lib/ephemeral-position';
 import { scrollPositionExtension } from '#/lib/extensions/ScrollPositionExtension';
 import { irPluginFacet } from '#/lib/extensions/irPluginFacet';
 import type { StateEffect } from '@codemirror/state';
@@ -1081,5 +1086,77 @@ describe('destroy()', () => {
     // Widget was present on mount — MutationObserver was never created
     expect(() => instance.destroy()).not.toThrow();
     expect(disconnect).not.toHaveBeenCalled();
+  });
+});
+
+describe('restore on mount — note opened to a particular place', () => {
+  /** Ephemeral state as Obsidian hands a view: some positional keys, some not. */
+  const eStateArb = fc.dictionary(
+    fc.constantFrom(
+      ...POSITIONAL_ESTATE_KEYS,
+      'focus',
+      'focusMetadata',
+      'rename'
+    ),
+    fc.oneof(fc.constant(true), fc.integer(), fc.string())
+  );
+
+  it('leaves the scroll to Obsidian when the view was positioned after the note loaded', async () => {
+    await fc.assert(
+      fc.asyncProperty(eStateArb, async (eState) => {
+        vi.restoreAllMocks();
+        const spy = spyScrollIntoView();
+        const info = { file: makeTFile(), app: {} };
+        const view = makeView({
+          info,
+          plugin: makePlugin(makeReviewManager(200)),
+        });
+
+        factory(view as never);
+        // Obsidian hands the view its ephemeral state once the file has loaded,
+        // which is after the extension started and before its deferred restore.
+        markEState(info, eState);
+        await vi.runAllTimersAsync();
+
+        if (isPositionalEState(eState)) {
+          expect(spy).not.toHaveBeenCalled();
+          expect(view.dispatch).not.toHaveBeenCalled();
+        } else {
+          expect(spy).toHaveBeenCalledWith(200, { y: 'start' });
+        }
+        // Saving the reader's scrolling carries on either way.
+        expect(view.scrollDOM.addEventListener).toHaveBeenCalledWith(
+          'scrollend',
+          expect.any(Function),
+          expect.anything()
+        );
+      })
+    );
+  });
+
+  it('restores despite a view positioned for the note it showed before', async () => {
+    const spy = spyScrollIntoView();
+    const info = { file: makeTFile(), app: {} };
+    markEState(info, { match: { content: '', matches: [[0, 1]] } });
+    const view = makeView({
+      info,
+      plugin: makePlugin(makeReviewManager(200)),
+    });
+
+    factory(view as never);
+    await vi.runAllTimersAsync();
+
+    expect(spy).toHaveBeenCalledWith(200, { y: 'start' });
+  });
+
+  it('restores when only some other view was positioned', async () => {
+    const spy = spyScrollIntoView();
+    const view = makeView({ plugin: makePlugin(makeReviewManager(200)) });
+
+    factory(view as never);
+    markEState({}, { subpath: '#Heading' });
+    await vi.runAllTimersAsync();
+
+    expect(spy).toHaveBeenCalledWith(200, { y: 'start' });
   });
 });

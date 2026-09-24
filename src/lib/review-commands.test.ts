@@ -3,7 +3,7 @@
 import type IncrementalReadingPlugin from '#/main';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
-import type { Command } from 'obsidian';
+import type { Command, TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { initReviewCommands } from './review-commands';
 
@@ -79,6 +79,37 @@ function mountedSetup(sourceMode: boolean) {
   return { editor, view, check: toggleSourceCommand(view) };
 }
 
+const GO_TO_CONTEXT_ID = 'go-to-context';
+
+/**
+ * The go-to-context command over a tab showing `itemFile`, and the action it
+ * hands off to.
+ */
+function goToContextSetup({
+  hasView,
+  itemFile,
+}: {
+  hasView: boolean;
+  itemFile: TFile | null;
+}) {
+  const goToContext = vi.fn().mockResolvedValue(undefined);
+  const view = hasView
+    ? ({ currentItemFile: () => itemFile } as unknown as ReviewView)
+    : null;
+  const commands = new Map<string, Command>();
+  const plugin = {
+    addCommand: (command: Command) => commands.set(command.id, command),
+    getActiveReviewView: () => view,
+    actions: { goToContext },
+  } as unknown as IncrementalReadingPlugin;
+  initReviewCommands(plugin);
+  const check = commands.get(GO_TO_CONTEXT_ID)?.checkCallback;
+  if (!check) {
+    throw new Error(`${GO_TO_CONTEXT_ID} registered no checkCallback`);
+  }
+  return { check, goToContext };
+}
+
 // #endregion
 
 afterEach(() => {
@@ -150,6 +181,42 @@ describe('review source mode command', () => {
         expect(view.sourceMode).toBe(flipped ? !sourceMode : sourceMode);
         expect(editor.editMode.sourceMode).toBe(view.sourceMode);
         expect(editor.editMode.toggleSource).toHaveBeenCalledTimes(runs);
+      })
+    );
+  });
+});
+
+describe('go to context command', () => {
+  it('registers under its id and name', () => {
+    const command = wireCommands(null).get(GO_TO_CONTEXT_ID);
+
+    expect(command).toMatchObject({
+      id: GO_TO_CONTEXT_ID,
+      name: 'Go to context',
+    });
+  });
+
+  it("is available only while a review tab shows an item, and hands that item's note to the action", () => {
+    fc.assert(
+      fc.property(fc.boolean(), fc.boolean(), (hasView, hasItemFile) => {
+        const itemFile = hasItemFile ? ({ path: 'a.md' } as TFile) : null;
+        const { check, goToContext } = goToContextSetup({
+          hasView,
+          itemFile,
+        });
+
+        const available = hasView && hasItemFile;
+        expect(check(true)).toBe(available);
+        expect(goToContext).not.toHaveBeenCalled();
+
+        const ran = check(false);
+        if (available) {
+          expect(ran).toBeUndefined();
+          expect(goToContext).toHaveBeenCalledExactlyOnceWith(itemFile);
+        } else {
+          expect(ran).toBe(false);
+          expect(goToContext).not.toHaveBeenCalled();
+        }
       })
     );
   });

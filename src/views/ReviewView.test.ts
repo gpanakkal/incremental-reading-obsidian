@@ -1252,6 +1252,25 @@ describe('ReviewView.onPaneMenu', () => {
 
     expect(revealInFolder).toHaveBeenCalledWith(file);
   });
+
+  it('offers the context of the item the tab is showing', () => {
+    const { view } = makeMenuReceiver();
+
+    const entry = itemTitled(paneMenu(view), 'Go to context');
+
+    expect(entry?.section).toBe('pane');
+    expect(entry?.icon).toBe('lucide-locate');
+  });
+
+  it("goes to the context of the tab's item", () => {
+    const goToContext = vi.fn().mockResolvedValue(undefined);
+    const { view, file } = makeMenuReceiver();
+    Object.assign(view.plugin, { actions: { goToContext } });
+
+    click(itemTitled(paneMenu(view), 'Go to context'));
+
+    expect(goToContext).toHaveBeenCalledExactlyOnceWith(file);
+  });
 });
 
 describe('ReviewView source mode', () => {

@@ -1,8 +1,13 @@
 import type IncrementalReadingPlugin from '#/main';
-import { MarkdownView } from 'obsidian';
+import { MarkdownView, type TFile } from 'obsidian';
 import { type Grade, Rating } from 'ts-fsrs';
 import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from './constants';
 import IRScheduler from './IRScheduler';
+import {
+  type MatchEphemeralState,
+  findArticleSource,
+  resolveItemContext,
+} from './item-context';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import {
   fetchCurrentItem,
@@ -390,6 +395,58 @@ export class Actions {
     );
   };
 
+  /**
+   * Open the location of a snippet's highlight or a card's embed in its parent.
+   * If the highlight or embed doesn't exist, fall back to opening the parent.
+   * If there's no parent and the source is a local link, open the source.
+   *
+   * An article opens its source, if that is a file in the vault.
+   *
+   * Takes the item's note rather than a view, since it is reached from
+   * anywhere a file menu opens — the file explorer included, where no view
+   * shows the note at all. Always opens in a new tab, so wherever it was
+   * reached from stays as it was.
+   */
+  goToContext = async (file: TFile) => {
+    const itemTitle = getContentSlice(
+      file.basename,
+      CONTENT_TITLE_SLICE_LENGTH,
+      true
+    );
+    // Read fresh rather than from the query cache: highlight offsets move as
+    // the parent is edited, and the cached row may predate those edits.
+    const item = await this.plugin.reviewManager.getReviewItemFromFile(file);
+    if (!item) {
+      Obsidian.notify(`"${itemTitle}" is not an incremental reading item`);
+      return;
+    }
+
+    if (isReviewArticle(item)) {
+      const source = findArticleSource(this.plugin.app, item);
+      if (source.file === null) {
+        Obsidian.notify(
+          source.reason === 'none'
+            ? `"${itemTitle}" has no source`
+            : `The source of "${itemTitle}" is outside the vault`
+        );
+        return;
+      }
+      await this._openInNewTab(source.file, null);
+      return;
+    }
+
+    const context = await resolveItemContext(
+      this.plugin.app,
+      this.plugin.reviewManager,
+      item
+    );
+    if (!context) {
+      Obsidian.notify(`"${itemTitle}" has no parent or local source to open`);
+      return;
+    }
+    await this._openInNewTab(context.file, context.eState);
+  };
+
   undo = async () => {
     const actionEntry = this.undoStack.pop();
     if (actionEntry === undefined) {
@@ -481,6 +538,27 @@ export class Actions {
     } else if (!types.includes(currentItem.data.type)) {
       this._getNext();
     }
+  };
+
+  /**
+   * Open a vault file the way following a link to it would, in a new tab: in
+   * whichever view is registered for its extension — markdown, PDF, or one a
+   * core or community plugin adds.
+   *
+   * A file no view is registered for goes straight to the system's default
+   * app. `WorkspaceLeaf.openFile` would do the same, but only after the new
+   * tab exists, leaving it behind empty.
+   */
+  _openInNewTab = async (file: TFile, eState: MatchEphemeralState | null) => {
+    const { app } = this.plugin;
+    if (!app.viewRegistry.isExtensionRegistered(file.extension)) {
+      app.openWithDefaultApp(file.path);
+      return;
+    }
+    await app.workspace.getLeaf('tab').openFile(file, {
+      active: true,
+      ...(eState && { eState }),
+    });
   };
 
   _createEmitter() {
