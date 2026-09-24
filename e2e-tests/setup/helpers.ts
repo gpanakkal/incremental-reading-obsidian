@@ -678,7 +678,7 @@ async function waitForBootedVaultWindow(
 }
 
 /** Whether a Playwright rejection is the page/context/browser having closed. */
-function isPageClosedError(error: unknown) {
+export function isPageClosedError(error: unknown) {
   return (
     error instanceof Error &&
     /Target (page|closed)|has been closed/i.test(error.message)
