@@ -114,7 +114,11 @@ export async function installObsidian(device: AndroidDevice) {
       `No Obsidian APK at ${apkPath}. Run scripts/setup-obsidian-android.sh.`
     );
   }
-  await device.installApk(apkPath, { args: ['-r', '-t', '-g'] });
+  // `-S` must stay last. Playwright streams the APK over stdin and appends its
+  // byte count after these args, which only `-S` consumes; without it the
+  // package manager waits for an end of stdin that never comes, and the
+  // install hangs until the hook times out.
+  await device.installApk(apkPath, { args: ['-r', '-t', '-g', '-S'] });
   await device.shell(
     `appops set --uid ${OBSIDIAN_PACKAGE} MANAGE_EXTERNAL_STORAGE allow`
   );
