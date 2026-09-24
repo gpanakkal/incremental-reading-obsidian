@@ -1866,3 +1866,8 @@ input.ir-queue-page-input {
 }
 
 /* #endregion */
+
+/* Hide the `ir-id` field outside source mode to reduce risk of user edits. */
+.metadata-property[data-property-key='ir-id'] {
+  display: none;
+}
