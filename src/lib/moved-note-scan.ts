@@ -229,7 +229,7 @@ export const PAGE_SIZE = 500;
 export const SLICE_MS = 5;
 
 /** Most paths named in one `IN (…)`, well under SQLite's parameter limit. */
-const PARAM_BATCH = 500;
+export const PARAM_BATCH = 500;
 
 /**
  * Hand the thread back once a slice's worth of work has piled up, and report
@@ -297,7 +297,7 @@ export const evictedSpot = (row: RowId) => `/ir-evicted/${row.id}`;
  * pass, so a path freed by a live handler since reads as free — and so that
  * pass need not keep every row it saw.
  */
-async function holdersOf(
+export async function holdersOf(
   repo: Pick<SQLiteRepository, 'query'>,
   paths: readonly string[]
 ): Promise<Map<string, Holder[]>> {

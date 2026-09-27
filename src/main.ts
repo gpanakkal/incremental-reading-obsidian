@@ -14,7 +14,7 @@ import databaseSchema from './db/schema.sql';
 import { Actions } from './lib/Actions';
 import { DATABASE_FILE_PATH, PLACEHOLDER_PLUGIN_ICON } from './lib/constants';
 import { recordEphemeralState } from './lib/ephemeral-position';
-import { createIRExtensions } from './lib/extensions';
+import { createIRExtensions, IR_ID_LOCKED_NOTICE } from './lib/extensions';
 import { registerFileExplorerActiveFileClick } from './lib/extensions/FileExplorerActiveFileClick';
 import { registerReadingModeActionBar } from './lib/extensions/ReadingModeActionBar';
 import {
@@ -26,6 +26,13 @@ import {
   registerSnippetHighlightPostProcessor,
 } from './lib/extensions/SnippetHighlightPostProcessor';
 import { registerTransclusionHostPostProcessor } from './lib/extensions/TransclusionHostPostProcessor';
+import { createIrIdRepairer } from './lib/ir-id-repair';
+import {
+  type IrIdWarning,
+  createIrIdWarning,
+  IR_ID_WARNING_MESSAGE,
+  persistentNotice,
+} from './lib/ir-id-warning-notice';
 import ReviewManager from './lib/items/ReviewManager';
 import { scanForMovedNotes } from './lib/moved-note-scan';
 import {
@@ -64,6 +71,12 @@ export default class IncrementalReadingPlugin extends Plugin {
   reviewManager!: ReviewManager;
   store!: typeof store;
   actions!: Actions;
+  /**
+   * Explains an edit to `ir-id` that the editor guard refused. Read by
+   * `irIdGuardExtension` through `irPluginFacet`, and unset until the guard is
+   * registered alongside it.
+   */
+  irIdLockedWarning?: IrIdWarning;
 
   MarkdownEditor!: typeof ExtractedMarkdownEditor;
 
@@ -276,6 +289,18 @@ export default class IncrementalReadingPlugin extends Plugin {
           (leaf) => new ReviewView(leaf, this, this.reviewManager)
         );
 
+        // One notice for a held key's worth of refused edits, like the repair
+        // path's warning below but with its own message: nothing was changed
+        // here, where there it already had been. Uncounted, because a count of
+        // key repeats is nothing the user can act on.
+        const lockedWarning = createIrIdWarning({
+          createNotice: persistentNotice,
+          message: IR_ID_LOCKED_NOTICE,
+          showCount: false,
+        });
+        this.irIdLockedWarning = lockedWarning;
+        this.register(() => lockedWarning.dispose());
+
         // Register global CodeMirror extensions for IR notes
         this.registerEditorExtension(createIRExtensions(this));
         // Lets scroll restore stand aside for a note opened to a particular
@@ -307,6 +332,8 @@ export default class IncrementalReadingPlugin extends Plugin {
               .then(() => invalidateCacheOnMatch(file, this.reviewManager));
           })
         );
+
+        this.watchIrIdFrontmatter();
 
         // Delegated handlers for highlights in reading mode.
         // The CM extension's eventHandlers cover edit mode;
@@ -497,6 +524,65 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.register(
       repo.onDataChange((event) => {
         void applyQueueChange(event, this.reviewManager);
+      })
+    );
+  }
+
+  /**
+   * Put back `ir-id` frontmatter that was changed outside the plugin, and bring
+   * a row back when a mangled id is undone. See {@link createIrIdRepairer}.
+   *
+   * Registered here rather than in {@link onload} for two reasons. The repairs
+   * read and write the database, which does not exist until
+   * {@link initReviewManager} has run; and Obsidian presents the whole vault to
+   * the metadata cache before the layout is ready, so by now the first index —
+   * one `changed` per file in the vault — is already over. Anything mangled while
+   * Obsidian was closed is caught on that item's next review fetch, as it was
+   * before this existed.
+   */
+  private watchIrIdFrontmatter() {
+    const { vault, metadataCache } = this.app;
+    // One notice at a time however many notes a single burst damages: a checkout
+    // or a folder arriving over Sync can name a great many at once, and a stack
+    // of identical warnings would be worse than the edit it is warning about
+    const warning = createIrIdWarning({
+      createNotice: persistentNotice,
+      message: IR_ID_WARNING_MESSAGE,
+    });
+    this.register(() => warning.dispose());
+
+    const repairer = createIrIdRepairer({
+      repo: this.reviewManager.repo,
+      vault,
+      metadataCache,
+      // The callback form of `updateFrontMatter`: the object form merges `tags`,
+      // and would fold an `undefined` into the note's tag list here
+      writeIrId: (file, id) =>
+        Obsidian.updateFrontMatter(
+          file,
+          (frontmatter) => {
+            frontmatter['ir-id'] = id;
+          },
+          this.app
+        ),
+      // A row coming back comes back at a new `reference`, and highlights are
+      // cached by note path. The queue table patches itself from the
+      // repository's own change events.
+      onRepaired: async (repairs) => {
+        if (!repairs.some(({ kind }) => kind === 'undelete')) return;
+        await this.reviewManager.refreshAllHighlights();
+        await invalidateCurrentItemQuery();
+      },
+      // Once per damaged note; the warning folds them into the one notice and
+      // counts them off on it
+      onDamage: (paths) => paths.forEach(() => warning.warn()),
+    });
+    this.register(() => repairer.dispose());
+
+    this.registerEvent(
+      this.app.metadataCache.on('changed', (file) => {
+        if (!this.reviewManager) return;
+        repairer.handleChange(file);
       })
     );
   }

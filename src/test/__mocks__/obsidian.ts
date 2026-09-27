@@ -6,6 +6,48 @@
 
 export const normalizePath = (path: string) => path;
 
+/** A frontmatter block opens with `---` on the very first line. */
+const FRONTMATTER_OPEN = /^---(\r?\n)/g;
+/** It closes at a `---` that is followed by a line break or the end of input. */
+const FRONTMATTER_CLOSE = /---(\r?\n|$)/g;
+
+const noFrontMatter = () => ({
+  exists: false,
+  contentStart: 0,
+  from: 0,
+  to: 0,
+  frontmatter: '',
+});
+
+/**
+ * Port of Obsidian's own `getFrontMatterInfo`, deminified from obsidian.asar so
+ * the offsets tests assert on are the ones production computes. The block must
+ * open on the first line; the closing fence is the first `---` that both starts a
+ * line and is followed by a line break or the end of the string. `to` is the
+ * offset of that fence, so `frontmatter` ends with the line break before it, and
+ * `contentStart` is the offset just past the fence's own line break.
+ */
+export function getFrontMatterInfo(content: string) {
+  FRONTMATTER_OPEN.lastIndex = 0;
+  if (!FRONTMATTER_OPEN.exec(content)) return noFrontMatter();
+  const from = FRONTMATTER_OPEN.lastIndex;
+
+  FRONTMATTER_CLOSE.lastIndex = from;
+  let close = FRONTMATTER_CLOSE.exec(content);
+  while (close && content.charAt(close.index - 1) !== '\n') {
+    close = FRONTMATTER_CLOSE.exec(content);
+  }
+  if (!close) return noFrontMatter();
+
+  return {
+    exists: true,
+    frontmatter: content.slice(from, close.index),
+    from,
+    to: close.index,
+    contentStart: FRONTMATTER_CLOSE.lastIndex,
+  };
+}
+
 export class Notice {
   /**
    * Every notice raised since the last {@link Notice.reset}, so tests can

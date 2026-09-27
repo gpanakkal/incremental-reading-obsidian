@@ -2,6 +2,7 @@ import type IncrementalReadingPlugin from '#/main';
 import type { Extension } from '@codemirror/state';
 import { actionBarExtension } from './ActionBarExtension';
 import { answerRevealExtension } from './AnswerRevealExtension';
+import { irIdGuardExtension } from './IrIdGuardExtension';
 import { irPluginFacet } from './irPluginFacet';
 import { scrollPositionExtension } from './ScrollPositionExtension';
 import { snippetHighlightExtension } from './SnippetHighlightExtension';
@@ -19,6 +20,11 @@ export {
   clearAnswerRevealEffect,
   findRevealedAnswerRange,
 } from './AnswerRevealExtension';
+export {
+  IR_ID_LOCKED_NOTICE,
+  irIdGuardExtension,
+  irIdProtectedRange,
+} from './IrIdGuardExtension';
 export { irPluginFacet, isReviewInterfaceFacet } from './irPluginFacet';
 export {
   isExternalSync,
@@ -39,6 +45,9 @@ export function createIRExtensions(
   const extensions: Extension[] = [
     // Plugin access facet - must be first so other extensions can use it
     irPluginFacet.of(plugin),
+
+    // Refuses user edits to the `ir-id` frontmatter entry of IR notes
+    irIdGuardExtension,
 
     // Scroll position save/restore for IR notes
     scrollPositionExtension,
