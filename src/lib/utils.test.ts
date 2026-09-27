@@ -29,7 +29,117 @@ import {
   startOfDay,
 } from './utils';
 
+// #region HELPERS
+
 const safeStringKey = () => fc.stringMatching(/^[a-zA-Z$][a-zA-Z0-9$_]*$/);
+
+/** The zone the suite started in, resolved before any test changes it. */
+const HOST_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+/**
+ * Run `fn` with the local time zone set to `timeZone`, then put the previous
+ * zone back.
+ *
+ * Node re-reads `process.env.TZ` whenever it is assigned, so this switches
+ * zones mid-run. That is the only way to pin one on Windows, where a `TZ`
+ * exported from Git Bash never reaches Node at all. Deleting the variable
+ * does not switch back, so the previous zone is restored by name. The change
+ * is process-wide, which is safe under Vitest's default `forks` pool: each
+ * test file gets its own process.
+ *
+ * Only call it from {@link itInPinnedZone} tests, since some runners cannot
+ * switch zones at all.
+ */
+function inTimeZone<T>(timeZone: string, fn: () => T): T {
+  const previous = process.env.TZ ?? HOST_TIME_ZONE;
+  process.env.TZ = timeZone;
+  try {
+    return fn();
+  } finally {
+    process.env.TZ = previous;
+  }
+}
+
+/**
+ * Whether {@link inTimeZone} takes effect here. Node only re-reads `TZ` on the
+ * main thread; a worker thread's `process.env` is a plain copy, so assigning
+ * to it changes nothing. Stryker's Vitest runner forces the `threads` pool, so
+ * under mutation testing the zone stays the host's.
+ */
+const CAN_PIN_TIME_ZONE = (() => {
+  const probe =
+    HOST_TIME_ZONE === 'Pacific/Chatham' ? 'Asia/Kathmandu' : 'Pacific/Chatham';
+  return inTimeZone(
+    probe,
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone === probe
+  );
+})();
+
+/**
+ * A test that pins its own time zone. Skipped, rather than run against the
+ * host's zone and failed, where the zone cannot be pinned.
+ */
+const itInPinnedZone = it.runIf(CAN_PIN_TIME_ZONE);
+
+/**
+ * Calendar dates on which the clocks change, one each way per zone, covering
+ * a whole-hour change at 02:00 (New York), one at 01:00 (London), a 30-minute
+ * change (Lord Howe Island), and a change at midnight, which leaves a day with
+ * no 00:00 at all (Santiago, 8 September).
+ */
+const DST_TRANSITIONS = [
+  { timeZone: 'America/New_York', year: 2024, month: 2, date: 10 },
+  { timeZone: 'America/New_York', year: 2024, month: 10, date: 3 },
+  { timeZone: 'Europe/London', year: 2024, month: 2, date: 31 },
+  { timeZone: 'Europe/London', year: 2024, month: 9, date: 27 },
+  { timeZone: 'Australia/Lord_Howe', year: 2024, month: 3, date: 7 },
+  { timeZone: 'Australia/Lord_Howe', year: 2024, month: 9, date: 6 },
+  { timeZone: 'America/Santiago', year: 2024, month: 3, date: 6 },
+  { timeZone: 'America/Santiago', year: 2024, month: 8, date: 8 },
+] as const;
+
+/**
+ * A rollover setting, a transition, and an instant within a few hours of a
+ * rollover on the day before, of, or after that transition — where the local
+ * day is not 24 hours long and a boundary computed by adding milliseconds to
+ * midnight drifts off the wall clock.
+ *
+ * The instant is kept as a shift from the rollover so it can be resolved in
+ * the transition's zone once that zone is active.
+ */
+const nearDstRollover = fc.record({
+  offsetHours: fc.integer({ min: -12, max: 12 }),
+  transition: fc.constantFrom(...DST_TRANSITIONS),
+  dayShift: fc.integer({ min: -1, max: 1 }),
+  msFromRollover: fc.integer({
+    min: -3 * 60 * MS_PER_MINUTE,
+    max: 3 * 60 * MS_PER_MINUTE,
+  }),
+});
+
+/** Resolve a {@link nearDstRollover} case to an instant in the active zone. */
+function rolloverInstant({
+  offsetHours,
+  transition,
+  dayShift,
+  msFromRollover,
+}: {
+  offsetHours: number;
+  transition: (typeof DST_TRANSITIONS)[number];
+  dayShift: number;
+  msFromRollover: number;
+}) {
+  const { year, month, date } = transition;
+  const rollover = new Date(year, month, date + dayShift, offsetHours);
+  return new Date(rollover.getTime() + msFromRollover);
+}
+
+/** The calendar date one day before `day`'s. */
+function dayBefore(day: Date) {
+  return new Date(day.getFullYear(), day.getMonth(), day.getDate() - 1);
+}
+
+// #endregion
 
 describe('deepCopy', () => {
   it('copies nested objects and iterables', () => {
@@ -365,25 +475,72 @@ describe('getEndOfDay for the current day', () => {
     expect(result).toBe(startOfToday + rolloverMs);
   });
 
-  it('the result is always either offsetHours or offsetHours+24h past start of today', () => {
+  it('ends at the first rollover after now', () => {
     fc.assert(
       fc.property(
         fc.integer({ min: -12, max: 12 }),
-        fc
-          .date({ min: new Date('2020-01-01'), max: new Date('2030-12-31') })
-          .filter((d) => !isNaN(d.getTime())),
+        fc.date({
+          min: new Date('2020-01-01'),
+          max: new Date('2030-12-31'),
+          noInvalidDate: true,
+        }),
         (offsetHours, now) => {
           vi.setSystemTime(now);
-          const result = getEndOfDay(offsetHours);
-          const startOfToday = Date.parse(now.toDateString());
-          const rolloverMs = offsetHours * 60 * MS_PER_MINUTE;
-          const candidate1 = startOfToday + rolloverMs;
-          const candidate2 = candidate1 + MS_PER_DAY;
-          expect([candidate1, candidate2]).toContain(result);
+          const end = getEndOfDay(offsetHours);
+          expect(end).toBeGreaterThan(now.getTime());
+          // No rollover between now and the end: the last moment before it is
+          // still in the review day now is in, and the end opens the next.
+          const today = reviewDayOf(now, offsetHours);
+          expect(reviewDayOf(new Date(end - 1), offsetHours)).toEqual(today);
+          expect(reviewDayOf(new Date(end), offsetHours)).not.toEqual(today);
         }
       )
     );
   });
+
+  itInPinnedZone(
+    'ends at the first rollover after now across a daylight-saving transition',
+    () => {
+      fc.assert(
+        fc.property(nearDstRollover, (testCase) => {
+          inTimeZone(testCase.transition.timeZone, () => {
+            const now = rolloverInstant(testCase);
+            vi.setSystemTime(now);
+            const end = getEndOfDay(testCase.offsetHours);
+            expect(end).toBeGreaterThan(now.getTime());
+            const today = reviewDayOf(now, testCase.offsetHours);
+            expect(
+              reviewDayOf(new Date(end - 1), testCase.offsetHours)
+            ).toEqual(today);
+            expect(
+              reviewDayOf(new Date(end), testCase.offsetHours)
+            ).not.toEqual(today);
+          });
+        })
+      );
+    }
+  );
+
+  it('ends the next review day once a negative rollover has passed', () => {
+    // -5h: review day 16 starts at 15 19:00, so at 20:00 it is the one in
+    // progress, and it runs until 16 19:00. Stopping at 15 19:00 would hold
+    // back everything due in the new review day until midnight.
+    vi.setSystemTime(new Date(2024, 5, 15, 20, 0));
+    expect(getEndOfDay(-5)).toBe(new Date(2024, 5, 16, 19, 0).getTime());
+  });
+
+  itInPinnedZone(
+    'keeps the rollover hour on the day the clocks go forward',
+    () => {
+      inTimeZone('America/New_York', () => {
+        // 2024-03-10 has no 02:00-03:00. At noon the +4h review day 10 is in
+        // progress, and it ends at 04:00 on the 11th by the clock on the wall,
+        // not 24 hours after a boundary that was itself thrown off by the gap.
+        vi.setSystemTime(new Date('2024-03-10T12:00:00-04:00'));
+        expect(getEndOfDay(4)).toBe(Date.parse('2024-03-11T04:00:00-04:00'));
+      });
+    }
+  );
 });
 
 describe('startOfDay', () => {
@@ -545,13 +702,61 @@ describe('reviewDayOf', () => {
           .filter((d) => !isNaN(d.getTime())),
         (offsetHours, instant) => {
           const day = reviewDayOf(instant, offsetHours);
+          // A review day opens where the one before it ends. Not 24 hours
+          // before its own end: a day the clocks change on is 23 or 25 long.
+          const start = getEndOfDay(offsetHours, dayBefore(day));
           const end = getEndOfDay(offsetHours, day);
           expect(instant.getTime()).toBeLessThan(end);
-          expect(instant.getTime()).toBeGreaterThanOrEqual(end - MS_PER_DAY);
+          expect(instant.getTime()).toBeGreaterThanOrEqual(start);
         }
       )
     );
   });
+
+  itInPinnedZone(
+    'inverts getEndOfDay across a daylight-saving transition',
+    () => {
+      fc.assert(
+        fc.property(nearDstRollover, (testCase) => {
+          inTimeZone(testCase.transition.timeZone, () => {
+            const { offsetHours } = testCase;
+            const instant = rolloverInstant(testCase);
+            const day = reviewDayOf(instant, offsetHours);
+            const start = getEndOfDay(offsetHours, dayBefore(day));
+            const end = getEndOfDay(offsetHours, day);
+            expect(instant.getTime()).toBeLessThan(end);
+            expect(instant.getTime()).toBeGreaterThanOrEqual(start);
+          });
+        })
+      );
+    }
+  );
+
+  itInPinnedZone(
+    'names the day the clocks go forward once its rollover has passed',
+    () => {
+      inTimeZone('America/New_York', () => {
+        // 2024-03-10 skips 02:00-03:00, so 04:30 is only 3.5 hours after
+        // midnight. It is still past the 04:00 rollover.
+        expect(reviewDayOf(new Date('2024-03-10T04:30:00-04:00'), 4)).toEqual(
+          new Date(2024, 2, 10)
+        );
+      });
+    }
+  );
+
+  itInPinnedZone(
+    'keeps the day the clocks go back until its rollover arrives',
+    () => {
+      inTimeZone('America/New_York', () => {
+        // 2024-11-03 repeats 01:00-02:00, so 21:30 is 22.5 hours after
+        // midnight. Review day 4 under -2h still only opens at 22:00.
+        expect(reviewDayOf(new Date('2024-11-03T21:30:00-05:00'), -2)).toEqual(
+          new Date(2024, 10, 3)
+        );
+      });
+    }
+  );
 });
 
 describe('currentReviewDay', () => {
@@ -674,6 +879,40 @@ describe('getEndOfDay with an explicit day', () => {
         }
       )
     );
+  });
+
+  itInPinnedZone(
+    'opens the day the clocks go forward at the rollover hour',
+    () => {
+      inTimeZone('America/New_York', () => {
+        // Review day 9 ends where day 10 opens: 04:00 on the 10th, after the
+        // 02:00-03:00 gap, not 28 hours past midnight on the 9th.
+        expect(getEndOfDay(4, new Date(2024, 2, 9))).toBe(
+          Date.parse('2024-03-10T04:00:00-04:00')
+        );
+      });
+    }
+  );
+
+  itInPinnedZone(
+    'ends the day the clocks go forward at the rollover hour',
+    () => {
+      inTimeZone('America/New_York', () => {
+        // That day is 23 hours long, so its end is 23 hours after its start.
+        expect(getEndOfDay(4, new Date(2024, 2, 10))).toBe(
+          Date.parse('2024-03-11T04:00:00-04:00')
+        );
+      });
+    }
+  );
+
+  itInPinnedZone('ends the day the clocks go back at the rollover hour', () => {
+    inTimeZone('America/New_York', () => {
+      // That day is 25 hours long, so its end is 25 hours after its start.
+      expect(getEndOfDay(3, new Date(2024, 10, 3))).toBe(
+        Date.parse('2024-11-04T03:00:00-05:00')
+      );
+    });
   });
 
   it('is invariant to the time of day within the same local date', () => {

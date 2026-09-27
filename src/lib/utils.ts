@@ -1,4 +1,3 @@
-import { MS_PER_DAY, MS_PER_MINUTE } from './constants';
 import type { DeepPartial } from './utility-types';
 
 /**
@@ -59,51 +58,75 @@ export function isSameDay(a: Date, b: Date) {
 }
 
 /**
+ * Where the review day named for a calendar date begins: `offsetHours` past
+ * midnight on that date, read off the local wall clock.
+ *
+ * Built with the `Date` constructor, which normalizes out-of-range hours onto
+ * a neighboring date (-5 on the 15th is 19:00 on the 14th), rather than by
+ * adding milliseconds to midnight. A day the clocks change on is 23 or 25
+ * hours long, so millisecond arithmetic lands an hour off the rollover the
+ * user set. When the rollover hour itself is skipped by the clocks going
+ * forward, the constructor lands on the hour they jump to.
+ */
+function reviewDayStart(
+  offsetHours: number,
+  year: number,
+  month: number,
+  date: number
+) {
+  return new Date(year, month, date, offsetHours).getTime();
+}
+
+/**
  * Get the rollover-adjusted end of a review day as a Unix timestamp.
  *
- * A review day begins at `midnight + offsetHours` on the calendar date it is
- * named for and ends one day later: with a +4-hour offset, review day D runs
- * from D 04:00 to D+1 04:00; with a -5-hour offset, from D-1 19:00 to D 19:00.
- * Passing D-1 gives the start of review day D.
+ * A review day begins at `offsetHours` past midnight, by the local clock, on
+ * the calendar date it is named for, and ends where the next one begins: with
+ * a +4-hour offset, review day D runs from D 04:00 to D+1 04:00; with a
+ * -5-hour offset, from D-1 19:00 to D 19:00. That is 24 hours except across a
+ * daylight-saving change. Passing D-1 gives the start of review day D.
  *
  * @param day the review day to measure, as any time on its calendar date.
  * @default the review day in progress
  */
 export function getEndOfDay(offsetHours: number, day?: Date) {
-  const date = day ?? new Date();
-  // `startOfDay` builds from date parts rather than parsing
-  // `date.toDateString()`: the format `toDateString` emits is
-  // implementation-defined, and `Date.parse` on a non-ISO string is too. This
-  // plugin runs in both Electron and mobile webviews, which are separate
-  // engines.
-  const midnight = startOfDay(date).getTime();
-  const boundary = midnight + offsetHours * 60 * MS_PER_MINUTE;
-
-  // The named day ends at the *next* boundary after the one that opens it.
-  if (day) return boundary + MS_PER_DAY;
-  // Once today's boundary has passed, the day in progress ends at the next one.
-  return date.getTime() >= boundary ? boundary + MS_PER_DAY : boundary;
+  // Date parts rather than parsing `date.toDateString()`: the format
+  // `toDateString` emits is implementation-defined, and `Date.parse` on a
+  // non-ISO string is too. This plugin runs in both Electron and mobile
+  // webviews, which are separate engines.
+  const named = day ?? currentReviewDay(offsetHours);
+  return reviewDayStart(
+    offsetHours,
+    named.getFullYear(),
+    named.getMonth(),
+    named.getDate() + 1
+  );
 }
 
 /**
- * Get the review day a given instant falls in, as a `Date` on that day's
- * calendar date. The inverse of {@link getEndOfDay}: the returned day always
- * satisfies `instant < getEndOfDay(offsetHours, day)`.
+ * Get the review day a given instant falls in, as a `Date` at local midnight
+ * on that day's calendar date. The inverse of {@link getEndOfDay}: the
+ * returned day always satisfies
+ * `getEndOfDay(offsetHours, dayBefore) <= instant < getEndOfDay(offsetHours, day)`.
  *
  * Under a +4h offset an instant at 02:00 belongs to the previous review day;
  * under a -5h offset one at 20:00 already belongs to the next.
  */
 export function reviewDayOf(instant: Date, offsetHours: number) {
-  const day = startOfDay(instant);
-  // Before its own day's opening boundary, so it still belongs to the day
-  // before; past the next one, so it already belongs to the day after.
-  const millisIntoDay = instant.getTime() - day.getTime();
-  const offsetMs = offsetHours * 60 * MS_PER_MINUTE;
-  if (millisIntoDay < offsetMs) day.setDate(day.getDate() - 1);
-  else if (millisIntoDay >= offsetMs + MS_PER_DAY) {
-    day.setDate(day.getDate() + 1);
+  const year = instant.getFullYear();
+  const month = instant.getMonth();
+  const date = instant.getDate();
+  const time = instant.getTime();
+  // An offset is under a day either way, so the instant is at most one day
+  // off its calendar date: before that date's own rollover, it still belongs
+  // to the day before; at or past the next one, it already belongs to the
+  // day after.
+  let shift = 0;
+  if (time < reviewDayStart(offsetHours, year, month, date)) shift = -1;
+  else if (time >= reviewDayStart(offsetHours, year, month, date + 1)) {
+    shift = 1;
   }
-  return day;
+  return new Date(year, month, date + shift);
 }
 
 /** The review day now falls in. See {@link reviewDayOf}. */
