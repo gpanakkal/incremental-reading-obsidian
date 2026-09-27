@@ -57,6 +57,7 @@ export class SchedulingModal extends Modal {
   onOpen() {
     const { plugin, item, contentEl } = this;
     const { data } = item;
+    this.setTitle(item.file.basename);
     const schedule = {
       intervalDays: data.type === 'article' ? data.fixed_interval_days : null,
       priority: data.priority,

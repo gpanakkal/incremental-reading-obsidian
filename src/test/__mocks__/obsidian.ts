@@ -74,7 +74,26 @@ export const editorEditorField = {};
 export class Plugin {}
 export class PluginSettingTab {}
 export class Setting {}
-export class Modal {}
+export class Modal {
+  app: unknown;
+  /** Built in the constructor, so only jsdom tests can instantiate a modal. */
+  contentEl: HTMLElement;
+  /** Stands in for the `.modal-title` element above `contentEl`. */
+  readonly titleEl: { textContent: string | null } = { textContent: null };
+
+  constructor(app: unknown) {
+    this.app = app;
+    this.contentEl = document.createElement('div');
+  }
+
+  setTitle(title: string) {
+    this.titleEl.textContent = title;
+    return this;
+  }
+
+  open() {}
+  close() {}
+}
 export class FileView {
   /**
    * Cleanups handed to `Component.register`. Exposed so tests can run them and

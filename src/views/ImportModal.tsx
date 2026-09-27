@@ -34,7 +34,8 @@ export class ImportModal extends Modal {
   }
 
   onOpen() {
-    const { plugin, contentEl } = this;
+    const { plugin, file, contentEl } = this;
+    this.setTitle(`Importing "${file.basename}"`);
     const schedule = {
       intervalDays: null as number | null,
       priority: plugin.settings.defaultPriority,
