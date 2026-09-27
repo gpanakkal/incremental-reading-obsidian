@@ -302,9 +302,11 @@ export class ObsidianHelpers {
       throw new Error(`${INVALID_TITLE_MESSAGE}. Title was ${newName}`);
     }
 
-    const newPath = file.parent
-      ? `${file.parent.path}/${newName}.${file.extension}`
-      : `${newName}.${file.extension}`;
+    // The vault root's path is `/`, and a file there has no folder to prefix.
+    const newPath =
+      file.parent && file.parent.path !== '/'
+        ? `${file.parent.path}/${newName}.${file.extension}`
+        : `${newName}.${file.extension}`;
 
     await app.fileManager.renameFile(file, newPath);
   }

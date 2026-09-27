@@ -454,6 +454,15 @@ body {
   justify-content: flex-end;
 }
 
+/* The review bar's stand-ins for the view header's back, forward and ⋮ buttons
+   (`.ir-header-standin`, see ActionBar.tsx) show only while Obsidian hides the
+   header. These are the cases its own rule leaves the header up:
+   `body:not(.show-view-header):not(.is-phone) .view-header { display: none; }` */
+body.show-view-header .ir-header-standin,
+body.is-phone .ir-header-standin {
+  display: none;
+}
+
 /* A bar built as a flat row of buttons — the ones the editing and reading views
    put on a note, rather than the review bar above — centers what it holds
    between a pair of auto margins. The review bar's outer zones opt out: they

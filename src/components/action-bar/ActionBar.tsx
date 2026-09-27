@@ -128,28 +128,39 @@ function HomeActions() {
 }
 
 /**
+ * Class for the controls that stand in for the view header's own, which
+ * styles.css shows only while Obsidian hides the header: the "Show tab title bar"
+ * setting turned off, on anything but a phone. The header is back the moment
+ * the setting is, and a second set of the same buttons would only crowd the bar.
+ *
+ * Left to CSS rather than read from the vault config, so the bar follows the
+ * setting from the same `body` class Obsidian's own rule keys on, with nothing
+ * to subscribe to.
+ */
+const HEADER_STANDIN_CLASS = 'ir-header-standin';
+
+/**
  * Actions that belong to the tab rather than to the item inside it: back and
  * forward through the tab's history.
  *
- * Desktop only. They stand in for the arrows Obsidian draws at the start of the
- * view header, which `ReviewView` hides on desktop — so they lead the bar, as
- * the ⋮ standing in for the header's closes it. Mobile keeps its header, and the
- * navbar's own buttons besides.
+ * They stand in for the arrows Obsidian draws at the start of the view header
+ * (see {@link HEADER_STANDIN_CLASS}) — so they lead the bar, as the ⋮ standing
+ * in for the header's closes it.
  *
  * Like the header's arrows, they hold the bar's start edge, at the head of the
  * leading zone.
  */
 function GlobalActions() {
-  const { plugin, reviewView } = useReviewContext();
+  const { reviewView } = useReviewContext();
   const { leaf } = reviewView;
   const { canGoBack, canGoForward } = useLeafHistory(leaf);
-  if (plugin.app.isMobile) return null;
 
   return (
     <>
       <ButtonWithIcon
         tooltip="Navigate back"
         id="navigate-back-button"
+        className={HEADER_STANDIN_CLASS}
         disabled={!canGoBack}
         handleClick={async () => {
           await leaf.history.back();
@@ -160,6 +171,7 @@ function GlobalActions() {
       <ButtonWithIcon
         tooltip="Navigate forward"
         id="navigate-forward-button"
+        className={HEADER_STANDIN_CLASS}
         disabled={!canGoForward}
         handleClick={async () => {
           await leaf.history.forward();
@@ -382,17 +394,15 @@ function DismissAction({ item }: { item: ReviewItem }) {
   );
 }
 
+/** Stands in for the view header's ⋮ — see {@link HEADER_STANDIN_CLASS}. */
 function MoreOptionsAction() {
-  const { plugin, reviewView } = useReviewContext();
-
-  // Obsidian draws its own ⋮ in the view header, which ReviewView hides on
-  // desktop, but not mobile.
-  if (plugin.app.isMobile) return null;
+  const { reviewView } = useReviewContext();
 
   return (
     <ButtonWithIcon
       tooltip="More options"
       id="more-options-button"
+      className={HEADER_STANDIN_CLASS}
       handleClick={(e) => {
         // Anchors the menu under the button, the way Obsidian's own header
         // button anchors it. Read synchronously: `currentTarget` is null once

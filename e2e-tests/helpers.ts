@@ -285,10 +285,9 @@ export async function openNote(window: Page, path: string) {
  * for the title text. The same string also sits in the window titlebar, in a
  * tab header per open tab, in a `.view-header-title` per leaf, and in the
  * source note's own `.inline-title`, so a document-wide `getByText` returns
- * seven elements of which six are not the review pane. Four of those six can
- * never be visible (the inactive leaf is display:none, and the review view
- * replaces its header row with the action bar) and two are always-visible tab
- * headers, which is what makes indexing into the list so treacherous: `.nth()`
+ * seven elements of which six are not the review pane. Several of those six
+ * are visible, and which ones depends on the leaf and the "Show tab title bar"
+ * setting, which is what makes indexing into the list so treacherous: `.nth()`
  * off by one either way is vacuously true or impossible, never wrong loudly.
  *
  * Nor is the ordering stable. `ReviewView.setTitle` fills the review leaf's
@@ -373,6 +372,27 @@ export async function toggleReviewSourceMode(window: Page) {
     }
     view.toggleSourceMode();
   }, REVIEW_VIEW_TYPE);
+}
+
+/** The view header of the active review tab. */
+export function reviewHeader(window: Page) {
+  return window.locator(
+    `.workspace-leaf.mod-active [data-type="${REVIEW_VIEW_TYPE}"] > .view-header`
+  );
+}
+
+/**
+ * Set Settings -> Appearance -> "Show tab title bar", which is the
+ * `showViewHeader` vault config underneath. Obsidian applies it as a class on
+ * `body`, so it takes effect at once, on tabs already open too.
+ */
+export async function setShowViewHeader(window: Page, show: boolean) {
+  await window.evaluate((value) => {
+    (window as unknown as TestWindow).app.vault.setConfig(
+      'showViewHeader',
+      value
+    );
+  }, show);
 }
 
 /** What the review tab calls itself when it is not showing an item. */

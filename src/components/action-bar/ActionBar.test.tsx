@@ -61,25 +61,22 @@ function wireCurrentItem(): void {
 }
 
 /**
- * Mount the bar inside the context it has in the app. Every page of it past the
- * home screen reads the context — the ⋮ button takes the platform off the
- * plugin and hands the view the button to anchor its menu to — so the bar is
- * not mounted bare here.
+ * Mount the bar inside the context it has in the app. Every page of it reads
+ * the context — the arrows read the leaf's history, and the ⋮ button hands the
+ * view the button to anchor its menu to — so the bar is not mounted bare here.
  */
 function mountBar({
-  isMobile = false,
   showMoreOptionsMenu = vi.fn(),
   actions = makeActions(),
   leaf = makeLeaf(),
 }: {
-  isMobile?: boolean;
   showMoreOptionsMenu?: () => void;
   actions?: ReturnType<typeof makeActions>;
   leaf?: ReturnType<typeof makeLeaf>;
 } = {}): HTMLElement {
   return mount(
     <ReviewContextProvider
-      plugin={{ actions, app: { isMobile } } as never}
+      plugin={{ actions, app: {} } as never}
       reviewView={{ showMoreOptionsMenu, leaf } as never}
       reviewManager={{} as never}
     >
@@ -575,9 +572,9 @@ describe('ActionBar', () => {
       vi.useRealTimers();
     });
 
-    it('lead the bar on desktop, on the home screen and in review', async () => {
-      // They stand in for the arrows at the start of the view header, which
-      // ReviewView hides on desktop, so they come before anything else.
+    it('lead the bar, on the home screen and in review', async () => {
+      // They stand in for the arrows at the start of the view header, so they
+      // come before anything else.
       for (const page of PAGES) {
         reduxState.page = page;
         const container = mountBar();
@@ -600,14 +597,22 @@ describe('ActionBar', () => {
       }
     });
 
-    it('stay off the bar on mobile, where the header keeps its own', async () => {
+    it('are marked as stand-ins for the header arrows, and are the only session actions that are', async () => {
+      // styles.css shows the marked controls only while Obsidian hides the view
+      // header, which draws its own arrows. Home, the type filter and undo have
+      // no counterpart there, so they stay whatever the header does.
       for (const page of PAGES) {
         reduxState.page = page;
-        const container = mountBar({ isMobile: true });
+        const container = mountBar();
         await settle();
 
-        expect(queryNavigateButton(container, 'back')).toBeNull();
-        expect(queryNavigateButton(container, 'forward')).toBeNull();
+        const standIns = zoneChildren(container, 'lead').filter((el) =>
+          el.classList.contains('ir-header-standin')
+        );
+        expect(standIns).toEqual([
+          navigateButton(container, 'back'),
+          navigateButton(container, 'forward'),
+        ]);
         render(null, container);
       }
     });
@@ -729,18 +734,16 @@ describe('ActionBar', () => {
 
     it('are all three there, in order, on every page', async () => {
       for (const page of PAGES) {
-        for (const isMobile of [false, true]) {
-          reduxState.page = page;
-          const container = mountBar({ isMobile });
-          await settle();
+        reduxState.page = page;
+        const container = mountBar();
+        await settle();
 
-          expect(barChildren(container).map((el) => el.className)).toEqual([
-            'ir-bar-lead',
-            'ir-bar-center',
-            'ir-bar-trail',
-          ]);
-          render(null, container);
-        }
+        expect(barChildren(container).map((el) => el.className)).toEqual([
+          'ir-bar-lead',
+          'ir-bar-center',
+          'ir-bar-trail',
+        ]);
+        render(null, container);
       }
     });
 
@@ -758,39 +761,20 @@ describe('ActionBar', () => {
       ]);
     });
 
-    it('keep the same session actions on mobile, where the arrows are absent', async () => {
-      wireCurrentItem();
-      const container = mountBar({ isMobile: true });
-      await settle();
-
-      expect(zoneChildren(container, 'lead')).toEqual([
-        getButton(container, 'Go to home screen'),
-        typeFilter(container),
-        undoButton(container),
-      ]);
-    });
-
     it('hold the arrows alone at the start edge on the home screen', async () => {
       // Nothing there acts on a review session, and the begin-review button is
       // the middle zone's whole contents.
-      for (const isMobile of [false, true]) {
-        reduxState.page = 'home';
-        const container = mountBar({ isMobile });
-        await settle();
+      reduxState.page = 'home';
+      const container = mountBar();
+      await settle();
 
-        expect(zoneChildren(container, 'lead')).toEqual(
-          isMobile
-            ? []
-            : [
-                navigateButton(container, 'back'),
-                navigateButton(container, 'forward'),
-              ]
-        );
-        expect(zoneChildren(container, 'center')).toEqual([
-          beginReviewButton(container),
-        ]);
-        render(null, container);
-      }
+      expect(zoneChildren(container, 'lead')).toEqual([
+        navigateButton(container, 'back'),
+        navigateButton(container, 'forward'),
+      ]);
+      expect(zoneChildren(container, 'center')).toEqual([
+        beginReviewButton(container),
+      ]);
     });
 
     it('give the end edge the ⋮ and nothing else', async () => {
@@ -819,20 +803,11 @@ describe('ActionBar', () => {
     });
 
     it('leave the end edge empty wherever there is no ⋮', async () => {
-      // Mobile keeps Obsidian's own header ⋮, the home screen has no item
-      // behind one, and neither does review before the first item arrives.
-      const empty = [
-        { page: 'review' as const, isMobile: true, withItem: true },
-        { page: 'review' as const, isMobile: false, withItem: false },
-        { page: 'home' as const, isMobile: false, withItem: false },
-      ];
-      for (const { page, isMobile, withItem } of empty) {
-        // Re-stubbed per case: `wireCurrentItem` leaves a spy behind, and the
-        // cases without an item have to be seen without the previous one's.
-        wireQueue();
+      // The home screen has no item behind one, and neither does review
+      // before the first item arrives.
+      for (const page of PAGES) {
         reduxState.page = page;
-        if (withItem) wireCurrentItem();
-        const container = mountBar({ isMobile });
+        const container = mountBar();
         await settle();
 
         expect(zoneChildren(container, 'trail')).toEqual([]);
@@ -869,14 +844,16 @@ describe('ActionBar', () => {
       expect(moreOptionsButton(mountBar())).toBeNull();
     });
 
-    it('stays out of the way on mobile, where Obsidian draws its own', () => {
-      // ReviewView only hides `headerEl` on desktop; on mobile the real ⋮ is
-      // still in the view header, and a second one would duplicate it.
+    it('is marked as a stand-in for the header ⋮', () => {
+      // styles.css shows it only while Obsidian hides the view header, whose
+      // own ⋮ opens the same menu.
       wireCurrentItem();
 
-      const container = mountBar({ isMobile: true });
+      const container = mountBar();
 
-      expect(moreOptionsButton(container)).toBeNull();
+      expect(moreOptionsButton(container)?.classList).toContain(
+        'ir-header-standin'
+      );
     });
   });
 

@@ -14,7 +14,9 @@ import {
   openFileInActiveLeaf,
   REVIEW_VIEW_DEFAULT_TITLE,
   REVIEW_VIEW_TYPE,
+  reviewHeader,
   setPluginSetting,
+  setShowViewHeader,
   waitForReviewItem,
   watchNotices,
   type HistoryEntrySnapshot,
@@ -407,43 +409,78 @@ test.describe('Review history navigation', () => {
     await expectScrolledTo(position);
   });
 
-  test('action bar back and forward buttons follow the tab history', async () => {
-    await importTwoArticles();
-    await executeCommandById(window, 'incremental-reading:learn');
-    await expectReviewHome(window);
+  /**
+   * The back and forward buttons for the review tab: the view header's own, or
+   * the action bar's stand-ins for them, which show only while the "Show tab
+   * title bar" setting hides the header.
+   */
+  function navButtons(where: 'view header' | 'action bar') {
+    if (where === 'action bar') {
+      return {
+        back: window.locator('css=#navigate-back-button'),
+        forward: window.locator('css=#navigate-forward-button'),
+        others: reviewHeader(window).locator('.view-header-nav-buttons button'),
+      };
+    }
+    const header = reviewHeader(window).locator(
+      '.view-header-nav-buttons button'
+    );
+    return {
+      back: header.nth(0),
+      forward: header.nth(1),
+      others: window.locator(
+        'css=#navigate-back-button, #navigate-forward-button'
+      ),
+    };
+  }
 
-    const backButton = window.locator('css=#navigate-back-button');
-    const forwardButton = window.locator('css=#navigate-forward-button');
-    // A fresh tab has nowhere to go either way.
-    expect((await leafSnapshot(window)).back).toEqual([]);
-    await expect(backButton).toBeDisabled();
-    await expect(forwardButton).toBeDisabled();
+  for (const where of ['view header', 'action bar'] as const) {
+    test(`${where} back and forward buttons follow the tab history`, async () => {
+      await importTwoArticles();
+      if (where === 'action bar') await setShowViewHeader(window, false);
+      await executeCommandById(window, 'incremental-reading:learn');
+      await expectReviewHome(window);
 
-    await window.locator('css=#begin-review-button').click();
-    const x = await waitForReviewItem(window);
-    await expect(backButton).toBeEnabled();
-    await expect(forwardButton).toBeDisabled();
+      const {
+        back: backButton,
+        forward: forwardButton,
+        others,
+      } = navButtons(where);
+      // One pair on screen, never both.
+      await expect(backButton).toBeVisible();
+      await expect(others.first()).toBeHidden();
+      await expect(others.last()).toBeHidden();
+      // A fresh tab has nowhere to go either way.
+      expect((await leafSnapshot(window)).back).toEqual([]);
+      await expect(backButton).toBeDisabled();
+      await expect(forwardButton).toBeDisabled();
 
-    const y = await skipTo(x);
-    await expect(backButton).toBeEnabled();
-    await expect(forwardButton).toBeDisabled();
+      await window.locator('css=#begin-review-button').click();
+      const x = await waitForReviewItem(window);
+      await expect(backButton).toBeEnabled();
+      await expect(forwardButton).toBeDisabled();
 
-    await backButton.click();
-    await expectReviewOn(window, x);
-    await expect(backButton).toBeEnabled();
-    await expect(forwardButton).toBeEnabled();
+      const y = await skipTo(x);
+      await expect(backButton).toBeEnabled();
+      await expect(forwardButton).toBeDisabled();
 
-    await forwardButton.click();
-    await expectReviewOn(window, y);
-    await expect(forwardButton).toBeDisabled();
+      await backButton.click();
+      await expectReviewOn(window, x);
+      await expect(backButton).toBeEnabled();
+      await expect(forwardButton).toBeEnabled();
 
-    await backButton.click();
-    await expectReviewOn(window, x);
-    await backButton.click();
-    await expectReviewHome(window);
-    await expect(backButton).toBeDisabled();
-    await expect(forwardButton).toBeEnabled();
-  });
+      await forwardButton.click();
+      await expectReviewOn(window, y);
+      await expect(forwardButton).toBeDisabled();
+
+      await backButton.click();
+      await expectReviewOn(window, x);
+      await backButton.click();
+      await expectReviewHome(window);
+      await expect(backButton).toBeDisabled();
+      await expect(forwardButton).toBeEnabled();
+    });
+  }
 
   /**
    * Read the bar's geometry in one pass inside the page, so no reflow lands
@@ -516,6 +553,9 @@ test.describe('Review history navigation', () => {
 
   test('action bar centers the item actions on the bar, between the edges the other two zones hold', async () => {
     await window.setViewportSize(WIDE_VIEWPORT);
+    // The layout this measures is the full bar, stand-ins included, which is
+    // the one the bar has while the view header is hidden.
+    await setShowViewHeader(window, false);
     await importTwoArticles();
     await beginReview();
 
@@ -549,8 +589,8 @@ test.describe('Review history navigation', () => {
     const x = await beginReview();
 
     // Mobile keeps Obsidian's own header and navbar arrows.
-    await expect(window.locator('css=#navigate-back-button')).toHaveCount(0);
-    await expect(window.locator('css=#navigate-forward-button')).toHaveCount(0);
+    await expect(window.locator('css=#navigate-back-button')).toBeHidden();
+    await expect(window.locator('css=#navigate-forward-button')).toBeHidden();
 
     const navButton = (direction: 'back' | 'forward') =>
       window.locator(`.mobile-navbar-action-${direction} button`);
@@ -659,6 +699,165 @@ test.describe('Review history navigation', () => {
     const expected = new Set(['go-back', 'review:null', `review:${x.id}`]);
     expect(labels.filter((label) => !expected.has(label))).toEqual([]);
   });
+
+  test.describe('view header', () => {
+    const MOVED_ARTICLE = 'Curse of dimensionality - Wikipedia';
+    const MOVED_TO = 'moved/deeper';
+
+    /**
+     * Move the imported note titled `title` into `folder`, so the two items
+     * review moves between live in different folders — the case where the
+     * header once named one item over another item's folder.
+     */
+    async function moveArticle(title: string, folder: string) {
+      await window.evaluate(
+        async ([name, dir]) => {
+          const { app } = window as unknown as HeaderTestWindow;
+          // Imported in place, so the note is still where the import found it.
+          const file = app.vault
+            .getMarkdownFiles()
+            .find((f) => f.basename === name);
+          if (!file) throw new Error(`No imported note named ${name}`);
+          if (!app.vault.getFolderByPath(dir))
+            await app.vault.createFolder(dir);
+          await app.fileManager.renameFile(file, `${dir}/${file.name}`);
+        },
+        [title, folder] as const
+      );
+    }
+
+    /** The folder the review tab's file sits in, relative to the vault root. */
+    async function folderOnScreen(): Promise<string> {
+      const { file } = await leafSnapshot(window);
+      if (!file) throw new Error('The review tab holds no file');
+      return file.slice(0, file.lastIndexOf('/'));
+    }
+
+    /** Assert the header names `item`, after the folder its note is in. */
+    async function expectHeaderNames(item: ShownItem) {
+      const header = reviewHeader(window);
+      await expect(header.locator('.view-header-title')).toHaveText(item.title);
+      await expect(header.locator('.view-header-breadcrumb')).toHaveText(
+        (await folderOnScreen()).split('/')
+      );
+    }
+
+    test('shows while the tab title bar setting is on, with the action bar standing in while it is off', async () => {
+      await importTwoArticles();
+      await beginReview();
+      const header = reviewHeader(window);
+      const standIns = [
+        '#navigate-back-button',
+        '#navigate-forward-button',
+        '#more-options-button',
+      ].map((id) => window.locator(`css=${id}`));
+
+      await expect(header).toBeVisible();
+      for (const button of standIns) await expect(button).toBeHidden();
+
+      await setShowViewHeader(window, false);
+      await expect(header).toBeHidden();
+      for (const button of standIns) await expect(button).toBeVisible();
+
+      await setShowViewHeader(window, true);
+      await expect(header).toBeVisible();
+      for (const button of standIns) await expect(button).toBeHidden();
+    });
+
+    test('names the item on screen after the folder it is in, and nothing on the home screen', async () => {
+      await importTwoArticles();
+      await moveArticle(MOVED_ARTICLE, MOVED_TO);
+      const x = await beginReview();
+      await expectHeaderNames(x);
+      const xFolder = await folderOnScreen();
+
+      const y = await skipTo(x);
+      await expectHeaderNames(y);
+      // The two really are in different folders, so the breadcrumb had to move.
+      expect(await folderOnScreen()).not.toBe(xFolder);
+      expect([xFolder, await folderOnScreen()]).toContain(MOVED_TO);
+
+      await executeCommandById(window, 'incremental-reading:learn');
+      await expectReviewHome(window);
+      const header = reviewHeader(window);
+      await expect(header.locator('.view-header-title')).toHaveText(
+        REVIEW_VIEW_DEFAULT_TITLE
+      );
+      await expect(header.locator('.view-header-breadcrumb')).toHaveCount(0);
+    });
+
+    test('reveals a folder in the file explorer when it is clicked', async () => {
+      await importTwoArticles();
+      await moveArticle(MOVED_ARTICLE, MOVED_TO);
+      let item = await beginReview();
+      if ((await folderOnScreen()) !== MOVED_TO) item = await skipTo(item);
+      await expectHeaderNames(item);
+      const folderRow = window.locator(
+        `.nav-folder-title[data-path="${MOVED_TO}"]`
+      );
+      // Inside a folder the explorer has never expanded.
+      await expect(folderRow).toBeHidden();
+
+      await reviewHeader(window)
+        .locator('.view-header-breadcrumb', { hasText: 'deeper' })
+        .click();
+
+      await expect(folderRow).toBeVisible();
+    });
+
+    test("has the ⋮ as its one action, opening the item's file menu", async () => {
+      await importTwoArticles();
+      await beginReview();
+      // A markdown tab has a reading-view toggle beside its ⋮; review does not
+      // support reading view, so it has the ⋮ alone.
+      const actions = reviewHeader(window).locator('.view-actions > *');
+      await expect(actions).toHaveCount(1);
+      await expect(actions).toHaveAttribute('aria-label', 'More options');
+
+      await actions.click();
+
+      const menu = window.locator('.menu');
+      for (const entry of [
+        'Source mode',
+        'Open in new tab',
+        'Go to context',
+        'Rename...',
+        'Delete',
+      ]) {
+        await expect(menu.getByText(entry, { exact: true })).toBeVisible();
+      }
+      await window.keyboard.press('Escape');
+      await expect(menu).toBeHidden();
+    });
+
+    test('renames the item from its title, and drops the edit on Escape', async () => {
+      await importTwoArticles();
+      const x = await beginReview();
+      const folder = await folderOnScreen();
+      const title = reviewHeader(window).locator('.view-header-title');
+      const renamed = 'Renamed in the header';
+
+      await title.click();
+      await window.keyboard.press('ControlOrMeta+A');
+      await window.keyboard.type(renamed);
+      await window.keyboard.press('Enter');
+
+      await expect
+        .poll(async () => (await leafSnapshot(window)).file)
+        .toBe(`${folder}/${renamed}.md`);
+      await expectReviewOn(window, { id: x.id, title: renamed });
+      await expect(title).toHaveText(renamed);
+
+      await title.click();
+      await window.keyboard.press('ControlOrMeta+A');
+      await window.keyboard.type('Not kept');
+      await window.keyboard.press('Escape');
+
+      await expect(title).toHaveText(renamed);
+      await window.waitForTimeout(500);
+      expect((await leafSnapshot(window)).file).toBe(`${folder}/${renamed}.md`);
+    });
+  });
 });
 /** The slice of Obsidian's `window.app` the race test reaches into. */
 type TestWindowLike = {
@@ -674,6 +873,20 @@ type TestWindowLike = {
           };
         }
       >;
+    };
+  };
+};
+
+/** The slice of Obsidian's `window.app` the view header tests reach into. */
+type HeaderTestWindow = {
+  app: {
+    vault: {
+      getMarkdownFiles(): { basename: string; name: string; path: string }[];
+      getFolderByPath(path: string): unknown;
+      createFolder(path: string): Promise<unknown>;
+    };
+    fileManager: {
+      renameFile(file: unknown, newPath: string): Promise<void>;
     };
   };
 };

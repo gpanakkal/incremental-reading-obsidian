@@ -121,6 +121,9 @@ export class FileView {
    * can spy here to check it does.
    */
   onPaneMenu(_menu: Menu, _source: string): void {}
+
+  /** A no-op here; Obsidian's retitles the header when `file` is renamed. */
+  async onRename(_file: unknown): Promise<void> {}
 }
 
 /**
@@ -243,7 +246,11 @@ export class WorkspaceWindow {
 export class MarkdownView {}
 export class Component {}
 export class MarkdownRenderer {}
-export const Platform = { isMobile: false, isDesktop: true };
+export const Platform = {
+  isMobile: false,
+  isMobileApp: false,
+  isDesktop: true,
+};
 
 /**
  * Mirrors Obsidian's Keymap.isModEvent: Mod-click (Ctrl on Win/Linux, Cmd on

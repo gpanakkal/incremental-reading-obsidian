@@ -5,6 +5,7 @@ import {
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import {
   actionsToReach,
   isDestination,
@@ -93,6 +94,12 @@ export default class ReviewView extends FileView {
    * returns to its place before settling anywhere else — see {@link trackPlace}.
    */
   #lastRecorded: WorkspaceLeafHistoryState | null = null;
+  /**
+   * The item file the header title was focused on, held until the edit is
+   * committed or cancelled — see {@link commitTitleRename}. `null` whenever no
+   * rename is under way, which is also how a cancelled one reaches the commit.
+   */
+  #renaming: TFile | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -142,6 +149,7 @@ export default class ReviewView extends FileView {
   setTitle() {
     this.renderTitleParent();
     this.titleEl.setText(this.getDisplayText());
+    this.updateTitleEditable();
     this.leaf.updateHeader();
     const container = this.leaf.getContainer();
     if (container instanceof WorkspaceWindow) {
@@ -530,9 +538,7 @@ export default class ReviewView extends FileView {
     if (this.initialItem) {
       this.setFile(this.initialItem.file);
     }
-    if (!this.app.isMobile) {
-      this.headerEl.hide();
-    }
+    this.wireTitleRename();
     render(
       createReviewInterface({
         reviewView: this,
@@ -618,9 +624,9 @@ export default class ReviewView extends FileView {
   }
 
   /**
-   * Populate the file context menu — the ⋮ button in the view header on mobile,
-   * the action bar's stand-in for it on desktop, and the tab header's
-   * right-click menu on both.
+   * Populate the file context menu — the ⋮ button in the view header, the
+   * action bar's stand-in for it while the header is hidden, and the tab
+   * header's right-click menu.
    *
    * `FileView` does not implement this. The class that does is the editable file
    * view below it in the hierarchy, which every markdown tab uses, so a plain
@@ -768,11 +774,11 @@ export default class ReviewView extends FileView {
    * Open the file context menu from a caller of our own.
    *
    * Obsidian builds this menu in `ItemView.onMoreOptions`, wired to the ⋮ button
-   * it draws in `headerEl` — which {@link onOpen} hides on desktop, where the
-   * action bar takes the header's place. The action bar's ⋮ calls this instead,
-   * and it mirrors that method step for step: same sections, same submenu
-   * grouping, same `leaf-menu` event, anchored under the button the same way, so
-   * the menu desktop gets is the one mobile gets natively.
+   * it draws in `headerEl` — which Obsidian hides everywhere but on a phone when
+   * the "Show tab title bar" appearance setting is off. The action bar's ⋮
+   * stands in for it then and calls this, and it mirrors that method step for
+   * step: same sections, same submenu grouping, same `leaf-menu` event, anchored
+   * under the button the same way, so both buttons open the same menu.
    */
   showMoreOptionsMenu(anchorEl: HTMLElement): void {
     const menu = new Menu().addSections(MORE_OPTIONS_SECTIONS);
@@ -796,6 +802,120 @@ export default class ReviewView extends FileView {
       overlap: true,
       left: true,
     });
+  }
+
+  /**
+   * Keep the view header in step when the file it names is renamed or moved.
+   *
+   * `FileView`'s own handler writes the file's name and folder into the header
+   * whenever `file` is renamed, and `file` stays pointed at the last item while
+   * the home screen is up — so renaming that note from the file explorer would
+   * put its name over the home screen. {@link setTitle} redraws both halves from
+   * the page the tab is actually on.
+   */
+  async onRename(file: TFile): Promise<void> {
+    await super.onRename(file);
+    if (file === this.file) this.setTitle();
+  }
+
+  /**
+   * Let the view header's title rename the item on screen, the way a note's
+   * header title does. Obsidian wires this up in the editable file view below
+   * `FileView` in the hierarchy, so a plain `FileView` gets a title that only
+   * reads.
+   *
+   * Enter or Tab commits, Escape cancels, and leaving the title commits. On the
+   * mobile app the title turns editable only on touch, as Obsidian's does, so
+   * that nothing else focusing the header raises the keyboard.
+   */
+  wireTitleRename(): void {
+    const { titleEl } = this;
+    titleEl.tabIndex = -1;
+    this.updateTitleEditable();
+    this.registerDomEvent(titleEl, 'focus', () => {
+      this.#renaming = this.currentItemFile();
+    });
+    this.registerDomEvent(titleEl, 'blur', () => {
+      void this.commitTitleRename();
+    });
+    this.registerDomEvent(titleEl, 'keydown', (e) => {
+      this.onTitleKeydown(e);
+    });
+    if (Platform.isMobileApp) {
+      this.registerDomEvent(titleEl, 'touchstart', () => {
+        this.updateTitleEditable(true);
+      });
+    }
+  }
+
+  /**
+   * Make the header title editable exactly while it names an item: the home
+   * screen's title is the plugin's name, not a note's, and there is nothing to
+   * rename.
+   *
+   * `plaintext-only` keeps a paste from dragging markup into the name.
+   *
+   * @param armed whether the platform lets the title take edits right now —
+   * always on desktop, and on the mobile app only from a touch until the edit
+   * ends.
+   */
+  updateTitleEditable(armed = !Platform.isMobileApp): void {
+    const editable = armed && this.currentItemFile() !== null;
+    this.titleEl.setAttribute(
+      'contenteditable',
+      editable ? 'plaintext-only' : 'false'
+    );
+  }
+
+  /** Enter and Tab end the edit by committing it, Escape by dropping it. */
+  onTitleKeydown(e: KeyboardEvent): void {
+    // Enter picks an IME candidate mid-composition; it must not commit.
+    if (e.isComposing) return;
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      this.titleEl.blur();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      this.#renaming = null;
+      this.titleEl.blur();
+    }
+  }
+
+  /**
+   * Rename the file the title was focused on to what the title now says, or put
+   * the title back when there is nothing to rename.
+   *
+   * Nothing is renamed when the edit was cancelled, the name is blank or
+   * unchanged, or review has moved to another item since the edit began: the
+   * title then names the new item, and renaming the old note after it would be
+   * the wrong note under the wrong name.
+   *
+   * A successful rename retitles the header through {@link onRename}; the
+   * vault's own `rename` event moves the item's database row along with it,
+   * as it does for a rename from anywhere else.
+   */
+  async commitTitleRename(): Promise<void> {
+    const file = this.#renaming;
+    this.#renaming = null;
+    this.updateTitleEditable();
+    const name = (this.titleEl.textContent ?? '').trim();
+    if (
+      !file ||
+      file !== this.currentItemFile() ||
+      name === '' ||
+      name === file.basename
+    ) {
+      this.titleEl.textContent = this.getDisplayText();
+      return;
+    }
+    try {
+      await Obsidian.renameFile(file, name, this.app);
+    } catch (error) {
+      console.error(error);
+      const reason = error instanceof Error ? error.message : String(error);
+      Obsidian.notify(`Could not rename "${file.basename}": ${reason}`);
+      this.titleEl.textContent = this.getDisplayText();
+    }
   }
 
   /* TODO: investigate how to use this */

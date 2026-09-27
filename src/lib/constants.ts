@@ -132,8 +132,8 @@ export const QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE = 20;
  * belong and why Kanban's board actions sit at the top of its menu.
  *
  * Needed because {@link ReviewView.showMoreOptionsMenu} builds the menu itself
- * on desktop, where {@link ReviewView.onOpen} hides `headerEl` and Obsidian
- * therefore never draws the button that would have built it.
+ * for the action bar's ⋮, which stands in for the view header's while the "Show
+ * tab title bar" setting hides it.
  */
 export const MORE_OPTIONS_SECTIONS: string[] = [
   'close',

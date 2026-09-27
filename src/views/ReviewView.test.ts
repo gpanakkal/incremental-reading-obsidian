@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 
 import * as ReviewInterface from '#/components/ReviewInterface';
-import { PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
+import {
+  FORBIDDEN_TITLE_CHARS,
+  PLACEHOLDER_PLUGIN_ICON,
+} from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import {
@@ -29,6 +32,7 @@ import type IncrementalReadingPlugin from '#/main';
 import {
   FileView,
   Menu,
+  Notice,
   Platform,
   type MenuItem,
 } from '#/test/__mocks__/obsidian';
@@ -110,7 +114,7 @@ function makeTitleReceiver(
   const receiver = {
     file,
     plugin: { store: { getState: () => state } },
-    titleEl: { setText: vi.fn() },
+    titleEl: { setText: vi.fn(), setAttribute: vi.fn() },
     // The two halves of the view header FileView keeps in step from `loadFile`:
     // the folder breadcrumb (`titleParentEl`, filled by `renderBreadcrumbs`) and
     // the name (`titleEl`). Stubbed on the receiver because the obsidian mock's
@@ -474,6 +478,7 @@ async function openHistoryView({
     leaf,
     file,
     contentEl: document.createElement('div'),
+    titleEl: document.createElement('div'),
     app: {
       isMobile: true,
       mobileNavbar,
@@ -492,6 +497,125 @@ function backPlaces(leaf: ReturnType<typeof makeHistoryLeaf>) {
 
 /** Let a lookup `leaveIfGone` started settle. */
 const flushLookups = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * An item's note, with the folder its rename has to stay in. `parentPath` of
+ * `null` is a file with no parent at all; `'/'` is one at the vault root.
+ */
+function makeItemFile(basename: string, parentPath: string | null): TFile {
+  return {
+    basename,
+    extension: 'md',
+    parent: parentPath === null ? null : { path: parentPath },
+  } as TFile;
+}
+
+/** Where renaming `file` to `name` should put it: the same folder, new name. */
+function renamedPath(file: TFile, name: string): string {
+  const folder = file.parent?.path;
+  return folder && folder !== '/' ? `${folder}/${name}.md` : `${name}.md`;
+}
+
+/**
+ * A constructed view with a real header title in the document, so focus, blur
+ * and keys reach the rename wiring the way they do in the app. Constructed
+ * rather than a prototype receiver because the rename holds its file in a
+ * private field, which only a constructed instance carries.
+ *
+ * `setText` is Obsidian's DOM extension, which jsdom lacks.
+ */
+function makeRenameView({
+  page = 'review',
+  file = makeItemFile('Chapter 1', 'Articles'),
+  isMobileApp = false,
+  renameFile = vi.fn(async (_file: TFile, _path: string) => {}),
+}: {
+  page?: ReviewPage;
+  file?: TFile | null;
+  isMobileApp?: boolean;
+  renameFile?: (file: TFile, path: string) => Promise<void>;
+} = {}) {
+  const store = makeFakeStore(page);
+  const view = makeView(store);
+  const titleEl = document.createElement('div');
+  titleEl.setText = (text: string | DocumentFragment) => {
+    titleEl.textContent = typeof text === 'string' ? text : text.textContent;
+  };
+  document.body.appendChild(titleEl);
+  Object.assign(view, {
+    file,
+    titleEl,
+    titleParentEl: { empty: vi.fn() },
+    renderBreadcrumbs: vi.fn(),
+    leaf: { updateHeader: vi.fn(), getContainer: () => ({}) },
+    app: {
+      fileManager: { renameFile },
+      workspace: { updateTitle: vi.fn() },
+    },
+  });
+  const previous = Platform.isMobileApp;
+  Platform.isMobileApp = isMobileApp;
+  try {
+    view.setTitle();
+    view.wireTitleRename();
+  } finally {
+    Platform.isMobileApp = previous;
+  }
+  return { view, store, titleEl, renameFile };
+}
+
+/**
+ * Type `text` over the title and end the edit the way a user would: by leaving
+ * the title, or with a key. Waits out the rename the commit starts.
+ */
+async function editTitle(
+  titleEl: HTMLElement,
+  text: string,
+  end: 'blur' | 'Enter' | 'Tab' | 'Escape' = 'blur'
+): Promise<void> {
+  titleEl.focus();
+  titleEl.textContent = text;
+  if (end === 'blur') {
+    titleEl.blur();
+  } else {
+    titleEl.dispatchEvent(
+      new KeyboardEvent('keydown', { key: end, cancelable: true })
+    );
+  }
+  await flushLookups();
+}
+
+/** A name a note can take: no forbidden character, no leading dot, no trailing dot or space. */
+function isValidName(name: string): boolean {
+  return (
+    name.trim() === name &&
+    name !== '' &&
+    !name.startsWith('.') &&
+    !name.endsWith('.') &&
+    ![...name].some((char) => FORBIDDEN_TITLE_CHARS.has(char))
+  );
+}
+
+const validNameArb = fc.string({ minLength: 1 }).filter(isValidName);
+/** Whitespace a title can pick up around the name, which the rename ignores. */
+const paddingArb = fc.constantFrom('', ' ', '  ', '\t', ' \n');
+/** No parent, the vault root, or a folder any number of levels deep. */
+const parentPathArb = fc.oneof(
+  fc.constant(null),
+  fc.constant('/'),
+  fc
+    .array(
+      fc.string({ minLength: 1 }).filter((seg) => !seg.includes('/')),
+      {
+        minLength: 1,
+        maxLength: 3,
+      }
+    )
+    .map((segments) => segments.join('/'))
+);
+const itemFileArb = fc
+  .tuple(fc.string(), parentPathArb)
+  .map(([basename, parent]) => makeItemFile(basename, parent));
 
 // #endregion
 
@@ -942,6 +1066,22 @@ describe('ReviewView.setTitle', () => {
     );
   });
 
+  it('lets the title be edited exactly while it names an item', () => {
+    fc.assert(
+      fc.property(pageArb, fileArb, (page, file) => {
+        const receiver = makeTitleReceiver(page, file);
+
+        asView(receiver).setTitle();
+
+        const onScreen = page === 'review' && !!file?.basename;
+        expect(receiver.titleEl.setAttribute).toHaveBeenLastCalledWith(
+          'contenteditable',
+          onScreen ? 'plaintext-only' : 'false'
+        );
+      })
+    );
+  });
+
   it('shows the plugin name once a review returns to the home screen with a file still loaded', () => {
     // Nothing recomputes document.title on a page change — that is neither a
     // leaf change nor a layout change — so the taskbar kept the item name.
@@ -1112,6 +1252,338 @@ const menuSourceArb = fc.constantFrom(
   'tab-header',
   'sidebar-context-menu'
 );
+
+describe('ReviewView header title rename', () => {
+  beforeEach(() => {
+    Notice.reset();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  const commitArb = fc.constantFrom(
+    'blur' as const,
+    'Enter' as const,
+    'Tab' as const
+  );
+
+  it('renames the note on screen to the edited title, keeping it in its folder', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pageArb,
+        itemFileArb,
+        validNameArb,
+        paddingArb,
+        paddingArb,
+        commitArb,
+        async (page, file, name, before, after, end) => {
+          const { view, titleEl, renameFile } = makeRenameView({ page, file });
+
+          await editTitle(titleEl, `${before}${name}${after}`, end);
+
+          const onScreen = page === 'review' && file.basename !== '';
+          if (onScreen && name !== file.basename) {
+            expect(renameFile).toHaveBeenCalledTimes(1);
+            expect(renameFile).toHaveBeenCalledWith(
+              file,
+              renamedPath(file, name)
+            );
+          } else {
+            // The home screen's title is the plugin's name, and an unchanged
+            // name is nothing to rename; either way the title reads as before.
+            expect(renameFile).not.toHaveBeenCalled();
+            expect(titleEl.textContent).toBe(view.getDisplayText());
+          }
+          expect(Notice.messages).toEqual([]);
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('ends the edit on Enter or Tab without letting the key through', () => {
+    for (const key of ['Enter', 'Tab']) {
+      const { titleEl } = makeRenameView();
+      titleEl.focus();
+      const event = new KeyboardEvent('keydown', { key, cancelable: true });
+
+      titleEl.dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).not.toBe(titleEl);
+    }
+  });
+
+  it('drops the edit on Escape, putting the name back', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.string(), async (text) => {
+        const { titleEl, renameFile } = makeRenameView();
+        titleEl.focus();
+        titleEl.textContent = text;
+        const event = new KeyboardEvent('keydown', {
+          key: 'Escape',
+          cancelable: true,
+        });
+
+        titleEl.dispatchEvent(event);
+        await flushLookups();
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(renameFile).not.toHaveBeenCalled();
+        expect(titleEl.textContent).toBe('Chapter 1');
+        expect(document.activeElement).not.toBe(titleEl);
+        document.body.innerHTML = '';
+      })
+    );
+  });
+
+  it('leaves the edit open while an input method is composing', () => {
+    // Enter there picks a candidate, and must not commit half a word.
+    const { titleEl, renameFile } = makeRenameView();
+    titleEl.focus();
+    titleEl.textContent = 'Chapter 2';
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      cancelable: true,
+      isComposing: true,
+    });
+
+    titleEl.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(titleEl);
+    expect(renameFile).not.toHaveBeenCalled();
+  });
+
+  it('leaves other keys to the title', () => {
+    const { titleEl } = makeRenameView();
+    titleEl.focus();
+    const event = new KeyboardEvent('keydown', { key: 'a', cancelable: true });
+
+    titleEl.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(titleEl);
+  });
+
+  it('renames nothing for a blank title, and puts the name back', async () => {
+    await fc.assert(
+      fc.asyncProperty(paddingArb, commitArb, async (blank, end) => {
+        const { titleEl, renameFile } = makeRenameView();
+
+        await editTitle(titleEl, blank, end);
+
+        expect(renameFile).not.toHaveBeenCalled();
+        expect(titleEl.textContent).toBe('Chapter 1');
+        document.body.innerHTML = '';
+      })
+    );
+  });
+
+  it('renames nothing when the title ends the edit saying what it said before', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        validNameArb,
+        parentPathArb,
+        paddingArb,
+        paddingArb,
+        commitArb,
+        async (basename, parent, before, after, end) => {
+          const { titleEl, renameFile } = makeRenameView({
+            file: makeItemFile(basename, parent),
+          });
+
+          await editTitle(titleEl, `${before}${basename}${after}`, end);
+
+          expect(renameFile).not.toHaveBeenCalled();
+          expect(titleEl.textContent).toBe(basename);
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('refuses a name a note cannot take, says why, and puts the name back', async () => {
+    const forbiddenArb = fc.constantFrom(
+      ...[...FORBIDDEN_TITLE_CHARS].filter((char) => char !== '\n')
+    );
+    const badNameArb = fc.oneof(
+      fc
+        .tuple(validNameArb, forbiddenArb, fc.string())
+        .map(([name, char, rest]) => `${name}${char}${rest}`),
+      validNameArb.map((name) => `.${name}`),
+      validNameArb.map((name) => `${name}.`)
+    );
+    await fc.assert(
+      fc.asyncProperty(badNameArb, commitArb, async (name, end) => {
+        Notice.reset();
+        const { titleEl, renameFile } = makeRenameView();
+
+        await editTitle(titleEl, name, end);
+
+        expect(renameFile).not.toHaveBeenCalled();
+        expect(Notice.messages).toHaveLength(1);
+        expect(Notice.messages[0]).toContain('Could not rename "Chapter 1": ');
+        expect(titleEl.textContent).toBe('Chapter 1');
+        document.body.innerHTML = '';
+      })
+    );
+  });
+
+  it('says why when the vault refuses the rename, and puts the name back', async () => {
+    const failures: [unknown, string][] = [
+      [
+        new Error('Destination file already exists!'),
+        'Destination file already exists!',
+      ],
+      ['disk full', 'disk full'],
+    ];
+    for (const [failure, reason] of failures) {
+      Notice.reset();
+      const { titleEl } = makeRenameView({
+        renameFile: vi.fn(async () => {
+          throw failure;
+        }),
+      });
+
+      await editTitle(titleEl, 'Chapter 2');
+
+      expect(Notice.messages).toEqual([
+        `Could not rename "Chapter 1": ${reason}`,
+      ]);
+      expect(titleEl.textContent).toBe('Chapter 1');
+    }
+  });
+
+  it('leaves the old note alone when review moves on mid-edit', async () => {
+    // By the time the edit ends the title names the next item, and renaming
+    // the previous note after it would be the wrong note under the wrong name.
+    const { view, titleEl, renameFile } = makeRenameView();
+    titleEl.focus();
+    titleEl.textContent = 'Chapter 2';
+
+    view.setFile(makeItemFile('Chapter 3', 'Articles'));
+    titleEl.blur();
+    await flushLookups();
+
+    expect(renameFile).not.toHaveBeenCalled();
+    expect(titleEl.textContent).toBe('Chapter 3');
+  });
+
+  it('leaves the note alone when review goes home mid-edit', async () => {
+    const { store, titleEl, renameFile } = makeRenameView();
+    titleEl.focus();
+    titleEl.textContent = 'Chapter 2';
+
+    store.dispatchPage('home');
+    titleEl.blur();
+    await flushLookups();
+
+    expect(renameFile).not.toHaveBeenCalled();
+    expect(titleEl.textContent).toBe(REVIEW_VIEW_DEFAULT_TITLE);
+  });
+
+  it('keeps the title out of the tab order', () => {
+    const { titleEl } = makeRenameView();
+
+    expect(titleEl.tabIndex).toBe(-1);
+  });
+
+  it('makes the title editable exactly while it names an item, on desktop', () => {
+    fc.assert(
+      fc.property(
+        pageArb,
+        fc.option(itemFileArb, { nil: null }),
+        (page, file) => {
+          const { titleEl } = makeRenameView({ page, file });
+
+          const onScreen = page === 'review' && !!file?.basename;
+          expect(titleEl.getAttribute('contenteditable')).toBe(
+            onScreen ? 'plaintext-only' : 'false'
+          );
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('on the mobile app, makes the title editable only from a touch until the edit ends', async () => {
+    // Obsidian's own header title does the same, so that nothing else putting
+    // focus in the header raises the keyboard.
+    await fc.assert(
+      fc.asyncProperty(
+        pageArb,
+        fc.option(itemFileArb, { nil: null }),
+        async (page, file) => {
+          const { titleEl } = makeRenameView({
+            page,
+            file,
+            isMobileApp: true,
+          });
+          const onScreen = page === 'review' && !!file?.basename;
+          const editable = () => titleEl.getAttribute('contenteditable');
+          expect(editable()).toBe('false');
+
+          titleEl.dispatchEvent(new Event('touchstart'));
+          expect(editable()).toBe(onScreen ? 'plaintext-only' : 'false');
+
+          const previous = Platform.isMobileApp;
+          Platform.isMobileApp = true;
+          try {
+            titleEl.focus();
+            titleEl.blur();
+            await flushLookups();
+          } finally {
+            Platform.isMobileApp = previous;
+          }
+          expect(editable()).toBe('false');
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('never listens for touch on desktop', () => {
+    const { titleEl } = makeRenameView();
+    titleEl.setAttribute('contenteditable', 'false');
+
+    titleEl.dispatchEvent(new Event('touchstart'));
+
+    expect(titleEl.getAttribute('contenteditable')).toBe('false');
+  });
+});
+
+describe('ReviewView.onRename', () => {
+  it('retitles the header from the page when the file it holds is renamed', async () => {
+    // FileView's own handler writes the file's name into the header whatever
+    // the page, which on the home screen names a note the tab is not showing.
+    await fc.assert(
+      fc.asyncProperty(pageArb, itemFileArb, async (page, file) => {
+        const { view, titleEl } = makeRenameView({ page, file });
+        const superRename = vi.spyOn(FileView.prototype, 'onRename');
+        titleEl.textContent = 'stale';
+
+        await view.onRename(file);
+
+        expect(superRename).toHaveBeenCalledWith(file);
+        expect(titleEl.textContent).toBe(view.getDisplayText());
+        superRename.mockRestore();
+        document.body.innerHTML = '';
+      })
+    );
+  });
+
+  it('leaves the header alone when some other file is renamed', async () => {
+    const { view, titleEl } = makeRenameView();
+    titleEl.textContent = 'untouched';
+
+    await view.onRename(makeItemFile('Other', 'Articles'));
+
+    expect(titleEl.textContent).toBe('untouched');
+  });
+});
 
 describe('ReviewView.onPaneMenu', () => {
   it("puts the view's own entries in the section that renders first", () => {
