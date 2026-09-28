@@ -395,6 +395,21 @@ export async function setShowViewHeader(window: Page, show: boolean) {
   }, show);
 }
 
+/**
+ * Set Settings -> Appearance -> "Native menus", the `nativeMenus` vault
+ * config. On macOS it defaults to on, and a native menu is drawn by Electron
+ * outside the page, where no locator can see it. Turn it off before asserting
+ * on a `.menu`. Takes effect at once, like `setShowViewHeader`.
+ */
+export async function setNativeMenus(window: Page, native: boolean) {
+  await window.evaluate((value) => {
+    (window as unknown as TestWindow).app.vault.setConfig(
+      'nativeMenus',
+      value
+    );
+  }, native);
+}
+
 /** What the review tab calls itself when it is not showing an item. */
 export const REVIEW_VIEW_DEFAULT_TITLE = 'Incremental reading';
 

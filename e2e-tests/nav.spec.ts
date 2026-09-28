@@ -15,6 +15,7 @@ import {
   REVIEW_VIEW_DEFAULT_TITLE,
   REVIEW_VIEW_TYPE,
   reviewHeader,
+  setNativeMenus,
   setPluginSetting,
   setShowViewHeader,
   waitForReviewItem,
@@ -806,6 +807,8 @@ test.describe('Review history navigation', () => {
     });
 
     test("has the ⋮ as its one action, opening the item's file menu", async () => {
+      // macOS defaults to native menus, which Electron draws outside the page.
+      await setNativeMenus(window, false);
       await importTwoArticles();
       await beginReview();
       // A markdown tab has a reading-view toggle beside its ⋮; review does not
