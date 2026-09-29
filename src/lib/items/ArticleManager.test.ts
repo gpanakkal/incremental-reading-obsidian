@@ -221,7 +221,7 @@ function makeSimpleRepo(): SQLiteRepository {
  */
 function makeApp(): Record<string, unknown> {
   return {
-    metadataCache: { getFileCache: () => undefined },
+    metadataCache: { getFileCache: () => ({}) },
     fileManager: { processFrontMatter: async () => undefined },
   };
 }
@@ -1023,6 +1023,94 @@ describe('rowToReviewArticle', () => {
     );
     expect(undeleteCall).toBeDefined();
     expect(undeleteCall![1][0]).toBe(row.id);
+  });
+});
+
+/**
+ * Obsidian's metadata cache answers `null` for a note between hashing its new
+ * content and finishing the parse of it, which every edit does — each keystroke
+ * saved from review among them. That is a note not readable yet, not one with
+ * its frontmatter gone.
+ */
+describe('rowToReviewArticle on a note the metadata cache is still re-reading', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns the row as a review item without writing to the note or its tombstone', async () => {
+    const fakeFile = { path: 'articles/test.md' } as TFile;
+    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
+    await fc.assert(
+      fc.asyncProperty(
+        articleRowArb,
+        fc.boolean(),
+        async (row, fuzzTextReviews) => {
+          const processFrontMatter = vi.fn().mockResolvedValue(undefined);
+          const repo = makeSimpleRepo();
+          const manager = new ArticleManager(
+            {
+              app: {
+                metadataCache: { getFileCache: () => null },
+                fileManager: { processFrontMatter },
+              },
+              settings: { fuzzTextReviews },
+            } as never,
+            repo
+          );
+
+          const result = manager.rowToReviewArticle(row);
+          await Promise.resolve();
+
+          expect(result).toStrictEqual({
+            data: ArticleManager.rowToBase(row),
+            file: fakeFile,
+          });
+          expect(processFrontMatter).not.toHaveBeenCalled();
+          // Review fuzz lives in the database alone, so it is still set
+          const mutated = (
+            repo.mutate as ReturnType<typeof vi.fn>
+          ).mock.calls.map(([sql]) => sql as string);
+          expect(
+            mutated.filter((sql) => !sql.includes('SET due_fuzz'))
+          ).toStrictEqual([]);
+        }
+      )
+    );
+  });
+
+  it('still restores the id and tag of a parsed note that has no frontmatter', async () => {
+    const fakeFile = { path: 'articles/test.md' } as TFile;
+    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
+    await fc.assert(
+      fc.asyncProperty(
+        articleRowArb,
+        fc.boolean(),
+        async (row, fuzzTextReviews) => {
+          const processFrontMatter = vi.fn().mockResolvedValue(undefined);
+          const repo = makeSimpleRepo();
+          const manager = new ArticleManager(
+            {
+              app: {
+                metadataCache: { getFileCache: () => ({}) },
+                fileManager: { processFrontMatter },
+              },
+              settings: { fuzzTextReviews },
+            } as never,
+            repo
+          );
+
+          const result = manager.rowToReviewArticle(row);
+          await Promise.resolve();
+
+          expect(result).toStrictEqual({
+            data: ArticleManager.rowToBase(row),
+            file: fakeFile,
+          });
+          expect(processFrontMatter).toHaveBeenCalledTimes(1);
+          expect(processFrontMatter.mock.calls[0][0]).toBe(fakeFile);
+        }
+      )
+    );
   });
 });
 

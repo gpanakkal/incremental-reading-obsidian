@@ -69,22 +69,7 @@ export class ArticleManager extends ItemManager {
       return null;
     }
 
-    const frontmatter = Obsidian.getFrontMatter(file, this.app);
-    const fileId = frontmatter?.['ir-id'];
-    // id is present but doesn't match
-    if (fileId && fileId !== row.id) {
-      void this.markDeleted(row.id, 'article');
-      return null;
-    }
-
-    // some frontmatter is missing; impute it
-    if (!fileId || !frontmatter?.tags?.includes(ARTICLE_TAG)) {
-      void this.setFrontmatter(file, row.id, ARTICLE_TAG);
-    }
-
-    if (row.deleted) {
-      void this.markUndeleted(row.id, 'article');
-    }
+    if (!this.reconcileNote(row, file, 'article', ARTICLE_TAG)) return null;
 
     if (this.plugin.settings.fuzzTextReviews && row.due_fuzz === null) {
       void this.setReviewTimeFuzz(row.id, 'article');

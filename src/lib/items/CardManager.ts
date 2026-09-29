@@ -124,22 +124,7 @@ export class CardManager extends ItemManager {
       return null;
     }
 
-    const frontmatter = Obsidian.getFrontMatter(file, this.app);
-    const fileId = frontmatter?.['ir-id'];
-    // id is present but doesn't match
-    if (fileId && fileId !== row.id) {
-      void this.markDeleted(row.id, 'card');
-      return null;
-    }
-
-    // some frontmatter is missing; impute it
-    if (!fileId || !frontmatter?.tags?.includes(CARD_TAG)) {
-      void this.setFrontmatter(file, row.id, CARD_TAG);
-    }
-
-    if (row.deleted) {
-      void this.markUndeleted(row.id, 'card');
-    }
+    if (!this.reconcileNote(row, file, 'card', CARD_TAG)) return null;
 
     return {
       data: base,
