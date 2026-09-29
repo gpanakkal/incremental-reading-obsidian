@@ -36,6 +36,24 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
 
+  # The stylesheet in WebKit (Obsidian's iOS engine) and Firefox, which measure
+  # layout differently from Electron's Chromium. No Obsidian needed.
+  e2e-engines:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps webkit firefox
+      - run: pnpm run e2e:engines
+
   e2e:
     strategy:
       fail-fast: false
