@@ -1341,6 +1341,115 @@ describe('createIrIdRepairer', () => {
     });
   });
 
+  /**
+   * Obsidian's metadata cache hands back `null` for a note between hashing its
+   * new content and finishing the parse, so every edit — each keystroke saved
+   * from review, the import's own frontmatter write — opens a moment where the
+   * note reads as having no frontmatter at all. That is not the `ir-id` being
+   * gone, and the `changed` event that ends the moment brings the note back.
+   */
+  describe('a note the cache is still re-reading', () => {
+    const PATH = 'notes/one.md';
+
+    /** Rows around the note's path, some of them holding it. */
+    const rowsNearArb = fc
+      .uniqueArray(
+        fc
+          .record({
+            table: tableArb,
+            id: idArb,
+            reference: fc.constantFrom(PATH, 'notes/other.md'),
+            deleted: fc.boolean(),
+          })
+          .map((row) => ({ ...row })),
+        { selector: ({ id }) => id, maxLength: 5 }
+      )
+      .filter(
+        (rows) =>
+          new Set(rows.map(({ table, reference }) => `${table}\0${reference}`))
+            .size === rows.length
+      );
+
+    /** Whatever the note holds on disk: no claim, a stranger's, or a row's. */
+    const noteArb = (rows: readonly StoredRow[]) =>
+      fc.oneof(
+        noClaimArb.map((irId): FakeNote => ({ path: PATH, irId })),
+        someClaimArb.map((irId): FakeNote => ({ path: PATH, irId })),
+        fc.constant<FakeNote>({ path: PATH }),
+        ...(rows.length > 0
+          ? [
+              fc
+                .constantFrom(...rows.map(({ id }) => id))
+                .map((irId): FakeNote => ({ path: PATH, irId })),
+            ]
+          : [])
+      );
+
+    it('neither writes nor warns about it, whatever it holds and whatever holds its path', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          rowsNearArb.chain((rows) =>
+            fc.tuple(fc.constant(rows), noteArb(rows))
+          ),
+          async ([rows, note]) => {
+            const onDamage = vi.fn();
+            const { repairer, repo, vault } = wire(rows, [note], { onDamage });
+            vault.metadataCache.getFileCache.mockReturnValue(null);
+            const bulkMutate = vi.spyOn(repo, 'bulkMutate');
+            const before = readRows(repo);
+
+            repairer.handleChange(changed(PATH));
+            expect(await repairer.flush()).toStrictEqual([]);
+
+            expect(vault.writeIrId).not.toHaveBeenCalled();
+            expect(bulkMutate).not.toHaveBeenCalled();
+            expect(onDamage).not.toHaveBeenCalled();
+            expect(readRows(repo)).toStrictEqual(before);
+          }
+        )
+      );
+    });
+
+    it('judges it once the parse lands and the cache says changed', async () => {
+      const onDamage = vi.fn();
+      const { repairer, vault } = wire(
+        [{ table: 'article', id: 'a1', reference: PATH, deleted: false }],
+        [{ path: PATH }],
+        { onDamage }
+      );
+      vault.metadataCache.getFileCache.mockReturnValueOnce(null);
+
+      repairer.handleChange(changed(PATH));
+      expect(await repairer.flush()).toStrictEqual([]);
+      expect(onDamage).not.toHaveBeenCalled();
+
+      // The parse finishing is what raises `changed`, and the note it finds
+      // really has lost its id
+      repairer.handleChange(changed(PATH));
+      await repairer.flush();
+
+      expect(onDamage).toHaveBeenCalledWith([PATH]);
+      expect(vault.snapshot().get(PATH)).toBe('a1');
+    });
+
+    it('does not write over a note that went back to being re-read after it was judged', async () => {
+      const { repairer, vault } = wire(
+        [{ table: 'article', id: 'a1', reference: PATH, deleted: false }],
+        [{ path: PATH }]
+      );
+      // Judged on a settled read; by the re-read before writing, an edit has
+      // landed and its parse has not
+      const settled = vault.metadataCache.getFileCache.getMockImplementation();
+      vault.metadataCache.getFileCache
+        .mockImplementationOnce((file: TFile) => settled?.(file) ?? null)
+        .mockReturnValue(null);
+
+      repairer.handleChange(changed(PATH));
+      expect(await repairer.flush()).toStrictEqual([]);
+      expect(vault.writeIrId).not.toHaveBeenCalled();
+    });
+  });
+
   describe('the write it makes does not come back to it', () => {
     it('settles after one pass when an id is restored', async () => {
       const { repairer, vault, repo } = wire(

@@ -347,11 +347,26 @@ export function createIrIdRepairer({
   // every other reader about what a `reference` points at
   const fileAt = (path: string) => vault.getFileByPath(normalizePath(path));
 
+  /**
+   * What the note at `path` claims, or null when there is nothing to judge yet:
+   * no note there, or one the metadata cache is part way through re-reading.
+   *
+   * The second is every edit, briefly. Obsidian points a note's cache entry at
+   * the hash of its new content before the parse of that content has finished,
+   * and `getFileCache` answers `null` until it has (read from
+   * `MetadataCache.computeFileMetadataAsync` in obsidian.asar, 1.13 — not
+   * documented). Read as a note with no frontmatter, that is an `ir-id` gone
+   * missing: a pass that happened to land there warned the user about an edit
+   * nobody made, typing in review straight after an import being the easiest
+   * way to hit it. Nothing is lost by passing over it, because the parse
+   * finishing is what raises `changed`, and that brings the note back.
+   */
   const claimAt = (path: string): { claim: NoteClaim; file: TFile } | null => {
     const file = fileAt(path);
     if (!file) return null;
-    const irId: unknown =
-      metadataCache.getFileCache(file)?.frontmatter?.['ir-id'];
+    const cache = metadataCache.getFileCache(file);
+    if (!cache) return null;
+    const irId: unknown = cache.frontmatter?.['ir-id'];
     return { claim: { path, irId }, file };
   };
 
@@ -368,7 +383,8 @@ export function createIrIdRepairer({
     const claims: NoteClaim[] = [];
     for (const path of batch) {
       // Gone since the change was remembered: a deletion is the vault delete
-      // handler's business, not this one's
+      // handler's business, not this one's. Or mid-parse, which the `changed`
+      // ending the parse comes back for.
       const found = claimAt(path);
       if (found) claims.push(found.claim);
     }
