@@ -12,7 +12,7 @@ import {
   SOURCE_TAG,
 } from '#/lib/constants';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
-import type { NoteType, PluginFrontMatter } from '#/lib/types';
+import type { NoteType } from '#/lib/types';
 import type { EditorState } from '@codemirror/state';
 import fc from 'fast-check';
 import {
@@ -72,6 +72,71 @@ function makeApp(overrides: Partial<App> = {}): App {
     },
     ...overrides,
   } as unknown as App;
+}
+
+/**
+ * An app whose `processFrontMatter` runs every callback against the one live
+ * `frontmatter` object, the way successive writes to one note see each other.
+ */
+function makeFrontmatterApp(frontmatter: Record<string, unknown>): App {
+  return makeApp({
+    fileManager: {
+      processFrontMatter: vi
+        .fn()
+        .mockImplementation(
+          async (_file: TFile, cb: (fm: Record<string, unknown>) => void) => {
+            cb(frontmatter);
+          }
+        ),
+      renameFile: vi.fn(),
+      generateMarkdownLink: vi.fn(),
+    } as unknown as App['fileManager'],
+  });
+}
+
+/** Builds a frontmatter object with `tags` absent when `tags` is `ABSENT`. */
+const ABSENT = Symbol('absent');
+function makeFrontmatter(tags: unknown): Record<string, unknown> {
+  return tags === ABSENT ? { title: 'x' } : { title: 'x', tags };
+}
+
+/** YAML leaves an empty `tags:` or `- ` entry as null; blank strings are empty tags */
+function isEmptyTag(tag: unknown) {
+  return (
+    tag === null ||
+    tag === undefined ||
+    (typeof tag === 'string' && tag.trim() === '')
+  );
+}
+
+const itemTagArb = fc.constantFrom(
+  ARTICLE_TAG,
+  SNIPPET_TAG,
+  CARD_TAG,
+  SOURCE_TAG
+);
+/** Any tag string a user or the plugin may write, `#`-prefixed or blank included */
+const tagArb = fc.oneof(
+  itemTagArb,
+  fc.string(),
+  fc.string().map((s) => `#${s}`)
+);
+const emptyTagArb = fc.constantFrom(null, undefined, '', ' ', '\t');
+/** Anything YAML can put in a `tags` list, plus what a JS writer could */
+const tagEntryArb = fc.oneof(tagArb, emptyTagArb, fc.integer(), fc.object());
+/** Every value a note's raw `tags` key can hold */
+const rawTagsArb = fc.oneof(
+  emptyTagArb,
+  tagArb,
+  fc.array(tagEntryArb),
+  fc.object()
+);
+/** Every shape a note's raw `tags` value can take, key absence included */
+const existingTagsArb = fc.oneof(fc.constant(ABSENT), rawTagsArb);
+const tagUpdateArb = fc.oneof(tagArb, fc.array(tagArb));
+
+function toList(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [value];
 }
 // #endregion
 
@@ -174,7 +239,10 @@ describe('sanitizeForTitle', () => {
 
   it('replaces a forbidden whitespace character with a space', () => {
     // Mutant: return ' ' → return '' — words either side would run together
-    const result = ObsidianHelpers.sanitizeForTitle('line one\nline two', false);
+    const result = ObsidianHelpers.sanitizeForTitle(
+      'line one\nline two',
+      false
+    );
     expect(result).toBe('line one line two');
   });
 
@@ -1340,6 +1408,58 @@ describe('renameFile', () => {
 });
 
 // ---------------------------------------------------------------------------
+// _mergeTags
+// ---------------------------------------------------------------------------
+describe('_mergeTags', () => {
+  it('drops tags already present', () => {
+    expect(ObsidianHelpers._mergeTags(['tag-a'], ['tag-a', 'tag-b'])).toEqual([
+      'tag-a',
+      'tag-b',
+    ]);
+  });
+
+  it('accepts a lone string on either side', () => {
+    expect(ObsidianHelpers._mergeTags('tag-a', 'tag-b')).toEqual([
+      'tag-a',
+      'tag-b',
+    ]);
+  });
+
+  it('returns only the added tags when there are none yet', () => {
+    expect(ObsidianHelpers._mergeTags(undefined, ['new-tag'])).toEqual([
+      'new-tag',
+    ]);
+  });
+
+  it('holds no empty entries and no duplicates', () => {
+    fc.assert(
+      fc.property(rawTagsArb, tagUpdateArb, (existing, added) => {
+        const result = ObsidianHelpers._mergeTags(existing, added);
+        expect(result.filter(isEmptyTag)).toEqual([]);
+        expect(new Set(result).size).toBe(result.length);
+      })
+    );
+  });
+
+  it('keeps every existing entry in order, then adds the new ones', () => {
+    fc.assert(
+      fc.property(rawTagsArb, tagUpdateArb, (existing, added) => {
+        const kept = [
+          ...new Set(toList(existing).filter((tag) => !isEmptyTag(tag))),
+        ];
+        const fresh = toList(added).filter(
+          (tag) => !isEmptyTag(tag) && !kept.includes(tag)
+        );
+        expect(ObsidianHelpers._mergeTags(existing, added)).toEqual([
+          ...kept,
+          ...new Set(fresh),
+        ]);
+      })
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // updateFrontMatter
 // ---------------------------------------------------------------------------
 describe('updateFrontMatter', () => {
@@ -1361,102 +1481,68 @@ describe('updateFrontMatter', () => {
     expect(processFrontMatter).toHaveBeenCalledWith(file, fn);
   });
 
-  it('calls processFrontMatter with an object update and merges tags', async () => {
-    const processFrontMatter = vi
-      .fn()
-      .mockImplementation(
-        async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
-          const fm: PluginFrontMatter = { tags: ['existing-tag'] };
-          cb(fm);
+  it('writes the merge of the existing and updated tags', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        existingTagsArb,
+        tagUpdateArb,
+        fc.array(fc.string()),
+        async (existing, tags, merged) => {
+          const mergeTags = vi
+            .spyOn(ObsidianHelpers, '_mergeTags')
+            .mockReturnValue(merged);
+          const fm = makeFrontmatter(existing);
+          await ObsidianHelpers.updateFrontMatter(
+            makeTFile(),
+            { tags },
+            makeFrontmatterApp(fm)
+          );
+          expect(mergeTags).toHaveBeenCalledTimes(1);
+          expect(mergeTags).toHaveBeenCalledWith(
+            existing === ABSENT ? undefined : existing,
+            tags
+          );
+          expect(fm.tags).toBe(merged);
+          mergeTags.mockRestore();
         }
-      );
-    const app = makeApp({
-      fileManager: {
-        processFrontMatter,
-        renameFile: vi.fn(),
-        generateMarkdownLink: vi.fn(),
-      } as unknown as App['fileManager'],
-    });
-    const file = makeTFile();
-
-    await ObsidianHelpers.updateFrontMatter(file, { tags: ['new-tag'] }, app);
-    expect(processFrontMatter).toHaveBeenCalledWith(file, expect.any(Function));
+      )
+    );
   });
 
-  it('deduplicates tags when merging', async () => {
-    let capturedFm: PluginFrontMatter = { tags: ['tag-a'] };
-    const processFrontMatter = vi
-      .fn()
-      .mockImplementation(
-        async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
-          cb(capturedFm);
-        }
-      );
-    const app = makeApp({
-      fileManager: {
-        processFrontMatter,
-        renameFile: vi.fn(),
-        generateMarkdownLink: vi.fn(),
-      } as unknown as App['fileManager'],
-    });
-
-    await ObsidianHelpers.updateFrontMatter(
-      makeTFile(),
-      { tags: ['tag-a', 'tag-b'] },
-      app
+  it('leaves tags untouched when the update carries none', async () => {
+    await fc.assert(
+      fc.asyncProperty(existingTagsArb, fc.string(), async (existing, id) => {
+        const fm = makeFrontmatter(existing);
+        await ObsidianHelpers.updateFrontMatter(
+          makeTFile(),
+          { 'ir-id': id },
+          makeFrontmatterApp(fm)
+        );
+        expect(fm['ir-id']).toBe(id);
+        expect('tags' in fm).toBe(existing !== ABSENT);
+        expect(fm.tags).toBe(existing === ABSENT ? undefined : existing);
+      })
     );
-    expect(capturedFm.tags).toEqual(['tag-a', 'tag-b']);
-    expect(new Set(capturedFm.tags).size).toBe(capturedFm.tags!.length);
   });
 
-  it('accepts a string for tags in updates', async () => {
-    let capturedFm: PluginFrontMatter = { tags: [] };
-    const processFrontMatter = vi
-      .fn()
-      .mockImplementation(
-        async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
-          cb(capturedFm);
+  it('writes the other updated properties alongside the tags', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        existingTagsArb,
+        tagUpdateArb,
+        fc.string(),
+        async (existing, tags, id) => {
+          const fm = makeFrontmatter(existing);
+          await ObsidianHelpers.updateFrontMatter(
+            makeTFile(),
+            { 'ir-id': id, tags },
+            makeFrontmatterApp(fm)
+          );
+          expect(fm['ir-id']).toBe(id);
+          expect(fm.title).toBe('x');
         }
-      );
-    const app = makeApp({
-      fileManager: {
-        processFrontMatter,
-        renameFile: vi.fn(),
-        generateMarkdownLink: vi.fn(),
-      } as unknown as App['fileManager'],
-    });
-
-    await ObsidianHelpers.updateFrontMatter(
-      makeTFile(),
-      { tags: 'single-tag' },
-      app
+      )
     );
-    expect(capturedFm.tags).toContain('single-tag');
-  });
-
-  it('sets tags to updateTags when existing frontmatter has no tags', async () => {
-    let capturedFm: PluginFrontMatter = {};
-    const processFrontMatter = vi
-      .fn()
-      .mockImplementation(
-        async (_file: TFile, cb: (fm: PluginFrontMatter) => void) => {
-          cb(capturedFm);
-        }
-      );
-    const app = makeApp({
-      fileManager: {
-        processFrontMatter,
-        renameFile: vi.fn(),
-        generateMarkdownLink: vi.fn(),
-      } as unknown as App['fileManager'],
-    });
-
-    await ObsidianHelpers.updateFrontMatter(
-      makeTFile(),
-      { tags: ['new-tag'] },
-      app
-    );
-    expect(capturedFm.tags).toEqual(['new-tag']);
   });
 });
 
@@ -1552,6 +1638,54 @@ describe('createNote', () => {
 
     expect(result).toBeUndefined();
     expect(consoleError).toHaveBeenCalled();
+  });
+
+  // Import-as-copy: the copy carries the source's frontmatter, gets `created`
+  // from createNote, then the item tag
+  it('an untagged note created then tagged holds only the item tag', async () => {
+    const fm = makeFrontmatter(ABSENT);
+    const app = makeFrontmatterApp(fm);
+    const file = await ObsidianHelpers.createNote({
+      content: 'body',
+      frontmatter: { created: '2026-01-01T00:00:00.000Z' },
+      fileName: 'note.md',
+      directory: `${DATA_DIRECTORY}/articles`,
+      app,
+    });
+    await ObsidianHelpers.updateFrontMatter(file!, { tags: ARTICLE_TAG }, app);
+    expect(fm.tags).toEqual([ARTICLE_TAG]);
+  });
+
+  it('a note created then tagged keeps its own tags and gains the item tag', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        existingTagsArb,
+        itemTagArb,
+        async (existing, itemTag) => {
+          const fm = makeFrontmatter(existing);
+          const app = makeFrontmatterApp(fm);
+          const file = await ObsidianHelpers.createNote({
+            content: 'body',
+            frontmatter: { created: '2026-01-01T00:00:00.000Z' },
+            fileName: 'note.md',
+            directory: `${DATA_DIRECTORY}/articles`,
+            app,
+          });
+          await ObsidianHelpers.updateFrontMatter(
+            file!,
+            { tags: itemTag },
+            app
+          );
+          const result = fm.tags as unknown[];
+          expect(result.filter(isEmptyTag)).toEqual([]);
+          expect(result).toContain(itemTag);
+          const userTags = existing === ABSENT ? [] : toList(existing);
+          for (const tag of userTags.filter((t) => !isEmptyTag(t))) {
+            expect(result).toContain(tag);
+          }
+        }
+      )
+    );
   });
 });
 

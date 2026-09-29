@@ -374,6 +374,24 @@ export class ObsidianHelpers {
     return frontmatter;
   }
 
+  /**
+   * Adds tags to a note's raw frontmatter `tags` value. Obsidian takes a lone
+   * string or a list there, and YAML reads an empty `tags:` or `- ` entry as
+   * null, so empty entries are dropped (which also cleans nulls earlier writes
+   * left behind) and duplicates removed. Every other entry keeps its exact form.
+   */
+  static _mergeTags(existing: unknown, added: string | string[]): unknown[] {
+    const toList = (value: unknown): unknown[] =>
+      Array.isArray(value) ? value : [value];
+    const merged = [...toList(existing), ...toList(added)].filter(
+      (tag: unknown) =>
+        tag !== null &&
+        tag !== undefined &&
+        !(typeof tag === 'string' && tag.trim() === '')
+    );
+    return [...new Set(merged)];
+  }
+
   static async updateFrontMatter(
     file: TFile,
     updates:
@@ -386,18 +404,13 @@ export class ObsidianHelpers {
     } else {
       await app.fileManager.processFrontMatter(
         file,
-        (frontmatter: PluginFrontMatter) => {
-          const { tags } = frontmatter;
-          const updateTags = Array.isArray(updates.tags)
-            ? updates.tags
-            : [updates.tags];
-          const combinedTags = tags
-            ? [...new Set([...tags, ...updateTags])]
-            : updateTags;
-          Object.assign(frontmatter, {
-            ...updates,
-            tags: combinedTags,
-          });
+        (frontmatter: Record<string, unknown>) => {
+          const { tags, ...rest } = updates;
+          Object.assign(frontmatter, rest);
+          // An update without tags leaves the note's tags as they are
+          if (tags !== undefined) {
+            frontmatter.tags = this._mergeTags(frontmatter.tags, tags);
+          }
         }
       );
     }

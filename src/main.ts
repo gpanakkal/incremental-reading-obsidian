@@ -509,8 +509,6 @@ export default class IncrementalReadingPlugin extends Plugin {
       repo: this.reviewManager.repo,
       vault,
       metadataCache,
-      // The callback form of `updateFrontMatter`: the object form merges `tags`,
-      // and would fold an `undefined` into the note's tag list here
       writeIrId: (file, id) =>
         Obsidian.updateFrontMatter(
           file,
