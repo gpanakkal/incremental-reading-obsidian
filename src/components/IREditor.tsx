@@ -12,6 +12,7 @@ import { type ExtractedMarkdownEditor,
   getBaseMarkdownExtensions,
   getMarkdownController,
   setInsertMode } from '#/lib/obsidian-editor';
+import { createSaveCoalescer } from '#/lib/save-coalescer';
 import { isEditing, setHasSelection, setShowAnswer } from '#/lib/store';
 import {
   type ReviewArticle,
@@ -22,6 +23,7 @@ import {
 import { insertBlankLine } from '@codemirror/commands';
 import {
   type Extension,
+  type Text,
   Compartment,
   EditorSelection,
   EditorState,
@@ -277,23 +279,40 @@ export function IREditor({
     itemRef.current = item;
   }, [item]);
 
-  const handleChange = async (update: ViewUpdate) => {
-    if (!isPersistableChange(update)) return;
-
-    const docText = update.state.doc.toString();
-    // Record this write so updateEditorContent recognises saveNote's echo of it
-    // as our own rather than an external edit. Each entry is normally consumed
-    // as its echo arrives; the cap only bounds a leak from an echo that never
-    // returns.
-    const pending = pendingSavesRef.current;
-    pending.push(docText);
-    if (pending.length > MAX_PENDING_SAVES) pending.shift();
-    // TODO: don't save if changes occurred outside review
-    await saveNote(itemRef.current, docText);
-  };
-
   // extend the MarkdownEditor extracted from Obsidian
   useEffect(() => {
+    // The document as of the editor's latest change, whatever made it. A save
+    // reads it when it starts rather than when it was asked for, so one that
+    // was held back behind another writes the newest text, including anything
+    // updateEditorContent synced in since.
+    let latestDoc: Text | null = null;
+    const saver = createSaveCoalescer(
+      async () => {
+        if (!latestDoc) return;
+        const docText = latestDoc.toString();
+        // Record this write so updateEditorContent recognises saveNote's echo
+        // of it as our own rather than an external edit. Each entry is normally
+        // consumed as its echo arrives; the cap only bounds a leak from an echo
+        // that never returns.
+        const pending = pendingSavesRef.current;
+        pending.push(docText);
+        if (pending.length > MAX_PENDING_SAVES) pending.shift();
+        // TODO: don't save if changes occurred outside review
+        await saveNote(itemRef.current, docText);
+      },
+      (error) => {
+        console.error('Incremental Reading - Failed to save the note:', error);
+      }
+    );
+
+    // Saves go through the coalescer rather than one per change: a keystroke
+    // typed while a save is still running waits for it and shares the next one.
+    // See createSaveCoalescer for why this matters on mobile.
+    const handleChange = (update: ViewUpdate) => {
+      if (update.docChanged) latestDoc = update.state.doc;
+      if (isPersistableChange(update)) void saver.request();
+    };
+
     // Mirror the editor's selection into the store for the action bar, which
     // lives outside this component. Compared against the store rather than
     // dispatched blindly, since the mount and unmount syncs below are not
@@ -318,7 +337,7 @@ export function IREditor({
 
         onUpdate(update: ViewUpdate, changed: boolean) {
           super.onUpdate(update, changed);
-          void handleChange(update);
+          handleChange(update);
         }
 
         buildLocalExtensions(): Extension[] {

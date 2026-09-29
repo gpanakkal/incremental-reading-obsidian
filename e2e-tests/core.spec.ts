@@ -594,6 +594,129 @@ test.describe('Action Bar', () => {
   });
 });
 
+test.describe('Review editor', () => {
+  test('saves the note one write at a time while typing outpaces the disk', async () => {
+    // Typing in review used to save the note once per keystroke, each save
+    // starting at once whether or not the last had finished. Wherever a save
+    // takes longer than the gap between keys (every phone), the writes and
+    // everything that reacts to them piled up on the main thread and the keys
+    // typed meanwhile showed up late. Slow the note's writes down to a phone's
+    // pace and check they stay one at a time — and still end with what was
+    // typed on disk.
+    const NOTE = 'sources/Security Principles.md';
+    const TYPED = ' typed faster than it saves';
+
+    await importArticle(window, 'sources/Security Principles');
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await expect(reviewTitle(window, 'Security Principles')).toBeVisible();
+
+    await window.evaluate((path) => {
+      type Process = (file: { path: string }, ...rest: unknown[]) => unknown;
+      const w = window as unknown as {
+        app: { vault: { process: Process } };
+        __saves: { started: number; inFlight: number; maxInFlight: number };
+      };
+      const saves = { started: 0, inFlight: 0, maxInFlight: 0 };
+      w.__saves = saves;
+      const { vault } = w.app;
+      const original = vault.process.bind(vault) as Process;
+      vault.process = async (file, ...rest) => {
+        // Frontmatter reads and writes go through `process` too; only the
+        // editor's own whole-note saves are under test.
+        const isFrontmatter = new Error().stack?.includes('processFrontMatter');
+        if (file.path !== path || isFrontmatter) return original(file, ...rest);
+        saves.started++;
+        saves.inFlight++;
+        saves.maxInFlight = Math.max(saves.maxInFlight, saves.inFlight);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          return await original(file, ...rest);
+        } finally {
+          saves.inFlight--;
+        }
+      };
+    }, NOTE);
+
+    await window.waitForFunction(() => {
+      const w = window as unknown as {
+        app: {
+          workspace: {
+            getLeavesOfType(type: string): {
+              view: { reviewEditor(): { cm: unknown } | null };
+            }[];
+          };
+        };
+      };
+      const [leaf] = w.app.workspace.getLeavesOfType(
+        'incremental-reading-review'
+      );
+      return !!leaf?.view.reviewEditor()?.cm;
+    });
+    await window.evaluate(() => {
+      const w = window as unknown as {
+        app: {
+          workspace: {
+            getLeavesOfType(type: string): {
+              view: {
+                reviewEditor(): {
+                  cm: {
+                    state: { doc: { length: number } };
+                    focus(): void;
+                    dispatch(spec: unknown): void;
+                  };
+                } | null;
+              };
+            }[];
+          };
+        };
+      };
+      const [leaf] = w.app.workspace.getLeavesOfType(
+        'incremental-reading-review'
+      );
+      const cm = leaf.view.reviewEditor()!.cm;
+      cm.focus();
+      cm.dispatch({ selection: { anchor: cm.state.doc.length } });
+    });
+    await window.keyboard.type(TYPED, { delay: 20 });
+
+    // Settled: nothing in flight and the last save has landed on disk.
+    await expect
+      .poll(
+        () =>
+          window.evaluate(
+            async ([path, typed]) => {
+              const w = window as unknown as {
+                app: {
+                  vault: { adapter: { read(p: string): Promise<string> } };
+                };
+                __saves: { inFlight: number };
+              };
+              const text = await w.app.vault.adapter.read(path);
+              return w.__saves.inFlight === 0 && text.endsWith(typed);
+            },
+            [NOTE, TYPED] as const
+          ),
+        { timeout: 10_000 }
+      )
+      .toBe(true);
+
+    const saves = await window.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __saves: { started: number; maxInFlight: number };
+          }
+        ).__saves
+    );
+    expect(saves.maxInFlight).toBe(1);
+    // One save per keystroke would be TYPED.length. Held to a quarter-second
+    // each, the keys land a few saves' worth apart at most.
+    expect(saves.started).toBeGreaterThan(0);
+    expect(saves.started).toBeLessThan(TYPED.length / 2);
+  });
+});
+
 test.describe('Extracting snippets', () => {
   test('Can extract from Markdown notes', async () => {
     await openNote(window, 'sources/Security Principles');
