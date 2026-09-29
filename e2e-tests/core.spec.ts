@@ -7,6 +7,7 @@ import test, {
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
+  emulateMobile,
   executeCommandById,
   expectReviewOn,
   finalizeArticleImport,
@@ -519,6 +520,77 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'incremental-reading:learn');
     const priorityInput2 = window.getByRole('textbox', { name: 'Priority' });
     await expect(priorityInput2).toHaveValue('4.9');
+  });
+
+  test('note action bar sits on the iOS keyboard, not a keyboard height above it', async () => {
+    await importArticle(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+    await emulateMobile(window, true);
+    await window.setViewportSize({ width: 400, height: 850 });
+    await window.evaluate(() => {
+      // With auto full screen on, the editor shrinking under the keyboard reads
+      // as a scroll and hides the navbar, whose rule zeroes the lift and would
+      // hide the bug. On a device the open keyboard stops that from happening.
+      (
+        window as unknown as {
+          app: { vault: { setConfig(key: string, value: unknown): void } };
+        }
+      ).app.vault.setConfig('autoFullScreen', false);
+    });
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+
+    const leaf = '.workspace-leaf.mod-active';
+    const bar = window.locator(`${leaf} .ir-action-bar-panel`);
+    await expect(bar).toBeVisible();
+
+    /** How far the bar's bottom edge sits above the editor's. */
+    const lift = () =>
+      window.evaluate((leaf) => {
+        const editor = document.querySelector(`${leaf} .cm-editor`);
+        const panel = document.querySelector(`${leaf} .ir-action-bar-panel`);
+        if (!editor || !panel) return null;
+        return (
+          editor.getBoundingClientRect().bottom -
+          panel.getBoundingClientRect().bottom
+        );
+      }, leaf);
+
+    // Focusing the editor brings up Obsidian's toolbar, which takes the navbar
+    // away, so none of the lift is owed to the navbar any more.
+    await window.locator(`${leaf} .cm-content`).click();
+    await expect(window.locator('.mobile-toolbar')).toBeVisible();
+
+    // What Obsidian's iOS app reports with the keyboard up, read on an iPhone:
+    // the bottom safe-area inset grows to cover the keyboard, on top of the
+    // app container already shrinking by `--keyboard-height`.
+    await window.evaluate(() => {
+      document.documentElement.style.setProperty('--keyboard-height', '335px');
+      document.body.style.setProperty('--safe-area-inset-bottom', '335px');
+    });
+    await expect.poll(lift).toBeLessThanOrEqual(1);
+
+    // Keyboard down again: the navbar comes back, and the bar clears exactly
+    // its footprint, the host's safe-area share included.
+    await window.evaluate(() => {
+      document.documentElement.style.removeProperty('--keyboard-height');
+      document.body.style.removeProperty('--safe-area-inset-bottom');
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+    await expect(window.locator('.mobile-navbar')).toBeVisible();
+    const navbarFootprint = await window.evaluate(() =>
+      Number.parseFloat(
+        document.body.style.getPropertyValue('--ir-mobile-toolbar-height')
+      )
+    );
+    expect(navbarFootprint).toBeGreaterThan(0);
+    await expect
+      .poll(async () => Math.abs((await lift())! - navbarFootprint))
+      .toBeLessThanOrEqual(1);
   });
 });
 

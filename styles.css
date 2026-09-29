@@ -558,13 +558,33 @@ body.is-phone .ir-header-standin {
    exceed the navbar's footprint (a 34px iPhone inset against a hidden navbar),
    and a negative margin would hang the bar off the bottom edge.
 
+   Except that Obsidian's rule over-lifts on iOS while the keyboard is up: the
+   bottom safe-area inset grows to cover the keyboard (335px on an iPhone,
+   against 34px without it), and `.app-container` has already shrunk by
+   `--keyboard-height`, so the panel would float a keyboard's height above the
+   keyboard. Obsidian subtracts `--keyboard-height` from that inset everywhere
+   else it uses it (`--view-bottom-spacing`, the drawer's padding), so the host
+   is re-lifted by the same difference here and the bar reads its share from it.
+
    `.ir-action-bar-host` is stamped on the panel container by the panel's
    mount() hook in ActionBarExtension — CodeMirror owns that element, so the
-   class is what tells us the lift below it is ours to account for. */
+   class is what tells us the lift below it is ours to account for. Obsidian's
+   selector is matched and extended, so this wins without leaning on stylesheet
+   order. */
+.is-mobile
+  .markdown-source-view.mod-cm6
+  .cm-panels.cm-panels-bottom.ir-action-bar-host {
+  --ir-panel-host-lift: max(
+    0px,
+    var(--safe-area-inset-bottom, 0px) - var(--keyboard-height, 0px)
+  );
+  margin-bottom: var(--ir-panel-host-lift);
+}
+
 .is-mobile .cm-panels-bottom.ir-action-bar-host .ir-action-bar {
   margin-bottom: max(
     0px,
-    var(--ir-mobile-toolbar-height, 0px) - var(--safe-area-inset-bottom, 0px)
+    var(--ir-mobile-toolbar-height, 0px) - var(--ir-panel-host-lift, 0px)
   );
 }
 
@@ -598,7 +618,9 @@ body.is-phone .ir-header-standin {
    the `autoFullScreen` setting is on, and Obsidian drops its own bottom fade
    mask in the same state. */
 .is-mobile.is-hidden-nav .ir-action-bar,
-.is-mobile.is-hidden-nav .cm-panels.cm-panels-bottom.ir-action-bar-host,
+.is-mobile.is-hidden-nav
+  .markdown-source-view.mod-cm6
+  .cm-panels.cm-panels-bottom.ir-action-bar-host,
 .is-mobile.is-hidden-nav .cm-panels-bottom.ir-action-bar-host .ir-action-bar {
   margin-bottom: 0;
 }
