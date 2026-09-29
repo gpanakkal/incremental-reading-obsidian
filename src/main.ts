@@ -1,3 +1,5 @@
+import { checkImportable } from '#/lib/items/ArticleManager';
+import { isImportable } from '#/lib/mime';
 import {
   type App,
   type Menu,
@@ -101,22 +103,7 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     this.addExtractCommands();
 
-    this.addCommand({
-      id: 'import-article',
-      name: 'Import article',
-      checkCallback: (checking: boolean) => {
-        if (!this.reviewManager) return false;
-
-        const activeReviewView = this.getActiveReviewView();
-        if (activeReviewView) return false;
-
-        const fileView = this.app.workspace.getActiveFileView();
-        if (!fileView?.file) return false;
-
-        if (checking) return true;
-        void this.importArticle(fileView.file);
-      },
-    });
+    this.addImportCommands();
 
     this.addCommand({
       id: 'create-empty-article',
@@ -678,15 +665,20 @@ export default class IncrementalReadingPlugin extends Plugin {
     }
 
     menu.addSections(['incremental-reading']);
-    menu.addItem((item) => {
-      item
-        .setTitle('Import article')
-        .setIcon(PLACEHOLDER_PLUGIN_ICON)
-        .setSection('incremental-reading')
-        .onClick(async () => {
-          await this.importArticle(file);
-        });
-    });
+    // Checked by type alone: a file the plugin can't turn into an article
+    // gets no import entry at all, rather than one that fails on click.
+    const importable = isImportable(file);
+    if (importable) {
+      menu.addItem((item) => {
+        item
+          .setTitle('Import article')
+          .setIcon(PLACEHOLDER_PLUGIN_ICON)
+          .setSection('incremental-reading')
+          .onClick(async () => {
+            await this.importArticle(file);
+          });
+      });
+    }
 
     // Menus are built synchronously, so the database cannot be asked here. An
     // `ir-id` is the cached mark of an item's note; `goToContext` checks the
@@ -704,7 +696,7 @@ export default class IncrementalReadingPlugin extends Plugin {
           });
       });
     }
-    if (!this.settings.showAdvancedImportMenuItems) {
+    if (!importable || !this.settings.showAdvancedImportMenuItems) {
       return;
     }
 
@@ -762,6 +754,8 @@ export default class IncrementalReadingPlugin extends Plugin {
       copyOnImport?: boolean;
     }
   ) {
+    if (!checkImportable(file)) return;
+
     const merged = { ...this.settings, ...(opts ?? {}) };
     if (merged.showImportDialog) {
       new ImportModal(this, file, merged.copyOnImport).open();
@@ -838,80 +832,56 @@ export default class IncrementalReadingPlugin extends Plugin {
     });
   }
 
+  /** The import command every user gets; the rest are advanced. */
+  private addImportCommands() {
+    this.addImportCommand('import-article', 'Import article');
+  }
+
+  /**
+   * Register a command that imports the active tab's file with `opts`.
+   *
+   * Unavailable until the plugin has loaded, in the review tab (whose note is
+   * already an item), with no file open, and while the open file is of a type
+   * that can't be imported, so the palette never lists an import that would
+   * only be refused.
+   */
+  private addImportCommand(
+    id: string,
+    name: string,
+    opts?: Parameters<IncrementalReadingPlugin['importArticle']>[1]
+  ) {
+    this.addCommand({
+      id,
+      name,
+      checkCallback: (checking: boolean) => {
+        if (!this.reviewManager) return false;
+        if (this.getActiveReviewView()) return false;
+
+        const file = this.app.workspace.getActiveFileView()?.file;
+        if (!file || !isImportable(file)) return false;
+
+        if (checking) return true;
+        void this.importArticle(file, opts);
+      },
+    });
+  }
+
   toggleAdvancedCommands(enable: boolean) {
     if (enable) {
-      this.addCommand({
-        id: 'import-article-copy',
-        name: 'Import article as copy',
-        checkCallback: (checking: boolean) => {
-          if (!this.reviewManager) return false;
-
-          const activeReviewView = this.getActiveReviewView();
-          if (activeReviewView) return false;
-
-          const fileView = this.app.workspace.getActiveFileView();
-          if (!fileView?.file) return false;
-
-          if (checking) return true;
-          void this.importArticle(fileView.file, {
-            copyOnImport: true,
-            showImportDialog: false,
-          });
-        },
+      this.addImportCommand('import-article-copy', 'Import article as copy', {
+        copyOnImport: true,
+        showImportDialog: false,
       });
-
-      this.addCommand({
-        id: 'import-article-in-place',
-        name: 'Import article in place',
-        checkCallback: (checking: boolean) => {
-          if (!this.reviewManager) return false;
-
-          const activeReviewView = this.getActiveReviewView();
-          if (activeReviewView) return false;
-
-          const fileView = this.app.workspace.getActiveFileView();
-          if (!fileView?.file) return false;
-
-          if (checking) return true;
-          void this.importArticle(fileView.file, {
-            copyOnImport: false,
-            showImportDialog: false,
-          });
-        },
+      this.addImportCommand(
+        'import-article-in-place',
+        'Import article in place',
+        { copyOnImport: false, showImportDialog: false }
+      );
+      this.addImportCommand('open-import-dialog', 'Open import dialog...', {
+        showImportDialog: true,
       });
-
-      this.addCommand({
-        id: 'open-import-dialog',
-        name: 'Open import dialog...',
-        checkCallback: (checking: boolean) => {
-          if (!this.reviewManager) return false;
-
-          const activeReviewView = this.getActiveReviewView();
-          if (activeReviewView) return false;
-
-          const fileView = this.app.workspace.getActiveFileView();
-          if (!fileView?.file) return false;
-
-          if (checking) return true;
-          void this.importArticle(fileView.file, { showImportDialog: true });
-        },
-      });
-
-      this.addCommand({
-        id: 'quick-import',
-        name: 'Quick import',
-        checkCallback: (checking: boolean) => {
-          if (!this.reviewManager) return false;
-
-          const activeReviewView = this.getActiveReviewView();
-          if (activeReviewView) return false;
-
-          const fileView = this.app.workspace.getActiveFileView();
-          if (!fileView?.file) return false;
-
-          if (checking) return true;
-          void this.importArticle(fileView.file, { showImportDialog: false });
-        },
+      this.addImportCommand('quick-import', 'Quick import', {
+        showImportDialog: false,
       });
     } else {
       this.removeCommand('import-article-copy');

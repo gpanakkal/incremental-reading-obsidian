@@ -6,7 +6,8 @@ import IncrementalReadingPlugin from '#/main';
 // The Vitest alias points `obsidian` at this same file, so the `Menu` built
 // here is the one the plugin fills — importing it by path is what gives TS the
 // stub's recorded `items`, which the real class does not expose.
-import { Menu, type MenuItem } from '#/test/__mocks__/obsidian';
+import { Menu, Notice, type MenuItem } from '#/test/__mocks__/obsidian';
+import { ImportModal } from '#/views/ImportModal';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
 import { MarkdownView, type TFile, type WorkspaceLeaf } from 'obsidian';
@@ -20,10 +21,42 @@ vi.mock('./db/schema.sql', () => ({ default: '' }));
 
 // #region HELPERS
 
-/** The menu entries read only `path` off the file they were raised on. */
+/**
+ * The menu entries read only `path` and `extension` off the file they were
+ * raised on; the extension is derived the way Obsidian derives it, lowercased.
+ */
 function makeFile(path = 'notes/Chapter 1.md'): TFile {
-  return { path } as TFile;
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  const dot = name.lastIndexOf('.');
+  const extension = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+  return { path, name, extension } as TFile;
 }
+
+/**
+ * The extension of any file the plugin cannot import: a PDF, or anything
+ * else a vault can hold, including no extension at all.
+ */
+const unimportableExtension = fc
+  .oneof(fc.constantFrom('pdf', 'png', 'canvas', ''), fc.string())
+  .filter((extension) => extension.toLowerCase() !== 'md');
+
+/** A file of type `extension` somewhere in the vault. */
+function fileWithExtension(extension: string): TFile {
+  return {
+    path: `notes/thing.${extension}`,
+    name: `thing.${extension}`,
+    extension,
+  } as TFile;
+}
+
+/** Every menu entry that imports, whichever setting shows it. */
+const IMPORT_MENU_TITLES = [
+  'Import article',
+  'Import a copy',
+  'Import in place',
+  'Open import dialog...',
+  'Quick import',
+];
 
 /**
  * Bare receiver for `addIRMenuItems`, carrying the slots it touches.
@@ -77,13 +110,14 @@ function otherLeaf(): WorkspaceLeaf {
 /** Raise a file menu the way `workspace.trigger('file-menu', …)` does. */
 function raiseMenu(
   receiver: ReturnType<typeof makeReceiver>['receiver'],
-  leaf?: WorkspaceLeaf
+  leaf?: WorkspaceLeaf,
+  file: TFile = makeFile()
 ): Menu {
   const menu = new Menu();
   IncrementalReadingPlugin.prototype.addIRMenuItems.call(
     receiver as unknown as IncrementalReadingPlugin,
     menu as never,
-    makeFile(),
+    file,
     leaf
   );
   return menu;
@@ -349,6 +383,123 @@ function makeExtractReceiver({
   return { receiver, actions, reviewView, run };
 }
 
+/**
+ * Each import command, by id, with its name in the palette and the options it
+ * hands `importArticle`. All but the first appear only with
+ * `showAdvancedImportCommands` on.
+ */
+const IMPORT_COMMANDS = {
+  'import-article': { name: 'Import article', opts: undefined },
+  'import-article-copy': {
+    name: 'Import article as copy',
+    opts: { copyOnImport: true, showImportDialog: false },
+  },
+  'import-article-in-place': {
+    name: 'Import article in place',
+    opts: { copyOnImport: false, showImportDialog: false },
+  },
+  'open-import-dialog': {
+    name: 'Open import dialog...',
+    opts: { showImportDialog: true },
+  },
+  'quick-import': {
+    name: 'Quick import',
+    opts: { showImportDialog: false },
+  },
+} as const;
+
+type ImportCommandId = keyof typeof IMPORT_COMMANDS;
+
+const importCommandIds = fc.constantFrom(
+  ...(Object.keys(IMPORT_COMMANDS) as ImportCommandId[])
+);
+
+/**
+ * A plugin with every import command registered, basic and advanced, and the
+ * active tab showing `where`: a file of type `extension`, the review tab, or
+ * nothing. Built on the prototype so the commands reach the real helpers they
+ * share; the slots they touch are set by hand.
+ */
+function makeImportCommandReceiver({
+  extension = 'md',
+  where = 'file' as 'file' | 'review' | 'none',
+  loaded = true,
+} = {}) {
+  const file = fileWithExtension(extension);
+  const importArticle = vi.fn(() => Promise.resolve());
+  /** The palette: registered commands by id, dropped again on removal. */
+  const commands = new Map<
+    string,
+    { name: string; checkCallback: (checking: boolean) => boolean | void }
+  >();
+  const receiver = Object.assign(
+    Object.create(IncrementalReadingPlugin.prototype) as object,
+    {
+      reviewManager: loaded ? {} : undefined,
+      importArticle,
+      addCommand: vi.fn(
+        (command: {
+          id: string;
+          name: string;
+          checkCallback: (checking: boolean) => boolean | void;
+        }) => {
+          commands.set(command.id, command);
+        }
+      ),
+      removeCommand: vi.fn((id: string) => {
+        commands.delete(id);
+      }),
+      getActiveReviewView: vi.fn(() =>
+        where === 'review'
+          ? (Object.create(ReviewView.prototype) as ReviewView)
+          : null
+      ),
+      app: {
+        workspace: {
+          getActiveFileView: vi.fn(() => (where === 'none' ? null : { file })),
+        },
+      },
+    }
+  ) as unknown as {
+    addImportCommands(): void;
+    toggleAdvancedCommands(enable: boolean): void;
+  };
+  receiver.addImportCommands();
+  receiver.toggleAdvancedCommands(true);
+
+  /** Run the command, or only ask whether it can run. */
+  const run = (id: ImportCommandId, checking = false) => {
+    const command = commands.get(id);
+    if (!command) throw new Error(`no command ${id}`);
+    return command.checkCallback(checking);
+  };
+  return { receiver, commands, file, importArticle, run };
+}
+
+/**
+ * Bare receiver for `importArticle`, with the dialog off and a copy not made
+ * unless a call's options say otherwise. `call` runs the method on it.
+ */
+function makeImportReceiver() {
+  const importArticle = vi.fn(() => Promise.resolve(null));
+  const receiver = {
+    settings: {
+      showImportDialog: false,
+      copyOnImport: false,
+      defaultPriority: 3,
+    },
+    reviewManager: { importArticle },
+  };
+  const call = async (file: TFile, opts?: Record<string, boolean>) => {
+    await IncrementalReadingPlugin.prototype.importArticle.call(
+      receiver as unknown as IncrementalReadingPlugin,
+      file,
+      opts
+    );
+  };
+  return { importArticle, call };
+}
+
 // #endregion
 
 afterEach(() => {
@@ -454,6 +605,30 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
     );
   });
 
+  it('offers no import on a file whose type it cannot import', () => {
+    fc.assert(
+      fc.property(
+        unimportableExtension,
+        fc.boolean(),
+        fc.boolean(),
+        (extension, advanced, withLeaf) => {
+          const file = fileWithExtension(extension);
+          const { receiver } = makeReceiver({ advanced, file });
+
+          const menu = raiseMenu(
+            receiver,
+            withLeaf ? otherLeaf() : undefined,
+            file
+          );
+
+          for (const title of IMPORT_MENU_TITLES) {
+            expect(titles(menu)).not.toContain(title);
+          }
+        }
+      )
+    );
+  });
+
   it('goes to the context of the note the menu was raised on', () => {
     const { receiver, goToContext, file } = makeReceiver({
       frontmatter: { 'ir-id': 'abc' },
@@ -463,6 +638,145 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
     click(menu.items.find((i) => i.title === 'Go to context'));
 
     expect(goToContext).toHaveBeenCalledExactlyOnceWith(file);
+  });
+});
+
+describe('IncrementalReadingPlugin import commands', () => {
+  it('lists each import in the palette under its own name', () => {
+    const { commands } = makeImportCommandReceiver();
+
+    expect(
+      Object.fromEntries(
+        [...commands].map(([id, command]) => [id, command.name])
+      )
+    ).toEqual(
+      Object.fromEntries(
+        Object.entries(IMPORT_COMMANDS).map(([id, { name }]) => [id, name])
+      )
+    );
+  });
+
+  it('takes the advanced imports back out when their setting goes off', () => {
+    const { receiver, commands } = makeImportCommandReceiver();
+
+    receiver.toggleAdvancedCommands(false);
+
+    expect([...commands.keys()]).toEqual(['import-article']);
+  });
+
+  it('offers every import on a note, each with its own options', () => {
+    fc.assert(
+      fc.property(importCommandIds, (id) => {
+        const { file, importArticle, run } = makeImportCommandReceiver();
+
+        expect(run(id, true)).toBe(true);
+        expect(importArticle).not.toHaveBeenCalled();
+
+        run(id);
+
+        expect(importArticle).toHaveBeenCalledExactlyOnceWith(
+          file,
+          IMPORT_COMMANDS[id].opts
+        );
+      })
+    );
+  });
+
+  it('offers no import while a file it cannot import is active', () => {
+    fc.assert(
+      fc.property(importCommandIds, unimportableExtension, (id, extension) => {
+        const { importArticle, run } = makeImportCommandReceiver({
+          extension,
+        });
+
+        expect(run(id, true)).toBe(false);
+        run(id);
+
+        expect(importArticle).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('offers no import from the review tab, with no file open, or before loading', () => {
+    fc.assert(
+      fc.property(
+        importCommandIds,
+        fc.constantFrom(
+          { where: 'review' as const },
+          { where: 'none' as const },
+          { loaded: false }
+        ),
+        (id, setup) => {
+          const { importArticle, run } = makeImportCommandReceiver(setup);
+
+          expect(run(id, true)).toBe(false);
+          run(id);
+
+          expect(importArticle).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+});
+
+describe('IncrementalReadingPlugin.importArticle', () => {
+  it('refuses a file it cannot import, dialog or not, and says so', async () => {
+    // With the dialog on, constructing the modal would throw here (no DOM), so
+    // reaching it fails the property as surely as the `open` spy would.
+    await fc.assert(
+      fc.asyncProperty(
+        unimportableExtension,
+        fc.boolean(),
+        async (extension, showImportDialog) => {
+          Notice.reset();
+          const open = vi.spyOn(ImportModal.prototype, 'open');
+          open.mockClear();
+          const { importArticle, call } = makeImportReceiver();
+          const file = fileWithExtension(extension);
+
+          await call(file, { showImportDialog });
+
+          expect(importArticle).not.toHaveBeenCalled();
+          expect(open).not.toHaveBeenCalled();
+          expect(Notice.messages).toHaveLength(1);
+          expect(Notice.messages[0]).toContain(file.name);
+        }
+      )
+    );
+  });
+
+  it('imports a note straight away when the dialog is off', async () => {
+    const { importArticle, call } = makeImportReceiver();
+    const file = makeFile();
+
+    await call(file, { showImportDialog: false, copyOnImport: true });
+
+    expect(importArticle).toHaveBeenCalledExactlyOnceWith(file, 3, null, true);
+  });
+
+  it('opens the dialog on a note when asked, importing nothing yet', async () => {
+    // The mock modal builds its content element in its constructor, and this
+    // file runs without a DOM; any element will do for a dialog never shown.
+    vi.stubGlobal('document', { createElement: () => ({}) });
+    try {
+      Notice.reset();
+      const open = vi
+        .spyOn(ImportModal.prototype, 'open')
+        .mockImplementation(() => {});
+      const { importArticle, call } = makeImportReceiver();
+      const file = makeFile();
+
+      await call(file, { showImportDialog: true, copyOnImport: true });
+
+      expect(open).toHaveBeenCalledOnce();
+      const modal = open.mock.contexts[0] as ImportModal;
+      expect(modal.file).toBe(file);
+      expect(modal.defaultCopyOnImport).toBe(true);
+      expect(importArticle).not.toHaveBeenCalled();
+      expect(Notice.messages).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

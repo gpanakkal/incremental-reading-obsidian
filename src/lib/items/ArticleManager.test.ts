@@ -2316,6 +2316,54 @@ describe('import', () => {
     vi.restoreAllMocks();
   });
 
+  it('refuses a file of a type it cannot import, touching nothing', async () => {
+    // The menus and commands hide the entries for these; this is the guard
+    // behind them, for a stale menu or a caller that skipped the check.
+    const unimportable = fc
+      .oneof(fc.constant('pdf'), fc.string())
+      .filter((extension) => extension.toLowerCase() !== 'md');
+    await fc.assert(
+      fc.asyncProperty(
+        unimportable,
+        fc.option(fc.boolean(), { nil: undefined }),
+        fc.boolean(),
+        async (extension, makeCopy, copyOnImport) => {
+          Notice.reset();
+          // `beforeEach` runs once for all the property's cases, and spying
+          // again hands back its spies, so their counts are cleared per case.
+          const createNote = vi.spyOn(Obsidian, 'createNote');
+          const updateFrontMatter = vi.spyOn(Obsidian, 'updateFrontMatter');
+          createNote.mockClear();
+          updateFrontMatter.mockClear();
+          const repo = makeSimpleRepo();
+          const query = vi.spyOn(repo, 'query');
+          const mutate = vi.spyOn(repo, 'mutate');
+          const manager = new ArticleManager(
+            makeImportPlugin(copyOnImport),
+            repo
+          );
+          const file = {
+            ...IMPORT_FILE,
+            path: `notes/my-file.${extension}`,
+            name: `my-file.${extension}`,
+            extension,
+          } as TFile;
+
+          await expect(
+            manager.import(file, DEFAULT_PRIORITY, null, makeCopy)
+          ).resolves.toBeNull();
+
+          expect(Notice.messages).toHaveLength(1);
+          expect(Notice.messages[0]).toContain(file.name);
+          expect(query).not.toHaveBeenCalled();
+          expect(mutate).not.toHaveBeenCalled();
+          expect(createNote).not.toHaveBeenCalled();
+          expect(updateFrontMatter).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
   describe('in-place mode', () => {
     it('registers the original file without creating a copy', async () => {
       const repo = makeSimpleRepo();
