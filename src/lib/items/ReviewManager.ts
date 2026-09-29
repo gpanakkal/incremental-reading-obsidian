@@ -138,6 +138,16 @@ export default class ReviewManager {
   }
 
   /**
+   * Update several snippets' offsets at once, saving the database file once
+   * rather than once per snippet. See {@link SnippetManager.updateManyOffsets}.
+   */
+  async updateManySnippetOffsets(
+    highlights: Parameters<SnippetManager['updateManyOffsets']>[0]
+  ) {
+    return this.snippets.updateManyOffsets(highlights);
+  }
+
+  /**
    * Add a SnippetReview and set the next review date
    */
   async reviewSnippet(

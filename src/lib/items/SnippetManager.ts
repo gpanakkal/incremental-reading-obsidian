@@ -133,6 +133,31 @@ export class SnippetManager extends ItemManager {
     );
   }
 
+  /**
+   * Persist the offsets of several highlights in one transaction.
+   *
+   * Every standalone write saves the whole database file, so writing a note's
+   * highlights one {@link updateOffsets} at a time rewrote the file once per
+   * highlight — on every save of a note being typed into. One transaction
+   * saves it once for the lot. Nothing is written for an empty list.
+   */
+  async updateManyOffsets(
+    highlights: readonly Pick<
+      SnippetHighlight,
+      'id' | 'start_offset' | 'end_offset'
+    >[]
+  ): Promise<void> {
+    if (highlights.length === 0) return;
+    await this.repo.transaction(async () => {
+      for (const { id, start_offset, end_offset } of highlights) {
+        await this.repo.mutate(
+          `UPDATE snippet SET start_offset = $1, end_offset = $2 WHERE id = $3`,
+          [start_offset, end_offset, id]
+        );
+      }
+    });
+  }
+
   async getDue(
     dueBy?: number,
     limit?: number,

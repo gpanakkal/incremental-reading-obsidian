@@ -6,8 +6,7 @@ import { setReviewViewSaving } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
-import type { PropsWithChildren } from 'react';
-import { createContext, useContext } from 'react';
+import { type PropsWithChildren, createContext, useContext  } from 'react';
 import { useDispatch } from 'react-redux';
 
 interface ReviewContextProps {
@@ -56,14 +55,8 @@ export function ReviewContextProvider({
       await Obsidian.editNote(reviewView.app, item.file, () => newContent);
       queryClient.setQueryData(['item', item.data.id, 'file-text'], newContent);
     });
-    // Save body-relative highlight offsets
-    for (const h of highlights) {
-      await reviewManager.updateSnippetOffsets(
-        h.id,
-        h.start_offset,
-        h.end_offset
-      );
-    }
+    // Save body-relative highlight offsets, all in one database write
+    await reviewManager.updateManySnippetOffsets(highlights);
   };
 
   const value = {

@@ -35,7 +35,7 @@ function makeReviewManager(highlights: Highlight[] = []) {
     snippets: {
       offsetTracker: { getHighlights: vi.fn(() => highlights) },
     },
-    updateSnippetOffsets: vi.fn(async () => undefined),
+    updateManySnippetOffsets: vi.fn(async () => undefined),
   };
 }
 
@@ -232,7 +232,7 @@ describe('saveNote publishes its write to the file-text cache', () => {
     );
   });
 
-  it('persists every highlight offset read before the write (property-based)', async () => {
+  it('persists every highlight offset read before the write, in one batch (property-based)', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(
@@ -250,17 +250,14 @@ describe('saveNote publishes its write to the file-text cache', () => {
 
           await saveNote(makeItem('article-1'), 'body');
 
-          expect(reviewManager.updateSnippetOffsets).toHaveBeenCalledTimes(
-            highlights.length
+          // One call for the lot: each separate write saves the whole
+          // database file, and this runs on every save of the note.
+          expect(reviewManager.updateManySnippetOffsets).toHaveBeenCalledTimes(
+            1
           );
-          highlights.forEach((h, i) => {
-            expect(reviewManager.updateSnippetOffsets).toHaveBeenNthCalledWith(
-              i + 1,
-              h.id,
-              h.start_offset,
-              h.end_offset
-            );
-          });
+          expect(reviewManager.updateManySnippetOffsets).toHaveBeenCalledWith(
+            highlights
+          );
         }
       )
     );

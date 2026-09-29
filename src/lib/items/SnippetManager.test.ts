@@ -642,6 +642,93 @@ describe('updateOffsets', () => {
   });
 });
 
+describe('updateManyOffsets', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const highlightArb = fc.record({
+    id: fc.uuid(),
+    start_offset: fc.integer({ min: 0 }),
+    end_offset: fc.integer({ min: 0 }),
+  });
+
+  it('writes every highlight inside a single transaction, in order (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(highlightArb, { minLength: 1, maxLength: 20 }),
+        async (highlights) => {
+          // Record whether each write lands inside the transaction: writes
+          // outside one each save the whole database file.
+          let inTransaction = false;
+          const writesInTransaction: boolean[] = [];
+          const transaction = vi.fn(async (work: () => unknown) => {
+            inTransaction = true;
+            try {
+              return await work();
+            } finally {
+              inTransaction = false;
+            }
+          });
+          const mutate = vi.fn((_sql: string, _params: unknown[]) => {
+            writesInTransaction.push(inTransaction);
+            return [[]];
+          });
+          const repo = {
+            ...makeSimpleRepo(),
+            transaction,
+            mutate,
+          } as unknown as SQLiteRepository;
+          const manager = new SnippetManager({} as never, repo);
+
+          await manager.updateManyOffsets(highlights);
+
+          expect(transaction).toHaveBeenCalledTimes(1);
+          expect(writesInTransaction).toEqual(highlights.map(() => true));
+          const calls = mutate.mock.calls;
+          highlights.forEach((h, i) => {
+            const [sql, params] = calls[i];
+            expect(sql).toMatch(
+              /UPDATE snippet SET start_offset = \$1, end_offset = \$2 WHERE id = \$3/i
+            );
+            expect(params).toEqual([h.start_offset, h.end_offset, h.id]);
+          });
+        }
+      )
+    );
+  });
+
+  it('writes nothing, and opens no transaction, for an empty list', async () => {
+    const transaction = vi.fn(async (work: () => unknown) => work());
+    const mutate = vi.fn();
+    const repo = {
+      ...makeSimpleRepo(),
+      transaction,
+      mutate,
+    } as unknown as SQLiteRepository;
+    const manager = new SnippetManager({} as never, repo);
+
+    await manager.updateManyOffsets([]);
+
+    expect(transaction).not.toHaveBeenCalled();
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it('rejects when a write fails, so the transaction rolls back', async () => {
+    const repo = {
+      ...makeSimpleRepo(),
+      mutate: vi.fn(() => {
+        throw new Error('write failed');
+      }),
+    } as unknown as SQLiteRepository;
+    const manager = new SnippetManager({} as never, repo);
+
+    await expect(
+      manager.updateManyOffsets([{ id: 'a', start_offset: 0, end_offset: 1 }])
+    ).rejects.toThrow('write failed');
+  });
+});
+
 describe('fetchMany', () => {
   afterEach(() => {
     vi.restoreAllMocks();

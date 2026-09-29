@@ -2806,3 +2806,48 @@ describe('ReviewManager.handleExternalRename console.warn mutant', () => {
     expect(repo.mutate).not.toHaveBeenCalled();
   });
 });
+
+describe('ReviewManager.updateManySnippetOffsets', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('hands the highlights to the snippet manager and passes its result back (property-based)', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          fc.record({
+            id: fc.uuid(),
+            start_offset: fc.integer({ min: 0 }),
+            end_offset: fc.integer({ min: 0 }),
+          }),
+          { maxLength: 10 }
+        ),
+        async (highlights) => {
+          const manager = new ReviewManager(makePlugin(), makeRepo());
+          const updateManyOffsets = vi
+            .spyOn(manager.snippets, 'updateManyOffsets')
+            .mockResolvedValue(undefined);
+
+          await expect(
+            manager.updateManySnippetOffsets(highlights)
+          ).resolves.toBeUndefined();
+
+          expect(updateManyOffsets).toHaveBeenCalledTimes(1);
+          expect(updateManyOffsets).toHaveBeenCalledWith(highlights);
+        }
+      )
+    );
+  });
+
+  it('rejects when the snippet manager does', async () => {
+    const manager = new ReviewManager(makePlugin(), makeRepo());
+    vi.spyOn(manager.snippets, 'updateManyOffsets').mockRejectedValue(
+      new Error('write failed')
+    );
+
+    await expect(manager.updateManySnippetOffsets([])).rejects.toThrow(
+      'write failed'
+    );
+  });
+});
