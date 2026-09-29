@@ -10,7 +10,9 @@ import {
   removeCompletedReview,
   removeSeenId,
   resetCurrentItem,
+  type SelectionKind,
   setCurrentItemId,
+  setSelectionMode,
   store,
 } from '#/lib/store';
 import {
@@ -28,6 +30,9 @@ import fc from 'fast-check';
 // here is the one `ObsidianHelpers.notify` constructs — importing it by path is
 // what gives TS the mock's `messages`/`reset`, which the real class lacks.
 import { Notice } from '#/test/__mocks__/obsidian';
+import * as CardAnswerModal from '#/views/CardAnswerModal';
+import type ReviewView from '#/views/ReviewView';
+import { EditorState } from '@codemirror/state';
 import type { TFile } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -345,6 +350,72 @@ function expectNothingOpened(wired: ReturnType<typeof wireGoToContext>) {
   expect(wired.getLeaf).not.toHaveBeenCalled();
   expect(wired.openWithDefaultApp).not.toHaveBeenCalled();
 }
+
+/**
+ * A review tab whose editor holds `doc` with `anchor`-`head` selected, or one
+ * with no editor on screen when passed null: what the selection actions read
+ * off the view. `domSelection` stands in for the browser's selection, which
+ * starts inside the editor's content.
+ */
+function makeSelectingView(
+  editor: { doc: string; anchor: number; head: number } | null
+) {
+  const domSelection = { anchorNode: {}, removeAllRanges: vi.fn() };
+  const contentDOM = {
+    contains: vi.fn(() => true),
+    ownerDocument: { getSelection: () => domSelection },
+  };
+  const cm = editor && {
+    state: EditorState.create({
+      doc: editor.doc,
+      selection: { anchor: editor.anchor, head: editor.head },
+    }),
+    dispatch: vi.fn(),
+    contentDOM,
+  };
+  const reviewView = {
+    reviewEditor: () => (cm ? { cm } : null),
+  } as unknown as ReviewView;
+  return { reviewView, cm, contentDOM, domSelection };
+}
+
+/** Put the store in selection mode for `kind`, or out of it. */
+function wireSelectionMode(kind: SelectionKind | null) {
+  vi.spyOn(store, 'getState').mockReturnValue({
+    selectionMode: kind,
+  } as never);
+}
+
+/**
+ * Actions over a plugin whose dispatches are read back, with the two creators
+ * stubbed: what they do with the editor is theirs to test, and here only
+ * whether and how they are reached matters.
+ */
+function wireSelectionActions() {
+  const plugin = makePlugin() as unknown as IncrementalReadingPlugin & {
+    store: { dispatch: ReturnType<typeof vi.fn> };
+  };
+  const actions = new Actions(plugin);
+  const createSnippet = vi
+    .spyOn(actions, 'createSnippet')
+    .mockResolvedValue(null);
+  const createCard = vi.spyOn(actions, 'createCard').mockResolvedValue(null);
+  const prompt = vi
+    .spyOn(CardAnswerModal, 'promptForCardAnswer')
+    .mockResolvedValue(null);
+  return { plugin, actions, createSnippet, createCard, prompt };
+}
+
+const selectionKindArb = fc.constantFrom<SelectionKind>('snippet', 'card');
+
+/** A document with a selection in it, which may be empty or run backwards. */
+const editorArb = fc
+  .string({ maxLength: 40 })
+  .chain((doc) =>
+    fc
+      .tuple(fc.nat(doc.length), fc.nat(doc.length))
+      .map(([anchor, head]) => ({ doc, anchor, head }))
+  );
 
 // #endregion
 
@@ -1295,5 +1366,378 @@ describe('Actions.goToContext', () => {
         }
       )
     );
+  });
+});
+
+describe('Actions.extract', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('enters selection mode when nothing is selected', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        selectionKindArb,
+        editorArb.map((e) => ({ ...e, head: e.anchor })),
+        async (kind, editor) => {
+          const { plugin, actions, createSnippet, createCard } =
+            wireSelectionActions();
+          const { reviewView } = makeSelectingView(editor);
+
+          await actions.extract(kind, reviewView);
+
+          expect(dispatched(plugin)).toEqual([setSelectionMode(kind)]);
+          expect(createSnippet).not.toHaveBeenCalled();
+          expect(createCard).not.toHaveBeenCalled();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('makes the snippet or card at once when text is selected', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        selectionKindArb,
+        editorArb.filter((e) => e.anchor !== e.head),
+        async (kind, editor) => {
+          const { plugin, actions, createSnippet, createCard } =
+            wireSelectionActions();
+          const { reviewView } = makeSelectingView(editor);
+
+          await actions.extract(kind, reviewView);
+
+          expect(dispatched(plugin)).toEqual([]);
+          expect(createSnippet).toHaveBeenCalledTimes(
+            kind === 'snippet' ? 1 : 0
+          );
+          // Called bare: the card is made of the line, as outside the mode.
+          if (kind === 'card') {
+            expect(createCard).toHaveBeenCalledExactlyOnceWith();
+          } else {
+            expect(createCard).not.toHaveBeenCalled();
+          }
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('makes the snippet or card at once where there is no editor to select in', async () => {
+    await fc.assert(
+      fc.asyncProperty(selectionKindArb, async (kind) => {
+        const { plugin, actions, createSnippet, createCard } =
+          wireSelectionActions();
+        const { reviewView } = makeSelectingView(null);
+
+        await actions.extract(kind, reviewView);
+
+        expect(dispatched(plugin)).toEqual([]);
+        expect(createSnippet).toHaveBeenCalledTimes(kind === 'snippet' ? 1 : 0);
+        expect(createCard).toHaveBeenCalledTimes(kind === 'card' ? 1 : 0);
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  // In the mode, the item's buttons are hidden, so only the commands reach
+  // here: the one for the mode's kind stands in for its Confirm button, and
+  // the other must not start something else halfway through.
+  it('confirms the selection when already in the mode for that kind', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        selectionKindArb,
+        fc.option(editorArb, { nil: null }),
+        async (kind, editor) => {
+          Notice.reset();
+          const { plugin, actions, createSnippet, createCard, prompt } =
+            wireSelectionActions();
+          const confirmSelection = vi
+            .spyOn(actions, 'confirmSelection')
+            .mockResolvedValue();
+          const cancelSelection = vi.spyOn(actions, 'cancelSelection');
+          wireSelectionMode(kind);
+          const { reviewView } = makeSelectingView(editor);
+
+          await actions.extract(kind, reviewView);
+
+          expect(confirmSelection).toHaveBeenCalledExactlyOnceWith(reviewView);
+          expect(cancelSelection).not.toHaveBeenCalled();
+          expect(dispatched(plugin)).toEqual([]);
+          expect(createSnippet).not.toHaveBeenCalled();
+          expect(createCard).not.toHaveBeenCalled();
+          expect(prompt).not.toHaveBeenCalled();
+          expect(Notice.messages).toEqual([]);
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('refuses the other kind while in the mode, says so, and leaves the selection be', async () => {
+    const refusal = {
+      snippet: 'Finish or cancel the snippet selection first',
+      card: 'Finish or cancel the card selection first',
+    };
+    await fc.assert(
+      fc.asyncProperty(
+        selectionKindArb,
+        fc.option(editorArb, { nil: null }),
+        async (kind, editor) => {
+          Notice.reset();
+          const { plugin, actions, createSnippet, createCard, prompt } =
+            wireSelectionActions();
+          const confirmSelection = vi.spyOn(actions, 'confirmSelection');
+          const cancelSelection = vi.spyOn(actions, 'cancelSelection');
+          const mode = kind === 'snippet' ? 'card' : 'snippet';
+          wireSelectionMode(mode);
+          const { reviewView, cm, domSelection } = makeSelectingView(editor);
+
+          await actions.extract(kind, reviewView);
+
+          expect(Notice.messages).toEqual([refusal[mode]]);
+          expect(dispatched(plugin)).toEqual([]);
+          if (cm) expect(cm.dispatch).not.toHaveBeenCalled();
+          expect(domSelection.removeAllRanges).not.toHaveBeenCalled();
+          expect(confirmSelection).not.toHaveBeenCalled();
+          expect(cancelSelection).not.toHaveBeenCalled();
+          expect(createSnippet).not.toHaveBeenCalled();
+          expect(createCard).not.toHaveBeenCalled();
+          expect(prompt).not.toHaveBeenCalled();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+});
+
+describe('Actions.confirmSelection', () => {
+  beforeEach(() => {
+    Notice.reset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does nothing outside selection mode', async () => {
+    await fc.assert(
+      fc.asyncProperty(editorArb, async (editor) => {
+        const { plugin, actions, createSnippet, createCard, prompt } =
+          wireSelectionActions();
+        wireSelectionMode(null);
+        const { reviewView } = makeSelectingView(editor);
+
+        await actions.confirmSelection(reviewView);
+
+        expect(dispatched(plugin)).toEqual([]);
+        expect(createSnippet).not.toHaveBeenCalled();
+        expect(createCard).not.toHaveBeenCalled();
+        expect(prompt).not.toHaveBeenCalled();
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('stays in the mode, and says so, while nothing is selected', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        selectionKindArb,
+        editorArb.map((e) => ({ ...e, head: e.anchor })),
+        async (kind, editor) => {
+          Notice.reset();
+          const { plugin, actions, createSnippet, createCard, prompt } =
+            wireSelectionActions();
+          wireSelectionMode(kind);
+          const { reviewView, cm, domSelection } = makeSelectingView(editor);
+
+          await actions.confirmSelection(reviewView);
+
+          expect(dispatched(plugin)).toEqual([]);
+          expect(cm!.dispatch).not.toHaveBeenCalled();
+          expect(domSelection.removeAllRanges).not.toHaveBeenCalled();
+          expect(Notice.messages).toHaveLength(1);
+          expect(createSnippet).not.toHaveBeenCalled();
+          expect(createCard).not.toHaveBeenCalled();
+          expect(prompt).not.toHaveBeenCalled();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('ends the mode, extracts the selection to a snippet, then drops the selection', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        editorArb.filter((e) => e.anchor !== e.head),
+        async (editor) => {
+          const { plugin, actions, createSnippet, createCard, prompt } =
+            wireSelectionActions();
+          wireSelectionMode('snippet');
+          const { reviewView, cm, domSelection } = makeSelectingView(editor);
+          // The snippet is made of the editor's selection, so it must still be
+          // there when the snippet is made.
+          let untouchedWhenMade = false;
+          createSnippet.mockImplementation(() => {
+            untouchedWhenMade =
+              cm!.dispatch.mock.calls.length === 0 &&
+              domSelection.removeAllRanges.mock.calls.length === 0;
+            return Promise.resolve(null);
+          });
+
+          await actions.confirmSelection(reviewView);
+
+          expect(dispatched(plugin)).toEqual([setSelectionMode(null)]);
+          expect(createSnippet).toHaveBeenCalledOnce();
+          expect(untouchedWhenMade).toBe(true);
+          expect(cm!.dispatch).toHaveBeenCalledExactlyOnceWith({
+            selection: { anchor: editor.head },
+          });
+          expect(domSelection.removeAllRanges).toHaveBeenCalledOnce();
+          expect(createCard).not.toHaveBeenCalled();
+          expect(prompt).not.toHaveBeenCalled();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('ends the mode, asks for the answer in the selected text, and makes the card of both', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        editorArb.filter((e) => e.anchor !== e.head),
+        fc.tuple(fc.nat(), fc.nat()),
+        async (editor, answer) => {
+          const { plugin, actions, createSnippet, createCard, prompt } =
+            wireSelectionActions();
+          prompt.mockResolvedValue(answer);
+          wireSelectionMode('card');
+          const { reviewView, cm, domSelection } = makeSelectingView(editor);
+          const from = Math.min(editor.anchor, editor.head);
+          const to = Math.max(editor.anchor, editor.head);
+          const text = editor.doc.slice(from, to);
+
+          await actions.confirmSelection(reviewView);
+
+          expect(dispatched(plugin)).toEqual([setSelectionMode(null)]);
+          expect(prompt).toHaveBeenCalledExactlyOnceWith(plugin.app, text);
+          expect(createCard).toHaveBeenCalledExactlyOnceWith({
+            selection: { from, to, text },
+            answer,
+          });
+          expect(cm!.dispatch).toHaveBeenCalledExactlyOnceWith({
+            selection: { anchor: editor.head },
+          });
+          expect(domSelection.removeAllRanges).toHaveBeenCalledOnce();
+          expect(createSnippet).not.toHaveBeenCalled();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('makes no card when the answer prompt is cancelled', async () => {
+    const { plugin, actions, createCard, prompt } = wireSelectionActions();
+    wireSelectionMode('card');
+    const { reviewView, cm, domSelection } = makeSelectingView({
+      doc: 'some text',
+      anchor: 0,
+      head: 4,
+    });
+
+    await actions.confirmSelection(reviewView);
+
+    expect(prompt).toHaveBeenCalledOnce();
+    expect(createCard).not.toHaveBeenCalled();
+    // The mode is over all the same: the prompt is its last step.
+    expect(dispatched(plugin)).toEqual([setSelectionMode(null)]);
+    expect(cm!.dispatch).toHaveBeenCalledExactlyOnceWith({
+      selection: { anchor: 4 },
+    });
+    expect(domSelection.removeAllRanges).toHaveBeenCalledOnce();
+  });
+
+  it('leaves a selection outside the editor alone', async () => {
+    const { actions } = wireSelectionActions();
+    wireSelectionMode('snippet');
+    const { reviewView, contentDOM, domSelection } = makeSelectingView({
+      doc: 'some text',
+      anchor: 0,
+      head: 4,
+    });
+    contentDOM.contains.mockReturnValue(false);
+
+    await actions.confirmSelection(reviewView);
+
+    expect(domSelection.removeAllRanges).not.toHaveBeenCalled();
+  });
+
+  it('ends the mode having made nothing when there is no editor to read', async () => {
+    await fc.assert(
+      fc.asyncProperty(selectionKindArb, async (kind) => {
+        const { plugin, actions, createSnippet, createCard, prompt } =
+          wireSelectionActions();
+        wireSelectionMode(kind);
+        const { reviewView } = makeSelectingView(null);
+
+        await actions.confirmSelection(reviewView);
+
+        expect(dispatched(plugin)).toEqual([setSelectionMode(null)]);
+        expect(createSnippet).not.toHaveBeenCalled();
+        expect(createCard).not.toHaveBeenCalled();
+        expect(prompt).not.toHaveBeenCalled();
+        vi.restoreAllMocks();
+      })
+    );
+  });
+});
+
+describe('Actions.cancelSelection', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('ends the mode and collapses the selection where it ended', () => {
+    fc.assert(
+      fc.property(editorArb, (editor) => {
+        const { plugin, actions, createSnippet, createCard } =
+          wireSelectionActions();
+        const { reviewView, cm, domSelection } = makeSelectingView(editor);
+
+        actions.cancelSelection(reviewView);
+
+        expect(dispatched(plugin)).toEqual([setSelectionMode(null)]);
+        expect(cm!.dispatch).toHaveBeenCalledExactlyOnceWith({
+          selection: { anchor: editor.head },
+        });
+        expect(domSelection.removeAllRanges).toHaveBeenCalledOnce();
+        expect(createSnippet).not.toHaveBeenCalled();
+        expect(createCard).not.toHaveBeenCalled();
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('leaves a selection outside the editor alone', () => {
+    const { actions } = wireSelectionActions();
+    const { reviewView, contentDOM, domSelection } = makeSelectingView({
+      doc: 'some text',
+      anchor: 0,
+      head: 4,
+    });
+    contentDOM.contains.mockReturnValue(false);
+
+    actions.cancelSelection(reviewView);
+
+    expect(domSelection.removeAllRanges).not.toHaveBeenCalled();
+  });
+
+  it('ends the mode where there is no editor', () => {
+    const { plugin, actions } = wireSelectionActions();
+    const { reviewView } = makeSelectingView(null);
+
+    actions.cancelSelection(reviewView);
+
+    expect(dispatched(plugin)).toEqual([setSelectionMode(null)]);
   });
 });

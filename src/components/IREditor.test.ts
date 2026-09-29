@@ -4,12 +4,14 @@ import {
   computeMinimalChange,
   isPersistableChange,
   reconcileIncomingValue,
+  selectionModeExtension,
+  selectionPresenceListener,
 } from '#/components/IREditor';
 import { isExternalSync } from '#/lib/extensions/SnippetHighlightExtension';
 import { EditorSelection, EditorState } from '@codemirror/state';
 import { EditorView, type ViewUpdate } from '@codemirror/view';
 import fc from 'fast-check';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 // #region HELPERS
 
@@ -842,6 +844,188 @@ describe('updateEditorContent applies genuine external changes (property-based)'
         }
       ),
       { numRuns: 200 }
+    );
+  });
+});
+
+describe('selectionModeExtension', () => {
+  // Obsidian's own extensions sit alongside this one, and any of them may say
+  // the editor is editable; the mode has to win regardless.
+  const othersArb = fc.array(fc.boolean(), { maxLength: 3 });
+
+  function stateWith(selecting: boolean, others: boolean[]) {
+    return EditorState.create({
+      extensions: [
+        ...others.map((value) => EditorView.editable.of(value)),
+        selectionModeExtension(selecting),
+      ],
+    });
+  }
+
+  it('turns editing off in selection mode, whatever else says otherwise', () => {
+    fc.assert(
+      fc.property(othersArb, (others) => {
+        const state = stateWith(true, others);
+
+        expect(state.facet(EditorView.editable)).toBe(false);
+        expect(state.readOnly).toBe(true);
+      })
+    );
+  });
+
+  it('leaves editing as the rest of the editor has it outside the mode', () => {
+    fc.assert(
+      fc.property(othersArb, (others) => {
+        const state = stateWith(false, others);
+
+        expect(state.facet(EditorView.editable)).toBe(others[0] ?? true);
+        expect(state.readOnly).toBe(false);
+      })
+    );
+  });
+
+  it('keeps the content DOM from taking input while selecting', () => {
+    // Obsidian's editor asks for `contenteditable="true"` through content
+    // attributes of its own, which outrank the attribute the facet sets.
+    const view = new EditorView({
+      state: EditorState.create({
+        extensions: [
+          EditorView.contentAttributes.of({ contenteditable: 'true' }),
+          selectionModeExtension(true),
+        ],
+      }),
+      parent: document.body,
+    });
+    try {
+      expect(view.contentDOM.getAttribute('contenteditable')).toBe('false');
+    } finally {
+      view.destroy();
+    }
+  });
+
+  describe('text selection', () => {
+    // Obsidian's app CSS: selection off for the whole app, and back on only
+    // for content that is editable.
+    let appCss: HTMLStyleElement;
+    beforeEach(() => {
+      appCss = document.head.appendChild(document.createElement('style'));
+      appCss.textContent =
+        'body { user-select: none; }' +
+        ' body [contenteditable="true"] { user-select: text; }';
+    });
+    afterEach(() => {
+      appCss.remove();
+    });
+
+    function contentUserSelect(selecting: boolean): string {
+      const view = new EditorView({
+        state: EditorState.create({
+          extensions: [
+            EditorView.contentAttributes.of({ contenteditable: 'true' }),
+            selectionModeExtension(selecting),
+          ],
+        }),
+        parent: document.body,
+      });
+      try {
+        return getComputedStyle(view.contentDOM).userSelect;
+      } finally {
+        view.destroy();
+      }
+    }
+
+    it('keeps the uneditable content selectable in selection mode', () => {
+      expect(contentUserSelect(true)).toBe('text');
+    });
+
+    it('leaves selectability to the app outside the mode', () => {
+      expect(contentUserSelect(false)).toBe('text');
+    });
+  });
+});
+
+describe('selectionPresenceListener', () => {
+  type Step =
+    | { kind: 'select'; anchor: number; head: number }
+    | { kind: 'delete'; from: number; to: number }
+    | { kind: 'insert'; at: number; text: string };
+
+  // Positions are taken modulo the document's length at the time of the step,
+  // so every step lands inside whatever the steps before it left.
+  const posArb = fc.nat({ max: 1000 });
+  const stepArb: fc.Arbitrary<Step> = fc.oneof(
+    fc.record({
+      kind: fc.constant('select' as const),
+      anchor: posArb,
+      head: posArb,
+    }),
+    // A deletion can swallow a selection whole, collapsing it without any
+    // selection being dispatched.
+    fc.record({
+      kind: fc.constant('delete' as const),
+      from: posArb,
+      to: posArb,
+    }),
+    fc.record({
+      kind: fc.constant('insert' as const),
+      at: posArb,
+      text: fc.string({ minLength: 1, maxLength: 5 }),
+    })
+  );
+
+  function apply(view: EditorView, step: Step): void {
+    const clamp = (pos: number) => pos % (view.state.doc.length + 1);
+    if (step.kind === 'select') {
+      view.dispatch({
+        selection: { anchor: clamp(step.anchor), head: clamp(step.head) },
+      });
+    } else if (step.kind === 'delete') {
+      const [from, to] = [clamp(step.from), clamp(step.to)].sort(
+        (a, b) => a - b
+      );
+      view.dispatch({ changes: { from, to } });
+    } else {
+      view.dispatch({ changes: { from: clamp(step.at), insert: step.text } });
+    }
+  }
+
+  it('reports whether the editor holds a selection, only when that changes', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        fc.array(stepArb, { maxLength: 30 }),
+        (selecting, steps) => {
+          const reports: boolean[] = [];
+          const view = new EditorView({
+            state: EditorState.create({
+              doc: 'alpha beta\ngamma delta',
+              extensions: [
+                // Selection mode leaves the editor uneditable, and the
+                // selection made in it must still be reported.
+                selectionModeExtension(selecting),
+                selectionPresenceListener((has) => reports.push(has)),
+              ],
+            }),
+            parent: document.body,
+          });
+          try {
+            for (const step of steps) {
+              apply(view, step);
+
+              const has = !view.state.selection.main.empty;
+              // A fresh editor holds a cursor, so it starts out reported empty.
+              expect(reports[reports.length - 1] ?? false).toBe(has);
+            }
+            // Each report differs from the one before it: no report without a
+            // change, so the store is not written on every transaction.
+            reports.forEach((has, i) => {
+              expect(has).toBe(i % 2 === 0);
+            });
+          } finally {
+            view.destroy();
+          }
+        }
+      )
     );
   });
 });

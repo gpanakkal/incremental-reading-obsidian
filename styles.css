@@ -810,6 +810,45 @@ body.is-phone .ir-header-standin {
   color: var(--text-muted);
 }
 
+/* Selection mode's confirm and cancel: text with an icon ahead of it. */
+#confirm-selection-button,
+#cancel-selection-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-2-2);
+}
+
+#confirm-selection-button {
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-weight: var(--font-medium);
+}
+
+#confirm-selection-button:hover {
+  background-color: var(--interactive-accent-hover);
+}
+
+#confirm-selection-button svg,
+#cancel-selection-button svg {
+  width: var(--icon-s);
+  height: var(--icon-s);
+}
+
+/* The card's text in the answer prompt, raw and selectable. */
+.ir-card-answer-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: var(--size-4-2) var(--size-4-3);
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background-color: var(--background-secondary);
+  font-family: var(--font-text);
+}
+
 .ir-review-interface .ir-editor,
 .ir-review-interface .markdown-preview-view {
   flex: 1;

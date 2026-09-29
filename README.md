@@ -70,9 +70,22 @@ You may find the phrasing of a snippet can be improved by revising wording, remo
 
 Once a snippet has been sufficiently trimmed down and revised, it's ready to be turned into one or more spaced repetition cards.
 
-- Cards are created as fill-in-the-blank questions from text blocks — just select the part of the text that you want to be the answer, and run **Create spaced repetition card**.
-- The entire paragraph or list item containing the selected text will be extracted to the card. Split paragraphs or list items up as needed to avoid including extra text.
-- Cards should ideally be one or two sentences and have only one correct answer. The shorter the better, as long as it remains clear how to answer them.
+Cards should ideally be one or two sentences and have only one correct answer. The shorter the better, as long as it remains clear how to answer them.
+
+There are two ways to create cards:
+
+##### Quick-create
+
+Select the portion of a block that you want to be the answer, and run **Create spaced repetition card**. The entire paragraph or list item containing the selected text will be extracted to the card. Split paragraphs or list items up as needed.
+
+##### Two-step
+
+You can also create cards spanning multiple blocks, or from a portion of a block. 
+
+1. While in review, select **Create card** on the action bar (or run **Create spaced repetition card**) before selecting any text. 
+2. Select what you want to include in the card and select **Confirm** (or run **Create spaced repetition card** again).
+3. A modal will appear showing what you selected. Select the answer within it and press **Enter**.
+
 
 #### Grade cards
 

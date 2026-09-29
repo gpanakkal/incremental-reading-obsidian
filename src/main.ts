@@ -99,53 +99,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     // const statusBarItemEl = this.addStatusBarItem();
     // statusBarItemEl.setText('Status Bar Text');
 
-    this.addCommand({
-      id: 'extract-selection',
-      name: 'Extract selection to snippet',
-      // hotkeys: [{ key: 'X', modifiers: ['Alt'] }],
-      checkCallback: (checking) => {
-        if (!this.reviewManager) return false;
-
-        const editor = this.app.workspace.activeEditor?.editor;
-        if (!editor) return false;
-
-        const view =
-          this.getActiveReviewView() ??
-          this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (!view) return false;
-        if (
-          view.getViewType() === 'markdown' &&
-          view instanceof MarkdownView &&
-          view.currentMode === view.previewMode
-        ) {
-          // disable in reading mode
-          return false;
-        }
-        if (checking) return true;
-
-        void this.actions.createSnippet();
-      },
-    });
-
-    this.addCommand({
-      id: 'create-card',
-      name: 'Create spaced repetition card',
-      // hotkeys: [{ key: 'Z', modifiers: ['Alt'] }],
-      checkCallback: (checking) => {
-        if (!this.reviewManager) return false;
-
-        const view =
-          this.getActiveReviewView() ??
-          this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (!view) return false;
-
-        const editor = this.app.workspace.activeEditor?.editor;
-        if (!editor) return false;
-        if (checking) return true;
-
-        void this.actions.createCard();
-      },
-    });
+    this.addExtractCommands();
 
     this.addCommand({
       id: 'import-article',
@@ -821,6 +775,69 @@ export default class IncrementalReadingPlugin extends Plugin {
         merged.copyOnImport
       );
     }
+  }
+
+  /**
+   * The commands that make a snippet or a card.
+   *
+   * In the review tab they do what the action bar's buttons do, through the
+   * same {@link Actions.extract}: selected text becomes the snippet or card at
+   * once, and with nothing selected review enters selection mode instead. Once
+   * in the mode, the command for its kind confirms it and the other is refused.
+   * In a note, which has no selection mode, they make it at once either way.
+   */
+  private addExtractCommands() {
+    this.addCommand({
+      id: 'extract-selection',
+      name: 'Extract selection to snippet',
+      // hotkeys: [{ key: 'X', modifiers: ['Alt'] }],
+      checkCallback: (checking) => {
+        if (!this.reviewManager) return false;
+
+        const editor = this.app.workspace.activeEditor?.editor;
+        if (!editor) return false;
+
+        const view =
+          this.getActiveReviewView() ??
+          this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view) return false;
+        if (
+          view.getViewType() === 'markdown' &&
+          view instanceof MarkdownView &&
+          view.currentMode === view.previewMode
+        ) {
+          // disable in reading mode
+          return false;
+        }
+        if (checking) return true;
+
+        void (view instanceof ReviewView
+          ? this.actions.extract('snippet', view)
+          : this.actions.createSnippet());
+      },
+    });
+
+    this.addCommand({
+      id: 'create-card',
+      name: 'Create spaced repetition card',
+      // hotkeys: [{ key: 'Z', modifiers: ['Alt'] }],
+      checkCallback: (checking) => {
+        if (!this.reviewManager) return false;
+
+        const view =
+          this.getActiveReviewView() ??
+          this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view) return false;
+
+        const editor = this.app.workspace.activeEditor?.editor;
+        if (!editor) return false;
+        if (checking) return true;
+
+        void (view instanceof ReviewView
+          ? this.actions.extract('card', view)
+          : this.actions.createCard());
+      },
+    });
   }
 
   toggleAdvancedCommands(enable: boolean) {

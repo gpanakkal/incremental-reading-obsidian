@@ -6,11 +6,19 @@ import {
   completedReviewsSlice,
   getCompletedReviews,
   getSeenIds,
+  hasSelectionSlice,
   removeCompletedReview,
   removeSeenId,
+  resetCurrentItem,
   resetSeenIds,
   resetSession,
+  selectionModeSlice,
+  setHasSelection,
+  setPage,
+  setSelectionMode,
+  setShowAnswer,
   store,
+  type SelectionKind,
 } from './store';
 import type { NoteType } from './types';
 
@@ -407,6 +415,118 @@ describe('getSeenIds', () => {
 
         expect(entriesOf(first)).toEqual([]);
         expect(getSeenIds({ seenIds: { ...state } } as never)).toBe(first);
+      })
+    );
+  });
+});
+
+describe('selectionMode', () => {
+  const kindArb = fc.constantFrom<SelectionKind>('snippet', 'card');
+
+  afterEach(() => {
+    store.dispatch(setSelectionMode(null));
+    store.dispatch(resetSession());
+    store.dispatch(resetSeenIds(0));
+  });
+
+  it('starts outside selection mode', () => {
+    expect(selectionModeSlice.getInitialState()).toBeNull();
+  });
+
+  it('holds whichever kind of extraction it was entered for', () => {
+    fc.assert(
+      fc.property(kindArb, (kind) => {
+        store.dispatch(setSelectionMode(kind));
+
+        expect(store.getState().selectionMode).toBe(kind);
+      })
+    );
+  });
+
+  it('ends when cancelled or confirmed', () => {
+    fc.assert(
+      fc.property(kindArb, (kind) => {
+        store.dispatch(setSelectionMode(kind));
+        store.dispatch(setSelectionMode(null));
+
+        expect(store.getState().selectionMode).toBeNull();
+      })
+    );
+  });
+
+  // Back and forward reach review through these same actions (see
+  // `actionsToReach`), as do advancing, the home button, and closing the tab.
+  const leaving = [
+    ['review moves off the item', () => resetCurrentItem()],
+    ['the session ends', () => resetSession()],
+    ['review goes to the home screen', () => setPage('home')],
+    ['review comes back from the home screen', () => setPage('review')],
+    ["a card's answer is revealed", () => setShowAnswer(true)],
+  ] as const;
+
+  it.each(leaving)('ends when %s', (_, action) => {
+    fc.assert(
+      fc.property(kindArb, (kind) => {
+        store.dispatch(setSelectionMode(kind));
+        store.dispatch(action());
+
+        expect(store.getState().selectionMode).toBeNull();
+      })
+    );
+  });
+
+  it('survives what leaves review on its item', () => {
+    fc.assert(
+      fc.property(kindArb, fc.uuid(), (kind, id) => {
+        store.dispatch(setSelectionMode(kind));
+        store.dispatch(addSeenId({ id, resetTime: Date.now() + 1000 }));
+
+        expect(store.getState().selectionMode).toBe(kind);
+      })
+    );
+  });
+});
+
+describe('hasSelection', () => {
+  afterEach(() => {
+    store.dispatch(setHasSelection(false));
+    store.dispatch(setSelectionMode(null));
+    store.dispatch(resetSession());
+  });
+
+  it('starts with nothing selected', () => {
+    expect(hasSelectionSlice.getInitialState()).toBe(false);
+  });
+
+  it('holds whatever the editor last reported', () => {
+    fc.assert(
+      fc.property(fc.array(fc.boolean(), { minLength: 1 }), (reports) => {
+        for (const has of reports) store.dispatch(setHasSelection(has));
+
+        expect(store.getState().hasSelection).toBe(reports[reports.length - 1]);
+      })
+    );
+  });
+
+  // It mirrors the editor rather than the mode: the selection stays in the
+  // editor across all of these, so a reset here would disagree with it until
+  // the next change.
+  const others = [
+    ['selection mode is entered', () => setSelectionMode('snippet')],
+    ['selection mode ends', () => setSelectionMode(null)],
+    ['review moves off the item', () => resetCurrentItem()],
+    ['the session ends', () => resetSession()],
+    ['the page changes', () => setPage('review')],
+    ["a card's answer is revealed", () => setShowAnswer(true)],
+  ] as const;
+
+  it.each(others)('is left as the editor reported when %s', (_, action) => {
+    fc.assert(
+      fc.property(fc.boolean(), (has) => {
+        store.dispatch(setHasSelection(has));
+        store.dispatch(action());
+
+        expect(store.getState().hasSelection).toBe(has);
       })
     );
   });

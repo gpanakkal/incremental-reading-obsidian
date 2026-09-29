@@ -9,7 +9,7 @@ import IncrementalReadingPlugin from '#/main';
 import { Menu, type MenuItem } from '#/test/__mocks__/obsidian';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
-import type { TFile, WorkspaceLeaf } from 'obsidian';
+import { MarkdownView, type TFile, type WorkspaceLeaf } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // `main.ts` pulls the schema in as a raw `.sql` import, which Vite cannot parse
@@ -276,6 +276,78 @@ function followMovedNotes({
 
 /** Give a scan that was never going to start long enough to show it didn't. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+/** The ids of the commands that make a snippet or card, by what they make. */
+const EXTRACT_COMMANDS = {
+  snippet: 'extract-selection',
+  card: 'create-card',
+} as const;
+
+type ExtractKind = keyof typeof EXTRACT_COMMANDS;
+
+/** A note open in its own tab, in editing mode unless `reading`. */
+function markdownView({ reading = false } = {}): MarkdownView {
+  const editMode = {};
+  const previewMode = {};
+  return Object.assign(Object.create(MarkdownView.prototype) as object, {
+    getViewType: () => 'markdown',
+    editMode,
+    previewMode,
+    currentMode: reading ? previewMode : editMode,
+  }) as unknown as MarkdownView;
+}
+
+/**
+ * Bare receiver for `addExtractCommands`, with the active tab showing
+ * `where`: the review tab, a note, or neither. The commands it registers are
+ * kept by id, to be run the way the command palette runs them.
+ */
+function makeExtractReceiver({
+  where = 'review' as 'review' | 'note' | 'none',
+  reading = false,
+  editor = true,
+} = {}) {
+  const reviewView = Object.create(ReviewView.prototype) as ReviewView;
+  const noteView = markdownView({ reading });
+  const actions = {
+    extract: vi.fn(() => Promise.resolve()),
+    createSnippet: vi.fn(() => Promise.resolve(null)),
+    createCard: vi.fn(() => Promise.resolve(null)),
+  };
+  const commands = new Map<string, (checking: boolean) => boolean | void>();
+  const receiver = {
+    reviewManager: {},
+    actions,
+    addCommand: vi.fn(
+      (command: {
+        id: string;
+        checkCallback: (checking: boolean) => boolean | void;
+      }) => {
+        commands.set(command.id, command.checkCallback);
+      }
+    ),
+    getActiveReviewView: vi.fn(() => (where === 'review' ? reviewView : null)),
+    app: {
+      workspace: {
+        activeEditor: editor ? { editor: {} } : null,
+        getActiveViewOfType: vi.fn(() => (where === 'note' ? noteView : null)),
+      },
+    },
+  };
+  (
+    IncrementalReadingPlugin.prototype as unknown as {
+      addExtractCommands(): void;
+    }
+  ).addExtractCommands.call(receiver);
+
+  /** Run the command that makes `kind`, or only ask whether it can run. */
+  const run = (kind: ExtractKind, checking = false) => {
+    const callback = commands.get(EXTRACT_COMMANDS[kind]);
+    if (!callback) throw new Error(`no command makes a ${kind}`);
+    return callback(checking);
+  };
+  return { receiver, actions, reviewView, run };
+}
 
 // #endregion
 
@@ -595,6 +667,98 @@ describe('IncrementalReadingPlugin.resumeSession', () => {
 
     await expect(resumeSession(receiver)).resolves.toBe(false);
     expect(getReviewItemFromId).not.toHaveBeenCalled();
+  });
+});
+
+describe('IncrementalReadingPlugin.addExtractCommands', () => {
+  const kinds = fc.constantFrom<ExtractKind>('snippet', 'card');
+
+  it('does what the action bar button does in the review tab', () => {
+    // `Actions.extract` is the button's path: it makes the snippet or card at
+    // once of selected text, and enters selection mode with none.
+    fc.assert(
+      fc.property(kinds, (kind) => {
+        const { actions, reviewView, run } = makeExtractReceiver();
+
+        run(kind);
+
+        expect(actions.extract).toHaveBeenCalledExactlyOnceWith(
+          kind,
+          reviewView
+        );
+        expect(actions.createSnippet).not.toHaveBeenCalled();
+        expect(actions.createCard).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('makes the snippet or card at once in a note', () => {
+    // Selection mode is review's; a note has no action bar to confirm it from.
+    fc.assert(
+      fc.property(kinds, (kind) => {
+        const { actions, run } = makeExtractReceiver({ where: 'note' });
+
+        run(kind);
+
+        const [made, other] =
+          kind === 'snippet'
+            ? [actions.createSnippet, actions.createCard]
+            : [actions.createCard, actions.createSnippet];
+        expect(made).toHaveBeenCalledExactlyOnceWith();
+        expect(other).not.toHaveBeenCalled();
+        expect(actions.extract).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('only answers whether it can run while the palette is checking', () => {
+    fc.assert(
+      fc.property(
+        kinds,
+        fc.constantFrom('review' as const, 'note' as const),
+        (kind, where) => {
+          const { actions, run } = makeExtractReceiver({ where });
+
+          expect(run(kind, true)).toBe(true);
+
+          expect(actions.extract).not.toHaveBeenCalled();
+          expect(actions.createSnippet).not.toHaveBeenCalled();
+          expect(actions.createCard).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('is unavailable with no editor on screen', () => {
+    // A card still asking its question is rendered markdown, not an editor.
+    fc.assert(
+      fc.property(
+        kinds,
+        fc.constantFrom('review' as const, 'note' as const, 'none' as const),
+        (kind, where) => {
+          const { run } = makeExtractReceiver({ where, editor: false });
+
+          expect(run(kind, true)).toBe(false);
+        }
+      )
+    );
+  });
+
+  it('is unavailable outside review and notes', () => {
+    fc.assert(
+      fc.property(kinds, (kind) => {
+        const { run } = makeExtractReceiver({ where: 'none' });
+
+        expect(run(kind, true)).toBe(false);
+      })
+    );
+  });
+
+  it('extracts no snippet from a note in reading mode, but still makes a card', () => {
+    const { run } = makeExtractReceiver({ where: 'note', reading: true });
+
+    expect(run('snippet', true)).toBe(false);
+    expect(run('card', true)).toBe(true);
   });
 });
 

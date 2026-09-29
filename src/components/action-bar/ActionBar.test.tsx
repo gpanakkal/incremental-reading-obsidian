@@ -3,7 +3,7 @@ import { ReviewContextProvider } from '#/components/ReviewContext';
 import type { QueuePage } from '#/components/types';
 import * as ReactQuery from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
-import { setPage, setShowAnswer } from '#/lib/store';
+import { type SelectionKind, setPage, setShowAnswer } from '#/lib/store';
 import type { NoteType, ReviewItem } from '#/lib/types';
 import fc from 'fast-check';
 import { type ComponentChild, render } from 'preact';
@@ -69,15 +69,17 @@ function mountBar({
   showMoreOptionsMenu = vi.fn(),
   actions = makeActions(),
   leaf = makeLeaf(),
+  reviewView = { showMoreOptionsMenu, leaf },
 }: {
   showMoreOptionsMenu?: () => void;
   actions?: ReturnType<typeof makeActions>;
   leaf?: ReturnType<typeof makeLeaf>;
+  reviewView?: object;
 } = {}): HTMLElement {
   return mount(
     <ReviewContextProvider
       plugin={{ actions, app: {} } as never}
-      reviewView={{ showMoreOptionsMenu, leaf } as never}
+      reviewView={reviewView as never}
       reviewManager={{} as never}
     >
       <ActionBar />
@@ -170,8 +172,9 @@ function makeActions() {
       return () => void listeners.delete(fn);
     },
     setCardsOnly: vi.fn(),
-    createSnippet: vi.fn(),
-    createCard: vi.fn(),
+    extract: vi.fn(),
+    confirmSelection: vi.fn(),
+    cancelSelection: vi.fn(),
     dismissItem: vi.fn(),
     unDismissItem: vi.fn(),
     review: vi.fn(),
@@ -270,15 +273,34 @@ function mountItemBar(
   item: ReviewItem,
   {
     showAnswer = false,
+    selectionMode = null,
+    hasSelection = false,
     actions = makeActions(),
-  }: { showAnswer?: boolean; actions?: ReturnType<typeof makeActions> } = {}
+    reviewView = makeReviewView(),
+  }: {
+    showAnswer?: boolean;
+    selectionMode?: SelectionKind | null;
+    hasSelection?: boolean;
+    actions?: ReturnType<typeof makeActions>;
+    reviewView?: ReturnType<typeof makeReviewView>;
+  } = {}
 ): HTMLElement {
   reduxState.page = 'review';
   reduxState.showAnswer = showAnswer;
+  reduxState.selectionMode = selectionMode;
+  reduxState.hasSelection = hasSelection;
   vi.spyOn(ReactQuery, 'useCurrentItem').mockReturnValue({
     data: item,
   } as never);
-  return mountBar({ actions });
+  return mountBar({ actions, reviewView });
+}
+
+/**
+ * The view the bar hands to the actions that act on its editor, kept by the
+ * test to check it is that view they are handed.
+ */
+function makeReviewView() {
+  return { showMoreOptionsMenu: vi.fn(), leaf: makeLeaf() };
 }
 
 /** The button carrying `label` as its tooltip, or null when there is none. */
@@ -336,8 +358,10 @@ vi.mock('lucide-react', () => ({
   House: () => null,
   Scissors: () => null,
   SkipForward: () => null,
+  TextSelect: () => null,
   Trash2: () => null,
   Undo2: () => null,
+  X: () => null,
 }));
 
 // react-redux is mocked rather than spied on because its exports are
@@ -350,6 +374,8 @@ const defaultReduxState = {
   page: 'home' as 'home' | 'review',
   showAnswer: false,
   typesToReview: { article: true, snippet: true, card: true },
+  selectionMode: null as SelectionKind | null,
+  hasSelection: false,
 };
 const reduxState = { ...defaultReduxState };
 vi.mock('react-redux', () => ({
@@ -868,31 +894,38 @@ describe('ActionBar', () => {
     describe.each(screens)(
       'on a $type (answer shown: $showAnswer)',
       (screen) => {
-        it('extracts the selection to a new snippet', () => {
+        it('extracts a snippet from what this tab shows', () => {
           const actions = makeActions();
+          const reviewView = makeReviewView();
           const container = mountItemBar(makeItem(screen.type), {
             ...screen,
             actions,
+            reviewView,
           });
 
-          getButton(
-            container,
-            'Extract selected text to a new snippet'
-          ).click();
+          getButton(container, 'Create snippet').click();
 
-          expect(actions.createSnippet).toHaveBeenCalledTimes(1);
+          expect(actions.extract).toHaveBeenCalledExactlyOnceWith(
+            'snippet',
+            reviewView
+          );
         });
 
-        it('creates a card', () => {
+        it('makes a card from what this tab shows', () => {
           const actions = makeActions();
+          const reviewView = makeReviewView();
           const container = mountItemBar(makeItem(screen.type), {
             ...screen,
             actions,
+            reviewView,
           });
 
           getButton(container, 'Create card').click();
 
-          expect(actions.createCard).toHaveBeenCalledTimes(1);
+          expect(actions.extract).toHaveBeenCalledExactlyOnceWith(
+            'card',
+            reviewView
+          );
         });
 
         it('stops scheduling an item that is still scheduled', () => {
@@ -1030,6 +1063,138 @@ describe('ActionBar', () => {
           queryButton(container, 'Skip for current review session')
         ).toBeNull();
       });
+    });
+  });
+
+  describe('in selection mode', () => {
+    const KINDS: SelectionKind[] = ['snippet', 'card'];
+    const screens = ITEM_TYPES.flatMap((type) =>
+      KINDS.map((kind) => ({ type, kind }))
+    );
+
+    function confirmButton(container: HTMLElement) {
+      return container.querySelector<HTMLButtonElement>(
+        '#confirm-selection-button'
+      );
+    }
+
+    function cancelButton(container: HTMLElement) {
+      return container.querySelector<HTMLButtonElement>(
+        '#cancel-selection-button'
+      );
+    }
+
+    describe.each(screens)('making a $kind from a $type', ({ type, kind }) => {
+      it('offers confirm and cancel in place of the item actions', () => {
+        const container = mountItemBar(makeItem(type), { selectionMode: kind });
+
+        expect(zoneChildren(container, 'center')).toEqual([
+          confirmButton(container),
+          cancelButton(container),
+        ]);
+      });
+
+      it('leaves the session actions and the ⋮ where they are', () => {
+        const container = mountItemBar(makeItem(type), { selectionMode: kind });
+
+        expect(zoneChildren(container, 'lead')).toContain(
+          getButton(container, 'Go to home screen')
+        );
+        expect(zoneChildren(container, 'trail')).toEqual([
+          moreOptionsButton(container),
+        ]);
+      });
+
+      // With nothing selected too: confirming then says what is missing and
+      // stays in the mode, which is `confirmSelection`'s to do.
+      it.each([false, true])(
+        'confirms the selection in this tab (text selected: %s)',
+        (hasSelection) => {
+          const actions = makeActions();
+          const reviewView = makeReviewView();
+          const container = mountItemBar(makeItem(type), {
+            selectionMode: kind,
+            hasSelection,
+            actions,
+            reviewView,
+          });
+
+          confirmButton(container)?.click();
+
+          expect(actions.confirmSelection).toHaveBeenCalledExactlyOnceWith(
+            reviewView
+          );
+          expect(actions.cancelSelection).not.toHaveBeenCalled();
+        }
+      );
+
+      // A button that read "Select text" until something was selected proved
+      // confusing, so it reads the same either way.
+      it('looks the same whether or not text is selected', () => {
+        const confirmLook = (hasSelection: boolean) => {
+          const container = mountItemBar(makeItem(type), {
+            selectionMode: kind,
+            hasSelection,
+          });
+          const button = confirmButton(container);
+          const look = {
+            text: button?.textContent,
+            label: button?.getAttribute('aria-label'),
+          };
+          render(null, container);
+          return look;
+        };
+
+        const unselected = confirmLook(false);
+
+        expect(unselected.text).toBe('Confirm');
+        expect(unselected).toEqual(confirmLook(true));
+      });
+
+      it('cancels the selection in this tab', () => {
+        const actions = makeActions();
+        const reviewView = makeReviewView();
+        const container = mountItemBar(makeItem(type), {
+          selectionMode: kind,
+          actions,
+          reviewView,
+        });
+
+        cancelButton(container)?.click();
+
+        expect(actions.cancelSelection).toHaveBeenCalledExactlyOnceWith(
+          reviewView
+        );
+        expect(actions.confirmSelection).not.toHaveBeenCalled();
+      });
+
+      it.each([false, true])(
+        'names what confirming and cancelling are for (text selected: %s)',
+        (hasSelection) => {
+          const container = mountItemBar(makeItem(type), {
+            selectionMode: kind,
+            hasSelection,
+          });
+          const noun = kind === 'snippet' ? /snippet/ : /card/;
+
+          expect(confirmButton(container)?.getAttribute('aria-label')).toMatch(
+            noun
+          );
+          expect(cancelButton(container)?.getAttribute('aria-label')).toMatch(
+            noun
+          );
+        }
+      );
+    });
+
+    it('offers neither outside the mode', () => {
+      for (const type of ITEM_TYPES) {
+        const container = mountItemBar(makeItem(type));
+
+        expect(confirmButton(container)).toBeNull();
+        expect(cancelButton(container)).toBeNull();
+        render(null, container);
+      }
     });
   });
 });

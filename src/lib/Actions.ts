@@ -1,4 +1,6 @@
 import type IncrementalReadingPlugin from '#/main';
+import { promptForCardAnswer } from '#/views/CardAnswerModal';
+import type ReviewView from '#/views/ReviewView';
 import { MarkdownView, type TFile } from 'obsidian';
 import { type Grade, Rating } from 'ts-fsrs';
 import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from './constants';
@@ -8,6 +10,7 @@ import {
   findArticleSource,
   resolveItemContext,
 } from './item-context';
+import type { CardSelection } from './items/CardManager';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import {
   fetchCurrentItem,
@@ -16,15 +19,18 @@ import {
   queryClient,
 } from './query-client';
 import {
+  type SelectionKind,
   addCompletedReview,
   addSeenId,
   removeCompletedReview,
   removeSeenId,
   resetCurrentItem,
   setCurrentItemId,
+  setSelectionMode,
   setTypesToReview,
   store,
 } from './store';
+import type { TextBounds } from './text-selection';
 import {
   NOTE_TYPES,
   type NoteType,
@@ -36,6 +42,11 @@ import {
   isReviewArticle,
 } from './types';
 import { getContentSlice, getEndOfDay } from './utils';
+
+/** The CodeMirror view of the review tab's editor. */
+type ReviewEditorView = NonNullable<
+  ReturnType<ReviewView['reviewEditor']>
+>['cm'];
 
 export type ActionStackEntry = {
   item: ReviewItem;
@@ -316,7 +327,15 @@ export class Actions {
     return snippet;
   };
 
-  createCard = async () => {
+  /**
+   * @param fromSelection a span chosen in selection mode and the answer chosen
+   * in it, to make the card of. Without one, the card is made of the line the
+   * cursor is on, with the selection in it as its answer.
+   */
+  createCard = async (fromSelection?: {
+    selection: CardSelection;
+    answer: TextBounds;
+  }) => {
     const editor = this.plugin.app.workspace.activeEditor?.editor;
     if (!editor) return null;
     const view =
@@ -327,7 +346,14 @@ export class Actions {
     const sourceFile = view.file;
     if (!sourceFile) return null;
 
-    const result = await this.plugin.reviewManager.createCard(editor, view);
+    const result = fromSelection
+      ? await this.plugin.reviewManager.createCardFromSelection(
+          editor,
+          view,
+          fromSelection.selection,
+          fromSelection.answer
+        )
+      : await this.plugin.reviewManager.createCard(editor, view);
 
     if (result) {
       const { reviewCard, line } = result;
@@ -373,6 +399,113 @@ export class Actions {
     }
 
     return result;
+  };
+
+  /**
+   * What the create snippet and create card buttons do. With text selected, the
+   * snippet or card is made of it at once. With none, review enters selection
+   * mode for the user to select the text in and then confirm or cancel; see
+   * {@link confirmSelection} and {@link cancelSelection}.
+   *
+   * A screen without an editor — a card still asking its question — has
+   * nothing to select in, so the button acts as it would with no selection
+   * outside the mode.
+   *
+   * Once in the mode, the buttons are hidden, and only the commands still come
+   * here. The one for the mode's kind confirms, as its Confirm button does. The
+   * other is refused, leaving the mode and its selection as they were: it would
+   * otherwise make its snippet or card of the text selected for the first.
+   */
+  extract = async (kind: SelectionKind, reviewView: ReviewView) => {
+    const mode = store.getState().selectionMode;
+    if (mode === kind) {
+      await this.confirmSelection(reviewView);
+      return;
+    }
+    if (mode !== null) {
+      Obsidian.notify(`Finish or cancel the ${mode} selection first`);
+      return;
+    }
+
+    const cm = reviewView.reviewEditor()?.cm;
+    if (cm && cm.state.selection.main.empty) {
+      this.plugin.store.dispatch(setSelectionMode(kind));
+      return;
+    }
+    if (kind === 'snippet') await this.createSnippet();
+    else await this.createCard();
+  };
+
+  /**
+   * End selection mode by making a snippet or card of what the user selected.
+   * A card's text is only half of it: its answer is asked for next, in a modal
+   * over the text just selected.
+   *
+   * With nothing selected yet, review stays in the mode and says so, rather
+   * than leaving it having made nothing.
+   *
+   * The span is read before the mode ends, since that is when it is known to be
+   * what was chosen in the mode. The snippet is then made through the editor's
+   * selection, as it is from outside the mode; the card through the span, since
+   * the modal stands between choosing it and making the card.
+   *
+   * Either way the selection is dropped once that is done, as it is on
+   * cancelling: it was only ever the input to the mode, and leaving it in the
+   * editor's state would bring it back on screen the next time the editor is
+   * focused.
+   */
+  confirmSelection = async (reviewView: ReviewView) => {
+    const kind = store.getState().selectionMode;
+    if (kind === null) return;
+    const cm = reviewView.reviewEditor()?.cm;
+    if (!cm) {
+      this.plugin.store.dispatch(setSelectionMode(null));
+      return;
+    }
+
+    const { from, to } = cm.state.selection.main;
+    if (from === to) {
+      Obsidian.notify(
+        kind === 'snippet'
+          ? 'Select the text to extract first'
+          : 'Select the text to make a card of first'
+      );
+      return;
+    }
+
+    this.plugin.store.dispatch(setSelectionMode(null));
+    if (kind === 'snippet') {
+      // Made of the editor's selection, so that is dropped only afterwards.
+      await this.createSnippet();
+    } else {
+      const selection: CardSelection = {
+        from,
+        to,
+        text: cm.state.sliceDoc(from, to),
+      };
+      const answer = await promptForCardAnswer(this.plugin.app, selection.text);
+      if (answer !== null) await this.createCard({ selection, answer });
+    }
+    this._dropSelection(cm);
+  };
+
+  /** Leave selection mode having made nothing, and drop what was selected. */
+  cancelSelection = (reviewView: ReviewView) => {
+    this.plugin.store.dispatch(setSelectionMode(null));
+    const cm = reviewView.reviewEditor()?.cm;
+    if (!cm) return;
+    this._dropSelection(cm);
+  };
+
+  /** Collapse the editor's selection to its head, on screen as well as in state. */
+  private _dropSelection = (cm: ReviewEditorView) => {
+    cm.dispatch({ selection: { anchor: cm.state.selection.main.head } });
+    // The editor is not focused in the mode, so the selection on screen is the
+    // browser's rather than one CodeMirror draws, and outlives the dispatch.
+    const domSelection = cm.contentDOM.ownerDocument.getSelection();
+    if (domSelection && cm.contentDOM.contains(domSelection.anchorNode)) {
+      domSelection.removeAllRanges();
+    }
   };
 
   setCardsOnly = async (cardsOnly: boolean) => {

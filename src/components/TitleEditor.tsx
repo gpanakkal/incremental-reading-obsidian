@@ -1,3 +1,4 @@
+import { useAppSelector } from '#/hooks/useAppSelector';
 import type { ReviewArticle } from '#/lib/types';
 import { useLayoutEffect, useRef } from 'react';
 import { useReviewContext } from './ReviewContext';
@@ -6,6 +7,8 @@ import { useReviewContext } from './ReviewContext';
 export function TitleEditor({ item }: { item: ReviewArticle }) {
   const titleRef = useRef<HTMLDivElement>(null);
   const { reviewManager } = useReviewContext();
+  // Selection mode turns editing off for the title as for the body below it.
+  const selecting = useAppSelector((state) => state.selectionMode !== null);
 
   useLayoutEffect(() => {
     if (!titleRef.current) return;
@@ -47,7 +50,7 @@ export function TitleEditor({ item }: { item: ReviewArticle }) {
     <div
       ref={titleRef}
       className="ir-title inline-title"
-      contentEditable
+      contentEditable={!selecting}
       onBlur={() => void handleBlur()}
       onKeyDown={handleKeyDown}
     >

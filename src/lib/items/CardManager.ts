@@ -7,7 +7,12 @@ import type {
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
-import { type Editor, type MarkdownView, type TFile } from 'obsidian';
+import {
+  type Editor,
+  type EditorPosition,
+  type MarkdownView,
+  type TFile,
+} from 'obsidian';
 import {
   type Grade,
   type StateType,
@@ -34,6 +39,9 @@ import { getEndOfDay, searchAll } from '../utils';
 import { ItemManager } from './ItemManager';
 import SRSCard from './SRSCard';
 import SRSCardReview from './SRSCardReview';
+
+/** A span of a note chosen to become a card: its document offsets and text. */
+export type CardSelection = { from: number; to: number; text: string };
 
 export class CardManager extends ItemManager {
   constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
@@ -203,21 +211,10 @@ export class CardManager extends ItemManager {
 
     try {
       const withDelimiters = this.delimitText(line, bounds)[0];
-      const reviewCard = await this.createFileAndEntry(
-        withDelimiters,
-        currentFile
-      );
-      if (!reviewCard) throw new Error(`Failed to create card`);
-
-      const linkToCard = Obsidian.generateMarkdownLink(
-        reviewCard.file,
-        currentFile,
-        this.app,
-        TRANSCLUSION_HIDE_TITLE_ALIAS
-      );
-      Obsidian.transcludeLink(
+      const reviewCard = await this.createAndEmbed(
         editor,
-        linkToCard,
+        currentFile,
+        withDelimiters,
         { line: lineNumber, ch: start },
         { line: lineNumber, ch: end }
       );
@@ -237,6 +234,93 @@ export class CardManager extends ItemManager {
       Obsidian.notify(`Failed to create card`);
       return null;
     }
+  }
+
+  /**
+   * Make a card of a span of the note chosen up front — in selection mode —
+   * rather than of the line the cursor is on, with its answer chosen apart from
+   * it. The span is replaced by the card's embed, as the line is by
+   * {@link create}.
+   *
+   * The span and its text were read before the answer was asked for, and the
+   * note can change while that question is open. The text is checked against
+   * the span again first, so a card is never made of text the note no longer
+   * holds, nor its embed written over text the user never chose.
+   *
+   * @param selection document offsets of the span, and the text it held
+   * @param answer offsets of the answer within that text
+   */
+  async createFromSelection(
+    editor: Editor,
+    view: MarkdownView | ReviewView,
+    selection: CardSelection,
+    answer: readonly [number, number]
+  ) {
+    const currentFile = view.file;
+    if (!currentFile) {
+      Obsidian.notify(`A Markdown file must be active`);
+      return null;
+    }
+
+    const { from, to, text } = selection;
+    const start = editor.offsetToPos(from);
+    const end = editor.offsetToPos(to);
+    if (editor.getRange(start, end) !== text) {
+      Obsidian.notify(`The selected text changed before the card was made`);
+      return null;
+    }
+
+    try {
+      const withDelimiters = this.delimitText(text, answer)[0];
+      const reviewCard = await this.createAndEmbed(
+        editor,
+        currentFile,
+        withDelimiters,
+        start,
+        end
+      );
+      // Off the embed's line, as `create` does, so live preview renders the
+      // embed rather than revealing its source around the cursor. The span may
+      // have held several lines, but the embed that replaced it holds one.
+      editor.setSelection({
+        line: Math.min(start.line + 1, editor.lastLine()),
+        ch: 0,
+      });
+      return {
+        reviewCard,
+        line: text,
+        lineNumber: start.line,
+        start: start.ch,
+        end: end.ch,
+      };
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(error);
+      }
+      Obsidian.notify(`Failed to create card`);
+      return null;
+    }
+  }
+
+  /** Make the card's note and row, and put its embed in place of `start`–`end`. */
+  protected async createAndEmbed(
+    editor: Editor,
+    sourceFile: TFile,
+    delimitedText: string,
+    start: EditorPosition,
+    end: EditorPosition
+  ) {
+    const reviewCard = await this.createFileAndEntry(delimitedText, sourceFile);
+    if (!reviewCard) throw new Error(`Failed to create card`);
+
+    const linkToCard = Obsidian.generateMarkdownLink(
+      reviewCard.file,
+      sourceFile,
+      this.app,
+      TRANSCLUSION_HIDE_TITLE_ALIAS
+    );
+    Obsidian.transcludeLink(editor, linkToCard, start, end);
+    return reviewCard;
   }
 
   protected async createFileAndEntry(delimitedText: string, sourceFile: TFile) {

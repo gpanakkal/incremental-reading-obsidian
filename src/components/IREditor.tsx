@@ -12,7 +12,7 @@ import { type ExtractedMarkdownEditor,
   getBaseMarkdownExtensions,
   getMarkdownController,
   setInsertMode } from '#/lib/obsidian-editor';
-import { isEditing, setShowAnswer } from '#/lib/store';
+import { isEditing, setHasSelection, setShowAnswer } from '#/lib/store';
 import {
   type ReviewArticle,
   type ReviewCard,
@@ -20,7 +20,13 @@ import {
   type ReviewSnippet, isReviewArticle 
 } from '#/lib/types';
 import { insertBlankLine } from '@codemirror/commands';
-import { type Extension, EditorSelection, Prec  } from '@codemirror/state';
+import {
+  type Extension,
+  Compartment,
+  EditorSelection,
+  EditorState,
+  Prec,
+} from '@codemirror/state';
 import { type ViewUpdate,
   EditorView,
   keymap,
@@ -76,6 +82,60 @@ interface IREditorProps {
 export function isPersistableChange(update: ViewUpdate): boolean {
   if (!update.docChanged) return false;
   return !update.transactions.some((tr) => tr.annotation(isExternalSync));
+}
+
+/** Makes the content selectable again; see {@link selectionModeExtension}. */
+const selectableContentTheme = EditorView.theme({
+  '.cm-content': { userSelect: 'text', WebkitUserSelect: 'text' },
+});
+
+/**
+ * What selection mode turns off in the review editor: editing. Selecting text
+ * then leaves the content DOM uneditable, which is what keeps the on-screen
+ * keyboard down on mobile — read-only alone still lets it come up. Read-only
+ * besides, so commands and keys can't edit what the DOM no longer lets them.
+ *
+ * The facet alone does not reach the DOM here. Obsidian's editor asks for
+ * `contenteditable="true"` through content attributes of its own, and content
+ * attributes are applied over the one the facet sets, so the attribute is
+ * overridden the same way. Highest precedence throughout, since both the facet
+ * and the attributes take the value that comes first.
+ *
+ * Text has to stay selectable once the content is uneditable. Obsidian's app
+ * CSS turns selection off for the whole app (`body { user-select: none }`) and
+ * back on only for `body [contenteditable="true"]`, so `contenteditable="false"`
+ * leaves the content inheriting `none`. The selection is still made — the
+ * editor's state and the DOM both hold it — but the browser paints nothing for
+ * it, and a long press on a touch screen finds no selectable text to start one
+ * on. The theme puts selection back on the content alone, for as long as the
+ * mode lasts. (Obsidian's CSS is undocumented; this was read from its app.css
+ * in `obsidian.asar`, 1.13.)
+ */
+export function selectionModeExtension(selecting: boolean): Extension {
+  if (!selecting) return [];
+  return Prec.highest([
+    EditorView.editable.of(false),
+    EditorView.contentAttributes.of({ contenteditable: 'false' }),
+    EditorState.readOnly.of(true),
+    selectableContentTheme,
+  ]);
+}
+
+/**
+ * Calls `onChange` each time the editor's main selection goes from empty to
+ * non-empty or back, with whether it now holds one — whatever moved it: the
+ * mouse, the keyboard, the touch selection the DOM observer reads in, or an
+ * edit that deletes the selected text. Only on a change, so a listener that
+ * writes to the store does not write on every transaction.
+ */
+export function selectionPresenceListener(
+  onChange: (hasSelection: boolean) => void
+): Extension {
+  return EditorView.updateListener.of((update) => {
+    const had = !update.startState.selection.main.empty;
+    const has = !update.state.selection.main.empty;
+    if (had !== has) onChange(has);
+  });
 }
 
 const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
@@ -197,6 +257,10 @@ export function IREditor({
   const { saveNote } = useReviewContext();
   const store = useAppStore();
   const showAnswer = useAppSelector((state) => state.showAnswer);
+  const selecting = useAppSelector((state) => state.selectionMode !== null);
+  // Holds `selectionModeExtension`, for switching editing off and back on in
+  // place as selection mode comes and goes.
+  const [selectionModeCompartment] = useState(() => new Compartment());
   // Contents this editor has saved but not yet seen echoed back through the
   // file-text query. updateEditorContent consults it to tell a stale re-fetch
   // of one of our own writes (skip) from a genuine external modification
@@ -230,6 +294,16 @@ export function IREditor({
 
   // extend the MarkdownEditor extracted from Obsidian
   useEffect(() => {
+    // Mirror the editor's selection into the store for the action bar, which
+    // lives outside this component. Compared against the store rather than
+    // dispatched blindly, since the mount and unmount syncs below are not
+    // changes the listener saw.
+    const syncHasSelection = (has: boolean) => {
+      if (store.getState().hasSelection !== has) {
+        store.dispatch(setHasSelection(has));
+      }
+    };
+
     const setupEditor = () => {
       /* eslint-disable-next-line react-hooks/unsupported-syntax --
        * Required since we have to create CustomEditor at runtime
@@ -258,6 +332,12 @@ export function IREditor({
           }
 
           extensions.push(isReviewInterfaceFacet.of(true));
+          extensions.push(
+            selectionModeCompartment.of(
+              selectionModeExtension(store.getState().selectionMode !== null)
+            ),
+            selectionPresenceListener(syncHasSelection)
+          );
 
           // extensions.push(stateManagerField.init(() => stateManager));
           // extensions.push(datePlugins);
@@ -439,6 +519,9 @@ export function IREditor({
         });
       }
 
+      // The listener reports changes from here on; this is where it starts.
+      syncHasSelection(!cm.state.selection.main.empty);
+
       const onShow = () => {
         // elRef.current?.scrollIntoView({ block: 'end' });
       };
@@ -509,6 +592,8 @@ export function IREditor({
         elRef.current?.firstElementChild?.remove();
         internalRef.current = null;
         if (editorRef) editorRef.current = null;
+        // The selection goes with the editor.
+        syncHasSelection(false);
       };
       return cleanupEffect;
     };
@@ -558,6 +643,22 @@ export function IREditor({
       view.scrollDOM.scrollLeft = scrollLeft;
     },
     [value]
+  );
+
+  useEffect(
+    function applySelectionMode() {
+      const cm = internalRef.current;
+      if (!cm) return;
+      cm.dispatch({
+        effects: selectionModeCompartment.reconfigure(
+          selectionModeExtension(selecting)
+        ),
+      });
+      // Dropping `contenteditable` does not take focus with it, and a focused
+      // editor keeps the mobile keyboard up.
+      if (selecting) cm.contentDOM.blur();
+    },
+    [selecting, selectionModeCompartment]
   );
 
   // Sync showAnswer state to the action bar extension

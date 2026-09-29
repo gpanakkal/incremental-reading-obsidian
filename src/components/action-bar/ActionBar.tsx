@@ -5,7 +5,7 @@ import { useLeafHistory } from '#/hooks/useLeafHistory';
 import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
-import { setPage, setShowAnswer } from '#/lib/store';
+import { type SelectionKind, setPage, setShowAnswer } from '#/lib/store';
 import {
   isReviewArticle,
   isReviewCard,
@@ -27,6 +27,7 @@ import {
   House,
   SkipForward,
   Undo2,
+  X,
 } from 'lucide-react';
 import { useSyncExternalStore } from 'react';
 import { useDispatch } from 'react-redux';
@@ -50,6 +51,7 @@ import { TextScheduler } from './TextScheduler';
 export function ActionBar() {
   const page = useAppSelector((state) => state.page);
   const { data: currentItem } = useCurrentItem();
+  const selectionMode = useAppSelector((state) => state.selectionMode);
   const dispatch = useDispatch();
   const itemActions = page !== 'home' && currentItem;
 
@@ -75,7 +77,10 @@ export function ActionBar() {
       </div>
       <div className="ir-bar-center">
         {page === 'home' && <HomeActions />}
-        {itemActions && (
+        {itemActions && selectionMode !== null && (
+          <SelectionActions kind={selectionMode} />
+        )}
+        {itemActions && selectionMode === null && (
           <>
             {isReviewArticle(currentItem) && (
               <ArticleActions article={currentItem} />
@@ -342,13 +347,13 @@ function GradeActions({ card }: { card: ReviewCard }) {
 }
 
 function ExtractSnippetAction() {
-  const { actions } = useReviewContext();
+  const { actions, reviewView } = useReviewContext();
 
   return (
     <ButtonWithIcon
-      tooltip="Extract selected text to a new snippet"
+      tooltip="Create snippet"
       handleClick={async () => {
-        await actions.createSnippet();
+        await actions.extract('snippet', reviewView);
       }}
     >
       <ScissorsPlus />
@@ -357,17 +362,63 @@ function ExtractSnippetAction() {
 }
 
 function CreateCardAction() {
-  const { actions } = useReviewContext();
+  const { actions, reviewView } = useReviewContext();
 
   return (
     <ButtonWithIcon
       tooltip="Create card"
       handleClick={async () => {
-        await actions.createCard();
+        await actions.extract('card', reviewView);
       }}
     >
       <CardCogPlus />
     </ButtonWithIcon>
+  );
+}
+
+/**
+ * Stand in for the item's actions while review waits for the user to select
+ * text to extract. Everything outside the middle zone stays: it acts on the
+ * session, and leaving the item by it ends the mode.
+ */
+function SelectionActions({ kind }: { kind: SelectionKind }) {
+  const { actions, reviewView } = useReviewContext();
+
+  // Still pressable so we can show a notice to select text
+  const confirmTooltip =
+    kind === 'snippet'
+      ? 'Extract the selected text to a new snippet'
+      : 'Make a card of the selected text';
+
+  return (
+    <>
+      <TextButton
+        id="confirm-selection-button"
+        tooltip={confirmTooltip}
+        handleClick={async () => {
+          await actions.confirmSelection(reviewView);
+        }}
+      >
+        <>
+          <Check />
+          Confirm
+        </>
+      </TextButton>
+      <TextButton
+        id="cancel-selection-button"
+        tooltip={
+          kind === 'snippet'
+            ? 'Cancel extracting a snippet'
+            : 'Cancel making a card'
+        }
+        handleClick={() => {
+          actions.cancelSelection(reviewView);
+        }}
+      >
+        <X />
+        Cancel
+      </TextButton>
+    </>
   );
 }
 

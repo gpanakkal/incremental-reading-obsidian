@@ -41,7 +41,7 @@ import {
   getEndOfDay,
 } from '../utils';
 import { ArticleManager } from './ArticleManager';
-import { CardManager } from './CardManager';
+import { type CardSelection, CardManager } from './CardManager';
 import { SnippetManager } from './SnippetManager';
 
 export default class ReviewManager {
@@ -72,6 +72,16 @@ export default class ReviewManager {
    */
   async createCard(editor: Editor, view: MarkdownView | ReviewView) {
     return this.cards.create(editor, view);
+  }
+
+  /** Create an SRS item from a span chosen in selection mode */
+  async createCardFromSelection(
+    editor: Editor,
+    view: MarkdownView | ReviewView,
+    selection: CardSelection,
+    answer: readonly [number, number]
+  ) {
+    return this.cards.createFromSelection(editor, view, selection, answer);
   }
 
   parseCloze(text: string, delimiters: [string, string]) {

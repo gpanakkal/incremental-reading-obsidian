@@ -229,6 +229,77 @@ const delimiterArb = fc
   )
   .filter(([l, r]) => l !== r);
 
+/**
+ * An `Editor` over a plain string, covering what card creation touches:
+ * positions to and from offsets, reads, replacements, and the cursor.
+ */
+function makeEditor(initial: string) {
+  let text = initial;
+  const posToOffset = ({ line, ch }: { line: number; ch: number }) =>
+    text
+      .split('\n')
+      .slice(0, line)
+      .reduce((sum, l) => sum + l.length + 1, 0) + ch;
+  return {
+    get text() {
+      return text;
+    },
+    offsetToPos: (offset: number) => {
+      const lines = text.slice(0, offset).split('\n');
+      return { line: lines.length - 1, ch: lines[lines.length - 1].length };
+    },
+    getRange: (
+      from: { line: number; ch: number },
+      to: { line: number; ch: number }
+    ) => text.slice(posToOffset(from), posToOffset(to)),
+    replaceRange: vi.fn(
+      (
+        insert: string,
+        from: { line: number; ch: number },
+        to: { line: number; ch: number }
+      ) => {
+        text =
+          text.slice(0, posToOffset(from)) +
+          insert +
+          text.slice(posToOffset(to));
+      }
+    ),
+    setSelection: vi.fn(),
+    lastLine: () => text.split('\n').length - 1,
+  };
+}
+
+/**
+ * A note's text with a span in it and an answer in that span, none of it
+ * holding cloze delimiters, which `delimitText` would strip. The answer is
+ * never empty: the answer prompt refuses to confirm without one.
+ */
+const cardSelectionArb = fc
+  .tuple(
+    fc.string({ maxLength: 20 }),
+    fc.string({ maxLength: 10 }),
+    fc.string({ minLength: 1, maxLength: 10 }),
+    fc.string({ maxLength: 10 }),
+    fc.string({ maxLength: 20 })
+  )
+  .filter((parts) =>
+    parts.every((p) => !p.includes(LEFT) && !p.includes(RIGHT))
+  )
+  .map(([before, pre, answer, post, after]) => ({
+    before,
+    pre,
+    answer,
+    post,
+    after,
+    text: pre + answer + post,
+    selection: {
+      from: before.length,
+      to: before.length + pre.length + answer.length + post.length,
+      text: pre + answer + post,
+    },
+    answerBounds: [pre.length, pre.length + answer.length] as const,
+  }));
+
 // #endregion
 
 describe('rowToDisplay', () => {
@@ -2101,5 +2172,135 @@ describe('review — against the production schema', () => {
 
     expect(readCard(db, 'card-1').state).toBe('Review');
     db.close();
+  });
+});
+
+describe('createFromSelection', () => {
+  const sourceFile = { path: 'articles/source.md' } as TFile;
+  const reviewCard = { file: { path: 'cards/new.md' }, data: { id: 'card-1' } };
+  const LINK = '[[new|ir-hide-title]]';
+
+  function setUp() {
+    const manager = new CardManager(makePlugin(), makeRepo());
+    const createFileAndEntry = vi
+      .spyOn(
+        manager as unknown as {
+          createFileAndEntry: (text: string, file: TFile) => Promise<unknown>;
+        },
+        'createFileAndEntry'
+      )
+      .mockResolvedValue(reviewCard);
+    vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue(LINK);
+    const notify = vi.spyOn(Obsidian, 'notify').mockImplementation(() => {});
+    return { manager, createFileAndEntry, notify };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('makes a card of the span, with the answer hidden, from the note it is in', async () => {
+    await fc.assert(
+      fc.asyncProperty(cardSelectionArb, async (c) => {
+        const { manager, createFileAndEntry } = setUp();
+        const editor = makeEditor(c.before + c.text + c.after);
+
+        await manager.createFromSelection(
+          editor as never,
+          { file: sourceFile } as never,
+          c.selection,
+          c.answerBounds
+        );
+
+        expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+          c.pre + `${LEFT} ${c.answer} ${RIGHT}` + c.post,
+          sourceFile
+        );
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('replaces the span, and only the span, with the embed', async () => {
+    await fc.assert(
+      fc.asyncProperty(cardSelectionArb, async (c) => {
+        const { manager } = setUp();
+        const editor = makeEditor(c.before + c.text + c.after);
+
+        const result = await manager.createFromSelection(
+          editor as never,
+          { file: sourceFile } as never,
+          c.selection,
+          c.answerBounds
+        );
+
+        expect(editor.text).toBe(c.before + `!${LINK}` + c.after);
+        // Undo puts `line` back where the embed is.
+        expect(result).toMatchObject({ reviewCard, line: c.text });
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('makes nothing when the span no longer holds the text chosen', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        cardSelectionArb,
+        fc.string({ minLength: 1, maxLength: 5 }),
+        async (c, edit) => {
+          const { manager, createFileAndEntry, notify } = setUp();
+          // Typed at the start of the span since it was chosen.
+          const changed = c.before + edit + c.text + c.after;
+          const editor = makeEditor(changed);
+
+          const result = await manager.createFromSelection(
+            editor as never,
+            { file: sourceFile } as never,
+            c.selection,
+            c.answerBounds
+          );
+
+          expect(result).toBeNull();
+          expect(createFileAndEntry).not.toHaveBeenCalled();
+          expect(editor.text).toBe(changed);
+          expect(notify).toHaveBeenCalledOnce();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('makes nothing without a note to make it from', async () => {
+    const { manager, createFileAndEntry } = setUp();
+    const editor = makeEditor('some text');
+
+    const result = await manager.createFromSelection(
+      editor as never,
+      { file: null } as never,
+      { from: 0, to: 4, text: 'some' },
+      [0, 2]
+    );
+
+    expect(result).toBeNull();
+    expect(createFileAndEntry).not.toHaveBeenCalled();
+    expect(editor.text).toBe('some text');
+  });
+
+  it('leaves the note alone when the card cannot be made', async () => {
+    const { manager, createFileAndEntry, notify } = setUp();
+    createFileAndEntry.mockResolvedValue(null);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const editor = makeEditor('some text');
+
+    const result = await manager.createFromSelection(
+      editor as never,
+      { file: sourceFile } as never,
+      { from: 0, to: 4, text: 'some' },
+      [0, 2]
+    );
+
+    expect(result).toBeNull();
+    expect(editor.text).toBe('some text');
+    expect(notify).toHaveBeenCalledWith('Failed to create card');
   });
 });

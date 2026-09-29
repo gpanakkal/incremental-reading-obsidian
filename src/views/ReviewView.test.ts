@@ -21,9 +21,11 @@ import {
   resetSession,
   setCurrentItemId,
   setPage,
+  setSelectionMode,
   setShowAnswer,
   store,
   type ReviewPage,
+  type SelectionKind,
 } from '#/lib/store';
 import type IncrementalReadingPlugin from '#/main';
 // The mock is what `obsidian` resolves to at runtime (see vitest.config.ts), so
@@ -34,6 +36,7 @@ import {
   Menu,
   Notice,
   Platform,
+  Scope,
   type MenuItem,
 } from '#/test/__mocks__/obsidian';
 import ReviewView, { REVIEW_VIEW_DEFAULT_TITLE } from '#/views/ReviewView';
@@ -616,6 +619,76 @@ const parentPathArb = fc.oneof(
 const itemFileArb = fc
   .tuple(fc.string(), parentPathArb)
   .map(([basename, parent]) => makeItemFile(basename, parent));
+
+/**
+ * A view over the real store, with the app's keymap scope and the one action
+ * selection mode's keys reach for. `hotkey` stands in for the app's hotkey
+ * manager, which Obsidian registers on that scope for every key.
+ *
+ * Unload the view when done, or its store subscription outlives the test.
+ */
+function makeKeyedView() {
+  const hotkey = vi.fn((): unknown => undefined);
+  const appScope = new Scope();
+  appScope.register(null, null, hotkey);
+  const cancelSelection = vi.fn();
+  const view = new ReviewView(
+    {} as WorkspaceLeaf,
+    {
+      store,
+      app: { ...makePluginApp(), scope: appScope },
+      actions: { cancelSelection },
+    } as unknown as IncrementalReadingPlugin,
+    {} as ReviewManager
+  );
+  return { view, appScope, hotkey, cancelSelection };
+}
+
+const MODIFIER_FLAGS = [
+  ['Ctrl', 'ctrlKey'],
+  ['Meta', 'metaKey'],
+  ['Alt', 'altKey'],
+  ['Shift', 'shiftKey'],
+] as const;
+
+/**
+ * Press a key with the review tab as the active leaf, routed as Obsidian's
+ * keymap routes it: the workspace's scope hands the key to the active view's
+ * `scope` when it has one, and otherwise answers from its parent, the app's.
+ * `consumed` is whether the keymap then prevents the key's default and stops
+ * it, which it does when the answer is `false`.
+ */
+function pressKey(
+  keyed: ReturnType<typeof makeKeyedView>,
+  init: KeyboardEventInit,
+  target: EventTarget = document.body
+) {
+  const evt = new KeyboardEvent('keydown', init);
+  Object.defineProperty(evt, 'target', { value: target });
+  const modifiers = MODIFIER_FLAGS.filter(([, flag]) => evt[flag])
+    .map(([name]) => name)
+    .join(',');
+  const scope = (keyed.view.scope as Scope | null) ?? keyed.appScope;
+  const answer = scope.handleKey(evt, { modifiers, key: evt.key });
+  return { consumed: answer === false };
+}
+
+/** Elements whose own keys edit text, focused when Escape is pressed. */
+const editableTargetArb = fc.constantFrom(
+  () => document.createElement('input'),
+  () => document.createElement('textarea'),
+  () => {
+    const title = document.createElement('div');
+    title.setAttribute('contenteditable', 'plaintext-only');
+    return title;
+  },
+  () => {
+    const title = document.createElement('div');
+    title.setAttribute('contenteditable', 'true');
+    // Where the key lands is the text inside the editable element.
+    return title.appendChild(document.createElement('span'));
+  }
+);
 
 // #endregion
 
@@ -2576,6 +2649,204 @@ describe('ReviewView.refreshMobileNavbar', () => {
       expect(() => leaf.trigger('history-change')).not.toThrow();
     } finally {
       unload(view);
+    }
+  });
+});
+
+describe('ReviewView selection mode', () => {
+  const selectionKindArb = fc.constantFrom<SelectionKind>('snippet', 'card');
+
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  afterEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  it('is over wherever history brings review back to, the place it is already at included', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        storeStateArb,
+        fc.option(placeArb, { nil: null }),
+        selectionKindArb,
+        async (initial, target, kind) => {
+          store.dispatch(resetSession());
+          store.dispatch(setCurrentItemId(initial.currentItemId));
+          store.dispatch(setPage(initial.page));
+          const { view } = await openHistoryView();
+          try {
+            store.dispatch(setSelectionMode(kind));
+
+            view.setEphemeralState(
+              placeToEphemeralState(target ?? placeOf(store.getState()))
+            );
+
+            expect(store.getState().selectionMode).toBeNull();
+          } finally {
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('is over once the tab closes, though another review tab keeps the session', async () => {
+    await fc.assert(
+      fc.asyncProperty(selectionKindArb, async (kind) => {
+        store.dispatch(setCurrentItemId('a'));
+        store.dispatch(setPage('review'));
+        const { view, leaf, sessionTracker } = await openHistoryView();
+        Object.assign(view.app.workspace, {
+          getLeavesOfType: () => [leaf, {}],
+        });
+        try {
+          store.dispatch(setSelectionMode(kind));
+
+          await view.onClose();
+
+          expect(store.getState().selectionMode).toBeNull();
+          // The session itself is the other tab's, and outlives this one.
+          expect(sessionTracker.commit).not.toHaveBeenCalled();
+          expect(store.getState().currentItemId).toBe('a');
+        } finally {
+          unload(view);
+        }
+      })
+    );
+  });
+});
+
+describe('ReviewView Escape in selection mode', () => {
+  const selectionKindArb = fc.constantFrom<SelectionKind>('snippet', 'card');
+  /** Entering the mode as either kind, or leaving it. */
+  const modeArb = fc.option(selectionKindArb, { nil: null });
+
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  afterEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  it('cancels the mode through this tab and takes the key, exactly while review is in it', () => {
+    fc.assert(
+      fc.property(fc.array(modeArb, { maxLength: 6 }), (modes) => {
+        store.dispatch(resetSession());
+        const keyed = makeKeyedView();
+        try {
+          modes.forEach((mode) => store.dispatch(setSelectionMode(mode)));
+          const inMode = store.getState().selectionMode !== null;
+
+          const { consumed } = pressKey(keyed, { key: 'Escape' });
+
+          if (inMode) {
+            // What the Cancel button does, for the tab the key was pressed in.
+            expect(keyed.cancelSelection).toHaveBeenCalledExactlyOnceWith(
+              keyed.view
+            );
+            expect(consumed).toBe(true);
+            expect(keyed.hotkey).not.toHaveBeenCalled();
+          } else {
+            // Nothing changes outside the mode: the key still reaches the
+            // app's hotkeys and Obsidian's own Escape handling.
+            expect(keyed.cancelSelection).not.toHaveBeenCalled();
+            expect(consumed).toBe(false);
+            expect(keyed.hotkey).toHaveBeenCalledOnce();
+          }
+        } finally {
+          unload(keyed.view);
+        }
+      })
+    );
+  });
+
+  it('leaves every key but a bare Escape to the app in the mode', () => {
+    const modifiersArb = fc.record({
+      ctrlKey: fc.boolean(),
+      metaKey: fc.boolean(),
+      altKey: fc.boolean(),
+      shiftKey: fc.boolean(),
+    });
+    fc.assert(
+      fc.property(
+        selectionKindArb,
+        fc.constantFrom('Escape', 'Enter', 'a', 'F3', 'ArrowDown', ' '),
+        modifiersArb,
+        (kind, key, modifiers) => {
+          fc.pre(key !== 'Escape' || Object.values(modifiers).some(Boolean));
+          store.dispatch(resetSession());
+          const keyed = makeKeyedView();
+          try {
+            store.dispatch(setSelectionMode(kind));
+
+            pressKey(keyed, { key, ...modifiers });
+
+            expect(keyed.cancelSelection).not.toHaveBeenCalled();
+            expect(keyed.hotkey).toHaveBeenCalledOnce();
+          } finally {
+            unload(keyed.view);
+          }
+        }
+      )
+    );
+  });
+
+  it('leaves Escape to an element that edits text, such as the header title being renamed', () => {
+    fc.assert(
+      fc.property(selectionKindArb, editableTargetArb, (kind, makeTarget) => {
+        store.dispatch(resetSession());
+        const keyed = makeKeyedView();
+        try {
+          store.dispatch(setSelectionMode(kind));
+
+          const { consumed } = pressKey(keyed, { key: 'Escape' }, makeTarget());
+
+          expect(keyed.cancelSelection).not.toHaveBeenCalled();
+          // Not stopped, so the element's own Escape handler still runs.
+          expect(consumed).toBe(false);
+        } finally {
+          unload(keyed.view);
+        }
+      })
+    );
+  });
+
+  it('cancels from the editor, which the mode has made read-only', () => {
+    const keyed = makeKeyedView();
+    try {
+      store.dispatch(setSelectionMode('snippet'));
+      const content = document.createElement('div');
+      content.setAttribute('contenteditable', 'false');
+
+      const { consumed } = pressKey(
+        keyed,
+        { key: 'Escape' },
+        content.appendChild(document.createElement('span'))
+      );
+
+      expect(keyed.cancelSelection).toHaveBeenCalledExactlyOnceWith(keyed.view);
+      expect(consumed).toBe(true);
+    } finally {
+      unload(keyed.view);
+    }
+  });
+
+  it('leaves Escape mid-composition to the input method', () => {
+    const keyed = makeKeyedView();
+    try {
+      store.dispatch(setSelectionMode('card'));
+
+      const { consumed } = pressKey(keyed, {
+        key: 'Escape',
+        isComposing: true,
+      });
+
+      expect(keyed.cancelSelection).not.toHaveBeenCalled();
+      expect(consumed).toBe(false);
+    } finally {
+      unload(keyed.view);
     }
   });
 });

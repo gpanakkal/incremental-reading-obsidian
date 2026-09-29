@@ -19,6 +19,7 @@ import {
   resetCurrentItem,
   resetSession,
   setPage,
+  setSelectionMode,
   type ReviewPage,
 } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
@@ -28,6 +29,7 @@ import {
   Menu,
   MenuItem,
   Platform,
+  Scope,
   WorkspaceWindow,
   type IconName,
   type MarkdownEditView,
@@ -40,6 +42,20 @@ import { render } from 'preact';
 
 /** Shown whenever the review tab is not displaying an item. */
 export const REVIEW_VIEW_DEFAULT_TITLE = 'Incremental reading';
+
+/**
+ * Whether keys pressed at `target` edit text: a form field, or anything inside
+ * an element made editable. The review editor in selection mode is not one —
+ * its `contenteditable` is `false`.
+ */
+function isEditableTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest(
+      'input, textarea, select, [contenteditable]:not([contenteditable="false"])'
+    ) !== null
+  );
+}
 
 export default class ReviewView extends FileView {
   static #viewType = 'incremental-reading-review';
@@ -100,6 +116,13 @@ export default class ReviewView extends FileView {
    * rename is under way, which is also how a cancelled one reaches the commit.
    */
   #renaming: TFile | null = null;
+  /**
+   * The keys review answers while it is in selection mode, held here and handed
+   * to Obsidian through `scope` only for as long as the mode lasts — see
+   * {@link syncSelectionScope}. Parented on the app's scope, as Obsidian's own
+   * views' are, so every other hotkey keeps working in the mode.
+   */
+  #selectionScope: Scope;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -112,8 +135,14 @@ export default class ReviewView extends FileView {
     this.#page = plugin.store.getState().page;
     this.#place = placeOf(plugin.store.getState());
     this.sourceMode = !plugin.app.vault.getConfig('livePreview');
+    this.#selectionScope = new Scope(plugin.app.scope);
+    this.#selectionScope.register([], 'Escape', (evt) =>
+      this.onSelectionEscape(evt)
+    );
+    this.syncSelectionScope();
 
     const unsub = plugin.store.subscribe(() => {
+      this.syncSelectionScope();
       this.trackPlace(placeOf(plugin.store.getState()));
       const currentPage = plugin.store.getState().page;
       if (currentPage !== this.#page) {
@@ -359,6 +388,10 @@ export default class ReviewView extends FileView {
     this.#lastRecorded = null;
     this.#applyingHistory = true;
     try {
+      // Every move there ends selection mode on its own, bar one: to where
+      // review already is, which is no move at all as the store sees it. Coming
+      // back through history still must not find the mode as it was left.
+      store.dispatch(setSelectionMode(null));
       for (const action of actionsToReach(store.getState(), place)) {
         store.dispatch(action);
       }
@@ -587,6 +620,46 @@ export default class ReviewView extends FileView {
   }
 
   /**
+   * Give Obsidian's keymap review's selection mode keys exactly while review is
+   * in the mode, and nothing at all otherwise.
+   *
+   * The workspace's keymap scope asks the active leaf's view for `scope` on
+   * every key it handles, and falls back to its own handling when there is none
+   * (undocumented; read from the Workspace constructor in the app bundle). So
+   * the keys apply only while this tab is the active leaf, and swapping the
+   * field takes effect from the next key. It is left `null` outside the mode
+   * rather than holding a scope whose Escape declines: a handler bound to a key
+   * ends Obsidian's lookup even when it declines, which would keep that key
+   * from the app's hotkeys and from anything registered on the workspace.
+   */
+  syncSelectionScope(): void {
+    this.scope = this.plugin.store.getState().selectionMode
+      ? this.#selectionScope
+      : null;
+  }
+
+  /**
+   * Escape in selection mode does what the mode's Cancel button does. Reached
+   * only in the mode, whose scope this is — see {@link syncSelectionScope}.
+   *
+   * Anything open over review — a modal such as the card answer prompt or the
+   * command palette, a menu, a suggest, the editor's find bar — pushes a keymap
+   * scope of its own above the workspace's, so Escape closes that first and
+   * never reaches here. Nor does it while the view header's title is being
+   * renamed, or anything else that edits text has focus: its own Escape handler
+   * runs at the element, after this one, and would find the key stopped.
+   *
+   * @returns `false`, which has Obsidian prevent the key's default and stop it,
+   * when the mode was cancelled; nothing otherwise.
+   */
+  onSelectionEscape(evt: KeyboardEvent): false | undefined {
+    if (evt.isComposing) return undefined;
+    if (isEditableTarget(evt.target)) return undefined;
+    this.plugin.actions.cancelSelection(this);
+    return false;
+  }
+
+  /**
    * Whether this is the only review tab there is — the one whose close ends the
    * review session, and the only one free to choose the page on the way in.
    *
@@ -609,6 +682,9 @@ export default class ReviewView extends FileView {
     render(null, this.contentEl);
     this.activeEditor = null;
     this.#lastFocusedEl = null;
+    // Ahead of the check below: selection mode belongs to the editor this tab
+    // just unmounted, whether or not the session outlives it.
+    this.plugin.store.dispatch(setSelectionMode(null));
     // Another review tab is still open and still on its item: the session
     // belongs to it now, and ending it here would send that tab back to the
     // home screen and drop what it was reading.

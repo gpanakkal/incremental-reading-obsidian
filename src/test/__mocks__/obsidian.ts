@@ -287,6 +287,61 @@ export class Keymap {
   }
 }
 
+interface ScopeHandler {
+  /** Modifiers joined with `,`, or `null` for any. */
+  modifiers: string | null;
+  key: string | null;
+  func: (
+    evt: KeyboardEvent,
+    ctx: { modifiers: string; key: string }
+  ) => unknown;
+}
+
+/**
+ * Obsidian's keymap scope, far enough to route a key the way its `Keymap`
+ * does. `handleKey` is undocumented; this mirrors the one in the app bundle:
+ * the first handler matching key and modifiers answers, a handler bound to a
+ * key ends the lookup even when it returns nothing, and a scope with no match
+ * passes the key up to its parent.
+ */
+export class Scope {
+  readonly keys: ScopeHandler[] = [];
+
+  constructor(readonly parent?: Scope) {}
+
+  register(
+    modifiers: string[] | null,
+    key: string | null,
+    func: ScopeHandler['func']
+  ): ScopeHandler {
+    const handler = { modifiers: modifiers?.join(',') ?? null, key, func };
+    this.keys.push(handler);
+    return handler;
+  }
+
+  unregister(handler: ScopeHandler): void {
+    this.keys.splice(this.keys.indexOf(handler), 1);
+  }
+
+  handleKey(
+    evt: KeyboardEvent,
+    ctx: { modifiers: string; key: string }
+  ): unknown {
+    for (const handler of this.keys) {
+      const modifiersMatch =
+        handler.modifiers === null || handler.modifiers === ctx.modifiers;
+      const keyMatches =
+        handler.key === null ||
+        handler.key.toLowerCase() === ctx.key.toLowerCase();
+      if (!modifiersMatch || !keyMatches) continue;
+      const result = handler.func(evt, ctx);
+      if (result !== undefined) return result;
+      if (handler.key !== null || handler.modifiers !== null) return result;
+    }
+    return this.parent?.handleKey(evt, ctx);
+  }
+}
+
 export class MarkdownPreviewView {
   static async render(
     _app: unknown,

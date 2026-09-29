@@ -238,6 +238,58 @@ const editStateSlice = createSlice({
 export const { setEditState } = editStateSlice.actions;
 export const { isEditing } = editStateSlice.selectors;
 
+/** What a selection made in selection mode is extracted into. */
+export type SelectionKind = 'snippet' | 'card';
+
+/**
+ * Selection mode: the create snippet or create card button was pressed with
+ * nothing selected, so review is waiting for the user to select the text and
+ * confirm. Holds which of the two it will make, or `null` outside the mode.
+ *
+ * Belongs to the item on screen and nothing else. Anything that takes review
+ * off it — advancing, leaving for the home screen, back and forward, which go
+ * through the same actions, closing the tab — ends the mode, so coming back to
+ * the item finds it in the standard mode. So does revealing a card's answer,
+ * which swaps the rendered question for an editor the mode was never applied
+ * to.
+ */
+export const selectionModeSlice = createSlice({
+  name: 'selectionMode',
+  initialState: null as SelectionKind | null,
+  reducers: {
+    setSelectionMode: (_state, action: PayloadAction<SelectionKind | null>) =>
+      action.payload,
+  },
+  extraReducers: (builder) => {
+    builder.addCase(resetSession, () => null);
+    builder.addCase(resetCurrentItem, () => null);
+    builder.addCase(setPage, () => null);
+    builder.addCase(setShowAnswer, () => null);
+  },
+});
+
+export const { setSelectionMode } = selectionModeSlice.actions;
+
+/**
+ * Whether the review editor holds a non-empty selection: the one
+ * `Actions.confirmSelection` reads, so the Confirm button can ask for text to
+ * be selected while confirming would only say that none is.
+ *
+ * A mirror of the editor, which `IREditor` writes as the selection goes from
+ * empty to not and back, and clears on unmounting. Nothing else resets it —
+ * not even the mode ending — since the selection outlives all of that in the
+ * editor, and a reset would contradict it until the next change.
+ */
+export const hasSelectionSlice = createSlice({
+  name: 'hasSelection',
+  initialState: false,
+  reducers: {
+    setHasSelection: (_state, action: PayloadAction<boolean>) => action.payload,
+  },
+});
+
+export const { setHasSelection } = hasSelectionSlice.actions;
+
 export const store = configureStore({
   reducer: {
     currentItemId: currentItemIdSlice.reducer,
@@ -248,6 +300,8 @@ export const store = configureStore({
     completedReviews: completedReviewsSlice.reducer,
     isReviewViewSaving: isReviewViewSavingSlice.reducer,
     editState: editStateSlice.reducer,
+    selectionMode: selectionModeSlice.reducer,
+    hasSelection: hasSelectionSlice.reducer,
   },
 });
 
