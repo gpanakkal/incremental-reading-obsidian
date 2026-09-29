@@ -142,6 +142,21 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # android-emulator-runner downloads these itself with no retry, and
+      # Google's CDN sometimes serves a truncated zip ("Error on ZipFile unknown
+      # archive"), failing the job before the emulator starts. Installing them
+      # here first, with retries, leaves the action's own install a no-op.
+      - name: Install emulator and system image
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null
+          for attempt in 1 2 3; do
+            "$sdkmanager" --install emulator "system-images;android-${ANDROID_API_LEVEL};google_apis;x86_64" --channel=0 > /dev/null && exit 0
+            echo "sdkmanager attempt $attempt failed; retrying"
+            sleep 15
+          done
+          exit 1
+
       - name: Cache AVD
         id: avd-cache
         uses: actions/cache@v6
