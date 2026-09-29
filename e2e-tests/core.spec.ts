@@ -846,6 +846,134 @@ test.describe('Card embeds', () => {
       expect(layout!.tint).not.toBe('rgba(0, 0, 0, 0)');
     }).toPass({ timeout: 30_000 });
   });
+
+  test('mark only the rows of a card made from part of a paragraph, with the open button on the first', async () => {
+    /** The middle of a paragraph that wraps well past it on either side. */
+    const SPAN =
+      'Are you trying to stop a toddler from accessing your laptop? Or are ' +
+      'you trying to protect a laptop that contains technical designs worth ' +
+      'millions of dollars?';
+
+    await importArticle(window, 'sources/Security Principles');
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await expect(reviewTitle(window, 'Security Principles')).toBeVisible();
+    const content = window.locator(
+      '.workspace-leaf.mod-active .ir-editor .cm-content'
+    );
+    await expect(content).toContainText(SPAN);
+
+    // Made the way selection mode makes it, minus the UI for picking the span
+    // and the answer: the embed replaces the span and nothing else, so the
+    // paragraph's own text stays on the rows around it.
+    await window.evaluate(async (span) => {
+      const { app } = window as unknown as {
+        app: {
+          workspace: { activeEditor: { editor: { getValue(): string } } };
+          plugins: {
+            plugins: Record<
+              string,
+              {
+                actions: {
+                  createCard(fromSelection: {
+                    selection: { from: number; to: number; text: string };
+                    answer: [number, number];
+                  }): Promise<unknown>;
+                };
+              }
+            >;
+          };
+        };
+      };
+      const from = app.workspace.activeEditor.editor.getValue().indexOf(span);
+      if (from < 0) throw new Error('span not in the review editor');
+      await app.plugins.plugins['incremental-reading'].actions.createCard({
+        selection: { from, to: from + span.length, text: span },
+        answer: [4, 7],
+      });
+    }, SPAN);
+
+    const embed = content.locator(
+      '.cm-line > .internal-embed[alt*="ir-hide-title"].is-loaded'
+    );
+    await expect(embed).toBeVisible();
+
+    /**
+     * The embed's rows, the rule, and the button, in viewport pixels. The rule
+     * is a pseudo-element, so it is placed from its computed box, which
+     * resolves against the host line.
+     */
+    const measure = () =>
+      embed.evaluate((el) => {
+        const host = el.parentElement as HTMLElement;
+        const hostRect = host.getBoundingClientRect();
+        const rows = Array.from(el.getClientRects()).filter(
+          (rect) => rect.height > 0
+        );
+        const before = getComputedStyle(el, '::before');
+        const link = el.querySelector(':scope > .markdown-embed-link');
+        const linkRect = link?.getBoundingClientRect();
+        const ruleTop = hostRect.top + Number.parseFloat(before.top);
+        return {
+          host: {
+            top: hostRect.top,
+            bottom: hostRect.bottom,
+            right: hostRect.right,
+          },
+          lineHeight: Number.parseFloat(getComputedStyle(host).lineHeight),
+          rows: rows.map((rect) => ({ top: rect.top, bottom: rect.bottom })),
+          rule: {
+            top: ruleTop,
+            bottom: ruleTop + Number.parseFloat(before.height),
+            left: hostRect.left + Number.parseFloat(before.left),
+            color: before.backgroundColor,
+          },
+          hostLeft: hostRect.left,
+          link: linkRect && {
+            top: linkRect.top,
+            bottom: linkRect.bottom,
+            right: linkRect.right,
+          },
+        };
+      });
+
+    // Two widths, so the rows the card wraps across change under a resize and
+    // the rule has to follow them. Pinned: CI's window is much narrower than a
+    // local headless run's.
+    for (const width of [1000, 760]) {
+      await window.setViewportSize({ width, height: 800 });
+
+      // Polled: the embed fills in after it is created, and the geometry is
+      // measured on the frame after the layout it follows.
+      await expect(async () => {
+        const m = await measure();
+        const first = m.rows[0];
+        const last = m.rows[m.rows.length - 1];
+        const slack = m.lineHeight / 2;
+
+        // Not vacuous: the paragraph has rows of its own text above and below
+        // the card's, and the card itself wraps.
+        expect(m.rows.length).toBeGreaterThan(1);
+        expect(first.top - m.host.top).toBeGreaterThan(slack);
+        expect(m.host.bottom - last.bottom).toBeGreaterThan(slack);
+
+        // The rule spans the card's rows, and none of the paragraph's.
+        expect(m.rule.color).not.toBe('rgba(0, 0, 0, 0)');
+        expect(Math.abs(m.rule.top - first.top)).toBeLessThan(slack);
+        expect(Math.abs(m.rule.bottom - last.bottom)).toBeLessThan(slack);
+        expect(Math.abs(m.rule.left - m.hostLeft)).toBeLessThan(slack);
+
+        // The button sits at the end of the card's first row.
+        expect(m.link).toBeTruthy();
+        const linkCenter = (m.link!.top + m.link!.bottom) / 2;
+        expect(linkCenter).toBeGreaterThan(first.top);
+        expect(linkCenter).toBeLessThan(first.bottom);
+        expect(Math.abs(m.link!.right - m.host.right)).toBeLessThan(
+          m.lineHeight
+        );
+      }).toPass({ timeout: 15_000 });
+    }
+  });
 });
 
 test.describe('Frontmatter', () => {

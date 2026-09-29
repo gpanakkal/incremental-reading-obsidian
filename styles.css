@@ -22,6 +22,28 @@
   display: inline;
 }
 
+/* Until that first pass, give the still-block sizer a height, or the pass never
+   runs at all on iOS.
+
+   The renderer's first pass bails unless its preview element measures wider
+   than zero (`offsetParent && offsetWidth > 0` — read from Obsidian 1.13's
+   `app.js`; undocumented), and nothing retries it: the embed stays empty
+   through tab reopens and app reloads. The preview element is inline by the
+   rule above, and before that pass it holds nothing but the sizer, still an
+   empty block. WebKit, and Firefox, measure an inline box across its line
+   fragments only, which all have zero width; the block holding the sizer
+   counts toward it only once it has height of its own. Chromium counts the
+   block regardless, which is why desktop and `emulateMobile` never show it
+   (e2e-tests/embed-engines.spec.ts covers it in WebKit).
+
+   A floor rather than un-flattening the preview element: it keeps the gate on
+   the one element that has it, needs no `:has()`, and drops out on its own the
+   moment Obsidian writes the min-height this selector excludes. */
+.internal-embed[alt*='ir-hide-title']
+  .markdown-preview-sizer:not([style*='min-height']) {
+  min-height: 1px;
+}
+
 /* The embed's own title and every chrome section the transcluded note brings —
    inline title, properties, the raw frontmatter block, the footer — have
    nowhere to sit in inline flow. Each would interrupt the sentence, and each
@@ -93,7 +115,8 @@ body {
 
   /* Hand the open-in-tab button's containing block to the host line, so
      Obsidian's own `top: 4px; inset-inline-end: 4px` lands on one predictable
-     corner.
+     corner — and, in Live Preview, so the rule and the button placed further
+     down resolve against the line the embed's rows are measured in.
  */
   position: static;
 }
@@ -170,14 +193,9 @@ body {
    Except where a `<br>` starts the transclusion on its own line (Reading view),
    which the post-processor encodes by withholding `.ir-transclusion-rule`.
 
-   The Live Preview branch keeps its `:has()`: the host is a `.cm-line`
-   CodeMirror owns and rebuilds, and the transclusion is a widget whose child
-   elements arrive after the update that created the line — so a marker class
-   would have to be reapplied from a MutationObserver, which costs more than
-   the selector does. It is also the cheap shape of `:has()`: a child
-   combinator over the viewport-rendered lines only, not a whole document. */
-.markdown-source-view.mod-cm6
-  .cm-line:has(> .internal-embed[alt*='ir-hide-title']),
+   Reading view only: this spans the whole host block, including rows of the
+   host's own text before and after the transclusion. Live Preview fits the
+   rule to the transclusion's rows instead, below. */
 .markdown-rendered .ir-transclusion-rule {
   background-image: linear-gradient(
     var(--ir-transclusion-rule-color),
@@ -187,6 +205,44 @@ body {
   background-size: 2px 100%;
   background-position: 0 0;
   background-origin: content-box;
+}
+
+/* Live Preview: the rule covers only the rows the transclusion's text is on,
+   and the open-in-tab button sits at the end of the first of them.
+
+   A card made from part of a paragraph sits mid-line, so the host `.cm-line`
+   holds rows of ordinary text above and below it. Which rows the transclusion
+   wraps across is a layout fact no selector can know, so
+   TransclusionGeometryExtension measures it and hands it over as custom
+   properties on the embed, in the host line's pixels. Both boxes below resolve
+   against the host line, since the embed itself is `position: static`.
+
+   The fallbacks draw no rule and leave the button where Obsidian puts it, for
+   the frame between the embed rendering and its first measurement.
+
+   `z-index: -1` keeps the rule under the text, where the host background it
+   replaces painted it: it sinks to CodeMirror's scroller, which is a stacking
+   context of its own (the one CodeMirror's selection layer paints in), so it
+   still draws above the editor's background. */
+.markdown-source-view.mod-cm6
+  .cm-line
+  > .internal-embed[alt*='ir-hide-title']::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  left: var(--ir-embed-rule-left, 0);
+  top: var(--ir-embed-rule-top, 0);
+  width: 2px;
+  height: var(--ir-embed-rule-height, 0);
+  background-color: var(--ir-transclusion-rule-color);
+  pointer-events: none;
+}
+
+.markdown-source-view.mod-cm6
+  .cm-line
+  > .internal-embed[alt*='ir-hide-title']
+  > .markdown-embed-link {
+  top: var(--ir-embed-link-top, 4px);
 }
 
 /* No `:has()` on either branch: the child combinator already implies it.

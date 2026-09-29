@@ -25,7 +25,23 @@ export default defineConfig({
       name: 'e2e',
       testDir: './e2e-tests',
       testMatch: '*.spec.ts',
-      testIgnore: 'mobile.spec.ts',
+      testIgnore: ['mobile.spec.ts', 'embed-engines.spec.ts'],
+    },
+    // The stylesheet in engines that measure layout differently from Electron's
+    // Chromium: WebKit, which Obsidian's iOS app renders with, and Firefox,
+    // which measures the same way. No Obsidian needed, only the browsers
+    // (`pnpm exec playwright install webkit firefox`).
+    {
+      name: 'engines-webkit',
+      testDir: './e2e-tests',
+      testMatch: 'embed-engines.spec.ts',
+      use: { browserName: 'webkit' },
+    },
+    {
+      name: 'engines-firefox',
+      testDir: './e2e-tests',
+      testMatch: 'embed-engines.spec.ts',
+      use: { browserName: 'firefox' },
     },
     {
       // The Obsidian Android app on an emulator or device over adb. Needs one

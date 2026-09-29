@@ -6,6 +6,7 @@ import { irIdGuardExtension } from './IrIdGuardExtension';
 import { irPluginFacet } from './irPluginFacet';
 import { scrollPositionExtension } from './ScrollPositionExtension';
 import { snippetHighlightExtension } from './SnippetHighlightExtension';
+import { transclusionGeometryExtension } from './TransclusionGeometryExtension';
 
 // Re-export for convenience
 export {
@@ -60,6 +61,9 @@ export function createIRExtensions(
 
     // Action bar panel for IR notes
     actionBarExtension,
+
+    // Fits card embeds' accent rule and open button to the rows they occupy
+    transclusionGeometryExtension,
   ];
 
   return extensions;
