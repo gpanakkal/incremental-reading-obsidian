@@ -4,6 +4,7 @@ import {
   type TFile,
   type Vault,
 } from 'obsidian';
+import { supportsFrontmatter } from './mime';
 import {
   holdersOf,
   ITEM_TABLES,
@@ -553,10 +554,10 @@ export function createIrIdRepairer({
   return {
     handleChange(file) {
       if (disposed) return;
-      // Item notes are always markdown, while the cache raises this for
+      // An `ir-id` lives in frontmatter, while the cache raises this for
       // everything it indexes. Checked before the path is so much as
       // remembered: a vault being indexed runs this once per file in it.
-      if (file.extension !== 'md') return;
+      if (!supportsFrontmatter(file)) return;
 
       pending.add(file.path);
       // A fixed window from the first change of a burst, not a timer pushed back

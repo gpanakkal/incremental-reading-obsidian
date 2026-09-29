@@ -10,6 +10,7 @@ import {
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
+import { isImportable } from '#/lib/mime';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   ArticleDisplay,
@@ -31,6 +32,18 @@ import { type TFile } from 'obsidian';
 import { ItemManager } from './ItemManager';
 
 const IMPORT_BLOCKED_TAGS = new Set([SNIPPET_TAG, CARD_TAG]);
+
+/**
+ * Whether `file` can be imported as an article, telling the user why not when
+ * it can't. The menus and commands hide the entries for such a file already;
+ * this is the guard behind them, for a stale menu or a caller that skipped
+ * the check, so none of them can leave a row behind that nothing identifies.
+ */
+export function checkImportable(file: TFile): boolean {
+  if (isImportable(file)) return true;
+  Obsidian.notify(`"${file.name}" can't be imported as an article`);
+  return false;
+}
 
 export class ArticleManager extends ItemManager {
   static rowToBase(articleRow: ArticleRow): IArticleBase {
@@ -82,7 +95,8 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * Import the passed note as an article
+   * Import the passed note as an article, refusing a file whose type can't be
+   * imported before the database is touched (see {@link checkImportable}).
    */
   async import(
     file: TFile,
@@ -90,6 +104,8 @@ export class ArticleManager extends ItemManager {
     fixedIntervalDays: number | null,
     makeCopy?: boolean
   ) {
+    if (!checkImportable(file)) return null;
+
     const willCopy = makeCopy ?? this.plugin.settings.copyOnImport;
     try {
       if (willCopy) {
