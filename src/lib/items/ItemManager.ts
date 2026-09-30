@@ -78,6 +78,19 @@ export class ItemManager {
     return null;
   }
 
+  /**
+   * The type of item `file` is, if any. A note is typed by its tags, as
+   * `getNoteType` reads them. A file with no frontmatter, a PDF say, has none.
+   * It is known by its path alone, so it is whatever the row at its path is.
+   */
+  async getItemType(file: TFile): Promise<NoteType | null> {
+    if (supportsFrontmatter(file)) return Obsidian.getNoteType(file, this.app);
+
+    const match = await this.findItem(file);
+    if (!match) return null;
+    return match.table === 'srs_card' ? 'card' : match.table;
+  }
+
   async findById(id: string): Promise<{
     row: SnippetRow | SRSCardRow | ArticleRow;
     table: TableName;

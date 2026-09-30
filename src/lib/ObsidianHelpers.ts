@@ -32,12 +32,7 @@ import {
 } from './constants';
 import { Markdown } from './Markdown';
 import { isEditableText, supportsFrontmatter } from './mime';
-import type {
-  FrontMatterUpdates,
-  NoteType,
-  PluginFrontMatter,
-  TableName,
-} from './types';
+import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
 import { binarySearch, generateId } from './utils';
 
 export class ObsidianHelpers {
@@ -169,26 +164,13 @@ export class ObsidianHelpers {
   /**
    * Gets the type of a note based on its tags.
    *
-   * A file with no frontmatter has no tags to go by — a PDF article is known by
-   * its path alone — so it is whatever the row at its path is in `items`. The
-   * lookup is opt-in: without `items`, such a file is never an item, so any
-   * caller that can meet one (not the editor extensions, which only ever see
-   * markdown) has to pass it.
+   * Notes only: a file with no frontmatter, a PDF say, has no tags to go by and
+   * is never read, so it answers `null` here even when it is an item. Code that
+   * can meet one asks the item layer instead (`ItemManager.getItemType`), which
+   * knows such a file by the row at its path.
    */
-  static async getNoteType(
-    note: TFile,
-    app: App,
-    items?: {
-      findItem(file: TFile): Promise<{
-        table: Extract<TableName, 'article' | 'snippet' | 'srs_card'>;
-      } | null>;
-    }
-  ): Promise<NoteType | null> {
-    if (!supportsFrontmatter(note)) {
-      const match = await items?.findItem(note);
-      if (!match) return null;
-      return match.table === 'srs_card' ? 'card' : match.table;
-    }
+  static async getNoteType(note: TFile, app: App): Promise<NoteType | null> {
+    if (!supportsFrontmatter(note)) return null;
 
     let type: NoteType | null = null;
     await app.fileManager.processFrontMatter(

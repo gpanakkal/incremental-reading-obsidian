@@ -117,6 +117,18 @@ const binaryFileArb = fc
     ([name, extension]) =>
       ({ path: `${name}.${extension}`, extension }) as TFile
   );
+
+/** The note type each table's rows are. */
+const TABLE_TYPE = {
+  article: 'article',
+  snippet: 'snippet',
+  srs_card: 'card',
+} as const;
+/** A table, or no row at all. */
+const tableArb = fc.option(
+  fc.constantFrom<keyof typeof TABLE_TYPE>('article', 'snippet', 'srs_card'),
+  { nil: null }
+);
 // #endregion
 
 describe('reconcileNote', () => {
@@ -300,6 +312,60 @@ describe('setFrontmatter', () => {
             'ir-id': id,
             tags: Obsidian._mergeTags(undefined, tags),
           });
+        }
+      )
+    );
+  });
+});
+
+describe('getItemType', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('types a file without frontmatter by the row at its path, never reading the file', async () => {
+    await fc.assert(
+      fc.asyncProperty(binaryFileArb, tableArb, async (file, table) => {
+        const processFrontMatter = vi.fn();
+        const manager = new TestManager(
+          { app: { fileManager: { processFrontMatter } } } as never,
+          makeRepo().repo
+        );
+        const findItem = vi
+          .spyOn(manager, 'findItem')
+          .mockResolvedValue(table && ({ table } as never));
+        const getNoteType = vi.spyOn(Obsidian, 'getNoteType');
+        getNoteType.mockClear();
+
+        const type = await manager.getItemType(file);
+
+        expect(type).toBe(table && TABLE_TYPE[table]);
+        expect(findItem).toHaveBeenCalledExactlyOnceWith(file);
+        expect(getNoteType).not.toHaveBeenCalled();
+        expect(processFrontMatter).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('types a markdown note by its tags alone, whatever the rows say', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.option(typeArb, { nil: null }),
+        tableArb,
+        async (noteType, table) => {
+          const app = {};
+          const manager = new TestManager({ app } as never, makeRepo().repo);
+          const findItem = vi
+            .spyOn(manager, 'findItem')
+            .mockResolvedValue(table && ({ table } as never));
+          const getNoteType = vi
+            .spyOn(Obsidian, 'getNoteType')
+            .mockResolvedValue(noteType);
+          getNoteType.mockClear();
+
+          await expect(manager.getItemType(FILE)).resolves.toBe(noteType);
+          expect(getNoteType).toHaveBeenCalledExactlyOnceWith(FILE, app);
+          expect(findItem).not.toHaveBeenCalled();
         }
       )
     );

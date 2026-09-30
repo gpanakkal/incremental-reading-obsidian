@@ -7,6 +7,7 @@ import type {
 } from '#/components/types';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '#/lib/constants';
 import { supportsFrontmatter } from '#/lib/mime';
+import { evictedSpot } from '#/lib/moved-note-scan';
 import {
   type ArticleRow,
   type IArticleBase,
@@ -546,7 +547,7 @@ export default class ReviewManager {
    * Returns null if the item is not found in the database.
    */
   async getReviewItemFromFile(file: TFile): Promise<ReviewItem | null> {
-    const noteType = await Obsidian.getNoteType(file, this.app, this.articles);
+    const noteType = await this.articles.getItemType(file);
     if (noteType === 'article') {
       const row = await this.articles.findArticle(file);
       if (!row) return null;
@@ -611,7 +612,10 @@ export default class ReviewManager {
       throw new Error(`Failed to find a file at ${newPath}`);
     }
     // Everything below goes by frontmatter, which a PDF has none of
-    if (!supportsFrontmatter(concreteFile)) return;
+    if (!supportsFrontmatter(concreteFile)) {
+      await this.#followPathRename(oldPath, newPath);
+      return;
+    }
 
     let type: string | null = null,
       rowId: string | undefined;
@@ -653,6 +657,68 @@ export default class ReviewManager {
   }
 
   /**
+   * Follow a file with no frontmatter, such as a PDF, from `oldPath` to `newPath`.
+   * Such a file is known by its path alone, so the article row at the old path
+   * is its row, and moves with it; snippets and cards name their parent by id,
+   * so they follow along untouched. The rename shows the file is there, so the
+   * row is live afterwards whatever it was before.
+   *
+   * `reference` is `UNIQUE`, so a row still naming the new path has to give it
+   * up first: a tombstone left by a file deleted from there, or a row whose file
+   * is missing. Neither has its file there any more — this one's is — so it is
+   * parked where `moved-note-scan` parks the tombstones it evicts, deleted or
+   * not as it was: a missing row stays missing, which is only ever derived,
+   * for Relink to find. An untracked file moving onto a tombstone's path takes
+   * that row back, as a file created there would.
+   *
+   * Anything else — an image, say — has no row at either path, and costs a
+   * read and no write: every write outside a transaction saves the database.
+   */
+  async #followPathRename(oldPath: string, newPath: string) {
+    if (oldPath === newPath) return;
+    const [moving] = (await this.#repo.query(
+      'SELECT id FROM article WHERE reference = $1',
+      [oldPath]
+    )) as unknown as { id: string }[];
+    if (!moving) {
+      await this.#restoreAtPath(newPath);
+      return;
+    }
+
+    this.snippets.offsetTracker.renameFile(oldPath, newPath);
+    await this.#repo.transaction(async () => {
+      const holders = (await this.#repo.query(
+        'SELECT id FROM article WHERE reference = $1',
+        [newPath]
+      )) as unknown as { id: string }[];
+      for (const { id } of holders) {
+        await this.#repo.mutate(
+          'UPDATE article SET reference = $1 WHERE id = $2',
+          [evictedSpot({ table: 'article', id }), id]
+        );
+      }
+      await this.#repo.mutate(
+        'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
+        [newPath, moving.id]
+      );
+    });
+  }
+
+  /**
+   * Bring back the tombstoned article row at `path`, now that a file with no
+   * frontmatter, known by its path alone, is there again: restored from the
+   * trash, say. Reads first, so the many files that are no item cost no write.
+   */
+  async #restoreAtPath(path: string) {
+    const [tombstone] = (await this.#repo.query(
+      'SELECT id FROM article WHERE reference = $1 AND deleted = TRUE',
+      [path]
+    )) as unknown as { id: string }[];
+    if (!tombstone) return;
+    await this.articles.markUndeleted(tombstone.id, 'article');
+  }
+
+  /**
    * Mark rows as deleted
    */
   async handleDeletion(file: TAbstractFile) {
@@ -684,8 +750,12 @@ export default class ReviewManager {
    */
   async handleCreation(file: TAbstractFile) {
     const concreteFile = this.app.vault.getFileByPath(file.path);
+    if (!concreteFile) return;
     // Everything below goes by frontmatter, which a PDF has none of
-    if (!concreteFile || !supportsFrontmatter(concreteFile)) return;
+    if (!supportsFrontmatter(concreteFile)) {
+      await this.#restoreAtPath(file.path);
+      return;
+    }
 
     let id: string | undefined;
     let type: string | null = null;
