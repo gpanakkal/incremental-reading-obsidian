@@ -1,6 +1,8 @@
 import { DATA_DIRECTORY, MS_PER_DAY } from '#/lib/constants';
 import { resolveItemContext } from '#/lib/item-context';
+import { evictedSpot } from '#/lib/moved-note-scan';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import type {
   ArticleRow,
   IArticleBase,
@@ -16,9 +18,20 @@ import type {
 } from '#/lib/types';
 import { getEndOfDay } from '#/lib/utils';
 import fc from 'fast-check';
-import type { TAbstractFile, TFile } from 'obsidian';
+import { readFileSync } from 'fs';
+import type { App, TAbstractFile, TFile } from 'obsidian';
+import { resolve } from 'path';
+import initSqlJs, { type SqlJsStatic } from 'sql.js';
 import { generatorParameters } from 'ts-fsrs';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { CardManager } from './CardManager';
 import ReviewManager from './ReviewManager';
 
@@ -365,6 +378,129 @@ const itemTableArb = fc.option(
   fc.constantFrom<ItemTable>('article', 'snippet', 'srs_card'),
   { nil: null }
 );
+
+const SCHEMA = readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8');
+let SQL: SqlJsStatic;
+
+/** A repository over a real in-memory database, with the disk write stubbed. */
+class TestRepository extends SQLJSRepository {
+  static create(): TestRepository {
+    const repo = new TestRepository({
+      app: { vault: { adapter: {} } } as unknown as App,
+      dbFilePath: 'ir-test.sqlite',
+      schema: SCHEMA,
+    });
+    repo.db = new SQL.Database();
+    repo.db.exec(SCHEMA);
+    repo.registerUpdateHook();
+    return repo;
+  }
+
+  protected override async save() {}
+
+  /** Every row of `table`, read straight off the database. */
+  rows(table: 'article' | 'snippet' | 'srs_card') {
+    const [result] = this.db?.exec(
+      `SELECT id, reference, deleted FROM ${table} ORDER BY id`
+    ) ?? [undefined];
+    return (result?.values ?? []).map(([id, reference, deleted]) => ({
+      id: String(id),
+      reference: String(reference),
+      deleted: deleted === 1,
+    }));
+  }
+}
+
+/**
+ * A manager over a real database and a vault of files that have no
+ * frontmatter, which the test moves around itself before firing the event
+ * Obsidian would. Every call that could read or write a file's content or
+ * frontmatter is spied on.
+ */
+function wirePaths(paths: readonly string[]) {
+  const repo = TestRepository.create();
+  const files = new Map<string, TFile>();
+  const fileAt = (path: string) => {
+    const extension = path.slice(path.lastIndexOf('.') + 1);
+    const file = { path, extension } as TFile;
+    files.set(path, file);
+    return file;
+  };
+  for (const path of paths) fileAt(path);
+  const touches = {
+    processFrontMatter: vi.fn().mockResolvedValue(undefined),
+    process: vi.fn().mockResolvedValue(''),
+    modify: vi.fn().mockResolvedValue(undefined),
+    read: vi.fn().mockResolvedValue(''),
+    cachedRead: vi.fn().mockResolvedValue(''),
+  };
+  const { processFrontMatter, ...vaultTouches } = touches;
+  const plugin = makePlugin({
+    vault: {
+      ...vaultTouches,
+      getFileByPath: (path: string) => files.get(path) ?? null,
+    },
+    fileManager: { processFrontMatter },
+  });
+  const manager = new ReviewManager(plugin, repo);
+
+  const insertArticle = (id: string, reference: string, deleted = false) =>
+    repo.mutate(
+      `INSERT INTO article (id, reference, deleted, due, interval, priority)
+       VALUES ($1, $2, $3, $4, 86400000, 30)`,
+      [id, reference, deleted, YEAR_2000_MS]
+    );
+  const insertChildren = (parent: string) => {
+    repo.mutate(
+      `INSERT INTO snippet (id, reference, parent, due, interval, priority)
+       VALUES ($1, $2, $3, $4, 86400000, 30)`,
+      [`snippet-of-${parent}`, `snippets/${parent}.md`, parent, YEAR_2000_MS]
+    );
+    repo.mutate(
+      `INSERT INTO srs_card (id, reference, parent, created_at, due, stability,
+         difficulty, elapsed_days, scheduled_days, state)
+       VALUES ($1, $2, $3, $4, $4, 0, 0, 0, 0, 0)`,
+      [`card-of-${parent}`, `cards/${parent}.md`, parent, YEAR_2000_MS]
+    );
+  };
+
+  /** Move the file at `from` to `to`, as Obsidian does before it fires `rename`. */
+  const rename = (from: string, to: string) => {
+    const file = files.get(from)!;
+    files.delete(from);
+    file.path = to;
+    files.set(to, file);
+    return manager.handleExternalRename(file, from);
+  };
+  const remove = (path: string) => {
+    const file = files.get(path)!;
+    files.delete(path);
+    return manager.handleDeletion(file);
+  };
+  const create = (path: string) => manager.handleCreation(fileAt(path));
+
+  return {
+    repo,
+    manager,
+    files,
+    touches,
+    insertArticle,
+    insertChildren,
+    rename,
+    remove,
+    create,
+  };
+}
+
+/** Where each child's parent is, read through the parent id it holds. */
+const parentPaths = (repo: TestRepository) =>
+  ['snippet', 'srs_card'].flatMap((table) => {
+    const [result] = repo.db!.exec(
+      `SELECT child.id, article.reference FROM ${table} child
+       JOIN article ON article.id = child.parent ORDER BY child.id`
+    );
+    return (result?.values ?? []).map(([id, reference]) => [id, reference]);
+  });
 
 // #endregion
 
@@ -2996,8 +3132,8 @@ describe('ReviewManager on a file without frontmatter', () => {
         Obsidian.updateFrontMatter(file, { tags: 'ir-source' }, app as never),
       updateFrontMatterFn: ({ app }, file) =>
         Obsidian.updateFrontMatter(file, () => {}, app as never),
-      getNoteType: ({ app, manager }, file) =>
-        Obsidian.getNoteType(file, app as never, manager.articles),
+      getNoteType: ({ app }, file) => Obsidian.getNoteType(file, app as never),
+      getItemType: ({ manager }, file) => manager.articles.getItemType(file),
       setFrontmatter: ({ manager }, file) =>
         manager.articles.setFrontmatter(file, 'id', 'ir-article'),
       fetch: ({ manager, row }) =>
@@ -3035,5 +3171,369 @@ describe('ReviewManager on a file without frontmatter', () => {
         }
       )
     );
+  });
+});
+
+describe('ReviewManager tracking files without frontmatter by path', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('moves the row at the old path to the new one, children and history and all', async () => {
+    const wired = wirePaths(['papers/a.pdf']);
+    wired.insertArticle('a', 'papers/a.pdf');
+    wired.insertChildren('a');
+    wired.repo.mutate(
+      'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
+      ['review-1', 'a', YEAR_2000_MS]
+    );
+    const highlights = [{ id: 'snippet-of-a', start: 1, end: 2 }];
+    wired.manager.snippets.offsetTracker.loadHighlights(
+      'papers/a.pdf',
+      highlights as never
+    );
+
+    await wired.rename('papers/a.pdf', 'archive/b.pdf');
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'archive/b.pdf', deleted: false },
+    ]);
+    expect(parentPaths(wired.repo)).toStrictEqual([
+      ['snippet-of-a', 'archive/b.pdf'],
+      ['card-of-a', 'archive/b.pdf'],
+    ]);
+    expect(
+      wired.repo.query('SELECT article_id FROM article_review')
+    ).toStrictEqual([{ article_id: 'a' }]);
+    expect(
+      wired.manager.snippets.offsetTracker.getHighlights('archive/b.pdf')
+    ).toStrictEqual(highlights);
+    for (const touch of Object.values(wired.touches)) {
+      expect(touch).not.toHaveBeenCalled();
+    }
+  });
+
+  it('leaves every other row where it is', async () => {
+    const wired = wirePaths(['a.pdf', 'b.pdf']);
+    wired.insertArticle('a', 'a.pdf');
+    wired.insertArticle('b', 'b.pdf');
+    wired.insertArticle('gone', 'gone.pdf', true);
+
+    await wired.rename('a.pdf', 'c.pdf');
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'c.pdf', deleted: false },
+      { id: 'b', reference: 'b.pdf', deleted: false },
+      { id: 'gone', reference: 'gone.pdf', deleted: true },
+    ]);
+  });
+
+  it('brings back a row the rename shows still has its file', async () => {
+    const wired = wirePaths(['a.pdf']);
+    wired.insertArticle('a', 'a.pdf', true);
+
+    await wired.rename('a.pdf', 'b.pdf');
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'b.pdf', deleted: false },
+    ]);
+  });
+
+  it('moves a row onto a tombstoned path, putting the tombstone aside', async () => {
+    const wired = wirePaths(['a.pdf']);
+    wired.insertArticle('a', 'a.pdf');
+    wired.insertArticle('old', 'b.pdf', true);
+
+    await wired.rename('a.pdf', 'b.pdf');
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'b.pdf', deleted: false },
+      {
+        id: 'old',
+        reference: evictedSpot({ table: 'article', id: 'old' }),
+        deleted: true,
+      },
+    ]);
+  });
+
+  it('moves a row onto the path of a row whose file is missing, leaving that one live', async () => {
+    const wired = wirePaths(['a.pdf']);
+    wired.insertArticle('a', 'a.pdf');
+    wired.insertArticle('missing', 'b.pdf');
+
+    await wired.rename('a.pdf', 'b.pdf');
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'b.pdf', deleted: false },
+      {
+        id: 'missing',
+        reference: evictedSpot({ table: 'article', id: 'missing' }),
+        deleted: false,
+      },
+    ]);
+  });
+
+  it('restores a tombstone when an untracked file is renamed onto its path', async () => {
+    const wired = wirePaths(['other.pdf']);
+    wired.insertArticle('old', 'b.pdf', true);
+
+    await wired.rename('other.pdf', 'b.pdf');
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'old', reference: 'b.pdf', deleted: false },
+    ]);
+  });
+
+  it('writes nothing to the database for a file that is no item', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.string(),
+        fc.constantFrom('pdf', 'PDF', 'png', ''),
+        async (from, to, extension) => {
+          const oldPath = `${from}.${extension}`;
+          const newPath = `new/${to}.${extension}`;
+          const wired = wirePaths([oldPath]);
+          wired.insertArticle('a', 'elsewhere.pdf');
+          const mutate = vi.spyOn(wired.repo, 'mutate');
+          const transaction = vi.spyOn(wired.repo, 'transaction');
+
+          await wired.rename(oldPath, newPath);
+          await wired.create(`created.${extension}`);
+
+          expect(mutate).not.toHaveBeenCalled();
+          expect(transaction).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('writes nothing for a rename that leaves a tracked file where it was', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), async (deleted) => {
+        const wired = wirePaths(['a.pdf']);
+        wired.insertArticle('a', 'a.pdf', deleted);
+        const mutate = vi.spyOn(wired.repo, 'mutate');
+
+        await wired.rename('a.pdf', 'a.pdf');
+
+        expect(mutate).not.toHaveBeenCalled();
+        expect(wired.repo.rows('article')).toStrictEqual([
+          { id: 'a', reference: 'a.pdf', deleted },
+        ]);
+      })
+    );
+  });
+
+  it('tombstones the row at the path of a deleted file, and nothing else', async () => {
+    const wired = wirePaths(['a.pdf', 'b.pdf']);
+    wired.insertArticle('a', 'a.pdf');
+    wired.insertArticle('b', 'b.pdf');
+
+    await wired.remove('a.pdf');
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'a.pdf', deleted: true },
+      { id: 'b', reference: 'b.pdf', deleted: false },
+    ]);
+  });
+
+  it('restores the tombstone at the path a file is created at', async () => {
+    const wired = wirePaths(['a.pdf']);
+    wired.insertArticle('a', 'a.pdf');
+    wired.insertArticle('b', 'b.pdf', true);
+
+    await wired.remove('a.pdf');
+    await wired.create('a.pdf');
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'a.pdf', deleted: false },
+      { id: 'b', reference: 'b.pdf', deleted: true },
+    ]);
+    for (const touch of Object.values(wired.touches)) {
+      expect(touch).not.toHaveBeenCalled();
+    }
+  });
+
+  it('leaves a live row alone when a file arrives at its path', async () => {
+    const wired = wirePaths(['other.pdf']);
+    wired.insertArticle('live', 'a.pdf');
+    const mutate = vi.spyOn(wired.repo, 'mutate');
+
+    await wired.create('a.pdf');
+    wired.files.delete('a.pdf');
+    await wired.rename('other.pdf', 'a.pdf');
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'live', reference: 'a.pdf', deleted: false },
+    ]);
+  });
+
+  it('follows every file of a renamed folder, one event per child', async () => {
+    const wired = wirePaths(['f/a.pdf', 'f/sub/b.pdf', 'g/a.pdf']);
+    wired.insertArticle('a', 'f/a.pdf');
+    wired.insertArticle('b', 'f/sub/b.pdf');
+    wired.insertArticle('ga', 'g/a.pdf');
+    wired.insertChildren('b');
+
+    await wired.rename('f/sub/b.pdf', 'h/sub/b.pdf');
+    await wired.rename('f/a.pdf', 'h/a.pdf');
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'h/a.pdf', deleted: false },
+      { id: 'b', reference: 'h/sub/b.pdf', deleted: false },
+      { id: 'ga', reference: 'g/a.pdf', deleted: false },
+    ]);
+    expect(parentPaths(wired.repo)).toStrictEqual([
+      ['snippet-of-b', 'h/sub/b.pdf'],
+      ['card-of-b', 'h/sub/b.pdf'],
+    ]);
+  });
+
+  describe('over any sequence of renames, deletions and creations', () => {
+    /** Few names in few folders, so moves keep landing on used paths. */
+    const PATHS = [
+      'a.pdf',
+      'b.pdf',
+      'f/a.pdf',
+      'f/c.pdf',
+      'g/a.pdf',
+      'g/b.pdf',
+    ];
+    const FOLDERS = ['f', 'g', 'h'];
+
+    type Op =
+      | { kind: 'rename'; from: number; to: string }
+      | { kind: 'moveFolder'; from: string; to: string }
+      | { kind: 'delete'; at: number }
+      | { kind: 'create'; at: string };
+
+    const opArb: fc.Arbitrary<Op> = fc.oneof(
+      fc.record({
+        kind: fc.constant('rename' as const),
+        from: fc.nat(),
+        to: fc.constantFrom(...PATHS),
+      }),
+      fc.record({
+        kind: fc.constant('moveFolder' as const),
+        from: fc.constantFrom(...FOLDERS),
+        to: fc.constantFrom(...FOLDERS),
+      }),
+      fc.record({ kind: fc.constant('delete' as const), at: fc.nat() }),
+      fc.record({
+        kind: fc.constant('create' as const),
+        at: fc.constantFrom(...PATHS),
+      })
+    );
+
+    /** The starting paths, and whether each holds a tracked file. */
+    const startArb = fc.subarray(PATHS, { minLength: 1 }).chain((paths) =>
+      fc.tuple(
+        fc.constant(paths),
+        fc.array(fc.constantFrom('none', 'live', 'tombstone'), {
+          minLength: paths.length,
+          maxLength: paths.length,
+        })
+      )
+    );
+
+    it('ends with the row of each file at its path, and every row without one tombstoned', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          startArb,
+          fc.array(opArb, { maxLength: 20 }),
+          async ([paths, tracked], ops) => {
+            const wired = wirePaths(paths);
+            // The row each file is, if any, which renames carry along; and the
+            // row a file arriving at a tombstoned path takes back
+            const rowOf = new Map<TFile, string>();
+            const tombstones = new Map<string, string>();
+            // A tombstone starts with no file at its path, left by a deletion
+            paths.forEach((path, i) => {
+              if (tracked[i] === 'none') return;
+              const tombstoned = tracked[i] === 'tombstone';
+              wired.insertArticle(`row-${i}`, path, tombstoned);
+              if (tombstoned) {
+                wired.files.delete(path);
+                tombstones.set(path, `row-${i}`);
+              } else {
+                rowOf.set(wired.files.get(path)!, `row-${i}`);
+              }
+            });
+
+            const arrive = (file: TFile) => {
+              const row = tombstones.get(file.path);
+              if (row === undefined) return;
+              tombstones.delete(file.path);
+              if (!rowOf.has(file)) rowOf.set(file, row);
+            };
+            for (const op of ops) {
+              const present = [...wired.files.keys()];
+              if (op.kind === 'rename') {
+                const from = present[op.from % present.length];
+                if (from === undefined || wired.files.has(op.to)) continue;
+                const file = wired.files.get(from)!;
+                await wired.rename(from, op.to);
+                arrive(file);
+              } else if (op.kind === 'moveFolder') {
+                const inside = (folder: string) =>
+                  present.filter((path) => path.startsWith(`${folder}/`));
+                if (op.from === op.to || inside(op.to).length > 0) continue;
+                for (const from of inside(op.from)) {
+                  const file = wired.files.get(from)!;
+                  await wired.rename(from, `${op.to}${from.slice(1)}`);
+                  arrive(file);
+                }
+              } else if (op.kind === 'delete') {
+                const at = present[op.at % present.length];
+                if (at === undefined) continue;
+                const row = rowOf.get(wired.files.get(at)!);
+                if (row !== undefined) tombstones.set(at, row);
+                await wired.remove(at);
+              } else {
+                if (wired.files.has(op.at)) continue;
+                await wired.create(op.at);
+                arrive(wired.files.get(op.at)!);
+              }
+            }
+
+            const rows = wired.repo.rows('article');
+            // No row is ever lost, only moved or tombstoned
+            expect(rows.map(({ id }) => id).sort()).toStrictEqual(
+              tracked.flatMap((state, i) =>
+                state === 'none' ? [] : [`row-${i}`]
+              )
+            );
+            const expected = new Map<string, string>();
+            for (const [file, row] of rowOf) {
+              if (wired.files.get(file.path) === file)
+                expected.set(row, file.path);
+            }
+            for (const row of rows) {
+              if (expected.has(row.id)) {
+                expect(row).toStrictEqual({
+                  id: row.id,
+                  reference: expected.get(row.id),
+                  deleted: false,
+                });
+              } else {
+                expect(row.deleted).toBe(true);
+              }
+            }
+            for (const touch of Object.values(wired.touches)) {
+              expect(touch).not.toHaveBeenCalled();
+            }
+          }
+        )
+      );
+    });
   });
 });

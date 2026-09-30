@@ -1313,7 +1313,11 @@ test.describe('PDF articles', () => {
 
   /** What the page-side calls below reach on Obsidian and the plugin. */
   type PageApp = {
-    vault: { getFileByPath(path: string): unknown };
+    vault: {
+      getFileByPath(path: string): unknown;
+      getFolderByPath(path: string): unknown;
+      trash(file: unknown, system: boolean): Promise<void>;
+    };
     fileManager: { renameFile(file: unknown, newPath: string): Promise<void> };
     workspace: {
       getLeavesOfType(
@@ -1340,27 +1344,27 @@ test.describe('PDF articles', () => {
       const { app } = window as unknown as { app: PageApp };
       const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
       return repo.query(
-        'SELECT reference, dismissed, due, fixed_interval_days FROM article WHERE id = $1',
+        'SELECT reference, deleted, dismissed, due, fixed_interval_days FROM article WHERE id = $1',
         [id]
       )[0];
     }, PDF_ID);
 
   const pdfBytes = (at: string) => fs.readFile(path.join(vaultPath, at));
 
-  test('reviews a PDF row as a placeholder, never writing to the PDF', async () => {
+  /** Whether Obsidian has indexed a file at `at`. */
+  const hasFile = (page: Page, at: string) =>
+    page.evaluate(
+      (p) =>
+        (window as unknown as { app: PageApp }).app.vault.getFileByPath(p) !==
+        null,
+      at
+    );
+
+  /** Put the PDF in the vault, with an article row due for it. */
+  async function seedPdfArticle() {
     await fs.mkdir(path.join(vaultPath, 'papers'), { recursive: true });
     await fs.writeFile(path.join(vaultPath, PDF_PATH), PDF_BYTES);
-    await expect
-      .poll(() =>
-        window.evaluate(
-          (p) =>
-            (window as unknown as { app: PageApp }).app.vault.getFileByPath(
-              p
-            ) !== null,
-          PDF_PATH
-        )
-      )
-      .toBe(true);
+    await expect.poll(() => hasFile(window, PDF_PATH)).toBe(true);
 
     // Seeded directly, the way the old unguarded import left such rows behind
     await window.evaluate(
@@ -1375,6 +1379,10 @@ test.describe('PDF articles', () => {
       },
       [PDF_ID, PDF_PATH]
     );
+  }
+
+  test('reviews a PDF row as a placeholder, never writing to the PDF', async () => {
+    await seedPdfArticle();
 
     await executeCommandById(window, 'incremental-reading:learn');
     await window.locator('css=#begin-review-button').click();
@@ -1448,8 +1456,7 @@ test.describe('PDF articles', () => {
     expect((await pdfBytes(PDF_PATH)).equals(PDF_BYTES)).toBe(true);
 
     // A rename goes through the plugin's rename handler, which reads
-    // frontmatter for every other kind of item. The row does not follow a
-    // renamed PDF yet (task 0011); what this test holds to is the bytes.
+    // frontmatter for every other kind of item; a PDF's row follows its path
     await window.evaluate(
       async ([from, to]) => {
         const { app } = window as unknown as { app: PageApp };
@@ -1458,9 +1465,107 @@ test.describe('PDF articles', () => {
       [PDF_PATH, RENAMED_PATH]
     );
     await expect
+      .poll(async () => (await articleRow(window))?.reference)
+      .toBe(RENAMED_PATH);
+    await expect
       .poll(async () =>
         (await pdfBytes(RENAMED_PATH).catch(() => null))?.equals(PDF_BYTES)
       )
       .toBe(true);
+  });
+
+  test('follows a PDF article through renames and moves, and back out of the trash', async () => {
+    await seedPdfArticle();
+    // A child names its parent by id, and must still reach it at every step
+    await window.evaluate(async (parent) => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      await repo.mutate(
+        'INSERT INTO snippet (id, reference, parent, due, interval, priority) VALUES ($1, $2, $3, $4, $5, $6)',
+        ['pdf-child', 'snippets/child.md', parent, Date.now() + 1e9, 1, 30]
+      );
+    }, PDF_ID);
+    const childParentPath = () =>
+      window.evaluate(() => {
+        const { app } = window as unknown as { app: PageApp };
+        const { repo } =
+          app.plugins.plugins['incremental-reading'].reviewManager;
+        return repo.query(
+          `SELECT article.reference FROM snippet
+           JOIN article ON article.id = snippet.parent
+           WHERE snippet.id = 'pdf-child'`
+        )[0]?.reference;
+      });
+    /** The row where it should be, live, and the PDF there untouched. */
+    const expectRowAt = async (at: string) => {
+      await expect
+        .poll(async () => {
+          const row = await articleRow(window);
+          return [row?.reference, row?.deleted];
+        })
+        .toEqual([at, 0]);
+      expect(await childParentPath()).toBe(at);
+      expect((await pdfBytes(at)).equals(PDF_BYTES)).toBe(true);
+    };
+
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    const placeholder = window.locator('.ir-binary-item');
+    await expect(placeholder).toContainText('Paper.pdf');
+
+    // From the review tab's own title
+    const title = reviewHeader(window).locator('.view-header-title');
+    await title.click();
+    await window.keyboard.press('ControlOrMeta+A');
+    await window.keyboard.type('Retitled');
+    await window.keyboard.press('Enter');
+    await expectRowAt('papers/Retitled.pdf');
+    // Refetched at its new path, which a row left behind would fail and be
+    // tombstoned for
+    await expect(placeholder).toContainText('Retitled.pdf');
+    await expectRowAt('papers/Retitled.pdf');
+
+    // From the file explorer, on the row review marks as the active file
+    await setNativeMenus(window, false);
+    await executeCommandById(window, 'file-explorer:reveal-active-file');
+    await window
+      .locator('.nav-file-title[data-path="papers/Retitled.pdf"]')
+      .click({ button: 'right' });
+    await window
+      .locator('.menu')
+      .getByText('Rename...', { exact: true })
+      .click();
+    await window.keyboard.press('ControlOrMeta+A');
+    await window.keyboard.type('Explored');
+    await window.keyboard.press('Enter');
+    await expectRowAt('papers/Explored.pdf');
+    await expect(placeholder).toContainText('Explored.pdf');
+    await expectRowAt('papers/Explored.pdf');
+
+    // Its folder, which Obsidian reports as one rename per file inside
+    await window.evaluate(async () => {
+      const { app } = window as unknown as { app: PageApp };
+      await app.fileManager.renameFile(
+        app.vault.getFolderByPath('papers'),
+        'archive'
+      );
+    });
+    await expectRowAt('archive/Explored.pdf');
+
+    // Deleted to Obsidian's own trash, then put back at the same path
+    await window.evaluate(async () => {
+      const { app } = window as unknown as { app: PageApp };
+      await app.vault.trash(
+        app.vault.getFileByPath('archive/Explored.pdf'),
+        false
+      );
+    });
+    await expect.poll(async () => (await articleRow(window))?.deleted).toBe(1);
+    await fs.writeFile(
+      path.join(vaultPath, 'archive/Explored.pdf'),
+      await fs.readFile(path.join(vaultPath, '.trash/Explored.pdf'))
+    );
+    await expect.poll(() => hasFile(window, 'archive/Explored.pdf')).toBe(true);
+    await expectRowAt('archive/Explored.pdf');
   });
 });
