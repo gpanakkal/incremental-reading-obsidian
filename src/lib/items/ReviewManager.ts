@@ -6,8 +6,7 @@ import type {
   QueueSubset,
 } from '#/components/types';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '#/lib/constants';
-import { supportsFrontmatter } from '#/lib/mime';
-import { evictedSpot } from '#/lib/moved-note-scan';
+import { extensionOfPath, supportsFrontmatter } from '#/lib/mime';
 import {
   type ArticleRow,
   type IArticleBase,
@@ -34,6 +33,7 @@ import {
 } from 'obsidian';
 import type { Grade } from 'ts-fsrs';
 import IRScheduler from '../IRScheduler';
+import { evictedSpot } from '../moved-note-scan';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
 import {
@@ -613,7 +613,12 @@ export default class ReviewManager {
     }
     // Everything below goes by frontmatter, which a PDF has none of
     if (!supportsFrontmatter(concreteFile)) {
-      await this.#followPathRename(oldPath, newPath);
+      // Only a file that was already known by its path follows by path. A
+      // note renamed to another type leaves its row behind, missing, until
+      // it's renamed back and found by its ir-id again
+      if (!supportsFrontmatter({ extension: extensionOfPath(oldPath) })) {
+        await this.#followPathRename(oldPath, newPath);
+      }
       return;
     }
 

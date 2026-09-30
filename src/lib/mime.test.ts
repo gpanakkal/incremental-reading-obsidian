@@ -3,6 +3,7 @@ import type { TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   EDITABLE_TEXT_MIME_TYPES,
+  extensionOfPath,
   FRONTMATTER_MIME_TYPES,
   getMimeType,
   IMPORTABLE_MIME_TYPES,
@@ -51,6 +52,36 @@ function makeApp(bytes: Uint8Array) {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe('extensionOfPath', () => {
+  it.each([
+    ['a.pdf', 'pdf'],
+    ['notes/a.MD', 'MD'],
+    ['a.tar.gz', 'gz'],
+    ['folder.d/file', ''],
+    ['noext', ''],
+    ['trailing.', ''],
+  ])('takes %j to have the extension %j', (path, expected) => {
+    expect(extensionOfPath(path)).toBe(expected);
+  });
+
+  it('reads the extension off the name alone, whatever folders it sits in', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.string(), { maxLength: 3 }),
+        fc
+          .string()
+          .filter((name) => !name.includes('/') && !name.includes('.')),
+        fc.string().filter((ext) => !ext.includes('/') && !ext.includes('.')),
+        (folders, name, extension) => {
+          const path = [...folders, `${name}.${extension}`].join('/');
+
+          expect(extensionOfPath(path)).toBe(extension);
+        }
+      )
+    );
+  });
 });
 
 describe('getMimeType', () => {

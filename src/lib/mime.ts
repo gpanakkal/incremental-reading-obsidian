@@ -33,6 +33,17 @@ export function getMimeType(file: Pick<TFile, 'extension'>): string | null {
 }
 
 /**
+ * The extension of the file at `path`, for a path with no `TFile` behind it
+ * any more (the old path of a rename, say): whatever follows the last dot of
+ * its name, or nothing for a name without one.
+ */
+export function extensionOfPath(path: string): string {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  const dot = name.lastIndexOf('.');
+  return dot === -1 ? '' : name.slice(dot + 1);
+}
+
+/**
  * The MIME type of `file` once its content has been checked against what
  * {@link getMimeType} says it is, or `null` when the two disagree (a `.pdf`
  * that isn't a PDF, a `.md` that is one) or the extension is unknown.

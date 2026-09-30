@@ -420,9 +420,9 @@ class TestRepository extends SQLJSRepository {
 function wirePaths(paths: readonly string[]) {
   const repo = TestRepository.create();
   const files = new Map<string, TFile>();
+  const extensionOf = (path: string) => path.slice(path.lastIndexOf('.') + 1);
   const fileAt = (path: string) => {
-    const extension = path.slice(path.lastIndexOf('.') + 1);
-    const file = { path, extension } as TFile;
+    const file = { path, extension: extensionOf(path) } as TFile;
     files.set(path, file);
     return file;
   };
@@ -468,7 +468,9 @@ function wirePaths(paths: readonly string[]) {
   const rename = (from: string, to: string) => {
     const file = files.get(from)!;
     files.delete(from);
+    // Obsidian re-derives the extension, which a rename can change too
     file.path = to;
+    file.extension = extensionOf(to);
     files.set(to, file);
     return manager.handleExternalRename(file, from);
   };
@@ -3289,6 +3291,32 @@ describe('ReviewManager tracking files without frontmatter by path', () => {
     expect(wired.repo.rows('article')).toStrictEqual([
       { id: 'old', reference: 'b.pdf', deleted: false },
     ]);
+  });
+
+  it('leaves the row of a note renamed to a type with no frontmatter where it was', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('pdf', 'PDF', 'png', 'txt'),
+        fc.constantFrom('md', 'MD'),
+        fc.boolean(),
+        async (extension, noteExtension, tombstoneAtTarget) => {
+          const oldPath = `notes/a.${noteExtension}`;
+          const newPath = `notes/a.${extension}`;
+          const wired = wirePaths([oldPath]);
+          wired.insertArticle('a', oldPath);
+          if (tombstoneAtTarget) wired.insertArticle('old', newPath, true);
+          const before = wired.repo.rows('article');
+          const mutate = vi.spyOn(wired.repo, 'mutate');
+          const transaction = vi.spyOn(wired.repo, 'transaction');
+
+          await wired.rename(oldPath, newPath);
+
+          expect(mutate).not.toHaveBeenCalled();
+          expect(transaction).not.toHaveBeenCalled();
+          expect(wired.repo.rows('article')).toStrictEqual(before);
+        }
+      )
+    );
   });
 
   it('writes nothing to the database for a file that is no item', async () => {
