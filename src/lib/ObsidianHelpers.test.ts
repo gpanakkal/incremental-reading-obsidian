@@ -138,6 +138,35 @@ const tagUpdateArb = fc.oneof(tagArb, fc.array(tagArb));
 function toList(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [value];
 }
+
+/**
+ * Any extension of a file with no frontmatter: `pdf` in every casing, and any
+ * other string that isn't some casing of `md`, the empty one included.
+ */
+const binaryExtensionArb = fc.oneof(
+  fc.mixedCase(fc.constant('pdf')),
+  fc.string().filter((ext) => ext.toLowerCase() !== 'md')
+);
+
+/** Both forms `updateFrontMatter` takes: a callback, or properties to merge. */
+const frontMatterUpdatesArb = fc.oneof(
+  fc.constant((_frontmatter: Record<string, unknown>) => {}),
+  fc.record(
+    { 'ir-id': fc.string(), tags: tagUpdateArb, source: fc.string() },
+    { requiredKeys: [] }
+  )
+);
+
+/** The note type each table's rows are, and `null` for no row at all. */
+const TABLE_TYPE: Record<
+  'article' | 'snippet' | 'srs_card' | 'none',
+  NoteType | null
+> = {
+  article: 'article',
+  snippet: 'snippet',
+  srs_card: 'card',
+  none: null,
+};
 // #endregion
 
 // ---------------------------------------------------------------------------
@@ -944,6 +973,70 @@ describe('getNoteType', () => {
       'snippet'
     );
   });
+
+  it('types a file without frontmatter by the row at its path', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        binaryExtensionArb,
+        fc.string(),
+        fc.option(fc.constantFrom('article', 'snippet', 'srs_card'), {
+          nil: null,
+        }),
+        async (extension, path, table) => {
+          const processFrontMatter = vi.fn();
+          const app = makeApp({ fileManager: { processFrontMatter } as never });
+          const file = makeTFile({ extension, path });
+          const findItem = vi.fn().mockResolvedValue(table && { table });
+
+          const type = await ObsidianHelpers.getNoteType(file, app, {
+            findItem,
+          });
+
+          expect(type).toBe(TABLE_TYPE[table ?? 'none']);
+          expect(findItem).toHaveBeenCalledExactlyOnceWith(file);
+          expect(processFrontMatter).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('never makes an item of a file without frontmatter when no rows are given', async () => {
+    await fc.assert(
+      fc.asyncProperty(binaryExtensionArb, async (extension) => {
+        const processFrontMatter = vi.fn();
+        const app = makeApp({ fileManager: { processFrontMatter } as never });
+        await expect(
+          ObsidianHelpers.getNoteType(makeTFile({ extension }), app)
+        ).resolves.toBeNull();
+        expect(processFrontMatter).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('types a markdown note by its tags alone, whatever the rows say', async () => {
+    const TAG_TYPE: [string[] | undefined, NoteType | null][] = [
+      [undefined, null],
+      [['other'], null],
+      [[ARTICLE_TAG], 'article'],
+      [[SNIPPET_TAG], 'snippet'],
+      [[CARD_TAG], 'card'],
+    ];
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...TAG_TYPE),
+        fc.constantFrom('article', 'snippet', 'srs_card'),
+        async ([tags, type], table) => {
+          const findItem = vi.fn().mockResolvedValue({ table });
+          await expect(
+            ObsidianHelpers.getNoteType(makeTFile(), makeAppWithTags(tags), {
+              findItem,
+            })
+          ).resolves.toBe(type);
+          expect(findItem).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1314,6 +1407,26 @@ describe('editNote', () => {
     await ObsidianHelpers.editNote(app, file, (d) => d, opts);
     expect(process).toHaveBeenCalledWith(file, expect.any(Function), opts);
   });
+
+  it('never edits a file that is not text', async () => {
+    await fc.assert(
+      fc.asyncProperty(binaryExtensionArb, async (extension) => {
+        const process = vi.fn().mockResolvedValue('transformed');
+        const fn = vi.fn((data: string) => data);
+        const app = makeApp({ vault: { process } as never });
+
+        const result = await ObsidianHelpers.editNote(
+          app,
+          makeTFile({ extension, path: `a.${extension}` }),
+          fn
+        );
+
+        expect(result).toBeNull();
+        expect(process).not.toHaveBeenCalled();
+        expect(fn).not.toHaveBeenCalled();
+      })
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1522,6 +1635,30 @@ describe('updateFrontMatter', () => {
         expect('tags' in fm).toBe(existing !== ABSENT);
         expect(fm.tags).toBe(existing === ABSENT ? undefined : existing);
       })
+    );
+  });
+
+  it('never writes to a file without frontmatter', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        binaryExtensionArb,
+        frontMatterUpdatesArb,
+        async (extension, updates) => {
+          const processFrontMatter = vi.fn();
+          const process = vi.fn();
+          const app = makeApp({
+            fileManager: { processFrontMatter } as never,
+            vault: { process } as never,
+          });
+          await ObsidianHelpers.updateFrontMatter(
+            makeTFile({ extension, path: `a.${extension}` }),
+            updates,
+            app
+          );
+          expect(processFrontMatter).not.toHaveBeenCalled();
+          expect(process).not.toHaveBeenCalled();
+        }
+      )
     );
   });
 

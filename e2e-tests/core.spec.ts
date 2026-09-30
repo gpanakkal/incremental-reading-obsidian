@@ -14,9 +14,11 @@ import {
   importArticle,
   leafSnapshot,
   openNote,
+  reviewHeader,
   reviewTitle,
   selectParagraph,
   setDefaultEditingMode,
+  setNativeMenus,
   setPluginSetting,
   toggleReviewSourceMode,
   waitForReviewItem,
@@ -1291,5 +1293,174 @@ test.describe('Moved notes', () => {
     await expect
       .poll(async () => (await articleRows(window)).rows)
       .toEqual([{ id: imported.id, reference: movedPath }]);
+  });
+});
+
+test.describe('PDF articles', () => {
+  const PDF_PATH = 'papers/Paper.pdf';
+  const RENAMED_PATH = 'papers/Renamed.pdf';
+  const PDF_ID = 'pdf-article';
+
+  /** A one-page PDF: header, catalog, page tree, one blank page. */
+  const PDF_BYTES = Buffer.from(
+    '%PDF-1.4\n' +
+      '1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n' +
+      '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n' +
+      '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n' +
+      'trailer<</Root 1 0 R>>\n%%EOF\n',
+    'latin1'
+  );
+
+  /** What the page-side calls below reach on Obsidian and the plugin. */
+  type PageApp = {
+    vault: { getFileByPath(path: string): unknown };
+    fileManager: { renameFile(file: unknown, newPath: string): Promise<void> };
+    workspace: {
+      getLeavesOfType(
+        type: string
+      ): { view: { file?: { path: string } }; working: boolean }[];
+    };
+    plugins: {
+      plugins: Record<
+        string,
+        {
+          reviewManager: {
+            repo: {
+              query(sql: string, params?: unknown[]): Record<string, unknown>[];
+              mutate(sql: string, params?: unknown[]): Promise<unknown>;
+            };
+          };
+        }
+      >;
+    };
+  };
+
+  const articleRow = (page: Page) =>
+    page.evaluate((id) => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      return repo.query(
+        'SELECT reference, dismissed, due, fixed_interval_days FROM article WHERE id = $1',
+        [id]
+      )[0];
+    }, PDF_ID);
+
+  const pdfBytes = (at: string) => fs.readFile(path.join(vaultPath, at));
+
+  test('reviews a PDF row as a placeholder, never writing to the PDF', async () => {
+    await fs.mkdir(path.join(vaultPath, 'papers'), { recursive: true });
+    await fs.writeFile(path.join(vaultPath, PDF_PATH), PDF_BYTES);
+    await expect
+      .poll(() =>
+        window.evaluate(
+          (p) =>
+            (window as unknown as { app: PageApp }).app.vault.getFileByPath(
+              p
+            ) !== null,
+          PDF_PATH
+        )
+      )
+      .toBe(true);
+
+    // Seeded directly, the way the old unguarded import left such rows behind
+    await window.evaluate(
+      async ([id, reference]) => {
+        const { app } = window as unknown as { app: PageApp };
+        const { repo } =
+          app.plugins.plugins['incremental-reading'].reviewManager;
+        await repo.mutate(
+          'INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)',
+          [id, reference, Date.now() - 1000, 86_400_000, 30]
+        );
+      },
+      [PDF_ID, PDF_PATH]
+    );
+
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    const placeholder = window.locator('.ir-binary-item');
+    await expect(placeholder).toBeVisible();
+    await expect(placeholder).toContainText('Paper.pdf');
+
+    await placeholder.getByRole('button', { name: 'Open in PDF tab' }).click();
+    // Settled, not merely created: the new tab takes focus only once the PDF
+    // has loaded, and would pull focus back from review if left before that.
+    // `working` is the leaf's own flag for a view state still being set
+    // (read from obsidian.asar, not documented).
+    await expect
+      .poll(() =>
+        window.evaluate(() =>
+          (window as unknown as { app: PageApp }).app.workspace
+            .getLeavesOfType('pdf')
+            .map((leaf) => [leaf.view.file?.path, leaf.working])
+        )
+      )
+      .toEqual([[PDF_PATH, false]]);
+    await window
+      .locator('.workspace-tab-header[data-type="incremental-reading-review"]')
+      .click();
+    await expect(placeholder).toBeVisible();
+
+    // Every action bar control: those that stay on the item, those that leave
+    // it (undone to come back), then the one that finishes it
+    const bar = (name: string) => window.getByRole('button', { name });
+    await bar('Create snippet').click();
+    await bar('Create card').click();
+    const priority = window.getByRole('textbox', { name: 'Priority' });
+    await priority.fill('11');
+    await priority.press('Enter');
+    await expect(priority).toHaveValue('1.1');
+
+    await bar('Change scheduling strategy').click();
+    const modal = window.locator('.ir-scheduling-modal');
+    await modal.locator('input[type="checkbox"]').click();
+    await modal.getByRole('button', { name: 'Confirm' }).click();
+    await expect
+      .poll(async () => (await articleRow(window))?.fixed_interval_days)
+      .not.toBeNull();
+
+    // The ⋮ stands in for the view header's; with the header shown, that one
+    await setNativeMenus(window, false);
+    await reviewHeader(window).getByLabel('More options').click();
+    await expect(window.locator('.menu')).toBeVisible();
+    await window.keyboard.press('Escape');
+
+    await bar('Skip for current review session').click();
+    await expect(placeholder).toBeHidden();
+    await window.locator('#undo-button').click();
+    await expect(placeholder).toBeVisible();
+
+    await bar('Stop scheduling this item for review').click();
+    await expect
+      .poll(async () => (await articleRow(window))?.dismissed)
+      .toBe(1);
+    await window.locator('#undo-button').click();
+    await expect(placeholder).toBeVisible();
+    await expect
+      .poll(async () => (await articleRow(window))?.dismissed)
+      .toBe(0);
+    const dueBefore = (await articleRow(window))?.due;
+    await bar('Mark reviewed').click();
+    await expect
+      .poll(async () => (await articleRow(window))?.due)
+      .not.toBe(dueBefore);
+
+    expect((await pdfBytes(PDF_PATH)).equals(PDF_BYTES)).toBe(true);
+
+    // A rename goes through the plugin's rename handler, which reads
+    // frontmatter for every other kind of item. The row does not follow a
+    // renamed PDF yet (task 0011); what this test holds to is the bytes.
+    await window.evaluate(
+      async ([from, to]) => {
+        const { app } = window as unknown as { app: PageApp };
+        await app.fileManager.renameFile(app.vault.getFileByPath(from), to);
+      },
+      [PDF_PATH, RENAMED_PATH]
+    );
+    await expect
+      .poll(async () =>
+        (await pdfBytes(RENAMED_PATH).catch(() => null))?.equals(PDF_BYTES)
+      )
+      .toBe(true);
   });
 });

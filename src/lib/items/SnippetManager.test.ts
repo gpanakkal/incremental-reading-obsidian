@@ -8,6 +8,7 @@ import {
   MS_PER_YEAR,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
+  SOURCE_TAG,
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
@@ -15,6 +16,7 @@ import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   ISnippetBase,
   ISnippetReview,
+  NoteType,
   SnippetRow,
   SQLiteRepository,
 } from '#/lib/types';
@@ -194,6 +196,74 @@ function insertSnippetRow(
     ]
   );
 }
+
+const SNIPPET_FILE = {
+  path: 'snippets/s.md',
+  extension: 'md',
+  basename: 's',
+} as TFile;
+
+/**
+ * Snip from `parent`, whose article row (if any) has `priority`, with every
+ * call that could touch the parent's content or frontmatter spied on.
+ */
+async function snipFrom(parent: TFile, priority: number | null) {
+  const parentRow =
+    priority === null
+      ? null
+      : { id: 'article-1', reference: parent.path, priority };
+  const touches = {
+    processFrontMatter: vi.fn().mockResolvedValue(undefined),
+    process: vi.fn(),
+    modify: vi.fn(),
+    read: vi.fn(),
+    cachedRead: vi.fn(),
+  };
+  const { processFrontMatter, ...vault } = touches;
+  vi.spyOn(Obsidian, 'createFromText').mockResolvedValue(SNIPPET_FILE);
+  vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue('[[a]]');
+  vi.spyOn(console, 'warn').mockReturnValue(undefined);
+  const repo = {
+    ...makeSimpleRepo(),
+    query: vi.fn(async (sql: string, params?: unknown[]) =>
+      parentRow &&
+      sql.startsWith('SELECT * FROM article WHERE reference') &&
+      params?.[0] === parent.path
+        ? [parentRow]
+        : []
+    ),
+  } as unknown as SQLiteRepository;
+  const manager = new SnippetManager(
+    {
+      app: { vault, fileManager: { processFrontMatter } },
+      settings: {},
+    } as never,
+    repo
+  );
+  const createEntry = vi
+    .spyOn(manager as never as { createEntry: () => unknown }, 'createEntry')
+    .mockResolvedValue(null);
+
+  await manager.create(
+    { getSelection: () => 'selected' } as never,
+    {
+      file: parent,
+      getViewType: () => 'markdown',
+      getSelection: () => '',
+    } as never
+  );
+
+  return { touches, createEntry, parentRow };
+}
+
+/**
+ * Any extension of a file with no frontmatter: `pdf` in every casing, or any
+ * other string that isn't some casing of `md`, the empty one included.
+ */
+const binaryExtensionArb = fc.oneof(
+  fc.mixedCase(fc.constant('pdf')),
+  fc.string().filter((ext) => ext.toLowerCase() !== 'md')
+);
 // #endregion
 
 describe('rowToBase', () => {
@@ -306,7 +376,7 @@ describe('rowToReviewSnippet', () => {
   });
 
   it('returns a ReviewSnippet with correct data and file when the file exists', async () => {
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const repo = makeSimpleRepo();
     const manager = new SnippetManager(
@@ -385,7 +455,7 @@ describe('rowToReviewSnippet', () => {
   });
 
   it('returns null and calls markDeleted when frontmatter has a different ir-id', async () => {
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeSnippetRow({ id: 'row-id-001' });
     const repo = makeSimpleRepo();
@@ -415,7 +485,7 @@ describe('rowToReviewSnippet', () => {
   });
 
   it('calls setFrontmatter when the file has an ir-id but lacks the snippet tag', async () => {
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeSnippetRow({
       id: 'row-id-002',
@@ -444,7 +514,7 @@ describe('rowToReviewSnippet', () => {
   });
 
   it('does not call setFrontmatter when the file has both matching ir-id and the snippet tag', async () => {
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeSnippetRow({
       id: 'row-id-004',
@@ -473,7 +543,7 @@ describe('rowToReviewSnippet', () => {
   });
 
   it('does not call markUndeleted when the file exists and the row is not deleted', async () => {
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeSnippetRow({
       deleted: false,
@@ -506,7 +576,7 @@ describe('rowToReviewSnippet', () => {
   });
 
   it('calls markUndeleted when the file exists but the row is flagged as deleted', async () => {
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeSnippetRow({ deleted: true, due_fuzz: 0 });
     const repo = makeSimpleRepo();
@@ -538,7 +608,7 @@ describe('rowToReviewSnippet on a note the metadata cache is still re-reading', 
   });
 
   it('returns the row as a review item without writing to the note or its tombstone', async () => {
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     await fc.assert(
       fc.asyncProperty(
@@ -579,7 +649,7 @@ describe('rowToReviewSnippet on a note the metadata cache is still re-reading', 
   });
 
   it('still restores the id and tag of a parsed note that has no frontmatter', async () => {
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     await fc.assert(
       fc.asyncProperty(
@@ -931,7 +1001,7 @@ describe('fetch', () => {
 
   it('returns a ReviewSnippet when a row and file are found', async () => {
     const row = makeSnippetRow();
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const repo = {
       query: vi.fn().mockResolvedValue([row]),
@@ -960,6 +1030,7 @@ describe('getDue', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.spyOn(Obsidian, 'getNote').mockReturnValue({
       path: 'snippets/test.md',
+      extension: 'md',
     } as TFile);
   });
 
@@ -1054,7 +1125,7 @@ describe('getDue', () => {
   it('skips rows whose note file is missing and retries until all results have files', async () => {
     const rowA = makeSnippetRow({ id: 'no-file', due: 0 });
     const rowB = makeSnippetRow({ id: 'has-file', due: 0 });
-    const file = { path: 'snippets/test.md' } as TFile;
+    const file = { path: 'snippets/test.md', extension: 'md' } as TFile;
 
     vi.spyOn(Obsidian, 'getNote').mockImplementation((_ref) => {
       if (_ref === rowA.reference) return null;
@@ -1090,7 +1161,7 @@ describe('getDue', () => {
 
   it('passes pre-existing excludeIds on the first fetch call', async () => {
     const rowA = makeSnippetRow({ id: 'excluded-by-caller', due: 0 });
-    const file = { path: 'snippets/test.md' } as TFile;
+    const file = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(file);
 
     const queryCalls: unknown[][] = [];
@@ -1118,7 +1189,7 @@ describe('getDue', () => {
   });
 
   it('starts with an empty exclude list when no excludeIds are given', async () => {
-    const file = { path: 'snippets/test.md' } as TFile;
+    const file = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(file);
 
     const queryCalls: [string, unknown[]][] = [];
@@ -1157,7 +1228,7 @@ describe('getDue', () => {
       reference: 'snippets/no-file.md',
       due: 1,
     });
-    const file = { path: 'snippets/with-file.md' } as TFile;
+    const file = { path: 'snippets/with-file.md', extension: 'md' } as TFile;
 
     vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) => {
       return ref === rowNoFile.reference ? null : file;
@@ -1348,7 +1419,7 @@ describe('fuzzing (rowToReviewSnippet)', () => {
   });
 
   it('fires setReviewTimeFuzz when fuzzTextReviews=true and due_fuzz is null', async () => {
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(3600000);
 
@@ -1371,7 +1442,7 @@ describe('fuzzing (rowToReviewSnippet)', () => {
   });
 
   it('does not fire setReviewTimeFuzz when fuzzTextReviews=false', async () => {
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
 
     const row = makeSnippetRow({ due_fuzz: null });
@@ -1391,7 +1462,7 @@ describe('fuzzing (rowToReviewSnippet)', () => {
   });
 
   it('does not fire setReviewTimeFuzz when due_fuzz is already set', async () => {
-    const fakeFile = { path: 'snippets/test.md' } as TFile;
+    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
 
     const row = makeSnippetRow({ due_fuzz: 12345 });
@@ -1416,6 +1487,7 @@ describe('fuzzing (getDue sort)', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.spyOn(Obsidian, 'getNote').mockReturnValue({
       path: 'snippets/test.md',
+      extension: 'md',
     } as TFile);
   });
 
@@ -1770,7 +1842,7 @@ function wireOrphanNotes(
     const spec = specByPath.get(reference);
     if (spec && !spec.exists) return null;
     // Files outside the candidate set (e.g. a snippet note being rewritten)
-    return { path: reference } as TFile;
+    return { path: reference, extension: 'md' } as TFile;
   });
   vi.spyOn(Obsidian, 'getSourceFile').mockImplementation((file) => {
     const spec = specByPath.get(file.path);
@@ -1901,7 +1973,7 @@ describe('rowToHighlight', () => {
 });
 
 describe('adoptOrphans', () => {
-  const TARGET = { path: 'notes/parent.md' } as TFile;
+  const TARGET = { path: 'notes/parent.md', extension: 'md' } as TFile;
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -2068,7 +2140,7 @@ describe('adoptOrphans', () => {
 });
 
 describe('getHighlights for a note with a database entry', () => {
-  const ARTICLE = { path: 'articles/imported.md' } as TFile;
+  const ARTICLE = { path: 'articles/imported.md', extension: 'md' } as TFile;
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -2336,7 +2408,7 @@ describe('refreshAllHighlights', () => {
 });
 
 describe('repointSource', () => {
-  const NEW_SOURCE = { path: 'articles/copy.md' } as TFile;
+  const NEW_SOURCE = { path: 'articles/copy.md', extension: 'md' } as TFile;
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -2355,7 +2427,9 @@ describe('repointSource', () => {
           );
           vi.spyOn(Obsidian, 'getNote').mockImplementation((reference) => {
             const index = rows.findIndex((row) => row.reference === reference);
-            return fileExists[index] ? ({ path: reference } as TFile) : null;
+            return fileExists[index]
+              ? ({ path: reference, extension: 'md' } as TFile)
+              : null;
           });
           vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue(
             '[[copy]]'
@@ -2381,7 +2455,7 @@ describe('repointSource', () => {
 
   it('writes the link the snippet would have had if taken from the new source', async () => {
     const row = makeSnippetRow({ reference: 'snippets/one.md' });
-    const snippetFile = { path: row.reference } as TFile;
+    const snippetFile = { path: row.reference, extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(snippetFile);
     const linkSpy = vi
       .spyOn(Obsidian, 'generateMarkdownLink')
@@ -2414,7 +2488,7 @@ describe('repointSource', () => {
 });
 
 describe('getHighlights for a note with no database entry', () => {
-  const SOURCE = { path: 'notes/source.md' } as TFile;
+  const SOURCE = { path: 'notes/source.md', extension: 'md' } as TFile;
   let repo: SQLiteRepository;
   let db: Database;
 
@@ -2492,5 +2566,79 @@ describe('getHighlights for a note with no database entry', () => {
     const { manager } = makeSourceNoteManager([RENDERABLE], false);
 
     expect(await manager.getHighlights(SOURCE)).toEqual([]);
+  });
+});
+
+describe('create', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('never touches a parent without frontmatter, and takes after its row when it has one', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        binaryExtensionArb,
+        fc.option(
+          fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+          { nil: null }
+        ),
+        async (extension, priority) => {
+          vi.restoreAllMocks();
+          const parent = { path: `papers/a.${extension}`, extension } as TFile;
+
+          const { touches, createEntry, parentRow } = await snipFrom(
+            parent,
+            priority
+          );
+
+          const touchedParent = Object.values(touches)
+            .flatMap((fn) => fn.mock.calls)
+            .some(([file]) => file === parent);
+          expect(touchedParent).toBe(false);
+          expect(createEntry).toHaveBeenCalledWith(
+            SNIPPET_FILE,
+            expect.any(String),
+            expect.any(Number),
+            parentRow?.priority ?? DEFAULT_PRIORITY,
+            parentRow?.id,
+            undefined
+          );
+        }
+      )
+    );
+  });
+
+  it('tags a markdown parent as a source only when it is no item itself', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<NoteType | null>(null, 'article', 'snippet', 'card'),
+        fc.option(
+          fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+          { nil: null }
+        ),
+        async (parentType, priority) => {
+          vi.restoreAllMocks();
+          const parent = { path: 'notes/a.md', extension: 'md' } as TFile;
+          const updateFrontMatter = vi.fn().mockResolvedValue(undefined);
+          vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(parentType);
+          vi.spyOn(Obsidian, 'updateFrontMatter').mockImplementation(
+            updateFrontMatter
+          );
+
+          // An item parent with no row behind it throws after the tag step;
+          // only the tag step is this test's
+          await snipFrom(parent, priority).catch((error: unknown) => {
+            expect(String(error)).toMatch(/Couldn't find entry/);
+          });
+
+          const parentWrites = updateFrontMatter.mock.calls
+            .filter(([file]) => file === parent)
+            .map(([, updates]: unknown[]) => updates);
+          expect(parentWrites).toStrictEqual(
+            parentType === null ? [{ tags: SOURCE_TAG }] : []
+          );
+        }
+      )
+    );
   });
 });

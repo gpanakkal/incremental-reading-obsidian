@@ -6,6 +6,7 @@ import type {
   QueueSubset,
 } from '#/components/types';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '#/lib/constants';
+import { supportsFrontmatter } from '#/lib/mime';
 import {
   type ArticleRow,
   type IArticleBase,
@@ -545,7 +546,7 @@ export default class ReviewManager {
    * Returns null if the item is not found in the database.
    */
   async getReviewItemFromFile(file: TFile): Promise<ReviewItem | null> {
-    const noteType = await Obsidian.getNoteType(file, this.app);
+    const noteType = await Obsidian.getNoteType(file, this.app, this.articles);
     if (noteType === 'article') {
       const row = await this.articles.findArticle(file);
       if (!row) return null;
@@ -609,6 +610,8 @@ export default class ReviewManager {
     if (!concreteFile) {
       throw new Error(`Failed to find a file at ${newPath}`);
     }
+    // Everything below goes by frontmatter, which a PDF has none of
+    if (!supportsFrontmatter(concreteFile)) return;
 
     let type: string | null = null,
       rowId: string | undefined;
@@ -681,7 +684,8 @@ export default class ReviewManager {
    */
   async handleCreation(file: TAbstractFile) {
     const concreteFile = this.app.vault.getFileByPath(file.path);
-    if (!concreteFile) return;
+    // Everything below goes by frontmatter, which a PDF has none of
+    if (!concreteFile || !supportsFrontmatter(concreteFile)) return;
 
     let id: string | undefined;
     let type: string | null = null;

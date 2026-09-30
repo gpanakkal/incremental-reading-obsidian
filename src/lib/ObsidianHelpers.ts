@@ -31,7 +31,13 @@ import {
   SOURCE_TAG,
 } from './constants';
 import { Markdown } from './Markdown';
-import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
+import { isEditableText, supportsFrontmatter } from './mime';
+import type {
+  FrontMatterUpdates,
+  NoteType,
+  PluginFrontMatter,
+  TableName,
+} from './types';
 import { binarySearch, generateId } from './utils';
 
 export class ObsidianHelpers {
@@ -162,8 +168,28 @@ export class ObsidianHelpers {
 
   /**
    * Gets the type of a note based on its tags.
+   *
+   * A file with no frontmatter has no tags to go by — a PDF article is known by
+   * its path alone — so it is whatever the row at its path is in `items`. The
+   * lookup is opt-in: without `items`, such a file is never an item, so any
+   * caller that can meet one (not the editor extensions, which only ever see
+   * markdown) has to pass it.
    */
-  static async getNoteType(note: TFile, app: App): Promise<NoteType | null> {
+  static async getNoteType(
+    note: TFile,
+    app: App,
+    items?: {
+      findItem(file: TFile): Promise<{
+        table: Extract<TableName, 'article' | 'snippet' | 'srs_card'>;
+      } | null>;
+    }
+  ): Promise<NoteType | null> {
+    if (!supportsFrontmatter(note)) {
+      const match = await items?.findItem(note);
+      if (!match) return null;
+      return match.table === 'srs_card' ? 'card' : match.table;
+    }
+
     let type: NoteType | null = null;
     await app.fileManager.processFrontMatter(
       note,
@@ -280,14 +306,17 @@ export class ObsidianHelpers {
   }
 
   /**
-   * Atomically modify a note
+   * Atomically modify a note, resolving to its new text. A file that isn't
+   * text, a PDF say, is left alone and resolves to `null`: text written over
+   * one corrupts it.
    */
   static async editNote(
     app: App,
     file: TFile,
     fn: (data: string) => string,
     options?: DataWriteOptions
-  ): Promise<string> {
+  ): Promise<string | null> {
+    if (!isEditableText(file)) return null;
     return app.vault.process(file, fn, options);
   }
 
@@ -392,6 +421,12 @@ export class ObsidianHelpers {
     return [...new Set(merged)];
   }
 
+  /**
+   * Write `updates` into `file`'s frontmatter. A file with no frontmatter, a
+   * PDF say, is left alone. `processFrontMatter` skips anything but `.md`
+   * silently too (read from obsidian.asar, not documented), but no caller
+   * should rest on that.
+   */
   static async updateFrontMatter(
     file: TFile,
     updates:
@@ -399,6 +434,7 @@ export class ObsidianHelpers {
       | ((frontmatter: Record<string, unknown>) => void),
     app: App
   ) {
+    if (!supportsFrontmatter(file)) return;
     if (typeof updates === 'function') {
       await app.fileManager.processFrontMatter(file, updates);
     } else {

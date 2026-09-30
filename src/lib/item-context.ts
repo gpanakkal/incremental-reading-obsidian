@@ -1,6 +1,7 @@
 import type { App, TFile } from 'obsidian';
 import { SOURCE_PROPERTY_NAME } from './constants';
 import type ReviewManager from './items/ReviewManager';
+import { isEditableText } from './mime';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import {
   type ReviewArticle,
@@ -124,6 +125,8 @@ export async function resolveItemContext(
 ): Promise<ItemContext | null> {
   const file = await findContextFile(app, reviewManager, item);
   if (!file) return null;
+  // A PDF has no text to find the item in; it opens where it opens
+  if (!isEditableText(file)) return { file, eState: null };
 
   const content = await app.vault.cachedRead(file);
   const range = isReviewSnippet(item)

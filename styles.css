@@ -302,6 +302,24 @@ body {
   display: none;
 }
 
+/* A PDF article in review: its name and a way to open it, centred */
+.ir-binary-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--size-4-4);
+  flex: 1;
+  padding: var(--size-4-6) var(--size-4-4);
+  text-align: center;
+}
+
+.ir-binary-item-name {
+  margin: 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
 .ir-review-placeholder {
   display: flex;
   align-items: center;

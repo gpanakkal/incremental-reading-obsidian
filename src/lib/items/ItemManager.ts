@@ -1,4 +1,5 @@
 import IRScheduler from '#/lib/IRScheduler';
+import { supportsFrontmatter } from '#/lib/mime';
 import type {
   ArticleRow,
   NoteType,
@@ -57,7 +58,7 @@ export class ItemManager {
 
   async findItem(file: TAbstractFile): Promise<{
     row: SnippetRow | SRSCardRow | ArticleRow;
-    table: TableName;
+    table: Extract<TableName, 'srs_card' | 'snippet' | 'article'>;
   } | null> {
     let row: RowTypes | null = await this.findCard(file);
     if (row) {
@@ -134,6 +135,10 @@ export class ItemManager {
    * while the user typed, and it would stamp this row's id over another item's
    * note just as readily. The item is still the row's to show: the note is at
    * its reference, and the next fetch after the parse judges it properly.
+   *
+   * A file with no frontmatter, a PDF say, has no id or tag to square: the
+   * file at a row's reference is that row's file by its path alone. Its
+   * tombstone is left to the vault events that track such files.
    * @returns false when the note claims another item's id. The row is marked
    * deleted then, and has no note to review.
    */
@@ -143,6 +148,7 @@ export class ItemManager {
     type: NoteType,
     tag: string
   ): boolean {
+    if (!supportsFrontmatter(file)) return true;
     if (!this.app.metadataCache.getFileCache(file)) return true;
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);

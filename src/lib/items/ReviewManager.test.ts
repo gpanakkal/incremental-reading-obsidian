@@ -1,4 +1,5 @@
 import { DATA_DIRECTORY, MS_PER_DAY } from '#/lib/constants';
+import { resolveItemContext } from '#/lib/item-context';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   ArticleRow,
@@ -26,7 +27,10 @@ import ReviewManager from './ReviewManager';
 const YEAR_2000_MS = new Date('2000-01-01T12:00:00Z').getTime();
 const YEAR_2100_MS = new Date('2100-01-01T12:00:00Z').getTime();
 
-const FAKE_FILE = { path: 'incremental-reading/test.md' } as TFile;
+const FAKE_FILE = {
+  path: 'incremental-reading/test.md',
+  extension: 'md',
+} as TFile;
 
 function makeRepo(): SQLiteRepository {
   return {
@@ -265,7 +269,7 @@ function wireDueAt(dueTimes: number[]) {
   vi.spyOn(manager.snippets, 'fetchMany').mockResolvedValue([] as never);
   vi.spyOn(manager.cards, 'fetchMany').mockResolvedValue([] as never);
   vi.spyOn(Obsidian, 'getNote').mockImplementation(
-    (reference: string) => ({ path: reference }) as TFile
+    (reference: string) => ({ path: reference, extension: 'md' }) as TFile
   );
   return manager;
 }
@@ -282,6 +286,85 @@ function startOfDay(date: Date) {
   );
   return getEndOfDay(4, yesterday);
 }
+
+/**
+ * A file with no frontmatter: `pdf` in every casing, or any other extension
+ * that isn't some casing of `md`, the empty one included.
+ */
+const binaryFileArb = fc
+  .tuple(
+    fc.string(),
+    fc.oneof(
+      fc.mixedCase(fc.constant('pdf')),
+      fc.string().filter((ext) => ext.toLowerCase() !== 'md')
+    )
+  )
+  .map(
+    ([name, extension]) =>
+      ({ path: `${name}.${extension}`, extension }) as TFile
+  );
+
+type ItemTable = 'article' | 'snippet' | 'srs_card';
+
+const ROW_BY_TABLE: Record<
+  ItemTable,
+  (reference: string) => ArticleRow | SnippetRow | SRSCardRow
+> = {
+  article: (reference) => makeArticleRow({ reference }),
+  snippet: (reference) => makeSnippetRow({ reference }),
+  srs_card: (reference) => makeCardRow({ reference }),
+};
+
+/**
+ * A manager over a vault holding only `file`, whose database holds `table`'s
+ * row at `file`'s path (or no row at all), with every call that could read or
+ * write the file's content or frontmatter spied on.
+ */
+function wireBinary(file: TFile, table: ItemTable | null) {
+  const row = table && { ...ROW_BY_TABLE[table](file.path), table };
+  const touches = {
+    processFrontMatter: vi.fn().mockResolvedValue(undefined),
+    process: vi.fn().mockResolvedValue(''),
+    modify: vi.fn().mockResolvedValue(undefined),
+    read: vi.fn().mockResolvedValue(''),
+    cachedRead: vi.fn().mockResolvedValue(''),
+  };
+  const { processFrontMatter, ...vaultTouches } = touches;
+  const app = {
+    vault: {
+      ...vaultTouches,
+      getFileByPath: vi.fn((path: string) =>
+        path === file.path ? file : null
+      ),
+    },
+    fileManager: { processFrontMatter },
+    metadataCache: {
+      getFileCache: vi.fn(() => ({})),
+      getFirstLinkpathDest: vi.fn(() => null),
+    },
+  };
+  const repo = {
+    ...makeRepo(),
+    // Answers a lookup of `table` by the row's own id or reference
+    query: vi.fn(async (sql: string, params?: unknown[]) => {
+      if (!row) return [];
+      const [, from, column] =
+        /FROM (\w+) WHERE (reference|id) = \$1/.exec(sql) ?? [];
+      const key = column === 'id' ? row.id : row.reference;
+      return from === row.table && params?.[0] === key ? [row] : [];
+    }),
+  } as unknown as SQLiteRepository;
+  const plugin = makePlugin(app);
+  (plugin as { settings: Record<string, unknown> }).settings.fuzzTextReviews =
+    false;
+  const manager = new ReviewManager(plugin, repo);
+  return { manager, app, row, touches };
+}
+
+const itemTableArb = fc.option(
+  fc.constantFrom<ItemTable>('article', 'snippet', 'srs_card'),
+  { nil: null }
+);
 
 // #endregion
 
@@ -463,7 +546,7 @@ describe('ReviewManager.getQueue', () => {
     );
     // Every reference resolves to a file whose path is the reference itself.
     vi.spyOn(Obsidian, 'getNote').mockImplementation(
-      (reference: string) => ({ path: reference }) as TFile
+      (reference: string) => ({ path: reference, extension: 'md' }) as TFile
     );
     return manager;
   }
@@ -864,7 +947,9 @@ describe('ReviewManager.getQueue', () => {
     vi.spyOn(manager.snippets, 'fetchMany').mockResolvedValue([] as never);
     vi.spyOn(manager.cards, 'fetchMany').mockResolvedValue([] as never);
     vi.spyOn(Obsidian, 'getNote').mockImplementation((reference: string) =>
-      reference === 'articles/here.md' ? ({ path: reference } as TFile) : null
+      reference === 'articles/here.md'
+        ? ({ path: reference, extension: 'md' } as TFile)
+        : null
     );
     const { rows: queue } = await manager.getQueue();
     expect(queue.map((r) => r.id)).toEqual(['here']);
@@ -1213,7 +1298,7 @@ describe('ReviewManager.findPageForDate', () => {
     vi.spyOn(manager.snippets, 'fetchMany').mockResolvedValue([] as never);
     vi.spyOn(manager.cards, 'fetchMany').mockResolvedValue([] as never);
     vi.spyOn(Obsidian, 'getNote').mockImplementation(
-      (reference: string) => ({ path: reference }) as TFile
+      (reference: string) => ({ path: reference, extension: 'md' }) as TFile
     );
 
     // Null-due rows sort last, so the dated row is index 0 → page 0. A null
@@ -1289,7 +1374,7 @@ describe('ReviewManager.getQueueRow', () => {
       return Promise.resolve([]);
     });
     vi.spyOn(Obsidian, 'getNote').mockImplementation(
-      (reference: string) => ({ path: reference }) as TFile
+      (reference: string) => ({ path: reference, extension: 'md' }) as TFile
     );
     return new ReviewManager(makePlugin(), repo);
   }
@@ -1863,7 +1948,9 @@ describe('ReviewManager.handleExternalRename', () => {
     filePath?: string
   ) {
     const resolvedPath = filePath ?? `${IR_DIR}/articles/renamed.md`;
-    const file = fileExists ? ({ path: resolvedPath } as TFile) : null;
+    const file = fileExists
+      ? ({ path: resolvedPath, extension: 'md' } as TFile)
+      : null;
     const tagMap: Record<NonNullable<NoteType>, string> = {
       article: 'ir-article',
       snippet: 'ir-text-snippet',
@@ -1994,7 +2081,10 @@ describe('ReviewManager.handleExternalRename', () => {
   it('returns early (no mutate) when old and new reference are identical', async () => {
     const repo = makeRepo();
     // same basename in same subfolder → same reference
-    const sameFile = { path: `${IR_DIR}/articles/same.md` } as TFile;
+    const sameFile = {
+      path: `${IR_DIR}/articles/same.md`,
+      extension: 'md',
+    } as TFile;
     const appObj = {
       vault: {
         getFileByPath: vi.fn().mockReturnValue(sameFile),
@@ -2045,7 +2135,7 @@ describe('ReviewManager.handleExternalRename', () => {
       };
       const newPath = `${IR_DIR}/articles/new-name.md`;
       const oldPath = `${IR_DIR}/articles/old-name.md`;
-      const file = { path: newPath } as TFile;
+      const file = { path: newPath, extension: 'md' } as TFile;
       const appObj = {
         vault: {
           getFileByPath: vi.fn().mockReturnValue(file),
@@ -2399,7 +2489,7 @@ describe('ReviewManager.handleExternalRename rowId branch', () => {
       snippet: 'ir-text-snippet',
       card: 'ir-card',
     };
-    const file = { path: newPath } as TFile;
+    const file = { path: newPath, extension: 'md' } as TFile;
     return {
       vault: {
         getFileByPath: vi.fn().mockReturnValue(file),
@@ -2559,7 +2649,7 @@ describe('ReviewManager.handleExternalRename CARD_TAG condition', () => {
     const repo = makeRepo();
     const newPath = `${IR_DIR}/articles/new-name.md`;
     const oldPath = `${IR_DIR}/articles/old-name.md`;
-    const file = { path: newPath } as TFile;
+    const file = { path: newPath, extension: 'md' } as TFile;
     const appObj = {
       vault: {
         getFileByPath: vi.fn().mockReturnValue(file),
@@ -2601,7 +2691,7 @@ describe('ReviewManager.handleExternalRename CARD_TAG condition', () => {
     const repo = makeRepo();
     const newPath = `${IR_DIR}/articles/some.md`;
     const oldPath = `${IR_DIR}/articles/other.md`;
-    const file = { path: newPath } as TFile;
+    const file = { path: newPath, extension: 'md' } as TFile;
     const appObj = {
       vault: {
         getFileByPath: vi.fn().mockReturnValue(file),
@@ -2647,7 +2737,10 @@ describe('ReviewManager.handleCreation copy detection', () => {
     existingFiles: { path: string; irId?: string }[]
   ) {
     const files = new Map(
-      existingFiles.map(({ path }) => [path, { path } as TFile])
+      existingFiles.map(({ path }) => [
+        path,
+        { path, extension: 'md' } as TFile,
+      ])
     );
     const cachedIds = new Map(
       existingFiles.map(({ path, irId: fileIrId }) => [path, fileIrId])
@@ -2771,7 +2864,7 @@ describe('ReviewManager.handleExternalRename console.warn mutant', () => {
   it('warns (does not mutate) when old and new reference are identical', async () => {
     const repo = makeRepo();
     const samePath = `${DATA_DIRECTORY}/articles/same.md`;
-    const file = { path: samePath } as TFile;
+    const file = { path: samePath, extension: 'md' } as TFile;
     const appObj = {
       vault: {
         getFileByPath: vi.fn().mockReturnValue(file),
@@ -2848,6 +2941,99 @@ describe('ReviewManager.updateManySnippetOffsets', () => {
 
     await expect(manager.updateManySnippetOffsets([])).rejects.toThrow(
       'write failed'
+    );
+  });
+});
+
+describe('ReviewManager on a file without frontmatter', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('types it by the row at its path when fetched from its file', async () => {
+    await fc.assert(
+      fc.asyncProperty(binaryFileArb, itemTableArb, async (file, table) => {
+        const { manager, row } = wireBinary(file, table);
+
+        const item = await manager.getReviewItemFromFile(file);
+
+        expect(item?.file ?? null).toBe(row && file);
+        expect(item?.data.id ?? null).toBe(row && row.id);
+        expect(item?.data.type ?? null).toBe(
+          table === 'srs_card' ? 'card' : table
+        );
+      })
+    );
+  });
+
+  it('never touches its content or frontmatter when it is renamed or created', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        binaryFileArb,
+        itemTableArb,
+        fc.string(),
+        async (file, table, oldPath) => {
+          const { manager, touches } = wireBinary(file, table);
+
+          await manager.handleExternalRename(file, oldPath);
+          await manager.handleCreation(file);
+
+          for (const touch of Object.values(touches)) {
+            expect(touch).not.toHaveBeenCalled();
+          }
+        }
+      )
+    );
+  });
+
+  it('never reads or writes its content or frontmatter, whatever is called on it in whatever order', async () => {
+    type Call = (
+      wired: ReturnType<typeof wireBinary>,
+      file: TFile
+    ) => Promise<unknown>;
+    const calls: Record<string, Call> = {
+      updateFrontMatter: ({ app }, file) =>
+        Obsidian.updateFrontMatter(file, { tags: 'ir-source' }, app as never),
+      updateFrontMatterFn: ({ app }, file) =>
+        Obsidian.updateFrontMatter(file, () => {}, app as never),
+      getNoteType: ({ app, manager }, file) =>
+        Obsidian.getNoteType(file, app as never, manager.articles),
+      setFrontmatter: ({ manager }, file) =>
+        manager.articles.setFrontmatter(file, 'id', 'ir-article'),
+      fetch: ({ manager, row }) =>
+        manager.getReviewItemFromId(row?.id ?? 'none'),
+      getDue: ({ manager }) => manager.articles.getDue(),
+      getReviewItemFromFile: ({ manager }, file) =>
+        manager.getReviewItemFromFile(file),
+      handleExternalRename: ({ manager }, file) =>
+        manager.handleExternalRename(file, 'old.pdf'),
+      handleCreation: ({ manager }, file) => manager.handleCreation(file),
+      resolveItemContext: ({ app, manager, row }) =>
+        resolveItemContext(app as never, manager, {
+          data: { ...makeSnippetBase(), parent: row?.id ?? null },
+          file: { path: 'snippets/s.md', extension: 'md' } as TFile,
+        }),
+    };
+    await fc.assert(
+      fc.asyncProperty(
+        binaryFileArb,
+        itemTableArb,
+        fc.array(fc.constantFrom(...Object.keys(calls))),
+        async (file, table, sequence) => {
+          const wired = wireBinary(file, table);
+          vi.spyOn(wired.manager.articles, 'fetchMany').mockResolvedValue(
+            wired.row?.table === 'article' ? [wired.row as never] : []
+          );
+
+          for (const name of sequence) await calls[name](wired, file);
+          // Let the fire-and-forget writes those started run
+          await Promise.resolve();
+
+          for (const touch of Object.values(wired.touches)) {
+            expect(touch).not.toHaveBeenCalled();
+          }
+        }
+      )
     );
   });
 });

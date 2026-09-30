@@ -257,8 +257,9 @@ export class SnippetManager extends ItemManager {
       this.app
     );
 
-    // Tag the source note as ir-source if it doesn't have any IR tag yet
-    const parentType = await Obsidian.getNoteType(currentFile, this.app);
+    // Tag the source note as ir-source if it doesn't have any IR tag yet (a
+    // PDF, which has no tags, is left untagged by `updateFrontMatter`)
+    const parentType = await Obsidian.getNoteType(currentFile, this.app, this);
     if (!parentType) {
       await Obsidian.updateFrontMatter(
         currentFile,
