@@ -1,6 +1,7 @@
 import { useReviewContext } from '#/components/ReviewContext';
 import type { QueueSubset } from '#/components/types';
 import { CURRENT_ITEM_REFETCH_TIME } from '#/lib/constants';
+import { isEditableText } from '#/lib/mime';
 import {
   currentItemQueryFn,
   currentItemQueryKey,
@@ -127,11 +128,14 @@ export function useCurrentItemFileText(): {
   const { plugin } = useReviewContext();
   const { data: currentItem, isLoading: itemLoading } = useCurrentItem();
 
+  // Only text is read: a PDF read as text is what the review editor would
+  // show, and then save back over the PDF.
+  const readable = !!currentItem && isEditableText(currentItem.file);
   const { data: text, isLoading: textLoading } = useQuery({
-    enabled: !!currentItem,
+    enabled: readable,
     queryKey: ['item', currentItem?.data.id, 'file-text'],
     queryFn: async () => {
-      if (!currentItem) return;
+      if (!currentItem || !readable) return;
       return plugin.app.vault.read(currentItem.file);
     },
   });

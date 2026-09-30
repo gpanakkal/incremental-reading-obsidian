@@ -1,11 +1,35 @@
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { useCurrentItemFileText } from '#/hooks/useReactQuery';
-import { isReviewCard } from '#/lib/types';
+import { getMimeType, isEditableText } from '#/lib/mime';
+import { type ReviewItem as TReviewItem, isReviewCard } from '#/lib/types';
 import type { EditorView } from '@codemirror/view';
 import { CardViewer } from './CardViewer';
 import { IREditor } from './IREditor';
 import { LoadingSpinner } from './LoadingSpinner';
+import { useReviewContext } from './ReviewContext';
 import { ReviewSummary } from './ReviewSummary';
+
+/**
+ * An item whose file isn't text, a PDF article, in place of the editor: the
+ * review tab can't show it yet, so it offers to open it where Obsidian can.
+ * The action bar still reviews it; only its content lives in the other tab.
+ */
+function BinaryItem({ item }: { item: TReviewItem }) {
+  const { actions } = useReviewContext();
+  return (
+    <div className="ir-binary-item">
+      <p className="ir-binary-item-name">{item.file.name}</p>
+      <button
+        className="mod-cta"
+        onClick={() => void actions._openInNewTab(item.file, null)}
+      >
+        {getMimeType(item.file) === 'application/pdf'
+          ? 'Open in PDF tab'
+          : 'Open in new tab'}
+      </button>
+    </div>
+  );
+}
 
 /**
  * TODO:
@@ -25,6 +49,9 @@ export default function ReviewItem() {
   // time it was merely unread — including on the first open of the tab.
   if (isLoading) return <LoadingSpinner label="Loading review item" />;
 
+  // Before the summary: such an item's text is never read, and an item with
+  // no text would otherwise read as an empty queue.
+  if (item && !isEditableText(item.file)) return <BinaryItem item={item} />;
   if (!item || !fileText) return <ReviewSummary />;
   return (
     <>

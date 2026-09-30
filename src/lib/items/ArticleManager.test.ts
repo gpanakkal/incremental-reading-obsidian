@@ -423,6 +423,7 @@ describe('getDue', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.spyOn(Obsidian, 'getNote').mockReturnValue({
       path: 'articles/test.md',
+      extension: 'md',
     } as TFile);
   });
 
@@ -560,7 +561,7 @@ describe('getDue', () => {
     // returns only rowB (rowA excluded). Obsidian.getNote returns null for rowA's reference.
     const rowA = makeArticleRow({ id: 'no-file', due: 0 });
     const rowB = makeArticleRow({ id: 'has-file', due: 0 });
-    const file = { path: 'articles/test.md' } as TFile;
+    const file = { path: 'articles/test.md', extension: 'md' } as TFile;
 
     vi.spyOn(Obsidian, 'getNote').mockImplementation((_ref) => {
       if (_ref === rowA.reference) return null;
@@ -595,7 +596,7 @@ describe('getDue', () => {
   });
 
   it('starts with an empty exclude list when no excludeIds are given', async () => {
-    const file = { path: 'articles/test.md' } as TFile;
+    const file = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(file);
 
     const queryCalls: [string, unknown[]][] = [];
@@ -625,7 +626,7 @@ describe('getDue', () => {
 
   it('passes pre-existing excludeIds on the first fetch call', async () => {
     const rowA = makeArticleRow({ id: 'excluded-by-caller', due: 0 });
-    const file = { path: 'articles/test.md' } as TFile;
+    const file = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(file);
 
     const queryCalls: unknown[][] = [];
@@ -666,7 +667,7 @@ describe('getDue', () => {
       reference: 'articles/no-file.md',
       due: 1,
     });
-    const file = { path: 'articles/with-file.md' } as TFile;
+    const file = { path: 'articles/with-file.md', extension: 'md' } as TFile;
 
     vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) => {
       return ref === rowNoFile.reference ? null : file;
@@ -807,7 +808,7 @@ describe('rowToReviewArticle', () => {
   });
 
   it('returns a ReviewArticle with data and file when the file exists', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     await fc.assert(
       fc.asyncProperty(articleRowArb, async (row) => {
@@ -823,6 +824,55 @@ describe('rowToReviewArticle', () => {
         expect(result!.data.dismissed).toBe(Boolean(row.dismissed));
         expect(result!.data.type).toBe('article');
       })
+    );
+  });
+
+  it('returns a PDF row as a review item without reading or writing the PDF', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        articleRowArb,
+        fc.oneof(
+          fc.mixedCase(fc.constant('pdf')),
+          fc.string().filter((ext) => ext.toLowerCase() !== 'md')
+        ),
+        fc.boolean(),
+        async (row, extension, fuzz) => {
+          const file = { path: `papers/a.${extension}`, extension } as TFile;
+          const touches = {
+            processFrontMatter: vi.fn().mockResolvedValue(undefined),
+            process: vi.fn().mockResolvedValue(''),
+            modify: vi.fn().mockResolvedValue(undefined),
+            read: vi.fn().mockResolvedValue(''),
+            cachedRead: vi.fn().mockResolvedValue(''),
+          };
+          const { processFrontMatter, ...vault } = touches;
+          const manager = new ArticleManager(
+            {
+              app: {
+                vault: { ...vault, getFileByPath: () => file },
+                // Whatever the cache says of a PDF, it has no id or tag to repair
+                metadataCache: { getFileCache: () => ({}) },
+                fileManager: { processFrontMatter },
+              },
+              settings: { fuzzTextReviews: fuzz },
+            } as never,
+            makeSimpleRepo()
+          );
+
+          const result = manager.rowToReviewArticle({
+            ...row,
+            reference: file.path,
+          });
+          // Let the fire-and-forget writes it starts run
+          await Promise.resolve();
+
+          expect(result?.file).toBe(file);
+          expect(result?.data.id).toBe(row.id);
+          for (const touch of Object.values(touches)) {
+            expect(touch).not.toHaveBeenCalled();
+          }
+        }
+      )
     );
   });
 
@@ -855,7 +905,7 @@ describe('rowToReviewArticle', () => {
   });
 
   it('returns null and calls markDeleted when frontmatter has a different ir-id', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeArticleRow({ id: 'row-id-001' });
     const repo = makeSimpleRepo();
@@ -886,7 +936,7 @@ describe('rowToReviewArticle', () => {
   });
 
   it('calls setFrontmatter when the file has an ir-id but lacks the article tag', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeArticleRow({
       id: 'row-id-002',
@@ -915,7 +965,7 @@ describe('rowToReviewArticle', () => {
   });
 
   it('calls setFrontmatter when the file has matching ir-id but no tags field', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeArticleRow({
       id: 'row-id-003',
@@ -944,7 +994,7 @@ describe('rowToReviewArticle', () => {
   });
 
   it('does not call setFrontmatter when the file has both matching ir-id and the article tag', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeArticleRow({
       id: 'row-id-004',
@@ -973,7 +1023,7 @@ describe('rowToReviewArticle', () => {
   });
 
   it('does not call markUndeleted when the file exists and the row is not deleted', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeArticleRow({
       deleted: false,
@@ -1006,7 +1056,7 @@ describe('rowToReviewArticle', () => {
   });
 
   it('calls markUndeleted when the file exists but the row is flagged as deleted', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeArticleRow({ deleted: true, due_fuzz: 0 });
     const repo = makeSimpleRepo();
@@ -1038,7 +1088,7 @@ describe('rowToReviewArticle on a note the metadata cache is still re-reading', 
   });
 
   it('returns the row as a review item without writing to the note or its tombstone', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     await fc.assert(
       fc.asyncProperty(
@@ -1079,7 +1129,7 @@ describe('rowToReviewArticle on a note the metadata cache is still re-reading', 
   });
 
   it('still restores the id and tag of a parsed note that has no frontmatter', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     await fc.assert(
       fc.asyncProperty(
@@ -1320,7 +1370,7 @@ describe('fetch', () => {
 
   it('returns a ReviewArticle when a row and file are found', async () => {
     const row = makeArticleRow();
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const repo = {
       query: vi.fn().mockResolvedValue([row]),
@@ -1906,7 +1956,7 @@ describe('getDue (filter correctness)', () => {
       reference: 'articles/with-file.md',
       due: 0,
     });
-    const file = { path: 'articles/with-file.md' } as TFile;
+    const file = { path: 'articles/with-file.md', extension: 'md' } as TFile;
 
     vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) =>
       ref === rowNoFile.reference ? null : file
@@ -1952,7 +2002,7 @@ describe('getDue (filter correctness)', () => {
       reference: 'articles/present.md',
       due: 0,
     });
-    const file = { path: 'articles/present.md' } as TFile;
+    const file = { path: 'articles/present.md', extension: 'md' } as TFile;
 
     vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) =>
       ref === missingRow.reference ? null : file
@@ -1997,7 +2047,7 @@ describe('fuzzing (rowToReviewArticle)', () => {
   });
 
   it('fires setReviewTimeFuzz when fuzzTextReviews=true and due_fuzz is null', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(3600000);
 
@@ -2022,7 +2072,7 @@ describe('fuzzing (rowToReviewArticle)', () => {
   });
 
   it('does not fire setReviewTimeFuzz when fuzzTextReviews=false', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
 
     const row = makeArticleRow({ due_fuzz: null });
@@ -2042,7 +2092,7 @@ describe('fuzzing (rowToReviewArticle)', () => {
   });
 
   it('does not fire setReviewTimeFuzz when due_fuzz is already set', async () => {
-    const fakeFile = { path: 'articles/test.md' } as TFile;
+    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
 
     const row = makeArticleRow({ due_fuzz: 12345 });
@@ -2067,6 +2117,7 @@ describe('fuzzing (getDue sort)', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.spyOn(Obsidian, 'getNote').mockReturnValue({
       path: 'articles/test.md',
+      extension: 'md',
     } as TFile);
   });
 

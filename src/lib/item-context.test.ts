@@ -201,6 +201,15 @@ const highlightCaseArb = noteArb.chain((note) =>
   })
 );
 
+/**
+ * Any extension of a file that isn't text: `pdf` in every casing, or any
+ * other string that isn't some casing of `md`, the empty one included.
+ */
+const binaryExtensionArb = fc.oneof(
+  fc.mixedCase(fc.constant('pdf')),
+  fc.string().filter((ext) => ext.toLowerCase() !== 'md')
+);
+
 // #endregion
 
 afterEach(() => {
@@ -412,6 +421,49 @@ describe('resolveItemContext', () => {
           expect(app.metadataCache.getFileCache).toHaveBeenCalledWith(
             contextFile
           );
+        }
+      )
+    );
+  });
+
+  it('opens a context that is not text without reading it, since it has no text to point into', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('snippet', 'card'),
+        binaryExtensionArb,
+        fc.boolean(),
+        async (type, extension, fromParent) => {
+          vi.restoreAllMocks();
+          const contextFile = {
+            ...makeTFile(`papers/Paper.${extension}`),
+            extension,
+          } as TFile;
+          const parent = {
+            data: { id: 'article-1' },
+            file: contextFile,
+          } as ReviewItem;
+          vi.spyOn(ObsidianHelpers, 'getSourceFile').mockReturnValue(
+            fromParent ? null : contextFile
+          );
+          const app = makeApp({ content: 'text' });
+          const item =
+            type === 'snippet'
+              ? makeSnippet({
+                  parent: 'article-1',
+                  start_offset: 0,
+                  end_offset: 1,
+                })
+              : makeCard('article-1');
+
+          const context = await resolveItemContext(
+            app,
+            makeReviewManager(fromParent ? parent : null),
+            item
+          );
+
+          expect(context).toEqual({ file: contextFile, eState: null });
+          expect(app.vault.cachedRead).not.toHaveBeenCalled();
+          expect(app.metadataCache.getFileCache).not.toHaveBeenCalled();
         }
       )
     );

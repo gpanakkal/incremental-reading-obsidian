@@ -1,6 +1,7 @@
 import type { Actions } from '#/lib/Actions';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type ReviewManager from '#/lib/items/ReviewManager';
+import { isEditableText } from '#/lib/mime';
 import { queryClient } from '#/lib/query-client';
 import { setReviewViewSaving } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
@@ -46,6 +47,9 @@ export function ReviewContextProvider({
   }
 
   const saveNote = async (item: ReviewItem, newContent: string) => {
+    // The editor never mounts on a PDF, and `editNote` won't write to one, but
+    // the cache entry and highlight offsets below are no business of it either
+    if (!isEditableText(item.file)) return;
     // Save document content and highlight offsets together to avoid race conditions
     const highlights = reviewManager.snippets.offsetTracker.getHighlights(
       item.file.path

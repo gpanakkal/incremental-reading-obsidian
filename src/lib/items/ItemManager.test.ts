@@ -1,3 +1,4 @@
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type { NoteType, SQLiteRepository } from '#/lib/types';
 import fc from 'fast-check';
 import type { CachedMetadata, TFile } from 'obsidian';
@@ -50,7 +51,7 @@ function wire(cache: CachedMetadata | null) {
   return { manager, mutate, setFrontmatter, markDeleted, markUndeleted };
 }
 
-const FILE = { path: 'notes/item.md' } as TFile;
+const FILE = { path: 'notes/item.md', extension: 'md' } as TFile;
 
 // Row ids are UUIDs; any non-empty string stands in for one
 const rowArb = fc.record({
@@ -99,6 +100,23 @@ const settledArb = fc
       frontmatter: frontmatterArb,
     });
   });
+
+/**
+ * A file with no frontmatter: `pdf` in every casing, or any other extension
+ * that isn't some casing of `md`, the empty one included.
+ */
+const binaryFileArb = fc
+  .tuple(
+    fc.string(),
+    fc.oneof(
+      fc.mixedCase(fc.constant('pdf')),
+      fc.string().filter((ext) => ext.toLowerCase() !== 'md')
+    )
+  )
+  .map(
+    ([name, extension]) =>
+      ({ path: `${name}.${extension}`, extension }) as TFile
+  );
 // #endregion
 
 describe('reconcileNote', () => {
@@ -196,5 +214,94 @@ describe('reconcileNote', () => {
     expect(setFrontmatter.mock.calls).toStrictEqual([
       [FILE, 'a1', 'ir-article'],
     ]);
+  });
+});
+
+describe('reconcileNote on a file without frontmatter', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('keeps the row by path alone, writing nothing to the file or the row', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        settledArb,
+        fc.boolean(),
+        binaryFileArb,
+        async ({ row, type, tag, frontmatter }, settled, file) => {
+          // Whatever the cache holds for it, a PDF's frontmatter is not the
+          // row's to read or repair
+          const { manager, setFrontmatter, markDeleted, markUndeleted } = wire(
+            settled
+              ? ({
+                  frontmatter: structuredClone(frontmatter),
+                } as CachedMetadata)
+              : null
+          );
+
+          expect(manager.reconcile(row, file, type, tag)).toBe(true);
+
+          expect(setFrontmatter).not.toHaveBeenCalled();
+          expect(markDeleted).not.toHaveBeenCalled();
+          expect(markUndeleted).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+});
+
+describe('setFrontmatter', () => {
+  it('never writes to a file without frontmatter', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        binaryFileArb,
+        fc.string(),
+        fc.oneof(fc.string(), fc.array(fc.string())),
+        async (file, id, tags) => {
+          const processFrontMatter = vi.fn().mockResolvedValue(undefined);
+          const process = vi.fn().mockResolvedValue('');
+          const manager = new TestManager(
+            {
+              app: { fileManager: { processFrontMatter }, vault: { process } },
+            } as never,
+            makeRepo().repo
+          );
+
+          await manager.setFrontmatter(file, id, tags);
+
+          expect(processFrontMatter).not.toHaveBeenCalled();
+          expect(process).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('writes the id and tags into a markdown note', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.oneof(fc.string(), fc.array(fc.string())),
+        async (id, tags) => {
+          const frontmatter: Record<string, unknown> = {};
+          const processFrontMatter = vi.fn(
+            async (_file: TFile, fn: (fm: Record<string, unknown>) => void) => {
+              fn(frontmatter);
+            }
+          );
+          const manager = new TestManager(
+            { app: { fileManager: { processFrontMatter } } } as never,
+            makeRepo().repo
+          );
+
+          await manager.setFrontmatter(FILE, id, tags);
+
+          expect(processFrontMatter).toHaveBeenCalledOnce();
+          expect(frontmatter).toStrictEqual({
+            'ir-id': id,
+            tags: Obsidian._mergeTags(undefined, tags),
+          });
+        }
+      )
+    );
   });
 });

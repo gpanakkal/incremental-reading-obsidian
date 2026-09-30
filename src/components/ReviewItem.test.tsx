@@ -7,6 +7,7 @@ import { type ComponentChild, render } from 'preact';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as CardViewerModule from './CardViewer';
 import * as IREditorModule from './IREditor';
+import * as ReviewContext from './ReviewContext';
 import ReviewItem from './ReviewItem';
 import * as ReviewSummaryModule from './ReviewSummary';
 
@@ -30,12 +31,17 @@ function makeItem({
   type,
   id = 'i1',
   path = 'sources/a.md',
+  extension = 'md',
 }: {
   type: NoteType;
   id?: string;
   path?: string;
+  extension?: string;
 }): TReviewItem {
-  return { data: { type, id }, file: { path } as TFile } as TReviewItem;
+  return {
+    data: { type, id },
+    file: { path, name: path.split('/').pop(), extension } as TFile,
+  } as TReviewItem;
 }
 
 /**
@@ -64,6 +70,10 @@ function wireItem({
   document.body.innerHTML = '';
 
   reduxState = { showAnswer };
+  const openInNewTab = vi.fn().mockResolvedValue(undefined);
+  vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
+    actions: { _openInNewTab: openInNewTab },
+  } as never);
   vi.spyOn(ReactQuery, 'useCurrentItemFileText').mockReturnValue({
     item,
     text,
@@ -80,8 +90,18 @@ function wireItem({
   const summary = vi
     .spyOn(ReviewSummaryModule, 'ReviewSummary')
     .mockReturnValue(<></>);
-  return { cardViewer, editor, summary };
+  return { cardViewer, editor, summary, openInNewTab };
 }
+
+function binaryPlaceholder(container: HTMLElement): HTMLElement | null {
+  return container.querySelector('.ir-binary-item');
+}
+
+/** An extension that isn't some casing of `md`: a PDF, or anything else. */
+const binaryExtensionArb = fc.oneof(
+  fc.mixedCase(fc.constant('pdf')),
+  fc.string().filter((ext) => ext.toLowerCase() !== 'md')
+);
 
 function spinner(container: HTMLElement): HTMLElement | null {
   return container.querySelector('.ir-loading');
@@ -248,6 +268,75 @@ describe('ReviewItem', () => {
             className: 'ir-editor',
             item,
           });
+        }
+      )
+    );
+  });
+
+  it('shows an item that is not text as a way to open it, never as text', () => {
+    // A PDF has no text to edit, and its file text is never read, so it
+    // cannot fall through to the editor, which would write whatever it shows
+    // back over the PDF, nor to the summary, which would call the queue empty.
+    fc.assert(
+      fc.property(
+        fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+        fc.string(),
+        binaryExtensionArb,
+        fc.option(loadedTextArb, { nil: undefined }),
+        fc.boolean(),
+        (type, id, extension, text, showAnswer) => {
+          const item = makeItem({
+            type,
+            id,
+            path: `papers/a.${extension}`,
+            extension,
+          });
+          const { cardViewer, editor, summary, openInNewTab } = wireItem({
+            item,
+            text,
+            isLoading: false,
+            showAnswer,
+          });
+
+          const container = mount(<ReviewItem />);
+          const button = binaryPlaceholder(container)?.querySelector('button');
+
+          expect(button?.textContent).toBe(
+            extension.toLowerCase() === 'pdf'
+              ? 'Open in PDF tab'
+              : 'Open in new tab'
+          );
+          expect(editor).not.toHaveBeenCalled();
+          expect(cardViewer).not.toHaveBeenCalled();
+          expect(summary).not.toHaveBeenCalled();
+          expect(openInNewTab).not.toHaveBeenCalled();
+
+          button!.click();
+
+          expect(openInNewTab.mock.calls).toStrictEqual([[item.file, null]]);
+        }
+      )
+    );
+  });
+
+  it('never shows a markdown item as a way to open it', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+        fc.mixedCase(fc.constant('md')),
+        fc.option(loadedTextArb, { nil: undefined }),
+        fc.boolean(),
+        (type, extension, text, showAnswer) => {
+          wireItem({
+            item: makeItem({ type, path: `notes/a.${extension}`, extension }),
+            text,
+            isLoading: false,
+            showAnswer,
+          });
+
+          const container = mount(<ReviewItem />);
+
+          expect(binaryPlaceholder(container)).toBeNull();
         }
       )
     );

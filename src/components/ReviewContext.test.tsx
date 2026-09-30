@@ -22,8 +22,12 @@ function fileTextKey(itemId: string) {
   return ['item', itemId, 'file-text'];
 }
 
-function makeItem(id: string, path = 'IR/Articles/source.md'): ReviewItem {
-  return { data: { id }, file: { path } } as unknown as ReviewItem;
+function makeItem(
+  id: string,
+  path = 'IR/Articles/source.md',
+  extension = 'md'
+): ReviewItem {
+  return { data: { id }, file: { path, extension } } as unknown as ReviewItem;
 }
 
 /**
@@ -70,6 +74,15 @@ function captureSaveNote(reviewManager: ReturnType<typeof makeReviewManager>) {
   if (!ref.current) throw new Error('saveNote was not provided by the context');
   return ref.current;
 }
+
+/**
+ * Any extension of a file that isn't text: `pdf` in every casing, or any
+ * other string that isn't some casing of `md`, the empty one included.
+ */
+const binaryExtensionArb = fc.oneof(
+  fc.mixedCase(fc.constant('pdf')),
+  fc.string().filter((ext) => ext.toLowerCase() !== 'md')
+);
 
 // #endregion
 
@@ -188,9 +201,9 @@ describe('saveNote publishes its write to the file-text cache', () => {
 
     const saveNote = captureSaveNote(makeReviewManager());
 
-    await expect(saveNote(makeItem('article-1'), 'never reached')).rejects.toThrow(
-      'write failed'
-    );
+    await expect(
+      saveNote(makeItem('article-1'), 'never reached')
+    ).rejects.toThrow('write failed');
     expect(queryClient.getQueryData(fileTextKey('article-1'))).toBe(original);
   });
 
@@ -326,5 +339,47 @@ describe('saveNote suppresses external-modification handling around its own writ
       ([action]) => (action as { payload: boolean }).payload
     );
     expect(payloads).toEqual([true, false]);
+  });
+});
+
+describe('saveNote on an item that is not text', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    dispatch.mockClear();
+    queryClient.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('writes nothing, so no text can land over a PDF', async () => {
+    const editNote = vi
+      .spyOn(ObsidianHelpers, 'editNote')
+      .mockResolvedValue('');
+    const reviewManager = makeReviewManager();
+    const saveNote = captureSaveNote(reviewManager);
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ minLength: 1 }),
+        binaryExtensionArb,
+        fc.string(),
+        async (itemId, extension, written) => {
+          // Counts accumulate across cases, shrinking included
+          editNote.mockClear();
+          reviewManager.updateManySnippetOffsets.mockClear();
+          dispatch.mockClear();
+          queryClient.clear();
+
+          await saveNote(
+            makeItem(itemId, `papers/a.${extension}`, extension),
+            written
+          );
+
+          expect(editNote).not.toHaveBeenCalled();
+          expect(reviewManager.updateManySnippetOffsets).not.toHaveBeenCalled();
+          expect(dispatch).not.toHaveBeenCalled();
+          expect(queryClient.getQueryData(fileTextKey(itemId))).toBeUndefined();
+        }
+      )
+    );
   });
 });

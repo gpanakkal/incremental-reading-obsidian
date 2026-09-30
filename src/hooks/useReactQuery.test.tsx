@@ -58,10 +58,10 @@ vi.mock('react-redux', () => ({
   useDispatch: () => vi.fn(),
 }));
 
-function makeItem(id: string): ReviewItem {
+function makeItem(id: string, extension = 'md'): ReviewItem {
   return {
     data: { type: 'article', id },
-    file: { path: `sources/${id}.md` } as TFile,
+    file: { path: `sources/${id}.${extension}`, extension } as TFile,
   } as ReviewItem;
 }
 
@@ -79,9 +79,13 @@ function seedCurrentItem(cachedFor: string | null, result: QueryResult) {
   cache.set(keyOf(['current-review-item', cachedFor]), result);
 }
 
+/** The vault the hook reads file text through. Replaced per case. */
+let vault = { read: vi.fn() };
+
 function wireContext() {
+  vault = { read: vi.fn().mockResolvedValue('text') };
   vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
-    plugin: { app: { vault: { read: vi.fn() } } },
+    plugin: { app: { vault } },
     reviewManager: {},
     // The hook pushes the current file into the view from an effect. Preact
     // defers effects past `render`, so these are never reached here, but the
@@ -219,6 +223,38 @@ describe('useCurrentItemFileText', () => {
         expect(textQueryOptions().enabled).toBe(item !== null);
         expect(result.isLoading).toBe(false);
       })
+    );
+  });
+
+  it('never reads the file of an item that is not text', async () => {
+    // A PDF read as text is what the review editor would show and then write
+    // back over the PDF; with the query off, nothing is read and so nothing can
+    // be written. A markdown item in any casing still reads as before.
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.oneof(fc.mixedCase(fc.constantFrom('pdf', 'md')), fc.string()),
+        async (id, extension) => {
+          const item = makeItem(id, extension);
+          const isText = extension.toLowerCase() === 'md';
+          wireQueries({
+            item,
+            itemLoading: false,
+            text: undefined,
+            textLoading: false,
+          });
+
+          callHook();
+          const { enabled, queryFn } = textQueryOptions();
+          const text = await (queryFn as () => Promise<unknown>)();
+
+          expect(enabled).toBe(isText);
+          expect(text).toBe(isText ? 'text' : undefined);
+          expect(vault.read.mock.calls).toStrictEqual(
+            isText ? [[item.file]] : []
+          );
+        }
+      )
     );
   });
 

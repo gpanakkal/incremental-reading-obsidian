@@ -895,7 +895,7 @@ describe('rowToReviewCard', () => {
   });
 
   it('returns a ReviewCard with data and file when the file exists', async () => {
-    const fakeFile = { path: 'cards/test.md' } as TFile;
+    const fakeFile = { path: 'cards/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     await fc.assert(
       fc.asyncProperty(cardRowArb, async (row) => {
@@ -924,7 +924,7 @@ describe('rowToReviewCard on a note the metadata cache is still re-reading', () 
   });
 
   it('returns the row as a review item without writing to the note or its tombstone', async () => {
-    const fakeFile = { path: 'cards/test.md' } as TFile;
+    const fakeFile = { path: 'cards/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     await fc.assert(
       fc.asyncProperty(cardRowArb, async (row) => {
@@ -957,7 +957,7 @@ describe('rowToReviewCard on a note the metadata cache is still re-reading', () 
   });
 
   it('still restores the id and tag of a parsed note that has no frontmatter', async () => {
-    const fakeFile = { path: 'cards/test.md' } as TFile;
+    const fakeFile = { path: 'cards/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     await fc.assert(
       fc.asyncProperty(cardRowArb, async (row) => {
@@ -1153,7 +1153,7 @@ describe('fetch', () => {
 
   it('returns a ReviewCard when a row and its file are found', async () => {
     const row = makeCardRow();
-    const fakeFile = { path: 'cards/test.md' } as TFile;
+    const fakeFile = { path: 'cards/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const repo = {
       query: vi.fn().mockResolvedValue([row]),
@@ -1179,6 +1179,7 @@ describe('getDue', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.spyOn(Obsidian, 'getNote').mockReturnValue({
       path: 'cards/test.md',
+      extension: 'md',
     } as TFile);
   });
 
@@ -1232,7 +1233,7 @@ describe('getDue', () => {
       reference: 'cards/has-file.md',
       due: 0,
     });
-    const file = { path: 'cards/has-file.md' } as TFile;
+    const file = { path: 'cards/has-file.md', extension: 'md' } as TFile;
 
     vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) => {
       return ref === rowA.reference ? null : file;
@@ -1304,7 +1305,7 @@ describe('getDue', () => {
       reference: 'cards/has-file.md',
       due: 0,
     });
-    const file = { path: 'cards/has-file.md' } as TFile;
+    const file = { path: 'cards/has-file.md', extension: 'md' } as TFile;
 
     vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) => {
       return ref === rowA.reference ? null : file;
@@ -1344,7 +1345,7 @@ describe('getDue', () => {
       reference: 'cards/present.md',
       due: 0,
     });
-    const file = { path: 'cards/present.md' } as TFile;
+    const file = { path: 'cards/present.md', extension: 'md' } as TFile;
 
     vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) => {
       return ref === rowNoFile.reference ? null : file;
@@ -2249,8 +2250,11 @@ describe('review — against the production schema', () => {
 });
 
 describe('createFromSelection', () => {
-  const sourceFile = { path: 'articles/source.md' } as TFile;
-  const reviewCard = { file: { path: 'cards/new.md' }, data: { id: 'card-1' } };
+  const sourceFile = { path: 'articles/source.md', extension: 'md' } as TFile;
+  const reviewCard = {
+    file: { path: 'cards/new.md', extension: 'md' },
+    data: { id: 'card-1' },
+  };
   const LINK = '[[new|ir-hide-title]]';
 
   function setUp() {
