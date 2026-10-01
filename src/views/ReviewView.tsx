@@ -405,12 +405,12 @@ export default class ReviewView extends FileView {
    * Move review on to the next item when the one history brought it back to no
    * longer exists, as deleting an item in review does. History outlives items:
    * one deleted since it was recorded would otherwise sit in review as an empty
-   * pane.
+   * pane. One that is only missing its file still exists, and is shown as such.
    *
    * Unless review has already moved off it by the time the lookup returns.
    */
   async leaveIfGone(itemId: string): Promise<void> {
-    const item = await this.#reviewManager.getReviewItemFromId(itemId);
+    const item = await this.#reviewManager.getItemOrMissingFromId(itemId);
     if (item) return;
     const { store } = this.plugin;
     if (store.getState().currentItemId !== itemId) return;

@@ -579,3 +579,61 @@ describe('queue column configuration', () => {
     expect(widths.get('parent')).toBe('flexible');
   });
 });
+
+describe('a missing row', () => {
+  const missingRowArb = queueRowArb.map(
+    (row): QueueRow => ({ ...row, file: null })
+  );
+
+  it('flags its file cell as missing, ahead of the path it was last at', () => {
+    fc.assert(
+      fc.property(missingRowArb, (row) => {
+        const missing = renderQueueCells(row).reference as VNode<{
+          className: string;
+          children: [VNode<{ className: string; children: string }>, unknown];
+        }>;
+        const present = renderQueueCells({
+          ...row,
+          file: { path: row.reference } as TFile,
+        }).reference;
+
+        expect(missing.props.className).toBe('ir-queue-missing-reference');
+        const [badge, path] = missing.props.children;
+        expect(badge.props.className).toBe('ir-queue-missing-badge');
+        expect(badge.props.children).toBe('Missing');
+        // The same path rendering a row with its file gets (vnodes carry
+        // per-render ids, so they are compared by class and text)
+        expect((path as VNode<{ className: string }>).props.className).toBe(
+          (present as VNode<{ className: string }>).props.className
+        );
+        expect(renderedText(path)).toBe(renderedText(present));
+      })
+    );
+  });
+
+  it('says it is missing in its file cell’s title', () => {
+    fc.assert(
+      fc.property(missingRowArb, (row) => {
+        expect(queueCellTitles(row).reference).toBe(
+          `No file at ${row.reference}`
+        );
+      })
+    );
+  });
+
+  it('renders every other cell as a row with its file would', () => {
+    fc.assert(
+      fc.property(missingRowArb, (row) => {
+        const withFile = { ...row, file: { path: row.reference } as TFile };
+        const cells = renderQueueCells(row);
+        const expected = renderQueueCells(withFile);
+        for (const key of ['type', 'due', 'scheduling', 'parent'] as const) {
+          expect(renderedText(cells[key])).toBe(renderedText(expected[key]));
+        }
+        const { reference: _c, ...titles } = queueCellTitles(row);
+        const { reference: _d, ...expectedTitles } = queueCellTitles(withFile);
+        expect(titles).toEqual(expectedTitles);
+      })
+    );
+  });
+});

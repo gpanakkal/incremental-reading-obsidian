@@ -32,6 +32,7 @@ import {
 } from './store';
 import type { TextBounds } from './text-selection';
 import {
+  type MaybeMissingItem,
   NOTE_TYPES,
   type NoteType,
   type ReviewArticle,
@@ -43,13 +44,25 @@ import {
 } from './types';
 import { getContentSlice, getEndOfDay } from './utils';
 
+/**
+ * What to call `item` to the user: its file's name, or for a missing item, the
+ * name its reference last gave it.
+ */
+export function itemName(item: MaybeMissingItem): string {
+  if (item.file) return item.file.basename;
+  const { reference } = item.data;
+  const name = reference.slice(reference.lastIndexOf('/') + 1);
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
 /** The CodeMirror view of the review tab's editor. */
 type ReviewEditorView = NonNullable<
   ReturnType<ReviewView['reviewEditor']>
 >['cm'];
 
 export type ActionStackEntry = {
-  item: ReviewItem;
+  item: MaybeMissingItem;
   description: string;
   undo: () => void | Promise<void>;
 };
@@ -206,7 +219,7 @@ export class Actions {
     this._getNext();
   };
 
-  dismissItem = async (item: ReviewItem) => {
+  dismissItem = async (item: MaybeMissingItem) => {
     // Check if it was being reviewed to conditionally navigate review back to
     // item upon undoing, since items can also be dismissed outside review
     const wasBeingReviewed = item.data.id === store.getState().currentItemId;
@@ -215,7 +228,7 @@ export class Actions {
 
     this._pushUndo({
       item,
-      description: `dismissing "${item.file.basename}"`,
+      description: `dismissing "${itemName(item)}"`,
       undo: async () => {
         await this.plugin.reviewManager.unDismissItem(item);
         await invalidateItemQuery(item.data.id);
@@ -224,7 +237,7 @@ export class Actions {
     });
 
     const itemTitle = getContentSlice(
-      item.file.basename,
+      itemName(item),
       CONTENT_TITLE_SLICE_LENGTH,
       true
     );
@@ -234,7 +247,7 @@ export class Actions {
     }
   };
 
-  unDismissItem = async (item: ReviewItem) => {
+  unDismissItem = async (item: MaybeMissingItem) => {
     await this.plugin.reviewManager.unDismissItem(item);
     await invalidateItemQuery(item.data.id);
     const { currentItemId } = store.getState();
@@ -244,7 +257,7 @@ export class Actions {
     }
 
     const itemTitle = getContentSlice(
-      item.file.basename,
+      itemName(item),
       CONTENT_TITLE_SLICE_LENGTH,
       true
     );
@@ -262,20 +275,20 @@ export class Actions {
     }
   };
 
-  skipItem = (item: ReviewItem) => {
+  skipItem = (item: MaybeMissingItem) => {
     const resetTime = getEndOfDay(this.plugin.settings.dayRolloverOffset);
     this.plugin.store.dispatch(addSeenId({ id: item.data.id, resetTime }));
 
     this._pushUndo({
       item,
-      description: `skipping "${item.file.basename}"`,
+      description: `skipping "${itemName(item)}"`,
       undo: () => {
         this.plugin.store.dispatch(removeSeenId({ id: item.data.id }));
         this._returnToItem(item);
       },
     });
     const itemTitle = getContentSlice(
-      item.file.basename,
+      itemName(item),
       CONTENT_TITLE_SLICE_LENGTH + 5,
       true
     );
@@ -629,7 +642,7 @@ export class Actions {
    * hidden. The session tracker is told nothing: it mirrors the item arrived
    * at, and that lifts any hold over the one left.
    */
-  _returnToItem = (item: ReviewItem) => {
+  _returnToItem = (item: MaybeMissingItem) => {
     this.plugin.store.dispatch(resetCurrentItem());
     this.plugin.store.dispatch(setCurrentItemId(item.data.id));
   };

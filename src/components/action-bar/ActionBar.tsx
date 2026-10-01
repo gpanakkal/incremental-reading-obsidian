@@ -7,12 +7,14 @@ import type { ActionStackEntry } from '#/lib/Actions';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import { type SelectionKind, setPage, setShowAnswer } from '#/lib/store';
 import {
+  isMissingItem,
   isReviewArticle,
   isReviewCard,
   isReviewSnippet,
+  type MaybeMissingItem,
+  type MissingItem,
   type ReviewArticle,
   type ReviewCard,
-  type ReviewItem,
   type ReviewSnippet,
   type ReviewText,
 } from '#/lib/types';
@@ -80,17 +82,22 @@ export function ActionBar() {
         {itemActions && selectionMode !== null && (
           <SelectionActions kind={selectionMode} />
         )}
-        {itemActions && selectionMode === null && (
-          <>
-            {isReviewArticle(currentItem) && (
-              <ArticleActions article={currentItem} />
-            )}
-            {isReviewSnippet(currentItem) && (
-              <SnippetActions snippet={currentItem} />
-            )}
-            {isReviewCard(currentItem) && <CardActions card={currentItem} />}
-          </>
-        )}
+        {itemActions &&
+          selectionMode === null &&
+          isMissingItem(currentItem) && <MissingActions item={currentItem} />}
+        {itemActions &&
+          selectionMode === null &&
+          !isMissingItem(currentItem) && (
+            <>
+              {isReviewArticle(currentItem) && (
+                <ArticleActions article={currentItem} />
+              )}
+              {isReviewSnippet(currentItem) && (
+                <SnippetActions snippet={currentItem} />
+              )}
+              {isReviewCard(currentItem) && <CardActions card={currentItem} />}
+            </>
+          )}
       </div>
       <div className="ir-bar-trail">{itemActions && <MoreOptionsAction />}</div>
     </div>
@@ -223,6 +230,22 @@ function UndoAction() {
   );
 }
 
+/**
+ * An item with no file has nothing to read, extract from or grade: it can be
+ * put off or dropped from review. Relinking it is left to the placeholder,
+ * where the missing file is explained, and to the queue's row menu and the
+ * command.
+ */
+function MissingActions({ item }: { item: MissingItem }) {
+  return (
+    <>
+      <SkipAction item={item} />
+      <Separator />
+      <DismissAction item={item} />
+    </>
+  );
+}
+
 function ArticleActions({ article }: { article: ReviewArticle }) {
   return (
     <>
@@ -287,7 +310,7 @@ function MarkReviewedAction({ text }: { text: ReviewText }) {
   );
 }
 
-function SkipAction({ item }: { item: ReviewItem }) {
+function SkipAction({ item }: { item: MaybeMissingItem }) {
   const { actions } = useReviewContext();
 
   return (
@@ -425,7 +448,7 @@ function SelectionActions({ kind }: { kind: SelectionKind }) {
 /**
  * Dismisses the item, or restores it to the queue if it's already dismissed.
  */
-function DismissAction({ item }: { item: ReviewItem }) {
+function DismissAction({ item }: { item: MaybeMissingItem }) {
   const { actions } = useReviewContext();
 
   return item.data.dismissed ? (

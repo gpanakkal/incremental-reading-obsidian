@@ -1,7 +1,14 @@
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { useCurrentItemFileText } from '#/hooks/useReactQuery';
 import { getMimeType, isEditableText } from '#/lib/mime';
-import { type ReviewItem as TReviewItem, isReviewCard } from '#/lib/types';
+import { tableOf } from '#/lib/relink';
+import {
+  type MissingItem as TMissingItem,
+  type ReviewItem as TReviewItem,
+  isMissingItem,
+  isReviewCard,
+} from '#/lib/types';
+import { openRelinkPicker } from '#/views/RelinkModal';
 import type { EditorView } from '@codemirror/view';
 import { CardViewer } from './CardViewer';
 import { IREditor } from './IREditor';
@@ -32,6 +39,29 @@ function BinaryItem({ item }: { item: TReviewItem }) {
 }
 
 /**
+ * An item with no file at its reference, in place of its content: where its
+ * file was last seen, and a way to point it at the file it has now. The action
+ * bar can still skip or dismiss it.
+ */
+function MissingItem({ item }: { item: TMissingItem }) {
+  const { plugin } = useReviewContext();
+  const { id, type, reference } = item.data;
+  return (
+    <div className="ir-missing-item">
+      <p className="ir-missing-item-reference">No file at "{reference}"</p>
+      <button
+        className="mod-cta"
+        onClick={() =>
+          void openRelinkPicker(plugin, { table: tableOf(type), id, reference })
+        }
+      >
+        Relink file…
+      </button>
+    </div>
+  );
+}
+
+/**
  * TODO:
  * - indicate if the item is a snippet, card, or article
  * - error element
@@ -51,6 +81,7 @@ export default function ReviewItem() {
 
   // Before the summary: such an item's text is never read, and an item with
   // no text would otherwise read as an empty queue.
+  if (item && isMissingItem(item)) return <MissingItem item={item} />;
   if (item && !isEditableText(item.file)) return <BinaryItem item={item} />;
   if (!item || !fileText) return <ReviewSummary />;
   return (

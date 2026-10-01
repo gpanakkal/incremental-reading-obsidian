@@ -135,6 +135,25 @@ export type ReviewCard = {
 
 export type ReviewItem = ReviewArticle | ReviewSnippet | ReviewCard;
 
+/**
+ * An item with no file at its `reference`: moved or deleted while Obsidian was
+ * closed, or its `ir-id` stripped. Missing is derived live whenever the row is
+ * read and never stored, so the item is back to a {@link ReviewItem} as soon as
+ * a file is at its reference again, by relinking or otherwise. Its row, with
+ * its schedule, is still there to dismiss or relink.
+ */
+export type MissingItem<D extends ReviewItem['data'] = ReviewItem['data']> = {
+  data: D;
+  file: null;
+};
+
+/** What review can be on: an item and its file, or an item missing one. */
+export type MaybeMissingItem = ReviewItem | MissingItem;
+
+export function isMissingItem(item: MaybeMissingItem): item is MissingItem {
+  return item.file === null;
+}
+
 /** Any item subject to non-SRS scheduling */
 export type ReviewText = ReviewArticle | ReviewSnippet;
 

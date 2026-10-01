@@ -151,6 +151,19 @@ function referencePath(path: string): ComponentChild {
 }
 
 /**
+ * The file cell of a missing item: flagged ahead of the path it was last at,
+ * which is still what identifies it to the user.
+ */
+function missingReference(path: string): ComponentChild {
+  return (
+    <span className="ir-queue-missing-reference">
+      <span className="ir-queue-missing-badge">Missing</span>
+      {referencePath(path)}
+    </span>
+  );
+}
+
+/**
  * Format a due date as `2026/7/10` (local time, no zero padding). A null due
  * (row has no due time) renders as `--` rather than the epoch.
  */
@@ -272,7 +285,10 @@ export function renderQueueCells(
           {row.scheduling.value}
         </span>
       ),
-    reference: referencePath(row.reference),
+    reference:
+      row.file === null
+        ? missingReference(row.reference)
+        : referencePath(row.reference),
     parent: (
       <span>
         <span className="ir-queue-inline-label ir-queue-origin-label">
@@ -294,7 +310,8 @@ export function queueCellTitles(row: QueueRow): Record<QueueColumnKey, string> {
     type: row.type,
     due: formatQueueDate(row.due),
     scheduling: schedulingText(row),
-    reference: row.reference,
+    reference:
+      row.file === null ? `No file at ${row.reference}` : row.reference,
     parent: `${originLabel(row.type)} ${row.parent ?? EMPTY_CELL}`,
   };
 }

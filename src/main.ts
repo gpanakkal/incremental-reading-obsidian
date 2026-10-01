@@ -377,7 +377,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       : sessionItemId(this.data.session, getDeviceId(this.app));
     if (!itemId) return false;
 
-    const item = await this.reviewManager.getReviewItemFromId(itemId);
+    const item = await this.reviewManager.getItemOrMissingFromId(itemId);
     // A dismissed item is not coming back into review, and the pointer can name
     // one: dismissing runs a database write first, so a tab closed in the
     // moments after the click records the item still on screen.

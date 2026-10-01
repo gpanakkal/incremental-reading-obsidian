@@ -463,7 +463,7 @@ async function openHistoryView({
     .mockImplementation(resume);
   const leaf = makeHistoryLeaf();
   const reviewManager = {
-    getReviewItemFromId: vi.fn(async (id: string) =>
+    getItemOrMissingFromId: vi.fn(async (id: string) =>
       itemExists ? { data: { id } } : null
     ),
   };
@@ -2410,7 +2410,7 @@ describe('ReviewView.setEphemeralState', () => {
           view.setEphemeralState(eState);
 
           expect(store.getState()).toBe(before);
-          expect(reviewManager.getReviewItemFromId).not.toHaveBeenCalled();
+          expect(reviewManager.getItemOrMissingFromId).not.toHaveBeenCalled();
         } finally {
           unload(view);
         }
@@ -2443,9 +2443,9 @@ describe('ReviewView.setEphemeralState', () => {
           view.setEphemeralState(placeToEphemeralState(target));
 
           if (target.itemId === null) {
-            expect(reviewManager.getReviewItemFromId).not.toHaveBeenCalled();
+            expect(reviewManager.getItemOrMissingFromId).not.toHaveBeenCalled();
           } else {
-            expect(reviewManager.getReviewItemFromId).toHaveBeenCalledWith(
+            expect(reviewManager.getItemOrMissingFromId).toHaveBeenCalledWith(
               target.itemId
             );
           }

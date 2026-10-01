@@ -1,4 +1,4 @@
-import { Actions } from '#/lib/Actions';
+import { Actions, itemName } from '#/lib/Actions';
 import { CONTENT_TITLE_SLICE_LENGTH } from '#/lib/constants';
 import * as itemContext from '#/lib/item-context';
 import {
@@ -10,13 +10,14 @@ import {
   removeCompletedReview,
   removeSeenId,
   resetCurrentItem,
-  type SelectionKind,
   setCurrentItemId,
   setSelectionMode,
   store,
+  type SelectionKind,
 } from '#/lib/store';
 import {
   NOTE_TYPES,
+  type MaybeMissingItem,
   type NoteType,
   type ReviewArticle,
   type ReviewCard,
@@ -418,6 +419,102 @@ const editorArb = fc
   );
 
 // #endregion
+
+describe('itemName', () => {
+  it('names an item with a file by its file', () => {
+    fc.assert(
+      fc.property(fc.string(), fc.string(), (basename, reference) => {
+        const item = {
+          data: { reference },
+          file: { basename },
+        } as unknown as ReviewItem;
+        expect(itemName(item)).toBe(basename);
+      })
+    );
+  });
+
+  it('names a missing item by the last segment of its reference, less its extension', () => {
+    const segment = fc.string().map((text) => text.replace(/\//g, ''));
+    fc.assert(
+      fc.property(
+        fc.array(segment, { maxLength: 3 }),
+        segment,
+        fc.option(segment, { nil: undefined }),
+        (dirs, stem, extension) => {
+          const name = extension === undefined ? stem : `${stem}.${extension}`;
+          const reference = [...dirs, name].join('/');
+          const item = {
+            data: { reference },
+            file: null,
+          } as unknown as MaybeMissingItem;
+
+          // A leading dot starts a hidden name, not an extension
+          const lastDot = name.lastIndexOf('.');
+          const expected = lastDot > 0 ? name.slice(0, lastDot) : name;
+          expect(itemName(item)).toBe(expected);
+        }
+      )
+    );
+  });
+
+  it.each([
+    ['papers/deep/paper.v2.pdf', 'paper.v2'],
+    ['.hidden', '.hidden'],
+    ['folder/noext', 'noext'],
+    ['a.b/c', 'c'],
+  ])('names a missing item at %s "%s"', (reference, expected) => {
+    const item = {
+      data: { reference },
+      file: null,
+    } as unknown as MaybeMissingItem;
+    expect(itemName(item)).toBe(expected);
+  });
+});
+
+describe('Actions on a missing item', () => {
+  beforeEach(() => {
+    Notice.reset();
+    vi.spyOn(store, 'getState').mockReturnValue({
+      currentItemId: null,
+    } as never);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const missing = {
+    data: {
+      id: 'item-1',
+      type: 'article',
+      reference: 'gone/away.pdf',
+      dismissed: false,
+    },
+    file: null,
+  } as unknown as MaybeMissingItem;
+
+  it('skips, dismisses and restores it by the name its reference gave it', async () => {
+    const plugin = makePlugin();
+    const actions = new Actions(plugin);
+
+    actions.skipItem(missing);
+    await actions.dismissItem(missing);
+    await actions.unDismissItem(missing);
+
+    expect(Notice.messages).toEqual([
+      'Skipping away',
+      'Dismissed "away"',
+      'Restored "away" to queue',
+    ]);
+    expect(
+      (plugin.reviewManager.dismissItem as ReturnType<typeof vi.fn>).mock.calls
+    ).toEqual([[missing]]);
+    expect(actions.undoStack.map((entry) => entry.description)).toEqual([
+      'skipping "away"',
+      'dismissing "away"',
+    ]);
+  });
+});
 
 describe('Actions.skipItem — Notice message', () => {
   beforeEach(() => {

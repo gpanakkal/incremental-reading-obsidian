@@ -3,6 +3,7 @@
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
 import { SnippetOffsetTracker } from '#/lib/SnippetOffsetTracker';
+import { Notice } from '#/test/__mocks__/obsidian';
 import { EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import fc from 'fast-check';
@@ -10,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoteType } from '../types';
 import {
   isExternalSync,
+  openSnippetFromEvent,
   refreshHighlightsEffect,
   snippetHighlightExtension,
 } from './SnippetHighlightExtension';
@@ -61,6 +63,7 @@ type FakeEventRef = { name: string; callback: (...args: unknown[]) => unknown };
 type FakePlugin = {
   reviewManager: FakeReviewManager | null;
   app: {
+    vault: { getFileByPath: (path: string) => unknown };
     workspace: {
       openLinkText: ReturnType<typeof vi.fn>;
       on: ReturnType<typeof vi.fn>;
@@ -83,6 +86,8 @@ function makePlugin(
   return {
     reviewManager,
     app: {
+      // Every snippet's file is there, unless a test says otherwise
+      vault: { getFileByPath: (path: string) => ({ path }) },
       workspace: {
         openLinkText: vi.fn(),
         on: vi.fn((name: string, callback: (...args: unknown[]) => unknown) => {
@@ -796,9 +801,11 @@ describe('click event handler', () => {
    * Returns the openLinkText spy so assertions read as one line per case.
    */
   function withHighlight(
-    body: (ctx: { view: EditorView; span: HTMLElement }) => void
+    body: (ctx: { view: EditorView; span: HTMLElement }) => void,
+    fileThere = true
   ): ReturnType<typeof vi.fn> {
     const irPlugin = makePlugin(makeReviewManager());
+    if (!fileThere) irPlugin.app.vault.getFileByPath = () => null;
     const view = makeView('hello', irPlugin);
     const span = makeHighlightSpan(view);
     try {
@@ -809,6 +816,33 @@ describe('click event handler', () => {
     }
     return irPlugin.app.workspace.openLinkText;
   }
+
+  it('consumes a click on a missing snippet’s highlight', () => {
+    const plugin = makePlugin(makeReviewManager());
+    plugin.app.vault.getFileByPath = () => null;
+    const span = document.createElement('span');
+    span.className = 'ir-snippet-highlight';
+    span.setAttribute('data-snippet-ref', 'snippets/a.md');
+    const event = new MouseEvent('click', { cancelable: true });
+    Object.defineProperty(event, 'target', { value: span });
+
+    expect(openSnippetFromEvent(plugin as never, event)).toBe(true);
+    expect(plugin.app.workspace.openLinkText).not.toHaveBeenCalled();
+  });
+
+  it('opens nothing for a snippet missing its file, and says why', () => {
+    Notice.reset();
+    let event: MouseEvent | undefined;
+    const openLinkText = withHighlight(({ span }) => {
+      event = dispatchOn(span, 'click');
+    }, false);
+
+    expect(openLinkText).not.toHaveBeenCalled();
+    expect(event?.defaultPrevented).toBe(true);
+    expect(Notice.messages).toEqual([
+      'No file at "snippets/a.md". Relink the snippet from the review queue.',
+    ]);
+  });
 
   it('plain click opens the snippet in the active leaf', () => {
     const openLinkText = withHighlight(({ span }) => {

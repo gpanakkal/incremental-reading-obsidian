@@ -19,6 +19,7 @@ import type {
   ISnippetBase,
   ISnippetDisplay,
   ISnippetReview,
+  MissingItem,
   ReviewSnippet,
   SnippetRow,
   SQLiteRepository,
@@ -92,10 +93,8 @@ export class SnippetManager extends ItemManager {
   rowToReviewSnippet(row: SnippetRow): ReviewSnippet | null {
     const base = SnippetManager.rowToBase(row);
     const file = Obsidian.getNote(row.reference, this.app);
+    // Missing, which is never stored: see `MissingItem`
     if (!file) {
-      if (!row.deleted) {
-        void this.markDeleted(row.id, 'snippet');
-      }
       if (row.parent) {
         const parentPath = normalizePath(row.parent);
         this.offsetTracker.removeHighlight(parentPath, row.id);
@@ -162,11 +161,11 @@ export class SnippetManager extends ItemManager {
     dueBy?: number,
     limit?: number,
     excludeIds?: string[]
-  ): Promise<ReviewSnippet[]> {
+  ): Promise<(ReviewSnippet | MissingItem<ISnippetBase>)[]> {
     const dueTime =
       dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
     let allExcluded = [...(excludeIds ?? [])];
-    let due: ReviewSnippet[];
+    let due: (ReviewSnippet | MissingItem<ISnippetBase>)[];
     try {
       // keep fetching until all fetched rows have a note
       let lastMissingNotes = 0;
@@ -180,17 +179,16 @@ export class SnippetManager extends ItemManager {
           })
         )
           .map((row) => {
-            const item = this.rowToReviewSnippet(row);
+            const item =
+              this.rowToReviewSnippet(row) ??
+              this.asMissing(SnippetManager.rowToBase(row));
             if (!item) {
               allExcluded.push(row.id);
               lastMissingNotes += 1;
             }
             return item;
           }, this)
-          .filter(
-            (snippet): snippet is ReviewSnippet =>
-              !!snippet && snippet.file !== null
-          );
+          .filter((snippet) => snippet !== null);
 
         if (this.plugin.settings.fuzzTextReviews) {
           due.sort((a, b) => compareFuzzedDue(a.data, b.data));

@@ -302,8 +302,10 @@ body {
   display: none;
 }
 
-/* A PDF article in review: its name and a way to open it, centred */
-.ir-binary-item {
+/* A PDF article in review: its name and a way to open it, centred. An item
+   missing its file gets the same: where it was, and a way to relink it. */
+.ir-binary-item,
+.ir-missing-item {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -314,7 +316,8 @@ body {
   text-align: center;
 }
 
-.ir-binary-item-name {
+.ir-binary-item-name,
+.ir-missing-item-reference {
   margin: 0;
   color: var(--text-muted);
   overflow-wrap: anywhere;
@@ -1304,6 +1307,40 @@ body.is-phone .ir-header-standin {
 
 .ir-queue-row:focus-within .ir-queue-cell-actions {
   opacity: 1;
+}
+
+/* The row's ⋯ menu button. With no hover to reveal it, a touch screen shows it
+   outright; a long press opens the same menu. */
+.ir-queue-row-menu {
+  padding: 0 var(--size-2-2);
+  line-height: 1;
+}
+
+@media (hover: none) {
+  .ir-queue-cell-actions:has(.ir-queue-row-menu) {
+    opacity: 1;
+  }
+}
+
+/* A row whose file is gone: flagged ahead of the path it was last at, which is
+   dimmed since nothing is there now. */
+.ir-queue-missing-reference {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-2);
+  min-width: 0;
+  flex: 1;
+}
+
+.ir-queue-missing-badge {
+  flex: none;
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+}
+
+.ir-queue-row[data-missing] .ir-queue-path {
+  color: var(--text-muted);
 }
 
 /* Both path columns truncate rather than introducing horizontal scroll; how

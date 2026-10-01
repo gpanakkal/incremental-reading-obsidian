@@ -1,5 +1,6 @@
 import {
   CARD_ANSWER_REPLACEMENT,
+  CARD_TAG,
   CLOZE_DELIMITERS,
   MS_PER_DAY,
   MS_PER_YEAR,
@@ -74,6 +75,26 @@ function makePlugin(appOverrides: Record<string, unknown> = {}) {
     settings: { dayRolloverOffset: 4, fsrsParams: generatorParameters() },
     saveSettings: vi.fn().mockResolvedValue(undefined),
   } as never;
+}
+
+/**
+ * App overrides whose note at `claimedPath` carries another item's `ir-id`, so
+ * the row pointing there is refused as that note's owner.
+ */
+function claiming(claimedPath: string): Record<string, unknown> {
+  return {
+    metadataCache: {
+      getFileCache: (file: TFile) =>
+        file.path === claimedPath
+          ? { frontmatter: { 'ir-id': 'another-item', tags: [CARD_TAG] } }
+          : {},
+    },
+  };
+}
+
+/** Each reference's own note, so a claimed one can be told apart. */
+function noteAt(reference: string): TFile {
+  return { path: reference, extension: 'md' } as TFile;
 }
 
 /** Build a minimal SRSCardRow. State is stored as a number (enum value). */
@@ -1222,7 +1243,7 @@ describe('getDue', () => {
     );
   });
 
-  it('skips rows whose note file is missing and retries excluding them', async () => {
+  it('returns a row whose note file is missing as a missing item, without retrying', async () => {
     const rowA = makeCardRow({
       id: 'no-file',
       reference: 'cards/no-file.md',
@@ -1256,9 +1277,13 @@ describe('getDue', () => {
     const manager = new CardManager(makePlugin(), repo);
     const results = await manager.getDue(0);
 
-    expect(results.map((r) => r.data.id)).not.toContain('no-file');
-    expect(results.map((r) => r.data.id)).toContain('has-file');
-    expect(callCount).toBeGreaterThan(1);
+    expect(results).toEqual([
+      { data: CardManager.rowToDisplay(rowA), file: null },
+      { data: CardManager.rowToDisplay(rowB), file },
+    ]);
+    expect(callCount).toBe(1);
+    // Missing is never stored
+    expect((repo.mutate as ReturnType<typeof vi.fn>).mock.calls).toEqual([]);
   });
 
   it('returns an empty array when the repo throws', async () => {
@@ -1293,8 +1318,9 @@ describe('getDue', () => {
     expect(queryCalls[0]).toContain('excluded-id');
   });
 
-  it('does not include rows with null file in results (filter must check card.file)', async () => {
-    // rowA has no file, rowB does — only rowB should appear in results
+  it('does not include rows whose note is refused in results', async () => {
+    // rowA's note claims another item's id, rowB's is its own — only rowB
+    // should appear in results
     const rowA = makeCardRow({
       id: 'null-file',
       reference: 'cards/null-file.md',
@@ -1305,11 +1331,7 @@ describe('getDue', () => {
       reference: 'cards/has-file.md',
       due: 0,
     });
-    const file = { path: 'cards/has-file.md', extension: 'md' } as TFile;
-
-    vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) => {
-      return ref === rowA.reference ? null : file;
-    });
+    vi.spyOn(Obsidian, 'getNote').mockImplementation(noteAt);
 
     let call = 0;
     const repo = {
@@ -1326,14 +1348,14 @@ describe('getDue', () => {
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
-    const manager = new CardManager(makePlugin(), repo);
+    const manager = new CardManager(makePlugin(claiming(rowA.reference)), repo);
     const results = await manager.getDue(0);
     const ids = results.map((r) => r.data.id);
     expect(ids).not.toContain('null-file');
     expect(ids).toContain('has-file');
   });
 
-  it('excludes missing-file rows on the NEXT retry, not on the same call', async () => {
+  it('excludes refused rows on the NEXT retry, not on the same call', async () => {
     // Verifies lastMissingNotes is incremented (+1 not -1), triggering the retry loop
     const rowNoFile = makeCardRow({
       id: 'missing',
@@ -1345,11 +1367,7 @@ describe('getDue', () => {
       reference: 'cards/present.md',
       due: 0,
     });
-    const file = { path: 'cards/present.md', extension: 'md' } as TFile;
-
-    vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) => {
-      return ref === rowNoFile.reference ? null : file;
-    });
+    vi.spyOn(Obsidian, 'getNote').mockImplementation(noteAt);
 
     const queryCalls: unknown[][] = [];
     const repo = {
@@ -1365,9 +1383,12 @@ describe('getDue', () => {
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
 
-    const manager = new CardManager(makePlugin(), repo);
+    const manager = new CardManager(
+      makePlugin(claiming(rowNoFile.reference)),
+      repo
+    );
     await manager.getDue(0);
-    // Should have retried — the missing-file row's id must appear in the second call's params
+    // Should have retried — the refused row's id must appear in the second call's params
     expect(queryCalls.length).toBeGreaterThanOrEqual(2);
     expect(queryCalls[1]).toContain('missing');
   });

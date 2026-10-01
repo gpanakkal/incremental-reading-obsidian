@@ -1,6 +1,7 @@
 import type {
   ISRSCard,
   ISRSCardDisplay,
+  MissingItem,
   ReviewCard,
   SRSCardReviewRow,
   SRSCardRow,
@@ -117,12 +118,8 @@ export class CardManager extends ItemManager {
   rowToReviewCard(row: SRSCardRow): ReviewCard | null {
     const base = CardManager.rowToDisplay(row);
     const file = Obsidian.getNote(row.reference, this.app);
-    if (!file) {
-      if (!row.deleted) {
-        void this.markDeleted(row.id, 'card');
-      }
-      return null;
-    }
+    // Missing, which is never stored: see `MissingItem`
+    if (!file) return null;
 
     if (!this.reconcileNote(row, file, 'card', CARD_TAG)) return null;
 
@@ -136,11 +133,11 @@ export class CardManager extends ItemManager {
     dueBy?: number,
     limit?: number,
     excludeIds?: string[]
-  ): Promise<ReviewCard[]> {
+  ): Promise<(ReviewCard | MissingItem<ISRSCardDisplay>)[]> {
     const dueTime =
       dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
     let allExcluded = [...(excludeIds ?? [])];
-    let due: ReviewCard[];
+    let due: (ReviewCard | MissingItem<ISRSCardDisplay>)[];
     try {
       // keep fetching until all fetched rows have a note
       let lastMissingNotes = 0;
@@ -154,14 +151,16 @@ export class CardManager extends ItemManager {
           })
         )
           .map((row) => {
-            const item = this.rowToReviewCard(row);
+            const item =
+              this.rowToReviewCard(row) ??
+              this.asMissing(CardManager.rowToDisplay(row));
             if (!item) {
               allExcluded.push(row.id);
               lastMissingNotes += 1;
             }
             return item;
           }, this)
-          .filter((card): card is ReviewCard => !!card && card.file !== null);
+          .filter((card) => card !== null);
       } while (lastMissingNotes !== 0);
       return due;
     } catch (error) {
