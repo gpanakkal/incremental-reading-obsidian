@@ -2,6 +2,7 @@ import { DATA_DIRECTORY, MS_PER_DAY } from '#/lib/constants';
 import { resolveItemContext } from '#/lib/item-context';
 import { evictedSpot } from '#/lib/moved-note-scan';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { describeReclaim, recordRebind } from '#/lib/rebind-records';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import type {
   ArticleRow,
@@ -503,6 +504,14 @@ const parentPaths = (repo: TestRepository) =>
     );
     return (result?.values ?? []).map(([id, reference]) => [id, reference]);
   });
+
+/** A vault adapter for a log to be written through, finding nothing there yet. */
+const makeLogAdapter = () => ({
+  exists: vi.fn(async () => false),
+  mkdir: vi.fn(async () => {}),
+  write: vi.fn(async () => {}),
+  append: vi.fn(async () => {}),
+});
 
 // #endregion
 
@@ -3388,6 +3397,71 @@ describe('ReviewManager tracking files without frontmatter by path', () => {
     for (const touch of Object.values(wired.touches)) {
       expect(touch).not.toHaveBeenCalled();
     }
+  });
+
+  describe('a file turning up where a startup rebind took an article from', () => {
+    /** Article `a`, rebound by the startup scan from `old.pdf` to `new.pdf`. */
+    async function rebound(others: string[] = []) {
+      const wired = wirePaths(['new.pdf', ...others]);
+      wired.insertArticle('a', 'new.pdf');
+      await recordRebind(
+        wired.repo,
+        { id: 'a', from: 'old.pdf', to: 'new.pdf' },
+        Date.now()
+      );
+      const adapter = makeLogAdapter();
+      Object.assign(wired.manager.app.vault, { adapter });
+      const renameFile = vi.spyOn(
+        wired.manager.snippets.offsetTracker,
+        'renameFile'
+      );
+      return { ...wired, adapter, renameFile };
+    }
+
+    it('takes the article back to its own file, and logs it', async () => {
+      const wired = await rebound();
+
+      await wired.create('old.pdf');
+
+      expect(wired.repo.rows('article')).toStrictEqual([
+        { id: 'a', reference: 'old.pdf', deleted: false },
+      ]);
+      expect(wired.renameFile).toHaveBeenCalledWith('new.pdf', 'old.pdf');
+      expect(wired.adapter.write).toHaveBeenCalledWith(
+        expect.stringMatching(/\/rebinds-\d{4}-\d{2}\.log$/),
+        expect.stringContaining(
+          describeReclaim({ id: 'a', from: 'new.pdf', to: 'old.pdf' })
+        )
+      );
+      for (const touch of Object.values(wired.touches)) {
+        expect(touch).not.toHaveBeenCalled();
+      }
+    });
+
+    it('takes the article back when a file is moved onto the old path too', async () => {
+      const wired = await rebound(['downloads/old.pdf']);
+
+      await wired.rename('downloads/old.pdf', 'old.pdf');
+
+      expect(wired.repo.rows('article')).toStrictEqual([
+        { id: 'a', reference: 'old.pdf', deleted: false },
+      ]);
+      expect(wired.renameFile).toHaveBeenCalledWith('new.pdf', 'old.pdf');
+    });
+
+    it('restores a tombstone at that path instead, as its own file', async () => {
+      const wired = await rebound();
+      wired.insertArticle('b', 'old.pdf', true);
+
+      await wired.create('old.pdf');
+
+      expect(wired.repo.rows('article')).toStrictEqual([
+        { id: 'a', reference: 'new.pdf', deleted: false },
+        { id: 'b', reference: 'old.pdf', deleted: false },
+      ]);
+      expect(wired.renameFile).not.toHaveBeenCalled();
+      expect(wired.adapter.write).not.toHaveBeenCalled();
+    });
   });
 
   it('leaves a live row alone when a file arrives at its path', async () => {

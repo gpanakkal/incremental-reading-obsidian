@@ -13,6 +13,7 @@ import {
   it,
   vi,
 } from 'vitest';
+import { MS_PER_DAY } from './constants';
 import {
   type Holder,
   ITEM_TABLES,
@@ -25,10 +26,19 @@ import {
   type Skip,
   dropConflicts,
   evictedSpot,
+  isPathIdentified,
   isStranded,
+  matchPdfMoves,
   resolveMoves,
   scanForMovedNotes,
 } from './moved-note-scan';
+import {
+  RECLAIM_WINDOW_MS,
+  describeAmbiguous,
+  describeRebind,
+  describeReclaim,
+  recordRebind,
+} from './rebind-records';
 
 // #region HELPERS
 
@@ -111,7 +121,15 @@ function makeVault(initial: FakeNote[]) {
   const notes = new Map(initial.map((note) => [note.path, note]));
   const files = new Map<string, TFile>();
   const fileAt = (path: string) => {
-    const file = files.get(path) ?? ({ path } as TFile);
+    const name = path.slice(path.lastIndexOf('/') + 1);
+    const dot = name.lastIndexOf('.');
+    const file =
+      files.get(path) ??
+      ({
+        path,
+        name,
+        extension: dot === -1 ? '' : name.slice(dot + 1),
+      } as TFile);
     files.set(path, file);
     return file;
   };
@@ -122,6 +140,7 @@ function makeVault(initial: FakeNote[]) {
         notes.has(path) ? fileAt(path) : null
       ),
       getMarkdownFiles: vi.fn(() => [...notes.keys()].map(fileAt)),
+      getFiles: vi.fn(() => [...notes.keys()].map(fileAt)),
     },
     metadataCache: {
       getFileCache: vi.fn((file: TFile): CachedMetadata | null => {
@@ -382,6 +401,7 @@ function wire(world: ScanWorld, onYield?: (count: number) => void) {
     transaction.mock.calls.length +
     fake.vault.getFileByPath.mock.calls.length +
     fake.vault.getMarkdownFiles.mock.calls.length +
+    fake.vault.getFiles.mock.calls.length +
     fake.metadataCache.getFileCache.mock.calls.length;
   return {
     ...fake,
@@ -596,6 +616,174 @@ const stepOverWorld = () =>
     [{ path: 'two.md', frontmatter: { 'ir-id': 'a' } }]
   );
 
+/** The last segment of a path, as the matcher compares filenames. */
+const nameOf = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+
+/**
+ * Missing PDF rows and untracked PDFs as the scan hands them over: every path
+ * distinct, drawn from a pool of folders and filenames small enough that
+ * filenames repeat on either side, and across the two, both exactly and in
+ * case alone.
+ */
+const pdfMatchInputArb = fc
+  .uniqueArray(
+    fc.tuple(
+      fc.constantFrom('', 'a/', 'b/', 'a/b/'),
+      fc.constantFrom('x.pdf', 'X.pdf', 'y.pdf', 'x.PDF', 'x'),
+      fc.boolean()
+    ),
+    { selector: ([dir, name]) => dir + name, maxLength: 10 }
+  )
+  .map((picks) => ({
+    missing: picks
+      .filter(([, , isRow]) => isRow)
+      .map(
+        ([dir, name], i): ItemLocation => ({
+          table: 'article',
+          id: `row-${i}`,
+          reference: dir + name,
+        })
+      ),
+    untracked: picks
+      .filter(([, , isRow]) => !isRow)
+      .map(([dir, name]) => dir + name),
+  }));
+
+/** Filenames PDF files are named from, two of them the same but for case. */
+const PDF_NAMES = ['x.pdf', 'X.pdf', 'y.pdf'] as const;
+
+/** What became of a PDF article's file while Obsidian was closed. */
+const PDF_FATES = ['home', 'moved', 'renamed', 'deleted'] as const;
+
+/** What became of a markdown article's note while Obsidian was closed. */
+const NOTE_FATES = ['home', 'moved', 'gone'] as const;
+
+/** The notes and PDFs of a world, and where each row's own file ended up. */
+interface MixedWorld extends ScanWorld {
+  /** Where each row's own file is now, or `null` for nowhere. */
+  finals: (string | null)[];
+}
+
+/**
+ * PDF article rows, live and deleted, beside markdown articles, after Obsidian
+ * was closed a while. A live PDF's file stayed home, moved (keeping its name),
+ * was renamed or was deleted; a tombstone may still have a file at its path;
+ * markdown notes stayed, moved or went. Renamed PDFs and stray PDFs draw
+ * their names from the rows' own pool as often as not, so a PDF other than a
+ * row's own often carries that row's name, exactly or in another case.
+ *
+ * The one thing left out is a file landing on a path some other row still
+ * names — the scan never sees such a row as missing at all.
+ */
+const mixedWorldArb: fc.Arbitrary<MixedWorld> = fc
+  .record({
+    pdfs: fc.uniqueArray(
+      fc.record({
+        dir: fc.constantFrom('a', 'b', 'c'),
+        name: fc.constantFrom(...PDF_NAMES),
+        deleted: fc.boolean(),
+        keepsFile: fc.boolean(),
+        fate: fc.constantFrom(...PDF_FATES),
+        to: fc.constantFrom('a', 'b', 'c', 'd/e'),
+        renameTo: fc.option(fc.constantFrom(...PDF_NAMES), { nil: undefined }),
+      }),
+      { selector: ({ dir, name }) => `${dir}/${name}`, maxLength: 6 }
+    ),
+    strays: fc.array(
+      fc.record({
+        dir: fc.constantFrom('a', 'b', 'd/e'),
+        name: fc.option(fc.constantFrom(...PDF_NAMES), { nil: undefined }),
+      }),
+      { maxLength: 3 }
+    ),
+    notes: fc.array(fc.constantFrom(...NOTE_FATES), { maxLength: 3 }),
+    pageSize: fc.integer({ min: 1, max: 4 }),
+  })
+  .map(({ pdfs, strays, notes, pageSize }): MixedWorld => {
+    const pdfRows = pdfs.map(
+      ({ dir, name, deleted }, i): StoredRow => ({
+        table: 'article',
+        id: `pdf-${i}`,
+        reference: `${dir}/${name}`,
+        deleted,
+      })
+    );
+    // A deleted row's file went while Obsidian was running, which is how the
+    // row came to be deleted; what is at its path now arrived after
+    const pdfFinals = pdfs.map(
+      ({ dir, name, deleted, keepsFile, fate, to, renameTo }, i) => {
+        if (deleted) return keepsFile ? `${dir}/${name}` : null;
+        if (fate === 'moved') return `${to}/${name}`;
+        if (fate === 'renamed')
+          return `${dir}/${renameTo ?? `renamed-${i}.pdf`}`;
+        if (fate === 'deleted') return null;
+        return `${dir}/${name}`;
+      }
+    );
+    const noteRows = notes.map((_, i) => article(`note-${i}`, `n/${i}.md`));
+    const noteFinals = notes.map((fate, i) => {
+      if (fate === 'moved') return `moved/${i}.md`;
+      return fate === 'home' ? `n/${i}.md` : null;
+    });
+    const rows = [...pdfRows, ...noteRows];
+    const finals = [...pdfFinals, ...noteFinals];
+    const files: FakeNote[] = [
+      ...finals.flatMap((path, i) =>
+        path === null
+          ? []
+          : [
+              {
+                path,
+                frontmatter: path.endsWith('.md')
+                  ? { 'ir-id': rows[i].id }
+                  : undefined,
+              },
+            ]
+      ),
+      ...strays.map(({ dir, name }, i) => ({
+        path: `${dir}/${name ?? `stray-${i}.pdf`}`,
+      })),
+    ];
+    return { rows, fates: [], targets: [], notes: files, pageSize, finals };
+  })
+  .filter(({ rows, finals, notes }) => {
+    // One file per path, and none on a path a row names unless it is that
+    // row's own
+    const paths = notes.map(({ path }) => path);
+    const owners = new Map(rows.map((row, i) => [row.reference, i]));
+    const own = new Set(finals);
+    return (
+      new Set(paths).size === paths.length &&
+      finals.every(
+        (path, i) => path === null || (owners.get(path) ?? i) === i
+      ) &&
+      paths.every((path) => own.has(path) || !owners.has(path))
+    );
+  });
+
+/** A fixed wall clock for rebind records, well clear of any window edge. */
+const WALL_CLOCK = 1_800_000_000_000;
+
+/** `run`'s deps, logging to a spy and reading {@link WALL_CLOCK}. */
+function logged(run: ReturnType<typeof wire>) {
+  const log = vi.fn();
+  return { log, deps: { ...run.deps, log, dateNow: () => WALL_CLOCK } };
+}
+
+/** Every rebind record, read straight off the database. */
+function readRebindRows(repo: TestRepository) {
+  const [result] = repo.db?.exec(
+    `SELECT article_id, old_reference, new_reference, rebound_at
+     FROM rebind ORDER BY article_id`
+  ) ?? [undefined];
+  return (result?.values ?? []).map(([id, from, to, at]) => ({
+    id: String(id),
+    from: String(from),
+    to: String(to),
+    at: Number(at),
+  }));
+}
+
 // #endregion
 
 describe('isStranded', () => {
@@ -663,6 +851,161 @@ describe('resolveMoves', () => {
         );
       })
     );
+  });
+});
+
+describe('isPathIdentified', () => {
+  it('picks out articles in a known format that has no frontmatter', () => {
+    const cases: [ItemLocation, boolean][] = [
+      [{ table: 'article', id: 'a', reference: 'x/paper.pdf' }, true],
+      [{ table: 'article', id: 'a', reference: 'x/PAPER.PDF' }, true],
+      [{ table: 'article', id: 'a', reference: 'x/note.md' }, false],
+      [{ table: 'article', id: 'a', reference: 'x/unknown.png' }, false],
+      [{ table: 'article', id: 'a', reference: 'x/no-extension' }, false],
+      [{ table: 'snippet', id: 's', reference: 'x/paper.pdf' }, false],
+      [{ table: 'srs_card', id: 'c', reference: 'x/paper.pdf' }, false],
+    ];
+
+    for (const [row, expected] of cases) {
+      expect(isPathIdentified(row)).toBe(expected);
+    }
+  });
+});
+
+describe('matchPdfMoves', () => {
+  it('rebinds a missing row onto the one untracked PDF sharing its filename', () => {
+    const row = article('a', 'papers/paper.pdf');
+
+    const result = matchPdfMoves([row], ['archive/paper.pdf']);
+
+    expect(result).toEqual({
+      moves: [{ row, to: 'archive/paper.pdf' }],
+      skipped: [],
+    });
+  });
+
+  it('leaves a row whose file was renamed, not just moved, as missing', () => {
+    const row = article('a', 'papers/paper.pdf');
+
+    const result = matchPdfMoves([row], ['papers/paper (1).pdf']);
+
+    expect(result).toEqual({
+      moves: [],
+      skipped: [{ row, reason: 'missing' }],
+    });
+  });
+
+  it('skips both of two missing rows sharing a filename, with no telling which file is whose', () => {
+    const a = article('a', 'one/paper.pdf');
+    const b = article('b', 'two/paper.pdf');
+
+    const result = matchPdfMoves([a, b], ['three/paper.pdf']);
+
+    expect(result).toEqual({
+      moves: [],
+      skipped: [
+        { row: a, reason: 'ambiguous' },
+        { row: b, reason: 'ambiguous' },
+      ],
+    });
+  });
+
+  it('accounts for each missing row once, rebinding it only when its filename is unique on both sides', () => {
+    fc.assert(
+      fc.property(pdfMatchInputArb, ({ missing, untracked }) => {
+        const { moves, skipped } = matchPdfMoves(missing, untracked);
+
+        expect(moves.length + skipped.length).toBe(missing.length);
+        for (const row of missing) {
+          const name = nameOf(row.reference);
+          const paths = untracked.filter((path) => nameOf(path) === name);
+          const rows = missing.filter(
+            (other) => nameOf(other.reference) === name
+          );
+          const outcome = [
+            ...moves.filter((move) => move.row === row),
+            ...skipped.filter((skip) => skip.row === row),
+          ];
+
+          if (paths.length === 0) {
+            expect(outcome).toEqual([{ row, reason: 'missing' }]);
+          } else if (paths.length > 1 || rows.length > 1) {
+            expect(outcome).toEqual([{ row, reason: 'ambiguous' }]);
+          } else {
+            expect(outcome).toEqual([{ row, to: paths[0] }]);
+          }
+        }
+      })
+    );
+  });
+
+  it('moves rows only onto distinct untracked PDFs of exactly their own name', () => {
+    fc.assert(
+      fc.property(pdfMatchInputArb, ({ missing, untracked }) => {
+        const { moves } = matchPdfMoves(missing, untracked);
+
+        for (const { row, to } of moves) {
+          expect(untracked).toContain(to);
+          expect(nameOf(to)).toBe(nameOf(row.reference));
+        }
+        expect(new Set(moves.map(({ to }) => to)).size).toBe(moves.length);
+      })
+    );
+  });
+
+  it('never grows sure of a skipped row for one more file of its name', () => {
+    fc.assert(
+      fc.property(
+        pdfMatchInputArb,
+        fc.nat(),
+        ({ missing, untracked }, pick) => {
+          const { skipped } = matchPdfMoves(missing, untracked);
+          const ambiguous = skipped.filter(
+            ({ reason }) => reason === 'ambiguous'
+          );
+          fc.pre(ambiguous.length > 0);
+          const { row } = ambiguous[pick % ambiguous.length];
+
+          const more = [...untracked, `elsewhere/${nameOf(row.reference)}`];
+          const again = matchPdfMoves(missing, more);
+          expect(again.skipped).toContainEqual({ row, reason: 'ambiguous' });
+        }
+      )
+    );
+  });
+
+  it('leaves a row whose file was renamed in case alone missing, on purpose', () => {
+    // A case-only rename while Obsidian was closed is a rename like any
+    // other, for Relink file… to settle
+    const row = article('a', 'papers/Paper.pdf');
+
+    expect(matchPdfMoves([row], ['papers/paper.pdf'])).toEqual({
+      moves: [],
+      skipped: [{ row, reason: 'missing' }],
+    });
+  });
+
+  it('tells apart names that differ in case alone', () => {
+    const row = article('a', 'one/Paper.pdf');
+    const other = article('b', 'two/PAPER.pdf');
+
+    expect(
+      matchPdfMoves([row, other], ['three/Paper.pdf', 'four/paper.pdf'])
+    ).toEqual({
+      moves: [{ row, to: 'three/Paper.pdf' }],
+      skipped: [{ row: other, reason: 'missing' }],
+    });
+  });
+
+  it('skips a missing row when more than one untracked PDF carries its filename', () => {
+    const row = article('a', 'one/paper.pdf');
+
+    const result = matchPdfMoves([row], ['two/paper.pdf', 'three/paper.pdf']);
+
+    expect(result).toEqual({
+      moves: [],
+      skipped: [{ row, reason: 'ambiguous' }],
+    });
   });
 });
 
@@ -1568,5 +1911,562 @@ describe('scanForMovedNotes', () => {
 
     expect(moved).toHaveLength(1);
     expect(console.warn).not.toHaveBeenCalled();
+  });
+
+  describe('PDF articles', () => {
+    it('rebinds a PDF article moved while Obsidian was closed', async () => {
+      const run = wire(
+        handWorld(
+          [article('a', 'papers/paper.pdf')],
+          [{ path: 'archive/paper.pdf' }]
+        )
+      );
+
+      const moved = await scanForMovedNotes(run.deps);
+
+      expect(moved).toEqual([
+        {
+          table: 'article',
+          id: 'a',
+          from: 'papers/paper.pdf',
+          to: 'archive/paper.pdf',
+        },
+      ]);
+      expect(readLocations(run.repo)).toEqual([
+        article('a', 'archive/paper.pdf'),
+      ]);
+    });
+
+    it('follows notes by id and PDFs by a unique filename, never onto a file of another name', async () => {
+      await fc.assert(
+        fc.asyncProperty(mixedWorldArb, async (world) => {
+          const run = wire(world);
+          const { deps } = logged(run);
+
+          const moved = await scanForMovedNotes(deps);
+
+          const after = readLocations(run.repo);
+          const byRow = new Map(after.map((row) => [row.id, row.reference]));
+          // What the scan says it moved is exactly what moved
+          expect(moved.sort(byId)).toEqual(
+            world.rows
+              .filter((row) => byRow.get(row.id) !== row.reference)
+              .map((row) => ({
+                table: row.table,
+                id: row.id,
+                from: row.reference,
+                to: byRow.get(row.id),
+              }))
+              .sort(byId)
+          );
+
+          const held = new Set(world.rows.map((row) => row.reference));
+          const files = world.notes.map(({ path }) => path);
+          const untracked = files.filter((path) => !held.has(path));
+          const missing = world.rows.filter(
+            (row) =>
+              !row.deleted &&
+              row.reference.endsWith('.pdf') &&
+              !files.includes(row.reference)
+          );
+          const namesakes = (row: StoredRow) =>
+            untracked.filter((path) => nameOf(path) === nameOf(row.reference));
+          // Whether anything but the row's own file could be taken for it: a
+          // file of its name that is not its own, or another missing row of
+          // its name, to tell apart from it
+          const foreign = (row: StoredRow) =>
+            namesakes(row).some(
+              (path) => path !== world.finals[world.rows.indexOf(row)]
+            ) ||
+            missing.some(
+              (other) =>
+                other !== row &&
+                nameOf(other.reference) === nameOf(row.reference)
+            );
+
+          world.rows.forEach((row, i) => {
+            const to = byRow.get(row.id);
+            const final = world.finals[i];
+            if (row.reference.endsWith('.md')) {
+              // A note is followed by id, wherever it went
+              expect(to).toBe(final ?? row.reference);
+            } else if (!missing.includes(row)) {
+              expect(to).toBe(row.reference);
+            } else if (!foreign(row)) {
+              // With no other file to mistake for it, a PDF is followed
+              // exactly when its own file kept its name, case and all
+              const kept =
+                final !== null && nameOf(final) === nameOf(row.reference);
+              expect(to).toBe(kept ? final : row.reference);
+            } else if (to !== row.reference) {
+              // The blind spot: the name is all there is to go on
+              expect(namesakes(row)).toContain(to);
+            }
+            const twins = missing.filter(
+              (other) => nameOf(other.reference) === nameOf(row.reference)
+            );
+            if (namesakes(row).length > 1 || twins.length > 1) {
+              expect(to).toBe(row.reference);
+            }
+          });
+
+          // Every PDF rebind is on record, to be taken back if it was wrong
+          expect(readRebindRows(run.repo)).toEqual(
+            moved
+              .filter((move) => move.to.endsWith('.pdf'))
+              .map(({ id, from, to }) => ({ id, from, to, at: WALL_CLOCK }))
+              .sort(byId)
+          );
+        })
+      );
+    });
+
+    it('logs every PDF it rebound or had to leave, all at once', async () => {
+      const run = wire(
+        handWorld(
+          [
+            article('a', 'one/paper.pdf'),
+            article('b', 'two/paper.pdf'),
+            article('c', 'x/c.pdf'),
+            // Gone without a trace, which is no guess to log
+            article('d', 'x/gone.pdf'),
+          ],
+          [{ path: 'three/paper.pdf' }, { path: 'y/c.pdf' }]
+        )
+      );
+      const { deps, log } = logged(run);
+
+      await scanForMovedNotes(deps);
+
+      expect(log.mock.calls).toEqual([
+        [
+          [
+            describeAmbiguous(article('a', 'one/paper.pdf')),
+            describeAmbiguous(article('b', 'two/paper.pdf')),
+            describeRebind({ id: 'c', from: 'x/c.pdf', to: 'y/c.pdf' }),
+          ],
+        ],
+      ]);
+    });
+
+    it('logs and records nothing for notes followed by id', async () => {
+      const run = wire(
+        handWorld(
+          [article('n', 'one.md')],
+          [{ path: 'two.md', frontmatter: { 'ir-id': 'n' } }]
+        )
+      );
+      const { deps, log } = logged(run);
+
+      expect(await scanForMovedNotes(deps)).toHaveLength(1);
+      expect(log).not.toHaveBeenCalled();
+      expect(readRebindRows(run.repo)).toEqual([]);
+    });
+
+    it('stops looking through the vault for PDFs the moment it is aborted', async () => {
+      const files = Array.from({ length: 8 }, (_, i) => ({
+        path: `elsewhere/${i}.pdf`,
+      }));
+      let workAtAbort = -1;
+      const run: ReturnType<typeof wire> = wire(
+        handWorld([article('a', 'one/p.pdf')], files, EVERY_STEP),
+        () => {
+          if (workAtAbort >= 0 || run.vault.getFiles.mock.calls.length === 0)
+            return;
+          run.controller.abort();
+          workAtAbort = run.work();
+        }
+      );
+
+      expect(await scanForMovedNotes(run.deps)).toEqual([]);
+      expect(workAtAbort).toBeGreaterThanOrEqual(0);
+      expect(run.work()).toBe(workAtAbort);
+    });
+
+    it.each([
+      ['deleted', `UPDATE article SET deleted = 1`],
+      ['moved on', `UPDATE article SET reference = 'three/p.pdf'`],
+      ['removed outright', `DELETE FROM article`],
+    ])(
+      'records and logs no rebind of a row a live handler %s first',
+      async (_, sql) => {
+        const run = wire(
+          handWorld([article('a', 'one/p.pdf')], [{ path: 'two/p.pdf' }])
+        );
+        const { deps, log } = logged(run);
+        raceTheWrite(run, sql);
+
+        await scanForMovedNotes(deps);
+
+        expect(
+          readLocations(run.repo).map((row) => row.reference)
+        ).not.toContain('two/p.pdf');
+        expect(readRebindRows(run.repo)).toEqual([]);
+        expect(log).not.toHaveBeenCalled();
+      }
+    );
+
+    it('leaves a PDF whose own file turns up at home mid-scan where it is', async () => {
+      let fired = false;
+      const run: ReturnType<typeof wire> = wire(
+        handWorld(
+          [article('a', 'one/p.pdf')],
+          [{ path: 'two/p.pdf' }],
+          EVERY_STEP
+        ),
+        () => {
+          if (fired || run.vault.getFiles.mock.calls.length === 0) return;
+          fired = true;
+          run.notes.set('one/p.pdf', { path: 'one/p.pdf' });
+        }
+      );
+
+      const moved = await scanForMovedNotes(run.deps);
+
+      expect(fired).toBe(true);
+      expect(moved).toEqual([]);
+      expect(readLocations(run.repo)).toEqual([article('a', 'one/p.pdf')]);
+    });
+
+    describe('taking a rebind back', () => {
+      /** Article `a`, rebound from `old/p.pdf` to `new/p.pdf` a day ago. */
+      async function rebound(files: string[], reference = 'new/p.pdf') {
+        const run = wire(
+          handWorld(
+            [article('a', reference)],
+            files.map((path) => ({ path }))
+          )
+        );
+        await recordRebind(
+          run.repo,
+          { id: 'a', from: 'old/p.pdf', to: 'new/p.pdf' },
+          WALL_CLOCK - MS_PER_DAY
+        );
+        return { run, ...logged(run) };
+      }
+
+      it('puts the article back once its own file turns up at the old path', async () => {
+        const { run, deps, log } = await rebound(['old/p.pdf', 'new/p.pdf']);
+
+        const moved = await scanForMovedNotes(deps);
+
+        const back = { id: 'a', from: 'new/p.pdf', to: 'old/p.pdf' };
+        expect(moved).toEqual([{ table: 'article', ...back }]);
+        expect(readLocations(run.repo)).toEqual([article('a', 'old/p.pdf')]);
+        expect(readRebindRows(run.repo)).toEqual([]);
+        expect(log.mock.calls).toEqual([[[describeReclaim(back)]]]);
+        // Nothing is missing, so there was nothing to look for
+        expect(run.vault.getFiles).not.toHaveBeenCalled();
+      });
+
+      it('puts it back rather than rebinding it when the stand-in has gone too', async () => {
+        const { run, deps } = await rebound(['old/p.pdf', 'other/p.pdf']);
+
+        const moved = await scanForMovedNotes(deps);
+
+        expect(moved).toEqual([
+          { table: 'article', id: 'a', from: 'new/p.pdf', to: 'old/p.pdf' },
+        ]);
+        expect(readRebindRows(run.repo)).toEqual([]);
+      });
+
+      it('never offers the file it is taking back to another missing PDF', async () => {
+        const { run, deps } = await rebound(['old/p.pdf', 'new/p.pdf']);
+        insertItem(run.repo, article('b', 'z/p.pdf'));
+
+        const moved = await scanForMovedNotes(deps);
+
+        expect(moved).toEqual([
+          { table: 'article', id: 'a', from: 'new/p.pdf', to: 'old/p.pdf' },
+        ]);
+        expect(readLocations(run.repo)).toEqual([
+          article('a', 'old/p.pdf'),
+          article('b', 'z/p.pdf'),
+        ]);
+      });
+
+      it('keeps an open rebind while nothing is at the old path, writing nothing', async () => {
+        const { run, deps, log } = await rebound(['new/p.pdf']);
+
+        expect(await scanForMovedNotes(deps)).toEqual([]);
+        expect(run.transaction).not.toHaveBeenCalled();
+        expect(readRebindRows(run.repo)).toHaveLength(1);
+        expect(log).not.toHaveBeenCalled();
+      });
+
+      it('leaves the old path to a row that names it now', async () => {
+        const { run, deps } = await rebound(['old/p.pdf', 'new/p.pdf']);
+        insertItem(run.repo, tombstone('article', 'b', 'old/p.pdf'));
+
+        expect(await scanForMovedNotes(deps)).toEqual([]);
+        expect(run.transaction).not.toHaveBeenCalled();
+        expect(readRebindRows(run.repo)).toHaveLength(1);
+      });
+
+      it.each([
+        ['has outlived its window', 'new/p.pdf', -RECLAIM_WINDOW_MS - 1],
+        ['has an article that moved on since', 'moved/p.pdf', 0],
+      ])(
+        'forgets a rebind that %s, and moves nothing',
+        async (_, reference, age) => {
+          const { run, deps } = await rebound(
+            ['old/p.pdf', reference],
+            reference
+          );
+          run.repo.mutate(`UPDATE rebind SET rebound_at = rebound_at + $1`, [
+            age,
+          ]);
+
+          expect(await scanForMovedNotes(deps)).toEqual([]);
+          expect(readLocations(run.repo)).toEqual([article('a', reference)]);
+          expect(readRebindRows(run.repo)).toEqual([]);
+        }
+      );
+
+      it('reclaims up to the last moment of the window', async () => {
+        const { run, deps } = await rebound(['old/p.pdf', 'new/p.pdf']);
+        run.repo.mutate(`UPDATE rebind SET rebound_at = $1`, [
+          WALL_CLOCK - RECLAIM_WINDOW_MS,
+        ]);
+
+        expect(await scanForMovedNotes(deps)).toHaveLength(1);
+      });
+
+      it('brings back an article deleted along with its stand-in, once its own file turns up', async () => {
+        const { run, deps, log } = await rebound(['old/p.pdf']);
+        run.repo.mutate(`UPDATE article SET deleted = 1`);
+
+        const moved = await scanForMovedNotes(deps);
+
+        const back = { id: 'a', from: 'new/p.pdf', to: 'old/p.pdf' };
+        expect(moved).toEqual([{ table: 'article', ...back }]);
+        expect(readLocations(run.repo)).toEqual([article('a', 'old/p.pdf')]);
+        expect(readRebindRows(run.repo)).toEqual([]);
+        expect(log.mock.calls).toEqual([[[describeReclaim(back)]]]);
+      });
+
+      it('keeps the rebind of a deleted article while its own file is still away', async () => {
+        const { run, deps } = await rebound([]);
+        run.repo.mutate(`UPDATE article SET deleted = 1`);
+
+        expect(await scanForMovedNotes(deps)).toEqual([]);
+        expect(readRebindRows(run.repo)).toHaveLength(1);
+        expect(run.transaction).not.toHaveBeenCalled();
+      });
+
+      it('leaves a deleted article be when a row took its old path before the write', async () => {
+        const { run, deps, log } = await rebound(['old/p.pdf']);
+        run.repo.mutate(`UPDATE article SET deleted = 1`);
+        raceTheWrite(
+          run,
+          `INSERT INTO article (id, reference, deleted, due, interval, priority)
+           VALUES ('b', 'old/p.pdf', 0, ${FIXED_DUE}, 86400000, 30)`
+        );
+
+        expect(await scanForMovedNotes(deps)).toEqual([]);
+        expect(readLocations(run.repo)).toEqual([
+          tombstone('article', 'a', 'new/p.pdf'),
+          article('b', 'old/p.pdf'),
+        ]);
+        expect(readRebindRows(run.repo)).toHaveLength(1);
+        expect(log).not.toHaveBeenCalled();
+      });
+
+      it('takes back neither of two articles rebound away from one path', async () => {
+        const { run, deps } = await rebound(['old/p.pdf', 'new/p.pdf']);
+        // Deleted, so that it would be revived rather than moved
+        insertItem(run.repo, tombstone('article', 'b', 'b/p.pdf'));
+        await recordRebind(
+          run.repo,
+          { id: 'b', from: 'old/p.pdf', to: 'b/p.pdf' },
+          WALL_CLOCK
+        );
+
+        expect(await scanForMovedNotes(deps)).toEqual([]);
+        expect(readRebindRows(run.repo)).toHaveLength(2);
+      });
+
+      it('keeps a rebind written after the scan read it', async () => {
+        const { run, deps } = await rebound(['old/p.pdf', 'new/p.pdf']);
+        run.repo.mutate(`UPDATE article SET reference = 'moved/p.pdf'`);
+        raceTheWrite(
+          run,
+          `UPDATE rebind SET rebound_at = ${WALL_CLOCK}, new_reference = 'moved/p.pdf'`
+        );
+
+        await scanForMovedNotes(deps);
+
+        expect(readRebindRows(run.repo)).toEqual([
+          { id: 'a', from: 'old/p.pdf', to: 'moved/p.pdf', at: WALL_CLOCK },
+        ]);
+      });
+    });
+
+    it('leaves PDFs sharing a filename where they were, and says so once', async () => {
+      const run = wire(
+        handWorld(
+          [article('a', 'one/paper.pdf'), article('b', 'two/paper.pdf')],
+          [{ path: 'three/paper.pdf' }]
+        )
+      );
+
+      const moved = await scanForMovedNotes(run.deps);
+
+      expect(moved).toEqual([]);
+      expect(run.transaction).not.toHaveBeenCalled();
+      expect(console.warn).toHaveBeenCalledTimes(1);
+      expect(console.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Incremental Reading'),
+        [
+          {
+            row: { table: 'article', id: 'a', reference: 'one/paper.pdf' },
+            reason: 'ambiguous',
+          },
+          {
+            row: { table: 'article', id: 'b', reference: 'two/paper.pdf' },
+            reason: 'ambiguous',
+          },
+        ]
+      );
+    });
+
+    it.each([
+      ['a live row', article('b', 'archive/paper.pdf')],
+      ['a deleted row', tombstone('article', 'b', 'archive/paper.pdf')],
+    ])('never rebinds onto a PDF %s already names', async (_, holder) => {
+      const rows = [article('a', 'papers/paper.pdf'), holder];
+      const run = wire(handWorld(rows, [{ path: 'archive/paper.pdf' }]));
+
+      const moved = await scanForMovedNotes(run.deps);
+
+      expect(moved).toEqual([]);
+      expect(readLocations(run.repo)).toEqual(rows);
+    });
+
+    it('follows only articles by filename', async () => {
+      const rows: StoredRow[] = [
+        { table: 'snippet', id: 's', reference: 'one/s.pdf', deleted: false },
+        { table: 'srs_card', id: 'c', reference: 'one/c.pdf', deleted: false },
+      ];
+      const run = wire(
+        handWorld(rows, [{ path: 'two/s.pdf' }, { path: 'two/c.pdf' }])
+      );
+
+      const moved = await scanForMovedNotes(run.deps);
+
+      expect(moved).toEqual([]);
+      expect(readLocations(run.repo)).toEqual(rows);
+    });
+
+    it('lists the vault only for the kind of item that is missing', async () => {
+      const notesOnly = wire(
+        handWorld(
+          [article('n', 'one.md')],
+          [{ path: 'two.md', frontmatter: { 'ir-id': 'n' } }]
+        )
+      );
+      const pdfsOnly = wire(
+        handWorld([article('p', 'one/p.pdf')], [{ path: 'two/p.pdf' }])
+      );
+
+      await scanForMovedNotes(notesOnly.deps);
+      await scanForMovedNotes(pdfsOnly.deps);
+
+      expect(notesOnly.vault.getFiles).not.toHaveBeenCalled();
+      expect(pdfsOnly.vault.getMarkdownFiles).not.toHaveBeenCalled();
+    });
+
+    it('lands moved notes and moved PDFs in one write', async () => {
+      const run = wire(
+        handWorld(
+          [article('n', 'one.md'), article('p', 'one/p.pdf')],
+          [
+            { path: 'two.md', frontmatter: { 'ir-id': 'n' } },
+            { path: 'two/p.pdf' },
+          ]
+        )
+      );
+
+      const moved = await scanForMovedNotes(run.deps);
+
+      expect(moved).toEqual([
+        { table: 'article', id: 'n', from: 'one.md', to: 'two.md' },
+        { table: 'article', id: 'p', from: 'one/p.pdf', to: 'two/p.pdf' },
+      ]);
+      expect(run.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves a PDF that moves again before the write to the live handlers', async () => {
+      let fired = false;
+      const run: ReturnType<typeof wire> = wire(
+        handWorld(
+          [article('a', 'one/p.pdf')],
+          [{ path: 'two/p.pdf' }],
+          EVERY_STEP
+        ),
+        () => {
+          if (fired || run.vault.getFiles.mock.calls.length === 0) return;
+          fired = true;
+          run.move('two/p.pdf', 'three/p.pdf');
+        }
+      );
+
+      const moved = await scanForMovedNotes(run.deps);
+
+      expect(fired).toBe(true);
+      expect(moved).toEqual([]);
+      expect(readLocations(run.repo)).toEqual([article('a', 'one/p.pdf')]);
+    });
+
+    it('holds back a PDF whose file another row took before the write', async () => {
+      const run = wire(
+        handWorld([article('a', 'one/p.pdf')], [{ path: 'two/p.pdf' }])
+      );
+      raceTheWrite(
+        run,
+        `INSERT INTO article (id, reference, deleted, due, interval, priority)
+         VALUES ('b', 'two/p.pdf', 0, ${FIXED_DUE}, 86400000, 30)`
+      );
+
+      const moved = await scanForMovedNotes(run.deps);
+
+      expect(moved).toEqual([]);
+      expect(readLocations(run.repo)).toEqual([
+        article('a', 'one/p.pdf'),
+        article('b', 'two/p.pdf'),
+      ]);
+    });
+
+    // Known blind spots: a PDF is known by its path, and once that is lost, by
+    // its filename alone. Whichever PDF carries the name is taken for the one
+    // that went missing, even when it is some other file.
+    it('binds two PDFs that swapped names while closed to each other (blind spot)', async () => {
+      const run = wire(
+        handWorld(
+          [article('x', 'a/x.pdf'), article('y', 'b/y.pdf')],
+          // x's file renamed to y.pdf, y's to x.pdf
+          [{ path: 'a/y.pdf' }, { path: 'b/x.pdf' }]
+        )
+      );
+
+      await scanForMovedNotes(run.deps);
+
+      expect(readLocations(run.repo)).toEqual([
+        article('x', 'b/x.pdf'),
+        article('y', 'a/y.pdf'),
+      ]);
+    });
+
+    it('binds a deleted PDF to an unrelated one of the same name (blind spot)', async () => {
+      const run = wire(
+        handWorld([article('a', 'one/p.pdf')], [{ path: 'elsewhere/p.pdf' }])
+      );
+
+      await scanForMovedNotes(run.deps);
+
+      expect(readLocations(run.repo)).toEqual([
+        article('a', 'elsewhere/p.pdf'),
+      ]);
+    });
   });
 });

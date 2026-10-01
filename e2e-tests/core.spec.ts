@@ -1673,4 +1673,65 @@ test.describe('PDF articles', () => {
     await expect.poll(() => hasFile(window, 'archive/Explored.pdf')).toBe(true);
     await expectRowAt('archive/Explored.pdf');
   });
+
+  test('finds a PDF article moved while Obsidian was closed by its filename, and gives it back to its own file', async () => {
+    await seedPdfArticle();
+    // Quitting under a database write would lose the row being tested
+    await expect
+      .poll(() =>
+        window.evaluate(() => {
+          const { app } = window as unknown as { app: PageApp };
+          const { repo } = app.plugins.plugins['incremental-reading']
+            .reviewManager as unknown as { repo: { pendingSaveCount: number } };
+          return repo.pendingSaveCount;
+        })
+      )
+      .toBe(0);
+    await expect
+      .poll(async () => (await articleRow(window))?.reference)
+      .toBe(PDF_PATH);
+    await closeElectron(app);
+
+    // Obsidian only ever sees a new file, which carries no id to follow
+    const movedPath = `moved while closed/${path.posix.basename(PDF_PATH)}`;
+    await fs.mkdir(path.join(vaultPath, 'moved while closed'));
+    await fs.rename(
+      path.join(vaultPath, PDF_PATH),
+      path.join(vaultPath, movedPath)
+    );
+
+    app = await launchElectron(vaultPath);
+    window = await openVault(app, vaultPath);
+
+    await expect
+      .poll(async () => {
+        // The plugin has yet to load for the first few polls
+        const row = await articleRow(window).catch(() => undefined);
+        return [row?.reference, row?.deleted];
+      })
+      .toEqual([movedPath, 0]);
+    expect((await pdfBytes(movedPath)).equals(PDF_BYTES)).toBe(true);
+
+    // Rebinding by filename is a guess, so it is logged. Found by name: the
+    // log folder lives in the plugin's data folder, which the suite runs
+    // against the built bundle to find and cannot import from `src/`.
+    const rebindLog = async () => {
+      const entries = await fs.readdir(vaultPath, { recursive: true });
+      const log = entries.find((entry) =>
+        /(^|[\\/])rebinds-\d{4}-\d{2}\.log$/.test(entry)
+      );
+      return log ? fs.readFile(path.join(vaultPath, log), 'utf8') : '';
+    };
+    await expect
+      .poll(rebindLog)
+      .toContain(`rebound article ${PDF_ID} by filename`);
+
+    // The PDF's own file turning up at the old path after all, as Sync
+    // delivering it late would: the row goes back to it
+    await fs.writeFile(path.join(vaultPath, PDF_PATH), PDF_BYTES);
+    await expect
+      .poll(async () => (await articleRow(window))?.reference)
+      .toBe(PDF_PATH);
+    await expect.poll(rebindLog).toContain(`reclaimed article ${PDF_ID}`);
+  });
 });

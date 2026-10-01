@@ -562,4 +562,24 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 10,
+    description: 'Record startup rebinds of PDF articles',
+    up: (db) => {
+      db.exec(`
+        -- The startup scan's rebinds of articles known by path alone (PDFs), matched
+        -- by filename rather than proven. Kept for a while, so that the article's own
+        -- file turning up late at the old path (Sync still downloading it, say) can
+        -- take the row back. One per article: the latest rebind.
+        CREATE TABLE IF NOT EXISTS rebind (
+          article_id TEXT NOT NULL PRIMARY KEY REFERENCES article(id) ON DELETE CASCADE,
+          old_reference TEXT NOT NULL, -- where the row pointed before it was rebound
+          new_reference TEXT NOT NULL, -- where the scan rebound it to
+          rebound_at INTEGER NOT NULL -- unix timestamp
+        );
+
+        CREATE INDEX IF NOT EXISTS rebind_old_reference ON rebind(old_reference);
+      `);
+    },
+  },
 ];
