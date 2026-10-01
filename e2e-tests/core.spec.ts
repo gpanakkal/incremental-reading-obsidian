@@ -1323,6 +1323,9 @@ test.describe('PDF articles', () => {
       getLeavesOfType(
         type: string
       ): { view: { file?: { path: string } }; working: boolean }[];
+      getLeaf(newLeaf: 'tab' | false): {
+        openFile(file: unknown): Promise<void>;
+      };
     };
     plugins: {
       plugins: Record<
@@ -1472,6 +1475,108 @@ test.describe('PDF articles', () => {
         (await pdfBytes(RENAMED_PATH).catch(() => null))?.equals(PDF_BYTES)
       )
       .toBe(true);
+  });
+
+  test('puts the action bar on PDF article tabs only, and keeps it in step as the tab changes file', async () => {
+    const OTHER_PATH = 'papers/Other.pdf';
+    await seedPdfArticle();
+    await fs.writeFile(path.join(vaultPath, OTHER_PATH), PDF_BYTES);
+    await expect.poll(() => hasFile(window, OTHER_PATH)).toBe(true);
+    // Pinned, so the layout checks below don't depend on the window CI gets
+    await window.setViewportSize({ width: 1280, height: 800 });
+
+    /** Opens `at` in a new tab, or in place of whatever the active tab shows. */
+    const open = (at: string, inNewTab: boolean) =>
+      window.evaluate(
+        async ([p, newTab]) => {
+          const { app } = window as unknown as { app: PageApp };
+          await app.workspace
+            .getLeaf(newTab ? 'tab' : false)
+            .openFile(app.vault.getFileByPath(p));
+        },
+        [at, inNewTab] as const
+      );
+    const pdfTabCount = () =>
+      window.evaluate(
+        () =>
+          (window as unknown as { app: PageApp }).app.workspace.getLeavesOfType(
+            'pdf'
+          ).length
+      );
+    const activePdf = window.locator(
+      '.workspace-leaf.mod-active .workspace-leaf-content[data-type="pdf"]'
+    );
+    const bar = activePdf.locator('.ir-pdf-leaf-bar');
+
+    await open(PDF_PATH, true);
+    await expect(bar).toHaveCount(1);
+    await expect(bar.getByRole('button', { name: 'Dismiss' })).toBeVisible();
+
+    // Above Obsidian's own toolbar and viewer, taking room rather than
+    // covering them
+    const toolbar = activePdf.locator('.view-content > .pdf-toolbar');
+    await expect(toolbar).toBeVisible();
+    const expectBarAboveToolbar = async () => {
+      const barBox = (await bar.boundingBox())!;
+      const toolbarBox = (await toolbar.boundingBox())!;
+      expect(barBox.y + barBox.height).toBeLessThanOrEqual(toolbarBox.y + 1);
+    };
+    await expectBarAboveToolbar();
+
+    // The same tab, swapped to a PDF that isn't an article and back
+    await open(OTHER_PATH, false);
+    await expect(bar).toHaveCount(0);
+    await open(PDF_PATH, false);
+    await expect(bar).toHaveCount(1);
+    expect(await pdfTabCount()).toBe(1);
+
+    // Works the row it stands for, and never the PDF
+    await bar.getByRole('button', { name: 'Dismiss' }).click();
+    await expect
+      .poll(async () => (await articleRow(window))?.dismissed)
+      .toBe(1);
+    await expect(bar.getByRole('button', { name: 'Un-dismiss' })).toBeVisible();
+    expect((await pdfBytes(PDF_PATH)).equals(PDF_BYTES)).toBe(true);
+
+    // Renamed while open: the row follows it, and so does the bar
+    await window.evaluate(
+      async ([from, to]) => {
+        const { app } = window as unknown as { app: PageApp };
+        await app.fileManager.renameFile(app.vault.getFileByPath(from), to);
+      },
+      [PDF_PATH, RENAMED_PATH]
+    );
+    await expect
+      .poll(async () => (await articleRow(window))?.reference)
+      .toBe(RENAMED_PATH);
+    await expect(bar).toHaveCount(1);
+    await expect(bar.getByRole('button', { name: 'Un-dismiss' })).toBeVisible();
+
+    // A PDF that isn't an article, in a tab of its own, gets a bar only once a
+    // row makes it one
+    await open(OTHER_PATH, true);
+    await expect(toolbar).toBeVisible();
+    await expect(bar).toHaveCount(0);
+    await window.evaluate(async (reference) => {
+      const { app } = window as unknown as { app: PageApp };
+      await app.plugins.plugins[
+        'incremental-reading'
+      ].reviewManager.repo.mutate(
+        'INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)',
+        ['other-pdf', reference, Date.now() + 1e9, 86_400_000, 30]
+      );
+    }, OTHER_PATH);
+    await expect(bar).toHaveCount(1);
+    expect(await pdfTabCount()).toBe(2);
+
+    // Mobile moves the bars on notes to the bottom; this one stays on top
+    // The reload into mobile starts from an empty workspace
+    await emulateMobile(window, true);
+    await window.setViewportSize({ width: 400, height: 850 });
+    await open(RENAMED_PATH, false);
+    await expect(toolbar).toBeVisible();
+    await expect(bar).toHaveCount(1);
+    await expectBarAboveToolbar();
   });
 
   test('follows a PDF article through renames and moves, and back out of the trash', async () => {

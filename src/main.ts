@@ -74,6 +74,11 @@ export default class IncrementalReadingPlugin extends Plugin {
   store!: typeof store;
   actions!: Actions;
   /**
+   * Re-checks which open tabs carry a standalone action bar. Unset until the
+   * bars are registered, after the database is up.
+   */
+  private resyncLeafActionBars?: () => void;
+  /**
    * Explains an edit to `ir-id` that the editor guard refused. Read by
    * `irIdGuardExtension` through `irPluginFacet`, and unset until the guard is
    * registered alongside it.
@@ -255,8 +260,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         // Mark reading mode transclusion hosts for styles.css
         registerTransclusionHostPostProcessor(this);
 
-        // Register action bar for reading mode standalone notes
-        registerReadingModeActionBar(this);
+        // Action bar on notes in reading mode and on PDF article tabs
+        this.resyncLeafActionBars = registerReadingModeActionBar(this);
 
         // Make the reviewed note openable from the file explorer, which
         // otherwise swallows a plain click on the active file's row
@@ -442,6 +447,9 @@ export default class IncrementalReadingPlugin extends Plugin {
       },
       onReloadFromDisk: async () => {
         await invalidateCurrentItemQuery();
+        // A PDF is an article only by its row, and a swapped-in database
+        // reports no change to any row
+        this.resyncLeafActionBars?.();
         // Item text is re-fetched above, but snippet highlights are cached
         // separately in the offset tracker and are just as stale: the rows they
         // came from went out with the replaced database. The event that

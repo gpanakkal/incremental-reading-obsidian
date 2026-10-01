@@ -1,5 +1,7 @@
+import ReviewManager from '#/lib/items/ReviewManager';
 import type { ReviewSession } from '#/lib/plugin-data';
 import { queryClient } from '#/lib/query-client';
+import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import { resetSession, setPage, store, type ReviewPage } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import IncrementalReadingPlugin from '#/main';
@@ -498,6 +500,38 @@ function makeImportReceiver() {
     );
   };
   return { importArticle, call };
+}
+
+/**
+ * Stands the plugin's database up against a stub repository, and hands back
+ * the reload hook it gave the repository. `resync` stands for the action
+ * bars, registered once the database is up.
+ */
+async function startDatabase(resync: (() => void) | undefined) {
+  let onReloadFromDisk: (() => void | Promise<void>) | undefined;
+  vi.spyOn(SQLJSRepository, 'start').mockImplementation((params) => {
+    onReloadFromDisk = params.onReloadFromDisk;
+    return Promise.resolve({
+      onDataChange: vi.fn(() => () => {}),
+    } as unknown as SQLJSRepository);
+  });
+  vi.spyOn(ReviewManager.prototype, 'refreshAllHighlights').mockResolvedValue(
+    undefined
+  );
+  vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue(undefined);
+  const receiver = {
+    app: { vault: { on: vi.fn() } },
+    register: vi.fn(),
+    registerEvent: vi.fn(),
+    followMovedNotes: vi.fn(),
+    resyncLeafActionBars: resync,
+  };
+  await (
+    IncrementalReadingPlugin.prototype as unknown as {
+      initReviewManager(): Promise<void>;
+    }
+  ).initReviewManager.call(receiver);
+  return { reload: () => onReloadFromDisk!() };
 }
 
 // #endregion
@@ -1252,5 +1286,27 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
       )
     );
     expect(follow.refreshAllHighlights).not.toHaveBeenCalled();
+  });
+});
+
+describe('IncrementalReadingPlugin database reload', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('re-checks the action bars on open tabs when the database is swapped in from disk', async () => {
+    const resync = vi.fn();
+    const { reload } = await startDatabase(resync);
+    expect(resync).not.toHaveBeenCalled();
+
+    await reload();
+
+    expect(resync).toHaveBeenCalledOnce();
+  });
+
+  it('reloads without error before the action bars are registered', async () => {
+    const { reload } = await startDatabase(undefined);
+
+    await expect(reload()).resolves.toBeUndefined();
   });
 });

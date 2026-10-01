@@ -650,6 +650,15 @@ body.is-phone .ir-header-standin {
   border-bottom: none;
 }
 
+/* On a PDF tab the bar stays above Obsidian's PDF toolbar on mobile too,
+   rather than dropping to the bottom like the bars on notes. Obsidian's
+   `.workspace-leaf-content[data-type="pdf"] .view-content` is a flex column,
+   so the mobile `order` above would put the bar below `.pdf-container`. */
+.is-mobile .ir-action-bar.ir-pdf-leaf-bar {
+  order: 0;
+  margin-bottom: 0;
+}
+
 .ir-action-bar .clickable-icon svg.lucide,
 .ir-queue-type-icon svg.lucide,
 .ir-type-filter svg.lucide {
