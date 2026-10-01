@@ -109,6 +109,8 @@ export interface ImportModalProps {
     priority: number;
   };
   defaultCopyOnImport: boolean;
+  /** Whether the file can be imported as a copy; if not, no copy is offered. */
+  canCopy: boolean;
   onClose: (
     args:
       | 'cancel'

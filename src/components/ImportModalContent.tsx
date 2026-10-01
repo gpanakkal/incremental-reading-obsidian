@@ -15,10 +15,11 @@ export function ImportModalContent({
   plugin,
   schedule,
   defaultCopyOnImport,
+  canCopy,
   onClose,
 }: ImportModalProps) {
   const [strategy, setStrategy] = useState<SchedulingStrategy>('priority');
-  const [makeCopy, setMakeCopy] = useState(defaultCopyOnImport);
+  const [makeCopy, setMakeCopy] = useState(canCopy && defaultCopyOnImport);
   const [scheduleValues, setScheduleValues] = useState({
     priority: schedule.priority ?? plugin.settings.defaultPriority,
     fixedIntervalDays: schedule.intervalDays ?? MINIMUM_FIXED_REVIEW_INTERVAL,
@@ -97,21 +98,23 @@ export function ImportModalContent({
           <div className="ir-scheduling-tooltip">{intervalTooltip}</div>
         </>
       )}
-      <div className="ir-toggle">
-        <label className="ir-toggle-label">
-          Import in place
-          <div
-            className={'checkbox-container' + (makeCopy ? ' is-enabled' : '')}
-          >
-            <input
-              type="checkbox"
-              checked={makeCopy}
-              onChange={(e) => setMakeCopy(e.currentTarget.checked)}
-            />
-          </div>
-          Make a copy
-        </label>
-      </div>
+      {canCopy && (
+        <div className="ir-toggle">
+          <label className="ir-toggle-label">
+            Import in place
+            <div
+              className={'checkbox-container' + (makeCopy ? ' is-enabled' : '')}
+            >
+              <input
+                type="checkbox"
+                checked={makeCopy}
+                onChange={(e) => setMakeCopy(e.currentTarget.checked)}
+              />
+            </div>
+            Make a copy
+          </label>
+        </div>
+      )}
       <div className="modal-button-container">
         <button
           onClick={() => {

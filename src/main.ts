@@ -1,5 +1,5 @@
 import { checkImportable } from '#/lib/items/ArticleManager';
-import { isImportable } from '#/lib/mime';
+import { isCopyImportable, isImportable } from '#/lib/mime';
 import {
   type App,
   type Menu,
@@ -700,18 +700,20 @@ export default class IncrementalReadingPlugin extends Plugin {
       return;
     }
 
-    menu.addItem((item) => {
-      item
-        .setTitle('Import a copy')
-        .setIcon(PLACEHOLDER_PLUGIN_ICON)
-        .setSection('incremental-reading')
-        .onClick(async () => {
-          await this.importArticle(file, {
-            copyOnImport: true,
-            showImportDialog: false,
+    if (isCopyImportable(file)) {
+      menu.addItem((item) => {
+        item
+          .setTitle('Import a copy')
+          .setIcon(PLACEHOLDER_PLUGIN_ICON)
+          .setSection('incremental-reading')
+          .onClick(async () => {
+            await this.importArticle(file, {
+              copyOnImport: true,
+              showImportDialog: false,
+            });
           });
-        });
-    });
+      });
+    }
 
     menu.addItem((item) => {
       item
@@ -842,8 +844,8 @@ export default class IncrementalReadingPlugin extends Plugin {
    *
    * Unavailable until the plugin has loaded, in the review tab (whose note is
    * already an item), with no file open, and while the open file is of a type
-   * that can't be imported, so the palette never lists an import that would
-   * only be refused.
+   * that can't be imported (or, for a copy, copied), so the palette never lists
+   * an import that would only be refused.
    */
   private addImportCommand(
     id: string,
@@ -859,6 +861,7 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         const file = this.app.workspace.getActiveFileView()?.file;
         if (!file || !isImportable(file)) return false;
+        if (opts?.copyOnImport && !isCopyImportable(file)) return false;
 
         if (checking) return true;
         void this.importArticle(file, opts);

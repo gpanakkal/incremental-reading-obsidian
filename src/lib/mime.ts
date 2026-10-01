@@ -85,8 +85,21 @@ export const EDITABLE_TEXT_MIME_TYPES: ReadonlySet<string> = new Set([
   'text/markdown',
 ]);
 
-/** Types a file can be imported from as an article. */
+/**
+ * Types a file can be imported from as an article. A note becomes one by the
+ * id and tag written into its frontmatter; a PDF, which has none, by the row at
+ * its path alone.
+ */
 export const IMPORTABLE_MIME_TYPES: ReadonlySet<string> = new Set([
+  ...FRONTMATTER_MIME_TYPES,
+  'application/pdf',
+]);
+
+/**
+ * Types that can be imported as a copy in the data folder, rather than only
+ * where they are.
+ */
+export const COPY_IMPORTABLE_MIME_TYPES: ReadonlySet<string> = new Set([
   ...FRONTMATTER_MIME_TYPES,
 ]);
 
@@ -111,6 +124,11 @@ export function isEditableText(file: Pick<TFile, 'extension'>): boolean {
 /** Whether `file` can be imported as an article. */
 export function isImportable(file: Pick<TFile, 'extension'>): boolean {
   return hasMimeTypeIn(IMPORTABLE_MIME_TYPES, file);
+}
+
+/** Whether `file` can be imported as a copy, not only in place. */
+export function isCopyImportable(file: Pick<TFile, 'extension'>): boolean {
+  return hasMimeTypeIn(COPY_IMPORTABLE_MIME_TYPES, file);
 }
 
 // #endregion

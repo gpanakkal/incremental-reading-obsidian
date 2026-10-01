@@ -2,11 +2,13 @@ import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  COPY_IMPORTABLE_MIME_TYPES,
   EDITABLE_TEXT_MIME_TYPES,
   extensionOfPath,
   FRONTMATTER_MIME_TYPES,
   getMimeType,
   IMPORTABLE_MIME_TYPES,
+  isCopyImportable,
   isEditableText,
   isImportable,
   sniffMimeType,
@@ -170,15 +172,27 @@ describe('capabilities', () => {
     ['supportsFrontmatter', supportsFrontmatter, FRONTMATTER_MIME_TYPES],
     ['isEditableText', isEditableText, EDITABLE_TEXT_MIME_TYPES],
     ['isImportable', isImportable, IMPORTABLE_MIME_TYPES],
+    ['isCopyImportable', isCopyImportable, COPY_IMPORTABLE_MIME_TYPES],
   ] as const;
 
-  it.each(CAPABILITIES)(
+  /** The capabilities only a note has: a PDF has none of them yet. */
+  const NOTE_ONLY = CAPABILITIES.filter(([name]) => name !== 'isImportable');
+
+  it.each(NOTE_ONLY)(
     '%s holds only markdown, the one type Obsidian parses frontmatter of',
     (_name, _has, types) => {
-      // Importing a PDF lands with task 0009, which adds it to the import set.
+      // Copying a PDF on import lands with task 0010, which adds it to the
+      // copy set.
       expect([...types]).toEqual(['text/markdown']);
     }
   );
+
+  it('imports a note or a PDF, and nothing else', () => {
+    expect([...IMPORTABLE_MIME_TYPES]).toEqual([
+      'text/markdown',
+      'application/pdf',
+    ]);
+  });
 
   it.each(CAPABILITIES)(
     '%s is true of a file exactly when its type is in the set',
@@ -194,8 +208,13 @@ describe('capabilities', () => {
     }
   );
 
-  it.each(CAPABILITIES)('%s holds for a note and not a PDF', (_name, has) => {
+  it.each(NOTE_ONLY)('%s holds for a note and not a PDF', (_name, has) => {
     expect(has(makeFile('md'))).toBe(true);
     expect(has(makeFile('pdf'))).toBe(false);
+  });
+
+  it('can import a PDF in place but not as a copy', () => {
+    expect(isImportable(makeFile('pdf'))).toBe(true);
+    expect(isCopyImportable(makeFile('pdf'))).toBe(false);
   });
 });

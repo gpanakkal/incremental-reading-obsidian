@@ -2,6 +2,7 @@ import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
   CARD_TAG,
+  CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
   DAY_ROLLOVER_OFFSET_HOURS,
   DEFAULT_PRIORITY,
@@ -98,11 +99,29 @@ function lastMutateCall(repo: SQLiteRepository): [string, unknown[]] {
   return calls[calls.length - 1];
 }
 
-function makeImportPlugin(copyOnImport: boolean) {
+/** The bytes of a note, which open with no binary format's signature. */
+const NOTE_BYTES = new TextEncoder().encode('# Content');
+
+/** The bytes a real PDF opens with, and enough after them to look like one. */
+const PDF_BYTES = new TextEncoder().encode('%PDF-1.7\n%\n1 0 obj');
+
+/**
+ * The vault an import reads: the text of a note for a copy, and the raw bytes
+ * of whatever file it is for the check that its content is what its extension
+ * says. `bytes` are those of every file.
+ */
+function makeImportVault(bytes: Uint8Array = NOTE_BYTES) {
+  return {
+    cachedRead: vi.fn().mockResolvedValue('# Content'),
+    readBinary: vi.fn().mockResolvedValue(bytes.slice().buffer),
+  };
+}
+
+function makeImportPlugin(copyOnImport: boolean, bytes?: Uint8Array) {
   return {
     app: {
       ...makeApp(),
-      vault: { cachedRead: vi.fn().mockResolvedValue('# Content') },
+      vault: makeImportVault(bytes),
     },
     settings: { copyOnImport, defaultPriority: DEFAULT_PRIORITY },
   } as never;
@@ -133,12 +152,44 @@ function makeImportPluginWithSnippets(
   return {
     app: {
       ...makeApp(),
-      vault: { cachedRead: vi.fn().mockResolvedValue('# Content') },
+      vault: makeImportVault(),
       workspace: { trigger: vi.fn() },
     },
     settings: { copyOnImport, defaultPriority: DEFAULT_PRIORITY },
     reviewManager: { snippets },
   } as never;
+}
+
+/** The vault stub inside a plugin built by one of the import helpers. */
+function importVaultOf(plugin: unknown): ReturnType<typeof makeImportVault> {
+  return (plugin as { app: { vault: ReturnType<typeof makeImportVault> } }).app
+    .vault;
+}
+
+/**
+ * A plugin importing `file`, a PDF, which the vault finds at its path, and
+ * whose bytes are a PDF's.
+ */
+function makePdfImportPlugin(
+  file: TFile,
+  copyOnImport = false,
+  snippets = makeSnippetsStub()
+) {
+  return {
+    app: {
+      metadataCache: { getFileCache: vi.fn(() => null) },
+      fileManager: { processFrontMatter: vi.fn() },
+      vault: {
+        ...makeImportVault(PDF_BYTES),
+        getFileByPath: vi.fn((path: string) =>
+          path === file.path ? file : null
+        ),
+      },
+      workspace: { trigger: vi.fn() },
+    },
+    settings: { copyOnImport, defaultPriority: DEFAULT_PRIORITY },
+    reviewManager: { snippets },
+  };
 }
 
 /** A snippet row shaped like one the backlink scan would return. */
@@ -2371,8 +2422,8 @@ describe('import', () => {
     // The menus and commands hide the entries for these; this is the guard
     // behind them, for a stale menu or a caller that skipped the check.
     const unimportable = fc
-      .oneof(fc.constant('pdf'), fc.string())
-      .filter((extension) => extension.toLowerCase() !== 'md');
+      .oneof(fc.constantFrom('png', 'canvas', ''), fc.string())
+      .filter((extension) => !['md', 'pdf'].includes(extension.toLowerCase()));
     await fc.assert(
       fc.asyncProperty(
         unimportable,
@@ -2389,10 +2440,8 @@ describe('import', () => {
           const repo = makeSimpleRepo();
           const query = vi.spyOn(repo, 'query');
           const mutate = vi.spyOn(repo, 'mutate');
-          const manager = new ArticleManager(
-            makeImportPlugin(copyOnImport),
-            repo
-          );
+          const plugin = makeImportPlugin(copyOnImport);
+          const manager = new ArticleManager(plugin, repo);
           const file = {
             ...IMPORT_FILE,
             path: `notes/my-file.${extension}`,
@@ -2404,24 +2453,399 @@ describe('import', () => {
             manager.import(file, DEFAULT_PRIORITY, null, makeCopy)
           ).resolves.toBeNull();
 
-          expect(Notice.messages).toHaveLength(1);
-          expect(Notice.messages[0]).toContain(file.name);
+          expect(Notice.messages).toEqual([
+            `"${file.name}" can't be imported as an article`,
+          ]);
           expect(query).not.toHaveBeenCalled();
           expect(mutate).not.toHaveBeenCalled();
           expect(createNote).not.toHaveBeenCalled();
           expect(updateFrontMatter).not.toHaveBeenCalled();
+          expect(importVaultOf(plugin).readBinary).not.toHaveBeenCalled();
         }
       )
     );
   });
 
+  describe('content that is not what its extension says', () => {
+    /**
+     * A note or a PDF by its name, in any casing, with bytes that disagree: a
+     * note that opens like a PDF, or a PDF that doesn't.
+     */
+    const mismatchedArb = fc.oneof(
+      fc
+        .tuple(fc.mixedCase(fc.constant('md')), fc.uint8Array())
+        .map(([extension, rest]) => ({
+          extension,
+          bytes: Uint8Array.from([...PDF_BYTES, ...rest]),
+        })),
+      fc
+        .tuple(
+          fc.mixedCase(fc.constant('pdf')),
+          fc.oneof(fc.constant(NOTE_BYTES), fc.uint8Array())
+        )
+        .filter(
+          ([, bytes]) => !PDF_BYTES.slice(0, 5).every((b, i) => bytes[i] === b)
+        )
+        .map(([extension, bytes]) => ({ extension, bytes }))
+    );
+
+    it('is refused with a notice, before anything is written', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          mismatchedArb,
+          fc.option(fc.boolean(), { nil: undefined }),
+          fc.boolean(),
+          async ({ extension, bytes }, makeCopy, copyOnImport) => {
+            Notice.reset();
+            const createNote = vi.spyOn(Obsidian, 'createNote');
+            const updateFrontMatter = vi.spyOn(Obsidian, 'updateFrontMatter');
+            createNote.mockClear();
+            updateFrontMatter.mockClear();
+            const repo = makeSimpleRepo();
+            const query = vi.spyOn(repo, 'query');
+            const mutate = vi.spyOn(repo, 'mutate');
+            const plugin = makeImportPlugin(copyOnImport, bytes);
+            const manager = new ArticleManager(plugin, repo);
+            const file = {
+              path: `notes/my-file.${extension}`,
+              name: `my-file.${extension}`,
+              basename: 'my-file',
+              extension,
+            } as TFile;
+
+            await expect(
+              manager.import(file, DEFAULT_PRIORITY, null, makeCopy)
+            ).resolves.toBeNull();
+
+            expect(Notice.messages).toHaveLength(1);
+            expect(Notice.messages[0]).toContain(file.name);
+            expect(Notice.messages[0]).not.toContain('Failed');
+            expect(query).not.toHaveBeenCalled();
+            expect(mutate).not.toHaveBeenCalled();
+            expect(createNote).not.toHaveBeenCalled();
+            expect(updateFrontMatter).not.toHaveBeenCalled();
+            expect(importVaultOf(plugin).cachedRead).not.toHaveBeenCalled();
+          }
+        )
+      );
+    });
+
+    it('fails the import, touching nothing, when the file cannot be read', async () => {
+      Notice.reset();
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const repo = makeSimpleRepo();
+      const query = vi.spyOn(repo, 'query');
+      const mutate = vi.spyOn(repo, 'mutate');
+      const updateFrontMatter = vi.spyOn(Obsidian, 'updateFrontMatter');
+      const plugin = makeImportPlugin(false);
+      importVaultOf(plugin).readBinary.mockRejectedValue(new Error('EBUSY'));
+      const manager = new ArticleManager(plugin, repo);
+
+      await expect(
+        manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false)
+      ).resolves.toBeNull();
+
+      expect(Notice.messages).toEqual([
+        `Failed to import article "${IMPORT_FILE.name}"`,
+      ]);
+      expect(query).not.toHaveBeenCalled();
+      expect(mutate).not.toHaveBeenCalled();
+      expect(updateFrontMatter).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('a PDF', () => {
+    const PDF_FILE = {
+      path: 'papers/Paper.pdf',
+      name: 'Paper.pdf',
+      basename: 'Paper',
+      extension: 'pdf',
+    } as TFile;
+
+    /** Every article row, in a stable order, as the database holds it. */
+    const allRows = (repo: SQLiteRepository) =>
+      repo.query('SELECT * FROM article ORDER BY id') as ArticleRow[];
+
+    beforeEach(() => {
+      Notice.reset();
+    });
+
+    it('is imported where it is, by a row at its path, whatever copy was asked for', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.mixedCase(fc.constant('pdf')),
+          fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+          fc.option(
+            fc.integer({
+              min: MINIMUM_FIXED_REVIEW_INTERVAL,
+              max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+            }),
+            { nil: null }
+          ),
+          fc.option(fc.boolean(), { nil: undefined }),
+          fc.boolean(),
+          async (extension, priority, fixedDays, makeCopy, copyOnImport) => {
+            Notice.reset();
+            const file = {
+              ...PDF_FILE,
+              path: `papers/Paper.${extension}`,
+              name: `Paper.${extension}`,
+              extension,
+            } as TFile;
+            const { repo } = await makeSqlJsRepo();
+            const snippets = makeSnippetsStub();
+            const plugin = makePdfImportPlugin(file, copyOnImport, snippets);
+            const vault = importVaultOf(plugin);
+            const createNote = vi.spyOn(Obsidian, 'createNote');
+            const updateFrontMatter = vi.spyOn(Obsidian, 'updateFrontMatter');
+            createNote.mockClear();
+            updateFrontMatter.mockClear();
+            const before = Date.now();
+
+            const result = await new ArticleManager(
+              plugin as never,
+              repo
+            ).import(file, priority, fixedDays, makeCopy);
+
+            const rows = allRows(repo);
+            expect(rows).toHaveLength(1);
+            expect(rows[0]).toMatchObject({
+              reference: file.path,
+              priority,
+              fixed_interval_days: fixedDays,
+              interval: TEXT_BASE_REVIEW_INTERVAL,
+              deleted: 0,
+              dismissed: 0,
+            });
+            expect(rows[0].due).toBeGreaterThanOrEqual(before);
+            expect(rows[0].due).toBeLessThanOrEqual(Date.now());
+            expect(result?.data.id).toBe(rows[0].id);
+            expect(result?.file).toBe(file);
+            expect(Notice.messages).toEqual([
+              fixedDays === null
+                ? `Imported "Paper" with priority ${IRScheduler.toDisplayPriority(priority)}`
+                : `Imported "Paper" with fixed interval of ${fixedDays} days`,
+            ]);
+            // Nothing about the PDF itself changes, and no copy is made
+            expect(createNote).not.toHaveBeenCalled();
+            expect(updateFrontMatter).not.toHaveBeenCalled();
+            expect(
+              plugin.app.fileManager.processFrontMatter
+            ).not.toHaveBeenCalled();
+            expect(vault.cachedRead).not.toHaveBeenCalled();
+            expect(snippets.adoptOrphans).not.toHaveBeenCalled();
+          }
+        ),
+        { numRuns: 30 }
+      );
+    });
+
+    it('imports it once when asked twice before the first import finishes', async () => {
+      // A double press of the dialog's Enter, or a double click on a menu
+      // entry, while the first import is still reading the file
+      await fc.assert(
+        fc.asyncProperty(fc.integer({ min: 2, max: 4 }), async (calls) => {
+          Notice.reset();
+          vi.spyOn(console, 'error').mockImplementation(() => undefined);
+          const { repo } = await makeSqlJsRepo();
+          const manager = new ArticleManager(
+            makePdfImportPlugin(PDF_FILE) as never,
+            repo
+          );
+
+          const results = await Promise.all(
+            Array.from({ length: calls }, () =>
+              manager.import(PDF_FILE, DEFAULT_PRIORITY, null, false)
+            )
+          );
+
+          expect(allRows(repo)).toHaveLength(1);
+          expect(results.filter((r) => r !== null)).toHaveLength(1);
+          expect(Notice.messages).toEqual([
+            expect.stringContaining('Imported "Paper"'),
+          ]);
+
+          // Once it has finished, the file can be asked about again
+          await manager.import(PDF_FILE, DEFAULT_PRIORITY, null, false);
+          expect(Notice.messages.at(-1)).toContain('already an article');
+        }),
+        { numRuns: 5 }
+      );
+    });
+
+    it('can import at a path again after the file there was renamed mid-import', async () => {
+      // Obsidian renames a TFile in place, so its path can change while the
+      // import is still reading it
+      const file = { ...PDF_FILE } as TFile;
+      const { repo } = await makeSqlJsRepo();
+      const plugin = makePdfImportPlugin(file);
+      importVaultOf(plugin).readBinary.mockImplementationOnce(() => {
+        (file as { path: string }).path = 'papers/Renamed.pdf';
+        return Promise.resolve(PDF_BYTES.slice().buffer);
+      });
+      const manager = new ArticleManager(plugin as never, repo);
+      await manager.import(file, DEFAULT_PRIORITY, null, false);
+
+      const replacement = { ...PDF_FILE } as TFile;
+      plugin.app.vault.getFileByPath.mockImplementation((path: string) =>
+        path === replacement.path ? replacement : null
+      );
+      const result = await manager.import(
+        replacement,
+        DEFAULT_PRIORITY,
+        null,
+        false
+      );
+
+      expect(result?.file).toBe(replacement);
+    });
+
+    it('names a long PDF by the start of its name in the notice', async () => {
+      const file = {
+        ...PDF_FILE,
+        basename: 'P'.repeat(CONTENT_TITLE_SLICE_LENGTH + 10),
+      } as TFile;
+      const { repo } = await makeSqlJsRepo();
+
+      await new ArticleManager(makePdfImportPlugin(file) as never, repo).import(
+        file,
+        DEFAULT_PRIORITY,
+        null,
+        false
+      );
+
+      expect(Notice.messages).toEqual([
+        `Imported "${'P'.repeat(CONTENT_TITLE_SLICE_LENGTH - 3)}..." with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`,
+      ]);
+    });
+
+    it('gives back the article already at its path, adding nothing', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      insertArticleRow(db, {
+        id: 'existing',
+        due: 1234,
+        due_fuzz: 5,
+        priority: MAXIMUM_PRIORITY,
+      });
+      db.exec(`UPDATE article SET reference = $1 WHERE id = 'existing'`, [
+        PDF_FILE.path,
+      ]);
+      const before = allRows(repo);
+      const plugin = makePdfImportPlugin(PDF_FILE);
+
+      const result = await new ArticleManager(plugin as never, repo).import(
+        PDF_FILE,
+        MINIMUM_PRIORITY,
+        null,
+        false
+      );
+
+      expect(allRows(repo)).toEqual(before);
+      expect(result?.data.id).toBe('existing');
+      expect(result?.file).toBe(PDF_FILE);
+      expect(Notice.messages).toEqual([
+        `"${PDF_FILE.name}" is already an article; canceling import`,
+      ]);
+    });
+
+    it('makes a revived dismissed row with no due date due now', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      insertArticleRow(db, {
+        id: 'tombstoned',
+        due: 1234,
+        due_fuzz: null,
+        priority: MAXIMUM_PRIORITY,
+      });
+      // A dismissed row may hold no due date at all, as the schema allows
+      db.exec(
+        `UPDATE article SET reference = $1, deleted = 1, dismissed = 1,
+         due = NULL WHERE id = 'tombstoned'`,
+        [PDF_FILE.path]
+      );
+      const before = Date.now();
+
+      const result = await new ArticleManager(
+        makePdfImportPlugin(PDF_FILE) as never,
+        repo
+      ).import(PDF_FILE, DEFAULT_PRIORITY, null, false);
+
+      const [row] = allRows(repo);
+      expect(row).toMatchObject({ deleted: 0, dismissed: 0 });
+      expect(row.due).toBeGreaterThanOrEqual(before);
+      expect(row.due).toBeLessThanOrEqual(Date.now());
+      expect(result?.data.id).toBe('tombstoned');
+    });
+
+    it('revives a deleted row at its path into the queue, keeping its schedule and history', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom(0, 1),
+          fc.option(
+            fc.integer({
+              min: MINIMUM_FIXED_REVIEW_INTERVAL,
+              max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+            }),
+            { nil: null }
+          ),
+          async (dismissed, fixedDays) => {
+            Notice.reset();
+            const { repo, db } = await makeSqlJsRepo();
+            insertArticleRow(db, {
+              id: 'tombstoned',
+              due: 1234,
+              due_fuzz: 5,
+              priority: MAXIMUM_PRIORITY,
+            });
+            db.exec(
+              `UPDATE article SET reference = $1, deleted = 1, dismissed = $2,
+               fixed_interval_days = $3 WHERE id = 'tombstoned'`,
+              [PDF_FILE.path, dismissed, fixedDays]
+            );
+            db.exec(
+              `INSERT INTO article_review (id, article_id, review_time)
+               VALUES ('review', 'tombstoned', 1000)`
+            );
+            const [tombstone] = allRows(repo);
+            const plugin = makePdfImportPlugin(PDF_FILE);
+
+            // Asked for another schedule, which the revived row doesn't take
+            const result = await new ArticleManager(
+              plugin as never,
+              repo
+            ).import(PDF_FILE, MINIMUM_PRIORITY, null, false);
+
+            expect(allRows(repo)).toEqual([
+              { ...tombstone, deleted: 0, dismissed: 0 },
+            ]);
+            expect(repo.query('SELECT article_id FROM article_review')).toEqual(
+              [{ article_id: 'tombstoned' }]
+            );
+            expect(result?.data).toMatchObject({
+              id: 'tombstoned',
+              deleted: 0,
+              dismissed: false,
+            });
+            expect(Notice.messages).toEqual([
+              `Restored the article "Paper" to the queue with its earlier schedule`,
+            ]);
+          }
+        ),
+        { numRuns: 10 }
+      );
+    });
+  });
+
   describe('in-place mode', () => {
     it('registers the original file without creating a copy', async () => {
+      Notice.reset();
       const repo = makeSimpleRepo();
       const manager = new ArticleManager(makeImportPlugin(false), repo);
 
       await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
 
+      expect(Notice.messages).toEqual([
+        `Imported "my-note" with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`,
+      ]);
       expect(Obsidian.createNote).not.toHaveBeenCalled();
       const [sql, params] = lastMutateCall(repo);
       expect(sql).toContain('INSERT INTO article');

@@ -1,4 +1,5 @@
 import { ImportModalContent } from '#/components/ImportModalContent';
+import { isCopyImportable } from '#/lib/mime';
 import type { SchedulingStrategy } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import { type TFile, Modal } from 'obsidian';
@@ -47,6 +48,7 @@ export class ImportModal extends Modal {
         defaultCopyOnImport={
           this.defaultCopyOnImport ?? plugin.settings.copyOnImport
         }
+        canCopy={isCopyImportable(file)}
         onClose={(args) => {
           if (args !== 'cancel') {
             void this.handleClose(
