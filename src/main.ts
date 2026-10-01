@@ -1,5 +1,7 @@
 import { checkImportable } from '#/lib/items/ArticleManager';
+import { appendLog } from '#/lib/log-file';
 import { isCopyImportable, isImportable } from '#/lib/mime';
+import { REBIND_LOG_TOPIC } from '#/lib/rebind-records';
 import {
   type App,
   type Menu,
@@ -554,6 +556,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         vault,
         metadataCache,
         signal: controller.signal,
+        log: (entries) => appendLog(vault.adapter, REBIND_LOG_TOPIC, entries),
       })
         .then(async (moved) => {
           if (moved.length === 0) return;

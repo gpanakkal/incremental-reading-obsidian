@@ -4,7 +4,17 @@ import {
   type TFile,
   type Vault,
 } from 'obsidian';
+import { extensionOfPath, getMimeType, supportsFrontmatter } from './mime';
 import { yieldToHost } from './pacing';
+import {
+  describeAmbiguous,
+  describeRebind,
+  describeReclaim,
+  forgetRebind,
+  isReclaimable,
+  readRebinds,
+  recordRebind,
+} from './rebind-records';
 import type { SQLiteRepository } from './types';
 
 export const ITEM_TABLES = ['article', 'snippet', 'srs_card'] as const;
@@ -96,6 +106,73 @@ export function resolveMoves(
 
     if (paths.length === 0) skipped.push({ row, reason: 'missing' });
     else if (paths.length > 1) skipped.push({ row, reason: 'ambiguous' });
+    else moves.push({ row, to: paths[0] });
+  }
+  return { moves, skipped };
+}
+
+/** The last segment of a vault path: a file's name, extension included. */
+const fileName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+
+/**
+ * Whether `row` is known by its path alone: an article in a format the plugin
+ * knows but cannot keep an `ir-id` in, having no frontmatter (a PDF). A
+ * reference of no format the plugin knows is left to the `ir-id` pass.
+ */
+export function isPathIdentified(row: ItemLocation): boolean {
+  const file = { extension: extensionOfPath(row.reference) };
+  return (
+    row.table === 'article' &&
+    getMimeType(file) !== null &&
+    !supportsFrontmatter(file)
+  );
+}
+
+/** `values`, grouped by the key each one gives. */
+function groupBy<T>(values: readonly T[], keyOf: (value: T) => string) {
+  const groups = new Map<string, T[]>();
+  for (const value of values) {
+    const key = keyOf(value);
+    groups.set(key, [...(groups.get(key) ?? []), value]);
+  }
+  return groups;
+}
+
+/**
+ * Where each missing PDF row's file went. A PDF carries no `ir-id` to be
+ * followed by, so it is followed by its filename (extension included) instead:
+ * a row moves onto the one untracked PDF with the name its reference ends in,
+ * provided no other missing row ends in that name too. Names are compared
+ * exactly, case included, and on purpose: a file renamed in case alone while
+ * Obsidian was closed is a renamed file, left missing like any other, for
+ * **Relink file…** — never a guess that could pick the wrong file.
+ *
+ * No PDF bearing the name leaves the row missing; more than one, on either
+ * side, leaves it ambiguous and for **Relink file…** to settle. Neither is
+ * recorded anywhere: a row that is skipped is simply looked at again on the
+ * next scan.
+ *
+ * Known blind spot: the name is all there is to go on, so a PDF that takes on
+ * a missing file's name is taken for that file. Two PDFs that swap names while
+ * Obsidian is closed are each bound to the other's row, and a PDF deleted
+ * while closed is bound to an unrelated untracked one of the same name.
+ */
+export function matchPdfMoves(
+  missing: readonly ItemLocation[],
+  untracked: readonly string[]
+): { moves: Move[]; skipped: Skip[] } {
+  const nameOf = (row: ItemLocation) => fileName(row.reference);
+  const rowsNamed = groupBy(missing, nameOf);
+  const pathsNamed = groupBy(untracked, fileName);
+
+  const moves: Move[] = [];
+  const skipped: Skip[] = [];
+  for (const row of missing) {
+    const name = nameOf(row);
+    const paths = pathsNamed.get(name);
+    if (!paths) skipped.push({ row, reason: 'missing' });
+    else if (paths.length > 1 || rowsNamed.get(name)?.length !== 1)
+      skipped.push({ row, reason: 'ambiguous' });
     else moves.push({ row, to: paths[0] });
   }
   return { moves, skipped };
@@ -255,7 +332,7 @@ function pacer(
 
 export interface MovedNoteScanDeps {
   repo: Pick<SQLiteRepository, 'query' | 'mutate' | 'transaction'>;
-  vault: Pick<Vault, 'getFileByPath' | 'getMarkdownFiles'>;
+  vault: Pick<Vault, 'getFileByPath' | 'getMarkdownFiles' | 'getFiles'>;
   metadataCache: Pick<MetadataCache, 'getFileCache'>;
   yieldToHost?: () => Promise<void>;
   /** Stops the scan at its next check; nothing is written once it fires. */
@@ -264,6 +341,13 @@ export interface MovedNoteScanDeps {
   sliceMs?: number;
   /** The clock {@link sliceMs} is measured on. */
   now?: () => number;
+  /** The wall clock rebinds are stamped with, and expire by. */
+  dateNow?: () => number;
+  /**
+   * Where the scan records, once per scan, the PDFs it rebound or reclaimed
+   * and those it had to leave missing for want of a unique filename.
+   */
+  log?: (entries: string[]) => unknown;
 }
 
 interface LocationRow {
@@ -322,7 +406,9 @@ export async function holdersOf(
 
 /**
  * Point rows back at notes that moved while nothing was listening for it: with
- * Obsidian closed, or before the plugin was ready to handle renames.
+ * Obsidian closed, or before the plugin was ready to handle renames. PDF
+ * articles, which have no frontmatter to carry an `ir-id`, are followed by
+ * filename instead — see {@link matchPdfMoves}.
  *
  * Such a move reaches Obsidian as a new file, never as a rename, and timestamps
  * can't narrow the search — a move keeps the note's mtime and birthtime, and
@@ -349,6 +435,8 @@ export async function scanForMovedNotes({
   pageSize = PAGE_SIZE,
   sliceMs = SLICE_MS,
   now = () => performance.now(),
+  dateNow = Date.now,
+  log,
 }: MovedNoteScanDeps): Promise<Relocation[]> {
   const breathe = pacer(pause, now, sliceMs, signal);
 
@@ -385,19 +473,38 @@ export async function scanForMovedNotes({
       after = page[page.length - 1].rowid;
     }
   }
-  if (stranded.length === 0) return [];
+  // A PDF the scan rebound by filename can still be taken back by its own
+  // file turning up at the old path; see `reclaimAtPath`
+  const rebinds = await readRebinds(repo);
 
-  const wanted = new Set(stranded.map((row) => row.id));
+  // A PDF has no `ir-id` to be found by, so its rows are followed by filename
+  // instead, and never looked for among the notes
+  const strandedPdfs = stranded.filter(isPathIdentified);
+  const strandedNotes = stranded.filter((row) => !isPathIdentified(row));
+
+  const wanted = new Set(strandedNotes.map((row) => row.id));
   const indexed: { path: string; id: string }[] = [];
-  for (const file of vault.getMarkdownFiles()) {
-    if (!(await breathe())) return [];
-    const id = irIdOf(file);
-    if (id !== undefined && wanted.has(id))
-      indexed.push({ path: file.path, id });
+  if (strandedNotes.length > 0) {
+    for (const file of vault.getMarkdownFiles()) {
+      if (!(await breathe())) return [];
+      const id = irIdOf(file);
+      if (id !== undefined && wanted.has(id))
+        indexed.push({ path: file.path, id });
+    }
   }
-  // No note carries a stranded id: every one of them is gone, which the live
-  // handlers deal with as notes turn up
-  if (indexed.length === 0) return [];
+  const names = new Set(strandedPdfs.map((row) => fileName(row.reference)));
+  const namesakes: string[] = [];
+  if (strandedPdfs.length > 0) {
+    for (const file of vault.getFiles()) {
+      if (!(await breathe())) return [];
+      // Every name wanted is a PDF's, so a file bearing one is a PDF
+      if (names.has(file.name)) namesakes.push(file.path);
+    }
+  }
+  // No note carries a stranded id and no PDF a stranded name: every one of
+  // them is gone, which the live handlers deal with as files turn up
+  if (indexed.length === 0 && namesakes.length === 0 && rebinds.length === 0)
+    return [];
   // The write cannot be broken up, so let the host go first and an abort land
   if (!(await breathe())) return [];
 
@@ -409,7 +516,70 @@ export async function scanForMovedNotes({
     if (noteAt(path)?.irId !== id) continue;
     pathsById.set(id, [...(pathsById.get(id) ?? []), path]);
   }
-  const { moves, skipped: unresolved } = resolveMoves(stranded, pathsById);
+
+  // A rebind whose article has moved on or outlived its window is forgotten.
+  // One still open is taken back once a file is at its old path and no row
+  // names that path, since by then the path's own claim is newer — unless
+  // two articles were rebound away from it, with no telling whose file it is.
+  // An article deleted since, with its stand-in, comes back to life with it.
+  const wallNow = dateNow();
+  const lapsed = rebinds.filter((record) => !isReclaimable(record, wallNow));
+  const returning = rebinds.filter(
+    (record) =>
+      isReclaimable(record, wallNow) && noteAt(record.oldReference) !== null
+  );
+  const oldHolders = await holdersOf(
+    repo,
+    returning.map((record) => record.oldReference)
+  );
+  const claimants = groupBy(returning, (record) => record.oldReference);
+  const homecomings = returning.filter(
+    (record) =>
+      !oldHolders.has(record.oldReference) &&
+      claimants.get(record.oldReference)?.length === 1
+  );
+  const reclaims: Move[] = homecomings
+    .filter((record) => !record.deleted)
+    .map((record) => ({
+      row: {
+        table: 'article',
+        id: record.articleId,
+        reference: record.newReference,
+      },
+      to: record.oldReference,
+    }));
+  const revivals: Relocation[] = homecomings
+    .filter((record) => record.deleted)
+    .map((record) => ({
+      table: 'article',
+      id: record.articleId,
+      from: record.newReference,
+      to: record.oldReference,
+    }));
+  const reclaiming = new Set(reclaims.map(({ row }) => rowKey(row)));
+
+  // Any row naming a PDF, even a tombstone, makes it that row's file: a PDF is
+  // known by its path alone. So a PDF move never lands on a tombstone, and the
+  // eviction below only ever makes way for notes.
+  const present = namesakes.filter((path) => noteAt(path) !== null);
+  const tracked = await holdersOf(repo, present);
+  // A file at a rebind's old path is claimed already, if by no row yet: being
+  // taken back, or contested by more than one article
+  const reclaimed = new Set(returning.map((record) => record.oldReference));
+  const untracked = present.filter(
+    (path) => !tracked.has(path) && !reclaimed.has(path)
+  );
+  // A PDF back at home after all, between the scan's two looks, is not
+  // missing; one being reclaimed is going back to its own file already
+  const missingPdfs = strandedPdfs.filter(
+    (row) => noteAt(row.reference) === null && !reclaiming.has(rowKey(row))
+  );
+
+  const notes = resolveMoves(strandedNotes, pathsById);
+  const pdfs = matchPdfMoves(missingPdfs, untracked);
+  const rebinding = new Set(pdfs.moves.map(({ row }) => rowKey(row)));
+  const moves = [...notes.moves, ...pdfs.moves, ...reclaims];
+  const unresolved = [...notes.skipped, ...pdfs.skipped];
   const targets = moves.map(({ to }) => to);
   const {
     relocations,
@@ -424,11 +594,26 @@ export async function scanForMovedNotes({
   );
   if (unfollowed.length > 0) {
     console.warn(
-      'Incremental Reading - could not follow some moved notes:',
+      'Incremental Reading - could not follow some moved files:',
       unfollowed
     );
   }
-  if (relocations.length === 0) return [];
+  const entries = pdfs.skipped
+    .filter(({ reason }) => reason === 'ambiguous')
+    .map(({ row }) => describeAmbiguous(row));
+  // The PDF moves the write really made, which alone are recorded and logged
+  const settled = new Set<string>();
+  const report = async (landed: Relocation[]) => {
+    for (const move of landed) {
+      if (!settled.has(rowKey(move))) continue;
+      if (rebinding.has(rowKey(move))) entries.push(describeRebind(move));
+      else entries.push(describeReclaim(move));
+    }
+    if (entries.length > 0) await log?.(entries);
+    return landed;
+  };
+  if (relocations.length === 0 && lapsed.length === 0 && revivals.length === 0)
+    return report([]);
 
   // Guarded on the row being where the scan read it: a live handler may have
   // moved or deleted it since, and its word is newer
@@ -479,7 +664,50 @@ export async function scanForMovedNotes({
         [move.to, move.id, parkingSpot(move)]
       );
     }
-    return landing;
+
+    // A deleted article coming back to its own file is no move for the
+    // passes above, which leave deleted rows be: it is restored in one step,
+    // guarded on it still being the same tombstone, onto a path still free
+    const free = await holdersOf(
+      repo,
+      revivals.map(({ to }) => to)
+    );
+    for (const move of revivals) {
+      if (free.has(move.to)) continue;
+      await repo.mutate(
+        `UPDATE article SET reference = $1, deleted = 0
+         WHERE id = $2 AND reference = $3 AND deleted = 1`,
+        [move.to, move.id, move.from]
+      );
+    }
+
+    // Filename rebinds are kept a while in case they were wrong; see
+    // `reclaimAtPath`. Written in this transaction, so none lands unrecorded,
+    // and only for a row the writes above really moved: a live handler may
+    // have moved or deleted it since the scan read it.
+    for (const record of lapsed) {
+      await forgetRebind(repo, record.articleId, record.reboundAt);
+    }
+    const tracked = landing.filter(
+      (move) => rebinding.has(rowKey(move)) || reclaiming.has(rowKey(move))
+    );
+    for (const move of [...tracked, ...revivals]) {
+      // Every write above is guarded to leave a row alone that has moved on
+      // since the scan read it, deleted rows included, so one at its target
+      // is one this scan put there
+      const [row] = (await repo.query(
+        'SELECT reference FROM article WHERE id = $1',
+        [move.id]
+      )) as unknown as { reference: string }[];
+      if (row?.reference !== move.to) continue;
+      if (rebinding.has(rowKey(move))) await recordRebind(repo, move, wallNow);
+      else await forgetRebind(repo, move.id);
+      settled.add(rowKey(move));
+    }
+    return [
+      ...landing,
+      ...revivals.filter((move) => settled.has(rowKey(move))),
+    ];
   });
 
   const held = new Set(landed.map(rowKey));
@@ -502,5 +730,5 @@ export async function scanForMovedNotes({
       freed
     );
   }
-  return landed;
+  return report(landed);
 }

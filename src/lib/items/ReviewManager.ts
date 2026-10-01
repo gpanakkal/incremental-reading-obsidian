@@ -6,7 +6,13 @@ import type {
   QueueSubset,
 } from '#/components/types';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '#/lib/constants';
+import { appendLog } from '#/lib/log-file';
 import { extensionOfPath, supportsFrontmatter } from '#/lib/mime';
+import {
+  describeReclaim,
+  REBIND_LOG_TOPIC,
+  reclaimAtPath,
+} from '#/lib/rebind-records';
 import {
   type ArticleRow,
   type IArticleBase,
@@ -674,7 +680,8 @@ export default class ReviewManager {
    * parked where `moved-note-scan` parks the tombstones it evicts, deleted or
    * not as it was: a missing row stays missing, which is only ever derived,
    * for Relink to find. An untracked file moving onto a tombstone's path takes
-   * that row back, as a file created there would.
+   * that row back, as a file created there would — and so does one moving onto
+   * the old path of an article the startup scan rebound by filename.
    *
    * Anything else — an image, say — has no row at either path, and costs a
    * read and no write: every write outside a transaction saves the database.
@@ -686,6 +693,8 @@ export default class ReviewManager {
       [oldPath]
     )) as unknown as { id: string }[];
     if (!moving) {
+      // As if the file had been created there
+      await this.#reclaimAtPath(newPath);
       await this.#restoreAtPath(newPath);
       return;
     }
@@ -724,6 +733,20 @@ export default class ReviewManager {
   }
 
   /**
+   * Put back an article the startup scan rebound by filename away from `path`,
+   * now that a file — its own, by path — has turned up there: Sync delivering
+   * it late, say. See `reclaimAtPath`.
+   */
+  async #reclaimAtPath(path: string) {
+    const moved = await reclaimAtPath(this.#repo, path, Date.now());
+    if (!moved) return;
+    this.snippets.offsetTracker.renameFile(moved.from, moved.to);
+    await appendLog(this.app.vault.adapter, REBIND_LOG_TOPIC, [
+      describeReclaim(moved),
+    ]);
+  }
+
+  /**
    * Mark rows as deleted
    */
   async handleDeletion(file: TAbstractFile) {
@@ -758,6 +781,9 @@ export default class ReviewManager {
     if (!concreteFile) return;
     // Everything below goes by frontmatter, which a PDF has none of
     if (!supportsFrontmatter(concreteFile)) {
+      // A reclaim only ever takes a path no row names, and a restore only a
+      // path a tombstone names, so at most one of the two acts
+      await this.#reclaimAtPath(file.path);
       await this.#restoreAtPath(file.path);
       return;
     }

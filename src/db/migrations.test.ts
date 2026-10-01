@@ -1445,6 +1445,69 @@ describe('migration v9 — key item tables and cascade review deletes', () => {
   });
 });
 
+describe('migration v10 — record startup rebinds of PDF articles', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb(SCHEMA_V0);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version < 10)
+    );
+    db.exec('PRAGMA foreign_keys = ON');
+  });
+
+  it('adds a rebind table keyed by article, leaving every item row as it was', () => {
+    insertArticle(db, 'a1', 'papers/a1.pdf');
+    const before = selectAll(db, 'article');
+
+    applyMigrations(db, migrations);
+
+    expect(getSchemaVersion(db)).toBe(10);
+    expect(columnNames(db, 'rebind')).toEqual([
+      'article_id',
+      'old_reference',
+      'new_reference',
+      'rebound_at',
+    ]);
+    expect(selectAll(db, 'article')).toEqual(before);
+  });
+
+  it('drops the rebind record of an article that is deleted outright', () => {
+    insertArticle(db, 'a1', 'papers/a1.pdf');
+    applyMigrations(db, migrations);
+    db.exec(
+      `INSERT INTO rebind (article_id, old_reference, new_reference, rebound_at)
+       VALUES ('a1', 'old/a1.pdf', 'papers/a1.pdf', 1000)`
+    );
+
+    db.exec(`DELETE FROM article WHERE id = 'a1'`);
+
+    expect(selectAll(db, 'rebind')).toEqual([]);
+  });
+
+  it('refuses a record for an article that does not exist', () => {
+    applyMigrations(db, migrations);
+
+    expect(() =>
+      db.exec(
+        `INSERT INTO rebind (article_id, old_reference, new_reference, rebound_at)
+         VALUES ('nobody', 'old/a.pdf', 'new/a.pdf', 1000)`
+      )
+    ).toThrow(/FOREIGN KEY/);
+  });
+
+  it('keeps at most one record per article', () => {
+    insertArticle(db, 'a1', 'papers/a1.pdf');
+    applyMigrations(db, migrations);
+    const insert = `INSERT INTO rebind (article_id, old_reference, new_reference, rebound_at)
+       VALUES ('a1', 'old/a1.pdf', 'papers/a1.pdf', 1000)`;
+    db.exec(insert);
+
+    expect(() => db.exec(insert)).toThrow(/UNIQUE|PRIMARY KEY/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Schema version consistency
 // ---------------------------------------------------------------------------
