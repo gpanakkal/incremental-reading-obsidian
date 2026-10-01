@@ -4,7 +4,13 @@ import type { TAbstractFile, TFile } from 'obsidian';
 import { CLOZE_DELIMITERS, QUERY_STALE_TIME } from './constants';
 import type ReviewManager from './items/ReviewManager';
 import { getSeenIds, resetCurrentItem, setCurrentItemId, store } from './store';
-import { type DataChangeEvent, isReviewCard, type ReviewItem } from './types';
+import {
+  type DataChangeEvent,
+  isMissingItem,
+  isReviewCard,
+  type MaybeMissingItem,
+  type ReviewItem,
+} from './types';
 import type { DeepPartial } from './utility-types';
 import { deepMerge } from './utils';
 
@@ -120,7 +126,7 @@ export function startItemCacheEviction(): () => void {
 /** Does not auto-refetch */
 export async function fetchCurrentItem(
   reviewManager: ReviewManager
-): Promise<ReviewItem | null> {
+): Promise<MaybeMissingItem | null> {
   const { currentItemId } = store.getState();
   // Hoisted out of the query function so this never reads or creates the `null`
   // entry, which belongs to the review hook's advance and holds the next item
@@ -128,7 +134,7 @@ export async function fetchCurrentItem(
   if (currentItemId === null) return null;
   return queryClient.fetchQuery({
     queryKey: currentItemQueryKey(currentItemId),
-    queryFn: async () => reviewManager.getReviewItemFromId(currentItemId),
+    queryFn: async () => reviewManager.getItemOrMissingFromId(currentItemId),
   });
 }
 
@@ -138,7 +144,7 @@ export async function fetchCurrentItem(
  * the honest answer: acting on the item an advance just finished with is the
  * same mistake as rendering it.
  */
-export const getCurrentItemSync = (): ReviewItem | undefined => {
+export const getCurrentItemSync = (): MaybeMissingItem | undefined => {
   const { currentItemId } = store.getState();
   if (currentItemId === null) return undefined;
   return queryClient.getQueryData(currentItemQueryKey(currentItemId));
@@ -181,13 +187,13 @@ export async function fetchByFile(
 export const currentItemQueryFn = async (
   reviewManager: ReviewManager,
   currentItemId: string | null
-): Promise<ReviewItem | null> => {
+): Promise<MaybeMissingItem | null> => {
   // `null`, not falsiness: the key's absent id is null and nothing else, and
   // every other reader of it says so too. Under a truthiness check an id that
   // is merely falsy would quietly advance past the item it names instead of
   // looking it up and coming back empty.
   if (currentItemId !== null) {
-    return reviewManager.getReviewItemFromId(currentItemId);
+    return reviewManager.getItemOrMissingFromId(currentItemId);
   }
   return fetchNextItem(reviewManager);
 };
@@ -243,7 +249,7 @@ export async function invalidateCacheOnMatch(
   }
 
   const currentItem = await fetchCurrentItem(reviewManager);
-  if (!currentItem || currentItem.file.path !== file.path) {
+  if (!currentItem || currentItem.file?.path !== file.path) {
     return;
   }
 
@@ -257,7 +263,7 @@ export async function resetCurrentOnMatch(
   reviewManager: ReviewManager
 ) {
   const currentItem = await fetchCurrentItem(reviewManager);
-  if (!currentItem || currentItem.file.path !== file.path) {
+  if (!currentItem || currentItem.file?.path !== file.path) {
     return;
   }
 
@@ -392,7 +398,7 @@ async function patchQueuePages(
  */
 async function fetchNextItem(
   reviewManager: ReviewManager
-): Promise<ReviewItem | null> {
+): Promise<MaybeMissingItem | null> {
   const storeState = store.getState();
   const seenIds = getSeenIds(storeState);
   const { typesToReview } = storeState;
@@ -401,13 +407,13 @@ async function fetchNextItem(
     ...(excludeIds.length && { excludeIds }),
     typesToInclude: typesToReview,
   });
-  const nextItem: ReviewItem | null =
+  const nextItem: MaybeMissingItem | null =
     result.all.filter(({ data }) => !Object.hasOwn(seenIds, data.id))[0] ??
     null;
   if (!isAwaitingNextItem()) return nextItem;
 
   // update card delimiters
-  if (nextItem && isReviewCard(nextItem)) {
+  if (nextItem && !isMissingItem(nextItem) && isReviewCard(nextItem)) {
     await reviewManager.cards.updateDelimiters(nextItem, CLOZE_DELIMITERS);
     // Again, past the write's await.
     if (!isAwaitingNextItem()) return nextItem;

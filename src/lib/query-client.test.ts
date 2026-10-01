@@ -10,7 +10,9 @@ import {
   currentItemQueryFn,
   currentItemQueryKey,
   getCurrentItemSync,
+  invalidateCacheOnMatch,
   queryClient,
+  resetCurrentOnMatch,
   startItemCacheEviction,
 } from './query-client';
 import {
@@ -22,7 +24,7 @@ import {
   setPage,
   store,
 } from './store';
-import type { NoteType, ReviewItem } from './types';
+import type { MaybeMissingItem, NoteType, ReviewItem } from './types';
 
 // #region HELPERS
 
@@ -163,6 +165,19 @@ function watch(queryKey: QueryKey): () => void {
 
 const isCached = (queryKey: QueryKey) =>
   queryClient.getQueryCache().find({ queryKey, exact: true }) !== undefined;
+/** Review on a missing item, and a manager that resolves it as such. */
+function wireMissing() {
+  const item = {
+    data: { id: 'gone', type: 'article', reference: 'a.md' },
+    file: null,
+  } as unknown as MaybeMissingItem;
+  store.dispatch(setCurrentItemId('gone'));
+  const manager = {
+    getItemOrMissingFromId: vi.fn().mockResolvedValue(item),
+  } as unknown as ReviewManager;
+  return manager;
+}
+
 // #endregion
 
 describe('applyQueueChange', () => {
@@ -385,16 +400,16 @@ describe('currentItemQueryFn', () => {
     await fc.assert(
       fc.asyncProperty(twoIdsArb, async ([keyedId, storeId]) => {
         const item = makeReviewItem(keyedId);
-        const getReviewItemFromId = vi.fn().mockResolvedValue(item);
+        const getItemOrMissingFromId = vi.fn().mockResolvedValue(item);
         store.dispatch(setCurrentItemId(storeId));
 
         const resolved = await currentItemQueryFn(
-          { getReviewItemFromId } as unknown as ReviewManager,
+          { getItemOrMissingFromId } as unknown as ReviewManager,
           keyedId
         );
 
         expect(resolved).toBe(item);
-        expect(getReviewItemFromId).toHaveBeenCalledWith(keyedId);
+        expect(getItemOrMissingFromId).toHaveBeenCalledWith(keyedId);
       })
     );
   });
@@ -429,14 +444,12 @@ describe('currentItemQueryFn', () => {
           if (seen) store.dispatch(addSeenId({ id, resetTime }));
         }
         const due = queue.map(([id]) => makeReviewItem(id));
-        const getDue = vi
-          .fn()
-          .mockResolvedValue({
-            all: due,
-            cards: [],
-            snippets: [],
-            articles: due,
-          });
+        const getDue = vi.fn().mockResolvedValue({
+          all: due,
+          cards: [],
+          snippets: [],
+          articles: due,
+        });
 
         const resolved = await currentItemQueryFn(
           { getDue } as unknown as ReviewManager,
@@ -624,6 +637,69 @@ describe('currentItemQueryFn', () => {
         }
       )
     );
+  });
+
+  it('advances onto a missing item of any type, writing nothing to its missing file', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+        async (id, type) => {
+          resetCacheAndStore();
+          const item = {
+            data: { id, type },
+            file: null,
+          } as unknown as MaybeMissingItem;
+          const updateDelimiters = vi.fn(async () => {});
+          const manager = {
+            getDue: vi.fn().mockResolvedValue({
+              all: [item],
+              cards: [],
+              snippets: [],
+              articles: [],
+            }),
+            cards: { updateDelimiters },
+          } as unknown as ReviewManager;
+
+          expect(await currentItemQueryFn(manager, null)).toBe(item);
+          expect(updateDelimiters).not.toHaveBeenCalled();
+          expect(store.getState().currentItemId).toBe(id);
+          expect(queryClient.getQueryData(currentItemQueryKey(id))).toBe(item);
+        }
+      )
+    );
+  });
+});
+
+describe('file matches against a missing current item', () => {
+  afterEach(() => {
+    resetCacheAndStore();
+    vi.restoreAllMocks();
+  });
+
+  it('matches no file, so nothing is invalidated or reset', async () => {
+    const manager = wireMissing();
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+    const file = { path: 'a.md' } as TFile;
+
+    await invalidateCacheOnMatch(file, manager);
+    await resetCurrentOnMatch(file, manager);
+
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(store.getState().currentItemId).toBe('gone');
+  });
+
+  it('still resets review off an item whose file is the one deleted', async () => {
+    const item = makeReviewItem('here');
+    store.dispatch(setCurrentItemId('here'));
+    const manager = {
+      getItemOrMissingFromId: vi.fn().mockResolvedValue(item),
+    } as unknown as ReviewManager;
+
+    await resetCurrentOnMatch({ path: 'articles/other.md' } as TFile, manager);
+    expect(store.getState().currentItemId).toBe('here');
+    await resetCurrentOnMatch(item.file, manager);
+    expect(store.getState().currentItemId).toBeNull();
   });
 });
 

@@ -26,4 +26,9 @@ export class FakeReviewManager {
     await this.#gate;
     return this.#nextItem;
   }
+
+  /** Review's own lookup; this fake has no missing items to add. */
+  async getItemOrMissingFromId(id: string): Promise<ReviewItem | null> {
+    return this.getReviewItemFromId(id);
+  }
 }

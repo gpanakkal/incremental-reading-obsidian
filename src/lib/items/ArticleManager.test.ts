@@ -278,6 +278,27 @@ function makeApp(): Record<string, unknown> {
 }
 
 /**
+ * An app whose note at `claimedPath` carries another item's `ir-id`, so the row
+ * pointing there is refused as that note's owner. Every other note is plain.
+ */
+function makeAppClaiming(claimedPath: string): Record<string, unknown> {
+  return {
+    metadataCache: {
+      getFileCache: (file: TFile) =>
+        file.path === claimedPath
+          ? { frontmatter: { 'ir-id': 'another-item', tags: [ARTICLE_TAG] } }
+          : {},
+    },
+    fileManager: { processFrontMatter: async () => undefined },
+  };
+}
+
+/** Each reference's own note, so a claimed one can be told apart. */
+function noteAt(reference: string): TFile {
+  return { path: reference, extension: 'md' } as TFile;
+}
+
+/**
  * A repo backed by a real in-memory sql.js database, so ORDER BY / LIMIT
  * clauses are actually executed (mock repos ignore them).
  */
@@ -607,10 +628,12 @@ describe('getDue', () => {
     });
   });
 
-  it('skips rows whose note file is missing and retries until all results have files', async () => {
-    // Simulate: first call returns rowA (no file) + rowB (has file), second call
-    // returns only rowB (rowA excluded). Obsidian.getNote returns null for rowA's reference.
-    const rowA = makeArticleRow({ id: 'no-file', due: 0 });
+  it('returns a row whose note file is missing as a missing item, without retrying', async () => {
+    const rowA = makeArticleRow({
+      id: 'no-file',
+      reference: 'articles/gone.md',
+      due: 0,
+    });
     const rowB = makeArticleRow({ id: 'has-file', due: 0 });
     const file = { path: 'articles/test.md', extension: 'md' } as TFile;
 
@@ -641,9 +664,13 @@ describe('getDue', () => {
     const manager = new ArticleManager(plugin, repo);
     const results = await manager.getDue(0);
 
-    expect(results.every((r) => r.file !== null)).toBe(true);
-    expect(results.map((r) => r.data.id)).not.toContain('no-file');
-    expect(callCount).toBeGreaterThan(1);
+    expect(results).toEqual([
+      { data: ArticleManager.rowToBase(rowA), file: null },
+      { data: ArticleManager.rowToBase(rowB), file },
+    ]);
+    expect(callCount).toBe(1);
+    // Missing is never stored
+    expect((repo.mutate as ReturnType<typeof vi.fn>).mock.calls).toEqual([]);
   });
 
   it('starts with an empty exclude list when no excludeIds are given', async () => {
@@ -705,7 +732,7 @@ describe('getDue', () => {
     expect(firstCallParams).toContain(rowA.id);
   });
 
-  it('filters out items where rowToReviewArticle returns null (null row from filter predicate)', async () => {
+  it('filters out items where rowToReviewArticle refuses a note that is not the row’s', async () => {
     // Give each row a unique reference so the getNote mock can discriminate.
     // The second call must still return rowWithFile so that `due` is not empty after the retry.
     const rowWithFile = makeArticleRow({
@@ -718,11 +745,7 @@ describe('getDue', () => {
       reference: 'articles/no-file.md',
       due: 1,
     });
-    const file = { path: 'articles/with-file.md', extension: 'md' } as TFile;
-
-    vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) => {
-      return ref === rowNoFile.reference ? null : file;
-    });
+    vi.spyOn(Obsidian, 'getNote').mockImplementation(noteAt);
 
     // First call returns both rows; second call returns only rowWithFile (rowNoFile is excluded).
     let call = 0;
@@ -741,7 +764,7 @@ describe('getDue', () => {
     } as unknown as SQLiteRepository;
 
     const plugin = {
-      app: makeApp(),
+      app: makeAppClaiming(rowNoFile.reference),
       settings: { dayRolloverOffset: 0 },
     } as never;
     const manager = new ArticleManager(plugin, repo);
@@ -927,20 +950,14 @@ describe('rowToReviewArticle', () => {
     );
   });
 
-  it('calls markDeleted when the file is missing and the row is not already deleted', async () => {
+  it('returns null and leaves a live row alone when its file is missing, since missing is never stored', async () => {
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(null);
     const row = makeArticleRow({ deleted: false });
     const repo = makeSimpleRepo();
     const manager = new ArticleManager({} as never, repo);
-    manager.rowToReviewArticle(row);
+    expect(manager.rowToReviewArticle(row)).toBeNull();
     await Promise.resolve();
-    const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls as [string, unknown[]][];
-    const deleteCall = mutateCalls.find(([sql]) =>
-      sql.includes('SET deleted = 1')
-    );
-    expect(deleteCall).toBeDefined();
-    expect(deleteCall![1][0]).toBe(row.id);
+    expect((repo.mutate as ReturnType<typeof vi.fn>).mock.calls).toEqual([]);
   });
 
   it('skips markDeleted when the file is missing but the row is already deleted', async () => {
@@ -1993,9 +2010,8 @@ describe('getDue (filter correctness)', () => {
     vi.restoreAllMocks();
   });
 
-  it('excludes items where rowToReviewArticle returns null from the final result (article.file null check)', async () => {
-    // rowToReviewArticle returns null when getNote returns null.
-    // Mutant: `!!article && article.file !== null` → `true` would include nulls.
+  it('excludes items where rowToReviewArticle refuses the note from the final result', async () => {
+    // rowToReviewArticle returns null when the note claims another item's id.
     // Rows must have distinct references so the mock can discriminate.
     const rowNoFile = makeArticleRow({
       id: 'null-item',
@@ -2007,11 +2023,7 @@ describe('getDue (filter correctness)', () => {
       reference: 'articles/with-file.md',
       due: 0,
     });
-    const file = { path: 'articles/with-file.md', extension: 'md' } as TFile;
-
-    vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) =>
-      ref === rowNoFile.reference ? null : file
-    );
+    vi.spyOn(Obsidian, 'getNote').mockImplementation(noteAt);
 
     let callCount = 0;
     const repo = {
@@ -2028,7 +2040,7 @@ describe('getDue (filter correctness)', () => {
     } as unknown as SQLiteRepository;
 
     const plugin = {
-      app: makeApp(),
+      app: makeAppClaiming(rowNoFile.reference),
       settings: { dayRolloverOffset: 0 },
     } as never;
     const manager = new ArticleManager(plugin, repo);
@@ -2053,11 +2065,7 @@ describe('getDue (filter correctness)', () => {
       reference: 'articles/present.md',
       due: 0,
     });
-    const file = { path: 'articles/present.md', extension: 'md' } as TFile;
-
-    vi.spyOn(Obsidian, 'getNote').mockImplementation((ref) =>
-      ref === missingRow.reference ? null : file
-    );
+    vi.spyOn(Obsidian, 'getNote').mockImplementation(noteAt);
 
     const queryCalls: { sql: string; params: unknown[] }[] = [];
     const repo = {
@@ -2078,7 +2086,7 @@ describe('getDue (filter correctness)', () => {
     } as unknown as SQLiteRepository;
 
     const plugin = {
-      app: makeApp(),
+      app: makeAppClaiming(missingRow.reference),
       settings: { dayRolloverOffset: 0 },
     } as never;
     const manager = new ArticleManager(plugin, repo);

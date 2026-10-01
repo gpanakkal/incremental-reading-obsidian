@@ -1,11 +1,16 @@
 // @vitest-environment jsdom
 
 import type IncrementalReadingPlugin from '#/main';
+import * as RelinkModalModule from '#/views/RelinkModal';
+import { RelinkModal } from '#/views/RelinkModal';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
 import type { Command, TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { currentItemQueryKey, queryClient } from './query-client';
 import { initReviewCommands } from './review-commands';
+import { setCurrentItemId, setShowAnswer, store } from './store';
+import type { MaybeMissingItem, NoteType } from './types';
 
 // #region HELPERS
 
@@ -110,9 +115,65 @@ function goToContextSetup({
   return { check, goToContext };
 }
 
+const RELINK_ID = 'relink-file';
+
+/**
+ * The relink command over a review tab (or none) whose current item is of
+ * `type` and last lived at `reference`, in a vault holding `paths`.
+ */
+function relinkSetup({
+  hasView,
+  item,
+  paths,
+}: {
+  hasView: boolean;
+  item: { type: NoteType; reference: string } | null;
+  paths: string[];
+}) {
+  const files = paths.map(
+    (path) =>
+      ({ path, extension: path.slice(path.lastIndexOf('.') + 1) }) as TFile
+  );
+  const commands = new Map<string, Command>();
+  const query = vi.fn(async () => []);
+  const plugin = {
+    addCommand: (command: Command) => commands.set(command.id, command),
+    // A file on the view as well, so a guard on the view's file can't be what
+    // turns a command down for a missing item
+    getActiveReviewView: () =>
+      hasView ? ({ file: {} } as unknown as ReviewView) : null,
+    app: {
+      vault: {
+        getFileByPath: (path: string) =>
+          files.find((file) => file.path === path) ?? null,
+        getFiles: () => files,
+      },
+      metadataCache: { getFileCache: () => null },
+    },
+    reviewManager: { repo: { query } },
+  } as unknown as IncrementalReadingPlugin;
+  initReviewCommands(plugin);
+
+  if (item) {
+    const reviewItem = {
+      data: { id: 'item-1', ...item },
+      file: files.find((file) => file.path === item.reference) ?? null,
+    } as unknown as MaybeMissingItem;
+    store.dispatch(setCurrentItemId('item-1'));
+    queryClient.setQueryData(currentItemQueryKey('item-1'), reviewItem);
+  }
+  const command = commands.get(RELINK_ID);
+  if (!command?.checkCallback) {
+    throw new Error(`${RELINK_ID} registered no checkCallback`);
+  }
+  return { command, check: command.checkCallback, plugin, commands };
+}
+
 // #endregion
 
 afterEach(() => {
+  store.dispatch(setCurrentItemId(null));
+  queryClient.clear();
   vi.restoreAllMocks();
 });
 
@@ -219,5 +280,92 @@ describe('go to context command', () => {
         }
       })
     );
+  });
+});
+
+describe('relink file command', () => {
+  it('is named for what it does', () => {
+    const { command } = relinkSetup({ hasView: true, item: null, paths: [] });
+    expect(command.name).toBe('Relink file…');
+  });
+
+  it.each([
+    [
+      'there is no review tab',
+      false,
+      { type: 'article', reference: 'gone.md' },
+    ],
+    ['review has no current item', true, null],
+    [
+      'the current item’s file is there',
+      true,
+      { type: 'article', reference: 'here.md' },
+    ],
+  ] as const)('is unavailable when %s', (_case, hasView, item) => {
+    const open = vi.spyOn(RelinkModal.prototype, 'open');
+    const { check } = relinkSetup({ hasView, item, paths: ['here.md'] });
+
+    expect(check(true)).toBe(false);
+    expect(check(false)).toBe(false);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['article', 'article'],
+    ['snippet', 'snippet'],
+    ['card', 'srs_card'],
+  ] as const)(
+    'opens the picker for a missing %s, from its own table',
+    (type, table) => {
+      const openRelinkPicker = vi
+        .spyOn(RelinkModalModule, 'openRelinkPicker')
+        .mockResolvedValue(null);
+      const { check, plugin } = relinkSetup({
+        hasView: true,
+        item: { type, reference: 'gone.md' },
+        paths: ['here.md'],
+      });
+
+      expect(check(true)).toBe(true);
+      expect(openRelinkPicker).not.toHaveBeenCalled();
+      check(false);
+
+      expect(openRelinkPicker).toHaveBeenCalledExactlyOnceWith(plugin, {
+        table,
+        id: 'item-1',
+        reference: 'gone.md',
+      });
+    }
+  );
+});
+
+describe('review commands on a missing item', () => {
+  it.each([
+    ['mark-review', false],
+    ['open-scheduling-modal', false],
+    ['grade-card-good', true],
+  ] as const)(
+    '%s is unavailable, having no file to act on',
+    (id, showAnswer) => {
+      store.dispatch(setShowAnswer(showAnswer));
+      for (const type of ['article', 'snippet', 'card'] as const) {
+        const { commands } = relinkSetup({
+          hasView: true,
+          item: { type, reference: 'gone.md' },
+          paths: [],
+        });
+        expect(commands.get(id)?.checkCallback?.(true)).toBe(false);
+      }
+      store.dispatch(setShowAnswer(false));
+    }
+  );
+
+  it.each(['skip-item', 'dismiss-item'])('%s is still available', (id) => {
+    const { commands } = relinkSetup({
+      hasView: true,
+      item: { type: 'article', reference: 'gone.md' },
+      paths: [],
+    });
+    expect(commands.get(id)?.checkCallback?.(true)).toBe(true);
   });
 });

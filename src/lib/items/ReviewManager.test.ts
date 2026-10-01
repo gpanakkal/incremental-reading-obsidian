@@ -513,6 +513,35 @@ const makeLogAdapter = () => ({
   append: vi.fn(async () => {}),
 });
 
+/** One row of each item table, all under id `x`, for lookups by id. */
+const ITEM_ROW_KINDS = [
+  { table: 'article', type: 'article', reference: 'articles/x.md' },
+  { table: 'snippet', type: 'snippet', reference: 'snippets/x.md' },
+  { table: 'srs_card', type: 'card', reference: 'cards/x.md' },
+] as const;
+
+/** Insert the `kind` row `x`, live or a tombstone. */
+function insertItemRow(
+  repo: SQLJSRepository,
+  kind: (typeof ITEM_ROW_KINDS)[number],
+  deleted: boolean
+) {
+  if (kind.table === 'srs_card') {
+    repo.mutate(
+      `INSERT INTO srs_card (id, reference, deleted, created_at, due,
+         stability, difficulty, elapsed_days, scheduled_days, state)
+       VALUES ('x', $1, $2, $3, $3, 0, 0, 0, 0, 0)`,
+      [kind.reference, deleted, YEAR_2000_MS]
+    );
+    return;
+  }
+  repo.mutate(
+    `INSERT INTO ${kind.table} (id, reference, deleted, due, interval, priority)
+     VALUES ('x', $1, $2, $3, 86400000, 30)`,
+    [kind.reference, deleted, YEAR_2000_MS]
+  );
+}
+
 // #endregion
 
 describe('ReviewManager.getDue', () => {
@@ -715,7 +744,7 @@ describe('ReviewManager.getQueue', () => {
     expect(item.type).toBe('article');
     expect(item.reference).toBe('articles/a1.md');
     expect(item.due).toEqual(new Date(YEAR_2000_MS));
-    expect(item.file.path).toBe('articles/a1.md');
+    expect(item.file?.path).toBe('articles/a1.md');
   });
 
   it('omits redacted fields (due_fuzz, scroll_top, offsets, dismissed, deleted) from every QueueRow', async () => {
@@ -1084,22 +1113,33 @@ describe('ReviewManager.getQueue', () => {
     });
   });
 
-  it('drops items whose note cannot be resolved', async () => {
+  it('keeps items whose note cannot be resolved, as missing rows with no file', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);
     vi.spyOn(manager.articles, 'fetchMany').mockResolvedValue([
-      makeArticleRow({ id: 'gone', reference: 'articles/gone.md' }),
-      makeArticleRow({ id: 'here', reference: 'articles/here.md' }),
+      makeArticleRow({ id: 'gone', reference: 'articles/gone.md', due: 1 }),
+      makeArticleRow({ id: 'here', reference: 'articles/here.md', due: 2 }),
     ] as never);
-    vi.spyOn(manager.snippets, 'fetchMany').mockResolvedValue([] as never);
-    vi.spyOn(manager.cards, 'fetchMany').mockResolvedValue([] as never);
+    vi.spyOn(manager.snippets, 'fetchMany').mockResolvedValue([
+      makeSnippetRow({ id: 'gone-s', reference: 'snippets/gone.md', due: 3 }),
+    ] as never);
+    vi.spyOn(manager.cards, 'fetchMany').mockResolvedValue([
+      makeCardRow({ id: 'gone-c', reference: 'cards/gone.md', due: 4 }),
+    ] as never);
     vi.spyOn(Obsidian, 'getNote').mockImplementation((reference: string) =>
       reference === 'articles/here.md'
         ? ({ path: reference, extension: 'md' } as TFile)
         : null
     );
     const { rows: queue } = await manager.getQueue();
-    expect(queue.map((r) => r.id)).toEqual(['here']);
+    expect(queue.map((r) => [r.id, r.file?.path ?? null])).toEqual([
+      ['gone', null],
+      ['here', 'articles/here.md'],
+      ['gone-s', null],
+      ['gone-c', null],
+    ]);
+    // A missing article has no note to read its source off
+    expect(queue[0].parent).toBeNull();
   });
 
   it('uses the end of the given day when a date is supplied', async () => {
@@ -1542,7 +1582,7 @@ describe('ReviewManager.getQueueRow', () => {
     expect(row?.id).toBe('a1');
     expect(row?.type).toBe('article');
     expect(row?.due).toEqual(new Date(YEAR_2000_MS));
-    expect(row?.file.path).toBe('articles/a1.md');
+    expect(row?.file?.path).toBe('articles/a1.md');
   });
 
   it('resolves a snippet id', async () => {
@@ -1593,7 +1633,7 @@ describe('ReviewManager.getQueueRow', () => {
     expect(await manager.getQueueRow('missing')).toBeNull();
   });
 
-  it('returns null when the note file cannot be resolved', async () => {
+  it('resolves an item whose note cannot be resolved to a missing row', async () => {
     const repo = makeRepo();
     vi.spyOn(repo, 'query').mockImplementation((sql: string) =>
       Promise.resolve(
@@ -1604,7 +1644,10 @@ describe('ReviewManager.getQueueRow', () => {
     );
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(null);
     const manager = new ReviewManager(makePlugin(), repo);
-    expect(await manager.getQueueRow('a1')).toBeNull();
+    const row = await manager.getQueueRow('a1');
+    expect(row?.id).toBe('a1');
+    expect(row?.file).toBeNull();
+    expect(row?.parent).toBeNull();
   });
 });
 
@@ -1999,6 +2042,74 @@ describe('ReviewManager.getReviewItemFromId', () => {
     vi.spyOn(manager.cards, 'fetch').mockResolvedValue(null);
     const result = await manager.getReviewItemFromId('missing-id');
     expect(result).toBeNull();
+  });
+});
+
+describe('ReviewManager.getItemOrMissingFromId', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each(ITEM_ROW_KINDS)(
+    'resolves a live $table row with no file to a missing item, without writing to it',
+    async (kind) => {
+      const wired = wirePaths([]);
+      insertItemRow(wired.repo, kind, false);
+
+      const item = await wired.manager.getItemOrMissingFromId('x');
+
+      expect(item?.file).toBeNull();
+      expect(item?.data).toMatchObject({
+        id: 'x',
+        type: kind.type,
+        reference: kind.reference,
+      });
+      expect(wired.repo.rows(kind.table)).toEqual([
+        { id: 'x', reference: kind.reference, deleted: false },
+      ]);
+    }
+  );
+
+  it.each(ITEM_ROW_KINDS)(
+    'answers null for a $table tombstone with no file, whose file was deleted, not lost',
+    async (kind) => {
+      const wired = wirePaths([]);
+      insertItemRow(wired.repo, kind, true);
+
+      expect(await wired.manager.getItemOrMissingFromId('x')).toBeNull();
+      expect(wired.repo.rows(kind.table)).toEqual([
+        { id: 'x', reference: kind.reference, deleted: true },
+      ]);
+    }
+  );
+
+  it.each(
+    ITEM_ROW_KINDS.flatMap((kind) =>
+      [false, true].map((deleted) => ({ ...kind, deleted }))
+    )
+  )(
+    'resolves a $table row whose file is there (deleted: $deleted) as its ordinary review item',
+    async ({ deleted, ...kind }) => {
+      const wired = wirePaths([kind.reference]);
+      insertItemRow(wired.repo, kind, deleted);
+
+      const item = await wired.manager.getItemOrMissingFromId('x');
+
+      expect(item).toEqual(await wired.manager.getReviewItemFromId('x'));
+      expect(item?.file).toBe(wired.files.get(kind.reference));
+    }
+  );
+
+  it('answers null for an id no table holds', async () => {
+    const wired = wirePaths([]);
+    expect(await wired.manager.getItemOrMissingFromId('nothing')).toBeNull();
   });
 });
 

@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import * as ReactQuery from '#/hooks/useReactQuery';
-import type { NoteType, ReviewItem as TReviewItem } from '#/lib/types';
+import type {
+  MaybeMissingItem,
+  MissingItem,
+  NoteType,
+  ReviewItem as TReviewItem,
+} from '#/lib/types';
+import * as RelinkModalModule from '#/views/RelinkModal';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { type ComponentChild, render } from 'preact';
@@ -57,7 +63,7 @@ function wireItem({
   isLoading,
   showAnswer,
 }: {
-  item: TReviewItem | null;
+  item: MaybeMissingItem | null;
   text: string | undefined;
   isLoading: boolean;
   showAnswer: boolean;
@@ -71,9 +77,14 @@ function wireItem({
 
   reduxState = { showAnswer };
   const openInNewTab = vi.fn().mockResolvedValue(undefined);
+  const plugin = { name: 'plugin' };
   vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
     actions: { _openInNewTab: openInNewTab },
+    plugin,
   } as never);
+  const openRelinkPicker = vi
+    .spyOn(RelinkModalModule, 'openRelinkPicker')
+    .mockResolvedValue(null);
   vi.spyOn(ReactQuery, 'useCurrentItemFileText').mockReturnValue({
     item,
     text,
@@ -90,7 +101,18 @@ function wireItem({
   const summary = vi
     .spyOn(ReviewSummaryModule, 'ReviewSummary')
     .mockReturnValue(<></>);
-  return { cardViewer, editor, summary, openInNewTab };
+  return {
+    cardViewer,
+    editor,
+    summary,
+    openInNewTab,
+    openRelinkPicker,
+    plugin,
+  };
+}
+
+function missingPlaceholder(container: HTMLElement): HTMLElement | null {
+  return container.querySelector('.ir-missing-item');
 }
 
 function binaryPlaceholder(container: HTMLElement): HTMLElement | null {
@@ -337,6 +359,45 @@ describe('ReviewItem', () => {
           const container = mount(<ReviewItem />);
 
           expect(binaryPlaceholder(container)).toBeNull();
+        }
+      )
+    );
+  });
+  it('shows a missing item as a way to relink it, never as text or the summary', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+        fc.string(),
+        fc.string(),
+        fc.option(fc.string(), { nil: undefined }),
+        fc.boolean(),
+        (type, id, reference, text, showAnswer) => {
+          const item = {
+            data: { type, id, reference },
+            file: null,
+          } as unknown as MissingItem;
+          const { cardViewer, editor, summary, openRelinkPicker, plugin } =
+            wireItem({ item, text, isLoading: false, showAnswer });
+
+          const container = mount(<ReviewItem />);
+
+          const placeholder = missingPlaceholder(container);
+          expect(placeholder?.textContent).toContain(reference);
+          expect(binaryPlaceholder(container)).toBeNull();
+          expect(cardViewer).not.toHaveBeenCalled();
+          expect(editor).not.toHaveBeenCalled();
+          expect(summary).not.toHaveBeenCalled();
+
+          const button = placeholder?.querySelector('button');
+          expect(button?.textContent).toBe('Relink file…');
+          expect(openRelinkPicker).not.toHaveBeenCalled();
+          button?.click();
+          expect(openRelinkPicker).toHaveBeenCalledTimes(1);
+          expect(openRelinkPicker).toHaveBeenCalledWith(plugin, {
+            table: type === 'card' ? 'srs_card' : type,
+            id,
+            reference,
+          });
         }
       )
     );

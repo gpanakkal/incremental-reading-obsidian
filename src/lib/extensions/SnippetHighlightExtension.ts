@@ -41,6 +41,11 @@ export const MIDDLE_MOUSE_BUTTON = 1;
  * Ctrl/Cmd+Alt to `'split'`, and Ctrl/Cmd+Alt+Shift to `'window'`. A plain
  * click yields `false`, which `openLinkText` reads as "reuse the active leaf".
  *
+ * A snippet missing its file (see `MissingItem`) keeps its highlight, but is
+ * not opened: following the link would create an empty note at its reference,
+ * which the next review fetch would take for the snippet's own, leaving its
+ * real file no longer relinkable.
+ *
  * @returns true when the event targeted a highlight and was consumed.
  */
 export function openSnippetFromEvent(
@@ -56,6 +61,13 @@ export function openSnippetFromEvent(
 
   event.preventDefault();
   event.stopPropagation();
+
+  if (!Obsidian.getNote(snippetRef, plugin.app)) {
+    Obsidian.notify(
+      `No file at "${snippetRef}". Relink the snippet from the review queue.`
+    );
+    return true;
+  }
 
   void plugin.app.workspace.openLinkText(
     snippetRef,

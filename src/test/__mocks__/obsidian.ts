@@ -94,6 +94,18 @@ export class Modal {
   open() {}
   close() {}
 }
+/** Only what `RelinkModal` reaches: a modal that lists items to pick from. */
+export class FuzzySuggestModal<T> extends Modal {
+  placeholder = '';
+
+  setPlaceholder(placeholder: string) {
+    this.placeholder = placeholder;
+  }
+
+  getItems(): T[] {
+    return [];
+  }
+}
 export class FileView {
   /**
    * Cleanups handed to `Component.register`. Exposed so tests can run them and

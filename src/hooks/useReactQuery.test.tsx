@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import * as ReviewContext from '#/components/ReviewContext';
-import type { ReviewItem } from '#/lib/types';
+import type { MaybeMissingItem, NoteType, ReviewItem } from '#/lib/types';
 import type * as ReactQueryModule from '@tanstack/react-query';
 import type { UseQueryOptions } from '@tanstack/react-query';
 import fc from 'fast-check';
@@ -106,7 +106,7 @@ function wireQueries({
   textLoading,
   currentItemId = item?.data.id ?? null,
 }: {
-  item: ReviewItem | null;
+  item: MaybeMissingItem | null;
   itemLoading: boolean;
   text: string | undefined;
   textLoading: boolean;
@@ -253,6 +253,36 @@ describe('useCurrentItemFileText', () => {
           expect(vault.read.mock.calls).toStrictEqual(
             isText ? [[item.file]] : []
           );
+        }
+      )
+    );
+  });
+
+  it('reads nothing for a missing item, and hands it over settled', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+        async (id, type) => {
+          const item = {
+            data: { type, id, reference: 'gone.md' },
+            file: null,
+          } as unknown as MaybeMissingItem;
+          wireQueries({
+            item,
+            itemLoading: false,
+            text: undefined,
+            textLoading: false,
+          });
+
+          const result = callHook();
+          const { enabled, queryFn } = textQueryOptions();
+          const text = await (queryFn as () => Promise<unknown>)();
+
+          expect(result).toEqual({ item, text: undefined, isLoading: false });
+          expect(enabled).toBe(false);
+          expect(text).toBeUndefined();
+          expect(vault.read).not.toHaveBeenCalled();
         }
       )
     );

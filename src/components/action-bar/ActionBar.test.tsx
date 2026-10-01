@@ -4,7 +4,7 @@ import type { QueuePage } from '#/components/types';
 import * as ReactQuery from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
 import { type SelectionKind, setPage, setShowAnswer } from '#/lib/store';
-import type { NoteType, ReviewItem } from '#/lib/types';
+import type { MaybeMissingItem, NoteType, ReviewItem } from '#/lib/types';
 import fc from 'fast-check';
 import { type ComponentChild, render } from 'preact';
 import { Rating } from 'ts-fsrs';
@@ -270,7 +270,7 @@ function makeItem(
 
 /** Mount the review page with `item` on screen. */
 function mountItemBar(
-  item: ReviewItem,
+  item: MaybeMissingItem,
   {
     showAnswer = false,
     selectionMode = null,
@@ -338,6 +338,22 @@ function queryGradeButton(
  */
 async function settle() {
   await vi.advanceTimersByTimeAsync(200);
+}
+
+/**
+ * An item of `type` missing its file, carrying what the bar reads plus the
+ * reference relinking names it by.
+ */
+function makeMissing(type: NoteType, dismissed = false): MaybeMissingItem {
+  return {
+    data: {
+      id: `${type}-id`,
+      type,
+      dismissed,
+      reference: `gone/${type}.md`,
+    },
+    file: null,
+  } as never;
 }
 
 // #endregion
@@ -959,6 +975,79 @@ describe('ActionBar', () => {
         });
       }
     );
+  });
+
+  describe.each(ITEM_TYPES)('actions on a missing %s', (type) => {
+    it('skips it, dismisses it, or restores it, whatever the answer state', () => {
+      for (const showAnswer of [false, true]) {
+        const actions = makeActions();
+        const item = makeMissing(type);
+        const container = mountItemBar(item, { actions, showAnswer });
+
+        getButton(container, 'Skip for current review session').click();
+        getButton(container, 'Stop scheduling this item for review').click();
+
+        expect(actions.skipItem).toHaveBeenCalledWith(item);
+        expect(actions.dismissItem).toHaveBeenCalledWith(item);
+        expect(queryButton(container, 'Restore item to queue')).toBeNull();
+        document.body.innerHTML = '';
+      }
+
+      const actions = makeActions();
+      const dismissed = makeMissing(type, true);
+      const container = mountItemBar(dismissed, { actions });
+      getButton(container, 'Restore item to queue').click();
+      expect(actions.unDismissItem).toHaveBeenCalledWith(dismissed);
+    });
+
+    it('leaves relinking to the placeholder, the queue and the command', () => {
+      const container = mountItemBar(makeMissing(type));
+
+      expect(queryButton(container, 'Relink file…')).toBeNull();
+      expect(
+        Array.from(zone(container, 'center').querySelectorAll('button')).map(
+          (button) => button.getAttribute('aria-label')
+        )
+      ).toEqual([
+        'Skip for current review session',
+        'Stop scheduling this item for review',
+      ]);
+    });
+
+    it('gives way to the selection controls in selection mode', () => {
+      const container = mountItemBar(makeMissing(type), {
+        selectionMode: 'snippet',
+      });
+
+      expect(
+        queryButton(container, 'Skip for current review session')
+      ).toBeNull();
+      expect(queryButton(container, 'Relink file…')).toBeNull();
+      expect(
+        container.querySelector('#confirm-selection-button')
+      ).not.toBeNull();
+    });
+
+    it('offers nothing that needs its file', () => {
+      for (const showAnswer of [false, true]) {
+        const container = mountItemBar(makeMissing(type), { showAnswer });
+
+        for (const label of [
+          'Mark reviewed',
+          'Create snippet',
+          'Create card',
+          'Change scheduling strategy',
+          'Show answer',
+        ]) {
+          expect(queryButton(container, label)).toBeNull();
+        }
+        for (const [grade] of GRADES) {
+          expect(queryGradeButton(container, grade)).toBeNull();
+        }
+        expect(moreOptionsButton(container)).not.toBeNull();
+        document.body.innerHTML = '';
+      }
+    });
   });
 
   describe.each(TEXT_TYPES)('actions on a %s', (type) => {

@@ -1,9 +1,11 @@
 import type IncrementalReadingPlugin from '#/main';
+import { openRelinkPicker } from '#/views/RelinkModal';
 import { SchedulingModal } from '#/views/SchedulingModal';
 import { type Grade, Rating } from 'ts-fsrs';
 import { getCurrentItemSync } from './query-client';
+import { tableOf } from './relink';
 import { cardsOnly, setShowAnswer, store } from './store';
-import { isReviewCard, isReviewText } from './types';
+import { isMissingItem, isReviewCard, isReviewText } from './types';
 
 /** Commands corresponding to buttons on the action bar */
 export function initReviewCommands(plugin: IncrementalReadingPlugin) {
@@ -15,7 +17,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       const view = plugin.getActiveReviewView();
       if (!view || !view.file) return false;
       const currentItem = getCurrentItemSync();
-      if (!currentItem) return false;
+      if (!currentItem || isMissingItem(currentItem)) return false;
       const isCard = isReviewCard(currentItem);
       if (isCard && store.getState().showAnswer) {
         return false;
@@ -76,9 +78,25 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       const view = plugin.getActiveReviewView();
       if (!view) return false;
       const item = getCurrentItemSync();
-      if (!item || !isReviewText(item)) return false;
+      if (!item || isMissingItem(item) || !isReviewText(item)) return false;
       if (checking) return true;
       new SchedulingModal(plugin, item).open();
+    },
+  });
+
+  plugin.addCommand({
+    id: 'relink-file',
+    name: 'Relink file…',
+    checkCallback: (checking) => {
+      if (!plugin.getActiveReviewView()) return false;
+      const item = getCurrentItemSync();
+      if (!item || !isMissingItem(item)) return false;
+      if (checking) return true;
+      void openRelinkPicker(plugin, {
+        table: tableOf(item.data.type),
+        id: item.data.id,
+        reference: item.data.reference,
+      });
     },
   });
 
@@ -120,7 +138,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
     const view = plugin.getActiveReviewView();
     if (!view || !view.file) return false;
     const item = getCurrentItemSync();
-    if (!item || !isReviewCard(item)) return false;
+    if (!item || isMissingItem(item) || !isReviewCard(item)) return false;
     if (checking) return true;
     void plugin.actions.gradeCard(item, grade);
   };

@@ -165,17 +165,17 @@ function makeResumeReceiver({
   item?: ReviewItem | null;
 } = {}) {
   const saveSession = vi.fn(() => Promise.resolve());
-  const getReviewItemFromId = vi.fn(() => Promise.resolve(item));
+  const getItemOrMissingFromId = vi.fn(() => Promise.resolve(item));
   const forget = vi.fn();
   const receiver = {
     data: { session },
     app: { loadLocalStorage: vi.fn(() => DEVICE), saveLocalStorage: vi.fn() },
-    reviewManager: { getReviewItemFromId },
+    reviewManager: { getItemOrMissingFromId },
     sessionTracker:
       tracked === undefined ? undefined : { itemId: tracked, forget },
     saveSession,
   };
-  return { receiver, saveSession, getReviewItemFromId, forget };
+  return { receiver, saveSession, getItemOrMissingFromId, forget };
 }
 
 /** Run `resumeSession` against a bare receiver. */
@@ -1016,14 +1016,14 @@ describe('IncrementalReadingPlugin.resumeSession', () => {
   it('leaves the pointer on disk to tracking once it is running', async () => {
     // A departure tracking has not written out yet still names the item in
     // `data.json`; resuming from the file would reopen what review just left.
-    const { receiver, getReviewItemFromId } = makeResumeReceiver({
+    const { receiver, getItemOrMissingFromId } = makeResumeReceiver({
       session: { deviceId: DEVICE, itemId: 'item-1' },
       tracked: null,
     });
 
     await expect(resumeSession(receiver)).resolves.toBe(false);
     expect(store.getState().currentItemId).toBeNull();
-    expect(getReviewItemFromId).not.toHaveBeenCalled();
+    expect(getItemOrMissingFromId).not.toHaveBeenCalled();
   });
 
   it('drops a pointer that no longer resolves', async () => {
@@ -1077,14 +1077,14 @@ describe('IncrementalReadingPlugin.resumeSession', () => {
   });
 
   it('leaves an item review is already showing alone', async () => {
-    const { receiver, getReviewItemFromId } = makeResumeReceiver({
+    const { receiver, getItemOrMissingFromId } = makeResumeReceiver({
       tracked: 'item-1',
     });
     await resumeSession(receiver);
-    getReviewItemFromId.mockClear();
+    getItemOrMissingFromId.mockClear();
 
     await expect(resumeSession(receiver)).resolves.toBe(false);
-    expect(getReviewItemFromId).not.toHaveBeenCalled();
+    expect(getItemOrMissingFromId).not.toHaveBeenCalled();
   });
 });
 

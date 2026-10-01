@@ -2,6 +2,7 @@ import IRScheduler from '#/lib/IRScheduler';
 import { supportsFrontmatter } from '#/lib/mime';
 import type {
   ArticleRow,
+  MissingItem,
   NoteType,
   RowTypes,
   SRSCardRow,
@@ -117,6 +118,17 @@ export class ItemManager {
     }
 
     return null;
+  }
+
+  /**
+   * The item `data` belongs to as a missing one, when no file is at its
+   * `reference`, or `null` when one is. A row that fails to become a review
+   * item with its file right there was refused for some other reason (a note
+   * claiming another item's id), and is not missing.
+   */
+  asMissing<D extends MissingItem['data']>(data: D): MissingItem<D> | null {
+    if (Obsidian.getNote(data.reference, this.app)) return null;
+    return { data, file: null };
   }
 
   /**

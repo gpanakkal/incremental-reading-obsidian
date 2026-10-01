@@ -3,8 +3,12 @@ import { useReviewContext } from '#/components/ReviewContext';
 import type { QueueRow } from '#/components/types';
 import { useQueue } from '#/hooks/useReactQuery';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
+import { tableOf } from '#/lib/relink';
 import { setCurrentItemId, setPage } from '#/lib/store';
 import { currentReviewDay, reviewDayOf } from '#/lib/utils';
+import type IncrementalReadingPlugin from '#/main';
+import { openRelinkPicker } from '#/views/RelinkModal';
+import { Menu } from 'obsidian';
 import { useRef, useState } from 'react';
 import { useDispatch } from 'react-redux';
 import {
@@ -20,6 +24,29 @@ import { QueueTable } from './QueueTable';
 import { VisibleRangeLabel } from './VisibleRangeLabel';
 
 const QUEUE_TABLE_TITLE = 'Upcoming';
+
+/**
+ * The menu for one queue row. "Relink file…" is offered on every row so the
+ * menu reads the same throughout, but only a row missing its file can take it.
+ */
+export function queueRowMenu(
+  plugin: IncrementalReadingPlugin,
+  row: QueueRow
+): Menu {
+  return new Menu().addItem((item) =>
+    item
+      .setTitle('Relink file…')
+      .setIcon('link')
+      .setDisabled(row.file !== null)
+      .onClick(() => {
+        void openRelinkPicker(plugin, {
+          table: tableOf(row.type),
+          id: row.id,
+          reference: row.reference,
+        });
+      })
+  );
+}
 
 export function ReviewQueue() {
   const { plugin, reviewManager } = useReviewContext();
@@ -209,6 +236,9 @@ export function ReviewQueue() {
           cellTitles={queueCellTitles}
           isMobile={plugin.app.isMobile}
           onRowClick={handleRowClick}
+          onRowMenu={(row, position) => {
+            queueRowMenu(plugin, row).showAtPosition(position);
+          }}
         />
       )}
     </div>

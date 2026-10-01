@@ -18,6 +18,7 @@ import {
   type IArticleBase,
   type ISnippetBase,
   type ISRSCardDisplay,
+  type MaybeMissingItem,
   type NoteType,
   type PluginFrontMatter,
   type ReviewArticle,
@@ -341,17 +342,19 @@ export default class ReviewManager {
     return Obsidian.getSourceFile(file, this.app)?.path ?? source;
   }
 
-  /** Build a QueueRow for an article, resolving its note or returning null. */
-  #articleToQueueRow(row: ArticleRow): QueueRow | null {
+  /**
+   * Build a QueueRow for an article, resolving its note. A missing item keeps
+   * its row, with no file: the queue is where it is found and relinked.
+   */
+  #articleToQueueRow(row: ArticleRow): QueueRow {
     const file = Obsidian.getNote(row.reference, this.app);
-    if (!file) return null;
     return {
       id: row.id,
       type: 'article',
       file,
       due: row.due === null ? null : new Date(row.due + (row.due_fuzz ?? 0)),
       reference: row.reference,
-      parent: this.#articleSource(file),
+      parent: file && this.#articleSource(file),
       scheduling: ReviewManager.articleScheduling(row),
     };
   }
@@ -360,9 +363,8 @@ export default class ReviewManager {
   #snippetToQueueRow(
     row: SnippetRow,
     parentPaths: Map<string, string>
-  ): QueueRow | null {
+  ): QueueRow {
     const file = Obsidian.getNote(row.reference, this.app);
-    if (!file) return null;
     return {
       id: row.id,
       type: 'snippet',
@@ -378,12 +380,8 @@ export default class ReviewManager {
   }
 
   /** Build a QueueRow for a card (no fuzz; scheduled by FSRS memory state). */
-  #cardToQueueRow(
-    row: SRSCardRow,
-    parentPaths: Map<string, string>
-  ): QueueRow | null {
+  #cardToQueueRow(row: SRSCardRow, parentPaths: Map<string, string>): QueueRow {
     const file = Obsidian.getNote(row.reference, this.app);
-    if (!file) return null;
     return {
       id: row.id,
       type: 'card',
@@ -416,7 +414,7 @@ export default class ReviewManager {
       ...articleRows.map((row) => this.#articleToQueueRow(row)),
       ...snippetRows.map((row) => this.#snippetToQueueRow(row, parentPaths)),
       ...cardRows.map((row) => this.#cardToQueueRow(row, parentPaths)),
-    ].filter((row): row is QueueRow => row !== null);
+    ];
 
     // `due` is already the fuzzed timestamp, so ordering by it is fuzz order;
     // rows with no due time sort last (compareDates puts nulls at the end).
@@ -499,8 +497,8 @@ export default class ReviewManager {
 
   /**
    * Resolve a single item id to its current {@link QueueRow}, or `null` when
-   * the row no longer belongs in the review queue (dismissed, deleted, missing,
-   * or with no due time). Mirrors the inclusion rules {@link getQueue} applies,
+   * the row no longer belongs in the review queue (dismissed, deleted, or with
+   * no due time). A missing item still does. Mirrors the inclusion rules {@link getQueue} applies,
    * so a targeted queue update can refetch just the changed row.
    */
   async getQueueRow(id: string): Promise<QueueRow | null> {
@@ -586,7 +584,41 @@ export default class ReviewManager {
     return row;
   }
 
-  async dismissItem(item: ReviewItem): Promise<void> {
+  /**
+   * The item with id `itemId` as review shows it: with its file, or as a
+   * {@link MissingItem} when a live row has no file at its reference. `null`
+   * for no such row, a tombstone, or a note that belongs to another item.
+   */
+  async getItemOrMissingFromId(
+    itemId: string
+  ): Promise<MaybeMissingItem | null> {
+    const item = await this.getReviewItemFromId(itemId);
+    if (item) return item;
+
+    const [article] = (await this.#repo.query(
+      'SELECT * FROM article WHERE id = $1 AND deleted = FALSE',
+      [itemId]
+    )) as ArticleRow[];
+    if (article)
+      return this.articles.asMissing(ArticleManager.rowToBase(article));
+
+    const [snippet] = (await this.#repo.query(
+      'SELECT * FROM snippet WHERE id = $1 AND deleted = FALSE',
+      [itemId]
+    )) as SnippetRow[];
+    if (snippet)
+      return this.snippets.asMissing(SnippetManager.rowToBase(snippet));
+
+    const [card] = (await this.#repo.query(
+      'SELECT * FROM srs_card WHERE id = $1 AND deleted = FALSE',
+      [itemId]
+    )) as SRSCardRow[];
+    if (card) return this.cards.asMissing(CardManager.rowToDisplay(card));
+
+    return null;
+  }
+
+  async dismissItem(item: MaybeMissingItem): Promise<void> {
     const type = item.data.type;
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 1 WHERE id = $1`, [
@@ -599,7 +631,7 @@ export default class ReviewManager {
     this.plugin.sessionTracker?.forgetIf(item.data.id);
   }
 
-  async unDismissItem(item: ReviewItem): Promise<void> {
+  async unDismissItem(item: MaybeMissingItem): Promise<void> {
     const type = item.data.type;
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 0 WHERE id = $1`, [

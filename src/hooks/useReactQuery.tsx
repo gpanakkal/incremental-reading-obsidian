@@ -7,7 +7,7 @@ import {
   currentItemQueryKey,
   invalidateCurrentItemQuery,
 } from '#/lib/query-client';
-import type { ReviewItem } from '#/lib/types';
+import type { MaybeMissingItem, ReviewItem } from '#/lib/types';
 import { useQuery } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import { useAppSelector } from './useAppSelector';
@@ -63,7 +63,7 @@ export function useReviewItems(ids: string[]) {
  * refetch whether or not the item changed.
  */
 export function useCurrentItem(): {
-  data: ReviewItem | null | undefined;
+  data: MaybeMissingItem | null | undefined;
   isLoading: boolean;
 } {
   const { reviewManager, reviewView } = useReviewContext();
@@ -121,7 +121,7 @@ export function useCurrentItem(): {
  * displays.
  */
 export function useCurrentItemFileText(): {
-  item: ReviewItem | null;
+  item: MaybeMissingItem | null;
   text: string | undefined;
   isLoading: boolean;
 } {
@@ -130,13 +130,15 @@ export function useCurrentItemFileText(): {
 
   // Only text is read: a PDF read as text is what the review editor would
   // show, and then save back over the PDF.
-  const readable = !!currentItem && isEditableText(currentItem.file);
+  // A missing item has no file to read at all.
+  const file = currentItem?.file ?? null;
+  const readable = file !== null && isEditableText(file);
   const { data: text, isLoading: textLoading } = useQuery({
     enabled: readable,
     queryKey: ['item', currentItem?.data.id, 'file-text'],
     queryFn: async () => {
-      if (!currentItem || !readable) return;
-      return plugin.app.vault.read(currentItem.file);
+      if (!file || !readable) return;
+      return plugin.app.vault.read(file);
     },
   });
 

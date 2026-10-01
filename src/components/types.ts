@@ -41,7 +41,8 @@ export interface QueueCardMemory {
 export interface QueueRow {
   id: string;
   type: NoteType;
-  file: TFile;
+  /** Null while the item is missing: no file is at its `reference`. */
+  file: TFile | null;
   /**
    * The fuzzed due date (`due + due_fuzz`); cards have no fuzz (treated as 0).
    * Null when the row has no due time — never coerce that to the epoch.

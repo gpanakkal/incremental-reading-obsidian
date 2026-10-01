@@ -23,6 +23,7 @@ import type {
   FrontMatterUpdates,
   IArticleBase,
   IArticleReview,
+  MissingItem,
   ReviewArticle,
   SnippetRow,
 } from '#/lib/types';
@@ -93,12 +94,8 @@ export class ArticleManager extends ItemManager {
   rowToReviewArticle(row: ArticleRow): ReviewArticle | null {
     const base = ArticleManager.rowToBase(row);
     const file = Obsidian.getNote(row.reference, this.app);
-    if (!file) {
-      if (!row.deleted) {
-        void this.markDeleted(row.id, 'article');
-      }
-      return null;
-    }
+    // Missing, which is never stored: see `MissingItem`
+    if (!file) return null;
 
     if (!this.reconcileNote(row, file, 'article', ARTICLE_TAG)) return null;
 
@@ -539,11 +536,11 @@ export class ArticleManager extends ItemManager {
     dueBy?: number,
     limit?: number,
     excludeIds?: string[]
-  ): Promise<ReviewArticle[]> {
+  ): Promise<(ReviewArticle | MissingItem<IArticleBase>)[]> {
     const dueTime =
       dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
     let allExcluded = [...(excludeIds ?? [])];
-    let due: ReviewArticle[];
+    let due: (ReviewArticle | MissingItem<IArticleBase>)[];
     try {
       // keep fetching until all fetched rows have a note
       let lastMissingNotes = 0;
@@ -557,17 +554,16 @@ export class ArticleManager extends ItemManager {
           })
         )
           .map((row) => {
-            const item = this.rowToReviewArticle(row);
+            const item =
+              this.rowToReviewArticle(row) ??
+              this.asMissing(ArticleManager.rowToBase(row));
             if (!item) {
               allExcluded.push(row.id);
               lastMissingNotes += 1;
             }
             return item;
           }, this)
-          .filter(
-            (article): article is ReviewArticle =>
-              !!article && article.file !== null
-          );
+          .filter((article) => article !== null);
 
         if (this.plugin.settings.fuzzTextReviews) {
           due.sort((a, b) => compareFuzzedDue(a.data, b.data));

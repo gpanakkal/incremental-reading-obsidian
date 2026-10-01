@@ -4,11 +4,13 @@ import type { QueuePage, QueueRow } from '#/components/types';
 import * as ReactQuery from '#/hooks/useReactQuery';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
+import { Menu } from '#/test/__mocks__/obsidian';
+import * as RelinkModalModule from '#/views/RelinkModal';
 import type { TFile } from 'obsidian';
 import type { ComponentChild } from 'preact';
 import { render } from 'preact';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ReviewQueue } from './ReviewQueue';
+import { ReviewQueue, queueRowMenu } from './ReviewQueue';
 
 // #region HELPERS
 
@@ -680,5 +682,74 @@ describe('ReviewQueue', () => {
       expect(container.querySelector('.ir-queue-controls')).toBeNull();
       expect(container.querySelector('.ir-queue-table')).toBeNull();
     });
+  });
+});
+
+describe('queue row menu', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['article', 'article'],
+    ['snippet', 'snippet'],
+    ['card', 'srs_card'],
+  ] as const)('relinks a missing %s from its own table', (type, table) => {
+    const openRelinkPicker = vi
+      .spyOn(RelinkModalModule, 'openRelinkPicker')
+      .mockResolvedValue(null);
+    const plugin = { name: 'plugin' };
+    const row = makeQueueRow({
+      id: 'x',
+      type,
+      reference: 'gone.md',
+      file: null,
+    });
+
+    const menu = queueRowMenu(plugin as never, row) as unknown as Menu;
+
+    expect(menu.items.map((item) => [item.title, item.icon])).toEqual([
+      ['Relink file…', 'link'],
+    ]);
+    const [relink] = menu.items;
+    expect(relink.disabled).toBe(false);
+    expect(openRelinkPicker).not.toHaveBeenCalled();
+    relink.callback?.(undefined);
+    expect(openRelinkPicker).toHaveBeenCalledExactlyOnceWith(plugin, {
+      table,
+      id: 'x',
+      reference: 'gone.md',
+    });
+  });
+
+  it('offers relinking only to a row that is missing its file', () => {
+    const menu = queueRowMenu({} as never, makeQueueRow()) as unknown as Menu;
+
+    expect(menu.items.map((item) => [item.title, item.disabled])).toEqual([
+      ['Relink file…', true],
+    ]);
+  });
+
+  it('opens the row’s menu where the table asks', () => {
+    wireQueue({ rows: [makeQueueRow({ id: 'x', file: null })] });
+    const shown = vi.spyOn(Menu.prototype, 'showAtPosition');
+    const container = mount(<ReviewQueue />);
+
+    container.querySelector('.ir-queue-cell')?.dispatchEvent(
+      new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 3,
+        clientY: 4,
+      })
+    );
+
+    expect(shown).toHaveBeenCalledTimes(1);
+    expect(shown.mock.calls[0][0]).toEqual({ x: 3, y: 4 });
+    const menu = shown.mock.contexts[0] as Menu;
+    expect(menu.items.map((item) => [item.title, item.disabled])).toEqual([
+      ['Relink file…', false],
+    ]);
   });
 });
