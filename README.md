@@ -116,13 +116,14 @@ This is especially handy for:
 ## Known limitations and issues
 
 - Creating snippets and cards on partial code blocks, blockquotes, LaTeX, and other types of special formatting can break the formatting. It is recommended to include the entire formatted section (such as the entire code block) when making the snippet or card, and then editing it afterwards as desired.
-- Importing, making snippets, and making cards only works on Markdown notes. Web page and PDF support is planned, but in the meantime, check out the suggested [third-party tools](#third-party-tools) to convert these into Markdown.
+- Snippets and cards can only be made from Markdown notes. You can import a PDF in your vault as an article, though only in place, and review shows a button that opens it in a PDF tab instead of the PDF itself. Web page support is planned; in the meantime, check out these [third-party tools](#third-party-tools) to convert web pages and PDFs into Markdown.
 
 ## Third-party tools
 
-- [Obsidian Web Clipper](https://obsidian.md/clipper) — a browser extension to save webpages to your vault, from the Obsidian team. This is also built into Obsidian's web viewer; just select the overflow menu in the upper-right corner and select **Save to vault**.
-- [MarkDownload browser extension](https://github.com/deathau/markdownload) — works better than Obsidian Web Clipper on some websites.
-- [Marker](https://github.com/datalab-to/marker) — for PDF conversion.
+- [Obsidian Web Clipper](https://obsidian.md/clipper) to save webpages from your browser to your vault, from the Obsidian team. This is also built into Obsidian's web viewer; just select the overflow menu in the upper-right corner and select **Save to vault**.
+- [MarkDownload](https://github.com/deathau/markdownload) browser addon for saving pages. On some sites, this works better than Obsidian Web Clipper.
+- [PDF24 converter](https://tools.pdf24.org/en/pdf-converter) is a convenient tool to convert PDF to Markdown, but it's likely to leave spaces where lines wrapped in the PDF.
+- [Marker](https://github.com/datalab-to/marker) is another PDF converter that might work better.
 
 ## Terminology
 

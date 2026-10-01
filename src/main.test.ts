@@ -33,12 +33,12 @@ function makeFile(path = 'notes/Chapter 1.md'): TFile {
 }
 
 /**
- * The extension of any file the plugin cannot import: a PDF, or anything
- * else a vault can hold, including no extension at all.
+ * The extension of any file the plugin cannot import: anything a vault can
+ * hold but a note or a PDF, including no extension at all.
  */
 const unimportableExtension = fc
-  .oneof(fc.constantFrom('pdf', 'png', 'canvas', ''), fc.string())
-  .filter((extension) => extension.toLowerCase() !== 'md');
+  .oneof(fc.constantFrom('png', 'canvas', ''), fc.string())
+  .filter((extension) => !['md', 'pdf'].includes(extension.toLowerCase()));
 
 /** A file of type `extension` somewhere in the vault. */
 function fileWithExtension(extension: string): TFile {
@@ -559,6 +559,18 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
     expect(importArticle).toHaveBeenCalledWith(file);
   });
 
+  it('imports a copy of the note from the copy entry', () => {
+    const { receiver, importArticle, file } = makeReceiver({ advanced: true });
+    const menu = raiseMenu(receiver);
+
+    click(menu.items.find((i) => i.title === 'Import a copy'));
+
+    expect(importArticle).toHaveBeenCalledExactlyOnceWith(file, {
+      copyOnImport: true,
+      showImportDialog: false,
+    });
+  });
+
   it('says nothing about a path that resolves to no file', () => {
     // Folders reach the same event, and folder imports are not built yet.
     const { receiver } = makeReceiver({ file: null });
@@ -629,6 +641,37 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
     );
   });
 
+  it('offers every import of a PDF but a copy', () => {
+    fc.assert(
+      fc.property(
+        fc.mixedCase(fc.constant('pdf')),
+        fc.boolean(),
+        fc.boolean(),
+        (extension, advanced, withLeaf) => {
+          const file = fileWithExtension(extension);
+          const { receiver } = makeReceiver({ advanced, file });
+
+          const menu = raiseMenu(
+            receiver,
+            withLeaf ? otherLeaf() : undefined,
+            file
+          );
+
+          expect(titles(menu)).toEqual(
+            advanced
+              ? [
+                  'Import article',
+                  'Import in place',
+                  'Open import dialog...',
+                  'Quick import',
+                ]
+              : ['Import article']
+          );
+        }
+      )
+    );
+  });
+
   it('goes to the context of the note the menu was raised on', () => {
     const { receiver, goToContext, file } = makeReceiver({
       frontmatter: { 'ir-id': 'abc' },
@@ -694,6 +737,33 @@ describe('IncrementalReadingPlugin import commands', () => {
 
         expect(importArticle).not.toHaveBeenCalled();
       })
+    );
+  });
+
+  it('offers every import of a PDF but a copy, each with its own options', () => {
+    fc.assert(
+      fc.property(
+        importCommandIds,
+        fc.mixedCase(fc.constant('pdf')),
+        (id, extension) => {
+          const { file, importArticle, run } = makeImportCommandReceiver({
+            extension,
+          });
+          const offered = id !== 'import-article-copy';
+
+          expect(run(id, true)).toBe(offered);
+          run(id);
+
+          if (offered) {
+            expect(importArticle).toHaveBeenCalledExactlyOnceWith(
+              file,
+              IMPORT_COMMANDS[id].opts
+            );
+          } else {
+            expect(importArticle).not.toHaveBeenCalled();
+          }
+        }
+      )
     );
   });
 

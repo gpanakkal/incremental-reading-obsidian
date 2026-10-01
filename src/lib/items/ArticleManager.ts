@@ -10,7 +10,12 @@ import {
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
-import { isImportable } from '#/lib/mime';
+import {
+  isCopyImportable,
+  isImportable,
+  sniffMimeType,
+  supportsFrontmatter,
+} from '#/lib/mime';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   ArticleDisplay,
@@ -45,7 +50,20 @@ export function checkImportable(file: TFile): boolean {
   return false;
 }
 
+/** How an import says it scheduled the article, for its notice. */
+function describeSchedule(
+  priority: number,
+  fixedIntervalDays: number | null
+): string {
+  return fixedIntervalDays === null
+    ? `priority ${IRScheduler.toDisplayPriority(priority)}`
+    : `fixed interval of ${fixedIntervalDays} days`;
+}
+
 export class ArticleManager extends ItemManager {
+  /** The paths of the files being imported right now. */
+  private readonly importing = new Set<string>();
+
   static rowToBase(articleRow: ArticleRow): IArticleBase {
     return {
       ...articleRow,
@@ -95,8 +113,15 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * Import the passed note as an article, refusing a file whose type can't be
-   * imported before the database is touched (see {@link checkImportable}).
+   * Import the passed file as an article, refusing one whose type can't be
+   * imported (see {@link checkImportable}), or whose content isn't the type
+   * its extension says, before the database is touched.
+   *
+   * A file that can only be imported in place is, whatever copy was asked for.
+   * A second import of a file while one is still running is dropped: both
+   * would find no row at its path, and the second would fail on inserting it.
+   * @returns the imported or restored article; for a PDF already imported,
+   * that article; or null when nothing was imported
    */
   async import(
     file: TFile,
@@ -105,9 +130,21 @@ export class ArticleManager extends ItemManager {
     makeCopy?: boolean
   ) {
     if (!checkImportable(file)) return null;
+    // Read once: a rename during the import changes `file.path` in place
+    const { path } = file;
+    if (this.importing.has(path)) return null;
 
-    const willCopy = makeCopy ?? this.plugin.settings.copyOnImport;
+    const willCopy =
+      isCopyImportable(file) && (makeCopy ?? this.plugin.settings.copyOnImport);
+    this.importing.add(path);
     try {
+      if ((await sniffMimeType(this.app, file)) === null) {
+        Obsidian.notify(
+          `"${file.name}" doesn't hold what its extension says; canceling import`
+        );
+        return null;
+      }
+
       if (willCopy) {
         return await this.importCopy(file, priority, fixedIntervalDays);
       }
@@ -116,6 +153,8 @@ export class ArticleManager extends ItemManager {
       Obsidian.notify(`Failed to import article "${file.name}"`);
       console.error(error);
       return null;
+    } finally {
+      this.importing.delete(path);
     }
   }
 
@@ -162,6 +201,10 @@ export class ArticleManager extends ItemManager {
     priority: number,
     fixedIntervalDays: number | null
   ) {
+    if (!supportsFrontmatter(file)) {
+      return this.importBinaryInPlace(file, priority, fixedIntervalDays);
+    }
+
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
     if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
       Obsidian.notify(`Note contains a snippet or card tag; canceling import`);
@@ -216,18 +259,7 @@ export class ArticleManager extends ItemManager {
       this.app
     );
 
-    const dueTime = Date.now();
-    await this.repo.mutate(
-      'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days) VALUES ($1, $2, $3, $4, $5, $6)',
-      [
-        id,
-        file.path,
-        dueTime,
-        TEXT_BASE_REVIEW_INTERVAL,
-        priority,
-        fixedIntervalDays,
-      ]
-    );
+    await this.insertImported(id, file.path, priority, fixedIntervalDays);
 
     await this.claimSnippets(file, id);
 
@@ -236,11 +268,80 @@ export class ArticleManager extends ItemManager {
       CONTENT_TITLE_SLICE_LENGTH,
       true
     );
-    const schedulingString =
-      fixedIntervalDays === null
-        ? `priority ${IRScheduler.toDisplayPriority(priority)}`
-        : `fixed interval of ${fixedIntervalDays} days`;
+    const schedulingString = describeSchedule(priority, fixedIntervalDays);
 
+    Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
+    return this.fetch(id);
+  }
+
+  /** Add the row of a newly imported article at `reference`, due now. */
+  private async insertImported(
+    id: string,
+    reference: string,
+    priority: number,
+    fixedIntervalDays: number | null
+  ) {
+    await this.repo.mutate(
+      'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days) VALUES ($1, $2, $3, $4, $5, $6)',
+      [
+        id,
+        reference,
+        Date.now(),
+        TEXT_BASE_REVIEW_INTERVAL,
+        priority,
+        fixedIntervalDays,
+      ]
+    );
+  }
+
+  /**
+   * Import a file with no frontmatter, a PDF say, where it is. Nothing is
+   * written to the file: the row at its path is all that makes it an article,
+   * so its path is also all an earlier import of it is known by.
+   */
+  private async importBinaryInPlace(
+    file: TFile,
+    priority: number,
+    fixedIntervalDays: number | null
+  ) {
+    const existing = (
+      (await this.repo.query(
+        'SELECT id, deleted FROM article WHERE reference = $1',
+        [file.path]
+      )) as Pick<ArticleRow, 'id' | 'deleted'>[]
+    )[0];
+
+    if (existing && !existing.deleted) {
+      Obsidian.notify(`"${file.name}" is already an article; canceling import`);
+      return this.fetch(existing.id);
+    }
+
+    const titleSlice = getContentSlice(
+      file.basename,
+      CONTENT_TITLE_SLICE_LENGTH,
+      true
+    );
+
+    if (existing) {
+      // A deleted row still holds the path, which is unique, so a new row
+      // can't take it. The file is back, so the row is too, with its schedule
+      // and history; importing it again asks for it in the queue, so a
+      // dismissal is lifted. Only a dismissed row may lack a due date, so one
+      // that does is due now.
+      await this.repo.mutate(
+        'UPDATE article SET deleted = 0, dismissed = 0, due = COALESCE(due, $1) WHERE id = $2',
+        [Date.now(), existing.id]
+      );
+      Obsidian.notify(
+        `Restored the article "${titleSlice}" to the queue with its earlier schedule`
+      );
+      return this.fetch(existing.id);
+    }
+
+    const id = crypto.randomUUID();
+    await this.insertImported(id, file.path, priority, fixedIntervalDays);
+
+    const schedulingString = describeSchedule(priority, fixedIntervalDays);
     Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
     return this.fetch(id);
   }
@@ -343,18 +444,11 @@ export class ArticleManager extends ItemManager {
     }
     await Obsidian.updateFrontMatter(articleFile, frontmatterUpdates, this.app);
 
-    // Insert into database with immediate due time
-    const dueTime = Date.now();
-    await this.repo.mutate(
-      'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days) VALUES ($1, $2, $3, $4, $5, $6)',
-      [
-        id,
-        articleFile.path,
-        dueTime,
-        TEXT_BASE_REVIEW_INTERVAL,
-        priority,
-        fixedIntervalDays,
-      ]
+    await this.insertImported(
+      id,
+      articleFile.path,
+      priority,
+      fixedIntervalDays
     );
 
     const adopted = await this.claimSnippets(file, id, articleFile);
@@ -375,10 +469,7 @@ export class ArticleManager extends ItemManager {
       snippetMigratedNotice = `; ${snippetMigrationCount} to the copy`;
     }
 
-    const schedulingString =
-      fixedIntervalDays === null
-        ? `priority ${IRScheduler.toDisplayPriority(priority)}`
-        : `fixed interval of ${fixedIntervalDays} days`;
+    const schedulingString = describeSchedule(priority, fixedIntervalDays);
 
     Obsidian.notify(
       `Imported "${titleSlice}" with ${schedulingString}` +
