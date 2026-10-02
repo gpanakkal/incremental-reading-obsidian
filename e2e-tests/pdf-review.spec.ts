@@ -1,3 +1,4 @@
+import { PDF_PAGE_STRIDE } from '#/lib/pdf/position';
 import test, {
   expect,
   type ElectronApplication,
@@ -49,6 +50,7 @@ type PageApp = {
         reviewManager: {
           repo: {
             query(sql: string, params?: unknown[]): Record<string, unknown>[];
+            pendingSaveCount: number;
           };
         };
       }
@@ -283,5 +285,213 @@ test.describe('Reviewing a PDF article', () => {
     expect(viewer!.y + viewer!.height).toBeLessThanOrEqual(bar!.y + 1);
     expect(bar!.y + bar!.height).toBeLessThanOrEqual(900);
     expect(viewer!.height).toBeGreaterThan(400);
+  });
+});
+
+test.describe('Reading position in a PDF article', () => {
+  /** A markdown article to switch to and back from. */
+  const NOTE_PATH = 'sources/Security Principles.md';
+
+  /** The id of the article at `reference`, once there is one. */
+  async function articleId(page: Page, reference: string): Promise<string> {
+    let id = '';
+    await expect
+      .poll(async () => {
+        id = await page.evaluate((ref) => {
+          const { app } = window as unknown as { app: PageApp };
+          const { repo } =
+            app.plugins.plugins['incremental-reading'].reviewManager;
+          const rows = repo.query(
+            'SELECT id FROM article WHERE reference = $1',
+            [ref]
+          );
+          return rows.length ? String(rows[0].id) : '';
+        }, reference);
+        return id;
+      })
+      .not.toBe('');
+    return id;
+  }
+
+  /** The PDF's saved `scroll_top`, and whether the database is on disk. */
+  const saved = (page: Page) =>
+    page.evaluate((ref) => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      const [row] = repo.query(
+        'SELECT scroll_top FROM article WHERE reference = $1',
+        [ref]
+      );
+      return {
+        scrollTop: Number(row?.scroll_top ?? 0),
+        pendingSaves: repo.pendingSaveCount,
+      };
+    }, PDF_PATH);
+
+  /** Show item `id` in the review tab, opening one if there is none. */
+  async function showItem(page: Page, id: string) {
+    const hasReviewTab = await page.evaluate(
+      (viewType) =>
+        (window as unknown as { app: PageApp }).app.workspace.getLeavesOfType(
+          viewType
+        ).length > 0,
+      REVIEW_VIEW_TYPE
+    );
+    if (!hasReviewTab) {
+      await executeCommandById(page, 'incremental-reading:learn');
+    }
+    await page.evaluate((itemId) => {
+      const { store } = (window as unknown as { app: PageApp }).app.plugins
+        .plugins['incremental-reading'];
+      store.dispatch({ type: 'page/setPage', payload: 'review' });
+      store.dispatch({
+        type: 'currentItemId/setCurrentItemId',
+        payload: itemId,
+      });
+    }, id);
+  }
+
+  /**
+   * Where the top edge of the review tab's PDF view is: the page there, and
+   * how far down that page it is as a fraction of the page's height, which
+   * reads the same at every zoom. `null` until a page is laid out.
+   */
+  const readingPosition = (page: Page) =>
+    page.evaluate(() => {
+      const container = document.querySelector(
+        '.ir-pdf-article .pdf-viewer-container'
+      );
+      if (!container) return null;
+      const edge = container.getBoundingClientRect().top;
+      for (const el of container.querySelectorAll<HTMLElement>('.page')) {
+        const rect = el.getBoundingClientRect();
+        if (rect.height > 0 && rect.bottom > edge) {
+          return {
+            page: Number(el.dataset.pageNumber),
+            fraction: (edge - rect.top) / rect.height,
+          };
+        }
+      }
+      return null;
+    });
+
+  /** Scroll the review tab's PDF so `fraction` of page `n` is above its top. */
+  const scrollInto = (page: Page, n: number, fraction: number) =>
+    page.evaluate(
+      ([pageNumber, into]) => {
+        const container = document.querySelector(
+          '.ir-pdf-article .pdf-viewer-container'
+        )!;
+        const target = container.querySelector(
+          `.page[data-page-number="${pageNumber}"]`
+        )!;
+        const pageRect = target.getBoundingClientRect();
+        const edge = container.getBoundingClientRect().top;
+        container.scrollTop += pageRect.top - edge + into * pageRect.height;
+      },
+      [n, fraction] as const
+    );
+
+  /** Expect the view at `expected`, give or take a sliver of a page. */
+  async function expectAt(
+    page: Page,
+    expected: { page: number; fraction: number }
+  ) {
+    await expect
+      .poll(async () => {
+        const at = await readingPosition(page);
+        return (
+          at !== null &&
+          at.page === expected.page &&
+          Math.abs(at.fraction - expected.fraction) < 0.02
+        );
+      })
+      .toBe(true);
+  }
+
+  test('reopens where its reader stopped: across items, tabs, reloads and restarts, at any zoom', async () => {
+    await importFixture(window);
+    await openFileInActiveLeaf(window, NOTE_PATH);
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    const pdfId = await articleId(window, PDF_PATH);
+    const noteId = await articleId(window, NOTE_PATH);
+
+    await showItem(window, pdfId);
+    await expect(article(window).locator('.page')).toHaveCount(3);
+    await expect(pdfPage(window, 1).locator('.textLayer')).toContainText(
+      'Incremental reading turns a long text'
+    );
+    expect((await saved(window)).scrollTop).toBe(0);
+
+    // Zoomed in, then read a quarter of the way into page 3
+    const widthBefore = (await pdfPage(window, 1).boundingBox())!.width;
+    await article(window).locator('[aria-label="Zoom in"]').click();
+    await expect
+      .poll(async () => (await pdfPage(window, 1).boundingBox())!.width)
+      .toBeGreaterThan(widthBefore);
+    await scrollInto(window, 3, 0.25);
+    const stopped = { page: 3, fraction: 0.25 };
+    await expectAt(window, stopped);
+    await expect
+      .poll(async () =>
+        Math.floor((await saved(window)).scrollTop / PDF_PAGE_STRIDE)
+      )
+      .toBe(3);
+    const savedAtStop = (await saved(window)).scrollTop;
+
+    // Another item, then back, twice. Coming back is no move: what it saves,
+    // if anything, is what was saved, or every visit would creep the position
+    for (let visit = 0; visit < 2; visit++) {
+      await showItem(window, noteId);
+      await expect(article(window)).toHaveCount(0);
+      await showItem(window, pdfId);
+      await expectAt(window, stopped);
+      // Longer than the save delay: anything it was going to save is saved
+      await window.waitForTimeout(1000);
+      expect((await saved(window)).scrollTop).toBe(savedAtStop);
+    }
+
+    // Another tab in front, then back: nothing moves, nothing is saved over
+    await window.evaluate(async (notePath) => {
+      const { app } = window as unknown as { app: PageApp };
+      await app.workspace
+        .getLeaf('tab')
+        .openFile(app.vault.getFileByPath(notePath));
+    }, NOTE_PATH);
+    await expect(article(window)).toBeHidden();
+    await window
+      .locator(`.workspace-tab-header[data-type="${REVIEW_VIEW_TYPE}"]`)
+      .click();
+    await expect(article(window)).toBeVisible();
+    await expectAt(window, stopped);
+    await window.waitForTimeout(1000);
+    await expectAt(window, stopped);
+    expect((await saved(window)).scrollTop).toBe(savedAtStop);
+
+    // The file rewritten on disk: Obsidian reloads it, where it was
+    await window.evaluate(() => {
+      for (const el of document.querySelectorAll('.ir-pdf-article .page')) {
+        el.setAttribute('data-before-reload', '');
+      }
+    });
+    const bytes = await fs.readFile(path.join(vaultPath, PDF_PATH));
+    await fs.writeFile(path.join(vaultPath, PDF_PATH), bytes);
+    await expect(pdfPage(window, 3)).not.toHaveAttribute(
+      'data-before-reload',
+      ''
+    );
+    await expect(pdfPage(window, 3)).toHaveAttribute('data-loaded', 'true');
+    await expectAt(window, stopped);
+
+    // Quit, with the position saved to disk, and start again
+    await expect.poll(async () => (await saved(window)).pendingSaves).toBe(0);
+    await closeElectron(app);
+    app = await launchElectron(vaultPath);
+    window = await openVault(app, vaultPath);
+    await window.setViewportSize({ width: 1280, height: 800 });
+
+    await showItem(window, pdfId);
+    await expectAt(window, stopped);
   });
 });

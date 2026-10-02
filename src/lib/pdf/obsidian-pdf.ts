@@ -15,6 +15,7 @@ import {
   type TFile,
   type View,
 } from 'obsidian';
+import type { PdfPosition } from './position';
 
 // #region INTERNAL SHAPES
 // What the adapter relies on, typed as loosely as it is checked. Names follow
@@ -406,9 +407,151 @@ export function createPdfViewer(app: App): PdfViewer | null {
     const component = new Ctor(app, containerEl, viewerOptions());
     if (!isViewerComponent(component)) return null;
     registerPageKeys(component);
-    return new ObsidianPdfViewer(component, containerEl);
+    const viewer = new ObsidianPdfViewer(component, containerEl);
+    viewerComponents.set(viewer, component);
+    return viewer;
   } catch (error) {
     console.warn('Incremental Reading: no PDF viewer available', error);
     return null;
   }
 }
+
+// #region READING POSITION
+// Where the reader is in a viewer's file, for saving and restoring it (task
+// 0015). Kept apart from the class so other features extend it independently.
+
+/** The component behind each viewer {@link createPdfViewer} built. */
+const viewerComponents = new WeakMap<PdfViewer, PdfViewerComponent>();
+
+/**
+ * Undocumented: `PdfViewerChild.on`/`off`, which add and remove a listener on
+ * the pdf.js eventBus (`this.pdfViewer.eventBus._on`/`_off`).
+ */
+interface PdfViewerChildEvents {
+  on(name: string, cb: (evt: unknown) => void): void;
+  off(name: string, cb: (evt: unknown) => void): void;
+}
+
+function hasEvents(child: unknown): child is PdfViewerChildEvents {
+  return (
+    isObject(child) &&
+    typeof child.on === 'function' &&
+    typeof child.off === 'function'
+  );
+}
+
+/**
+ * How far, in PDF y, opening at a page's `offset` lands from where pdf.js
+ * reports the view to be: add it to a reported `top` to get the `top` that
+ * opens on the same view. `0` when the page view can't be measured.
+ *
+ * pdf.js measures the location from below a page's border
+ * (`div.offsetTop + div.clientTop` in `PDFViewer.update`), but scrolls a
+ * destination into view from above it (`div.offsetTop` alone in
+ * `scrollIntoView`). Opened at the `top` it reported, a page with borders —
+ * Obsidian's desktop viewer, not its mobile one — shows a border's width
+ * higher, and saving that would creep the position up a little on every
+ * visit. The width is converted to PDF units at the page's current scale,
+ * through pdf.js's own `PDFPageView.getPagePoint`, rotation and all.
+ *
+ * Undocumented: `PDFViewer.getPageView(index)` is pdf.js API, reached through
+ * Obsidian's `child.pdfViewer.pdfViewer`.
+ */
+function borderOffset(app: Record<string, unknown>, page: number): number {
+  const pdfJs = app.pdfViewer;
+  if (!isObject(pdfJs) || typeof pdfJs.getPageView !== 'function') return 0;
+  const view: unknown = (pdfJs.getPageView as (index: number) => unknown)(
+    page - 1
+  );
+  if (!isObject(view) || typeof view.getPagePoint !== 'function') return 0;
+  const border = isObject(view.div) ? view.div.clientTop : null;
+  if (typeof border !== 'number') return 0;
+  const pointAt = (y: number): unknown =>
+    (view.getPagePoint as (x: number, y: number) => unknown)(0, y);
+  const [atEdge, belowBorder] = [pointAt(0), pointAt(border)];
+  if (!Array.isArray(atEdge) || !Array.isArray(belowBorder)) return 0;
+  const offset = Number(belowBorder[1]) - Number(atEdge[1]);
+  return Number.isFinite(offset) ? offset : 0;
+}
+
+/**
+ * The position `location` names, or `null` while the pdf.js app object `app`
+ * hasn't yet put its file's initial view on screen. Its `top` is the one to
+ * open at to show the same view again (see {@link borderOffset}).
+ *
+ * Undocumented: pdf.js's `PDFViewerApplication.isInitialViewSet`, cleared when
+ * a file closes and set once a newly opened one is at the page it was opened
+ * to. Until then the location says page 1, wherever the file is opening.
+ * `location` is pdf.js's `PDFViewer._location`: `pageNumber`, and `top`, the
+ * PDF y at the view's top edge in unscaled points from the page's bottom.
+ */
+function positionAt(app: unknown, location: unknown): PdfPosition | null {
+  if (!isObject(app) || app.isInitialViewSet !== true) return null;
+  if (!isObject(location)) return null;
+  const { pageNumber, top } = location;
+  if (typeof pageNumber !== 'number' || typeof top !== 'number') return null;
+  if (!Number.isSafeInteger(pageNumber) || pageNumber < 1) return null;
+  if (!Number.isFinite(top)) return null;
+  return { page: pageNumber, top: top + borderOffset(app, pageNumber) };
+}
+
+/** The pdf.js app object of `component`'s child, if it has been built. */
+function pdfJsApp(component: PdfViewerComponent): unknown {
+  const child = component.child;
+  return isObject(child) ? child.pdfViewer : null;
+}
+
+/**
+ * Where the top edge of `viewer`'s view is in the file it has open, or `null`
+ * when it has none on screen yet.
+ *
+ * Undocumented: reads `child.pdfViewer.location`, which pdf.js's own
+ * `updateviewarea` handler keeps current.
+ */
+export function getPdfLocation(viewer: PdfViewer): PdfPosition | null {
+  const component = viewerComponents.get(viewer);
+  if (!component) return null;
+  const app = pdfJsApp(component);
+  return positionAt(app, isObject(app) ? app.location : null);
+}
+
+/**
+ * Call `listener` with the new position each time `viewer`'s view moves —
+ * scrolled, zoomed, resized — once its file is on screen. Returns the function
+ * that stops it. pdf.js reports every frame of a scroll: debounce anything
+ * costly.
+ *
+ * Undocumented: pdf.js's `updateviewarea` event, `{source, location}`, on the
+ * child's eventBus. It fires only while some page is in view, so never while
+ * the viewer is hidden.
+ */
+export function onPdfViewChange(
+  viewer: PdfViewer,
+  listener: (position: PdfPosition) => void
+): () => void {
+  const component = viewerComponents.get(viewer);
+  if (!component) return () => {};
+  let stopped = false;
+  let listening: PdfViewerChildEvents | null = null;
+  const onUpdate = (evt: unknown) => {
+    const location = isObject(evt) ? evt.location : null;
+    const position = positionAt(pdfJsApp(component), location);
+    if (position) listener(position);
+  };
+  component.then((child) => {
+    if (stopped || !hasEvents(child)) return;
+    child.on('updateviewarea', onUpdate);
+    listening = child;
+  });
+  return () => {
+    stopped = true;
+    try {
+      listening?.off('updateviewarea', onUpdate);
+    } catch {
+      // Unloaded first: its eventBus, and the listener with it, is gone.
+    }
+    listening = null;
+  };
+}
+
+// #endregion

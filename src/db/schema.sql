@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS article (
   fixed_interval_days INTEGER NULL,
   dismissed INTEGER NOT NULL DEFAULT FALSE,
   deleted INTEGER NOT NULL DEFAULT FALSE,
-  scroll_top INTEGER NOT NULL DEFAULT 0, -- top-visible document character offset (0 = unset)
+  scroll_top INTEGER NOT NULL DEFAULT 0, -- top-visible document character offset; for a PDF, page * 100000 + top in PDF points (0 = unset)
   CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(fixed_interval_days > 0),

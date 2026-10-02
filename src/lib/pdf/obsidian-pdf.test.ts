@@ -2,7 +2,13 @@
 import fc from 'fast-check';
 import { type App, Platform, Scope, type TFile, type View } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createPdfViewer, isPdfView, type PdfViewer } from './obsidian-pdf';
+import {
+  createPdfViewer,
+  getPdfLocation,
+  isPdfView,
+  onPdfViewChange,
+  type PdfViewer,
+} from './obsidian-pdf';
 
 // #region HELPERS
 
@@ -169,6 +175,83 @@ function pressKey(viewer: PdfViewer, key: string, target: EventTarget) {
     key,
   });
   return { answer, evt };
+}
+
+/**
+ * A loaded child whose pdf.js app object is `app` and whose eventBus the test
+ * dispatches on by hand, through `child.on`/`off` as Obsidian's own code does.
+ */
+function makeEventChild(app: Record<string, unknown> = {}) {
+  const listeners = new Map<string, Set<(evt: unknown) => void>>();
+  return {
+    loadFile: vi.fn(),
+    pdfViewer: app,
+    on: vi.fn((name: string, cb: (evt: unknown) => void) => {
+      const set = listeners.get(name) ?? new Set();
+      set.add(cb);
+      listeners.set(name, set);
+    }),
+    off: vi.fn((name: string, cb: (evt: unknown) => void) => {
+      listeners.get(name)?.delete(cb);
+    }),
+    dispatch(name: string, evt: unknown) {
+      for (const cb of listeners.get(name) ?? []) cb(evt);
+    },
+    count: (name: string) => listeners.get(name)?.size ?? 0,
+  };
+}
+
+/** Anything pdf.js's `location.pageNumber` could hold, valid or not. */
+const pageNumberArb = () =>
+  fc.oneof(
+    fc.integer({ min: 1, max: 100000 }),
+    fc.integer({ max: 0 }),
+    fc.double(),
+    fc.constant(Number.MAX_SAFE_INTEGER + 1),
+    fc.string(),
+    fc.constantFrom(null, undefined)
+  );
+
+/** Anything pdf.js's `location.top` could hold, valid or not. */
+const topArb = () =>
+  fc.oneof(
+    fc.integer({ min: -1000, max: 100000 }),
+    fc.double(),
+    fc.string(),
+    fc.constantFrom(null, undefined, Number.NaN, Infinity, -Infinity)
+  );
+
+/** The position a pdf.js location names, as the adapter should read it. */
+function expectedPosition(
+  initialViewSet: unknown,
+  pageNumber: unknown,
+  top: unknown
+) {
+  const valid =
+    initialViewSet === true &&
+    Number.isSafeInteger(pageNumber) &&
+    (pageNumber as number) >= 1 &&
+    Number.isFinite(top);
+  return valid ? { page: pageNumber, top } : null;
+}
+
+/** pdf.js's `updateviewarea` event, with the view's top at `top` on a page. */
+const at = (pageNumber: unknown, top: unknown) => ({
+  source: {},
+  location: { pageNumber, top, left: 0, scale: 125 },
+});
+
+/**
+ * A pdf.js viewer whose pages are `height` points tall, shown at `scale`
+ * CSS pixels per point inside a border `border` pixels wide, mapping points
+ * as an unrotated pdf.js page view does.
+ */
+function bordered(border: unknown, scale: number, height = 792) {
+  const getPageView = vi.fn((_index: number) => ({
+    div: { clientTop: border },
+    getPagePoint: (x: number, y: number) => [x / scale, height - y / scale],
+  }));
+  return { getPageView };
 }
 
 /** Let promise callbacks queued so far run. */
@@ -674,5 +757,298 @@ describe('PdfViewer page keys', () => {
 
     expect(answer).toBeUndefined();
     expect(evt.defaultPrevented).toBe(false);
+  });
+});
+
+describe('getPdfLocation', () => {
+  it("reads the page and top of pdf.js's location once the file's initial view is set", () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(fc.boolean(), fc.constantFrom(undefined, 1)),
+        pageNumberArb(),
+        topArb(),
+        (initialViewSet, pageNumber, top) => {
+          const { viewer, component } = makeViewer();
+          component.ready(
+            makeEventChild({
+              isInitialViewSet: initialViewSet,
+              location: { pageNumber, top, left: 0, scale: 'page-width' },
+            })
+          );
+
+          expect(getPdfLocation(viewer)).toEqual(
+            expectedPosition(initialViewSet, pageNumber, top)
+          );
+        }
+      )
+    );
+  });
+
+  it.each([
+    ['no child yet', null],
+    ['a child without pdf.js', {}],
+    [
+      'a pdf.js app with no location yet',
+      { pdfViewer: { isInitialViewSet: true } },
+    ],
+    [
+      'a location that is not an object',
+      { pdfViewer: { isInitialViewSet: true, location: 'page=3' } },
+    ],
+  ])('is null with %s', (_, child) => {
+    const { viewer, component } = makeViewer();
+    component.child = child;
+
+    expect(getPdfLocation(viewer)).toBeNull();
+  });
+
+  it('is null for a viewer it did not build', () => {
+    const { viewer, component } = makeViewer();
+    component.ready(
+      makeEventChild({
+        isInitialViewSet: true,
+        location: { pageNumber: 3, top: 700 },
+      })
+    );
+
+    expect(getPdfLocation({ ...viewer })).toBeNull();
+  });
+});
+
+describe('onPdfViewChange', () => {
+  it("reports each view change's position once the file's initial view is set", () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            initialViewSet: fc.boolean(),
+            pageNumber: pageNumberArb(),
+            top: topArb(),
+          })
+        ),
+        (changes) => {
+          const { viewer, component } = makeViewer();
+          const app: Record<string, unknown> = {};
+          const child = makeEventChild(app);
+          const listener = vi.fn();
+          onPdfViewChange(viewer, listener);
+          component.ready(child);
+
+          for (const { initialViewSet, pageNumber, top } of changes) {
+            app.isInitialViewSet = initialViewSet;
+            child.dispatch('updateviewarea', at(pageNumber, top));
+          }
+
+          const expected = changes
+            .map((c) => expectedPosition(c.initialViewSet, c.pageNumber, c.top))
+            .filter((p) => p !== null)
+            .map((p) => [p]);
+          expect(listener.mock.calls).toEqual(expected);
+        }
+      )
+    );
+  });
+
+  it('listens on a child that is already built', () => {
+    const { viewer, component } = makeViewer();
+    const child = makeEventChild({ isInitialViewSet: true });
+    component.ready(child);
+    const listener = vi.fn();
+
+    onPdfViewChange(viewer, listener);
+    child.dispatch('updateviewarea', at(3, 700));
+    child.dispatch('updateviewarea', at(1, 0));
+
+    expect(listener.mock.calls).toEqual([
+      [{ page: 3, top: 700 }],
+      [{ page: 1, top: 0 }],
+    ]);
+  });
+
+  it('ignores an event with no location in it', () => {
+    const { viewer, component } = makeViewer();
+    const child = makeEventChild({ isInitialViewSet: true });
+    component.ready(child);
+    const listener = vi.fn();
+    onPdfViewChange(viewer, listener);
+
+    child.dispatch('updateviewarea', undefined);
+    child.dispatch('updateviewarea', { location: null });
+
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('stops listening once stopped', () => {
+    const { viewer, component } = makeViewer();
+    const child = makeEventChild({ isInitialViewSet: true });
+    component.ready(child);
+    const listener = vi.fn();
+
+    const stop = onPdfViewChange(viewer, listener);
+    stop();
+    child.dispatch('updateviewarea', at(3, 700));
+
+    expect(listener).not.toHaveBeenCalled();
+    expect(child.count('updateviewarea')).toBe(0);
+    expect(child.off).toHaveBeenCalledExactlyOnceWith(
+      'updateviewarea',
+      child.on.mock.calls[0][1]
+    );
+  });
+
+  it('never starts listening when stopped before the child is built', () => {
+    const { viewer, component } = makeViewer();
+    const child = makeEventChild({ isInitialViewSet: true });
+
+    onPdfViewChange(viewer, vi.fn())();
+    component.ready(child);
+
+    expect(child.on).not.toHaveBeenCalled();
+    expect(child.off).not.toHaveBeenCalled();
+  });
+
+  it('stops quietly when the viewer was torn down first', () => {
+    const { viewer, component } = makeViewer();
+    const child = makeEventChild({ isInitialViewSet: true });
+    // Obsidian's `off` reaches `this.pdfViewer.eventBus`, gone after unload
+    child.off.mockImplementation(() => {
+      throw new TypeError('Cannot read properties of null');
+    });
+    component.ready(child);
+    const stop = onPdfViewChange(viewer, vi.fn());
+
+    expect(stop).not.toThrow();
+  });
+
+  it.each([
+    ['a child without events', { loadFile: vi.fn() }],
+    ['a child that is not an object', 'child'],
+  ])('does nothing with %s', (_, child) => {
+    const { viewer, component } = makeViewer();
+    const listener = vi.fn();
+    const stop = onPdfViewChange(viewer, listener);
+
+    component.ready(child);
+
+    expect(stop).not.toThrow();
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['on', { on: vi.fn() }],
+    ['off', { off: vi.fn() }],
+  ])('leaves alone a child that has only %s', (_, events) => {
+    const { viewer, component } = makeViewer();
+    const child = { loadFile: vi.fn(), ...events };
+    const stop = onPdfViewChange(viewer, vi.fn());
+
+    component.ready(child);
+    stop();
+
+    for (const method of Object.values(events)) {
+      expect(method).not.toHaveBeenCalled();
+    }
+  });
+
+  it('does nothing for a viewer it did not build', () => {
+    const { viewer, component } = makeViewer();
+    const child = makeEventChild({ isInitialViewSet: true });
+    component.ready(child);
+
+    const stop = onPdfViewChange({ ...viewer }, vi.fn());
+
+    expect(child.on).not.toHaveBeenCalled();
+    expect(stop).not.toThrow();
+  });
+});
+
+describe('PDF position on a page with borders', () => {
+  it('aims a border lower than pdf.js reports, so opening there shows the same view', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 5000 }),
+        fc.integer({ min: -1000, max: 100000 }),
+        fc.integer({ min: 0, max: 40 }),
+        fc.double({ min: 0.1, max: 10, noNaN: true }),
+        (pageNumber, top, border, scale) => {
+          const { viewer, component } = makeViewer();
+          const pdfViewer = bordered(border, scale);
+          component.ready(
+            makeEventChild({
+              isInitialViewSet: true,
+              location: { pageNumber, top },
+              pdfViewer,
+            })
+          );
+
+          const position = getPdfLocation(viewer);
+
+          expect(position?.page).toBe(pageNumber);
+          expect(position?.top).toBeCloseTo(top - border / scale, 9);
+          expect(pdfViewer.getPageView.mock.calls).toEqual([[pageNumber - 1]]);
+        }
+      )
+    );
+  });
+
+  it('aims the same way for each view change it reports', () => {
+    const { viewer, component } = makeViewer();
+    const child = makeEventChild({
+      isInitialViewSet: true,
+      pdfViewer: bordered(9, 2),
+    });
+    component.ready(child);
+    const listener = vi.fn();
+    onPdfViewChange(viewer, listener);
+
+    child.dispatch('updateviewarea', {
+      location: { pageNumber: 1, top: 600 },
+    });
+
+    expect(listener.mock.calls).toEqual([[{ page: 1, top: 595.5 }]]);
+  });
+
+  it.each([
+    ['no pdf.js viewer', undefined],
+    ['a pdf.js viewer without page views', {}],
+    ['no view for the page', { getPageView: () => undefined }],
+    [
+      'a view that cannot map points',
+      { getPageView: () => ({ div: { clientTop: 9 } }) },
+    ],
+    [
+      'a view with no page element',
+      { getPageView: () => ({ getPagePoint: () => [0, 0] }) },
+    ],
+    ['a border that is not a number', bordered('9px', 2)],
+    [
+      'points that are not pairs',
+      {
+        getPageView: () => ({
+          div: { clientTop: 9 },
+          getPagePoint: () => null,
+        }),
+      },
+    ],
+    [
+      'a point that is only half a pair',
+      {
+        getPageView: () => ({
+          div: { clientTop: 9 },
+          getPagePoint: (_: number, y: number) => (y === 0 ? [0, 792] : [0]),
+        }),
+      },
+    ],
+  ])('reports the top as is with %s', (_, pdfViewer) => {
+    const { viewer, component } = makeViewer();
+    component.ready(
+      makeEventChild({
+        isInitialViewSet: true,
+        location: { pageNumber: 3, top: 700 },
+        pdfViewer,
+      })
+    );
+
+    expect(getPdfLocation(viewer)).toEqual({ page: 3, top: 700 });
   });
 });
