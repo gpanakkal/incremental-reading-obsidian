@@ -860,17 +860,18 @@ export default class ReviewManager {
     );
   }
   /**
-   * Save the scroll anchor (top-visible character offset) for an article or
-   * snippet. Cards are excluded.
+   * Save the scroll anchor for an article or snippet. Cards are excluded.
    *
-   * The `scroll_top` column now holds a document character offset rather than the
-   * pixel offset it originally stored — a logical anchor survives viewport-width
-   * and layout changes. Legacy pixel values self-correct: a row written before
-   * this change restores to the wrong spot once, then the next scroll overwrites
-   * it with a real character offset.
+   * For a note, the `scroll_top` column holds the top-visible document
+   * character offset rather than the pixel offset it originally stored — a
+   * logical anchor survives viewport-width and layout changes. Legacy pixel
+   * values self-correct: a row written before this change restores to the
+   * wrong spot once, then the next scroll overwrites it with a real character
+   * offset. For a PDF article it holds a packed page and top (see
+   * `#/lib/pdf/position`).
    */
   async saveScrollPosition(file: TFile, offset: number) {
-    const noteType = await Obsidian.getNoteType(file, this.app);
+    const noteType = await this.articles.getItemType(file);
     if (!noteType || noteType === 'card') return;
 
     await this.#repo.mutate(
@@ -880,12 +881,12 @@ export default class ReviewManager {
   }
 
   /**
-   * Load the saved scroll anchor (character offset) for an article or snippet.
-   * Returns `null` when nothing is stored (`0`) or the note is not an
-   * article/snippet.
+   * Load the saved scroll anchor for an article or snippet, as
+   * {@link saveScrollPosition} stored it. Returns `null` when nothing is stored
+   * (`0`) or the file is not an article/snippet.
    */
   async loadScrollPosition(file: TFile): Promise<number | null> {
-    const noteType = await Obsidian.getNoteType(file, this.app);
+    const noteType = await this.articles.getItemType(file);
 
     let row: ArticleRow | SnippetRow | null = null;
     if (noteType === 'article') {

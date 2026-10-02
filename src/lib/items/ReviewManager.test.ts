@@ -372,7 +372,7 @@ function wireBinary(file: TFile, table: ItemTable | null) {
   (plugin as { settings: Record<string, unknown> }).settings.fuzzTextReviews =
     false;
   const manager = new ReviewManager(plugin, repo);
-  return { manager, app, row, touches };
+  return { manager, app, row, touches, repo };
 }
 
 const itemTableArb = fc.option(
@@ -2647,6 +2647,50 @@ describe('ReviewManager.loadScrollPosition', () => {
     );
     const result = await manager.loadScrollPosition(FAKE_FILE);
     expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scroll position of a binary item
+// ---------------------------------------------------------------------------
+
+describe('ReviewManager scroll position of a binary item', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("saves and loads an article's or snippet's position in its own row, and none for a card or an untracked file", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        binaryFileArb,
+        itemTableArb,
+        fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER }),
+        async (file, table, position) => {
+          vi.restoreAllMocks();
+          const { manager, row, repo } = wireBinary(file, table);
+          const { mutate } = repo as unknown as {
+            mutate: ReturnType<typeof vi.fn>;
+          };
+          if (row) Object.assign(row, { scroll_top: position });
+
+          await manager.saveScrollPosition(file, position);
+          const loaded = await manager.loadScrollPosition(file);
+
+          const kept = table === 'article' || table === 'snippet';
+          expect(mutate.mock.calls).toEqual(
+            kept
+              ? [
+                  [
+                    `UPDATE ${table} SET scroll_top = $1 WHERE reference = $2`,
+                    [position, file.path],
+                  ],
+                ]
+              : []
+          );
+          expect(loaded).toBe(kept ? position : null);
+        }
+      )
+    );
   });
 });
 
