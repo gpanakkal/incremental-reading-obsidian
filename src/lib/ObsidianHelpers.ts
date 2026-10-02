@@ -357,11 +357,6 @@ export class ObsidianHelpers {
     return match ?? null;
   }
 
-  static isDuplicate(fileName: string, noteType: NoteType, app: App) {
-    return !!app.vault.getAbstractFileByPath(
-      this.getTargetPath(fileName, noteType)
-    );
-  }
   /**
    * Generates a link with an absolute path and the file name as alias
    */
