@@ -1363,6 +1363,18 @@ test.describe('PDF articles', () => {
       at
     );
 
+  /**
+   * Take Obsidian's PDF viewer away from review, as an Obsidian whose PDF
+   * internals changed would, so review shows the "Open in PDF tab" placeholder.
+   */
+  const withoutPdfViewer = (page: Page) =>
+    page.evaluate(() => {
+      const { app } = window as unknown as {
+        app: { embedRegistry: { embedByExtension: Record<string, unknown> } };
+      };
+      app.embedRegistry.embedByExtension.pdf = () => ({});
+    });
+
   /** Put the PDF in the vault, with an article row due for it. */
   async function seedPdfArticle() {
     await fs.mkdir(path.join(vaultPath, 'papers'), { recursive: true });
@@ -1384,8 +1396,9 @@ test.describe('PDF articles', () => {
     );
   }
 
-  test('reviews a PDF row as a placeholder, never writing to the PDF', async () => {
+  test('reviews a PDF row as a placeholder without the PDF viewer, never writing to the PDF', async () => {
     await seedPdfArticle();
+    await withoutPdfViewer(window);
 
     await executeCommandById(window, 'incremental-reading:learn');
     await window.locator('css=#begin-review-button').click();
@@ -1590,6 +1603,7 @@ test.describe('PDF articles', () => {
         ['pdf-child', 'snippets/child.md', parent, Date.now() + 1e9, 1, 30]
       );
     }, PDF_ID);
+    await withoutPdfViewer(window);
     const childParentPath = () =>
       window.evaluate(() => {
         const { app } = window as unknown as { app: PageApp };

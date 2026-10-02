@@ -7,6 +7,7 @@ import {
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
+import type { PdfViewer } from '#/lib/pdf/obsidian-pdf';
 import {
   isDestination,
   placeOf,
@@ -689,6 +690,26 @@ const editableTargetArb = fc.constantFrom(
     return title.appendChild(document.createElement('span'));
   }
 );
+
+/**
+ * A PDF viewer whose scope answers Escape, as Obsidian's does, parented on
+ * `appScope` as Obsidian parents it on the app's.
+ */
+function makePdfViewer(appScope?: Scope) {
+  const scope = new Scope(appScope);
+  const escape = vi.fn((): unknown => false);
+  scope.register([], 'Escape', escape);
+  const viewer = {
+    containerEl: document.createElement('div'),
+    scope,
+    load: vi.fn(),
+    unload: vi.fn(),
+    open: vi.fn(),
+    showSearch: vi.fn(),
+    selectedText: vi.fn(() => 'selected in the PDF'),
+  };
+  return { viewer: viewer as unknown as PdfViewer, escape, raw: viewer };
+}
 
 // #endregion
 
@@ -2845,6 +2866,108 @@ describe('ReviewView Escape in selection mode', () => {
 
       expect(keyed.cancelSelection).not.toHaveBeenCalled();
       expect(consumed).toBe(false);
+    } finally {
+      unload(keyed.view);
+    }
+  });
+});
+
+describe('ReviewView with a PDF viewer on screen', () => {
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  afterEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  it("hands the viewer's keys to Obsidian exactly while it is attached", () => {
+    const keyed = makeKeyedView();
+    const { viewer, escape } = makePdfViewer(keyed.appScope);
+    try {
+      keyed.view.attachPdfViewer(viewer);
+      expect(keyed.view.scope).toBe(viewer.scope);
+      expect(pressKey(keyed, { key: 'Escape' }).consumed).toBe(true);
+      expect(escape).toHaveBeenCalledOnce();
+      expect(keyed.hotkey).not.toHaveBeenCalled();
+      // Keys the viewer doesn't bind still reach the app's hotkeys
+      pressKey(keyed, { key: 'a' });
+      expect(keyed.hotkey).toHaveBeenCalledOnce();
+
+      keyed.view.detachPdfViewer(viewer);
+      expect(keyed.view.scope).toBeNull();
+      expect(pressKey(keyed, { key: 'Escape' }).consumed).toBe(false);
+      expect(escape).toHaveBeenCalledOnce();
+    } finally {
+      unload(keyed.view);
+    }
+  });
+
+  it('keeps a newer viewer when an older one detaches late', () => {
+    const keyed = makeKeyedView();
+    const older = makePdfViewer().viewer;
+    const newer = makePdfViewer().viewer;
+    try {
+      keyed.view.attachPdfViewer(older);
+      keyed.view.attachPdfViewer(newer);
+      keyed.view.detachPdfViewer(older);
+
+      expect(keyed.view.pdfViewer).toBe(newer);
+      expect(keyed.view.scope).toBe(newer.scope);
+    } finally {
+      unload(keyed.view);
+    }
+  });
+
+  it("lets selection mode's Escape take over from the viewer's, and hands it back after", () => {
+    const keyed = makeKeyedView();
+    const { viewer, escape } = makePdfViewer();
+    try {
+      keyed.view.attachPdfViewer(viewer);
+      store.dispatch(setSelectionMode('snippet'));
+
+      pressKey(keyed, { key: 'Escape' });
+      expect(keyed.cancelSelection).toHaveBeenCalledOnce();
+      expect(escape).not.toHaveBeenCalled();
+
+      store.dispatch(setSelectionMode(null));
+      expect(keyed.view.scope).toBe(viewer.scope);
+    } finally {
+      unload(keyed.view);
+    }
+  });
+
+  it('reads the selection from the viewer while one is attached', () => {
+    const keyed = makeKeyedView();
+    const { viewer } = makePdfViewer();
+    try {
+      keyed.view.attachPdfViewer(viewer);
+      expect(keyed.view.getSelection()).toBe('selected in the PDF');
+
+      keyed.view.detachPdfViewer(viewer);
+      window.getSelection()?.removeAllRanges();
+      expect(keyed.view.getSelection()).toBe('');
+    } finally {
+      unload(keyed.view);
+    }
+  });
+
+  it("opens the viewer's find bar rather than the editor's while it is attached", () => {
+    const keyed = makeKeyedView();
+    const activeEditor = makeActiveEditor();
+    const { viewer, raw } = makePdfViewer();
+    try {
+      keyed.view.activeEditor = activeEditor as never;
+      keyed.view.attachPdfViewer(viewer);
+
+      keyed.view.showSearch(true);
+      expect(raw.showSearch).toHaveBeenCalledOnce();
+      expect(activeEditor.showSearch).not.toHaveBeenCalled();
+
+      keyed.view.detachPdfViewer(viewer);
+      keyed.view.showSearch(true);
+      expect(raw.showSearch).toHaveBeenCalledOnce();
+      expect(activeEditor.showSearch).toHaveBeenCalledExactlyOnceWith(true);
     } finally {
       unload(keyed.view);
     }

@@ -153,9 +153,9 @@ test.describe('Importing a PDF', () => {
       window.locator('.ir-queue-row', { hasText: 'PDF fixture' })
     ).toBeVisible();
     await window.locator('css=#begin-review-button').click();
-    await expect(window.locator('.ir-binary-item')).toContainText(
-      'PDF fixture.pdf'
-    );
+    await expect(
+      window.locator('.ir-pdf-article .textLayer').first()
+    ).toContainText('Incremental reading');
 
     expect(await sha256(PDF_PATH)).toBe(before);
   });

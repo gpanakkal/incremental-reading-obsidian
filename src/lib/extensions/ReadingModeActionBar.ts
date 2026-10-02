@@ -1,4 +1,5 @@
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
+import { isPdfView } from '#/lib/pdf/obsidian-pdf';
 import type { NoteType } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import ReviewView from '#/views/ReviewView';
@@ -12,13 +13,12 @@ import {
 import { renderStandaloneActionBarDOM } from './ActionBarExtension';
 
 /**
- * The view type Obsidian's built-in PDF viewer registers under. Undocumented:
- * `PdfView.getViewType` returns it (see `plans/reference/obsidian-pdf-internals.md`).
+ * Whether `view` is Obsidian's built-in PDF tab, as the PDF adapter (the one
+ * place that knows Obsidian's PDF internals) tells it, narrowed to the
+ * `FileView` it is.
  */
-const PDF_VIEW_TYPE = 'pdf';
-
-function isPdfView(view: View): view is FileView {
-  return view instanceof FileView && view.getViewType() === PDF_VIEW_TYPE;
+function isPdfFileView(view: View): view is FileView {
+  return view instanceof FileView && isPdfView(view);
 }
 
 /** Where a leaf's bar goes, and whether the file it shows earns one. */
@@ -53,7 +53,7 @@ function targetOf(
       accepts: (type) => type !== null,
     };
   }
-  if (isPdfView(view)) {
+  if (isPdfFileView(view)) {
     const { file } = view;
     if (!file) return null;
     // `contentEl` is the `.view-content` Obsidian fills with `.pdf-toolbar`
@@ -113,7 +113,7 @@ class LeafActionBarController {
 
   /** Whether the leaf shows a PDF, the only kind of view typed by its row. */
   showsPdf(): boolean {
-    return isPdfView(this.leaf.view);
+    return isPdfFileView(this.leaf.view);
   }
 
   private mount({ file, container, className }: BarTarget): void {

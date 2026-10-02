@@ -10,9 +10,12 @@ import * as RelinkModalModule from '#/views/RelinkModal';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { type ComponentChild, render } from 'preact';
+import { useEffect, useState } from 'preact/hooks';
+import { act } from 'preact/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as CardViewerModule from './CardViewer';
 import * as IREditorModule from './IREditor';
+import * as PdfArticleViewModule from './PdfArticleView';
 import * as ReviewContext from './ReviewContext';
 import ReviewItem from './ReviewItem';
 import * as ReviewSummaryModule from './ReviewSummary';
@@ -101,6 +104,19 @@ function wireItem({
   const summary = vi
     .spyOn(ReviewSummaryModule, 'ReviewSummary')
     .mockReturnValue(<></>);
+  // Stubbed as a viewer that couldn't be built, which shows what it is handed
+  // to fall back on; each mount is recorded by the item it was mounted for.
+  const pdfMounts: string[] = [];
+  const pdfView = vi
+    .spyOn(PdfArticleViewModule, 'PdfArticleView')
+    .mockImplementation(({ item: pdfItem, fallback }) => {
+      // Held from the first render, so it changes only with a new mount
+      const [mountedFor] = useState(pdfItem.data.id);
+      useEffect(() => {
+        pdfMounts.push(mountedFor);
+      }, [mountedFor]);
+      return <>{fallback}</>;
+    });
   return {
     cardViewer,
     editor,
@@ -108,6 +124,8 @@ function wireItem({
     openInNewTab,
     openRelinkPicker,
     plugin,
+    pdfView,
+    pdfMounts,
   };
 }
 
@@ -313,15 +331,21 @@ describe('ReviewItem', () => {
             path: `papers/a.${extension}`,
             extension,
           });
-          const { cardViewer, editor, summary, openInNewTab } = wireItem({
-            item,
-            text,
-            isLoading: false,
-            showAnswer,
-          });
+          const { cardViewer, editor, summary, openInNewTab, pdfView } =
+            wireItem({
+              item,
+              text,
+              isLoading: false,
+              showAnswer,
+            });
 
           const container = mount(<ReviewItem />);
           const button = binaryPlaceholder(container)?.querySelector('button');
+
+          // A PDF goes to the PDF viewer, with the placeholder to fall back on
+          expect(pdfView.mock.calls.map(([props]) => props.item)).toEqual(
+            extension.toLowerCase() === 'pdf' ? [item] : []
+          );
 
           expect(button?.textContent).toBe(
             extension.toLowerCase() === 'pdf'
@@ -368,7 +392,11 @@ describe('ReviewItem', () => {
       fc.property(
         fc.constantFrom<NoteType>('article', 'snippet', 'card'),
         fc.string(),
-        fc.string(),
+        // A PDF's reference too: missing, it has no file to view either
+        fc.oneof(
+          fc.string(),
+          fc.string().map((name) => `papers/${name}.pdf`)
+        ),
         fc.option(fc.string(), { nil: undefined }),
         fc.boolean(),
         (type, id, reference, text, showAnswer) => {
@@ -376,8 +404,14 @@ describe('ReviewItem', () => {
             data: { type, id, reference },
             file: null,
           } as unknown as MissingItem;
-          const { cardViewer, editor, summary, openRelinkPicker, plugin } =
-            wireItem({ item, text, isLoading: false, showAnswer });
+          const {
+            cardViewer,
+            editor,
+            summary,
+            openRelinkPicker,
+            plugin,
+            pdfView,
+          } = wireItem({ item, text, isLoading: false, showAnswer });
 
           const container = mount(<ReviewItem />);
 
@@ -387,6 +421,7 @@ describe('ReviewItem', () => {
           expect(cardViewer).not.toHaveBeenCalled();
           expect(editor).not.toHaveBeenCalled();
           expect(summary).not.toHaveBeenCalled();
+          expect(pdfView).not.toHaveBeenCalled();
 
           const button = placeholder?.querySelector('button');
           expect(button?.textContent).toBe('Relink file…');
@@ -401,5 +436,41 @@ describe('ReviewItem', () => {
         }
       )
     );
+  });
+
+  it('mounts a fresh PDF viewer for each PDF item, and keeps it while the item stays', () => {
+    const first = makeItem({
+      type: 'article',
+      id: 'p1',
+      path: 'papers/a.pdf',
+      extension: 'pdf',
+    });
+    const second = makeItem({
+      type: 'article',
+      id: 'p2',
+      path: 'papers/b.pdf',
+      extension: 'pdf',
+    });
+    const { pdfMounts } = wireItem({
+      item: first,
+      text: undefined,
+      isLoading: false,
+      showAnswer: false,
+    });
+    const container = document.createElement('div');
+    const show = (item: TReviewItem) => {
+      vi.mocked(ReactQuery.useCurrentItemFileText).mockReturnValue({
+        item,
+        text: undefined,
+        isLoading: false,
+      });
+      void act(() => render(<ReviewItem />, container));
+    };
+
+    show(first);
+    show({ ...first });
+    show(second);
+
+    expect(pdfMounts).toEqual(['p1', 'p2']);
   });
 });

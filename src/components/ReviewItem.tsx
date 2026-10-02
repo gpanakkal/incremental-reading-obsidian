@@ -13,13 +13,15 @@ import type { EditorView } from '@codemirror/view';
 import { CardViewer } from './CardViewer';
 import { IREditor } from './IREditor';
 import { LoadingSpinner } from './LoadingSpinner';
+import { PdfArticleView } from './PdfArticleView';
 import { useReviewContext } from './ReviewContext';
 import { ReviewSummary } from './ReviewSummary';
 
 /**
- * An item whose file isn't text, a PDF article, in place of the editor: the
- * review tab can't show it yet, so it offers to open it where Obsidian can.
- * The action bar still reviews it; only its content lives in the other tab.
+ * An item whose file isn't text, in place of the editor, whenever the review
+ * tab can't show it — a PDF article when Obsidian's viewer can't be had — so
+ * it offers to open it where Obsidian can. The action bar still reviews it;
+ * only its content lives in the other tab.
  */
 function BinaryItem({ item }: { item: TReviewItem }) {
   const { actions } = useReviewContext();
@@ -81,8 +83,19 @@ export default function ReviewItem() {
 
   // Before the summary: such an item's text is never read, and an item with
   // no text would otherwise read as an empty queue.
+  // A missing item has no file to show, PDF or otherwise: 0013's placeholder
   if (item && isMissingItem(item)) return <MissingItem item={item} />;
-  if (item && !isEditableText(item.file)) return <BinaryItem item={item} />;
+  if (item && !isEditableText(item.file)) {
+    return getMimeType(item.file) === 'application/pdf' ? (
+      <PdfArticleView
+        key={item.data.id}
+        item={item}
+        fallback={<BinaryItem item={item} />}
+      />
+    ) : (
+      <BinaryItem item={item} />
+    );
+  }
   if (!item || !fileText) return <ReviewSummary />;
   return (
     <>

@@ -342,8 +342,17 @@ function makeExtractReceiver({
   where = 'review' as 'review' | 'note' | 'none',
   reading = false,
   editor = true,
+  itemExtension = null as string | null,
 } = {}) {
   const reviewView = Object.create(ReviewView.prototype) as ReviewView;
+  // The review tab's item, by its file's extension; `null` for none
+  reviewView.currentItemFile = () =>
+    itemExtension === null
+      ? null
+      : ({
+          path: `items/a.${itemExtension}`,
+          extension: itemExtension,
+        } as TFile);
   const noteView = markdownView({ reading });
   const actions = {
     extract: vi.fn(() => Promise.resolve()),
@@ -1164,6 +1173,53 @@ describe('IncrementalReadingPlugin.addExtractCommands', () => {
 
         expect(run(kind, true)).toBe(false);
       })
+    );
+  });
+
+  it('does what the button does for a PDF in review, though it has no editor', () => {
+    // The button says snippets and cards from PDFs aren't supported yet; the
+    // hotkey should say so too rather than do nothing at all
+    fc.assert(
+      fc.property(
+        kinds,
+        fc.mixedCase(fc.constant('pdf')),
+        fc.boolean(),
+        (kind, itemExtension, editor) => {
+          const { actions, reviewView, run } = makeExtractReceiver({
+            itemExtension,
+            editor,
+          });
+
+          expect(run(kind, true)).toBe(true);
+          expect(actions.extract).not.toHaveBeenCalled();
+
+          run(kind);
+
+          expect(actions.extract).toHaveBeenCalledExactlyOnceWith(
+            kind,
+            reviewView
+          );
+          expect(actions.createSnippet).not.toHaveBeenCalled();
+          expect(actions.createCard).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('stays unavailable without an editor for any other review item', () => {
+    fc.assert(
+      fc.property(
+        kinds,
+        fc.option(
+          fc.string().filter((ext) => ext.toLowerCase() !== 'pdf'),
+          { nil: null }
+        ),
+        (kind, itemExtension) => {
+          const { run } = makeExtractReceiver({ itemExtension, editor: false });
+
+          expect(run(kind, true)).toBe(false);
+        }
+      )
     );
   });
 

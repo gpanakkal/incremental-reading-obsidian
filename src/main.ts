@@ -1,6 +1,6 @@
 import { checkImportable } from '#/lib/items/ArticleManager';
 import { appendLog } from '#/lib/log-file';
-import { isCopyImportable, isImportable } from '#/lib/mime';
+import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
 import { REBIND_LOG_TOPIC } from '#/lib/rebind-records';
 import {
   type App,
@@ -792,12 +792,29 @@ export default class IncrementalReadingPlugin extends Plugin {
    * In a note, which has no selection mode, they make it at once either way.
    */
   private addExtractCommands() {
+    /**
+     * The commands on a PDF article in review, which has no editor for them to
+     * find: handed to the button's path, which says neither snippets nor
+     * cards are supported for PDFs yet. Whether that applied, and so whether
+     * the command is available.
+     */
+    const extractFromPdf = (kind: 'snippet' | 'card', checking: boolean) => {
+      const view = this.getActiveReviewView();
+      const file = view?.currentItemFile();
+      if (!view || !file || getMimeType(file) !== 'application/pdf') {
+        return false;
+      }
+      if (!checking) void this.actions.extract(kind, view);
+      return true;
+    };
+
     this.addCommand({
       id: 'extract-selection',
       name: 'Extract selection to snippet',
       // hotkeys: [{ key: 'X', modifiers: ['Alt'] }],
       checkCallback: (checking) => {
         if (!this.reviewManager) return false;
+        if (extractFromPdf('snippet', checking)) return true;
 
         const editor = this.app.workspace.activeEditor?.editor;
         if (!editor) return false;
@@ -828,6 +845,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       // hotkeys: [{ key: 'Z', modifiers: ['Alt'] }],
       checkCallback: (checking) => {
         if (!this.reviewManager) return false;
+        if (extractFromPdf('card', checking)) return true;
 
         const view =
           this.getActiveReviewView() ??

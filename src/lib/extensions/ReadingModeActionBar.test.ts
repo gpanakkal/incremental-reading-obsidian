@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import * as ActionBarExtension from '#/lib/extensions/ActionBarExtension';
+import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
 import {
@@ -579,6 +580,32 @@ describe('registerReadingModeActionBar', () => {
   });
 
   describe('PDF leaves', () => {
+    it('asks the PDF adapter which views are PDFs', async () => {
+      // `obsidian-pdf` is the one place that knows Obsidian's PDF internals,
+      // its view type included; whatever it answers is what counts here
+      await fc.assert(
+        fc.asyncProperty(fc.boolean(), async (isPdf) => {
+          const isPdfView = vi
+            .spyOn(ObsidianPdf, 'isPdfView')
+            .mockReturnValue(isPdf);
+          const contentEl = makeContainerEl();
+          const leaf = makePdfLeaf({ contentEl });
+          const plugin = makePlugin([leaf]);
+          plugin.reviewManager.articles.getItemType.mockResolvedValue(
+            'article'
+          );
+
+          registerReadingModeActionBar(plugin as never);
+          await flush();
+
+          expect(isPdfView).toHaveBeenCalledWith(leaf.view);
+          expect(pdfBars(contentEl)).toHaveLength(isPdf ? 1 : 0);
+          plugin.runCleanup();
+          isPdfView.mockRestore();
+        })
+      );
+    });
+
     it("puts the bar above Obsidian's PDF toolbar and viewer, in the view's content element", async () => {
       const contentEl = makeContainerEl();
       for (const cls of ['pdf-toolbar', 'pdf-container']) {

@@ -323,6 +323,37 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* A PDF article in review, in Obsidian's own viewer (PdfArticleView.tsx).
+
+   Obsidian lays the viewer out only inside a PDF tab, by
+   `.workspace-leaf-content[data-type="pdf"] .view-content`, which never matches
+   here. Both boxes take that rule's place: the host fills what the action bar
+   leaves, and the viewer's container — which holds the toolbar above
+   `.pdf-container` — stacks them in a column so `.pdf-container`'s
+   `flex-grow` gets the rest. `min-height: 0` lets the pair shrink to the tab
+   rather than grow to the PDF, so pdf.js scrolls inside its own container. */
+.ir-pdf-article,
+.ir-pdf-viewer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* On phones the review tab zeroes `--view-top-spacing` so editor text scrolls
+   under the floating header; the PDF toolbar doesn't scroll, so it starts
+   below the header instead, as the home screen does. */
+.is-phone
+  .mod-root
+  .workspace-leaf-content[data-type='incremental-reading-review']
+  .ir-pdf-article {
+  padding-top: var(
+    --view-top-spacing-markdown,
+    var(--safe-area-inset-top, 0px)
+  );
+}
+
 .ir-review-placeholder {
   display: flex;
   align-items: center;
