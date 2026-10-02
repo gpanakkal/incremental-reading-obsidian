@@ -1,9 +1,13 @@
 import test, { expect, type AndroidDevice, type Page } from '@playwright/test';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import {
+  createLargePdf,
   executeCommandById,
   finalizeArticleImport,
   openFileInActiveLeaf,
   REVIEW_VIEW_TYPE,
+  watchFileReads,
   watchNotices,
 } from './helpers';
 import {
@@ -14,7 +18,7 @@ import {
   pushVaultCopy,
   stopObsidian,
 } from './setup/android';
-import { shouldCleanup } from './setup/helpers';
+import { shouldCleanup, sourceVaultPath } from './setup/helpers';
 
 // The real Obsidian Android app on an emulator, as the `e2e-android` project
 // runs it. What this covers that `app.emulateMobile` on desktop cannot: the
@@ -157,4 +161,65 @@ test("Reviews a PDF article in Obsidian's own PDF viewer", async () => {
       return { viewer: view.pdfViewer, scope: view.scope };
     }, REVIEW_VIEW_TYPE)
   ).toEqual({ viewer: null, scope: null });
+});
+
+test('Imports a large PDF in place, reading only its leading bytes if it can', async () => {
+  const largePath = 'sources/Large PDF.pdf';
+  await createLargePdf(
+    window,
+    largePath,
+    await fs.readFile(path.join(sourceVaultPath, 'sources/PDF fixture.pdf')),
+    20 * 1024 * 1024
+  );
+  const reads = await watchFileReads(window, largePath);
+
+  // Straight through the plugin: the file menu is a long press inside a
+  // drawer here, and the import command needs the PDF open in a tab, where
+  // the PDF viewer would read it too.
+  const imported = await window.evaluate(async (filePath) => {
+    const { app } = window as unknown as {
+      app: {
+        vault: { getFileByPath(p: string): unknown };
+        plugins: {
+          plugins: Record<
+            string,
+            {
+              reviewManager: {
+                importArticle(
+                  file: unknown,
+                  priority: number,
+                  fixed: null
+                ): Promise<unknown>;
+              };
+            }
+          >;
+        };
+      };
+    };
+    const file = app.vault.getFileByPath(filePath);
+    const { reviewManager } = app.plugins.plugins['incremental-reading'];
+    return (await reviewManager.importArticle(file, 25, null)) !== null;
+  }, largePath);
+
+  const { fetches, readBinary } = await reads();
+  // Whether Android's WebView server honors a range: this run's answer
+  const answer = `fetches ${JSON.stringify(fetches)}, readBinary ${readBinary}`;
+  console.log(`Large PDF import on Android: ${answer}`);
+  test.info().annotations.push({ type: 'android-range', description: answer });
+  expect(imported).toBe(true);
+  // Mobile's own readBinary fetches a large file's URL whole, with no range,
+  // so only the ranged fetches are the sniff's
+  const ranged = fetches.filter(({ range }) => range !== null);
+  expect(ranged).toEqual([
+    {
+      range: 'bytes=0-4',
+      status: expect.anything(),
+      bodyBytesRead: expect.any(Number),
+    },
+  ]);
+  // The whole file is read only when the fetch fails to bring the signature
+  const fetched =
+    (ranged[0].status === 200 || ranged[0].status === 206) &&
+    ranged[0].bodyBytesRead >= 5;
+  expect(readBinary).toBe(fetched ? 0 : 1);
 });

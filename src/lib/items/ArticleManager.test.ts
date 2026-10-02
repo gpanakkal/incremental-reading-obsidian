@@ -114,6 +114,7 @@ function makeImportVault(bytes: Uint8Array = NOTE_BYTES) {
   return {
     cachedRead: vi.fn().mockResolvedValue('# Content'),
     readBinary: vi.fn().mockResolvedValue(bytes.slice().buffer),
+    getResourcePath: vi.fn((file: TFile) => `app://vault/${file.path}`),
   };
 }
 
@@ -2506,6 +2507,15 @@ describe('import', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  beforeEach(() => {
+    // The content check can't fetch a file's leading bytes here, so it falls
+    // back to `readBinary`, which these tests control. mime.test.ts covers
+    // the fetch itself.
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new TypeError('Failed to fetch')
+    );
   });
 
   it('refuses a file of a type it cannot import, touching nothing', async () => {

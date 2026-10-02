@@ -12,11 +12,13 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
+  createLargePdf,
   executeCommandById,
   finalizeArticleImport,
   openFileInActiveLeaf,
   setNativeMenus,
   setPluginSetting,
+  watchFileReads,
   watchNotices,
 } from './helpers';
 import {
@@ -36,6 +38,12 @@ const PDF_PATH = 'sources/PDF fixture.pdf';
 
 /** The folder copies are imported into. */
 const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
+
+/**
+ * The size of the PDF that shows an import reads only its leading bytes: big
+ * enough that reading all of it would be slow on a phone.
+ */
+const LARGE_PDF_BYTES = 20 * 1024 * 1024;
 
 /** What the page-side calls below reach on Obsidian and the plugin. */
 type PageApp = {
@@ -257,6 +265,45 @@ test.describe('Importing a PDF', () => {
     expect(secondCopy?.startsWith(`${ARTICLES}/PDF fixture - `)).toBe(true);
     expect(await sha256(secondCopy!)).toBe(before);
     expect(await sha256(PDF_PATH)).toBe(before);
+  });
+
+  test('imports a large PDF reading only its leading bytes, never the whole file', async () => {
+    const largePath = 'sources/Large PDF.pdf';
+    await createLargePdf(
+      window,
+      largePath,
+      await fs.readFile(path.join(vaultPath, PDF_PATH)),
+      LARGE_PDF_BYTES
+    );
+    expect(
+      (await fs.stat(path.join(vaultPath, largePath))).size
+    ).toBeGreaterThan(LARGE_PDF_BYTES);
+    await setNativeMenus(window, false);
+    await setPluginSetting(window, 'showAdvancedImportMenuItems', true);
+    // Imported from the file menu: opening the PDF in a tab would have the
+    // PDF viewer read it too
+    const reads = await watchFileReads(window, largePath);
+
+    await window.getByText('sources', { exact: true }).click();
+    await window
+      .locator(`.nav-file-title[data-path="${largePath}"]`)
+      .click({ button: 'right' });
+    await window
+      .locator('.menu')
+      .getByText('Import in place', { exact: true })
+      .click();
+
+    await expect
+      .poll(() => rowsAt(window, largePath))
+      .toEqual([{ id: expect.any(String), reference: largePath, deleted: 0 }]);
+    const { fetches, readBinary } = await reads();
+    // Electron's file protocol answers a range with only those bytes but a
+    // 200; Obsidian's own handler, where it is used, with a 206
+    expect(fetches).toEqual([
+      { range: 'bytes=0-4', status: expect.any(Number), bodyBytesRead: 5 },
+    ]);
+    expect([200, 206]).toContain(fetches[0].status);
+    expect(readBinary).toBe(0);
   });
 
   test('refuses a .pdf that is not a PDF, with a notice', async () => {

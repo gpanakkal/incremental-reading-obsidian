@@ -707,3 +707,140 @@ export async function setPluginSetting(
     [key, value] as [string, unknown]
   );
 }
+
+/**
+ * Write a PDF of at least `minBytes` to `path` through the vault, so Obsidian
+ * knows the file and its size at once. It is `fixture`, a PDF, with an
+ * incremental update appended that adds one unreferenced stream of zeros:
+ * still a valid PDF, only a large one. Built in the page, so the bytes never
+ * cross the wire.
+ */
+export async function createLargePdf(
+  window: Page,
+  path: string,
+  fixture: Uint8Array,
+  minBytes: number
+) {
+  await window.evaluate(
+    async ({ filePath, fixtureBytes, padding }) => {
+      const base = Uint8Array.from(fixtureBytes);
+      const text = new TextDecoder('latin1').decode(base);
+      const match = (pattern: RegExp) => {
+        const found = pattern.exec(text);
+        if (!found) throw new Error(`Fixture has no ${pattern}`);
+        return Number(found[1]);
+      };
+      const previousXref = match(/startxref\s+(\d+)\s+%%EOF\s*$/);
+      const size = match(/\/Size (\d+)/);
+      const root = match(/\/Root (\d+) 0 R/);
+      const latin1 = (s: string) =>
+        Uint8Array.from(s, (char) => char.charCodeAt(0));
+
+      const head = latin1(`${size} 0 obj\n<</Length ${padding}>>\nstream\n`);
+      const tail = latin1('\nendstream\nendobj\n');
+      const xrefAt = base.length + head.length + padding + tail.length;
+      const offset = String(base.length).padStart(10, '0');
+      const update = latin1(
+        `xref\n0 1\n0000000000 65535 f \n${size} 1\n${offset} 00000 n \n` +
+          `trailer\n<</Size ${size + 1}/Root ${root} 0 R/Prev ${previousXref}>>\n` +
+          `startxref\n${xrefAt}\n%%EOF\n`
+      );
+
+      const bytes = new Uint8Array(xrefAt + update.length);
+      bytes.set(base, 0);
+      bytes.set(head, base.length);
+      // The padding is the zeros the array starts out as
+      bytes.set(tail, base.length + head.length + padding);
+      bytes.set(update, xrefAt);
+      const { app } = window as unknown as TestWindow;
+      await app.vault.createBinary(filePath, bytes.buffer);
+    },
+    { filePath: path, fixtureBytes: [...fixture], padding: minBytes }
+  );
+}
+
+/** What {@link watchFileReads} saw of one file. */
+export type FileReads = {
+  /**
+   * Each `fetch` of the file's resource URL: its `Range`, then its outcome,
+   * and how many bytes of its body the server delivered before the read
+   * stopped. The count can run a chunk ahead of what the reader took.
+   */
+  fetches: {
+    range: string | null;
+    status: number | string;
+    bodyBytesRead: number;
+  }[];
+  /** How many times the vault read the whole file. */
+  readBinary: number;
+};
+
+/**
+ * Record, from now on, every `fetch` of the file at `path` and every whole-file
+ * read of it through the vault adapter. The wrappers live in the page and keep
+ * their log in `window.__diag`, so a read is seen however fast it is. Returns
+ * a reader for that log.
+ */
+export async function watchFileReads(window: Page, path: string) {
+  await window.evaluate((filePath) => {
+    const { app } = window as unknown as TestWindow;
+    const file = app.vault.getFileByPath(filePath);
+    if (!file) throw new Error(`No such file: ${filePath}`);
+    // The URL carries the file's mtime as a query, which any fetch may drop
+    const resource = app.vault.getResourcePath(file).split('?')[0];
+    const diag: FileReads = { fetches: [], readBinary: 0 };
+    (window as unknown as { __diag: FileReads }).__diag = diag;
+
+    const page = window as unknown as Window;
+    const fetch = page.fetch.bind(page) as typeof page.fetch;
+    page.fetch = async (input, init) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (url.split('?')[0] !== resource) return fetch(input, init);
+      const entry: FileReads['fetches'][number] = {
+        range: new Headers(init?.headers).get('Range'),
+        status: 'pending',
+        bodyBytesRead: 0,
+      };
+      diag.fetches.push(entry);
+      try {
+        const response = await fetch(input, init);
+        entry.status = response.status;
+        if (response.body === null) return response;
+        // Count what passes through on its way to the reader. Cancelling the
+        // reader cancels the pipe, and that the response under it.
+        const counted = response.body.pipeThrough(
+          new TransformStream<Uint8Array, Uint8Array>({
+            transform(chunk, controller) {
+              entry.bodyBytesRead += chunk.length;
+              controller.enqueue(chunk);
+            },
+          })
+        );
+        return new Response(counted, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      } catch (error) {
+        entry.status = String(error);
+        throw error;
+      }
+    };
+
+    const adapter = app.vault.adapter;
+    const readBinary = adapter.readBinary.bind(
+      adapter
+    ) as typeof adapter.readBinary;
+    adapter.readBinary = (normalizedPath: string) => {
+      if (normalizedPath === filePath) diag.readBinary += 1;
+      return readBinary(normalizedPath);
+    };
+  }, path);
+  return () =>
+    window.evaluate(() => (window as unknown as { __diag: FileReads }).__diag);
+}
