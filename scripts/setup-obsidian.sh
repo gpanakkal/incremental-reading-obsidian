@@ -145,7 +145,6 @@ fi
 # 3. Extract app.asar and build test folder
 # ------------------------------------------------------------------------------
 echo "🔓 Unpacking $obsidian_app → $unpacked_path"
-rm -rf "$unpacked_path"
 
 if [[ "$PLATFORM" == "macos" ]]; then
   asar_path="$obsidian_app/Contents/Resources/app.asar"
@@ -179,8 +178,61 @@ fi
 [[ -f "$asar_path" ]] || { echo "❌ app.asar not found at $asar_path" >&2; exit 1; }
 [[ -f "$obsidian_asar_path" ]] || { echo "❌ obsidian.asar not found at $obsidian_asar_path" >&2; exit 1; }
 
-npx --yes @electron/asar extract "$asar_path" "$unpacked_path"
-cp "$obsidian_asar_path" "$unpacked_path/obsidian.asar"
+# Build the new copy in a temp sibling folder and swap it in only once it is complete,
+# so a failed or interrupted run (locked file, npx failure, Ctrl+C) leaves the existing
+# copy untouched instead of empty.
+staging_path="$(mktemp -d "$unpacked_path.tmp-XXXXXX")"
+old_path="$unpacked_path.old-${staging_path##*.tmp-}"
+swapped=0
+keep_staging=0
+
+restore_unpacked() {
+  [[ "$swapped" == 0 ]] || return 0
+  if [[ -e "$old_path" && ! -e "$unpacked_path" ]]; then
+    mv "$old_path" "$unpacked_path" ||
+      echo "⚠️  Could not restore the previous copy; rename $old_path to $unpacked_path by hand" >&2
+  fi
+  [[ "$keep_staging" == 1 ]] || rm -rf "$staging_path"
+}
+trap restore_unpacked EXIT
+trap 'exit 130' INT TERM
+
+if ! npx --yes @electron/asar extract "$asar_path" "$staging_path"; then
+  echo "❌ Failed to extract app.asar; $unpacked_path left unchanged" >&2
+  exit 1
+fi
+if ! cp "$obsidian_asar_path" "$staging_path/obsidian.asar"; then
+  echo "❌ Failed to copy obsidian.asar; $unpacked_path left unchanged" >&2
+  exit 1
+fi
+
+for required in main.js package.json obsidian.asar; do
+  [[ -f "$staging_path/$required" ]] || {
+    echo "❌ Unpacked copy is missing $required; $unpacked_path left unchanged" >&2
+    exit 1
+  }
+done
+
+if [[ -e "$unpacked_path" ]] && ! mv "$unpacked_path" "$old_path"; then
+  # Usually a running Obsidian or e2e run holding a file open. The old copy is still
+  # in place, so keep the new one for the user to swap in by hand.
+  keep_staging=1
+  echo "❌ Could not move the existing $unpacked_path aside (is Obsidian or an e2e run using it?)" >&2
+  echo "   The new copy was kept at $staging_path." >&2
+  echo "   Close Obsidian, then rerun this script, or delete $unpacked_path and rename $staging_path to $unpacked_path." >&2
+  exit 1
+fi
+
+if ! mv "$staging_path" "$unpacked_path"; then
+  echo "❌ Could not move the new copy into place; restoring $unpacked_path" >&2
+  exit 1
+fi
+swapped=1
+trap - EXIT INT TERM
+
+if [[ -e "$old_path" ]] && ! rm -rf "$old_path"; then
+  echo "⚠️  Could not delete the previous copy at $old_path; delete it once Obsidian is closed" >&2
+fi
 
 echo "✅ Obsidian unpacked"
 
