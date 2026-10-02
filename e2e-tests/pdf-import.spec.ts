@@ -1,4 +1,8 @@
-import { DATABASE_FILE_PATH } from '#/lib/constants';
+import {
+  ARTICLE_DIRECTORY,
+  DATA_DIRECTORY,
+  DATABASE_FILE_PATH,
+} from '#/lib/constants';
 import test, {
   expect,
   type ElectronApplication,
@@ -30,6 +34,9 @@ let vaultPath: string;
 /** The main fixture `scripts/make-pdf-fixtures.mjs` writes. */
 const PDF_PATH = 'sources/PDF fixture.pdf';
 
+/** The folder copies are imported into. */
+const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
+
 /** What the page-side calls below reach on Obsidian and the plugin. */
 type PageApp = {
   plugins: {
@@ -57,6 +64,16 @@ const rowsAt = (page: Page, reference: string) =>
       [ref]
     );
   }, reference);
+
+/** The reference of every article row, sorted. */
+const allReferences = (page: Page) =>
+  page.evaluate(() => {
+    const { app } = window as unknown as { app: PageApp };
+    const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+    return repo
+      .query('SELECT reference FROM article ORDER BY reference')
+      .map((row) => row.reference as string);
+  });
 
 /** The scheduling state of the article row `id`. */
 const scheduleOf = (page: Page, id: unknown) =>
@@ -115,15 +132,14 @@ test.afterEach(async () => {
 
 test.describe('Importing a PDF', () => {
   test('imports it in place from the command, leaving its bytes alone, into the queue', async () => {
-    // Asked for a copy by the setting; a PDF can't be copied yet
-    await setPluginSetting(window, 'copyOnImport', true);
+    await setPluginSetting(window, 'copyOnImport', false);
     const before = await sha256(PDF_PATH);
     const filesBefore = await vaultFiles(window);
     await openFileInActiveLeaf(window, PDF_PATH);
 
     await executeCommandById(window, 'incremental-reading:import-article');
     await expect(window.locator('.ir-scheduling-modal')).toBeVisible();
-    await expect(copyToggle(window)).toHaveCount(0);
+    await expect(copyToggle(window).locator('input')).not.toBeChecked();
     await finalizeArticleImport(window);
 
     await expect
@@ -144,7 +160,7 @@ test.describe('Importing a PDF', () => {
     expect(await sha256(PDF_PATH)).toBe(before);
   });
 
-  test('offers every import but a copy from the file menu, and imports in place', async () => {
+  test('offers every import from the file menu, and imports in place', async () => {
     await setNativeMenus(window, false);
     await setPluginSetting(window, 'showAdvancedImportMenuItems', true);
     const before = await sha256(PDF_PATH);
@@ -156,15 +172,90 @@ test.describe('Importing a PDF', () => {
     await expect(
       menu.getByText('Import in place', { exact: true })
     ).toBeVisible();
-    await expect(menu.getByText('Import a copy', { exact: true })).toHaveCount(
-      0
-    );
+    await expect(
+      menu.getByText('Import a copy', { exact: true })
+    ).toBeVisible();
 
     await menu.getByText('Import in place', { exact: true }).click();
 
     await expect
       .poll(() => rowsAt(window, PDF_PATH))
       .toEqual([{ id: expect.any(String), reference: PDF_PATH, deleted: 0 }]);
+    expect(await sha256(PDF_PATH)).toBe(before);
+  });
+
+  test('imports a byte-identical copy from the dialog, and a second, distinctly named one when imported again', async () => {
+    await setPluginSetting(window, 'copyOnImport', true);
+    const before = await sha256(PDF_PATH);
+    await openFileInActiveLeaf(window, PDF_PATH);
+
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await expect(copyToggle(window).locator('input')).toBeChecked();
+    await finalizeArticleImport(window);
+
+    const firstCopy = `${ARTICLES}/PDF fixture.pdf`;
+    await expect.poll(() => allReferences(window)).toEqual([firstCopy]);
+    expect(await sha256(firstCopy)).toBe(before);
+
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+
+    await expect.poll(() => allReferences(window)).toHaveLength(2);
+    const references = await allReferences(window);
+    const secondCopy = references.find((ref) => ref !== firstCopy);
+    expect(references).toContain(firstCopy);
+    expect(secondCopy?.startsWith(`${ARTICLES}/PDF fixture - `)).toBe(true);
+    expect(secondCopy).toMatch(/\/PDF fixture - [a-z0-9]{0,5}\.pdf$/);
+    expect(await sha256(secondCopy!)).toBe(before);
+    // The original is no article, and is as it was
+    expect(await rowsAt(window, PDF_PATH)).toEqual([]);
+    expect(await sha256(PDF_PATH)).toBe(before);
+
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(
+      window.locator('.ir-queue-row', { hasText: 'PDF fixture' })
+    ).toHaveCount(2);
+  });
+
+  test('imports a copy from the file menu and from the copy command', async () => {
+    await setNativeMenus(window, false);
+    await setPluginSetting(window, 'showAdvancedImportMenuItems', true);
+    const before = await sha256(PDF_PATH);
+
+    await window.getByText('sources', { exact: true }).click();
+    const fileRow = window.locator(`.nav-file-title[data-path="${PDF_PATH}"]`);
+    await fileRow.click({ button: 'right' });
+    await window
+      .locator('.menu')
+      .getByText('Import a copy', { exact: true })
+      .click();
+
+    const firstCopy = `${ARTICLES}/PDF fixture.pdf`;
+    await expect.poll(() => allReferences(window)).toEqual([firstCopy]);
+    expect(await sha256(firstCopy)).toBe(before);
+
+    await window.evaluate(() => {
+      const { app } = window as unknown as {
+        app: {
+          plugins: {
+            plugins: Record<
+              string,
+              { toggleAdvancedCommands(enable: boolean): void }
+            >;
+          };
+        };
+      };
+      app.plugins.plugins['incremental-reading'].toggleAdvancedCommands(true);
+    });
+    await openFileInActiveLeaf(window, PDF_PATH);
+    await executeCommandById(window, 'incremental-reading:import-article-copy');
+
+    await expect.poll(() => allReferences(window)).toHaveLength(2);
+    const secondCopy = (await allReferences(window)).find(
+      (ref) => ref !== firstCopy
+    );
+    expect(secondCopy?.startsWith(`${ARTICLES}/PDF fixture - `)).toBe(true);
+    expect(await sha256(secondCopy!)).toBe(before);
     expect(await sha256(PDF_PATH)).toBe(before);
   });
 

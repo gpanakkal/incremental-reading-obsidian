@@ -49,18 +49,25 @@ export class ObsidianHelpers {
     return 0;
   }
 
+  /**
+   * Make the folder `path` goes in, unless it is the vault root or exists
+   * already: a copy or a new file can't go in a folder that isn't there.
+   */
+  static async ensureParentFolder(app: App, path: string): Promise<void> {
+    const folderPrefixEnd = path.lastIndexOf('/');
+    if (folderPrefixEnd < 0) return;
+    const folderPath = path.slice(0, folderPrefixEnd);
+    if (!app.vault.getAbstractFileByPath(folderPath)) {
+      await app.vault.createFolder(folderPath);
+    }
+  }
+
   static async createFile(app: App, absolutePath: string): Promise<TFile> {
     if (app.vault.getAbstractFileByPath(absolutePath)) {
       throw new Error(`File already exists at ${absolutePath}`);
     }
 
-    const folderPrefixEnd = absolutePath.lastIndexOf('/');
-    if (folderPrefixEnd >= 0) {
-      const folderPath = absolutePath.slice(0, absolutePath.lastIndexOf('/'));
-      if (!app.vault.getAbstractFileByPath(folderPath)) {
-        await app.vault.createFolder(folderPath);
-      }
-    }
+    await this.ensureParentFolder(app, absolutePath);
     try {
       const file = await app.vault.create(absolutePath, '');
       return file;

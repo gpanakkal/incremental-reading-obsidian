@@ -97,10 +97,12 @@ export const IMPORTABLE_MIME_TYPES: ReadonlySet<string> = new Set([
 
 /**
  * Types that can be imported as a copy in the data folder, rather than only
- * where they are.
+ * where they are. Every importable type can be today; the set stays separate
+ * so a type that can only be imported in place needs no new checks.
  */
 export const COPY_IMPORTABLE_MIME_TYPES: ReadonlySet<string> = new Set([
   ...FRONTMATTER_MIME_TYPES,
+  'application/pdf',
 ]);
 
 function hasMimeTypeIn(

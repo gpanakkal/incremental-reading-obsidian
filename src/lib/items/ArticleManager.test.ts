@@ -192,6 +192,88 @@ function makePdfImportPlugin(
   };
 }
 
+/** A file at `path`, named as Obsidian names it. */
+function fileAt(path: string): TFile {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  const dot = name.lastIndexOf('.');
+  return {
+    path,
+    name,
+    basename: dot === -1 ? name : name.slice(0, dot),
+    extension: dot === -1 ? '' : name.slice(dot + 1),
+  } as TFile;
+}
+
+/**
+ * Like {@link makePdfImportPlugin}, over a vault holding `source`, a file at
+ * each of `paths` and each of `folders`, which copies and makes folders as
+ * Obsidian's does on a case-insensitive file system: a copy needs its folder
+ * to exist and its path to be free in any case, and a folder can't be made
+ * twice. Every way of changing a file is a spy, to show none is used on one.
+ */
+function makePdfCopyPlugin(
+  source: TFile,
+  {
+    paths = [],
+    folders = [],
+    copyOnImport = true,
+  }: {
+    paths?: readonly string[];
+    folders?: readonly string[];
+    copyOnImport?: boolean;
+  } = {}
+) {
+  const base = makePdfImportPlugin(source, copyOnImport);
+  const files = new Map<string, TFile>([
+    [source.path, source],
+    ...paths.map((path): [string, TFile] => [path, fileAt(path)]),
+  ]);
+  const folderPaths = new Set(folders);
+  const holdsInAnyCase = (path: string) =>
+    [...files.keys(), ...folderPaths].some(
+      (held) => held.toLowerCase() === path.toLowerCase()
+    );
+  const vault = {
+    ...base.app.vault,
+    getFileByPath: vi.fn((path: string) => files.get(path) ?? null),
+    getAbstractFileByPath: vi.fn((path: string) =>
+      files.has(path) || folderPaths.has(path) ? { path } : null
+    ),
+    getAbstractFileByPathInsensitive: vi.fn((path: string) =>
+      holdsInAnyCase(path) ? { path } : null
+    ),
+    createFolder: vi.fn(async (path: string) => {
+      if (files.has(path) || folderPaths.has(path)) {
+        throw new Error('Folder already exists.');
+      }
+      folderPaths.add(path);
+    }),
+    copy: vi.fn(async (file: TFile, path: string) => {
+      if (holdsInAnyCase(path)) throw new Error('EEXIST: file already exists');
+      if (!folderPaths.has(path.slice(0, path.lastIndexOf('/')))) {
+        throw new Error(`ENOENT: no such file or directory, copyfile`);
+      }
+      const copy = fileAt(path);
+      files.set(path, copy);
+      return copy;
+    }),
+    delete: vi.fn(),
+    modify: vi.fn(),
+    modifyBinary: vi.fn(),
+    process: vi.fn(),
+    rename: vi.fn(),
+    trash: vi.fn(),
+  };
+  const fileManager = {
+    ...base.app.fileManager,
+    renameFile: vi.fn(),
+    trashFile: vi.fn(async (file: TFile) => {
+      files.delete(file.path);
+    }),
+  };
+  return { ...base, app: { ...base.app, vault, fileManager }, files };
+}
+
 /** A snippet row shaped like one the backlink scan would return. */
 function makeAdoptedRow(index: number): SnippetRow {
   return {
@@ -2578,7 +2660,7 @@ describe('import', () => {
       Notice.reset();
     });
 
-    it('is imported where it is, by a row at its path, whatever copy was asked for', async () => {
+    it('is imported where it is, by a row at its path, when no copy is asked for', async () => {
       await fc.assert(
         fc.asyncProperty(
           fc.mixedCase(fc.constant('pdf')),
@@ -2590,9 +2672,9 @@ describe('import', () => {
             }),
             { nil: null }
           ),
-          fc.option(fc.boolean(), { nil: undefined }),
-          fc.boolean(),
-          async (extension, priority, fixedDays, makeCopy, copyOnImport) => {
+          // Turned down by the caller, or by the setting when it doesn't say
+          fc.constantFrom([false, false], [false, true], [undefined, false]),
+          async (extension, priority, fixedDays, [makeCopy, copyOnImport]) => {
             Notice.reset();
             const file = {
               ...PDF_FILE,
@@ -2840,6 +2922,431 @@ describe('import', () => {
         ),
         { numRuns: 10 }
       );
+    });
+
+    describe('as a copy', () => {
+      const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
+
+      beforeEach(() => {
+        // The copy is placed by the real helpers, rather than by the stand-ins
+        // the notes above use, so its path follows from its name.
+        vi.spyOn(Obsidian, 'getDirectory').mockRestore();
+        vi.spyOn(Obsidian, 'getTargetPath').mockRestore();
+      });
+
+      it('copies it into the articles folder under its own name, and the row references the copy', async () => {
+        await fc.assert(
+          fc.asyncProperty(
+            fc.mixedCase(fc.constant('pdf')),
+            fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+            fc.option(
+              fc.integer({
+                min: MINIMUM_FIXED_REVIEW_INTERVAL,
+                max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+              }),
+              { nil: null }
+            ),
+            // Asked for by the caller, or by the setting when it doesn't say
+            fc.constantFrom([true, false], [true, true], [undefined, true]),
+            fc.boolean(),
+            async (
+              extension,
+              priority,
+              fixedDays,
+              [makeCopy, copyOnImport],
+              folderExists
+            ) => {
+              Notice.reset();
+              const source = fileAt(`papers/Paper.${extension}`);
+              const { repo } = await makeSqlJsRepo();
+              const plugin = makePdfCopyPlugin(source, {
+                copyOnImport,
+                folders: folderExists ? [ARTICLES] : [],
+              });
+              const { vault } = plugin.app;
+              const { snippets } = plugin.reviewManager;
+              const createNote = vi.spyOn(Obsidian, 'createNote');
+              const updateFrontMatter = vi.spyOn(Obsidian, 'updateFrontMatter');
+              createNote.mockClear();
+              updateFrontMatter.mockClear();
+              const before = Date.now();
+
+              const result = await new ArticleManager(
+                plugin as never,
+                repo
+              ).import(source, priority, fixedDays, makeCopy);
+
+              const copyPath = `${ARTICLES}/Paper.${extension}`;
+              expect([...plugin.files.keys()]).toEqual([source.path, copyPath]);
+              expect(vault.copy.mock.calls).toEqual([[source, copyPath]]);
+              const rows = allRows(repo);
+              expect(rows).toHaveLength(1);
+              expect(rows[0]).toMatchObject({
+                reference: copyPath,
+                priority,
+                fixed_interval_days: fixedDays,
+                interval: TEXT_BASE_REVIEW_INTERVAL,
+                deleted: 0,
+                dismissed: 0,
+              });
+              expect(rows[0].due).toBeGreaterThanOrEqual(before);
+              expect(rows[0].due).toBeLessThanOrEqual(Date.now());
+              expect(result?.data.id).toBe(rows[0].id);
+              expect(result?.file).toBe(plugin.files.get(copyPath));
+              expect(Notice.messages).toEqual([
+                fixedDays === null
+                  ? `Imported "Paper" with priority ${IRScheduler.toDisplayPriority(priority)}`
+                  : `Imported "Paper" with fixed interval of ${fixedDays} days`,
+              ]);
+              // A PDF carries no frontmatter, so no link back to its original
+              expect(createNote).not.toHaveBeenCalled();
+              expect(updateFrontMatter).not.toHaveBeenCalled();
+              expect(
+                plugin.app.fileManager.processFrontMatter
+              ).not.toHaveBeenCalled();
+              expect(vault.cachedRead).not.toHaveBeenCalled();
+              expect(snippets.adoptOrphans).not.toHaveBeenCalled();
+              // The original stays as it was, where it was
+              for (const change of [
+                vault.modify,
+                vault.modifyBinary,
+                vault.process,
+                vault.rename,
+                vault.delete,
+                vault.trash,
+                plugin.app.fileManager.renameFile,
+                plugin.app.fileManager.trashFile,
+              ]) {
+                expect(change).not.toHaveBeenCalled();
+              }
+              expect(plugin.files.get(source.path)).toBe(source);
+            }
+          ),
+          { numRuns: 30 }
+        );
+      });
+
+      it('takes a name no file or article row in the articles folder holds, warning when it is not its own', async () => {
+        /** The suffix `generateId` makes of a `Math.random` value. */
+        const suffixOf = (value: number) => value.toString(36).slice(2, 7);
+        /**
+         * Who holds a name, if anyone: a file, which may spell it in another
+         * case; a row; or an article the startup scan rebound away from the
+         * path, which a file turning up there would take back.
+         */
+        const holderArb = fc.constantFrom(
+          null,
+          'file',
+          'file in another case',
+          'live row',
+          'deleted row',
+          'rebind'
+        );
+        /** The path of the file holding `path` for `holder`. */
+        const filePathFor = (path: string, holder: string) =>
+          holder === 'file'
+            ? path
+            : `${ARTICLES}/${path.slice(ARTICLES.length + 1).toUpperCase()}`;
+        await fc.assert(
+          fc.asyncProperty(
+            holderArb,
+            // The values `generateId` draws on, and who holds the name each
+            // one makes; the last is free, so a name is always found.
+            fc.array(
+              fc.tuple(
+                fc.double({ min: 0, max: 1, maxExcluded: true, noNaN: true }),
+                holderArb
+              ),
+              { maxLength: 4 }
+            ),
+            fc.double({ min: 0, max: 1, maxExcluded: true, noNaN: true }),
+            async (ownHolder, drawn, lastValue) => {
+              Notice.reset();
+              const pathFor = (name: string) => `${ARTICLES}/${name}`;
+              const held = new Map<string, string>();
+              const hold = (name: string, holder: string | null) => {
+                if (holder !== null && !held.has(pathFor(name))) {
+                  held.set(pathFor(name), holder);
+                }
+              };
+              hold('Paper.pdf', ownHolder);
+              for (const [value, holder] of drawn) {
+                hold(`Paper - ${suffixOf(value)}.pdf`, holder);
+              }
+              const free = (path: string) => !held.has(path);
+              // The last value makes a free name, unless it is held already
+              const lastName = `Paper - ${suffixOf(lastValue)}.pdf`;
+              fc.pre(free(pathFor(lastName)));
+              const values = [...drawn.map(([value]) => value), lastValue];
+
+              const { repo, db } = await makeSqlJsRepo();
+              let rowIndex = 0;
+              for (const [path, holder] of held) {
+                if (holder.startsWith('file')) continue;
+                const id = `row-${rowIndex++}`;
+                // A rebound article now names the file it was rebound to
+                const reference =
+                  holder === 'rebind' ? `papers/${id}.pdf` : path;
+                db.exec(
+                  `INSERT INTO article (id, reference, due, interval, priority, deleted)
+                   VALUES ($1, $2, 0, 1, 10, $3)`,
+                  [id, reference, holder === 'deleted row' ? 1 : 0]
+                );
+                if (holder === 'rebind') {
+                  db.exec(
+                    `INSERT INTO rebind (article_id, old_reference, new_reference, rebound_at)
+                     VALUES ($1, $2, $3, $4)`,
+                    [id, path, reference, Date.now()]
+                  );
+                }
+              }
+              const rowsBefore = allRows(repo);
+              const plugin = makePdfCopyPlugin(fileAt('papers/Paper.pdf'), {
+                folders: [ARTICLES],
+                paths: [...held]
+                  .filter(([, holder]) => holder.startsWith('file'))
+                  .map(([path, holder]) => filePathFor(path, holder)),
+              });
+              const notify = vi.spyOn(Obsidian, 'notify');
+              notify.mockClear();
+              // Mocked only now: sql.js names each database it opens by it
+              const random = vi.spyOn(Math, 'random');
+              random.mockReset();
+              for (const value of values) random.mockReturnValueOnce(value);
+
+              const result = await new ArticleManager(
+                plugin as never,
+                repo
+              ).import(plugin.files.get('papers/Paper.pdf')!, 10, null, true);
+              random.mockRestore();
+
+              const expectedName = [
+                'Paper.pdf',
+                ...values.map((value) => `Paper - ${suffixOf(value)}.pdf`),
+              ].find((name) => free(pathFor(name)))!;
+              const copyPath = pathFor(expectedName);
+              expect(plugin.app.vault.copy.mock.calls).toEqual([
+                [plugin.files.get('papers/Paper.pdf'), copyPath],
+              ]);
+              expect(result?.file.path).toBe(copyPath);
+              // The rows that held names are as they were; one more is added
+              const rows = allRows(repo);
+              expect(rows.filter((row) => row.id !== result?.data.id)).toEqual(
+                rowsBefore
+              );
+              expect(rows).toHaveLength(rowsBefore.length + 1);
+              const warning = `Warning: article with name already exists "Paper.pdf"`;
+              // Named by the copy, trimmed as every title is
+              const title = expectedName.slice(0, -'.pdf'.length).trim();
+              const imported = `Imported "${title}" with priority ${IRScheduler.toDisplayPriority(10)}`;
+              expect(Notice.messages).toEqual(
+                ownHolder === null ? [imported] : [warning, imported]
+              );
+              // The warning stays up until dismissed
+              if (ownHolder !== null) {
+                expect(notify).toHaveBeenCalledWith(warning, true);
+              }
+            }
+          ),
+          { numRuns: 60 }
+        );
+      });
+
+      it('makes a second, distinctly named copy when imported twice', async () => {
+        const source = fileAt('papers/Paper.pdf');
+        const { repo } = await makeSqlJsRepo();
+        const plugin = makePdfCopyPlugin(source);
+        const manager = new ArticleManager(plugin as never, repo);
+
+        const first = await manager.import(source, 10, null, true);
+        const second = await manager.import(source, 10, null, true);
+
+        const copies = [...plugin.files.keys()].filter((path) =>
+          path.startsWith(`${ARTICLES}/`)
+        );
+        expect(copies).toHaveLength(2);
+        expect(copies[0]).toBe(`${ARTICLES}/Paper.pdf`);
+        expect(copies[1].startsWith(`${ARTICLES}/Paper - `)).toBe(true);
+        expect(copies[1]).toMatch(/\/Paper - [a-z0-9]{0,5}\.pdf$/);
+        expect(
+          allRows(repo)
+            .map((row) => row.reference)
+            .sort()
+        ).toEqual([...copies].sort());
+        expect([first?.file.path, second?.file.path]).toEqual(copies);
+        expect(plugin.files.has(source.path)).toBe(true);
+      });
+
+      // Every case, as there are only six
+      it.each(
+        ['md', 'pdf'].flatMap((extension) =>
+          ['', `${ARTICLE_DIRECTORY}/`, 'nested/folder/'].map((folder) => [
+            extension,
+            folder,
+          ])
+        )
+      )(
+        'refuses a .%s file already in the data folder (under "%s"), copying nothing',
+        async (extension, folder) => {
+          Notice.reset();
+          const source = fileAt(
+            `${DATA_DIRECTORY}/${folder}Paper.${extension}`
+          );
+          const { repo } = await makeSqlJsRepo();
+          const plugin = makePdfCopyPlugin(source);
+          const bytes = extension === 'pdf' ? PDF_BYTES : NOTE_BYTES;
+          plugin.app.vault.readBinary.mockResolvedValue(bytes.slice().buffer);
+          const createNote = vi.spyOn(Obsidian, 'createNote');
+          createNote.mockClear();
+
+          const result = await new ArticleManager(plugin as never, repo).import(
+            source,
+            10,
+            null,
+            true
+          );
+
+          expect(result).toBeNull();
+          expect(Notice.messages).toEqual([
+            `"${source.name}" is already in the plugin data folder; canceling import`,
+          ]);
+          expect(plugin.app.vault.copy).not.toHaveBeenCalled();
+          expect(createNote).not.toHaveBeenCalled();
+          expect(allRows(repo)).toEqual([]);
+        }
+      );
+
+      it('gives files of the same name imported at once distinct copies', async () => {
+        await fc.assert(
+          fc.asyncProperty(fc.integer({ min: 2, max: 4 }), async (count) => {
+            Notice.reset();
+            const sources = Array.from({ length: count }, (_, i) =>
+              fileAt(`folder-${i}/Paper.pdf`)
+            );
+            const { repo } = await makeSqlJsRepo();
+            const plugin = makePdfCopyPlugin(sources[0], {
+              paths: sources.slice(1).map((source) => source.path),
+            });
+            const manager = new ArticleManager(plugin as never, repo);
+
+            const results = await Promise.all(
+              sources.map((source) =>
+                manager.import(
+                  plugin.files.get(source.path)!,
+                  DEFAULT_PRIORITY,
+                  null,
+                  true
+                )
+              )
+            );
+
+            const copyPaths = results.map((result) => result?.file.path);
+            expect(new Set(copyPaths).size).toBe(count);
+            expect(
+              allRows(repo)
+                .map((row) => row.reference)
+                .sort()
+            ).toEqual([...copyPaths].sort());
+            expect(
+              [...plugin.files.keys()].filter((path) =>
+                path.startsWith(`${ARTICLES}/`)
+              )
+            ).toHaveLength(count);
+          }),
+          { numRuns: 10 }
+        );
+      });
+
+      it('names a long copy by the start of its name in the notice', async () => {
+        Notice.reset();
+        const basename = 'P'.repeat(CONTENT_TITLE_SLICE_LENGTH + 10);
+        const source = fileAt(`papers/${basename}.pdf`);
+        const { repo } = await makeSqlJsRepo();
+
+        await new ArticleManager(
+          makePdfCopyPlugin(source) as never,
+          repo
+        ).import(source, DEFAULT_PRIORITY, null, true);
+
+        expect(Notice.messages).toEqual([
+          `Imported "${'P'.repeat(CONTENT_TITLE_SLICE_LENGTH - 3)}..." with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`,
+        ]);
+      });
+
+      it('takes the copy back out when its row cannot be added', async () => {
+        Notice.reset();
+        vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        const source = fileAt('papers/Paper.pdf');
+        const { repo } = await makeSqlJsRepo();
+        const plugin = makePdfCopyPlugin(source);
+        vi.spyOn(repo, 'mutate').mockRejectedValueOnce(
+          new Error('SQLITE_FULL')
+        );
+        const manager = new ArticleManager(plugin as never, repo);
+
+        const result = await manager.import(source, 10, null, true);
+
+        expect(result).toBeNull();
+        expect([...plugin.files.keys()]).toEqual([source.path]);
+        expect(allRows(repo)).toEqual([]);
+        expect(Notice.messages).toEqual([
+          `Failed to import article "Paper.pdf"`,
+        ]);
+
+        // Its name is free again for the next import
+        Notice.reset();
+        const retry = await manager.import(source, 10, null, true);
+        expect(retry?.file.path).toBe(`${ARTICLES}/Paper.pdf`);
+      });
+
+      it('fails with the error that stopped it, when the copy cannot be taken back out either', async () => {
+        Notice.reset();
+        const logged = vi
+          .spyOn(console, 'error')
+          .mockImplementation(() => undefined);
+        const source = fileAt('papers/Paper.pdf');
+        const { repo } = await makeSqlJsRepo();
+        const plugin = makePdfCopyPlugin(source);
+        const insertError = new Error('SQLITE_FULL');
+        const trashError = new Error('EBUSY');
+        vi.spyOn(repo, 'mutate').mockRejectedValueOnce(insertError);
+        plugin.app.fileManager.trashFile.mockRejectedValueOnce(trashError);
+
+        const result = await new ArticleManager(plugin as never, repo).import(
+          source,
+          10,
+          null,
+          true
+        );
+
+        expect(result).toBeNull();
+        expect(logged.mock.calls).toEqual([[trashError], [insertError]]);
+        expect(Notice.messages).toEqual([
+          `Failed to import article "Paper.pdf"`,
+        ]);
+      });
+
+      it('adds no row when the copy fails', async () => {
+        Notice.reset();
+        vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        const source = fileAt('papers/Paper.pdf');
+        const { repo } = await makeSqlJsRepo();
+        const plugin = makePdfCopyPlugin(source);
+        plugin.app.vault.copy.mockRejectedValue(new Error('ENOSPC'));
+
+        const result = await new ArticleManager(plugin as never, repo).import(
+          source,
+          10,
+          null,
+          true
+        );
+
+        expect(result).toBeNull();
+        expect(allRows(repo)).toEqual([]);
+        expect(Notice.messages).toEqual([
+          `Failed to import article "Paper.pdf"`,
+        ]);
+      });
     });
   });
 

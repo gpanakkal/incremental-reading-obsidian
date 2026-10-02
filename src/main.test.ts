@@ -675,7 +675,7 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
     );
   });
 
-  it('offers every import of a PDF but a copy', () => {
+  it('offers every import of a PDF that it offers of a note, a copy included', () => {
     fc.assert(
       fc.property(
         fc.mixedCase(fc.constant('pdf')),
@@ -683,7 +683,7 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
         fc.boolean(),
         (extension, advanced, withLeaf) => {
           const file = fileWithExtension(extension);
-          const { receiver } = makeReceiver({ advanced, file });
+          const { receiver, importArticle } = makeReceiver({ advanced, file });
 
           const menu = raiseMenu(
             receiver,
@@ -692,15 +692,14 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
           );
 
           expect(titles(menu)).toEqual(
-            advanced
-              ? [
-                  'Import article',
-                  'Import in place',
-                  'Open import dialog...',
-                  'Quick import',
-                ]
-              : ['Import article']
+            advanced ? IMPORT_MENU_TITLES : ['Import article']
           );
+          if (!advanced) return;
+          click(menu.items.find((i) => i.title === 'Import a copy'));
+          expect(importArticle).toHaveBeenCalledExactlyOnceWith(file, {
+            copyOnImport: true,
+            showImportDialog: false,
+          });
         }
       )
     );
@@ -774,7 +773,7 @@ describe('IncrementalReadingPlugin import commands', () => {
     );
   });
 
-  it('offers every import of a PDF but a copy, each with its own options', () => {
+  it('offers every import of a PDF, a copy included, each with its own options', () => {
     fc.assert(
       fc.property(
         importCommandIds,
@@ -783,19 +782,15 @@ describe('IncrementalReadingPlugin import commands', () => {
           const { file, importArticle, run } = makeImportCommandReceiver({
             extension,
           });
-          const offered = id !== 'import-article-copy';
 
-          expect(run(id, true)).toBe(offered);
+          expect(run(id, true)).toBe(true);
+          expect(importArticle).not.toHaveBeenCalled();
           run(id);
 
-          if (offered) {
-            expect(importArticle).toHaveBeenCalledExactlyOnceWith(
-              file,
-              IMPORT_COMMANDS[id].opts
-            );
-          } else {
-            expect(importArticle).not.toHaveBeenCalled();
-          }
+          expect(importArticle).toHaveBeenCalledExactlyOnceWith(
+            file,
+            IMPORT_COMMANDS[id].opts
+          );
         }
       )
     );

@@ -1214,6 +1214,66 @@ describe('generateMarkdownLink', () => {
 });
 
 // ---------------------------------------------------------------------------
+// ensureParentFolder
+// ---------------------------------------------------------------------------
+describe('ensureParentFolder', () => {
+  /** A vault path: segments of any text but a slash, joined by slashes. */
+  const segmentArb = fc
+    .string({ minLength: 1 })
+    .filter((s) => !s.includes('/'));
+
+  it('makes the folder a path goes in when nothing is there, and only then', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(segmentArb, { minLength: 1, maxLength: 4 }),
+        segmentArb,
+        fc.boolean(),
+        async (folders, name, exists) => {
+          const folderPath = folders.join('/');
+          const createFolder = vi.fn().mockResolvedValue(undefined);
+          const getAbstractFileByPath = vi.fn((path: string) =>
+            exists && path === folderPath ? { path } : null
+          );
+          const app = makeApp({
+            vault: {
+              getAbstractFileByPath,
+              createFolder,
+            } as unknown as App['vault'],
+          });
+
+          await ObsidianHelpers.ensureParentFolder(
+            app,
+            `${folderPath}/${name}`
+          );
+
+          expect(createFolder.mock.calls).toEqual(exists ? [] : [[folderPath]]);
+        }
+      )
+    );
+  });
+
+  it('makes no folder for a path at the vault root', async () => {
+    await fc.assert(
+      fc.asyncProperty(segmentArb, async (name) => {
+        const createFolder = vi.fn();
+        const getAbstractFileByPath = vi.fn(() => null);
+        const app = makeApp({
+          vault: {
+            getAbstractFileByPath,
+            createFolder,
+          } as unknown as App['vault'],
+        });
+
+        await ObsidianHelpers.ensureParentFolder(app, name);
+
+        expect(createFolder).not.toHaveBeenCalled();
+        expect(getAbstractFileByPath).not.toHaveBeenCalled();
+      })
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // createFile
 // ---------------------------------------------------------------------------
 describe('createFile', () => {

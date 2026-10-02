@@ -125,7 +125,7 @@ describe('ImportModal', () => {
     );
   });
 
-  it('offers no copy of a PDF, and imports it in place', () => {
+  it('offers a copy of a PDF as of a note, starting from the setting or the caller', () => {
     fc.assert(
       fc.property(
         fc.mixedCase(fc.constant('pdf')),
@@ -137,9 +137,8 @@ describe('ImportModal', () => {
           const modal = new ImportModal(plugin, file, defaultCopy);
           modal.onOpen();
           try {
-            expect(copyToggle(modal)).toBeNull();
-            expect(modal.contentEl.textContent).not.toContain(
-              'Import in place'
+            expect(copyToggle(modal)?.checked).toBe(
+              defaultCopy ?? copyOnImport
             );
 
             confirm(modal);
@@ -148,7 +147,7 @@ describe('ImportModal', () => {
               file,
               plugin.settings.defaultPriority,
               null,
-              false
+              defaultCopy ?? copyOnImport
             );
           } finally {
             modal.onClose();
