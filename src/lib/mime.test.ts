@@ -175,23 +175,24 @@ describe('capabilities', () => {
     ['isCopyImportable', isCopyImportable, COPY_IMPORTABLE_MIME_TYPES],
   ] as const;
 
+  /** The capabilities a PDF can import by: as an article, and as a copy. */
+  const IMPORTS = new Set(['isImportable', 'isCopyImportable']);
+
   /** The capabilities only a note has: a PDF has none of them yet. */
-  const NOTE_ONLY = CAPABILITIES.filter(([name]) => name !== 'isImportable');
+  const NOTE_ONLY = CAPABILITIES.filter(([name]) => !IMPORTS.has(name));
 
   it.each(NOTE_ONLY)(
     '%s holds only markdown, the one type Obsidian parses frontmatter of',
     (_name, _has, types) => {
-      // Copying a PDF on import lands with task 0010, which adds it to the
-      // copy set.
       expect([...types]).toEqual(['text/markdown']);
     }
   );
 
-  it('imports a note or a PDF, and nothing else', () => {
-    expect([...IMPORTABLE_MIME_TYPES]).toEqual([
-      'text/markdown',
-      'application/pdf',
-    ]);
+  it.each([
+    ['IMPORTABLE_MIME_TYPES', IMPORTABLE_MIME_TYPES],
+    ['COPY_IMPORTABLE_MIME_TYPES', COPY_IMPORTABLE_MIME_TYPES],
+  ])('%s holds a note and a PDF, and nothing else', (_name, types) => {
+    expect([...types]).toEqual(['text/markdown', 'application/pdf']);
   });
 
   it.each(CAPABILITIES)(
@@ -213,8 +214,8 @@ describe('capabilities', () => {
     expect(has(makeFile('pdf'))).toBe(false);
   });
 
-  it('can import a PDF in place but not as a copy', () => {
+  it('can import a PDF in place and as a copy', () => {
     expect(isImportable(makeFile('pdf'))).toBe(true);
-    expect(isCopyImportable(makeFile('pdf'))).toBe(false);
+    expect(isCopyImportable(makeFile('pdf'))).toBe(true);
   });
 });

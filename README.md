@@ -116,7 +116,7 @@ This is especially handy for:
 ## Known limitations and issues
 
 - Creating snippets and cards on partial code blocks, blockquotes, LaTeX, and other types of special formatting can break the formatting. It is recommended to include the entire formatted section (such as the entire code block) when making the snippet or card, and then editing it afterwards as desired.
-- Snippets and cards can only be made from Markdown notes. You can import a PDF in your vault as an article, though only in place, and review shows a button that opens it in a PDF tab instead of the PDF itself. Web page support is planned; in the meantime, check out these [third-party tools](#third-party-tools) to convert web pages and PDFs into Markdown.
+- Snippets and cards can only be made from Markdown notes. You can import a PDF in your vault as an article, and review shows a button that opens it in a PDF tab instead of the PDF itself. In the meantime, check out these [third-party tools](#third-party-tools) to convert web pages and PDFs into Markdown.
 
 ## Third-party tools
 
@@ -175,7 +175,7 @@ To avoid side effects, this plugin does not modify files outside its data folder
 
 Plugin data (items and the SQLite database) is stored in the `incremental-reading/` folder.
 
-Importing a note as an article makes a copy inside the plugin data folder. Feel free to delete the original note if it's no longer needed.
+Articles are imported where they are unless you turn on **Make a copy** in the import dialog (or the **Copy articles when importing** setting), which puts a copy in the plugin data folder. You can delete the original after that if you no longer need it. A copied note links back to its original in its `source` property. A copied PDF keeps no link to its original, since a PDF has no properties to hold one.
 
 When you make a snippet or card, a new note is created in the plugin data folder to hold its content.
 

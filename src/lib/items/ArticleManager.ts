@@ -64,6 +64,11 @@ function describeSchedule(
 export class ArticleManager extends ItemManager {
   /** The paths of the files being imported right now. */
   private readonly importing = new Set<string>();
+  /**
+   * The paths, lowercased, that copies being imported right now are claimed
+   * to land at.
+   */
+  private readonly copyTargets = new Set<string>();
 
   static rowToBase(articleRow: ArticleRow): IArticleBase {
     return {
@@ -344,7 +349,100 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * Copy a note to the data directory, then import the copy
+   * A name in the articles folder for a copy of `file`: its own when
+   * `isFree` says so, otherwise its basename with a random suffix until
+   * `isFree` accepts one, warning that it couldn't keep its own.
+   */
+  private async nameForCopy(
+    file: TFile,
+    isFree: (name: string) => boolean | Promise<boolean>
+  ): Promise<string> {
+    let name = file.name;
+    if (await isFree(name)) return name;
+
+    Obsidian.notify(
+      `Warning: article with name already exists "${file.name}"`,
+      true
+    );
+    do {
+      name = `${file.basename} - ${generateId()}.${file.extension}`;
+    } while (!(await isFree(name)));
+    return name;
+  }
+
+  /**
+   * Claim the articles-folder path for a copy named `name`, unless a file
+   * there has the name in any case (a case-insensitive file system can't hold
+   * both), an article row holds the path, a rebind record names it as an
+   * article's old path, or another copy has claimed it. A row holds its path
+   * even once deleted, and the path is unique; and a copy landing on a deleted
+   * row's path, or on a rebound article's old one, would bring that article
+   * back to it (see `ReviewManager.handleCreation`).
+   * @returns whether the path is now this caller's, to release once done
+   */
+  private async claimCopyTarget(name: string): Promise<boolean> {
+    const path = Obsidian.getTargetPath(name, 'article');
+    // Undocumented: Vault.getAbstractFileByPathInsensitive, which Obsidian's
+    // own getAvailablePath uses for the same reason.
+    if (this.app.vault.getAbstractFileByPathInsensitive(path)) return false;
+    // Any rebind record, reclaimable or not: a stale one costs only a suffix
+    const rows = await this.repo.query(
+      `SELECT 1 FROM article WHERE reference = $1
+       UNION ALL SELECT 1 FROM rebind WHERE old_reference = $1`,
+      [path]
+    );
+    // Checked and claimed with no await between, so two imports can't both
+    // pass the checks above and take the same path.
+    const key = path.toLowerCase();
+    if (rows.length > 0 || this.copyTargets.has(key)) return false;
+    this.copyTargets.add(key);
+    return true;
+  }
+
+  /**
+   * Copy a file with no frontmatter, a PDF say, byte for byte into the
+   * articles folder, and import the copy where it lands. Nothing is written
+   * to either file, so the copy keeps no link to its original.
+   */
+  private async importBinaryCopy(
+    file: TFile,
+    priority: number,
+    fixedIntervalDays: number | null
+  ) {
+    const copyPath = Obsidian.getTargetPath(
+      await this.nameForCopy(file, (name) => this.claimCopyTarget(name)),
+      'article'
+    );
+    try {
+      await Obsidian.ensureParentFolder(this.app, copyPath);
+      const copy = await this.app.vault.copy(file, copyPath);
+
+      const id = crypto.randomUUID();
+      try {
+        await this.insertImported(id, copy.path, priority, fixedIntervalDays);
+      } catch (error) {
+        // Left behind, a copy no row refers to would only hold its name
+        // against the next import. Failing to remove it is logged, so the
+        // error the import fails with is still the one that stopped it.
+        await this.app.fileManager.trashFile(copy).catch(console.error);
+        throw error;
+      }
+
+      const titleSlice = getContentSlice(
+        copy.basename,
+        CONTENT_TITLE_SLICE_LENGTH,
+        true
+      );
+      const schedulingString = describeSchedule(priority, fixedIntervalDays);
+      Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
+      return await this.fetch(id);
+    } finally {
+      this.copyTargets.delete(copyPath.toLowerCase());
+    }
+  }
+
+  /**
+   * Copy a file to the data directory, then import the copy
    */
   private async importCopy(
     file: TFile,
@@ -354,10 +452,14 @@ export class ArticleManager extends ItemManager {
     // check if the file is inside the plugin's data directory
     if (file.path.startsWith(DATA_DIRECTORY)) {
       Obsidian.notify(
-        `Note is already in the plugin data folder; canceling import`
+        `"${file.name}" is already in the plugin data folder; canceling import`
       );
       return null;
     }
+    if (!supportsFrontmatter(file)) {
+      return this.importBinaryCopy(file, priority, fixedIntervalDays);
+    }
+
     // Read the content of the current file
     const content = await this.app.vault.cachedRead(file);
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
@@ -394,18 +496,10 @@ export class ArticleManager extends ItemManager {
       );
     }
 
-    // check if an article with this name already exists
-    if (Obsidian.isDuplicate(file.name, 'article', this.app)) {
-      Obsidian.notify(
-        `Warning: article with name already exists "${file.name}"`,
-        true
-      );
-    }
-
-    let importFileName = file.name;
-    while (Obsidian.isDuplicate(importFileName, 'article', this.app)) {
-      importFileName = `${file.basename} - ${generateId()}.${file.extension}`;
-    }
+    const importFileName = await this.nameForCopy(
+      file,
+      (name) => !Obsidian.isDuplicate(name, 'article', this.app)
+    );
 
     // Create a copy in the articles directory
     const articleFile = await Obsidian.createNote({
