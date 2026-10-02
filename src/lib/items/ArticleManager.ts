@@ -400,6 +400,27 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
+   * Claim a name in the articles folder for a copy of `file` (see
+   * `nameForCopy` and `claimCopyTarget`), and hold it while `work` makes the
+   * copy under it, releasing it once `work` settles either way.
+   */
+  private async withCopyTarget<T>(
+    file: TFile,
+    work: (name: string) => Promise<T>
+  ): Promise<T> {
+    const name = await this.nameForCopy(file, (candidate) =>
+      this.claimCopyTarget(candidate)
+    );
+    try {
+      return await work(name);
+    } finally {
+      this.copyTargets.delete(
+        Obsidian.getTargetPath(name, 'article').toLowerCase()
+      );
+    }
+  }
+
+  /**
    * Copy a file with no frontmatter, a PDF say, byte for byte into the
    * articles folder, and import the copy where it lands. Nothing is written
    * to either file, so the copy keeps no link to its original.
@@ -409,11 +430,8 @@ export class ArticleManager extends ItemManager {
     priority: number,
     fixedIntervalDays: number | null
   ) {
-    const copyPath = Obsidian.getTargetPath(
-      await this.nameForCopy(file, (name) => this.claimCopyTarget(name)),
-      'article'
-    );
-    try {
+    return this.withCopyTarget(file, async (name) => {
+      const copyPath = Obsidian.getTargetPath(name, 'article');
       await Obsidian.ensureParentFolder(this.app, copyPath);
       const copy = await this.app.vault.copy(file, copyPath);
 
@@ -435,10 +453,8 @@ export class ArticleManager extends ItemManager {
       );
       const schedulingString = describeSchedule(priority, fixedIntervalDays);
       Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
-      return await this.fetch(id);
-    } finally {
-      this.copyTargets.delete(copyPath.toLowerCase());
-    }
+      return this.fetch(id);
+    });
   }
 
   /**
@@ -496,77 +512,78 @@ export class ArticleManager extends ItemManager {
       );
     }
 
-    const importFileName = await this.nameForCopy(
-      file,
-      (name) => !Obsidian.isDuplicate(name, 'article', this.app)
-    );
+    return this.withCopyTarget(file, async (importFileName) => {
+      // Create a copy in the articles directory
+      const articleFile = await Obsidian.createNote({
+        content,
+        frontmatter: {
+          created: new Date().toISOString(),
+        },
+        fileName: importFileName,
+        directory: Obsidian.getDirectory('article'),
+        app: this.app,
+      });
 
-    // Create a copy in the articles directory
-    const articleFile = await Obsidian.createNote({
-      content,
-      frontmatter: {
-        created: new Date().toISOString(),
-      },
-      fileName: importFileName,
-      directory: Obsidian.getDirectory('article'),
-      app: this.app,
-    });
+      if (!articleFile) {
+        throw new Error(
+          `Failed to create note ${Obsidian.getTargetPath(importFileName, 'article')}`
+        );
+      }
 
-    if (!articleFile) {
-      throw new Error(
-        `Failed to create note ${Obsidian.getTargetPath(importFileName, 'article')}`
-      );
-    }
+      const id = crypto.randomUUID();
 
-    const id = crypto.randomUUID();
-
-    // Tag it and create a link to the source if it doesn't exist
-    const frontmatterUpdates: FrontMatterUpdates = {
-      'ir-id': id,
-      tags: ARTICLE_TAG,
-    };
-    if (!frontmatter?.source) {
-      const sourceLink = Obsidian.generateMarkdownLink(
-        file,
+      // Tag it and create a link to the source if it doesn't exist
+      const frontmatterUpdates: FrontMatterUpdates = {
+        'ir-id': id,
+        tags: ARTICLE_TAG,
+      };
+      if (!frontmatter?.source) {
+        const sourceLink = Obsidian.generateMarkdownLink(
+          file,
+          articleFile,
+          this.app
+        );
+        frontmatterUpdates[`${SOURCE_PROPERTY_NAME}`] = sourceLink;
+      }
+      await Obsidian.updateFrontMatter(
         articleFile,
+        frontmatterUpdates,
         this.app
       );
-      frontmatterUpdates[`${SOURCE_PROPERTY_NAME}`] = sourceLink;
-    }
-    await Obsidian.updateFrontMatter(articleFile, frontmatterUpdates, this.app);
 
-    await this.insertImported(
-      id,
-      articleFile.path,
-      priority,
-      fixedIntervalDays
-    );
+      await this.insertImported(
+        id,
+        articleFile.path,
+        priority,
+        fixedIntervalDays
+      );
 
-    const adopted = await this.claimSnippets(file, id, articleFile);
+      const adopted = await this.claimSnippets(file, id, articleFile);
 
-    const titleSlice = getContentSlice(
-      articleFile.basename,
-      CONTENT_TITLE_SLICE_LENGTH,
-      true
-    );
+      const titleSlice = getContentSlice(
+        articleFile.basename,
+        CONTENT_TITLE_SLICE_LENGTH,
+        true
+      );
 
-    let snippetMigratedNotice = '';
-    if (adopted.length > 0) {
-      const snippetMigrationCount =
-        adopted.length === 1
-          ? '1 snippet now refers'
-          : `${adopted.length} snippets now refer`;
+      let snippetMigratedNotice = '';
+      if (adopted.length > 0) {
+        const snippetMigrationCount =
+          adopted.length === 1
+            ? '1 snippet now refers'
+            : `${adopted.length} snippets now refer`;
 
-      snippetMigratedNotice = `; ${snippetMigrationCount} to the copy`;
-    }
+        snippetMigratedNotice = `; ${snippetMigrationCount} to the copy`;
+      }
 
-    const schedulingString = describeSchedule(priority, fixedIntervalDays);
+      const schedulingString = describeSchedule(priority, fixedIntervalDays);
 
-    Obsidian.notify(
-      `Imported "${titleSlice}" with ${schedulingString}` +
-        snippetMigratedNotice
-    );
-    return this.fetch(id);
+      Obsidian.notify(
+        `Imported "${titleSlice}" with ${schedulingString}` +
+          snippetMigratedNotice
+      );
+      return this.fetch(id);
+    });
   }
 
   /**

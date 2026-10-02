@@ -13,6 +13,7 @@ import {
   MS_PER_DAY,
   MS_PER_YEAR,
   SNIPPET_TAG,
+  SOURCE_PROPERTY_NAME,
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
@@ -113,6 +114,7 @@ const PDF_BYTES = new TextEncoder().encode('%PDF-1.7\n%\n1 0 obj');
 function makeImportVault(bytes: Uint8Array = NOTE_BYTES) {
   return {
     cachedRead: vi.fn().mockResolvedValue('# Content'),
+    getAbstractFileByPathInsensitive: vi.fn(() => null),
     readBinary: vi.fn().mockResolvedValue(bytes.slice().buffer),
     getResourcePath: vi.fn((file: TFile) => `app://vault/${file.path}`),
   };
@@ -275,6 +277,35 @@ function makePdfCopyPlugin(
   return { ...base, app: { ...base.app, vault, fileManager }, files };
 }
 
+/**
+ * Like {@link makePdfCopyPlugin}, but `source` and every file are notes, and
+ * the vault creates a note as Obsidian's does on a case-insensitive file
+ * system: it needs its folder to exist and its path to be free in any case.
+ */
+function makeNoteCopyPlugin(
+  source: TFile,
+  options: Parameters<typeof makePdfCopyPlugin>[1] = {}
+) {
+  const plugin = makePdfCopyPlugin(source, options);
+  const { vault } = plugin.app;
+  vault.readBinary.mockResolvedValue(NOTE_BYTES.slice().buffer);
+  const create = vi.fn(async (path: string, _data: string) => {
+    if (vault.getAbstractFileByPathInsensitive(path)) {
+      throw new Error('EEXIST: file already exists');
+    }
+    if (!vault.getAbstractFileByPath(path.slice(0, path.lastIndexOf('/')))) {
+      throw new Error('ENOENT: no such file or directory, open');
+    }
+    const note = fileAt(path);
+    plugin.files.set(path, note);
+    return note;
+  });
+  return {
+    ...plugin,
+    app: { ...plugin.app, vault: { ...vault, create, append: vi.fn() } },
+  };
+}
+
 /** A snippet row shaped like one the backlink scan would return. */
 function makeAdoptedRow(index: number): SnippetRow {
   return {
@@ -301,6 +332,11 @@ function insertedArticleId(repo: SQLiteRepository): string {
   ][];
   const insert = calls.find(([sql]) => sql.includes('INSERT INTO article'));
   return insert![1][0] as string;
+}
+
+/** Every article row, in a stable order, as the database holds it. */
+function allRows(repo: SQLiteRepository): ArticleRow[] {
+  return repo.query('SELECT * FROM article ORDER BY id') as ArticleRow[];
 }
 
 /** Returns the [sql, params] tuple from the latest call to repo.query */
@@ -2492,7 +2528,6 @@ describe('import', () => {
     vi.spyOn(Obsidian, 'updateFrontMatter').mockResolvedValue(
       undefined as never
     );
-    vi.spyOn(Obsidian, 'isDuplicate').mockReturnValue(false);
     vi.spyOn(Obsidian, 'createNote').mockResolvedValue(COPY_FILE as never);
     vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue(
       '[[notes/my-note.md|my-note]]'
@@ -2661,10 +2696,6 @@ describe('import', () => {
       basename: 'Paper',
       extension: 'pdf',
     } as TFile;
-
-    /** Every article row, in a stable order, as the database holds it. */
-    const allRows = (repo: SQLiteRepository) =>
-      repo.query('SELECT * FROM article ORDER BY id') as ArticleRow[];
 
     beforeEach(() => {
       Notice.reset();
@@ -3357,6 +3388,244 @@ describe('import', () => {
           `Failed to import article "Paper.pdf"`,
         ]);
       });
+    });
+  });
+
+  describe('a note, as a copy', () => {
+    const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
+    /** The suffix `generateId` makes of a `Math.random` value. */
+    const suffixOf = (value: number) => value.toString(36).slice(2, 7);
+    /**
+     * A note's basename, in any case and long enough to be cut short in a
+     * notice. It opens with a letter, so it also has a spelling in another
+     * case.
+     */
+    const basenameArb = fc.oneof(
+      fc.stringMatching(/^[A-Za-z][A-Za-z0-9 _-]{0,20}[A-Za-z0-9]$/),
+      // Drawn apart, as fast-check rarely makes a string this long
+      fc.stringMatching(/^[A-Za-z][A-Za-z0-9 _-]{45,60}[A-Za-z0-9]$/)
+    );
+    /** `text` with every letter in the other case. */
+    const swapCase = (text: string) =>
+      [...text]
+        .map((char) =>
+          char === char.toLowerCase() ? char.toUpperCase() : char.toLowerCase()
+        )
+        .join('');
+    /** How a notice names a copy whose basename is `title`: trimmed, and cut short when long. */
+    const noticeTitle = (title: string) => {
+      const trimmed = title.trim();
+      return trimmed.length > CONTENT_TITLE_SLICE_LENGTH
+        ? `${trimmed.slice(0, CONTENT_TITLE_SLICE_LENGTH - 3)}...`
+        : trimmed;
+    };
+
+    beforeEach(() => {
+      Notice.reset();
+      // The copy is created by the real helpers, rather than by the stand-ins
+      // the notes above use, so its path follows from its name.
+      vi.spyOn(Obsidian, 'getDirectory').mockRestore();
+      vi.spyOn(Obsidian, 'getTargetPath').mockRestore();
+      vi.spyOn(Obsidian, 'createNote').mockRestore();
+    });
+
+    it('takes a name no file, article row or rebind record holds, warning when it is not its own', async () => {
+      /**
+       * Who holds the note's own name in the articles folder, if anyone: a
+       * file, which may spell it in another case; a row, deleted or not; or
+       * an article the startup scan rebound away from the path.
+       */
+      const holderArb = fc.constantFrom(
+        null,
+        'file',
+        'file in another case',
+        'live row',
+        'deleted row',
+        'rebind'
+      );
+      await fc.assert(
+        fc.asyncProperty(
+          basenameArb,
+          holderArb,
+          fc.double({ min: 0, max: 1, maxExcluded: true, noNaN: true }),
+          async (basename, holder, value) => {
+            Notice.reset();
+            const ownPath = `${ARTICLES}/${basename}.md`;
+            const { repo, db } = await makeSqlJsRepo();
+            if (holder === 'live row' || holder === 'deleted row') {
+              db.exec(
+                `INSERT INTO article (id, reference, due, interval, priority, deleted)
+                 VALUES ('held', $1, 0, 1, 10, $2)`,
+                [ownPath, holder === 'deleted row' ? 1 : 0]
+              );
+            } else if (holder === 'rebind') {
+              db.exec(
+                `INSERT INTO article (id, reference, due, interval, priority)
+                 VALUES ('held', 'notes/rebound.md', 0, 1, 10)`
+              );
+              db.exec(
+                `INSERT INTO rebind (article_id, old_reference, new_reference, rebound_at)
+                 VALUES ('held', $1, 'notes/rebound.md', $2)`,
+                [ownPath, Date.now()]
+              );
+            }
+            const rowsBefore = allRows(repo);
+            const sourcePath = `notes/${basename}.md`;
+            const plugin = makeNoteCopyPlugin(fileAt(sourcePath), {
+              folders: [ARTICLES],
+              paths:
+                holder === 'file'
+                  ? [ownPath]
+                  : holder === 'file in another case'
+                    ? [`${ARTICLES}/${swapCase(basename)}.md`]
+                    : [],
+            });
+            const logged = vi
+              .spyOn(console, 'error')
+              .mockImplementation(() => undefined);
+            logged.mockClear();
+            // Mocked only now: sql.js names each database it opens by it
+            const random = vi.spyOn(Math, 'random');
+            random.mockReset();
+            random.mockReturnValueOnce(value);
+
+            const result = await new ArticleManager(
+              plugin as never,
+              repo
+            ).import(plugin.files.get(sourcePath)!, 10, null, true);
+            random.mockRestore();
+
+            const title =
+              holder === null ? basename : `${basename} - ${suffixOf(value)}`;
+            const copyPath = `${ARTICLES}/${title}.md`;
+            expect(plugin.app.vault.create.mock.calls).toEqual([
+              [copyPath, ''],
+            ]);
+            expect(result?.file.path).toBe(copyPath);
+            // The row that held the name is as it was; one more is added
+            const rows = allRows(repo);
+            expect(rows.filter((row) => row.id !== result?.data.id)).toEqual(
+              rowsBefore
+            );
+            expect(rows).toHaveLength(rowsBefore.length + 1);
+            expect(
+              rows.find((row) => row.id === result?.data.id)?.reference
+            ).toBe(copyPath);
+            expect(logged).not.toHaveBeenCalled();
+            const imported = `Imported "${noticeTitle(title)}" with priority ${IRScheduler.toDisplayPriority(10)}`;
+            expect(Notice.messages).toEqual(
+              holder === null
+                ? [imported]
+                : [
+                    `Warning: article with name already exists "${basename}.md"`,
+                    imported,
+                  ]
+            );
+            logged.mockRestore();
+          }
+        ),
+        { numRuns: 60 }
+      );
+    });
+
+    it('marks the copy as the article, when it was made, and where it came from unless the note already says', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          // Missing, or as the property can hold it, an empty one included
+          fc.oneof(fc.constant(undefined), fc.constant(null), fc.string()),
+          async (source) => {
+            const note = fileAt('notes/my-note.md');
+            const { repo } = await makeSqlJsRepo();
+            const plugin = makeNoteCopyPlugin(note, { folders: [ARTICLES] });
+            vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue(
+              source === undefined ? undefined : ({ source } as never)
+            );
+            const updateFrontMatter = vi.spyOn(Obsidian, 'updateFrontMatter');
+            updateFrontMatter.mockClear();
+            const before = new Date().toISOString();
+
+            const result = await new ArticleManager(
+              plugin as never,
+              repo
+            ).import(note, 10, null, true);
+
+            const after = new Date().toISOString();
+            const copy = plugin.files.get(`${ARTICLES}/my-note.md`);
+            expect(result?.file).toBe(copy);
+            const calls = updateFrontMatter.mock.calls;
+            expect(calls.map(([file]) => file)).toEqual([copy, copy]);
+            const { created } = calls[0][1] as { created: string };
+            expect(calls[0][1]).toEqual({ created });
+            expect(created >= before && created <= after).toBe(true);
+            expect(calls[1][1]).toEqual({
+              'ir-id': result?.data.id,
+              tags: ARTICLE_TAG,
+              ...(!source && {
+                [SOURCE_PROPERTY_NAME]: '[[notes/my-note.md|my-note]]',
+              }),
+            });
+          }
+        ),
+        { numRuns: 20 }
+      );
+    });
+
+    it('gives notes of the same name imported at once distinct copies', async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.integer({ min: 2, max: 4 }), async (count) => {
+          Notice.reset();
+          const sources = Array.from({ length: count }, (_, i) =>
+            fileAt(`folder-${i}/my-note.md`)
+          );
+          const { repo } = await makeSqlJsRepo();
+          const plugin = makeNoteCopyPlugin(sources[0], {
+            folders: [ARTICLES],
+            paths: sources.slice(1).map((source) => source.path),
+          });
+          const manager = new ArticleManager(plugin as never, repo);
+
+          const results = await Promise.all(
+            sources.map((source) =>
+              manager.import(
+                plugin.files.get(source.path)!,
+                DEFAULT_PRIORITY,
+                null,
+                true
+              )
+            )
+          );
+
+          const copyPaths = results.map((result) => result?.file.path);
+          expect(copyPaths).not.toContain(undefined);
+          expect(new Set(copyPaths).size).toBe(count);
+          expect(
+            allRows(repo)
+              .map((row) => row.reference)
+              .sort()
+          ).toEqual([...copyPaths].sort());
+        }),
+        { numRuns: 10 }
+      );
+    });
+
+    it('fails, freeing the name it took, when the copy cannot be made', async () => {
+      const logged = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => undefined);
+      const source = fileAt('notes/my-note.md');
+      const { repo } = await makeSqlJsRepo();
+      const plugin = makeNoteCopyPlugin(source, { folders: [ARTICLES] });
+      plugin.app.vault.create.mockRejectedValueOnce(new Error('ENOSPC'));
+      const manager = new ArticleManager(plugin as never, repo);
+
+      const failed = await manager.import(source, 10, null, true);
+      const retry = await manager.import(source, 10, null, true);
+
+      expect(failed).toBeNull();
+      expect(logged).toHaveBeenCalledWith(
+        new Error(`Failed to create note ${ARTICLES}/my-note.md`)
+      );
+      expect(retry?.file.path).toBe(`${ARTICLES}/my-note.md`);
     });
   });
 

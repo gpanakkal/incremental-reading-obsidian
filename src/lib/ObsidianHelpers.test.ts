@@ -1133,27 +1133,6 @@ describe('getSourceFile', () => {
 });
 
 // ---------------------------------------------------------------------------
-// isDuplicate
-// ---------------------------------------------------------------------------
-describe('isDuplicate', () => {
-  afterEach(() => vi.restoreAllMocks());
-
-  it('returns true when vault has a file at the target path', () => {
-    const app = makeApp({
-      vault: {
-        getAbstractFileByPath: vi.fn().mockReturnValue(makeTFile()),
-      } as unknown as App['vault'],
-    });
-    expect(ObsidianHelpers.isDuplicate('note.md', 'article', app)).toBe(true);
-  });
-
-  it('returns false when vault has no file at the target path', () => {
-    const app = makeApp();
-    expect(ObsidianHelpers.isDuplicate('note.md', 'article', app)).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // generateMarkdownLink
 // ---------------------------------------------------------------------------
 describe('generateMarkdownLink', () => {
