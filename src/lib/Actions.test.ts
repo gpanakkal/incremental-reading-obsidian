@@ -359,7 +359,8 @@ function expectNothingOpened(wired: ReturnType<typeof wireGoToContext>) {
  * starts inside the editor's content.
  */
 function makeSelectingView(
-  editor: { doc: string; anchor: number; head: number } | null
+  editor: { doc: string; anchor: number; head: number } | null,
+  itemFile: TFile | null = null
 ) {
   const domSelection = { anchorNode: {}, removeAllRanges: vi.fn() };
   const contentDOM = {
@@ -376,6 +377,7 @@ function makeSelectingView(
   };
   const reviewView = {
     reviewEditor: () => (cm ? { cm } : null),
+    currentItemFile: () => itemFile,
   } as unknown as ReviewView;
   return { reviewView, cm, contentDOM, domSelection };
 }
@@ -1469,6 +1471,66 @@ describe('Actions.goToContext', () => {
 describe('Actions.extract', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("says snippets and cards from a PDF aren't supported yet, and makes nothing", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        selectionKindArb,
+        fc.option(editorArb, { nil: null }),
+        fc.mixedCase(fc.constant('pdf')),
+        fc.option(selectionKindArb, { nil: null }),
+        async (kind, editor, extension, mode) => {
+          Notice.reset();
+          const { plugin, actions, createSnippet, createCard, prompt } =
+            wireSelectionActions();
+          wireSelectionMode(mode);
+          const file = { path: `papers/a.${extension}`, extension } as TFile;
+          const { reviewView } = makeSelectingView(editor, file);
+
+          await actions.extract(kind, reviewView);
+
+          expect(Notice.messages).toEqual([
+            kind === 'snippet'
+              ? "Snippets from PDFs aren't supported yet"
+              : "Cards from PDFs aren't supported yet",
+          ]);
+          expect(dispatched(plugin)).toEqual([]);
+          expect(createSnippet).not.toHaveBeenCalled();
+          expect(createCard).not.toHaveBeenCalled();
+          expect(prompt).not.toHaveBeenCalled();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('extracts as before from any item but a PDF', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        selectionKindArb,
+        // Markdown, and anything with no MIME type at all
+        fc.oneof(
+          fc.mixedCase(fc.constant('md')),
+          fc.string().filter((ext) => ext.toLowerCase() !== 'pdf')
+        ),
+        async (kind, extension) => {
+          Notice.reset();
+          const { actions, createSnippet, createCard } = wireSelectionActions();
+          const file = { path: `notes/a.${extension}`, extension } as TFile;
+          const { reviewView } = makeSelectingView(null, file);
+
+          await actions.extract(kind, reviewView);
+
+          expect(Notice.messages).toEqual([]);
+          expect(createSnippet).toHaveBeenCalledTimes(
+            kind === 'snippet' ? 1 : 0
+          );
+          expect(createCard).toHaveBeenCalledTimes(kind === 'card' ? 1 : 0);
+          vi.restoreAllMocks();
+        }
+      )
+    );
   });
 
   it('enters selection mode when nothing is selected', async () => {

@@ -11,6 +11,7 @@ import {
   resolveItemContext,
 } from './item-context';
 import type { CardSelection } from './items/CardManager';
+import { getMimeType } from './mime';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import {
   fetchCurrentItem,
@@ -428,8 +429,19 @@ export class Actions {
    * here. The one for the mode's kind confirms, as its Confirm button does. The
    * other is refused, leaving the mode and its selection as they were: it would
    * otherwise make its snippet or card of the text selected for the first.
+   *
+   * A PDF article has neither yet, and says so.
    */
   extract = async (kind: SelectionKind, reviewView: ReviewView) => {
+    const itemFile = reviewView.currentItemFile();
+    if (itemFile && getMimeType(itemFile) === 'application/pdf') {
+      Obsidian.notify(
+        kind === 'snippet'
+          ? "Snippets from PDFs aren't supported yet"
+          : "Cards from PDFs aren't supported yet"
+      );
+      return;
+    }
     const mode = store.getState().selectionMode;
     if (mode === kind) {
       await this.confirmSelection(reviewView);

@@ -1,5 +1,11 @@
 import test, { expect, type AndroidDevice, type Page } from '@playwright/test';
-import { executeCommandById, REVIEW_VIEW_TYPE } from './helpers';
+import {
+  executeCommandById,
+  finalizeArticleImport,
+  openFileInActiveLeaf,
+  REVIEW_VIEW_TYPE,
+  watchNotices,
+} from './helpers';
 import {
   connectAndroidDevice,
   deleteDeviceVault,
@@ -83,4 +89,72 @@ test('Can open the review interface by executing the command', async () => {
     window.locator(`.workspace-leaf-content[data-type="${REVIEW_VIEW_TYPE}"]`)
   ).toBeVisible();
   await expect(window.locator('css=#begin-review-button')).toBeVisible();
+});
+
+test("Reviews a PDF article in Obsidian's own PDF viewer", async () => {
+  await openFileInActiveLeaf(window, 'sources/PDF fixture.pdf');
+  await executeCommandById(window, 'incremental-reading:import-article');
+  await finalizeArticleImport(window);
+  await executeCommandById(window, 'incremental-reading:learn');
+  await window.locator('css=#begin-review-button').click();
+
+  const article = window.locator('.ir-pdf-article');
+  const firstPage = article.locator('.page[data-page-number="1"]');
+  await expect(firstPage.locator('.textLayer')).toContainText(
+    'Incremental reading turns a long text'
+  );
+
+  // Above the action bar, which sits at the bottom on mobile, never under it
+  const leaf = `.workspace-leaf-content[data-type="${REVIEW_VIEW_TYPE}"]`;
+  const viewer = await article.boundingBox();
+  const bar = await window.locator(`${leaf} .ir-action-bar`).boundingBox();
+  expect(viewer && bar).toBeTruthy();
+  expect(viewer!.y + viewer!.height).toBeLessThanOrEqual(bar!.y + 1);
+
+  const widthBefore = (await firstPage.boundingBox())!.width;
+  await article.locator('[aria-label="Zoom in"]').click();
+  await expect
+    .poll(async () => (await firstPage.boundingBox())!.width)
+    .toBeGreaterThan(widthBefore);
+
+  // Find, from Obsidian's own search command, closed by the viewer's Escape
+  await executeCommandById(window, 'editor:open-search');
+  const findBar = article.locator('.pdf-findbar');
+  await expect(findBar).toBeVisible();
+  const findInput = findBar.locator('input[type="text"], input:not([type])');
+  await findInput.first().fill('snippet');
+  await findInput.first().press('Enter');
+  await expect(article.locator('.textLayer .highlight').first()).toBeVisible();
+  await window.keyboard.press('Escape');
+  await expect(findBar).toBeHidden();
+
+  // Snippets and cards aren't there yet, and say so
+  const notices = await watchNotices(window);
+  await window.getByRole('button', { name: 'Create snippet' }).click();
+  await window.getByRole('button', { name: 'Create card' }).click();
+  await expect
+    .poll(notices)
+    .toEqual([
+      "Snippets from PDFs aren't supported yet",
+      "Cards from PDFs aren't supported yet",
+    ]);
+
+  // Finishing the item takes the viewer, and its keys, with it
+  await window.getByRole('button', { name: 'Mark reviewed' }).click();
+  await expect(article).toHaveCount(0);
+  expect(
+    await window.evaluate((viewType) => {
+      const { app } = window as unknown as {
+        app: {
+          workspace: {
+            getLeavesOfType(type: string): {
+              view: { scope: unknown; pdfViewer: unknown };
+            }[];
+          };
+        };
+      };
+      const { view } = app.workspace.getLeavesOfType(viewType)[0];
+      return { viewer: view.pdfViewer, scope: view.scope };
+    }, REVIEW_VIEW_TYPE)
+  ).toEqual({ viewer: null, scope: null });
 });

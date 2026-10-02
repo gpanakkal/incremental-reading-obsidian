@@ -6,6 +6,7 @@ import {
 import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import type { PdfViewer } from '#/lib/pdf/obsidian-pdf';
 import {
   actionsToReach,
   isDestination,
@@ -123,6 +124,16 @@ export default class ReviewView extends FileView {
    * views' are, so every other hotkey keeps working in the mode.
    */
   #selectionScope: Scope;
+  /** See {@link pdfViewer}. */
+  #pdfViewer: PdfViewer | null = null;
+
+  /**
+   * The PDF viewer on screen, or `null` when the item isn't a PDF article —
+   * see {@link attachPdfViewer}.
+   */
+  get pdfViewer(): PdfViewer | null {
+    return this.#pdfViewer;
+  }
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -457,6 +468,10 @@ export default class ReviewView extends FileView {
    * own forwarder.
    */
   showSearch(replace = false): void {
+    if (this.pdfViewer) {
+      this.pdfViewer.showSearch();
+      return;
+    }
     this.activeEditor?.showSearch(replace);
   }
 
@@ -525,6 +540,7 @@ export default class ReviewView extends FileView {
    * This allows snippet creation from ReviewView
    */
   getSelection(): string {
+    if (this.pdfViewer) return this.pdfViewer.selectedText();
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) {
       return '';
@@ -635,7 +651,31 @@ export default class ReviewView extends FileView {
   syncSelectionScope(): void {
     this.scope = this.plugin.store.getState().selectionMode
       ? this.#selectionScope
-      : null;
+      : (this.pdfViewer?.scope ?? null);
+  }
+
+  /**
+   * Show `viewer` as this tab's content: its keys, find bar and selection
+   * become the tab's. `PdfArticleView` calls this on mount.
+   *
+   * Its scope goes to Obsidian the way a PDF tab's does, as the view's own
+   * `scope` (see {@link syncSelectionScope}): the workspace consults it only
+   * while this tab is the active leaf, so the keys stop the moment another tab
+   * is focused and come back with this one. Nothing pushes it otherwise.
+   */
+  attachPdfViewer(viewer: PdfViewer): void {
+    this.#pdfViewer = viewer;
+    this.syncSelectionScope();
+  }
+
+  /**
+   * Undo {@link attachPdfViewer} for `viewer`, unless another viewer has taken
+   * its place since: the next item's view can mount before this one's cleanup.
+   */
+  detachPdfViewer(viewer: PdfViewer): void {
+    if (this.#pdfViewer !== viewer) return;
+    this.#pdfViewer = null;
+    this.syncSelectionScope();
   }
 
   /**
