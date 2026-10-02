@@ -6,6 +6,7 @@ import {
   MINIMUM_PRIORITY,
   MS_PER_DAY,
   MS_PER_YEAR,
+  REVIEW_COUNT_FOR_PRIORITY_SCALING,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
@@ -2695,5 +2696,213 @@ describe('create', () => {
         }
       )
     );
+  });
+});
+
+describe('createFromPdf', () => {
+  const NOW = Date.UTC(2026, 9, 2, 12);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** A PDF article row, on a fixed interval or not. */
+  const pdfArticleArb = fc
+    .record({
+      id: fc.uuid(),
+      folder: fc.constantFrom('', 'papers/', 'a/b/'),
+      basename: fc.string({ minLength: 1, maxLength: 12 }),
+      priority: fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+      fixed_interval_days: fc.option(fc.integer({ min: 1, max: 365 }), {
+        nil: null,
+      }),
+      due: fc.integer({ min: NOW - MS_PER_YEAR, max: NOW + MS_PER_YEAR }),
+    })
+    .map(({ folder, basename, ...row }) => {
+      const path = `${folder}${basename}.pdf`;
+      return {
+        data: {
+          ...row,
+          type: 'article' as const,
+          reference: path,
+          due_fuzz: null,
+          interval: MS_PER_DAY,
+          dismissed: false,
+          deleted: false,
+          scroll_top: 0,
+        },
+        file: { path, basename, extension: 'pdf' } as TFile,
+      };
+    });
+
+  /** What a selection read from a PDF hands over: two anchors in order. */
+  const extractArb = fc.record({
+    text: fc.string({ minLength: 1 }),
+    page: fc.integer({ min: 1, max: 9_999 }),
+    anchors: fc
+      .uniqueArray(fc.integer({ min: 1e10, max: 1e14 }), {
+        minLength: 2,
+        maxLength: 2,
+      })
+      .map(([a, b]) => ({ start: Math.min(a, b), end: Math.max(a, b) })),
+  });
+
+  /**
+   * A manager whose app writes wikilinks as Obsidian does by default, with
+   * every call that could write to a file spied on, and `createEntry` stubbed
+   * to answer `entry`.
+   */
+  function wirePdfSnip(entry: unknown = { data: {}, file: SNIPPET_FILE }) {
+    const writes = {
+      processFrontMatter: vi.fn().mockResolvedValue(undefined),
+      process: vi.fn(),
+      modify: vi.fn(),
+      modifyBinary: vi.fn(),
+      append: vi.fn(),
+    };
+    const { processFrontMatter, ...vault } = writes;
+    const generateMarkdownLink = vi.fn(
+      (file: TFile, _sourcePath: string, subpath = '', alias = '') =>
+        `[[${file.path}${subpath}|${alias}]]`
+    );
+    const createFromText = vi
+      .spyOn(Obsidian, 'createFromText')
+      .mockResolvedValue(SNIPPET_FILE);
+    const updateFrontMatter = vi
+      .spyOn(Obsidian, 'updateFrontMatter')
+      .mockResolvedValue(undefined as never);
+    const app = {
+      vault,
+      fileManager: { processFrontMatter, generateMarkdownLink },
+    };
+    const manager = new SnippetManager(
+      { app, settings: {} } as never,
+      makeSimpleRepo()
+    );
+    const createEntry = vi
+      .spyOn(manager as never as { createEntry: () => unknown }, 'createEntry')
+      .mockResolvedValue(entry);
+    return {
+      manager,
+      app,
+      writes,
+      createFromText,
+      updateFrontMatter,
+      createEntry,
+    };
+  }
+
+  /** `start` moved onto `page`, keeping its idx and char. */
+  const onPage = (anchor: number, page: number) =>
+    page * 1e10 + (anchor % 1e10);
+
+  it('makes a snippet note of the text, linked to the PDF at the selection, and a row with its anchors', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfArticleArb,
+        extractArb,
+        fc.string(),
+        async (article, { text, page, anchors }, subpath) => {
+          vi.restoreAllMocks();
+          const wired = wirePdfSnip();
+          const start = onPage(anchors.start, page);
+          const end = Math.max(onPage(anchors.end, page), start + 1);
+
+          const result = await wired.manager.createFromPdf({
+            article,
+            text,
+            start,
+            end,
+            subpath,
+          });
+
+          expect(result).toEqual({ data: {}, file: SNIPPET_FILE });
+          expect(wired.createFromText).toHaveBeenCalledExactlyOnceWith(
+            text,
+            Obsidian.getDirectory('snippet'),
+            wired.app
+          );
+          expect(
+            wired.app.fileManager.generateMarkdownLink
+          ).toHaveBeenCalledWith(
+            article.file,
+            SNIPPET_FILE.path,
+            subpath,
+            `${article.file.basename}, page ${page}`
+          );
+          const id = (wired.createEntry.mock.calls[0] as unknown[])[1];
+          expect(wired.createEntry).toHaveBeenCalledExactlyOnceWith(
+            SNIPPET_FILE,
+            id,
+            NOW + MS_PER_DAY,
+            article.data.fixed_interval_days === null
+              ? article.data.priority
+              : IRScheduler.childPriorityFromFixedInterval(
+                  article.data,
+                  REVIEW_COUNT_FOR_PRIORITY_SCALING,
+                  NOW + MS_PER_DAY
+                ),
+            article.data.id,
+            { start, end }
+          );
+          expect(wired.updateFrontMatter).toHaveBeenCalledExactlyOnceWith(
+            SNIPPET_FILE,
+            {
+              'ir-id': id,
+              tags: SNIPPET_TAG,
+              [SOURCE_PROPERTY_NAME]: `[[${article.file.path}${subpath}|${article.file.basename}, page ${page}]]`,
+            },
+            wired.app
+          );
+        }
+      )
+    );
+  });
+
+  it('never writes to the PDF', async () => {
+    await fc.assert(
+      fc.asyncProperty(pdfArticleArb, extractArb, async (article, extract) => {
+        vi.restoreAllMocks();
+        const wired = wirePdfSnip();
+
+        await wired.manager.createFromPdf({
+          article,
+          text: extract.text,
+          ...extract.anchors,
+          subpath: '#page=1',
+        });
+
+        const touched = Object.values(wired.writes)
+          .flatMap((fn) => fn.mock.calls)
+          .some(([file]) => file === article.file);
+        expect(touched).toBe(false);
+        expect(
+          wired.updateFrontMatter.mock.calls.some(
+            ([file]) => file === article.file
+          )
+        ).toBe(false);
+      })
+    );
+  });
+
+  it('answers null when the row could not be saved', async () => {
+    const wired = wirePdfSnip(null);
+    const [article] = fc.sample(pdfArticleArb, 1);
+
+    expect(
+      await wired.manager.createFromPdf({
+        article,
+        text: 'text',
+        start: 1e10,
+        end: 1e10 + 4,
+        subpath: '#page=1&selection=0,0,0,4',
+      })
+    ).toBeNull();
   });
 });

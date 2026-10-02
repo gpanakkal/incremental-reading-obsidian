@@ -1,6 +1,7 @@
 import { Actions, itemName } from '#/lib/Actions';
 import { CONTENT_TITLE_SLICE_LENGTH } from '#/lib/constants';
 import * as itemContext from '#/lib/item-context';
+import * as pdfSelection from '#/lib/pdf/pdf-selection';
 import {
   fetchCurrentItem,
   invalidateCurrentItemQuery,
@@ -410,6 +411,70 @@ function wireSelectionActions() {
 }
 
 const selectionKindArb = fc.constantFrom<SelectionKind>('snippet', 'card');
+
+/** `pdf` in any casing: the MIME table ignores case. */
+const pdfExtensionArb = fc.mixedCase(fc.constant('pdf'));
+
+function pdfFile(extension = 'pdf', basename = 'paper') {
+  return {
+    path: `papers/${basename}.${extension}`,
+    basename,
+    extension,
+  } as TFile;
+}
+
+/**
+ * A pdf.js document stand-in with `pages` as the text of each page's items:
+ * an empty list for a scanned page.
+ */
+function pdfDocumentWith(pages: string[][]) {
+  return {
+    numPages: pages.length,
+    getPage: vi.fn((n: number) =>
+      Promise.resolve({
+        view: [0, 0, 612, 792],
+        getTextContent: () =>
+          Promise.resolve({ items: pages[n - 1].map((str) => ({ str })) }),
+      })
+    ),
+  };
+}
+
+/** Text selected in a PDF viewer, as far as review passes it along. */
+const SELECTED = { selected: true } as unknown as Range;
+
+/**
+ * What a PDF article's viewer has selected: some text, nothing, or no viewer
+ * at all (undefined), as when it couldn't load.
+ */
+const pdfViewerSelectionArb = fc.constantFrom<Range | null | undefined>(
+  SELECTED,
+  null,
+  undefined
+);
+
+/**
+ * Put a PDF viewer on `reviewView`, whose selection is `selection`, or none
+ * at all when `selection` is undefined.
+ */
+function withPdfViewer(
+  reviewView: ReviewView,
+  selection: Range | null | undefined,
+  pdfDocument: unknown = pdfDocumentWith([['Some text']])
+) {
+  const viewer =
+    selection === undefined
+      ? null
+      : {
+          containerEl: { isViewer: true },
+          selection: vi.fn(() => selection),
+          clearSelection: vi.fn(),
+          pdfDocument: vi.fn(() => pdfDocument),
+          visiblePages: vi.fn((): number[] => [1]),
+        };
+  Object.assign(reviewView, { pdfViewer: viewer });
+  return { viewer };
+}
 
 /** A document with a selection in it, which may be empty or run backwards. */
 const editorArb = fc
@@ -1473,32 +1538,292 @@ describe('Actions.extract', () => {
     vi.restoreAllMocks();
   });
 
-  it("says snippets and cards from a PDF aren't supported yet, and makes nothing", async () => {
+  it("says cards from a PDF aren't supported yet, and makes nothing", async () => {
     await fc.assert(
       fc.asyncProperty(
-        selectionKindArb,
         fc.option(editorArb, { nil: null }),
-        fc.mixedCase(fc.constant('pdf')),
+        pdfExtensionArb,
         fc.option(selectionKindArb, { nil: null }),
-        async (kind, editor, extension, mode) => {
+        pdfViewerSelectionArb,
+        async (editor, extension, mode, selection) => {
           Notice.reset();
           const { plugin, actions, createSnippet, createCard, prompt } =
             wireSelectionActions();
+          const createPdfSnippet = vi
+            .spyOn(actions, 'createPdfSnippet')
+            .mockResolvedValue(null);
           wireSelectionMode(mode);
-          const file = { path: `papers/a.${extension}`, extension } as TFile;
-          const { reviewView } = makeSelectingView(editor, file);
+          const { reviewView } = makeSelectingView(editor, pdfFile(extension));
+          const { viewer } = withPdfViewer(reviewView, selection);
 
-          await actions.extract(kind, reviewView);
+          await actions.extract('card', reviewView);
 
           expect(Notice.messages).toEqual([
-            kind === 'snippet'
-              ? "Snippets from PDFs aren't supported yet"
-              : "Cards from PDFs aren't supported yet",
+            "Cards from PDFs aren't supported yet",
           ]);
           expect(dispatched(plugin)).toEqual([]);
           expect(createSnippet).not.toHaveBeenCalled();
+          expect(createPdfSnippet).not.toHaveBeenCalled();
           expect(createCard).not.toHaveBeenCalled();
           expect(prompt).not.toHaveBeenCalled();
+          if (viewer) expect(viewer.clearSelection).not.toHaveBeenCalled();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('enters selection mode for a snippet from a PDF when nothing is selected in it', async () => {
+    await fc.assert(
+      fc.asyncProperty(pdfExtensionArb, async (extension) => {
+        Notice.reset();
+        const { plugin, actions, createSnippet } = wireSelectionActions();
+        const createPdfSnippet = vi
+          .spyOn(actions, 'createPdfSnippet')
+          .mockResolvedValue(null);
+        wireSelectionMode(null);
+        const { reviewView } = makeSelectingView(null, pdfFile(extension));
+        withPdfViewer(reviewView, null);
+
+        await actions.extract('snippet', reviewView);
+
+        expect(dispatched(plugin)).toEqual([setSelectionMode('snippet')]);
+        expect(createPdfSnippet).not.toHaveBeenCalled();
+        expect(createSnippet).not.toHaveBeenCalled();
+        expect(Notice.messages).toEqual([]);
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('says pages with no text have nothing to select, rather than entering the mode', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.constantFrom('', ' ', '\n'), { maxLength: 3 }),
+        fc.subarray([2, 3], { minLength: 1 }),
+        async (blank, visible) => {
+          Notice.reset();
+          const { plugin, actions } = wireSelectionActions();
+          const createPdfSnippet = vi
+            .spyOn(actions, 'createPdfSnippet')
+            .mockResolvedValue(null);
+          wireSelectionMode(null);
+          const { reviewView } = makeSelectingView(null, pdfFile());
+          const { viewer } = withPdfViewer(
+            reviewView,
+            null,
+            pdfDocumentWith([['Text'], blank, []])
+          );
+          viewer!.visiblePages.mockReturnValue(visible);
+
+          await actions.extract('snippet', reviewView);
+
+          expect(Notice.messages).toEqual(['No selectable text']);
+          expect(dispatched(plugin)).toEqual([]);
+          expect(createPdfSnippet).not.toHaveBeenCalled();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('enters the mode when any page on screen has text', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.subarray([1, 2, 3], { minLength: 1 }).filter((v) => v.includes(2)),
+        async (visible) => {
+          Notice.reset();
+          const { plugin, actions } = wireSelectionActions();
+          wireSelectionMode(null);
+          const { reviewView } = makeSelectingView(null, pdfFile());
+          const { viewer } = withPdfViewer(
+            reviewView,
+            null,
+            pdfDocumentWith([[], ['Text'], [' ']])
+          );
+          viewer!.visiblePages.mockReturnValue(visible);
+
+          await actions.extract('snippet', reviewView);
+
+          expect(dispatched(plugin)).toEqual([setSelectionMode('snippet')]);
+          expect(Notice.messages).toEqual([]);
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('enters the mode once nothing has changed while the pages were read', async () => {
+    for (const change of ['mode', 'viewer'] as const) {
+      Notice.reset();
+      const { plugin, actions } = wireSelectionActions();
+      const getState = vi
+        .spyOn(store, 'getState')
+        .mockReturnValue({ selectionMode: null } as never);
+      const { reviewView } = makeSelectingView(null, pdfFile());
+      const doc = pdfDocumentWith([['Text']]);
+      withPdfViewer(reviewView, null, doc);
+      // Meanwhile, a second press enters the mode, or review moves on
+      doc.getPage.mockImplementation(() => {
+        if (change === 'mode') {
+          getState.mockReturnValue({ selectionMode: 'snippet' } as never);
+        } else {
+          Object.assign(reviewView, { pdfViewer: null });
+        }
+        return Promise.resolve({
+          view: [0, 0, 612, 792],
+          getTextContent: () => Promise.resolve({ items: [{ str: 'Text' }] }),
+        });
+      });
+
+      await actions.extract('snippet', reviewView);
+
+      expect(dispatched(plugin)).toEqual([]);
+      expect(Notice.messages).toEqual([]);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('ignores a second press while the snippet from the first is being made, whichever way it was made', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('button', 'confirm'),
+        fc.constantFrom('made', 'failed'),
+        async (first, outcome) => {
+          Notice.reset();
+          const { plugin, actions } = wireSelectionActions();
+          const getState = vi.spyOn(store, 'getState').mockReturnValue({
+            selectionMode: first === 'confirm' ? 'snippet' : null,
+          } as never);
+          // Ending the mode is what a real store does with the dispatch
+          plugin.store.dispatch.mockImplementation(
+            (action: { payload: unknown }) => {
+              getState.mockReturnValue({
+                selectionMode: action.payload,
+              } as never);
+            }
+          );
+          const { reviewView } = makeSelectingView(null, pdfFile());
+          const { viewer } = withPdfViewer(reviewView, SELECTED);
+          let finish!: () => void;
+          const createPdfSnippet = vi
+            .spyOn(actions, 'createPdfSnippet')
+            .mockImplementation(() => {
+              // Reading it drops the selection, as the real one does
+              viewer!.selection.mockReturnValue(null);
+              return new Promise((resolve, reject) => {
+                finish = () =>
+                  outcome === 'made' ? resolve(null) : reject(new Error('x'));
+              });
+            });
+
+          const firstPress = actions.extract('snippet', reviewView);
+          await actions.extract('snippet', reviewView);
+          finish();
+          await firstPress.catch(() => {});
+
+          expect(createPdfSnippet).toHaveBeenCalledOnce();
+          expect(dispatched(plugin)).toEqual(
+            first === 'confirm' ? [setSelectionMode(null)] : []
+          );
+          expect(Notice.messages).toEqual([]);
+
+          // Over once the snippet is: the next press is heard again
+          await actions.extract('snippet', reviewView);
+          expect(dispatched(plugin).at(-1)).toEqual(
+            setSelectionMode('snippet')
+          );
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('enters the mode all the same when the pages on screen cannot be told', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failing = pdfDocumentWith([['Text']]);
+    failing.getPage.mockRejectedValue(new Error('worker gone'));
+    for (const [pages, doc] of [
+      [[], pdfDocumentWith([[]])],
+      [[1], null],
+      [[1], failing],
+    ] as const) {
+      Notice.reset();
+      const { plugin, actions } = wireSelectionActions();
+      wireSelectionMode(null);
+      const { reviewView } = makeSelectingView(null, pdfFile());
+      const { viewer } = withPdfViewer(reviewView, null, doc);
+      viewer!.visiblePages.mockReturnValue([...pages]);
+
+      await actions.extract('snippet', reviewView);
+
+      expect(dispatched(plugin)).toEqual([setSelectionMode('snippet')]);
+      expect(Notice.messages).toEqual([]);
+    }
+    expect(error).toHaveBeenCalledOnce();
+  });
+
+  it('extracts a snippet from a PDF at once when text is selected in it, or there is no viewer to select in', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfExtensionArb,
+        fc.constantFrom<Range | undefined>(SELECTED, undefined),
+        async (extension, selection) => {
+          const { plugin, actions, createSnippet } = wireSelectionActions();
+          const createPdfSnippet = vi
+            .spyOn(actions, 'createPdfSnippet')
+            .mockResolvedValue(null);
+          wireSelectionMode(null);
+          const { reviewView } = makeSelectingView(null, pdfFile(extension));
+          const { viewer } = withPdfViewer(reviewView, selection);
+
+          await actions.extract('snippet', reviewView);
+
+          expect(createPdfSnippet).toHaveBeenCalledExactlyOnceWith(reviewView);
+          expect(dispatched(plugin)).toEqual([]);
+          expect(createSnippet).not.toHaveBeenCalled();
+          // Outside the mode the selection stays, as the editor's does
+          if (viewer) expect(viewer.clearSelection).not.toHaveBeenCalled();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('confirms or refuses as before for a snippet from a PDF while in the mode', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfExtensionArb,
+        selectionKindArb,
+        pdfViewerSelectionArb,
+        async (extension, mode, selection) => {
+          Notice.reset();
+          const { plugin, actions } = wireSelectionActions();
+          const createPdfSnippet = vi
+            .spyOn(actions, 'createPdfSnippet')
+            .mockResolvedValue(null);
+          const confirmSelection = vi
+            .spyOn(actions, 'confirmSelection')
+            .mockResolvedValue();
+          wireSelectionMode(mode);
+          const { reviewView } = makeSelectingView(null, pdfFile(extension));
+          withPdfViewer(reviewView, selection);
+
+          await actions.extract('snippet', reviewView);
+
+          if (mode === 'snippet') {
+            expect(confirmSelection).toHaveBeenCalledExactlyOnceWith(
+              reviewView
+            );
+            expect(Notice.messages).toEqual([]);
+          } else {
+            expect(confirmSelection).not.toHaveBeenCalled();
+            expect(Notice.messages).toEqual([
+              'Finish or cancel the card selection first',
+            ]);
+          }
+          expect(dispatched(plugin)).toEqual([]);
+          expect(createPdfSnippet).not.toHaveBeenCalled();
           vi.restoreAllMocks();
         }
       )
@@ -1851,6 +2176,309 @@ describe('Actions.confirmSelection', () => {
   });
 });
 
+describe('Actions.createPdfSnippet', () => {
+  beforeEach(() => {
+    Notice.reset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const readArb = fc.record({
+    start: fc.integer({ min: 1e10, max: 1e14 }),
+    end: fc.integer({ min: 1e10, max: 1e14 }),
+    text: fc.string({ minLength: 1 }),
+    subpath: fc.string(),
+  });
+
+  /**
+   * Review on a PDF article whose viewer has `selection` selected, with the
+   * reading of it answering `read`, and the manager's `createFromPdf` making
+   * `snippet`. The item's row is `item`, an article by default.
+   */
+  function wirePdfSnippet({
+    read = null,
+    selection = SELECTED,
+    pdfDocument = pdfDocumentWith([['Text']]),
+    snippet = null,
+    item,
+    noViewer = false,
+  }: {
+    read?: pdfSelection.PdfSelection | null | Error;
+    selection?: Range | null;
+    noViewer?: boolean;
+    pdfDocument?: unknown;
+    snippet?: unknown;
+    item?: unknown;
+  }) {
+    const file = pdfFile('pdf', 'paper');
+    const article =
+      item === undefined
+        ? { data: { id: 'article-1', type: 'article' }, file }
+        : item;
+    const plugin = makePlugin();
+    const createFromPdf = vi.fn().mockResolvedValue(snippet);
+    const deleteSnippet = vi.fn().mockResolvedValue(true);
+    const getReviewItemFromFile = vi.fn().mockResolvedValue(article);
+    Object.assign(plugin.reviewManager, {
+      getReviewItemFromFile,
+      snippets: { createFromPdf, delete: deleteSnippet },
+    });
+    const actions = new Actions(plugin);
+    const readPdfSelection = vi
+      .spyOn(pdfSelection, 'readPdfSelection')
+      .mockImplementation(() =>
+        read instanceof Error ? Promise.reject(read) : Promise.resolve(read)
+      );
+    const { reviewView } = makeSelectingView(null, file);
+    const { viewer } = withPdfViewer(
+      reviewView,
+      noViewer ? undefined : selection,
+      pdfDocument
+    );
+    return {
+      actions,
+      reviewView,
+      viewer,
+      file,
+      article,
+      readPdfSelection,
+      getReviewItemFromFile,
+      createFromPdf,
+      deleteSnippet,
+    };
+  }
+
+  it('makes a snippet of the text the viewer has selected, which undo deletes', async () => {
+    await fc.assert(
+      fc.asyncProperty(readArb, fc.uuid(), async (read, id) => {
+        Notice.reset();
+        const snippet = { data: { id }, file: { basename: 'A snippet' } };
+        const wired = wirePdfSnippet({ read, snippet });
+
+        const made = await wired.actions.createPdfSnippet(wired.reviewView);
+
+        expect(made).toBe(snippet);
+        expect(wired.readPdfSelection).toHaveBeenCalledExactlyOnceWith(
+          SELECTED,
+          wired.viewer!.containerEl,
+          wired.viewer!.pdfDocument()
+        );
+        expect(wired.getReviewItemFromFile).toHaveBeenCalledExactlyOnceWith(
+          wired.file
+        );
+        expect(wired.createFromPdf).toHaveBeenCalledExactlyOnceWith({
+          article: wired.article,
+          ...read,
+        });
+        expect(Notice.messages).toEqual([]);
+        expect(wired.actions.undoStack).toHaveLength(1);
+        expect(wired.actions.undoStack[0]).toMatchObject({
+          item: snippet,
+          description: 'creating snippet "A snippet"',
+        });
+
+        await wired.actions.undo();
+
+        expect(wired.deleteSnippet).toHaveBeenCalledExactlyOnceWith(id);
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('records nothing to undo when the snippet could not be saved', async () => {
+    const wired = wirePdfSnippet({
+      read: { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' },
+    });
+
+    expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
+    expect(wired.createFromPdf).toHaveBeenCalledOnce();
+    expect(wired.actions.undoStack).toEqual([]);
+  });
+
+  it('says there is no selectable text, and makes nothing, when the selection holds none', async () => {
+    const cases = [{ read: null }, { selection: null }];
+    for (const options of cases) {
+      Notice.reset();
+      const wired = wirePdfSnippet(options);
+
+      expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
+
+      expect(Notice.messages).toEqual(['No selectable text']);
+      expect(wired.createFromPdf).not.toHaveBeenCalled();
+      expect(wired.readPdfSelection).toHaveBeenCalledTimes(
+        'read' in options ? 1 : 0
+      );
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('drops the selection as it reads it, so one made meanwhile stays', async () => {
+    const wired = wirePdfSnippet({
+      read: { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' },
+    });
+    let clearedBeforeReading = false;
+    wired.readPdfSelection.mockImplementation(() => {
+      clearedBeforeReading =
+        wired.viewer!.clearSelection.mock.calls.length === 1;
+      return Promise.resolve(null);
+    });
+
+    await wired.actions.createPdfSnippet(wired.reviewView);
+
+    expect(clearedBeforeReading).toBe(true);
+    expect(wired.viewer!.clearSelection).toHaveBeenCalledOnce();
+    expect(wired.readPdfSelection).toHaveBeenCalledWith(
+      SELECTED,
+      wired.viewer!.containerEl,
+      expect.anything()
+    );
+  });
+
+  it('says so, and keeps the selection, while the PDF is still loading', async () => {
+    const wired = wirePdfSnippet({ pdfDocument: null });
+
+    expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
+
+    expect(Notice.messages).toEqual(["The PDF hasn't finished loading"]);
+    expect(wired.readPdfSelection).not.toHaveBeenCalled();
+    expect(wired.viewer!.clearSelection).not.toHaveBeenCalled();
+    expect(wired.createFromPdf).not.toHaveBeenCalled();
+  });
+
+  it('says so, and makes nothing, when the PDF cannot be read', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failure = new Error('worker gone');
+    const wired = wirePdfSnippet({ read: failure });
+
+    expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
+
+    expect(Notice.messages).toEqual([
+      "Couldn't read the text selected in the PDF",
+    ]);
+    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(wired.createFromPdf).not.toHaveBeenCalled();
+  });
+
+  it('says so, and makes nothing, with no viewer to select in', async () => {
+    const wired = wirePdfSnippet({ noViewer: true });
+
+    expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
+
+    expect(Notice.messages).toEqual(["Can't select text in this PDF here"]);
+    expect(wired.readPdfSelection).not.toHaveBeenCalled();
+    expect(wired.createFromPdf).not.toHaveBeenCalled();
+  });
+
+  it('says so, and makes nothing, with no item on screen', async () => {
+    const wired = wirePdfSnippet({});
+    Object.assign(wired.reviewView, { currentItemFile: () => null });
+
+    expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
+
+    expect(Notice.messages).toEqual(["Can't select text in this PDF here"]);
+    expect(wired.readPdfSelection).not.toHaveBeenCalled();
+    expect(wired.createFromPdf).not.toHaveBeenCalled();
+  });
+
+  it('says so, and makes nothing, when the PDF is no article', async () => {
+    const read = { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' };
+    for (const item of [
+      null,
+      { data: { id: 's', type: 'snippet' }, file: pdfFile() },
+    ]) {
+      Notice.reset();
+      const wired = wirePdfSnippet({ read, item });
+
+      expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
+
+      expect(Notice.messages).toEqual([
+        '"paper" is not an incremental reading article',
+      ]);
+      expect(wired.createFromPdf).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe('Actions.confirmSelection for a PDF', () => {
+  beforeEach(() => {
+    Notice.reset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('stays in the mode, and says so, while nothing is selected in the viewer', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), async (pageHasText) => {
+        Notice.reset();
+        const { plugin, actions } = wireSelectionActions();
+        const createPdfSnippet = vi
+          .spyOn(actions, 'createPdfSnippet')
+          .mockResolvedValue(null);
+        wireSelectionMode('snippet');
+        const { reviewView } = makeSelectingView(null, pdfFile());
+        const { viewer } = withPdfViewer(
+          reviewView,
+          null,
+          pdfDocumentWith([pageHasText ? ['Text'] : []])
+        );
+
+        await actions.confirmSelection(reviewView);
+
+        // A scanned page has nothing to select, which is worth saying
+        expect(Notice.messages).toEqual([
+          pageHasText
+            ? 'Select the text to extract first'
+            : 'No selectable text',
+        ]);
+        expect(dispatched(plugin)).toEqual([]);
+        expect(createPdfSnippet).not.toHaveBeenCalled();
+        expect(viewer!.clearSelection).not.toHaveBeenCalled();
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('ends the mode and extracts the selection to a snippet', async () => {
+    const { plugin, actions, createSnippet } = wireSelectionActions();
+    wireSelectionMode('snippet');
+    const { reviewView } = makeSelectingView(null, pdfFile());
+    withPdfViewer(reviewView, SELECTED);
+    const createPdfSnippet = vi
+      .spyOn(actions, 'createPdfSnippet')
+      .mockResolvedValue(null);
+
+    await actions.confirmSelection(reviewView);
+
+    expect(dispatched(plugin)).toEqual([setSelectionMode(null)]);
+    expect(createPdfSnippet).toHaveBeenCalledExactlyOnceWith(reviewView);
+    expect(createSnippet).not.toHaveBeenCalled();
+    expect(Notice.messages).toEqual([]);
+  });
+
+  it('leaves a card selection to the editor, which a PDF has none of', async () => {
+    const { plugin, actions, createCard, prompt } = wireSelectionActions();
+    wireSelectionMode('card');
+    const { reviewView } = makeSelectingView(null, pdfFile());
+    const { viewer } = withPdfViewer(reviewView, SELECTED);
+    const createPdfSnippet = vi
+      .spyOn(actions, 'createPdfSnippet')
+      .mockResolvedValue(null);
+
+    await actions.confirmSelection(reviewView);
+
+    expect(dispatched(plugin)).toEqual([setSelectionMode(null)]);
+    expect(createPdfSnippet).not.toHaveBeenCalled();
+    expect(createCard).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
+    expect(viewer!.selection).not.toHaveBeenCalled();
+  });
+});
+
 describe('Actions.cancelSelection', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -1898,5 +2526,24 @@ describe('Actions.cancelSelection', () => {
     actions.cancelSelection(reviewView);
 
     expect(dispatched(plugin)).toEqual([setSelectionMode(null)]);
+  });
+
+  it("ends the mode and drops a PDF viewer's selection", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom<Range | null>(SELECTED, null),
+        (selection) => {
+          const { plugin, actions } = wireSelectionActions();
+          const { reviewView } = makeSelectingView(null, pdfFile());
+          const { viewer } = withPdfViewer(reviewView, selection);
+
+          actions.cancelSelection(reviewView);
+
+          expect(dispatched(plugin)).toEqual([setSelectionMode(null)]);
+          expect(viewer!.clearSelection).toHaveBeenCalledOnce();
+          vi.restoreAllMocks();
+        }
+      )
+    );
   });
 });

@@ -128,6 +128,18 @@ function makeViewer(): { viewer: PdfViewer; component: FakeViewerComponent } {
   return { viewer, component };
 }
 
+/**
+ * A viewer built over a fake component, with `prepare` run on its container
+ * before it is loaded.
+ */
+function makeViewerWith(prepare: (containerEl: HTMLElement) => void) {
+  const viewer = createPdfViewer(makeApp())!;
+  const component = FakeViewerComponent.instances.at(-1)!;
+  prepare(viewer.containerEl);
+  viewer.load();
+  return { viewer, component };
+}
+
 /** A viewer whose container holds `inside` and sits next to `outside`. */
 function withText(inside: string, outside: string) {
   const { viewer } = makeViewer();
@@ -679,6 +691,494 @@ describe('PdfViewer.selectedText', () => {
 
     document.getSelection()!.removeAllRanges();
     expect(viewer.selectedText()).toBe('');
+  });
+});
+
+describe('PdfViewer.selection', () => {
+  /**
+   * A viewer in a tab of its own, as review shows it: two pages whose text
+   * layers hold `first` and `second`, an action bar button beside the viewer
+   * in the same tab, and text outside the tab.
+   */
+  function inTab(first = 'inside', second = 'second') {
+    const { viewer } = makeViewer();
+    const tab = document.body.appendChild(document.createElement('div'));
+    tab.className = 'workspace-leaf';
+    tab.append(viewer.containerEl);
+    const pages = [first, second].map((text, i) => {
+      const page = viewer.containerEl.appendChild(
+        document.createElement('div')
+      );
+      page.className = 'page';
+      page.dataset.pageNumber = String(i + 1);
+      const layer = page.appendChild(document.createElement('div'));
+      layer.className = 'textLayer';
+      const span = layer.appendChild(document.createElement('span'));
+      span.textContent = text;
+      return { page, layer, text: span.firstChild! };
+    });
+    const button = tab.appendChild(document.createElement('button'));
+    const outsideEl = document.body.appendChild(document.createElement('p'));
+    outsideEl.textContent = 'outside';
+    return { viewer, tab, pages, button, outside: outsideEl.firstChild! };
+  }
+
+  /** Select as the user does: the browser then reports the change. */
+  function userSelects(
+    start: Node,
+    startOffset: number,
+    end: Node,
+    endOffset: number,
+    doc: Document = document
+  ) {
+    const range = doc.createRange();
+    range.setStart(start, startOffset);
+    range.setEnd(end, endOffset);
+    const selection = doc.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    doc.dispatchEvent(new Event('selectionchange'));
+  }
+
+  /** A press starting at `target`, as a tap or a click begins. */
+  function press(target: EventTarget) {
+    target.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+  }
+
+  const boundsOf = (range: Range | null) =>
+    range && [
+      range.startContainer,
+      range.startOffset,
+      range.endContainer,
+      range.endOffset,
+    ];
+
+  /** Text and two distinct offsets into it, in order. */
+  const textWithSpanArb = fc
+    .string({ minLength: 1 })
+    .chain((text) =>
+      fc
+        .uniqueArray(fc.nat(text.length), { minLength: 2, maxLength: 2 })
+        .map(([a, b]) => ({ text, from: Math.min(a, b), to: Math.max(a, b) }))
+    );
+
+  it('is what was last selected in the text layers', () => {
+    fc.assert(
+      fc.property(
+        textWithSpanArb,
+        fc.boolean(),
+        ({ text, from, to }, across) => {
+          document.body.innerHTML = '';
+          const { viewer, pages } = inTab(text, text);
+          const end = across ? pages[1].text : pages[0].text;
+
+          userSelects(pages[0].text, from, end, to);
+
+          expect(boundsOf(viewer.selection())).toEqual([
+            pages[0].text,
+            from,
+            end,
+            to,
+          ]);
+          viewer.unload();
+        }
+      )
+    );
+  });
+
+  it('keeps the selection when it moves out of the viewer, as pressing a button in the tab does', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('button', 'outside', 'none'),
+        fc.boolean(),
+        (where, collapsed) => {
+          document.body.innerHTML = '';
+          const { viewer, pages, button, outside } = inTab();
+          userSelects(pages[0].text, 1, pages[0].text, 4);
+          press(button);
+
+          if (where === 'none') {
+            document.getSelection()!.removeAllRanges();
+            document.dispatchEvent(new Event('selectionchange'));
+          } else {
+            const node = where === 'button' ? button : outside;
+            userSelects(node, 0, node, collapsed ? 0 : node.childNodes.length);
+          }
+
+          expect(boundsOf(viewer.selection())).toEqual([
+            pages[0].text,
+            1,
+            pages[0].text,
+            4,
+          ]);
+          viewer.unload();
+        }
+      )
+    );
+  });
+
+  it('is dropped by a press in another tab or on the bare tab around the viewer, and kept through any other', () => {
+    /** Where a press drops the selection: the user has moved on from it. */
+    const DROPS = [
+      'another tab',
+      'button in another tab',
+      'tab header',
+      'bar background',
+    ];
+    fc.assert(
+      fc.property(
+        fc.constantFrom(
+          ...DROPS,
+          'own tab button',
+          'icon in a button',
+          'clickable icon',
+          'input',
+          'title being edited',
+          'link',
+          'viewer',
+          'modal',
+          'outside'
+        ),
+        (where) => {
+          document.body.innerHTML = '';
+          const { viewer, tab, pages, button, outside } = inTab();
+          const add = (parent: Element, html: string) => {
+            const el = parent.appendChild(document.createElement('div'));
+            el.innerHTML = html;
+            return el.firstElementChild!;
+          };
+          const header = add(
+            tab,
+            '<div class="view-header"><div class="view-header-title" contenteditable="true">Title</div><div class="clickable-icon"><svg></svg></div><a href="#">link</a></div>'
+          );
+          const bar = add(tab, '<div class="ir-action-bar"><input></div>');
+          const icon = button.appendChild(document.createElement('span'));
+          // The file explorer, say, which is a tab of the sidebar
+          const otherTab = document.body.appendChild(
+            document.createElement('div')
+          );
+          otherTab.className = 'workspace-leaf';
+          const fileRow = otherTab.appendChild(document.createElement('div'));
+          // One that keeps the press to itself, as many of Obsidian's do
+          const otherButton = otherTab.appendChild(
+            document.createElement('button')
+          );
+          otherButton.addEventListener('pointerdown', (evt) =>
+            evt.stopPropagation()
+          );
+          // The command palette, which picks the command that extracts
+          const modal = document.body.appendChild(
+            document.createElement('div')
+          );
+          modal.className = 'modal-container';
+          userSelects(pages[0].text, 1, pages[0].text, 4);
+
+          press(
+            {
+              'another tab': fileRow,
+              'button in another tab': otherButton,
+              'tab header': header,
+              'bar background': bar,
+              'own tab button': button,
+              'icon in a button': icon,
+              'clickable icon': header.querySelector('.clickable-icon svg')!,
+              input: bar.querySelector('input')!,
+              'title being edited': header.querySelector('[contenteditable]')!,
+              link: header.querySelector('a')!,
+              viewer: pages[1].layer,
+              modal,
+              outside: outside.parentNode!,
+            }[where]!
+          );
+
+          expect(viewer.selection() === null).toBe(DROPS.includes(where));
+          viewer.unload();
+        }
+      )
+    );
+  });
+
+  it('is kept through a press in any tab when the viewer is in none', () => {
+    const { viewer, tab, pages } = inTab();
+    tab.classList.remove('workspace-leaf');
+    const otherTab = document.body.appendChild(document.createElement('div'));
+    otherTab.className = 'workspace-leaf';
+    userSelects(pages[0].text, 1, pages[0].text, 4);
+
+    press(otherTab);
+
+    expect(viewer.selection()).not.toBeNull();
+  });
+
+  it('is null once the selection collapses inside the viewer', () => {
+    const { viewer, pages } = inTab();
+    userSelects(pages[0].text, 1, pages[0].text, 4);
+
+    userSelects(pages[0].text, 2, pages[0].text, 2);
+
+    expect(viewer.selection()).toBeNull();
+  });
+
+  it('is null with nothing selected yet', () => {
+    const { viewer } = inTab();
+    expect(viewer.selection()).toBeNull();
+  });
+
+  it('keeps a selection with an end outside the text layers, for reading it to snap', () => {
+    const { viewer, pages } = inTab();
+    // A drag that ends between two pages, or a keyboard selection, which
+    // Obsidian doesn't snap into the text
+    const gap = pages[1].page;
+
+    userSelects(pages[0].text, 1, gap, 0);
+    expect(boundsOf(viewer.selection())).toEqual([pages[0].text, 1, gap, 0]);
+
+    // Nor does unloading another page's text drop it
+    pages[1].layer.remove();
+    expect(boundsOf(viewer.selection())).toEqual([pages[0].text, 1, gap, 0]);
+  });
+
+  it('is null once the text at either end of it is gone, as when pdf.js unloads a page', () => {
+    fc.assert(
+      fc.property(fc.constantFrom(0, 1), (gone) => {
+        document.body.innerHTML = '';
+        const { viewer, pages } = inTab();
+        userSelects(pages[0].text, 1, pages[1].text, 4);
+
+        pages[gone].layer.remove();
+
+        expect(viewer.selection()).toBeNull();
+        viewer.unload();
+      })
+    );
+  });
+
+  it('is null once a text layer it ends on, not in its text, is gone', () => {
+    const { viewer, pages } = inTab();
+    // An end between two items: in the layer itself, as an element offset
+    userSelects(pages[0].text, 1, pages[1].layer, 1);
+
+    pages[1].layer.remove();
+
+    expect(viewer.selection()).toBeNull();
+  });
+
+  it('hands out a copy, which leaves what it tracks alone', () => {
+    const { viewer, pages } = inTab();
+    userSelects(pages[0].text, 1, pages[0].text, 4);
+
+    viewer.selection()!.collapse(true);
+
+    expect(viewer.selection()!.collapsed).toBe(false);
+  });
+
+  it('stops following the selection once unloaded, and forgets it', () => {
+    const { viewer, pages, outside } = inTab();
+    userSelects(pages[0].text, 0, pages[0].text, 2);
+    viewer.unload();
+    expect(viewer.selection()).toBeNull();
+
+    userSelects(pages[0].text, 1, pages[0].text, 4);
+    expect(viewer.selection()).toBeNull();
+
+    // Nor does a press reach it
+    userSelects(pages[0].text, 1, pages[0].text, 4);
+    press(outside);
+    expect(viewer.selection()).toBeNull();
+  });
+
+  it('follows the selection into the window its tab is moved to', () => {
+    const migrated: ((win: Window) => void)[] = [];
+    const stopMigrated = vi.fn();
+    const { viewer } = makeViewerWith((containerEl) => {
+      (
+        containerEl as unknown as {
+          onWindowMigrated(cb: (win: Window) => void): () => void;
+        }
+      ).onWindowMigrated = (cb) => {
+        migrated.push(cb);
+        return stopMigrated;
+      };
+    });
+    // A window of its own, as a popout is
+    const frame = document.body.appendChild(document.createElement('iframe'));
+    const popoutWin = frame.contentWindow!;
+    const popout = popoutWin.document;
+    const layer = popout.body.appendChild(popout.createElement('div'));
+    layer.className = 'textLayer';
+    const span = layer.appendChild(popout.createElement('span'));
+    span.textContent = 'moved';
+    const mainText = document.body.appendChild(document.createElement('p'));
+    mainText.textContent = 'main';
+
+    // Obsidian moves the tab's DOM, then tells it which window it's in now
+    popout.body.prepend(viewer.containerEl);
+    viewer.containerEl.append(layer);
+    expect(migrated).toHaveLength(1);
+    migrated[0](popoutWin);
+
+    userSelects(span.firstChild!, 0, span.firstChild!, 4, popout);
+    expect(viewer.selection()?.toString()).toBe('move');
+
+    // The old window's selection no longer reaches it
+    userSelects(mainText.firstChild!, 0, mainText.firstChild!, 2);
+    document.dispatchEvent(new Event('selectionchange'));
+    expect(viewer.selection()?.toString()).toBe('move');
+
+    viewer.unload();
+    expect(stopMigrated).toHaveBeenCalledOnce();
+    userSelects(span.firstChild!, 1, span.firstChild!, 2, popout);
+    expect(viewer.selection()).toBeNull();
+  });
+
+  it('is cleared, on screen too, by clearSelection', () => {
+    const { viewer, pages } = inTab();
+    userSelects(pages[0].text, 1, pages[0].text, 4);
+
+    viewer.clearSelection();
+
+    expect(viewer.selection()).toBeNull();
+    expect(document.getSelection()!.rangeCount).toBe(0);
+  });
+
+  it('leaves a selection outside the viewer on screen when cleared', () => {
+    const { viewer, pages, button } = inTab();
+    userSelects(pages[0].text, 1, pages[0].text, 4);
+    const label = button.appendChild(document.createTextNode('button'));
+    userSelects(label, 0, label, 3);
+
+    viewer.clearSelection();
+
+    expect(viewer.selection()).toBeNull();
+    expect(document.getSelection()!.toString()).toBe('but');
+  });
+
+  it('clears with nothing selected on screen', () => {
+    const { viewer } = inTab();
+    document.getSelection()!.removeAllRanges();
+
+    expect(() => viewer.clearSelection()).not.toThrow();
+    expect(viewer.selection()).toBeNull();
+  });
+});
+
+describe('PdfViewer.visiblePages', () => {
+  /** pdf.js's own `PDFViewer` as far as telling the visible pages goes. */
+  const withPdfJs = (pdfJs: unknown) => {
+    const { viewer, component } = makeViewer();
+    component.ready({ ...makeChild(), pdfViewer: { pdfViewer: pdfJs } });
+    return viewer;
+  };
+
+  it('is the pages pdf.js has on screen, in order, once it is ready', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.integer({ min: 1, max: 1e6 }), { maxLength: 5 }),
+        fc.integer({ min: 1, max: 1e6 }),
+        (ids, current) => {
+          const getVisiblePages = vi.fn(function (this: unknown) {
+            expect(this).toBe(pdfJs);
+            return { ids: new Set(ids) };
+          });
+          const pdfJs = {
+            currentPageNumber: current,
+            _getVisiblePages: getVisiblePages,
+          };
+
+          expect(withPdfJs(pdfJs).visiblePages()).toEqual(
+            [...ids].sort((a, b) => a - b)
+          );
+        }
+      )
+    );
+  });
+
+  it('is the current page where pdf.js tells no visible pages', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 1e6 }),
+        fc.constantFrom<unknown>(
+          undefined,
+          'changed',
+          () => null,
+          () => ({}),
+          () => ({ ids: [1, 2] })
+        ),
+        (current, getVisiblePages) => {
+          const pdfJs = {
+            currentPageNumber: current,
+            _getVisiblePages: getVisiblePages,
+          };
+
+          expect(withPdfJs(pdfJs).visiblePages()).toEqual([current]);
+        }
+      )
+    );
+  });
+
+  it('is none before the viewer is ready', () => {
+    const { viewer } = makeViewer();
+    expect(viewer.visiblePages()).toEqual([]);
+  });
+
+  it.each([
+    ['no app object', {}],
+    ['no pdf.js viewer', { pdfViewer: {} }],
+    ['a pdf.js viewer that is not one', { pdfViewer: { pdfViewer: 3 } }],
+    ['no page number', { pdfViewer: { pdfViewer: {} } }],
+    [
+      'a page number that is not a number',
+      { pdfViewer: { pdfViewer: { currentPageNumber: '2' } } },
+    ],
+    ['no page yet', { pdfViewer: { pdfViewer: { currentPageNumber: 0 } } }],
+  ])('is none for a child with %s', (_, child) => {
+    const { viewer, component } = makeViewer();
+
+    component.ready({ ...makeChild(), ...child });
+
+    expect(viewer.visiblePages()).toEqual([]);
+  });
+
+  it('leaves out ids that are no page numbers', () => {
+    const pdfJs = {
+      currentPageNumber: 1,
+      _getVisiblePages: () => ({ ids: new Set([0, 2, '3', 1.5, 4]) }),
+    };
+
+    expect(withPdfJs(pdfJs).visiblePages()).toEqual([2, 4]);
+  });
+});
+
+describe('PdfViewer.pdfDocument', () => {
+  const pdfDocument = { numPages: 3, getPage: vi.fn() };
+
+  it("is the pdf.js document the viewer has open, once it's ready", () => {
+    const { viewer, component } = makeViewer();
+    expect(viewer.pdfDocument()).toBeNull();
+
+    component.ready({ ...makeChild(), pdfViewer: { pdfDocument } });
+
+    expect(viewer.pdfDocument()).toBe(pdfDocument);
+  });
+
+  it.each([
+    ['no app object', {}],
+    ['an app object that is not one', { pdfViewer: 'changed' }],
+    ['no document open', { pdfViewer: { pdfDocument: null } }],
+    [
+      'a document without a page count',
+      { pdfViewer: { pdfDocument: { getPage: vi.fn() } } },
+    ],
+    [
+      'a document without getPage',
+      { pdfViewer: { pdfDocument: { numPages: 3, getPage: 'changed' } } },
+    ],
+  ])('is null for a child with %s', (_, child) => {
+    const { viewer, component } = makeViewer();
+
+    component.ready({ ...makeChild(), ...child });
+
+    expect(viewer.pdfDocument()).toBeNull();
   });
 });
 

@@ -10,6 +10,8 @@ import {
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { decodeAnchor } from '#/lib/pdf/pdf-anchor';
+import { pageLinkAlias } from '#/lib/pdf/pdf-selection';
 import {
   SnippetOffsetTracker,
   type SnippetHighlight,
@@ -20,6 +22,7 @@ import type {
   ISnippetDisplay,
   ISnippetReview,
   MissingItem,
+  ReviewArticle,
   ReviewSnippet,
   SnippetRow,
   SQLiteRepository,
@@ -286,21 +289,9 @@ export class SnippetManager extends ItemManager {
       );
     }
 
-    let priority = currentFileEntry?.priority ?? DEFAULT_PRIORITY;
-    // if the parent is on a fixed-interval schedule, calculate priority
-    // for this snippet so its first n reviews occur before the first n
-    // reviews of the parent item
-    if (
-      currentFileEntry &&
-      'fixed_interval_days' in currentFileEntry &&
-      currentFileEntry.fixed_interval_days
-    ) {
-      priority = IRScheduler.childPriorityFromFixedInterval(
-        currentFileEntry,
-        REVIEW_COUNT_FOR_PRIORITY_SCALING,
-        snippetDueTime
-      );
-    }
+    const priority = currentFileEntry
+      ? SnippetManager.childPriority(currentFileEntry, snippetDueTime)
+      : DEFAULT_PRIORITY;
 
     // Calculate body-relative character offsets for highlighting
     let offsets: { start: number; end: number } | null = null;
@@ -353,6 +344,87 @@ export class SnippetManager extends ItemManager {
     }
 
     return result;
+  }
+
+  /**
+   * The priority of a snippet taken from `parent`, first due at `dueTime`: the
+   * parent's own, unless the parent is on a fixed-interval schedule, when it
+   * is calculated so the snippet's first n reviews occur before the first n
+   * reviews of the parent.
+   */
+  private static childPriority(
+    parent: IArticleBase | ISnippetBase,
+    dueTime: number
+  ): number {
+    if ('fixed_interval_days' in parent && parent.fixed_interval_days) {
+      return IRScheduler.childPriorityFromFixedInterval(
+        parent,
+        REVIEW_COUNT_FOR_PRIORITY_SCALING,
+        dueTime
+      );
+    }
+    return parent.priority;
+  }
+
+  /**
+   * Save `text`, selected in the PDF article `article`, as a snippet and add
+   * it to the learning queue, first due tomorrow.
+   *
+   * The row keeps the selection's anchors as its offsets, which the parent's
+   * MIME type says to read as PDF anchors. The note's source links to the
+   * selection itself, as Obsidian's own selection links do. Nothing is
+   * written to the PDF.
+   *
+   * @param start anchor of the selection's first character (see
+   *   `pdf-anchor`); its page is the one the link names.
+   * @param end anchor just past its last character.
+   * @param subpath the link's subpath, as `selectionSubpath` writes it.
+   * @returns the new snippet, or null when its row couldn't be saved.
+   */
+  async createFromPdf({
+    article,
+    text,
+    start,
+    end,
+    subpath,
+  }: {
+    article: ReviewArticle;
+    text: string;
+    start: number;
+    end: number;
+    subpath: string;
+  }): Promise<ReviewSnippet | null> {
+    const dueTime = Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
+    const snippetFile = await Obsidian.createFromText(
+      text,
+      Obsidian.getDirectory('snippet'),
+      this.app
+    );
+    const sourceLink = Obsidian.generateMarkdownLink(
+      article.file,
+      snippetFile,
+      this.app,
+      pageLinkAlias(article.file.basename, decodeAnchor(start).page),
+      subpath
+    );
+    const id = crypto.randomUUID();
+    await Obsidian.updateFrontMatter(
+      snippetFile,
+      {
+        'ir-id': id,
+        tags: SNIPPET_TAG,
+        [SOURCE_PROPERTY_NAME]: sourceLink,
+      },
+      this.app
+    );
+    return this.createEntry(
+      snippetFile,
+      id,
+      dueTime,
+      SnippetManager.childPriority(article.data, dueTime),
+      article.data.id,
+      { start, end }
+    );
   }
 
   /**

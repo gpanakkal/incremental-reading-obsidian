@@ -28,6 +28,10 @@ function makeViewer(openResult: PdfOpenResult = 'loaded') {
     open: vi.fn(() => Promise.resolve(openResult)),
     showSearch: vi.fn(),
     selectedText: vi.fn(() => ''),
+    selection: vi.fn(() => null),
+    clearSelection: vi.fn(),
+    pdfDocument: vi.fn(() => null),
+    visiblePages: vi.fn(() => []),
   } satisfies PdfViewer;
 }
 
