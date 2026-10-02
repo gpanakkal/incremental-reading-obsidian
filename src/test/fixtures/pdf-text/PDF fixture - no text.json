@@ -1,0 +1,24 @@
+{
+  "source": "e2e-tests/setup/test-vault/sources/PDF fixture - no text.pdf",
+  "obsidian": "1.13.7",
+  "pdfjs": {
+    "version": "5.3.34",
+    "build": 34,
+    "commit": "cc1e2a3e0"
+  },
+  "getTextContent": {
+    "includeMarkedContent": true,
+    "disableNormalization": true
+  },
+  "pages": [
+    {
+      "view": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "items": []
+    }
+  ]
+}

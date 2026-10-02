@@ -1,0 +1,354 @@
+{
+  "source": "e2e-tests/setup/test-vault/sources/PDF fixture - layout.pdf",
+  "obsidian": "1.13.7",
+  "pdfjs": {
+    "version": "5.3.34",
+    "build": 34,
+    "commit": "cc1e2a3e0"
+  },
+  "getTextContent": {
+    "includeMarkedContent": true,
+    "disableNormalization": true
+  },
+  "pages": [
+    {
+      "view": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "items": [
+        {
+          "str": "Proceedings of the Fixture Society",
+          "dir": "ltr",
+          "width": 137.06100000000006,
+          "height": 9,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            72,
+            750
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": false,
+          "chars": []
+        },
+        {
+          "str": "",
+          "dir": "ltr",
+          "width": 0,
+          "height": 0,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            72,
+            700
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true
+        },
+        {
+          "str": "A two-column page sets its text in",
+          "dir": "ltr",
+          "width": 148.95000000000002,
+          "height": 10,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            72,
+            700
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "narrow columns, which a reader takes",
+          "dir": "ltr",
+          "width": 168.39000000000004,
+          "height": 10,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            72,
+            687
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "one after the other.",
+          "dir": "ltr",
+          "width": 84.50000000000001,
+          "height": 10,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            72,
+            674
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "The ﬁrst words ﬂow down the left",
+          "dir": "ltr",
+          "width": 145.61,
+          "height": 10,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            72,
+            648
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "column, an efﬁcient layout, and a",
+          "dir": "ltr",
+          "width": 146.19000000000003,
+          "height": 10,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            72,
+            635
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "word that ends the column is hy-",
+          "dir": "ltr",
+          "width": 143.95000000000005,
+          "height": 10,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            72,
+            622
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "phenated across the gutter. The right",
+          "dir": "ltr",
+          "width": 163.9799999999999,
+          "height": 10,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            318,
+            700
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "column then runs to the foot of the",
+          "dir": "ltr",
+          "width": 151.75999999999985,
+          "height": 10,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            318,
+            687
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "page, where its last sentence con-",
+          "dir": "ltr",
+          "width": 151.7399999999999,
+          "height": 10,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            318,
+            674
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": false,
+          "chars": []
+        },
+        {
+          "str": "",
+          "dir": "ltr",
+          "width": 0,
+          "height": 0,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            303,
+            40
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true
+        },
+        {
+          "str": "1",
+          "dir": "ltr",
+          "width": 5.0040000000000004,
+          "height": 9,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            303,
+            40
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": false,
+          "chars": []
+        }
+      ]
+    },
+    {
+      "view": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "items": [
+        {
+          "str": "Proceedings of the Fixture Society",
+          "dir": "ltr",
+          "width": 137.06100000000006,
+          "height": 9,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            72,
+            750
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": false,
+          "chars": []
+        },
+        {
+          "str": "",
+          "dir": "ltr",
+          "width": 0,
+          "height": 0,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            72,
+            700
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true
+        },
+        {
+          "str": "tinues on the next page, past the page number and the header.",
+          "dir": "ltr",
+          "width": 279.62999999999994,
+          "height": 10,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            72,
+            700
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "A new paragraph closes the fixture.",
+          "dir": "ltr",
+          "width": 156.74000000000004,
+          "height": 10,
+          "transform": [
+            10,
+            0,
+            0,
+            10,
+            72,
+            674
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": false,
+          "chars": []
+        },
+        {
+          "str": "",
+          "dir": "ltr",
+          "width": 0,
+          "height": 0,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            303,
+            40
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": true
+        },
+        {
+          "str": "2",
+          "dir": "ltr",
+          "width": 5.0040000000000004,
+          "height": 9,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            303,
+            40
+          ],
+          "fontName": "g_d1_f1",
+          "hasEOL": false,
+          "chars": []
+        }
+      ]
+    }
+  ]
+}
