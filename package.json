@@ -11,6 +11,7 @@
 		"test": "vitest run",
 		"fuzz": "vitest run --config vitest.fuzz.config.ts",
 		"fixtures:pdf": "node scripts/make-pdf-fixtures.mjs",
+		"fixtures:pdf-text": "node scripts/dump-pdf-text-fixtures.mjs",
 		"e2e:setup": "pnpm run build && pnpm exec playwright test --project e2e-setup",
 		"e2e": "pnpm run build && cross-env E2E_CLEANUP=1 E2E_HEADLESS=1 pnpm exec playwright test --project e2e",
 		"e2e:headed": "pnpm run build && cross-env E2E_CLEANUP=1 E2E_HEADLESS=0 pnpm exec playwright test --project e2e",

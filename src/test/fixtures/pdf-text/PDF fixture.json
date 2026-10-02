@@ -1,0 +1,566 @@
+{
+  "source": "e2e-tests/setup/test-vault/sources/PDF fixture.pdf",
+  "obsidian": "1.13.7",
+  "pdfjs": {
+    "version": "5.3.34",
+    "build": 34,
+    "commit": "cc1e2a3e0"
+  },
+  "getTextContent": {
+    "includeMarkedContent": true,
+    "disableNormalization": true
+  },
+  "pages": [
+    {
+      "view": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "items": [
+        {
+          "str": "Journal of Incremental Reading Fixtures",
+          "dir": "ltr",
+          "width": 159.56100000000006,
+          "height": 9,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            72,
+            750
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": false,
+          "chars": []
+        },
+        {
+          "str": "",
+          "dir": "ltr",
+          "width": 0,
+          "height": 0,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            700
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true
+        },
+        {
+          "str": "Incremental reading turns a long text into a series of short reviews.",
+          "dir": "ltr",
+          "width": 324.02699999999976,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            700
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "Each review reads a little, keeps what matters, and schedules the rest",
+          "dir": "ltr",
+          "width": 340.53799999999967,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            685
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "for later, so a reader works through many texts at once.",
+          "dir": "ltr",
+          "width": 269.62099999999975,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            670
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "Extracting the passages worth keeping is the heart of the method. A",
+          "dir": "ltr",
+          "width": 330.17599999999965,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            640
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "good snippet stands on its own; a definition with its context is a",
+          "dir": "ltr",
+          "width": 305.7119999999997,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            625
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "fine exam-",
+          "dir": "ltr",
+          "width": 51.348,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            610
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "ple of one, and it is ready to become a card the moment it is clear.",
+          "dir": "ltr",
+          "width": 321.5959999999997,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            595
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "A paragraph that begins near the foot of one page is common in papers",
+          "dir": "ltr",
+          "width": 347.91899999999964,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            565
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "and books alike. Whatever reads the text has to carry the sentence over",
+          "dir": "ltr",
+          "width": 350.3389999999997,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            550
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "the page break, past the footer of this page and the header of the next,",
+          "dir": "ltr",
+          "width": 344.2889999999995,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            535
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": false,
+          "chars": []
+        },
+        {
+          "str": "",
+          "dir": "ltr",
+          "width": 0,
+          "height": 0,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            280,
+            40
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true
+        },
+        {
+          "str": "Page 1 of 3",
+          "dir": "ltr",
+          "width": 46.03500000000003,
+          "height": 9,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            280,
+            40
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": false,
+          "chars": []
+        }
+      ]
+    },
+    {
+      "view": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "items": [
+        {
+          "str": "Journal of Incremental Reading Fixtures",
+          "dir": "ltr",
+          "width": 159.56100000000006,
+          "height": 9,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            72,
+            750
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": false,
+          "chars": []
+        },
+        {
+          "str": "",
+          "dir": "ltr",
+          "width": 0,
+          "height": 0,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            700
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true
+        },
+        {
+          "str": "without mistaking either of them for part of the paragraph itself. It",
+          "dir": "ltr",
+          "width": 314.2589999999997,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            700
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "ends here, on the second page, where the text picks up again.",
+          "dir": "ltr",
+          "width": 303.2919999999997,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            685
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "Priority decides how soon an article comes back. A high priority keeps",
+          "dir": "ltr",
+          "width": 340.51599999999974,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            655
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "it close; a low one lets the interval grow quickly, so the reader sees",
+          "dir": "ltr",
+          "width": 325.24799999999976,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            640
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "it rarely until it has earned more attention.",
+          "dir": "ltr",
+          "width": 202.36699999999985,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            625
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "Cards are reviewed on their own schedule, which spaces each repetition",
+          "dir": "ltr",
+          "width": 352.7589999999997,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            595
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "further apart as the answer becomes easier to recall.",
+          "dir": "ltr",
+          "width": 256.77299999999985,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            580
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": false,
+          "chars": []
+        },
+        {
+          "str": "",
+          "dir": "ltr",
+          "width": 0,
+          "height": 0,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            280,
+            40
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true
+        },
+        {
+          "str": "Page 2 of 3",
+          "dir": "ltr",
+          "width": 46.03500000000003,
+          "height": 9,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            280,
+            40
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": false,
+          "chars": []
+        }
+      ]
+    },
+    {
+      "view": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "items": [
+        {
+          "str": "Journal of Incremental Reading Fixtures",
+          "dir": "ltr",
+          "width": 159.56100000000006,
+          "height": 9,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            72,
+            750
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": false,
+          "chars": []
+        },
+        {
+          "str": "",
+          "dir": "ltr",
+          "width": 0,
+          "height": 0,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            700
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true
+        },
+        {
+          "str": "The third page closes the fixture. It holds one last paragraph, so",
+          "dir": "ltr",
+          "width": 310.6069999999997,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            700
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "that every test reading this file has text on each of its pages.",
+          "dir": "ltr",
+          "width": 292.2699999999997,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            685
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": false,
+          "chars": []
+        },
+        {
+          "str": "",
+          "dir": "ltr",
+          "width": 0,
+          "height": 0,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            280,
+            40
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": true
+        },
+        {
+          "str": "Page 3 of 3",
+          "dir": "ltr",
+          "width": 46.03500000000003,
+          "height": 9,
+          "transform": [
+            9,
+            0,
+            0,
+            9,
+            280,
+            40
+          ],
+          "fontName": "g_d0_f1",
+          "hasEOL": false,
+          "chars": []
+        }
+      ]
+    }
+  ]
+}

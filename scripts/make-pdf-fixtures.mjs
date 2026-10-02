@@ -130,24 +130,16 @@ const ARTICLE_PAGES = [
 
 const HEADER = 'Journal of Incremental Reading Fixtures';
 
-function articlePdf() {
-  const pageCount = ARTICLE_PAGES.length;
+/** A PDF of one page per content stream, all set in `font` as `/F1`. */
+function pagesPdf(contents, font) {
   // 1 catalog, 2 page tree, 3 font, then a page and its contents per page
-  const pageNumbers = ARTICLE_PAGES.map((_, i) => 4 + i * 2);
+  const pageNumbers = contents.map((_, i) => 4 + i * 2);
   const objects = [
     '<</Type/Catalog/Pages 2 0 R>>',
-    `<</Type/Pages/Kids[${pageNumbers.map((n) => `${n} 0 R`).join(' ')}]/Count ${pageCount}>>`,
-    '<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>',
+    `<</Type/Pages/Kids[${pageNumbers.map((n) => `${n} 0 R`).join(' ')}]/Count ${contents.length}>>`,
+    font,
   ];
-  ARTICLE_PAGES.forEach((lines, i) => {
-    const content =
-      textBlock([HEADER], { x: MARGIN_LEFT, y: 750, size: 9 }) +
-      textBlock(lines, { x: MARGIN_LEFT, y: BODY_TOP, size: BODY_SIZE }) +
-      textBlock([`Page ${i + 1} of ${pageCount}`], {
-        x: 280,
-        y: 40,
-        size: 9,
-      });
+  contents.forEach((content, i) => {
     objects.push(
       `<</Type/Page/Parent 2 0 R/MediaBox[0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}]` +
         `/Resources<</Font<</F1 3 0 R>>>>/Contents ${pageNumbers[i] + 1} 0 R>>`,
@@ -155,6 +147,93 @@ function articlePdf() {
     );
   });
   return buildPdf(objects, 1);
+}
+
+const HELVETICA =
+  '<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>';
+
+function articlePdf() {
+  const pageCount = ARTICLE_PAGES.length;
+  return pagesPdf(
+    ARTICLE_PAGES.map(
+      (lines, i) =>
+        textBlock([HEADER], { x: MARGIN_LEFT, y: 750, size: 9 }) +
+        textBlock(lines, { x: MARGIN_LEFT, y: BODY_TOP, size: BODY_SIZE }) +
+        textBlock([`Page ${i + 1} of ${pageCount}`], {
+          x: 280,
+          y: 40,
+          size: 9,
+        })
+    ),
+    HELVETICA
+  );
+}
+
+/**
+ * Codes WinAnsiEncoding leaves unused, given to Helvetica's "fi" and "fl"
+ * ligature glyphs, which pdf.js reads as U+FB01 and U+FB02.
+ */
+const FI = String.fromCharCode(0x81);
+const FL = String.fromCharCode(0x8d);
+
+const LAYOUT_COLUMN_SIZE = 10;
+const LAYOUT_COLUMN_LEADING = 13;
+
+/**
+ * Text set the way papers set it. Page 1 has two columns, read down the left
+ * one and then the right one; a word is hyphenated across the gutter, and
+ * another across the page break. Ligatures stand in for "fi" and "fl". Each
+ * page has the same running header, and a bare page number for a footer.
+ */
+const LAYOUT_PAGES = [
+  [
+    [
+      'A two-column page sets its text in',
+      'narrow columns, which a reader takes',
+      'one after the other.',
+      '',
+      `The ${FI}rst words ${FL}ow down the left`,
+      `column, an ef${FI}cient layout, and a`,
+      'word that ends the column is hy-',
+    ],
+    [
+      'phenated across the gutter. The right',
+      'column then runs to the foot of the',
+      'page, where its last sentence con-',
+    ],
+  ],
+  [
+    [
+      'tinues on the next page, past the page number and the header.',
+      '',
+      'A new paragraph closes the fixture.',
+    ],
+  ],
+];
+
+const LAYOUT_HEADER = 'Proceedings of the Fixture Society';
+
+function layoutPdf() {
+  const columnX = [MARGIN_LEFT, 318];
+  return pagesPdf(
+    LAYOUT_PAGES.map(
+      (columns, i) =>
+        textBlock([LAYOUT_HEADER], { x: MARGIN_LEFT, y: 750, size: 9 }) +
+        columns
+          .map((lines, column) =>
+            textBlock(lines, {
+              x: columnX[column],
+              y: BODY_TOP,
+              size: LAYOUT_COLUMN_SIZE,
+              leading: LAYOUT_COLUMN_LEADING,
+            })
+          )
+          .join('') +
+        textBlock([`${i + 1}`], { x: 303, y: 40, size: 9 })
+    ),
+    '<</Type/Font/Subtype/Type1/BaseFont/Helvetica' +
+      `/Encoding<</Type/Encoding/BaseEncoding/WinAnsiEncoding/Differences[${FI.charCodeAt(0)}/fi ${FL.charCodeAt(0)}/fl]>>>>`
+  );
 }
 
 /**
@@ -191,6 +270,7 @@ function imageOnlyPdf() {
 const FIXTURES = {
   'PDF fixture.pdf': articlePdf,
   'PDF fixture - no text.pdf': imageOnlyPdf,
+  'PDF fixture - layout.pdf': layoutPdf,
 };
 
 await mkdir(OUT_DIR, { recursive: true });
