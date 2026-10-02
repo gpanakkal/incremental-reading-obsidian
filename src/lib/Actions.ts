@@ -1,3 +1,9 @@
+import type { PdfViewer } from '#/lib/pdf/obsidian-pdf';
+import {
+  type PdfSelection,
+  pageHasText,
+  readPdfSelection,
+} from '#/lib/pdf/pdf-selection';
 import type IncrementalReadingPlugin from '#/main';
 import { promptForCardAnswer } from '#/views/CardAnswerModal';
 import type ReviewView from '#/views/ReviewView';
@@ -74,6 +80,10 @@ export type ActionStackEntry = {
 export class Actions {
   plugin: IncrementalReadingPlugin;
   undoStack: ActionStackEntry[];
+  /**
+   * Whether a snippet from a PDF is being made: see {@link _makePdfSnippet}.
+   */
+  private _makingPdfSnippet = false;
   emitter;
   subscribe;
 
@@ -342,6 +352,69 @@ export class Actions {
   };
 
   /**
+   * Extract the text selected in the PDF article on screen in review to a
+   * snippet: see `SnippetManager.createFromPdf`. Says so, and makes nothing,
+   * when there is no text to make it of, as on a scanned page.
+   *
+   * The selection is dropped as it is read, before the PDF is: it was the
+   * input to this snippet, and one the user makes while the text is read is
+   * the input to the next.
+   */
+  createPdfSnippet = async (
+    reviewView: ReviewView
+  ): Promise<ReviewSnippet | null> => {
+    const viewer = reviewView.pdfViewer;
+    const file = reviewView.currentItemFile();
+    if (!viewer || !file) {
+      Obsidian.notify("Can't select text in this PDF here");
+      return null;
+    }
+    const doc = viewer.pdfDocument();
+    if (!doc) {
+      Obsidian.notify("The PDF hasn't finished loading");
+      return null;
+    }
+    const range = viewer.selection();
+    viewer.clearSelection();
+    let selection: PdfSelection | null;
+    try {
+      selection = range
+        ? await readPdfSelection(range, viewer.containerEl, doc)
+        : null;
+    } catch (error) {
+      console.error(error);
+      Obsidian.notify("Couldn't read the text selected in the PDF");
+      return null;
+    }
+    if (!selection) {
+      Obsidian.notify('No selectable text');
+      return null;
+    }
+    const article = await this.plugin.reviewManager.getReviewItemFromFile(file);
+    if (!article || !isReviewArticle(article)) {
+      Obsidian.notify(
+        `"${file.basename}" is not an incremental reading article`
+      );
+      return null;
+    }
+
+    const snippet = await this.plugin.reviewManager.snippets.createFromPdf({
+      article,
+      ...selection,
+    });
+    if (snippet) {
+      this._pushUndo({
+        item: snippet,
+        description: `creating snippet "${snippet.file.basename}"`,
+        undo: async () => {
+          await this.plugin.reviewManager.snippets.delete(snippet.data.id);
+        },
+      });
+    }
+    return snippet;
+  };
+
+  /**
    * @param fromSelection a span chosen in selection mode and the answer chosen
    * in it, to make the card of. Without one, the card is made of the line the
    * cursor is on, with the selection in it as its answer.
@@ -430,18 +503,19 @@ export class Actions {
    * other is refused, leaving the mode and its selection as they were: it would
    * otherwise make its snippet or card of the text selected for the first.
    *
-   * A PDF article has neither yet, and says so.
+   * A PDF article selects in its viewer rather than an editor, and has no
+   * cards yet, which it says.
    */
   extract = async (kind: SelectionKind, reviewView: ReviewView) => {
     const itemFile = reviewView.currentItemFile();
-    if (itemFile && getMimeType(itemFile) === 'application/pdf') {
-      Obsidian.notify(
-        kind === 'snippet'
-          ? "Snippets from PDFs aren't supported yet"
-          : "Cards from PDFs aren't supported yet"
-      );
+    const isPdf = !!itemFile && getMimeType(itemFile) === 'application/pdf';
+    if (isPdf && kind === 'card') {
+      Obsidian.notify("Cards from PDFs aren't supported yet");
       return;
     }
+    // A second press while the first is still at work: its selection is
+    // already taken, and with none left it would enter the mode
+    if (isPdf && this._makingPdfSnippet) return;
     const mode = store.getState().selectionMode;
     if (mode === kind) {
       await this.confirmSelection(reviewView);
@@ -449,6 +523,25 @@ export class Actions {
     }
     if (mode !== null) {
       Obsidian.notify(`Finish or cancel the ${mode} selection first`);
+      return;
+    }
+
+    const viewer = reviewView.pdfViewer;
+    // With no viewer there is nothing to select in: the snippet says why
+    if (isPdf && viewer && !viewer.selection()) {
+      if (await this._nothingToSelect(viewer)) {
+        Obsidian.notify('No selectable text');
+      } else if (
+        // A press since, or review moving on, has had its say meanwhile
+        store.getState().selectionMode === null &&
+        reviewView.pdfViewer === viewer
+      ) {
+        this.plugin.store.dispatch(setSelectionMode(kind));
+      }
+      return;
+    }
+    if (isPdf) {
+      await this._makePdfSnippet(reviewView);
       return;
     }
 
@@ -478,10 +571,27 @@ export class Actions {
    * cancelling: it was only ever the input to the mode, and leaving it in the
    * editor's state would bring it back on screen the next time the editor is
    * focused.
+   *
+   * A PDF article's selection is its viewer's, which it keeps when a button
+   * press moves the browser's selection out of the PDF.
    */
   confirmSelection = async (reviewView: ReviewView) => {
     const kind = store.getState().selectionMode;
     if (kind === null) return;
+    const viewer = reviewView.pdfViewer;
+    if (viewer && kind === 'snippet') {
+      if (!viewer.selection()) {
+        Obsidian.notify(
+          (await this._nothingToSelect(viewer))
+            ? 'No selectable text'
+            : 'Select the text to extract first'
+        );
+        return;
+      }
+      this.plugin.store.dispatch(setSelectionMode(null));
+      await this._makePdfSnippet(reviewView);
+      return;
+    }
     const cm = reviewView.reviewEditor()?.cm;
     if (!cm) {
       this.plugin.store.dispatch(setSelectionMode(null));
@@ -517,9 +627,40 @@ export class Actions {
   /** Leave selection mode having made nothing, and drop what was selected. */
   cancelSelection = (reviewView: ReviewView) => {
     this.plugin.store.dispatch(setSelectionMode(null));
+    reviewView.pdfViewer?.clearSelection();
     const cm = reviewView.reviewEditor()?.cm;
     if (!cm) return;
     this._dropSelection(cm);
+  };
+
+  /** {@link createPdfSnippet}, marked as under way while it is. */
+  private _makePdfSnippet = async (reviewView: ReviewView) => {
+    this._makingPdfSnippet = true;
+    try {
+      await this.createPdfSnippet(reviewView);
+    } finally {
+      this._makingPdfSnippet = false;
+    }
+  };
+
+  /**
+   * Whether no page `viewer` has on screen has text to select, as scanned
+   * pages haven't: there is then no selecting a snippet there. False when
+   * that can't be told.
+   */
+  private _nothingToSelect = async (viewer: PdfViewer): Promise<boolean> => {
+    const doc = viewer.pdfDocument();
+    const pages = viewer.visiblePages();
+    if (!doc || pages.length === 0) return false;
+    try {
+      const hasText = await Promise.all(
+        pages.map((page) => pageHasText(doc, page))
+      );
+      return !hasText.includes(true);
+    } catch (error) {
+      console.error(error);
+      return false;
+    }
   };
 
   /** Collapse the editor's selection to its head, on screen as well as in state. */

@@ -63,9 +63,9 @@ const placeholder = (page: Page) => page.locator('.ir-binary-item');
 const pdfPage = (page: Page, n: number) =>
   article(page).locator(`.page[data-page-number="${n}"]`);
 
-/** Import the fixture in place, from its own PDF tab. */
-async function importFixture(page: Page) {
-  await openFileInActiveLeaf(page, PDF_PATH);
+/** Import a fixture in place, from its own PDF tab. */
+async function importFixture(page: Page, pdfPath = PDF_PATH) {
+  await openFileInActiveLeaf(page, pdfPath);
   await executeCommandById(page, 'incremental-reading:import-article');
   await finalizeArticleImport(page);
   await expect
@@ -76,7 +76,7 @@ async function importFixture(page: Page) {
           app.plugins.plugins['incremental-reading'].reviewManager;
         return repo.query('SELECT id FROM article WHERE reference = $1', [ref])
           .length;
-      }, PDF_PATH)
+      }, pdfPath)
     )
     .toBe(1);
 }
@@ -166,19 +166,15 @@ test.describe('Reviewing a PDF article', () => {
     await window.keyboard.press('Escape');
     await expect(findBar).toBeHidden();
 
-    // Snippets and cards aren't there yet, and say so, from the buttons and
-    // from their commands alike
+    // Cards aren't there yet, and say so, from the button and from the
+    // command alike
     const notices = await watchNotices(window);
-    await window.getByRole('button', { name: 'Create snippet' }).click();
     await window.getByRole('button', { name: 'Create card' }).click();
-    await executeCommandById(window, 'incremental-reading:extract-selection');
     await executeCommandById(window, 'incremental-reading:create-card');
     await expect
       .poll(notices)
       .toEqual([
-        "Snippets from PDFs aren't supported yet",
         "Cards from PDFs aren't supported yet",
-        "Snippets from PDFs aren't supported yet",
         "Cards from PDFs aren't supported yet",
       ]);
 
@@ -493,5 +489,282 @@ test.describe('Reading position in a PDF article', () => {
 
     await showItem(window, pdfId);
     await expectAt(window, stopped);
+  });
+});
+
+test.describe('Snippets from a PDF article', () => {
+  /** The paragraph page 1 carries over onto page 2, past the running heads. */
+  const CARRIED_OVER =
+    'A paragraph that begins near the foot of one page is common in papers ' +
+    'and books alike. Whatever reads the text has to carry the sentence over ' +
+    'the page break, past the footer of this page and the header of the ' +
+    'next, without mistaking either of them for part of the paragraph ' +
+    'itself. It ends here, on the second page,';
+  const FIRST_LINE =
+    'Incremental reading turns a long text into a series of short reviews.';
+
+  const confirmButton = (page: Page) =>
+    page.locator('#confirm-selection-button');
+  const textItem = (page: Page, n: number, idx: number) =>
+    pdfPage(page, n).locator(`.textLayer [data-idx="${idx}"]`);
+
+  /** Every snippet row, with its note's body. */
+  const snippets = (page: Page) =>
+    page.evaluate(async () => {
+      const { app } = window as unknown as {
+        app: PageApp & {
+          vault: {
+            getFileByPath(path: string): unknown;
+            cachedRead(file: unknown): Promise<string>;
+          };
+          metadataCache: {
+            getFileCache(file: unknown): {
+              frontmatter?: Record<string, unknown>;
+            } | null;
+          };
+        };
+      };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      const rows = repo.query(
+        'SELECT reference, parent, start_offset, end_offset FROM snippet'
+      );
+      return Promise.all(
+        rows.map(async (row) => {
+          const file = app.vault.getFileByPath(row.reference as string);
+          const note = file ? await app.vault.cachedRead(file) : null;
+          return {
+            reference: row.reference as string,
+            parent: row.parent as string | null,
+            start_offset: row.start_offset as number | null,
+            end_offset: row.end_offset as number | null,
+            body: note?.replace(/^---\n[\s\S]*?\n---\n/, '').trim(),
+            source: file
+              ? app.metadataCache.getFileCache(file)?.frontmatter?.source
+              : undefined,
+          };
+        })
+      );
+    });
+
+  const articleId = (page: Page) =>
+    page.evaluate((ref) => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      return repo.query('SELECT id FROM article WHERE reference = $1', [ref])[0]
+        .id;
+    }, PDF_PATH);
+
+  /**
+   * Select from `[page, idx, offset]` to another such point in the review
+   * tab's PDF, as a script would: Obsidian snaps only pointer selections.
+   */
+  const selectText = (
+    page: Page,
+    from: [number, number, number],
+    to: [number, number, number]
+  ) =>
+    page.evaluate(
+      ([from, to]) => {
+        const point = ([n, idx, offset]: number[]) => {
+          const span = document.querySelector(
+            `.ir-pdf-article .page[data-page-number="${n}"] [data-idx="${idx}"]`
+          );
+          if (!span?.firstChild) throw new Error(`No item ${n}/${idx}`);
+          return [span.firstChild, offset] as const;
+        };
+        const range = document.createRange();
+        range.setStart(...point(from));
+        range.setEnd(...point(to));
+        const selection = document.getSelection()!;
+        selection.removeAllRanges();
+        selection.addRange(range);
+      },
+      [from, to]
+    );
+
+  /** Whether the review tab's selection change has reached the viewer yet. */
+  const viewerSelection = (page: Page) =>
+    page.evaluate((viewType) => {
+      const { app } = window as unknown as { app: PageApp };
+      const { view } = app.workspace.getLeavesOfType(viewType)[0];
+      const viewer = view.pdfViewer as unknown as {
+        selection(): Range | null;
+      } | null;
+      return viewer?.selection()?.toString() ?? null;
+    }, REVIEW_VIEW_TYPE);
+
+  test('extracts a paragraph carried over a page break as it reads, linked to where it was, leaving the PDF as it was', async () => {
+    const pdfBytes = await fs.readFile(path.join(vaultPath, PDF_PATH));
+    await importFixture(window);
+    await beginReview(window);
+    // Both pages' text layers on hand: pdf.js renders them as they come near
+    await pdfPage(window, 2).scrollIntoViewIfNeeded();
+    await expect(textItem(window, 2, 3)).toBeAttached();
+    await expect(textItem(window, 1, 9)).toBeAttached();
+    const notices = await watchNotices(window);
+
+    await selectText(window, [1, 9, 0], [2, 3, 30]);
+    await expect.poll(() => viewerSelection(window)).not.toBeNull();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+    const [snippet] = await snippets(window);
+    expect(snippet).toMatchObject({
+      parent: await articleId(window),
+      // page * 1e10 + idx * 1e5 + char
+      start_offset: 1_00009_00000,
+      end_offset: 2_00003_00030,
+      body: CARRIED_OVER,
+    });
+    expect(snippet.body).not.toContain('Journal of Incremental Reading');
+    expect(snippet.body).not.toContain('Page 1 of 3');
+    expect(snippet.source).toBe(
+      '[[PDF fixture.pdf#page=1&selection=9,0,13,11|PDF fixture, page 1]]'
+    );
+    expect(await notices()).toEqual([
+      expect.stringMatching(/^snippet created: /),
+    ]);
+    // Nothing written to the PDF
+    expect(
+      (await fs.readFile(path.join(vaultPath, PDF_PATH))).equals(pdfBytes)
+    ).toBe(true);
+
+    // Its source link opens the PDF on its page, with the selection lit up
+    await window.evaluate(
+      ([source, from]) => {
+        const { app } = window as unknown as {
+          app: {
+            workspace: {
+              openLinkText(
+                link: string,
+                from: string,
+                newLeaf: 'tab'
+              ): Promise<void>;
+            };
+          };
+        };
+        const link = source.slice(2, source.indexOf('|'));
+        return app.workspace.openLinkText(link, from, 'tab');
+      },
+      [snippet.source as string, snippet.reference]
+    );
+    const highlighted = window.locator(
+      '.workspace-leaf.mod-active .pdf-container .textLayer .mod-focused'
+    );
+    await expect(highlighted.first()).toContainText('A paragraph that begins');
+  });
+
+  test('enters selection mode with nothing selected, and extracts what is then selected, though the button press moves the selection away', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 2)).toBeVisible();
+
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await expect(confirmButton(window)).toBeVisible();
+
+    // A drag across the first line, as the user selects
+    const box = (await textItem(window, 1, 2).boundingBox())!;
+    await window.mouse.move(box.x + 1, box.y + box.height / 2);
+    await window.mouse.down();
+    await window.mouse.move(box.x + box.width - 1, box.y + box.height / 2, {
+      steps: 10,
+    });
+    await window.mouse.up();
+    await expect.poll(() => viewerSelection(window)).toContain('Incremental');
+    // As tapping a button does on a phone: the selection lands outside
+    await window.evaluate(() => {
+      const bar = document.querySelector('.ir-action-bar')!;
+      document.getSelection()!.collapse(bar, 0);
+    });
+
+    await confirmButton(window).click();
+
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+    const [snippet] = await snippets(window);
+    expect(FIRST_LINE).toContain(snippet.body);
+    expect(snippet.body!.length).toBeGreaterThan(FIRST_LINE.length - 5);
+    await expect(confirmButton(window)).toHaveCount(0);
+    expect(await viewerSelection(window)).toBeNull();
+  });
+
+  test('extracts from the command as from the button', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 2)).toBeAttached();
+
+    await selectText(window, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    await expect.poll(() => viewerSelection(window)).toBe(FIRST_LINE);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+    expect((await snippets(window))[0].body).toBe(FIRST_LINE);
+  });
+
+  test('forgets the selection once the bare tab around the viewer is clicked', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 2)).toBeAttached();
+    await selectText(window, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    await expect.poll(() => viewerSelection(window)).toBe(FIRST_LINE);
+
+    // A click on the action bar's background, which unselects the text
+    await window.evaluate(() => {
+      // The review tab's: the PDF's own tab, still open, has one too
+      const bar = document.querySelector(
+        '.ir-review-interface .ir-action-bar'
+      )!;
+      bar.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, composed: true })
+      );
+      document.getSelection()!.collapse(bar, 0);
+    });
+    await expect.poll(() => viewerSelection(window)).toBeNull();
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+
+    await expect(confirmButton(window)).toBeVisible();
+    expect(await snippets(window)).toEqual([]);
+  });
+
+  test('extracts from the command picked in the palette by a click', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 2)).toBeAttached();
+
+    await selectText(window, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    await expect.poll(() => viewerSelection(window)).toBe(FIRST_LINE);
+    await executeCommandById(window, 'command-palette:open');
+    const palette = window.locator('.modal-container .prompt');
+    await expect(palette).toBeVisible();
+    await window.keyboard.type('Extract selection to snippet');
+    await palette
+      .locator('.suggestion-item', { hasText: 'Extract selection to snippet' })
+      .first()
+      .click();
+
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+    expect((await snippets(window))[0].body).toBe(FIRST_LINE);
+    await expect(confirmButton(window)).toHaveCount(0);
+  });
+
+  test('says a scanned page has no selectable text, and makes nothing', async () => {
+    await importFixture(window, NO_TEXT_PDF_PATH);
+    await beginReview(window);
+    await expect(pdfPage(window, 1)).toBeVisible();
+    const notices = await watchNotices(window);
+
+    // A drag across the page, which selects nothing: there is no text
+    const box = (await pdfPage(window, 1).boundingBox())!;
+    await window.mouse.move(box.x + 50, box.y + 50);
+    await window.mouse.down();
+    await window.mouse.move(box.x + box.width - 50, box.y + 300, { steps: 10 });
+    await window.mouse.up();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+
+    await expect
+      .poll(notices)
+      .toEqual(['No selectable text', 'No selectable text']);
+    expect(await snippets(window)).toEqual([]);
+    await expect(confirmButton(window)).toHaveCount(0);
   });
 });

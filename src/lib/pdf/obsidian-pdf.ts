@@ -8,6 +8,7 @@
  * missing or have changed shape, callers get `null` or `'unsupported'` and fall
  * back to opening the PDF in Obsidian's own tab.
  */
+import { trackRange } from '#/lib/text-selection';
 import {
   type App,
   Platform,
@@ -15,6 +16,7 @@ import {
   type TFile,
   type View,
 } from 'obsidian';
+import type { PdfDocument } from './pdf-text';
 import type { PdfPosition } from './position';
 
 // #region INTERNAL SHAPES
@@ -142,6 +144,31 @@ function isViewerComponent(value: unknown): value is PdfViewerComponent {
   );
 }
 
+/**
+ * What a press may be meant to act on the selection through: a button, or
+ * anything else that takes input (`clickable-icon` is Obsidian's own class
+ * for an icon button).
+ */
+const CONTROL_SELECTOR =
+  'button, a, input, textarea, select, [role="button"], .clickable-icon, [contenteditable]:not([contenteditable="false"])';
+
+function isPageNumber(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 1;
+}
+
+/**
+ * The pdf.js text layer `node` is in, if any. pdf.js removes a page's layer
+ * whole when it unloads the page, which moves a range end that was in it out
+ * to the page.
+ */
+function textLayerOf(node: Node): Element | null {
+  const el =
+    node.nodeType === Node.ELEMENT_NODE
+      ? (node as Element)
+      : node.parentElement;
+  return el?.closest('.textLayer') ?? null;
+}
+
 function isViewerChild(value: unknown): value is PdfViewerChild {
   return isObject(value) && typeof value.loadFile === 'function';
 }
@@ -214,6 +241,22 @@ export interface PdfViewer {
    * or reaches outside it.
    */
   selectedText(): string;
+  /**
+   * The text-layer selection to extract from: what was last selected in the
+   * viewer, kept when the selection moves out of it (pressing a button, or
+   * picking a command from the palette, does that on some platforms).
+   * Dropped when it collapses inside the viewer, when a press lands in
+   * another tab, and when a text layer it ended in is gone, as pdf.js
+   * unloads pages far from view. `null` when there is none. A copy, so the
+   * caller may do as it likes with it.
+   */
+  selection(): Range | null;
+  /** Forget {@link selection}, and take it off screen if it is still there. */
+  clearSelection(): void;
+  /** The pdf.js document the viewer has open, or `null` before it has one. */
+  pdfDocument(): PdfDocument | null;
+  /** The numbers of the pages on screen, in order: none before there are any. */
+  visiblePages(): number[];
 }
 
 interface PendingOpen {
@@ -231,6 +274,12 @@ class ObsidianPdfViewer implements PdfViewer {
   #unloaded = false;
   /** Set once the component has failed to load: nothing will ever open. */
   #failed = false;
+  /**
+   * See {@link selection}: the range, and the text layers its ends were in
+   * when it was made.
+   */
+  #selection: { range: Range; layers: Element[] } | null = null;
+  #stopTrackingSelection: (() => void) | null = null;
 
   constructor(component: PdfViewerComponent, containerEl: HTMLElement) {
     this.#component = component;
@@ -239,6 +288,7 @@ class ObsidianPdfViewer implements PdfViewer {
   }
 
   load(): void {
+    this.#trackSelection();
     const loading = this.#component.load();
     if (!(loading instanceof Promise)) return;
     loading.catch((error: unknown) => {
@@ -251,6 +301,9 @@ class ObsidianPdfViewer implements PdfViewer {
 
   unload(): void {
     this.#unloaded = true;
+    this.#stopTrackingSelection?.();
+    this.#stopTrackingSelection = null;
+    this.#selection = null;
     this.#stopWatching();
     this.#settlePending('cancelled');
     this.#component.unload();
@@ -286,6 +339,127 @@ class ObsidianPdfViewer implements PdfViewer {
     return this.containerEl.contains(range.commonAncestorContainer)
       ? selection.toString()
       : '';
+  }
+
+  selection(): Range | null {
+    if (!this.#selection) return null;
+    const { range, layers } = this.#selection;
+    if (
+      range.collapsed ||
+      layers.some((layer) => !this.containerEl.contains(layer))
+    ) {
+      return null;
+    }
+    return range.cloneRange();
+  }
+
+  clearSelection(): void {
+    this.#selection = null;
+    const selection = this.containerEl.ownerDocument.getSelection();
+    if (
+      selection &&
+      selection.rangeCount > 0 &&
+      selection.getRangeAt(0).intersectsNode(this.containerEl)
+    ) {
+      selection.removeAllRanges();
+    }
+  }
+
+  pdfDocument(): PdfDocument | null {
+    // Undocumented: `child.pdfViewer.pdfDocument`, the `PDFDocumentProxy`
+    // pdf.js's `PDFViewerApplication` holds once a file is open
+    const child = this.#component.child;
+    const app = isObject(child) ? child.pdfViewer : null;
+    const doc = isObject(app) ? app.pdfDocument : null;
+    return isObject(doc) &&
+      typeof doc.numPages === 'number' &&
+      typeof doc.getPage === 'function'
+      ? (doc as unknown as PdfDocument)
+      : null;
+  }
+
+  visiblePages(): number[] {
+    const child = this.#component.child;
+    const app = isObject(child) ? child.pdfViewer : null;
+    const pdfJs = isObject(app) ? app.pdfViewer : null;
+    if (!isObject(pdfJs)) return [];
+    // Undocumented: pdf.js's `PDFViewer._getVisiblePages()`, whose `ids` is
+    // a Set of the page numbers on screen
+    const getVisible = pdfJs._getVisiblePages;
+    const visible: unknown =
+      typeof getVisible === 'function'
+        ? (getVisible as () => unknown).call(pdfJs)
+        : null;
+    const ids = isObject(visible) ? visible.ids : null;
+    if (ids instanceof Set) {
+      return Array.from(ids as Set<unknown>)
+        .filter(isPageNumber)
+        .sort((a, b) => a - b);
+    }
+    // Undocumented: `PDFViewer.currentPageNumber`, 0 before there are pages
+    const page = pdfJs.currentPageNumber;
+    return isPageNumber(page) ? [page] : [];
+  }
+
+  /**
+   * Follow the selection, for {@link selection}: the browser's own goes
+   * wherever the user's next tap or click puts it. Follows the tab into
+   * another window when it is moved there.
+   */
+  #trackSelection(): void {
+    let stop = this.#trackSelectionIn(this.containerEl.ownerDocument);
+    // Obsidian's own DOM extension, which a test document lacks
+    const stopMigrated =
+      typeof (this.containerEl.onWindowMigrated as unknown) === 'function'
+        ? this.containerEl.onWindowMigrated((win) => {
+            stop();
+            this.#selection = null;
+            stop = this.#trackSelectionIn(win.document);
+          })
+        : null;
+    this.#stopTrackingSelection = () => {
+      stop();
+      stopMigrated?.();
+    };
+  }
+
+  /** {@link #trackSelection} in `doc`; returns what stops it. */
+  #trackSelectionIn(doc: Document): () => void {
+    const onChange = () => {
+      const previous = this.#selection?.range ?? null;
+      const range = trackRange(previous, this.containerEl, doc.getSelection());
+      if (range === previous) return;
+      this.#selection = range && {
+        range,
+        layers: [range.startContainer, range.endContainer]
+          .map(textLayerOf)
+          .filter((layer) => layer !== null),
+      };
+    };
+    // `workspace-leaf` is Obsidian's own class for a tab. A press in another
+    // one is the user moving on, as is one on the bare tab around the viewer
+    // (its header, the action bar's background), which unselects the text on
+    // screen. One on a control, or outside any tab (the command palette, a
+    // menu), may be what extracts the selection.
+    const onPress = (evt: Event) => {
+      const tab = this.containerEl.closest('.workspace-leaf');
+      const target = evt.target as Partial<Element> | null;
+      const pressed = target?.closest?.('.workspace-leaf');
+      if (!tab || !pressed) return;
+      if (
+        pressed !== tab ||
+        (!this.containerEl.contains(target as Node) &&
+          !target?.closest?.(CONTROL_SELECTOR))
+      ) {
+        this.#selection = null;
+      }
+    };
+    doc.addEventListener('selectionchange', onChange);
+    doc.addEventListener('pointerdown', onPress, true);
+    return () => {
+      doc.removeEventListener('selectionchange', onChange);
+      doc.removeEventListener('pointerdown', onPress, true);
+    };
   }
 
   #settlePending(result: PdfOpenResult): void {

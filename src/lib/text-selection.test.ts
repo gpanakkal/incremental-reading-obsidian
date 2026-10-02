@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   rangeOffsetsWithin,
   type TextBounds,
+  trackRange,
   trackSelection,
 } from './text-selection';
 
@@ -84,6 +85,29 @@ const previousArb = fc.option(
     .tuple(fc.nat(100), fc.nat(100))
     .filter(([a, b]) => a !== b)
     .map(([a, b]) => [Math.min(a, b), Math.max(a, b)] as TextBounds)
+);
+
+/** The four boundary values of `range`, for comparing two ranges. */
+function boundsOf(range: Range | null) {
+  return (
+    range && [
+      range.startContainer,
+      range.startOffset,
+      range.endContainer,
+      range.endOffset,
+    ]
+  );
+}
+
+/** A previous tracked range: none, or one in a tree of its own. */
+const previousRangeArb = fc.option(
+  fc.string({ minLength: 1, maxLength: 8 }).map((text) => {
+    const el = document.createElement('p');
+    el.textContent = text;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    return range;
+  })
 );
 
 // #endregion
@@ -250,6 +274,123 @@ describe('trackSelection', () => {
           previous
         );
         expect(trackSelection(previous, container, null)).toBe(previous);
+        document.body.innerHTML = '';
+      })
+    );
+  });
+});
+
+describe('trackRange', () => {
+  it('takes a copy of a selection made in the text', () => {
+    fc.assert(
+      fc.property(
+        textWithBoundsArb.filter(({ bounds }) => bounds[0] !== bounds[1]),
+        previousRangeArb,
+        ({ chunks, bounds }, previous) => {
+          const { container } = makeContainer(chunks);
+          const range = rangeBetween(
+            pointAt(container, bounds[0]),
+            pointAt(container, bounds[1])
+          );
+          const taken = boundsOf(range);
+
+          const tracked = trackRange(previous, container, selectionOf(range));
+          // The selection's own range moves on as the user selects again
+          range.collapse(true);
+
+          expect(tracked).not.toBe(range);
+          expect(boundsOf(tracked)).toEqual(taken);
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('takes a selection reaching into the text from either side, uncut', () => {
+    fc.assert(
+      fc.property(
+        textWithBoundsArb,
+        fc.constantFrom('before', 'after', 'both'),
+        fc.nat(6),
+        fc.nat(5),
+        previousRangeArb,
+        ({ chunks, bounds }, side, beforeOffset, afterOffset, previous) => {
+          const { container, before, after } = makeContainer(chunks);
+          const outsideStart: [Node, number] = [
+            before.firstChild!,
+            beforeOffset,
+          ];
+          const outsideEnd: [Node, number] = [after.firstChild!, afterOffset];
+          const range = rangeBetween(
+            side === 'after' ? pointAt(container, bounds[0]) : outsideStart,
+            side === 'before' ? pointAt(container, bounds[1]) : outsideEnd
+          );
+
+          expect(
+            boundsOf(trackRange(previous, container, selectionOf(range)))
+          ).toEqual(boundsOf(range));
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('clears the selection when it collapses inside the text', () => {
+    fc.assert(
+      fc.property(
+        textWithBoundsArb,
+        previousRangeArb,
+        ({ chunks, bounds }, previous) => {
+          const { container } = makeContainer(chunks);
+          const point = pointAt(container, bounds[0]);
+
+          expect(
+            trackRange(
+              previous,
+              container,
+              selectionOf(rangeBetween(point, point))
+            )
+          ).toBeNull();
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('keeps the last selection when the selection moves out of the text', () => {
+    fc.assert(
+      fc.property(
+        previousRangeArb,
+        fc.constantFrom('before', 'after', 'detached'),
+        fc.boolean(),
+        (previous, side, collapsed) => {
+          const { container, before, after } = makeContainer(['text']);
+          const detached = document.createElement('p');
+          detached.textContent = 'elsewhere';
+          const el = { before, after, detached }[side];
+          const range = rangeBetween(
+            [el.firstChild!, 1],
+            [el.firstChild!, collapsed ? 1 : 3]
+          );
+
+          expect(trackRange(previous, container, selectionOf(range))).toBe(
+            previous
+          );
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('keeps the last selection when there is no selection at all', () => {
+    fc.assert(
+      fc.property(previousRangeArb, (previous) => {
+        const { container } = makeContainer(['text']);
+
+        expect(trackRange(previous, container, selectionOf(null))).toBe(
+          previous
+        );
+        expect(trackRange(previous, container, null)).toBe(previous);
         document.body.innerHTML = '';
       })
     );
