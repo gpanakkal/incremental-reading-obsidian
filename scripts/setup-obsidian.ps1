@@ -185,10 +185,6 @@ else {
 # ------------------------------------------------------------------------------
 Write-Host "Unpacking Obsidian to $unpackedPath" -ForegroundColor Yellow
 
-if (Test-Path $unpackedPath) {
-    Remove-Item -Path $unpackedPath -Recurse -Force
-}
-
 # Find asar files - Windows uses resources/ folder
 $asarPath = $null
 $obsidianAsarPath = $null
@@ -230,15 +226,88 @@ if (-not (Test-Path $obsidianAsarPath)) {
 Write-Host "  Found app.asar: $asarPath" -ForegroundColor Gray
 Write-Host "  Found obsidian.asar: $obsidianAsarPath" -ForegroundColor Gray
 
-# Extract using @electron/asar
-& npx --yes "@electron/asar" extract $asarPath $unpackedPath
+# Build the new copy in a temp sibling folder and swap it in only once it is complete,
+# so a failed or interrupted run (locked file, npx failure, Ctrl+C) leaves the existing
+# copy untouched instead of empty.
+$swapSuffix = Get-Random
+$stagingPath = $unpackedPath + ".tmp-" + $swapSuffix
+$oldPath = $unpackedPath + ".old-" + $swapSuffix
+$unpackedName = Split-Path -Leaf $unpackedPath
+$swapped = $false
+$keepStaging = $false
+$failure = $null
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Failed to extract app.asar"
+try {
+    # Extract using @electron/asar
+    & npx --yes "@electron/asar" extract $asarPath $stagingPath
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to extract app.asar"
+    }
+
+    Copy-Item -Path $obsidianAsarPath -Destination (Join-Path $stagingPath "obsidian.asar")
+
+    foreach ($required in @("main.js", "package.json", "obsidian.asar")) {
+        if (-not (Test-Path (Join-Path $stagingPath $required))) {
+            throw "Unpacked copy is missing $required"
+        }
+    }
+
+    if (Test-Path $unpackedPath) {
+        try {
+            Rename-Item -LiteralPath $unpackedPath -NewName (Split-Path -Leaf $oldPath)
+        }
+        catch {
+            # Usually a running Obsidian or e2e run holding a file open. The old copy is
+            # still in place, so keep the new one for the user to swap in by hand.
+            $keepStaging = $true
+            throw ("Could not move the existing $unpackedPath aside (is Obsidian or an e2e run using it?): $($_.Exception.Message)`n" +
+                "  The new copy was kept at $stagingPath.`n" +
+                "  Close Obsidian, then rerun this script, or delete $unpackedPath and rename $stagingPath to $unpackedName.")
+        }
+    }
+
+    Rename-Item -LiteralPath $stagingPath -NewName $unpackedName
+    $swapped = $true
+}
+catch {
+    $failure = $_
+}
+finally {
+    # Also runs on Ctrl+C, where catch does not
+    if (-not $swapped) {
+        if ((Test-Path $oldPath) -and -not (Test-Path $unpackedPath)) {
+            try {
+                Rename-Item -LiteralPath $oldPath -NewName $unpackedName
+            }
+            catch {
+                Write-Warning "Could not restore the previous copy; rename $oldPath to $unpackedName by hand"
+            }
+        }
+        if (-not $keepStaging -and (Test-Path $stagingPath)) {
+            Remove-Item -LiteralPath $stagingPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+if ($failure) {
+    if ($keepStaging -or (Test-Path $oldPath)) {
+        Write-Error "$($failure.Exception.Message)"
+    }
+    else {
+        Write-Error "$($failure.Exception.Message)`n  $unpackedPath was left unchanged."
+    }
     exit 1
 }
 
-Copy-Item -Path $obsidianAsarPath -Destination (Join-Path $unpackedPath "obsidian.asar")
+if (Test-Path $oldPath) {
+    try {
+        Remove-Item -LiteralPath $oldPath -Recurse -Force
+    }
+    catch {
+        Write-Warning "Could not delete the previous copy at ${oldPath}: $($_.Exception.Message)`n  Delete it once Obsidian is closed."
+    }
+}
 
 Write-Host "Obsidian unpacked" -ForegroundColor Green
 
