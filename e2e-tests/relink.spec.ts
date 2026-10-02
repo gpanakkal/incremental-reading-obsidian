@@ -209,12 +209,16 @@ test('relinks a missing PDF article from the queue row menu', async () => {
     .locator('.menu')
     .getByText('Relink file…', { exact: true })
     .click();
-  // Only PDFs, and none another item has
+  // Only PDFs, and none another item has. The test vault ships PDF fixtures
+  // of its own, which are untracked and so offered too: check what this test
+  // put there rather than the whole list.
   await expect(picker()).toBeVisible();
-  expect((await offered()).sort()).toEqual([
-    'papers/Found.pdf',
-    'papers/Other.pdf',
-  ]);
+  const paths = await offered();
+  expect(paths).toEqual(
+    expect.arrayContaining(['papers/Found.pdf', 'papers/Other.pdf'])
+  );
+  expect(paths).not.toContain('papers/Taken.pdf');
+  expect(paths.every((p) => p.endsWith('.pdf'))).toBe(true);
   await pick('papers/Found.pdf');
 
   await expect
