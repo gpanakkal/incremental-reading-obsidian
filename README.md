@@ -117,7 +117,7 @@ This is especially handy for:
 
 - Creating snippets and cards on partial code blocks, blockquotes, LaTeX, and other types of special formatting can break the formatting. It is recommended to include the entire formatted section (such as the entire code block) when making the snippet or card, and then editing it afterwards as desired.
 ### PDFs
-- You can't make snippets and cards from a PDF opened in a normal tab. 
+- To make snippets and cards from a PDF open in a normal tab, import the PDF as an article, select the text, and run **Extract selection to snippet** or **Create spaced repetition card**. That tab's action bar has no buttons for them, and selection mode is only in review.
 - A snippet that runs onto the next page is highlighted up to the end of its first page. 
 - A scanned PDF has no text to select, so nothing can be made from it.
 

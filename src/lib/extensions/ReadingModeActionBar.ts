@@ -1,5 +1,5 @@
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
-import { isPdfView } from '#/lib/pdf/obsidian-pdf';
+import { isPdfView, pdfTabSelection } from '#/lib/pdf/obsidian-pdf';
 import type { NoteType } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import ReviewView from '#/views/ReviewView';
@@ -31,6 +31,8 @@ interface BarTarget {
   lookUpType: () => Promise<NoteType | null>;
   /** Whether a file of the type looked up earns a bar here. */
   accepts: (type: NoteType | null) => boolean;
+  /** Anything else the leaf needs while it carries a bar. */
+  onMount?: () => void;
 }
 
 /**
@@ -66,6 +68,11 @@ function targetOf(
       className: 'ir-pdf-leaf-bar',
       lookUpType: () => plugin.reviewManager.articles.getItemType(file),
       accepts: (type) => type === 'article',
+      // The snippet and card commands are made of the selection in the PDF:
+      // follow it from now on, before picking a command from the palette can
+      // move it out of the PDF. Asked again, it is the same one; it stops
+      // once the tab closes.
+      onMount: () => void pdfTabSelection(view),
     };
   }
   return null;
@@ -116,7 +123,7 @@ class LeafActionBarController {
     return isPdfFileView(this.leaf.view);
   }
 
-  private mount({ file, container, className }: BarTarget): void {
+  private mount({ file, container, className, onMount }: BarTarget): void {
     if (
       this.barEl &&
       this.mountedFile === file &&
@@ -131,6 +138,7 @@ class LeafActionBarController {
     container.prepend(bar);
     this.barEl = bar;
     this.mountedFile = file;
+    onMount?.();
   }
 
   private unmount(): void {
@@ -150,7 +158,8 @@ class LeafActionBarController {
 
 /**
  * Keeps a standalone action bar on every leaf showing an item outside review:
- * notes in reading mode, and PDFs that are articles.
+ * notes in reading mode, and PDFs that are articles. Also follows the
+ * selection in each PDF article's tab, for the snippet and card commands.
  *
  * @returns a function that re-checks every leaf, for a database swapped in
  * from disk, which replaces the rows without reporting any change to them

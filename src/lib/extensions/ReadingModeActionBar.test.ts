@@ -625,6 +625,35 @@ describe('registerReadingModeActionBar', () => {
       ]);
     });
 
+    it("follows the selection in a PDF article's tab from when its bar goes up, and in no other tab", async () => {
+      // A button press or the command palette can move the browser's
+      // selection out of the PDF before the snippet or card is made of it
+      const tabSelection = vi
+        .spyOn(ObsidianPdf, 'pdfTabSelection')
+        .mockReturnValue(null);
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom('article', 'snippet', 'card', null),
+          async (type) => {
+            tabSelection.mockClear();
+            const pdfLeaf = makePdfLeaf();
+            // A note in reading mode that is an item, which gets a bar too
+            const noteLeaf = makeMarkdownLeaf({});
+            const plugin = makePlugin([pdfLeaf, noteLeaf]);
+            plugin.reviewManager.articles.getItemType.mockResolvedValue(type);
+
+            registerReadingModeActionBar(plugin as never);
+            await flush();
+
+            expect(tabSelection.mock.calls).toEqual(
+              type === 'article' ? [[pdfLeaf.view]] : []
+            );
+            plugin.runCleanup();
+          }
+        )
+      );
+    });
+
     it('looks the file up in the item layer, not by frontmatter', async () => {
       const getNoteType = vi.spyOn(ObsidianHelpers, 'getNoteType');
       const leaf = makePdfLeaf();

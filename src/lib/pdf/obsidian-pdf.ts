@@ -276,6 +276,153 @@ export interface PdfViewer {
   visiblePages(): number[];
 }
 
+/**
+ * What a snippet or card is made of a PDF selection through: the selection,
+ * and the viewer's document to read its text from. Both the review tab's
+ * {@link PdfViewer} and Obsidian's own PDF tab ({@link pdfTabSelection}) have
+ * one.
+ */
+export type PdfSelectionSource = Pick<
+  PdfViewer,
+  | 'containerEl'
+  | 'selection'
+  | 'clearSelection'
+  | 'pdfDocument'
+  | 'visiblePages'
+>;
+
+/**
+ * The pages pdf.js has on screen in the viewer child `child`, in order: see
+ * {@link PdfViewer.visiblePages}.
+ */
+function visiblePagesOf(child: unknown): number[] {
+  const app = isObject(child) ? child.pdfViewer : null;
+  const pdfJs = isObject(app) ? app.pdfViewer : null;
+  if (!isObject(pdfJs)) return [];
+  // Undocumented: pdf.js's `PDFViewer._getVisiblePages()`, whose `ids` is
+  // a Set of the page numbers on screen
+  const getVisible = pdfJs._getVisiblePages;
+  const visible: unknown =
+    typeof getVisible === 'function'
+      ? (getVisible as () => unknown).call(pdfJs)
+      : null;
+  const ids = isObject(visible) ? visible.ids : null;
+  if (ids instanceof Set) {
+    return Array.from(ids as Set<unknown>)
+      .filter(isPageNumber)
+      .sort((a, b) => a - b);
+  }
+  // Undocumented: `PDFViewer.currentPageNumber`, 0 before there are pages
+  const page = pdfJs.currentPageNumber;
+  return isPageNumber(page) ? [page] : [];
+}
+
+/**
+ * Follows the selection in a viewer's container, for
+ * {@link PdfViewer.selection}: the browser's own goes wherever the user's next
+ * tap or click puts it.
+ */
+class SelectionTracker {
+  /** The range, and the text layers its ends were in when it was made. */
+  #selection: { range: Range; layers: Element[] } | null = null;
+  #stopTracking: (() => void) | null = null;
+
+  constructor(readonly containerEl: HTMLElement) {}
+
+  /**
+   * Start following the selection. Follows the tab into another window when
+   * it is moved there.
+   */
+  start(): void {
+    let stop = this.#trackIn(this.containerEl.ownerDocument);
+    // Obsidian's own DOM extension, which a test document lacks
+    const stopMigrated =
+      typeof (this.containerEl.onWindowMigrated as unknown) === 'function'
+        ? this.containerEl.onWindowMigrated((win) => {
+            stop();
+            this.#selection = null;
+            stop = this.#trackIn(win.document);
+          })
+        : null;
+    this.#stopTracking = () => {
+      stop();
+      stopMigrated?.();
+    };
+  }
+
+  /** Stop following the selection, and forget it. */
+  stop(): void {
+    this.#stopTracking?.();
+    this.#stopTracking = null;
+    this.#selection = null;
+  }
+
+  selection(): Range | null {
+    if (!this.#selection) return null;
+    const { range, layers } = this.#selection;
+    if (
+      range.collapsed ||
+      layers.some((layer) => !this.containerEl.contains(layer))
+    ) {
+      return null;
+    }
+    return range.cloneRange();
+  }
+
+  clear(): void {
+    this.#selection = null;
+    const selection = this.containerEl.ownerDocument.getSelection();
+    if (
+      selection &&
+      selection.rangeCount > 0 &&
+      selection.getRangeAt(0).intersectsNode(this.containerEl)
+    ) {
+      selection.removeAllRanges();
+    }
+  }
+
+  /** {@link start} in `doc`; returns what stops it. */
+  #trackIn(doc: Document): () => void {
+    const onChange = () => {
+      const previous = this.#selection?.range ?? null;
+      const range = trackRange(previous, this.containerEl, doc.getSelection());
+      if (range === previous) return;
+      this.#selection = range && {
+        range,
+        layers: [range.startContainer, range.endContainer]
+          .map(textLayerOf)
+          .filter((layer) => layer !== null),
+      };
+    };
+    // `workspace-leaf` is Obsidian's own class for a tab. A press in another
+    // one is the user moving on, as is one on the bare tab around the viewer
+    // (its header, the action bar's background), which unselects the text on
+    // screen. One on a control, or outside any tab (the command palette, a
+    // menu), may be what extracts the selection.
+    const onPress = (evt: Event) => {
+      const tab = this.containerEl.closest('.workspace-leaf');
+      const target = evt.target as Partial<Element> | null;
+      const pressed = target?.closest?.('.workspace-leaf');
+      if (!tab || !pressed) return;
+      if (
+        pressed !== tab ||
+        (!this.containerEl.contains(target as Node) &&
+          !target?.closest?.(CONTROL_SELECTOR))
+      ) {
+        this.#selection = null;
+      }
+    };
+    doc.addEventListener('selectionchange', onChange);
+    doc.addEventListener('pointerdown', onPress, true);
+    // From what is selected already, as when the plugin loads over a tab
+    onChange();
+    return () => {
+      doc.removeEventListener('selectionchange', onChange);
+      doc.removeEventListener('pointerdown', onPress, true);
+    };
+  }
+}
+
 interface PendingOpen {
   file: TFile;
   subpath: string | undefined;
@@ -291,21 +438,17 @@ class ObsidianPdfViewer implements PdfViewer {
   #unloaded = false;
   /** Set once the component has failed to load: nothing will ever open. */
   #failed = false;
-  /**
-   * See {@link selection}: the range, and the text layers its ends were in
-   * when it was made.
-   */
-  #selection: { range: Range; layers: Element[] } | null = null;
-  #stopTrackingSelection: (() => void) | null = null;
+  #selection: SelectionTracker;
 
   constructor(component: PdfViewerComponent, containerEl: HTMLElement) {
     this.#component = component;
     this.containerEl = containerEl;
     this.scope = component.scope;
+    this.#selection = new SelectionTracker(containerEl);
   }
 
   load(): void {
-    this.#trackSelection();
+    this.#selection.start();
     const loading = this.#component.load();
     if (!(loading instanceof Promise)) return;
     loading.catch((error: unknown) => {
@@ -318,9 +461,7 @@ class ObsidianPdfViewer implements PdfViewer {
 
   unload(): void {
     this.#unloaded = true;
-    this.#stopTrackingSelection?.();
-    this.#stopTrackingSelection = null;
-    this.#selection = null;
+    this.#selection.stop();
     this.#stopWatching();
     this.#settlePending('cancelled');
     this.#component.unload();
@@ -359,27 +500,11 @@ class ObsidianPdfViewer implements PdfViewer {
   }
 
   selection(): Range | null {
-    if (!this.#selection) return null;
-    const { range, layers } = this.#selection;
-    if (
-      range.collapsed ||
-      layers.some((layer) => !this.containerEl.contains(layer))
-    ) {
-      return null;
-    }
-    return range.cloneRange();
+    return this.#selection.selection();
   }
 
   clearSelection(): void {
-    this.#selection = null;
-    const selection = this.containerEl.ownerDocument.getSelection();
-    if (
-      selection &&
-      selection.rangeCount > 0 &&
-      selection.getRangeAt(0).intersectsNode(this.containerEl)
-    ) {
-      selection.removeAllRanges();
-    }
+    this.#selection.clear();
   }
 
   pdfDocument(): PdfDocument | null {
@@ -387,87 +512,7 @@ class ObsidianPdfViewer implements PdfViewer {
   }
 
   visiblePages(): number[] {
-    const child = this.#component.child;
-    const app = isObject(child) ? child.pdfViewer : null;
-    const pdfJs = isObject(app) ? app.pdfViewer : null;
-    if (!isObject(pdfJs)) return [];
-    // Undocumented: pdf.js's `PDFViewer._getVisiblePages()`, whose `ids` is
-    // a Set of the page numbers on screen
-    const getVisible = pdfJs._getVisiblePages;
-    const visible: unknown =
-      typeof getVisible === 'function'
-        ? (getVisible as () => unknown).call(pdfJs)
-        : null;
-    const ids = isObject(visible) ? visible.ids : null;
-    if (ids instanceof Set) {
-      return Array.from(ids as Set<unknown>)
-        .filter(isPageNumber)
-        .sort((a, b) => a - b);
-    }
-    // Undocumented: `PDFViewer.currentPageNumber`, 0 before there are pages
-    const page = pdfJs.currentPageNumber;
-    return isPageNumber(page) ? [page] : [];
-  }
-
-  /**
-   * Follow the selection, for {@link selection}: the browser's own goes
-   * wherever the user's next tap or click puts it. Follows the tab into
-   * another window when it is moved there.
-   */
-  #trackSelection(): void {
-    let stop = this.#trackSelectionIn(this.containerEl.ownerDocument);
-    // Obsidian's own DOM extension, which a test document lacks
-    const stopMigrated =
-      typeof (this.containerEl.onWindowMigrated as unknown) === 'function'
-        ? this.containerEl.onWindowMigrated((win) => {
-            stop();
-            this.#selection = null;
-            stop = this.#trackSelectionIn(win.document);
-          })
-        : null;
-    this.#stopTrackingSelection = () => {
-      stop();
-      stopMigrated?.();
-    };
-  }
-
-  /** {@link #trackSelection} in `doc`; returns what stops it. */
-  #trackSelectionIn(doc: Document): () => void {
-    const onChange = () => {
-      const previous = this.#selection?.range ?? null;
-      const range = trackRange(previous, this.containerEl, doc.getSelection());
-      if (range === previous) return;
-      this.#selection = range && {
-        range,
-        layers: [range.startContainer, range.endContainer]
-          .map(textLayerOf)
-          .filter((layer) => layer !== null),
-      };
-    };
-    // `workspace-leaf` is Obsidian's own class for a tab. A press in another
-    // one is the user moving on, as is one on the bare tab around the viewer
-    // (its header, the action bar's background), which unselects the text on
-    // screen. One on a control, or outside any tab (the command palette, a
-    // menu), may be what extracts the selection.
-    const onPress = (evt: Event) => {
-      const tab = this.containerEl.closest('.workspace-leaf');
-      const target = evt.target as Partial<Element> | null;
-      const pressed = target?.closest?.('.workspace-leaf');
-      if (!tab || !pressed) return;
-      if (
-        pressed !== tab ||
-        (!this.containerEl.contains(target as Node) &&
-          !target?.closest?.(CONTROL_SELECTOR))
-      ) {
-        this.#selection = null;
-      }
-    };
-    doc.addEventListener('selectionchange', onChange);
-    doc.addEventListener('pointerdown', onPress, true);
-    return () => {
-      doc.removeEventListener('selectionchange', onChange);
-      doc.removeEventListener('pointerdown', onPress, true);
-    };
+    return visiblePagesOf(this.#component.child);
   }
 
   #settlePending(result: PdfOpenResult): void {
@@ -880,6 +925,71 @@ export function highlightPdfSelection(
       );
     }
   });
+}
+
+/** The selection source of each PDF tab asked for one, until it closes. */
+const tabSelections = new WeakMap<View, PdfSelectionSource>();
+
+/**
+ * What stops each tab's source following its selection, for
+ * {@link stopPdfTabSelections}: a closing tab stops its own.
+ */
+const tabTrackerStops = new Set<() => void>();
+
+/**
+ * The selection in Obsidian's PDF tab `view`, for making snippets and cards
+ * there as review does in its own viewer; `null` when `view` isn't a PDF tab
+ * this adapter knows.
+ *
+ * It follows the selection from the first time it is asked for until the tab
+ * closes, and is the same source each time: ask early, before the user can
+ * press anything that moves the browser's selection out of the PDF.
+ *
+ * Read in the tab's `contentEl`, which the tab's viewer renders into
+ * (`PdfView` builds its `PdfViewerComponent` over it), as review's is read in
+ * the container it builds its own over. Undocumented: `PdfView.viewer`, for
+ * the document and the pages on screen.
+ */
+export function pdfTabSelection(
+  view: View | null | undefined
+): PdfSelectionSource | null {
+  const component = tabComponent(view);
+  if (!view || !component) return null;
+  const known = tabSelections.get(view);
+  if (known) return known;
+  const { contentEl } = view as Partial<{ contentEl: unknown }>;
+  if (!isObject(contentEl) || contentEl.nodeType !== Node.ELEMENT_NODE) {
+    return null;
+  }
+  const tracker = new SelectionTracker(contentEl as unknown as HTMLElement);
+  tracker.start();
+  const source: PdfSelectionSource = {
+    containerEl: tracker.containerEl,
+    selection: () => tracker.selection(),
+    clearSelection: () => tracker.clear(),
+    pdfDocument: () => documentOf(component.child),
+    visiblePages: () => visiblePagesOf(component.child),
+  };
+  tabSelections.set(view, source);
+  const stop = () => {
+    tracker.stop();
+    tabSelections.delete(view);
+    tabTrackerStops.delete(stop);
+  };
+  tabTrackerStops.add(stop);
+  // Runs when the tab closes
+  if (typeof view.register === 'function') view.register(stop);
+  return source;
+}
+
+/**
+ * Stop every PDF tab's source following its selection, as the plugin
+ * unloads: the tabs outlive it, and a source left following would run its
+ * listeners on every selection change until its tab closed. Asked for again,
+ * a tab gets a new one.
+ */
+export function stopPdfTabSelections(): void {
+  for (const stop of [...tabTrackerStops]) stop();
 }
 
 // #endregion
