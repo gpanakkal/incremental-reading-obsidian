@@ -12,6 +12,7 @@ import {
   finalizeArticleImport,
   openFileInActiveLeaf,
   REVIEW_VIEW_TYPE,
+  setNativeMenus,
   watchNotices,
 } from './helpers';
 import {
@@ -766,5 +767,139 @@ test.describe('Snippets from a PDF article', () => {
       .toEqual(['No selectable text', 'No selectable text']);
     expect(await snippets(window)).toEqual([]);
     await expect(confirmButton(window)).toHaveCount(0);
+  });
+
+  /**
+   * Open the snippet's note in a tab of its own, and pick Go to context from
+   * that tab's ⋮ menu.
+   */
+  async function goToContextFrom(page: Page, snippetPath: string) {
+    await page.evaluate((path) => {
+      const { app } = window as unknown as { app: PageApp };
+      return app.workspace
+        .getLeaf('tab')
+        .openFile(app.vault.getFileByPath(path));
+    }, snippetPath);
+    await setNativeMenus(page, false);
+    await page
+      .locator('.workspace-leaf.mod-active .view-header')
+      .getByLabel('More options')
+      .click();
+    await page
+      .locator('.menu')
+      .getByText('Go to context', { exact: true })
+      .click();
+  }
+
+  /**
+   * Count, from now on, every read of the file at `path` through the vault:
+   * as text, or whole as bytes. The PDF tab loads it by its resource URL.
+   */
+  const watchVaultReads = (page: Page, filePath: string) =>
+    page.evaluate((filePath) => {
+      const { app } = window as unknown as {
+        app: {
+          vault: Record<string, unknown> & { adapter: Record<string, unknown> };
+        };
+      };
+      const diag = { reads: [] as string[] };
+      (window as unknown as { __vaultReads: typeof diag }).__vaultReads = diag;
+      const wrap = (target: Record<string, unknown>, name: string) => {
+        const original = target[name] as (...args: unknown[]) => unknown;
+        target[name] = function (this: unknown, ...args: unknown[]) {
+          const arg = args[0] as { path?: string } | string;
+          const path = typeof arg === 'string' ? arg : arg?.path;
+          if (path === filePath) diag.reads.push(name);
+          return original.apply(this, args) as unknown;
+        };
+      };
+      for (const name of ['read', 'cachedRead', 'readBinary']) {
+        wrap(app.vault, name);
+        wrap(app.vault.adapter, name);
+      }
+    }, filePath);
+
+  const vaultReads = (page: Page) =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __vaultReads: { reads: string[] } })
+          .__vaultReads.reads
+    );
+
+  /** The PDF tab Go to context opened, and its highlighted text. */
+  const contextTab = (page: Page) =>
+    page.locator('.workspace-leaf.mod-active .pdf-container');
+  const highlighted = (page: Page) =>
+    contextTab(page).locator('.textLayer .mod-focused');
+
+  test('goes to the context of a snippet carried over a page break: its PDF, lit up from where it starts to the foot of its first page, read nowhere', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await pdfPage(window, 2).scrollIntoViewIfNeeded();
+    await expect(textItem(window, 2, 3)).toBeAttached();
+    await expect(textItem(window, 1, 9)).toBeAttached();
+    await selectText(window, [1, 9, 0], [2, 3, 30]);
+    await expect.poll(() => viewerSelection(window)).not.toBeNull();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+    const [snippet] = await snippets(window);
+    await watchVaultReads(window, PDF_PATH);
+
+    await goToContextFrom(window, snippet.reference);
+
+    await expect(highlighted(window).first()).toContainText(
+      'A paragraph that begins'
+    );
+    await expect(highlighted(window).first()).toBeInViewport();
+    // To the end of the text on page 1, item 13, and no further
+    const page1 = contextTab(window).locator('.page[data-page-number="1"]');
+    await expect(
+      page1.locator('[data-idx="13"] .mod-focused, [data-idx="13"].mod-focused')
+    ).not.toHaveCount(0);
+    await expect(
+      contextTab(window).locator(
+        '.page[data-page-number="2"] .textLayer .mod-focused'
+      )
+    ).toHaveCount(0);
+    expect(
+      await window.evaluate(() => {
+        const { app } = window as unknown as {
+          app: {
+            workspace: {
+              activeLeaf: {
+                view: { getViewType(): string; file: { path: string } };
+              };
+            };
+          };
+        };
+        const { view } = app.workspace.activeLeaf;
+        return [view.getViewType(), view.file.path];
+      })
+    ).toEqual(['pdf', PDF_PATH]);
+    expect(await vaultReads(window)).toEqual([]);
+  });
+
+  test('goes to the context of a snippet on a later page: the PDF on that page, with the snippet lit up', async () => {
+    const SECOND_PAGE_TEXT = 'ends here, on the second page,';
+    await importFixture(window);
+    await beginReview(window);
+    await pdfPage(window, 2).scrollIntoViewIfNeeded();
+    await expect(textItem(window, 2, 3)).toBeAttached();
+    await selectText(window, [2, 3, 0], [2, 3, SECOND_PAGE_TEXT.length]);
+    await expect.poll(() => viewerSelection(window)).not.toBeNull();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+    const [snippet] = await snippets(window);
+    await watchVaultReads(window, PDF_PATH);
+
+    await goToContextFrom(window, snippet.reference);
+
+    const lit = contextTab(window).locator(
+      '.page[data-page-number="2"] .textLayer .mod-focused'
+    );
+    await expect(lit).toHaveCount(1);
+    await expect(lit).toHaveText(SECOND_PAGE_TEXT);
+    await expect(lit).toBeInViewport();
+    expect(await vaultReads(window)).toEqual([]);
   });
 });

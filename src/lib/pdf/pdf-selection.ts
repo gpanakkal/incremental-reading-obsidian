@@ -19,14 +19,75 @@ export interface PdfSelection {
 }
 
 /**
- * The subpath of a link to the text from the anchor `start` to the anchor
- * `end` (exclusive), as Obsidian's own "Copy link to selection" writes it:
- * `#page=N&selection=a,b,c,d`, the begin item's `data-idx` and offset, then
- * the end's. Obsidian highlights a selection on one page only, so one that
- * runs onto a later page is cut off at the end of the text on its first.
+ * Text on one page of a PDF, as Obsidian highlights it: from item
+ * `range[0][0]`'s character `range[0][1]` to item `range[1][0]`'s character
+ * `range[1][1]` (exclusive), counted in `data-idx` and UTF-16 units.
+ */
+export interface PageSelection {
+  page: number;
+  range: [[number, number], [number, number]];
+}
+
+/**
+ * The part of the text from the anchor `start` to the anchor `end`
+ * (exclusive) that Obsidian can highlight: Obsidian highlights a selection on
+ * one page only, so one that runs onto a later page is cut off at the end of
+ * the text on its first.
+ *
+ * @param startPage the text content of `start`'s page. Only text that runs
+ *   onto a later page needs it; when given, the selection is checked against
+ *   it.
+ * @returns null for text that runs onto a later page when `startPage` isn't
+ *   given, or holds no text, and whenever `startPage` is given but doesn't
+ *   hold the selection's ends, as when the PDF has changed since they were
+ *   taken. Obsidian's highlighting throws on an item a page doesn't have.
+ */
+export function pageSelection(
+  start: number,
+  end: number,
+  startPage?: PdfPageText
+): PageSelection | null {
+  const from = decodeAnchor(start);
+  let to = decodeAnchor(end);
+  const items = startPage?.items ?? [];
+  if (to.page !== from.page) {
+    // Empty items are never on the page, so they can't end a highlight
+    let idx = items.length - 1;
+    while (idx >= 0 && items[idx].str === '') idx--;
+    if (idx < 0) return null;
+    to = { page: from.page, idx, char: items[idx].str.length };
+  }
+  const holds = ({ idx, char }: { idx: number; char: number }) =>
+    idx < items.length && char <= items[idx].str.length;
+  if (startPage && !(holds(from) && holds(to))) return null;
+  return {
+    page: from.page,
+    range: [
+      [from.idx, from.char],
+      [to.idx, to.char],
+    ],
+  };
+}
+
+/**
+ * The subpath of a link to `selection`, as Obsidian's own "Copy link to
+ * selection" writes it: `#page=N&selection=a,b,c,d`, the begin item's
+ * `data-idx` and offset, then the end's.
  *
  * Undocumented: the grammar `PdfViewerChild.applySubpath` parses, read from
  * the app bundle (anchor `getTextSelectionRangeStr`).
+ */
+export function pageSelectionSubpath({
+  page,
+  range: [[beginIdx, beginChar], [endIdx, endChar]],
+}: PageSelection): string {
+  return `#page=${page}&selection=${beginIdx},${beginChar},${endIdx},${endChar}`;
+}
+
+/**
+ * The subpath of a link to the text from the anchor `start` to the anchor
+ * `end` (exclusive): see {@link pageSelection} and
+ * {@link pageSelectionSubpath}.
  *
  * @param startPage the text content of `start`'s page, which holds text
  *   from `start` on.
@@ -36,16 +97,9 @@ export function selectionSubpath(
   end: number,
   startPage: PdfPageText
 ): string {
-  const from = decodeAnchor(start);
-  let to = decodeAnchor(end);
-  if (to.page !== from.page) {
-    // Empty items are never on the page, so they can't end a highlight
-    const { items } = startPage;
-    let idx = items.length - 1;
-    while (items[idx].str === '') idx--;
-    to = { page: from.page, idx, char: items[idx].str.length };
-  }
-  return `#page=${from.page}&selection=${from.idx},${from.char},${to.idx},${to.char}`;
+  return pageSelectionSubpath(
+    (pageSelection(start, end) ?? pageSelection(start, end, startPage))!
+  );
 }
 
 /**

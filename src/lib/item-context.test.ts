@@ -4,9 +4,18 @@ import {
   findContextFile,
   highlightRange,
   resolveItemContext,
+  revealPdfContext,
 } from '#/lib/item-context';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
+import * as obsidianPdf from '#/lib/pdf/obsidian-pdf';
+import {
+  decodeAnchor,
+  encodeAnchor,
+  MAX_ANCHOR_PAGE,
+} from '#/lib/pdf/pdf-anchor';
+import type { PdfPageText } from '#/lib/pdf/pdf-text';
+import * as pdfText from '#/lib/pdf/pdf-text';
 import type {
   ReviewArticle,
   ReviewCard,
@@ -14,7 +23,13 @@ import type {
   ReviewSnippet,
 } from '#/lib/types';
 import fc from 'fast-check';
-import type { App, CachedMetadata, ReferenceCache, TFile } from 'obsidian';
+import type {
+  App,
+  CachedMetadata,
+  ReferenceCache,
+  TFile,
+  View,
+} from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // #region HELPERS
@@ -209,6 +224,125 @@ const binaryExtensionArb = fc.oneof(
   fc.mixedCase(fc.constant('pdf')),
   fc.string().filter((ext) => ext.toLowerCase() !== 'md')
 );
+
+/** A PDF in the vault, its extension in any case. */
+const pdfFileArb = fc.mixedCase(fc.constant('pdf')).map(
+  (extension) =>
+    ({
+      ...makeTFile(`papers/Paper.${extension}`),
+      extension,
+    }) as TFile
+);
+
+const anchorPartsArb = fc.record({
+  page: fc.integer({ min: 1, max: MAX_ANCHOR_PAGE }),
+  idx: fc.nat(99_999),
+  char: fc.nat(99_999),
+});
+
+/** A passage of a PDF, as tight anchors a snippet's offsets hold: start < end. */
+const pdfRangeArb = fc
+  .tuple(anchorPartsArb, anchorPartsArb)
+  .map(([a, b]) => [encodeAnchor(a), encodeAnchor(b)].sort((x, y) => x - y))
+  .filter(([start, end]) => start < end)
+  .map(([start, end]) => ({ start, end }));
+
+/** A passage of a PDF that stays on one page. */
+const samePageRangeArb = fc
+  .tuple(anchorPartsArb, fc.nat(99_999), fc.nat(99_999))
+  .map(([from, idx, char]) => {
+    const anchors = [
+      encodeAnchor(from),
+      encodeAnchor({ page: from.page, idx, char }),
+    ].sort((x, y) => x - y);
+    return { start: anchors[0], end: anchors[1] };
+  })
+  .filter(({ start, end }) => start < end);
+
+/** A passage that runs onto a later page. */
+const crossPageRangeArb = pdfRangeArb.filter(
+  ({ start, end }) => decodeAnchor(start).page < decodeAnchor(end).page
+);
+
+/** Snippet offsets that name no passage of a PDF. */
+const notPdfRangeArb = fc.oneof(
+  fc.record({
+    start: fc.option(fc.integer(), { nil: null }),
+    end: fc.constant(null),
+  }),
+  fc.record({
+    start: fc.constant(null),
+    end: fc.option(fc.integer(), { nil: null }),
+  }),
+  // Not anchors at all: below the first, or past the last
+  fc.record({
+    start: fc.integer({ max: encodeAnchor({ page: 1, idx: 0, char: 0 }) - 1 }),
+    end: pdfRangeArb.map(({ end }) => end),
+  }),
+  fc.record({
+    start: pdfRangeArb.map(({ start }) => start),
+    end: fc.oneof(
+      fc.double({ noNaN: false }).filter((n) => !Number.isSafeInteger(n)),
+      fc.constant(Number.MAX_SAFE_INTEGER)
+    ),
+  }),
+  // Backwards or empty
+  pdfRangeArb.chain(({ start, end }) =>
+    fc.constantFrom({ start: end, end: start }, { start, end: start })
+  )
+);
+
+/** The text content of a page whose items hold `strs`. */
+function pageText(strs: string[]): PdfPageText {
+  return {
+    items: strs.map((str) => ({
+      str,
+      hasEOL: false,
+      transform: [10, 0, 0, 10, 72, 700],
+      width: 0,
+      height: 10,
+    })),
+    view: [0, 0, 612, 792],
+  };
+}
+
+/** A PDF tab showing `file`, which a test may move on to another. */
+const makeTab = (file: unknown = { path: 'papers/Paper.pdf' }) =>
+  ({ getViewType: () => 'pdf', file }) as unknown as View & {
+    file: unknown;
+  };
+
+/**
+ * A passage that runs onto a later page, and the text of its first page,
+ * which holds its start: as when the PDF hasn't changed since.
+ */
+const crossPageCaseArb = fc
+  .record({
+    before: fc.array(fc.string(), { maxLength: 6 }),
+    last: fc.string({ minLength: 1 }),
+    trailing: fc.array(fc.constant(''), { maxLength: 3 }),
+    page: fc.integer({ min: 1, max: MAX_ANCHOR_PAGE - 1 }),
+    pagesOn: fc.integer({ min: 1, max: 100 }),
+    end: fc.record({ idx: fc.nat(99_999), char: fc.nat(99_999) }),
+  })
+  .chain(({ before, last, trailing, page, pagesOn, end }) => {
+    const strs = [...before, last, ...trailing];
+    return fc
+      .nat(strs.length - 1)
+      .chain((idx) => fc.nat(strs[idx].length).map((char) => ({ idx, char })))
+      .map((from) => ({
+        strs,
+        lastIdx: before.length,
+        from: { page, ...from },
+        range: {
+          start: encodeAnchor({ page, ...from }),
+          end: encodeAnchor({
+            page: Math.min(page + pagesOn, MAX_ANCHOR_PAGE),
+            ...end,
+          }),
+        },
+      }));
+  });
 
 // #endregion
 
@@ -526,5 +660,281 @@ describe('findArticleSource', () => {
       file: null,
       reason: 'none',
     });
+  });
+});
+
+describe('resolveItemContext for a snippet of a PDF', () => {
+  it("points it at its passage with the link Obsidian's own selections use, reading nothing", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfFileArb,
+        fc.oneof(samePageRangeArb, crossPageRangeArb),
+        fc.boolean(),
+        async (contextFile, { start, end }, fromParent) => {
+          vi.restoreAllMocks();
+          const parent = {
+            data: { id: 'article-1' },
+            file: contextFile,
+          } as ReviewItem;
+          vi.spyOn(ObsidianHelpers, 'getSourceFile').mockReturnValue(
+            fromParent ? null : contextFile
+          );
+          const app = makeApp({ content: 'text' });
+          const snippet = makeSnippet({
+            parent: 'article-1',
+            start_offset: start,
+            end_offset: end,
+          });
+
+          const context = await resolveItemContext(
+            app,
+            makeReviewManager(fromParent ? parent : null),
+            snippet
+          );
+
+          const from = decodeAnchor(start);
+          const to = decodeAnchor(end);
+          // Where text that runs onto a later page ends on its first depends
+          // on that page's text, which is read once the PDF is open, for the
+          // passage to be highlighted then
+          const subpath =
+            from.page === to.page
+              ? `#page=${from.page}&selection=${from.idx},${from.char},${to.idx},${to.char}`
+              : `#page=${from.page}`;
+          expect(context).toStrictEqual(
+            from.page === to.page
+              ? { file: contextFile, eState: { subpath } }
+              : {
+                  file: contextFile,
+                  eState: { subpath },
+                  pdfRange: { start, end },
+                }
+          );
+          expect(app.vault.cachedRead).not.toHaveBeenCalled();
+          expect(app.metadataCache.getFileCache).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('opens the PDF at no passage when the offsets name none', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfFileArb,
+        notPdfRangeArb,
+        async (contextFile, { start, end }) => {
+          vi.restoreAllMocks();
+          vi.spyOn(ObsidianHelpers, 'getSourceFile').mockReturnValue(
+            contextFile
+          );
+          const app = makeApp({ content: 'text' });
+          const snippet = makeSnippet({ start_offset: start, end_offset: end });
+
+          const context = await resolveItemContext(
+            app,
+            makeReviewManager(null),
+            snippet
+          );
+
+          expect(context).toStrictEqual({ file: contextFile, eState: null });
+          expect(app.vault.cachedRead).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('reads offsets as text offsets when the context is a note, whatever they hold', async () => {
+    await fc.assert(
+      fc.asyncProperty(pdfRangeArb, async ({ start, end }) => {
+        vi.restoreAllMocks();
+        const contextFile = makeTFile(CONTEXT_PATH);
+        vi.spyOn(ObsidianHelpers, 'getSourceFile').mockReturnValue(contextFile);
+        const content = 'a'.repeat(10);
+        const app = makeApp({ content });
+
+        const context = await resolveItemContext(
+          app,
+          makeReviewManager(null),
+          makeSnippet({ start_offset: start, end_offset: end })
+        );
+
+        expect(context).toStrictEqual({ file: contextFile, eState: null });
+        expect(app.vault.cachedRead).toHaveBeenCalledWith(contextFile);
+      })
+    );
+  });
+
+  it('opens a PDF at no passage for a card', async () => {
+    await fc.assert(
+      fc.asyncProperty(pdfFileArb, async (contextFile) => {
+        vi.restoreAllMocks();
+        vi.spyOn(ObsidianHelpers, 'getSourceFile').mockReturnValue(contextFile);
+        const app = makeApp();
+
+        const context = await resolveItemContext(
+          app,
+          makeReviewManager(null),
+          makeCard()
+        );
+
+        expect(context).toStrictEqual({ file: contextFile, eState: null });
+        expect(app.vault.cachedRead).not.toHaveBeenCalled();
+      })
+    );
+  });
+});
+
+describe('revealPdfContext', () => {
+  it('highlights a passage on one page in the PDF tab at once, reading nothing', async () => {
+    await fc.assert(
+      fc.asyncProperty(samePageRangeArb, async (range) => {
+        vi.restoreAllMocks();
+        const tab = makeTab();
+        const highlight = vi
+          .spyOn(obsidianPdf, 'highlightPdfSelection')
+          .mockReturnValue(undefined);
+        const tabDocument = vi.spyOn(obsidianPdf, 'pdfTabDocument');
+
+        await revealPdfContext(tab, range);
+
+        const from = decodeAnchor(range.start);
+        const to = decodeAnchor(range.end);
+        expect(highlight).toHaveBeenCalledExactlyOnceWith(tab, {
+          page: from.page,
+          range: [
+            [from.idx, from.char],
+            [to.idx, to.char],
+          ],
+        });
+        expect(tabDocument).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('highlights a passage that runs onto a later page up to the end of the text on its first, once the PDF is open', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        crossPageCaseArb,
+        async ({ strs, lastIdx, from, range }) => {
+          vi.restoreAllMocks();
+          const tab = makeTab();
+          const doc = { numPages: 1, getPage: vi.fn() };
+          const highlight = vi
+            .spyOn(obsidianPdf, 'highlightPdfSelection')
+            .mockReturnValue(undefined);
+          vi.spyOn(obsidianPdf, 'pdfTabDocument').mockResolvedValue(doc);
+          const read = vi
+            .spyOn(pdfText, 'readPageText')
+            .mockResolvedValue(pageText(strs));
+
+          await revealPdfContext(tab, range);
+
+          expect(obsidianPdf.pdfTabDocument).toHaveBeenCalledWith(tab);
+          expect(read).toHaveBeenCalledExactlyOnceWith(doc, from.page);
+          expect(highlight).toHaveBeenCalledExactlyOnceWith(tab, {
+            page: from.page,
+            range: [
+              [from.idx, from.char],
+              [lastIdx, strs[lastIdx].length],
+            ],
+          });
+        }
+      )
+    );
+  });
+
+  it("highlights nothing when the tab has no PDF open, or the passage's first page has no text or no longer holds its start", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        crossPageCaseArb,
+        fc.constantFrom('no document', 'no text', 'start gone'),
+        async ({ strs, range }, why) => {
+          vi.restoreAllMocks();
+          const tab = makeTab();
+          const highlight = vi
+            .spyOn(obsidianPdf, 'highlightPdfSelection')
+            .mockReturnValue(undefined);
+          vi.spyOn(obsidianPdf, 'pdfTabDocument').mockResolvedValue(
+            why === 'no document' ? null : { numPages: 1, getPage: vi.fn() }
+          );
+          const read = vi.spyOn(pdfText, 'readPageText').mockResolvedValue(
+            pageText(
+              why === 'no text'
+                ? strs.map(() => '')
+                : // The start's item and all after it gone
+                  strs.slice(0, decodeAnchor(range.start).idx)
+            )
+          );
+
+          await revealPdfContext(tab, range);
+
+          expect(highlight).not.toHaveBeenCalled();
+          if (why === 'no document') expect(read).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('highlights nothing once the tab has moved on to another file', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        crossPageCaseArb,
+        fc.constantFrom('opening', 'reading'),
+        async ({ strs, range }, when) => {
+          vi.restoreAllMocks();
+          const tab = makeTab();
+          const moveOn = () => {
+            tab.file = { path: 'papers/Other.pdf' };
+          };
+          const highlight = vi
+            .spyOn(obsidianPdf, 'highlightPdfSelection')
+            .mockReturnValue(undefined);
+          const doc = { numPages: 1, getPage: vi.fn() };
+          vi.spyOn(obsidianPdf, 'pdfTabDocument').mockImplementation(() => {
+            if (when === 'opening') moveOn();
+            return Promise.resolve(doc);
+          });
+          const read = vi
+            .spyOn(pdfText, 'readPageText')
+            .mockImplementation(() => {
+              if (when === 'reading') moveOn();
+              return Promise.resolve(pageText(strs));
+            });
+
+          await revealPdfContext(tab, range);
+
+          expect(highlight).not.toHaveBeenCalled();
+          if (when === 'opening') expect(read).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it("logs a first page that can't be read, as when the PDF has since lost pages, and highlights nothing", async () => {
+    await fc.assert(
+      fc.asyncProperty(crossPageCaseArb, async ({ range }) => {
+        vi.restoreAllMocks();
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const highlight = vi
+          .spyOn(obsidianPdf, 'highlightPdfSelection')
+          .mockReturnValue(undefined);
+        vi.spyOn(obsidianPdf, 'pdfTabDocument').mockResolvedValue({
+          numPages: 1,
+          getPage: vi.fn(),
+        });
+        const error = new Error('Invalid page request.');
+        vi.spyOn(pdfText, 'readPageText').mockRejectedValue(error);
+
+        await expect(
+          revealPdfContext(makeTab(), range)
+        ).resolves.toBeUndefined();
+
+        expect(highlight).not.toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledExactlyOnceWith(
+          "Incremental Reading: can't read the PDF page to highlight",
+          error
+        );
+      })
+    );
   });
 });

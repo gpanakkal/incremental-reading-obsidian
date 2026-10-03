@@ -1482,6 +1482,87 @@ describe('Actions.goToContext', () => {
     );
   });
 
+  it("highlights a PDF snippet's passage in the tab its context opened in, once it has opened", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        basenameArb,
+        fc.record({ start: fc.nat(), end: fc.nat() }),
+        fc.string(),
+        registeredArb,
+        async (basename, pdfRange, subpath, registered) => {
+          vi.restoreAllMocks();
+          Notice.reset();
+          const itemFile = makeTFile(basename);
+          const item = {
+            data: { id: 'item-1', type: 'snippet' },
+            file: itemFile,
+          } as unknown as ReviewItem;
+          const pdf = {
+            basename: 'Paper',
+            extension: 'pdf',
+            path: 'papers/Paper.pdf',
+          } as unknown as TFile;
+          vi.spyOn(itemContext, 'resolveItemContext').mockResolvedValue({
+            file: pdf,
+            eState: { subpath },
+            pdfRange,
+          });
+          const order: string[] = [];
+          const reveal = vi
+            .spyOn(itemContext, 'revealPdfContext')
+            .mockImplementation(() => {
+              order.push('reveal');
+              return Promise.resolve();
+            });
+          const wired = wireGoToContext({ item, registered });
+          const view = { getViewType: () => 'pdf' };
+          wired.openFile.mockImplementation(() => {
+            order.push('open');
+            return Promise.resolve();
+          });
+          wired.getLeaf.mockImplementation(() => ({
+            openFile: wired.openFile,
+            view,
+          }));
+
+          await new Actions(wired.plugin).goToContext(itemFile);
+
+          expectOpened(wired, registered, pdf, { subpath });
+          if (registered.includes('pdf')) {
+            expect(reveal).toHaveBeenCalledExactlyOnceWith(view, pdfRange);
+            expect(order).toEqual(['open', 'reveal']);
+          } else {
+            expect(reveal).not.toHaveBeenCalled();
+          }
+        }
+      )
+    );
+  });
+
+  it('highlights nothing more for a context with no PDF passage', async () => {
+    await fc.assert(
+      fc.asyncProperty(contextArb, async (context) => {
+        vi.restoreAllMocks();
+        Notice.reset();
+        const itemFile = makeTFile('Item');
+        const item = {
+          data: { id: 'item-1', type: 'snippet' },
+          file: itemFile,
+        } as unknown as ReviewItem;
+        vi.spyOn(itemContext, 'resolveItemContext').mockResolvedValue(context);
+        const reveal = vi.spyOn(itemContext, 'revealPdfContext');
+        const wired = wireGoToContext({
+          item,
+          registered: ['md', 'pdf', 'canvas', 'html', 'zip', ''],
+        });
+
+        await new Actions(wired.plugin).goToContext(itemFile);
+
+        expect(reveal).not.toHaveBeenCalled();
+      })
+    );
+  });
+
   it("opens an article's source the way Obsidian opens a vault file, or says why it cannot", async () => {
     await fc.assert(
       fc.asyncProperty(

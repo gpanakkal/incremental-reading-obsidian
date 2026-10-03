@@ -552,20 +552,29 @@ export async function readPageTexts(
     (_, i) => first + i
   );
   const texts = await Promise.all(
-    pageNumbers.map(async (pageNumber) => {
-      const page = await doc.getPage(pageNumber);
-      // The options the text layer renders with (undocumented in Obsidian:
-      // its TextLayerBuilder also passes a nonstandard `includeChars`, which
-      // adds no items). Marked content has no `str` and takes no `data-idx`.
-      const content = await page.getTextContent({
-        includeMarkedContent: true,
-        disableNormalization: true,
-      });
-      const items = content.items.filter(
-        (item): item is PdfTextItem => 'str' in item
-      );
-      return { items, view: page.view };
-    })
+    pageNumbers.map((pageNumber) => readPageText(doc, pageNumber))
   );
   return new Map(pageNumbers.map((pageNumber, i) => [pageNumber, texts[i]]));
+}
+
+/**
+ * Reads the text content of page `pageNumber` of `doc`. Item indices match
+ * the text layer's `data-idx`.
+ */
+export async function readPageText(
+  doc: PdfDocument,
+  pageNumber: number
+): Promise<PdfPageText> {
+  const page = await doc.getPage(pageNumber);
+  // The options the text layer renders with (undocumented in Obsidian: its
+  // TextLayerBuilder also passes a nonstandard `includeChars`, which adds no
+  // items). Marked content has no `str` and takes no `data-idx`.
+  const content = await page.getTextContent({
+    includeMarkedContent: true,
+    disableNormalization: true,
+  });
+  const items = content.items.filter(
+    (item): item is PdfTextItem => 'str' in item
+  );
+  return { items, view: page.view };
 }

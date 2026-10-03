@@ -5,10 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createPdfViewer,
   getPdfLocation,
+  highlightPdfSelection,
   isPdfView,
   onPdfViewChange,
+  pdfTabDocument,
   type PdfViewer,
 } from './obsidian-pdf';
+import type { PageSelection } from './pdf-selection';
 
 // #region HELPERS
 
@@ -268,6 +271,49 @@ function bordered(border: unknown, scale: number, height = 792) {
 
 /** Let promise callbacks queued so far run. */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * Obsidian's PDF tab as far as the adapter reaches into it: its view type,
+ * and its viewer component (`PdfView.viewer`).
+ */
+function makePdfTab(
+  viewer: unknown = new FakeViewerComponent(null, createDiv(), {})
+) {
+  return { getViewType: () => 'pdf', viewer } as unknown as View & {
+    viewer: FakeViewerComponent;
+  };
+}
+
+/**
+ * A PDF tab's viewer child that can highlight text, with page `rendered`'s
+ * text layer done rendering (none when 0).
+ */
+function makeHighlightingChild(rendered = 0) {
+  return {
+    ...makeChild(),
+    subpathHighlight: null as unknown,
+    highlightText: vi.fn(),
+    getPage: vi.fn((page: number): unknown => ({
+      textLayer: { renderingDone: page === rendered },
+    })),
+  };
+}
+
+const pageSelectionArb: fc.Arbitrary<PageSelection> = fc.record({
+  page: fc.integer({ min: 1, max: 900_718 }),
+  range: fc.tuple(
+    fc.tuple(fc.nat(99_999), fc.nat(99_999)),
+    fc.tuple(fc.nat(99_999), fc.nat(99_999))
+  ),
+});
+
+const SELECTION: PageSelection = {
+  page: 2,
+  range: [
+    [1, 0],
+    [3, 4],
+  ],
+};
 
 // #endregion
 
@@ -1550,5 +1596,273 @@ describe('PDF position on a page with borders', () => {
     );
 
     expect(getPdfLocation(viewer)).toEqual({ page: 3, top: 700 });
+  });
+});
+
+describe('pdfTabDocument', () => {
+  const pdfDocument = { numPages: 3, getPage: vi.fn() };
+
+  it('is the document a PDF tab has open, once its viewer is ready', async () => {
+    const tab = makePdfTab();
+    const resolved = vi.fn();
+    void pdfTabDocument(tab).then(resolved);
+    await flush();
+    expect(resolved).not.toHaveBeenCalled();
+
+    tab.viewer.ready(makeEventChild({ pdfDocument }));
+    await flush();
+
+    expect(resolved).toHaveBeenCalledExactlyOnceWith(pdfDocument);
+    await expect(pdfTabDocument(tab)).resolves.toBe(pdfDocument);
+  });
+
+  it('waits for the document to open, then stops listening', async () => {
+    const tab = makePdfTab();
+    const app: Record<string, unknown> = { pdfDocument: null };
+    const child = makeEventChild(app);
+    tab.viewer.ready(child);
+    const resolved = vi.fn();
+    void pdfTabDocument(tab).then(resolved);
+    await flush();
+    expect(resolved).not.toHaveBeenCalled();
+
+    app.pdfDocument = pdfDocument;
+    child.dispatch('pagesinit', {});
+    await flush();
+
+    expect(resolved).toHaveBeenCalledExactlyOnceWith(pdfDocument);
+    expect(child.count('pagesinit')).toBe(0);
+  });
+
+  it('is null once the tab closes before its document opens, and stops listening', async () => {
+    const tab = makePdfTab();
+    const onUnload: (() => void)[] = [];
+    Object.assign(tab, { register: (cb: () => void) => onUnload.push(cb) });
+    const child = makeEventChild({ pdfDocument: null });
+    tab.viewer.ready(child);
+    const resolved = vi.fn();
+    void pdfTabDocument(tab).then(resolved);
+    await flush();
+    expect(child.count('pagesinit')).toBe(1);
+
+    for (const cb of onUnload) cb();
+    await flush();
+
+    expect(resolved).toHaveBeenCalledExactlyOnceWith(null);
+    expect(child.count('pagesinit')).toBe(0);
+  });
+
+  it('is null once the tab closes before its viewer is ready', async () => {
+    const tab = makePdfTab();
+    const onUnload: (() => void)[] = [];
+    Object.assign(tab, { register: (cb: () => void) => onUnload.push(cb) });
+    const resolved = vi.fn();
+    void pdfTabDocument(tab).then(resolved);
+
+    for (const cb of onUnload) cb();
+    await flush();
+
+    expect(resolved).toHaveBeenCalledExactlyOnceWith(null);
+  });
+
+  it('closes cleanly when its viewer is already torn down', async () => {
+    const tab = makePdfTab();
+    const onUnload: (() => void)[] = [];
+    Object.assign(tab, { register: (cb: () => void) => onUnload.push(cb) });
+    const child = makeEventChild({ pdfDocument: null });
+    child.off.mockImplementation(() => {
+      throw new TypeError(
+        "Cannot read properties of null (reading 'eventBus')"
+      );
+    });
+    tab.viewer.ready(child);
+    const resolved = vi.fn();
+    void pdfTabDocument(tab).then(resolved);
+    await flush();
+
+    expect(() => {
+      for (const cb of onUnload) cb();
+    }).not.toThrow();
+    await flush();
+
+    expect(resolved).toHaveBeenCalledExactlyOnceWith(null);
+  });
+
+  it.each([
+    [
+      'a view of another type',
+      {
+        getViewType: (): string => 'markdown',
+        viewer: new FakeViewerComponent(null, createDiv(), {}),
+      },
+    ],
+    ['no view', null],
+    ['a PDF tab without a viewer', { getViewType: (): string => 'pdf' }],
+    [
+      'a PDF tab whose viewer has no then',
+      makePdfTab(
+        Object.assign(new FakeViewerComponent(null, createDiv(), {}), {
+          then: undefined,
+        })
+      ),
+    ],
+  ])('is null for %s', async (_, view) => {
+    await expect(pdfTabDocument(view as unknown as View)).resolves.toBeNull();
+  });
+
+  it.each([
+    ['is not an object', 'changed'],
+    ['has no document and no events', { ...makeChild(), pdfViewer: {} }],
+  ])('is null for a tab whose viewer child %s', async (_, child) => {
+    const tab = makePdfTab();
+    tab.viewer.ready(child);
+
+    await expect(pdfTabDocument(tab)).resolves.toBeNull();
+  });
+});
+
+describe('highlightPdfSelection', () => {
+  it('highlights the selection once its page renders its text layer, as a link to it would', () => {
+    fc.assert(
+      fc.property(pageSelectionArb, (selection) => {
+        const tab = makePdfTab();
+        const child = makeHighlightingChild();
+
+        highlightPdfSelection(tab, selection);
+        expect(child.subpathHighlight).toBeNull();
+        tab.viewer.ready(child);
+
+        expect(child.subpathHighlight).toEqual({ type: 'text', ...selection });
+        expect(child.getPage).toHaveBeenCalledWith(selection.page);
+        expect(child.highlightText).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('highlights it at once too when its page has already rendered its text layer', () => {
+    fc.assert(
+      fc.property(pageSelectionArb, (selection) => {
+        const tab = makePdfTab();
+        const child = makeHighlightingChild(selection.page);
+        tab.viewer.ready(child);
+
+        highlightPdfSelection(tab, selection);
+
+        expect(child.subpathHighlight).toEqual({ type: 'text', ...selection });
+        expect(child.highlightText).toHaveBeenCalledExactlyOnceWith(
+          selection.page,
+          selection.range
+        );
+      })
+    );
+  });
+
+  it.each([
+    ['no page view', () => null],
+    ['a page view without a text layer', () => ({})],
+    [
+      'a text layer still rendering',
+      () => ({ textLayer: { renderingDone: false } }),
+    ],
+    [
+      'a renderingDone that is not true',
+      () => ({ textLayer: { renderingDone: 1 } }),
+    ],
+    [
+      'getPage throwing',
+      () => {
+        throw new Error('no pdfViewer');
+      },
+    ],
+  ])('leaves the highlight to the text layer with %s', (_, getPage) => {
+    const tab = makePdfTab();
+    const child = { ...makeHighlightingChild(), getPage: vi.fn(getPage) };
+    tab.viewer.ready(child);
+
+    highlightPdfSelection(tab, SELECTION);
+
+    expect(child.subpathHighlight).toEqual({ type: 'text', ...SELECTION });
+    expect(child.highlightText).not.toHaveBeenCalled();
+  });
+
+  it('leaves the highlight to the text layer when the child has no getPage', () => {
+    const tab = makePdfTab();
+    const child = { ...makeHighlightingChild(2), getPage: undefined };
+    tab.viewer.ready(child);
+
+    highlightPdfSelection(tab, SELECTION);
+
+    expect(child.subpathHighlight).toEqual({ type: 'text', ...SELECTION });
+    expect(child.highlightText).not.toHaveBeenCalled();
+  });
+
+  it('logs a highlight that fails, as on a page whose text has changed', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const tab = makePdfTab();
+    const child = makeHighlightingChild(2);
+    const error = new TypeError('no such item');
+    child.highlightText.mockImplementation(() => {
+      throw error;
+    });
+    tab.viewer.ready(child);
+
+    expect(() => highlightPdfSelection(tab, SELECTION)).not.toThrow();
+
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "Incremental Reading: can't highlight the PDF selection",
+      error
+    );
+  });
+
+  it('touches nothing on a child without highlightText', () => {
+    const tab = makePdfTab();
+    const child = { ...makeHighlightingChild(2), highlightText: undefined };
+    tab.viewer.ready(child);
+
+    highlightPdfSelection(tab, SELECTION);
+
+    expect(child.subpathHighlight).toBeNull();
+    expect(child.getPage).not.toHaveBeenCalled();
+  });
+
+  it('touches nothing on a child without a subpath highlight', () => {
+    const tab = makePdfTab();
+    const { subpathHighlight, ...child } = makeHighlightingChild(2);
+    void subpathHighlight;
+    tab.viewer.ready(child);
+
+    highlightPdfSelection(tab, SELECTION);
+
+    expect('subpathHighlight' in child).toBe(false);
+    expect(child.getPage).not.toHaveBeenCalled();
+    expect(child.highlightText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'a view of another type',
+      {
+        getViewType: (): string => 'markdown',
+        viewer: new FakeViewerComponent(null, createDiv(), {}),
+      },
+    ],
+    ['no view', null],
+    ['a PDF tab without a viewer', { getViewType: (): string => 'pdf' }],
+  ])('does nothing for %s', (_, view) => {
+    const viewer = (view as { viewer?: FakeViewerComponent } | null)?.viewer;
+    const child = makeHighlightingChild(1);
+    viewer?.ready(child);
+
+    highlightPdfSelection(view as unknown as View, SELECTION);
+
+    expect(child.subpathHighlight).toBeNull();
+    expect(child.highlightText).not.toHaveBeenCalled();
+  });
+
+  it('does nothing for a tab whose viewer child is not an object', () => {
+    const tab = makePdfTab();
+    tab.viewer.ready('changed');
+
+    expect(() => highlightPdfSelection(tab, SELECTION)).not.toThrow();
   });
 });

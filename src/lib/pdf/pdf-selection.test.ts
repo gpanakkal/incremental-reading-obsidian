@@ -8,6 +8,8 @@ import { decodeAnchor, encodeAnchor, rangeToAnchors } from './pdf-anchor';
 import {
   pageHasText,
   pageLinkAlias,
+  pageSelection,
+  pageSelectionSubpath,
   readPdfSelection,
   selectionSubpath,
 } from './pdf-selection';
@@ -213,6 +215,180 @@ describe('selectionSubpath', () => {
           expect(subpath).toBe(
             `#page=${page}&selection=${start.idx},${start.char},${last},${strs[last].length}`
           );
+        }
+      )
+    );
+  });
+});
+
+describe('pageSelection', () => {
+  it("selects text on one page whole when the page isn't read", () => {
+    fc.assert(
+      fc.property(
+        pageArb,
+        fc.nat(99_999),
+        fc.nat(99_999),
+        fc.nat(99_999),
+        fc.nat(99_999),
+        (page, startIdx, startChar, endIdx, endChar) => {
+          const selection = pageSelection(
+            at(page, startIdx, startChar),
+            at(page, endIdx, endChar)
+          );
+
+          expect(selection).toEqual({
+            page,
+            range: [
+              [startIdx, startChar],
+              [endIdx, endChar],
+            ],
+          });
+        }
+      )
+    );
+  });
+
+  it('selects text on one page whole when the page read holds both its ends, else nothing', () => {
+    fc.assert(
+      fc.property(
+        pageArb,
+        startPageArb.chain(({ strs, start }) =>
+          fc.record({
+            strs: fc.constant(strs),
+            start: fc.constant(start),
+            endIdx: fc.nat(strs.length),
+            endChar: fc.nat(8),
+          })
+        ),
+        (page, { strs, start, endIdx, endChar }) => {
+          const selection = pageSelection(
+            at(page, start.idx, start.char),
+            at(page, endIdx, endChar),
+            makePage(strs)
+          );
+
+          const fits = endIdx < strs.length && endChar <= strs[endIdx].length;
+          expect(selection).toEqual(
+            fits
+              ? {
+                  page,
+                  range: [
+                    [start.idx, start.char],
+                    [endIdx, endChar],
+                  ],
+                }
+              : null
+          );
+        }
+      )
+    );
+  });
+
+  it("is null when the page read doesn't hold the start, as when the PDF has changed since", () => {
+    fc.assert(
+      fc.property(
+        pageArb.filter((page) => page < 900_718),
+        startPageArb.chain(({ strs }) =>
+          fc.record({
+            strs: fc.constant(strs),
+            start: fc.oneof(
+              fc.record({
+                idx: fc.integer({ min: strs.length, max: 99_999 }),
+                char: fc.nat(99_999),
+              }),
+              fc.nat(strs.length - 1).chain((idx) =>
+                fc.record({
+                  idx: fc.constant(idx),
+                  char: fc.integer({
+                    min: strs[idx].length + 1,
+                    max: 99_999,
+                  }),
+                })
+              )
+            ),
+          })
+        ),
+        fc.nat(1),
+        (page, { strs, start }, pagesOn) => {
+          const selection = pageSelection(
+            at(page, start.idx, start.char),
+            at(page + pagesOn, 99_999, 99_999),
+            makePage(strs)
+          );
+
+          expect(selection).toBeNull();
+        }
+      )
+    );
+  });
+
+  it('cuts text that runs onto a later page off at the end of the text on its first', () => {
+    fc.assert(
+      fc.property(
+        pageArb.filter((page) => page < 900_718),
+        startPageArb,
+        fc.integer({ min: 1, max: 100 }),
+        fc.nat(99_999),
+        fc.nat(99_999),
+        (page, { strs, start }, pagesOn, endIdx, endChar) => {
+          const selection = pageSelection(
+            at(page, start.idx, start.char),
+            at(Math.min(page + pagesOn, 900_718), endIdx, endChar),
+            makePage(strs)
+          );
+
+          let last = strs.length - 1;
+          while (strs[last] === '') last--;
+          expect(selection).toEqual({
+            page,
+            range: [
+              [start.idx, start.char],
+              [last, strs[last].length],
+            ],
+          });
+        }
+      )
+    );
+  });
+
+  it("is null for text that runs onto a later page when its first page's text isn't given, or has none", () => {
+    fc.assert(
+      fc.property(
+        pageArb.filter((page) => page < 900_718),
+        fc.integer({ min: 1, max: 100 }),
+        fc.option(fc.array(fc.constant(''), { maxLength: 4 }), {
+          nil: undefined,
+        }),
+        (page, pagesOn, emptyStrs) => {
+          const selection = pageSelection(
+            at(page, 0, 0),
+            at(Math.min(page + pagesOn, 900_718), 0, 1),
+            emptyStrs && makePage(emptyStrs)
+          );
+
+          expect(selection).toBeNull();
+        }
+      )
+    );
+  });
+});
+
+describe('pageSelectionSubpath', () => {
+  it("links to the selection in the grammar Obsidian's own selection links use", () => {
+    fc.assert(
+      fc.property(
+        pageArb,
+        fc.array(fc.nat(), { minLength: 4, maxLength: 4 }),
+        (page, [a, b, c, d]) => {
+          expect(
+            pageSelectionSubpath({
+              page,
+              range: [
+                [a, b],
+                [c, d],
+              ],
+            })
+          ).toBe(`#page=${page}&selection=${a},${b},${c},${d}`);
         }
       )
     );

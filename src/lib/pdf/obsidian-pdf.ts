@@ -16,6 +16,7 @@ import {
   type TFile,
   type View,
 } from 'obsidian';
+import type { PageSelection } from './pdf-selection';
 import type { PdfDocument } from './pdf-text';
 import type { PdfPosition } from './position';
 
@@ -167,6 +168,22 @@ function textLayerOf(node: Node): Element | null {
       ? (node as Element)
       : node.parentElement;
   return el?.closest('.textLayer') ?? null;
+}
+
+/**
+ * The pdf.js document the viewer child `child` has open, if any.
+ *
+ * Undocumented: `child.pdfViewer.pdfDocument`, the `PDFDocumentProxy` pdf.js's
+ * `PDFViewerApplication` holds once a file is open.
+ */
+function documentOf(child: unknown): PdfDocument | null {
+  const app = isObject(child) ? child.pdfViewer : null;
+  const doc = isObject(app) ? app.pdfDocument : null;
+  return isObject(doc) &&
+    typeof doc.numPages === 'number' &&
+    typeof doc.getPage === 'function'
+    ? (doc as unknown as PdfDocument)
+    : null;
 }
 
 function isViewerChild(value: unknown): value is PdfViewerChild {
@@ -366,16 +383,7 @@ class ObsidianPdfViewer implements PdfViewer {
   }
 
   pdfDocument(): PdfDocument | null {
-    // Undocumented: `child.pdfViewer.pdfDocument`, the `PDFDocumentProxy`
-    // pdf.js's `PDFViewerApplication` holds once a file is open
-    const child = this.#component.child;
-    const app = isObject(child) ? child.pdfViewer : null;
-    const doc = isObject(app) ? app.pdfDocument : null;
-    return isObject(doc) &&
-      typeof doc.numPages === 'number' &&
-      typeof doc.getPage === 'function'
-      ? (doc as unknown as PdfDocument)
-      : null;
+    return documentOf(this.#component.child);
   }
 
   visiblePages(): number[] {
@@ -726,6 +734,152 @@ export function onPdfViewChange(
     }
     listening = null;
   };
+}
+
+// #endregion
+
+// #region PDF TABS
+// Obsidian's own PDF tab, as Go to context opens a snippet's PDF in (task
+// 0019).
+
+/**
+ * The viewer component of Obsidian's PDF tab `view`, if it is one this adapter
+ * knows.
+ *
+ * Undocumented: `PdfView.viewer`, the `PdfViewerComponent` its constructor
+ * builds.
+ */
+function tabComponent(
+  view: View | null | undefined
+): PdfViewerComponent | null {
+  if (!isPdfView(view)) return null;
+  const component = (view as unknown as { viewer?: unknown }).viewer;
+  return isViewerComponent(component) ? component : null;
+}
+
+/**
+ * The pdf.js document Obsidian's PDF tab `view` has open, once it has opened
+ * one; `null` when `view` isn't a PDF tab this adapter knows, or closes first.
+ *
+ * Undocumented: pdf.js's `pagesinit` event, which `PDFViewer.setDocument`
+ * fires on the child's eventBus once the document it was handed is in place.
+ */
+export function pdfTabDocument(
+  view: View | null | undefined
+): Promise<PdfDocument | null> {
+  const component = tabComponent(view);
+  if (!view || !component) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let listening: { child: PdfViewerChildEvents; cb: () => void } | null =
+      null;
+    const stopListening = () => {
+      try {
+        listening?.child.off('pagesinit', listening.cb);
+      } catch {
+        // Unloaded first: its eventBus, and the listener with it, is gone.
+      }
+      listening = null;
+    };
+    // Runs when the tab closes. A settled promise ignores it.
+    if (typeof view.register === 'function') {
+      view.register(() => {
+        stopListening();
+        resolve(null);
+      });
+    }
+    component.then((child) => {
+      const doc = documentOf(child);
+      if (doc || !hasEvents(child)) {
+        resolve(doc);
+        return;
+      }
+      const onInit = () => {
+        stopListening();
+        resolve(documentOf(child));
+      };
+      child.on('pagesinit', onInit);
+      listening = { child, cb: onInit };
+    });
+  });
+}
+
+/**
+ * Undocumented: what of `PdfViewerChild` highlighting a selection uses.
+ */
+interface HighlightingChild {
+  /**
+   * What `applySubpath` makes of a link's `selection=`, or `null`. The
+   * child's `textlayerrendered` listener highlights it whenever its page's
+   * text layer renders, scrolling to it.
+   */
+  subpathHighlight: unknown;
+  /**
+   * Highlight `range` on page `page`, scrolling to it. Needs the page's text
+   * layer rendered, and throws when `range` names items it doesn't have.
+   */
+  highlightText(page: number, range: PageSelection['range']): void;
+  /** pdf.js's `PDFPageView` for page `page`: `getPageView(page - 1)`. */
+  getPage?(page: number): unknown;
+}
+
+function isHighlightingChild(value: unknown): value is HighlightingChild {
+  return (
+    isObject(value) &&
+    'subpathHighlight' in value &&
+    typeof value.highlightText === 'function'
+  );
+}
+
+/**
+ * Whether page `page` of `child` has its text layer rendered.
+ *
+ * Undocumented: `TextLayerBuilder.renderingDone`, which Obsidian's own
+ * annotation highlighting checks too.
+ */
+function textLayerRendered(child: HighlightingChild, page: number): boolean {
+  if (typeof child.getPage !== 'function') return false;
+  try {
+    const pageView = child.getPage(page);
+    const textLayer = isObject(pageView) ? pageView.textLayer : null;
+    return isObject(textLayer) && textLayer.renderingDone === true;
+  } catch {
+    // Its pdf.js viewer is gone: the tab is closing
+    return false;
+  }
+}
+
+/**
+ * Highlight `selection` in Obsidian's PDF tab `view`, as opening a link to it
+ * would: whenever its page's text layer renders, and at once if it already
+ * has. Opening the tab at a link does the same, but only for a selection the
+ * link names when the tab opens.
+ *
+ * Undocumented: sets `PdfViewerChild.subpathHighlight` the way its
+ * `applySubpath` does for `selection=`, without the jump to the page top that
+ * `applySubpath` also makes; Obsidian highlights from it only on
+ * `textlayerrendered`, so a page already rendered is highlighted with the
+ * child's `highlightText` directly.
+ */
+export function highlightPdfSelection(
+  view: View | null | undefined,
+  selection: PageSelection
+): void {
+  const component = tabComponent(view);
+  if (!component) return;
+  component.then((child) => {
+    if (!isHighlightingChild(child)) return;
+    const { page, range } = selection;
+    child.subpathHighlight = { type: 'text', page, range };
+    if (!textLayerRendered(child, page)) return;
+    try {
+      child.highlightText(page, range);
+    } catch (error) {
+      console.warn(
+        "Incremental Reading: can't highlight the PDF selection",
+        error
+      );
+    }
+  });
 }
 
 // #endregion

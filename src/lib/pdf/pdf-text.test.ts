@@ -7,6 +7,7 @@ import {
   type PdfDocument,
   type PdfPageText,
   type PdfTextItem,
+  readPageText,
   readPageTexts,
 } from './pdf-text';
 
@@ -1864,6 +1865,38 @@ describe('readPageTexts', () => {
       includeMarkedContent: true,
       disableNormalization: true,
     });
+  });
+});
+
+describe('readPageText', () => {
+  it('reads one page, numbering its items as the text layer does', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc
+          .array(textContentArb, { minLength: 1, maxLength: 12 })
+          .chain((content) =>
+            fc.tuple(
+              fc.constant(content),
+              fc.integer({ min: 1, max: content.length })
+            )
+          ),
+        async ([content, page]) => {
+          const { doc, getTextContent } = makeDocument(content);
+
+          const text = await readPageText(doc, page);
+
+          expect(text).toEqual({
+            items: content[page - 1].filter((item) => 'str' in item),
+            view: [0, 0, 600 + page, 800],
+          });
+          expect(doc.getPage).toHaveBeenCalledExactlyOnceWith(page);
+          expect(getTextContent).toHaveBeenCalledExactlyOnceWith({
+            includeMarkedContent: true,
+            disableNormalization: true,
+          });
+        }
+      )
+    );
   });
 });
 
