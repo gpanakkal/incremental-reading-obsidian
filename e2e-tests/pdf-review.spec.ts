@@ -1,3 +1,4 @@
+import { CLOZE_DELIMITERS } from '#/lib/constants';
 import { PDF_PAGE_STRIDE } from '#/lib/pdf/position';
 import test, {
   expect,
@@ -166,18 +167,6 @@ test.describe('Reviewing a PDF article', () => {
     ).toBeVisible();
     await window.keyboard.press('Escape');
     await expect(findBar).toBeHidden();
-
-    // Cards aren't there yet, and say so, from the button and from the
-    // command alike
-    const notices = await watchNotices(window);
-    await window.getByRole('button', { name: 'Create card' }).click();
-    await executeCommandById(window, 'incremental-reading:create-card');
-    await expect
-      .poll(notices)
-      .toEqual([
-        "Cards from PDFs aren't supported yet",
-        "Cards from PDFs aren't supported yet",
-      ]);
 
     // Finishing the item takes the viewer, and its keys, with it
     await window.getByRole('button', { name: 'Mark reviewed' }).click();
@@ -493,7 +482,7 @@ test.describe('Reading position in a PDF article', () => {
   });
 });
 
-test.describe('Snippets from a PDF article', () => {
+test.describe('Snippets and cards from a PDF article', () => {
   /** The paragraph page 1 carries over onto page 2, past the running heads. */
   const CARRIED_OVER =
     'A paragraph that begins near the foot of one page is common in papers ' +
@@ -506,6 +495,11 @@ test.describe('Snippets from a PDF article', () => {
 
   const confirmButton = (page: Page) =>
     page.locator('#confirm-selection-button');
+  /** The review tab's action bar: the PDF's own tab, still open, has one too. */
+  const actionBar = (page: Page) =>
+    page.locator('.ir-review-interface .ir-action-bar');
+  const answerText = (page: Page) =>
+    page.locator('.modal .ir-card-answer-text');
   const textItem = (page: Page, n: number, idx: number) =>
     pdfPage(page, n).locator(`.textLayer [data-idx="${idx}"]`);
 
@@ -546,6 +540,63 @@ test.describe('Snippets from a PDF article', () => {
         })
       );
     });
+
+  /** Every card row, with its note's body. */
+  const cards = (page: Page) =>
+    page.evaluate(async () => {
+      const { app } = window as unknown as {
+        app: PageApp & {
+          vault: {
+            getFileByPath(path: string): unknown;
+            cachedRead(file: unknown): Promise<string>;
+          };
+          metadataCache: {
+            getFileCache(file: unknown): {
+              frontmatter?: Record<string, unknown>;
+            } | null;
+          };
+        };
+      };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      const rows = repo.query('SELECT reference, parent FROM srs_card');
+      return Promise.all(
+        rows.map(async (row) => {
+          const file = app.vault.getFileByPath(row.reference as string);
+          const note = file ? await app.vault.cachedRead(file) : null;
+          return {
+            reference: row.reference as string,
+            parent: row.parent as string | null,
+            body: note?.replace(/^---\n[\s\S]*?\n---\n/, '').trim(),
+            source: file
+              ? app.metadataCache.getFileCache(file)?.frontmatter?.source
+              : undefined,
+          };
+        })
+      );
+    });
+
+  /** Whether a note is at `reference` in the vault. */
+  const noteExists = (page: Page, reference: string) =>
+    page.evaluate((ref) => {
+      const { app } = window as unknown as { app: PageApp };
+      return app.vault.getFileByPath(ref) !== null;
+    }, reference);
+
+  /** Select `answer` in the answer modal's text, as the user would. */
+  const selectAnswer = async (page: Page, answer: string) => {
+    await answerText(page).evaluate((el, answer) => {
+      const node = el.firstChild as Text;
+      const start = node.data.indexOf(answer);
+      const range = document.createRange();
+      range.setStart(node, start);
+      range.setEnd(node, start + answer.length);
+      const selection = document.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }, answer);
+    // `selectionchange` is dispatched as a task, not synchronously
+    await page.waitForTimeout(100);
+  };
 
   const articleId = (page: Page) =>
     page.evaluate((ref) => {
@@ -747,6 +798,68 @@ test.describe('Snippets from a PDF article', () => {
     await expect(confirmButton(window)).toHaveCount(0);
   });
 
+  test('makes a card of the selection, its answer chosen in the modal, linked to where it was, leaving the PDF as it was; undo deletes it', async () => {
+    const pdfBytes = await fs.readFile(path.join(vaultPath, PDF_PATH));
+    const unchanged = async () =>
+      (await fs.readFile(path.join(vaultPath, PDF_PATH))).equals(pdfBytes);
+    await importFixture(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 2)).toBeAttached();
+
+    await selectText(window, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    await expect.poll(() => viewerSelection(window)).toBe(FIRST_LINE);
+    await actionBar(window)
+      .getByRole('button', { name: 'Create card' })
+      .click();
+    await expect(answerText(window)).toHaveText(FIRST_LINE);
+    await selectAnswer(window, 'long text');
+    await window.keyboard.press('Enter');
+
+    await expect(answerText(window)).toHaveCount(0);
+    await expect.poll(() => cards(window)).toHaveLength(1);
+    const [card] = await cards(window);
+    const [left, right] = CLOZE_DELIMITERS;
+    expect(card).toMatchObject({
+      parent: await articleId(window),
+      body: FIRST_LINE.replace('long text', `${left} long text ${right}`),
+      source:
+        `[[PDF fixture.pdf#page=1&selection=2,0,2,${FIRST_LINE.length}` +
+        '|PDF fixture, page 1]]',
+    });
+    expect(await unchanged()).toBe(true);
+    expect(await viewerSelection(window)).toBeNull();
+
+    await actionBar(window).locator('#undo-button').click();
+
+    await expect.poll(() => cards(window)).toEqual([]);
+    expect(await noteExists(window, card.reference)).toBe(false);
+    expect(await unchanged()).toBe(true);
+  });
+
+  test('enters selection mode from the command with nothing selected, and makes no card when its answer is not chosen', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 2)).toBeAttached();
+
+    await executeCommandById(window, 'incremental-reading:create-card');
+    await expect(confirmButton(window)).toBeVisible();
+    await selectText(window, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    await expect.poll(() => viewerSelection(window)).toBe(FIRST_LINE);
+    // The command for the mode's kind confirms it, as its button does
+    await executeCommandById(window, 'incremental-reading:create-card');
+    await expect(answerText(window)).toHaveText(FIRST_LINE);
+    await expect(confirmButton(window)).toHaveCount(0);
+
+    await window.keyboard.press('Escape');
+
+    await expect(answerText(window)).toHaveCount(0);
+    expect(await cards(window)).toEqual([]);
+    expect(await viewerSelection(window)).toBeNull();
+    // Heard again once the answer is no longer being asked for
+    await executeCommandById(window, 'incremental-reading:create-card');
+    await expect(confirmButton(window)).toBeVisible();
+  });
+
   test('says a scanned page has no selectable text, and makes nothing', async () => {
     await importFixture(window, NO_TEXT_PDF_PATH);
     await beginReview(window);
@@ -761,11 +874,21 @@ test.describe('Snippets from a PDF article', () => {
     await window.mouse.up();
     await window.getByRole('button', { name: 'Create snippet' }).click();
     await executeCommandById(window, 'incremental-reading:extract-selection');
+    await actionBar(window)
+      .getByRole('button', { name: 'Create card' })
+      .click();
+    await executeCommandById(window, 'incremental-reading:create-card');
 
     await expect
       .poll(notices)
-      .toEqual(['No selectable text', 'No selectable text']);
+      .toEqual([
+        'No selectable text',
+        'No selectable text',
+        'No selectable text',
+        'No selectable text',
+      ]);
     expect(await snippets(window)).toEqual([]);
+    expect(await cards(window)).toEqual([]);
     await expect(confirmButton(window)).toHaveCount(0);
   });
 

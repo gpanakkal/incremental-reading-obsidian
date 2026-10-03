@@ -1177,8 +1177,8 @@ describe('IncrementalReadingPlugin.addExtractCommands', () => {
   });
 
   it('does what the button does for a PDF in review, though it has no editor', () => {
-    // The button says snippets and cards from PDFs aren't supported yet; the
-    // hotkey should say so too rather than do nothing at all
+    // The button makes snippets and cards from a PDF's viewer, which has no
+    // editor; the hotkey should do the same rather than nothing at all
     fc.assert(
       fc.property(
         kinds,

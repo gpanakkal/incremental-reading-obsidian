@@ -470,9 +470,15 @@ export class SnippetManager extends ItemManager {
   }
 
   /**
-   * Delete snippet file and mark row as deleted.
+   * Delete snippet file and drop its row.
+   *
+   * @param options.prompt whether to delete the note as Obsidian does from
+   *   its own menus (the default): asking first, if the user has it ask, and
+   *   then offering to delete whatever only the note linked to. That includes
+   *   the PDF a note made from one links to as its source, so an undo, which
+   *   only takes back what it made, says `false` and trashes just the note.
    */
-  async delete(id: string) {
+  async delete(id: string, { prompt = true }: { prompt?: boolean } = {}) {
     try {
       const row = (
         await this.repo.query(`SELECT * FROM snippet WHERE id = $1`, [id])
@@ -481,8 +487,12 @@ export class SnippetManager extends ItemManager {
 
       const file = Obsidian.getNote(row.reference, this.app);
       if (file) {
-        // delete the snippet file
-        await this.plugin.app.fileManager.promptForFileDeletion(file);
+        // delete the snippet file. `promptForFileDeletion` is undocumented
+        // Obsidian API (`trashFile` is the public one); its offer to delete
+        // unlinked attachments was read from the app bundle.
+        await (prompt
+          ? this.plugin.app.fileManager.promptForFileDeletion(file)
+          : this.plugin.app.fileManager.trashFile(file));
       }
 
       // remove the row entirely
