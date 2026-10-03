@@ -1,4 +1,5 @@
 import ReviewManager from '#/lib/items/ReviewManager';
+import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import type { ReviewSession } from '#/lib/plugin-data';
 import { queryClient } from '#/lib/query-client';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
@@ -335,14 +336,18 @@ function markdownView({ reading = false } = {}): MarkdownView {
 
 /**
  * Bare receiver for `addExtractCommands`, with the active tab showing
- * `where`: the review tab, a note, or neither. The commands it registers are
- * kept by id, to be run the way the command palette runs them.
+ * `where`: the review tab, a note, Obsidian's own PDF tab (with
+ * `tabFile` open), another file view of type `otherViewType`, or none.
+ * The commands it registers are kept by id, to be run the way the command
+ * palette runs them.
  */
 function makeExtractReceiver({
-  where = 'review' as 'review' | 'note' | 'none',
+  where = 'review' as 'review' | 'note' | 'pdf' | 'other' | 'none',
   reading = false,
   editor = true,
   itemExtension = null as string | null,
+  tabFile = { path: 'papers/a.pdf', extension: 'pdf' } as TFile | null,
+  otherViewType = 'image',
 } = {}) {
   const reviewView = Object.create(ReviewView.prototype) as ReviewView;
   // The review tab's item, by its file's extension; `null` for none
@@ -354,15 +359,22 @@ function makeExtractReceiver({
           extension: itemExtension,
         } as TFile);
   const noteView = markdownView({ reading });
+  const fileView = {
+    getViewType: () => (where === 'pdf' ? 'pdf' : otherViewType),
+    file: tabFile,
+  };
   const actions = {
     extract: vi.fn(() => Promise.resolve()),
+    extractFromPdfTab: vi.fn(() => Promise.resolve()),
     createSnippet: vi.fn(() => Promise.resolve(null)),
     createCard: vi.fn(() => Promise.resolve(null)),
   };
   const commands = new Map<string, (checking: boolean) => boolean | void>();
+  const unloaders: (() => void)[] = [];
   const receiver = {
     reviewManager: {},
     actions,
+    register: vi.fn((unloader: () => void) => unloaders.push(unloader)),
     addCommand: vi.fn(
       (command: {
         id: string;
@@ -376,6 +388,9 @@ function makeExtractReceiver({
       workspace: {
         activeEditor: editor ? { editor: {} } : null,
         getActiveViewOfType: vi.fn(() => (where === 'note' ? noteView : null)),
+        getActiveFileView: vi.fn(() =>
+          where === 'pdf' || where === 'other' ? fileView : null
+        ),
       },
     },
   };
@@ -391,7 +406,8 @@ function makeExtractReceiver({
     if (!callback) throw new Error(`no command makes a ${kind}`);
     return callback(checking);
   };
-  return { receiver, actions, reviewView, run };
+  const unload = () => unloaders.forEach((unloader) => unloader());
+  return { receiver, actions, reviewView, fileView, run, unload };
 }
 
 /**
@@ -1221,6 +1237,67 @@ describe('IncrementalReadingPlugin.addExtractCommands', () => {
         }
       )
     );
+  });
+
+  it("makes the snippet or card from a PDF open in Obsidian's own tab, which has no editor", () => {
+    fc.assert(
+      fc.property(kinds, fc.boolean(), (kind, editor) => {
+        const { actions, fileView, run } = makeExtractReceiver({
+          where: 'pdf',
+          editor,
+        });
+
+        expect(run(kind, true)).toBe(true);
+        expect(actions.extractFromPdfTab).not.toHaveBeenCalled();
+
+        run(kind);
+
+        expect(actions.extractFromPdfTab).toHaveBeenCalledExactlyOnceWith(
+          kind,
+          fileView
+        );
+        expect(actions.extract).not.toHaveBeenCalled();
+        expect(actions.createSnippet).not.toHaveBeenCalled();
+        expect(actions.createCard).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('is unavailable on a PDF tab with no file open, and on any other file view without an editor', () => {
+    fc.assert(
+      fc.property(
+        kinds,
+        fc.string().filter((type) => type !== 'pdf'),
+        (kind, otherViewType) => {
+          expect(
+            makeExtractReceiver({
+              where: 'pdf',
+              tabFile: null,
+              editor: false,
+            }).run(kind, true)
+          ).toBe(false);
+          expect(
+            makeExtractReceiver({
+              where: 'other',
+              otherViewType,
+              editor: false,
+            }).run(kind, true)
+          ).toBe(false);
+        }
+      )
+    );
+  });
+
+  it("stops following PDF tabs' selections once the plugin unloads", () => {
+    // The commands start following a tab's selection whatever else loaded
+    const stop = vi.spyOn(ObsidianPdf, 'stopPdfTabSelections');
+    const { unload } = makeExtractReceiver({ where: 'pdf' });
+    expect(stop).not.toHaveBeenCalled();
+
+    unload();
+
+    expect(stop).toHaveBeenCalledOnce();
+    stop.mockRestore();
   });
 
   it('extracts no snippet from a note in reading mode, but still makes a card', () => {

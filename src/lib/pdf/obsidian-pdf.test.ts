@@ -9,7 +9,9 @@ import {
   isPdfView,
   onPdfViewChange,
   pdfTabDocument,
+  pdfTabSelection,
   type PdfViewer,
+  stopPdfTabSelections,
 } from './obsidian-pdf';
 import type { PageSelection } from './pdf-selection';
 
@@ -284,6 +286,59 @@ function makePdfTab(
   };
 }
 
+/** Select as the user does: the browser then reports the change. */
+function userSelects(
+  start: Node,
+  startOffset: number,
+  end: Node,
+  endOffset: number,
+  doc: Document = document
+) {
+  const range = doc.createRange();
+  range.setStart(start, startOffset);
+  range.setEnd(end, endOffset);
+  const selection = doc.getSelection()!;
+  selection.removeAllRanges();
+  selection.addRange(range);
+  doc.dispatchEvent(new Event('selectionchange'));
+}
+
+/** A press starting at `target`, as a tap or a click begins. */
+function press(target: EventTarget) {
+  target.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+}
+
+/**
+ * Obsidian's PDF tab on screen in a tab (`.workspace-leaf`) of its own: its
+ * `contentEl` holds a page whose text layer reads `text`, and the tab a
+ * button beside it, as the action bar puts there. `close` runs what the view
+ * was handed to run as it unloads, which `afterEach` does for every tab left
+ * open.
+ */
+function pdfTabOnScreen(text = 'inside') {
+  const leafEl = document.body.appendChild(document.createElement('div'));
+  leafEl.className = 'workspace-leaf';
+  const contentEl = leafEl.appendChild(document.createElement('div'));
+  const page = contentEl.appendChild(document.createElement('div'));
+  page.className = 'page';
+  const layer = page.appendChild(document.createElement('div'));
+  layer.className = 'textLayer';
+  const span = layer.appendChild(document.createElement('span'));
+  span.textContent = text;
+  const button = leafEl.appendChild(document.createElement('button'));
+  const onUnload: (() => void)[] = [];
+  const tab = Object.assign(makePdfTab(), {
+    contentEl,
+    register: (cb: () => void) => onUnload.push(cb),
+  });
+  const close = () => onUnload.splice(0).forEach((cb) => cb());
+  openTabs.push(close);
+  return { tab, contentEl, layer, text: span.firstChild!, button, close };
+}
+
+/** How to close each tab {@link pdfTabOnScreen} put on screen. */
+const openTabs: (() => void)[] = [];
+
 /**
  * A PDF tab's viewer child that can highlight text, with page `rendered`'s
  * text layer done rendering (none when 0).
@@ -324,6 +379,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  openTabs.splice(0).forEach((close) => close());
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   document.body.innerHTML = '';
@@ -767,28 +823,6 @@ describe('PdfViewer.selection', () => {
     const outsideEl = document.body.appendChild(document.createElement('p'));
     outsideEl.textContent = 'outside';
     return { viewer, tab, pages, button, outside: outsideEl.firstChild! };
-  }
-
-  /** Select as the user does: the browser then reports the change. */
-  function userSelects(
-    start: Node,
-    startOffset: number,
-    end: Node,
-    endOffset: number,
-    doc: Document = document
-  ) {
-    const range = doc.createRange();
-    range.setStart(start, startOffset);
-    range.setEnd(end, endOffset);
-    const selection = doc.getSelection()!;
-    selection.removeAllRanges();
-    selection.addRange(range);
-    doc.dispatchEvent(new Event('selectionchange'));
-  }
-
-  /** A press starting at `target`, as a tap or a click begins. */
-  function press(target: EventTarget) {
-    target.dispatchEvent(new Event('pointerdown', { bubbles: true }));
   }
 
   const boundsOf = (range: Range | null) =>
@@ -1864,5 +1898,211 @@ describe('highlightPdfSelection', () => {
     tab.viewer.ready('changed');
 
     expect(() => highlightPdfSelection(tab, SELECTION)).not.toThrow();
+  });
+});
+
+describe('pdfTabSelection', () => {
+  it("follows what is selected in the tab's text layers from when it is first asked for", () => {
+    fc.assert(
+      fc.property(
+        fc.string({ minLength: 2 }).chain((text) =>
+          fc
+            .uniqueArray(fc.nat(text.length), { minLength: 2, maxLength: 2 })
+            .map(([a, b]) => ({
+              text,
+              from: Math.min(a, b),
+              to: Math.max(a, b),
+            }))
+        ),
+        ({ text, from, to }) => {
+          document.body.innerHTML = '';
+          const screen = pdfTabOnScreen(text);
+          const source = pdfTabSelection(screen.tab)!;
+
+          userSelects(screen.text, from, screen.text, to);
+
+          expect(source.selection()?.toString()).toBe(text.slice(from, to));
+          // Asked for again, as each command and button press does: the same
+          // source, which has been following all along
+          expect(pdfTabSelection(screen.tab)).toBe(source);
+          screen.close();
+        }
+      ),
+      // Each selection reaches every viewer earlier tests left following it
+      { numRuns: 20 }
+    );
+  });
+
+  it('starts from what is already selected in the tab when first asked for', () => {
+    const screen = pdfTabOnScreen();
+    userSelects(screen.text, 1, screen.text, 4);
+
+    expect(pdfTabSelection(screen.tab)!.selection()?.toString()).toBe('nsi');
+  });
+
+  it('starts from nothing when what is selected is outside the tab', () => {
+    const screen = pdfTabOnScreen();
+    const outside = document.body.appendChild(document.createElement('p'));
+    outside.textContent = 'outside';
+    userSelects(outside.firstChild!, 0, outside.firstChild!, 3);
+
+    expect(pdfTabSelection(screen.tab)!.selection()).toBeNull();
+  });
+
+  it.each([
+    ['keeps', 'on a button in the tab', false],
+    ['drops', 'in another tab', true],
+  ])('%s the selection through a press %s', (_, __, elsewhere) => {
+    const screen = pdfTabOnScreen();
+    const source = pdfTabSelection(screen.tab)!;
+    const otherTab = document.body.appendChild(document.createElement('div'));
+    otherTab.className = 'workspace-leaf';
+    userSelects(screen.text, 1, screen.text, 4);
+
+    press(elsewhere ? otherTab : screen.button);
+    // Pressing a button moves the browser's selection out of the PDF
+    document.getSelection()!.removeAllRanges();
+    document.dispatchEvent(new Event('selectionchange'));
+
+    expect(source.selection()?.toString() ?? null).toBe(
+      elsewhere ? null : 'nsi'
+    );
+    screen.close();
+  });
+
+  it("is read in the tab's content, which is where its viewer renders", () => {
+    const screen = pdfTabOnScreen();
+
+    expect(pdfTabSelection(screen.tab)!.containerEl).toBe(screen.contentEl);
+  });
+
+  it("reads the document and the pages on screen off the tab's viewer once it is ready", () => {
+    const screen = pdfTabOnScreen();
+    const source = pdfTabSelection(screen.tab)!;
+    expect(source.pdfDocument()).toBeNull();
+    expect(source.visiblePages()).toEqual([]);
+
+    const pdfDocument = { numPages: 3, getPage: vi.fn() };
+    screen.tab.viewer.ready({
+      ...makeChild(),
+      pdfViewer: {
+        pdfDocument,
+        pdfViewer: {
+          currentPageNumber: 2,
+          _getVisiblePages: () => ({ ids: new Set([3, 2]) }),
+        },
+      },
+    });
+
+    expect(source.pdfDocument()).toBe(pdfDocument);
+    expect(source.visiblePages()).toEqual([2, 3]);
+  });
+
+  it('clears the selection, on screen too', () => {
+    const screen = pdfTabOnScreen();
+    const source = pdfTabSelection(screen.tab)!;
+    userSelects(screen.text, 1, screen.text, 4);
+
+    source.clearSelection();
+
+    expect(source.selection()).toBeNull();
+    expect(document.getSelection()!.rangeCount).toBe(0);
+  });
+
+  it('stops following the selection once the tab closes, and starts afresh if asked again', () => {
+    const screen = pdfTabOnScreen();
+    const source = pdfTabSelection(screen.tab)!;
+    userSelects(screen.text, 0, screen.text, 2);
+
+    screen.close();
+
+    expect(source.selection()).toBeNull();
+    userSelects(screen.text, 1, screen.text, 4);
+    expect(source.selection()).toBeNull();
+
+    const fresh = pdfTabSelection(screen.tab)!;
+    expect(fresh).not.toBe(source);
+    userSelects(screen.text, 0, screen.text, 3);
+    expect(fresh.selection()?.toString()).toBe('ins');
+  });
+
+  it('takes off every listener it put on the document once the tab closes', () => {
+    const added = vi.spyOn(document, 'addEventListener');
+    const removed = vi.spyOn(document, 'removeEventListener');
+    const screen = pdfTabOnScreen();
+    pdfTabSelection(screen.tab);
+    const listeners = added.mock.calls.map(([type, cb, opts]) => [
+      type,
+      cb,
+      opts,
+    ]);
+    expect(listeners.map(([type]) => type).sort()).toEqual([
+      'pointerdown',
+      'selectionchange',
+    ]);
+
+    screen.close();
+
+    expect(
+      removed.mock.calls.map(([type, cb, opts]) => [type, cb, opts])
+    ).toEqual(expect.arrayContaining(listeners));
+    expect(removed).toHaveBeenCalledTimes(listeners.length);
+  });
+
+  it('stops following the selection in every tab once told to, as the plugin unloads', () => {
+    const screens = [pdfTabOnScreen('first'), pdfTabOnScreen('second')];
+    const sources = screens.map((screen) => pdfTabSelection(screen.tab)!);
+    userSelects(screens[0].text, 0, screens[0].text, 2);
+
+    stopPdfTabSelections();
+
+    expect(sources[0].selection()).toBeNull();
+    userSelects(screens[1].text, 0, screens[1].text, 2);
+    expect(sources[1].selection()).toBeNull();
+    // Loaded again, the plugin follows them anew
+    const fresh = pdfTabSelection(screens[1].tab)!;
+    expect(fresh).not.toBe(sources[1]);
+    userSelects(screens[1].text, 1, screens[1].text, 3);
+    expect(fresh.selection()?.toString()).toBe('ec');
+  });
+
+  it('follows the selection in a tab that cannot say when it closes', () => {
+    const screen = pdfTabOnScreen();
+    Object.assign(screen.tab, { register: undefined });
+    const source = pdfTabSelection(screen.tab)!;
+
+    userSelects(screen.text, 1, screen.text, 4);
+
+    expect(source.selection()?.toString()).toBe('nsi');
+    expect(pdfTabSelection(screen.tab)).toBe(source);
+    stopPdfTabSelections();
+    expect(source.selection()).toBeNull();
+  });
+
+  it.each([
+    [
+      'a view of another type',
+      {
+        getViewType: (): string => 'markdown',
+        viewer: new FakeViewerComponent(null, createDiv(), {}),
+        contentEl: createDiv(),
+      },
+    ],
+    ['no view', null],
+    [
+      'a PDF tab without a viewer',
+      { getViewType: (): string => 'pdf', contentEl: createDiv() },
+    ],
+    ['a PDF tab without content', makePdfTab()],
+    [
+      'a PDF tab whose content is not an element',
+      Object.assign(makePdfTab(), { contentEl: {} }),
+    ],
+    [
+      'a PDF tab whose content is text',
+      Object.assign(makePdfTab(), { contentEl: document.createTextNode('') }),
+    ],
+  ])('is null for %s', (_, view) => {
+    expect(pdfTabSelection(view as unknown as View)).toBeNull();
   });
 });

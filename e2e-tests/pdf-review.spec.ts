@@ -1311,4 +1311,174 @@ test.describe('Snippets and cards from a PDF article', () => {
       });
     expect(alpha).toBeGreaterThanOrEqual(0.15);
   });
+
+  // #region IN THE PDF'S OWN TAB
+
+  /** The PDF's own tab, active, as importing it from there leaves it. */
+  const pdfTab = (page: Page) =>
+    page.locator(
+      '.workspace-leaf.mod-active .workspace-leaf-content[data-type="pdf"]'
+    );
+  const tabItem = (page: Page, n: number, idx: number) =>
+    pdfTab(page).locator(
+      `.page[data-page-number="${n}"] .textLayer [data-idx="${idx}"]`
+    );
+
+  /**
+   * Select from `[page, idx, offset]` to another such point in the active PDF
+   * tab, as a script would: Obsidian snaps only pointer selections.
+   */
+  const selectInTab = (
+    page: Page,
+    from: [number, number, number],
+    to: [number, number, number]
+  ) =>
+    page.evaluate(
+      ([from, to]) => {
+        const point = ([n, idx, offset]: number[]) => {
+          const span = document.querySelector(
+            '.workspace-leaf.mod-active .workspace-leaf-content[data-type="pdf"] ' +
+              `.page[data-page-number="${n}"] .textLayer [data-idx="${idx}"]`
+          );
+          if (!span?.firstChild) throw new Error(`No item ${n}/${idx}`);
+          return [span.firstChild, offset] as const;
+        };
+        const range = document.createRange();
+        range.setStart(...point(from));
+        range.setEnd(...point(to));
+        const selection = document.getSelection()!;
+        selection.removeAllRanges();
+        selection.addRange(range);
+      },
+      [from, to]
+    );
+
+  /** Import the fixture from its own tab, and wait for the tab's action bar. */
+  async function importInTab(page: Page) {
+    await importFixture(page);
+    await expect(pdfTab(page).locator('.ir-pdf-leaf-bar')).toBeVisible();
+    await expect(tabItem(page, 1, 2)).toBeAttached();
+  }
+
+  test("extracts a snippet in the PDF's own tab from the command, as in review, leaving the PDF as it was", async () => {
+    const pdfBytes = await fs.readFile(path.join(vaultPath, PDF_PATH));
+    await importInTab(window);
+    const notices = await watchNotices(window);
+
+    await selectInTab(window, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    // `selectionchange` is dispatched as a task, not synchronously
+    await window.waitForTimeout(100);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+    const [snippet] = await snippets(window);
+    expect(snippet).toMatchObject({
+      parent: await articleId(window),
+      start_offset: 1_00002_00000,
+      end_offset: 1_00002_00000 + FIRST_LINE.length,
+      body: FIRST_LINE,
+      source:
+        `[[PDF fixture.pdf#page=1&selection=2,0,2,${FIRST_LINE.length}` +
+        '|PDF fixture, page 1]]',
+    });
+    expect(await notices()).toEqual([
+      expect.stringMatching(/^snippet created: /),
+    ]);
+    // Highlighted in the tab, as one extracted in review is
+    await expect(
+      tabItem(window, 1, 2).locator('.ir-snippet-highlight')
+    ).not.toHaveCount(0);
+    expect(
+      (await fs.readFile(path.join(vaultPath, PDF_PATH))).equals(pdfBytes)
+    ).toBe(true);
+    // No review tab was needed
+    expect(
+      await window.evaluate(
+        (viewType) =>
+          (window as unknown as { app: PageApp }).app.workspace.getLeavesOfType(
+            viewType
+          ).length,
+        REVIEW_VIEW_TYPE
+      )
+    ).toBe(0);
+  });
+
+  test("makes a card in the PDF's own tab from the command picked in the palette by a click, though that moves the selection away", async () => {
+    const pdfBytes = await fs.readFile(path.join(vaultPath, PDF_PATH));
+    await importInTab(window);
+
+    await selectInTab(window, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    await window.waitForTimeout(100);
+    await executeCommandById(window, 'command-palette:open');
+    const palette = window.locator('.modal-container .prompt');
+    await expect(palette).toBeVisible();
+    await window.keyboard.type('Create spaced repetition card');
+    await palette
+      .locator('.suggestion-item', { hasText: 'Create spaced repetition card' })
+      .first()
+      .click();
+    await expect(answerText(window)).toHaveText(FIRST_LINE);
+    await selectAnswer(window, 'long text');
+    await window.keyboard.press('Enter');
+
+    await expect(answerText(window)).toHaveCount(0);
+    await expect.poll(() => cards(window)).toHaveLength(1);
+    const [card] = await cards(window);
+    const [left, right] = CLOZE_DELIMITERS;
+    expect(card).toMatchObject({
+      parent: await articleId(window),
+      body: FIRST_LINE.replace('long text', `${left} long text ${right}`),
+      source:
+        `[[PDF fixture.pdf#page=1&selection=2,0,2,${FIRST_LINE.length}` +
+        '|PDF fixture, page 1]]',
+    });
+    expect(
+      (await fs.readFile(path.join(vaultPath, PDF_PATH))).equals(pdfBytes)
+    ).toBe(true);
+  });
+
+  test("asks for a selection first in the PDF's own tab with nothing selected, and makes nothing", async () => {
+    await importInTab(window);
+    const notices = await watchNotices(window);
+
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+    await executeCommandById(window, 'incremental-reading:create-card');
+
+    await expect
+      .poll(notices)
+      .toEqual([
+        'Select the text to extract first',
+        'Select the text to make a card of first',
+      ]);
+    expect(await snippets(window)).toEqual([]);
+    expect(await cards(window)).toEqual([]);
+    await expect(answerText(window)).toHaveCount(0);
+  });
+
+  test('offers the commands in a PDF tab that is no article, and says so once one is run, making nothing', async () => {
+    await openFileInActiveLeaf(window, PDF_PATH);
+    await expect(tabItem(window, 1, 2)).toBeAttached();
+    const notices = await watchNotices(window);
+
+    await selectInTab(window, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    await window.waitForTimeout(100);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+    // Refused before the selection is read: it stays, for after an import
+    expect(
+      await window.evaluate(() => document.getSelection()!.toString())
+    ).toBe(FIRST_LINE);
+    await executeCommandById(window, 'incremental-reading:create-card');
+
+    await expect
+      .poll(notices)
+      .toEqual([
+        '"PDF fixture" is not an incremental reading article',
+        '"PDF fixture" is not an incremental reading article',
+      ]);
+    expect(await snippets(window)).toEqual([]);
+    expect(await cards(window)).toEqual([]);
+    await expect(answerText(window)).toHaveCount(0);
+  });
+
+  // #endregion
 });

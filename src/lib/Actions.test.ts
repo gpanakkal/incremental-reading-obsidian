@@ -2,6 +2,7 @@ import { Actions, itemName } from '#/lib/Actions';
 import { CONTENT_TITLE_SLICE_LENGTH } from '#/lib/constants';
 import * as itemContext from '#/lib/item-context';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import * as obsidianPdf from '#/lib/pdf/obsidian-pdf';
 import * as pdfSelection from '#/lib/pdf/pdf-selection';
 import {
   fetchCurrentItem,
@@ -36,7 +37,7 @@ import { Notice } from '#/test/__mocks__/obsidian';
 import * as CardAnswerModal from '#/views/CardAnswerModal';
 import type ReviewView from '#/views/ReviewView';
 import { EditorState } from '@codemirror/state';
-import type { TFile } from 'obsidian';
+import type { FileView, TFile } from 'obsidian';
 import {
   afterEach,
   beforeEach,
@@ -2792,6 +2793,330 @@ describe('Actions.confirmSelection for a PDF', () => {
       expect(Notice.messages).toEqual([]);
       vi.restoreAllMocks();
     }
+  });
+});
+
+describe('Actions.extractFromPdfTab', () => {
+  beforeEach(() => {
+    Notice.reset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Obsidian's PDF tab showing `file`, whose selection source (see
+   * `pdfTabSelection`) has `selection` selected, or which has none with
+   * `noViewer`. The database types the file `type`. Review is in selection
+   * mode for `mode`, which a tab has nothing to do with.
+   */
+  function wirePdfTab({
+    selection = SELECTED as Range | null,
+    noViewer = false,
+    pdfDocument = pdfDocumentWith([['Some text']]) as unknown,
+    mode = null as SelectionKind | null,
+    file = pdfFile() as TFile | null,
+    type = 'article' as NoteType | null | Error,
+  } = {}) {
+    const { plugin, actions, createSnippet, createCard } =
+      wireSelectionActions();
+    const getItemType = vi.fn(() =>
+      type instanceof Error ? Promise.reject(type) : Promise.resolve(type)
+    );
+    Object.assign(plugin.reviewManager, { articles: { getItemType } });
+    const fromPdf = spyPdfCreators(actions);
+    wireSelectionMode(mode);
+    const host = makeSelectingView(null, null).reviewView;
+    const { viewer } = withPdfViewer(
+      host,
+      noViewer ? undefined : selection,
+      pdfDocument
+    );
+    const view = { file } as unknown as FileView;
+    const tabSelection = vi
+      .spyOn(obsidianPdf, 'pdfTabSelection')
+      .mockReturnValue(viewer as never);
+    return {
+      plugin,
+      actions,
+      fromPdf,
+      createSnippet,
+      createCard,
+      viewer,
+      view,
+      file,
+      tabSelection,
+      getItemType,
+    };
+  }
+
+  /** What the snippet or card was made through: the tab's source and file. */
+  function madeFrom(creator: MockInstance) {
+    const [host] = creator.mock.calls[0] as [
+      { pdfViewer: unknown; currentItemFile(): unknown },
+    ];
+    return { viewer: host.pdfViewer, file: host.currentItemFile() };
+  }
+
+  it('makes the snippet or card at once of the text selected in the tab, whatever mode review is in', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        selectionKindArb,
+        fc.option(selectionKindArb, { nil: null }),
+        async (kind, mode) => {
+          Notice.reset();
+          const wired = wirePdfTab({ mode });
+
+          await wired.actions.extractFromPdfTab(kind, wired.view);
+
+          expect(wired.tabSelection).toHaveBeenCalledWith(wired.view);
+          expect(wired.fromPdf[kind]).toHaveBeenCalledOnce();
+          expect(madeFrom(wired.fromPdf[kind])).toEqual({
+            viewer: wired.viewer,
+            file: wired.file,
+          });
+          expect(
+            wired.fromPdf[kind === 'snippet' ? 'card' : 'snippet']
+          ).not.toHaveBeenCalled();
+          // A tab has no selection mode: review's is left as it was
+          expect(dispatched(wired.plugin)).toEqual([]);
+          expect(wired.createSnippet).not.toHaveBeenCalled();
+          expect(wired.createCard).not.toHaveBeenCalled();
+          expect(Notice.messages).toEqual([]);
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('asks for a selection first, and makes nothing, with nothing selected in the tab', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        selectionKindArb,
+        fc.option(selectionKindArb, { nil: null }),
+        async (kind, mode) => {
+          Notice.reset();
+          const wired = wirePdfTab({ selection: null, mode });
+
+          await wired.actions.extractFromPdfTab(kind, wired.view);
+
+          expect(Notice.messages).toEqual([
+            kind === 'snippet'
+              ? 'Select the text to extract first'
+              : 'Select the text to make a card of first',
+          ]);
+          expect(wired.fromPdf.snippet).not.toHaveBeenCalled();
+          expect(wired.fromPdf.card).not.toHaveBeenCalled();
+          expect(dispatched(wired.plugin)).toEqual([]);
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('says there is no selectable text when no page on screen has any', async () => {
+    await fc.assert(
+      fc.asyncProperty(selectionKindArb, async (kind) => {
+        Notice.reset();
+        const wired = wirePdfTab({
+          selection: null,
+          pdfDocument: pdfDocumentWith([[' ']]),
+        });
+
+        await wired.actions.extractFromPdfTab(kind, wired.view);
+
+        expect(Notice.messages).toEqual(['No selectable text']);
+        expect(wired.fromPdf[kind]).not.toHaveBeenCalled();
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('says a PDF that is no article is not one, and leaves its selection, whatever is selected', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        selectionKindArb,
+        fc.constantFrom<NoteType | null>(null, 'snippet', 'card'),
+        fc.constantFrom<Range | null>(SELECTED, null),
+        async (kind, type, selection) => {
+          Notice.reset();
+          const wired = wirePdfTab({ type, selection });
+
+          await wired.actions.extractFromPdfTab(kind, wired.view);
+
+          expect(wired.getItemType).toHaveBeenCalledExactlyOnceWith(wired.file);
+          expect(Notice.messages).toEqual([
+            '"paper" is not an incremental reading article',
+          ]);
+          expect(wired.fromPdf.snippet).not.toHaveBeenCalled();
+          expect(wired.fromPdf.card).not.toHaveBeenCalled();
+          // Kept, to make something of once the PDF is imported
+          expect(wired.viewer!.clearSelection).not.toHaveBeenCalled();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('goes on to make it when the type lookup fails, leaving the snippet or card to check the PDF', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failure = new Error('db gone');
+    const wired = wirePdfTab({ type: failure });
+
+    await wired.actions.extractFromPdfTab('snippet', wired.view);
+
+    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(wired.fromPdf.snippet).toHaveBeenCalledOnce();
+  });
+
+  it("leaves it to the snippet or card to say why, when the tab's viewer is not one this knows", async () => {
+    await fc.assert(
+      fc.asyncProperty(selectionKindArb, async (kind) => {
+        const wired = wirePdfTab({ noViewer: true });
+
+        await wired.actions.extractFromPdfTab(kind, wired.view);
+
+        expect(wired.fromPdf[kind]).toHaveBeenCalledOnce();
+        expect(madeFrom(wired.fromPdf[kind])).toEqual({
+          viewer: null,
+          file: wired.file,
+        });
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('ignores a second press while the first is making its snippet or card, wherever it was made', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('tab', 'review'),
+        selectionKindArb,
+        selectionKindArb,
+        async (first, kind, secondKind) => {
+          Notice.reset();
+          const wired = wirePdfTab();
+          let finish!: () => void;
+          wired.fromPdf[kind].mockImplementationOnce(
+            () =>
+              new Promise((resolve) => {
+                finish = () => resolve(null);
+              })
+          );
+          const { reviewView } = makeSelectingView(null, pdfFile());
+          withPdfViewer(reviewView, SELECTED);
+
+          const firstPress =
+            first === 'tab'
+              ? wired.actions.extractFromPdfTab(kind, wired.view)
+              : wired.actions.extract(kind, reviewView);
+          // Pressed while the first is still looking the PDF up, and again
+          // once it is making the snippet or card
+          await wired.actions.extractFromPdfTab(secondKind, wired.view);
+          await vi.waitFor(() =>
+            expect(wired.fromPdf[kind]).toHaveBeenCalled()
+          );
+          await wired.actions.extractFromPdfTab(secondKind, wired.view);
+          finish();
+          await firstPress;
+
+          expect(wired.fromPdf[kind]).toHaveBeenCalledOnce();
+          expect(
+            wired.fromPdf[kind === 'snippet' ? 'card' : 'snippet']
+          ).not.toHaveBeenCalled();
+
+          // Over once it is: the next press is heard again
+          await wired.actions.extractFromPdfTab(secondKind, wired.view);
+          expect(wired.fromPdf[secondKind]).toHaveBeenCalledTimes(
+            kind === secondKind ? 2 : 1
+          );
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+});
+
+describe('Actions.createPdfSnippet and createPdfCard from a PDF tab', () => {
+  beforeEach(() => {
+    Notice.reset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("read the tab's selection in its viewer, for the article the tab shows", async () => {
+    await fc.assert(
+      fc.asyncProperty(selectionKindArb, async (kind) => {
+        Notice.reset();
+        const file = pdfFile('pdf', 'paper');
+        const article = { data: { id: 'article-1', type: 'article' }, file };
+        const read = {
+          start: 1e10,
+          end: 1e10 + 1,
+          text: 'a',
+          subpath: '#page=1',
+        };
+        const plugin = makePlugin();
+        const getReviewItemFromFile = vi.fn().mockResolvedValue(article);
+        const made = { data: { id: 'made' }, file: { basename: 'Made' } };
+        const createFromPdf = vi.fn().mockResolvedValue(made);
+        Object.assign(plugin.reviewManager, {
+          getReviewItemFromFile,
+          articles: { getItemType: vi.fn().mockResolvedValue('article') },
+          snippets: { createFromPdf },
+          cards: { createFromPdf },
+        });
+        const actions = new Actions(plugin);
+        const readPdfSelection = vi
+          .spyOn(pdfSelection, 'readPdfSelection')
+          .mockResolvedValue(read);
+        vi.spyOn(CardAnswerModal, 'promptForCardAnswer').mockResolvedValue([
+          0, 1,
+        ]);
+        const host = makeSelectingView(null, null).reviewView;
+        const { viewer } = withPdfViewer(host, SELECTED);
+        vi.spyOn(obsidianPdf, 'pdfTabSelection').mockReturnValue(
+          viewer as never
+        );
+        const view = { file } as unknown as FileView;
+
+        await actions.extractFromPdfTab(kind, view);
+
+        expect(readPdfSelection).toHaveBeenCalledExactlyOnceWith(
+          SELECTED,
+          viewer!.containerEl,
+          viewer!.pdfDocument()
+        );
+        expect(viewer!.clearSelection).toHaveBeenCalledOnce();
+        expect(getReviewItemFromFile).toHaveBeenCalledExactlyOnceWith(file);
+        expect(createFromPdf).toHaveBeenCalledExactlyOnceWith(
+          kind === 'snippet'
+            ? { article, ...read }
+            : { article, ...read, answer: [0, 1] }
+        );
+        expect(actions.undoStack).toHaveLength(1);
+        expect(Notice.messages).toEqual([]);
+        vi.restoreAllMocks();
+      })
+    );
+  });
+
+  it('says why, and makes nothing, for a tab that has no file', async () => {
+    const plugin = makePlugin();
+    const actions = new Actions(plugin);
+    const readPdfSelection = vi.spyOn(pdfSelection, 'readPdfSelection');
+    const host = makeSelectingView(null, null).reviewView;
+    const { viewer } = withPdfViewer(host, SELECTED);
+    vi.spyOn(obsidianPdf, 'pdfTabSelection').mockReturnValue(viewer as never);
+
+    await actions.extractFromPdfTab('snippet', {
+      file: null,
+    } as unknown as FileView);
+
+    expect(Notice.messages).toEqual(["Can't select text in this PDF here"]);
+    expect(readPdfSelection).not.toHaveBeenCalled();
   });
 });
 

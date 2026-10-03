@@ -2,6 +2,7 @@ import { registerPdfLeafHighlights } from '#/lib/extensions/PdfSnippetHighlights
 import { checkImportable } from '#/lib/items/ArticleManager';
 import { appendLog } from '#/lib/log-file';
 import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
+import { isPdfView, stopPdfTabSelections } from '#/lib/pdf/obsidian-pdf';
 import { REBIND_LOG_TOPIC } from '#/lib/rebind-records';
 import {
   type App,
@@ -794,20 +795,36 @@ export default class IncrementalReadingPlugin extends Plugin {
    * once, and with nothing selected review enters selection mode instead. Once
    * in the mode, the command for its kind confirms it and the other is refused.
    * In a note, which has no selection mode, they make it at once either way.
+   * So they do in a PDF open in Obsidian's own tab, through the PDF's viewer.
    */
   private addExtractCommands() {
+    // The commands, and the PDF tab action bars, follow the selection in PDF
+    // tabs, which outlive the plugin
+    this.register(stopPdfTabSelections);
     /**
-     * The commands on a PDF article in review, which has no editor for them to
-     * find: handed to the button's path, which selects in the PDF's viewer
-     * instead. Whether that applied, and so whether the command is available.
+     * The commands on a PDF article, which has no editor for them to find:
+     * in review, handed to the button's path, which selects in the PDF's
+     * viewer instead; in Obsidian's own PDF tab, to the tab's. Whether that
+     * applied, and so whether the command is available.
      */
     const extractFromPdf = (kind: 'snippet' | 'card', checking: boolean) => {
       const view = this.getActiveReviewView();
-      const file = view?.currentItemFile();
-      if (!view || !file || getMimeType(file) !== 'application/pdf') {
-        return false;
-      }
+      if (!view) return extractFromPdfTab(kind, checking);
+      const file = view.currentItemFile();
+      if (!file || getMimeType(file) !== 'application/pdf') return false;
       if (!checking) void this.actions.extract(kind, view);
+      return true;
+    };
+    /**
+     * {@link extractFromPdf} in Obsidian's own PDF tab. Any PDF it has open
+     * may be an article, which only its row tells: one that isn't is refused
+     * once the command runs.
+     */
+    const extractFromPdfTab = (kind: 'snippet' | 'card', checking: boolean) => {
+      // Undocumented: `Workspace.getActiveFileView` (typed by obsidian-typings)
+      const view = this.app.workspace.getActiveFileView();
+      if (!view?.file || !isPdfView(view)) return false;
+      if (!checking) void this.actions.extractFromPdfTab(kind, view);
       return true;
     };
 

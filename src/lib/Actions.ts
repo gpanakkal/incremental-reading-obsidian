@@ -1,4 +1,7 @@
-import type { PdfViewer } from '#/lib/pdf/obsidian-pdf';
+import {
+  type PdfSelectionSource,
+  pdfTabSelection,
+} from '#/lib/pdf/obsidian-pdf';
 import {
   type PdfSelection,
   pageHasText,
@@ -7,7 +10,12 @@ import {
 import type IncrementalReadingPlugin from '#/main';
 import { promptForCardAnswer } from '#/views/CardAnswerModal';
 import type ReviewView from '#/views/ReviewView';
-import { MarkdownView, type TFile, type WorkspaceLeaf } from 'obsidian';
+import {
+  type FileView,
+  MarkdownView,
+  type TFile,
+  type WorkspaceLeaf,
+} from 'obsidian';
 import { type Grade, Rating } from 'ts-fsrs';
 import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from './constants';
 import IRScheduler from './IRScheduler';
@@ -68,6 +76,29 @@ export function itemName(item: MaybeMissingItem): string {
 type ReviewEditorView = NonNullable<
   ReturnType<ReviewView['reviewEditor']>
 >['cm'];
+
+/**
+ * Where a snippet or card is made of a PDF selection: the viewer selected in,
+ * `null` when there is none to select in, and the PDF it shows. The review tab
+ * is one; Obsidian's own PDF tab is made into one by
+ * {@link Actions.extractFromPdfTab}.
+ */
+export interface PdfSelectionHost {
+  readonly pdfViewer: PdfSelectionSource | null;
+  currentItemFile(): TFile | null;
+}
+
+/** What to say when `file` is asked to give a snippet or card but no article. */
+function notAnArticle(file: TFile): string {
+  return `"${file.basename}" is not an incremental reading article`;
+}
+
+/** What to say when there is nothing selected yet to make `kind` of. */
+function selectFirst(kind: SelectionKind): string {
+  return kind === 'snippet'
+    ? 'Select the text to extract first'
+    : 'Select the text to make a card of first';
+}
 
 export type ActionStackEntry = {
   item: MaybeMissingItem;
@@ -354,14 +385,15 @@ export class Actions {
   };
 
   /**
-   * Extract the text selected in the PDF article on screen in review to a
-   * snippet: see `SnippetManager.createFromPdf`. Says so, and makes nothing,
-   * when there is no text to make it of, as on a scanned page.
+   * Extract the text selected in the PDF article on screen in `host` (review,
+   * or a PDF tab) to a snippet: see `SnippetManager.createFromPdf`. Says so,
+   * and makes nothing, when there is no text to make it of, as on a scanned
+   * page.
    */
   createPdfSnippet = async (
-    reviewView: ReviewView
+    host: PdfSelectionHost
   ): Promise<ReviewSnippet | null> => {
-    const read = await this._readPdfSelection(reviewView);
+    const read = await this._readPdfSelection(host);
     if (!read) return null;
 
     const snippet = await this.plugin.reviewManager.snippets.createFromPdf({
@@ -391,8 +423,8 @@ export class Actions {
   };
 
   /**
-   * Make a card of the text selected in the PDF article on screen in review,
-   * asking for its answer as selection mode does: see
+   * Make a card of the text selected in the PDF article on screen in `host`
+   * (review, or a PDF tab), asking for its answer as selection mode does: see
    * `CardManager.createFromPdf`. Says so, and makes nothing, when there is no
    * text to make it of, as on a scanned page.
    *
@@ -402,9 +434,9 @@ export class Actions {
    * note links to it.
    */
   createPdfCard = async (
-    reviewView: ReviewView
+    host: PdfSelectionHost
   ): Promise<ReviewCard | null> => {
-    const read = await this._readPdfSelection(reviewView);
+    const read = await this._readPdfSelection(host);
     if (!read) return null;
     const { article, selection } = read;
 
@@ -431,7 +463,7 @@ export class Actions {
   };
 
   /**
-   * Read the text selected in the PDF article on screen in review, for a
+   * Read the text selected in the PDF article on screen in `host`, for a
    * snippet or card to be made of, along with the article's row. Says why,
    * and answers null, when there is nothing to make one of.
    *
@@ -440,10 +472,10 @@ export class Actions {
    * read is the input to the next.
    */
   private _readPdfSelection = async (
-    reviewView: ReviewView
+    host: PdfSelectionHost
   ): Promise<{ article: ReviewArticle; selection: PdfSelection } | null> => {
-    const viewer = reviewView.pdfViewer;
-    const file = reviewView.currentItemFile();
+    const viewer = host.pdfViewer;
+    const file = host.currentItemFile();
     if (!viewer || !file) {
       Obsidian.notify("Can't select text in this PDF here");
       return null;
@@ -471,9 +503,7 @@ export class Actions {
     }
     const article = await this.plugin.reviewManager.getReviewItemFromFile(file);
     if (!article || !isReviewArticle(article)) {
-      Obsidian.notify(
-        `"${file.basename}" is not an incremental reading article`
-      );
+      Obsidian.notify(notAnArticle(file));
       return null;
     }
     return { article, selection };
@@ -639,17 +669,13 @@ export class Actions {
   confirmSelection = async (reviewView: ReviewView) => {
     const kind = store.getState().selectionMode;
     if (kind === null) return;
-    const selectFirst =
-      kind === 'snippet'
-        ? 'Select the text to extract first'
-        : 'Select the text to make a card of first';
     const viewer = reviewView.pdfViewer;
     if (viewer) {
       if (!viewer.selection()) {
         Obsidian.notify(
           (await this._nothingToSelect(viewer))
             ? 'No selectable text'
-            : selectFirst
+            : selectFirst(kind)
         );
         return;
       }
@@ -665,7 +691,7 @@ export class Actions {
 
     const { from, to } = cm.state.selection.main;
     if (from === to) {
-      Obsidian.notify(selectFirst);
+      Obsidian.notify(selectFirst(kind));
       return;
     }
 
@@ -695,18 +721,76 @@ export class Actions {
   };
 
   /**
+   * What the create snippet and create card commands do on a PDF open in
+   * Obsidian's own PDF tab `view`: what {@link extract} does in review with
+   * text selected. A tab has no selection mode to enter, so with nothing
+   * selected this asks for a selection instead.
+   *
+   * A PDF that is no article is refused first, its selection left on screen
+   * to make something of once it is imported.
+   */
+  extractFromPdfTab = async (kind: SelectionKind, view: FileView) => {
+    // A second press while the first is still at work, or a card's answer
+    // still being asked for, wherever that was pressed
+    if (this._makingFromPdf) return;
+    this._makingFromPdf = true;
+    try {
+      const { file } = view;
+      if (file && !(await this._mayBeArticle(file))) {
+        Obsidian.notify(notAnArticle(file));
+        return;
+      }
+      const viewer = pdfTabSelection(view);
+      if (viewer && !viewer.selection()) {
+        Obsidian.notify(
+          (await this._nothingToSelect(viewer))
+            ? 'No selectable text'
+            : selectFirst(kind)
+        );
+        return;
+      }
+      // With no viewer there is nothing to select in: the snippet says why
+      const host: PdfSelectionHost = {
+        pdfViewer: viewer,
+        currentItemFile: () => view.file,
+      };
+      await (kind === 'snippet'
+        ? this.createPdfSnippet(host)
+        : this.createPdfCard(host));
+    } finally {
+      this._makingFromPdf = false;
+    }
+  };
+
+  /**
+   * Whether `file` may be an article: false only once its row says it is
+   * not. When that can't be read, the snippet or card checks for itself.
+   */
+  private _mayBeArticle = async (file: TFile): Promise<boolean> => {
+    try {
+      return (
+        (await this.plugin.reviewManager.articles.getItemType(file)) ===
+        'article'
+      );
+    } catch (error) {
+      console.error(error);
+      return true;
+    }
+  };
+
+  /**
    * {@link createPdfSnippet} or {@link createPdfCard}, marked as under way
    * while it is.
    */
   private _makeFromPdf = async (
     kind: SelectionKind,
-    reviewView: ReviewView
+    host: PdfSelectionHost
   ) => {
     this._makingFromPdf = true;
     try {
       await (kind === 'snippet'
-        ? this.createPdfSnippet(reviewView)
-        : this.createPdfCard(reviewView));
+        ? this.createPdfSnippet(host)
+        : this.createPdfCard(host));
     } finally {
       this._makingFromPdf = false;
     }
@@ -717,7 +801,9 @@ export class Actions {
    * pages haven't: there is then no selecting a snippet or card there. False when
    * that can't be told.
    */
-  private _nothingToSelect = async (viewer: PdfViewer): Promise<boolean> => {
+  private _nothingToSelect = async (
+    viewer: PdfSelectionSource
+  ): Promise<boolean> => {
     const doc = viewer.pdfDocument();
     const pages = viewer.visiblePages();
     if (!doc || pages.length === 0) return false;
