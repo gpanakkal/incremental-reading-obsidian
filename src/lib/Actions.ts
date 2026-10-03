@@ -7,14 +7,15 @@ import {
 import type IncrementalReadingPlugin from '#/main';
 import { promptForCardAnswer } from '#/views/CardAnswerModal';
 import type ReviewView from '#/views/ReviewView';
-import { MarkdownView, type TFile } from 'obsidian';
+import { MarkdownView, type TFile, type WorkspaceLeaf } from 'obsidian';
 import { type Grade, Rating } from 'ts-fsrs';
 import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from './constants';
 import IRScheduler from './IRScheduler';
 import {
-  type MatchEphemeralState,
+  type ItemContext,
   findArticleSource,
   resolveItemContext,
+  revealPdfContext,
 } from './item-context';
 import type { CardSelection } from './items/CardManager';
 import { getMimeType } from './mime';
@@ -743,7 +744,10 @@ export class Actions {
       Obsidian.notify(`"${itemTitle}" has no parent or local source to open`);
       return;
     }
-    await this._openInNewTab(context.file, context.eState);
+    const leaf = await this._openInNewTab(context.file, context.eState);
+    if (leaf && context.pdfRange) {
+      await revealPdfContext(leaf.view, context.pdfRange);
+    }
   };
 
   undo = async () => {
@@ -847,17 +851,24 @@ export class Actions {
    * A file no view is registered for goes straight to the system's default
    * app. `WorkspaceLeaf.openFile` would do the same, but only after the new
    * tab exists, leaving it behind empty.
+   *
+   * @returns the new tab, or null when the file went to the default app.
    */
-  _openInNewTab = async (file: TFile, eState: MatchEphemeralState | null) => {
+  _openInNewTab = async (
+    file: TFile,
+    eState: ItemContext['eState']
+  ): Promise<WorkspaceLeaf | null> => {
     const { app } = this.plugin;
     if (!app.viewRegistry.isExtensionRegistered(file.extension)) {
       app.openWithDefaultApp(file.path);
-      return;
+      return null;
     }
-    await app.workspace.getLeaf('tab').openFile(file, {
+    const leaf = app.workspace.getLeaf('tab');
+    await leaf.openFile(file, {
       active: true,
       ...(eState && { eState }),
     });
+    return leaf;
   };
 
   _createEmitter() {

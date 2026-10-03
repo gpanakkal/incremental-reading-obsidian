@@ -116,7 +116,7 @@ This is especially handy for:
 ## Known limitations and issues
 
 - Creating snippets and cards on partial code blocks, blockquotes, LaTeX, and other types of special formatting can break the formatting. It is recommended to include the entire formatted section (such as the entire code block) when making the snippet or card, and then editing it afterwards as desired.
-- Cards can only be made from Markdown notes. A PDF article shows in review in Obsidian's own PDF viewer, and you can extract snippets from its text there, each linking back to its page in the PDF. A scanned PDF has no text to select, so nothing can be extracted from it. To make cards from a PDF, convert it to Markdown with one of these [third-party tools](#third-party-tools).
+- Cards can only be made from Markdown notes. A PDF article shows in review in Obsidian's own PDF viewer, and you can extract snippets from its text there, each linking back to its page in the PDF. **Go to context** on one of those snippets opens the PDF at its page with the passage highlighted; a passage that runs onto the next page is highlighted up to the end of its first page. A scanned PDF has no text to select, so nothing can be extracted from it. To make cards from a PDF, convert it to Markdown with one of these [third-party tools](#third-party-tools).
 
 ## Third-party tools
 
