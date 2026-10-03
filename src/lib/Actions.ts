@@ -369,14 +369,21 @@ export class Actions {
       ...read.selection,
     });
     if (snippet) {
+      const pdfPath = read.article.file.path;
       this._pushUndo({
         item: snippet,
         description: `creating snippet "${snippet.file.basename}"`,
         undo: async () => {
+          const { snippets } = this.plugin.reviewManager;
           // Without a prompt, which would offer to delete the PDF too
-          await this.plugin.reviewManager.snippets.delete(snippet.data.id, {
+          const deleted = await snippets.delete(snippet.data.id, {
             prompt: false,
           });
+          if (!deleted) return;
+          // The row is deleted outright, which the repository reports no
+          // change for: take the highlight off the PDF by hand
+          snippets.offsetTracker.removeHighlight(pdfPath, snippet.data.id);
+          this.plugin.app.workspace.trigger('ir-highlights-changed', pdfPath);
         },
       });
     }

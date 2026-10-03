@@ -2290,6 +2290,7 @@ describe('Actions.createPdfSnippet', () => {
     snippet = null,
     item,
     noViewer = false,
+    deleted = true,
   }: {
     read?: pdfSelection.PdfSelection | null | Error;
     selection?: Range | null;
@@ -2297,6 +2298,8 @@ describe('Actions.createPdfSnippet', () => {
     pdfDocument?: unknown;
     snippet?: unknown;
     item?: unknown;
+    /** Whether deleting the snippet, to undo it, succeeds. */
+    deleted?: boolean;
   }) {
     const file = pdfFile('pdf', 'paper');
     const article =
@@ -2305,12 +2308,19 @@ describe('Actions.createPdfSnippet', () => {
         : item;
     const plugin = makePlugin();
     const createFromPdf = vi.fn().mockResolvedValue(snippet);
-    const deleteSnippet = vi.fn().mockResolvedValue(true);
+    const deleteSnippet = vi.fn().mockResolvedValue(deleted);
+    const removeHighlight = vi.fn();
+    const trigger = vi.fn();
     const getReviewItemFromFile = vi.fn().mockResolvedValue(article);
     Object.assign(plugin.reviewManager, {
       getReviewItemFromFile,
-      snippets: { createFromPdf, delete: deleteSnippet },
+      snippets: {
+        createFromPdf,
+        delete: deleteSnippet,
+        offsetTracker: { removeHighlight },
+      },
     });
+    Object.assign(plugin.app.workspace, { trigger });
     const actions = new Actions(plugin);
     const readPdfSelection = vi
       .spyOn(pdfSelection, 'readPdfSelection')
@@ -2333,10 +2343,12 @@ describe('Actions.createPdfSnippet', () => {
       getReviewItemFromFile,
       createFromPdf,
       deleteSnippet,
+      removeHighlight,
+      trigger,
     };
   }
 
-  it('makes a snippet of the text the viewer has selected, which undo deletes', async () => {
+  it('makes a snippet of the text the viewer has selected, which undo deletes, highlight and all', async () => {
     await fc.assert(
       fc.asyncProperty(readArb, fc.uuid(), async (read, id) => {
         Notice.reset();
@@ -2370,9 +2382,35 @@ describe('Actions.createPdfSnippet', () => {
         expect(wired.deleteSnippet).toHaveBeenCalledExactlyOnceWith(id, {
           prompt: false,
         });
+        expect(wired.removeHighlight).toHaveBeenCalledExactlyOnceWith(
+          wired.file.path,
+          id
+        );
+        expect(wired.trigger).toHaveBeenCalledExactlyOnceWith(
+          'ir-highlights-changed',
+          wired.file.path
+        );
         vi.restoreAllMocks();
       })
     );
+  });
+
+  it('leaves the highlight when undo could not delete the snippet', async () => {
+    const snippet = { data: { id: 'snippet-1' }, file: { basename: 'A' } };
+    const wired = wirePdfSnippet({
+      read: { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' },
+      snippet,
+      deleted: false,
+    });
+    await wired.actions.createPdfSnippet(wired.reviewView);
+
+    await wired.actions.undo();
+
+    expect(wired.deleteSnippet).toHaveBeenCalledExactlyOnceWith('snippet-1', {
+      prompt: false,
+    });
+    expect(wired.removeHighlight).not.toHaveBeenCalled();
+    expect(wired.trigger).not.toHaveBeenCalled();
   });
 
   it('records nothing to undo when the snippet could not be saved', async () => {

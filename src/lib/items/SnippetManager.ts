@@ -9,6 +9,7 @@ import {
   TEXT_REVIEW_INTERVALS,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
+import { supportsFrontmatter } from '#/lib/mime';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { decodeAnchor } from '#/lib/pdf/pdf-anchor';
 import { pageLinkAlias } from '#/lib/pdf/pdf-selection';
@@ -575,7 +576,8 @@ export class SnippetManager extends ItemManager {
     const parentType = await Obsidian.getNoteType(parentFile, this.app);
     let parentEntry;
 
-    if (parentType === 'article') {
+    if (parentType === 'article' || !supportsFrontmatter(parentFile)) {
+      // A file without frontmatter, a PDF, is an article only by its row
       parentEntry = await this.findArticle(parentFile);
     } else if (parentType === 'snippet') {
       parentEntry = await this.findSnippet(parentFile);

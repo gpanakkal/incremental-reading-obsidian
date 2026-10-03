@@ -2268,6 +2268,125 @@ describe('getHighlights for a note with a database entry', () => {
   });
 });
 
+describe('getHighlights for a PDF', () => {
+  const PDF = { path: 'papers/Paper.pdf', extension: 'pdf' } as TFile;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** A PDF has no frontmatter, so no note type: it is an article by its row. */
+  async function makePdfManager() {
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(null);
+    vi.spyOn(Obsidian, 'isSourceNote').mockReturnValue(false);
+    const { repo, db } = await makeSqlJsRepo();
+    const insertArticle = (id: string, reference: string) =>
+      db.exec(
+        `INSERT INTO article (id, reference, due, interval, priority)
+         VALUES ($1, $2, 0, 1, 20)`,
+        [id, reference]
+      );
+    const insertSnippet = (
+      id: string,
+      parent: string,
+      offsets: [number, number] | null,
+      deleted = false
+    ) =>
+      db.exec(
+        `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset, deleted)
+         VALUES ($1, $2, 0, 1, 20, $3, $4, $5, $6)`,
+        [
+          id,
+          `snippets/${id}.md`,
+          parent,
+          offsets?.[0] ?? null,
+          offsets?.[1] ?? null,
+          Number(deleted),
+        ]
+      );
+    return {
+      manager: new SnippetManager({ app: makeApp() } as never, repo),
+      insertArticle,
+      insertSnippet,
+    };
+  }
+
+  it("finds the snippets of the article at the PDF's path, by their anchors, and caches them under the path", async () => {
+    const { manager, insertArticle, insertSnippet } = await makePdfManager();
+    insertArticle('pdf-article', PDF.path);
+    insertArticle('other-article', 'papers/Other.pdf');
+    insertSnippet('kept', 'pdf-article', [1_00009_00000, 2_00003_00030]);
+    insertSnippet('no-offsets', 'pdf-article', null);
+    insertSnippet(
+      'deleted',
+      'pdf-article',
+      [1_00000_00000, 1_00001_00000],
+      true
+    );
+    insertSnippet('elsewhere', 'other-article', [1_00000_00000, 1_00001_00000]);
+
+    const highlights = await manager.getHighlights(PDF);
+
+    expect(
+      highlights.map(({ id, reference, start_offset, end_offset }) => ({
+        id,
+        reference,
+        start_offset,
+        end_offset,
+      }))
+    ).toEqual([
+      {
+        id: 'kept',
+        reference: 'snippets/kept.md',
+        start_offset: 1_00009_00000,
+        end_offset: 2_00003_00030,
+      },
+    ]);
+    expect(manager.offsetTracker.getHighlights(PDF.path)).toEqual(highlights);
+  });
+
+  it('finds none for a PDF that is no article', async () => {
+    const { manager, insertArticle, insertSnippet } = await makePdfManager();
+    insertArticle('other-article', 'papers/Other.pdf');
+    insertSnippet('elsewhere', 'other-article', [1_00000_00000, 1_00001_00000]);
+
+    expect(await manager.getHighlights(PDF)).toEqual([]);
+  });
+
+  it('never looks a note up by its path: a note is typed by its frontmatter', async () => {
+    const { manager, insertArticle, insertSnippet } = await makePdfManager();
+    const note = { path: 'notes/untagged.md', extension: 'md' } as TFile;
+    insertArticle('untagged', note.path);
+    insertSnippet('child', 'untagged', [0, 4]);
+    const other = {
+      path: 'snippets/untagged-snippet.md',
+      extension: 'md',
+    } as TFile;
+    // A snippet row at a note's path, as `insertSnippet` names them
+    insertSnippet('untagged-snippet', 'untagged', [0, 1]);
+    insertSnippet('grandchild', 'untagged-snippet', [0, 4]);
+
+    expect(await manager.getHighlights(note)).toEqual([]);
+    expect(await manager.getHighlights(other)).toEqual([]);
+  });
+
+  it("finds a snippet note's own snippets by its row", async () => {
+    const { manager, insertArticle, insertSnippet } = await makePdfManager();
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
+    insertArticle('pdf-article', PDF.path);
+    insertSnippet('parent-snippet', 'pdf-article', [0, 1]);
+    insertSnippet('child', 'parent-snippet', [0, 4]);
+    const note = {
+      path: 'snippets/parent-snippet.md',
+      extension: 'md',
+    } as TFile;
+
+    expect((await manager.getHighlights(note)).map(({ id }) => id)).toEqual([
+      'child',
+    ]);
+  });
+});
+
 describe('refreshAllHighlights', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -2336,7 +2455,9 @@ describe('refreshAllHighlights', () => {
       ...makeApp(),
       vault: {
         getFileByPath: (path: string) =>
-          existing.has(path) ? ({ path } as TFile) : null,
+          existing.has(path)
+            ? ({ path, extension: path.split('.').pop() } as TFile)
+            : null,
       },
       workspace: { trigger },
     };
