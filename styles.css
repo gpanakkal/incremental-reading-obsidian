@@ -1089,6 +1089,11 @@ body.is-phone .ir-header-standin {
 :root {
   --ir-snippet-highlight-color: rgba(255, 235, 59, 0.3);
   --ir-snippet-highlight-color-hover: rgba(255, 235, 59, 0.5);
+  /* Opaque: a PDF's text layer is drawn at a fifth of its opacity, which caps
+     any highlight in it below the 0.3 above. This color, seen at 0.2 over a
+     white page, matches the markdown highlight there: c = 1.5 * yellow - 0.5 *
+     white, its blue clamped at 0 */
+  --ir-pdf-snippet-highlight-color: rgb(255, 225, 0);
 }
 
 /* Snippet highlight styles */
@@ -1131,6 +1136,24 @@ body.is-phone .ir-header-standin {
 /* Keep external links transparent on hover */
 .ir-snippet-highlight:hover .external-link {
   background-color: transparent;
+}
+
+/* In a PDF's text layer, pdf.js positions every span absolutely. A highlight
+ flows inside its text item instead, as Obsidian's own subpath highlight
+ (`.mod-focused.appended`) does, so the item keeps its width over the page.
+ Its text stays transparent: the background shows over the rendered page.
+ Obsidian draws the whole text layer at `opacity: 0.2` (`.pdf-container
+ .textLayer`), so the colors are opaque, as its own find highlights' are. */
+.textLayer span.ir-snippet-highlight {
+  position: static;
+  /* pdf.js's `.textLayer span` sets the text cursor, and outranks the class */
+  cursor: pointer;
+  background-color: var(--ir-pdf-snippet-highlight-color);
+}
+
+.textLayer span.ir-snippet-highlight:hover {
+  background-color: var(--ir-pdf-snippet-highlight-color);
+  box-shadow: 0 0 0 2px var(--text-accent);
 }
 
 /* Style for potentially corrupted highlights (overlapping edits) */

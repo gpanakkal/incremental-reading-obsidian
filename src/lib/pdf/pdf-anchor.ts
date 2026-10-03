@@ -59,6 +59,44 @@ export interface AnchorRange {
   end: number;
 }
 
+/** A text item on a page: its `data-idx` and the length of its text. */
+export interface PageItem {
+  idx: number;
+  /** UTF-16 length of the item's text. */
+  length: number;
+}
+
+/** The characters `start` to `end` (exclusive) of the text item `idx`. */
+export interface ItemSpan {
+  idx: number;
+  start: number;
+  /** Exclusive. */
+  end: number;
+}
+
+/**
+ * The part of each of `page`'s `items` that `range` covers: the characters
+ * whose anchors fall in it, in the order the items come. An item it doesn't
+ * reach, one whose idx no anchor holds, and the characters of an item past
+ * the most an anchor addresses get no span. `range` may start and end on
+ * other pages, or be one no snippet has, starting at or after its end.
+ */
+export function itemSpansOnPage(
+  range: AnchorRange,
+  page: number,
+  items: readonly PageItem[]
+): ItemSpan[] {
+  const spans: ItemSpan[] = [];
+  for (const { idx, length } of items) {
+    if (!inRange(idx, 0, SPAN - 1)) continue;
+    const base = (page * SPAN + idx) * SPAN;
+    const start = Math.max(Math.ceil(range.start - base), 0);
+    const end = Math.min(Math.ceil(range.end - base), length, SPAN);
+    if (start < end) spans.push({ idx, start, end });
+  }
+  return spans;
+}
+
 // Text layer DOM of Obsidian's patched pdf.js 5.3 (undocumented; its
 // TextLayer#appendText): `div.page[data-page-number]` > `div.textLayer` >
 // `span.textLayerNode[data-idx]`, possibly nested in `span.markedContent`, with
@@ -66,14 +104,14 @@ export interface AnchorRange {
 // counts every text item, but items with empty text get no span, so idx gaps
 // are normal. Highlights split a span's text into child spans and text nodes.
 
-const PAGE_SELECTOR = '[data-page-number]';
+export const PAGE_SELECTOR = '[data-page-number]';
 
 /**
  * A text item's span on a page. Select on `data-idx` alone, which only these
  * spans carry: pdf.js find overwrites a middle match's class, dropping
  * `textLayerNode` while the match is shown.
  */
-const ITEM_SELECTOR = `${PAGE_SELECTOR} [data-idx]`;
+export const ITEM_SELECTOR = `${PAGE_SELECTOR} [data-idx]`;
 
 function numberAttr(el: Element, name: string) {
   return Number(el.getAttribute(name));

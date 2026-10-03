@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import * as PdfSnippetHighlights from '#/lib/extensions/PdfSnippetHighlights';
 import type { PdfOpenResult, PdfViewer } from '#/lib/pdf/obsidian-pdf';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import { packPdfPosition, type PdfPosition } from '#/lib/pdf/position';
@@ -61,14 +62,29 @@ function wireContext(saved: number | null = null) {
     loadScrollPosition: vi.fn((_: TFile) => Promise.resolve(saved)),
     saveScrollPosition: vi.fn((_: TFile, __: number) => Promise.resolve()),
   };
+  const plugin = { app, reviewManager };
   vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
-    plugin: { app, reviewManager },
+    plugin,
     reviewView,
   } as never);
+  const stopHighlights = vi.fn();
+  const showHighlights = vi
+    .spyOn(PdfSnippetHighlights, 'showPdfSnippetHighlights')
+    .mockReturnValue(stopHighlights);
   const modify = (f: TFile) => {
     for (const handler of handlers) handler(f);
   };
-  return { app, vault, reviewView, reviewManager, handlers, modify };
+  return {
+    app,
+    plugin,
+    vault,
+    reviewView,
+    reviewManager,
+    handlers,
+    modify,
+    showHighlights,
+    stopHighlights,
+  };
 }
 
 /**
@@ -214,8 +230,33 @@ describe('PdfArticleView', () => {
     expect(container.innerHTML).toBe('');
   });
 
+  it("highlights its snippets' passages on the viewer's pages, until unmounted", async () => {
+    const { plugin, showHighlights, stopHighlights } = wireContext();
+    const viewer = makeViewer();
+    vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
+    const { unmount } = mount();
+    await settle();
+
+    expect(showHighlights.mock.calls).toEqual([
+      [plugin, file, viewer.containerEl],
+    ]);
+    expect(stopHighlights).not.toHaveBeenCalled();
+    unmount();
+    expect(stopHighlights).toHaveBeenCalledOnce();
+  });
+
+  it('highlights nothing when it falls back', async () => {
+    const { showHighlights, stopHighlights } = wireContext();
+    vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(null);
+    mount();
+    await settle();
+
+    expect(showHighlights).not.toHaveBeenCalled();
+    expect(stopHighlights).not.toHaveBeenCalled();
+  });
+
   it('falls back, and tears the viewer down, when its internals turn out unsupported', async () => {
-    const { reviewView, handlers } = wireContext();
+    const { reviewView, handlers, stopHighlights } = wireContext();
     const viewer = makeViewer('unsupported');
     vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
 
@@ -227,6 +268,7 @@ describe('PdfArticleView', () => {
     expect(viewer.unload).toHaveBeenCalledOnce();
     expect(reviewView.detachPdfViewer.mock.calls).toEqual([[viewer]]);
     expect(handlers.size).toBe(0);
+    expect(stopHighlights).toHaveBeenCalledOnce();
   });
 
   it.each<PdfOpenResult>(['loaded', 'cancelled'])(

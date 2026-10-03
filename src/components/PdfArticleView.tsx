@@ -1,3 +1,4 @@
+import { showPdfSnippetHighlights } from '#/lib/extensions/PdfSnippetHighlights';
 import {
   createPdfViewer,
   getPdfLocation,
@@ -31,7 +32,8 @@ const POSITION_SAVE_DELAY_MS = 500;
  * PDF internals aren't what `obsidian-pdf` knows, found at once or only when
  * the viewer first opens the file.
  *
- * The item opens where its reader stopped, saved as they read.
+ * The item opens where its reader stopped, saved as they read, with the
+ * passages its snippets were extracted from highlighted.
  */
 export function PdfArticleView({
   item,
@@ -65,6 +67,12 @@ export function PdfArticleView({
       shown.containerEl.remove();
     };
   }, [shown, reviewView]);
+
+  // The passages already extracted to snippets, highlighted on its pages
+  useEffect(() => {
+    if (!shown) return;
+    return showPdfSnippetHighlights(plugin, item.file, shown.containerEl);
+  }, [shown, item.file, plugin]);
 
   // The item's file in it, where its reader stopped, opened afresh whenever it
   // changes on disk, as Obsidian's PDF tab does

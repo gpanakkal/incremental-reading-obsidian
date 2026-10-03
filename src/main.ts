@@ -1,3 +1,4 @@
+import { registerPdfLeafHighlights } from '#/lib/extensions/PdfSnippetHighlights';
 import { checkImportable } from '#/lib/items/ArticleManager';
 import { appendLog } from '#/lib/log-file';
 import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
@@ -258,6 +259,9 @@ export default class IncrementalReadingPlugin extends Plugin {
         // Register post-processor for reading mode snippet highlights
         registerSnippetHighlightPostProcessor(this);
         registerHighlightRefreshListener(this);
+        // Snippet highlights on Obsidian's own PDF tabs (review's PDF viewer
+        // keeps its own)
+        registerPdfLeafHighlights(this);
 
         // Mark reading mode transclusion hosts for styles.css
         registerTransclusionHostPostProcessor(this);

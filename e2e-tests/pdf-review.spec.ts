@@ -3,6 +3,7 @@ import { PDF_PAGE_STRIDE } from '#/lib/pdf/position';
 import test, {
   expect,
   type ElectronApplication,
+  type Locator,
   type Page,
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
@@ -1024,5 +1025,290 @@ test.describe('Snippets and cards from a PDF article', () => {
     await expect(lit).toHaveText(SECOND_PAGE_TEXT);
     await expect(lit).toBeInViewport();
     expect(await vaultReads(window)).toEqual([]);
+  });
+
+  /** The snippet highlights in `scope`, as [reference, text] pairs. */
+  const highlightsIn = (scope: Locator) =>
+    scope
+      .locator('.ir-snippet-highlight')
+      .evaluateAll((spans) =>
+        spans.map((span) => [
+          span.getAttribute('data-snippet-ref'),
+          span.textContent,
+        ])
+      );
+
+  /** The text of item `idx` on page `n` of the PDF in `scope`. */
+  const itemText = (scope: Locator, n: number, idx: number) =>
+    scope
+      .locator(`.page[data-page-number="${n}"] .textLayer [data-idx="${idx}"]`)
+      .textContent();
+
+  /**
+   * Select by character offsets, as {@link selectText} does, in item spans
+   * whose text highlights have split into several nodes.
+   */
+  const selectChars = (
+    page: Page,
+    from: [number, number, number],
+    to: [number, number, number]
+  ) =>
+    page.evaluate(
+      ([from, to]) => {
+        const point = ([n, idx, char]: number[]) => {
+          const span = document.querySelector(
+            `.ir-pdf-article .page[data-page-number="${n}"] [data-idx="${idx}"]`
+          );
+          if (!span) throw new Error(`No item ${n}/${idx}`);
+          const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+          let left = char;
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const { length } = node as Text;
+            if (left <= length) return [node, left] as const;
+            left -= length;
+          }
+          throw new Error(`No character ${char} in item ${n}/${idx}`);
+        };
+        const range = document.createRange();
+        range.setStart(...point(from));
+        range.setEnd(...point(to));
+        const selection = document.getSelection()!;
+        selection.removeAllRanges();
+        selection.addRange(range);
+      },
+      [from, to]
+    );
+
+  /** The paths of the files every tab shows. */
+  const openFiles = (page: Page) =>
+    page.evaluate(() => {
+      const { app } = window as unknown as {
+        app: {
+          workspace: {
+            iterateAllLeaves(
+              cb: (leaf: { view: { file?: { path: string } } }) => void
+            ): void;
+          };
+        };
+      };
+      const paths: string[] = [];
+      app.workspace.iterateAllLeaves((leaf) => {
+        if (leaf.view.file) paths.push(leaf.view.file.path);
+      });
+      return paths;
+    });
+
+  /** Extract the paragraph carried over the page break, and its snippet's note. */
+  async function extractAcrossPages(page: Page) {
+    await pdfPage(page, 2).scrollIntoViewIfNeeded();
+    await expect(textItem(page, 2, 3)).toBeAttached();
+    await expect(textItem(page, 1, 9)).toBeAttached();
+    await selectText(page, [1, 9, 0], [2, 3, 30]);
+    await expect.poll(() => viewerSelection(page)).not.toBeNull();
+    await page.getByRole('button', { name: 'Create snippet' }).click();
+    await expect.poll(() => snippets(page)).toHaveLength(1);
+    return (await snippets(page))[0].reference;
+  }
+
+  test('highlights what was extracted on every page it covers, and nothing else, and a click on it opens the snippet', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    const reference = await extractAcrossPages(window);
+
+    // The end of page 1 from item 9, and the start of page 2 up to item 3's
+    // 30th character
+    const viewer = article(window);
+    const page2Item3 = (await itemText(viewer, 2, 3))!;
+    await expect
+      .poll(() => highlightsIn(textItem(window, 2, 3)))
+      .toEqual([[reference, page2Item3.slice(0, 30)]]);
+    expect(await highlightsIn(textItem(window, 1, 9))).toEqual([
+      [reference, await itemText(viewer, 1, 9)],
+    ]);
+    expect(await highlightsIn(textItem(window, 1, 8))).toEqual([]);
+    expect(await highlightsIn(textItem(window, 2, 4))).toEqual([]);
+    // Over the page, behind its transparent text: laid out within its item
+    const box = await textItem(window, 2, 3)
+      .locator('.ir-snippet-highlight')
+      .boundingBox();
+    const itemBox = await textItem(window, 2, 3).boundingBox();
+    expect(box!.width).toBeGreaterThan(0);
+    expect(box!.width).toBeLessThan(itemBox!.width);
+    expect(Math.abs(box!.x - itemBox!.x)).toBeLessThan(2);
+    const middle = box!.y + box!.height / 2;
+    expect(middle).toBeGreaterThan(itemBox!.y);
+    expect(middle).toBeLessThan(itemBox!.y + itemBox!.height);
+
+    await textItem(window, 2, 3).locator('.ir-snippet-highlight').click();
+    await expect.poll(() => openFiles(window)).toContain(reference);
+  });
+
+  test('keeps text in a highlight selectable, to extract a snippet of a snippet, highlighted inside it', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    const outer = await extractAcrossPages(window);
+    await expect(
+      textItem(window, 1, 9).locator('.ir-snippet-highlight')
+    ).toHaveCount(1);
+
+    await selectChars(window, [1, 9, 2], [1, 9, 12]);
+    await expect.poll(() => viewerSelection(window)).not.toBeNull();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+
+    await expect.poll(() => snippets(window)).toHaveLength(2);
+    const inner = (await snippets(window)).find((s) => s.reference !== outer)!;
+    expect(inner).toMatchObject({
+      start_offset: 1_00009_00002,
+      end_offset: 1_00009_00012,
+    });
+    const text = (await itemText(article(window), 1, 9))!;
+    await expect
+      .poll(() =>
+        textItem(window, 1, 9)
+          .locator('.ir-snippet-highlight .ir-snippet-highlight')
+          .evaluateAll((spans) =>
+            spans.map((span) => [
+              span.parentElement!.getAttribute('data-snippet-ref'),
+              span.getAttribute('data-snippet-ref'),
+              span.textContent,
+            ])
+          )
+      )
+      .toEqual([[outer, inner.reference, text.slice(2, 12)]]);
+  });
+
+  test('takes the highlight off when the snippet is undone', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await extractAcrossPages(window);
+    await expect(
+      article(window).locator('.ir-snippet-highlight').first()
+    ).toBeAttached();
+
+    await executeCommandById(window, 'incremental-reading:undo');
+
+    await expect.poll(() => snippets(window)).toHaveLength(0);
+    await expect(article(window).locator('.ir-snippet-highlight')).toHaveCount(
+      0
+    );
+    // Undone without Obsidian's offer to delete the PDF too
+    await expect(window.locator('.modal-container')).toHaveCount(0);
+  });
+
+  test("highlights it in the PDF's own tab too, alongside the selection a link to it lights up, and after that is cleared", async () => {
+    await importFixture(window);
+    await beginReview(window);
+    const reference = await extractAcrossPages(window);
+    const [snippet] = await snippets(window);
+
+    // Its source link opens the PDF on its page, with the selection lit up
+    await window.evaluate(
+      ([source, from]) => {
+        const { app } = window as unknown as {
+          app: {
+            workspace: {
+              openLinkText(
+                link: string,
+                from: string,
+                newLeaf: 'tab'
+              ): Promise<void>;
+            };
+          };
+        };
+        const link = source.slice(2, source.indexOf('|'));
+        return app.workspace.openLinkText(link, from, 'tab');
+      },
+      [snippet.source as string, reference]
+    );
+    const tab = window.locator('.workspace-leaf.mod-active .pdf-container');
+    const item9 = tab.locator(
+      '.page[data-page-number="1"] .textLayer [data-idx="9"]'
+    );
+    // Obsidian's own highlight rebuilds the item: the snippet's is put back in it
+    await expect(item9.locator('.mod-focused')).not.toHaveCount(0);
+    await expect
+      .poll(() => highlightsIn(item9))
+      .toEqual([[reference, await itemText(tab, 1, 9)]]);
+    expect(
+      await item9
+        .locator('.mod-focused .ir-snippet-highlight')
+        .evaluateAll((spans) => spans.length)
+    ).toBeGreaterThan(0);
+
+    // A press on the page clears Obsidian's highlight, rebuilding the item again
+    await tab
+      .locator('.page[data-page-number="1"] .textLayer [data-idx="0"]')
+      .click();
+    await expect(item9.locator('.mod-focused')).toHaveCount(0);
+    await expect
+      .poll(() => highlightsIn(item9))
+      .toEqual([[reference, await itemText(tab, 1, 9)]]);
+  });
+
+  test("keeps a drag begun beside a partly highlighted line starting at the line, through Obsidian's snap", async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 9)).toBeAttached();
+    // Highlight the middle of item 9, leaving its text in three nodes
+    await selectChars(window, [1, 9, 2], [1, 9, 12]);
+    await expect.poll(() => viewerSelection(window)).not.toBeNull();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+
+    // The PDF's own tab, opened first, so its text layers hold pdf.js's one
+    // snapping listener
+    await window
+      .locator('.workspace-tab-header', { hasText: 'PDF fixture' })
+      .first()
+      .click();
+    const tab = window.locator('.workspace-leaf.mod-active .pdf-container');
+    const item9 = tab.locator(
+      '.page[data-page-number="1"] .textLayer [data-idx="9"]'
+    );
+    await expect(item9.locator('.ir-snippet-highlight')).toHaveCount(1);
+    const text = (await item9.textContent())!;
+
+    // A drag begun in the margin starts beside the item, not in its text,
+    // which Obsidian's pdf.js snaps on pointerup
+    const selected = await item9.evaluate((item) => {
+      const range = document.createRange();
+      const parent = item.parentNode!;
+      range.setStart(parent, Array.from(parent.childNodes).indexOf(item));
+      range.setEnd(item.lastChild!, item.lastChild!.textContent!.length);
+      const selection = document.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      item.dispatchEvent(
+        // Its listener reads the selection off the event's `view`
+        new PointerEvent('pointerup', {
+          bubbles: true,
+          composed: true,
+          view: item.ownerDocument.defaultView,
+        })
+      );
+      return selection.toString();
+    });
+
+    expect(selected).toBe(text);
+  });
+
+  test('shows highlights in a PDF solid enough to see through its faded text layer', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await extractAcrossPages(window);
+    const alpha = await textItem(window, 2, 3)
+      .locator('.ir-snippet-highlight')
+      .evaluate((span) => {
+        const [, a = '1'] =
+          /rgba?\([^,]+,[^,]+,[^,)]+(?:,\s*([\d.]+))?\)/.exec(
+            getComputedStyle(span).backgroundColor
+          ) ?? [];
+        let shown = Number(a);
+        for (let el: Element | null = span; el; el = el.parentElement) {
+          shown *= Number(getComputedStyle(el).opacity);
+        }
+        return shown;
+      });
+    expect(alpha).toBeGreaterThanOrEqual(0.15);
   });
 });

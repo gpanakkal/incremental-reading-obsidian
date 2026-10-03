@@ -6,7 +6,9 @@ import {
   type AnchorParts,
   decodeAnchor,
   encodeAnchor,
+  itemSpansOnPage,
   MAX_ANCHOR_PAGE,
+  type PageItem,
   rangeToAnchors,
 } from './pdf-anchor';
 
@@ -617,5 +619,113 @@ describe('text layers no anchor can hold', () => {
       RangeError
     );
     expect(() => rangeToAnchors(range, pageEl)).toThrow(RangeError);
+  });
+});
+
+describe('itemSpansOnPage', () => {
+  /** How many characters an anchor can address in one item. */
+  const SPAN = 1e5;
+
+  /**
+   * A page's items as its text layer lists them: unique idxs in any order,
+   * long and short texts, and the odd idx no anchor can hold.
+   */
+  const itemsArb = fc.uniqueArray(
+    fc.record({
+      idx: fc.oneof(
+        { weight: 6, arbitrary: fc.integer({ min: 0, max: 99_999 }) },
+        { weight: 6, arbitrary: fc.nat({ max: 8 }) },
+        {
+          weight: 1,
+          arbitrary: fc.constantFrom(-1, 100_000, 1.5, NaN, Infinity),
+        }
+      ),
+      length: fc.oneof(
+        { weight: 6, arbitrary: fc.nat({ max: 12 }) },
+        { weight: 1, arbitrary: fc.integer({ min: 99_990, max: 200_000 }) }
+      ),
+    }),
+    { selector: (item) => item.idx, maxLength: 6 }
+  );
+
+  /**
+   * Anchors on, before and after `page`, landing in, around and between its
+   * items, and now and then a number no anchor is.
+   */
+  const anchorNearArb = (page: number, items: PageItem[]) =>
+    fc.oneof(
+      {
+        weight: 8,
+        arbitrary: fc
+          .record({
+            page: fc.constantFrom(
+              ...[page - 1, page, page, page + 1].filter(
+                (p) => p >= 1 && p <= MAX_ANCHOR_PAGE
+              )
+            ),
+            idx: fc.oneof(
+              fc.constantFrom(
+                ...items
+                  .map((item) => item.idx)
+                  .filter((idx) => Number.isInteger(idx) && idx >= 0)
+                  .filter((idx) => idx < SPAN),
+                0
+              ),
+              fc.integer({ min: 0, max: 99_999 })
+            ),
+            char: fc.oneof(
+              fc.nat({ max: 14 }),
+              fc.integer({ min: 99_985, max: 99_999 })
+            ),
+          })
+          .map(encodeAnchor),
+      },
+      { weight: 1, arbitrary: anyNumberArb }
+    );
+
+  const caseArb = fc
+    .record({
+      page: fc.integer({ min: 1, max: MAX_ANCHOR_PAGE }),
+      items: itemsArb,
+    })
+    .chain(({ page, items }) =>
+      fc.record({
+        page: fc.constant(page),
+        items: fc.constant(items),
+        start: anchorNearArb(page, items),
+        end: anchorNearArb(page, items),
+      })
+    );
+
+  it("gives each item the run of characters whose anchors fall in the range, in the items' order, and nothing for an item with none or an idx no anchor holds", () => {
+    fc.assert(
+      fc.property(caseArb, ({ page, items, start, end }) => {
+        const spans = itemSpansOnPage({ start, end }, page, items);
+
+        const addressable = items.filter(
+          ({ idx }) => Number.isInteger(idx) && idx >= 0 && idx < SPAN
+        );
+        // Whether the character at `char` of `item` starts inside the range
+        const covered = (item: PageItem, char: number) => {
+          const at = encodeAnchor({ page, idx: item.idx, char });
+          return at >= start && at < end;
+        };
+        const expected = addressable.flatMap((item) => {
+          // Characters past what an anchor can address are never covered
+          const length = Math.min(item.length, SPAN);
+          if (length === 0) return [];
+          // The covered characters are one run, as anchors grow with `char`:
+          // when there are any, the first at or after `start` is one of them
+          const offset = start - encodeAnchor({ page, idx: item.idx, char: 0 });
+          const first =
+            offset > 0 ? Math.min(Math.ceil(offset), length - 1) : 0;
+          if (!covered(item, first)) return [];
+          let last = first;
+          while (last + 1 < length && covered(item, last + 1)) last++;
+          return [{ idx: item.idx, start: first, end: last + 1 }];
+        });
+        expect(spans).toEqual(expected);
+      })
+    );
   });
 });
