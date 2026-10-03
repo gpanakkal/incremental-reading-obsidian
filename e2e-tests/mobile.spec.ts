@@ -8,7 +8,6 @@ import {
   openFileInActiveLeaf,
   REVIEW_VIEW_TYPE,
   watchFileReads,
-  watchNotices,
 } from './helpers';
 import {
   connectAndroidDevice,
@@ -132,16 +131,16 @@ test("Reviews a PDF article in Obsidian's own PDF viewer", async () => {
   await window.keyboard.press('Escape');
   await expect(findBar).toBeHidden();
 
-  // Snippets and cards aren't there yet, and say so
-  const notices = await watchNotices(window);
-  await window.getByRole('button', { name: 'Create snippet' }).click();
-  await window.getByRole('button', { name: 'Create card' }).click();
-  await expect
-    .poll(notices)
-    .toEqual([
-      "Snippets from PDFs aren't supported yet",
-      "Cards from PDFs aren't supported yet",
-    ]);
+  // With nothing selected, either button enters selection mode for its kind
+  for (const name of ['Create snippet', 'Create card']) {
+    await window
+      .locator(`${leaf} .ir-action-bar`)
+      .getByRole('button', { name })
+      .click();
+    await expect(window.locator('#confirm-selection-button')).toBeVisible();
+    await window.locator('#cancel-selection-button').click();
+    await expect(window.locator('#confirm-selection-button')).toHaveCount(0);
+  }
 
   // Finishing the item takes the viewer, and its keys, with it
   await window.getByRole('button', { name: 'Mark reviewed' }).click();

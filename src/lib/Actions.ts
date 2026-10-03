@@ -82,9 +82,10 @@ export class Actions {
   plugin: IncrementalReadingPlugin;
   undoStack: ActionStackEntry[];
   /**
-   * Whether a snippet from a PDF is being made: see {@link _makePdfSnippet}.
+   * Whether a snippet or card from a PDF is being made: see
+   * {@link _makeFromPdf}.
    */
-  private _makingPdfSnippet = false;
+  private _makingFromPdf = false;
   emitter;
   subscribe;
 
@@ -356,14 +357,84 @@ export class Actions {
    * Extract the text selected in the PDF article on screen in review to a
    * snippet: see `SnippetManager.createFromPdf`. Says so, and makes nothing,
    * when there is no text to make it of, as on a scanned page.
-   *
-   * The selection is dropped as it is read, before the PDF is: it was the
-   * input to this snippet, and one the user makes while the text is read is
-   * the input to the next.
    */
   createPdfSnippet = async (
     reviewView: ReviewView
   ): Promise<ReviewSnippet | null> => {
+    const read = await this._readPdfSelection(reviewView);
+    if (!read) return null;
+
+    const snippet = await this.plugin.reviewManager.snippets.createFromPdf({
+      article: read.article,
+      ...read.selection,
+    });
+    if (snippet) {
+      this._pushUndo({
+        item: snippet,
+        description: `creating snippet "${snippet.file.basename}"`,
+        undo: async () => {
+          // Without a prompt, which would offer to delete the PDF too
+          await this.plugin.reviewManager.snippets.delete(snippet.data.id, {
+            prompt: false,
+          });
+        },
+      });
+    }
+    return snippet;
+  };
+
+  /**
+   * Make a card of the text selected in the PDF article on screen in review,
+   * asking for its answer as selection mode does: see
+   * `CardManager.createFromPdf`. Says so, and makes nothing, when there is no
+   * text to make it of, as on a scanned page.
+   *
+   * Undo only deletes the card: unlike a card from a note, it left no embed
+   * behind in its parent to put the text back in place of. It does so without
+   * Obsidian's prompts, which would offer to delete the PDF as well once no
+   * note links to it.
+   */
+  createPdfCard = async (
+    reviewView: ReviewView
+  ): Promise<ReviewCard | null> => {
+    const read = await this._readPdfSelection(reviewView);
+    if (!read) return null;
+    const { article, selection } = read;
+
+    const answer = await promptForCardAnswer(this.plugin.app, selection.text);
+    if (answer === null) return null;
+    const card = await this.plugin.reviewManager.cards.createFromPdf({
+      article,
+      ...selection,
+      answer,
+    });
+    if (card) {
+      this._pushUndo({
+        item: card,
+        description: `creating card "${card.file.basename}"`,
+        undo: async () => {
+          // Without a prompt, which would offer to delete the PDF too
+          await this.plugin.reviewManager.cards.delete(card.data.id, {
+            prompt: false,
+          });
+        },
+      });
+    }
+    return card;
+  };
+
+  /**
+   * Read the text selected in the PDF article on screen in review, for a
+   * snippet or card to be made of, along with the article's row. Says why,
+   * and answers null, when there is nothing to make one of.
+   *
+   * The selection is dropped as it is read, before the PDF is: it was the
+   * input to this snippet or card, and one the user makes while the text is
+   * read is the input to the next.
+   */
+  private _readPdfSelection = async (
+    reviewView: ReviewView
+  ): Promise<{ article: ReviewArticle; selection: PdfSelection } | null> => {
     const viewer = reviewView.pdfViewer;
     const file = reviewView.currentItemFile();
     if (!viewer || !file) {
@@ -398,21 +469,7 @@ export class Actions {
       );
       return null;
     }
-
-    const snippet = await this.plugin.reviewManager.snippets.createFromPdf({
-      article,
-      ...selection,
-    });
-    if (snippet) {
-      this._pushUndo({
-        item: snippet,
-        description: `creating snippet "${snippet.file.basename}"`,
-        undo: async () => {
-          await this.plugin.reviewManager.snippets.delete(snippet.data.id);
-        },
-      });
-    }
-    return snippet;
+    return { article, selection };
   };
 
   /**
@@ -504,19 +561,15 @@ export class Actions {
    * other is refused, leaving the mode and its selection as they were: it would
    * otherwise make its snippet or card of the text selected for the first.
    *
-   * A PDF article selects in its viewer rather than an editor, and has no
-   * cards yet, which it says.
+   * A PDF article selects in its viewer rather than an editor.
    */
   extract = async (kind: SelectionKind, reviewView: ReviewView) => {
     const itemFile = reviewView.currentItemFile();
     const isPdf = !!itemFile && getMimeType(itemFile) === 'application/pdf';
-    if (isPdf && kind === 'card') {
-      Obsidian.notify("Cards from PDFs aren't supported yet");
-      return;
-    }
-    // A second press while the first is still at work: its selection is
-    // already taken, and with none left it would enter the mode
-    if (isPdf && this._makingPdfSnippet) return;
+    // A second press while the first is still at work, or a card's answer
+    // still being asked for: its selection is already taken, and with none
+    // left it would enter the mode
+    if (isPdf && this._makingFromPdf) return;
     const mode = store.getState().selectionMode;
     if (mode === kind) {
       await this.confirmSelection(reviewView);
@@ -542,7 +595,7 @@ export class Actions {
       return;
     }
     if (isPdf) {
-      await this._makePdfSnippet(reviewView);
+      await this._makeFromPdf(kind, reviewView);
       return;
     }
 
@@ -579,18 +632,22 @@ export class Actions {
   confirmSelection = async (reviewView: ReviewView) => {
     const kind = store.getState().selectionMode;
     if (kind === null) return;
+    const selectFirst =
+      kind === 'snippet'
+        ? 'Select the text to extract first'
+        : 'Select the text to make a card of first';
     const viewer = reviewView.pdfViewer;
-    if (viewer && kind === 'snippet') {
+    if (viewer) {
       if (!viewer.selection()) {
         Obsidian.notify(
           (await this._nothingToSelect(viewer))
             ? 'No selectable text'
-            : 'Select the text to extract first'
+            : selectFirst
         );
         return;
       }
       this.plugin.store.dispatch(setSelectionMode(null));
-      await this._makePdfSnippet(reviewView);
+      await this._makeFromPdf(kind, reviewView);
       return;
     }
     const cm = reviewView.reviewEditor()?.cm;
@@ -601,11 +658,7 @@ export class Actions {
 
     const { from, to } = cm.state.selection.main;
     if (from === to) {
-      Obsidian.notify(
-        kind === 'snippet'
-          ? 'Select the text to extract first'
-          : 'Select the text to make a card of first'
-      );
+      Obsidian.notify(selectFirst);
       return;
     }
 
@@ -634,19 +687,27 @@ export class Actions {
     this._dropSelection(cm);
   };
 
-  /** {@link createPdfSnippet}, marked as under way while it is. */
-  private _makePdfSnippet = async (reviewView: ReviewView) => {
-    this._makingPdfSnippet = true;
+  /**
+   * {@link createPdfSnippet} or {@link createPdfCard}, marked as under way
+   * while it is.
+   */
+  private _makeFromPdf = async (
+    kind: SelectionKind,
+    reviewView: ReviewView
+  ) => {
+    this._makingFromPdf = true;
     try {
-      await this.createPdfSnippet(reviewView);
+      await (kind === 'snippet'
+        ? this.createPdfSnippet(reviewView)
+        : this.createPdfCard(reviewView));
     } finally {
-      this._makingPdfSnippet = false;
+      this._makingFromPdf = false;
     }
   };
 
   /**
    * Whether no page `viewer` has on screen has text to select, as scanned
-   * pages haven't: there is then no selecting a snippet there. False when
+   * pages haven't: there is then no selecting a snippet or card there. False when
    * that can't be told.
    */
   private _nothingToSelect = async (viewer: PdfViewer): Promise<boolean> => {

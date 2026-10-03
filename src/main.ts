@@ -794,9 +794,8 @@ export default class IncrementalReadingPlugin extends Plugin {
   private addExtractCommands() {
     /**
      * The commands on a PDF article in review, which has no editor for them to
-     * find: handed to the button's path, which says neither snippets nor
-     * cards are supported for PDFs yet. Whether that applied, and so whether
-     * the command is available.
+     * find: handed to the button's path, which selects in the PDF's viewer
+     * instead. Whether that applied, and so whether the command is available.
      */
     const extractFromPdf = (kind: 'snippet' | 'card', checking: boolean) => {
       const view = this.getActiveReviewView();

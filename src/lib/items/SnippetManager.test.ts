@@ -2906,3 +2906,101 @@ describe('createFromPdf', () => {
     ).toBeNull();
   });
 });
+
+describe('delete', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * A manager over a snippet row with `id` whose note is `note`, and the
+   * calls by which Obsidian could remove that note.
+   */
+  function wireDelete(id: string, note: TFile | null) {
+    const mutate = vi.fn().mockResolvedValue([[]]);
+    const repo = {
+      ...makeSimpleRepo(),
+      query: vi.fn().mockResolvedValue([{ id, reference: 'items/note.md' }]),
+      mutate,
+    };
+    const fileManager = {
+      promptForFileDeletion: vi.fn().mockResolvedValue(true),
+      trashFile: vi.fn().mockResolvedValue(undefined),
+    };
+    const app = { fileManager };
+    vi.spyOn(Obsidian, 'getNote').mockReturnValue(note);
+    const manager = new SnippetManager({ app } as never, repo);
+    return { manager, mutate, fileManager };
+  }
+
+  const NOTE = { path: 'items/note.md', extension: 'md' } as TFile;
+
+  it('trashes the note without a word, and drops the row, when told not to prompt', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.uuid(), async (id) => {
+        vi.restoreAllMocks();
+        const { manager, mutate, fileManager } = wireDelete(id, NOTE);
+
+        expect(await manager.delete(id, { prompt: false })).toBe(true);
+
+        // Obsidian's prompt would also offer to delete what the note alone
+        // linked to: a PDF its source links to among them
+        expect(fileManager.trashFile).toHaveBeenCalledExactlyOnceWith(NOTE);
+        expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
+        expect(mutate).toHaveBeenCalledExactlyOnceWith(
+          `DELETE FROM snippet WHERE id = $1`,
+          [id]
+        );
+      })
+    );
+  });
+
+  it('deletes the note as Obsidian does, prompts and all, by default', async () => {
+    for (const options of [undefined, {}, { prompt: true }]) {
+      const { manager, mutate, fileManager } = wireDelete('id-1', NOTE);
+
+      expect(await manager.delete('id-1', options)).toBe(true);
+
+      expect(fileManager.promptForFileDeletion).toHaveBeenCalledExactlyOnceWith(
+        NOTE
+      );
+      expect(fileManager.trashFile).not.toHaveBeenCalled();
+      expect(mutate).toHaveBeenCalledOnce();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('answers false, and deletes nothing, for an id with no row', async () => {
+    for (const prompt of [true, false]) {
+      const mutate = vi.fn().mockResolvedValue([[]]);
+      const repo = { ...makeSimpleRepo(), mutate };
+      const fileManager = {
+        promptForFileDeletion: vi.fn().mockResolvedValue(true),
+        trashFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const manager = new SnippetManager(
+        { app: { fileManager } } as never,
+        repo
+      );
+
+      expect(await manager.delete('id-1', { prompt })).toBe(false);
+
+      expect(fileManager.trashFile).not.toHaveBeenCalled();
+      expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
+      expect(mutate).not.toHaveBeenCalled();
+    }
+  });
+
+  it('drops the row of a note already gone', async () => {
+    for (const prompt of [true, false]) {
+      const { manager, mutate, fileManager } = wireDelete('id-1', null);
+
+      expect(await manager.delete('id-1', { prompt })).toBe(true);
+
+      expect(fileManager.trashFile).not.toHaveBeenCalled();
+      expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
+      expect(mutate).toHaveBeenCalledOnce();
+      vi.restoreAllMocks();
+    }
+  });
+});

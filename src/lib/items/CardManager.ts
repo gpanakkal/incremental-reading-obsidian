@@ -1,8 +1,12 @@
+import { decodeAnchor } from '#/lib/pdf/pdf-anchor';
+import { type PdfSelection, pageLinkAlias } from '#/lib/pdf/pdf-selection';
 import type {
   ISRSCard,
   ISRSCardDisplay,
   MissingItem,
+  ReviewArticle,
   ReviewCard,
+  SQLiteRepository,
   SRSCardReviewRow,
   SRSCardRow,
 } from '#/lib/types';
@@ -35,7 +39,6 @@ import {
   VALID_DELIMITER_PATTERN,
 } from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
-import type { SQLiteRepository } from '../types';
 import { getEndOfDay, searchAll } from '../utils';
 import { ItemManager } from './ItemManager';
 import SRSCard from './SRSCard';
@@ -43,6 +46,12 @@ import SRSCardReview from './SRSCardReview';
 
 /** A span of a note chosen to become a card: its document offsets and text. */
 export type CardSelection = { from: number; to: number; text: string };
+
+/**
+ * Where a card made other than from a note's text links back to: its parent's
+ * row, and the subpath and alias of the link to it.
+ */
+type CardOrigin = { parent: string; subpath: string; alias: string };
 
 export class CardManager extends ItemManager {
   constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
@@ -286,6 +295,42 @@ export class CardManager extends ItemManager {
     }
   }
 
+  /**
+   * Make a card of text selected in a PDF article. Unlike a card from a note,
+   * nothing is put in place of the text: the PDF is never written to. The
+   * card links back to the selection as a snippet from the PDF does, and its
+   * parent is the article's row, since a PDF has no frontmatter to find it by.
+   *
+   * @param selection the selection as `readPdfSelection` read it
+   * @param answer offsets of the answer within its text
+   */
+  async createFromPdf({
+    article,
+    text,
+    start,
+    subpath,
+    answer,
+  }: PdfSelection & {
+    article: ReviewArticle;
+    answer: readonly [number, number];
+  }): Promise<ReviewCard | null> {
+    try {
+      return await this.createFileAndEntry(
+        this.delimitText(text, answer)[0],
+        article.file,
+        {
+          parent: article.data.id,
+          subpath,
+          alias: pageLinkAlias(article.file.basename, decodeAnchor(start).page),
+        }
+      );
+    } catch (_error) {
+      // `createFileAndEntry` has logged it
+      Obsidian.notify(`Failed to create card`);
+      return null;
+    }
+  }
+
   /** Make the card's note and row, and put its embed in place of `start`–`end`. */
   protected async createAndEmbed(
     editor: Editor,
@@ -307,10 +352,24 @@ export class CardManager extends ItemManager {
     return reviewCard;
   }
 
-  protected async createFileAndEntry(delimitedText: string, sourceFile: TFile) {
+  /**
+   * Make the card's note and row. Its parent is found by `sourceFile`'s note
+   * type, unless `origin` gives it, along with how to link to `sourceFile`.
+   *
+   * A note made for a row that then can't be saved is trashed again: with no
+   * row, review would never show it. Once the row is saved, the note is the
+   * card's whatever fails after.
+   */
+  protected async createFileAndEntry(
+    delimitedText: string,
+    sourceFile: TFile,
+    origin?: CardOrigin
+  ) {
+    let cardFile: TFile | null = null;
+    let saved = false;
     try {
       // Create the card from the content
-      const cardFile = await Obsidian.createFromText(
+      cardFile = await Obsidian.createFromText(
         delimitedText,
         Obsidian.getDirectory('card'),
         this.app
@@ -321,7 +380,9 @@ export class CardManager extends ItemManager {
       const linkToSource = Obsidian.generateMarkdownLink(
         sourceFile,
         cardFile,
-        this.app
+        this.app,
+        origin?.alias,
+        origin?.subpath
       );
       await Obsidian.updateFrontMatter(
         cardFile,
@@ -334,14 +395,9 @@ export class CardManager extends ItemManager {
         this.app
       );
 
-      const parentType = await Obsidian.getNoteType(sourceFile, this.app);
-      let currentFileEntry;
-      if (parentType === 'article') {
-        currentFileEntry = await this.findArticle(sourceFile);
-      } else if (parentType === 'snippet') {
-        currentFileEntry = await this.findSnippet(sourceFile);
-      }
-      const parent = currentFileEntry ? currentFileEntry.id : null;
+      const parent = origin
+        ? origin.parent
+        : await this.findParentId(sourceFile);
       // create the database entry
 
       const params = [
@@ -366,20 +422,41 @@ export class CardManager extends ItemManager {
           `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
         params
       );
+      saved = true;
 
       const reviewCard = await this.fetch(card.id);
       return reviewCard;
     } catch (error) {
       console.error(error);
-      // TODO: error handling
+      if (cardFile && !saved) {
+        await this.app.fileManager.trashFile(cardFile).catch(console.error);
+      }
       throw error;
     }
   }
 
+  /** The id of the row of the article or snippet note `file`, if it is one. */
+  private async findParentId(file: TFile) {
+    const parentType = await Obsidian.getNoteType(file, this.app);
+    let entry;
+    if (parentType === 'article') {
+      entry = await this.findArticle(file);
+    } else if (parentType === 'snippet') {
+      entry = await this.findSnippet(file);
+    }
+    return entry ? entry.id : null;
+  }
+
   /**
    * Drop a card's row and delete its note
+   *
+   * @param options.prompt whether to delete the note as Obsidian does from
+   *   its own menus (the default): asking first, if the user has it ask, and
+   *   then offering to delete whatever only the note linked to. That includes
+   *   the PDF a note made from one links to as its source, so an undo, which
+   *   only takes back what it made, says `false` and trashes just the note.
    */
-  async delete(id: string) {
+  async delete(id: string, { prompt = true }: { prompt?: boolean } = {}) {
     try {
       const row = (
         await this.repo.query(`SELECT * FROM srs_card WHERE id = $1`, [id])
@@ -388,8 +465,12 @@ export class CardManager extends ItemManager {
 
       const file = Obsidian.getNote(row.reference, this.app);
       if (file) {
-        // delete the card file
-        await this.plugin.app.fileManager.promptForFileDeletion(file);
+        // delete the card file. `promptForFileDeletion` is undocumented
+        // Obsidian API (`trashFile` is the public one); its offer to delete
+        // unlinked attachments was read from the app bundle.
+        await (prompt
+          ? this.plugin.app.fileManager.promptForFileDeletion(file)
+          : this.plugin.app.fileManager.trashFile(file));
       }
 
       // remove the row entirely

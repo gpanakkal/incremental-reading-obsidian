@@ -7,6 +7,11 @@ import {
   VALID_DELIMITER_PATTERN,
 } from '#/lib/constants';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import {
+  decodeAnchor,
+  encodeAnchor,
+  MAX_ANCHOR_PAGE,
+} from '#/lib/pdf/pdf-anchor';
 import type {
   ISRSCard,
   ISRSCardDisplay,
@@ -28,6 +33,7 @@ import {
   describe,
   expect,
   it,
+  onTestFinished,
   vi,
 } from 'vitest';
 import { CardManager } from './CardManager';
@@ -2018,6 +2024,10 @@ describe('review — FSRS settings', () => {
 });
 
 describe('review — against the production schema', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   // #region REAL-DB HELPERS
 
   /**
@@ -2268,6 +2278,47 @@ describe('review — against the production schema', () => {
     expect(readCard(db, 'card-1').state).toBe('Review');
     db.close();
   });
+
+  it('saves a card made from a PDF as a new card due the next day, under its article', async () => {
+    const db = new SQL.Database();
+    db.exec(readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8'));
+    const cardFile = { path: 'cards/c.md', basename: 'c' } as TFile;
+    vi.spyOn(Obsidian, 'createFromText').mockResolvedValue(cardFile);
+    vi.spyOn(Obsidian, 'updateFrontMatter').mockResolvedValue(
+      undefined as never
+    );
+    const pdf = { path: 'p.pdf', basename: 'p', extension: 'pdf' } as TFile;
+    const manager = new CardManager(
+      makePlugin({
+        fileManager: { generateMarkdownLink: () => '[[p.pdf]]' },
+      }),
+      makeRealRepo(db)
+    );
+    onTestFinished(() => db.close());
+
+    await manager.createFromPdf({
+      article: { data: { id: 'article-1' }, file: pdf } as never,
+      text: 'some text',
+      start: 1e10,
+      end: 1e10 + 4,
+      subpath: '#page=1',
+      answer: [0, 4],
+    });
+
+    const rows = db.exec('SELECT * FROM srs_card')[0];
+    expect(rows.values).toHaveLength(1);
+    const row = Object.fromEntries(
+      rows.columns.map((col, i) => [col, rows.values[0][i]])
+    );
+    expect(row).toMatchObject({
+      reference: cardFile.path,
+      parent: 'article-1',
+      due: (row.created_at as number) + MS_PER_DAY,
+      last_review: null,
+      reps: 0,
+      state: State.New,
+    });
+  });
 });
 
 describe('createFromSelection', () => {
@@ -2400,5 +2451,394 @@ describe('createFromSelection', () => {
     expect(result).toBeNull();
     expect(editor.text).toBe('some text');
     expect(notify).toHaveBeenCalledWith('Failed to create card');
+  });
+});
+
+describe('createFromPdf', () => {
+  const CARD_FILE = { path: 'cards/new card.md', basename: 'new card' };
+
+  /** A PDF article row and its file, in any folder. */
+  const pdfArticleArb = fc
+    .record({
+      id: fc.uuid(),
+      folder: fc.constantFrom('', 'papers/', 'a/b/'),
+      basename: fc.string({ minLength: 1, maxLength: 12 }),
+    })
+    .map(({ id, folder, basename }) => {
+      const path = `${folder}${basename}.pdf`;
+      return {
+        data: { id, type: 'article' as const, reference: path },
+        file: { path, basename, extension: 'pdf' } as TFile,
+      };
+    });
+
+  const anchorPartsArb = fc.record({
+    page: fc.integer({ min: 1, max: MAX_ANCHOR_PAGE }),
+    idx: fc.integer({ min: 0, max: 99_999 }),
+    char: fc.integer({ min: 0, max: 99_999 }),
+  });
+
+  /**
+   * What a selection read from a PDF hands over: two anchors in order, the
+   * end on the start's page or a later one, and the start's page.
+   */
+  const anchorsArb = fc
+    .uniqueArray(anchorPartsArb.map(encodeAnchor), {
+      minLength: 2,
+      maxLength: 2,
+    })
+    .map(([a, b]) => {
+      const start = Math.min(a, b);
+      return { page: decodeAnchor(start).page, start, end: Math.max(a, b) };
+    });
+
+  /**
+   * A manager whose app writes wikilinks as Obsidian does by default, with
+   * every call that could write to a file spied on, and the row it saves read
+   * back as `saved`.
+   */
+  function wirePdfCard(saved: unknown = { data: { id: 'card' } }) {
+    const writes = {
+      processFrontMatter: vi.fn().mockResolvedValue(undefined),
+      process: vi.fn(),
+      modify: vi.fn(),
+      modifyBinary: vi.fn(),
+      append: vi.fn(),
+    };
+    const { processFrontMatter, ...vault } = writes;
+    const generateMarkdownLink = vi.fn(
+      (file: TFile, _sourcePath: string, subpath = '', alias = '') =>
+        `[[${file.path}${subpath}|${alias}]]`
+    );
+    const createFromText = vi
+      .spyOn(Obsidian, 'createFromText')
+      .mockResolvedValue(CARD_FILE as TFile);
+    const updateFrontMatter = vi
+      .spyOn(Obsidian, 'updateFrontMatter')
+      .mockResolvedValue(undefined as never);
+    const getNoteType = vi.spyOn(Obsidian, 'getNoteType');
+    const notify = vi.spyOn(Obsidian, 'notify').mockImplementation(() => {});
+    const repo = makeRepo();
+    const app = {
+      vault,
+      metadataCache: { getFileCache: () => ({}) },
+      fileManager: {
+        processFrontMatter,
+        generateMarkdownLink,
+        trashFile: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    const manager = new CardManager(
+      { app, settings: { dayRolloverOffset: 4 } } as never,
+      repo
+    );
+    const fetch = vi.spyOn(manager, 'fetch').mockResolvedValue(saved as never);
+    return {
+      manager,
+      app,
+      repo,
+      writes,
+      createFromText,
+      updateFrontMatter,
+      getNoteType,
+      notify,
+      fetch,
+    };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('makes a card note of the text with its answer hidden, linked to the PDF at the selection, and a row whose parent is the article', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfArticleArb,
+        cardSelectionArb,
+        anchorsArb,
+        fc.string(),
+        async (article, c, { page, start, end }, subpath) => {
+          vi.restoreAllMocks();
+          const wired = wirePdfCard();
+
+          const result = await wired.manager.createFromPdf({
+            article: article as never,
+            text: c.text,
+            start,
+            end,
+            subpath,
+            answer: c.answerBounds,
+          });
+
+          expect(result).toEqual({ data: { id: 'card' } });
+          expect(wired.createFromText).toHaveBeenCalledExactlyOnceWith(
+            c.pre + `${LEFT} ${c.answer} ${RIGHT}` + c.post,
+            Obsidian.getDirectory('card'),
+            wired.app
+          );
+          const [, [id, reference, parent]] = lastMutateCall(wired.repo);
+          expect(reference).toBe(CARD_FILE.path);
+          expect(parent).toBe(article.data.id);
+          expect(wired.fetch).toHaveBeenCalledExactlyOnceWith(id);
+          expect(wired.updateFrontMatter).toHaveBeenCalledExactlyOnceWith(
+            CARD_FILE,
+            {
+              'ir-id': id,
+              tags: CARD_TAG,
+              source: `[[${article.file.path}${subpath}|${article.file.basename}, page ${page}]]`,
+              delimiters: CLOZE_DELIMITERS,
+            },
+            wired.app
+          );
+          expect(wired.notify).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('never reads or writes the PDF as a note', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfArticleArb,
+        cardSelectionArb,
+        anchorsArb,
+        async (article, c, anchors) => {
+          vi.restoreAllMocks();
+          const wired = wirePdfCard();
+
+          await wired.manager.createFromPdf({
+            article: article as never,
+            text: c.text,
+            ...anchors,
+            subpath: '#page=1',
+            answer: c.answerBounds,
+          });
+
+          const touched = Object.values(wired.writes)
+            .flatMap((fn) => fn.mock.calls)
+            .some(([file]) => file === article.file);
+          expect(touched).toBe(false);
+          expect(
+            wired.updateFrontMatter.mock.calls.some(
+              ([file]) => file === article.file
+            )
+          ).toBe(false);
+          // Its parent comes from the row, never from frontmatter it hasn't
+          expect(wired.getNoteType).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('says so, answers null, and leaves no card note behind, when the card cannot be made', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfArticleArb,
+        cardSelectionArb,
+        anchorsArb,
+        fc.constantFrom('file', 'properties', 'row', 'read back'),
+        async (article, c, anchors, fail) => {
+          vi.restoreAllMocks();
+          const wired = wirePdfCard();
+          const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+          const failure = new Error('disk full');
+          if (fail === 'file') wired.createFromText.mockRejectedValue(failure);
+          else if (fail === 'properties') {
+            wired.updateFrontMatter.mockRejectedValue(failure);
+          } else if (fail === 'row') {
+            vi.spyOn(wired.repo, 'mutate').mockRejectedValue(failure);
+          } else wired.fetch.mockRejectedValue(failure);
+
+          expect(
+            await wired.manager.createFromPdf({
+              article: article as never,
+              text: c.text,
+              ...anchors,
+              subpath: '#page=1',
+              answer: c.answerBounds,
+            })
+          ).toBeNull();
+          expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
+            'Failed to create card'
+          );
+          expect(error).toHaveBeenCalledExactlyOnceWith(failure);
+          // A note with no row would be a card review never shows; once the
+          // row is saved, the note is the card's and stays
+          expect(wired.app.fileManager.trashFile.mock.calls).toEqual(
+            fail === 'properties' || fail === 'row' ? [[CARD_FILE]] : []
+          );
+        }
+      )
+    );
+  });
+});
+
+describe('delete', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * A manager over a srs_card row with `id` whose note is `note`, and the
+   * calls by which Obsidian could remove that note.
+   */
+  function wireDelete(id: string, note: TFile | null) {
+    const mutate = vi.fn().mockResolvedValue([[]]);
+    const repo = {
+      ...makeRepo(),
+      query: vi.fn().mockResolvedValue([{ id, reference: 'items/note.md' }]),
+      mutate,
+    };
+    const fileManager = {
+      promptForFileDeletion: vi.fn().mockResolvedValue(true),
+      trashFile: vi.fn().mockResolvedValue(undefined),
+    };
+    const app = { fileManager };
+    vi.spyOn(Obsidian, 'getNote').mockReturnValue(note);
+    const manager = new CardManager({ app } as never, repo);
+    return { manager, mutate, fileManager };
+  }
+
+  const NOTE = { path: 'items/note.md', extension: 'md' } as TFile;
+
+  it('trashes the note without a word, and drops the row, when told not to prompt', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.uuid(), async (id) => {
+        vi.restoreAllMocks();
+        const { manager, mutate, fileManager } = wireDelete(id, NOTE);
+
+        expect(await manager.delete(id, { prompt: false })).toBe(true);
+
+        // Obsidian's prompt would also offer to delete what the note alone
+        // linked to: a PDF its source links to among them
+        expect(fileManager.trashFile).toHaveBeenCalledExactlyOnceWith(NOTE);
+        expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
+        expect(mutate).toHaveBeenCalledExactlyOnceWith(
+          `DELETE FROM srs_card WHERE id = $1`,
+          [id]
+        );
+      })
+    );
+  });
+
+  it('deletes the note as Obsidian does, prompts and all, by default', async () => {
+    for (const options of [undefined, {}, { prompt: true }]) {
+      const { manager, mutate, fileManager } = wireDelete('id-1', NOTE);
+
+      expect(await manager.delete('id-1', options)).toBe(true);
+
+      expect(fileManager.promptForFileDeletion).toHaveBeenCalledExactlyOnceWith(
+        NOTE
+      );
+      expect(fileManager.trashFile).not.toHaveBeenCalled();
+      expect(mutate).toHaveBeenCalledOnce();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('answers false, and deletes nothing, for an id with no row', async () => {
+    for (const prompt of [true, false]) {
+      const mutate = vi.fn().mockResolvedValue([[]]);
+      const repo = { ...makeRepo(), mutate };
+      const fileManager = {
+        promptForFileDeletion: vi.fn().mockResolvedValue(true),
+        trashFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const manager = new CardManager({ app: { fileManager } } as never, repo);
+
+      expect(await manager.delete('id-1', { prompt })).toBe(false);
+
+      expect(fileManager.trashFile).not.toHaveBeenCalled();
+      expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
+      expect(mutate).not.toHaveBeenCalled();
+    }
+  });
+
+  it('drops the row of a note already gone', async () => {
+    for (const prompt of [true, false]) {
+      const { manager, mutate, fileManager } = wireDelete('id-1', null);
+
+      expect(await manager.delete('id-1', { prompt })).toBe(true);
+
+      expect(fileManager.trashFile).not.toHaveBeenCalled();
+      expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
+      expect(mutate).toHaveBeenCalledOnce();
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe('createFromSelection — its parent', () => {
+  const CARD_FILE = { path: 'cards/new card.md', basename: 'new card' };
+  const SOURCE = {
+    path: 'notes/source.md',
+    basename: 'source',
+    extension: 'md',
+  } as TFile;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('is the row of the article or snippet note the card was made in, which it links to plainly', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article', 'snippet', 'card', null),
+        fc.option(fc.uuid(), { nil: null }),
+        cardSelectionArb,
+        async (noteType, rowId, c) => {
+          vi.restoreAllMocks();
+          const repo = makeRepo();
+          const generateMarkdownLink = vi.fn(() => '[[source]]');
+          const app = {
+            metadataCache: { getFileCache: () => ({}) },
+            fileManager: { generateMarkdownLink },
+          };
+          vi.spyOn(Obsidian, 'createFromText').mockResolvedValue(
+            CARD_FILE as TFile
+          );
+          vi.spyOn(Obsidian, 'updateFrontMatter').mockResolvedValue(
+            undefined as never
+          );
+          vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(noteType);
+          const manager = new CardManager({ app } as never, repo);
+          const row = rowId === null ? null : { id: rowId };
+          const findArticle = vi
+            .spyOn(manager, 'findArticle')
+            .mockResolvedValue(row as never);
+          const findSnippet = vi
+            .spyOn(manager, 'findSnippet')
+            .mockResolvedValue(row as never);
+          vi.spyOn(manager, 'fetch').mockResolvedValue({
+            file: CARD_FILE,
+            data: { id: 'card' },
+          } as never);
+          const editor = makeEditor(c.before + c.text + c.after);
+
+          await manager.createFromSelection(
+            editor as never,
+            { file: SOURCE } as never,
+            c.selection,
+            c.answerBounds
+          );
+
+          const [, [, , parent]] = lastMutateCall(repo);
+          const isParent = noteType === 'article' || noteType === 'snippet';
+          expect(parent).toBe(isParent ? rowId : null);
+          expect(findArticle).toHaveBeenCalledTimes(
+            noteType === 'article' ? 1 : 0
+          );
+          expect(findSnippet).toHaveBeenCalledTimes(
+            noteType === 'snippet' ? 1 : 0
+          );
+          expect(generateMarkdownLink).toHaveBeenCalledWith(
+            SOURCE,
+            CARD_FILE.path,
+            undefined,
+            SOURCE.basename
+          );
+        }
+      )
+    );
   });
 });
