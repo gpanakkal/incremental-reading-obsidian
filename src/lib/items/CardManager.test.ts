@@ -2673,6 +2673,248 @@ describe('createFromPdf', () => {
   });
 });
 
+describe('createFromPdf without an article', () => {
+  const CARD_FILE = { path: 'cards/new card.md', basename: 'new card' };
+
+  /** A PDF no row makes an article, in any folder. */
+  const pdfArb = fc
+    .record({
+      folder: fc.constantFrom('', 'papers/', 'a/b/'),
+      basename: fc.string({ minLength: 1, maxLength: 12 }),
+    })
+    .map(
+      ({ folder, basename }) =>
+        ({
+          path: `${folder}${basename}.pdf`,
+          basename,
+          extension: 'pdf',
+        }) as TFile
+    );
+
+  const anchorsArb = fc
+    .uniqueArray(
+      fc
+        .record({
+          page: fc.integer({ min: 1, max: MAX_ANCHOR_PAGE }),
+          idx: fc.integer({ min: 0, max: 99_999 }),
+          char: fc.integer({ min: 0, max: 99_999 }),
+        })
+        .map(encodeAnchor),
+      { minLength: 2, maxLength: 2 }
+    )
+    .map(([a, b]) => {
+      const start = Math.min(a, b);
+      return { page: decodeAnchor(start).page, start, end: Math.max(a, b) };
+    });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('makes a card linked to the PDF at the selection, with no parent, and writes nothing to the PDF', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfArb,
+        cardSelectionArb,
+        anchorsArb,
+        fc.string(),
+        async (pdf, c, { page, start, end }, subpath) => {
+          vi.restoreAllMocks();
+          const writes = {
+            processFrontMatter: vi.fn().mockResolvedValue(undefined),
+            process: vi.fn(),
+            modify: vi.fn(),
+            modifyBinary: vi.fn(),
+            append: vi.fn(),
+          };
+          const { processFrontMatter, ...vault } = writes;
+          const app = {
+            vault,
+            metadataCache: { getFileCache: () => ({}) },
+            fileManager: {
+              processFrontMatter,
+              generateMarkdownLink: (
+                file: TFile,
+                _sourcePath: string,
+                sub = '',
+                alias = ''
+              ) => `[[${file.path}${sub}|${alias}]]`,
+            },
+          };
+          vi.spyOn(Obsidian, 'createFromText').mockResolvedValue(
+            CARD_FILE as TFile
+          );
+          const updateFrontMatter = vi
+            .spyOn(Obsidian, 'updateFrontMatter')
+            .mockResolvedValue(undefined as never);
+          const getNoteType = vi.spyOn(Obsidian, 'getNoteType');
+          const repo = makeRepo();
+          const manager = new CardManager(
+            { app, settings: { dayRolloverOffset: 4 } } as never,
+            repo
+          );
+          vi.spyOn(manager, 'fetch').mockResolvedValue({
+            data: { id: 'card' },
+          } as never);
+
+          const result = await manager.createFromPdf({
+            pdf,
+            text: c.text,
+            start,
+            end,
+            subpath,
+            answer: c.answerBounds,
+          });
+
+          expect(result).toEqual({ data: { id: 'card' } });
+          const [, [id, reference, parent]] = (
+            repo.mutate as ReturnType<typeof vi.fn>
+          ).mock.calls.at(-1) as [string, unknown[]];
+          expect(reference).toBe(CARD_FILE.path);
+          expect(parent).toBeNull();
+          expect(updateFrontMatter).toHaveBeenCalledExactlyOnceWith(
+            CARD_FILE,
+            {
+              'ir-id': id,
+              tags: CARD_TAG,
+              source: `[[${pdf.path}${subpath}|${pdf.basename}, page ${page}]]`,
+              delimiters: CLOZE_DELIMITERS,
+            },
+            app
+          );
+          const touched = Object.values(writes)
+            .flatMap((fn) => fn.mock.calls)
+            .some(([file]) => file === pdf);
+          expect(touched).toBe(false);
+          expect(getNoteType).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+});
+
+describe('adoptOrphans', () => {
+  let SQL: SqlJsStatic;
+
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const PDF = { path: 'papers/Paper.pdf', extension: 'pdf' } as TFile;
+
+  /** A card as adoption meets it; see the snippet manager's orphan specs. */
+  const cardSpecArb = fc.record({
+    exists: fc.boolean(),
+    source: fc.constantFrom<'target' | 'elsewhere' | null>(
+      'target',
+      'elsewhere',
+      null
+    ),
+    parent: fc.oneof(fc.uuid(), fc.constant(null)),
+    deleted: fc.boolean(),
+  });
+
+  it('gives every parentless card taken from the file the new parent, and no other card', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(cardSpecArb, { maxLength: 8 }),
+        fc.uuid(),
+        async (specs, parentId) => {
+          vi.restoreAllMocks();
+          const db = new SQL.Database();
+          db.exec(
+            readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8')
+          );
+          const query = (
+            sql: string,
+            params: unknown[] = []
+          ): Record<string, unknown>[] => {
+            const results = db.exec(sql, params as never);
+            if (!results.length) return [];
+            const { columns, values } = results[0];
+            return values.map(
+              (row): Record<string, unknown> =>
+                Object.fromEntries(columns.map((col, i) => [col, row[i]]))
+            );
+          };
+          const repo = {
+            ...makeRepo(),
+            query: vi.fn(async (sql: string, params?: unknown[]) =>
+              query(sql, params)
+            ),
+            mutate: vi.fn(async (sql: string, params?: unknown[]) => {
+              query(sql, params);
+              return [[]];
+            }),
+          } as unknown as SQLiteRepository;
+          specs.forEach((spec, i) =>
+            db.exec(
+              `INSERT INTO srs_card (id, reference, parent, created_at, due,
+                 stability, difficulty, elapsed_days, scheduled_days, state, deleted)
+               VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0, $4)`,
+              [
+                `card-${i}`,
+                `cards/card-${i}.md`,
+                spec.parent,
+                Number(spec.deleted),
+              ]
+            )
+          );
+          const specOf = (reference: string) =>
+            specs[Number(/card-(\d+)/.exec(reference)?.[1])];
+          vi.spyOn(Obsidian, 'getNote').mockImplementation((reference) =>
+            specOf(reference)?.exists === false
+              ? null
+              : ({ path: reference, extension: 'md' } as TFile)
+          );
+          vi.spyOn(Obsidian, 'getSourceFile').mockImplementation((file) => {
+            const source = specOf(file.path)?.source;
+            if (!source) return null;
+            return {
+              path: source === 'target' ? PDF.path : 'papers/Other.pdf',
+            } as TFile;
+          });
+          const manager = new CardManager(makePlugin(), repo);
+
+          const adopted = await manager.adoptOrphans(PDF, parentId);
+
+          const expected = specs
+            .map((spec, i) => ({ spec, id: `card-${i}` }))
+            .filter(
+              ({ spec }) =>
+                spec.parent === null &&
+                !spec.deleted &&
+                spec.exists &&
+                spec.source === 'target'
+            )
+            .map(({ id }) => id);
+          expect(adopted.map((row) => row.id).sort()).toEqual(expected.sort());
+          expect(adopted.every((row) => row.parent === parentId)).toBe(true);
+          const parents = new Map(
+            query('SELECT id, parent FROM srs_card').map((row) => [
+              row.id,
+              row.parent,
+            ])
+          );
+          specs.forEach((spec, i) =>
+            expect(parents.get(`card-${i}`)).toBe(
+              expected.includes(`card-${i}`) ? parentId : spec.parent
+            )
+          );
+          db.close();
+        }
+      )
+    );
+  });
+});
+
 describe('delete', () => {
   afterEach(() => {
     vi.restoreAllMocks();

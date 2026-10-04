@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import { encodeAnchor } from '#/lib/pdf/pdf-anchor';
 import {
   type SnippetHighlight,
@@ -479,6 +480,30 @@ describe('registerPdfLeafHighlights', () => {
 
     expect(getSnippetHighlights).toHaveBeenCalledTimes(1);
     expect(marked(leaf.containerEl)).toEqual([['Snippets/a.md', 'Hello']]);
+  });
+
+  it('follows the selection in every PDF tab, article or not, from when it is first found, and in no other view', async () => {
+    // A press on the command palette, or a tap on mobile, moves the browser's
+    // selection out of the PDF before the snippet or card is made of it
+    const tabSelection = vi
+      .spyOn(ObsidianPdf, 'pdfTabSelection')
+      .mockReturnValue(null);
+    const pdfLeaf = makePdfLeaf(PDF);
+    const otherViewLeaf = makePdfLeaf(PDF, 'markdown');
+    const leaves = [pdfLeaf, otherViewLeaf];
+    const { plugin, workspace } = makePlugin(leaves);
+
+    registerPdfLeafHighlights(plugin);
+    expect(tabSelection.mock.calls).toEqual([[pdfLeaf.view]]);
+
+    const opened = makePdfLeaf(PDF);
+    leaves.push(opened);
+    workspace.trigger('layout-change');
+    await flush();
+    expect(tabSelection).toHaveBeenLastCalledWith(opened.view);
+    expect(tabSelection.mock.calls.map(([view]) => view)).not.toContain(
+      otherViewLeaf.view
+    );
   });
 
   it('lets go of a closed tab, and of every tab once the plugin unloads', async () => {

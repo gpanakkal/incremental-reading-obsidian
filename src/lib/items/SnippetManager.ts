@@ -3,16 +3,21 @@ import {
   MAX_SQL_QUERY_PARAMS,
   REVIEW_COUNT_FOR_PRIORITY_SCALING,
   SNIPPET_TAG,
+  SOURCE_INDEX_TIMEOUT_MS,
   SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
   TEXT_BASE_REVIEW_INTERVAL,
   TEXT_REVIEW_INTERVALS,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
-import { supportsFrontmatter } from '#/lib/mime';
+import { getMimeType, supportsFrontmatter } from '#/lib/mime';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
-import { decodeAnchor } from '#/lib/pdf/pdf-anchor';
-import { pageLinkAlias } from '#/lib/pdf/pdf-selection';
+import { decodeAnchor, MIN_ANCHOR } from '#/lib/pdf/pdf-anchor';
+import {
+  originFile,
+  pageLinkAlias,
+  type PdfOrigin,
+} from '#/lib/pdf/pdf-selection';
 import {
   SnippetOffsetTracker,
   type SnippetHighlight,
@@ -23,7 +28,6 @@ import type {
   ISnippetDisplay,
   ISnippetReview,
   MissingItem,
-  ReviewArticle,
   ReviewSnippet,
   SnippetRow,
   SQLiteRepository,
@@ -368,13 +372,16 @@ export class SnippetManager extends ItemManager {
   }
 
   /**
-   * Save `text`, selected in the PDF article `article`, as a snippet and add
-   * it to the learning queue, first due tomorrow.
+   * Save `text`, selected in a PDF, as a snippet and add it to the learning
+   * queue, first due tomorrow: a child of the PDF's `article` at its priority,
+   * or for a `pdf` that is no article, a parentless one at the default
+   * priority, as from a note that is none, until the PDF is imported (see
+   * {@link adoptOrphans}).
    *
-   * The row keeps the selection's anchors as its offsets, which the parent's
-   * MIME type says to read as PDF anchors. The note's source links to the
-   * selection itself, as Obsidian's own selection links do. Nothing is
-   * written to the PDF.
+   * The row keeps the selection's anchors as its offsets, which the MIME type
+   * of the file its source names says to read as PDF anchors. The note's
+   * source links to the selection itself, as Obsidian's own selection links
+   * do. Nothing is written to the PDF.
    *
    * @param start anchor of the selection's first character (see
    *   `pdf-anchor`); its page is the one the link names.
@@ -383,29 +390,29 @@ export class SnippetManager extends ItemManager {
    * @returns the new snippet, or null when its row couldn't be saved.
    */
   async createFromPdf({
-    article,
     text,
     start,
     end,
     subpath,
-  }: {
-    article: ReviewArticle;
+    ...origin
+  }: PdfOrigin & {
     text: string;
     start: number;
     end: number;
     subpath: string;
   }): Promise<ReviewSnippet | null> {
     const dueTime = Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
+    const pdf = originFile(origin);
     const snippetFile = await Obsidian.createFromText(
       text,
       Obsidian.getDirectory('snippet'),
       this.app
     );
     const sourceLink = Obsidian.generateMarkdownLink(
-      article.file,
+      pdf,
       snippetFile,
       this.app,
-      pageLinkAlias(article.file.basename, decodeAnchor(start).page),
+      pageLinkAlias(pdf.basename, decodeAnchor(start).page),
       subpath
     );
     const id = crypto.randomUUID();
@@ -418,14 +425,45 @@ export class SnippetManager extends ItemManager {
       },
       this.app
     );
+    const { article } = origin;
+    if (!article) {
+      // Its row's change tells the PDF's tab to read its highlights again,
+      // which finds a parentless snippet by its source link: in the cache by
+      // then, or the snippet's highlight waits for the next change
+      await this.sourceIndexed(snippetFile, pdf);
+    }
     return this.createEntry(
       snippetFile,
       id,
       dueTime,
-      SnippetManager.childPriority(article.data, dueTime),
-      article.data.id,
+      article
+        ? SnippetManager.childPriority(article.data, dueTime)
+        : DEFAULT_PRIORITY,
+      article?.data.id,
       { start, end }
     );
+  }
+
+  /**
+   * Settles once the metadata cache has `note`'s `source` link resolving to
+   * `source`, or after {@link SOURCE_INDEX_TIMEOUT_MS} whatever it has.
+   */
+  private sourceIndexed(note: TFile, source: TFile): Promise<void> {
+    const indexed = () =>
+      Obsidian.getSourceFile(note, this.app)?.path === source.path;
+    if (indexed()) return Promise.resolve();
+    const { metadataCache } = this.app;
+    return new Promise((resolve) => {
+      const done = () => {
+        metadataCache.offref(ref);
+        window.clearTimeout(timer);
+        resolve();
+      };
+      const ref = metadataCache.on('changed', (file) => {
+        if (file.path === note.path && indexed()) done();
+      });
+      const timer = window.setTimeout(done, SOURCE_INDEX_TIMEOUT_MS);
+    });
   }
 
   /**
@@ -598,6 +636,19 @@ export class SnippetManager extends ItemManager {
       return highlights;
     }
 
+    // A PDF that is no article has its snippets by their source links too,
+    // but no tag to say it has any: every parentless one is asked. Only those
+    // with anchors can be its, and their offsets are read as anchors since it
+    // is a PDF their links name (see `pdf-anchor`).
+    if (getMimeType(parentFile) === 'application/pdf') {
+      const highlights = await this.getOrphanSnippetHighlights(
+        parentFile,
+        MIN_ANCHOR
+      );
+      this.offsetTracker.loadHighlights(parentFile.path, highlights);
+      return highlights;
+    }
+
     // For source notes (or any note without a DB entry), find snippets by the
     // source property that names this note
     if (Obsidian.isSourceNote(parentFile, this.app)) {
@@ -684,46 +735,29 @@ export class SnippetManager extends ItemManager {
    * by way of the snippets that name it as their source.
    */
   private async getOrphanSnippetHighlights(
-    sourceFile: TFile
+    sourceFile: TFile,
+    minStartOffset?: number
   ): Promise<SnippetHighlight[]> {
-    const rows = await this.findOrphanSnippetsFrom(sourceFile);
+    const rows = await this.findOrphanSnippetsFrom(sourceFile, minStartOffset);
     return rows
       .map((row) => SnippetManager.rowToHighlight(row))
       .filter((h): h is SnippetHighlight => h !== null);
   }
 
-  /**
-   * Snippet rows taken from `file` that belong to no item.
-   *
-   * A snippet taken from a note that is not itself an item has nothing but its
-   * `source` property tying it to that note. That property is the plugin's own
-   * record, written when the snippet was made, so it is read from each
-   * parentless row rather than from `metadataCache.resolvedLinks`: the link
-   * index resolves asynchronously and does not reliably carry links that live
-   * in frontmatter, which is where every snippet keeps its source.
-   *
-   * Snippets that already have a parent are skipped: they belong to that item
-   * even while their note still points here, which is what keeps a copy import
-   * from leaving highlights behind on the note it copied.
-   */
-  private async findOrphanSnippetsFrom(file: TFile): Promise<SnippetRow[]> {
-    const rows = ((await this.repo.query(
-      'SELECT * FROM snippet WHERE parent IS NULL AND deleted = FALSE'
-    )) ?? []) as SnippetRow[];
-
-    return rows.filter((row) => {
-      const snippetFile = Obsidian.getNote(row.reference, this.app);
-      if (!snippetFile) return false;
-      return Obsidian.getSourceFile(snippetFile, this.app)?.path === file.path;
-    });
+  /** Snippet rows taken from `file` that belong to no item: see `findParentlessFrom`. */
+  private async findOrphanSnippetsFrom(
+    file: TFile,
+    minStartOffset?: number
+  ): Promise<SnippetRow[]> {
+    return this.findParentlessFrom<SnippetRow>('snippet', file, minStartOffset);
   }
 
   /**
    * Hand every parentless snippet taken from `parentFile` to the item now
-   * backing that note.
+   * backing that file.
    *
-   * Snippets made before the note was imported carry no parent id, so the
-   * moment the note gains a database entry the parent-id lookup in
+   * Snippets made before the file was imported carry no parent id, so the
+   * moment it gains a database entry the parent-id lookup in
    * {@link getHighlights} stops finding them and their highlights vanish.
    * @returns the adopted rows, carrying their new parent
    */
@@ -731,21 +765,7 @@ export class SnippetManager extends ItemManager {
     parentFile: TFile,
     parentId: string
   ): Promise<SnippetRow[]> {
-    const orphans = await this.findOrphanSnippetsFrom(parentFile);
-
-    // Chunked so a note with a very large number of snippets cannot blow the
-    // statement's parameter limit; the parent id takes one slot per chunk.
-    const chunkSize = MAX_SQL_QUERY_PARAMS - 1;
-    for (let i = 0; i < orphans.length; i += chunkSize) {
-      const chunk = orphans.slice(i, i + chunkSize);
-      const placeholders = chunk.map((_, j) => `$${j + 2}`).join(', ');
-      await this.repo.mutate(
-        `UPDATE snippet SET parent = $1 WHERE id IN (${placeholders})`,
-        [parentId, ...chunk.map((row) => row.id)]
-      );
-    }
-
-    return orphans.map((row) => ({ ...row, parent: parentId }));
+    return this.adoptParentless<SnippetRow>('snippet', parentFile, parentId);
   }
 
   /**

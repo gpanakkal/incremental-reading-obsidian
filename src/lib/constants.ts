@@ -107,6 +107,12 @@ export const TRANSCLUSION_HIDE_TITLE_ALIAS = 'ir-hide-title';
 
 export const QUERY_STALE_TIME = MS_PER_MINUTE;
 export const CURRENT_ITEM_REFETCH_TIME = 1000 * 5;
+/**
+ * How long a parentless snippet's row waits for the metadata cache to index
+ * its note's source link before it is saved anyway: see
+ * `SnippetManager.createFromPdf`.
+ */
+export const SOURCE_INDEX_TIMEOUT_MS = 2000;
 
 export const MAX_SQL_QUERY_PARAMS = 999;
 /**

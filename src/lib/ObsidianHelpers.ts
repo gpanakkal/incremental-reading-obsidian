@@ -32,6 +32,7 @@ import {
 } from './constants';
 import { Markdown } from './Markdown';
 import { isEditableText, supportsFrontmatter } from './mime';
+import { parseSourceLink } from './source-link';
 import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
 import { binarySearch, generateId } from './utils';
 
@@ -222,8 +223,10 @@ export class ObsidianHelpers {
   static getSourceFile(file: TFile, app: App): TFile | null {
     const source = this.getFrontMatter(file, app)?.[SOURCE_PROPERTY_NAME];
     if (typeof source !== 'string') return null;
+    // A link as the plugin writes one, or failing that, whatever it holds
+    const linkPath = parseSourceLink(source)?.path.trim();
     return app.metadataCache.getFirstLinkpathDest(
-      this.parseLinkTarget(source),
+      linkPath ?? this.parseLinkTarget(source),
       file.path
     );
   }

@@ -17,7 +17,8 @@ const SPAN = 1e5;
 /** The highest page whose every anchor stays a safe integer. */
 export const MAX_ANCHOR_PAGE = 900_718;
 
-const MIN_ANCHOR = SPAN * SPAN;
+/** The least anchor there is: page 1's first character. */
+export const MIN_ANCHOR = SPAN * SPAN;
 const MAX_ANCHOR = ((MAX_ANCHOR_PAGE + 1) * SPAN - 1) * SPAN + SPAN - 1;
 
 function inRange(value: number, min: number, max: number) {

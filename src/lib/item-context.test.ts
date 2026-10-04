@@ -717,6 +717,39 @@ describe('resolveItemContext for a snippet of a PDF', () => {
     );
   });
 
+  it('points a parentless snippet at its passage in the PDF its source link names, by that file being a PDF', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfFileArb,
+        samePageRangeArb,
+        async (contextFile, { start, end }) => {
+          vi.restoreAllMocks();
+          vi.spyOn(ObsidianHelpers, 'getSourceFile').mockReturnValue(
+            contextFile
+          );
+          const app = makeApp({ content: 'text' });
+          const reviewManager = makeReviewManager(null);
+
+          const context = await resolveItemContext(
+            app,
+            reviewManager,
+            makeSnippet({ parent: null, start_offset: start, end_offset: end })
+          );
+
+          const from = decodeAnchor(start);
+          const to = decodeAnchor(end);
+          expect(context).toStrictEqual({
+            file: contextFile,
+            eState: {
+              subpath: `#page=${from.page}&selection=${from.idx},${from.char},${to.idx},${to.char}`,
+            },
+          });
+          expect(app.vault.cachedRead).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
   it('opens the PDF at no passage when the offsets name none', async () => {
     await fc.assert(
       fc.asyncProperty(

@@ -1,5 +1,12 @@
+import { MAX_SQL_QUERY_PARAMS, SOURCE_PROPERTY_NAME } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { supportsFrontmatter } from '#/lib/mime';
+import {
+  formatSourceLink,
+  linkNamesPath,
+  parseSourceLink,
+  retargetAlias,
+} from '#/lib/source-link';
 import type {
   ArticleRow,
   MissingItem,
@@ -118,6 +125,189 @@ export class ItemManager {
     }
 
     return null;
+  }
+
+  /**
+   * Rows of `table` taken from `file` that belong to no item, leaving out any
+   * whose `start_offset` is below `minStartOffset` when one is given.
+   *
+   * An item taken from a file that is not itself an item has nothing but its
+   * `source` property tying it to that file. That property is the plugin's own
+   * record, written when the item was made, so it is read from each
+   * parentless row's note rather than from `metadataCache.resolvedLinks`: the
+   * link index resolves asynchronously and does not reliably carry links that
+   * live in frontmatter, which is where every item keeps its source.
+   *
+   * Rows that already have a parent are skipped: they belong to that item even
+   * while their note still points here, which is what keeps a copy import from
+   * leaving highlights behind on the file it copied.
+   */
+  protected async findParentlessFrom<R extends SnippetRow | SRSCardRow>(
+    table: 'snippet' | 'srs_card',
+    file: TFile,
+    minStartOffset?: number
+  ): Promise<R[]> {
+    const rows = ((minStartOffset === undefined
+      ? await this.repo.query(
+          `SELECT * FROM ${table} WHERE parent IS NULL AND deleted = FALSE`
+        )
+      : await this.repo.query(
+          `SELECT * FROM ${table} WHERE parent IS NULL AND deleted = FALSE AND start_offset >= $1`,
+          [minStartOffset]
+        )) ?? []) as R[];
+
+    return rows.filter((row) => {
+      const note = Obsidian.getNote(row.reference, this.app);
+      if (!note) return false;
+      return Obsidian.getSourceFile(note, this.app)?.path === file.path;
+    });
+  }
+
+  /**
+   * Hand every parentless row of `table` taken from `file` to the item
+   * `parentId` now backing that file (see {@link findParentlessFrom}).
+   * @returns the adopted rows, carrying their new parent
+   */
+  protected async adoptParentless<R extends SnippetRow | SRSCardRow>(
+    table: 'snippet' | 'srs_card',
+    file: TFile,
+    parentId: string
+  ): Promise<R[]> {
+    return this.adoptRows(
+      table,
+      await this.findParentlessFrom<R>(table, file),
+      parentId
+    );
+  }
+
+  /**
+   * Give the rows `orphans` of `table` the parent `parentId`.
+   * @returns the rows, carrying their new parent
+   */
+  protected async adoptRows<R extends SnippetRow | SRSCardRow>(
+    table: 'snippet' | 'srs_card',
+    orphans: readonly R[],
+    parentId: string
+  ): Promise<R[]> {
+    // Chunked so a file with a very large number of them cannot blow the
+    // statement's parameter limit; the parent id takes one slot per chunk.
+    const chunkSize = MAX_SQL_QUERY_PARAMS - 1;
+    for (let i = 0; i < orphans.length; i += chunkSize) {
+      const chunk = orphans.slice(i, i + chunkSize);
+      const placeholders = chunk.map((_, j) => `$${j + 2}`).join(', ');
+      await this.repo.mutate(
+        `UPDATE ${table} SET parent = $1 WHERE id IN (${placeholders})`,
+        [parentId, ...chunk.map((row) => row.id)]
+      );
+    }
+
+    return orphans.map((row) => ({ ...row, parent: parentId }));
+  }
+
+  /**
+   * Point the `source` link of each item's note that names the file at
+   * `fromPath` at `to` instead, as though the item had been taken from `to`:
+   * written as it was (a wikilink or markdown link, as Obsidian's own link
+   * updater keeps it), with its subpath (a PDF selection), and unless
+   * `renameAlias` is false, an alias that was the old file's name, or its page
+   * label, takes the new one's. A note that is gone, is another item's by its
+   * `ir-id`, has no link, or links elsewhere is left alone, as is one whose
+   * link is already what it would become; none of them costs a write.
+   *
+   * A link is matched by what it names rather than by what it resolves to: the
+   * file it was written for may have moved on, so it resolves nowhere, or
+   * somewhere else entirely. A note that can't be written to is logged and
+   * skipped.
+   * @param renameAlias false to keep every alias as written, as Obsidian's own
+   *   link updater does, which may be rewriting the same links meanwhile
+   * @returns how many links were rewritten
+   */
+  async retargetSources(
+    items: readonly { id: string; reference: string }[],
+    fromPath: string,
+    to: TFile,
+    { renameAlias = true }: { renameAlias?: boolean } = {}
+  ): Promise<number> {
+    const fileName = fromPath.slice(fromPath.lastIndexOf('/') + 1);
+    const dot = fileName.lastIndexOf('.');
+    const fromBasename = dot > 0 ? fileName.slice(0, dot) : fileName;
+
+    const retargeted = (
+      note: TFile,
+      id: string,
+      frontmatter: Record<string, unknown> | undefined
+    ): string | null => {
+      // A note at the path that is not the row's own: see `reconcileNote`
+      if (frontmatter?.['ir-id'] !== id) return null;
+      const source = frontmatter[SOURCE_PROPERTY_NAME];
+      if (typeof source !== 'string') return null;
+      const link = parseSourceLink(source);
+      if (!link || !linkNamesPath(link.path, note.path, fromPath)) return null;
+      const next = formatSourceLink({
+        ...link,
+        // As Obsidian links to it from the note: a note without its `.md` in
+        // a wikilink only, as its link updater does
+        path: this.app.metadataCache.fileToLinktext(
+          to,
+          note.path,
+          link.form === 'wiki'
+        ),
+        alias: renameAlias
+          ? retargetAlias(link.alias, fromBasename, to.basename)
+          : link.alias,
+      });
+      return next === source.trim() ? null : next;
+    };
+
+    let rewritten = 0;
+    for (const { id, reference } of items) {
+      const note = Obsidian.getNote(reference, this.app);
+      if (!note) continue;
+      // Read from the cache first, so the many that need nothing cost no write
+      if (
+        retargeted(note, id, Obsidian.getFrontMatter(note, this.app)) === null
+      )
+        continue;
+      let changed = false;
+      try {
+        // Decided again on the note as written, which the cache may lag
+        await Obsidian.updateFrontMatter(
+          note,
+          (frontmatter) => {
+            const next = retargeted(note, id, frontmatter);
+            if (next === null) return;
+            frontmatter[SOURCE_PROPERTY_NAME] = next;
+            changed = true;
+          },
+          this.app
+        );
+      } catch (error) {
+        console.error(error);
+        continue;
+      }
+      if (changed) rewritten += 1;
+    }
+    return rewritten;
+  }
+
+  /**
+   * {@link retargetSources} for the live snippets and cards whose parent is
+   * the row `parentId`, whose file has moved from `fromPath` to `to`: their
+   * links are the record of where they were taken from, and follow it.
+   */
+  async retargetChildSources(
+    parentId: string,
+    fromPath: string,
+    to: TFile,
+    options?: { renameAlias?: boolean }
+  ): Promise<number> {
+    const children = (await this.repo.query(
+      `SELECT id, reference FROM snippet WHERE parent = $1 AND deleted = FALSE
+       UNION ALL
+       SELECT id, reference FROM srs_card WHERE parent = $1 AND deleted = FALSE`,
+      [parentId]
+    )) as unknown as { id: string; reference: string }[];
+    return this.retargetSources(children, fromPath, to, options);
   }
 
   /**

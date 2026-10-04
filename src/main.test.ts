@@ -260,6 +260,8 @@ function makeFollowReceiver({ moved = true, indexingSignal = true } = {}) {
     transaction: vi.fn((work: () => Promise<void>) => work()),
   };
   const refreshAllHighlights = vi.fn(() => Promise.resolve());
+  const followChildSources = vi.fn(() => Promise.resolve());
+  const claimMovedFiles = vi.fn(() => Promise.resolve());
   const resolvedRef = { event: 'resolved' };
   const metadataCache = {
     getFileCache: vi.fn(() => ({ frontmatter: { 'ir-id': 'a' } })),
@@ -277,7 +279,11 @@ function makeFollowReceiver({ moved = true, indexingSignal = true } = {}) {
   const receiver = {
     register: vi.fn((unloader: () => void) => unloaders.push(unloader)),
     registerEvent: vi.fn(),
-    reviewManager: { refreshAllHighlights },
+    reviewManager: {
+      refreshAllHighlights,
+      followChildSources,
+      claimMovedFiles,
+    },
     app: {
       vault: {
         getFileByPath: vi.fn((path: string) =>
@@ -294,6 +300,8 @@ function makeFollowReceiver({ moved = true, indexingSignal = true } = {}) {
     metadataCache,
     resolvedRef,
     refreshAllHighlights,
+    followChildSources,
+    claimMovedFiles,
     finishIndexing: () => whenIndexed?.(),
     unload: () => unloaders.forEach((unloader) => unloader()),
   };
@@ -1371,6 +1379,33 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
     expect(follow.refreshAllHighlights).toHaveBeenCalledTimes(1);
   });
 
+  it("points the source links of the moved items' snippets and cards at where they went", async () => {
+    const follow = makeFollowReceiver();
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+
+    await vi.waitFor(() =>
+      expect(follow.followChildSources).toHaveBeenCalledExactlyOnceWith([
+        expect.objectContaining({
+          id: 'a',
+          from: 'one.md',
+          to: 'moved/one.md',
+        }),
+      ])
+    );
+    // And gives them whatever was taken from where they went meanwhile
+    await vi.waitFor(() =>
+      expect(follow.claimMovedFiles).toHaveBeenCalledExactlyOnceWith([
+        expect.objectContaining({
+          id: 'a',
+          from: 'one.md',
+          to: 'moved/one.md',
+        }),
+      ])
+    );
+  });
+
   it('leaves highlights and review alone when nothing moved', async () => {
     const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
     const follow = makeFollowReceiver({ moved: false });
@@ -1383,6 +1418,8 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
     await settle();
 
     expect(follow.refreshAllHighlights).not.toHaveBeenCalled();
+    expect(follow.followChildSources).not.toHaveBeenCalled();
+    expect(follow.claimMovedFiles).not.toHaveBeenCalled();
     expect(invalidate).not.toHaveBeenCalled();
   });
 

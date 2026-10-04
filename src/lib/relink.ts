@@ -293,7 +293,8 @@ function refusal(
  * the item's by the same frontmatter every other note is; a file with no
  * frontmatter, a PDF, is the item's by its path alone and is left untouched.
  * Highlights of the item's snippets move with it, and a snippet's own highlight
- * in its parent is reloaded to name its new path. The user hears how it went.
+ * in its parent is reloaded to name its new path; its snippets' and cards'
+ * source links are pointed at the target. The user hears how it went.
  *
  * The row is relinked even if the note's frontmatter can't be written
  * (malformed YAML, say): the note is at the row's reference either way, and a
@@ -330,6 +331,17 @@ export async function relinkItem(
   reviewManager.snippets.offsetTracker.renameFile(result.from, target.path);
   app.workspace.trigger('ir-highlights-changed', target.path);
   if (row.table === 'snippet') await reloadParentHighlights(plugin, row.id);
+  // Its snippets' and cards' links still name the path it was lost from. The
+  // relink stands if they can't be re-pointed.
+  try {
+    await reviewManager.articles.retargetChildSources(
+      row.id,
+      result.from,
+      target
+    );
+  } catch (error) {
+    console.error(error);
+  }
   Obsidian.notify(notice);
   return result;
 }

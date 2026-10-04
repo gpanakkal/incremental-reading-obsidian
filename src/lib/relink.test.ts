@@ -206,6 +206,7 @@ function makePlugin(
     },
     reviewManager: {
       repo,
+      articles: { retargetChildSources: vi.fn().mockResolvedValue(0) },
       snippets: {
         offsetTracker: { renameFile: vi.fn(), loadHighlights: vi.fn() },
         // Looked up in the database, as the real item managers do
@@ -683,6 +684,63 @@ describe('relinkItem', () => {
       });
     }
   );
+
+  it.each(TABLE_TAGS)(
+    "points the $table's snippets' and cards' source links at the target, and only once it is relinked",
+    async ({ table }) => {
+      const repo = TestRepository.create();
+      insertItem(repo, {
+        table,
+        id: 'i',
+        reference: 'gone.pdf',
+        deleted: false,
+      });
+      const { plugin } = makePlugin(repo);
+      const { retargetChildSources } = plugin.reviewManager.articles;
+      const target = makeFile('new.pdf') as TFile;
+
+      await relinkItem(plugin as never, { table, id: 'i' }, target);
+      expect(retargetChildSources).toHaveBeenCalledExactlyOnceWith(
+        'i',
+        'gone.pdf',
+        target
+      );
+
+      // Refused: of another type
+      await relinkItem(
+        plugin as never,
+        { table, id: 'i' },
+        makeFile('new.md') as TFile
+      );
+      expect(retargetChildSources).toHaveBeenCalledOnce();
+    }
+  );
+
+  it('relinks all the same when the links cannot be re-pointed', async () => {
+    const repo = TestRepository.create();
+    insertItem(repo, {
+      table: 'article',
+      id: 'i',
+      reference: 'gone.pdf',
+      deleted: false,
+    });
+    const { plugin } = makePlugin(repo);
+    const failure = new Error('bad YAML');
+    plugin.reviewManager.articles.retargetChildSources.mockRejectedValue(
+      failure
+    );
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await relinkItem(
+      plugin as never,
+      { table: 'article', id: 'i' },
+      makeFile('new.pdf') as TFile
+    );
+
+    expect(result).toEqual({ ok: true, from: 'gone.pdf' });
+    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(Notice.messages).toEqual(['Relinked to "new.pdf"']);
+  });
 
   it('writes nothing to a PDF target', async () => {
     const repo = TestRepository.create();

@@ -625,9 +625,7 @@ describe('registerReadingModeActionBar', () => {
       ]);
     });
 
-    it("follows the selection in a PDF article's tab from when its bar goes up, and in no other tab", async () => {
-      // A button press or the command palette can move the browser's
-      // selection out of the PDF before the snippet or card is made of it
+    it('leaves following the selection in PDF tabs to the highlights, which do it in every one', async () => {
       const tabSelection = vi
         .spyOn(ObsidianPdf, 'pdfTabSelection')
         .mockReturnValue(null);
@@ -645,9 +643,7 @@ describe('registerReadingModeActionBar', () => {
             registerReadingModeActionBar(plugin as never);
             await flush();
 
-            expect(tabSelection.mock.calls).toEqual(
-              type === 'article' ? [[pdfLeaf.view]] : []
-            );
+            expect(tabSelection).not.toHaveBeenCalled();
             plugin.runCleanup();
           }
         )

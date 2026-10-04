@@ -1,4 +1,8 @@
-import { CLOZE_DELIMITERS } from '#/lib/constants';
+import {
+  ARTICLE_DIRECTORY,
+  CLOZE_DELIMITERS,
+  DATA_DIRECTORY,
+} from '#/lib/constants';
 import { PDF_PAGE_STRIDE } from '#/lib/pdf/position';
 import test, {
   expect,
@@ -1455,29 +1459,166 @@ test.describe('Snippets and cards from a PDF article', () => {
     await expect(answerText(window)).toHaveCount(0);
   });
 
-  test('offers the commands in a PDF tab that is no article, and says so once one is run, making nothing', async () => {
-    await openFileInActiveLeaf(window, PDF_PATH);
-    await expect(tabItem(window, 1, 2)).toBeAttached();
+  // #endregion
+
+  // #region IN THE TAB OF A PDF THAT IS NO ARTICLE
+
+  /** Where the first line's selection links to, in the PDF at `pdfLink`. */
+  const firstLineSource = (pdfLink: string) =>
+    `[[${pdfLink}#page=1&selection=2,0,2,${FIRST_LINE.length}` +
+    '|PDF fixture, page 1]]';
+
+  /** Highlights in the first line, in the active PDF tab. */
+  const firstLineHighlights = (page: Page) =>
+    tabItem(page, 1, 2).locator('.ir-snippet-highlight');
+
+  /**
+   * In the fixture's own tab, open and no article, make a card of the first
+   * line from the command picked in the palette by a click, with "long text"
+   * its answer, and then a snippet of it by the command's hotkey path. (The
+   * snippet's highlight splits the line's text, which `selectInTab` can't
+   * select across.)
+   */
+  async function snipAndCardInPlainTab(page: Page) {
+    await openFileInActiveLeaf(page, PDF_PATH);
+    await expect(tabItem(page, 1, 2)).toBeAttached();
+
+    await selectInTab(page, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    // `selectionchange` is dispatched as a task, not synchronously
+    await page.waitForTimeout(100);
+    await executeCommandById(page, 'command-palette:open');
+    const palette = page.locator('.modal-container .prompt');
+    await expect(palette).toBeVisible();
+    await page.keyboard.type('Create spaced repetition card');
+    await palette
+      .locator('.suggestion-item', { hasText: 'Create spaced repetition card' })
+      .first()
+      .click();
+    await expect(answerText(page)).toHaveText(FIRST_LINE);
+    await selectAnswer(page, 'long text');
+    await page.keyboard.press('Enter');
+    await expect(answerText(page)).toHaveCount(0);
+    await expect.poll(() => cards(page)).toHaveLength(1);
+
+    await selectInTab(page, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    await page.waitForTimeout(100);
+    await executeCommandById(page, 'incremental-reading:extract-selection');
+    await expect.poll(() => snippets(page)).toHaveLength(1);
+  }
+
+  /** Every article row's id and reference. */
+  const articleRows = (page: Page) =>
+    page.evaluate(() => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      return repo.query('SELECT id, reference FROM article') as {
+        id: string;
+        reference: string;
+      }[];
+    });
+
+  test('makes a parentless snippet and card in the tab of a PDF that is no article, linked as from an article, the snippet highlighted there', async () => {
+    const pdfBytes = await fs.readFile(path.join(vaultPath, PDF_PATH));
     const notices = await watchNotices(window);
 
-    await selectInTab(window, [1, 2, 0], [1, 2, FIRST_LINE.length]);
-    await window.waitForTimeout(100);
-    await executeCommandById(window, 'incremental-reading:extract-selection');
-    // Refused before the selection is read: it stays, for after an import
-    expect(
-      await window.evaluate(() => document.getSelection()!.toString())
-    ).toBe(FIRST_LINE);
-    await executeCommandById(window, 'incremental-reading:create-card');
+    await snipAndCardInPlainTab(window);
 
+    const [snippet] = await snippets(window);
+    expect(snippet).toMatchObject({
+      parent: null,
+      start_offset: 1_00002_00000,
+      end_offset: 1_00002_00000 + FIRST_LINE.length,
+      body: FIRST_LINE,
+      source: firstLineSource('PDF fixture.pdf'),
+    });
+    const [card] = await cards(window);
+    const [left, right] = CLOZE_DELIMITERS;
+    expect(card).toMatchObject({
+      parent: null,
+      body: FIRST_LINE.replace('long text', `${left} long text ${right}`),
+      source: firstLineSource('PDF fixture.pdf'),
+    });
+    expect(await notices()).toContainEqual(
+      expect.stringMatching(/^snippet created: /)
+    );
+    // Found by its source link, the PDF having no row to find it by
+    await expect(firstLineHighlights(window)).not.toHaveCount(0);
+    expect(await articleRows(window)).toEqual([]);
+    expect(
+      (await fs.readFile(path.join(vaultPath, PDF_PATH))).equals(pdfBytes)
+    ).toBe(true);
+
+    // Undone without Obsidian's offer to delete the PDF too
+    await executeCommandById(window, 'incremental-reading:undo');
+    await executeCommandById(window, 'incremental-reading:undo');
+    await expect.poll(() => snippets(window)).toHaveLength(0);
+    await expect.poll(() => cards(window)).toHaveLength(0);
+    await expect(firstLineHighlights(window)).toHaveCount(0);
+    await expect(window.locator('.modal-container')).toHaveCount(0);
+  });
+
+  test('gives the snippet and card to the PDF once it is imported in place, which keeps the highlight', async () => {
+    await snipAndCardInPlainTab(window);
+    await expect(firstLineHighlights(window)).not.toHaveCount(0);
+
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+
+    await expect.poll(() => articleRows(window)).toHaveLength(1);
+    const id = await articleId(window);
     await expect
-      .poll(notices)
-      .toEqual([
-        '"PDF fixture" is not an incremental reading article',
-        '"PDF fixture" is not an incremental reading article',
-      ]);
-    expect(await snippets(window)).toEqual([]);
-    expect(await cards(window)).toEqual([]);
-    await expect(answerText(window)).toHaveCount(0);
+      .poll(async () => (await snippets(window)).map((s) => s.parent))
+      .toEqual([id]);
+    await expect
+      .poll(async () => (await cards(window)).map((c) => c.parent))
+      .toEqual([id]);
+    // Their links still name the PDF where it is
+    expect((await snippets(window))[0].source).toBe(
+      firstLineSource('PDF fixture.pdf')
+    );
+    await expect(firstLineHighlights(window)).not.toHaveCount(0);
+  });
+
+  test('gives the snippet and card to a copy imported from the PDF, pointing their links at it, and the original loses the highlight', async () => {
+    await snipAndCardInPlainTab(window);
+    await expect(firstLineHighlights(window)).not.toHaveCount(0);
+
+    await window.evaluate(() => {
+      const { app } = window as unknown as {
+        app: {
+          plugins: {
+            plugins: Record<
+              string,
+              { toggleAdvancedCommands(enable: boolean): void }
+            >;
+          };
+        };
+      };
+      app.plugins.plugins['incremental-reading'].toggleAdvancedCommands(true);
+    });
+    await executeCommandById(window, 'incremental-reading:import-article-copy');
+
+    const copyPath = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/PDF fixture.pdf`;
+    await expect
+      .poll(async () => (await articleRows(window)).map((r) => r.reference))
+      .toEqual([copyPath]);
+    const [{ id }] = await articleRows(window);
+    // Two PDFs share the name now, so a link to the copy is by its path
+    await expect
+      .poll(async () =>
+        (await snippets(window)).map(({ parent, source }) => ({
+          parent,
+          source,
+        }))
+      )
+      .toEqual([{ parent: id, source: firstLineSource(copyPath) }]);
+    await expect
+      .poll(async () =>
+        (await cards(window)).map(({ parent, source }) => ({ parent, source }))
+      )
+      .toEqual([{ parent: id, source: firstLineSource(copyPath) }]);
+    // The original's tab is still the active one
+    await expect(firstLineHighlights(window)).toHaveCount(0);
   });
 
   // #endregion
