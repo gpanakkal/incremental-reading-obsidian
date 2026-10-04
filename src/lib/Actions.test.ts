@@ -2292,6 +2292,7 @@ describe('Actions.createPdfSnippet', () => {
     item,
     noViewer = false,
     deleted = true,
+    adoptedBy = null,
   }: {
     read?: pdfSelection.PdfSelection | null | Error;
     selection?: Range | null;
@@ -2301,6 +2302,8 @@ describe('Actions.createPdfSnippet', () => {
     item?: unknown;
     /** Whether deleting the snippet, to undo it, succeeds. */
     deleted?: boolean;
+    /** The note or PDF of the item that took the snippet over meanwhile. */
+    adoptedBy?: TFile | null;
   }) {
     const file = pdfFile('pdf', 'paper');
     const article =
@@ -2313,11 +2316,23 @@ describe('Actions.createPdfSnippet', () => {
     const removeHighlight = vi.fn();
     const trigger = vi.fn();
     const getReviewItemFromFile = vi.fn().mockResolvedValue(article);
+    const fetchSnippet = vi.fn((id: string) =>
+      Promise.resolve(
+        adoptedBy ? { data: { id, parent: 'adopter' } } : { data: { id } }
+      )
+    );
+    const getReviewItemFromId = vi.fn((id: string) =>
+      Promise.resolve(
+        adoptedBy && id === 'adopter' ? { data: { id }, file: adoptedBy } : null
+      )
+    );
     Object.assign(plugin.reviewManager, {
       getReviewItemFromFile,
+      getReviewItemFromId,
       snippets: {
         createFromPdf,
         delete: deleteSnippet,
+        fetch: fetchSnippet,
         offsetTracker: { removeHighlight },
       },
     });
@@ -2509,7 +2524,80 @@ describe('Actions.createPdfSnippet', () => {
     expect(wired.createFromPdf).not.toHaveBeenCalled();
   });
 
-  it('says so, and makes nothing, when the PDF is no article', async () => {
+  it('makes a parentless snippet of a PDF that is no article where any PDF is taken, which undo deletes, highlight and all', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        readArb,
+        fc.uuid(),
+        fc.constantFrom<unknown>(null, {
+          data: { id: 's', type: 'snippet' },
+          file: pdfFile(),
+        }),
+        async (read, id, item) => {
+          Notice.reset();
+          const snippet = { data: { id }, file: { basename: 'A snippet' } };
+          const wired = wirePdfSnippet({ read, snippet, item });
+          const tab = {
+            pdfViewer: wired.reviewView.pdfViewer,
+            currentItemFile: () => wired.file,
+            takesAnyPdf: true,
+          };
+
+          expect(await wired.actions.createPdfSnippet(tab)).toBe(snippet);
+
+          expect(wired.createFromPdf).toHaveBeenCalledExactlyOnceWith({
+            pdf: wired.file,
+            ...read,
+          });
+          expect(Notice.messages).toEqual([]);
+
+          await wired.actions.undo();
+
+          expect(wired.deleteSnippet).toHaveBeenCalledExactlyOnceWith(id, {
+            prompt: false,
+          });
+          expect(wired.removeHighlight).toHaveBeenCalledExactlyOnceWith(
+            wired.file.path,
+            id
+          );
+          expect(wired.trigger).toHaveBeenCalledExactlyOnceWith(
+            'ir-highlights-changed',
+            wired.file.path
+          );
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('takes the highlight off the copy that took the snippet over too, when it is undone', async () => {
+    const snippet = { data: { id: 'snippet-1' }, file: { basename: 'A' } };
+    const copy = pdfFile('pdf', 'copy');
+    const wired = wirePdfSnippet({
+      read: { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' },
+      snippet,
+      item: null,
+      adoptedBy: copy,
+    });
+    await wired.actions.createPdfSnippet({
+      pdfViewer: wired.reviewView.pdfViewer,
+      currentItemFile: () => wired.file,
+      takesAnyPdf: true,
+    });
+
+    await wired.actions.undo();
+
+    expect(wired.removeHighlight.mock.calls).toEqual([
+      [wired.file.path, 'snippet-1'],
+      [copy.path, 'snippet-1'],
+    ]);
+    expect(wired.trigger.mock.calls).toEqual([
+      ['ir-highlights-changed', wired.file.path],
+      ['ir-highlights-changed', copy.path],
+    ]);
+  });
+
+  it('says so, and makes nothing, in review on a PDF that is no article', async () => {
     const read = { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' };
     for (const item of [
       null,
@@ -2663,6 +2751,46 @@ describe('Actions.createPdfCard', () => {
     );
   });
 
+  it('makes a parentless card of a PDF that is no article, which undo deletes', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        readArb,
+        fc.tuple(fc.nat(), fc.nat()),
+        fc.uuid(),
+        fc.constantFrom<unknown>(null, {
+          data: { id: 's', type: 'snippet' },
+          file: pdfFile(),
+        }),
+        async (read, answer, id, item) => {
+          Notice.reset();
+          const card = { data: { id }, file: { basename: 'A card' } };
+          const wired = wirePdfCard({ read, answer, card, item });
+          const tab = {
+            pdfViewer: wired.reviewView.pdfViewer,
+            currentItemFile: () => wired.file,
+            takesAnyPdf: true,
+          };
+
+          expect(await wired.actions.createPdfCard(tab)).toBe(card);
+
+          expect(wired.createFromPdf).toHaveBeenCalledExactlyOnceWith({
+            pdf: wired.file,
+            ...read,
+            answer,
+          });
+          expect(Notice.messages).toEqual([]);
+
+          await wired.actions.undo();
+
+          expect(wired.deleteCard).toHaveBeenCalledExactlyOnceWith(id, {
+            prompt: false,
+          });
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
   it('makes nothing when the answer is not chosen', async () => {
     const wired = wirePdfCard({ read: READ, answer: null });
 
@@ -2692,6 +2820,7 @@ describe('Actions.createPdfCard', () => {
       [{ pdfDocument: null }, "The PDF hasn't finished loading"],
       [{ read: failure }, "Couldn't read the text selected in the PDF"],
       [{ noViewer: true }, "Can't select text in this PDF here"],
+      // Review only ever shows articles
       [
         { read: READ, item: null },
         '"paper" is not an incremental reading article',
@@ -2851,11 +2980,15 @@ describe('Actions.extractFromPdfTab', () => {
     };
   }
 
-  /** What the snippet or card was made through: the tab's source and file. */
+  /**
+   * What the snippet or card was made through: the tab's source and file,
+   * taking any PDF, article or not.
+   */
   function madeFrom(creator: MockInstance) {
     const [host] = creator.mock.calls[0] as [
-      { pdfViewer: unknown; currentItemFile(): unknown },
+      { pdfViewer: unknown; currentItemFile(): unknown; takesAnyPdf?: boolean },
     ];
+    expect(host.takesAnyPdf).toBe(true);
     return { viewer: host.pdfViewer, file: host.currentItemFile() };
   }
 
@@ -2933,41 +3066,35 @@ describe('Actions.extractFromPdfTab', () => {
     );
   });
 
-  it('says a PDF that is no article is not one, and leaves its selection, whatever is selected', async () => {
+  it('makes the snippet or card of any PDF, article or not, leaving it to them to tell which', async () => {
     await fc.assert(
       fc.asyncProperty(
         selectionKindArb,
-        fc.constantFrom<NoteType | null>(null, 'snippet', 'card'),
-        fc.constantFrom<Range | null>(SELECTED, null),
-        async (kind, type, selection) => {
+        fc.constantFrom<NoteType | null | Error>(
+          null,
+          'article',
+          'snippet',
+          'card',
+          new Error('db gone')
+        ),
+        async (kind, type) => {
           Notice.reset();
-          const wired = wirePdfTab({ type, selection });
+          const wired = wirePdfTab({ type });
 
           await wired.actions.extractFromPdfTab(kind, wired.view);
 
-          expect(wired.getItemType).toHaveBeenCalledExactlyOnceWith(wired.file);
-          expect(Notice.messages).toEqual([
-            '"paper" is not an incremental reading article',
-          ]);
-          expect(wired.fromPdf.snippet).not.toHaveBeenCalled();
-          expect(wired.fromPdf.card).not.toHaveBeenCalled();
-          // Kept, to make something of once the PDF is imported
-          expect(wired.viewer!.clearSelection).not.toHaveBeenCalled();
+          // Not asked first: the snippet or card reads the row itself
+          expect(wired.getItemType).not.toHaveBeenCalled();
+          expect(wired.fromPdf[kind]).toHaveBeenCalledOnce();
+          expect(madeFrom(wired.fromPdf[kind])).toEqual({
+            viewer: wired.viewer,
+            file: wired.file,
+          });
+          expect(Notice.messages).toEqual([]);
           vi.restoreAllMocks();
         }
       )
     );
-  });
-
-  it('goes on to make it when the type lookup fails, leaving the snippet or card to check the PDF', async () => {
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const failure = new Error('db gone');
-    const wired = wirePdfTab({ type: failure });
-
-    await wired.actions.extractFromPdfTab('snippet', wired.view);
-
-    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
-    expect(wired.fromPdf.snippet).toHaveBeenCalledOnce();
   });
 
   it("leaves it to the snippet or card to say why, when the tab's viewer is not one this knows", async () => {

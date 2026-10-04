@@ -1,10 +1,14 @@
 import { decodeAnchor } from '#/lib/pdf/pdf-anchor';
-import { type PdfSelection, pageLinkAlias } from '#/lib/pdf/pdf-selection';
+import {
+  type PdfOrigin,
+  type PdfSelection,
+  originFile,
+  pageLinkAlias,
+} from '#/lib/pdf/pdf-selection';
 import type {
   ISRSCard,
   ISRSCardDisplay,
   MissingItem,
-  ReviewArticle,
   ReviewCard,
   SQLiteRepository,
   SRSCardReviewRow,
@@ -51,7 +55,7 @@ export type CardSelection = { from: number; to: number; text: string };
  * Where a card made other than from a note's text links back to: its parent's
  * row, and the subpath and alias of the link to it.
  */
-type CardOrigin = { parent: string; subpath: string; alias: string };
+type CardOrigin = { parent: string | null; subpath: string; alias: string };
 
 export class CardManager extends ItemManager {
   constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
@@ -296,32 +300,35 @@ export class CardManager extends ItemManager {
   }
 
   /**
-   * Make a card of text selected in a PDF article. Unlike a card from a note,
-   * nothing is put in place of the text: the PDF is never written to. The
-   * card links back to the selection as a snippet from the PDF does, and its
-   * parent is the article's row, since a PDF has no frontmatter to find it by.
+   * Make a card of text selected in a PDF. Unlike a card from a note, nothing
+   * is put in place of the text: the PDF is never written to. The card links
+   * back to the selection as a snippet from the PDF does. Its parent is the
+   * article's row, since a PDF has no frontmatter to find it by; a PDF that is
+   * no article leaves it parentless, as a note that is none does, until the
+   * PDF is imported (see {@link adoptOrphans}).
    *
    * @param selection the selection as `readPdfSelection` read it
    * @param answer offsets of the answer within its text
    */
   async createFromPdf({
-    article,
     text,
     start,
     subpath,
     answer,
-  }: PdfSelection & {
-    article: ReviewArticle;
-    answer: readonly [number, number];
-  }): Promise<ReviewCard | null> {
+    ...origin
+  }: PdfSelection &
+    PdfOrigin & {
+      answer: readonly [number, number];
+    }): Promise<ReviewCard | null> {
+    const pdf = originFile(origin);
     try {
       return await this.createFileAndEntry(
         this.delimitText(text, answer)[0],
-        article.file,
+        pdf,
         {
-          parent: article.data.id,
+          parent: origin.article?.data.id ?? null,
           subpath,
-          alias: pageLinkAlias(article.file.basename, decodeAnchor(start).page),
+          alias: pageLinkAlias(pdf.basename, decodeAnchor(start).page),
         }
       );
     } catch (_error) {
@@ -433,6 +440,15 @@ export class CardManager extends ItemManager {
       }
       throw error;
     }
+  }
+
+  /**
+   * Hand every parentless card taken from `file` to the item `parentId` now
+   * backing it, as an import does for its snippets.
+   * @returns the adopted rows, carrying their new parent
+   */
+  async adoptOrphans(file: TFile, parentId: string): Promise<SRSCardRow[]> {
+    return this.adoptParentless<SRSCardRow>('srs_card', file, parentId);
   }
 
   /** The id of the row of the article or snippet note `file`, if it is one. */

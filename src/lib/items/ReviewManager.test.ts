@@ -3386,6 +3386,137 @@ describe('ReviewManager tracking files without frontmatter by path', () => {
     }
   });
 
+  it("points its snippets' and cards' source links at the file where it went, and only for a row that moved", async () => {
+    const wired = wirePaths(['papers/a.pdf', 'other.pdf']);
+    wired.insertArticle('a', 'papers/a.pdf');
+    const retarget = vi
+      .spyOn(wired.manager.articles, 'retargetChildSources')
+      .mockResolvedValue(0);
+
+    await wired.rename('papers/a.pdf', 'archive/b.pdf');
+    // Keeping aliases as Obsidian's own updater does, which may run after
+    expect(retarget).toHaveBeenCalledExactlyOnceWith(
+      'a',
+      'papers/a.pdf',
+      wired.files.get('archive/b.pdf'),
+      { renameAlias: false }
+    );
+
+    // An untracked file, and a rename that goes nowhere
+    await wired.rename('other.pdf', 'elsewhere.pdf');
+    await wired.rename('archive/b.pdf', 'archive/b.pdf');
+    expect(retarget).toHaveBeenCalledOnce();
+  });
+
+  it('gives a tombstone brought back by its file turning up the parentless snippets and cards taken from that file, and keeps it back if that fails', async () => {
+    const wired = wirePaths([]);
+    wired.insertArticle('old', 'b.pdf', true);
+    const failure = new Error('db busy');
+    const claim = vi
+      .spyOn(wired.manager.articles, 'claimFromBinary')
+      .mockRejectedValue(failure);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await wired.create('b.pdf');
+
+    expect(claim).toHaveBeenCalledExactlyOnceWith(
+      wired.files.get('b.pdf'),
+      'old'
+    );
+    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'old', reference: 'b.pdf', deleted: false },
+    ]);
+  });
+
+  it('claims nothing for a file renamed onto a tombstone or a rebound article’s old path, whose links name its old path', async () => {
+    const wired = wirePaths(['other.pdf', 'more.pdf', 'new.pdf']);
+    wired.insertArticle('old', 'b.pdf', true);
+    wired.insertArticle('a', 'new.pdf');
+    await recordRebind(
+      wired.repo,
+      { id: 'a', from: 'old.pdf', to: 'new.pdf' },
+      Date.now()
+    );
+    Object.assign(wired.manager.app.vault, { adapter: makeLogAdapter() });
+    const claim = vi.spyOn(wired.manager.articles, 'claimFromBinary');
+
+    await wired.rename('other.pdf', 'b.pdf');
+    await wired.rename('more.pdf', 'old.pdf');
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'old.pdf', deleted: false },
+      { id: 'old', reference: 'b.pdf', deleted: false },
+    ]);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it('claims nothing where no tombstone is brought back', async () => {
+    const wired = wirePaths(['other.pdf']);
+    wired.insertArticle('live', 'a.pdf');
+    const claim = vi.spyOn(wired.manager.articles, 'claimFromBinary');
+
+    await wired.create('c.pdf');
+    await wired.rename('other.pdf', 'd.pdf');
+
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it('gives the articles the startup scan moved onto a PDF what was taken from it, and no other row', async () => {
+    const wired = wirePaths(['b.pdf', 'n.md', 'c.pdf']);
+    const claim = vi
+      .spyOn(wired.manager.articles, 'claimFromBinary')
+      .mockResolvedValue(undefined);
+
+    await wired.manager.claimMovedFiles([
+      { table: 'article', id: 'pdf', to: 'b.pdf' },
+      { table: 'article', id: 'note', to: 'n.md' },
+      { table: 'snippet', id: 'snippet', to: 'c.pdf' },
+      { table: 'article', id: 'gone', to: 'nowhere.pdf' },
+    ]);
+
+    expect(claim).toHaveBeenCalledExactlyOnceWith(
+      wired.files.get('b.pdf'),
+      'pdf'
+    );
+  });
+
+  it('re-points the links of only the moves whose file is there', async () => {
+    const wired = wirePaths(['b.pdf']);
+    const retarget = vi
+      .spyOn(wired.manager.articles, 'retargetChildSources')
+      .mockResolvedValue(0);
+
+    await wired.manager.followChildSources([
+      { id: 'gone', from: 'a.pdf', to: 'nowhere.pdf' },
+      { id: 'here', from: 'a.pdf', to: 'b.pdf' },
+    ]);
+
+    expect(retarget).toHaveBeenCalledExactlyOnceWith(
+      'here',
+      'a.pdf',
+      wired.files.get('b.pdf'),
+      undefined
+    );
+  });
+
+  it('keeps the row where it went when its links cannot be re-pointed', async () => {
+    const wired = wirePaths(['a.pdf']);
+    wired.insertArticle('a', 'a.pdf');
+    const failure = new Error('bad YAML');
+    vi.spyOn(wired.manager.articles, 'retargetChildSources').mockRejectedValue(
+      failure
+    );
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await wired.rename('a.pdf', 'b.pdf');
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'b.pdf', deleted: false },
+    ]);
+    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
+  });
+
   it('leaves every other row where it is', async () => {
     const wired = wirePaths(['a.pdf', 'b.pdf']);
     wired.insertArticle('a', 'a.pdf');
@@ -3591,6 +3722,36 @@ describe('ReviewManager tracking files without frontmatter by path', () => {
       for (const touch of Object.values(wired.touches)) {
         expect(touch).not.toHaveBeenCalled();
       }
+    });
+
+    it("points its snippets' and cards' source links back at its own file", async () => {
+      const wired = await rebound();
+      const retarget = vi
+        .spyOn(wired.manager.articles, 'retargetChildSources')
+        .mockResolvedValue(0);
+
+      await wired.create('old.pdf');
+
+      expect(retarget).toHaveBeenCalledExactlyOnceWith(
+        'a',
+        'new.pdf',
+        wired.files.get('old.pdf'),
+        undefined
+      );
+    });
+
+    it('gives the article the parentless snippets and cards taken from its own file meanwhile', async () => {
+      const wired = await rebound();
+      const claim = vi
+        .spyOn(wired.manager.articles, 'claimFromBinary')
+        .mockResolvedValue(undefined);
+
+      await wired.create('old.pdf');
+
+      expect(claim).toHaveBeenCalledExactlyOnceWith(
+        wired.files.get('old.pdf'),
+        'a'
+      );
     });
 
     it('takes the article back when a file is moved onto the old path too', async () => {

@@ -1,4 +1,4 @@
-import { isPdfView } from '#/lib/pdf/obsidian-pdf';
+import { isPdfView, pdfTabSelection } from '#/lib/pdf/obsidian-pdf';
 import {
   createPdfHighlightLayer,
   HIGHLIGHT_CLASS,
@@ -142,8 +142,13 @@ interface LeafHighlights {
 
 /**
  * Keep snippet highlights on every one of Obsidian's own PDF tabs, as
- * {@link showPdfSnippetHighlights} does in review. A PDF that is no article
- * has no snippets, so shows none.
+ * {@link showPdfSnippetHighlights} does in review: an article's snippets, or
+ * for a PDF that is no article, the parentless ones taken from it.
+ *
+ * Also follows the selection in each of them, from when it is first found,
+ * for the snippet and card commands: picking one from the palette, or a tap
+ * on mobile, moves the browser's selection out of the PDF before the command
+ * runs. Asked again, a tab's is the same one; it stops once the tab closes.
  */
 export function registerPdfLeafHighlights(
   plugin: IncrementalReadingPlugin
@@ -161,6 +166,7 @@ export function registerPdfLeafHighlights(
       // Let go of below, with closed tabs
       if (!pdfView || !file) return;
       live.add(leaf);
+      pdfTabSelection(pdfView);
       const current = shown.get(leaf);
       if (current?.file === file) return;
       current?.stop();

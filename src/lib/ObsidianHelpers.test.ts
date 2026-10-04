@@ -1095,6 +1095,50 @@ describe('getSourceFile', () => {
     );
   });
 
+  /** An app whose cache reports `source`, and the link lookup it makes. */
+  function makeLookingUpApp(source: string, dest: TFile | null) {
+    const getFirstLinkpathDest = vi.fn().mockReturnValue(dest);
+    const app = makeApp({
+      metadataCache: {
+        getFileCache: vi.fn().mockReturnValue({ frontmatter: { source } }),
+        getFirstLinkpathDest,
+      } as unknown as App['metadataCache'],
+    });
+    return { app, getFirstLinkpathDest };
+  }
+
+  it('resolves a markdown link to a name with brackets in it by the whole name', () => {
+    // Obsidian leaves brackets in a markdown link's target unencoded
+    const dest = makeTFile({
+      path: 'Smith (2020).pdf',
+      basename: 'Smith (2020)',
+    });
+    const { app, getFirstLinkpathDest } = makeLookingUpApp(
+      '[Smith (2020), page 3](Smith%20(2020).pdf#page=3&selection=1,2,3,4)',
+      dest
+    );
+
+    expect(ObsidianHelpers.getSourceFile(makeTFile(), app)).toBe(dest);
+    expect(getFirstLinkpathDest).toHaveBeenCalledWith(
+      'Smith (2020).pdf',
+      expect.any(String)
+    );
+  });
+
+  it('resolves a wikilink with spaces around its path by the path alone', () => {
+    const { app, getFirstLinkpathDest } = makeLookingUpApp(
+      '[[ notes/origin |origin]]',
+      makeTFile()
+    );
+
+    ObsidianHelpers.getSourceFile(makeTFile(), app);
+
+    expect(getFirstLinkpathDest).toHaveBeenCalledWith(
+      'notes/origin',
+      expect.any(String)
+    );
+  });
+
   it('returns null when the note has no source property', () => {
     const app = makeApp({
       metadataCache: {

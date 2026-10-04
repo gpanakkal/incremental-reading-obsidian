@@ -8,12 +8,14 @@ import {
   MS_PER_YEAR,
   REVIEW_COUNT_FOR_PRIORITY_SCALING,
   SNIPPET_TAG,
+  SOURCE_INDEX_TIMEOUT_MS,
   SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { encodeAnchor, MAX_ANCHOR_PAGE } from '#/lib/pdf/pdf-anchor';
 import type {
   ISnippetBase,
   ISnippetReview,
@@ -2353,6 +2355,113 @@ describe('getHighlights for a PDF', () => {
     expect(await manager.getHighlights(PDF)).toEqual([]);
   });
 
+  /**
+   * Parentless snippets in the database, each with its note's source
+   * resolving to the PDF or elsewhere, and offsets that are PDF anchors,
+   * markdown offsets, or none.
+   */
+  const parentlessArb = fc.array(
+    fc.record({
+      exists: fc.boolean(),
+      source: fc.constantFrom<'pdf' | 'elsewhere' | null>(
+        'pdf',
+        'elsewhere',
+        null
+      ),
+      deleted: fc.boolean(),
+      offsets: fc.oneof(
+        fc.constant(null),
+        // PDF anchors anywhere the codec reaches, or a note's body offsets
+        fc
+          .uniqueArray(
+            fc
+              .record({
+                page: fc.integer({ min: 1, max: MAX_ANCHOR_PAGE }),
+                idx: fc.integer({ min: 0, max: 99_999 }),
+                char: fc.integer({ min: 0, max: 99_999 }),
+              })
+              .map(encodeAnchor),
+            { minLength: 2, maxLength: 2 }
+          )
+          .map(([a, b]): [number, number] => [Math.min(a, b), Math.max(a, b)]),
+        fc
+          .tuple(fc.nat({ max: 1e10 - 2 }), fc.integer({ min: 1, max: 1e5 }))
+          .map(([start, length]): [number, number] => [start, start + length])
+      ),
+    }),
+    { maxLength: 8 }
+  );
+
+  it('finds the parentless snippets of a PDF that is no article by their source link, and only those with anchors', async () => {
+    await fc.assert(
+      fc.asyncProperty(parentlessArb, async (specs) => {
+        vi.restoreAllMocks();
+        const { manager, insertSnippet } = await makePdfManager();
+        specs.forEach((spec, i) =>
+          insertSnippet(`s${i}`, null as never, spec.offsets, spec.deleted)
+        );
+        // One the PDF's article would have, had it one, is never its
+        insertSnippet('parented', 'some-article', [1e10, 1e10 + 1]);
+        const specOf = (path: string) =>
+          specs[Number(/snippets\/s(\d+)\.md/.exec(path)?.[1])];
+        vi.spyOn(Obsidian, 'getNote').mockImplementation((reference) =>
+          specOf(reference)?.exists === false
+            ? null
+            : ({ path: reference, extension: 'md' } as TFile)
+        );
+        vi.spyOn(Obsidian, 'getSourceFile').mockImplementation((note) => {
+          const source = note.path.endsWith('parented.md')
+            ? 'pdf'
+            : specOf(note.path)?.source;
+          if (!source) return null;
+          return { path: source === 'pdf' ? PDF.path : 'notes/n.md' } as TFile;
+        });
+
+        const highlights = await manager.getHighlights(PDF);
+
+        const expected = specs
+          .map((spec, i) => ({ spec, id: `s${i}` }))
+          .filter(
+            ({ spec }) =>
+              spec.exists &&
+              spec.source === 'pdf' &&
+              !spec.deleted &&
+              spec.offsets !== null &&
+              spec.offsets[0] >= 1e10
+          );
+        expect(
+          highlights.map(({ id, start_offset, end_offset }) => ({
+            id,
+            start_offset,
+            end_offset,
+          }))
+        ).toEqual(
+          expected.map(({ spec, id }) => ({
+            id,
+            start_offset: spec.offsets![0],
+            end_offset: spec.offsets![1],
+          }))
+        );
+        expect(manager.offsetTracker.getHighlights(PDF.path)).toEqual(
+          highlights
+        );
+      })
+    );
+  });
+
+  it('finds none, and caches none, for a file that is neither a note nor a PDF', async () => {
+    const { manager, insertSnippet } = await makePdfManager();
+    const image = { path: 'img/a.png', extension: 'png' } as TFile;
+    insertSnippet('s0', null as never, [1e10, 1e10 + 1]);
+    vi.spyOn(Obsidian, 'getNote').mockImplementation(
+      (reference) => ({ path: reference, extension: 'md' }) as TFile
+    );
+    vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(image);
+
+    expect(await manager.getHighlights(image)).toEqual([]);
+    expect(manager.offsetTracker.getTrackedPaths()).not.toContain(image.path);
+  });
+
   it('never looks a note up by its path: a note is typed by its frontmatter', async () => {
     const { manager, insertArticle, insertSnippet } = await makePdfManager();
     const note = { path: 'notes/untagged.md', extension: 'md' } as TFile;
@@ -2824,12 +2933,15 @@ describe('createFromPdf', () => {
   const NOW = Date.UTC(2026, 9, 2, 12);
 
   beforeEach(() => {
+    // Timers are the window's, which Node has none of
+    vi.stubGlobal('window', globalThis);
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -3010,6 +3122,166 @@ describe('createFromPdf', () => {
         ).toBe(false);
       })
     );
+  });
+
+  /**
+   * {@link wirePdfSnip} with a metadata cache that has indexed the snippet
+   * note's source link once `indexed()` says so, and fires `changed` for the
+   * note when `index()` is called.
+   */
+  function wireParentless(pdf: TFile, indexedAtOnce: boolean) {
+    const wired = wirePdfSnip();
+    let indexed = indexedAtOnce;
+    const listeners = new Set<(file: TFile) => void>();
+    const metadataCache = {
+      on: vi.fn((_name: string, cb: (file: TFile) => void) => {
+        listeners.add(cb);
+        return cb;
+      }),
+      offref: vi.fn((ref: (file: TFile) => void) => listeners.delete(ref)),
+    };
+    Object.assign(wired.app, { metadataCache });
+    const getSourceFile = vi
+      .spyOn(Obsidian, 'getSourceFile')
+      .mockImplementation((note) =>
+        note === SNIPPET_FILE && indexed ? pdf : null
+      );
+    const index = (file: TFile = SNIPPET_FILE) => {
+      indexed = true;
+      for (const cb of [...listeners]) cb(file);
+    };
+    return { ...wired, metadataCache, listeners, index, getSourceFile };
+  }
+
+  const pdfArb = fc
+    .record({
+      folder: fc.constantFrom('', 'papers/', 'a/b/'),
+      basename: fc.string({ minLength: 1, maxLength: 12 }),
+    })
+    .map(
+      ({ folder, basename }) =>
+        ({
+          path: `${folder}${basename}.pdf`,
+          basename,
+          extension: 'pdf',
+        }) as TFile
+    );
+
+  it('makes a parentless snippet of a PDF that is no article, at the default priority, linked the same way', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfArb,
+        extractArb,
+        fc.string(),
+        async (pdf, { text, page, anchors }, subpath) => {
+          vi.restoreAllMocks();
+          const wired = wireParentless(pdf, true);
+          const start = onPage(anchors.start, page);
+          const end = Math.max(onPage(anchors.end, page), start + 1);
+
+          const result = await wired.manager.createFromPdf({
+            pdf,
+            text,
+            start,
+            end,
+            subpath,
+          });
+
+          expect(result).toEqual({ data: {}, file: SNIPPET_FILE });
+          const id = (wired.createEntry.mock.calls[0] as unknown[])[1];
+          expect(wired.createEntry).toHaveBeenCalledExactlyOnceWith(
+            SNIPPET_FILE,
+            id,
+            NOW + MS_PER_DAY,
+            DEFAULT_PRIORITY,
+            undefined,
+            { start, end }
+          );
+          expect(wired.updateFrontMatter).toHaveBeenCalledExactlyOnceWith(
+            SNIPPET_FILE,
+            {
+              'ir-id': id,
+              tags: SNIPPET_TAG,
+              [SOURCE_PROPERTY_NAME]: `[[${pdf.path}${subpath}|${pdf.basename}, page ${page}]]`,
+            },
+            wired.app
+          );
+          const touched = Object.values(wired.writes)
+            .flatMap((fn) => fn.mock.calls)
+            .some(([file]) => file === pdf);
+          expect(touched).toBe(false);
+          // Nothing left listening
+          expect(wired.listeners.size).toBe(0);
+        }
+      )
+    );
+  });
+
+  it("saves a parentless snippet's row only once its source link is indexed, so the PDF's highlights can find it", async () => {
+    const [pdf] = fc.sample(pdfArb, 1);
+    const wired = wireParentless(pdf, false);
+
+    const made = wired.manager.createFromPdf({
+      pdf,
+      text: 'text',
+      start: 1e10,
+      end: 1e10 + 4,
+      subpath: '#page=1',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(wired.createEntry).not.toHaveBeenCalled();
+    expect(wired.metadataCache.on).toHaveBeenCalledWith(
+      'changed',
+      expect.any(Function)
+    );
+
+    wired.index();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(wired.createEntry).toHaveBeenCalledOnce();
+    await made;
+    expect(wired.listeners.size).toBe(0);
+  });
+
+  it("waits for no other note's change, though the cache has the link by then", async () => {
+    const [pdf] = fc.sample(pdfArb, 1);
+    const wired = wireParentless(pdf, false);
+
+    void wired.manager.createFromPdf({
+      pdf,
+      text: 'text',
+      start: 1e10,
+      end: 1e10 + 4,
+      subpath: '#page=1',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    wired.index({ path: 'other.md' } as TFile);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(wired.createEntry).not.toHaveBeenCalled();
+    // Its own change, or the time running out, still lets it go on
+    wired.index();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(wired.createEntry).toHaveBeenCalledOnce();
+  });
+
+  it('saves the row anyway once the cache has had long enough', async () => {
+    const [pdf] = fc.sample(pdfArb, 1);
+    const wired = wireParentless(pdf, false);
+
+    const made = wired.manager.createFromPdf({
+      pdf,
+      text: 'text',
+      start: 1e10,
+      end: 1e10 + 4,
+      subpath: '#page=1',
+    });
+    await vi.advanceTimersByTimeAsync(SOURCE_INDEX_TIMEOUT_MS - 1);
+    expect(wired.createEntry).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await made;
+
+    expect(wired.createEntry).toHaveBeenCalledOnce();
+    expect(wired.listeners.size).toBe(0);
   });
 
   it('answers null when the row could not be saved', async () => {

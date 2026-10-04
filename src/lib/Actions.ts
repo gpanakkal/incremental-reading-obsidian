@@ -3,7 +3,9 @@ import {
   pdfTabSelection,
 } from '#/lib/pdf/obsidian-pdf';
 import {
+  type PdfOrigin,
   type PdfSelection,
+  originFile,
   pageHasText,
   readPdfSelection,
 } from '#/lib/pdf/pdf-selection';
@@ -86,6 +88,12 @@ type ReviewEditorView = NonNullable<
 export interface PdfSelectionHost {
   readonly pdfViewer: PdfSelectionSource | null;
   currentItemFile(): TFile | null;
+  /**
+   * Whether a PDF that is no article may give a parentless snippet or card
+   * here, as a PDF tab's may. Review only ever shows articles, so one there
+   * whose row can't be found is refused instead.
+   */
+  readonly takesAnyPdf?: boolean;
 }
 
 /** What to say when `file` is asked to give a snippet or card but no article. */
@@ -385,10 +393,9 @@ export class Actions {
   };
 
   /**
-   * Extract the text selected in the PDF article on screen in `host` (review,
-   * or a PDF tab) to a snippet: see `SnippetManager.createFromPdf`. Says so,
-   * and makes nothing, when there is no text to make it of, as on a scanned
-   * page.
+   * Extract the text selected in the PDF on screen in `host` (review, or a
+   * PDF tab) to a snippet: see `SnippetManager.createFromPdf`. Says so, and
+   * makes nothing, when there is no text to make it of, as on a scanned page.
    */
   createPdfSnippet = async (
     host: PdfSelectionHost
@@ -397,25 +404,35 @@ export class Actions {
     if (!read) return null;
 
     const snippet = await this.plugin.reviewManager.snippets.createFromPdf({
-      article: read.article,
+      ...read.origin,
       ...read.selection,
     });
     if (snippet) {
-      const pdfPath = read.article.file.path;
+      const pdfPath = originFile(read.origin).path;
       this._pushUndo({
         item: snippet,
         description: `creating snippet "${snippet.file.basename}"`,
         undo: async () => {
-          const { snippets } = this.plugin.reviewManager;
+          const { reviewManager } = this.plugin;
+          const { snippets } = reviewManager;
+          const { id } = snippet.data;
+          // Highlighted in its PDF, and in the copy of it imported since,
+          // which took the snippet over
+          const now = await snippets.fetch(id);
+          const parent = now?.data.parent
+            ? await reviewManager.getReviewItemFromId(now.data.parent)
+            : null;
+          const paths = new Set([pdfPath]);
+          if (parent?.file) paths.add(parent.file.path);
           // Without a prompt, which would offer to delete the PDF too
-          const deleted = await snippets.delete(snippet.data.id, {
-            prompt: false,
-          });
+          const deleted = await snippets.delete(id, { prompt: false });
           if (!deleted) return;
           // The row is deleted outright, which the repository reports no
-          // change for: take the highlight off the PDF by hand
-          snippets.offsetTracker.removeHighlight(pdfPath, snippet.data.id);
-          this.plugin.app.workspace.trigger('ir-highlights-changed', pdfPath);
+          // change for: take the highlight off by hand
+          for (const path of paths) {
+            snippets.offsetTracker.removeHighlight(path, id);
+            this.plugin.app.workspace.trigger('ir-highlights-changed', path);
+          }
         },
       });
     }
@@ -423,8 +440,8 @@ export class Actions {
   };
 
   /**
-   * Make a card of the text selected in the PDF article on screen in `host`
-   * (review, or a PDF tab), asking for its answer as selection mode does: see
+   * Make a card of the text selected in the PDF on screen in `host` (review,
+   * or a PDF tab), asking for its answer as selection mode does: see
    * `CardManager.createFromPdf`. Says so, and makes nothing, when there is no
    * text to make it of, as on a scanned page.
    *
@@ -438,12 +455,12 @@ export class Actions {
   ): Promise<ReviewCard | null> => {
     const read = await this._readPdfSelection(host);
     if (!read) return null;
-    const { article, selection } = read;
+    const { origin, selection } = read;
 
     const answer = await promptForCardAnswer(this.plugin.app, selection.text);
     if (answer === null) return null;
     const card = await this.plugin.reviewManager.cards.createFromPdf({
-      article,
+      ...origin,
       ...selection,
       answer,
     });
@@ -463,9 +480,10 @@ export class Actions {
   };
 
   /**
-   * Read the text selected in the PDF article on screen in `host`, for a
-   * snippet or card to be made of, along with the article's row. Says why,
-   * and answers null, when there is nothing to make one of.
+   * Read the text selected in the PDF on screen in `host`, for a snippet or
+   * card to be made of, along with what it is made from: the PDF's article
+   * row, or the PDF itself when it is no article. Says why, and answers null,
+   * when there is nothing to make one of.
    *
    * The selection is dropped as it is read, before the PDF is: it was the
    * input to this snippet or card, and one the user makes while the text is
@@ -473,7 +491,7 @@ export class Actions {
    */
   private _readPdfSelection = async (
     host: PdfSelectionHost
-  ): Promise<{ article: ReviewArticle; selection: PdfSelection } | null> => {
+  ): Promise<{ origin: PdfOrigin; selection: PdfSelection } | null> => {
     const viewer = host.pdfViewer;
     const file = host.currentItemFile();
     if (!viewer || !file) {
@@ -501,12 +519,16 @@ export class Actions {
       Obsidian.notify('No selectable text');
       return null;
     }
-    const article = await this.plugin.reviewManager.getReviewItemFromFile(file);
-    if (!article || !isReviewArticle(article)) {
+    // A PDF is only ever an article, by the row at its path
+    const item = await this.plugin.reviewManager.getReviewItemFromFile(file);
+    if (item && isReviewArticle(item)) {
+      return { origin: { article: item }, selection };
+    }
+    if (!host.takesAnyPdf) {
       Obsidian.notify(notAnArticle(file));
       return null;
     }
-    return { article, selection };
+    return { origin: { pdf: file }, selection };
   };
 
   /**
@@ -724,10 +746,8 @@ export class Actions {
    * What the create snippet and create card commands do on a PDF open in
    * Obsidian's own PDF tab `view`: what {@link extract} does in review with
    * text selected. A tab has no selection mode to enter, so with nothing
-   * selected this asks for a selection instead.
-   *
-   * A PDF that is no article is refused first, its selection left on screen
-   * to make something of once it is imported.
+   * selected this asks for a selection instead. A PDF that is no article
+   * gives a parentless snippet or card, as a note that is none does.
    */
   extractFromPdfTab = async (kind: SelectionKind, view: FileView) => {
     // A second press while the first is still at work, or a card's answer
@@ -735,11 +755,6 @@ export class Actions {
     if (this._makingFromPdf) return;
     this._makingFromPdf = true;
     try {
-      const { file } = view;
-      if (file && !(await this._mayBeArticle(file))) {
-        Obsidian.notify(notAnArticle(file));
-        return;
-      }
       const viewer = pdfTabSelection(view);
       if (viewer && !viewer.selection()) {
         Obsidian.notify(
@@ -753,28 +768,13 @@ export class Actions {
       const host: PdfSelectionHost = {
         pdfViewer: viewer,
         currentItemFile: () => view.file,
+        takesAnyPdf: true,
       };
       await (kind === 'snippet'
         ? this.createPdfSnippet(host)
         : this.createPdfCard(host));
     } finally {
       this._makingFromPdf = false;
-    }
-  };
-
-  /**
-   * Whether `file` may be an article: false only once its row says it is
-   * not. When that can't be read, the snippet or card checks for itself.
-   */
-  private _mayBeArticle = async (file: TFile): Promise<boolean> => {
-    try {
-      return (
-        (await this.plugin.reviewManager.articles.getItemType(file)) ===
-        'article'
-      );
-    } catch (error) {
-      console.error(error);
-      return true;
     }
   };
 

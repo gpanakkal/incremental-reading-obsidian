@@ -371,3 +371,350 @@ describe('getItemType', () => {
     );
   });
 });
+
+// #region SOURCE HELPERS
+/** Whether the round brackets in `text` balance. */
+const balanced = (text: string) => {
+  let depth = 0;
+  for (const char of text) {
+    if (char === '(') depth += 1;
+    else if (char === ')' && --depth < 0) return false;
+  }
+  return depth === 0;
+};
+
+/** The id of the item whose note is at `path`, as its `ir-id` says. */
+const idOf = (path: string) => `id-of-${path}`;
+
+/** The items whose notes are at `paths`. */
+const itemsAt = (...paths: string[]) =>
+  paths.map((reference) => ({ id: idOf(reference), reference }));
+
+/**
+ * Notes at `sources`' keys, each its item's by its `ir-id` and with that
+ * `source` property (or none), in a
+ * vault holding only them. `processFrontMatter` edits the notes' frontmatter
+ * in place, and the metadata cache answers it; links are made as
+ * `[[<path><subpath>|<alias>]]`, so the test can read back what was asked for.
+ */
+function wireSources(sources: Record<string, string | undefined>) {
+  const frontmatter = new Map<string, Record<string, unknown>>(
+    Object.entries(sources).map(([path, source]) => [
+      path,
+      source === undefined
+        ? { 'ir-id': idOf(path) }
+        : { 'ir-id': idOf(path), source },
+    ])
+  );
+  const processFrontMatter = vi.fn(
+    async (file: TFile, edit: (fm: Record<string, unknown>) => void) => {
+      edit(frontmatter.get(file.path)!);
+    }
+  );
+  const app = {
+    metadataCache: {
+      getFileCache: (file: TFile) => ({
+        frontmatter: { ...frontmatter.get(file.path) },
+      }),
+      // Every file linked to by its full path
+      fileToLinktext: vi.fn((file: TFile) => file.path),
+    },
+    fileManager: { processFrontMatter },
+  };
+  vi.spyOn(Obsidian, 'getNote').mockImplementation((reference) =>
+    frontmatter.has(reference)
+      ? ({ path: reference, extension: 'md' } as TFile)
+      : null
+  );
+  const query = vi.fn().mockResolvedValue([]);
+  const repo = { query, mutate: vi.fn() } as unknown as SQLiteRepository;
+  const manager = new TestManager({ app } as never, repo);
+  return {
+    manager,
+    query,
+    processFrontMatter,
+    fileToLinktext: app.metadataCache.fileToLinktext,
+    sourceOf: (path: string) => frontmatter.get(path)?.source,
+  };
+}
+
+const TO = {
+  path: 'IR/articles/Paper copy.pdf',
+  basename: 'Paper copy',
+  extension: 'pdf',
+} as TFile;
+const FROM = 'papers/Paper.pdf';
+// #endregion
+
+describe('retargetSources', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * A name a vault can hold and a link can carry: dots, spaces, brackets and
+   * `%` included.
+   */
+  const nameArb = fc
+    .string({
+      minLength: 1,
+      maxLength: 8,
+      unit: fc.constantFrom('a', 'B', '1', ' ', '.', '(', ')', '-', '%'),
+    })
+    .filter(
+      (s) =>
+        s.trim() === s &&
+        !s.startsWith('.') &&
+        !s.endsWith('.') &&
+        // Read as an escape in a markdown link, as Obsidian reads it too
+        !/%[0-9A-Fa-f]{2}/.test(s)
+    );
+  const folderArb = fc.array(nameArb, { maxLength: 3 });
+
+  /**
+   * A file the link was written for, a note it is in, and the link, written
+   * as Obsidian may write one: a wikilink or markdown link (encoded, or in
+   * angle brackets) by the full path, a tail of it, a leading `/`, or a path
+   * relative to the note; a note's maybe without `.md`; with a subpath or
+   * none, and an alias that is the file's name, its page label, the user's
+   * own words, or none.
+   */
+  const linkCaseArb = fc
+    .record({
+      fromFolder: folderArb,
+      fromBase: nameArb,
+      extension: fc.constantFrom('.pdf', '.md', ''),
+      noteFolder: folderArb,
+      to: fc.record({ folder: folderArb, base: nameArb }),
+      form: fc.constantFrom('wiki', 'markdown', 'angled'),
+      pathForm: fc.constantFrom('full', 'tail', 'slash', 'relative', 'noExt'),
+      tail: fc.nat(),
+      subpath: fc.constantFrom('', '#page=3&selection=1,2,3,4', '#page=12'),
+      alias: fc.constantFrom('name', 'page', 'own', null),
+    })
+    .map((c) => {
+      const fromParts = [...c.fromFolder, c.fromBase + c.extension];
+      const fromPath = fromParts.join('/');
+      const notePath = [...c.noteFolder, 's.md'].join('/');
+      let linkPath = fromPath;
+      if (c.pathForm === 'tail') {
+        linkPath = fromParts.slice(c.tail % fromParts.length).join('/');
+      } else if (c.pathForm === 'slash') {
+        linkPath = `/${fromPath}`;
+      } else if (c.pathForm === 'relative') {
+        linkPath =
+          c.noteFolder.length === 0
+            ? `./${fromPath}`
+            : '../'.repeat(c.noteFolder.length) + fromPath;
+      } else if (c.pathForm === 'noExt' && c.extension === '.md') {
+        linkPath = fromPath.slice(0, -'.md'.length);
+      }
+      // Its name as Obsidian has it: all but what follows the last dot
+      const fileName = c.fromBase + c.extension;
+      const dot = fileName.lastIndexOf('.');
+      const fromName = dot > 0 ? fileName.slice(0, dot) : fileName;
+      const alias =
+        c.alias === 'name'
+          ? fromName
+          : c.alias === 'page'
+            ? `${fromName}, page 3`
+            : c.alias === 'own'
+              ? 'my (own) words'
+              : null;
+      const target = linkPath + c.subpath;
+      const link =
+        c.form === 'wiki'
+          ? `[[${target}${alias === null ? '' : `|${alias}`}]]`
+          : c.form === 'angled'
+            ? `[${alias ?? ''}](<${target}>)`
+            : `[${alias ?? ''}](${target.replace(/ /g, '%20')})`;
+      const to = {
+        path: [...c.to.folder, `${c.to.base}.pdf`].join('/'),
+        basename: c.to.base,
+        extension: 'pdf',
+      } as TFile;
+      // Renamed where it was the old name or its page label, else kept
+      const newAlias =
+        c.alias === 'name'
+          ? to.basename
+          : c.alias === 'page'
+            ? `${to.basename}, page 3`
+            : alias;
+      const newTarget = to.path + c.subpath;
+      const expected =
+        c.form === 'wiki'
+          ? `[[${newTarget}${newAlias === null ? '' : `|${newAlias}`}]]`
+          : c.form === 'angled'
+            ? `[${newAlias ?? ''}](<${newTarget}>)`
+            : `[${newAlias ?? ''}](${newTarget.replace(/ /g, '%20')})`;
+      return {
+        fromPath,
+        notePath,
+        link,
+        to,
+        expected,
+        form: c.form,
+        target,
+      };
+    });
+
+  it('points every link naming the old file at the new one, as it was written, keeping its subpath and renaming its alias', async () => {
+    await fc.assert(
+      fc.asyncProperty(linkCaseArb, async (c) => {
+        // A bare markdown target's brackets must balance to be read at all
+        fc.pre(c.form !== 'markdown' || balanced(c.target));
+        vi.restoreAllMocks();
+        const wired = wireSources({ [c.notePath]: c.link });
+
+        await expect(
+          wired.manager.retargetSources(itemsAt(c.notePath), c.fromPath, c.to)
+        ).resolves.toBe(1);
+
+        expect(wired.sourceOf(c.notePath)).toBe(c.expected);
+        // A note named without its .md in a wikilink only, as Obsidian does
+        expect(wired.fileToLinktext).toHaveBeenCalledWith(
+          c.to,
+          c.notePath,
+          c.form === 'wiki'
+        );
+      })
+    );
+  });
+
+  it('leaves alone, without a write, a note that is gone, has no link, or links elsewhere', async () => {
+    const wired = wireSources({
+      'a.md': '[[papers/Other.pdf#page=1|Other, page 1]]',
+      'b.md': undefined,
+      'c.md': 'papers/Paper.pdf',
+      'd.md': '[[aper.pdf]]',
+    });
+
+    await expect(
+      wired.manager.retargetSources(
+        itemsAt('a.md', 'b.md', 'c.md', 'd.md', 'gone.md'),
+        FROM,
+        TO
+      )
+    ).resolves.toBe(0);
+
+    expect(wired.processFrontMatter).not.toHaveBeenCalled();
+    expect(wired.sourceOf('a.md')).toBe(
+      '[[papers/Other.pdf#page=1|Other, page 1]]'
+    );
+  });
+
+  it('writes nothing where the link is already the one it would become', async () => {
+    const wired = wireSources({
+      's.md': `[[${TO.path}#page=2|Paper copy, page 2]]`,
+      // Spaces around it are no change to the link
+      't.md': ` [[${TO.path}#page=2|Paper copy, page 2]] `,
+    });
+
+    await expect(
+      wired.manager.retargetSources(itemsAt('s.md', 't.md'), TO.path, TO)
+    ).resolves.toBe(0);
+    expect(wired.processFrontMatter).not.toHaveBeenCalled();
+  });
+
+  it('decides again on the note as written, where the cache was behind', async () => {
+    const wired = wireSources({ 's.md': '[[papers/Paper.pdf|Paper]]' });
+    const error = vi.spyOn(console, 'error');
+    // The note was rewritten elsewhere after the cache read it
+    const asWritten: Record<string, unknown> = {
+      'ir-id': idOf('s.md'),
+      source: '[[elsewhere.pdf|elsewhere]]',
+    };
+    wired.processFrontMatter.mockImplementationOnce(async (_file, edit) => {
+      edit(asWritten);
+    });
+
+    await expect(
+      wired.manager.retargetSources(itemsAt('s.md'), FROM, TO)
+    ).resolves.toBe(0);
+
+    expect(wired.processFrontMatter).toHaveBeenCalledOnce();
+    expect(asWritten).toEqual({
+      'ir-id': idOf('s.md'),
+      source: '[[elsewhere.pdf|elsewhere]]',
+    });
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it("leaves alone, without a write, a note at an item's path that is another's by its ir-id", async () => {
+    const wired = wireSources({ 's.md': '[[papers/Paper.pdf|Paper]]' });
+
+    await expect(
+      wired.manager.retargetSources(
+        [{ id: 'some-other-item', reference: 's.md' }],
+        FROM,
+        TO
+      )
+    ).resolves.toBe(0);
+
+    expect(wired.processFrontMatter).not.toHaveBeenCalled();
+    expect(wired.sourceOf('s.md')).toBe('[[papers/Paper.pdf|Paper]]');
+  });
+
+  it('keeps every alias as written when asked to, as Obsidian does', async () => {
+    const wired = wireSources({
+      'a.md': '[[papers/Paper.pdf#page=3|Paper, page 3]]',
+      'b.md': '[[papers/Paper.pdf|Paper]]',
+    });
+
+    await expect(
+      wired.manager.retargetSources(itemsAt('a.md', 'b.md'), FROM, TO, {
+        renameAlias: false,
+      })
+    ).resolves.toBe(2);
+
+    expect(wired.sourceOf('a.md')).toBe(`[[${TO.path}#page=3|Paper, page 3]]`);
+    expect(wired.sourceOf('b.md')).toBe(`[[${TO.path}|Paper]]`);
+  });
+
+  it('goes on to the next note when one cannot be written', async () => {
+    const wired = wireSources({
+      'a.md': '[[papers/Paper.pdf|Paper]]',
+      'b.md': '[[papers/Paper.pdf|Paper]]',
+    });
+    const failure = new Error('bad YAML');
+    wired.processFrontMatter.mockRejectedValueOnce(failure);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(
+      wired.manager.retargetSources(itemsAt('a.md', 'b.md'), FROM, TO)
+    ).resolves.toBe(1);
+
+    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(wired.sourceOf('b.md')).toBe(`[[${TO.path}|Paper copy]]`);
+  });
+});
+
+describe('retargetChildSources', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("re-points the snippets and cards whose parent is the row, by the row's id", async () => {
+    const wired = wireSources({
+      'IR/snippets/s.md': '[[papers/Paper.pdf#page=1|Paper, page 1]]',
+      'IR/cards/c.md': '[[Paper.pdf#page=2|Paper, page 2]]',
+    });
+    wired.query.mockResolvedValue(itemsAt('IR/snippets/s.md', 'IR/cards/c.md'));
+
+    await expect(
+      wired.manager.retargetChildSources('article-1', FROM, TO)
+    ).resolves.toBe(2);
+
+    const [sql, params] = wired.query.mock.calls[0] as [string, unknown[]];
+    expect(sql).toMatch(
+      /SELECT id, reference FROM snippet WHERE parent = \$1 AND deleted = FALSE\s+UNION ALL\s+SELECT id, reference FROM srs_card WHERE parent = \$1 AND deleted = FALSE/
+    );
+    expect(params).toEqual(['article-1']);
+    expect(wired.sourceOf('IR/snippets/s.md')).toBe(
+      `[[${TO.path}#page=1|Paper copy, page 1]]`
+    );
+    expect(wired.sourceOf('IR/cards/c.md')).toBe(
+      `[[${TO.path}#page=2|Paper copy, page 2]]`
+    );
+  });
+});

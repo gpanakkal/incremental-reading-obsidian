@@ -565,6 +565,9 @@ export default class IncrementalReadingPlugin extends Plugin {
       })
         .then(async (moved) => {
           if (moved.length === 0) return;
+          // Obsidian saw none of these moves, so updated no links to them
+          await this.reviewManager.followChildSources(moved);
+          await this.reviewManager.claimMovedFiles(moved);
           // Highlights are cached by note path, and review may be showing one
           // of the notes that moved
           await this.reviewManager.refreshAllHighlights();
@@ -798,8 +801,7 @@ export default class IncrementalReadingPlugin extends Plugin {
    * So they do in a PDF open in Obsidian's own tab, through the PDF's viewer.
    */
   private addExtractCommands() {
-    // The commands, and the PDF tab action bars, follow the selection in PDF
-    // tabs, which outlive the plugin
+    // The commands follow the selection in PDF tabs, which outlive the plugin
     this.register(stopPdfTabSelections);
     /**
      * The commands on a PDF article, which has no editor for them to find:
@@ -816,9 +818,8 @@ export default class IncrementalReadingPlugin extends Plugin {
       return true;
     };
     /**
-     * {@link extractFromPdf} in Obsidian's own PDF tab. Any PDF it has open
-     * may be an article, which only its row tells: one that isn't is refused
-     * once the command runs.
+     * {@link extractFromPdf} in Obsidian's own PDF tab, on any PDF it has
+     * open: one that is no article gives a parentless snippet or card.
      */
     const extractFromPdfTab = (kind: 'snippet' | 'card', checking: boolean) => {
       // Undocumented: `Workspace.getActiveFileView` (typed by obsidian-typings)

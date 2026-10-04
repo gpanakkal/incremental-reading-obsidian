@@ -725,9 +725,11 @@ export default class ReviewManager {
       [oldPath]
     )) as unknown as { id: string }[];
     if (!moving) {
-      // As if the file had been created there
-      await this.#reclaimAtPath(newPath);
-      await this.#restoreAtPath(newPath);
+      // As if the file had been created there, but for what was taken from
+      // it: their links still name the old path, which Obsidian updates, if
+      // it is let, only after this (task 0031)
+      await this.#reclaimAtPath(newPath, { claim: false });
+      await this.#restoreAtPath(newPath, { claim: false });
       return;
     }
 
@@ -748,31 +750,97 @@ export default class ReviewManager {
         [newPath, moving.id]
       );
     });
+    // Obsidian updates them itself only when the user lets it, and then
+    // maybe after this has: as it does, keep each alias as written, so its
+    // write and this one agree whichever lands last
+    await this.followChildSources(
+      [{ id: moving.id, from: oldPath, to: newPath }],
+      { renameAlias: false }
+    );
+  }
+
+  /**
+   * Point the `source` links of the snippets and cards of each row that moved
+   * from `from` to `to` at the file there (see `retargetChildSources`), in
+   * step with the row: a link names its file by path, and is the record of
+   * where its item was taken from. Links Obsidian has already updated are
+   * left alone. A row whose links can't be re-pointed keeps its move; the
+   * failure is logged.
+   */
+  async followChildSources(
+    moves: readonly { id: string; from: string; to: string }[],
+    options?: { renameAlias?: boolean }
+  ) {
+    for (const { id, from, to } of moves) {
+      const file = this.app.vault.getFileByPath(to);
+      if (!file) continue;
+      try {
+        await this.articles.retargetChildSources(id, from, file, options);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+  }
+
+  /**
+   * For each article row the startup scan put at a file with no frontmatter,
+   * a PDF, {@link #claimAtPath}: the file had no live row while it was away,
+   * so snippets and cards taken from it then have no parent.
+   */
+  async claimMovedFiles(
+    moves: readonly { table: string; id: string; to: string }[]
+  ) {
+    for (const { table, id, to } of moves) {
+      if (table !== 'article') continue;
+      if (supportsFrontmatter({ extension: extensionOfPath(to) })) continue;
+      await this.#claimAtPath(to, id);
+    }
+  }
+
+  /**
+   * Give the article row `id`, now back at its file `path`, the parentless
+   * snippets and cards taken from that file while no live row named it (see
+   * `ArticleManager.claimFromBinary`). A failure is logged; the row stays.
+   */
+  async #claimAtPath(path: string, id: string) {
+    const file = this.app.vault.getFileByPath(path);
+    if (!file) return;
+    try {
+      await this.articles.claimFromBinary(file, id);
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   /**
    * Bring back the tombstoned article row at `path`, now that a file with no
    * frontmatter, known by its path alone, is there again: restored from the
    * trash, say. Reads first, so the many files that are no item cost no write.
+   * @param options.claim whether to adopt what was taken from the file
+   *   meanwhile (see {@link #claimAtPath})
    */
-  async #restoreAtPath(path: string) {
+  async #restoreAtPath(path: string, { claim }: { claim: boolean }) {
     const [tombstone] = (await this.#repo.query(
       'SELECT id FROM article WHERE reference = $1 AND deleted = TRUE',
       [path]
     )) as unknown as { id: string }[];
     if (!tombstone) return;
     await this.articles.markUndeleted(tombstone.id, 'article');
+    if (claim) await this.#claimAtPath(path, tombstone.id);
   }
 
   /**
    * Put back an article the startup scan rebound by filename away from `path`,
    * now that a file — its own, by path — has turned up there: Sync delivering
    * it late, say. See `reclaimAtPath`.
+   * @param options.claim as for {@link #restoreAtPath}
    */
-  async #reclaimAtPath(path: string) {
+  async #reclaimAtPath(path: string, { claim }: { claim: boolean }) {
     const moved = await reclaimAtPath(this.#repo, path, Date.now());
     if (!moved) return;
     this.snippets.offsetTracker.renameFile(moved.from, moved.to);
+    await this.followChildSources([moved]);
+    if (claim) await this.#claimAtPath(moved.to, moved.id);
     await appendLog(this.app.vault.adapter, REBIND_LOG_TOPIC, [
       describeReclaim(moved),
     ]);
@@ -815,8 +883,8 @@ export default class ReviewManager {
     if (!supportsFrontmatter(concreteFile)) {
       // A reclaim only ever takes a path no row names, and a restore only a
       // path a tombstone names, so at most one of the two acts
-      await this.#reclaimAtPath(file.path);
-      await this.#restoreAtPath(file.path);
+      await this.#reclaimAtPath(file.path, { claim: true });
+      await this.#restoreAtPath(file.path, { claim: true });
       return;
     }
 

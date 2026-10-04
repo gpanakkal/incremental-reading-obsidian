@@ -144,6 +144,11 @@ function makeSnippetsStub(adopted: SnippetRow[] = []) {
   };
 }
 
+/** The card manager as an import adopts cards through it. */
+function makeCardsStub(adopted: { id: string; reference: string }[] = []) {
+  return { adoptOrphans: vi.fn().mockResolvedValue(adopted) };
+}
+
 /**
  * Like {@link makeImportPlugin}, but with the review manager wired up, so the
  * import actually reaches the snippet-adoption step.
@@ -176,7 +181,8 @@ function importVaultOf(plugin: unknown): ReturnType<typeof makeImportVault> {
 function makePdfImportPlugin(
   file: TFile,
   copyOnImport = false,
-  snippets = makeSnippetsStub()
+  snippets = makeSnippetsStub(),
+  cards = makeCardsStub()
 ) {
   return {
     app: {
@@ -191,7 +197,7 @@ function makePdfImportPlugin(
       workspace: { trigger: vi.fn() },
     },
     settings: { copyOnImport, defaultPriority: DEFAULT_PRIORITY },
-    reviewManager: { snippets },
+    reviewManager: { snippets, cards },
   };
 }
 
@@ -2764,7 +2770,11 @@ describe('import', () => {
               plugin.app.fileManager.processFrontMatter
             ).not.toHaveBeenCalled();
             expect(vault.cachedRead).not.toHaveBeenCalled();
-            expect(snippets.adoptOrphans).not.toHaveBeenCalled();
+            // Whatever was taken from it before is its own now
+            expect(snippets.adoptOrphans).toHaveBeenCalledExactlyOnceWith(
+              file,
+              rows[0].id
+            );
           }
         ),
         { numRuns: 30 }
@@ -2965,6 +2975,273 @@ describe('import', () => {
       );
     });
 
+    describe('with snippets and cards taken from it before', () => {
+      /** Parentless snippets and cards, 0–3 of each, as adoption returns them. */
+      const takenArb = fc.record({
+        snippets: fc
+          .integer({ min: 0, max: 3 })
+          .map((n) => Array.from({ length: n }, (_, i) => makeAdoptedRow(i))),
+        cards: fc.integer({ min: 0, max: 3 }).map((n) =>
+          Array.from({ length: n }, (_, i) => ({
+            id: `card-${i}`,
+            reference: `cards/card-${i}.md`,
+          }))
+        ),
+      });
+
+      /** The manager over `plugin`, its link rewriting spied on. */
+      function managerFor(plugin: unknown, repo: SQLiteRepository) {
+        const manager = new ArticleManager(plugin as never, repo);
+        const retargetSources = vi
+          .spyOn(manager, 'retargetSources')
+          .mockResolvedValue(0);
+        return { manager, retargetSources };
+      }
+
+      const triggerOf = (plugin: unknown) =>
+        (
+          plugin as {
+            app: { workspace: { trigger: ReturnType<typeof vi.fn> } };
+          }
+        ).app.workspace.trigger;
+
+      it('gives them to the article made in place, which keeps their highlights and links', async () => {
+        await fc.assert(
+          fc.asyncProperty(takenArb, async (taken) => {
+            const { repo } = await makeSqlJsRepo();
+            const snippets = makeSnippetsStub(taken.snippets);
+            const cards = makeCardsStub(taken.cards);
+            const plugin = makePdfImportPlugin(
+              PDF_FILE,
+              false,
+              snippets,
+              cards
+            );
+            const { manager, retargetSources } = managerFor(plugin, repo);
+
+            await manager.import(PDF_FILE, DEFAULT_PRIORITY, null, false);
+
+            const [{ id }] = allRows(repo);
+            expect(snippets.adoptOrphans).toHaveBeenCalledExactlyOnceWith(
+              PDF_FILE,
+              id
+            );
+            expect(cards.adoptOrphans).toHaveBeenCalledExactlyOnceWith(
+              PDF_FILE,
+              id
+            );
+            expect(retargetSources).not.toHaveBeenCalled();
+            expect(snippets.repointSource).not.toHaveBeenCalled();
+            const adoptedAny = taken.snippets.length + taken.cards.length > 0;
+            expect(snippets.getHighlights.mock.calls).toEqual(
+              adoptedAny ? [[PDF_FILE]] : []
+            );
+            expect(triggerOf(plugin).mock.calls).toEqual(
+              adoptedAny ? [['ir-highlights-changed', PDF_FILE.path]] : []
+            );
+            vi.restoreAllMocks();
+          }),
+          // Nothing taken from it, too, every run
+          { numRuns: 20, examples: [[{ snippets: [], cards: [] }]] }
+        );
+      });
+
+      it('still imports it, in place or as a copy, before the review manager is there', async () => {
+        vi.spyOn(Obsidian, 'getDirectory').mockRestore();
+        vi.spyOn(Obsidian, 'getTargetPath').mockRestore();
+        const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
+        // Something taken from it, which a copy still takes over
+        vi.spyOn(Obsidian, 'getNote').mockImplementation(
+          (reference) => ({ path: reference, extension: 'md' }) as TFile
+        );
+        vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(PDF_FILE);
+        for (const copy of [false, true]) {
+          const { repo, db } = await makeSqlJsRepo();
+          db.exec(
+            `INSERT INTO snippet (id, reference, due, interval, priority, start_offset, end_offset)
+             VALUES ('s', 'snippets/s.md', 0, 1, 20, 10000000000, 10000000001)`
+          );
+          const plugin = makePdfCopyPlugin(PDF_FILE, { folders: [ARTICLES] });
+          Object.assign(plugin, { reviewManager: undefined });
+          const manager = new ArticleManager(plugin as never, repo);
+          vi.spyOn(manager, 'retargetSources').mockResolvedValue(1);
+          const error = vi.spyOn(console, 'error');
+
+          const result = await manager.import(
+            PDF_FILE,
+            DEFAULT_PRIORITY,
+            null,
+            copy
+          );
+
+          expect(result?.data.id).toBe(allRows(repo)[0].id);
+          expect(error).not.toHaveBeenCalled();
+          expect(repo.query('SELECT parent FROM snippet')).toEqual([
+            { parent: copy ? result?.data.id : null },
+          ]);
+          error.mockRestore();
+        }
+      });
+
+      it('gives them to the article already at its path, or revived there, on importing it again', async () => {
+        for (const deleted of [0, 1]) {
+          const { repo, db } = await makeSqlJsRepo();
+          insertArticleRow(db, {
+            id: 'existing',
+            due: 1234,
+            due_fuzz: null,
+            priority: MAXIMUM_PRIORITY,
+          });
+          db.exec(
+            `UPDATE article SET reference = $1, deleted = $2 WHERE id = 'existing'`,
+            [PDF_FILE.path, deleted]
+          );
+          const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
+          const cards = makeCardsStub();
+          const plugin = makePdfImportPlugin(PDF_FILE, false, snippets, cards);
+
+          await managerFor(plugin, repo).manager.import(
+            PDF_FILE,
+            DEFAULT_PRIORITY,
+            null,
+            false
+          );
+
+          expect(snippets.adoptOrphans).toHaveBeenCalledExactlyOnceWith(
+            PDF_FILE,
+            'existing'
+          );
+          expect(cards.adoptOrphans).toHaveBeenCalledExactlyOnceWith(
+            PDF_FILE,
+            'existing'
+          );
+          expect(snippets.getHighlights).toHaveBeenCalledWith(PDF_FILE);
+          vi.restoreAllMocks();
+        }
+      });
+
+      it('gives them to a copy, pointing their links at it, and takes their highlights off the original', async () => {
+        vi.spyOn(Obsidian, 'getDirectory').mockRestore();
+        vi.spyOn(Obsidian, 'getTargetPath').mockRestore();
+        const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
+        const COPY_PATH = `${ARTICLES}/Paper.pdf`;
+        // Snippets and cards taken from it, and what the notice adds
+        const cases = [
+          [0, 0, ''],
+          [1, 0, '; 1 snippet now refers to the copy'],
+          [0, 1, '; 1 card now refers to the copy'],
+          [2, 0, '; 2 snippets now refer to the copy'],
+          [1, 1, '; 1 snippet and 1 card now refer to the copy'],
+          [3, 2, '; 3 snippets and 2 cards now refer to the copy'],
+        ] as const;
+        for (const [snippetCount, cardCount, notice] of cases) {
+          vi.restoreAllMocks();
+          vi.spyOn(Obsidian, 'getDirectory').mockRestore();
+          vi.spyOn(Obsidian, 'getTargetPath').mockRestore();
+          Notice.reset();
+          const { repo, db } = await makeSqlJsRepo();
+          const insertSnippet = (id: string, parent: string | null) =>
+            db.exec(
+              `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset)
+                   VALUES ($1, $2, 0, 1, 20, $3, 10000000000, 10000000001)`,
+              [id, `snippets/${id}.md`, parent]
+            );
+          const insertCard = (id: string) =>
+            db.exec(
+              `INSERT INTO srs_card (id, reference, created_at, due,
+                     stability, difficulty, elapsed_days, scheduled_days, state)
+                   VALUES ($1, $2, 0, 0, 0, 0, 0, 0, 0)`,
+              [id, `cards/${id}.md`]
+            );
+          const snippetIds = Array.from(
+            { length: snippetCount },
+            (_, i) => `s${i}`
+          );
+          const cardIds = Array.from({ length: cardCount }, (_, i) => `c${i}`);
+          snippetIds.forEach((id) => insertSnippet(id, null));
+          cardIds.forEach(insertCard);
+          // Taken from elsewhere, or someone else's already
+          insertSnippet('elsewhere', null);
+          insertCard('elsewhere');
+          insertSnippet('parented', 'some-article');
+          const plugin = makePdfCopyPlugin(PDF_FILE, {
+            folders: [ARTICLES],
+          });
+          const snippets = makeSnippetsStub();
+          Object.assign(plugin.reviewManager, { snippets });
+          vi.spyOn(Obsidian, 'getNote').mockImplementation(
+            (reference) => ({ path: reference, extension: 'md' }) as TFile
+          );
+          // Their links name the PDF by its name alone, which resolves to
+          // the copy once there is one, its path being the shorter
+          vi.spyOn(Obsidian, 'getSourceFile').mockImplementation((note) =>
+            note.path.includes('elsewhere')
+              ? fileAt('papers/Other.pdf')
+              : (plugin.files.get(COPY_PATH) ?? PDF_FILE)
+          );
+          const { manager, retargetSources } = managerFor(plugin, repo);
+
+          await manager.import(PDF_FILE, DEFAULT_PRIORITY, null, true);
+
+          const [{ id, reference }] = allRows(repo);
+          expect(reference).toBe(COPY_PATH);
+          const parents = (table: string) =>
+            Object.fromEntries(
+              (
+                repo.query(`SELECT id, parent FROM ${table}`) as {
+                  id: string;
+                  parent: string | null;
+                }[]
+              ).map((row) => [row.id, row.parent])
+            );
+          expect(parents('snippet')).toEqual({
+            ...Object.fromEntries(snippetIds.map((s) => [s, id])),
+            elsewhere: null,
+            parented: 'some-article',
+          });
+          expect(parents('srs_card')).toEqual({
+            ...Object.fromEntries(cardIds.map((c) => [c, id])),
+            elsewhere: null,
+          });
+          expect(Notice.messages.at(-1)).toBe(
+            `Imported "Paper" with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}${notice}`
+          );
+          if (snippetCount + cardCount === 0) {
+            expect(retargetSources).not.toHaveBeenCalled();
+            expect(
+              snippets.offsetTracker.loadHighlights
+            ).not.toHaveBeenCalled();
+            expect(triggerOf(plugin)).not.toHaveBeenCalled();
+          } else {
+            const [items, from, to] = retargetSources.mock.calls[0];
+            expect(retargetSources).toHaveBeenCalledOnce();
+            expect(
+              items.map(({ id, reference }) => ({ id, reference }))
+            ).toEqual([
+              ...snippetIds.map((s) => ({
+                id: s,
+                reference: `snippets/${s}.md`,
+              })),
+              ...cardIds.map((c) => ({ id: c, reference: `cards/${c}.md` })),
+            ]);
+            expect(from).toBe(PDF_FILE.path);
+            expect(to).toBe(plugin.files.get(COPY_PATH));
+            // The original keeps no highlights: they moved to the copy
+            expect(
+              snippets.offsetTracker.loadHighlights
+            ).toHaveBeenCalledExactlyOnceWith(PDF_FILE.path, []);
+            expect(triggerOf(plugin)).toHaveBeenCalledExactlyOnceWith(
+              'ir-highlights-changed',
+              PDF_FILE.path
+            );
+          }
+          expect(snippets.adoptOrphans).not.toHaveBeenCalled();
+          expect(snippets.getHighlights).not.toHaveBeenCalled();
+          expect(snippets.repointSource).not.toHaveBeenCalled();
+        }
+      });
+    });
+
     describe('as a copy', () => {
       const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
 
@@ -3046,6 +3323,7 @@ describe('import', () => {
                 plugin.app.fileManager.processFrontMatter
               ).not.toHaveBeenCalled();
               expect(vault.cachedRead).not.toHaveBeenCalled();
+              // Taken from the original are found in the database: none here
               expect(snippets.adoptOrphans).not.toHaveBeenCalled();
               // The original stays as it was, where it was
               for (const change of [

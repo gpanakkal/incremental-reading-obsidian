@@ -1,3 +1,5 @@
+import type { ReviewArticle } from '#/lib/types';
+import type { TFile } from 'obsidian';
 import { decodeAnchor, rangeToAnchors } from './pdf-anchor';
 import {
   extractText,
@@ -5,6 +7,20 @@ import {
   type PdfPageText,
   readPageTexts,
 } from './pdf-text';
+
+/**
+ * The PDF a snippet or card is made from: the article it is, which becomes its
+ * parent, or a PDF that is no article, which leaves it parentless until the
+ * PDF is imported.
+ */
+export type PdfOrigin =
+  | { article: ReviewArticle; pdf?: undefined }
+  | { article?: undefined; pdf: TFile };
+
+/** The PDF file of `origin`. */
+export function originFile(origin: PdfOrigin): TFile {
+  return origin.article ? origin.article.file : origin.pdf;
+}
 
 /** A selection in a PDF, read for extracting. */
 export interface PdfSelection {

@@ -26,6 +26,7 @@ import type {
   MissingItem,
   ReviewArticle,
   SnippetRow,
+  SRSCardRow,
 } from '#/lib/types';
 import {
   compareFuzzedDue,
@@ -59,6 +60,36 @@ function describeSchedule(
   return fixedIntervalDays === null
     ? `priority ${IRScheduler.toDisplayPriority(priority)}`
     : `fixed interval of ${fixedIntervalDays} days`;
+}
+
+/**
+ * What a copy import's notice adds about the snippets and cards it took over
+ * from the original (see `claimFromBinary`): nothing when it took none.
+ */
+function movedToCopy({
+  snippets,
+  cards,
+}: {
+  snippets: number;
+  cards: number;
+}): string {
+  const counted = (
+    [
+      [snippets, 'snippet'],
+      [cards, 'card'],
+    ] as const
+  )
+    .filter(([count]) => count > 0)
+    .map(([count, noun]) => `${count} ${noun}${count === 1 ? '' : 's'}`);
+  if (counted.length === 0) return '';
+  const verb = snippets + cards === 1 ? 'refers' : 'refer';
+  return `; ${counted.join(' and ')} now ${verb} to the copy`;
+}
+
+/** The parentless snippets and cards taken from a file. */
+interface Taken {
+  snippets: SnippetRow[];
+  cards: SRSCardRow[];
 }
 
 export class ArticleManager extends ItemManager {
@@ -196,6 +227,71 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
+   * Adopt the snippets and cards taken from the file with no frontmatter `pdf`
+   * before it became the article `articleId` (see `adoptOrphans`), then reload
+   * its highlights: they stay where they are, reached by parent id from here
+   * on.
+   */
+  async claimFromBinary(pdf: TFile, articleId: string): Promise<void> {
+    const reviewManager = this.plugin.reviewManager;
+    if (!reviewManager) return;
+    const { snippets, cards } = reviewManager;
+
+    const adopted = [
+      ...(await snippets.adoptOrphans(pdf, articleId)),
+      ...(await cards.adoptOrphans(pdf, articleId)),
+    ];
+    if (adopted.length === 0) return;
+    await snippets.getHighlights(pdf);
+    this.app.workspace.trigger('ir-highlights-changed', pdf.path);
+  }
+
+  /**
+   * The parentless snippets and cards taken from the file with no frontmatter
+   * `pdf`, for {@link handToCopy}. Read before the copy is made: once it is,
+   * a link by name alone may resolve to the copy instead.
+   */
+  private async takenFrom(pdf: TFile): Promise<Taken> {
+    return {
+      snippets: await this.findParentlessFrom<SnippetRow>('snippet', pdf),
+      cards: await this.findParentlessFrom<SRSCardRow>('srs_card', pdf),
+    };
+  }
+
+  /**
+   * Give `taken` from `pdf` to the article `articleId` imported as its copy
+   * `copy`, which takes them over: their source links are re-pointed at it,
+   * keeping each link's page and selection, and `pdf` loses their highlights
+   * to it.
+   * @returns how many snippets and cards changed hands
+   */
+  private async handToCopy(
+    pdf: TFile,
+    taken: Taken,
+    articleId: string,
+    copy: TFile
+  ): Promise<{ snippets: number; cards: number }> {
+    const counts = {
+      snippets: taken.snippets.length,
+      cards: taken.cards.length,
+    };
+    if (counts.snippets + counts.cards === 0) return counts;
+    await this.adoptRows('snippet', taken.snippets, articleId);
+    await this.adoptRows('srs_card', taken.cards, articleId);
+    await this.retargetSources(
+      [...taken.snippets, ...taken.cards],
+      pdf.path,
+      copy
+    );
+    this.plugin.reviewManager?.snippets.offsetTracker.loadHighlights(
+      pdf.path,
+      []
+    );
+    this.app.workspace.trigger('ir-highlights-changed', pdf.path);
+    return counts;
+  }
+
+  /**
    * Import a note directly
    */
   private async importInPlace(
@@ -314,6 +410,9 @@ export class ArticleManager extends ItemManager {
     )[0];
 
     if (existing && !existing.deleted) {
+      // Nothing left to import, but re-running it is how a user repairs
+      // snippets and cards stranded without a parent
+      await this.claimFromBinary(file, existing.id);
       Obsidian.notify(`"${file.name}" is already an article; canceling import`);
       return this.fetch(existing.id);
     }
@@ -334,6 +433,8 @@ export class ArticleManager extends ItemManager {
         'UPDATE article SET deleted = 0, dismissed = 0, due = COALESCE(due, $1) WHERE id = $2',
         [Date.now(), existing.id]
       );
+      // Taken from the file while its row was deleted, they had no parent
+      await this.claimFromBinary(file, existing.id);
       Obsidian.notify(
         `Restored the article "${titleSlice}" to the queue with its earlier schedule`
       );
@@ -342,6 +443,7 @@ export class ArticleManager extends ItemManager {
 
     const id = crypto.randomUUID();
     await this.insertImported(id, file.path, priority, fixedIntervalDays);
+    await this.claimFromBinary(file, id);
 
     const schedulingString = describeSchedule(priority, fixedIntervalDays);
     Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
@@ -432,6 +534,7 @@ export class ArticleManager extends ItemManager {
   ) {
     return this.withCopyTarget(file, async (name) => {
       const copyPath = Obsidian.getTargetPath(name, 'article');
+      const taken = await this.takenFrom(file);
       await Obsidian.ensureParentFolder(this.app, copyPath);
       const copy = await this.app.vault.copy(file, copyPath);
 
@@ -445,6 +548,7 @@ export class ArticleManager extends ItemManager {
         await this.app.fileManager.trashFile(copy).catch(console.error);
         throw error;
       }
+      const moved = await this.handToCopy(file, taken, id, copy);
 
       const titleSlice = getContentSlice(
         copy.basename,
@@ -452,7 +556,9 @@ export class ArticleManager extends ItemManager {
         true
       );
       const schedulingString = describeSchedule(priority, fixedIntervalDays);
-      Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
+      Obsidian.notify(
+        `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`
+      );
       return this.fetch(id);
     });
   }
