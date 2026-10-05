@@ -10,6 +10,7 @@ import {
   TEXT_REVIEW_INTERVALS,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
+import { Markdown } from '#/lib/Markdown';
 import { getMimeType, supportsFrontmatter } from '#/lib/mime';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { decodeAnchor, MIN_ANCHOR } from '#/lib/pdf/pdf-anchor';
@@ -403,10 +404,13 @@ export class SnippetManager extends ItemManager {
   }): Promise<ReviewSnippet | null> {
     const dueTime = Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
     const pdf = originFile(origin);
+    // Whatever the PDF holds reads as plain text, and names the note as it
+    // reads
     const snippetFile = await Obsidian.createFromText(
-      text,
+      Markdown.escape(text),
       Obsidian.getDirectory('snippet'),
-      this.app
+      this.app,
+      text
     );
     const sourceLink = Obsidian.generateMarkdownLink(
       pdf,

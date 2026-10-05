@@ -30,8 +30,335 @@ const keepLabel = (_match: string, label: string) => label;
 const keepAliasOrTarget = (_match: string, target: string, alias?: string) =>
   alias ?? target;
 
+/**
+ * The HTML entities a browser decodes without their `;`, even as the start of
+ * a longer word (`&notice` reads `¬ice`): a fixed list in the HTML standard.
+ * Obsidian's reading view decodes them so, case and all (`&AMP`, not `&Amp`).
+ */
+export const LEGACY_ENTITIES: readonly string[] = (
+  'AElig AMP Aacute Acirc Agrave Aring Atilde Auml COPY Ccedil ETH Eacute ' +
+  'Ecirc Egrave Euml GT Iacute Icirc Igrave Iuml LT Ntilde Oacute Ocirc ' +
+  'Ograve Oslash Otilde Ouml QUOT REG THORN Uacute Ucirc Ugrave Uuml Yacute ' +
+  'aacute acirc acute aelig agrave amp aring atilde auml brvbar ccedil ' +
+  'cedil cent copy curren deg divide eacute ecirc egrave eth euml frac12 ' +
+  'frac14 frac34 gt iacute icirc iexcl igrave iquest iuml laquo lt macr ' +
+  'micro middot nbsp not ntilde oacute ocirc ograve ordf ordm oslash otilde ' +
+  'ouml para plusmn pound quot raquo reg sect shy sup1 sup2 sup3 szlig ' +
+  'thorn times uacute ucirc ugrave uml uuml yacute yen yuml'
+).split(' ');
+
+/**
+ * The characters escaped wherever they are. Obsidian reads each as syntax
+ * even where CommonMark wouldn't: a lone backtick as code in live preview, a
+ * `*` between spaces as emphasis in reading view, and a bare `[x]` as a link
+ * in live preview. `]` is never escaped: with every `[` escaped, nothing it
+ * closes can open.
+ */
+const ALWAYS = new Set('`*[|');
+
+/** The characters that are syntax only doubled: comments, highlights, strikethrough. */
+const DOUBLED = new Set('%=~');
+
+/**
+ * The characters some rule escapes only beside others. Beside an end of an
+ * answer, where a cloze delimiter or the hidden answer's `<mark>` will stand,
+ * the neighbour is unknown, and they are escaped there regardless.
+ */
+const CONTEXTUAL = new Set('\\{})#$<^%=~_&@:./-+');
+
+const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/;
+
+/**
+ * A character of a word, as Obsidian's emphasis reads one: `_` between two is
+ * never emphasis. Only ASCII: a letter of any other script closes it.
+ */
+const WORD_CHAR = /[A-Za-z\d]/;
+
+/**
+ * What can't end an email address's name before its `@`: reading view takes
+ * only ASCII there, but live preview takes any character but these.
+ */
+const NOT_ADDRESS_LOCAL = /[\s<>()[\]\\,;:@"]/;
+/** A character that can start an email address's domain. */
+const ADDRESS_DOMAIN = /[\w.-]/;
+
+/**
+ * A URI scheme live preview links when a `:` and then a letter, digit, `%` or
+ * `/` follow it, as `doi:10.1000/1` or `tel:555`. Undocumented: the list in
+ * the URL pattern of Obsidian 1.13.7's live preview, which also links a
+ * `www.` host with up to three digits after `www`, and a domain name before
+ * a `/`, as `arxiv.org/abs`. A scheme is matched at the end of the text
+ * before the `:`, wherever its word starts.
+ */
+export const URI_SCHEME =
+  /(?:aaas?|about|acap|adiumxtra|af[ps]|aim|apt|attachment|aw|beshare|bitcoin|bolo|callto|cap|chrome(?:-extension)?|cid|coap|com-eventbrite-attendee|content|crid|cvs|data|dav|dict|dlna-(?:playcontainer|playsingle)|dns|doi|dtn|dvb|ed2k|facetime|feed|file|finger|fish|ftp|geo|gg|git|gizmoproject|go|gopher|gtalk|h323|hcp|https?|iax|icap|icon|im|imap|info|ipn|ipp|irc[6s]?|iris(?:\.beep|\.lwz|\.xpc|\.xpcs)?|itms|jar|javascript|jms|keyparc|lastfm|ldaps?|magnet|mailto|maps|market|message|mid|mms|ms-help|msnim|msrps?|mtqp|mumble|mupdate|mvn|news|nfs|nih?|nntp|notes|oid|opaquelocktoken|palm|paparazzi|platform|pop|pres|proxy|psyc|query|res(?:ource)?|rmi|rsync|rtmp|rtsp|secondlife|service|session|sftp|sgn|shttp|sieve|sips?|skype|sm[bs]|snmp|soap\.beeps?|soldat|spotify|ssh|steam|svn|tag|teamspeak|tel(?:net)?|tftp|things|thismessage|tip|tn3270|tv|udp|unreal|urn|ut2004|vemmi|ventrilo|view-source|webcal|wss?|wtai|wyciwyg|xcon(?:-userid)?|xfire|xmlrpc\.beeps?|xmpp|xri|ymsgr|z39\.50[rs]?)$/i;
+
+/** The longest text {@link URI_SCHEME} needs before a `:`. */
+const LONGEST_SCHEME = 32;
+
+const isLineBreak = (char: string) => char === '\n' || char === '\r';
+
+/** JavaScript's whitespace, which is what Obsidian takes for it. */
+const isBlank = (char: string) => /\s/.test(char);
+
+/** The rest of the line in `text` from `i`, without its line break. */
+const restOfLine = (text: string, i: number) =>
+  text.slice(i).split(/[\r\n]/, 1)[0];
+
+/**
+ * The index of the character in `text` that marks the line starting at `i` as
+ * a list item, a rule or a heading's underline, if any: `-` or `+` before
+ * whitespace (of any kind: live preview takes them all), the `.` or `)` of
+ * `N.` or `N)` before whitespace, or the first of a line of only `-` and `=`.
+ *
+ * @param endsMarker whether what is at an index lets a marker end there
+ */
+function markerAt(
+  text: string,
+  i: number,
+  endsMarker: (index: number) => boolean
+): number | undefined {
+  const line = restOfLine(text, i);
+  // It starts with what isn't whitespace: `-` or `=`, if this holds
+  if (/^[-=\s]*$/.test(line)) return i;
+  const char = text[i];
+  if ((char === '-' || char === '+') && endsMarker(i + 1)) return i;
+  const number = /^\d+[.)]/.exec(line);
+  if (!number) return undefined;
+  const end = i + number[0].length - 1;
+  return endsMarker(end + 1) ? end : undefined;
+}
+
+/**
+ * Where a character stands in the escaped note, as the rules need to know.
+ */
+type Context = {
+  /**
+   * The character before it as the escaped note reads: a line break, not the
+   * whitespace dropped after one, or `''` at the start.
+   */
+  prev: string;
+  /** Whether it is the first character its line keeps. */
+  atLineStart: boolean;
+  /** Whether the character before it is escaped. */
+  afterEscape: boolean;
+  /** Whether an end of an answer lies in an index range, both ends in. */
+  boundaryWithin: (from: number, to: number) => boolean;
+  /** Whether no whitespace follows an index before its line ends. */
+  isLastWord: (from: number) => boolean;
+};
+
+/**
+ * Whether the character at `i` in `text` has to be escaped to read as itself,
+ * line markers aside (see {@link markerAt}).
+ */
+function isSyntax(text: string, i: number, context: Context): boolean {
+  const { prev, atLineStart } = context;
+  const char = text[i];
+  const next = text[i + 1] ?? '';
+  const after = text.slice(i + 1);
+  if (ALWAYS.has(char)) return true;
+  if (DOUBLED.has(char) && (prev === char || next === char)) return true;
+  switch (char) {
+    // An escape, or a hard line break
+    case '\\':
+      return next === '' || isLineBreak(next) || ASCII_PUNCTUATION.test(next);
+    // The cloze delimiters, `(}` and `{)`, and the old `{{` and `}}`: an
+    // escape inside each hides it from the plugin, which reads them as text
+    case '}':
+      return prev === '(' || prev === '}';
+    case '{':
+    case ')':
+      return prev === '{';
+    case '#':
+      return atLineStart || isTagStart(text, i, context);
+    // Math closes at a `$` after anything but a space or a tab, even a line
+    // break: one after a space opens, and only display math, `$$`, needs no
+    // closer of that kind
+    case '$':
+      return !(prev === ' ' && next !== '$');
+    // HTML, comments, declarations and autolinks
+    // Reading view links `<` before an escape too (`<\<https\://e.x>`), so
+    // only what no tag, comment or link starts with is left: whitespace, a
+    // digit, `=` or `-`, as in `x < 5`, `<5`, `<=` and `<-`
+    case '<':
+      return !(next === '' || /[\s\d=-]/.test(next));
+    case '>':
+      return atLineStart;
+    // An inline footnote, or a block id: the last word of its line
+    case '^':
+      return next === '[' || context.isLastWord(i + 1);
+    // Templater runs `<% … %>` in a note it sees made, escaped or not
+    case '%':
+      return prev === '<';
+    case '_':
+      return !(WORD_CHAR.test(prev) && WORD_CHAR.test(next));
+    // An entity, by number, by name with its `;`, or one of those a browser
+    // reads without
+    case '&':
+      return (
+        next === '#' ||
+        /^[A-Za-z][A-Za-z\d]*;/.test(after) ||
+        LEGACY_ENTITIES.some((name) => after.startsWith(name))
+      );
+    case '@':
+      return (
+        prev !== '' &&
+        !NOT_ADDRESS_LOCAL.test(prev) &&
+        ADDRESS_DOMAIN.test(next)
+      );
+    // A scheme's `://` or `scheme:x`, and a Dataview field's `::`
+    case ':':
+      return (
+        prev === ':' ||
+        next === ':' ||
+        after.startsWith('//') ||
+        // One slash links too, as `javascript:/x/` or `https:/e.x`
+        (/[a-z\d%/]/i.test(next) &&
+          URI_SCHEME.test(text.slice(Math.max(0, i - LONGEST_SCHEME), i)))
+      );
+    // Obsidian links `www.` even inside a word, and `www1.` to `www999.`
+    case '.':
+      return /www\d{0,3}$/i.test(text.slice(Math.max(0, i - 6), i));
+    // A domain name before a `/` is a link in live preview: `arxiv.org/abs`
+    case '/':
+      return /[a-z\d.-]\.[a-z]{2,4}$/i.test(text.slice(Math.max(0, i - 6), i));
+    default:
+      return false;
+  }
+}
+
+/**
+ * Whether the `#` at `i`, not at the start of its line, could start a tag:
+ * one after whitespace, or after an escape (reading view starts a tag there
+ * too), before a character a tag can hold. Obsidian doesn't read a number as
+ * a tag, so `#1` before whitespace, `,`, `.` or `)` is left, unless an end
+ * of the answer could change what follows it.
+ */
+function isTagStart(
+  text: string,
+  i: number,
+  { prev, afterEscape, boundaryWithin }: Context
+): boolean {
+  // The end of the text ends a tag as whitespace does
+  if (!(isBlank(prev) || afterEscape) || isBlank(text[i + 1] ?? ' ')) {
+    return false;
+  }
+  const number = /^\d+/.exec(text.slice(i + 1));
+  if (!number) return true;
+  const end = i + 1 + number[0].length;
+  return !/^(?:[\s,.)]|$)/.test(text.slice(end)) || boundaryWithin(i + 2, end);
+}
+
+/**
+ * `text` escaped to read as plain text, and where each of its characters
+ * went, by index: one past the last for `text.length`. The ends of an answer
+ * are `boundaries`, offsets in `text`. See {@link Markdown.escape}.
+ */
+function escapeWithMap(
+  text: string,
+  boundaries: readonly number[] = []
+): { text: string; at: number[] } {
+  const boundaryWithin = (from: number, to: number) =>
+    boundaries.some((boundary) => boundary >= from && boundary <= to);
+  // The end of the text ends a marker as whitespace does
+  const endsMarker = (index: number) =>
+    isBlank(text[index] ?? ' ') || boundaries.includes(index);
+  /** The index of the first whitespace at or after the last index asked about. */
+  let blank = -1;
+  // Asked in order along the text, so each stretch is searched once
+  const isLastWord = (from: number) => {
+    if (blank < from) {
+      const search = /\s/g;
+      search.lastIndex = from;
+      blank = search.exec(text)?.index ?? text.length;
+    }
+    return blank === text.length || isLineBreak(text[blank]);
+  };
+  let out = '';
+  const at: number[] = [];
+  let lineStart = true;
+  /** The index of the last character kept, a line break included. */
+  let kept = -1;
+  /**
+   * Whether the last character kept, not a line break, was escaped. Only a
+   * `#` within a line asks, so it is never read at the start of one.
+   */
+  let afterEscape = false;
+  /** The index of the character that marks a list item, if any. */
+  let marker: number | undefined;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    at.push(out.length);
+    // CommonMark ends a line at a carriage return too
+    if (isLineBreak(char)) {
+      out += char;
+      lineStart = true;
+      kept = i;
+      continue;
+    }
+    // Indented text is code, in live preview by whitespace of any kind, and
+    // less indent shows nothing
+    if (lineStart && isBlank(char)) continue;
+    const atLineStart = lineStart;
+    if (lineStart) {
+      lineStart = false;
+      marker = markerAt(text, i, endsMarker);
+    }
+    const prev = kept < 0 ? '' : text[kept];
+    const besideBoundary =
+      boundaryWithin(kept + 1, i) || boundaries.includes(i + 1);
+    const escapes: boolean =
+      i === marker ||
+      (besideBoundary && CONTEXTUAL.has(char)) ||
+      isSyntax(text, i, {
+        prev,
+        atLineStart,
+        afterEscape,
+        boundaryWithin,
+        isLastWord,
+      });
+    out += escapes ? `\\${char}` : char;
+    afterEscape = escapes;
+    kept = i;
+  }
+  at.push(out.length);
+  return { text: out, at };
+}
+
 /** Utilities for parsing Obsidian-flavored Markdown */
 export class Markdown {
+  /**
+   * `text` escaped so that it reads as itself, as plain text, wherever it is
+   * put in a note: nothing in it becomes a link, an embed, a tag, a heading,
+   * a list, HTML, math or any other syntax, Templater runs none of it, and
+   * the cloze delimiters are never in it. Each character Obsidian would read
+   * as syntax where it stands gets a backslash, which only hides; whitespace
+   * that starts a line, which shows nothing, is dropped.
+   *
+   * Only what could form syntax is escaped, so that the note is found by
+   * searching for most of the PDF's text: `C#`, `#1`, `$5` after a space,
+   * `x < 5`, `AT&T`, `-5` and `1.5` starting a line stay as they are. Where
+   * the rules come from: task 0032's audit of Obsidian 1.13.7.
+   */
+  static escape(text: string): string {
+    return escapeWithMap(text).text;
+  }
+
+  /**
+   * {@link escape} `text`, and find where `range`, offsets in `text`, lies in
+   * what it escapes to: a character's escape goes with it. What a rule could
+   * escape beside either end of the range is escaped there, since a cloze
+   * delimiter will stand beside it.
+   */
+  static escapeAround(
+    text: string,
+    [start, end]: readonly [number, number]
+  ): { text: string; range: [number, number] } {
+    const escaped = escapeWithMap(text, [start, end]);
+    return { text: escaped.text, range: [escaped.at[start], escaped.at[end]] };
+  }
+
   /**
    * Replace every link with its label, dropping the target and the syntax.
    * `[my site](www.example.com)` becomes `my site`, `[[Note|alias]]` becomes

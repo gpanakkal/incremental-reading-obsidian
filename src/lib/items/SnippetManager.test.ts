@@ -14,6 +14,7 @@ import {
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
+import { Markdown } from '#/lib/Markdown';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { encodeAnchor, MAX_ANCHOR_PAGE } from '#/lib/pdf/pdf-anchor';
 import type {
@@ -3035,7 +3036,7 @@ describe('createFromPdf', () => {
   const onPage = (anchor: number, page: number) =>
     page * 1e10 + (anchor % 1e10);
 
-  it('makes a snippet note of the text, linked to the PDF at the selection, and a row with its anchors', async () => {
+  it('makes a snippet note of the text, escaped and named as it reads, linked to the PDF at the selection, and a row with its anchors', async () => {
     await fc.assert(
       fc.asyncProperty(
         pdfArticleArb,
@@ -3057,9 +3058,10 @@ describe('createFromPdf', () => {
 
           expect(result).toEqual({ data: {}, file: SNIPPET_FILE });
           expect(wired.createFromText).toHaveBeenCalledExactlyOnceWith(
-            text,
+            Markdown.escape(text),
             Obsidian.getDirectory('snippet'),
-            wired.app
+            wired.app,
+            text
           );
           expect(
             wired.app.fileManager.generateMarkdownLink
@@ -3095,6 +3097,25 @@ describe('createFromPdf', () => {
           );
         }
       )
+    );
+  });
+
+  it('writes what a PDF hides in its text as plain text, and no Templater tag', async () => {
+    const wired = wirePdfSnip();
+
+    await wired.manager.createFromPdf({
+      article: {
+        data: { id: 'article-1', type: 'article', priority: 30 },
+        file: { path: 'papers/a.pdf', basename: 'a', extension: 'pdf' },
+      } as never,
+      text: '#ir-card ![[x]] <img src=y> <%* z %>',
+      start: 1e10,
+      end: 1e10 + 36,
+      subpath: '#page=1',
+    });
+
+    expect(wired.createFromText.mock.calls[0][0]).toBe(
+      String.raw`\#ir-card !\[\[x]] \<img src=y> \<\%\* z %>`
     );
   });
 
@@ -3212,6 +3233,36 @@ describe('createFromPdf', () => {
           expect(touched).toBe(false);
           // Nothing left listening
           expect(wired.listeners.size).toBe(0);
+        }
+      )
+    );
+  });
+
+  it('writes a parentless snippet of a PDF that is no article escaped, named after its text as it reads', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfArb,
+        extractArb,
+        fc.constantFrom('', '#ir-card ![[x]] <%* y %> [a](b) $5$'),
+        async (pdf, { text, page, anchors }, hostile) => {
+          vi.restoreAllMocks();
+          const wired = wireParentless(pdf, true);
+          const start = onPage(anchors.start, page);
+
+          await wired.manager.createFromPdf({
+            pdf,
+            text: hostile + text,
+            start,
+            end: start + 1,
+            subpath: '',
+          });
+
+          expect(wired.createFromText).toHaveBeenCalledExactlyOnceWith(
+            Markdown.escape(hostile + text),
+            Obsidian.getDirectory('snippet'),
+            wired.app,
+            hostile + text
+          );
         }
       )
     );

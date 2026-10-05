@@ -1,0 +1,47 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<</Type/Catalog/Pages 2 0 R>>
+endobj
+2 0 obj
+<</Type/Pages/Kids[4 0 R]/Count 1>>
+endobj
+3 0 obj
+<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>
+endobj
+4 0 obj
+<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 3 0 R>>>>/Contents 5 0 R>>
+endobj
+5 0 obj
+<</Length 490>>
+stream
+BT
+/F1 8 Tf
+15 TL
+72 700 Td
+(# Heading #ir-card #ir-text-snippet ![[Secret note]] ![t]\(https://e.x/t.png\)) Tj T*
+([[Note|alias]] [link]\(https://e.x/\) <img src=x onerror=alert\(1\)> &amp; \(} cloze {\)) Tj T*
+($x^2$ `code` %%hidden%% ==mark== ~~del~~ *em* _u_ {{legacy}} [^1] ^blockid) Tj T*
+ T*
+(> quoted -- a callout? [!note] | table | \\ backslash) Tj T*
+ T*
+(--- 1. a list - item + more) Tj T*
+ T*
+(<%* app.vault.create\("Pwned.md", ""\) %> a_b_c costs $5, AT&T, C# and x < 5) Tj
+ET
+
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000060 00000 n 
+0000000111 00000 n 
+0000000199 00000 n 
+0000000311 00000 n 
+trailer
+<</Size 6/Root 1 0 R/ID[<49524649585455524530303030303031><49524649585455524530303030303031>]>>
+startxref
+850
+%%EOF

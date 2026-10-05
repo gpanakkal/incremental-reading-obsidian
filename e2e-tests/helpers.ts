@@ -403,10 +403,7 @@ export async function setShowViewHeader(window: Page, show: boolean) {
  */
 export async function setNativeMenus(window: Page, native: boolean) {
   await window.evaluate((value) => {
-    (window as unknown as TestWindow).app.vault.setConfig(
-      'nativeMenus',
-      value
-    );
+    (window as unknown as TestWindow).app.vault.setConfig('nativeMenus', value);
   }, native);
 }
 
@@ -843,4 +840,252 @@ export async function watchFileReads(window: Page, path: string) {
   }, path);
   return () =>
     window.evaluate(() => (window as unknown as { __diag: FileReads }).__diag);
+}
+
+/** What Obsidian's three parsers make of some Markdown: see {@link readMarkdown}. */
+export type MarkdownReadings = {
+  /** Reading view: each block element rendered, and every syntax element in them. */
+  reading: { blocks: { tag: string; text: string }[]; syntax: string[] };
+  /**
+   * Live preview, with the cursor off its lines: their visible text, any class
+   * on them but an escape's, and any element coloured unlike its line.
+   */
+  live: { text: string; classes: string[]; colours: string[] };
+  /** What the metadata cache reads in it as a note, and its sections' kinds. */
+  cache: { found: Record<string, unknown>; sections: string[] };
+};
+
+/**
+ * What Obsidian makes of `markdown` in reading view, in live preview and in
+ * its metadata cache, each in its real parser: unit tests can't run them.
+ * Reading view renders in a probe note's own tab, live preview in another.
+ *
+ * @param allowed selectors of elements reading view may hold, as the hidden
+ *   answer's `<mark>` in a card under review
+ */
+export function readMarkdown(
+  window: Page,
+  markdown: string,
+  allowed: string[] = []
+): Promise<MarkdownReadings> {
+  return window.evaluate(
+    async ({ markdown, allowed }) => {
+      type ProbeView = {
+        file: { path: string } | null;
+        setViewData(data: string, clear: boolean): void;
+        previewMode: { containerEl: HTMLElement };
+        containerEl: HTMLElement;
+        editor: {
+          setValue(text: string): void;
+          lastLine(): number;
+          setCursor(pos: { line: number; ch: number }): void;
+        };
+      };
+      type ProbeLeaf = {
+        view: ProbeView;
+        openFile(file: unknown, state: unknown): Promise<void>;
+      };
+      const { app } = window as unknown as {
+        app: {
+          vault: {
+            getFileByPath(path: string): unknown;
+            create(path: string, data: string): Promise<unknown>;
+          };
+          workspace: {
+            getLeavesOfType(type: string): ProbeLeaf[];
+            getLeaf(newLeaf: 'tab' | 'split'): ProbeLeaf;
+          };
+          metadataCache: {
+            // Undocumented: what the cache's worker reads a note's bytes as
+            computeMetadataAsync(
+              data: ArrayBuffer
+            ): Promise<Record<string, unknown> | null>;
+          };
+        };
+      };
+      const sleep = (ms: number) =>
+        new Promise((resolve) => setTimeout(resolve, ms));
+      /**
+       * The view of the probe note at `path`, opened in `state` once, in a new
+       * tab or beside the last: both stay shown, as a hidden one never renders.
+       */
+      const probe = async (
+        path: string,
+        state: unknown,
+        where: 'tab' | 'split'
+      ) => {
+        const open = app.workspace
+          .getLeavesOfType('markdown')
+          .find(({ view }) => view.file?.path === path);
+        if (open) return open.view;
+        const file =
+          app.vault.getFileByPath(path) ?? (await app.vault.create(path, ''));
+        const tab = app.workspace.getLeaf(where);
+        await tab.openFile(file, { active: true, state });
+        return tab.view;
+      };
+      // Unique to this call: the probe is rendered once it is
+      const token = `END${Math.random().toString(36).slice(2)}`;
+
+      // Reading view. Undocumented: its DOM, where `.markdown-preview-sizer`
+      // holds a div per section, besides its header, footer and pusher
+      const preview = await probe(
+        'Render probe.md',
+        { mode: 'preview' },
+        'tab'
+      );
+      preview.setViewData(`${markdown}\n\n${token}`, true);
+      const sizer = () =>
+        preview.previewMode.containerEl.querySelector(
+          '.markdown-preview-sizer'
+        );
+      for (let i = 0; i < 250 && !sizer()?.textContent?.includes(token); i++) {
+        await sleep(20);
+      }
+      if (!sizer()?.textContent?.includes(token)) {
+        throw new Error('Reading view never rendered the probe');
+      }
+      const blocks = [...sizer()!.children]
+        .filter(
+          (section) =>
+            !section.matches(
+              '.mod-header, .mod-footer, .markdown-preview-pusher'
+            )
+        )
+        .flatMap((section) => [...section.children])
+        .filter((block) => block.textContent !== token);
+      const syntax = blocks.flatMap((block) =>
+        [
+          ...block.querySelectorAll(
+            'a, img, .tag, .internal-embed, .math, code, mark, del, s, ' +
+              'em, strong, h1, h2, h3, h4, h5, h6, ul, ol, li, ' +
+              'blockquote, hr, sup, table, input, .callout, .footnotes'
+          ),
+        ]
+          .filter((el) => !allowed.some((selector) => el.matches(selector)))
+          .map((el) => el.outerHTML.slice(0, 80))
+      );
+
+      // Live preview, with the cursor on a line of its own after the text
+      const live = await probe(
+        'Live probe.md',
+        // Undocumented: the view state of live preview
+        { mode: 'source', source: false },
+        'split'
+      );
+      live.editor.setValue(`${markdown}\n\n${token}`);
+      live.editor.setCursor({ line: live.editor.lastLine(), ch: 0 });
+      let lines: HTMLElement[] = [];
+      for (let i = 0; i < 250; i++) {
+        await sleep(20);
+        lines = [
+          ...live.containerEl.querySelectorAll<HTMLElement>('.cm-content > *'),
+        ];
+        if (lines.at(-1)?.innerText === token) break;
+      }
+      const textLines = lines.slice(0, -1);
+      /**
+       * An escape's own marks, and a line's. CodeMirror puts a
+       * `cm-widgetBuffer` image beside each hidden backslash for the cursor;
+       * a real widget shows itself in the text and its own classes.
+       */
+      // Undocumented: the classes of Obsidian 1.13.7's live preview, and its
+      // lines as `.cm-content`'s children
+      const ESCAPE_CLASSES = new Set([
+        'cm-line',
+        'cm-widgetBuffer',
+        'cm-escape',
+        'cm-hmd-escape-char',
+        'cm-hmd-escape-backslash',
+        'cm-formatting-escape',
+      ]);
+      /**
+       * What live preview adds for a line's leading spaces, as a card's
+       * closing delimiter starts a line with one after an answer ending in a
+       * line break: their spacing, and the fold arrow on the line above,
+       * which folds by indent. Neither is syntax, nor shows any text.
+       */
+      const INDENT_UI =
+        '.cm-indent-spacing, .cm-fold-indicator, .cm-fold-indicator *';
+      const classes = [
+        ...new Set(
+          textLines.flatMap((line) =>
+            [
+              line,
+              ...[...line.querySelectorAll('*')].filter(
+                (el) => !el.matches(INDENT_UI)
+              ),
+            ].flatMap((el) =>
+              [...el.classList].filter(
+                (name) =>
+                  !ESCAPE_CLASSES.has(name) &&
+                  // Trailing spaces, shown as a line break would be
+                  !name.startsWith('cm-trailing-space')
+              )
+            )
+          )
+        ),
+      ];
+      const colours = textLines.flatMap((line) => {
+        const colour = getComputedStyle(line).color;
+        return [...line.querySelectorAll<HTMLElement>('*')]
+          .filter(
+            (el) =>
+              !el.matches(INDENT_UI) && getComputedStyle(el).color !== colour
+          )
+          .map((el) => `${el.innerText}: ${getComputedStyle(el).color}`);
+      });
+
+      const cache =
+        (await app.metadataCache.computeMetadataAsync(
+          new TextEncoder().encode(markdown).buffer
+        )) ?? {};
+      const { sections, ...found } = cache;
+      return {
+        reading: {
+          blocks: blocks.map((block) => ({
+            tag: block.tagName,
+            text: block.textContent ?? '',
+          })),
+          syntax,
+        },
+        live: {
+          text: textLines.map((line) => line.innerText).join('\n'),
+          classes,
+          colours,
+        },
+        cache: {
+          found,
+          sections: ((sections as { type: string }[] | undefined) ?? []).map(
+            ({ type }) => type
+          ),
+        },
+      };
+    },
+    { markdown, allowed }
+  );
+}
+
+/** `text` with each run of whitespace one space, and none at its ends. */
+export const squashed = (text: string) => text.replace(/\s+/g, ' ').trim();
+
+/**
+ * Check `readings` show `text`, whitespace aside, as plain paragraphs with no
+ * syntax in any of Obsidian's three parsers.
+ */
+export function expectPlainText(readings: MarkdownReadings, text: string) {
+  expect(readings.reading.syntax).toEqual([]);
+  expect(readings.reading.blocks.map(({ tag }) => tag)).toEqual(
+    readings.reading.blocks.map(() => 'P')
+  );
+  expect(
+    squashed(readings.reading.blocks.map((block) => block.text).join(' '))
+  ).toBe(squashed(text));
+  expect(squashed(readings.live.text)).toBe(squashed(text));
+  expect(readings.live.classes).toEqual([]);
+  expect(readings.live.colours).toEqual([]);
+  expect(readings.cache.found).toEqual({});
+  expect(readings.cache.sections).toEqual(
+    readings.cache.sections.map(() => 'paragraph')
+  );
 }

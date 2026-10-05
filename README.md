@@ -117,9 +117,8 @@ This is especially handy for:
 
 - Creating snippets and cards on partial code blocks, blockquotes, LaTeX, and other types of special formatting can break the formatting. It is recommended to include the entire formatted section (such as the entire code block) when making the snippet or card, and then editing it afterwards as desired.
 ### PDFs
-- To make snippets and cards from a PDF open in a normal tab, select the text and run **Extract selection to snippet** or **Create spaced repetition card**. That tab's action bar has no buttons for them, and selection mode is only in review.
-- Snippets and cards from a PDF that isn't an article belong to no article, as from a note that isn't one. Importing the PDF later gives them to it. A copy takes them over: their links point at the copy, and their highlights move to it.
 - Snippets and cards from a PDF that isn't an article find it by their link alone. If the PDF is moved while Obsidian is closed, or renamed without letting Obsidian update links, they lose their highlights and **Go to context**, and importing the PDF won't pick them up. For a PDF that is an article, the plugin fixes their links itself.
+- Text from a PDF goes into its snippet or card as plain text: anything in it that would turn into Markdown (links, tags, headings, math and so on) or a Templater command gets a backslash, so it reads exactly as the PDF does. Source mode, and the line you're editing, show those backslashes, and a search that spans one won't find the text: `US$5` won't find `US\$5`.
 - A snippet that runs onto the next page is highlighted up to the end of its first page. 
 - A scanned PDF has no text to select, so nothing can be made from it.
 

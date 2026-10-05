@@ -1918,6 +1918,7 @@ describe("extractText over the text content of Obsidian's pdf.js", () => {
   const article = loadTextFixture('PDF fixture');
   const layout = loadTextFixture('PDF fixture - layout');
   const noText = loadTextFixture('PDF fixture - no text');
+  const hostile = loadTextFixture('PDF fixture - hostile');
 
   async function extract(fixture: TextFixture, start: number, end: number) {
     const pages = await readPageTexts(fixtureDocument(fixture), start, end);
@@ -1959,6 +1960,22 @@ describe("extractText over the text content of Obsidian's pdf.js", () => {
         anchorAt(article, 1, 'ple of one', 2)
       )
     ).toBe('exampl');
+  });
+
+  it('reads a hostile PDF as it holds its text, Markdown and all', async () => {
+    const last =
+      '<%* app.vault.create("Pwned.md", "") %> a_b_c costs $5, AT&T, C# and x < 5';
+    const start = anchorAt(hostile, 1, '# Heading', 0);
+    const end = anchorAt(hostile, 1, '<%* app', last.length);
+    expect(await extract(hostile, start, end)).toBe(
+      '# Heading #ir-card #ir-text-snippet ![[Secret note]] ' +
+        '![t](https://e.x/t.png) [[Note|alias]] [link](https://e.x/) ' +
+        '<img src=x onerror=alert(1)> &amp; (} cloze {) $x^2$ `code` ' +
+        '%%hidden%% ==mark== ~~del~~ *em* _u_ {{legacy}} [^1] ^blockid\n\n' +
+        '> quoted -- a callout? [!note] | table | \\ backslash\n\n' +
+        '--- 1. a list - item + more\n\n' +
+        last
+    );
   });
 
   it('reads columns in turn, rejoining words across the gutter and the page', async () => {

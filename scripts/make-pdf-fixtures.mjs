@@ -267,10 +267,38 @@ function imageOnlyPdf() {
   );
 }
 
+/**
+ * Text a hostile PDF could carry into a note made of it: embeds, links, the
+ * plugin's own tags, HTML, cloze delimiters, a Templater command and every
+ * other kind of Markdown and Obsidian syntax, as four paragraphs on one page,
+ * each starting with what Markdown reads at the start of a line.
+ */
+const HOSTILE_PARAGRAPHS = [
+  [
+    '# Heading #ir-card #ir-text-snippet ![[Secret note]] ![t](https://e.x/t.png)',
+    '[[Note|alias]] [link](https://e.x/) <img src=x onerror=alert(1)> &amp; (} cloze {)',
+    '$x^2$ `code` %%hidden%% ==mark== ~~del~~ *em* _u_ {{legacy}} [^1] ^blockid',
+  ],
+  ['> quoted -- a callout? [!note] | table | \\ backslash'],
+  ['--- 1. a list - item + more'],
+  ['<%* app.vault.create("Pwned.md", "") %> a_b_c costs $5, AT&T, C# and x < 5'],
+];
+
+function hostilePdf() {
+  const lines = HOSTILE_PARAGRAPHS.flatMap((paragraph, i) =>
+    i === 0 ? paragraph : ['', ...paragraph]
+  );
+  return pagesPdf(
+    [textBlock(lines, { x: MARGIN_LEFT, y: BODY_TOP, size: 8 })],
+    HELVETICA
+  );
+}
+
 const FIXTURES = {
   'PDF fixture.pdf': articlePdf,
   'PDF fixture - no text.pdf': imageOnlyPdf,
   'PDF fixture - layout.pdf': layoutPdf,
+  'PDF fixture - hostile.pdf': hostilePdf,
 };
 
 await mkdir(OUT_DIR, { recursive: true });

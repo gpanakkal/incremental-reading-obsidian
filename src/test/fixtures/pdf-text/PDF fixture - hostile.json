@@ -1,0 +1,127 @@
+{
+  "source": "e2e-tests/setup/test-vault/sources/PDF fixture - hostile.pdf",
+  "obsidian": "1.13.7",
+  "pdfjs": {
+    "version": "5.3.34",
+    "build": 34,
+    "commit": "cc1e2a3e0"
+  },
+  "getTextContent": {
+    "includeMarkedContent": true,
+    "disableNormalization": true
+  },
+  "pages": [
+    {
+      "view": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "items": [
+        {
+          "str": "# Heading #ir-card #ir-text-snippet ![[Secret note]] ![t](https://e.x/t.png)",
+          "dir": "ltr",
+          "width": 246.3359999999999,
+          "height": 8,
+          "transform": [
+            8,
+            0,
+            0,
+            8,
+            72,
+            700
+          ],
+          "fontName": "g_d3_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "[[Note|alias]] [link](https://e.x/) <img src=x onerror=alert(1)> &amp; (} cloze {)",
+          "dir": "ltr",
+          "width": 270.6239999999999,
+          "height": 8,
+          "transform": [
+            8,
+            0,
+            0,
+            8,
+            72,
+            685
+          ],
+          "fontName": "g_d3_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "$x^2$ `code` %%hidden%% ==mark== ~~del~~ *em* _u_ {{legacy}} [^1] ^blockid",
+          "dir": "ltr",
+          "width": 287.85599999999994,
+          "height": 8,
+          "transform": [
+            8,
+            0,
+            0,
+            8,
+            72,
+            670
+          ],
+          "fontName": "g_d3_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "> quoted -- a callout? [!note] | table | \\ backslash",
+          "dir": "ltr",
+          "width": 170.25600000000003,
+          "height": 8,
+          "transform": [
+            8,
+            0,
+            0,
+            8,
+            72,
+            640
+          ],
+          "fontName": "g_d3_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "--- 1. a list - item + more",
+          "dir": "ltr",
+          "width": 85.12800000000001,
+          "height": 8,
+          "transform": [
+            8,
+            0,
+            0,
+            8,
+            72,
+            610
+          ],
+          "fontName": "g_d3_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "<%* app.vault.create(\"Pwned.md\", \"\") %> a_b_c costs $5, AT&T, C# and x < 5",
+          "dir": "ltr",
+          "width": 277.936,
+          "height": 8,
+          "transform": [
+            8,
+            0,
+            0,
+            8,
+            72,
+            580
+          ],
+          "fontName": "g_d3_f1",
+          "hasEOL": false,
+          "chars": []
+        }
+      ]
+    }
+  ]
+}

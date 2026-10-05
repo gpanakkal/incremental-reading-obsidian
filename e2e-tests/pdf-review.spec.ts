@@ -3,6 +3,7 @@ import {
   CLOZE_DELIMITERS,
   DATA_DIRECTORY,
 } from '#/lib/constants';
+import { Markdown } from '#/lib/Markdown';
 import { PDF_PAGE_STRIDE } from '#/lib/pdf/position';
 import test, {
   expect,
@@ -15,8 +16,10 @@ import * as path from 'node:path';
 import {
   emulateMobile,
   executeCommandById,
+  expectPlainText,
   finalizeArticleImport,
   openFileInActiveLeaf,
+  readMarkdown,
   REVIEW_VIEW_TYPE,
   setNativeMenus,
   watchNotices,
@@ -37,6 +40,18 @@ let vaultPath: string;
 const PDF_PATH = 'sources/PDF fixture.pdf';
 /** Its one-page sibling with no text layer. */
 const NO_TEXT_PDF_PATH = 'sources/PDF fixture - no text.pdf';
+/** Its sibling whose text is Markdown, Obsidian syntax and a Templater command. */
+const HOSTILE_PDF_PATH = 'sources/PDF fixture - hostile.pdf';
+/** The hostile fixture's paragraphs, as the PDF reads. */
+const HOSTILE_PARAGRAPHS = [
+  '# Heading #ir-card #ir-text-snippet ![[Secret note]] ' +
+    '![t](https://e.x/t.png) [[Note|alias]] [link](https://e.x/) ' +
+    '<img src=x onerror=alert(1)> &amp; (} cloze {) $x^2$ `code` ' +
+    '%%hidden%% ==mark== ~~del~~ *em* _u_ {{legacy}} [^1] ^blockid',
+  '> quoted -- a callout? [!note] | table | \\ backslash',
+  '--- 1. a list - item + more',
+  '<%* app.vault.create("Pwned.md", "") %> a_b_c costs $5, AT&T, C# and x < 5',
+];
 
 /** What the page-side calls below reach on Obsidian and the plugin. */
 type PageApp = {
@@ -863,6 +878,111 @@ test.describe('Snippets and cards from a PDF article', () => {
     // Heard again once the answer is no longer being asked for
     await executeCommandById(window, 'incremental-reading:create-card');
     await expect(confirmButton(window)).toBeVisible();
+  });
+
+  /** What Obsidian's cache read in the note at `reference` besides its properties. */
+  const noteSyntax = (page: Page, reference: string) =>
+    page.evaluate(async (reference) => {
+      const { app } = window as unknown as {
+        app: PageApp & {
+          vault: { cachedRead(file: unknown): Promise<string> };
+          metadataCache: {
+            getFileCache(file: unknown): Record<string, unknown> | null;
+          };
+        };
+      };
+      const file = app.vault.getFileByPath(reference);
+      const cache = app.metadataCache.getFileCache(file) ?? {};
+      const sections = (cache.sections ?? []) as { type: string }[];
+      return {
+        links: cache.links ?? [],
+        embeds: cache.embeds ?? [],
+        tags: cache.tags ?? [],
+        headings: cache.headings ?? [],
+        listItems: cache.listItems ?? [],
+        blocks: cache.blocks ?? {},
+        footnotes: cache.footnotes ?? [],
+        footnoteRefs: cache.footnoteRefs ?? [],
+        referenceLinks: cache.referenceLinks ?? [],
+        sections: sections.map(({ type }) => type),
+        frontmatterTags: (cache.frontmatter as { tags?: unknown } | undefined)
+          ?.tags,
+        // Templater's opening tag, `<%` (its parser's `ParserConfig("<%",
+        // "%>", …)`), anywhere in the note: Templater ignores escapes
+        templater: /<%/.test(await app.vault.cachedRead(file)),
+      };
+    }, reference);
+
+  const CLEAN_NOTE = {
+    links: [],
+    embeds: [],
+    tags: [],
+    headings: [],
+    listItems: [],
+    blocks: {},
+    footnotes: [],
+    footnoteRefs: [],
+    referenceLinks: [],
+    templater: false,
+  };
+
+  test('makes snippets and cards of a PDF whose text is Markdown and a Templater command that read as that text, and nothing more', async () => {
+    await importFixture(window, HOSTILE_PDF_PATH);
+    await beginReview(window);
+    await expect(textItem(window, 1, 5)).toBeAttached();
+
+    // The card first: the snippet's highlight splits the text it selects in
+    const last = HOSTILE_PARAGRAPHS[3];
+    await selectText(window, [1, 5, 0], [1, 5, last.length]);
+    await expect.poll(() => viewerSelection(window)).toBe(last);
+    await actionBar(window)
+      .getByRole('button', { name: 'Create card' })
+      .click();
+    await expect(answerText(window)).toHaveText(last);
+    // `_` either side of it: a cloze delimiter beside one is italic in live
+    // preview, unless escaped
+    await selectAnswer(window, 'b');
+    await window.keyboard.press('Enter');
+    await expect.poll(() => cards(window)).toHaveLength(1);
+
+    await selectText(window, [1, 0, 0], [1, 5, last.length]);
+    await expect.poll(() => viewerSelection(window)).not.toBeNull();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+
+    const [snippet] = await snippets(window);
+    const [card] = await cards(window);
+    const text = HOSTILE_PARAGRAPHS.join('\n\n');
+    expect(snippet.body).toBe(Markdown.escape(text));
+    const answer = last.indexOf('a_b_c') + 2;
+    const escaped = Markdown.escapeAround(last, [answer, answer + 1]);
+    const [from, to] = escaped.range;
+    const [left, right] = CLOZE_DELIMITERS;
+    expect(card.body).toBe(
+      escaped.text.slice(0, from) +
+        `${left} ${escaped.text.slice(from, to)} ${right}` +
+        escaped.text.slice(to)
+    );
+    await expect
+      .poll(() => noteSyntax(window, snippet.reference))
+      .toEqual({
+        ...CLEAN_NOTE,
+        sections: ['yaml', 'paragraph', 'paragraph', 'paragraph', 'paragraph'],
+        frontmatterTags: ['ir-text-snippet'],
+      });
+    await expect
+      .poll(() => noteSyntax(window, card.reference))
+      .toEqual({
+        ...CLEAN_NOTE,
+        sections: ['yaml', 'paragraph'],
+        frontmatterTags: ['ir-card'],
+      });
+    // Read as itself, paragraph by paragraph, in reading view and live preview
+    expectPlainText(await readMarkdown(window, snippet.body!), text);
+    expectPlainText(
+      await readMarkdown(window, card.body!),
+      last.slice(0, answer) + `${left} b ${right}` + last.slice(answer + 1)
+    );
   });
 
   test('says a scanned page has no selectable text, and makes nothing', async () => {

@@ -6,6 +6,7 @@ import {
   MS_PER_YEAR,
   VALID_DELIMITER_PATTERN,
 } from '#/lib/constants';
+import { Markdown } from '#/lib/Markdown';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import {
   decodeAnchor,
@@ -326,6 +327,45 @@ const cardSelectionArb = fc
     },
     answerBounds: [pre.length, pre.length + answer.length] as const,
   }));
+
+/**
+ * Text a PDF hands over, rich in Markdown and the cloze delimiters, and the
+ * range of its answer.
+ */
+const pdfTextArb = fc
+  .string({
+    unit: fc.oneof(
+      fc.constantFrom(
+        LEFT,
+        RIGHT,
+        '{{',
+        '}}',
+        '![[x]]',
+        '#tag',
+        '_',
+        '<%',
+        '\\',
+        '\n',
+        ' ',
+        '\u00a0',
+        '- ',
+        '1. ',
+        '(',
+        ')',
+        '{',
+        '}'
+      ),
+      fc.string({ minLength: 1, maxLength: 1 })
+    ),
+    minLength: 1,
+    maxLength: 30,
+  })
+  .chain((text) =>
+    fc.tuple(fc.nat(text.length), fc.nat(text.length)).map(([x, y]) => ({
+      text,
+      answer: [Math.min(x, y), Math.max(x, y)] as [number, number],
+    }))
+  );
 
 // #endregion
 
@@ -2550,32 +2590,47 @@ describe('createFromPdf', () => {
     vi.restoreAllMocks();
   });
 
-  it('makes a card note of the text with its answer hidden, linked to the PDF at the selection, and a row whose parent is the article', async () => {
+  it('makes a card note of the text, escaped, with its answer hidden, named as it reads, linked to the PDF at the selection, and a row whose parent is the article', async () => {
     await fc.assert(
       fc.asyncProperty(
         pdfArticleArb,
-        cardSelectionArb,
+        pdfTextArb,
         anchorsArb,
         fc.string(),
-        async (article, c, { page, start, end }, subpath) => {
+        async (article, { text, answer }, { page, start, end }, subpath) => {
           vi.restoreAllMocks();
           const wired = wirePdfCard();
 
           const result = await wired.manager.createFromPdf({
             article: article as never,
-            text: c.text,
+            text,
             start,
             end,
             subpath,
-            answer: c.answerBounds,
+            answer,
           });
 
           expect(result).toEqual({ data: { id: 'card' } });
+          // The answer delimited in the text as escaped around it, and the
+          // note named after the raw text, delimited as a card from a note is
+          const escaped = Markdown.escapeAround(text, answer);
+          const [from, to] = escaped.range;
+          const strip = (part: string) =>
+            part.replaceAll(LEFT, '').replaceAll(RIGHT, '');
           expect(wired.createFromText).toHaveBeenCalledExactlyOnceWith(
-            c.pre + `${LEFT} ${c.answer} ${RIGHT}` + c.post,
+            escaped.text.slice(0, from) +
+              `${LEFT} ${escaped.text.slice(from, to)} ${RIGHT}` +
+              escaped.text.slice(to),
             Obsidian.getDirectory('card'),
-            wired.app
+            wired.app,
+            strip(text.slice(0, answer[0])) +
+              `${LEFT} ${text.slice(...answer)} ${RIGHT}` +
+              strip(text.slice(answer[1]))
           );
+          // One pair of delimiters, whatever the text held
+          const [note] = wired.createFromText.mock.calls[0];
+          expect(note.split(LEFT)).toHaveLength(2);
+          expect(note.split(RIGHT)).toHaveLength(2);
           const [, [id, reference, parent]] = lastMutateCall(wired.repo);
           expect(reference).toBe(CARD_FILE.path);
           expect(parent).toBe(article.data.id);
@@ -2591,6 +2646,73 @@ describe('createFromPdf', () => {
             wired.app
           );
           expect(wired.notify).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('writes what a PDF hides in its text as plain text, around the answer too', async () => {
+    const wired = wirePdfCard();
+    const text = '#ir-card ![[x]] (} [[y]] {) <%* z %> a_b';
+    const answer = text.indexOf('[[y]]');
+
+    await wired.manager.createFromPdf({
+      article: {
+        data: { id: 'article-1', type: 'article', reference: 'papers/a.pdf' },
+        file: { path: 'papers/a.pdf', basename: 'a', extension: 'pdf' },
+      } as never,
+      text,
+      start: 1e10,
+      end: 1e10 + text.length,
+      subpath: '#page=1',
+      answer: [answer, text.length - 1],
+    });
+
+    // The `_` beside the answer's end is escaped, a delimiter standing there
+    expect(wired.createFromText.mock.calls[0][0]).toBe(
+      String.raw`\#ir-card !\[\[x]] (\} ` +
+        `${LEFT} ${String.raw`\[\[y]] {\) \<\%\* z %> a\_`} ${RIGHT}` +
+        'b'
+    );
+  });
+
+  it('writes a parentless card of a PDF that is no article escaped, its answer delimited, named after its text as it reads', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        pdfTextArb,
+        anchorsArb,
+        async ({ text, answer }, { start, end }) => {
+          vi.restoreAllMocks();
+          const wired = wirePdfCard();
+          const pdf = {
+            path: 'loose.pdf',
+            basename: 'loose',
+            extension: 'pdf',
+          } as TFile;
+
+          await wired.manager.createFromPdf({
+            pdf,
+            text,
+            start,
+            end,
+            subpath: '',
+            answer,
+          });
+
+          const escaped = Markdown.escapeAround(text, answer);
+          const [from, to] = escaped.range;
+          const strip = (part: string) =>
+            part.replaceAll(LEFT, '').replaceAll(RIGHT, '');
+          expect(wired.createFromText).toHaveBeenCalledExactlyOnceWith(
+            escaped.text.slice(0, from) +
+              `${LEFT} ${escaped.text.slice(from, to)} ${RIGHT}` +
+              escaped.text.slice(to),
+            Obsidian.getDirectory('card'),
+            wired.app,
+            strip(text.slice(0, answer[0])) +
+              `${LEFT} ${text.slice(...answer)} ${RIGHT}` +
+              strip(text.slice(answer[1]))
+          );
         }
       )
     );
