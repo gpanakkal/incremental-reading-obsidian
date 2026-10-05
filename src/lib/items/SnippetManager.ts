@@ -766,32 +766,6 @@ export class SnippetManager extends ItemManager {
     return this.adoptParentless<SnippetRow>('snippet', parentFile, parentId);
   }
 
-  /**
-   * Rewrite the `source` property of each snippet note to link to `newSource`,
-   * so it reads as though the snippet had been taken from that note.
-   *
-   * Uses the callback form of `updateFrontMatter` to leave tags untouched.
-   */
-  async repointSource(snippetRows: SnippetRow[], newSource: TFile) {
-    for (const row of snippetRows) {
-      const snippetFile = Obsidian.getNote(row.reference, this.app);
-      if (!snippetFile) continue;
-
-      const sourceLink = Obsidian.generateMarkdownLink(
-        newSource,
-        snippetFile,
-        this.app
-      );
-      await Obsidian.updateFrontMatter(
-        snippetFile,
-        (frontmatter) => {
-          frontmatter[SOURCE_PROPERTY_NAME] = sourceLink;
-        },
-        this.app
-      );
-    }
-  }
-
   protected async getLastReview(snippet: ISnippetBase) {
     const lastReview = (
       await this.repo.query(

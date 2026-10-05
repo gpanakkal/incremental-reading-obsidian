@@ -138,7 +138,6 @@ function makeImportPlugin(copyOnImport: boolean, bytes?: Uint8Array) {
 function makeSnippetsStub(adopted: SnippetRow[] = []) {
   return {
     adoptOrphans: vi.fn().mockResolvedValue(adopted),
-    repointSource: vi.fn().mockResolvedValue(undefined),
     getHighlights: vi.fn().mockResolvedValue([]),
     offsetTracker: { loadHighlights: vi.fn() },
   };
@@ -155,7 +154,8 @@ function makeCardsStub(adopted: { id: string; reference: string }[] = []) {
  */
 function makeImportPluginWithSnippets(
   copyOnImport: boolean,
-  snippets: ReturnType<typeof makeSnippetsStub>
+  snippets: ReturnType<typeof makeSnippetsStub>,
+  cards = makeCardsStub()
 ) {
   return {
     app: {
@@ -164,7 +164,7 @@ function makeImportPluginWithSnippets(
       workspace: { trigger: vi.fn() },
     },
     settings: { copyOnImport, defaultPriority: DEFAULT_PRIORITY },
-    reviewManager: { snippets },
+    reviewManager: { snippets, cards },
   } as never;
 }
 
@@ -478,6 +478,72 @@ function insertArticleRow(
     ]
   );
 }
+/** The folder a copy is imported into. */
+const ARTICLES_FOLDER = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
+
+/**
+ * A database holding `snippetCount` snippets and `cardCount` cards that
+ * belong to no item, and some that no import may take: taken from elsewhere,
+ * another item's already, deleted, or whose note is gone (see
+ * {@link makeTakenNoteCopyPlugin}, which tells them apart by their notes).
+ */
+async function seedParentless(snippetCount: number, cardCount: number) {
+  const { repo, db } = await makeSqlJsRepo();
+  const insertSnippet = (id: string) =>
+    db.exec(
+      `INSERT INTO snippet (id, reference, due, interval, priority, start_offset, end_offset)
+       VALUES ($1, $2, 0, 1, 20, 0, 5)`,
+      [id, `snippets/${id}.md`]
+    );
+  const insertCard = (id: string, parent: string | null = null, deleted = 0) =>
+    db.exec(
+      `INSERT INTO srs_card (id, reference, parent, created_at, due,
+         stability, difficulty, elapsed_days, scheduled_days, state, deleted)
+       VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0, $4)`,
+      [id, `cards/${id}.md`, parent, deleted]
+    );
+  const snippetIds = Array.from({ length: snippetCount }, (_, i) => `s${i}`);
+  const cardIds = Array.from({ length: cardCount }, (_, i) => `c${i}`);
+  snippetIds.forEach(insertSnippet);
+  cardIds.forEach((id) => insertCard(id));
+  insertSnippet('elsewhere');
+  insertCard('elsewhere');
+  insertCard('parented', 'some-article');
+  insertCard('deleted', null, 1);
+  insertCard('gone');
+  return { repo, snippetIds, cardIds };
+}
+
+/**
+ * Like {@link makeNoteCopyPlugin}, into the articles folder holding a file at
+ * each of `paths`, for a `note` whose items' links name it by its name alone,
+ * which resolves to its copy, the first note the vault creates, once there is
+ * one. An item whose note's path says `elsewhere` was taken from another note,
+ * and one whose says `gone` has no note.
+ */
+function makeTakenNoteCopyPlugin(note: TFile, paths: readonly string[] = []) {
+  const plugin = makeNoteCopyPlugin(note, {
+    folders: [ARTICLES_FOLDER],
+    paths,
+  });
+  const copy = () => {
+    const created = plugin.app.vault.create.mock.calls[0];
+    return created ? plugin.files.get(created[0]) : undefined;
+  };
+  vi.spyOn(Obsidian, 'getNote').mockImplementation((reference) =>
+    reference.includes('gone')
+      ? null
+      : (plugin.files.get(reference) ??
+        ({ path: reference, extension: 'md' } as TFile))
+  );
+  vi.spyOn(Obsidian, 'getSourceFile').mockImplementation((item) =>
+    item.path.includes('elsewhere')
+      ? fileAt('notes/Other.md')
+      : (copy() ?? note)
+  );
+  return plugin;
+}
+
 // #endregion
 
 describe('disableFixedInterval', () => {
@@ -3031,7 +3097,6 @@ describe('import', () => {
               id
             );
             expect(retargetSources).not.toHaveBeenCalled();
-            expect(snippets.repointSource).not.toHaveBeenCalled();
             const adoptedAny = taken.snippets.length + taken.cards.length > 0;
             expect(snippets.getHighlights.mock.calls).toEqual(
               adoptedAny ? [[PDF_FILE]] : []
@@ -3237,7 +3302,6 @@ describe('import', () => {
           }
           expect(snippets.adoptOrphans).not.toHaveBeenCalled();
           expect(snippets.getHighlights).not.toHaveBeenCalled();
-          expect(snippets.repointSource).not.toHaveBeenCalled();
         }
       });
     });
@@ -4049,6 +4113,13 @@ describe('import', () => {
       .map((count) =>
         Array.from({ length: count }, (_, i) => makeAdoptedRow(i))
       );
+    /** 0–3 cards, as card adoption returns them. */
+    const adoptedCardsArb = fc.integer({ min: 0, max: 3 }).map((count) =>
+      Array.from({ length: count }, (_, i) => ({
+        id: `card-${i}`,
+        reference: `cards/card-${i}.md`,
+      }))
+    );
 
     it('still imports when the review manager is not available yet', async () => {
       await fc.assert(
@@ -4088,32 +4159,42 @@ describe('import', () => {
         );
       });
 
-      it('repaints the note only when snippets were adopted', async () => {
+      it('repaints the note only when it adopted something', async () => {
         await fc.assert(
-          fc.asyncProperty(adoptedRowsArb, async (adopted) => {
-            const snippets = makeSnippetsStub(adopted);
-            const plugin = makeImportPluginWithSnippets(false, snippets);
-            const manager = new ArticleManager(plugin, makeSimpleRepo());
-
-            await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
-
-            const trigger = (
-              plugin as unknown as {
-                app: { workspace: { trigger: ReturnType<typeof vi.fn> } };
-              }
-            ).app.workspace.trigger;
-            if (adopted.length === 0) {
-              expect(snippets.getHighlights).not.toHaveBeenCalled();
-              expect(trigger).not.toHaveBeenCalled();
-            } else {
-              // reloaded under the new parent id, then repainted
-              expect(snippets.getHighlights).toHaveBeenCalledWith(IMPORT_FILE);
-              expect(trigger).toHaveBeenCalledWith(
-                'ir-highlights-changed',
-                IMPORT_FILE.path
+          fc.asyncProperty(
+            adoptedRowsArb,
+            adoptedCardsArb,
+            async (adoptedSnippets, adoptedCards) => {
+              const snippets = makeSnippetsStub(adoptedSnippets);
+              const plugin = makeImportPluginWithSnippets(
+                false,
+                snippets,
+                makeCardsStub(adoptedCards)
               );
+              const manager = new ArticleManager(plugin, makeSimpleRepo());
+
+              await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
+
+              const trigger = (
+                plugin as unknown as {
+                  app: { workspace: { trigger: ReturnType<typeof vi.fn> } };
+                }
+              ).app.workspace.trigger;
+              if (adoptedSnippets.length + adoptedCards.length === 0) {
+                expect(snippets.getHighlights).not.toHaveBeenCalled();
+                expect(trigger).not.toHaveBeenCalled();
+              } else {
+                // reloaded under the new parent id, then repainted
+                expect(snippets.getHighlights).toHaveBeenCalledWith(
+                  IMPORT_FILE
+                );
+                expect(trigger).toHaveBeenCalledWith(
+                  'ir-highlights-changed',
+                  IMPORT_FILE.path
+                );
+              }
             }
-          })
+          )
         );
       });
 
@@ -4123,10 +4204,11 @@ describe('import', () => {
           makeImportPluginWithSnippets(false, snippets),
           makeSimpleRepo()
         );
+        const retargetSources = vi.spyOn(manager, 'retargetSources');
 
         await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
 
-        expect(snippets.repointSource).not.toHaveBeenCalled();
+        expect(retargetSources).not.toHaveBeenCalled();
       });
 
       it('adopts for the linked record when the note carries a known ir-id', async () => {
@@ -4184,100 +4266,6 @@ describe('import', () => {
     });
 
     describe('as a copy', () => {
-      it('gives the copy every snippet taken from the original note', async () => {
-        const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
-        const repo = makeSimpleRepo();
-        const manager = new ArticleManager(
-          makeImportPluginWithSnippets(true, snippets),
-          repo
-        );
-
-        await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, true);
-
-        expect(snippets.adoptOrphans).toHaveBeenCalledWith(
-          IMPORT_FILE,
-          insertedArticleId(repo)
-        );
-      });
-
-      it('re-points the adopted snippets at the copy and clears the original note, only when there were some', async () => {
-        await fc.assert(
-          fc.asyncProperty(adoptedRowsArb, async (adopted) => {
-            const snippets = makeSnippetsStub(adopted);
-            const plugin = makeImportPluginWithSnippets(true, snippets);
-            const manager = new ArticleManager(plugin, makeSimpleRepo());
-
-            await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, true);
-
-            const trigger = (
-              plugin as unknown as {
-                app: { workspace: { trigger: ReturnType<typeof vi.fn> } };
-              }
-            ).app.workspace.trigger;
-            if (adopted.length === 0) {
-              expect(snippets.repointSource).not.toHaveBeenCalled();
-              expect(
-                snippets.offsetTracker.loadHighlights
-              ).not.toHaveBeenCalled();
-              expect(trigger).not.toHaveBeenCalled();
-            } else {
-              expect(snippets.repointSource).toHaveBeenCalledWith(
-                adopted,
-                COPY_FILE
-              );
-              // the original note keeps no highlights: they moved to the copy
-              expect(
-                snippets.offsetTracker.loadHighlights
-              ).toHaveBeenCalledWith(IMPORT_FILE.path, []);
-              expect(trigger).toHaveBeenCalledWith(
-                'ir-highlights-changed',
-                IMPORT_FILE.path
-              );
-            }
-          })
-        );
-      });
-
-      it('does not reload highlights for the note it copied', async () => {
-        const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
-        const manager = new ArticleManager(
-          makeImportPluginWithSnippets(true, snippets),
-          makeSimpleRepo()
-        );
-
-        await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, true);
-
-        expect(snippets.getHighlights).not.toHaveBeenCalled();
-      });
-
-      it('says in the notice how many snippets moved to the copy', async () => {
-        await fc.assert(
-          fc.asyncProperty(adoptedRowsArb, async (adopted) => {
-            Notice.reset();
-            const snippets = makeSnippetsStub(adopted);
-            const manager = new ArticleManager(
-              makeImportPluginWithSnippets(true, snippets),
-              makeSimpleRepo()
-            );
-
-            await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, true);
-
-            const message = Notice.messages.at(-1)!;
-            expect(message).toContain(`Imported "${IMPORT_FILE.basename}"`);
-            if (adopted.length === 0) {
-              // an import that moved nothing reads as it always has
-              expect(message).not.toContain('the copy');
-            } else if (adopted.length === 1) {
-              expect(message).toContain('1 snippet now refers to the copy');
-            } else {
-              expect(message).toContain(
-                `${adopted.length} snippets now refer to the copy`
-              );
-            }
-          })
-        );
-      });
-
       it('leaves the in-place notice alone, where nothing changed hands', async () => {
         Notice.reset();
         const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
@@ -4302,6 +4290,7 @@ describe('import', () => {
           makeImportPluginWithSnippets(true, snippets),
           repo
         );
+        const retargetSources = vi.spyOn(manager, 'retargetSources');
         vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
           'ir-id': EXISTING_ID,
         } as never);
@@ -4313,7 +4302,353 @@ describe('import', () => {
           EXISTING_ID
         );
         // no copy was made, so nothing to re-point at
-        expect(snippets.repointSource).not.toHaveBeenCalled();
+        expect(retargetSources).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe('cards made from a note before it was imported', () => {
+    const EXISTING_ID = 'existing-article-id';
+
+    const PRIORITY = `priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`;
+    /**
+     * Each way an import of a note meets the database: as no article yet; with
+     * its own row at its path (the repair); with its row, named by its
+     * `ir-id`, elsewhere, whether or not a copy was asked for; or with another
+     * article's row at its path. What the import says, and the row the note's
+     * cards go to, if any.
+     */
+    const cases = {
+      new: { row: null, notice: `Imported "my-note" with ${PRIORITY}` },
+      repair: {
+        row: { id: EXISTING_ID, reference: 'notes/my-note.md' },
+        notice: 'Note is already an article; canceling import',
+      },
+      relink: {
+        row: { id: EXISTING_ID, reference: 'notes/old.md' },
+        notice: 'Linked "my-note" to existing article with the same ID',
+      },
+      'relink asked to copy': {
+        row: { id: EXISTING_ID, reference: 'notes/old.md' },
+        notice: 'Linked "my-note" to existing article with the same ID',
+      },
+      'another article at its path': {
+        row: { id: 'another', reference: 'notes/my-note.md' },
+        notice:
+          'Another article is already at this file path; canceling import',
+      },
+    } as const;
+
+    it.each(Object.keys(cases) as (keyof typeof cases)[])(
+      'gives them to the note’s article on every import that keeps the note, and to none other (%s)',
+      async (path) => {
+        Notice.reset();
+        const { row, notice } = cases[path];
+        const { repo, db } = await makeSqlJsRepo();
+        if (row) {
+          db.exec(
+            `INSERT INTO article (id, reference, due, interval, priority)
+             VALUES ($1, $2, 0, 1, 10)`,
+            [row.id, row.reference]
+          );
+        }
+        vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue(
+          path === 'new' ? undefined : ({ 'ir-id': EXISTING_ID } as never)
+        );
+        vi.spyOn(Obsidian, 'getNote').mockReturnValue(IMPORT_FILE);
+        const cards = makeCardsStub([
+          { id: 'card-0', reference: 'cards/card-0.md' },
+        ]);
+        const copy = path === 'relink asked to copy';
+        const snippets = makeSnippetsStub();
+        const plugin = makeImportPluginWithSnippets(copy, snippets, cards);
+        const manager = new ArticleManager(plugin, repo);
+
+        await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, copy);
+
+        expect(Notice.messages).toEqual([notice]);
+        if (path === 'another article at its path') {
+          expect(cards.adoptOrphans).not.toHaveBeenCalled();
+          expect(snippets.getHighlights).not.toHaveBeenCalled();
+          return;
+        }
+        const ids = allRows(repo)
+          .filter((article) => article.reference === IMPORT_FILE.path)
+          .map((article) => article.id);
+        expect(ids).toEqual(
+          path === 'new' ? [expect.any(String)] : [EXISTING_ID]
+        );
+        expect(cards.adoptOrphans).toHaveBeenCalledExactlyOnceWith(
+          IMPORT_FILE,
+          ids[0]
+        );
+        // Something was adopted, so the note is repainted
+        expect(snippets.getHighlights).toHaveBeenCalledExactlyOnceWith(
+          IMPORT_FILE
+        );
+      }
+    );
+
+    it('gives a PDF’s parentless items to its article when asked by the review manager', async () => {
+      const pdf = fileAt('papers/Paper.pdf');
+      const snippets = makeSnippetsStub([makeAdoptedRow(0)]);
+      const cards = makeCardsStub();
+      const plugin = makePdfImportPlugin(pdf, false, snippets, cards);
+      const manager = new ArticleManager(plugin as never, makeSimpleRepo());
+
+      await manager.claimFromBinary(pdf, 'article-1');
+
+      expect(snippets.adoptOrphans).toHaveBeenCalledExactlyOnceWith(
+        pdf,
+        'article-1'
+      );
+      expect(cards.adoptOrphans).toHaveBeenCalledExactlyOnceWith(
+        pdf,
+        'article-1'
+      );
+      expect(snippets.getHighlights).toHaveBeenCalledExactlyOnceWith(pdf);
+    });
+
+    describe('as a copy', () => {
+      const NOTE = fileAt('notes/Note.md');
+      const COPY_PATH = `${ARTICLES_FOLDER}/Note.md`;
+
+      beforeEach(() => {
+        Notice.reset();
+        vi.spyOn(Obsidian, 'getDirectory').mockRestore();
+        vi.spyOn(Obsidian, 'getTargetPath').mockRestore();
+        vi.spyOn(Obsidian, 'createNote').mockRestore();
+      });
+
+      it.each([
+        [0, 0, ''],
+        [1, 0, '; 1 snippet now refers to the copy'],
+        [0, 1, '; 1 card now refers to the copy'],
+        [0, 2, '; 2 cards now refer to the copy'],
+        [1, 2, '; 1 snippet and 2 cards now refer to the copy'],
+      ] as const)(
+        'hands %i snippets and %i cards to the copy, re-pointing their links at it, and counts them in the notice',
+        async (snippetCount, cardCount, notice) => {
+          const { repo, snippetIds, cardIds } = await seedParentless(
+            snippetCount,
+            cardCount
+          );
+          const plugin = makeTakenNoteCopyPlugin(NOTE);
+          const manager = new ArticleManager(plugin as never, repo);
+          const retargetSources = vi
+            .spyOn(manager, 'retargetSources')
+            .mockResolvedValue(0);
+          const { snippets, cards } = plugin.reviewManager;
+
+          await manager.import(NOTE, DEFAULT_PRIORITY, null, true);
+
+          const [{ id, reference }] = allRows(repo);
+          expect(reference).toBe(COPY_PATH);
+          const parents = (table: string) =>
+            Object.fromEntries(
+              (
+                repo.query(`SELECT id, parent FROM ${table}`) as {
+                  id: string;
+                  parent: string | null;
+                }[]
+              ).map((row) => [row.id, row.parent])
+            );
+          expect(parents('snippet')).toEqual({
+            ...Object.fromEntries(snippetIds.map((s) => [s, id])),
+            elsewhere: null,
+          });
+          expect(parents('srs_card')).toEqual({
+            ...Object.fromEntries(cardIds.map((c) => [c, id])),
+            elsewhere: null,
+            parented: 'some-article',
+            deleted: null,
+            gone: null,
+          });
+          expect(Notice.messages).toEqual([
+            `Imported "Note" with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}${notice}`,
+          ]);
+          if (snippetCount + cardCount === 0) {
+            expect(retargetSources).not.toHaveBeenCalled();
+          } else {
+            expect(retargetSources).toHaveBeenCalledOnce();
+            const [items, from, to] = retargetSources.mock.calls[0];
+            expect(
+              items.map(({ id, reference }) => ({ id, reference }))
+            ).toEqual([
+              ...snippetIds.map((s) => ({
+                id: s,
+                reference: `snippets/${s}.md`,
+              })),
+              ...cardIds.map((c) => ({ id: c, reference: `cards/${c}.md` })),
+            ]);
+            expect(from).toBe(NOTE.path);
+            expect(to).toBe(plugin.files.get(COPY_PATH));
+          }
+          // The original keeps no highlights: they moved to the copy
+          const moved = snippetCount + cardCount > 0;
+          expect(snippets.offsetTracker.loadHighlights.mock.calls).toEqual(
+            moved ? [[NOTE.path, []]] : []
+          );
+          expect(plugin.app.workspace.trigger.mock.calls).toEqual(
+            moved ? [['ir-highlights-changed', NOTE.path]] : []
+          );
+          // Taken over by the copy, not adopted in place or reloaded there
+          expect(snippets.adoptOrphans).not.toHaveBeenCalled();
+          expect(cards.adoptOrphans).not.toHaveBeenCalled();
+          expect(snippets.getHighlights).not.toHaveBeenCalled();
+        }
+      );
+
+      it('re-points links from the path the note had when the import began, though it is renamed meanwhile', async () => {
+        const note = fileAt('notes/Note.md');
+        const { repo } = await seedParentless(1, 1);
+        const plugin = makeTakenNoteCopyPlugin(note);
+        const { create } = plugin.app.vault;
+        const make = create.getMockImplementation()!;
+        create.mockImplementationOnce(async (path: string, data: string) => {
+          // Obsidian renames a TFile in place
+          note.path = 'notes/Renamed.md';
+          return make(path, data);
+        });
+        const manager = new ArticleManager(plugin as never, repo);
+        const retargetSources = vi
+          .spyOn(manager, 'retargetSources')
+          .mockResolvedValue(0);
+
+        await manager.import(note, DEFAULT_PRIORITY, null, true);
+
+        expect(retargetSources).toHaveBeenCalledExactlyOnceWith(
+          expect.any(Array),
+          'notes/Note.md',
+          plugin.files.get(COPY_PATH)
+        );
+      });
+
+      /**
+       * A source link to {@link NOTE} as an item's note can hold it: a
+       * wikilink or a Markdown link, by its path or its name alone, with or
+       * without a heading or block subpath, and with no alias, its name, or
+       * another.
+       */
+      const linkArb = fc.record({
+        wiki: fc.boolean(),
+        byPath: fc.boolean(),
+        subpath: fc.constantFrom('', '#Heading', '#^block'),
+        alias: fc.constantFrom(null, 'Note', 'my note'),
+      });
+
+      it('never writes to the original, whose card embeds the copy carries too, and re-points each link as it was written', async () => {
+        await fc.assert(
+          fc.asyncProperty(
+            fc.integer({ min: 0, max: 3 }),
+            fc.integer({ min: 0, max: 3 }),
+            linkArb,
+            // Whether the copy can't have the note's own name
+            fc.boolean(),
+            async (snippetCount, cardCount, link, occupied) => {
+              const { repo, snippetIds, cardIds } = await seedParentless(
+                snippetCount,
+                cardCount
+              );
+              const plugin = makeTakenNoteCopyPlugin(
+                NOTE,
+                occupied ? [COPY_PATH] : []
+              );
+              // The note's text, with each card's embed where its text was
+              const text = [
+                '# Note',
+                ...cardIds.map((c) => `![[${c}|ir-hide-title]]`),
+                'The end.',
+              ].join('\n\n');
+              plugin.app.vault.cachedRead.mockResolvedValue(text);
+              // A Markdown link has the spaces in its path encoded
+              const linkTo = (target: string, alias: string | null) =>
+                link.wiki
+                  ? `[[${target}${link.subpath}${alias === null ? '' : `|${alias}`}]]`
+                  : `[${alias ?? ''}](${target.replaceAll(' ', '%20')}.md${link.subpath})`;
+              vi.spyOn(Obsidian, 'getFrontMatter').mockImplementation((file) =>
+                file === NOTE
+                  ? undefined
+                  : ({
+                      'ir-id': /([^/]+)\.md$/.exec(file.path)?.[1],
+                      [SOURCE_PROPERTY_NAME]: linkTo(
+                        link.byPath ? 'notes/Note' : 'Note',
+                        link.alias
+                      ),
+                    } as never)
+              );
+              const updateFrontMatter = vi.spyOn(Obsidian, 'updateFrontMatter');
+              updateFrontMatter.mockClear();
+              Object.assign(plugin.app.metadataCache, {
+                fileToLinktext: (
+                  file: TFile,
+                  _from: string,
+                  omitMd: boolean
+                ) => (omitMd ? file.path.replace(/\.md$/, '') : file.path),
+              });
+
+              const result = await new ArticleManager(
+                plugin as never,
+                repo
+              ).import(NOTE, DEFAULT_PRIORITY, null, true);
+
+              const copy = result!.file;
+              expect(copy).toBe(plugin.files.get(copy.path));
+              expect(copy.path === COPY_PATH).toBe(!occupied);
+              const { vault, fileManager } = plugin.app;
+              const writes = [
+                vault.create,
+                vault.append,
+                vault.modify,
+                vault.modifyBinary,
+                vault.process,
+                vault.rename,
+                vault.delete,
+                vault.trash,
+                vault.copy,
+                fileManager.processFrontMatter,
+                fileManager.renameFile,
+                fileManager.trashFile,
+                updateFrontMatter,
+              ];
+              for (const write of writes) {
+                for (const [target] of write.mock.calls as unknown[][]) {
+                  expect(target).not.toBe(NOTE);
+                  expect(target).not.toBe(NOTE.path);
+                }
+              }
+              expect(vault.append).toHaveBeenCalledExactlyOnceWith(copy, text);
+              // Each adopted item's link, re-pointed, keeps its form and
+              // subpath; an alias that was the note's name takes the copy's
+              const sources = updateFrontMatter.mock.calls
+                .filter(([file]) => file !== copy)
+                .map(([file, update]) => {
+                  const frontmatter: Record<string, unknown> = {
+                    ...Obsidian.getFrontMatter(file, plugin.app as never),
+                  };
+                  (update as (fm: Record<string, unknown>) => void)(
+                    frontmatter
+                  );
+                  return [file.path, frontmatter[SOURCE_PROPERTY_NAME]];
+                });
+              expect(Object.fromEntries(sources)).toEqual(
+                Object.fromEntries(
+                  [
+                    ...snippetIds.map((s) => `snippets/${s}.md`),
+                    ...cardIds.map((c) => `cards/${c}.md`),
+                  ].map((path) => [
+                    path,
+                    linkTo(
+                      copy.path.slice(0, -'.md'.length),
+                      link.alias === NOTE.basename ? copy.basename : link.alias
+                    ),
+                  ])
+                )
+              );
+            }
+          ),
+          { numRuns: 40 }
+        );
       });
     });
   });
