@@ -228,6 +228,54 @@ function syntaxAt(
 /** The characters some rule escapes, and so escapes beside an answer's ends. */
 const CONTEXTUAL = '`*[|\\{})#$<^%=~_&@:./-+';
 
+/**
+ * Text thick with backslashes, runs of them included, beside the ASCII
+ * punctuation they escape and the characters they don't.
+ */
+const backslashyArb = fc.string({
+  unit: fc.oneof(
+    fc.constantFrom('\\', '\\\\', '\\\\\\', '#', '[', '(', '}', 'a', ' ', '\n'),
+    fc.string({ unit: 'grapheme', minLength: 1, maxLength: 1 })
+  ),
+  maxLength: 30,
+});
+
+/** A selection in `text`, as offsets that may be equal. */
+const backslashyRangeArb = backslashyArb.chain((text) =>
+  fc.tuple(fc.nat(text.length), fc.nat(text.length)).map(([x, y]) => ({
+    text,
+    range: [Math.min(x, y), Math.max(x, y)] as [number, number],
+  }))
+);
+
+/**
+ * Where Markdown reads backslashes in `text`, read left to right as a parser
+ * does: the offsets just inside each backslash and the ASCII punctuation it
+ * escapes.
+ */
+function escapePairs(text: string) {
+  return readBackslashes(text).pairs;
+}
+
+/**
+ * {@link escapePairs} as `pairs`, and as `escaping` the offsets just after
+ * each backslash that would escape ASCII punctuation put there: those of the
+ * pairs, and those of the backslashes before anything else.
+ */
+function readBackslashes(text: string) {
+  const pairs = new Set<number>();
+  const escaping = new Set<number>();
+  for (let k = 0; k < text.length; k++) {
+    if (text[k] !== '\\') continue;
+    escaping.add(k + 1);
+    if (ASCII_PUNCTUATION.test(text[k + 1] ?? '')) {
+      pairs.add(k + 1);
+      k++;
+    }
+  }
+  return { pairs, escaping };
+}
+
 // #endregion
 
 describe('getListItemText', () => {
@@ -915,6 +963,77 @@ describe('escapeAround', () => {
     expect(Markdown.escapeAround('a\n  -b', [2, 4])).toEqual({
       text: 'a\n' + String.raw`\-b`,
       range: [2, 2],
+    });
+  });
+});
+
+describe('snapOffEscapes', () => {
+  it('widens each end that splits an escape pair to take the pair whole, and leaves the others', () => {
+    fc.assert(
+      fc.property(backslashyRangeArb, ({ text, range: [from, to] }) => {
+        const pairs = escapePairs(text);
+
+        expect(Markdown.snapOffEscapes(text, [from, to])).toEqual([
+          pairs.has(from) ? from - 1 : from,
+          pairs.has(to) ? to + 1 : to,
+        ]);
+      }),
+      { numRuns: 1000 }
+    );
+  });
+
+  it('takes an escaped backslash for no escape', () => {
+    // From the `#` of `\\#`: the backslash is escaped, the `#` is not
+    expect(Markdown.snapOffEscapes(String.raw`\\#tag`, [2, 6])).toEqual([2, 6]);
+    // From between the two backslashes of `\\`
+    expect(Markdown.snapOffEscapes(String.raw`a\\b`, [2, 4])).toEqual([1, 4]);
+    expect(Markdown.snapOffEscapes(String.raw`a\\b`, [0, 2])).toEqual([0, 3]);
+    // The third backslash of `\\\#` escapes the `#`
+    expect(Markdown.snapOffEscapes(String.raw`\\\#tag`, [3, 7])).toEqual([
+      2, 7,
+    ]);
+  });
+
+  it('snaps a start back before the backslash, and an end past the escaped char', () => {
+    expect(Markdown.snapOffEscapes(String.raw`\#tag`, [1, 5])).toEqual([0, 5]);
+    expect(Markdown.snapOffEscapes(String.raw`a \[1] b`, [0, 3])).toEqual([
+      0, 4,
+    ]);
+    // A backslash before what is no punctuation escapes nothing
+    expect(Markdown.snapOffEscapes(String.raw`C:\Users`, [3, 8])).toEqual([
+      3, 8,
+    ]);
+    expect(Markdown.snapOffEscapes('a\\\nb', [2, 4])).toEqual([2, 4]);
+  });
+
+  describe('for an answer a cloze delimiter will open', () => {
+    it('also moves its start back off any backslash that would escape the delimiter', () => {
+      fc.assert(
+        fc.property(backslashyRangeArb, ({ text, range: [from, to] }) => {
+          const { pairs, escaping } = readBackslashes(text);
+
+          expect(
+            Markdown.snapOffEscapes(text, [from, to], { delimited: true })
+          ).toEqual([
+            escaping.has(from) ? from - 1 : from,
+            pairs.has(to) ? to + 1 : to,
+          ]);
+        }),
+        { numRuns: 1000 }
+      );
+    });
+
+    it('starts before the backslash of `C:\\Users`, where `(}` would follow it', () => {
+      expect(
+        Markdown.snapOffEscapes(String.raw`C:\Users`, [3, 8], {
+          delimited: true,
+        })
+      ).toEqual([2, 8]);
+      expect(
+        Markdown.snapOffEscapes(String.raw`C:\\Users`, [4, 9], {
+          delimited: true,
+        })
+      ).toEqual([4, 9]);
     });
   });
 });

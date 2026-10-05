@@ -272,6 +272,7 @@ function makeEditor(initial: string) {
     get text() {
       return text;
     },
+    getValue: () => text,
     offsetToPos: (offset: number) => {
       const lines = text.slice(0, offset).split('\n');
       return { line: lines.length - 1, ch: lines[lines.length - 1].length };
@@ -327,6 +328,53 @@ const cardSelectionArb = fc
     },
     answerBounds: [pre.length, pre.length + answer.length] as const,
   }));
+
+/**
+ * {@link cardSelectionArb} with no backslash, whose escapes would move the
+ * span and the answer when the card is made of a note: see
+ * {@link escapedCardSelectionArb}.
+ */
+const unescapedCardSelectionArb = cardSelectionArb.filter(
+  ({ before, text, after }) => !(before + text + after).includes('\\')
+);
+
+/**
+ * A note thick with backslashes and what they escape, with a span chosen in
+ * it and an answer in that span: either may start or end anywhere, between a
+ * backslash and its char included. It holds no cloze delimiters, which
+ * `delimitText` strips from the card: a backslash before one the note holds
+ * is left to escape the new delimiter (`x\(}y`, answer `y`), a case no
+ * snap of the selection sees.
+ */
+const escapedCardSelectionArb = fc
+  .string({
+    unit: fc.oneof(
+      fc.constantFrom('\\', '\\\\', '#', '[', '(', '}', 'a', ' ', '\n'),
+      fc.string({ minLength: 1, maxLength: 1 })
+    ),
+    minLength: 1,
+    maxLength: 30,
+  })
+  .filter((doc) => !doc.includes(LEFT) && !doc.includes(RIGHT))
+  .chain((doc) =>
+    fc
+      .tuple(fc.nat(doc.length), fc.nat(doc.length))
+      .filter(([x, y]) => x !== y)
+      .chain(([x, y]) => {
+        const [from, to] = [Math.min(x, y), Math.max(x, y)];
+        return fc
+          .tuple(fc.nat(to - from), fc.nat(to - from))
+          .filter(([a, b]) => a !== b)
+          .map(([a, b]) => ({
+            doc,
+            selection: { from, to, text: doc.slice(from, to) },
+            answer: [Math.min(a, b), Math.max(a, b)] as const,
+          }));
+      })
+  );
+
+/** Whether `text` ends in a backslash that escapes whatever follows it. */
+const endsInEscape = (text: string) => (/\\*$/.exec(text)![0].length & 1) === 1;
 
 /**
  * Text a PDF hands over, rich in Markdown and the cloze delimiters, and the
@@ -2361,6 +2409,66 @@ describe('review — against the production schema', () => {
   });
 });
 
+describe('create', () => {
+  const sourceFile = { path: 'articles/source.md', extension: 'md' } as TFile;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("makes a card of the cursor's line, its answer the selection moved off any backslash that would escape a delimiter", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('', '- ', '  1. '),
+        escapedCardSelectionArb.filter(({ doc }) => !doc.includes('\n')),
+        async (marker, { doc: line, selection: { from, to } }) => {
+          const manager = new CardManager(makePlugin(), makeRepo());
+          const createFileAndEntry = vi
+            .spyOn(
+              manager as unknown as {
+                createFileAndEntry: (text: string) => Promise<unknown>;
+              },
+              'createFileAndEntry'
+            )
+            .mockResolvedValue({ file: {}, data: {} });
+          vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue('[[c]]');
+          vi.spyOn(Obsidian, 'transcludeLink').mockReturnValue(undefined);
+          vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
+            line,
+            lineNumber: 0,
+            start: marker.length,
+            end: marker.length + line.length,
+          });
+          vi.spyOn(Obsidian, 'getSelectionWithBounds').mockReturnValue({
+            selection: line.slice(from, to),
+            start: { line: 0, ch: marker.length + from },
+            end: { line: 0, ch: marker.length + to },
+            startOffset: marker.length + from,
+            endOffset: marker.length + to,
+          });
+
+          await manager.create(
+            { setSelection: vi.fn() } as never,
+            { file: sourceFile } as never
+          );
+
+          const [a, b] = Markdown.snapOffEscapes(line, [from, to], {
+            delimited: true,
+          });
+          expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+            line.slice(0, a) +
+              `${LEFT} ${line.slice(a, b)} ${RIGHT}` +
+              line.slice(b),
+            sourceFile
+          );
+          vi.restoreAllMocks();
+        }
+      ),
+      { numRuns: 300 }
+    );
+  });
+});
+
 describe('createFromSelection', () => {
   const sourceFile = { path: 'articles/source.md', extension: 'md' } as TFile;
   const reviewCard = {
@@ -2390,7 +2498,7 @@ describe('createFromSelection', () => {
 
   it('makes a card of the span, with the answer hidden, from the note it is in', async () => {
     await fc.assert(
-      fc.asyncProperty(cardSelectionArb, async (c) => {
+      fc.asyncProperty(unescapedCardSelectionArb, async (c) => {
         const { manager, createFileAndEntry } = setUp();
         const editor = makeEditor(c.before + c.text + c.after);
 
@@ -2412,7 +2520,7 @@ describe('createFromSelection', () => {
 
   it('replaces the span, and only the span, with the embed', async () => {
     await fc.assert(
-      fc.asyncProperty(cardSelectionArb, async (c) => {
+      fc.asyncProperty(unescapedCardSelectionArb, async (c) => {
         const { manager } = setUp();
         const editor = makeEditor(c.before + c.text + c.after);
 
@@ -2452,11 +2560,109 @@ describe('createFromSelection', () => {
           expect(result).toBeNull();
           expect(createFileAndEntry).not.toHaveBeenCalled();
           expect(editor.text).toBe(changed);
-          expect(notify).toHaveBeenCalledOnce();
+          expect(notify).toHaveBeenCalledExactlyOnceWith(
+            `The selected text changed before the card was made`
+          );
           vi.restoreAllMocks();
         }
       )
     );
+  });
+
+  it('makes the card of the span widened off the escape pairs it splits, its answer off any backslash that would escape a delimiter', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        escapedCardSelectionArb,
+        async ({ doc, selection, answer }) => {
+          const { manager, createFileAndEntry } = setUp();
+          const editor = makeEditor(doc);
+
+          const result = await manager.createFromSelection(
+            editor as never,
+            { file: sourceFile } as never,
+            selection,
+            answer
+          );
+
+          const [start, end] = Markdown.snapOffEscapes(doc, [
+            selection.from,
+            selection.to,
+          ]);
+          const text = doc.slice(start, end);
+          const shift = selection.from - start;
+          const [a, b] = Markdown.snapOffEscapes(
+            text,
+            [answer[0] + shift, answer[1] + shift],
+            { delimited: true }
+          );
+          expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+            text.slice(0, a) +
+              `${LEFT} ${text.slice(a, b)} ${RIGHT}` +
+              text.slice(b),
+            sourceFile
+          );
+          expect(editor.text).toBe(
+            doc.slice(0, start) + `!${LINK}` + doc.slice(end)
+          );
+          // Undo puts `line` back where the embed is.
+          expect(result).toMatchObject({ reviewCard, line: text });
+          vi.restoreAllMocks();
+        }
+      ),
+      { numRuns: 300 }
+    );
+  });
+
+  it('shows the hidden answer in review as its placeholder, whatever backslash the note held before it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        escapedCardSelectionArb,
+        async ({ doc, selection, answer }) => {
+          const { manager, createFileAndEntry } = setUp();
+
+          await manager.createFromSelection(
+            makeEditor(doc) as never,
+            { file: sourceFile } as never,
+            selection,
+            answer
+          );
+
+          const [body] = createFileAndEntry.mock.calls[0];
+          const [before] = CardManager.hideAnswer(body).split(
+            CARD_ANSWER_REPLACEMENT
+          );
+          expect(endsInEscape(before)).toBe(false);
+          vi.restoreAllMocks();
+        }
+      ),
+      { numRuns: 300 }
+    );
+  });
+
+  it('keeps each `\\#` whole that the span or the answer would split', async () => {
+    const { manager, createFileAndEntry } = setUp();
+    const doc = String.raw`a \#b \#c`;
+    const editor = makeEditor(doc);
+
+    // The span from the `#` of `\#b` to just after the `\` of `\#c`, its
+    // answer from just after the span's added `\`
+    const result = await manager.createFromSelection(
+      editor as never,
+      { file: sourceFile } as never,
+      { from: 3, to: 7, text: doc.slice(3, 7) },
+      [0, 3]
+    );
+
+    expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+      String.raw`${LEFT} \#b  ${RIGHT}\#`,
+      sourceFile
+    );
+    expect(editor.text).toBe(`a !${LINK}c`);
+    expect(result).toMatchObject({
+      line: String.raw`\#b \#`,
+      start: 2,
+      end: 8,
+    });
   });
 
   it('makes nothing without a note to make it from', async () => {

@@ -25,6 +25,7 @@ import type {
   SQLiteRepository,
 } from '#/lib/types';
 import { getEndOfDay } from '#/lib/utils';
+import { EditorSelection, EditorState } from '@codemirror/state';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
@@ -289,6 +290,123 @@ const binaryExtensionArb = fc.oneof(
   fc.mixedCase(fc.constant('pdf')),
   fc.string().filter((ext) => ext.toLowerCase() !== 'md')
 );
+
+/**
+ * A note, frontmatter and all or none, thick with backslashes and what they
+ * escape, with one or more selections in it that may run backwards: the
+ * main one, at `mainIndex`, is never empty.
+ */
+const escapedNoteArb = fc
+  .tuple(
+    fc.constantFrom('', '---\ntags: x\n---\n'),
+    fc.string({
+      unit: fc.oneof(
+        fc.constantFrom('\\', '\\\\', '#', '[', '$', 'a', ' ', '\n'),
+        fc.string({ minLength: 1, maxLength: 1 })
+      ),
+      minLength: 1,
+      maxLength: 30,
+    })
+  )
+  .chain(([frontmatter, body]) => {
+    const doc = frontmatter + body;
+    const rangeArb = fc.tuple(fc.nat(doc.length), fc.nat(doc.length));
+    return fc
+      .array(rangeArb, { minLength: 1, maxLength: 3 })
+      .chain((ranges) =>
+        fc.nat(ranges.length - 1).map((mainIndex) => ({
+          doc,
+          ranges,
+          mainIndex,
+        }))
+      )
+      .filter(({ ranges, mainIndex }) => {
+        const [anchor, head] = ranges[mainIndex];
+        return anchor !== head;
+      });
+  });
+
+/**
+ * Snip from a markdown note, no item itself, through `editor`, with
+ * `viewSelection` selected in reading view: what was made of it, if anything,
+ * and what was said.
+ */
+async function snipWith(
+  editor: { getSelection: () => string; cm?: { state: EditorState } },
+  viewSelection = ''
+) {
+  const createFromText = vi
+    .spyOn(Obsidian, 'createFromText')
+    .mockResolvedValue(SNIPPET_FILE);
+  vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue('[[a]]');
+  vi.spyOn(Obsidian, 'updateFrontMatter').mockResolvedValue(undefined);
+  vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(null);
+  const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  const warn = vi.spyOn(console, 'warn').mockReturnValue(undefined);
+  const manager = new SnippetManager(
+    { app: {}, settings: {} } as never,
+    makeSimpleRepo()
+  );
+  const createEntry = vi
+    .spyOn(manager as never as { createEntry: () => unknown }, 'createEntry')
+    .mockResolvedValue(null);
+  vi.spyOn(
+    manager as never as {
+      refreshHighlightsAfterSnippetCreation: () => unknown;
+    },
+    'refreshHighlightsAfterSnippetCreation'
+  ).mockResolvedValue(undefined);
+
+  const result = await manager.create(
+    editor as never,
+    {
+      file: { path: 'notes/a.md', extension: 'md' },
+      getViewType: () => 'markdown',
+      getSelection: () => viewSelection,
+    } as never
+  );
+
+  const [entryArgs] = createEntry.mock.calls as unknown[][];
+  return {
+    result,
+    text: createFromText.mock.calls[0]?.[0],
+    offsets: entryArgs?.[5] as { start: number; end: number } | undefined,
+    notify,
+    warn,
+  };
+}
+
+/**
+ * Snip from a markdown note, no item itself, holding `doc` with each
+ * `[anchor, head]` of `ranges` selected in its editor, the one at `mainIndex`
+ * main: what the editor reports, and the snippet's text and offsets as they
+ * were made.
+ */
+async function snipSelection({
+  doc,
+  ranges,
+  mainIndex = 0,
+}: {
+  doc: string;
+  ranges: [number, number][];
+  mainIndex?: number;
+}) {
+  const state = EditorState.create({
+    doc,
+    selection: EditorSelection.create(
+      ranges.map(([anchor, head]) => EditorSelection.range(anchor, head)),
+      mainIndex
+    ),
+    extensions: EditorState.allowMultipleSelections.of(true),
+  });
+  // What `Editor.getSelection` reads
+  const { from, to } = state.selection.main;
+  const { text, offsets } = await snipWith({
+    getSelection: () => doc.slice(from, to),
+    cm: { state },
+  });
+  return { from, to, text, offsets };
+}
 // #endregion
 
 describe('rowToBase', () => {
@@ -2927,6 +3045,74 @@ describe('create', () => {
         }
       )
     );
+  });
+
+  it('takes an escape pair the main selection splits whole, in its text and its offsets alike', async () => {
+    await fc.assert(
+      fc.asyncProperty(escapedNoteArb, async (note) => {
+        vi.restoreAllMocks();
+
+        const { from, to, text, offsets } = await snipSelection(note);
+
+        const [start, end] = Markdown.snapOffEscapes(note.doc, [from, to]);
+        const bodyStart = Obsidian.getBodyStartOffset(note.doc);
+        expect(text).toBe(note.doc.slice(start, end));
+        expect(offsets).toEqual({
+          start: start - bodyStart,
+          end: end - bodyStart,
+        });
+      }),
+      { numRuns: 300 }
+    );
+  });
+
+  it('makes a snippet selected from the `#` of `\\#tag` of `\\#tag`, not of a tag', async () => {
+    const { text, offsets } = await snipSelection({
+      doc: String.raw`see \#tag`,
+      ranges: [[5, 9]],
+    });
+
+    expect(text).toBe(String.raw`\#tag`);
+    expect(offsets).toEqual({ start: 4, end: 9 });
+  });
+
+  it("makes a snippet of reading view's selection as it reads, the editor's being empty", async () => {
+    const state = EditorState.create({
+      doc: String.raw`see \#tag`,
+      selection: { anchor: 5 },
+    });
+
+    const { text } = await snipWith(
+      { getSelection: () => '', cm: { state } },
+      'see #tag'
+    );
+
+    expect(text).toBe('see #tag');
+  });
+
+  it('makes a snippet of the selection as it is, and without offsets, when there is no CodeMirror view to read', async () => {
+    const { text, offsets, warn } = await snipWith({
+      getSelection: () => '#tag',
+    });
+
+    expect(text).toBe('#tag');
+    expect(offsets).toBeUndefined();
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('CodeMirror')
+    );
+  });
+
+  it('makes nothing, and says so, with nothing selected', async () => {
+    const state = EditorState.create({ doc: 'text' });
+
+    const { result, text, notify } = await snipWith({
+      getSelection: () => '',
+      cm: { state },
+    });
+
+    expect(result).toBeNull();
+    expect(text).toBeUndefined();
+    expect(notify).toHaveBeenCalledExactlyOnceWith('Text must be selected');
   });
 });
 
