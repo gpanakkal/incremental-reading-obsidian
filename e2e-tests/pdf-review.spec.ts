@@ -14,12 +14,14 @@ import test, {
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
+  askBeforeUpdatingLinks,
   emulateMobile,
   executeCommandById,
   expectPlainText,
   finalizeArticleImport,
   openFileInActiveLeaf,
   readMarkdown,
+  renameDecliningLinkUpdate,
   REVIEW_VIEW_TYPE,
   setDefaultEditingMode,
   setNativeMenus,
@@ -2001,6 +2003,49 @@ test.describe('Snippets and cards from a PDF article', () => {
       .toEqual([{ parent: id, source: firstLineSource(copyPath) }]);
     // The original's tab is still the active one
     await expect(firstLineHighlights(window)).toHaveCount(0);
+  });
+
+  test('keeps the snippet and card linked to the PDF, highlighted and with their context, when it is renamed and Obsidian is told not to update links', async () => {
+    await snipAndCardInPlainTab(window);
+    await askBeforeUpdatingLinks(window);
+    const renamed = 'sources/Renamed fixture.pdf';
+
+    await renameDecliningLinkUpdate(window, PDF_PATH, renamed);
+
+    // The alias that was its name takes the new one
+    const source =
+      `[[Renamed fixture.pdf#page=1&selection=2,0,2,${FIRST_LINE.length}` +
+      '|Renamed fixture, page 1]]';
+    await expect
+      .poll(async () => (await snippets(window)).map((s) => s.source))
+      .toEqual([source]);
+    await expect
+      .poll(async () => (await cards(window)).map((c) => c.source))
+      .toEqual([source]);
+    // Read again, by their links, in a tab opened on it afresh
+    await openFileInActiveLeaf(window, 'sources/Security Principles.md');
+    await openFileInActiveLeaf(window, renamed);
+    await expect(firstLineHighlights(window)).not.toHaveCount(0);
+
+    const [snippet] = await snippets(window);
+    await goToContextFrom(window, snippet.reference);
+    await expect
+      .poll(() =>
+        window.evaluate(() => {
+          const { app } = window as unknown as {
+            app: {
+              workspace: {
+                activeLeaf: {
+                  view: { getViewType(): string; file?: { path: string } };
+                };
+              };
+            };
+          };
+          const { view } = app.workspace.activeLeaf;
+          return [view.getViewType(), view.file?.path];
+        })
+      )
+      .toEqual(['pdf', renamed]);
   });
 
   // #endregion

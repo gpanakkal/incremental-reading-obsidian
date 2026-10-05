@@ -157,9 +157,10 @@ function resolveRelative(relative: string, from: string): string {
 
 /**
  * Whether the link path `linkPath`, in the note at `notePath`, names the file
- * at `path`: as the whole path, as a tail of it (Obsidian's shortest form), or
- * relative to the note's folder; a note's without its `.md`. Case is ignored,
- * as Obsidian ignores it in resolving a link.
+ * at `path`: as the whole path, as a tail of it (Obsidian's shortest form)
+ * unless it starts at the vault root with `/`, or relative to the note's
+ * folder; a note's without its `.md`. Case is ignored, as Obsidian ignores it
+ * in resolving a link.
  *
  * Asked of a link that may no longer resolve, since its file has moved on: it
  * tells only whether the link was written for `path`.
@@ -178,8 +179,12 @@ export function linkNamesPath(
     link = resolveRelative(link, folderOf(notePath.toLowerCase()));
     return names.includes(link);
   }
+  // From the vault root: the whole path, never a tail of another
+  const rooted = link.startsWith('/');
   link = link.replace(/^\/+/, '');
-  return names.some((name) => name === link || name.endsWith(`/${link}`));
+  return names.some(
+    (name) => name === link || (!rooted && name.endsWith(`/${link}`))
+  );
 }
 
 /**

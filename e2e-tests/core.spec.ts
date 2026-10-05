@@ -7,6 +7,7 @@ import test, {
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
+  askBeforeUpdatingLinks,
   emulateMobile,
   executeCommandById,
   expectReviewOn,
@@ -14,6 +15,7 @@ import {
   importArticle,
   leafSnapshot,
   openNote,
+  renameDecliningLinkUpdate,
   reviewHeader,
   reviewTitle,
   selectParagraph,
@@ -1747,5 +1749,122 @@ test.describe('PDF articles', () => {
       .poll(async () => (await articleRow(window))?.reference)
       .toBe(PDF_PATH);
     await expect.poll(rebindLog).toContain(`reclaimed article ${PDF_ID}`);
+  });
+});
+
+test.describe('Renames Obsidian is told not to update links for', () => {
+  const SOURCE = 'sources/Security Principles.md';
+  const PARAGRAPH =
+    'Before we start discussing the different security principles';
+
+  /** Every snippet row, with its note's `source` as the cache reads it. */
+  const snippetLinks = (page: Page) =>
+    page.evaluate(() => {
+      const { app } = window as unknown as {
+        app: {
+          vault: { getFileByPath(path: string): unknown };
+          metadataCache: {
+            getFileCache(
+              file: unknown
+            ): { frontmatter?: Record<string, unknown> } | null;
+          };
+          plugins: {
+            plugins: Record<
+              string,
+              {
+                reviewManager: {
+                  repo: {
+                    query(
+                      sql: string
+                    ): { reference: string; parent: string | null }[];
+                  };
+                };
+              }
+            >;
+          };
+        };
+      };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      return repo
+        .query('SELECT reference, parent FROM snippet ORDER BY reference')
+        .map(({ reference, parent }) => ({
+          reference,
+          parent,
+          source: app.metadataCache.getFileCache(
+            app.vault.getFileByPath(reference)
+          )?.frontmatter?.source,
+        }));
+    });
+
+  /** Go to the context of the item whose note is at `path`; where it lands. */
+  const goToContext = (page: Page, path: string) =>
+    page.evaluate(async (path) => {
+      const { app } = window as unknown as {
+        app: {
+          vault: { getFileByPath(path: string): unknown };
+          workspace: { getActiveFile(): { path: string } | null };
+          plugins: {
+            plugins: Record<
+              string,
+              { actions: { goToContext(file: unknown): Promise<void> } }
+            >;
+          };
+        };
+      };
+      await app.plugins.plugins['incremental-reading'].actions.goToContext(
+        app.vault.getFileByPath(path)
+      );
+      return app.workspace.getActiveFile()?.path;
+    }, path);
+
+  async function extractParagraph(page: Page, note: string) {
+    await openNote(page, note);
+    await selectParagraph(page, PARAGRAPH);
+    await executeCommandById(page, 'incremental-reading:extract-selection');
+    await expect.poll(async () => (await snippetLinks(page)).length).toBe(1);
+  }
+
+  test("keeps a plain note's snippet linked to it, highlighted and with its context", async () => {
+    await extractParagraph(window, 'sources/Security Principles');
+    await askBeforeUpdatingLinks(window);
+    const renamed = 'sources/Safety Principles.md';
+
+    await renameDecliningLinkUpdate(window, SOURCE, renamed);
+
+    await expect
+      .poll(async () => (await snippetLinks(window)).map((s) => s.source))
+      .toEqual(['[[Safety Principles]]']);
+    const [{ reference }] = await snippetLinks(window);
+    expect(await goToContext(window, reference)).toBe(renamed);
+    // Read again, by its link, in a note opened afresh
+    await openNote(window, 'sources/Curse of dimensionality');
+    await openNote(window, 'sources/Safety Principles');
+    await expect(
+      window.locator('.workspace-leaf.mod-active .ir-snippet-highlight').first()
+    ).toBeVisible();
+  });
+
+  test("keeps an article's snippet linked to it, highlighted and with its context", async () => {
+    await openNote(window, 'sources/Security Principles');
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await extractParagraph(window, 'sources/Security Principles');
+    const [{ parent }] = await snippetLinks(window);
+    expect(parent).not.toBeNull();
+    await askBeforeUpdatingLinks(window);
+    const renamed = 'sources/Safety Principles.md';
+
+    await renameDecliningLinkUpdate(window, SOURCE, renamed);
+
+    await expect
+      .poll(async () => (await snippetLinks(window)).map((s) => s.source))
+      .toEqual(['[[Safety Principles]]']);
+    const [{ reference }] = await snippetLinks(window);
+    expect(await goToContext(window, reference)).toBe(renamed);
+    await openNote(window, 'sources/Curse of dimensionality');
+    await openNote(window, 'sources/Safety Principles');
+    await expect(
+      window.locator('.workspace-leaf.mod-active .ir-snippet-highlight').first()
+    ).toBeVisible();
   });
 });

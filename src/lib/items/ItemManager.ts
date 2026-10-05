@@ -208,9 +208,10 @@ export class ItemManager {
    * Point the `source` link of each item's note that names the file at
    * `fromPath` at `to` instead, as though the item had been taken from `to`:
    * written as it was (a wikilink or markdown link, as Obsidian's own link
-   * updater keeps it), with its subpath (a PDF selection), and unless
-   * `renameAlias` is false, an alias that was the old file's name, or its page
-   * label, takes the new one's. A note that is gone, is another item's by its
+   * updater keeps it), with its subpath (a PDF selection), and an alias that
+   * was the old file's name, or its page label, taking the new one's. A link is
+   * read from where its note was when it was written: `writtenAt`, for a note
+   * that has moved since, else where it is. A note that is gone, is another item's by its
    * `ir-id`, has no link, or links elsewhere is left alone, as is one whose
    * link is already what it would become; none of them costs a write.
    *
@@ -218,15 +219,12 @@ export class ItemManager {
    * file it was written for may have moved on, so it resolves nowhere, or
    * somewhere else entirely. A note that can't be written to is logged and
    * skipped.
-   * @param renameAlias false to keep every alias as written, as Obsidian's own
-   *   link updater does, which may be rewriting the same links meanwhile
    * @returns how many links were rewritten
    */
   async retargetSources(
-    items: readonly { id: string; reference: string }[],
+    items: readonly { id: string; reference: string; writtenAt?: string }[],
     fromPath: string,
-    to: TFile,
-    { renameAlias = true }: { renameAlias?: boolean } = {}
+    to: TFile
   ): Promise<number> {
     const fileName = fromPath.slice(fromPath.lastIndexOf('/') + 1);
     const dot = fileName.lastIndexOf('.');
@@ -234,7 +232,7 @@ export class ItemManager {
 
     const retargeted = (
       note: TFile,
-      id: string,
+      { id, writtenAt = note.path }: (typeof items)[number],
       frontmatter: Record<string, unknown> | undefined
     ): string | null => {
       // A note at the path that is not the row's own: see `reconcileNote`
@@ -242,7 +240,7 @@ export class ItemManager {
       const source = frontmatter[SOURCE_PROPERTY_NAME];
       if (typeof source !== 'string') return null;
       const link = parseSourceLink(source);
-      if (!link || !linkNamesPath(link.path, note.path, fromPath)) return null;
+      if (!link || !linkNamesPath(link.path, writtenAt, fromPath)) return null;
       const next = formatSourceLink({
         ...link,
         // As Obsidian links to it from the note: a note without its `.md` in
@@ -252,20 +250,18 @@ export class ItemManager {
           note.path,
           link.form === 'wiki'
         ),
-        alias: renameAlias
-          ? retargetAlias(link.alias, fromBasename, to.basename)
-          : link.alias,
+        alias: retargetAlias(link.alias, fromBasename, to.basename),
       });
       return next === source.trim() ? null : next;
     };
 
     let rewritten = 0;
-    for (const { id, reference } of items) {
-      const note = Obsidian.getNote(reference, this.app);
+    for (const item of items) {
+      const note = Obsidian.getNote(item.reference, this.app);
       if (!note) continue;
       // Read from the cache first, so the many that need nothing cost no write
       if (
-        retargeted(note, id, Obsidian.getFrontMatter(note, this.app)) === null
+        retargeted(note, item, Obsidian.getFrontMatter(note, this.app)) === null
       )
         continue;
       let changed = false;
@@ -274,7 +270,7 @@ export class ItemManager {
         await Obsidian.updateFrontMatter(
           note,
           (frontmatter) => {
-            const next = retargeted(note, id, frontmatter);
+            const next = retargeted(note, item, frontmatter);
             if (next === null) return;
             frontmatter[SOURCE_PROPERTY_NAME] = next;
             changed = true;
@@ -298,8 +294,7 @@ export class ItemManager {
   async retargetChildSources(
     parentId: string,
     fromPath: string,
-    to: TFile,
-    options?: { renameAlias?: boolean }
+    to: TFile
   ): Promise<number> {
     const children = (await this.repo.query(
       `SELECT id, reference FROM snippet WHERE parent = $1 AND deleted = FALSE
@@ -307,7 +302,7 @@ export class ItemManager {
        SELECT id, reference FROM srs_card WHERE parent = $1 AND deleted = FALSE`,
       [parentId]
     )) as unknown as { id: string; reference: string }[];
-    return this.retargetSources(children, fromPath, to, options);
+    return this.retargetSources(children, fromPath, to);
   }
 
   /**

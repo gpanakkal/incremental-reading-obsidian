@@ -438,6 +438,25 @@ describe('linkNamesPath', () => {
     expect(linkNamesPath('../', 'n/s.md', 'n/a.pdf')).toBe(false);
   });
 
+  it('takes a link from the vault root, with a leading slash, as the whole path only, as Obsidian resolves it', () => {
+    fc.assert(
+      fc.property(
+        fc.array(segmentArb, { minLength: 1, maxLength: 4 }),
+        pathArb,
+        fc.nat(),
+        (parts, notePath, cut) => {
+          const path = parts.join('/');
+          const tail = parts.slice(cut % parts.length).join('/');
+          expect(linkNamesPath(`/${tail}`, notePath, path)).toBe(
+            tail.toLowerCase() === path.toLowerCase()
+          );
+        }
+      )
+    );
+    expect(linkNamesPath('/notes/a', 's.md', 'notes/a.md')).toBe(true);
+    expect(linkNamesPath('/a', 's.md', 'notes/a.md')).toBe(false);
+  });
+
   it('reads past spaces around the link path and any number of leading slashes', () => {
     expect(linkNamesPath(' papers/a.pdf ', 's.md', 'papers/a.pdf')).toBe(true);
     expect(linkNamesPath('//papers/a.pdf', 's.md', 'papers/a.pdf')).toBe(true);
