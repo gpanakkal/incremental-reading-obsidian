@@ -64,7 +64,7 @@ function describeSchedule(
 
 /**
  * What a copy import's notice adds about the snippets and cards it took over
- * from the original (see `claimFromBinary`): nothing when it took none.
+ * from the original (see `handToCopy`): nothing when it took none.
  */
 function movedToCopy({
   snippets,
@@ -88,6 +88,8 @@ function movedToCopy({
 
 /** The parentless snippets and cards taken from a file. */
 interface Taken {
+  /** The file's path when they were found, which their links name */
+  from: string;
   snippets: SnippetRow[];
   cards: SRSCardRow[];
 }
@@ -192,81 +194,59 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * Adopt the snippets taken from a note before it became an article, then
-   * bring any view of that note in line with their new owner.
-   *
-   * An in-place import leaves the snippets where they are, so the note keeps
-   * its highlights — they are simply reached by parent id from here on.
-   * @param articleFile the copy, when importing as one. The copy takes
-   * ownership: the snippets are re-pointed at it and their highlights move
-   * with them, so the note that was copied loses its own.
-   * @returns the adopted rows, so a caller can report how many changed hands
+   * Adopt the snippets and cards taken from `file` before it became the
+   * article `articleId` where it is (see `adoptOrphans`), then reload its
+   * highlights: they stay where they are, reached by parent id from here on.
+   * A card made from a note keeps its embed there, which is where its context
+   * is found (see `backlinkRange`).
    */
-  private async claimSnippets(
-    noteFile: TFile,
-    articleId: string,
-    articleFile?: TFile
-  ): Promise<SnippetRow[]> {
-    const snippets = this.plugin.reviewManager?.snippets;
-    if (!snippets) return [];
-
-    const adopted = await snippets.adoptOrphans(noteFile, articleId);
-    if (adopted.length === 0) return adopted;
-
-    if (articleFile) {
-      await snippets.repointSource(adopted, articleFile);
-      snippets.offsetTracker.loadHighlights(noteFile.path, []);
-    } else {
-      // Reload under the new parent id so the tracker holds the same
-      // highlights the backlink lookup used to supply.
-      await snippets.getHighlights(noteFile);
-    }
-
-    this.app.workspace.trigger('ir-highlights-changed', noteFile.path);
-    return adopted;
-  }
-
-  /**
-   * Adopt the snippets and cards taken from the file with no frontmatter `pdf`
-   * before it became the article `articleId` (see `adoptOrphans`), then reload
-   * its highlights: they stay where they are, reached by parent id from here
-   * on.
-   */
-  async claimFromBinary(pdf: TFile, articleId: string): Promise<void> {
+  private async claimInPlace(file: TFile, articleId: string): Promise<void> {
     const reviewManager = this.plugin.reviewManager;
     if (!reviewManager) return;
     const { snippets, cards } = reviewManager;
 
     const adopted = [
-      ...(await snippets.adoptOrphans(pdf, articleId)),
-      ...(await cards.adoptOrphans(pdf, articleId)),
+      ...(await snippets.adoptOrphans(file, articleId)),
+      ...(await cards.adoptOrphans(file, articleId)),
     ];
     if (adopted.length === 0) return;
-    await snippets.getHighlights(pdf);
-    this.app.workspace.trigger('ir-highlights-changed', pdf.path);
+    await snippets.getHighlights(file);
+    this.app.workspace.trigger('ir-highlights-changed', file.path);
   }
 
   /**
-   * The parentless snippets and cards taken from the file with no frontmatter
-   * `pdf`, for {@link handToCopy}. Read before the copy is made: once it is,
-   * a link by name alone may resolve to the copy instead.
+   * {@link claimInPlace} for a file with no frontmatter, a PDF say, whose row
+   * is all that makes it an article.
    */
-  private async takenFrom(pdf: TFile): Promise<Taken> {
+  async claimFromBinary(pdf: TFile, articleId: string): Promise<void> {
+    return this.claimInPlace(pdf, articleId);
+  }
+
+  /**
+   * The parentless snippets and cards taken from `file`, for
+   * {@link handToCopy}. Read before the copy is made: once it is, a link by
+   * name alone may resolve to the copy instead. The path is kept as well:
+   * renamed meanwhile, `file` would carry its new one.
+   */
+  private async takenFrom(file: TFile): Promise<Taken> {
     return {
-      snippets: await this.findParentlessFrom<SnippetRow>('snippet', pdf),
-      cards: await this.findParentlessFrom<SRSCardRow>('srs_card', pdf),
+      from: file.path,
+      snippets: await this.findParentlessFrom<SnippetRow>('snippet', file),
+      cards: await this.findParentlessFrom<SRSCardRow>('srs_card', file),
     };
   }
 
   /**
-   * Give `taken` from `pdf` to the article `articleId` imported as its copy
+   * Give `taken` from `file` to the article `articleId` imported as its copy
    * `copy`, which takes them over: their source links are re-pointed at it,
-   * keeping each link's page and selection, and `pdf` loses their highlights
-   * to it.
+   * keeping each link's subpath (a PDF's page and selection), and `file`
+   * loses their highlights to it. Nothing is written to `file`: a card made
+   * from a note keeps its embed there, as the copy, made from its text, has
+   * one too.
    * @returns how many snippets and cards changed hands
    */
   private async handToCopy(
-    pdf: TFile,
+    file: TFile,
     taken: Taken,
     articleId: string,
     copy: TFile
@@ -280,14 +260,14 @@ export class ArticleManager extends ItemManager {
     await this.adoptRows('srs_card', taken.cards, articleId);
     await this.retargetSources(
       [...taken.snippets, ...taken.cards],
-      pdf.path,
+      taken.from,
       copy
     );
     this.plugin.reviewManager?.snippets.offsetTracker.loadHighlights(
-      pdf.path,
+      file.path,
       []
     );
-    this.app.workspace.trigger('ir-highlights-changed', pdf.path);
+    this.app.workspace.trigger('ir-highlights-changed', file.path);
     return counts;
   }
 
@@ -320,8 +300,8 @@ export class ArticleManager extends ItemManager {
 
     if (refMatch && refMatch.id === existingId) {
       // Nothing left to import, but re-running it on an article is the only
-      // way a user can repair snippets stranded by an earlier import.
-      await this.claimSnippets(file, refMatch.id);
+      // way a user can repair snippets and cards stranded by an earlier import.
+      await this.claimInPlace(file, refMatch.id);
       Obsidian.notify(`Note is already an article; canceling import`);
       return null;
     } else if (refMatch) {
@@ -341,7 +321,7 @@ export class ArticleManager extends ItemManager {
           'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
           [file.path, existingId]
         );
-        await this.claimSnippets(file, existingId);
+        await this.claimInPlace(file, existingId);
         Obsidian.notify(
           `Linked "${file.basename}" to existing article with the same ID`
         );
@@ -359,7 +339,7 @@ export class ArticleManager extends ItemManager {
 
     await this.insertImported(id, file.path, priority, fixedIntervalDays);
 
-    await this.claimSnippets(file, id);
+    await this.claimInPlace(file, id);
 
     const titleSlice = getContentSlice(
       file.basename,
@@ -412,7 +392,7 @@ export class ArticleManager extends ItemManager {
     if (existing && !existing.deleted) {
       // Nothing left to import, but re-running it is how a user repairs
       // snippets and cards stranded without a parent
-      await this.claimFromBinary(file, existing.id);
+      await this.claimInPlace(file, existing.id);
       Obsidian.notify(`"${file.name}" is already an article; canceling import`);
       return this.fetch(existing.id);
     }
@@ -434,7 +414,7 @@ export class ArticleManager extends ItemManager {
         [Date.now(), existing.id]
       );
       // Taken from the file while its row was deleted, they had no parent
-      await this.claimFromBinary(file, existing.id);
+      await this.claimInPlace(file, existing.id);
       Obsidian.notify(
         `Restored the article "${titleSlice}" to the queue with its earlier schedule`
       );
@@ -443,7 +423,7 @@ export class ArticleManager extends ItemManager {
 
     const id = crypto.randomUUID();
     await this.insertImported(id, file.path, priority, fixedIntervalDays);
-    await this.claimFromBinary(file, id);
+    await this.claimInPlace(file, id);
 
     const schedulingString = describeSchedule(priority, fixedIntervalDays);
     Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
@@ -603,8 +583,8 @@ export class ArticleManager extends ItemManager {
           [file.path, existingId]
         );
         // No copy was made — the record now points at this note, so its
-        // snippets are adopted in place rather than handed to a copy.
-        await this.claimSnippets(file, existingId);
+        // snippets and cards are adopted in place rather than handed to a copy.
+        await this.claimInPlace(file, existingId);
         Obsidian.notify(
           `Linked "${file.basename}" to existing article with the same ID`
         );
@@ -619,6 +599,7 @@ export class ArticleManager extends ItemManager {
     }
 
     return this.withCopyTarget(file, async (importFileName) => {
+      const taken = await this.takenFrom(file);
       // Create a copy in the articles directory
       const articleFile = await Obsidian.createNote({
         content,
@@ -664,29 +645,16 @@ export class ArticleManager extends ItemManager {
         fixedIntervalDays
       );
 
-      const adopted = await this.claimSnippets(file, id, articleFile);
+      const moved = await this.handToCopy(file, taken, id, articleFile);
 
       const titleSlice = getContentSlice(
         articleFile.basename,
         CONTENT_TITLE_SLICE_LENGTH,
         true
       );
-
-      let snippetMigratedNotice = '';
-      if (adopted.length > 0) {
-        const snippetMigrationCount =
-          adopted.length === 1
-            ? '1 snippet now refers'
-            : `${adopted.length} snippets now refer`;
-
-        snippetMigratedNotice = `; ${snippetMigrationCount} to the copy`;
-      }
-
       const schedulingString = describeSchedule(priority, fixedIntervalDays);
-
       Obsidian.notify(
-        `Imported "${titleSlice}" with ${schedulingString}` +
-          snippetMigratedNotice
+        `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`
       );
       return this.fetch(id);
     });

@@ -107,6 +107,8 @@ This is especially handy for:
 - Notes that only have one passage you want to learn from, which you can extract into a snippet directly instead of importing the whole note.
 - Notes that are well-structured for direct conversion into cards, such as lists of atomic, self-contained information.
 
+If you import a note as an article later, the snippets and cards you already made from it become the article's. Import it as a copy and they move to the copy, their links pointing at it. The original note is left as it was, card embeds and all, but **Go to context** will now go the copy, so the original can be safely deleted.
+
 ### More guides
 
 - [A short guide to incremental reading](https://www.supermemo.wiki/en/learning/incremental-reading)
@@ -116,6 +118,7 @@ This is especially handy for:
 ## Known limitations and issues
 
 - Creating snippets and cards on partial code blocks, blockquotes, LaTeX, and other types of special formatting can break the formatting. It is recommended to include the entire formatted section (such as the entire code block) when making the snippet or card, and then editing it afterwards as desired.
+- A note imported as a copy lands in the plugin data folder with its text unchanged, so a link written as a relative path (Settings → Files and links → **New link format**: "Relative path to file") can point nowhere from there. Card embeds are written in that format too, so the copy shows them broken, and **Go to context** on their cards opens the copy at the top.
 ### PDFs
 - Snippets and cards from a PDF that isn't an article find it by their link alone. If the PDF is moved while Obsidian is closed, or renamed without letting Obsidian update links, they lose their highlights and **Go to context**, and importing the PDF won't pick them up. For a PDF that is an article, the plugin fixes their links itself.
 - Text from a PDF goes into its snippet or card as plain text: anything in it that would turn into Markdown (links, tags, headings, math and so on) or a Templater command gets a backslash, so it reads exactly as the PDF does. Source mode, and the line you're editing, show those backslashes, and a search that spans one won't find the text: `US$5` won't find `US\$5`. A selection in any note that starts or ends between a backslash and the punctuation it escapes takes in both, so a snippet or card made from it reads as the selection did: select from the `#` of `\#tag` and the snippet holds `\#tag`, not a tag.
