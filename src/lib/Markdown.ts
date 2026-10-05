@@ -106,6 +106,16 @@ const restOfLine = (text: string, i: number) =>
   text.slice(i).split(/[\r\n]/, 1)[0];
 
 /**
+ * Whether the character before `i` in `text` is a backslash that escapes the
+ * one at `i`: the last of an odd run of them.
+ */
+function escapesNext(text: string, i: number): boolean {
+  let run = 0;
+  while (text[i - 1 - run] === '\\') run++;
+  return run % 2 === 1;
+}
+
+/**
  * The index of the character in `text` that marks the line starting at `i` as
  * a list item, a rule or a heading's underline, if any: `-` or `+` before
  * whitespace (of any kind: live preview takes them all), the `.` or `)` of
@@ -357,6 +367,37 @@ export class Markdown {
   ): { text: string; range: [number, number] } {
     const escaped = escapeWithMap(text, [start, end]);
     return { text: escaped.text, range: [escaped.at[start], escaped.at[end]] };
+  }
+
+  /**
+   * `[from, to]`, a selection in `text`, widened so that neither end falls
+   * between a backslash and the ASCII punctuation it escapes: a start moves
+   * back before the backslash, an end past the escaped char. Text taken from
+   * the selection then reads as it did in `text`. Split, it would start with
+   * bare syntax (`#tag` of `\#tag`) or end in a backslash that escapes
+   * whatever comes after it.
+   *
+   * A backslash escapes only when an even run of them comes before it, so
+   * the `#` of `\\#` is no escape's.
+   *
+   * Code spans and blocks are snapped too, though a backslash in them is
+   * literal: text cut from one at a selection edge is no longer code there.
+   *
+   * @param options.delimited the selection is a card's answer, which a cloze
+   *   delimiter will open: its start moves back off a backslash before
+   *   anything, punctuation or not, which would otherwise escape the
+   *   delimiter (`C:\(} Users {)`), and with it the hidden answer's `<mark>`.
+   */
+  static snapOffEscapes(
+    text: string,
+    [from, to]: readonly [number, number],
+    { delimited = false }: { delimited?: boolean } = {}
+  ): [number, number] {
+    const splits = (at: number) =>
+      escapesNext(text, at) && ASCII_PUNCTUATION.test(text[at] ?? '');
+    const start =
+      (delimited && escapesNext(text, from)) || splits(from) ? from - 1 : from;
+    return [start, splits(to) ? to + 1 : to];
   }
 
   /**

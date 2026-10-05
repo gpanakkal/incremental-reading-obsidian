@@ -235,13 +235,37 @@ export class SnippetManager extends ItemManager {
       return null;
     }
 
-    const selection = editor.getSelection() || view.getSelection();
+    const editorSelection = editor.getSelection();
+    const selection = editorSelection || view.getSelection();
     if (!selection) {
       Obsidian.notify('Text must be selected');
       return null;
     }
+
+    // The selection's range in the note, snapped off any escape pair it
+    // splits so the snippet reads as the selection did, and its text and
+    // body-relative offsets for highlighting. `editor.cm`, the CodeMirror
+    // view, is undocumented Obsidian API. Its main range is the one
+    // `getSelection` reads.
+    const cm = editor.cm as Editor['cm'] | undefined;
+    let source: {
+      text: string;
+      offsets: { start: number; end: number };
+    } | null = null;
+    if (cm) {
+      const doc = cm.state.doc.toString();
+      const { from, to } = cm.state.selection.main;
+      const [start, end] = Markdown.snapOffEscapes(doc, [from, to]);
+      const bodyStart = Obsidian.getBodyStartOffset(doc);
+      source = {
+        text: doc.slice(start, end),
+        offsets: { start: start - bodyStart, end: end - bodyStart },
+      };
+    } else {
+      console.warn(`[createSnippet] Could not access the CodeMirror view`);
+    }
     const snippetFile = await Obsidian.createFromText(
-      selection,
+      editorSelection && source ? source.text : selection,
       Obsidian.getDirectory('snippet'),
       this.app
     );
@@ -299,36 +323,6 @@ export class SnippetManager extends ItemManager {
       ? SnippetManager.childPriority(currentFileEntry, snippetDueTime)
       : DEFAULT_PRIORITY;
 
-    // Calculate body-relative character offsets for highlighting
-    let offsets: { start: number; end: number } | null = null;
-
-    // Try to get offsets from CodeMirror
-    const cm = editor.cm;
-    if (cm && cm.state && cm.state.selection) {
-      const range = cm.state.selection.ranges[0];
-      if (range) {
-        // Get body start to convert to body-relative offsets
-        const docContent = cm.state.doc.toString();
-        const bodyStart = Obsidian.getBodyStartOffset(docContent);
-
-        offsets = {
-          start: range.from - bodyStart, // body-relative
-          end: range.to - bodyStart, // body-relative
-        };
-      } else {
-        console.warn(`[createSnippet] CodeMirror selection has no ranges`);
-      }
-    } else {
-      console.warn(
-        `[createSnippet] Could not access CodeMirror instance or selection:`,
-        {
-          hasCm: !!cm,
-          hasState: !!cm?.state,
-          hasSelection: !!cm?.state?.selection,
-        }
-      );
-    }
-
     // Create the snippet entry
     const result = await this.createEntry(
       snippetFile,
@@ -336,11 +330,11 @@ export class SnippetManager extends ItemManager {
       snippetDueTime,
       priority,
       currentFileEntry?.id,
-      offsets ?? undefined
+      source?.offsets
     );
 
     // Refresh highlights immediately after snippet creation.
-    if (offsets && cm) {
+    if (cm) {
       await this.refreshHighlightsAfterSnippetCreation(
         currentFile,
         snippetFile,

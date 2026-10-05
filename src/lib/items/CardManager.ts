@@ -208,10 +208,13 @@ export class CardManager extends ItemManager {
       return;
     }
 
-    const bounds = [
-      selectionBounds.start.ch - start,
-      selectionBounds.end.ch - start,
-    ] as const;
+    // Moved off any escape pair it splits, and off a backslash that would
+    // escape the delimiter put after it
+    const bounds = Markdown.snapOffEscapes(
+      line,
+      [selectionBounds.start.ch - start, selectionBounds.end.ch - start],
+      { delimited: true }
+    );
 
     try {
       const withDelimiters = this.delimitText(line, bounds)[0];
@@ -266,16 +269,33 @@ export class CardManager extends ItemManager {
       return null;
     }
 
-    const { from, to, text } = selection;
-    const start = editor.offsetToPos(from);
-    const end = editor.offsetToPos(to);
-    if (editor.getRange(start, end) !== text) {
+    if (
+      editor.getRange(
+        editor.offsetToPos(selection.from),
+        editor.offsetToPos(selection.to)
+      ) !== selection.text
+    ) {
       Obsidian.notify(`The selected text changed before the card was made`);
       return null;
     }
+    // The span and its answer, snapped off any escape pair they split
+    const doc = editor.getValue();
+    const [from, to] = Markdown.snapOffEscapes(doc, [
+      selection.from,
+      selection.to,
+    ]);
+    const text = doc.slice(from, to);
+    const shift = selection.from - from;
+    const start = editor.offsetToPos(from);
+    const end = editor.offsetToPos(to);
 
     try {
-      const withDelimiters = this.delimitText(text, answer)[0];
+      const withDelimiters = this.delimitText(
+        text,
+        Markdown.snapOffEscapes(text, [answer[0] + shift, answer[1] + shift], {
+          delimited: true,
+        })
+      )[0];
       const reviewCard = await this.createAndEmbed(
         editor,
         currentFile,

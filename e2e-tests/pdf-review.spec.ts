@@ -21,6 +21,7 @@ import {
   openFileInActiveLeaf,
   readMarkdown,
   REVIEW_VIEW_TYPE,
+  setDefaultEditingMode,
   setNativeMenus,
   watchNotices,
 } from './helpers';
@@ -983,6 +984,267 @@ test.describe('Snippets and cards from a PDF article', () => {
       await readMarkdown(window, card.body!),
       last.slice(0, answer) + `${left} b ${right}` + last.slice(answer + 1)
     );
+  });
+
+  /**
+   * A snippet of all of the hostile fixture's first page, its text escaped:
+   * `\#ir-card` and all. Leaves review open on the PDF.
+   */
+  async function hostileSnippet(page: Page) {
+    await importFixture(page, HOSTILE_PDF_PATH);
+    await beginReview(page);
+    await expect(textItem(page, 1, 5)).toBeAttached();
+    const last = HOSTILE_PARAGRAPHS[3];
+    await selectText(page, [1, 0, 0], [1, 5, last.length]);
+    await expect.poll(() => viewerSelection(page)).not.toBeNull();
+    await page.getByRole('button', { name: 'Create snippet' }).click();
+    await expect.poll(() => snippets(page)).toHaveLength(1);
+    const [snippet] = await snippets(page);
+    expect(snippet.body).toContain('\\#ir-card \\#ir-text-snippet');
+    return snippet;
+  }
+
+  /** The id of the `table` row at `reference`. */
+  const rowId = (page: Page, table: string, reference: string) =>
+    page.evaluate(
+      ([table, ref]) => {
+        const { app } = window as unknown as { app: PageApp };
+        const { repo } =
+          app.plugins.plugins['incremental-reading'].reviewManager;
+        return String(
+          repo.query(`SELECT id FROM ${table} WHERE reference = $1`, [ref])[0]
+            .id
+        );
+      },
+      [table, reference] as const
+    );
+
+  /**
+   * Make the `table` row `id` due now and show it in the review tab. A new
+   * item is due tomorrow at the soonest, and review moves off one that is not
+   * due when it next looks.
+   */
+  async function reviewNow(page: Page, table: string, id: string) {
+    await page.evaluate(
+      async ([table, itemId, viewType]) => {
+        const { app } = window as unknown as {
+          app: PageApp & {
+            workspace: {
+              setActiveLeaf(leaf: unknown, params: { focus: boolean }): void;
+            };
+          };
+        };
+        const plugin = app.plugins.plugins['incremental-reading'];
+        const { repo } = plugin.reviewManager as unknown as {
+          repo: { mutate(sql: string, params: unknown[]): Promise<unknown> };
+        };
+        await repo.mutate(`UPDATE ${table} SET due = $1 WHERE id = $2`, [
+          Date.now() - 60_000,
+          itemId,
+        ]);
+        const [leaf] = app.workspace.getLeavesOfType(viewType);
+        app.workspace.setActiveLeaf(leaf, { focus: true });
+        plugin.store.dispatch({ type: 'page/setPage', payload: 'review' });
+        plugin.store.dispatch({
+          type: 'currentItemId/setCurrentItemId',
+          payload: itemId,
+        });
+      },
+      [table, id, REVIEW_VIEW_TYPE] as const
+    );
+  }
+
+  /**
+   * The CodeMirror editor of the active tab, or of review's. `editor.cm` is
+   * undocumented Obsidian API. Each `page.evaluate` below finds it for itself,
+   * since what runs in the page can't share code with the test.
+   */
+  type EditorPick = 'active' | 'review';
+  const editorDoc = (page: Page, editor: EditorPick) =>
+    page.evaluate(
+      ([editor, viewType]) => {
+        type CM = { state: { doc: { toString(): string } } };
+        const { app } = window as unknown as {
+          app: {
+            workspace: {
+              activeEditor: { editor?: { cm: CM } } | null;
+              getLeavesOfType(type: string): {
+                view: { reviewEditor(): { cm: CM } | null };
+              }[];
+            };
+          };
+        };
+        const cm =
+          editor === 'active'
+            ? app.workspace.activeEditor?.editor?.cm
+            : app.workspace.getLeavesOfType(viewType)[0]?.view.reviewEditor()
+                ?.cm;
+        return cm?.state.doc.toString() ?? null;
+      },
+      [editor, REVIEW_VIEW_TYPE] as const
+    );
+
+  /**
+   * Select from `from` to `to` past the start of `text` in an editor's note,
+   * in its state: a drag can't be made to land between a `\` and what it
+   * escapes. Fails if the editor moves the selection after: live preview
+   * moves a selection a script sets off the hidden `\`, so these tests run in
+   * source mode.
+   */
+  const selectInEditor = (
+    page: Page,
+    editor: EditorPick,
+    text: string,
+    [from, to]: [number, number]
+  ) =>
+    page.evaluate(
+      async ([editor, text, from, to, viewType]) => {
+        type CM = {
+          state: {
+            doc: { toString(): string };
+            selection: { main: { anchor: number; head: number } };
+          };
+          dispatch(spec: { selection: { anchor: number; head: number } }): void;
+        };
+        const { app } = window as unknown as {
+          app: {
+            workspace: {
+              activeEditor: { editor?: { cm: CM } } | null;
+              getLeavesOfType(type: string): {
+                view: { reviewEditor(): { cm: CM } | null };
+              }[];
+            };
+          };
+        };
+        const cm =
+          editor === 'active'
+            ? app.workspace.activeEditor?.editor?.cm
+            : app.workspace.getLeavesOfType(viewType)[0]?.view.reviewEditor()
+                ?.cm;
+        const at = cm?.state.doc.toString().indexOf(text) ?? -1;
+        if (!cm || at < 0) throw new Error(`No editor holds ${text}`);
+        cm.dispatch({ selection: { anchor: at + from, head: at + to } });
+        // Live preview's move comes on a timeout
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const { anchor, head } = cm.state.selection.main;
+        if (anchor !== at + from || head !== at + to) {
+          throw new Error(
+            `Selection moved from ${at + from}-${at + to} to ${anchor}-${head}`
+          );
+        }
+      },
+      [editor, text, from, to, REVIEW_VIEW_TYPE] as const
+    );
+
+  /** The card review is showing, and the placeholder of its hidden answer. */
+  const cardViewer = (page: Page) =>
+    page.locator('.ir-review-interface .ir-card-viewer');
+
+  test('keeps the escape in a snippet and a card made in a Markdown tab from a selection starting between a `\\` and the `#` it escapes', async () => {
+    await setDefaultEditingMode(window, 'source');
+    const parent = await hostileSnippet(window);
+    await window.evaluate(async (reference) => {
+      const { app } = window as unknown as {
+        app: PageApp & {
+          workspace: {
+            setActiveLeaf(leaf: unknown, params: { focus: boolean }): void;
+          };
+        };
+      };
+      const leaf = app.workspace.getLeaf('tab');
+      await leaf.openFile(app.vault.getFileByPath(reference));
+      app.workspace.setActiveLeaf(leaf, { focus: true });
+    }, parent.reference);
+    const tag = '\\#ir-card';
+    await expect.poll(() => editorDoc(window, 'active')).toContain(tag);
+
+    // From the `#`, past the `\` before it, to the end of the tag
+    await selectInEditor(window, 'active', tag, [1, tag.length]);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+
+    await expect.poll(() => snippets(window)).toHaveLength(2);
+    const child = (await snippets(window)).find(
+      (s) => s.reference !== parent.reference
+    )!;
+    expect(child.body).toBe(tag);
+    // The highlight in the parent covers the escape too
+    expect(parent.body!.slice(child.start_offset!, child.end_offset!)).toBe(
+      tag
+    );
+    await expect
+      .poll(() => noteSyntax(window, child.reference))
+      .toEqual({
+        ...CLEAN_NOTE,
+        sections: ['yaml', 'paragraph'],
+        frontmatterTags: ['ir-text-snippet'],
+      });
+
+    // The answer, from just after the `\`, on the line the card is made of
+    await selectInEditor(window, 'active', tag, [1, tag.length]);
+    await executeCommandById(window, 'incremental-reading:create-card');
+
+    await expect.poll(() => cards(window)).toHaveLength(1);
+    const [card] = await cards(window);
+    const [left, right] = CLOZE_DELIMITERS;
+    expect(card.body).toContain(`${left} ${tag} ${right}`);
+    expect(card.body).not.toContain(`\\${left}`);
+
+    await reviewNow(
+      window,
+      'srs_card',
+      await rowId(window, 'srs_card', card.reference)
+    );
+    await expect(
+      cardViewer(window).locator('mark.ir-hidden-answer')
+    ).toHaveCount(1);
+    await expect(cardViewer(window)).not.toContainText('<mark');
+  });
+
+  test('keeps the escape in a card made in selection mode from a span and an answer each starting between a `\\` and the `#` it escapes', async () => {
+    await setDefaultEditingMode(window, 'source');
+    const parent = await hostileSnippet(window);
+    await reviewNow(
+      window,
+      'snippet',
+      await rowId(window, 'snippet', parent.reference)
+    );
+    const span = '\\#ir-card \\#ir-text-snippet';
+    await expect.poll(() => editorDoc(window, 'review')).toContain(span);
+    await actionBar(window)
+      .getByRole('button', { name: 'Create card' })
+      .click();
+    await expect(confirmButton(window)).toBeVisible();
+
+    // The span from the `#` of its first tag, past the `\` before it
+    await selectInEditor(window, 'review', span, [1, span.length]);
+    await confirmButton(window).click();
+    await expect(answerText(window)).toHaveText(span.slice(1));
+    // The answer from just after the second tag's `\`
+    await selectAnswer(window, '#ir-text-snippet');
+    await window.keyboard.press('Enter');
+
+    await expect.poll(() => cards(window)).toHaveLength(1);
+    const [card] = await cards(window);
+    const [left, right] = CLOZE_DELIMITERS;
+    expect(card.body).toBe(`\\#ir-card ${left} \\#ir-text-snippet ${right}`);
+    await expect
+      .poll(() => noteSyntax(window, card.reference))
+      .toEqual({
+        ...CLEAN_NOTE,
+        sections: ['yaml', 'paragraph'],
+        frontmatterTags: ['ir-card'],
+      });
+
+    await reviewNow(
+      window,
+      'srs_card',
+      await rowId(window, 'srs_card', card.reference)
+    );
+    await expect(
+      cardViewer(window).locator('mark.ir-hidden-answer')
+    ).toHaveCount(1);
+    await expect(cardViewer(window)).not.toContainText('<mark');
+    await expect(cardViewer(window)).toContainText('#ir-card');
   });
 
   test('says a scanned page has no selectable text, and makes nothing', async () => {
