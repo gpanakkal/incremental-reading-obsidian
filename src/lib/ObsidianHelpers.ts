@@ -272,13 +272,17 @@ export class ObsidianHelpers {
   /**
    * Shared logic for creating items from (possibly empty) text.
    * Throws if it fails to create the file.
+   *
+   * @param titleText the text to name the note after, when not `textContent`
+   *   itself: the text as it reads, say, when `textContent` is escaped.
    */
   static async createFromText(
     textContent: string,
     directory: string,
-    app: App
+    app: App,
+    titleText?: string
   ) {
-    const newNoteName = ObsidianHelpers.createTitle(textContent);
+    const newNoteName = ObsidianHelpers.createTitle(titleText ?? textContent);
     const newNote = await this.createNote({
       content: textContent,
       frontmatter: {

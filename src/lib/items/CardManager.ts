@@ -1,3 +1,4 @@
+import { Markdown } from '#/lib/Markdown';
 import { decodeAnchor } from '#/lib/pdf/pdf-anchor';
 import {
   type PdfOrigin,
@@ -53,9 +54,15 @@ export type CardSelection = { from: number; to: number; text: string };
 
 /**
  * Where a card made other than from a note's text links back to: its parent's
- * row, and the subpath and alias of the link to it.
+ * row, and the subpath and alias of the link to it. And the text to name its
+ * note after, as it reads.
  */
-type CardOrigin = { parent: string | null; subpath: string; alias: string };
+type CardOrigin = {
+  parent: string | null;
+  subpath: string;
+  alias: string;
+  title: string;
+};
 
 export class CardManager extends ItemManager {
   constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
@@ -306,6 +313,8 @@ export class CardManager extends ItemManager {
    * article's row, since a PDF has no frontmatter to find it by; a PDF that is
    * no article leaves it parentless, as a note that is none does, until the
    * PDF is imported (see {@link adoptOrphans}).
+   * The text is escaped before its answer is delimited, so that whatever the
+   * PDF holds reads as plain text: see `Markdown.escape`.
    *
    * @param selection the selection as `readPdfSelection` read it
    * @param answer offsets of the answer within its text
@@ -322,13 +331,16 @@ export class CardManager extends ItemManager {
     }): Promise<ReviewCard | null> {
     const pdf = originFile(origin);
     try {
+      const escaped = Markdown.escapeAround(text, answer);
       return await this.createFileAndEntry(
-        this.delimitText(text, answer)[0],
+        this.delimitText(escaped.text, escaped.range)[0],
         pdf,
         {
           parent: origin.article?.data.id ?? null,
           subpath,
           alias: pageLinkAlias(pdf.basename, decodeAnchor(start).page),
+          // Named as a card from a note is, after its text as it reads
+          title: this.delimitText(text, answer)[0],
         }
       );
     } catch (_error) {
@@ -379,7 +391,8 @@ export class CardManager extends ItemManager {
       cardFile = await Obsidian.createFromText(
         delimitedText,
         Obsidian.getDirectory('card'),
-        this.app
+        this.app,
+        origin?.title
       );
 
       const card = new SRSCard(cardFile.path);

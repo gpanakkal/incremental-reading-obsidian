@@ -28,6 +28,7 @@ const FIXTURES = [
   'PDF fixture.pdf',
   'PDF fixture - layout.pdf',
   'PDF fixture - no text.pdf',
+  'PDF fixture - hostile.pdf',
 ];
 
 /** The options Obsidian's text layer renders with, as in pdf-text.ts. */

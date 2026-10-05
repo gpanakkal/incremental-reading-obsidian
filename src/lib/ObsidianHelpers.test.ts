@@ -1886,6 +1886,40 @@ describe('createFromText', () => {
     expect(calledPath).toMatch(/\.md$/);
   });
 
+  it('names the note after the title text when given one, holding the text itself', async () => {
+    const create = vi.fn().mockResolvedValue(makeTFile());
+    const append = vi.fn().mockResolvedValue(undefined);
+    const app = makeApp({
+      vault: {
+        getAbstractFileByPath: vi.fn().mockReturnValue(null),
+        createFolder: vi.fn().mockResolvedValue(undefined),
+        create,
+        append,
+      } as unknown as App['vault'],
+      fileManager: {
+        processFrontMatter: vi.fn().mockResolvedValue(undefined),
+        renameFile: vi.fn(),
+        generateMarkdownLink: vi.fn(),
+      } as unknown as App['fileManager'],
+    });
+
+    await ObsidianHelpers.createFromText(
+      String.raw`\[\[Note\|alias]] more`,
+      `${DATA_DIRECTORY}/snippets`,
+      app,
+      '[[Note|alias]] more'
+    );
+
+    const [path] = create.mock.calls[0] as [string];
+    expect(path).toMatch(
+      new RegExp(`^${DATA_DIRECTORY}/snippets/alias more - [^/]+\\.md$`)
+    );
+    const written = (append.mock.calls as [unknown, string][])
+      .map(([, text]) => text)
+      .join('');
+    expect(written).toBe(String.raw`\[\[Note\|alias]] more`);
+  });
+
   it('throws when createNote returns undefined (e.g., createFile fails)', async () => {
     const app = makeApp({
       vault: {
