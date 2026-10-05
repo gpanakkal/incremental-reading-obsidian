@@ -491,6 +491,8 @@ describe('retargetSources', () => {
       tail: fc.nat(),
       subpath: fc.constantFrom('', '#page=3&selection=1,2,3,4', '#page=12'),
       alias: fc.constantFrom('name', 'page', 'own', null),
+      // Where the note has moved since its link was written, if it has
+      movedTo: fc.option(folderArb, { nil: null }),
     })
     .map((c) => {
       const fromParts = [...c.fromFolder, c.fromBase + c.extension];
@@ -555,26 +557,40 @@ describe('retargetSources', () => {
         expected,
         form: c.form,
         target,
+        nowAt:
+          c.movedTo === null
+            ? notePath
+            : [...c.movedTo, 'moved', 's.md'].join('/'),
       };
     });
 
-  it('points every link naming the old file at the new one, as it was written, keeping its subpath and renaming its alias', async () => {
+  it('points every link naming the old file at the new one, as it was written where its note was, keeping its subpath and renaming its alias', async () => {
     await fc.assert(
       fc.asyncProperty(linkCaseArb, async (c) => {
         // A bare markdown target's brackets must balance to be read at all
         fc.pre(c.form !== 'markdown' || balanced(c.target));
         vi.restoreAllMocks();
-        const wired = wireSources({ [c.notePath]: c.link });
+        const wired = wireSources({ [c.nowAt]: c.link });
+        const [item] = itemsAt(c.nowAt);
 
         await expect(
-          wired.manager.retargetSources(itemsAt(c.notePath), c.fromPath, c.to)
+          wired.manager.retargetSources(
+            [
+              c.nowAt === c.notePath
+                ? item
+                : { ...item, writtenAt: c.notePath },
+            ],
+            c.fromPath,
+            c.to
+          )
         ).resolves.toBe(1);
 
-        expect(wired.sourceOf(c.notePath)).toBe(c.expected);
-        // A note named without its .md in a wikilink only, as Obsidian does
+        expect(wired.sourceOf(c.nowAt)).toBe(c.expected);
+        // Linked to from where the note is now; a note named without its .md
+        // in a wikilink only, as Obsidian does
         expect(wired.fileToLinktext).toHaveBeenCalledWith(
           c.to,
-          c.notePath,
+          c.nowAt,
           c.form === 'wiki'
         );
       })
@@ -655,20 +671,40 @@ describe('retargetSources', () => {
     expect(wired.sourceOf('s.md')).toBe('[[papers/Paper.pdf|Paper]]');
   });
 
-  it('keeps every alias as written when asked to, as Obsidian does', async () => {
+  it('reads a relative link from where the note was when it was written, for a note that has moved since', async () => {
+    // Written in `notes/` as `../papers/Paper.pdf`; the note is now in `archive/deep/`
     const wired = wireSources({
-      'a.md': '[[papers/Paper.pdf#page=3|Paper, page 3]]',
-      'b.md': '[[papers/Paper.pdf|Paper]]',
+      'archive/deep/s.md': '[[../papers/Paper.pdf#page=3|Paper, page 3]]',
+      'archive/deep/t.md': '[[../papers/Paper.pdf|Paper]]',
     });
 
     await expect(
-      wired.manager.retargetSources(itemsAt('a.md', 'b.md'), FROM, TO, {
-        renameAlias: false,
-      })
-    ).resolves.toBe(2);
+      wired.manager.retargetSources(
+        [
+          { ...itemsAt('archive/deep/s.md')[0], writtenAt: 'notes/s.md' },
+          // Read from where it is now, the link names no such file
+          ...itemsAt('archive/deep/t.md'),
+        ],
+        FROM,
+        TO
+      )
+    ).resolves.toBe(1);
 
-    expect(wired.sourceOf('a.md')).toBe(`[[${TO.path}#page=3|Paper, page 3]]`);
-    expect(wired.sourceOf('b.md')).toBe(`[[${TO.path}|Paper]]`);
+    expect(wired.sourceOf('archive/deep/s.md')).toBe(
+      `[[${TO.path}#page=3|Paper copy, page 3]]`
+    );
+    // Linked to from where the note is now
+    expect(wired.fileToLinktext).toHaveBeenCalledWith(
+      TO,
+      'archive/deep/s.md',
+      true
+    );
+    expect(
+      new Set(wired.fileToLinktext.mock.calls.map((call) => call.at(1)))
+    ).toStrictEqual(new Set(['archive/deep/s.md']));
+    expect(wired.sourceOf('archive/deep/t.md')).toBe(
+      '[[../papers/Paper.pdf|Paper]]'
+    );
   });
 
   it('goes on to the next note when one cannot be written', async () => {

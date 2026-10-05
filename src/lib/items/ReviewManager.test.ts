@@ -1,4 +1,10 @@
-import { DATA_DIRECTORY, MS_PER_DAY } from '#/lib/constants';
+import {
+  ARTICLE_TAG,
+  CARD_TAG,
+  DATA_DIRECTORY,
+  MS_PER_DAY,
+  SNIPPET_TAG,
+} from '#/lib/constants';
 import { resolveItemContext } from '#/lib/item-context';
 import { evictedSpot } from '#/lib/moved-note-scan';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
@@ -18,6 +24,7 @@ import type {
   SRSCardRow,
 } from '#/lib/types';
 import { getEndOfDay } from '#/lib/utils';
+import { makeLinkVault } from '#/test/link-vault';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { App, TAbstractFile, TFile } from 'obsidian';
@@ -492,6 +499,83 @@ function wirePaths(paths: readonly string[]) {
     rename,
     remove,
     create,
+  };
+}
+
+/** An item's note: its id, its type's tag, and its `source`, if any. */
+const note = (id: string, tag: string, source?: string) => ({
+  'ir-id': id,
+  tags: [tag],
+  ...(source === undefined ? {} : { source }),
+});
+
+/**
+ * A manager over a real database and a vault whose links resolve (see
+ * `makeLinkVault`), with Obsidian's link-update queue: `hold` puts a rename's
+ * link update in it that waits until released, as one does on Obsidian's prompt.
+ */
+function wireRenames(notes: Record<string, Record<string, unknown> | null>) {
+  const vault = makeLinkVault(notes);
+  let tail: Promise<unknown> = Promise.resolve();
+  const updateQueue = {
+    queue: vi.fn((job: () => Promise<unknown>) => (tail = tail.then(job, job))),
+  };
+  Object.assign(vault.app.fileManager, { updateQueue });
+  const repo = TestRepository.create();
+  const manager = new ReviewManager(makePlugin(vault.app), repo);
+
+  const hold = () => {
+    let release!: () => void;
+    void updateQueue.queue(() => new Promise<void>((done) => (release = done)));
+    return () => release();
+  };
+  /** Settles once every job queued so far has, the ones they queue too. */
+  const drained = async () => {
+    let seen: Promise<unknown>;
+    do {
+      seen = tail;
+      await seen;
+      await new Promise((done) => setTimeout(done, 0));
+    } while (seen !== tail);
+  };
+  const rename = (from: string, to: string) =>
+    manager.handleExternalRename(vault.move(from, to), from);
+  const insert = (
+    table: 'article' | 'snippet' | 'srs_card',
+    id: string,
+    reference: string,
+    parent: string | null = null
+  ) => {
+    if (table === 'article') {
+      repo.mutate(
+        `INSERT INTO article (id, reference, due, interval, priority)
+         VALUES ($1, $2, $3, 86400000, 30)`,
+        [id, reference, YEAR_2000_MS]
+      );
+    } else if (table === 'snippet') {
+      repo.mutate(
+        `INSERT INTO snippet (id, reference, parent, due, interval, priority)
+         VALUES ($1, $2, $3, $4, 86400000, 30)`,
+        [id, reference, parent, YEAR_2000_MS]
+      );
+    } else {
+      repo.mutate(
+        `INSERT INTO srs_card (id, reference, parent, created_at, due,
+           stability, difficulty, elapsed_days, scheduled_days, state)
+         VALUES ($1, $2, $3, $4, $4, 0, 0, 0, 0, 0)`,
+        [id, reference, parent, YEAR_2000_MS]
+      );
+    }
+  };
+  return {
+    ...vault,
+    repo,
+    manager,
+    updateQueue,
+    hold,
+    drained,
+    rename,
+    insert,
   };
 }
 
@@ -3386,28 +3470,6 @@ describe('ReviewManager tracking files without frontmatter by path', () => {
     }
   });
 
-  it("points its snippets' and cards' source links at the file where it went, and only for a row that moved", async () => {
-    const wired = wirePaths(['papers/a.pdf', 'other.pdf']);
-    wired.insertArticle('a', 'papers/a.pdf');
-    const retarget = vi
-      .spyOn(wired.manager.articles, 'retargetChildSources')
-      .mockResolvedValue(0);
-
-    await wired.rename('papers/a.pdf', 'archive/b.pdf');
-    // Keeping aliases as Obsidian's own updater does, which may run after
-    expect(retarget).toHaveBeenCalledExactlyOnceWith(
-      'a',
-      'papers/a.pdf',
-      wired.files.get('archive/b.pdf'),
-      { renameAlias: false }
-    );
-
-    // An untracked file, and a rename that goes nowhere
-    await wired.rename('other.pdf', 'elsewhere.pdf');
-    await wired.rename('archive/b.pdf', 'archive/b.pdf');
-    expect(retarget).toHaveBeenCalledOnce();
-  });
-
   it('gives a tombstone brought back by its file turning up the parentless snippets and cards taken from that file, and keeps it back if that fails', async () => {
     const wired = wirePaths([]);
     wired.insertArticle('old', 'b.pdf', true);
@@ -3495,26 +3557,8 @@ describe('ReviewManager tracking files without frontmatter by path', () => {
     expect(retarget).toHaveBeenCalledExactlyOnceWith(
       'here',
       'a.pdf',
-      wired.files.get('b.pdf'),
-      undefined
+      wired.files.get('b.pdf')
     );
-  });
-
-  it('keeps the row where it went when its links cannot be re-pointed', async () => {
-    const wired = wirePaths(['a.pdf']);
-    wired.insertArticle('a', 'a.pdf');
-    const failure = new Error('bad YAML');
-    vi.spyOn(wired.manager.articles, 'retargetChildSources').mockRejectedValue(
-      failure
-    );
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    await wired.rename('a.pdf', 'b.pdf');
-
-    expect(wired.repo.rows('article')).toStrictEqual([
-      { id: 'a', reference: 'b.pdf', deleted: false },
-    ]);
-    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
   });
 
   it('leaves every other row where it is', async () => {
@@ -3735,8 +3779,7 @@ describe('ReviewManager tracking files without frontmatter by path', () => {
       expect(retarget).toHaveBeenCalledExactlyOnceWith(
         'a',
         'new.pdf',
-        wired.files.get('old.pdf'),
-        undefined
+        wired.files.get('old.pdf')
       );
     });
 
@@ -3953,5 +3996,413 @@ describe('ReviewManager tracking files without frontmatter by path', () => {
         )
       );
     });
+  });
+});
+
+describe('ReviewManager following source links on rename', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("moves a renamed article's row at once, and its children's links once Obsidian's link update ahead is done", async () => {
+    const wired = wireRenames({
+      'IR/articles/A.md': note('art', ARTICLE_TAG),
+      'IR/snippets/s.md': note('s', SNIPPET_TAG, '[[IR/articles/A|A]]'),
+      'IR/cards/c.md': note('c', CARD_TAG, '[A](IR/articles/A.md)'),
+    });
+    wired.insert('article', 'art', 'IR/articles/A.md');
+    wired.insert('snippet', 's', 'IR/snippets/s.md', 'art');
+    wired.insert('srs_card', 'c', 'IR/cards/c.md', 'art');
+
+    const release = wired.hold();
+    await wired.rename('IR/articles/A.md', 'IR/articles/B.md');
+    await new Promise((done) => setTimeout(done, 0));
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'art', reference: 'IR/articles/B.md', deleted: false },
+    ]);
+    expect(wired.sourceOf('IR/snippets/s.md')).toBe('[[IR/articles/A|A]]');
+
+    release();
+    await wired.drained();
+    expect(wired.sourceOf('IR/snippets/s.md')).toBe('[[IR/articles/B|B]]');
+    expect(wired.sourceOf('IR/cards/c.md')).toBe('[B](IR/articles/B.md)');
+  });
+
+  it('re-points the parentless snippets and cards of a renamed plain note and a plain PDF, and moves their highlights', async () => {
+    const wired = wireRenames({
+      'notes/N.md': {},
+      'papers/P.pdf': null,
+      'IR/snippets/s.md': note(
+        's',
+        SNIPPET_TAG,
+        '[[papers/P.pdf#page=1|P, page 1]]'
+      ),
+      'IR/snippets/t.md': note('t', SNIPPET_TAG, '[[notes/N|N]]'),
+      'IR/cards/c.md': note('c', CARD_TAG, '[[notes/N]]'),
+    });
+    wired.insert('snippet', 's', 'IR/snippets/s.md');
+    wired.insert('snippet', 't', 'IR/snippets/t.md');
+    wired.insert('srs_card', 'c', 'IR/cards/c.md');
+    const tracker = wired.manager.snippets.offsetTracker;
+    const highlight = (id: string) => ({ id, start: 1, end: 2 }) as never;
+    tracker.loadHighlights('papers/P.pdf', [highlight('s')]);
+    tracker.loadHighlights('notes/N.md', [highlight('t')]);
+
+    await wired.rename('papers/P.pdf', 'archive/Q.pdf');
+    await wired.rename('notes/N.md', 'archive/M.md');
+    await wired.drained();
+
+    expect(wired.sourceOf('IR/snippets/s.md')).toBe(
+      '[[archive/Q.pdf#page=1|Q, page 1]]'
+    );
+    expect(wired.sourceOf('IR/snippets/t.md')).toBe('[[archive/M|M]]');
+    expect(wired.sourceOf('IR/cards/c.md')).toBe('[[archive/M]]');
+    expect(tracker.getHighlights('archive/Q.pdf')).toStrictEqual([
+      highlight('s'),
+    ]);
+    expect(tracker.getHighlights('archive/M.md')).toStrictEqual([
+      highlight('t'),
+    ]);
+  });
+
+  it("points an article PDF's children at where it went, an alias that was its name taking the new one", async () => {
+    const wired = wireRenames({
+      'papers/P.pdf': null,
+      'IR/snippets/s.md': note(
+        's',
+        SNIPPET_TAG,
+        '[[papers/P.pdf#page=3|P, page 3]]'
+      ),
+      'IR/cards/c.md': note('c', CARD_TAG, '[[papers/P.pdf|my words]]'),
+    });
+    wired.insert('article', 'pdf', 'papers/P.pdf');
+    wired.insert('snippet', 's', 'IR/snippets/s.md', 'pdf');
+    wired.insert('srs_card', 'c', 'IR/cards/c.md', 'pdf');
+
+    await wired.rename('papers/P.pdf', 'archive/Q.pdf');
+    await wired.drained();
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'pdf', reference: 'archive/Q.pdf', deleted: false },
+    ]);
+    expect(wired.sourceOf('IR/snippets/s.md')).toBe(
+      '[[archive/Q.pdf#page=3|Q, page 3]]'
+    );
+    expect(wired.sourceOf('IR/cards/c.md')).toBe('[[archive/Q.pdf|my words]]');
+  });
+
+  it("re-points a moved item note's own relative link that its move broke", async () => {
+    const wired = wireRenames({
+      'papers/P.pdf': null,
+      'notes/c.md': note('c', CARD_TAG, '[[../papers/P.pdf]]'),
+    });
+    wired.insert('srs_card', 'c', 'notes/c.md');
+
+    await wired.rename('notes/c.md', 'a/b/c.md');
+    await wired.drained();
+
+    expect(wired.repo.rows('srs_card')).toStrictEqual([
+      { id: 'c', reference: 'a/b/c.md', deleted: false },
+    ]);
+    expect(wired.sourceOf('a/b/c.md')).toBe('[[papers/P.pdf]]');
+  });
+
+  it("follows every file of a renamed folder in one pass once Obsidian's update is done", async () => {
+    const wired = wireRenames({
+      'f/a.md': {},
+      'f/b.pdf': null,
+      'f/c.md': note('art', ARTICLE_TAG),
+      'IR/snippets/s.md': note('s', SNIPPET_TAG, '[[f/a]]'),
+      'IR/cards/c.md': note('c', CARD_TAG, '[[f/b.pdf]]'),
+    });
+    wired.insert('article', 'art', 'f/c.md');
+    wired.insert('snippet', 's', 'IR/snippets/s.md');
+    wired.insert('srs_card', 'c', 'IR/cards/c.md');
+    const query = vi.spyOn(wired.repo, 'query');
+
+    const release = wired.hold();
+    await wired.rename('f/a.md', 'g/a.md');
+    await wired.rename('f/b.pdf', 'g/b.pdf');
+    await wired.rename('f/c.md', 'g/c.md');
+    release();
+    await wired.drained();
+
+    expect(wired.sourceOf('IR/snippets/s.md')).toBe('[[g/a]]');
+    expect(wired.sourceOf('IR/cards/c.md')).toBe('[[g/b.pdf]]');
+    const scans = query.mock.calls.filter(([sql]) =>
+      sql.includes('parent IS NULL')
+    );
+    expect(scans).toHaveLength(1);
+    // One job of its own after the rename's
+    expect(wired.updateQueue.queue).toHaveBeenCalledTimes(2);
+  });
+
+  it('writes nothing to a note whose link Obsidian updated meanwhile', async () => {
+    const wired = wireRenames({
+      'notes/N.md': {},
+      'IR/snippets/s.md': note('s', SNIPPET_TAG, '[[notes/N|N]]'),
+    });
+    wired.insert('snippet', 's', 'IR/snippets/s.md');
+
+    const release = wired.hold();
+    await wired.rename('notes/N.md', 'notes/M.md');
+    // "Just once" on Obsidian's prompt, which keeps the alias
+    const snippet = wired.files.get('IR/snippets/s.md')!;
+    await wired.processFrontMatter(snippet, (fm) => {
+      fm.source = '[[notes/M|N]]';
+    });
+    wired.processFrontMatter.mockClear();
+    release();
+    await wired.drained();
+
+    expect(wired.sourceOf('IR/snippets/s.md')).toBe('[[notes/M|N]]');
+    expect(wired.processFrontMatter).not.toHaveBeenCalled();
+  });
+
+  it('logs links it cannot re-point, and keeps the row where it went', async () => {
+    const wired = wireRenames({
+      'papers/P.pdf': null,
+      'IR/snippets/s.md': note('s', SNIPPET_TAG, '[[papers/P.pdf]]'),
+    });
+    wired.insert('article', 'pdf', 'papers/P.pdf');
+    wired.insert('snippet', 's', 'IR/snippets/s.md', 'pdf');
+    const failure = new Error('bad YAML');
+    vi.spyOn(wired.manager.articles, 'retargetSources').mockRejectedValue(
+      failure
+    );
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await wired.rename('papers/P.pdf', 'b.pdf');
+    await wired.drained();
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'pdf', reference: 'b.pdf', deleted: false },
+    ]);
+    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
+  });
+
+  it('follows nothing for a rename that leaves a file where it was, of a file no item can be taken from, or that changes its type', async () => {
+    const wired = wireRenames({
+      'img/a.png': null,
+      'notes/N.md': {},
+      'notes/X.md': {},
+      'papers/P.pdf': null,
+      'IR/articles/A.md': note('art', ARTICLE_TAG),
+      'IR/cards/x.md': note('x', CARD_TAG, '[[notes/X]]'),
+      'IR/cards/p.md': note('p', CARD_TAG, '[[papers/P.pdf]]'),
+    });
+    wired.insert('article', 'art', 'IR/articles/A.md');
+    wired.insert('srs_card', 'x', 'IR/cards/x.md');
+    wired.insert('srs_card', 'p', 'IR/cards/p.md');
+    const retarget = vi.spyOn(wired.manager.articles, 'retargetSources');
+    const query = vi.spyOn(wired.repo, 'query');
+
+    await wired.rename('img/a.png', 'img/b.png');
+    await wired.rename('notes/N.md', 'notes/N.md');
+    await wired.rename('IR/articles/A.md', 'IR/articles/A.md');
+    await wired.rename('notes/X.md', 'notes/X.pdf');
+    await wired.rename('papers/P.pdf', 'papers/P.md');
+    await wired.drained();
+
+    expect(retarget).not.toHaveBeenCalled();
+    expect(
+      query.mock.calls.filter(([sql]) => sql.includes('parent IS NULL'))
+    ).toStrictEqual([]);
+    expect(wired.sourceOf('IR/cards/x.md')).toBe('[[notes/X]]');
+    expect(wired.sourceOf('IR/cards/p.md')).toBe('[[papers/P.pdf]]');
+  });
+
+  it("re-points a renamed snippet note's own snippets and cards", async () => {
+    const wired = wireRenames({
+      'IR/snippets/s.md': note('s', SNIPPET_TAG),
+      'IR/snippets/t.md': note('t', SNIPPET_TAG, '[[IR/snippets/s|s]]'),
+      'IR/cards/c.md': note('c', CARD_TAG, '[[IR/snippets/s]]'),
+    });
+    wired.insert('snippet', 's', 'IR/snippets/s.md');
+    wired.insert('snippet', 't', 'IR/snippets/t.md', 's');
+    wired.insert('srs_card', 'c', 'IR/cards/c.md', 's');
+
+    await wired.rename('IR/snippets/s.md', 'IR/snippets/renamed.md');
+    await wired.drained();
+
+    expect(wired.repo.rows('snippet')).toContainEqual({
+      id: 's',
+      reference: 'IR/snippets/renamed.md',
+      deleted: false,
+    });
+    expect(wired.sourceOf('IR/snippets/t.md')).toBe(
+      '[[IR/snippets/renamed|renamed]]'
+    );
+    expect(wired.sourceOf('IR/cards/c.md')).toBe('[[IR/snippets/renamed]]');
+  });
+
+  it('re-points the children of a renamed article note that carries no ir-id, found by its path', async () => {
+    const wired = wireRenames({
+      'IR/articles/A.md': { tags: [ARTICLE_TAG] },
+      'IR/snippets/s.md': note('s', SNIPPET_TAG, '[[IR/articles/A]]'),
+    });
+    wired.insert('article', 'art', 'IR/articles/A.md');
+    wired.insert('snippet', 's', 'IR/snippets/s.md', 'art');
+
+    await wired.rename('IR/articles/A.md', 'IR/articles/B.md');
+    await wired.drained();
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'art', reference: 'IR/articles/B.md', deleted: false },
+    ]);
+    expect(wired.sourceOf('IR/snippets/s.md')).toBe('[[IR/articles/B]]');
+  });
+
+  it("follows every file of a renamed folder in one pass, though Obsidian's queue is idle and each file's handler takes its time", async () => {
+    const wired = wireRenames({
+      'f/a.md': {},
+      'f/s.md': note('s', SNIPPET_TAG, '[[f/a]]'),
+    });
+    wired.insert('snippet', 's', 'IR/whatever.md');
+    wired.repo.mutate('UPDATE snippet SET reference = $1 WHERE id = $2', [
+      'f/s.md',
+      's',
+    ]);
+    const query = vi.spyOn(wired.repo, 'query');
+
+    // Fired together, as Obsidian fires a folder's events, the source first
+    const renaming = [
+      wired.rename('f/a.md', 'g/a.md'),
+      wired.rename('f/s.md', 'g/s.md'),
+    ];
+    await Promise.all(renaming);
+    await wired.drained();
+
+    expect(wired.sourceOf('g/s.md')).toBe('[[g/a]]');
+    expect(
+      query.mock.calls.filter(([sql]) => sql.includes('parent IS NULL'))
+    ).toHaveLength(1);
+  });
+
+  it("puts back a rebound article's links when a file is renamed onto its old path, once Obsidian's link update is done", async () => {
+    const wired = wireRenames({
+      'new.pdf': null,
+      'downloads/old.pdf': null,
+      'IR/snippets/s.md': note(
+        's',
+        SNIPPET_TAG,
+        '[[new.pdf#page=1|new, page 1]]'
+      ),
+    });
+    Object.assign(wired.app.vault, { adapter: makeLogAdapter() });
+    wired.insert('article', 'a', 'new.pdf');
+    wired.insert('snippet', 's', 'IR/snippets/s.md', 'a');
+    await recordRebind(
+      wired.repo,
+      { id: 'a', from: 'old.pdf', to: 'new.pdf' },
+      Date.now()
+    );
+
+    const release = wired.hold();
+    await wired.rename('downloads/old.pdf', 'old.pdf');
+    await new Promise((done) => setTimeout(done, 0));
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'old.pdf', deleted: false },
+    ]);
+    expect(wired.sourceOf('IR/snippets/s.md')).toBe(
+      '[[new.pdf#page=1|new, page 1]]'
+    );
+
+    release();
+    await wired.drained();
+    // Its parent's, though `new.pdf` is still there to take the link
+    expect(wired.sourceOf('IR/snippets/s.md')).toBe(
+      '[[old.pdf#page=1|old, page 1]]'
+    );
+  });
+
+  it('follows a rename only where the file went somewhere else and stays the type, a note or a PDF, it was, for every pair of extensions', async () => {
+    const EXTENSIONS = ['md', 'MD', 'Md', 'pdf', 'PDF', 'png', 'txt', ''];
+    const name = (folder: string, extension: string) =>
+      extension === '' ? `${folder}/a` : `${folder}/a.${extension}`;
+    const typeOf = (extension: string) =>
+      ({ md: 'note', pdf: 'pdf' })[extension.toLowerCase()] ?? null;
+
+    // Every case, few as they are, rather than a sample of them
+    const cases = EXTENSIONS.flatMap((fromExtension) =>
+      EXTENSIONS.flatMap((toExtension) =>
+        [false, true].map((moves) => ({ fromExtension, toExtension, moves }))
+      )
+    );
+    for (const { fromExtension, toExtension, moves } of cases) {
+      vi.restoreAllMocks();
+      const from = name('f', fromExtension);
+      const to = name(moves ? 'g' : 'f', toExtension);
+      const wired = wireRenames({
+        [from]: typeOf(fromExtension) === 'note' ? {} : null,
+      });
+      const query = vi.spyOn(wired.repo, 'query');
+
+      await wired.rename(from, to);
+      await wired.drained();
+
+      const followed =
+        from !== to &&
+        typeOf(fromExtension) !== null &&
+        typeOf(fromExtension) === typeOf(toExtension);
+      expect(
+        query.mock.calls.filter(([sql]) => sql.includes('parent IS NULL'))
+      ).toHaveLength(followed ? 1 : 0);
+    }
+  });
+
+  it('follows nothing for a rename it fails on, leaving the failure to its caller alone', async () => {
+    const wired = wireRenames({ 'notes/N.md': {} });
+    const retarget = vi.spyOn(wired.manager.articles, 'retargetSources');
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const release = wired.hold();
+      const file = wired.move('notes/N.md', 'notes/M.md');
+      wired.files.delete('notes/M.md');
+
+      await expect(
+        wired.manager.handleExternalRename(file, 'notes/N.md')
+      ).rejects.toThrow('Failed to find a file at notes/M.md');
+      // Long enough for Node to call a rejection no one handles unhandled
+      await new Promise((done) => setTimeout(done, 10));
+      release();
+      await wired.drained();
+
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(retarget).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
+  it('logs each row whose links it cannot re-point at once, and goes on to the next', async () => {
+    const wired = wireRenames({ 'a.pdf': null, 'b.pdf': null });
+    const failure = new Error('bad YAML');
+    const retarget = vi
+      .spyOn(wired.manager.articles, 'retargetChildSources')
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValue(1);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await wired.manager.followChildSources([
+      { id: 'first', from: 'x.pdf', to: 'a.pdf' },
+      { id: 'second', from: 'y.pdf', to: 'b.pdf' },
+    ]);
+
+    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(retarget).toHaveBeenLastCalledWith(
+      'second',
+      'y.pdf',
+      wired.files.get('b.pdf')
+    );
   });
 });

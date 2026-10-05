@@ -6,8 +6,14 @@ import type {
   QueueSubset,
 } from '#/components/types';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '#/lib/constants';
+import { batchAfterLinkUpdates } from '#/lib/link-update-queue';
 import { appendLog } from '#/lib/log-file';
-import { extensionOfPath, supportsFrontmatter } from '#/lib/mime';
+import {
+  extensionOfPath,
+  getMimeType,
+  isImportable,
+  supportsFrontmatter,
+} from '#/lib/mime';
 import {
   describeReclaim,
   REBIND_LOG_TOPIC,
@@ -51,7 +57,22 @@ import {
 } from '../utils';
 import { ArticleManager } from './ArticleManager';
 import { type CardSelection, CardManager } from './CardManager';
+import { type FileMove, followSourceLinks } from './follow-source-links';
 import { SnippetManager } from './SnippetManager';
+
+/**
+ * Whether links to the file `move` moved can need following: it went
+ * somewhere else, as a type of file an item can be taken from (any that can be
+ * imported), and is still that type. Links to a note renamed to a PDF, or the
+ * other way round, name a file that isn't there any more.
+ */
+function isFollowable({ from, file }: FileMove): boolean {
+  return (
+    from !== file.path &&
+    isImportable(file) &&
+    getMimeType({ extension: extensionOfPath(from) }) === getMimeType(file)
+  );
+}
 
 export default class ReviewManager {
   plugin: IncrementalReadingPlugin;
@@ -60,6 +81,8 @@ export default class ReviewManager {
   snippets: SnippetManager;
   cards: CardManager;
   articles: ArticleManager;
+  /** Follows the links to files that moved: see {@link handleExternalRename}. */
+  #followMoves: (moves: Promise<readonly FileMove[]>) => void;
 
   constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
     this.plugin = plugin;
@@ -68,6 +91,9 @@ export default class ReviewManager {
     this.snippets = new SnippetManager(plugin, repo);
     this.cards = new CardManager(plugin, repo);
     this.articles = new ArticleManager(plugin, repo);
+    this.#followMoves = batchAfterLinkUpdates(this.app, (moves) =>
+      followSourceLinks(this.articles, moves)
+    );
   }
 
   // TODO: remove for production
@@ -640,10 +666,39 @@ export default class ReviewManager {
   }
 
   /**
-   * Update database references in response to Obsidian rename events
+   * Update database references in response to Obsidian rename events, and
+   * once Obsidian's own link update for the rename is done, point the `source`
+   * links that still name where the file was at where it is (see
+   * `followSourceLinks`), as Obsidian does only when it is let: they are the
+   * record of where items were taken from.
+   *
+   * Moves are followed in batches (see `batchAfterLinkUpdates`): each event
+   * gives its moves to one at once, before its first `await`, so a renamed
+   * folder, which fires one event per file all together, is one batch, and
+   * the batch waits for every one of them to update the database first.
    * @param oldPath The vault-relative path the file had before it was moved
    */
-  async handleExternalRename(file: TAbstractFile, oldPath: string) {
+  handleExternalRename(file: TAbstractFile, oldPath: string): Promise<void> {
+    const moves = this.#trackRename(file, oldPath);
+    // A failed rename follows nothing; the caller sees its failure
+    this.#followMoves(
+      moves.then(
+        (all) => all.filter(isFollowable),
+        () => []
+      )
+    );
+    return moves.then(() => undefined);
+  }
+
+  /**
+   * Update database references for a rename, see {@link handleExternalRename}.
+   * @returns the moves whose links to follow: the file's, with its row's id
+   *   when it is an item, and any row it put back where it is
+   */
+  async #trackRename(
+    file: TAbstractFile,
+    oldPath: string
+  ): Promise<FileMove[]> {
     const newPath = file.path;
     const concreteFile = this.app.vault.getFileByPath(newPath);
     if (!concreteFile) {
@@ -655,9 +710,9 @@ export default class ReviewManager {
       // note renamed to another type leaves its row behind, missing, until
       // it's renamed back and found by its ir-id again
       if (!supportsFrontmatter({ extension: extensionOfPath(oldPath) })) {
-        await this.#followPathRename(oldPath, newPath);
+        return this.#followPathRename(oldPath, concreteFile);
       }
-      return;
+      return [];
     }
 
     let type: string | null = null,
@@ -672,11 +727,10 @@ export default class ReviewManager {
         else if (frontmatter.tags.includes(CARD_TAG)) type = 'card';
       }
     );
-    if (!type) {
-      return;
-    }
-
     this.snippets.offsetTracker.renameFile(oldPath, file.path);
+    // A plain note may be what snippets and cards were taken from
+    if (!type) return [{ from: oldPath, file: concreteFile }];
+
     const table = type === 'card' ? 'srs_card' : type;
 
     if (rowId) {
@@ -689,14 +743,21 @@ export default class ReviewManager {
     } else {
       if (oldPath === file.path) {
         console.warn('File reference did not change; ignoring');
-        return;
+        return [];
       }
 
       await this.#repo.mutate(
         `UPDATE ${table} SET reference = $1 WHERE reference = $2`,
         [file.path, oldPath]
       );
+      // Its children name it by its id, which its note doesn't carry
+      const [row] = (await this.#repo.query(
+        `SELECT id FROM ${table} WHERE reference = $1`,
+        [file.path]
+      )) as unknown as { id: string }[];
+      rowId = row?.id;
     }
+    return [{ from: oldPath, file: concreteFile, id: rowId }];
   }
 
   /**
@@ -718,19 +779,26 @@ export default class ReviewManager {
    * Anything else — an image, say — has no row at either path, and costs a
    * read and no write: every write outside a transaction saves the database.
    */
-  async #followPathRename(oldPath: string, newPath: string) {
-    if (oldPath === newPath) return;
+  async #followPathRename(oldPath: string, file: TFile): Promise<FileMove[]> {
+    const newPath = file.path;
+    if (oldPath === newPath) return [];
     const [moving] = (await this.#repo.query(
       'SELECT id FROM article WHERE reference = $1',
       [oldPath]
     )) as unknown as { id: string }[];
     if (!moving) {
       // As if the file had been created there, but for what was taken from
-      // it: their links still name the old path, which Obsidian updates, if
-      // it is let, only after this (task 0031)
-      await this.#reclaimAtPath(newPath, { claim: false });
+      // it: their links still name the old path until they are followed. A
+      // PDF that is no article may still be what snippets and cards were
+      // taken from.
+      const reclaimed = await this.#reclaimAtPath(newPath, { claim: false });
       await this.#restoreAtPath(newPath, { claim: false });
-      return;
+      this.snippets.offsetTracker.renameFile(oldPath, newPath);
+      const moves: FileMove[] = [{ from: oldPath, file }];
+      if (reclaimed) {
+        moves.push({ from: reclaimed.from, file, id: reclaimed.id });
+      }
+      return moves;
     }
 
     this.snippets.offsetTracker.renameFile(oldPath, newPath);
@@ -750,13 +818,7 @@ export default class ReviewManager {
         [newPath, moving.id]
       );
     });
-    // Obsidian updates them itself only when the user lets it, and then
-    // maybe after this has: as it does, keep each alias as written, so its
-    // write and this one agree whichever lands last
-    await this.followChildSources(
-      [{ id: moving.id, from: oldPath, to: newPath }],
-      { renameAlias: false }
-    );
+    return [{ from: oldPath, file, id: moving.id }];
   }
 
   /**
@@ -768,14 +830,13 @@ export default class ReviewManager {
    * failure is logged.
    */
   async followChildSources(
-    moves: readonly { id: string; from: string; to: string }[],
-    options?: { renameAlias?: boolean }
+    moves: readonly { id: string; from: string; to: string }[]
   ) {
     for (const { id, from, to } of moves) {
       const file = this.app.vault.getFileByPath(to);
       if (!file) continue;
       try {
-        await this.articles.retargetChildSources(id, from, file, options);
+        await this.articles.retargetChildSources(id, from, file);
       } catch (error) {
         console.error(error);
       }
@@ -833,17 +894,23 @@ export default class ReviewManager {
    * Put back an article the startup scan rebound by filename away from `path`,
    * now that a file — its own, by path — has turned up there: Sync delivering
    * it late, say. See `reclaimAtPath`.
-   * @param options.claim as for {@link #restoreAtPath}
+   * @param options.claim as for {@link #restoreAtPath}, and whether to point
+   *   the links of its snippets and cards at its file here and now: a rename
+   *   follows them once Obsidian has updated links instead
+   * @returns the article's move, if it was put back
    */
   async #reclaimAtPath(path: string, { claim }: { claim: boolean }) {
     const moved = await reclaimAtPath(this.#repo, path, Date.now());
-    if (!moved) return;
+    if (!moved) return null;
     this.snippets.offsetTracker.renameFile(moved.from, moved.to);
-    await this.followChildSources([moved]);
-    if (claim) await this.#claimAtPath(moved.to, moved.id);
+    if (claim) {
+      await this.followChildSources([moved]);
+      await this.#claimAtPath(moved.to, moved.id);
+    }
     await appendLog(this.app.vault.adapter, REBIND_LOG_TOPIC, [
       describeReclaim(moved),
     ]);
+    return moved;
   }
 
   /**

@@ -706,6 +706,56 @@ export async function setPluginSetting(
 }
 
 /**
+ * Turn Obsidian's "Automatically update internal links" off for this vault, so
+ * a rename asks before it updates links to the file. The test vault ships with
+ * it on.
+ *
+ * Undocumented: the setting is the `alwaysUpdateLinks` vault config, set
+ * through `Vault.setConfig`.
+ */
+export async function askBeforeUpdatingLinks(window: Page) {
+  await waitForLayoutReady(window);
+  await window.evaluate(() => {
+    const { app } = window as unknown as {
+      app: { vault: { setConfig(key: string, value: unknown): void } };
+    };
+    app.vault.setConfig('alwaysUpdateLinks', false);
+  });
+}
+
+/**
+ * Rename the file at `from` to `to` as the file explorer does, through
+ * `FileManager.renameFile`, and answer "Do not update" when Obsidian offers to
+ * update the links to it (see {@link askBeforeUpdatingLinks}).
+ */
+export async function renameDecliningLinkUpdate(
+  window: Page,
+  from: string,
+  to: string
+) {
+  const renaming = window.evaluate(
+    ([from, to]) => {
+      const { app } = window as unknown as {
+        app: {
+          vault: { getFileByPath(path: string): unknown };
+          fileManager: {
+            renameFile(file: unknown, newPath: string): Promise<void>;
+          };
+        };
+      };
+      // Settles only once the prompt is answered
+      return app.fileManager.renameFile(app.vault.getFileByPath(from), to);
+    },
+    [from, to] as const
+  );
+  await window
+    .locator('.modal-container')
+    .getByRole('button', { name: 'Do not update' })
+    .click();
+  await renaming;
+}
+
+/**
  * Write a PDF of at least `minBytes` to `path` through the vault, so Obsidian
  * knows the file and its size at once. It is `fixture`, a PDF, with an
  * incremental update appended that adds one unreferenced stream of zeros:
