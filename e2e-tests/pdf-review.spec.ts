@@ -498,8 +498,11 @@ test.describe('Reading position in a PDF article', () => {
     await closeElectron(app);
     app = await launchElectron(vaultPath);
     window = await openVault(app, vaultPath);
-    await window.setViewportSize({ width: 1280, height: 800 });
 
+    // Don't setViewportSize here. Obsidian reopens the review tab while it boots,
+    // at whatever size the window has (CI's small screens), and resizing the
+    // viewer after that moves its position by a few percent of a page.
+    // Obsidian's own PDF tab moves the same way. Checked as it opened instead
     await showItem(window, pdfId);
     await expectAt(window, stopped);
   });
