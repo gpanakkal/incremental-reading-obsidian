@@ -1,12 +1,18 @@
 /**
- * Snippet and card highlights in a PDF's text layer (tasks 0023, 0041): which
- * characters of which text items each snippet or card covers, and the spans
- * that mark them.
+ * Snippet and card highlights on a PDF's pages (tasks 0023, 0041, 0047):
+ * which characters of which text items each snippet or card covers, and the
+ * boxes that mark them.
+ *
+ * The boxes sit in an overlay of their own over each page's canvas, under its
+ * text layer, positioned in percent of the page. pdf.js keeps the overlay
+ * through a zoom and the page's size carries the boxes with it, so they stay
+ * on screen and on their text while pdf.js hides and redraws the text layer.
+ * Nothing of the plugin's goes into the text layer itself.
  */
 import {
-  ITEM_SELECTOR,
   type ItemSpan,
   itemSpansOnPage,
+  MIN_ANCHOR,
   PAGE_SELECTOR,
   type PageItem,
 } from './pdf-anchor';
@@ -25,20 +31,20 @@ export interface PdfHighlight {
   end: number;
 }
 
-/** A run of an item's characters that the same snippets and cards cover. */
-export interface HighlightSegment extends ItemSpan {
-  /** The covering items' references, outermost first. */
-  refs: string[];
+/** The characters of one text item that one snippet or card covers. */
+export interface HighlightRun extends ItemSpan {
+  ref: string;
+  kind: PdfHighlight['kind'];
 }
 
 /** Where a highlight of each kind goes among those over the very same text. */
 const TIE_DEPTH = { snippet: 0, card: 1 } as const;
 
 /**
- * Nesting order: a highlight that starts earlier wraps one that starts later,
- * a longer one a shorter one, a snippet a card over the very same text, and
- * otherwise the references decide (no two items share one), so the same
- * highlights always nest the same way.
+ * Stacking order: a highlight that starts earlier goes under one that starts
+ * later, a longer one under a shorter one, a snippet under a card over the
+ * very same text, and otherwise the references decide (no two items share
+ * one), so the same highlights always stack the same way.
  */
 function outerFirst(a: PdfHighlight, b: PdfHighlight) {
   return (
@@ -50,53 +56,112 @@ function outerFirst(a: PdfHighlight, b: PdfHighlight) {
 }
 
 /**
- * Split `page`'s `items` into the runs of characters that `highlights` cover,
- * each as long as the same set of snippets covers it: in item order, then in
- * text order. Characters no snippet covers get no segment.
+ * Whether `highlight` may cover any character of `page`, whose anchors are
+ * `[page * MIN_ANCHOR, (page + 1) * MIN_ANCHOR)`.
  */
-export function highlightSegments(
+function mayCoverPage(highlight: PdfHighlight, page: number) {
+  return (
+    highlight.start < (page + 1) * MIN_ANCHOR &&
+    highlight.end > page * MIN_ANCHOR
+  );
+}
+
+/**
+ * What of `page`'s `items` each of `highlights` covers, one run per highlight
+ * and item: the highlights outermost first (the bottom of the stack), each in
+ * item order. Characters no highlight covers get no run.
+ */
+export function pageHighlightRuns(
   highlights: readonly PdfHighlight[],
   page: number,
   items: readonly PageItem[]
-): HighlightSegment[] {
-  const nested = [...highlights].sort(outerFirst);
-  const segments: HighlightSegment[] = [];
-  for (const item of items) {
-    const covers = nested.flatMap((highlight) =>
-      itemSpansOnPage(highlight, page, [item]).map((span) => ({
-        ref: highlight.ref,
-        span,
+): HighlightRun[] {
+  return highlights
+    .filter((highlight) => mayCoverPage(highlight, page))
+    .sort(outerFirst)
+    .flatMap(({ ref, kind, start, end }) =>
+      itemSpansOnPage({ start, end }, page, items).map((span) => ({
+        ...span,
+        ref,
+        kind,
       }))
     );
-    const cuts = [
-      ...new Set(covers.flatMap(({ span }) => [span.start, span.end])),
-    ].sort((a, b) => a - b);
-    cuts.slice(1).forEach((end, i) => {
-      const start = cuts[i];
-      const refs = covers
-        .filter(({ span }) => span.start <= start && end <= span.end)
-        .map(({ ref }) => ref);
-      if (refs.length > 0) segments.push({ idx: item.idx, start, end, refs });
-    });
-  }
-  return segments;
 }
 
-// #region TEXT LAYER DOM
-// Obsidian's patched pdf.js 5.3 text layer (undocumented): see pdf-anchor.ts.
-// An item span's text may already be split into text nodes and child spans by
-// Obsidian's subpath highlight or pdf.js find, which rebuild the item's
-// content whenever they change, dropping the spans painted here.
+/** A box on a page, in percent of the page's width and height. */
+export interface PageBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** A rectangle on screen, as `getBoundingClientRect` and `getClientRects` give. */
+export type ScreenRect = Pick<
+  DOMRectReadOnly,
+  'left' | 'top' | 'width' | 'height'
+>;
 
 /**
- * The class a highlight span carries, as in markdown notes: a card's too, so
- * one set of rules finds, paints and opens them all.
+ * The box around every one of `rects` that has an area, in percent of
+ * `frame`. Null when none has, or `frame` has no area: nothing laid out.
+ * Text set at a slant gets the upright box around it, wider than its glyphs.
+ */
+export function boxAround(
+  rects: readonly ScreenRect[],
+  frame: ScreenRect
+): PageBox | null {
+  const solid = rects.filter(({ width, height }) => width > 0 && height > 0);
+  if (solid.length === 0 || !(frame.width > 0 && frame.height > 0)) {
+    return null;
+  }
+  const left = Math.min(...solid.map((rect) => rect.left));
+  const top = Math.min(...solid.map((rect) => rect.top));
+  const right = Math.max(...solid.map((rect) => rect.left + rect.width));
+  const bottom = Math.max(...solid.map((rect) => rect.top + rect.height));
+  return {
+    left: ((left - frame.left) / frame.width) * 100,
+    top: ((top - frame.top) / frame.height) * 100,
+    width: ((right - left) / frame.width) * 100,
+    height: ((bottom - top) / frame.height) * 100,
+  };
+}
+
+// #region PAGE DOM
+// Obsidian's patched pdf.js 5.3 (undocumented; see pdf-anchor.ts and
+// plans/reference/obsidian-pdf-internals.md): `div.page[data-page-number]`
+// holds `div.canvasWrapper`, which holds the page's canvases, and after it
+// `div.textLayer`, which holds the item spans. A zoom keeps both
+// (`PDFPageView.update` resets with `keepCanvasWrapper` and `keepTextLayer`);
+// pdf.js only prepends canvases to the wrapper and removes old ones, so a
+// box overlay appended there stays, under the text layer. pdf.js hides the
+// text layer with its `hidden` attribute from a zoom until the canvas is
+// redrawn, and rebuilds it whole only when the page went far out of view.
+
+/**
+ * The class each highlight box carries, as a markdown highlight does: a
+ * card's too, so one set of rules finds, paints and opens them all.
  */
 export const HIGHLIGHT_CLASS = 'ir-snippet-highlight';
-/** The class a card's highlight span carries as well, for its color. */
+/** The class a card's highlight box carries as well, for its color. */
 export const CARD_HIGHLIGHT_CLASS = 'ir-card-highlight';
+/** The class of the overlay that holds a page's boxes. */
+export const OVERLAY_CLASS = 'ir-pdf-highlights';
 const REF_ATTR = 'data-snippet-ref';
+const TEXT_LAYER_CLASS = 'textLayer';
+const CANVAS_WRAPPER_CLASS = 'canvasWrapper';
+/**
+ * The attribute pdf.js keeps a text layer's rotation in. `setLayerDimensions`
+ * sets it on every zoom, mostly to the value it had.
+ */
+const ROTATION_ATTR = 'data-main-rotation';
 
+/** The text layer of the page div `pageEl`, if it has one. */
+function textLayerOf(pageEl: Element) {
+  return pageEl.querySelector<HTMLElement>(`.${TEXT_LAYER_CLASS}`);
+}
+
+/** The text nodes of `el`, in order. */
 function textNodesIn(el: Element): Text[] {
   const walker = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   const nodes: Text[] = [];
@@ -106,160 +171,133 @@ function textNodesIn(el: Element): Text[] {
   return nodes;
 }
 
-/** The refs of the highlight spans around `node` inside `item`, outermost first. */
-function refsAround(node: Node, item: Element): string[] {
-  const refs: string[] = [];
-  // `node` is in `item`, so the walk up ends there
-  for (let el = node.parentElement!; el !== item; el = el.parentElement!) {
-    if (el.classList.contains(HIGHLIGHT_CLASS)) {
-      refs.unshift(el.getAttribute(REF_ATTR)!);
-    }
-  }
-  return refs;
-}
-
-function sameRefs(a: readonly string[], b: readonly string[]) {
-  return a.length === b.length && a.every((ref, i) => ref === b[i]);
-}
-
-/** The runs `item`'s highlight spans mark now, as {@link highlightSegments} has them. */
-function paintedSegments(item: Element, idx: number): HighlightSegment[] {
-  const runs: HighlightSegment[] = [];
-  let offset = 0;
+/**
+ * Where characters `start` to `end` of `item` are on screen. Obsidian's
+ * subpath highlight and pdf.js find may have split its text into several
+ * nodes, so each one's part is measured on its own: a range over a whole
+ * child span would report the span's box as well.
+ */
+function rectsOfChars(item: Element, start: number, end: number) {
+  const range = item.ownerDocument.createRange();
+  const rects: ScreenRect[] = [];
+  let from = 0;
   for (const node of textNodesIn(item)) {
-    const { length } = node;
-    const refs = refsAround(node, item);
-    const last = runs[runs.length - 1];
-    // A snippet's run is unbroken, so one whose snippets match the last's
-    // carries it on
-    if (last && sameRefs(last.refs, refs)) {
-      last.end += length;
-    } else if (refs.length > 0) {
-      runs.push({ idx, start: offset, end: offset + length, refs });
-    }
-    offset += length;
+    // This node's part of the run, if it holds any
+    const first = Math.max(start - from, 0);
+    const last = Math.min(end - from, node.length);
+    from += node.length;
+    if (first >= last) continue;
+    range.setStart(node, first);
+    range.setEnd(node, last);
+    rects.push(...Array.from(range.getClientRects()));
   }
-  return runs;
+  return rects;
 }
 
-function sameSegments(a: HighlightSegment[], b: HighlightSegment[]) {
-  return (
-    a.length === b.length &&
-    a.every(
-      (seg, i) =>
-        seg.start === b[i].start &&
-        seg.end === b[i].end &&
-        sameRefs(seg.refs, b[i].refs)
-    )
-  );
-}
-
-/** Take every highlight span out of `item`, keeping what they held. */
-function unpaint(item: Element) {
-  item
-    .querySelectorAll(`.${HIGHLIGHT_CLASS}`)
-    .forEach((span) => span.replaceWith(...Array.from(span.childNodes)));
-  item.normalize();
-}
-
-/**
- * Whether every highlight span in `item` is marked as a card's exactly when
- * its ref is one of `cards`.
- */
-function paintedKindsMatch(item: Element, cards: ReadonlySet<string>) {
-  return Array.from(item.querySelectorAll(`.${HIGHLIGHT_CLASS}`)).every(
-    (span) =>
-      span.classList.contains(CARD_HIGHLIGHT_CLASS) ===
-      cards.has(span.getAttribute(REF_ATTR)!)
-  );
+/** One box of `run`'s, at `box`, in the overlay's window. */
+function makeBox(win: Window, run: HighlightRun, box: PageBox) {
+  const el = win.createDiv({
+    cls:
+      run.kind === 'card'
+        ? [HIGHLIGHT_CLASS, CARD_HIGHLIGHT_CLASS]
+        : HIGHLIGHT_CLASS,
+    attr: {
+      [REF_ATTR]: run.ref,
+      // Not `data-idx`, which marks pdf.js's text items
+      'data-item': run.idx,
+      'data-start': run.start,
+      'data-end': run.end,
+    },
+  });
+  el.style.left = `${box.left}%`;
+  el.style.top = `${box.top}%`;
+  el.style.width = `${box.width}%`;
+  el.style.height = `${box.height}%`;
+  return el;
 }
 
 /**
- * Wrap characters `start` to `end` of `item` in nested spans, one per ref,
- * those of `cards` marked as a card's.
- */
-function wrapRun(
-  item: Element,
-  { start, end, refs }: HighlightSegment,
-  cards: ReadonlySet<string>
-) {
-  // A text layer is always in a window's document
-  const win = item.ownerDocument.defaultView!;
-  let offset = 0;
-  for (let node of textNodesIn(item)) {
-    const from = offset;
-    offset += node.length;
-    // `item` was normalized: no text node is empty
-    if (offset <= start || from >= end) continue;
-    if (start > from) node = node.splitText(start - from);
-    const length = Math.min(end, offset) - Math.max(start, from);
-    if (length < node.length) node.splitText(length);
-    const [parent, next] = [node.parentNode!, node.nextSibling];
-    let outer: Node = node;
-    for (let i = refs.length - 1; i >= 0; i--) {
-      // In the item's own window, which may be a popout. Not `doc.createSpan`:
-      // Obsidian's `Node.createSpan` appends the span to the node it's called on
-      const span = win.createSpan({
-        cls: cards.has(refs[i])
-          ? [HIGHLIGHT_CLASS, CARD_HIGHLIGHT_CLASS]
-          : HIGHLIGHT_CLASS,
-        attr: { [REF_ATTR]: refs[i] },
-      });
-      span.append(outer);
-      outer = span;
-    }
-    parent.insertBefore(outer, next);
-  }
-}
-
-/** The page's text item spans, by `data-idx`, and the items they hold. */
-function pageItems(pageEl: Element) {
-  return Array.from(pageEl.querySelectorAll(ITEM_SELECTOR), (el) => ({
-    el,
-    idx: Number(el.getAttribute('data-idx')),
-    length: el.textContent.length,
-  }));
-}
-
-/**
- * Make the text layer of the page div `pageEl` mark exactly what `highlights`
- * cover: each run of characters ({@link highlightSegments}) wrapped in one
- * `span.ir-snippet-highlight[data-snippet-ref]` per snippet or card over it,
- * outermost first, a card's also `.ir-card-highlight`.
+ * Make the page div `pageEl` show exactly what `highlights` cover: one box
+ * per highlight and text item over the characters it covers ({@link
+ * pageHighlightRuns}), in an overlay in the page's canvas wrapper, a card's
+ * also `.ir-card-highlight`.
  *
- * Only items whose marks differ are touched, so painting what is already
- * there changes nothing, and a selection in an item that keeps its marks
- * survives. The text is left as it is, so anchors read off the page, and
- * Obsidian's own selection links, come out the same.
+ * The boxes are measured off the text layer, so that has to be shown and
+ * laid out. A page none of `highlights` reaches loses its overlay without
+ * being measured at all.
+ *
+ * @returns whether the page shows them now: false when its text layer, or
+ *   its canvas wrapper, isn't there, is hidden or has no size, which leaves
+ *   whatever it showed before.
  */
-export function paintPageHighlights(
+export function drawPageHighlights(
   pageEl: Element,
   highlights: readonly PdfHighlight[]
-): void {
+): boolean {
   const page = Number(pageEl.getAttribute('data-page-number'));
-  const items = pageItems(pageEl);
-  const wanted = highlightSegments(highlights, page, items);
-  const cards = new Set(
-    highlights.filter(({ kind }) => kind === 'card').map(({ ref }) => ref)
+  const onPage = highlights.filter((h) => mayCoverPage(h, page));
+  const existing = pageEl.querySelector(`.${OVERLAY_CLASS}`);
+  // Most pages, of most PDFs, have none
+  if (onPage.length === 0) {
+    existing?.remove();
+    return true;
+  }
+  const textLayer = textLayerOf(pageEl);
+  const wrapper = pageEl.querySelector(`.${CANVAS_WRAPPER_CLASS}`);
+  if (!textLayer || textLayer.hidden || !wrapper) return false;
+
+  // A page is always in a window's document
+  const win = pageEl.ownerDocument.defaultView!;
+  const overlay =
+    existing ??
+    win.createDiv({ cls: OVERLAY_CLASS, attr: { 'aria-hidden': 'true' } });
+  // After the canvases pdf.js prepends, so over them
+  if (overlay.parentElement !== wrapper) wrapper.append(overlay);
+  const frame = overlay.getBoundingClientRect();
+  if (!(frame.width > 0 && frame.height > 0)) return false;
+
+  const items = new Map(
+    Array.from(textLayer.querySelectorAll('[data-idx]'), (el) => [
+      Number(el.getAttribute('data-idx')),
+      el,
+    ])
   );
-  // Most pages, of most PDFs, have none to paint and none to take off
-  if (wanted.length === 0 && !pageEl.querySelector(`.${HIGHLIGHT_CLASS}`)) {
-    return;
+  const runs = pageHighlightRuns(
+    onPage,
+    page,
+    Array.from(items, ([idx, el]) => ({ idx, length: el.textContent.length }))
+  );
+  const boxes: HTMLElement[] = [];
+  for (const run of runs) {
+    // Every run is of an item on the page
+    const box = boxAround(
+      rectsOfChars(items.get(run.idx)!, run.start, run.end),
+      frame
+    );
+    if (box) boxes.push(makeBox(win, run, box));
   }
-  for (const { el, idx } of items) {
-    const want = wanted.filter((segment) => segment.idx === idx);
-    if (
-      sameSegments(paintedSegments(el, idx), want) &&
-      paintedKindsMatch(el, cards)
-    ) {
-      continue;
-    }
-    unpaint(el);
-    for (const segment of want) wrapRun(el, segment, cards);
-  }
+  overlay.replaceChildren(...boxes);
+  return true;
 }
 
-// #endregion
+/**
+ * The highlight box on the page div `pageEl` that the point (`x`, `y`) on
+ * screen is over, the topmost if several are: the innermost highlight.
+ */
+export function highlightAt(
+  pageEl: Element,
+  x: number,
+  y: number
+): Element | null {
+  const boxes = pageEl.querySelectorAll(
+    `.${OVERLAY_CLASS} > .${HIGHLIGHT_CLASS}`
+  );
+  for (let i = boxes.length - 1; i >= 0; i--) {
+    const { left, top, right, bottom } = boxes[i].getBoundingClientRect();
+    if (x >= left && x < right && y >= top && y < bottom) return boxes[i];
+  }
+  return null;
+}
 
 /** Whether `node` is pdf.js's `div.endOfContent`, one per text layer. */
 function isEndOfContent(node: Node) {
@@ -269,32 +307,32 @@ function isEndOfContent(node: Node) {
   );
 }
 
-/** Whether `record` only moves pdf.js's end-of-content marker. */
+/**
+ * Whether `record` only moves pdf.js's end-of-content marker. Undocumented:
+ * its `selectionchange` handler (TextLayerBuilder) moves the marker on every
+ * selection change in the window.
+ */
 function movesEndOfContent(record: MutationRecord) {
   return [...record.addedNodes, ...record.removedNodes].every(isEndOfContent);
 }
 
 /**
- * Put pdf.js's end-of-content marker beside the item it went into, where it
- * would have gone without a highlight.
- *
- * Undocumented: while text is selected, pdf.js's `selectionchange` handler
- * (TextLayerBuilder) puts the marker next to the element holding the
- * selection's focus, sized to cover the whole text layer, so a drag past the
- * text doesn't jump. When that element is a highlight, the marker lands inside
- * the item, which pdf.js positions on its own, and covers only part of the page.
+ * The pages whose text layer or canvas wrapper `node`, just added, is or
+ * holds: a text layer rendered afresh, or a page drawn afresh, moved or put
+ * back.
  */
-function keepOutOfItems(marker: Node) {
-  const item = (marker as Element).parentElement?.closest(ITEM_SELECTOR);
-  if (!item) return;
-  // pdf.js puts it before the highlight a backward selection's focus is in,
-  // and after the one a forward selection's is: the item's own place, in the
-  // item's stead
-  const { focusNode } = marker.ownerDocument!.getSelection()!;
-  const next = marker.nextSibling;
-  if (focusNode && next?.contains(focusNode)) item.before(marker);
-  else item.after(marker);
+function pagesBuiltIn(node: Node): Element[] {
+  if (node.nodeType !== Node.ELEMENT_NODE) return [];
+  const el = node as Element;
+  const layers =
+    el.classList.contains(TEXT_LAYER_CLASS) ||
+    el.classList.contains(CANVAS_WRAPPER_CLASS)
+      ? [el]
+      : Array.from(el.querySelectorAll(`.${TEXT_LAYER_CLASS}`));
+  return layers.flatMap((layer) => layer.closest(PAGE_SELECTOR) ?? []);
 }
+
+// #endregion
 
 /** Snippet highlights kept on a PDF viewer's pages, however it redraws them. */
 export interface PdfHighlightLayer {
@@ -305,82 +343,119 @@ export interface PdfHighlightLayer {
 }
 
 /**
- * Keep `highlights` painted on the pages of the PDF viewer in `containerEl`
- * (see {@link paintPageHighlights}).
+ * Keep `highlights` drawn on the pages of the PDF viewer in `containerEl`
+ * (see {@link drawPageHighlights}).
  *
- * pdf.js renders a page's text layer only as the page nears the view, drops
- * it when the page goes far, and rebuilds it on a zoom; Obsidian's subpath
- * highlight and pdf.js find rebuild an item's content, dropping the spans in
- * it. Rather than hook each of those (Obsidian's `clearTextHighlight` fires
- * no event at all), the layer watches the viewer's DOM and repaints a page
- * whenever its content changes. Its own changes are taken off the record, and
- * painting what is already there changes nothing, so it settles.
+ * The boxes are measured once per text layer pdf.js renders, and again when
+ * the highlights change or a page turns. A zoom needs nothing: pdf.js keeps
+ * both the text layer and the overlay, and the boxes scale with the page.
+ * Rather than hook pdf.js's rendering, the layer watches the viewer's DOM for
+ * a text layer or canvas wrapper put on a page, and for a text layer turned
+ * or shown again. A page it can't measure yet, its text layer hidden or the
+ * viewer not on screen, waits until the layer is shown or the viewer resized.
+ * With no highlights at all, it watches nothing.
  */
 export function createPdfHighlightLayer(
   containerEl: HTMLElement
 ): PdfHighlightLayer {
   let highlights: readonly PdfHighlight[] = [];
-  const paint = (pages: Iterable<Element>) => {
-    for (const pageEl of pages) paintPageHighlights(pageEl, highlights);
-    // Its own changes: nothing for the observer to answer
-    observer.takeRecords();
-  };
-  const allPages = () => containerEl.querySelectorAll(PAGE_SELECTOR);
+  /** Pages to draw once they can be measured. */
+  const pending = new Set<Element>();
+  /**
+   * Pages drawn on, attached or not: pdf.js takes page divs out of the
+   * viewer, and may put them back as they are, overlay and all.
+   */
+  const drawnOn = new Set<Element>();
+  let watching = false;
 
-  const observer = new MutationObserver((records) => {
-    const pages = new Set<Element>();
+  /** {@link drawPageHighlights}, noting the page. */
+  const draw = (pageEl: Element) => {
+    drawnOn.add(pageEl);
+    return drawPageHighlights(pageEl, highlights);
+  };
+
+  const drawPending = () => {
+    for (const pageEl of pending) {
+      if (!pageEl.isConnected || draw(pageEl)) pending.delete(pageEl);
+    }
+  };
+
+  const mutations = new MutationObserver((records) => {
     for (const record of records) {
-      // pdf.js moves its marker on every selection change in the window
-      if (movesEndOfContent(record)) {
-        record.addedNodes.forEach(keepOutOfItems);
+      const target = record.target as Element;
+      if (record.type === 'attributes') {
+        // Shown again: a pending page may be drawn now. A text layer turned:
+        // measure anew. The annotation layer carries the attribute too
+        if (
+          record.attributeName === ROTATION_ATTR &&
+          target.classList.contains(TEXT_LAYER_CLASS) &&
+          record.oldValue !== target.getAttribute(ROTATION_ATTR)
+        ) {
+          const page = target.closest(PAGE_SELECTOR);
+          if (page) pending.add(page);
+        }
         continue;
       }
-      // Only an element has children to change
-      const page = (record.target as Element).closest(PAGE_SELECTOR);
-      // A change above the pages may have added some
-      if (!page) {
-        paint(allPages());
-        return;
+      // Obsidian's subpath highlight and pdf.js find rebuild an item's
+      // content, which moves none of its text
+      if (target.closest('[data-idx]')) continue;
+      if (target.closest(`.${TEXT_LAYER_CLASS}`)) {
+        if (movesEndOfContent(record)) continue;
+        const page = target.closest(PAGE_SELECTOR);
+        if (page) pending.add(page);
+        continue;
       }
-      pages.add(page);
+      // Canvases swapped on a redraw, the toolbar, the sidebar's thumbnails,
+      // the overlay's own boxes: none puts a layer on a page
+      record.addedNodes.forEach((node) =>
+        pagesBuiltIn(node).forEach((page) => pending.add(page))
+      );
     }
-    paint(pages);
+    drawPending();
   });
-  observer.observe(containerEl, { childList: true, subtree: true });
 
-  // Undocumented: Obsidian's pdf.js snaps a drag begun beside the text by
-  // setting the selection's start before the first item's `lastChild`, in a
-  // `pointerup` listener on the viewer's container (TextLayerBuilder). That
-  // was the item's start while its text was one node; a highlight leaves it
-  // only the tail. Its own highlight is cleared on `pointerdown`, ours stays.
-  const onPointerUp = () => {
-    const selection = containerEl.ownerDocument.getSelection()!;
-    // No range at all is collapsed too
-    if (selection.isCollapsed) return;
-    const range = selection.getRangeAt(0);
-    const { startContainer: start, startOffset } = range;
-    if (
-      start.nodeType === Node.ELEMENT_NODE &&
-      (start as Element).matches(ITEM_SELECTOR) &&
-      containerEl.contains(start) &&
-      (start as Element).querySelector(`.${HIGHLIGHT_CLASS}`) &&
-      startOffset === start.childNodes.length - 1
-    ) {
-      range.setStart(start, 0);
+  // Showing a hidden viewer takes it from no size to some size
+  const Resize = window.ResizeObserver;
+  const resizes = typeof Resize === 'function' ? new Resize(drawPending) : null;
+
+  const watch = (on: boolean) => {
+    if (on === watching) return;
+    watching = on;
+    if (on) {
+      mutations.observe(containerEl, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['hidden', ROTATION_ATTR],
+        attributeOldValue: true,
+      });
+      resizes?.observe(containerEl);
+    } else {
+      mutations.disconnect();
+      resizes?.disconnect();
+      pending.clear();
     }
   };
-  containerEl.addEventListener('pointerup', onPointerUp);
 
-  return {
-    set(next) {
-      highlights = next;
-      paint(allPages());
-    },
-    destroy() {
-      observer.disconnect();
-      containerEl.removeEventListener('pointerup', onPointerUp);
-      highlights = [];
-      for (const pageEl of allPages()) paintPageHighlights(pageEl, []);
-    },
+  const show = (next: readonly PdfHighlight[]) => {
+    highlights = next;
+    watch(next.length > 0);
+    // A page out of the viewer may never come back, as when the PDF is
+    // opened afresh: let it go, boxes and all. One put back is drawn as it
+    // comes, while there are highlights to draw
+    for (const page of drawnOn) {
+      if (page.isConnected) continue;
+      page.querySelector(`.${OVERLAY_CLASS}`)?.remove();
+      drawnOn.delete(page);
+    }
+    const rendered = Array.from(
+      containerEl.querySelectorAll(`.${TEXT_LAYER_CLASS}`),
+      (layer) => layer.closest(PAGE_SELECTOR)
+    ).filter((page) => page !== null);
+    for (const page of new Set([...rendered, ...drawnOn])) {
+      if (!draw(page)) pending.add(page);
+    }
   };
+
+  return { set: show, destroy: () => show([]) };
 }
