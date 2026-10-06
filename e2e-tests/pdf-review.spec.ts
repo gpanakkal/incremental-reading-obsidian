@@ -1112,7 +1112,6 @@ test.describe('Snippets and cards from a PDF article', () => {
     await expect(textItem(window, 1, 0)).toBeAttached();
     const notices = await watchNotices(window);
 
-    // The card first: the snippet's highlight splits the text it selects in
     await selectText(window, [1, 0, 0], [1, 0, CONTROLS_LINE.length]);
     await expect.poll(() => viewerSelection(window)).toBe(CONTROLS_LINE);
     await actionBar(window)
@@ -1123,7 +1122,8 @@ test.describe('Snippets and cards from a PDF article', () => {
     await window.keyboard.press('Enter');
     await expect.poll(() => cards(window)).toHaveLength(1);
 
-    await selectText(window, [1, 0, 0], [1, 0, CONTROLS_LINE.length]);
+    // By character: the card's highlight splits the text it selects in
+    await selectChars(window, [1, 0, 0], [1, 0, CONTROLS_LINE.length]);
     await expect.poll(() => viewerSelection(window)).toBe(CONTROLS_LINE);
     await window.getByRole('button', { name: 'Create snippet' }).click();
     await expect.poll(() => snippets(window)).toHaveLength(1);
