@@ -15,6 +15,7 @@ import {
   finalizeArticleImport,
   importArticle,
   leafSnapshot,
+  openFileInActiveLeaf,
   openNote,
   pendingSaves,
   renameDecliningLinkUpdate,
@@ -2004,5 +2005,205 @@ test.describe('Renames Obsidian is told not to update links for', () => {
     await expect(
       window.locator('.workspace-leaf.mod-active .ir-snippet-highlight').first()
     ).toBeVisible();
+  });
+});
+
+test.describe("Deleting an item's note", () => {
+  const SOURCE = 'sources/Security Principles';
+  const PLAIN_NOTE = 'sources/Curse of dimensionality - Wikipedia.md';
+
+  /**
+   * What the page-side calls below reach on Obsidian and the plugin.
+   * Unofficial: `window.app`, `app.plugins.plugins`.
+   */
+  type PageApp = {
+    vault: { getFileByPath(path: string): unknown };
+    fileManager: {
+      trashFile(file: unknown): Promise<void>;
+      // A property, not a method: the probe below swaps it for a wrapper
+      processFrontMatter: (...args: unknown[]) => Promise<void>;
+    };
+    plugins: {
+      plugins: Record<
+        string,
+        {
+          reviewManager: {
+            repo: {
+              query(sql: string): { reference: string; deleted: number }[];
+            };
+          };
+        }
+      >;
+    };
+  };
+  type Probe = { __irFrontmatterReads?: number };
+
+  /** The rows in `table`, as the plugin's database holds them. */
+  const itemRows = (page: Page, table: string) =>
+    page.evaluate((table) => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      return repo.query(`SELECT reference, deleted FROM ${table}`);
+    }, table);
+
+  /**
+   * Count frontmatter reads still under way, so the test can wait for the
+   * ones a delete sets off to settle before saying none of them failed.
+   */
+  const countFrontmatterReads = (page: Page) =>
+    page.evaluate(() => {
+      const w = window as unknown as Probe & { app: PageApp };
+      const { fileManager } = w.app;
+      const original: (...args: unknown[]) => Promise<void> =
+        fileManager.processFrontMatter;
+      let inFlight = 0;
+      w.__irFrontmatterReads = 0;
+      fileManager.processFrontMatter = async (...args: unknown[]) => {
+        w.__irFrontmatterReads = ++inFlight;
+        try {
+          await original.apply(fileManager, args);
+        } finally {
+          w.__irFrontmatterReads = --inFlight;
+        }
+      };
+    });
+
+  /**
+   * Make an item with `make`, then show its note in the active tab in `mode`
+   * with its action bar watching the item; returns the note's path.
+   *
+   * The note is browsed to from another note, so Obsidian goes back to that
+   * one when the note is deleted. Going back loads a file, which keeps the
+   * note's action bar up past the database write the delete makes, so the
+   * bar reacts to that write every time rather than about half the time.
+   */
+  async function showItemNote(
+    make: () => Promise<void>,
+    table: string,
+    mode: 'editing' | 'reading'
+  ) {
+    await make();
+    await expect
+      .poll(async () => (await itemRows(window, table)).length)
+      .toBe(1);
+    const [{ reference }] = await itemRows(window, table);
+
+    await openFileInActiveLeaf(window, PLAIN_NOTE);
+    await openFileInActiveLeaf(window, reference);
+    if (mode === 'reading') {
+      await executeCommandById(window, 'markdown:toggle-preview');
+    }
+    // The label is set once the bar has read its item and is watching it
+    await expect(
+      window
+        .locator('.workspace-leaf.mod-active .ir-action-bar')
+        .getByRole('button', { name: 'Dismiss', exact: true })
+        .filter({ visible: true })
+    ).toBeVisible();
+    return reference;
+  }
+
+  /**
+   * Collect page errors, and errors logged about a missing file, from now on;
+   * a reader once the reads have settled. A logged one counts too: caught and
+   * logged, a read of the deleted note is still the console error reported.
+   */
+  async function watchPageErrors() {
+    const pageErrors: string[] = [];
+    window.on('pageerror', (error) => pageErrors.push(error.message));
+    window.on('console', (message) => {
+      if (message.type() === 'error' && message.text().includes('ENOENT')) {
+        pageErrors.push(message.text());
+      }
+    });
+    await countFrontmatterReads(window);
+    return async () => {
+      await expect
+        .poll(() =>
+          window.evaluate(
+            () => (window as unknown as Probe).__irFrontmatterReads
+          )
+        )
+        .toBe(0);
+      // A macrotask past the last read, by which any rejection it left
+      // unhandled has been reported
+      await window.evaluate(
+        () => new Promise((resolve) => setTimeout(resolve, 0))
+      );
+      return pageErrors;
+    };
+  }
+
+  const kinds = [
+    {
+      kind: 'article',
+      table: 'article',
+      make: async () => {
+        await openNote(window, SOURCE);
+        await executeCommandById(window, 'incremental-reading:import-article');
+        await finalizeArticleImport(window);
+      },
+    },
+    {
+      kind: 'snippet',
+      table: 'snippet',
+      make: async () => {
+        await openNote(window, SOURCE);
+        await selectParagraph(
+          window,
+          'Before we start discussing the different security principles'
+        );
+        await executeCommandById(
+          window,
+          'incremental-reading:extract-selection'
+        );
+      },
+    },
+    {
+      kind: 'card',
+      table: 'srs_card',
+      make: async () => {
+        await openNote(window, SOURCE);
+        await selectParagraph(
+          window,
+          'Explain the security functions: Confidentiality, Integrity and Availability (CIA).'
+        );
+        await executeCommandById(window, 'incremental-reading:create-card');
+      },
+    },
+  ];
+
+  for (const { kind, table, make } of kinds) {
+    for (const mode of ['editing', 'reading'] as const) {
+      test(`throws nothing when a ${kind} note open in ${mode} view is deleted`, async () => {
+        const reference = await showItemNote(make, table, mode);
+        const pageErrors = await watchPageErrors();
+
+        await window.evaluate(async (path) => {
+          const { app } = window as unknown as { app: PageApp };
+          await app.fileManager.trashFile(app.vault.getFileByPath(path));
+        }, reference);
+
+        await expect
+          .poll(async () => (await itemRows(window, table))[0]?.deleted)
+          .toBe(1);
+        expect(await pageErrors()).toEqual([]);
+      });
+    }
+  }
+
+  test("throws nothing when the plugin's undo deletes a snippet open in editing view", async () => {
+    const snippet = kinds.find(({ kind }) => kind === 'snippet');
+    if (!snippet) throw new Error('No snippet kind');
+    await showItemNote(snippet.make, snippet.table, 'editing');
+    const pageErrors = await watchPageErrors();
+
+    // Undoing the extract deletes the note through the plugin's own delete
+    await executeCommandById(window, 'incremental-reading:undo');
+
+    await expect
+      .poll(async () => (await itemRows(window, snippet.table)).length)
+      .toBe(0);
+    expect(await pageErrors()).toEqual([]);
   });
 });

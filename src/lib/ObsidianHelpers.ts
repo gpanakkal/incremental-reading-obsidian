@@ -279,20 +279,36 @@ export class ObsidianHelpers {
    * is never read, so it answers `null` here even when it is an item. Code that
    * can meet one asks the item layer instead (`ItemManager.getItemType`), which
    * knows such a file by the row at its path.
+   *
+   * A note already gone from the disk when it is read has no type either. The
+   * tags are read off the disk, and a delete reaches the disk before the vault
+   * reports it, so any caller can meet a note that is already gone: the action
+   * bar re-reads its note's type when the delete marks the row. A failed read
+   * of a note still on disk, or one the disk can't answer for, rejects with
+   * the read's own error.
    */
   static async getNoteType(note: TFile, app: App): Promise<NoteType | null> {
     if (!supportsFrontmatter(note)) return null;
 
     let type: NoteType | null = null;
-    await app.fileManager.processFrontMatter(
-      note,
-      (frontmatter: PluginFrontMatter) => {
-        if (frontmatter.tags === undefined) type = null;
-        else if (frontmatter.tags.includes(ARTICLE_TAG)) type = 'article';
-        else if (frontmatter.tags.includes(SNIPPET_TAG)) type = 'snippet';
-        else if (frontmatter.tags.includes(CARD_TAG)) type = 'card';
-      }
-    );
+    try {
+      await app.fileManager.processFrontMatter(
+        note,
+        (frontmatter: PluginFrontMatter) => {
+          if (frontmatter.tags === undefined) type = null;
+          else if (frontmatter.tags.includes(ARTICLE_TAG)) type = 'article';
+          else if (frontmatter.tags.includes(SNIPPET_TAG)) type = 'snippet';
+          else if (frontmatter.tags.includes(CARD_TAG)) type = 'card';
+        }
+      );
+    } catch (error) {
+      // A disk that can't say is taken to still have it
+      const onDisk = await app.vault.adapter
+        .exists(note.path)
+        .catch(() => true);
+      if (!onDisk) return null;
+      throw error;
+    }
     return type;
   }
 

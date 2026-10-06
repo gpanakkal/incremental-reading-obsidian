@@ -451,6 +451,42 @@ describe('renderStandaloneActionBarDOM', () => {
       expect(dismissButton(container).textContent).toBe('Dismiss');
     });
 
+    it('keeps the label and reports why when re-reading the item fails', async () => {
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await fc.assert(
+        fc.asyncProperty(
+          fc.boolean(),
+          fc.anything(),
+          async (dismissed, reason) => {
+            logged.mockClear();
+            const file = makeFile();
+            const harness = makeHarness({
+              item: makeItem({ id: 'watched', dismissed, file }),
+            });
+            const container = makeContainer();
+
+            renderStandaloneActionBarDOM(file, harness.plugin, container);
+            await tick();
+
+            harness.reviewManager.getReviewItemFromFile.mockRejectedValueOnce(
+              reason
+            );
+            harness.emit({ ids: ['watched'] });
+            await tick();
+
+            expect(dismissButton(container).textContent).toBe(
+              dismissed ? 'Un-dismiss' : 'Dismiss'
+            );
+            expect(logged).toHaveBeenCalledExactlyOnceWith(
+              'Failed to refresh item status:',
+              reason
+            );
+            container.remove();
+          }
+        )
+      );
+    });
+
     it('keeps the label when the row disappears rather than blanking it', async () => {
       const file = makeFile();
       const harness = makeHarness({
