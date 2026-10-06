@@ -10,8 +10,13 @@ import {
 } from '#/lib/SnippetOffsetTracker';
 import type { DataChangeEvent } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
+import {
+  charsRect,
+  fakePdfLayout,
+  FakeResizeObserver,
+} from '#/test/pdf-layout';
 import { FileView, type TFile, type WorkspaceLeaf } from 'obsidian';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   registerPdfLeafHighlights,
   showPdfItemHighlights,
@@ -22,12 +27,21 @@ import * as SnippetHighlightExtension from './SnippetHighlightExtension';
 
 const PDF = { path: 'papers/Paper.pdf', extension: 'pdf' } as TFile;
 
-/** A viewer's page 1, its text layer holding "Hello world". */
+/** Where every page's highlight overlay is on screen. */
+const FRAME = { left: 0, top: 0, width: 600, height: 800 };
+
+/**
+ * A viewer's page 1, its canvas wrapper, and its text layer holding "Hello
+ * world", laid out as `fakePdfLayout` has it.
+ */
 function makeViewer() {
   const containerEl = document.body.appendChild(document.createElement('div'));
   const pageEl = containerEl.appendChild(document.createElement('div'));
   pageEl.className = 'page';
   pageEl.dataset.pageNumber = '1';
+  const wrapper = pageEl.appendChild(document.createElement('div'));
+  wrapper.className = 'canvasWrapper';
+  wrapper.appendChild(document.createElement('canvas'));
   const textLayer = pageEl.appendChild(document.createElement('div'));
   textLayer.className = 'textLayer';
   const item = textLayer.appendChild(document.createElement('span'));
@@ -37,19 +51,31 @@ function makeViewer() {
   return { containerEl, item };
 }
 
+/**
+ * The references and text the highlight boxes in `el` matching `selector`
+ * mark, bottom of the stack first.
+ */
+const boxesIn = (el: Element, selector: string) =>
+  Array.from(el.querySelectorAll<HTMLElement>(selector), (box) => {
+    const item = box
+      .closest('.page')!
+      .querySelector(`.textLayer [data-idx="${box.dataset.item}"]`)!;
+    return [
+      box.dataset.snippetRef,
+      item.textContent.slice(
+        Number(box.dataset.start),
+        Number(box.dataset.end)
+      ),
+    ];
+  });
+
 /** The references and text the viewer's highlights mark. */
 const marked = (el: Element) =>
-  Array.from(el.querySelectorAll('.ir-snippet-highlight'), (span) => [
-    span.getAttribute('data-snippet-ref'),
-    span.textContent,
-  ]);
+  boxesIn(el, '.ir-pdf-highlights > .ir-snippet-highlight');
 
 /** The references the viewer's card highlights mark, and their text. */
 const markedCards = (el: Element) =>
-  Array.from(
-    el.querySelectorAll('.ir-snippet-highlight.ir-card-highlight'),
-    (span) => [span.getAttribute('data-snippet-ref'), span.textContent]
-  );
+  boxesIn(el, '.ir-pdf-highlights > .ir-snippet-highlight.ir-card-highlight');
 
 /** A card of page 1's item 0, characters `from` to `to`. */
 function makeCard(ref: string, from: number, to: number): PdfHighlight {
@@ -197,8 +223,17 @@ function withNotes(notes: ReturnType<typeof cardNote>[]) {
 
 // #endregion
 
+let layout: ReturnType<typeof fakePdfLayout>;
+
+beforeEach(() => {
+  layout = fakePdfLayout(() => FRAME);
+  vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+});
+
 afterEach(() => {
+  layout.restore();
   document.body.replaceChildren();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -344,20 +379,19 @@ describe('showPdfItemHighlights, for cards', () => {
     stop();
   });
 
-  it('nests a card inside a snippet over the very same text', async () => {
+  it('stacks a card over a snippet over the very same text', async () => {
     const { plugin, rows, cards } = makePlugin();
     rows.set(PDF.path, [makeHighlight('Snippets/z.md', 0, 5)]);
     cards.set(PDF.path, [makeCard('Cards/a.md', 0, 5)]);
-    const { containerEl, item } = makeViewer();
+    const { containerEl } = makeViewer();
 
     const stop = showPdfItemHighlights(plugin, PDF, containerEl);
     await flush();
 
-    const card = item.querySelector('.ir-card-highlight')!;
-    expect(card.parentElement!.getAttribute('data-snippet-ref')).toBe(
-      'Snippets/z.md'
-    );
-    expect(card.querySelector('.ir-snippet-highlight')).toBeNull();
+    expect(marked(containerEl)).toEqual([
+      ['Snippets/z.md', 'Hello'],
+      ['Cards/a.md', 'Hello'],
+    ]);
     stop();
   });
 
@@ -592,13 +626,18 @@ describe('showPdfItemHighlights, for cards', () => {
 });
 
 describe('a press on a highlight shown by showPdfItemHighlights', () => {
+  /** A point over "Hello" (characters 0 to 5 of item 0), and one over "world". */
+  const ON_HELLO = { clientX: charsRect(0, 0, 5).left + 10, clientY: 35 };
+  const ON_WORLD = { clientX: charsRect(0, 6, 11).left + 10, clientY: 35 };
+
   /**
    * The PDF's viewer, in whichever window, with "Hello" highlighted, and the
    * snippet opener spied on.
    */
-  async function setUp() {
-    const { plugin, rows } = makePlugin();
+  async function setUp(cardRows: PdfHighlight[] = []) {
+    const { plugin, rows, cards } = makePlugin();
     rows.set(PDF.path, [makeHighlight('Snippets/a.md', 0, 5)]);
+    cards.set(PDF.path, cardRows);
     const { containerEl, item } = makeViewer();
     const stop = showPdfItemHighlights(plugin, PDF, containerEl);
     await flush();
@@ -608,7 +647,7 @@ describe('a press on a highlight shown by showPdfItemHighlights', () => {
     const reached = vi.fn();
     document.addEventListener('click', reached);
     document.addEventListener('auxclick', reached);
-    const span = containerEl.querySelector('.ir-snippet-highlight')!;
+    const boxes = containerEl.querySelectorAll('.ir-snippet-highlight');
     const select = (node: Node, from: number, to: number) => {
       const range = document.createRange();
       range.setStart(node, from);
@@ -618,8 +657,10 @@ describe('a press on a highlight shown by showPdfItemHighlights', () => {
     };
     return {
       plugin,
+      containerEl,
       item,
-      span,
+      box: boxes[0],
+      boxes,
       open,
       reached,
       select,
@@ -632,11 +673,18 @@ describe('a press on a highlight shown by showPdfItemHighlights', () => {
     };
   }
 
-  const press = (el: Element, type: string, button = 0) => {
+  /** A press of `button` on `el`, at `point` on screen. */
+  const press = (
+    el: Element,
+    type: string,
+    button = 0,
+    point: { clientX: number; clientY: number } = ON_HELLO
+  ) => {
     const evt = new MouseEvent(type, {
       bubbles: true,
       cancelable: true,
       button,
+      ...point,
     });
     el.dispatchEvent(evt);
     return evt;
@@ -648,9 +696,14 @@ describe('a press on a highlight shown by showPdfItemHighlights', () => {
     // A popout: a document of its own, with its own window and selection
     const frame = document.body.appendChild(document.createElement('iframe'));
     const popout = frame.contentDocument!;
+    const popoutWindow = frame.contentWindow!;
     // Obsidian gives every window its DOM helpers; the test setup only the main one
-    Object.assign(frame.contentWindow!, { createSpan: window.createSpan });
-    const { containerEl } = makeViewer();
+    Object.assign(popoutWindow, { createDiv: window.createDiv });
+    const popoutLayout = fakePdfLayout(
+      () => FRAME,
+      popoutWindow as unknown as typeof globalThis
+    );
+    const { containerEl, item } = makeViewer();
     popout.body.append(popout.adoptNode(containerEl));
     const stop = showPdfItemHighlights(plugin, PDF, containerEl);
     await flush();
@@ -660,35 +713,59 @@ describe('a press on a highlight shown by showPdfItemHighlights', () => {
     const reached = vi.fn();
     document.addEventListener('click', reached);
 
-    const span = containerEl.querySelector('.ir-snippet-highlight')!;
-    const click = new MouseEvent('click', { bubbles: true });
-    span.dispatchEvent(click);
+    const box = containerEl.querySelector('.ir-snippet-highlight')!;
+    const click = press(item, 'click');
 
-    expect(open.mock.calls).toEqual([[plugin, click]]);
+    expect(open.mock.calls).toEqual([[plugin, click, box]]);
     expect(reached).not.toHaveBeenCalled();
     document.removeEventListener('click', reached);
     stop();
+    popoutLayout.restore();
   });
 
-  it('opens its snippet on a click or a middle click, as markdown highlights do', async () => {
-    const { plugin, span, open, done, stop } = await setUp();
-    const click = press(span, 'click');
-    const middle = press(span, 'auxclick', 1);
-    press(span, 'auxclick', 2);
+  it('opens its snippet on a click or a middle click on the text over it, as markdown highlights do', async () => {
+    const { plugin, item, box, open, done, stop } = await setUp();
+    const click = press(item, 'click');
+    const middle = press(item, 'auxclick', 1);
+    press(item, 'auxclick', 2);
 
     expect(open.mock.calls).toEqual([
-      [plugin, click],
-      [plugin, middle],
+      [plugin, click, box],
+      [plugin, middle, box],
     ]);
     done();
     stop();
   });
 
+  it('opens its snippet on a click on the page while pdf.js hides the text over it through a zoom', async () => {
+    const { plugin, containerEl, box, open, done, stop } = await setUp();
+    containerEl.querySelector<HTMLElement>('.textLayer')!.hidden = true;
+    const canvas = containerEl.querySelector('.canvasWrapper > canvas')!;
+    const click = press(canvas, 'click');
+
+    expect(open.mock.calls).toEqual([[plugin, click, box]]);
+    done();
+    stop();
+  });
+
+  it('opens the card over a snippet, the topmost highlight there', async () => {
+    const { plugin, item, boxes, open, done, stop } = await setUp([
+      makeCard('Cards/c.md', 1, 3),
+    ]);
+    const onCard = { clientX: charsRect(0, 1, 3).left + 1, clientY: 35 };
+    const click = press(item, 'click', 0, onCard);
+
+    expect(boxes).toHaveLength(2);
+    expect(open.mock.calls).toEqual([[plugin, click, boxes[1]]]);
+    done();
+    stop();
+  });
+
   it('opens nothing for a click that ends a drag selecting text, and keeps it from every other handler, so the text can be extracted', async () => {
-    const { span, open, reached, select, done, stop } = await setUp();
-    select(span.firstChild!, 1, 4);
-    press(span, 'click');
-    press(span, 'auxclick', 1);
+    const { item, open, reached, select, done, stop } = await setUp();
+    select(item.firstChild!, 1, 4);
+    press(item, 'click');
+    press(item, 'auxclick', 1);
 
     expect(open).not.toHaveBeenCalled();
     expect(reached).not.toHaveBeenCalled();
@@ -697,49 +774,71 @@ describe('a press on a highlight shown by showPdfItemHighlights', () => {
   });
 
   it('opens its snippet with an empty selection in it', async () => {
-    const { span, open, select, done, stop } = await setUp();
-    select(span.firstChild!, 2, 2);
-    press(span, 'click');
+    const { item, open, select, done, stop } = await setUp();
+    select(item.firstChild!, 2, 2);
+    press(item, 'click');
 
     expect(open).toHaveBeenCalledOnce();
     done();
     stop();
   });
 
-  it('leaves a press elsewhere in the viewer alone, selection or not', async () => {
-    const { item, span, open, reached, select, done, stop } = await setUp();
-    select(span.firstChild!, 1, 4);
-    const evt = press(item, 'mousedown', 1);
-    press(item, 'click');
+  it('leaves alone a press elsewhere in the text, or on anything over the text layer, such as a link, selection or not', async () => {
+    const { containerEl, item, open, reached, select, done, stop } =
+      await setUp();
+    // A link annotation, in pdf.js's annotation layer over the text
+    const page = containerEl.querySelector('.page')!;
+    const annotations = page.appendChild(document.createElement('div'));
+    annotations.className = 'annotationLayer';
+    const link = annotations.appendChild(document.createElement('a'));
+    select(item.firstChild!, 1, 4);
+
+    const middle = press(item, 'mousedown', 1, ON_WORLD);
+    press(item, 'click', 0, ON_WORLD);
+    const onLink = press(link, 'mousedown', 1);
+    press(link, 'click');
+    // Beside the page, in the toolbar, say
+    press(containerEl, 'click');
 
     expect(open).not.toHaveBeenCalled();
-    expect(reached).toHaveBeenCalledOnce();
-    expect(evt.defaultPrevented).toBe(false);
+    expect(reached).toHaveBeenCalledTimes(3);
+    expect(middle.defaultPrevented).toBe(false);
+    expect(onLink.defaultPrevented).toBe(false);
     done();
     stop();
   });
 
-  it('keeps a middle press from scrolling or pasting, and nothing else', async () => {
-    const { span, done, stop } = await setUp();
+  it('keeps a middle press over it from scrolling or pasting, and nothing else', async () => {
+    const { item, done, stop } = await setUp();
 
-    expect(press(span, 'mousedown', 1).defaultPrevented).toBe(true);
-    expect(press(span, 'mousedown', 0).defaultPrevented).toBe(false);
+    expect(press(item, 'mousedown', 1).defaultPrevented).toBe(true);
+    expect(press(item, 'mousedown', 0).defaultPrevented).toBe(false);
     done();
     stop();
   });
 
   it('once stopped, leaves every press alone', async () => {
-    const { item, open, reached, select, done, stop } = await setUp();
+    const { containerEl, item, open, reached, select, done, stop } =
+      await setUp();
     stop();
-    // Someone else's span of the same class, say a markdown embed's
-    const span = item.appendChild(document.createElement('span'));
-    span.className = 'ir-snippet-highlight';
-    span.textContent = 'more';
-    select(span.firstChild!, 0, 2);
+    // Someone else's box over the text, say another viewer's layer's
+    const overlay = containerEl
+      .querySelector('.canvasWrapper')!
+      .appendChild(document.createElement('div'));
+    overlay.className = 'ir-pdf-highlights';
+    const box = overlay.appendChild(document.createElement('div'));
+    box.className = 'ir-snippet-highlight';
+    Object.assign(box.style, {
+      left: '0%',
+      top: '0%',
+      width: '50%',
+      height: '50%',
+    });
+    select(item.firstChild!, 0, 2);
 
-    press(span, 'click');
-    press(span, 'auxclick', 1);
-    expect(press(span, 'mousedown', 1).defaultPrevented).toBe(false);
+    press(item, 'click');
+    press(item, 'auxclick', 1);
+    expect(press(item, 'mousedown', 1).defaultPrevented).toBe(false);
     expect(open).not.toHaveBeenCalled();
     expect(reached).toHaveBeenCalledTimes(2);
     done();

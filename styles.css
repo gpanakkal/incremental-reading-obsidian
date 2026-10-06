@@ -83,13 +83,6 @@ body {
   --ir-transclusion-rule-color: hsl(
     var(--ir-transclusion-hue) var(--accent-s, 80%) var(--accent-l, 68%)
   );
-  /* A card's highlight in a PDF. Opaque, for the same reason as
-     --ir-pdf-snippet-highlight-color: Obsidian draws a PDF's text layer at
-     `opacity: 0.2`, so an opaque p in it reads as 0.2p + 0.8w over a white
-     page w. Matching the tint above (c at alpha a = 0.1, read as
-     ac + (1 - a)w) takes p = w + 5a(c - w) = (c + w) / 2: the same hue, halfway
-     from 50% lightness to white, so no channel clamps. */
-  --ir-pdf-card-highlight-color: hsl(var(--ir-transclusion-hue) 100% 75%);
 }
 
 /* Keep Obsidian's accent rule, which now marks the run of transcluded text
@@ -1104,11 +1097,6 @@ body.is-phone .ir-header-standin {
 :root {
   --ir-snippet-highlight-color: rgba(255, 235, 59, 0.3);
   --ir-snippet-highlight-color-hover: rgba(255, 235, 59, 0.5);
-  /* Opaque: a PDF's text layer is drawn at a fifth of its opacity, which caps
-     any highlight in it below the 0.3 above. This color, seen at 0.2 over a
-     white page, matches the markdown highlight there: c = 1.5 * yellow - 0.5 *
-     white, its blue clamped at 0 */
-  --ir-pdf-snippet-highlight-color: rgb(255, 225, 0);
 }
 
 /* Snippet highlight styles */
@@ -1153,29 +1141,30 @@ body.is-phone .ir-header-standin {
   background-color: transparent;
 }
 
-/* In a PDF's text layer, pdf.js positions every span absolutely. A highlight
- flows inside its text item instead, as Obsidian's own subpath highlight
- (`.mod-focused.appended`) does, so the item keeps its width over the page.
- Its text stays transparent: the background shows over the rendered page.
- Obsidian draws the whole text layer at `opacity: 0.2` (`.pdf-container
- .textLayer`), so the colors are opaque, as its own find highlights' are. */
-.textLayer span.ir-snippet-highlight {
-  position: static;
-  /* pdf.js's `.textLayer span` sets the text cursor, and outranks the class */
-  cursor: pointer;
-  background-color: var(--ir-pdf-snippet-highlight-color);
+/* A PDF's highlights are boxes in an overlay over the page's canvas, under
+ its text layer (src/lib/pdf/pdf-highlights.ts), positioned in percent of the
+ page so they follow a zoom with no script. They take no pointer events: the
+ text above them stays selectable, and a click there is looked up by where it
+ is. So they have no hover, and nothing of the markdown highlight's border or
+ transition. Out of Obsidian's faded text layer, they take the markdown colors
+ as they are. Clipped to the page, as pdf.js clips its text layer: text it
+ places past the page's edge stays unmarked. */
+.ir-pdf-highlights {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 
-.textLayer span.ir-snippet-highlight:hover {
-  background-color: var(--ir-pdf-snippet-highlight-color);
-  box-shadow: 0 0 0 2px var(--text-accent);
+.ir-pdf-highlights > .ir-snippet-highlight {
+  position: absolute;
+  border-bottom: none;
+  transition: none;
 }
 
-/* A card's highlight is orange, as its embed is in a note; hover keeps the
-   ring above */
-.textLayer span.ir-snippet-highlight.ir-card-highlight,
-.textLayer span.ir-snippet-highlight.ir-card-highlight:hover {
-  background-color: var(--ir-pdf-card-highlight-color);
+/* A card's highlight is orange, as its embed is tinted in a note */
+.ir-pdf-highlights > .ir-snippet-highlight.ir-card-highlight {
+  background-color: var(--ir-transclusion-tint);
 }
 
 /* Style for potentially corrupted highlights (overlapping edits) */

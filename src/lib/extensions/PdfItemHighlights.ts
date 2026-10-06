@@ -1,9 +1,10 @@
 import { CARD_TAG } from '#/lib/constants';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { isPdfView, pdfTabSelection } from '#/lib/pdf/obsidian-pdf';
+import { PAGE_SELECTOR } from '#/lib/pdf/pdf-anchor';
 import {
   createPdfHighlightLayer,
-  HIGHLIGHT_CLASS,
+  highlightAt,
   type PdfHighlight,
 } from '#/lib/pdf/pdf-highlights';
 import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
@@ -75,6 +76,13 @@ function oneAtATime(
  * on, as a markdown highlight does, in whichever window the viewer is: the plugin's
  * own handler covers only the main one. Returns what stops it.
  *
+ * The highlights lie under the page's text layer and take no pointer events,
+ * so a press on the text layer is looked up by where it is: on the topmost
+ * highlight there, the innermost. So is one on the canvas, which is what a
+ * press lands on while pdf.js hides the text layer through a zoom. A press on
+ * a link or form field over the text, in pdf.js's annotation layer, is the
+ * link's.
+ *
  * A click that ends a drag selecting text opens nothing, and goes no further:
  * the text was selected to be extracted, maybe from inside a snippet or card.
  */
@@ -82,15 +90,22 @@ function openItemsOnPress(
   plugin: IncrementalReadingPlugin,
   containerEl: HTMLElement
 ): () => void {
-  const onHighlight = (evt: MouseEvent) =>
-    (evt.target as Element).closest(`.${HIGHLIGHT_CLASS}`) !== null;
+  const highlightUnder = (evt: MouseEvent) => {
+    // Undocumented: pdf.js's `div.textLayer` and `div.canvasWrapper`, inside
+    // the page div
+    const pageEl = (evt.target as Element)
+      .closest('.textLayer, .canvasWrapper')
+      ?.closest(PAGE_SELECTOR);
+    return pageEl ? highlightAt(pageEl, evt.clientX, evt.clientY) : null;
+  };
   const onClick = (evt: MouseEvent) => {
-    if (!onHighlight(evt)) return;
+    const highlight = highlightUnder(evt);
+    if (!highlight) return;
     if (!containerEl.ownerDocument.getSelection()!.isCollapsed) {
       evt.stopPropagation();
       return;
     }
-    openHighlightFromEvent(plugin, evt);
+    openHighlightFromEvent(plugin, evt, highlight);
   };
   // A middle click fires `auxclick`; a right click does too, for the menu
   const onAuxClick = (evt: MouseEvent) => {
@@ -98,7 +113,7 @@ function openItemsOnPress(
   };
   // A middle press scrolls on Windows and pastes on Linux
   const onMouseDown = (evt: MouseEvent) => {
-    if (evt.button === MIDDLE_MOUSE_BUTTON && onHighlight(evt)) {
+    if (evt.button === MIDDLE_MOUSE_BUTTON && highlightUnder(evt)) {
       evt.preventDefault();
     }
   };

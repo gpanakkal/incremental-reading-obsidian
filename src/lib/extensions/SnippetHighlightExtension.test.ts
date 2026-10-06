@@ -879,6 +879,29 @@ describe('click event handler', () => {
     );
   });
 
+  it('opens the highlight it is given, not one around the target, as a PDF does for a press on the text over a highlight', () => {
+    const plugin = makePlugin(makeReviewManager());
+    plugin.app.vault.getFileByPath = (path: string) => ({ path }) as never;
+    const given = document.createElement('div');
+    given.className = 'ir-snippet-highlight ir-card-highlight';
+    given.setAttribute('data-snippet-ref', 'cards/c.md');
+    const around = document.createElement('span');
+    around.className = 'ir-snippet-highlight';
+    around.setAttribute('data-snippet-ref', 'snippets/a.md');
+    const text = around.appendChild(document.createElement('span'));
+    const event = new MouseEvent('click', { cancelable: true });
+    Object.defineProperty(event, 'target', { value: text });
+
+    expect(openHighlightFromEvent(plugin as never, event, given)).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(plugin.app.workspace.openLinkText).toHaveBeenCalledExactlyOnceWith(
+      'cards/c.md',
+      '',
+      false
+    );
+    expect(openHighlightFromEvent(plugin as never, event, null)).toBe(false);
+  });
+
   it('opens nothing for a snippet missing its file, and says why', () => {
     Notice.reset();
     let event: MouseEvent | undefined;

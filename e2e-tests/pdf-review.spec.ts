@@ -1716,16 +1716,84 @@ test.describe('Snippets and cards from a PDF article', () => {
     expect(await vaultReads(window)).toEqual([]);
   });
 
-  /** The snippet highlights in `scope`, as [reference, text] pairs. */
-  const highlightsIn = (scope: Locator) =>
-    scope
-      .locator('.ir-snippet-highlight')
-      .evaluateAll((spans) =>
-        spans.map((span) => [
-          span.getAttribute('data-snippet-ref'),
-          span.textContent,
-        ])
-      );
+  /**
+   * The highlights over `scope`, a text item or a whole page, as [reference,
+   * text] pairs, bottom of the stack first: the text each box is drawn over.
+   * The plugin draws them as boxes in an overlay over the page's canvas,
+   * under its text layer, each naming the item and characters it covers.
+   */
+  const highlightsIn = (scope: Locator, cls = 'ir-snippet-highlight') =>
+    scope.evaluate((el, cls) => {
+      const page = el.closest('.page')!;
+      const { idx } = (el as HTMLElement).dataset;
+      return Array.from(
+        page.querySelectorAll<HTMLElement>(`.ir-pdf-highlights > .${cls}`)
+      )
+        .filter((box) => idx === undefined || box.dataset.item === idx)
+        .map((box) => {
+          const item = page.querySelector(
+            `.textLayer [data-idx="${box.dataset.item}"]`
+          )!;
+          return [
+            box.dataset.snippetRef,
+            item.textContent.slice(
+              Number(box.dataset.start),
+              Number(box.dataset.end)
+            ),
+          ];
+        });
+    }, cls);
+
+  /** The highlight boxes over item `idx` of page `n` of the PDF in `root`. */
+  const itemBoxes = (
+    root: Locator,
+    n: number,
+    idx: number,
+    cls = 'ir-snippet-highlight'
+  ) =>
+    root.locator(
+      `.page[data-page-number="${n}"] .ir-pdf-highlights > .${cls}[data-item="${idx}"]`
+    );
+
+  /**
+   * Click the middle of `box`, as a reader does: on the text over it, since
+   * the box itself takes no pointer events.
+   */
+  async function clickOn(page: Page, box: Locator) {
+    await box.scrollIntoViewIfNeeded();
+    const { x, y, width, height } = (await box.boundingBox())!;
+    await page.mouse.click(x + width / 2, y + height / 2);
+  }
+
+  /**
+   * The color `scope`'s element shows over a white page, as [r, g, b]: its
+   * background, composited through its own and its ancestors' opacity. With
+   * `probe`, that of a box in the document's body painted `probe`, which may
+   * name the plugin's variables, as a markdown highlight is painted.
+   */
+  const seenOverWhite = (scope: Locator, probe?: string) =>
+    scope.evaluate((el, probe) => {
+      let target = el;
+      if (probe) {
+        target = el.ownerDocument.body.appendChild(
+          el.ownerDocument.createElement('div')
+        );
+        target.style.backgroundColor = probe;
+      }
+      const [r, g, b, a = 1] = (
+        /rgba?\(([^)]*)\)/.exec(
+          getComputedStyle(target).backgroundColor
+        )?.[1] ?? ''
+      )
+        .split(/[,\s/]+/)
+        .map(Number);
+      let alpha = a;
+      for (let up: Element | null = target; up; up = up.parentElement) {
+        alpha *= Number(getComputedStyle(up).opacity);
+      }
+      if (probe) target.remove();
+      return [r, g, b].map((c) => Math.round(alpha * c + (1 - alpha) * 255));
+    }, probe);
 
   /** The text of item `idx` on page `n` of the PDF in `scope`. */
   const itemText = (scope: Locator, n: number, idx: number) =>
@@ -1816,10 +1884,10 @@ test.describe('Snippets and cards from a PDF article', () => {
     ]);
     expect(await highlightsIn(textItem(window, 1, 8))).toEqual([]);
     expect(await highlightsIn(textItem(window, 2, 4))).toEqual([]);
-    // Over the page, behind its transparent text: laid out within its item
-    const box = await textItem(window, 2, 3)
-      .locator('.ir-snippet-highlight')
-      .boundingBox();
+    // Over the page, under its transparent text: over the part of its item
+    // extracted
+    const highlight = itemBoxes(article(window), 2, 3);
+    const box = await highlight.boundingBox();
     const itemBox = await textItem(window, 2, 3).boundingBox();
     expect(box!.width).toBeGreaterThan(0);
     expect(box!.width).toBeLessThan(itemBox!.width);
@@ -1828,7 +1896,7 @@ test.describe('Snippets and cards from a PDF article', () => {
     expect(middle).toBeGreaterThan(itemBox!.y);
     expect(middle).toBeLessThan(itemBox!.y + itemBox!.height);
 
-    await textItem(window, 2, 3).locator('.ir-snippet-highlight').click();
+    await clickOn(window, highlight);
     await expect.poll(() => openFiles(window)).toContain(reference);
   });
 
@@ -1836,9 +1904,7 @@ test.describe('Snippets and cards from a PDF article', () => {
     await importFixture(window);
     await beginReview(window);
     const outer = await extractAcrossPages(window);
-    await expect(
-      textItem(window, 1, 9).locator('.ir-snippet-highlight')
-    ).toHaveCount(1);
+    await expect(itemBoxes(article(window), 1, 9)).toHaveCount(1);
 
     await selectChars(window, [1, 9, 2], [1, 9, 12]);
     await expect.poll(() => viewerSelection(window)).not.toBeNull();
@@ -1851,19 +1917,13 @@ test.describe('Snippets and cards from a PDF article', () => {
       end_offset: 1_00009_00012,
     });
     const text = (await itemText(article(window), 1, 9))!;
+    // The inner one over the outer
     await expect
-      .poll(() =>
-        textItem(window, 1, 9)
-          .locator('.ir-snippet-highlight .ir-snippet-highlight')
-          .evaluateAll((spans) =>
-            spans.map((span) => [
-              span.parentElement!.getAttribute('data-snippet-ref'),
-              span.getAttribute('data-snippet-ref'),
-              span.textContent,
-            ])
-          )
-      )
-      .toEqual([[outer, inner.reference, text.slice(2, 12)]]);
+      .poll(() => highlightsIn(textItem(window, 1, 9)))
+      .toEqual([
+        [outer, text],
+        [inner.reference, text.slice(2, 12)],
+      ]);
   });
 
   test('takes the highlight off when the snippet is undone', async () => {
@@ -1913,16 +1973,11 @@ test.describe('Snippets and cards from a PDF article', () => {
     const item9 = tab.locator(
       '.page[data-page-number="1"] .textLayer [data-idx="9"]'
     );
-    // Obsidian's own highlight rebuilds the item: the snippet's is put back in it
+    // Obsidian's own highlight rebuilds the item, beside the snippet's over it
     await expect(item9.locator('.mod-focused')).not.toHaveCount(0);
     await expect
       .poll(() => highlightsIn(item9))
       .toEqual([[reference, await itemText(tab, 1, 9)]]);
-    expect(
-      await item9
-        .locator('.mod-focused .ir-snippet-highlight')
-        .evaluateAll((spans) => spans.length)
-    ).toBeGreaterThan(0);
 
     // A press on the page clears Obsidian's highlight, rebuilding the item again
     await tab
@@ -1954,7 +2009,7 @@ test.describe('Snippets and cards from a PDF article', () => {
     const item9 = tab.locator(
       '.page[data-page-number="1"] .textLayer [data-idx="9"]'
     );
-    await expect(item9.locator('.ir-snippet-highlight')).toHaveCount(1);
+    await expect(itemBoxes(tab, 1, 9)).toHaveCount(1);
     const text = (await item9.textContent())!;
 
     // A drag begun in the margin starts beside the item, not in its text,
@@ -1981,25 +2036,313 @@ test.describe('Snippets and cards from a PDF article', () => {
     expect(selected).toBe(text);
   });
 
-  test('shows highlights in a PDF solid enough to see through its faded text layer', async () => {
+  test("shows highlights in a PDF in a markdown highlight's color, unfaded by its text layer", async () => {
     await importFixture(window);
     await beginReview(window);
     await extractAcrossPages(window);
-    const alpha = await textItem(window, 2, 3)
-      .locator('.ir-snippet-highlight')
-      .evaluate((span) => {
-        const [, a = '1'] =
-          /rgba?\([^,]+,[^,]+,[^,)]+(?:,\s*([\d.]+))?\)/.exec(
-            getComputedStyle(span).backgroundColor
-          ) ?? [];
-        let shown = Number(a);
-        for (let el: Element | null = span; el; el = el.parentElement) {
-          shown *= Number(getComputedStyle(el).opacity);
-        }
-        return shown;
-      });
+    const box = itemBoxes(article(window), 2, 3);
+    await expect(box).toHaveCount(1);
+
+    expect(await seenOverWhite(box)).toEqual(
+      await seenOverWhite(box, 'var(--ir-snippet-highlight-color)')
+    );
+    // Not the white page, nor faded to nearly that
+    expect(await seenOverWhite(box)).not.toEqual([255, 255, 255]);
+    const alpha = await box.evaluate((el) => {
+      let shown = Number(
+        /,\s*([\d.]+)\)$/.exec(getComputedStyle(el).backgroundColor)?.[1] ?? 1
+      );
+      for (let up: Element | null = el; up; up = up.parentElement) {
+        shown *= Number(getComputedStyle(up).opacity);
+      }
+      return shown;
+    });
     expect(alpha).toBeGreaterThanOrEqual(0.15);
   });
+
+  // #region THROUGH A ZOOM
+
+  /**
+   * Count, from now on, what the plugin's own code does in the page: each
+   * run of a `MutationObserver` it makes (made from now on), and each text
+   * range it measures. Told apart by the stack: Obsidian loads a plugin as
+   * `plugin:<id>`.
+   */
+  const watchPluginWork = (page: Page) =>
+    page.evaluate(() => {
+      const w = window as unknown as {
+        __irWork: { observerRuns: number; measures: number };
+      };
+      w.__irWork = { observerRuns: 0, measures: 0 };
+      const ours = () =>
+        /plugin:incremental-reading/.test(new Error().stack ?? '');
+      // `window` here is the page's: the spec's own is shadowed only at run time
+      const page = globalThis as unknown as {
+        MutationObserver: typeof MutationObserver;
+      };
+      const Observer = page.MutationObserver;
+      page.MutationObserver = class extends Observer {
+        constructor(callback: MutationCallback) {
+          super(
+            ours()
+              ? (records: MutationRecord[], observer: MutationObserver) => {
+                  w.__irWork.observerRuns++;
+                  callback(records, observer);
+                }
+              : callback
+          );
+        }
+      };
+      const { prototype } = Range;
+      const measure = Object.getOwnPropertyDescriptor(
+        prototype,
+        'getClientRects'
+      )!.value as (this: Range) => DOMRectList;
+      prototype.getClientRects = function (this: Range) {
+        if (ours()) w.__irWork.measures++;
+        return measure.call(this) as DOMRectList;
+      };
+    });
+  /** What {@link watchPluginWork} has counted since it last read. */
+  const pluginWork = (page: Page) =>
+    page.evaluate(() => {
+      const w = window as unknown as {
+        __irWork: { observerRuns: number; measures: number };
+      };
+      const work = { ...w.__irWork };
+      w.__irWork.observerRuns = 0;
+      w.__irWork.measures = 0;
+      return work;
+    });
+
+  /**
+   * Wait until every page of the review tab's PDF on screen is drawn at its
+   * zoom: loaded, and its text layer shown again.
+   */
+  const settled = (page: Page) =>
+    page.waitForFunction(() => {
+      const root = document.querySelector('.ir-pdf-article')!;
+      const view = root
+        .querySelector('.pdf-viewer-container')!
+        .getBoundingClientRect();
+      const shown = Array.from(
+        root.querySelectorAll<HTMLElement>('.page')
+      ).filter((pageEl) => {
+        const { top, bottom } = pageEl.getBoundingClientRect();
+        return bottom > view.top && top < view.bottom;
+      });
+      return (
+        shown.length > 0 &&
+        shown.every(
+          (pageEl) =>
+            pageEl.dataset.loaded === 'true' &&
+            pageEl.querySelector<HTMLElement>('.textLayer')?.hidden === false
+        )
+      );
+    });
+
+  /**
+   * Run `zoom` and watch, every animation frame for 2s from just before it,
+   * whether the highlight of `ref` in the review tab's PDF is on screen.
+   * Returns how many frames it was not, of how many, and how wide page 1 was
+   * before and after.
+   */
+  async function framesThroughZoom(
+    page: Page,
+    ref: string,
+    zoom: () => Promise<void>
+  ) {
+    await page.evaluate((ref) => {
+      const w = window as unknown as {
+        __irFrames: Promise<{ frames: number; unseen: number }>;
+      };
+      const root = document.querySelector('.ir-pdf-article')!;
+      const seen = () =>
+        Array.from(
+          root.querySelectorAll<HTMLElement>(
+            `.ir-snippet-highlight[data-snippet-ref="${CSS.escape(ref)}"]`
+          )
+        ).some((box) => {
+          const { width, height } = box.getBoundingClientRect();
+          return (
+            width > 0 &&
+            height > 0 &&
+            box.checkVisibility({
+              opacityProperty: true,
+              visibilityProperty: true,
+            })
+          );
+        });
+      w.__irFrames = (async () => {
+        let frames = 0;
+        let unseen = 0;
+        const start = performance.now();
+        while (performance.now() - start < 2000) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          frames++;
+          if (!seen()) unseen++;
+        }
+        return { frames, unseen };
+      })();
+    }, ref);
+    const before = (await pdfPage(page, 1).boundingBox())!.width;
+    await zoom();
+    const watched = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __irFrames: Promise<{ frames: number; unseen: number }>;
+          }
+        ).__irFrames
+    );
+    return {
+      ...watched,
+      before,
+      after: (await pdfPage(page, 1).boundingBox())!.width,
+    };
+  }
+
+  /**
+   * How far each highlight box over page 1 of the review tab's PDF is from
+   * the text it covers, at most, in pixels: its edges against those of the
+   * characters it names, as the text layer lays them out now.
+   */
+  const boxOffsets = (page: Page) =>
+    page.evaluate(() => {
+      const pageEl = document.querySelector(
+        '.ir-pdf-article .page[data-page-number="1"]'
+      )!;
+      const boxes = Array.from(
+        pageEl.querySelectorAll<HTMLElement>(
+          '.ir-pdf-highlights > .ir-snippet-highlight'
+        )
+      );
+      return boxes.map((box) => {
+        const item = pageEl.querySelector(
+          `.textLayer [data-idx="${box.dataset.item}"]`
+        )!;
+        const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
+        const range = document.createRange();
+        let from = 0;
+        const rects: DOMRect[] = [];
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          const { length } = node as Text;
+          const first = Math.max(Number(box.dataset.start) - from, 0);
+          const last = Math.min(Number(box.dataset.end) - from, length);
+          from += length;
+          if (first >= last) continue;
+          range.setStart(node, first);
+          range.setEnd(node, last);
+          rects.push(...Array.from(range.getClientRects()));
+        }
+        const text = {
+          left: Math.min(...rects.map((r) => r.left)),
+          top: Math.min(...rects.map((r) => r.top)),
+          right: Math.max(...rects.map((r) => r.right)),
+          bottom: Math.max(...rects.map((r) => r.bottom)),
+        };
+        const drawn = box.getBoundingClientRect();
+        return Math.max(
+          Math.abs(drawn.left - text.left),
+          Math.abs(drawn.top - text.top),
+          Math.abs(drawn.right - text.right),
+          Math.abs(drawn.bottom - text.bottom)
+        );
+      });
+    });
+
+  /** Import the fixture and review it, with a snippet over the first line. */
+  async function reviewWithFirstLineSnippet(page: Page) {
+    await importFixture(page);
+    await beginReview(page);
+    await expect(textItem(page, 1, 2)).toBeAttached();
+    await selectText(page, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    await expect.poll(() => viewerSelection(page)).not.toBeNull();
+    await page.getByRole('button', { name: 'Create snippet' }).click();
+    await expect.poll(() => snippets(page)).toHaveLength(1);
+    const [snippet] = await snippets(page);
+    await expect(itemBoxes(article(page), 1, 2)).toHaveCount(1);
+    await page.evaluate(() => document.getSelection()!.removeAllRanges());
+    await settled(page);
+    return snippet.reference;
+  }
+
+  test('keeps a highlight on screen and over its text on every frame of a zoom from the toolbar, and of one with Ctrl and the wheel', async () => {
+    const reference = await reviewWithFirstLineSnippet(window);
+
+    const toolbar = await framesThroughZoom(window, reference, () =>
+      article(window).locator('[aria-label="Zoom in"]').click()
+    );
+    expect(toolbar.after).toBeGreaterThan(toolbar.before * 1.05);
+    expect(toolbar.frames).toBeGreaterThan(30);
+    expect(toolbar.unseen).toBe(0);
+    await settled(window);
+    for (const offset of await boxOffsets(window)) {
+      expect(offset).toBeLessThan(2);
+    }
+
+    const page1 = (await pdfPage(window, 1).boundingBox())!;
+    await window.mouse.move(page1.x + page1.width / 2, page1.y + 150);
+    const wheel = await framesThroughZoom(window, reference, async () => {
+      await window.keyboard.down('Control');
+      await window.mouse.wheel(0, 100);
+      await window.keyboard.up('Control');
+    });
+    expect(wheel.after).toBeLessThan(wheel.before * 0.95);
+    expect(wheel.unseen).toBe(0);
+    await settled(window);
+    for (const offset of await boxOffsets(window)) {
+      expect(offset).toBeLessThan(2);
+    }
+  });
+
+  test('does no work of its own on a zoom: runs nothing for a PDF with no highlights, and measures nothing for one with some', async () => {
+    await importFixture(window);
+    await watchPluginWork(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 2)).toBeAttached();
+    await settled(window);
+    await pluginWork(window);
+
+    await article(window).locator('[aria-label="Zoom in"]').click();
+    await settled(window);
+    expect(await pluginWork(window)).toEqual({ observerRuns: 0, measures: 0 });
+
+    // With a highlight, the boxes are measured once drawn, and not again
+    await selectText(window, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    await expect.poll(() => viewerSelection(window)).not.toBeNull();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await expect(itemBoxes(article(window), 1, 2)).toHaveCount(1);
+    await window.evaluate(() => document.getSelection()!.removeAllRanges());
+    await settled(window);
+    expect((await pluginWork(window)).measures).toBeGreaterThan(0);
+
+    await article(window).locator('[aria-label="Zoom out"]').click();
+    await settled(window);
+    const work = await pluginWork(window);
+    // Its observer still sees the zoom's changes, as the instrument shows
+    expect(work.observerRuns).toBeGreaterThan(0);
+    expect(work.measures).toBe(0);
+  });
+
+  test('lets a drag with the mouse select through a highlighted line, opening nothing', async () => {
+    const reference = await reviewWithFirstLineSnippet(window);
+    const item = (await textItem(window, 1, 2).boundingBox())!;
+    const y = item.y + item.height / 2;
+
+    await window.mouse.move(item.x + 1, y);
+    await window.mouse.down();
+    await window.mouse.move(item.x + item.width / 2, y, { steps: 5 });
+    await window.mouse.move(item.x + item.width - 1, y, { steps: 5 });
+    await window.mouse.up();
+
+    await expect
+      .poll(() => viewerSelection(window))
+      .toMatch(/^Incremental reading turns a long text/);
+    expect(await openFiles(window)).not.toContain(reference);
+  });
+
+  // #endregion
 
   // #region IN THE PDF'S OWN TAB
 
@@ -2083,9 +2426,7 @@ test.describe('Snippets and cards from a PDF article', () => {
       expect.stringMatching(/^snippet created: /),
     ]);
     // Highlighted in the tab, as one extracted in review is
-    await expect(
-      tabItem(window, 1, 2).locator('.ir-snippet-highlight')
-    ).not.toHaveCount(0);
+    await expect(itemBoxes(pdfTab(window), 1, 2)).not.toHaveCount(0);
     expect(
       (await fs.readFile(path.join(vaultPath, PDF_PATH))).equals(pdfBytes)
     ).toBe(true);
@@ -2162,9 +2503,8 @@ test.describe('Snippets and cards from a PDF article', () => {
     `[[${pdfLink}#page=1&selection=2,0,2,${FIRST_LINE.length}` +
     '|PDF fixture, page 1]]';
 
-  /** Highlights in the first line, in the active PDF tab. */
-  const firstLineHighlights = (page: Page) =>
-    tabItem(page, 1, 2).locator('.ir-snippet-highlight');
+  /** Highlights over the first line, in the active PDF tab. */
+  const firstLineHighlights = (page: Page) => itemBoxes(pdfTab(page), 1, 2);
 
   /**
    * In the fixture's own tab, open and no article, make a card of the first
@@ -2360,34 +2700,9 @@ test.describe('Snippets and cards from a PDF article', () => {
 
   // #region CARD HIGHLIGHTS
 
-  /** The card highlights in `scope`, as [reference, text] pairs. */
+  /** The card highlights over `scope`, as [reference, text] pairs. */
   const cardHighlightsIn = (scope: Locator) =>
-    scope
-      .locator('.ir-snippet-highlight.ir-card-highlight')
-      .evaluateAll((spans) =>
-        spans.map((span) => [
-          span.getAttribute('data-snippet-ref'),
-          span.textContent,
-        ])
-      );
-
-  /** The background color `locator`'s element is painted, as [r, g, b]. */
-  const backgroundOf = (locator: Locator) =>
-    locator.evaluate((el) =>
-      (/rgba?\(([^)]*)\)/.exec(getComputedStyle(el).backgroundColor)?.[1] ?? '')
-        .split(/[,\s/]+/)
-        .slice(0, 3)
-        .map((channel) => Math.round(Number(channel)))
-    );
-
-  /**
-   * The card embed tint, `hsl(26 100% 50% / 0.1)`, as it reads over a white
-   * page, made opaque for a text layer drawn at a fifth of its opacity:
-   * `hsl(26 100% 75%)`.
-   */
-  const CARD_PDF_COLOR = [255, 183, 128];
-  /** The snippet color in a PDF, as before cards had highlights. */
-  const SNIPPET_PDF_COLOR = [255, 225, 0];
+    highlightsIn(scope, 'ir-card-highlight');
 
   /**
    * Make a card in review of the text from `[page, idx, char]` to another
@@ -2440,9 +2755,13 @@ test.describe('Snippets and cards from a PDF article', () => {
     await expect
       .poll(() => cardHighlightsIn(textItem(window, 1, 2)))
       .toEqual([[card.reference, FIRST_LINE]]);
-    const cardSpan = textItem(window, 1, 2).locator('.ir-card-highlight');
-    expect(await backgroundOf(cardSpan)).toEqual(CARD_PDF_COLOR);
-    const snippetSpan = textItem(window, 1, 9).locator('.ir-snippet-highlight');
+    // Seen over the page as the card's embed tint and a markdown highlight
+    // are seen over a note
+    const cardBox = itemBoxes(article(window), 1, 2, 'ir-card-highlight');
+    expect(await seenOverWhite(cardBox)).toEqual(
+      await seenOverWhite(cardBox, 'var(--ir-transclusion-tint)')
+    );
+    const snippetBox = itemBoxes(article(window), 1, 9);
     expect(await cardHighlightsIn(textItem(window, 1, 9))).toEqual([]);
     expect(await highlightsIn(textItem(window, 1, 9))).toEqual([
       [
@@ -2450,9 +2769,14 @@ test.describe('Snippets and cards from a PDF article', () => {
         (await itemText(article(window), 1, 9))!.slice(2, 12),
       ],
     ]);
-    expect(await backgroundOf(snippetSpan)).toEqual(SNIPPET_PDF_COLOR);
+    expect(await seenOverWhite(snippetBox)).toEqual(
+      await seenOverWhite(snippetBox, 'var(--ir-snippet-highlight-color)')
+    );
+    expect(await seenOverWhite(snippetBox)).not.toEqual(
+      await seenOverWhite(cardBox)
+    );
 
-    await cardSpan.click();
+    await clickOn(window, cardBox);
     await expect.poll(() => openFiles(window)).toContain(card.reference);
   });
 
@@ -2467,17 +2791,17 @@ test.describe('Snippets and cards from a PDF article', () => {
 
     await cardInReview(window, ...line, 'long text');
     await expect(
-      textItem(window, 1, 2).locator('.ir-card-highlight')
+      itemBoxes(article(window), 1, 2, 'ir-card-highlight')
     ).not.toHaveCount(0);
     await actionBar(window).locator('#undo-button').click();
     await expect.poll(() => cards(window)).toEqual([]);
     await expect(
-      textItem(window, 1, 2).locator('.ir-card-highlight')
+      itemBoxes(article(window), 1, 2, 'ir-card-highlight')
     ).toHaveCount(0);
 
     const card = await cardInReview(window, ...line, 'long text');
     await expect(
-      textItem(window, 1, 2).locator('.ir-card-highlight')
+      itemBoxes(article(window), 1, 2, 'ir-card-highlight')
     ).not.toHaveCount(0);
     await window.evaluate(async (ref) => {
       const { app } = window as unknown as {
@@ -2488,7 +2812,7 @@ test.describe('Snippets and cards from a PDF article', () => {
       await app.fileManager.trashFile(app.vault.getFileByPath(ref));
     }, card.reference);
     await expect(
-      textItem(window, 1, 2).locator('.ir-card-highlight')
+      itemBoxes(article(window), 1, 2, 'ir-card-highlight')
     ).toHaveCount(0);
   });
 
@@ -2599,20 +2923,14 @@ test.describe('Snippets and cards from a PDF article', () => {
     await expect.poll(async () => (await cards(window))[0].source).toBeTruthy();
 
     // The snippet was made of the very same line: on that tie the card goes
-    // inside it, and nothing inside the card
+    // over it
     await expect
       .poll(() => cardHighlightsIn(tabItem(window, 1, 2)))
       .toEqual([[card.reference, FIRST_LINE]]);
-    await expect(
-      tabItem(window, 1, 2).locator('.ir-card-highlight .ir-snippet-highlight')
-    ).toHaveCount(0);
-    expect(
-      await tabItem(window, 1, 2)
-        .locator('.ir-card-highlight')
-        .evaluate((span) =>
-          span.parentElement!.getAttribute('data-snippet-ref')
-        )
-    ).toBe(snippet.reference);
+    expect(await highlightsIn(tabItem(window, 1, 2))).toEqual([
+      [snippet.reference, FIRST_LINE],
+      [card.reference, FIRST_LINE],
+    ]);
 
     await executeCommandById(window, 'incremental-reading:import-article');
     await finalizeArticleImport(window);

@@ -49,14 +49,17 @@ export const MIDDLE_MOUSE_BUTTON = 1;
  * which the next review fetch would take for the item's own, leaving its
  * real file no longer relinkable.
  *
+ * @param highlight the highlight to open, when the event's target isn't in
+ *   it: a PDF's highlights lie under its text layer, out of the pointer's way.
  * @returns true when the event targeted a highlight and was consumed.
  */
 export function openHighlightFromEvent(
   plugin: IncrementalReadingPlugin,
-  event: MouseEvent
+  event: MouseEvent,
+  highlight = (event.target as HTMLElement | null)?.closest(
+    '.ir-snippet-highlight'
+  )
 ): boolean {
-  const target = event.target as HTMLElement | null;
-  const highlight = target?.closest('.ir-snippet-highlight');
   if (!highlight) return false;
 
   const ref = highlight.getAttribute('data-snippet-ref');

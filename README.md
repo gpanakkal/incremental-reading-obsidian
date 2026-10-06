@@ -124,6 +124,7 @@ If you import a note as an article later, the snippets and cards you already mad
 - Text from a PDF goes into its snippet or card as plain text: anything in it that would turn into Markdown (links, tags, headings, math and so on) or a Templater command gets a backslash, so it reads exactly as the PDF does. Source mode, and the line you're editing, show those backslashes, and a search that spans one won't find the text: `US$5` won't find `US\$5`.
 - Invisible characters in a PDF's text, such as zero-width spaces, soft hyphens and the direction controls that can make text read backwards, are left out of its snippets and cards. The marks that place punctuation in Hebrew or Arabic text stay, and so do the joiners and variation selectors emoji and some scripts need, though the England, Scotland and Wales flags read as a plain black flag, as in note names. The PDF itself keeps them all, so a line that holds a direction control may select differently from how it looks; drag past the line's end to take all of it.
 - A snippet or card that runs onto the next page is highlighted up to the end of its first page.
+- Highlights in a PDF don't change when you hover over them, and the pointer stays a text cursor, so the text under them stays easy to select. Clicking or tapping a highlight still opens its snippet or card.
 - A scanned PDF has no text to select, so nothing can be made from it.
 
 ## Third-party tools
