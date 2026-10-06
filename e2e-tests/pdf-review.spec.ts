@@ -49,6 +49,14 @@ const HOSTILE_PDF_PATH = 'sources/PDF fixture - hostile.pdf';
 const CONTROLS_PDF_PATH = 'sources/PDF fixture - controls.pdf';
 /** That line, as the PDF reads. */
 const CONTROLS_LINE = 'Tabbed\there report\u202efdp.exe';
+/**
+ * The line after it, as the PDF reads. It shows as "Flag Report", and its
+ * ToUnicode CMap reads a tag sequence spelling an instruction after the "g",
+ * and a variation selector after "p" and after "o". Obsidian's pdf.js (as of
+ * 1.13.7) drops a glyph whose text holds a tag character, its "g" with it, so
+ * only the selectors come through.
+ */
+const HIDDEN_LINE = `Fla Rep\ufe00o${String.fromCodePoint(0xe0100)}rt`;
 /** The hostile fixture's paragraphs, as the PDF reads. */
 const HOSTILE_PARAGRAPHS = [
   '# Heading #ir-card #ir-text-snippet ![[Secret note]] ' +
@@ -1144,6 +1152,28 @@ test.describe('Snippets and cards from a PDF article', () => {
     );
     // The text itself keeps them
     expect(snippet.body).toBe(Markdown.escape(CONTROLS_LINE));
+  });
+
+  test('names a snippet of text hiding variation selectors without them', async () => {
+    await importFixture(window, CONTROLS_PDF_PATH);
+    await beginReview(window);
+    await expect(textItem(window, 1, 1)).toBeAttached();
+    const notices = await watchNotices(window);
+
+    await selectText(window, [1, 1, 0], [1, 1, HIDDEN_LINE.length]);
+    // pdf.js reads the selectors, so a name could carry them
+    await expect.poll(() => viewerSelection(window)).toBe(HIDDEN_LINE);
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+
+    expect(await notices()).not.toContainEqual(expect.stringMatching(/fail/i));
+    const [snippet] = await snippets(window);
+    const name = snippet.reference
+      .slice(snippet.reference.lastIndexOf('/') + 1)
+      .replace(/ - \w+\.md$/, '');
+    // `Re`, U+FE00, `port` would look like `Report` and be another name
+    expect(name).toBe('Fla Report');
+    expect(snippet.body).toBe(Markdown.escape(HIDDEN_LINE));
   });
 
   /**

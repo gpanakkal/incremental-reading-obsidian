@@ -182,7 +182,7 @@ To avoid side effects, this plugin does not modify files outside its data folder
 
 Plugin data (items and the SQLite database) is stored in the `incremental-reading/` folder.
 
-Articles are imported where they are unless you turn on **Make a copy** in the import dialog (or the **Copy articles when importing** setting), which puts a copy in the plugin data folder. You can delete the original after that if you no longer need it. A copied note links back to its original in its `source` property. A copied PDF keeps no link to its original, since a PDF has no properties to hold one.
+Articles are imported where they are unless you turn on **Make a copy** in the import dialog (or the **Copy articles when importing** setting), which puts a copy in the plugin data folder. You can delete the original after that if you no longer need it. A copied note links back to its original in its `source` property. A copied PDF keeps no link to its original, since a PDF has no properties to hold one. A copy takes its original's name, minus anything a snippet or card name can't hold: characters like `#` and `:`, control and text-direction characters, and other characters that don't show. When that changes the name, a notice tells you what the copy is called.
 
 When you make a snippet or card, a new note is created in the plugin data folder to hold its content.
 

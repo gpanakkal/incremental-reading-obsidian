@@ -3702,6 +3702,28 @@ describe('import', () => {
         );
       });
 
+      it('names a copy of a PDF named after a reversed extension so that it reads in order, and says so', async () => {
+        Notice.reset();
+        const rlo = String.fromCodePoint(0x202e);
+        const source = fileAt(`papers/invoice${rlo}fdp.exe.pdf`);
+        const { repo } = await makeSqlJsRepo();
+        const plugin = makePdfCopyPlugin(source, { folders: [ARTICLES] });
+
+        const result = await new ArticleManager(plugin as never, repo).import(
+          source,
+          10,
+          null,
+          true
+        );
+
+        const copyPath = `${ARTICLES}/invoicefdp.exe.pdf`;
+        expect(plugin.app.vault.copy.mock.calls).toEqual([[source, copyPath]]);
+        expect(result?.file.path).toBe(copyPath);
+        expect(Notice.messages[0]).toBe(
+          `Warning: removed characters a note name can't hold; the copy is named "invoicefdp.exe.pdf"`
+        );
+      });
+
       it('makes a second, distinctly named copy when imported twice', async () => {
         const source = fileAt('papers/Paper.pdf');
         const { repo } = await makeSqlJsRepo();
@@ -4035,6 +4057,182 @@ describe('import', () => {
         ),
         { numRuns: 60 }
       );
+    });
+
+    describe('whose name holds what a title drops', () => {
+      const fromCodes = (...codes: number[]) => String.fromCodePoint(...codes);
+      const RLO = fromCodes(0x202e);
+      const BLACK_FLAG = fromCodes(0x1f3f4);
+      /**
+       * Characters a name can arrive with, by sync, git or zip, that a title
+       * drops or changes: bidi controls, joiners and selectors out of place,
+       * tags, other format characters, controls, forbidden characters.
+       */
+      const droppedArb = fc.oneof(
+        fc.constantFrom(
+          RLO,
+          fromCodes(0x2066),
+          fromCodes(0x200f),
+          fromCodes(0x200b),
+          fromCodes(0x200c),
+          fromCodes(0x200d),
+          fromCodes(0xfe00),
+          fromCodes(0xe0100),
+          fromCodes(0xfff9),
+          fromCodes(0x20e3),
+          '\t',
+          '#',
+          ':',
+          '.'
+        ),
+        fc
+          .integer({ min: 0xe0020, max: 0xe007f })
+          .map((code) => fromCodes(code))
+      );
+      /**
+       * What a title keeps of a name, though it isn't ASCII: emoji and script
+       * sequences, and a decomposed letter, which it only composes.
+       */
+      const keptArb = fc.constantFrom(
+        fromCodes(0x2764, 0xfe0f),
+        fromCodes(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467),
+        fromCodes(0x645, 0x6cc, 0x200c, 0x62e, 0x648, 0x627, 0x647),
+        fromCodes(0x915, 0x94d, 0x200d, 0x937),
+        fromCodes(0x65, 0x301)
+      );
+      /**
+       * A basename with dropped characters and kept sequences anywhere in it,
+       * perhaps none.
+       */
+      const dirtyBasenameArb = fc
+        .tuple(
+          basenameArb,
+          fc.array(fc.tuple(fc.nat(), fc.oneof(droppedArb, keptArb)))
+        )
+        .map(([basename, inserts]) => {
+          const chars = [...basename];
+          for (const [at, char] of inserts) {
+            chars.splice(at % (chars.length + 1), 0, char);
+          }
+          return chars.join('');
+        });
+      const warningFor = (name: string) =>
+        `Warning: removed characters a note name can't hold; the copy is named "${name}"`;
+
+      it('names the copy as a title would read its name, warning when that changed it', async () => {
+        await fc.assert(
+          fc.asyncProperty(
+            dirtyBasenameArb,
+            fc.boolean(),
+            async (basename, taken) => {
+              Notice.reset();
+              const clean = Obsidian.sanitizeForTitle(basename, true);
+              const { repo } = await makeSqlJsRepo();
+              const sourcePath = `notes/${basename}.md`;
+              const plugin = makeNoteCopyPlugin(fileAt(sourcePath), {
+                folders: [ARTICLES],
+                paths: taken ? [`${ARTICLES}/${clean}.md`] : [],
+              });
+              const random = vi.spyOn(Math, 'random');
+              random.mockReset();
+              random.mockReturnValueOnce(0.5);
+
+              const result = await new ArticleManager(
+                plugin as never,
+                repo
+              ).import(plugin.files.get(sourcePath)!, 10, null, true);
+              random.mockRestore();
+
+              const title = taken ? `${clean} - ${suffixOf(0.5)}` : clean;
+              const changed = clean !== basename.normalize('NFC');
+              const copyPath = `${ARTICLES}/${title}.md`;
+              expect(plugin.app.vault.create.mock.calls).toEqual([
+                [copyPath, ''],
+              ]);
+              expect(result?.file.path).toBe(copyPath);
+              const imported = `Imported "${noticeTitle(title)}" with priority ${IRScheduler.toDisplayPriority(10)}`;
+              // The copy's own name, as it ends up
+              expect(Notice.messages).toEqual([
+                ...(taken
+                  ? [`Warning: article with name already exists "${clean}.md"`]
+                  : []),
+                ...(changed ? [warningFor(`${title}.md`)] : []),
+                imported,
+              ]);
+            }
+          ),
+          { numRuns: 40 }
+        );
+      });
+
+      it('names a copy of a note named after a reversed extension so that it reads in order', async () => {
+        Notice.reset();
+        const notify = vi.spyOn(Obsidian, 'notify');
+        notify.mockClear();
+        const tags = fromCodes(0xe0069, 0xe0067, 0xe006e, 0xe006f, 0xe0072);
+        const sourcePath = `notes/invoice${RLO}fdp.exe ${BLACK_FLAG}${tags}${fromCodes(0xe007f)}.md`;
+        const { repo } = await makeSqlJsRepo();
+        const plugin = makeNoteCopyPlugin(fileAt(sourcePath), {
+          folders: [ARTICLES],
+        });
+
+        const result = await new ArticleManager(plugin as never, repo).import(
+          plugin.files.get(sourcePath)!,
+          10,
+          null,
+          true
+        );
+
+        const name = `invoicefdp.exe ${BLACK_FLAG}.md`;
+        expect(result?.file.path).toBe(`${ARTICLES}/${name}`);
+        // Persists, as the name-taken warning does
+        expect(notify).toHaveBeenCalledWith(warningFor(name), true);
+      });
+
+      it('gives a copy of a note with a decomposed name the composed name, unwarned', async () => {
+        Notice.reset();
+        // `Café`, its accent a combining mark, as macOS file systems spell it
+        const sourcePath = `notes/Cafe${fromCodes(0x301)}.md`;
+        const { repo } = await makeSqlJsRepo();
+        const plugin = makeNoteCopyPlugin(fileAt(sourcePath), {
+          folders: [ARTICLES],
+        });
+
+        const result = await new ArticleManager(plugin as never, repo).import(
+          plugin.files.get(sourcePath)!,
+          10,
+          null,
+          true
+        );
+
+        expect(result?.file.path).toBe(`${ARTICLES}/Caf${fromCodes(0xe9)}.md`);
+        expect(Notice.messages).toHaveLength(1);
+        expect(Notice.messages[0]).toMatch(/^Imported /);
+      });
+
+      it('names a copy whose name a title drops all of by a generated id', async () => {
+        Notice.reset();
+        const sourcePath = `notes/${RLO}${fromCodes(0x200d)}#.md`;
+        const { repo } = await makeSqlJsRepo();
+        const plugin = makeNoteCopyPlugin(fileAt(sourcePath), {
+          folders: [ARTICLES],
+        });
+        const random = vi.spyOn(Math, 'random');
+        random.mockReset();
+        random.mockReturnValueOnce(0.25);
+
+        const result = await new ArticleManager(plugin as never, repo).import(
+          plugin.files.get(sourcePath)!,
+          10,
+          null,
+          true
+        );
+        random.mockRestore();
+
+        const name = `${suffixOf(0.25)}.md`;
+        expect(result?.file.path).toBe(`${ARTICLES}/${name}`);
+        expect(Notice.messages[0]).toBe(warningFor(name));
+      });
     });
 
     it('marks the copy as the article, when it was made, and where it came from unless the note already says', async () => {
