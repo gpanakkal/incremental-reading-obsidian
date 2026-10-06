@@ -592,6 +592,12 @@ body.is-phone .ir-header-standin {
 
 /* Mobile: Move action bar to bottom using flex order.
 
+   The standalone bars outside review are prepended to a flex column: a note's
+   `.markdown-reading-view`, or a PDF tab's `.view-content` (Obsidian's
+   `.workspace-leaf-content[data-type="pdf"] .view-content`). On a PDF tab this
+   puts the bar below `.pdf-container`, while Obsidian's PDF toolbar stays on
+   top, as it does on every platform.
+
    The bar has to clear the Obsidian navbar, whose footprint is measured live
    into `--ir-mobile-toolbar-height` by `configureNavbarPosition` in main.ts.
    That whole distance is the bar's own margin here; the one host that pays
@@ -689,15 +695,6 @@ body.is-phone .ir-header-standin {
    the panel container is CodeMirror's element and other plugins can share it. */
 .cm-panels-top.ir-action-bar-host {
   border-bottom: none;
-}
-
-/* On a PDF tab the bar stays above Obsidian's PDF toolbar on mobile too,
-   rather than dropping to the bottom like the bars on notes. Obsidian's
-   `.workspace-leaf-content[data-type="pdf"] .view-content` is a flex column,
-   so the mobile `order` above would put the bar below `.pdf-container`. */
-.is-mobile .ir-action-bar.ir-pdf-leaf-bar {
-  order: 0;
-  margin-bottom: 0;
 }
 
 .ir-action-bar .clickable-icon svg.lucide,

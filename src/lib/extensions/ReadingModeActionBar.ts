@@ -58,7 +58,8 @@ function targetOf(
     if (!file) return null;
     // `contentEl` is the `.view-content` Obsidian fills with `.pdf-toolbar`
     // and `.pdf-container` once pdf.js has loaded. Prepending puts the bar
-    // above both, whether they are there yet or not. A PDF has no frontmatter,
+    // above both, whether they are there yet or not; on mobile, styles.css
+    // moves it to the bottom, as it does a note's. A PDF has no frontmatter,
     // so it is an item only by its row, and only articles are ever PDFs.
     return {
       file,
