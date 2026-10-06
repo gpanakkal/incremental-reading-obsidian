@@ -54,6 +54,23 @@ export class ObsidianHelpers {
   }
 
   /**
+   * Settles once the metadata cache has nothing left to read: a note's cache
+   * then describes its text, and links Obsidian has just rewritten are in it.
+   *
+   * Undocumented: `MetadataCache.onCleanCache`, which Obsidian's own link
+   * updater waits on before it reads links (see `main.ts`).
+   */
+  static settleMetadataCache(app: App): Promise<void> {
+    const { metadataCache } = app;
+    if (typeof metadataCache.onCleanCache !== 'function') {
+      return Promise.resolve();
+    }
+    return new Promise((done) => {
+      metadataCache.onCleanCache(done);
+    });
+  }
+
+  /**
    * Make the folder `path` goes in, unless it is the vault root or exists
    * already: a copy or a new file can't go in a folder that isn't there.
    */
@@ -369,6 +386,9 @@ export class ObsidianHelpers {
   }
 
   /**
+   * @param content the note's text, or what gives it from the note once it
+   *   exists, still empty, and before the text is written to it: its text can
+   *   then depend on where the note is, and on its being there
    * @param directory path relative to the vault root
    */
   static async createNote({
@@ -378,7 +398,7 @@ export class ObsidianHelpers {
     directory,
     app,
   }: {
-    content: string;
+    content: string | ((file: TFile) => string);
     frontmatter?: PluginFrontMatter;
     fileName: string;
     directory: string;
@@ -387,7 +407,10 @@ export class ObsidianHelpers {
     try {
       const fullPath = normalizePath(`${directory}/${fileName}`);
       const file = await ObsidianHelpers.createFile(app, fullPath);
-      await app.vault.append(file, content);
+      await app.vault.append(
+        file,
+        typeof content === 'string' ? content : content(file)
+      );
       if (frontmatter) {
         await this.updateFrontMatter(file, frontmatter, app);
       }
@@ -555,25 +578,35 @@ export class ObsidianHelpers {
   }
 
   /**
-   * Write `updates` into `file`'s frontmatter. A file with no frontmatter, a
-   * PDF say, is left alone. `processFrontMatter` skips anything but `.md`
-   * silently too (read from obsidian.asar, not documented), but no caller
-   * should rest on that.
+   * Write `updates` into `file`'s frontmatter, after `edit` when given, in
+   * the same write. A file with no frontmatter, a PDF say, is left alone.
+   * `processFrontMatter` skips anything but `.md` silently too (read from
+   * obsidian.asar, not documented), but no caller should rest on that.
    */
   static async updateFrontMatter(
     file: TFile,
     updates:
       | FrontMatterUpdates
       | ((frontmatter: Record<string, unknown>) => void),
-    app: App
+    app: App,
+    edit?: (frontmatter: Record<string, unknown>) => void
   ) {
     if (!supportsFrontmatter(file)) return;
     if (typeof updates === 'function') {
-      await app.fileManager.processFrontMatter(file, updates);
+      await app.fileManager.processFrontMatter(
+        file,
+        edit
+          ? (frontmatter: Record<string, unknown>) => {
+              edit(frontmatter);
+              updates(frontmatter);
+            }
+          : updates
+      );
     } else {
       await app.fileManager.processFrontMatter(
         file,
         (frontmatter: Record<string, unknown>) => {
+          edit?.(frontmatter);
           const { tags, ...rest } = updates;
           Object.assign(frontmatter, rest);
           // An update without tags leaves the note's tags as they are

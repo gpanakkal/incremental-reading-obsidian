@@ -1,7 +1,7 @@
 import { MAX_SQL_QUERY_PARAMS, SOURCE_PROPERTY_NAME } from '#/lib/constants';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { linkNamesPath, parseSourceLink } from '#/lib/source-link';
-import type { App, TFile } from 'obsidian';
+import type { TFile } from 'obsidian';
 import type { ItemManager } from './ItemManager';
 
 /**
@@ -18,23 +18,6 @@ export interface FileMove {
 type Item = { id: string; reference: string; writtenAt?: string };
 /** A moved row's snippet or card, whose link names the file it is from. */
 type Child = Item & { parent: string };
-
-/**
- * Settles once the metadata cache has nothing left to read: links Obsidian
- * has just rewritten are then in it.
- *
- * Undocumented: `MetadataCache.onCleanCache`, which Obsidian's own link
- * updater waits on before it reads links (see `main.ts`).
- */
-function cacheSettled(app: App): Promise<void> {
-  const { metadataCache } = app;
-  if (typeof metadataCache.onCleanCache !== 'function') {
-    return Promise.resolve();
-  }
-  return new Promise((done) => {
-    metadataCache.onCleanCache(done);
-  });
-}
 
 /**
  * Point the `source` link of every item that `moves` broke at the file it was
@@ -61,7 +44,7 @@ export async function followSourceLinks(
   moves: readonly FileMove[]
 ): Promise<number> {
   const { app, repo } = manager;
-  await cacheSettled(app);
+  await Obsidian.settleMetadataCache(app);
 
   // Each move whose file is still in the vault, at `file.path`: a file that
   // moved again since is followed to where it is now
