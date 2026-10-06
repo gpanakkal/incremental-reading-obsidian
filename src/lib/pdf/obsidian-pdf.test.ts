@@ -345,8 +345,8 @@ function watchMoves(width = 800, height = 600) {
 }
 
 /**
- * What tears down each viewer {@link watchMoves} and {@link viewerWithApp}
- * built and left running. A loaded viewer follows the document's selection,
+ * What tears down each viewer {@link makeViewer}, {@link makeViewerWith},
+ * {@link watchMoves} and {@link viewerWithApp} built and left running. A loaded viewer follows the document's selection,
  * so the many a property builds would slow every later test down.
  */
 const builtViewers: (() => void)[] = [];
@@ -420,18 +420,6 @@ function viewerWithApp(app: Record<string, unknown>) {
   component.ready(makeEventChild(app));
   builtViewers.push(() => viewer.unload());
   return viewer;
-}
-
-/**
- * What tears down each viewer {@link makeViewer} and {@link makeViewerWith}
- * built and left running. A loaded viewer follows the document's selection,
- * so the many a property builds would slow every later test down.
- */
-const builtViewers: (() => void)[] = [];
-
-/** Tear down the viewers left running so far. */
-function tearDownViewers() {
-  builtViewers.splice(0).forEach((tearDown) => tearDown());
 }
 
 /**
