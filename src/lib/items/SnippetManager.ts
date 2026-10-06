@@ -3,7 +3,6 @@ import {
   MAX_SQL_QUERY_PARAMS,
   REVIEW_COUNT_FOR_PRIORITY_SCALING,
   SNIPPET_TAG,
-  SOURCE_INDEX_TIMEOUT_MS,
   SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
   TEXT_BASE_REVIEW_INTERVAL,
@@ -440,28 +439,6 @@ export class SnippetManager extends ItemManager {
       article?.data.id,
       { start, end }
     );
-  }
-
-  /**
-   * Settles once the metadata cache has `note`'s `source` link resolving to
-   * `source`, or after {@link SOURCE_INDEX_TIMEOUT_MS} whatever it has.
-   */
-  private sourceIndexed(note: TFile, source: TFile): Promise<void> {
-    const indexed = () =>
-      Obsidian.getSourceFile(note, this.app)?.path === source.path;
-    if (indexed()) return Promise.resolve();
-    const { metadataCache } = this.app;
-    return new Promise((resolve) => {
-      const done = () => {
-        metadataCache.offref(ref);
-        window.clearTimeout(timer);
-        resolve();
-      };
-      const ref = metadataCache.on('changed', (file) => {
-        if (file.path === note.path && indexed()) done();
-      });
-      const timer = window.setTimeout(done, SOURCE_INDEX_TIMEOUT_MS);
-    });
   }
 
   /**

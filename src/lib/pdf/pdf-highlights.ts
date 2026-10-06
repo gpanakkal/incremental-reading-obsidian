@@ -1,6 +1,7 @@
 /**
- * Snippet highlights in a PDF's text layer (task 0023): which characters of
- * which text items each snippet covers, and the spans that mark them.
+ * Snippet and card highlights in a PDF's text layer (tasks 0023, 0041): which
+ * characters of which text items each snippet or card covers, and the spans
+ * that mark them.
  */
 import {
   ITEM_SELECTOR,
@@ -10,28 +11,42 @@ import {
   type PageItem,
 } from './pdf-anchor';
 
-/** A snippet's extent in its PDF, and the reference its highlight opens. */
+/**
+ * A snippet's or card's extent in its PDF, and the reference its highlight
+ * opens.
+ */
 export interface PdfHighlight {
+  /** Its note's path. A card's note is never a snippet's. */
   ref: string;
-  /** Anchor of the snippet's first character. */
+  kind: 'snippet' | 'card';
+  /** Anchor of its first character. */
   start: number;
   /** Anchor just past its last character. */
   end: number;
 }
 
-/** A run of an item's characters that the same snippets cover. */
+/** A run of an item's characters that the same snippets and cards cover. */
 export interface HighlightSegment extends ItemSpan {
-  /** The covering snippets' references, outermost first. */
+  /** The covering items' references, outermost first. */
   refs: string[];
 }
 
+/** Where a highlight of each kind goes among those over the very same text. */
+const TIE_DEPTH = { snippet: 0, card: 1 } as const;
+
 /**
  * Nesting order: a highlight that starts earlier wraps one that starts later,
- * a longer one a shorter one, and otherwise the references decide (no two
- * snippets share one), so the same snippets always nest the same way.
+ * a longer one a shorter one, a snippet a card over the very same text, and
+ * otherwise the references decide (no two items share one), so the same
+ * highlights always nest the same way.
  */
 function outerFirst(a: PdfHighlight, b: PdfHighlight) {
-  return a.start - b.start || b.end - a.end || (a.ref < b.ref ? -1 : 1);
+  return (
+    a.start - b.start ||
+    b.end - a.end ||
+    TIE_DEPTH[a.kind] - TIE_DEPTH[b.kind] ||
+    (a.ref < b.ref ? -1 : 1)
+  );
 }
 
 /**
@@ -73,8 +88,13 @@ export function highlightSegments(
 // Obsidian's subpath highlight or pdf.js find, which rebuild the item's
 // content whenever they change, dropping the spans painted here.
 
-/** The class a highlight span carries, as in markdown notes. */
+/**
+ * The class a highlight span carries, as in markdown notes: a card's too, so
+ * one set of rules finds, paints and opens them all.
+ */
 export const HIGHLIGHT_CLASS = 'ir-snippet-highlight';
+/** The class a card's highlight span carries as well, for its color. */
+export const CARD_HIGHLIGHT_CLASS = 'ir-card-highlight';
 const REF_ATTR = 'data-snippet-ref';
 
 function textNodesIn(el: Element): Text[] {
@@ -142,8 +162,27 @@ function unpaint(item: Element) {
   item.normalize();
 }
 
-/** Wrap characters `start` to `end` of `item` in nested spans, one per ref. */
-function wrapRun(item: Element, { start, end, refs }: HighlightSegment) {
+/**
+ * Whether every highlight span in `item` is marked as a card's exactly when
+ * its ref is one of `cards`.
+ */
+function paintedKindsMatch(item: Element, cards: ReadonlySet<string>) {
+  return Array.from(item.querySelectorAll(`.${HIGHLIGHT_CLASS}`)).every(
+    (span) =>
+      span.classList.contains(CARD_HIGHLIGHT_CLASS) ===
+      cards.has(span.getAttribute(REF_ATTR)!)
+  );
+}
+
+/**
+ * Wrap characters `start` to `end` of `item` in nested spans, one per ref,
+ * those of `cards` marked as a card's.
+ */
+function wrapRun(
+  item: Element,
+  { start, end, refs }: HighlightSegment,
+  cards: ReadonlySet<string>
+) {
   // A text layer is always in a window's document
   const win = item.ownerDocument.defaultView!;
   let offset = 0;
@@ -161,7 +200,9 @@ function wrapRun(item: Element, { start, end, refs }: HighlightSegment) {
       // In the item's own window, which may be a popout. Not `doc.createSpan`:
       // Obsidian's `Node.createSpan` appends the span to the node it's called on
       const span = win.createSpan({
-        cls: HIGHLIGHT_CLASS,
+        cls: cards.has(refs[i])
+          ? [HIGHLIGHT_CLASS, CARD_HIGHLIGHT_CLASS]
+          : HIGHLIGHT_CLASS,
         attr: { [REF_ATTR]: refs[i] },
       });
       span.append(outer);
@@ -183,8 +224,8 @@ function pageItems(pageEl: Element) {
 /**
  * Make the text layer of the page div `pageEl` mark exactly what `highlights`
  * cover: each run of characters ({@link highlightSegments}) wrapped in one
- * `span.ir-snippet-highlight[data-snippet-ref]` per snippet over it,
- * outermost first.
+ * `span.ir-snippet-highlight[data-snippet-ref]` per snippet or card over it,
+ * outermost first, a card's also `.ir-card-highlight`.
  *
  * Only items whose marks differ are touched, so painting what is already
  * there changes nothing, and a selection in an item that keeps its marks
@@ -198,15 +239,23 @@ export function paintPageHighlights(
   const page = Number(pageEl.getAttribute('data-page-number'));
   const items = pageItems(pageEl);
   const wanted = highlightSegments(highlights, page, items);
+  const cards = new Set(
+    highlights.filter(({ kind }) => kind === 'card').map(({ ref }) => ref)
+  );
   // Most pages, of most PDFs, have none to paint and none to take off
   if (wanted.length === 0 && !pageEl.querySelector(`.${HIGHLIGHT_CLASS}`)) {
     return;
   }
   for (const { el, idx } of items) {
     const want = wanted.filter((segment) => segment.idx === idx);
-    if (sameSegments(paintedSegments(el, idx), want)) continue;
+    if (
+      sameSegments(paintedSegments(el, idx), want) &&
+      paintedKindsMatch(el, cards)
+    ) {
+      continue;
+    }
     unpaint(el);
-    for (const segment of want) wrapRun(el, segment);
+    for (const segment of want) wrapRun(el, segment, cards);
   }
 }
 

@@ -277,6 +277,15 @@ export class ObsidianHelpers {
   }
 
   /**
+   * Whether the metadata cache has the `source` link of the note `note`
+   * resolving to `file` (see {@link getSourceFile}): how an item taken from a
+   * file that is no item is known to be that file's.
+   */
+  static sourceIs(note: TFile, file: TFile, app: App): boolean {
+    return this.getSourceFile(note, app)?.path === file.path;
+  }
+
+  /**
    * Check if a file has the ir-source tag
    */
   static isSourceNote(file: TFile, app: App): boolean {

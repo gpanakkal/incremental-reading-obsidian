@@ -955,7 +955,8 @@ test.describe('Snippets and cards from a PDF article', () => {
     await window.keyboard.press('Enter');
     await expect.poll(() => cards(window)).toHaveLength(1);
 
-    await selectText(window, [1, 0, 0], [1, 5, last.length]);
+    // By character: the card's highlight splits the text it selects in
+    await selectChars(window, [1, 0, 0], [1, 5, last.length]);
     await expect.poll(() => viewerSelection(window)).not.toBeNull();
     await window.getByRole('button', { name: 'Create snippet' }).click();
     await expect.poll(() => snippets(window)).toHaveLength(1);
@@ -1760,8 +1761,10 @@ test.describe('Snippets and cards from a PDF article', () => {
     );
 
   /**
-   * Select from `[page, idx, offset]` to another such point in the active PDF
-   * tab, as a script would: Obsidian snaps only pointer selections.
+   * Select from `[page, idx, char]` to another such point in the active PDF
+   * tab, as a script would: Obsidian snaps only pointer selections. By
+   * character, in item spans whose text highlights may have split into
+   * several nodes.
    */
   const selectInTab = (
     page: Page,
@@ -1770,13 +1773,20 @@ test.describe('Snippets and cards from a PDF article', () => {
   ) =>
     page.evaluate(
       ([from, to]) => {
-        const point = ([n, idx, offset]: number[]) => {
+        const point = ([n, idx, char]: number[]) => {
           const span = document.querySelector(
             '.workspace-leaf.mod-active .workspace-leaf-content[data-type="pdf"] ' +
               `.page[data-page-number="${n}"] .textLayer [data-idx="${idx}"]`
           );
-          if (!span?.firstChild) throw new Error(`No item ${n}/${idx}`);
-          return [span.firstChild, offset] as const;
+          if (!span) throw new Error(`No item ${n}/${idx}`);
+          const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+          let left = char;
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const { length } = node as Text;
+            if (left <= length) return [node, left] as const;
+            left -= length;
+          }
+          throw new Error(`No character ${char} in item ${n}/${idx}`);
         };
         const range = document.createRange();
         range.setStart(...point(from));
@@ -1906,9 +1916,7 @@ test.describe('Snippets and cards from a PDF article', () => {
   /**
    * In the fixture's own tab, open and no article, make a card of the first
    * line from the command picked in the palette by a click, with "long text"
-   * its answer, and then a snippet of it by the command's hotkey path. (The
-   * snippet's highlight splits the line's text, which `selectInTab` can't
-   * select across.)
+   * its answer, and then a snippet of it by the command's hotkey path.
    */
   async function snipAndCardInPlainTab(page: Page) {
     await openFileInActiveLeaf(page, PDF_PATH);
@@ -2093,6 +2101,276 @@ test.describe('Snippets and cards from a PDF article', () => {
         })
       )
       .toEqual(['pdf', renamed]);
+  });
+
+  // #endregion
+
+  // #region CARD HIGHLIGHTS
+
+  /** The card highlights in `scope`, as [reference, text] pairs. */
+  const cardHighlightsIn = (scope: Locator) =>
+    scope
+      .locator('.ir-snippet-highlight.ir-card-highlight')
+      .evaluateAll((spans) =>
+        spans.map((span) => [
+          span.getAttribute('data-snippet-ref'),
+          span.textContent,
+        ])
+      );
+
+  /** The background color `locator`'s element is painted, as [r, g, b]. */
+  const backgroundOf = (locator: Locator) =>
+    locator.evaluate((el) =>
+      (/rgba?\(([^)]*)\)/.exec(getComputedStyle(el).backgroundColor)?.[1] ?? '')
+        .split(/[,\s/]+/)
+        .slice(0, 3)
+        .map((channel) => Math.round(Number(channel)))
+    );
+
+  /**
+   * The card embed tint, `hsl(26 100% 50% / 0.1)`, as it reads over a white
+   * page, made opaque for a text layer drawn at a fifth of its opacity:
+   * `hsl(26 100% 75%)`.
+   */
+  const CARD_PDF_COLOR = [255, 183, 128];
+  /** The snippet color in a PDF, as before cards had highlights. */
+  const SNIPPET_PDF_COLOR = [255, 225, 0];
+
+  /**
+   * Make a card in review of the text from `[page, idx, char]` to another
+   * such point, with `answer` its answer, and wait until the metadata cache
+   * has its `source` link (a race seen at 5 workers). Returns its row.
+   */
+  async function cardInReview(
+    page: Page,
+    from: [number, number, number],
+    to: [number, number, number],
+    answer: string
+  ) {
+    const before = (await cards(page)).map((card) => card.reference);
+    await selectChars(page, from, to);
+    await expect.poll(() => viewerSelection(page)).not.toBeNull();
+    await actionBar(page).getByRole('button', { name: 'Create card' }).click();
+    await expect(answerText(page)).toBeVisible();
+    await selectAnswer(page, answer);
+    await page.keyboard.press('Enter');
+    await expect(answerText(page)).toHaveCount(0);
+    await expect
+      .poll(async () =>
+        (await cards(page)).filter(
+          (card) => !before.includes(card.reference) && card.source
+        )
+      )
+      .toHaveLength(1);
+    return (await cards(page)).find(
+      (card) => !before.includes(card.reference)
+    )!;
+  }
+
+  test('highlights a card made in review in orange at once, as its embed is tinted, beside a snippet that stays yellow, and a click on it opens the card', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 9)).toBeAttached();
+    await selectChars(window, [1, 9, 2], [1, 9, 12]);
+    await expect.poll(() => viewerSelection(window)).not.toBeNull();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+    const [snippet] = await snippets(window);
+
+    const card = await cardInReview(
+      window,
+      [1, 2, 0],
+      [1, 2, FIRST_LINE.length],
+      'long text'
+    );
+
+    await expect
+      .poll(() => cardHighlightsIn(textItem(window, 1, 2)))
+      .toEqual([[card.reference, FIRST_LINE]]);
+    const cardSpan = textItem(window, 1, 2).locator('.ir-card-highlight');
+    expect(await backgroundOf(cardSpan)).toEqual(CARD_PDF_COLOR);
+    const snippetSpan = textItem(window, 1, 9).locator('.ir-snippet-highlight');
+    expect(await cardHighlightsIn(textItem(window, 1, 9))).toEqual([]);
+    expect(await highlightsIn(textItem(window, 1, 9))).toEqual([
+      [
+        snippet.reference,
+        (await itemText(article(window), 1, 9))!.slice(2, 12),
+      ],
+    ]);
+    expect(await backgroundOf(snippetSpan)).toEqual(SNIPPET_PDF_COLOR);
+
+    await cardSpan.click();
+    await expect.poll(() => openFiles(window)).toContain(card.reference);
+  });
+
+  test("takes a card's highlight off when it is undone, and when its note is deleted", async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 2)).toBeAttached();
+    const line: [[number, number, number], [number, number, number]] = [
+      [1, 2, 0],
+      [1, 2, FIRST_LINE.length],
+    ];
+
+    await cardInReview(window, ...line, 'long text');
+    await expect(
+      textItem(window, 1, 2).locator('.ir-card-highlight')
+    ).not.toHaveCount(0);
+    await actionBar(window).locator('#undo-button').click();
+    await expect.poll(() => cards(window)).toEqual([]);
+    await expect(
+      textItem(window, 1, 2).locator('.ir-card-highlight')
+    ).toHaveCount(0);
+
+    const card = await cardInReview(window, ...line, 'long text');
+    await expect(
+      textItem(window, 1, 2).locator('.ir-card-highlight')
+    ).not.toHaveCount(0);
+    await window.evaluate(async (ref) => {
+      const { app } = window as unknown as {
+        app: PageApp & {
+          fileManager: { trashFile(file: unknown): Promise<void> };
+        };
+      };
+      await app.fileManager.trashFile(app.vault.getFileByPath(ref));
+    }, card.reference);
+    await expect(
+      textItem(window, 1, 2).locator('.ir-card-highlight')
+    ).toHaveCount(0);
+  });
+
+  test('highlights a card carried over a page break on its first page, to its foot', async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await pdfPage(window, 2).scrollIntoViewIfNeeded();
+    await expect(textItem(window, 2, 3)).toBeAttached();
+    await expect(textItem(window, 1, 9)).toBeAttached();
+
+    const card = await cardInReview(window, [1, 9, 0], [2, 3, 30], 'paragraph');
+
+    await expect
+      .poll(() => cardHighlightsIn(textItem(window, 1, 9)))
+      .toEqual([[card.reference, await itemText(article(window), 1, 9)]]);
+    expect(await cardHighlightsIn(textItem(window, 1, 8))).toEqual([]);
+    expect(await cardHighlightsIn(pdfPage(window, 2))).toEqual([]);
+  });
+
+  test('highlights a card made before cards had highlights, from its note and row alone', async () => {
+    await importFixture(window);
+    const id = await articleId(window);
+    const reference = 'Old card.md';
+    await window.evaluate(
+      async ({ reference, source }) => {
+        const { app } = window as unknown as {
+          app: PageApp & {
+            vault: { create(path: string, data: string): Promise<unknown> };
+          };
+        };
+        await app.vault.create(
+          reference,
+          [
+            '---',
+            'ir-id: old-card',
+            'tags: ir-card',
+            `source: "${source}"`,
+            '---',
+            'Incremental reading turns a {{ long text }} into a series of short reviews.',
+          ].join('\n')
+        );
+      },
+      {
+        reference,
+        source: `[[PDF fixture.pdf#page=1&selection=2,0,2,${FIRST_LINE.length}|PDF fixture, page 1]]`,
+      }
+    );
+    await expect
+      .poll(() =>
+        window.evaluate((ref) => {
+          const { app } = window as unknown as {
+            app: PageApp & {
+              metadataCache: {
+                getFileCache(file: unknown): {
+                  frontmatter?: Record<string, unknown>;
+                } | null;
+              };
+            };
+          };
+          const file = app.vault.getFileByPath(ref);
+          return file
+            ? (app.metadataCache.getFileCache(file)?.frontmatter?.source ??
+                null)
+            : null;
+        }, reference)
+      )
+      .not.toBeNull();
+    await window.evaluate(
+      async ({ reference, id }) => {
+        const { app } = window as unknown as {
+          app: {
+            plugins: {
+              plugins: Record<
+                string,
+                {
+                  reviewManager: {
+                    repo: {
+                      mutate(sql: string, params?: unknown[]): Promise<unknown>;
+                    };
+                  };
+                }
+              >;
+            };
+          };
+        };
+        const { repo } =
+          app.plugins.plugins['incremental-reading'].reviewManager;
+        await repo.mutate(
+          `INSERT INTO srs_card (id, reference, parent, created_at, due,
+             stability, difficulty, elapsed_days, scheduled_days, state)
+           VALUES ('old-card', $1, $2, 0, $3, 0, 0, 0, 0, 0)`,
+          [reference, id, Date.now() + 86_400_000]
+        );
+      },
+      { reference, id }
+    );
+
+    await beginReview(window);
+    await expect
+      .poll(() => cardHighlightsIn(textItem(window, 1, 2)))
+      .toEqual([[reference, FIRST_LINE]]);
+  });
+
+  test('highlights a card made in the tab of a PDF that is no article, there, and keeps it once the PDF is imported', async () => {
+    await snipAndCardInPlainTab(window);
+    const [card] = await cards(window);
+    const [snippet] = await snippets(window);
+    await expect.poll(async () => (await cards(window))[0].source).toBeTruthy();
+
+    // The snippet was made of the very same line: on that tie the card goes
+    // inside it, and nothing inside the card
+    await expect
+      .poll(() => cardHighlightsIn(tabItem(window, 1, 2)))
+      .toEqual([[card.reference, FIRST_LINE]]);
+    await expect(
+      tabItem(window, 1, 2).locator('.ir-card-highlight .ir-snippet-highlight')
+    ).toHaveCount(0);
+    expect(
+      await tabItem(window, 1, 2)
+        .locator('.ir-card-highlight')
+        .evaluate((span) =>
+          span.parentElement!.getAttribute('data-snippet-ref')
+        )
+    ).toBe(snippet.reference);
+
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    await expect.poll(() => articleRows(window)).toHaveLength(1);
+    const id = await articleId(window);
+    await expect
+      .poll(async () => (await cards(window)).map((c) => c.parent))
+      .toEqual([id]);
+    await expect
+      .poll(() => cardHighlightsIn(tabItem(window, 1, 2)))
+      .toEqual([[card.reference, FIRST_LINE]]);
   });
 
   // #endregion

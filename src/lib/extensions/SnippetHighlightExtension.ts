@@ -1,3 +1,6 @@
+// Whatever paints a PDF's highlights must keep this class on a card's, for the
+// notice below to name it a card
+import { CARD_HIGHLIGHT_CLASS } from '#/lib/pdf/pdf-highlights';
 import type IncrementalReadingPlugin from '#/main';
 import { Annotation, RangeSetBuilder, StateEffect } from '@codemirror/state';
 import {
@@ -34,21 +37,21 @@ export const refreshHighlightsEffect = StateEffect.define<null>();
 export const MIDDLE_MOUSE_BUTTON = 1;
 
 /**
- * Open the snippet whose highlight the event targeted, honoring the modifier
- * keys the same way Obsidian's own links do.
+ * Open the snippet, or in a PDF the card, whose highlight the event targeted,
+ * honoring the modifier keys the same way Obsidian's own links do.
  *
  * `Keymap.isModEvent` maps Ctrl/Cmd-click and middle-click to `'tab'`,
  * Ctrl/Cmd+Alt to `'split'`, and Ctrl/Cmd+Alt+Shift to `'window'`. A plain
  * click yields `false`, which `openLinkText` reads as "reuse the active leaf".
  *
- * A snippet missing its file (see `MissingItem`) keeps its highlight, but is
+ * An item missing its file (see `MissingItem`) keeps its highlight, but is
  * not opened: following the link would create an empty note at its reference,
- * which the next review fetch would take for the snippet's own, leaving its
+ * which the next review fetch would take for the item's own, leaving its
  * real file no longer relinkable.
  *
  * @returns true when the event targeted a highlight and was consumed.
  */
-export function openSnippetFromEvent(
+export function openHighlightFromEvent(
   plugin: IncrementalReadingPlugin,
   event: MouseEvent
 ): boolean {
@@ -56,24 +59,23 @@ export function openSnippetFromEvent(
   const highlight = target?.closest('.ir-snippet-highlight');
   if (!highlight) return false;
 
-  const snippetRef = highlight.getAttribute('data-snippet-ref');
-  if (!snippetRef) return false;
+  const ref = highlight.getAttribute('data-snippet-ref');
+  if (!ref) return false;
 
   event.preventDefault();
   event.stopPropagation();
 
-  if (!Obsidian.getNote(snippetRef, plugin.app)) {
+  if (!Obsidian.getNote(ref, plugin.app)) {
+    const kind = highlight.classList.contains(CARD_HIGHLIGHT_CLASS)
+      ? 'card'
+      : 'snippet';
     Obsidian.notify(
-      `No file at "${snippetRef}". Relink the snippet from the review queue.`
+      `No file at "${ref}". Relink the ${kind} from the review queue.`
     );
     return true;
   }
 
-  void plugin.app.workspace.openLinkText(
-    snippetRef,
-    '',
-    Keymap.isModEvent(event)
-  );
+  void plugin.app.workspace.openLinkText(ref, '', Keymap.isModEvent(event));
   return true;
 }
 
@@ -375,7 +377,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       click: (event: MouseEvent, view: EditorView) => {
         const plugin = view.state.facet(irPluginFacet);
         if (!plugin) return false;
-        return openSnippetFromEvent(plugin, event);
+        return openHighlightFromEvent(plugin, event);
       },
 
       // A middle click never fires `click` — browsers emit `auxclick` for every
@@ -386,7 +388,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         if (event.button !== MIDDLE_MOUSE_BUTTON) return false;
         const plugin = view.state.facet(irPluginFacet);
         if (!plugin) return false;
-        return openSnippetFromEvent(plugin, event);
+        return openHighlightFromEvent(plugin, event);
       },
 
       // Middle-mousedown starts autoscroll on Windows and pastes the primary

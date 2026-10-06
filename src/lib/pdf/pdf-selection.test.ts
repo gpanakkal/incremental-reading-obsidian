@@ -10,6 +10,7 @@ import {
   pageLinkAlias,
   pageSelection,
   pageSelectionSubpath,
+  parseSelectionSubpath,
   readPdfSelection,
   selectionSubpath,
 } from './pdf-selection';
@@ -162,6 +163,20 @@ const startPageArb = fc
   });
 
 const pageArb = fc.integer({ min: 1, max: 900_718 });
+
+/** An item index or character offset an anchor holds. */
+const partArb = fc.integer({ min: 0, max: 99_999 });
+/** Two positions on a page, the first before the second. */
+const orderedArb = fc
+  .tuple(partArb, partArb, partArb, partArb)
+  .filter(([a, b, c, d]) => a < c || (a === c && b < d));
+/** A parameter Obsidian's grammar may carry besides `page` and `selection`. */
+const extraArb = fc
+  .tuple(
+    fc.constantFrom('color', 'offset', 'height', 'zoom', 'x'),
+    fc.stringMatching(/^[\w,.-]{0,8}$/)
+  )
+  .map(([name, value]) => `${name}=${value}`);
 
 // #endregion
 
@@ -391,6 +406,103 @@ describe('pageSelectionSubpath', () => {
           ).toBe(`#page=${page}&selection=${a},${b},${c},${d}`);
         }
       )
+    );
+  });
+});
+
+describe('parseSelectionSubpath', () => {
+  it('reads back the selection pageSelectionSubpath links to, as the anchors of its ends', () => {
+    fc.assert(
+      fc.property(pageArb, orderedArb, (page, [a, b, c, d]) => {
+        const subpath = pageSelectionSubpath({
+          page,
+          range: [
+            [a, b],
+            [c, d],
+          ],
+        });
+        expect(parseSelectionSubpath(subpath)).toEqual({
+          start: at(page, a, b),
+          end: at(page, c, d),
+        });
+      })
+    );
+  });
+
+  it('ignores parameters other than page and selection, in any order, and a missing #', () => {
+    fc.assert(
+      fc.property(
+        pageArb,
+        orderedArb,
+        fc.array(extraArb, { maxLength: 3 }),
+        fc.boolean(),
+        fc.boolean(),
+        (page, [a, b, c, d], extras, selectionFirst, hash) => {
+          const own = [`page=${page}`, `selection=${a},${b},${c},${d}`];
+          if (selectionFirst) own.reverse();
+          const params = [...extras, ...own];
+          const subpath = (hash ? '#' : '') + params.join('&');
+          expect(parseSelectionSubpath(subpath)).toEqual({
+            start: at(page, a, b),
+            end: at(page, c, d),
+          });
+        }
+      )
+    );
+  });
+
+  it('reads nothing from a selection that ends where it starts, or before', () => {
+    fc.assert(
+      fc.property(
+        pageArb,
+        fc
+          .tuple(partArb, partArb, partArb, partArb)
+          .filter(([a, b, c, d]) => a > c || (a === c && b >= d)),
+        (page, [a, b, c, d]) => {
+          expect(
+            parseSelectionSubpath(`#page=${page}&selection=${a},${b},${c},${d}`)
+          ).toBeNull();
+        }
+      )
+    );
+  });
+
+  it.each([
+    ['no subpath', ''],
+    ['only a page', '#page=3'],
+    ['no page', '#selection=0,1,0,4'],
+    ['an empty page', '#page=&selection=0,1,0,4'],
+    ['page 0', '#page=0&selection=0,1,0,4'],
+    ['a page past what an anchor holds', '#page=900719&selection=0,1,0,4'],
+    ['a fractional page', '#page=1.5&selection=0,1,0,4'],
+    ['a negative page', '#page=-1&selection=0,1,0,4'],
+    ['an empty selection', '#page=1&selection='],
+    ['three numbers', '#page=1&selection=0,1,4'],
+    ['five numbers', '#page=1&selection=0,1,0,4,5'],
+    ['an empty number', '#page=1&selection=0,,0,4'],
+    ['a negative number', '#page=1&selection=0,-1,0,4'],
+    ['a fractional number', '#page=1&selection=0,1,0,4.5'],
+    ['a number in exponent form', '#page=1&selection=0,1,0,1e3'],
+    ['a hexadecimal number', '#page=1&selection=0,1,0,0x4'],
+    ['a number with spaces', '#page=1&selection=0, 1,0,4'],
+    ['an index past what an anchor holds', '#page=1&selection=0,1,100000,4'],
+    ['a character past what an anchor holds', '#page=1&selection=0,1,0,100000'],
+    ['a heading', '#Chapter 1'],
+    ['a # inside the page, not before it', 'page=1#&selection=0,1,0,4'],
+  ])('reads nothing from a subpath with %s', (_, subpath) => {
+    expect(parseSelectionSubpath(subpath)).toBeNull();
+  });
+
+  it('reads nothing from a selection that is not four non-negative integers', () => {
+    fc.assert(
+      fc.property(pageArb, fc.string(), (page, selection) => {
+        fc.pre(!/^\d+,\d+,\d+,\d+$/.test(selection));
+        expect(
+          parseSelectionSubpath(
+            `#page=${page}&selection=${encodeURIComponent(selection)}`
+          )
+        ).toBeNull();
+      })
     );
   });
 });

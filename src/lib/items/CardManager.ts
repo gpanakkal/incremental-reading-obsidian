@@ -1,11 +1,14 @@
 import { Markdown } from '#/lib/Markdown';
 import { decodeAnchor } from '#/lib/pdf/pdf-anchor';
+import type { PdfHighlight } from '#/lib/pdf/pdf-highlights';
 import {
   type PdfOrigin,
   type PdfSelection,
   originFile,
   pageLinkAlias,
+  parseSelectionSubpath,
 } from '#/lib/pdf/pdf-selection';
+import { parseSourceLink } from '#/lib/source-link';
 import type {
   ISRSCard,
   ISRSCardDisplay,
@@ -438,6 +441,12 @@ export class CardManager extends ItemManager {
       const parent = origin
         ? origin.parent
         : await this.findParentId(sourceFile);
+      if (origin) {
+        // Its row's change tells the PDF's tabs to read their card highlights
+        // again, which come from this link's subpath, article or not: in the
+        // cache by then, or the card's highlight waits for the next change
+        await this.sourceIndexed(cardFile, sourceFile);
+      }
       // create the database entry
 
       const params = [
@@ -482,6 +491,57 @@ export class CardManager extends ItemManager {
    */
   async adoptOrphans(file: TFile, parentId: string): Promise<SRSCardRow[]> {
     return this.adoptParentless<SRSCardRow>('srs_card', file, parentId);
+  }
+
+  /**
+   * The highlights of the cards made from the PDF `pdf`, as their notes'
+   * `source` links name their selections (see `parseSelectionSubpath`): of
+   * the live cards whose parent is `pdf`'s article, wherever their links now
+   * resolve, or for a PDF that is no article, of the live parentless cards
+   * whose links resolve to it (see `findParentlessFrom`). A dismissed card
+   * keeps its highlight, as a dismissed snippet does.
+   *
+   * A link names one page only, so a card whose text runs onto the next page
+   * is highlighted up to the end of its first. A card whose note is gone, or
+   * whose link names no selection, has no highlight.
+   */
+  async getPdfHighlights(pdf: TFile): Promise<PdfHighlight[]> {
+    const article = await this.findArticle(pdf);
+    if (article) {
+      const rows = (await this.repo.query(
+        'SELECT * FROM srs_card WHERE parent = $1 AND deleted = FALSE',
+        [article.id]
+      )) as SRSCardRow[];
+      return rows.flatMap((row) => this.pdfHighlight(row) ?? []);
+    }
+
+    // No offsets to narrow these down by, as a PDF's snippets have: every
+    // parentless card is asked, but only one whose link names a selection has
+    // its link resolved
+    const rows = (await this.repo.query(
+      'SELECT * FROM srs_card WHERE parent IS NULL AND deleted = FALSE'
+    )) as SRSCardRow[];
+    return rows.flatMap((row) => this.pdfHighlight(row, pdf) ?? []);
+  }
+
+  /**
+   * The highlight of the card `row`, as its note's `source` link names its
+   * selection; when `from` is given, only if that link resolves to `from`.
+   * A note at its reference with another item's `ir-id` is that item's, not
+   * the card's (see `reconcileNote`), and gives it none.
+   */
+  private pdfHighlight(row: SRSCardRow, from?: TFile): PdfHighlight | null {
+    const note = Obsidian.getNote(row.reference, this.app);
+    if (!note) return null;
+    const frontmatter = Obsidian.getFrontMatter(note, this.app);
+    const id = frontmatter?.['ir-id'];
+    if (id && id !== row.id) return null;
+    const source = frontmatter?.[SOURCE_PROPERTY_NAME];
+    if (typeof source !== 'string') return null;
+    const range = parseSelectionSubpath(parseSourceLink(source)?.subpath ?? '');
+    if (!range) return null;
+    if (from && !Obsidian.sourceIs(note, from, this.app)) return null;
+    return { ref: row.reference, kind: 'card', ...range };
   }
 
   /** The id of the row of the article or snippet note `file`, if it is one. */

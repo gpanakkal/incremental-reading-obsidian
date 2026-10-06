@@ -1,4 +1,4 @@
-import { showPdfSnippetHighlights } from '#/lib/extensions/PdfSnippetHighlights';
+import { showPdfItemHighlights } from '#/lib/extensions/PdfItemHighlights';
 import {
   createPdfViewer,
   getPdfLocation,
@@ -68,10 +68,11 @@ export function PdfArticleView({
     };
   }, [shown, reviewView]);
 
-  // The passages already extracted to snippets, highlighted on its pages
+  // The passages already extracted to snippets or made into cards,
+  // highlighted on its pages
   useEffect(() => {
     if (!shown) return;
-    return showPdfSnippetHighlights(plugin, item.file, shown.containerEl);
+    return showPdfItemHighlights(plugin, item.file, shown.containerEl);
   }, [shown, item.file, plugin]);
 
   // The item's file in it, where its reader stopped, opened afresh whenever it
