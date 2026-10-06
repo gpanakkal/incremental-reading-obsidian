@@ -674,6 +674,20 @@ export async function emulateMobile(window: Page, on: boolean) {
 }
 
 /**
+ * How many writes of the database file are still under way. Poll it to 0
+ * before {@link emulateMobile}: a reload mid-write leaves an empty database.
+ */
+export async function pendingSaves(window: Page): Promise<number> {
+  return await window.evaluate(() => {
+    const { app } = window as unknown as TestWindow;
+    const { reviewManager } = app.plugins.plugins[
+      'incremental-reading'
+    ] as unknown as { reviewManager: { repo: { pendingSaveCount: number } } };
+    return reviewManager.repo.pendingSaveCount;
+  });
+}
+
+/**
  * Flip one of the plugin's settings from inside the running app.
  *
  * In memory only — no `saveSettings` — because that is where everything reads

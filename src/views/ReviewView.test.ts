@@ -41,7 +41,10 @@ import {
   Scope,
   type MenuItem,
 } from '#/test/__mocks__/obsidian';
-import ReviewView, { REVIEW_VIEW_DEFAULT_TITLE } from '#/views/ReviewView';
+import ReviewView, {
+  NON_TEXT_ITEM_CLASS,
+  REVIEW_VIEW_DEFAULT_TITLE,
+} from '#/views/ReviewView';
 import fc from 'fast-check';
 import { WorkspaceWindow, type TFile, type WorkspaceLeaf } from 'obsidian';
 import type { WorkspaceLeafHistoryState } from 'obsidian-typings';
@@ -95,14 +98,20 @@ function callRefocusWithoutScroll(el: Element | null): void {
   ReviewView.prototype.refocusWithoutScroll.call({} as ReviewView, el);
 }
 
-/** Every title path reads `basename` and nothing else off the file. */
-function makeFile(basename: string): TFile {
-  return { basename } as TFile;
+/**
+ * A file as the title paths see it: they read `basename` for the name and
+ * `extension` for whether it is text. A note unless told otherwise.
+ */
+function makeFile(basename: string, extension = 'md'): TFile {
+  return { basename, extension } as TFile;
 }
 
 const pageArb = fc.constantFrom<ReviewPage[]>('home', 'review');
 /** Any file the queue can hand the view, plus the no-item case. */
-const fileArb = fc.option(fc.string().map(makeFile), { nil: null });
+const fileArb = fc.option(
+  fc.string().map((name) => makeFile(name)),
+  { nil: null }
+);
 
 /**
  * Receiver for the title methods, carrying the workspace surfaces they touch.
@@ -126,6 +135,9 @@ function makeTitleReceiver(
     // `FileView` has neither.
     titleParentEl: { empty: vi.fn() },
     renderBreadcrumbs: vi.fn(),
+    // The tab's `.workspace-leaf-content`, which carries the view's state
+    // classes for styles.css
+    containerEl: document.createElement('div'),
     leaf: { updateHeader: vi.fn(), getContainer: () => container },
     app: { workspace: { updateTitle: vi.fn() } },
     /** Move between the home screen and an item, as the store would. */
@@ -1228,6 +1240,43 @@ describe('ReviewView.setTitle', () => {
 
     expect(receiver.renderBreadcrumbs).toHaveBeenCalledTimes(1);
     expect(receiver.titleParentEl.empty).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks the tab exactly while it shows an item whose file is not text', () => {
+    // Only a text item gets an inline title above its body; styles.css keeps
+    // the phone header title for the rest, as a PDF tab keeps its own.
+    const cases: [ReviewPage, TFile | null, boolean][] = [
+      ['review', makeFile('Paper', 'pdf'), true],
+      ['review', makeFile('Diagram', 'png'), true],
+      ['review', makeFile('Notes', 'md'), false],
+      ['review', null, false],
+      ['home', makeFile('Paper', 'pdf'), false],
+    ];
+    for (const [page, file, marked] of cases) {
+      const receiver = makeTitleReceiver(page, file);
+
+      asView(receiver).setTitle();
+
+      expect(
+        receiver.containerEl.classList.contains(NON_TEXT_ITEM_CLASS),
+        `${page} ${file?.extension ?? 'no file'}`
+      ).toBe(marked);
+    }
+  });
+
+  it('unmarks the tab once review moves from a PDF on to a note, or home', () => {
+    const receiver = makeTitleReceiver('review', makeFile('Paper', 'pdf'));
+    asView(receiver).setTitle();
+    expect(receiver.containerEl.classList).toContain(NON_TEXT_ITEM_CLASS);
+
+    asView(receiver).setFile(makeFile('Notes'));
+    expect(receiver.containerEl.classList).not.toContain(NON_TEXT_ITEM_CLASS);
+
+    asView(receiver).setFile(makeFile('Paper', 'pdf'));
+    expect(receiver.containerEl.classList).toContain(NON_TEXT_ITEM_CLASS);
+    receiver.setPage('home');
+    asView(receiver).setTitle();
+    expect(receiver.containerEl.classList).not.toContain(NON_TEXT_ITEM_CLASS);
   });
 
   it('retitles the popout window instead of the main one when the tab is popped out', () => {

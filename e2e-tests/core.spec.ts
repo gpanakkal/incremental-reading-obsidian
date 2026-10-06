@@ -16,6 +16,7 @@ import {
   importArticle,
   leafSnapshot,
   openNote,
+  pendingSaves,
   renameDecliningLinkUpdate,
   reviewHeader,
   reviewTitle,
@@ -1306,7 +1307,7 @@ test.describe('Moved notes', () => {
       const repo = plugin?.reviewManager?.repo;
       return {
         rows: repo?.query('SELECT id, reference FROM article') ?? [],
-        pendingSaves: repo?.pendingSaveCount ?? 0,
+        pendingSaveCount: repo?.pendingSaveCount ?? 0,
       };
     });
 
@@ -1320,10 +1321,10 @@ test.describe('Moved notes', () => {
 
     let imported = { id: '', reference: '' };
     await expect(async () => {
-      const { rows, pendingSaves } = await articleRows(window);
+      const { rows, pendingSaveCount } = await articleRows(window);
       expect(rows).toHaveLength(1);
       // Quitting under a database write would lose the row being tested
-      expect(pendingSaves).toBe(0);
+      expect(pendingSaveCount).toBe(0);
       imported = rows[0];
       const note = await fs.readFile(
         path.join(vaultPath, imported.reference),
@@ -1408,15 +1409,6 @@ test.describe('PDF articles', () => {
     }, PDF_ID);
 
   const pdfBytes = (at: string) => fs.readFile(path.join(vaultPath, at));
-
-  /** How many writes of the database file are still under way. */
-  const pendingSaves = (page: Page) =>
-    page.evaluate(() => {
-      const { app } = window as unknown as { app: PageApp };
-      const { repo } = app.plugins.plugins['incremental-reading']
-        .reviewManager as unknown as { repo: { pendingSaveCount: number } };
-      return repo.pendingSaveCount;
-    });
 
   /** Whether Obsidian has indexed a file at `at`. */
   const hasFile = (page: Page, at: string) =>
