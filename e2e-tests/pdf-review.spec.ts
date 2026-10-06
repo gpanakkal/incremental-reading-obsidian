@@ -1503,6 +1503,115 @@ test.describe('Snippets and cards from a PDF article', () => {
     await expect(cardViewer(window)).not.toContainText('<mark');
   });
 
+  /*
+   * The extract command is off in reading view, so nothing in the UI makes a
+   * snippet there today. The test drives the action the command runs instead,
+   * through the real view, selection and renderer: should the command ever be
+   * let through in reading view, this is what it would make.
+   */
+  test("escapes a snippet of reading view's selection, so what the note escaped stays plain text in it", async () => {
+    const parent = await hostileSnippet(window);
+    await window.evaluate(async (reference) => {
+      const { app } = window as unknown as {
+        app: {
+          vault: PageApp['vault'];
+          workspace: {
+            getLeaf(newLeaf: 'tab'): {
+              openFile(file: unknown, state: unknown): Promise<void>;
+            };
+            setActiveLeaf(leaf: unknown, params: { focus: boolean }): void;
+          };
+        };
+      };
+      const leaf = app.workspace.getLeaf('tab');
+      await leaf.openFile(app.vault.getFileByPath(reference), {
+        state: { mode: 'preview' },
+      });
+      app.workspace.setActiveLeaf(leaf, { focus: true });
+    }, parent.reference);
+    // The rendered paragraphs of the open note, the properties above them left out
+    const paragraphs = window.locator(
+      '.workspace-leaf.mod-active .markdown-reading-view .markdown-preview-section > div > p'
+    );
+    await expect(paragraphs).toHaveCount(HOSTILE_PARAGRAPHS.length);
+
+    // Everything from the first paragraph to the last, as a drag would select it
+    const selected = await paragraphs.first().evaluate((first) => {
+      const paras = first
+        .closest('.markdown-preview-section')!
+        .querySelectorAll(':scope > div > p');
+      const last = paras[paras.length - 1];
+      const range = first.ownerDocument.createRange();
+      range.setStart(first, 0);
+      range.setEnd(last, last.childNodes.length);
+      const selection = first.ownerDocument.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return selection.toString();
+    });
+    // What the note escaped reads bare in the selection: what makes the
+    // escape needed
+    expect(selected).toContain('<%*');
+    expect(selected).toContain('[[Note|alias]]');
+    expect(selected).toContain(' #ir-card #ir-text-snippet');
+    expect(selected).not.toContain('\\#');
+
+    // The command is off here, as the palette asks it. Undocumented:
+    // `app.commands.commands`, Obsidian's registry of commands by id
+    const available = await window.evaluate(() => {
+      const { app } = window as unknown as {
+        app: {
+          commands: {
+            commands: Record<
+              string,
+              { checkCallback(checking: boolean): boolean | void }
+            >;
+          };
+        };
+      };
+      return app.commands.commands[
+        'incremental-reading:extract-selection'
+      ].checkCallback(true);
+    });
+    expect(available).toBe(false);
+    // Undocumented: `app.plugins.plugins`, Obsidian's loaded plugins by id
+    await window.evaluate(async (reference) => {
+      const { app } = window as unknown as {
+        app: {
+          workspace: { activeEditor: { file: { path: string } | null } | null };
+          plugins: {
+            plugins: Record<
+              string,
+              { actions: { createSnippet(): Promise<unknown> } }
+            >;
+          };
+        };
+      };
+      // The action snips through the active editor: it must be the note's,
+      // not one review left behind
+      const active = app.workspace.activeEditor?.file?.path;
+      if (active !== reference) throw new Error(`Active editor is ${active}`);
+      await app.plugins.plugins['incremental-reading'].actions.createSnippet();
+    }, parent.reference);
+
+    await expect.poll(() => snippets(window)).toHaveLength(2);
+    const child = (await snippets(window)).find(
+      (s) => s.reference !== parent.reference
+    )!;
+    expect(child.body).toBe(Markdown.escape(selected));
+    // Nor offsets from the cursor of the editor hidden behind reading view
+    expect([child.start_offset, child.end_offset]).toEqual([null, null]);
+    await expect
+      .poll(() => noteSyntax(window, child.reference))
+      .toEqual({
+        ...CLEAN_NOTE,
+        sections: ['yaml', ...HOSTILE_PARAGRAPHS.map(() => 'paragraph')],
+        frontmatterTags: ['ir-text-snippet'],
+      });
+    // It reads as the selection did, in reading view and live preview alike
+    expectPlainText(await readMarkdown(window, child.body!), selected);
+  });
+
   test('keeps the escape in a card made in selection mode from a span and an answer each starting between a `\\` and the `#` it escapes', async () => {
     await setDefaultEditingMode(window, 'source');
     const parent = await hostileSnippet(window);

@@ -263,10 +263,17 @@ export class SnippetManager extends ItemManager {
     } else {
       console.warn(`[createSnippet] Could not access the CodeMirror view`);
     }
+    // With the editor's selection empty, the text is reading view's: rendered,
+    // every escape in the note already read. Escaped again, it reads in the
+    // snippet as the selection did, rather than coming back as a link, tag or
+    // Templater command, and names the note as it reads.
     const snippetFile = await Obsidian.createFromText(
-      editorSelection && source ? source.text : selection,
+      editorSelection
+        ? (source?.text ?? editorSelection)
+        : Markdown.escape(selection),
       Obsidian.getDirectory('snippet'),
-      this.app
+      this.app,
+      editorSelection ? undefined : selection
     );
 
     // Tag it and link to the source file
@@ -322,14 +329,15 @@ export class SnippetManager extends ItemManager {
       ? SnippetManager.childPriority(currentFileEntry, snippetDueTime)
       : DEFAULT_PRIORITY;
 
-    // Create the snippet entry
+    // Create the snippet entry. Reading view's selection has no offsets in
+    // the note: the editor's cursor behind it marks nothing that was selected.
     const result = await this.createEntry(
       snippetFile,
       id,
       snippetDueTime,
       priority,
       currentFileEntry?.id,
-      source?.offsets
+      editorSelection ? source?.offsets : undefined
     );
 
     // Refresh highlights immediately after snippet creation.
