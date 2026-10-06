@@ -2,6 +2,7 @@
 
 import * as ReviewInterface from '#/components/ReviewInterface';
 import {
+  CONTROL_TITLE_CHARS,
   FORBIDDEN_TITLE_CHARS,
   PLACEHOLDER_PLUGIN_ICON,
 } from '#/lib/constants';
@@ -589,14 +590,22 @@ async function editTitle(
   await flushLookups();
 }
 
-/** A name a note can take: no forbidden character, no leading dot, no trailing dot or space. */
+/**
+ * A name a note can take: no forbidden, control or invisible character, no leading
+ * dot, no trailing dot or space.
+ */
 function isValidName(name: string): boolean {
   return (
     name.trim() === name &&
     name !== '' &&
     !name.startsWith('.') &&
     !name.endsWith('.') &&
-    ![...name].some((char) => FORBIDDEN_TITLE_CHARS.has(char))
+    ![...name].some(
+      (char) =>
+        FORBIDDEN_TITLE_CHARS.has(char) ||
+        CONTROL_TITLE_CHARS.has(char) ||
+        /\p{Default_Ignorable_Code_Point}/u.test(char)
+    )
   );
 }
 

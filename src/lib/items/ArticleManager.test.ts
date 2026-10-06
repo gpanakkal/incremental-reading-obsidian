@@ -6,6 +6,7 @@ import {
   DATA_DIRECTORY,
   DAY_ROLLOVER_OFFSET_HOURS,
   DEFAULT_PRIORITY,
+  INVALID_TITLE_MESSAGE,
   MAXIMUM_FIXED_REVIEW_INTERVAL,
   MAXIMUM_PRIORITY,
   MINIMUM_FIXED_REVIEW_INTERVAL,
@@ -22,6 +23,7 @@ import type {
   ArticleRow,
   IArticleBase,
   IArticleReview,
+  ReviewArticle,
   SnippetRow,
   SQLiteRepository,
 } from '#/lib/types';
@@ -39,6 +41,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ArticleManager } from './ArticleManager';
 
 // #region HELPERS
+/**
+ * A control or bidi character, not a newline: what titles refuse since task
+ * 0040, and an old name may hold from before.
+ */
+const titleControlCharArb = fc
+  .oneof(
+    fc.integer({ min: 0x00, max: 0x1f }),
+    fc.integer({ min: 0x7f, max: 0x9f }),
+    fc.constantFrom(0x2028, 0x2029, 0x200e, 0x200f, 0x061c),
+    fc.integer({ min: 0x202a, max: 0x202e }),
+    fc.integer({ min: 0x2066, max: 0x2069 })
+  )
+  .map((code) => String.fromCharCode(code))
+  .filter((char) => char !== '\n');
+
 function makeArticle(overrides: Partial<IArticleBase> = {}): IArticleBase {
   return {
     id: 'article-1',
@@ -1872,6 +1889,110 @@ describe('rename', () => {
     expect(params[1]).toBe('art-1');
   });
 
+  it('says whether it renamed: not for a name it refuses, which it says why of', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(
+          titleControlCharArb.map((char) => `valid${char}name`),
+          fc.constantFrom('.name', 'name.', ' name', 'name ')
+        ),
+        async (name) => {
+          Notice.reset();
+          const renameFile = vi.fn().mockResolvedValue(undefined);
+          const repo = makeSimpleRepo();
+          const manager = new ArticleManager(
+            { app: { fileManager: { renameFile } } } as never,
+            repo
+          );
+          const article = {
+            data: makeArticle(),
+            file: { basename: 'test', extension: 'md', parent: null },
+          } as unknown as ReviewArticle;
+
+          await expect(manager.rename(article, name)).resolves.toBe(false);
+          expect(renameFile).not.toHaveBeenCalled();
+          expect(repo.mutate).not.toHaveBeenCalled();
+          expect(Notice.messages).toEqual([INVALID_TITLE_MESSAGE]);
+        }
+      )
+    );
+  });
+
+  describe('an article whose name hides a path in backslashes', () => {
+    const oldName = 'Paper\\..\\..\\pwn';
+    function setUp(mutate: () => Promise<unknown>) {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const renameFile = vi
+        .fn<(file: TFile, path: string) => Promise<void>>()
+        .mockResolvedValue(undefined);
+      const repo = {
+        ...makeSimpleRepo(),
+        mutate: vi.fn(mutate),
+      } as unknown as SQLiteRepository;
+      const manager = new ArticleManager(
+        { app: { fileManager: { renameFile } } } as never,
+        repo
+      );
+      const article = {
+        data: makeArticle({ id: 'art-1' }),
+        file: { basename: oldName, extension: 'md', parent: { path: 'a' } },
+      } as unknown as ReviewArticle;
+      return { renameFile, manager, article };
+    }
+
+    it('is not renamed to a name keeping the backslashes', async () => {
+      const { renameFile, manager, article } = setUp(async () => [[]]);
+      await expect(manager.rename(article, `${oldName}2`)).resolves.toBe(false);
+      expect(renameFile).not.toHaveBeenCalled();
+    });
+
+    it('is not put back to that name when the db update fails, and says so', async () => {
+      const { renameFile, manager, article } = setUp(async () => {
+        throw new Error('db error');
+      });
+      await expect(manager.rename(article, 'Paper')).rejects.toThrow(
+        INVALID_TITLE_MESSAGE
+      );
+      expect(renameFile.mock.calls.map(([, path]) => path)).toEqual([
+        'a/Paper.md',
+      ]);
+    });
+  });
+
+  it('renames a note keeping the characters a title can not hold that its name already had', async () => {
+    await fc.assert(
+      fc.asyncProperty(titleControlCharArb, async (char) => {
+        const renameFile = vi
+          .fn<(file: TFile, path: string) => Promise<void>>()
+          .mockResolvedValue(undefined);
+        const repo = makeSimpleRepo();
+        const manager = new ArticleManager(
+          { app: { fileManager: { renameFile } } } as never,
+          repo
+        );
+        const article = {
+          data: makeArticle({ id: 'art-1' }),
+          file: {
+            basename: `old${char}name`,
+            extension: 'md',
+            parent: { path: 'articles' },
+          },
+        } as unknown as ReviewArticle;
+
+        await expect(manager.rename(article, `old${char}name 2`)).resolves.toBe(
+          true
+        );
+        expect(renameFile.mock.calls.map(([, path]) => path)).toEqual([
+          `articles/old${char}name 2.md`,
+        ]);
+        expect(lastMutateCall(repo)[1]).toEqual([
+          `articles/old${char}name 2.md`,
+          'art-1',
+        ]);
+      })
+    );
+  });
+
   it('rejects names ending in a trailing space or period without mutating', async () => {
     for (const name of ['valid-name ', 'valid-name.']) {
       const repo = makeSimpleRepo();
@@ -1892,8 +2013,9 @@ describe('rename', () => {
   });
 
   it('attempts to rename back to original name if the db update throws', async () => {
-    const renameFileSpy = vi
-      .spyOn(Obsidian, 'renameFile')
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const renameFile = vi
+      .fn<(file: TFile, path: string) => Promise<void>>()
       .mockResolvedValue(undefined);
     const repo = {
       query: vi.fn().mockResolvedValue([]),
@@ -1903,7 +2025,10 @@ describe('rename', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
-    const manager = new ArticleManager({} as never, repo);
+    const manager = new ArticleManager(
+      { app: { fileManager: { renameFile } } } as never,
+      repo
+    );
     const originalName = 'original';
     const article = {
       data: makeArticle({ id: 'art-1' }),
@@ -1914,10 +2039,52 @@ describe('rename', () => {
       } as unknown as TFile,
     };
     await manager.rename(article, 'new-name');
-    // second renameFile call should use the original name
-    const calls = renameFileSpy.mock.calls;
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    expect(calls[calls.length - 1][1]).toBe(originalName);
+    // the rename back should use the original name
+    expect(renameFile.mock.calls.map(([, path]) => path)).toEqual([
+      'new-name.md',
+      `${originalName}.md`,
+    ]);
+  });
+
+  it('puts back an old name no new note could take when the db update throws', async () => {
+    // A name made before titles lost their control and bidi characters
+    // No `/` or `\`, which no name can be put back to
+    const noSeparatorArb = fc.string().filter((s) => !/[\\/]/.test(s));
+    const oldNameArb = fc
+      .tuple(noSeparatorArb, titleControlCharArb, noSeparatorArb)
+      .map(([before, char, after]) => `${before}${char}${after}`);
+    await fc.assert(
+      fc.asyncProperty(oldNameArb, async (oldName) => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        const renameFile = vi
+          .fn<(file: TFile, path: string) => Promise<void>>()
+          .mockResolvedValue(undefined);
+        const repo = {
+          ...makeSimpleRepo(),
+          mutate: vi.fn().mockRejectedValue(new Error('db error')),
+        } as unknown as SQLiteRepository;
+        const manager = new ArticleManager(
+          { app: { fileManager: { renameFile } } } as never,
+          repo
+        );
+        const article = {
+          data: makeArticle({ id: 'art-1' }),
+          file: {
+            basename: oldName,
+            extension: 'md',
+            parent: { path: 'articles' },
+          } as unknown as TFile,
+        };
+
+        // Not renamed, so the title editor puts the old name back
+        await expect(manager.rename(article, 'new-name')).resolves.toBe(false);
+        expect(renameFile.mock.calls.map(([, path]) => path)).toEqual([
+          'articles/new-name.md',
+          `articles/${oldName}.md`,
+        ]);
+        vi.restoreAllMocks();
+      })
+    );
   });
 });
 

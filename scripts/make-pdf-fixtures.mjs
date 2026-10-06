@@ -294,11 +294,82 @@ function hostilePdf() {
   );
 }
 
+/**
+ * Codes WinAnsiEncoding leaves unused, given to Helvetica's "d" and "f"
+ * glyphs. The controls fixture's ToUnicode CMap reads the first as "d" and a
+ * tab, the second as U+202E, the right-to-left override, and "f".
+ *
+ * Obsidian's pdf.js reads a glyph that maps to a tab alone as a space, and
+ * drops one that maps to a bidi control alone, so neither reaches a note that
+ * way; a glyph that maps to a control and a letter keeps both.
+ */
+const D_TAB = String.fromCharCode(0x81);
+const RLO_F = String.fromCharCode(0x8d);
+
+const hex = (code) => code.toString(16).toUpperCase().padStart(2, '0');
+
+/** Every printable ASCII code reads as itself, and `D_TAB` and `RLO_F` as above. */
+const CONTROLS_TO_UNICODE = [
+  '/CIDInit /ProcSet findresource begin',
+  '12 dict begin',
+  'begincmap',
+  '/CIDSystemInfo <</Registry (Adobe) /Ordering (UCS) /Supplement 0>> def',
+  '/CMapName /Adobe-Identity-UCS def',
+  '/CMapType 2 def',
+  '1 begincodespacerange',
+  '<00> <FF>',
+  'endcodespacerange',
+  '1 beginbfrange',
+  '<20> <7E> <0020>',
+  'endbfrange',
+  '2 beginbfchar',
+  `<${hex(D_TAB.charCodeAt(0))}> <00640009>`,
+  `<${hex(RLO_F.charCodeAt(0))}> <202E0066>`,
+  'endbfchar',
+  'endcmap',
+  'CMapName currentdict /CIDInit /ProcSet findresource exch defineresource pop',
+  'end',
+  'end',
+].join('\n');
+
+/**
+ * A line whose text holds a tab and a right-to-left override, as pdf.js reads
+ * it: "Tabbed", a tab, "here report", the override, "fdp.exe". Named after
+ * it, a snippet or card would get a note name that can't be created on
+ * Windows and Android, and that shows as "...reportexe.pdf".
+ */
+const CONTROLS_LINE = `Tabbe${D_TAB}here report${RLO_F}dp.exe`;
+
+function controlsPdf() {
+  // 1 catalog, 2 page tree, 3 font, 4 page, 5 its contents, 6 the CMap
+  const content = textBlock([CONTROLS_LINE], {
+    x: MARGIN_LEFT,
+    y: BODY_TOP,
+    size: BODY_SIZE,
+  });
+  return buildPdf(
+    [
+      '<</Type/Catalog/Pages 2 0 R>>',
+      '<</Type/Pages/Kids[4 0 R]/Count 1>>',
+      '<</Type/Font/Subtype/Type1/BaseFont/Helvetica' +
+        '/Encoding<</Type/Encoding/BaseEncoding/WinAnsiEncoding' +
+        `/Differences[${D_TAB.charCodeAt(0)}/d ${RLO_F.charCodeAt(0)}/f]>>` +
+        '/ToUnicode 6 0 R>>',
+      `<</Type/Page/Parent 2 0 R/MediaBox[0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}]` +
+        '/Resources<</Font<</F1 3 0 R>>>>/Contents 5 0 R>>',
+      { dict: '<<>>', data: Buffer.from(content, 'latin1') },
+      { dict: '<<>>', data: Buffer.from(CONTROLS_TO_UNICODE, 'latin1') },
+    ],
+    1
+  );
+}
+
 const FIXTURES = {
   'PDF fixture.pdf': articlePdf,
   'PDF fixture - no text.pdf': imageOnlyPdf,
   'PDF fixture - layout.pdf': layoutPdf,
   'PDF fixture - hostile.pdf': hostilePdf,
+  'PDF fixture - controls.pdf': controlsPdf,
 };
 
 await mkdir(OUT_DIR, { recursive: true });

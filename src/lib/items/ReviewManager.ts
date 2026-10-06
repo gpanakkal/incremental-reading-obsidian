@@ -221,6 +221,7 @@ export default class ReviewManager {
 
   /**
    * @param newName The basename excluding the file extension
+   * @returns whether it was renamed
    */
   async renameArticle(article: ReviewArticle, newName: string) {
     return this.articles.rename(article, newName);

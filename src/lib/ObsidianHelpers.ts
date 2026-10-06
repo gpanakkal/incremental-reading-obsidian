@@ -18,7 +18,9 @@ import {
   ARTICLE_TAG,
   CARD_DIRECTORY,
   CARD_TAG,
+  CONTENT_TITLE_MAX_BYTES,
   CONTENT_TITLE_SLICE_LENGTH,
+  CONTROL_TITLE_CHARS,
   DATA_DIRECTORY,
   FORBIDDEN_TITLE_CHARS,
   FRONTMATTER_PATTERN,
@@ -80,35 +82,76 @@ export class ObsidianHelpers {
 
   /**
    * Remove characters that cannot be used for file names
-   * or Obsidian note titles
-   * @param checkFinalChar if true, removes spaces and periods from the end
+   * or Obsidian note titles. Control characters become a space, and invisible
+   * ones are dropped so a name always reads as its text. So is half a
+   * surrogate pair standing alone, which the file system can't store as it is.
+   * Leading whitespace and periods are always removed.
+   *
+   * The text is read as NFC, as Obsidian stores a path, so the cuts measure
+   * the name the file will have.
+   * @param checkFinalChar if true, also removes trailing whitespace and periods
+   * @param maxLength the most code points to keep: a cut never splits a pair
+   * @param maxBytes the most UTF-8 bytes to keep, cut by whole code points
    */
   static sanitizeForTitle(
     text: string,
     checkFinalChar: boolean,
-    maxLength?: number
+    maxLength?: number,
+    maxBytes?: number
   ) {
-    const cleaned = text
-      .split('')
-      .map((char, i) => {
-        if (i === 0 && char === '.') return '';
-        if (checkFinalChar && i === text.length - 1) {
-          if (' .'.includes(char)) return '';
-        }
-        if (FORBIDDEN_TITLE_CHARS.has(char)) {
-          // whitespace becomes a space so the words around it stay separated;
-          // every other forbidden char is dropped
-          return /\s/.test(char) ? ' ' : '';
-        } else return char;
-      })
-      .join('');
+    // By code point, so a surrogate pair is one character
+    const cleaned = keepSequences(
+      Array.from(text.normalize('NFC')).map(titleChar)
+    )
+      .join('')
+      // What a dropped character stood between may compose
+      .normalize('NFC')
+      // No leading dot, which hides the note, or whitespace, once what came
+      // before them is dropped too
+      .replace(/^[\s.]+/, '');
 
-    const trimmed = checkFinalChar
-      ? cleaned.trim()
-      : cleaned.slice(0, cleaned.length - 1).trimStart() +
-        cleaned.slice(cleaned.length - 1);
+    // Nor, when asked, a trailing one, whatever was dropped after it
+    const trimmed = checkFinalChar ? cleaned.replace(/[\s.]+$/, '') : cleaned;
 
-    return maxLength ? trimmed.slice(0, maxLength) : trimmed;
+    let chars = Array.from(trimmed).slice(0, maxLength);
+    if (maxBytes !== undefined) {
+      let bytes = 0;
+      const fits = chars.findIndex((char) => {
+        bytes += UTF8.encode(char).length;
+        return bytes > maxBytes;
+      });
+      if (fits >= 0) chars = chars.slice(0, fits);
+    }
+    // A cut can leave a joiner, or tags, whose sequence is cut off
+    return keepSequences(chars).join('');
+  }
+
+  /**
+   * Whether `newName` may replace `oldName` as a note's name. It may not be
+   * empty, start or end with whitespace or a dot, or hold a forbidden title
+   * character. A control or invisible character, or a joiner, variation
+   * selector or tag character outside a sequence that needs it, is refused
+   * only where the new name adds it: one the old name held already, made
+   * before titles refused it, may stay, as many times as the old name had it.
+   */
+  static isValidRename(newName: string, oldName: string) {
+    if (newName === '' || /^[\s.]|[\s.]$/.test(newName)) return false;
+
+    // How many of each character the old name held where a title can't: one
+    // a sequence there needed grants nothing, or it could stray in the new
+    const allowed = new Map<string, number>();
+    for (const char of refusedChars(oldName)) {
+      allowed.set(char, (allowed.get(char) ?? 0) + 1);
+    }
+    for (const char of refusedChars(newName)) {
+      // Refused before titles refused controls and invisible characters, so
+      // no old name holds one by right: and `\` or `/` would move the note
+      if (FORBIDDEN_TITLE_CHARS.has(char)) return false;
+      const left = allowed.get(char) ?? 0;
+      if (left === 0) return false;
+      allowed.set(char, left - 1);
+    }
+    return true;
   }
 
   /**
@@ -122,9 +165,11 @@ export class ObsidianHelpers {
       const sanitized = this.sanitizeForTitle(
         Markdown.stripLinks(content),
         false,
-        CONTENT_TITLE_SLICE_LENGTH
+        CONTENT_TITLE_SLICE_LENGTH,
+        CONTENT_TITLE_MAX_BYTES
       );
-      if (sanitized.trim().length > 0) segments.push(sanitized);
+      // It never starts with whitespace, so all whitespace leaves it empty
+      if (sanitized.length > 0) segments.push(sanitized);
     }
     segments.push(generateId());
     return segments.join(TITLE_SEGMENT_SEPARATOR);
@@ -318,20 +363,34 @@ export class ObsidianHelpers {
 
   /**
    * Rename a file without moving it
-   * @throws if the title contains invalid characters
+   * @throws if the new name adds characters a title can't hold (see
+   * {@link isValidRename})
    * or if the rename operation fails
    */
   static async renameFile(file: TFile, newName: string, app: App) {
-    const sanitized = ObsidianHelpers.sanitizeForTitle(newName, true);
-    if (sanitized !== newName) {
+    if (!ObsidianHelpers.isValidRename(newName, file.basename)) {
       throw new Error(`${INVALID_TITLE_MESSAGE}. Title was ${newName}`);
     }
 
+    await this.restoreName(file, newName, app);
+  }
+
+  /**
+   * Rename a file without moving it, unchecked: to put back a name it had,
+   * which may be one a new note could no longer take.
+   * @throws if the name holds `/` or `\`, which would move the note
+   */
+  static async restoreName(file: TFile, name: string, app: App) {
+    // Obsidian's normalizePath reads `\` as `/`: either would move the note
+    // to another folder, or out of the vault
+    if (/[\\/]/.test(name)) {
+      throw new Error(`${INVALID_TITLE_MESSAGE}. Title was ${name}`);
+    }
     // The vault root's path is `/`, and a file there has no folder to prefix.
     const newPath =
       file.parent && file.parent.path !== '/'
-        ? `${file.parent.path}/${newName}.${file.extension}`
-        : `${newName}.${file.extension}`;
+        ? `${file.parent.path}/${name}.${file.extension}`
+        : `${name}.${file.extension}`;
 
     await app.fileManager.renameFile(file, newPath);
   }
@@ -526,3 +585,138 @@ export class ObsidianHelpers {
     new Notice(message, persist ? 0 : duration);
   }
 }
+
+/**
+ * Whether `char`, a code point as `Array.from` splits text, is half a
+ * surrogate pair standing alone.
+ */
+function isLoneSurrogate(char: string) {
+  const code = char.charCodeAt(0);
+  return char.length === 1 && code >= 0xd800 && code <= 0xdfff;
+}
+
+/**
+ * Default-ignorable code points, which show as nothing. Among them are the
+ * bidi controls (U+202A–U+202E, U+2066–U+2069) and the implicit marks LRM, RLM
+ * and ALM, which reorder how a name reads: `report`, U+202E, `fdp.exe` shows
+ * as `reportexe.pdf`, and `1`, RLM, `-`, RLM, `2` as `12-`. The rest (soft
+ * hyphen, Hangul fillers, CGJ and the like) can make a name look blank, or
+ * hide text in it.
+ */
+const DEFAULT_IGNORABLE = /\p{Default_Ignorable_Code_Point}/u;
+
+/** ZWNJ or ZWJ: emoji sequences and some scripts join with them. */
+function isJoiner(char: string) {
+  const code = char.codePointAt(0);
+  return code === 0x200c || code === 0x200d;
+}
+
+/**
+ * A variation selector, standard (U+FE00–U+FE0F) or ideographic
+ * (U+E0100–U+E01EF), or a Mongolian free variation selector: each picks a
+ * form of the character before it, an emoji's colour one among them.
+ */
+function isVariationSelector(char: string) {
+  const code = char.codePointAt(0) ?? 0;
+  return (
+    (code >= 0xfe00 && code <= 0xfe0f) ||
+    (code >= 0xe0100 && code <= 0xe01ef) ||
+    (code >= 0x180b && code <= 0x180d) ||
+    code === 0x180f
+  );
+}
+
+/** A tag character, which spells out a flag after the black flag emoji. */
+function isTag(char: string) {
+  const code = char.codePointAt(0) ?? 0;
+  return code >= 0xe0020 && code <= 0xe007e;
+}
+/** The black flag emoji, which a tag sequence turns into a region's flag. */
+const BLACK_FLAG = String.fromCodePoint(0x1f3f4);
+/** The cancel tag, which ends a tag sequence. */
+const CANCEL_TAG = String.fromCodePoint(0xe007f);
+
+/** Something a sequence can build on: it shows, and isn't a dot. */
+function isBase(char: string) {
+  return (
+    char !== '' &&
+    !/\s/.test(char) &&
+    char !== '.' &&
+    !DEFAULT_IGNORABLE.test(char)
+  );
+}
+
+/**
+ * What `char`, one code point, becomes in a title: a space for a control or
+ * a forbidden whitespace character, nothing for any other forbidden, invisible
+ * or lone-surrogate one, and itself otherwise. Joiners, variation selectors
+ * and tag characters stay, for {@link keepSequences} to judge in context.
+ */
+function titleChar(char: string) {
+  if (FORBIDDEN_TITLE_CHARS.has(char)) {
+    // whitespace becomes a space so the words around it stay separated;
+    // every other forbidden char is dropped
+    return /\s/.test(char) ? ' ' : '';
+  }
+  if (CONTROL_TITLE_CHARS.has(char)) return ' ';
+  if (isLoneSurrogate(char)) return '';
+  if (
+    isJoiner(char) ||
+    isVariationSelector(char) ||
+    isTag(char) ||
+    char === CANCEL_TAG
+  ) {
+    return char;
+  }
+  if (DEFAULT_IGNORABLE.test(char)) return '';
+  return char;
+}
+
+/**
+ * `chars`, code points as {@link titleChar} leaves them, with every joiner,
+ * variation selector and tag character dropped (`''`) that no sequence needs:
+ * - a variation selector right after something that shows, one only;
+ * - a joiner between something that shows and the next that does, one only;
+ * - tag characters after the black flag, ended by the cancel tag.
+ */
+function keepSequences(chars: readonly string[]): string[] {
+  const kept = [...chars];
+  let prev = '';
+  // Where the code point a joiner joins to is: it only moves on, so a run of
+  // joiners costs no more than the text
+  let scan = 0;
+  for (let i = 0; i < kept.length; i++) {
+    const char = kept[i];
+    if (char === BLACK_FLAG) {
+      let end = i + 1;
+      while (end < kept.length && isTag(kept[end])) end++;
+      if (end > i + 1 && kept[end] === CANCEL_TAG) {
+        prev = CANCEL_TAG;
+        i = end;
+        continue;
+      }
+    } else if (isVariationSelector(char)) {
+      if (!isBase(prev)) kept[i] = '';
+    } else if (isJoiner(char)) {
+      const joinsOn =
+        prev !== '' && !/\s/.test(prev) && prev !== '.' && !isJoiner(prev);
+      // The next code point not dropped already, past this one
+      while (scan <= i || kept[scan] === '') scan++;
+      if (!joinsOn || !isBase(kept[scan] ?? '')) kept[i] = '';
+    } else if (isTag(char) || char === CANCEL_TAG) {
+      kept[i] = '';
+    }
+    if (kept[i] !== '') prev = kept[i];
+  }
+  return kept;
+}
+
+/** The code points of `name` that a title drops or changes where they stand. */
+function refusedChars(name: string) {
+  const chars = Array.from(name);
+  const kept = keepSequences(chars.map(titleChar));
+  return chars.filter((char, i) => kept[i] !== char);
+}
+
+/** To measure text in UTF-8 bytes, as file systems limit a name. */
+const UTF8 = new TextEncoder();

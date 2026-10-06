@@ -21,10 +21,36 @@ export const NOTICE_MIN_DURATION_MS = 5000;
 
 /** characters that should never be permitted in note titles */
 export const FORBIDDEN_TITLE_CHARS = new Set(`#^[]|*"\\/<>:?\n`.split(''));
+/** The characters with char codes `from` to `to`, both included. */
+const charRange = (from: number, to: number) =>
+  Array.from({ length: to - from + 1 }, (_, i) =>
+    String.fromCharCode(from + i)
+  );
+
+/**
+ * C0 controls (`\x00`–`\x1f`), DEL and C1 controls (`\x7f`–`\x9f`), and the
+ * line and paragraph separators (U+2028, U+2029). Invalid or invisible in a
+ * file name, or breaking it across lines: a `\r` or `\t` makes `vault.create`
+ * fail on Windows and Android. Titles turn them into a space, so the words
+ * around them stay apart.
+ */
+export const CONTROL_TITLE_CHARS = new Set([
+  ...charRange(0x00, 0x1f),
+  ...charRange(0x7f, 0x9f),
+  ...[0x2028, 0x2029].map((code) => String.fromCharCode(code)),
+]);
 export const INVALID_TITLE_MESSAGE =
-  `Titles cannot contain any of the following: ` +
+  `Titles cannot contain control or invisible characters, ` +
+  `or any of the following: ` +
   `${[...FORBIDDEN_TITLE_CHARS.keys()].join(', ')}`;
 export const CONTENT_TITLE_SLICE_LENGTH = 50;
+/**
+ * The most UTF-8 bytes a title made from text may take, the ` - <id>.md` after
+ * it aside: file systems cap a name at 255 bytes (ext4, APFS) or UTF-16 units
+ * (NTFS). 50 code points take 200 bytes at most, so this holds should the
+ * slice length grow.
+ */
+export const CONTENT_TITLE_MAX_BYTES = 200;
 export const SNIPPET_SLICE_LENGTH = 30;
 
 export const MS_PER_MINUTE = 1000 * 60;
