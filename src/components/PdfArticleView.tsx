@@ -2,8 +2,9 @@ import { showPdfItemHighlights } from '#/lib/extensions/PdfItemHighlights';
 import {
   createPdfViewer,
   getPdfLocation,
-  onPdfViewChange,
+  onPdfViewMove,
   type PdfViewer,
+  setPdfPosition,
 } from '#/lib/pdf/obsidian-pdf';
 import {
   packPdfPosition,
@@ -82,17 +83,15 @@ export function PdfArticleView({
     let active = true;
     const file = item.file;
     // Where the reader is. Carried over when this reruns for a file swapped
-    // under the item, then kept current by the viewer.
+    // under the item, or else where the item's row says they stopped, then
+    // kept current by the viewer.
     let position: PdfPosition | null = getPdfLocation(shown);
     /** What the item's row holds, as far as this view knows. */
     let stored: number | null = null;
-    /** Where the file first opened, for a reload before the view moves. */
-    let opening: string | undefined;
     let saveTimer: number | undefined;
 
     // Only a position the row doesn't hold yet: opening at the saved one
-    // reports it straight back, and so do a resize or a zoom that leave the
-    // top edge where it was. Each save writes the whole database out.
+    // reports it straight back. Each save writes the whole database out.
     const save = () => {
       window.clearTimeout(saveTimer);
       if (!position) return;
@@ -103,10 +102,22 @@ export function PdfArticleView({
         console.warn('Incremental Reading: PDF position not saved', error);
       });
     };
-    const stopWatching = onPdfViewChange(shown, (moved) => {
-      position = moved;
+    const moved = (to: PdfPosition) => {
+      position = to;
       window.clearTimeout(saveTimer);
       saveTimer = window.setTimeout(save, POSITION_SAVE_DELAY_MS);
+    };
+    const stopWatching = onPdfViewMove(shown, {
+      moved,
+      // pdf.js moves the view a little when the viewer is resized, as in
+      // Obsidian's own PDF tab: put it back where the reader left it, or where
+      // it opened, which is no move of the reader's to save
+      resized: () => {
+        if (position && setPdfPosition(shown, position)) return;
+        // It can't be put back: keep where the resize left it, as a move
+        const here = getPdfLocation(shown);
+        if (here) moved(here);
+      },
     });
 
     const open = (at: string | undefined) => {
@@ -117,7 +128,7 @@ export function PdfArticleView({
     const modifyRef = vault.on('modify', (changed) => {
       if (changed !== file) return;
       // Reopening drops the view to page 1: put it back where it was
-      open(position ? pdfPositionSubpath(position) : opening);
+      open(position ? pdfPositionSubpath(position) : undefined);
     });
 
     // Where it opens: where the reader is, carried over, or else where the
@@ -129,13 +140,11 @@ export function PdfArticleView({
           .catch(() => null)
           .then((saved) => {
             stored = saved;
-            const at = saved === null ? null : unpackPdfPosition(saved);
-            return at ? pdfPositionSubpath(at) : undefined;
+            position ??= saved === null ? null : unpackPdfPosition(saved);
+            return position ? pdfPositionSubpath(position) : undefined;
           });
     void start.then((at) => {
-      if (!active) return;
-      opening = at;
-      open(at);
+      if (active) open(at);
     });
 
     return () => {

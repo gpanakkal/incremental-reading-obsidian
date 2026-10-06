@@ -405,10 +405,11 @@ test.describe('Reading position in a PDF article', () => {
       [n, fraction] as const
     );
 
-  /** Expect the view at `expected`, give or take a sliver of a page. */
+  /** Expect the view at `expected`, give or take `within` of a page. */
   async function expectAt(
     page: Page,
-    expected: { page: number; fraction: number }
+    expected: { page: number; fraction: number },
+    within = 0.02
   ) {
     await expect
       .poll(async () => {
@@ -416,7 +417,7 @@ test.describe('Reading position in a PDF article', () => {
         return (
           at !== null &&
           at.page === expected.page &&
-          Math.abs(at.fraction - expected.fraction) < 0.02
+          Math.abs(at.fraction - expected.fraction) < within
         );
       })
       .toBe(true);
@@ -502,13 +503,122 @@ test.describe('Reading position in a PDF article', () => {
     await closeElectron(app);
     app = await launchElectron(vaultPath);
     window = await openVault(app, vaultPath);
+    // Obsidian reopens the review tab while it boots, at whatever size the
+    // window has (CI's small screens): this resizes it after it has opened
+    await window.setViewportSize({ width: 1280, height: 800 });
 
-    // Don't setViewportSize here. Obsidian reopens the review tab while it boots,
-    // at whatever size the window has (CI's small screens), and resizing the
-    // viewer after that moves its position by a few percent of a page.
-    // Obsidian's own PDF tab moves the same way. Checked as it opened instead
     await showItem(window, pdfId);
-    await expectAt(window, stopped);
+    await expectAt(window, stopped, 0.005);
+    await window.waitForTimeout(1000);
+    await expectAt(window, stopped, 0.005);
+    expect((await saved(window)).scrollTop).toBe(savedAtStop);
+  });
+
+  test('holds its place through resizes of the window and the sidebar, at any zoom, saving nothing for them', async () => {
+    await importFixture(window);
+    await openFileInActiveLeaf(window, NOTE_PATH);
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    const pdfId = await articleId(window, PDF_PATH);
+    const noteId = await articleId(window, NOTE_PATH);
+    await window.setViewportSize({ width: 1024, height: 650 });
+    await showItem(window, pdfId);
+    await expect(article(window).locator('.page')).toHaveCount(3);
+    await expect(pdfPage(window, 1).locator('.textLayer')).toContainText(
+      'Incremental reading turns a long text'
+    );
+
+    await scrollInto(window, 3, 0.25);
+    const stopped = { page: 3, fraction: 0.25 };
+    await expectAt(window, stopped, 0.005);
+    await expect
+      .poll(async () =>
+        Math.floor((await saved(window)).scrollTop / PDF_PAGE_STRIDE)
+      )
+      .toBe(3);
+    let savedAtStop = (await saved(window)).scrollTop;
+
+    const pageWidth = async () =>
+      (await pdfPage(window, 3).boundingBox())!.width;
+    /**
+     * Do `resize`, which re-fits the page to the view when `refits`, and
+     * expect the view where it was once that has settled, with nothing saved.
+     */
+    async function expectHeldThrough(
+      resize: () => Promise<unknown>,
+      refits: boolean
+    ) {
+      const widthBefore = await pageWidth();
+      await resize();
+      if (refits) {
+        await expect.poll(pageWidth).not.toBeCloseTo(widthBefore, 0);
+      }
+      // Longer than Obsidian takes to re-fit it, and than the save delay
+      await window.waitForTimeout(1000);
+      if (!refits) expect(await pageWidth()).toBeCloseTo(widthBefore, 0);
+      await expectAt(window, stopped, 0.005);
+      expect((await saved(window)).scrollTop).toBe(savedAtStop);
+    }
+
+    // The window, larger and then smaller
+    await expectHeldThrough(
+      () => window.setViewportSize({ width: 1280, height: 800 }),
+      true
+    );
+    await expectHeldThrough(
+      () => window.setViewportSize({ width: 1920, height: 1080 }),
+      true
+    );
+    await expectHeldThrough(
+      () => window.setViewportSize({ width: 1280, height: 800 }),
+      true
+    );
+    // The left sidebar, collapsed and expanded again
+    await expectHeldThrough(
+      () => executeCommandById(window, 'app:toggle-left-sidebar'),
+      true
+    );
+    await expectHeldThrough(
+      () => executeCommandById(window, 'app:toggle-left-sidebar'),
+      true
+    );
+
+    // Opened afresh where it was saved, at 1024x650 and at 1920x1080, then
+    // grown and shrunk
+    await window.setViewportSize({ width: 1024, height: 650 });
+    await showItem(window, noteId);
+    await expect(article(window)).toHaveCount(0);
+    await showItem(window, pdfId);
+    await expectAt(window, stopped, 0.005);
+    await expectHeldThrough(
+      () => window.setViewportSize({ width: 1280, height: 800 }),
+      true
+    );
+    await window.setViewportSize({ width: 1920, height: 1080 });
+    await showItem(window, noteId);
+    await expect(article(window)).toHaveCount(0);
+    await showItem(window, pdfId);
+    await expectAt(window, stopped, 0.005);
+    await expectHeldThrough(
+      () => window.setViewportSize({ width: 1280, height: 800 }),
+      true
+    );
+
+    // Zoomed in by the reader, which is a move to save. A resize re-fits no
+    // zoom of the reader's own, so pdf.js moves nothing here: this checks
+    // that holding the place keeps that zoom, and saves nothing either
+    const widthBefore = await pageWidth();
+    await article(window).locator('[aria-label="Zoom in"]').click();
+    await expect.poll(pageWidth).toBeGreaterThan(widthBefore);
+    await scrollInto(window, 3, 0.25);
+    await expectAt(window, stopped, 0.005);
+    await window.waitForTimeout(1000);
+    savedAtStop = (await saved(window)).scrollTop;
+    expect(Math.floor(savedAtStop / PDF_PAGE_STRIDE)).toBe(3);
+    await expectHeldThrough(
+      () => window.setViewportSize({ width: 1024, height: 650 }),
+      false
+    );
   });
 });
 

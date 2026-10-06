@@ -8,9 +8,11 @@ import {
   highlightPdfSelection,
   isPdfView,
   onPdfViewChange,
+  onPdfViewMove,
   pdfTabDocument,
   pdfTabSelection,
   type PdfViewer,
+  setPdfPosition,
   stopPdfTabSelections,
 } from './obsidian-pdf';
 import type { PageSelection } from './pdf-selection';
@@ -274,6 +276,143 @@ function bordered(border: unknown, scale: number, height = 792) {
 /** Let promise callbacks queued so far run. */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/** Let microtasks queued so far run. Works under fake timers too. */
+async function microtasks() {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+}
+
+/** jsdom lays nothing out, so the size `el` reports is pinned. */
+function setSize(el: HTMLElement, width: number, height: number) {
+  Object.defineProperty(el, 'clientWidth', {
+    configurable: true,
+    get: () => width,
+  });
+  Object.defineProperty(el, 'clientHeight', {
+    configurable: true,
+    get: () => height,
+  });
+}
+
+/**
+ * A viewer at `width` by `height` whose view {@link onPdfViewMove} watches,
+ * with ways to move it as pdf.js and the browser would: `scrollTo` reports a
+ * view change, `resizeTo` resizes the container and has the browser report
+ * it, and `relayout` is pdf.js handling its `resize` event. `scroller` is
+ * pdf.js's scrolling element.
+ */
+function watchMoves(width = 800, height = 600) {
+  tearDownViewers();
+  const { viewer, component } = makeViewer();
+  // pdf.js's scrolling element, where it last reported the view
+  const scroller = { scrollTop: 100, scrollHeight: 5000, clientHeight: 600 };
+  const child = makeEventChild({
+    isInitialViewSet: true,
+    pdfViewer: { container: scroller },
+  });
+  component.ready(child);
+  setSize(viewer.containerEl, width, height);
+  const moves = { moved: vi.fn(), resized: vi.fn() };
+  const stop = onPdfViewMove(viewer, moves);
+  builtViewers.push(() => {
+    stop();
+    viewer.unload();
+  });
+  const observer = FakeResizeObserver.instances.at(-1);
+  return {
+    viewer,
+    child,
+    moves,
+    stop,
+    observer,
+    scroller,
+    scrollTo: (page: number, top: number) =>
+      child.dispatch('updateviewarea', at(page, top)),
+    resizeTo: (w: number, h: number) => {
+      setSize(viewer.containerEl, w, h);
+      observer?.fire();
+    },
+    relayout: () => child.dispatch('resize', { source: {} }),
+  };
+}
+
+/**
+ * What tears down each viewer {@link watchMoves} and {@link viewerWithApp}
+ * built and left running. A loaded viewer follows the document's selection,
+ * so the many a property builds would slow every later test down.
+ */
+const builtViewers: (() => void)[] = [];
+
+/** Tear down the viewers left running so far. */
+function tearDownViewers() {
+  builtViewers.splice(0).forEach((tearDown) => tearDown());
+}
+
+/** The size of a container on screen. */
+const sizeArb = () =>
+  fc.record({
+    width: fc.integer({ min: 1, max: 5000 }),
+    height: fc.integer({ min: 1, max: 5000 }),
+  });
+
+/** Two container sizes that differ. */
+const twoSizesArb = () =>
+  fc
+    .tuple(sizeArb(), sizeArb())
+    .filter(([a, b]) => a.width !== b.width || a.height !== b.height);
+
+/** A size a hidden container reports. */
+const hiddenSizeArb = () =>
+  fc.oneof(
+    fc.record({ width: fc.constant(0), height: fc.nat(5000) }),
+    fc.record({ width: fc.nat(5000), height: fc.constant(0) })
+  );
+
+/**
+ * Positions pdf.js can report: tops anywhere, a gap between pages included,
+ * but mostly a few, so that repeats come up.
+ */
+const viewPositionArb = () =>
+  fc.oneof(
+    fc.record({
+      page: fc.integer({ min: 1, max: 3 }),
+      top: fc.integer({ min: 0, max: 3 }),
+    }),
+    fc.record({
+      page: fc.integer({ min: 1, max: 100_000 }),
+      top: fc.double({ noNaN: true, noDefaultInfinity: true }),
+    })
+  );
+
+/**
+ * pdf.js's `PDFViewer`, as far as {@link setPdfPosition} uses it: scrolling
+ * a page into view moves the container sideways to the destination's x, as
+ * pdf.js does.
+ */
+function makeScrollingPdfJs(pagesCount = 5, scrollLeft = 40) {
+  const container = { scrollLeft };
+  const scrollLeftAtUpdate: number[] = [];
+  return {
+    pagesCount,
+    container,
+    scrollPageIntoView: vi.fn((_: unknown) => {
+      container.scrollLeft = 0;
+    }),
+    update: vi.fn(() => {
+      scrollLeftAtUpdate.push(container.scrollLeft);
+    }),
+    scrollLeftAtUpdate,
+  };
+}
+
+/** A viewer whose child's pdf.js app object is `app`. */
+function viewerWithApp(app: Record<string, unknown>) {
+  tearDownViewers();
+  const { viewer, component } = makeViewer();
+  component.ready(makeEventChild(app));
+  builtViewers.push(() => viewer.unload());
+  return viewer;
+}
+
 /**
  * Obsidian's PDF tab as far as the adapter reaches into it: its view type,
  * and its viewer component (`PdfView.viewer`).
@@ -380,6 +519,7 @@ beforeEach(() => {
 
 afterEach(() => {
   openTabs.splice(0).forEach((close) => close());
+  tearDownViewers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   document.body.innerHTML = '';
@@ -1630,6 +1770,649 @@ describe('PDF position on a page with borders', () => {
     );
 
     expect(getPdfLocation(viewer)).toEqual({ page: 3, top: 700 });
+  });
+});
+
+describe('onPdfViewMove', () => {
+  it('reports each move of a view that keeps its size once the task that made it ends, but not one to where it already is', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        sizeArb(),
+        fc.array(viewPositionArb()),
+        async ({ width, height }, positions) => {
+          const { moves, scrollTo, resizeTo } = watchMoves(width, height);
+
+          for (const { page, top } of positions) {
+            const before = moves.moved.mock.calls.length;
+            scrollTo(page, top);
+            expect(moves.moved).toHaveBeenCalledTimes(before);
+            await microtasks();
+            // The browser reporting the size it already has
+            resizeTo(width, height);
+          }
+
+          const expected = positions.filter(
+            (p, i) =>
+              i === 0 ||
+              p.page !== positions[i - 1].page ||
+              p.top !== positions[i - 1].top
+          );
+          // Read with no border to add, a -0 top reads as 0
+          expect(moves.moved.mock.calls).toEqual(
+            expected.map((p) => [{ page: p.page, top: p.top + 0 }])
+          );
+          expect(moves.resized).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('reports only the last of the moves made in one task', async () => {
+    const { moves, scrollTo } = watchMoves();
+
+    scrollTo(1, 100);
+    scrollTo(2, 200);
+    await microtasks();
+
+    expect(moves.moved.mock.calls).toEqual([[{ page: 2, top: 200 }]]);
+  });
+
+  it('takes the moves pdf.js makes laying the view out again as none, asks for the view back, and remembers where they went', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.option(viewPositionArb(), { nil: undefined }),
+        fc.array(viewPositionArb(), { minLength: 1 }),
+        async (before, layout) => {
+          const { moves, scrollTo, relayout } = watchMoves();
+          if (before) {
+            scrollTo(before.page, before.top);
+            await microtasks();
+          }
+          const reported = moves.moved.mock.calls.length;
+
+          // pdf.js reports its moves as it handles the event, before us
+          for (const { page, top } of layout) scrollTo(page, top);
+          relayout();
+          expect(moves.resized).not.toHaveBeenCalled();
+          await microtasks();
+
+          expect(moves.moved).toHaveBeenCalledTimes(reported);
+          expect(moves.resized).toHaveBeenCalledOnce();
+          // Reported again a frame later, it is still no move
+          const { page, top } = layout[layout.length - 1];
+          scrollTo(page, top);
+          await microtasks();
+          expect(moves.moved).toHaveBeenCalledTimes(reported);
+        }
+      )
+    );
+  });
+
+  it('asks for the view back when pdf.js lays it out again without moving it', async () => {
+    const { moves, relayout } = watchMoves();
+
+    relayout();
+    relayout();
+    await microtasks();
+
+    expect(moves.resized).toHaveBeenCalledOnce();
+    expect(moves.moved).not.toHaveBeenCalled();
+  });
+
+  it('asks for the view back each time pdf.js lays it out again', async () => {
+    const { moves, relayout } = watchMoves();
+
+    relayout();
+    await microtasks();
+    relayout();
+    await microtasks();
+
+    expect(moves.resized).toHaveBeenCalledTimes(2);
+  });
+
+  it('remembers where the view was through a layout that did not move it', async () => {
+    const { moves, scrollTo, relayout } = watchMoves();
+    scrollTo(3, 700);
+    await microtasks();
+
+    relayout();
+    await microtasks();
+    scrollTo(3, 700);
+    await microtasks();
+
+    expect(moves.moved.mock.calls).toEqual([[{ page: 3, top: 700 }]]);
+  });
+
+  it('asks for the view back when a resize between two sizes scrolled it, and takes the scroll as no move', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        twoSizesArb(),
+        fc.double({ min: 0, max: 10_000, noNaN: true }),
+        fc.double({ min: 0, max: 10_000, noNaN: true }),
+        async ([from, to], scrolled, clamped) => {
+          fc.pre(scrolled !== clamped);
+          const { moves, scroller, scrollTo, resizeTo } = watchMoves(
+            from.width,
+            from.height
+          );
+          scroller.scrollTop = scrolled;
+          scrollTo(3, 700);
+          await microtasks();
+          // Put back, which pdf.js reports at once
+          moves.resized.mockImplementation(() => {
+            scroller.scrollTop = scrolled;
+            scrollTo(3, 700);
+          });
+
+          // The resize scrolls the view, which pdf.js reports a frame later
+          scroller.scrollTop = clamped;
+          resizeTo(to.width, to.height);
+          await microtasks();
+          expect(moves.resized).toHaveBeenCalledOnce();
+          scrollTo(3, 700);
+          await microtasks();
+
+          expect(moves.moved.mock.calls).toEqual([[{ page: 3, top: 700 }]]);
+        }
+      )
+    );
+  });
+
+  it.each([
+    ['only its width', 1000, 600],
+    ['only its height', 800, 400],
+  ])(
+    'asks for the view back when the browser reports a resize of %s that scrolled it',
+    async (_, width, height) => {
+      const { moves, scroller, scrollTo, resizeTo } = watchMoves(800, 600);
+      scrollTo(3, 700);
+
+      scroller.scrollTop = 50;
+      resizeTo(width, height);
+      await microtasks();
+
+      expect(moves.resized).toHaveBeenCalledOnce();
+    }
+  );
+
+  it('leaves the view alone through a resize that did not scroll it, and reports the scroll after it', async () => {
+    await fc.assert(
+      fc.asyncProperty(twoSizesArb(), async ([from, to]) => {
+        const { moves, scroller, scrollTo, resizeTo } = watchMoves(
+          from.width,
+          from.height
+        );
+        scrollTo(3, 700);
+        await microtasks();
+
+        resizeTo(to.width, to.height);
+        // The reader's, in a frame of the resize
+        scroller.scrollTop = 120;
+        scrollTo(3, 600);
+        resizeTo(to.width + 1, to.height);
+        await microtasks();
+
+        expect(moves.resized).not.toHaveBeenCalled();
+        expect(moves.moved.mock.calls).toEqual([
+          [{ page: 3, top: 700 }],
+          [{ page: 3, top: 600 }],
+        ]);
+      })
+    );
+  });
+
+  it('takes a move in a frame where the size changed between two sizes as none when nothing scrolled it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        twoSizesArb(),
+        viewPositionArb(),
+        async ([from, to], position) => {
+          const { viewer, moves, scrollTo } = watchMoves(
+            from.width,
+            from.height
+          );
+          scrollTo(3, 700);
+          await microtasks();
+
+          // pdf.js reports it before the browser reports the resize
+          setSize(viewer.containerEl, to.width, to.height);
+          scrollTo(position.page, position.top);
+          await microtasks();
+
+          expect(moves.moved.mock.calls).toEqual([[{ page: 3, top: 700 }]]);
+          expect(moves.resized).toHaveBeenCalledOnce();
+          // Where it went is remembered
+          scrollTo(position.page, position.top);
+          await microtasks();
+          expect(moves.moved).toHaveBeenCalledOnce();
+        }
+      )
+    );
+  });
+
+  it.each([
+    ['only its width', 1000, 600],
+    ['only its height', 800, 400],
+  ])(
+    'takes a move in a frame where %s changed as none when nothing scrolled it',
+    async (_, width, height) => {
+      const { viewer, moves, scrollTo } = watchMoves(800, 600);
+      scrollTo(3, 700);
+      await microtasks();
+
+      setSize(viewer.containerEl, width, height);
+      scrollTo(2, 100);
+      await microtasks();
+
+      expect(moves.moved).toHaveBeenCalledOnce();
+      expect(moves.resized).toHaveBeenCalledOnce();
+    }
+  );
+
+  it('takes a move in a frame where the size changed as none when the view was scrolled to the end', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        twoSizesArb(),
+        fc.integer({ min: 0, max: 10_000 }),
+        fc.integer({ min: 1, max: 10_000 }),
+        fc.double({ min: -1, max: 0, noNaN: true }),
+        async ([from, to], clientHeight, scrollable, slack) => {
+          const { viewer, moves, scroller, scrollTo } = watchMoves(
+            from.width,
+            from.height
+          );
+          scrollTo(3, 700);
+          await microtasks();
+
+          Object.assign(scroller, {
+            scrollHeight: clientHeight + scrollable,
+            clientHeight,
+            scrollTop: scrollable + slack,
+          });
+          setSize(viewer.containerEl, to.width, to.height);
+          scrollTo(3, 650);
+          await microtasks();
+
+          expect(moves.moved).toHaveBeenCalledOnce();
+          expect(moves.resized).toHaveBeenCalledOnce();
+        }
+      )
+    );
+  });
+
+  it("takes a scroll anywhere but the end, in a frame where the size changed, as the reader's", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        twoSizesArb(),
+        fc.double({ min: 0, max: 4398.999, noNaN: true }),
+        async ([from, to], scrolled) => {
+          fc.pre(scrolled !== 100);
+          const { viewer, moves, scroller, scrollTo } = watchMoves(
+            from.width,
+            from.height
+          );
+          scrollTo(3, 700);
+          await microtasks();
+
+          scroller.scrollTop = scrolled;
+          setSize(viewer.containerEl, to.width, to.height);
+          scrollTo(3, 650);
+          await microtasks();
+
+          expect(moves.moved.mock.calls).toEqual([
+            [{ page: 3, top: 700 }],
+            [{ page: 3, top: 650 }],
+          ]);
+          expect(moves.resized).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it("takes a move while the view has no size as the reader's", async () => {
+    await fc.assert(
+      fc.asyncProperty(hiddenSizeArb(), async (hidden) => {
+        const { viewer, moves, scrollTo } = watchMoves();
+
+        setSize(viewer.containerEl, hidden.width, hidden.height);
+        scrollTo(2, 100);
+        await microtasks();
+
+        expect(moves.moved.mock.calls).toEqual([[{ page: 2, top: 100 }]]);
+        expect(moves.resized).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('takes hiding the view, and showing it again at its size, as no resize, whatever the hidden view reads', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        sizeArb(),
+        hiddenSizeArb(),
+        async ({ width, height }, hidden) => {
+          const { moves, scroller, scrollTo, resizeTo } = watchMoves(
+            width,
+            height
+          );
+          scrollTo(3, 700);
+
+          // A hidden element scrolls nowhere
+          scroller.scrollTop = 0;
+          resizeTo(hidden.width, hidden.height);
+          resizeTo(width, height);
+          await microtasks();
+
+          expect(moves.resized).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('takes the first size the view has on screen as no resize, when it starts out hidden', async () => {
+    const { moves, scroller, resizeTo } = watchMoves(0, 0);
+
+    scroller.scrollTop = 50;
+    resizeTo(800, 600);
+    await microtasks();
+
+    expect(moves.resized).not.toHaveBeenCalled();
+  });
+
+  it("can't tell from the browser's report that a resize scrolled the view when pdf.js's scroll position can't be read, but takes a move in its frame as none", async () => {
+    const { viewer, component } = makeViewer();
+    const child = makeEventChild({ isInitialViewSet: true, pdfViewer: {} });
+    component.ready(child);
+    setSize(viewer.containerEl, 800, 600);
+    const moves = { moved: vi.fn(), resized: vi.fn() };
+    builtViewers.push(onPdfViewMove(viewer, moves), () => viewer.unload());
+
+    child.dispatch('updateviewarea', at(3, 700));
+    setSize(viewer.containerEl, 1000, 600);
+    FakeResizeObserver.instances.at(-1)!.fire();
+    await microtasks();
+    expect(moves.resized).not.toHaveBeenCalled();
+
+    setSize(viewer.containerEl, 1200, 600);
+    child.dispatch('updateviewarea', at(3, 650));
+    await microtasks();
+    expect(moves.resized).toHaveBeenCalledOnce();
+    expect(moves.moved.mock.calls).toEqual([[{ page: 3, top: 700 }]]);
+  });
+
+  it.each([
+    ['no pdf.js app object', { pdfViewer: undefined }],
+    ['an app object with no pdf.js viewer', { pdfViewer: {} }],
+  ])(
+    "can't tell from the browser's report that a resize scrolled the view with %s",
+    async (_, changes) => {
+      const { viewer, component } = makeViewer();
+      component.ready({ ...makeEventChild(), ...changes });
+      setSize(viewer.containerEl, 800, 600);
+      const moves = { moved: vi.fn(), resized: vi.fn() };
+      builtViewers.push(onPdfViewMove(viewer, moves), () => viewer.unload());
+
+      setSize(viewer.containerEl, 1000, 600);
+      FakeResizeObserver.instances.at(-1)!.fire();
+      await microtasks();
+
+      expect(moves.resized).not.toHaveBeenCalled();
+    }
+  );
+
+  it("takes a scroll in a frame where the size changed as the reader's once pdf.js's scrolling element is gone", async () => {
+    const { viewer, moves, child, scrollTo } = watchMoves(800, 600);
+    scrollTo(3, 700);
+    await microtasks();
+
+    child.pdfViewer.pdfViewer = {};
+    setSize(viewer.containerEl, 1000, 600);
+    scrollTo(3, 650);
+    await microtasks();
+
+    expect(moves.moved.mock.calls).toEqual([
+      [{ page: 3, top: 700 }],
+      [{ page: 3, top: 650 }],
+    ]);
+    expect(moves.resized).not.toHaveBeenCalled();
+  });
+
+  it('reports nothing of the view being put back', async () => {
+    const { moves, scrollTo, relayout } = watchMoves();
+    // Putting the view back moves it, which pdf.js reports at once
+    moves.resized.mockImplementation(() => scrollTo(3, 700));
+
+    scrollTo(3, 650);
+    relayout();
+    await microtasks();
+    expect(moves.resized).toHaveBeenCalledOnce();
+    expect(moves.moved).not.toHaveBeenCalled();
+
+    // The scroll it made, reported again a frame later, is still no move
+    scrollTo(3, 700);
+    await microtasks();
+    expect(moves.moved).not.toHaveBeenCalled();
+    scrollTo(3, 710);
+    await microtasks();
+    expect(moves.moved.mock.calls).toEqual([[{ page: 3, top: 710 }]]);
+  });
+
+  it('does nothing more once stopped', async () => {
+    const { child, moves, stop, observer, scrollTo, relayout } = watchMoves();
+    scrollTo(1, 5);
+    relayout();
+    scrollTo(1, 10);
+
+    stop();
+    await microtasks();
+
+    expect(moves.moved).not.toHaveBeenCalled();
+    expect(moves.resized).not.toHaveBeenCalled();
+    expect(observer?.disconnected).toBe(true);
+    expect(child.count('updateviewarea')).toBe(0);
+    expect(child.count('resize')).toBe(0);
+  });
+
+  it('stops quietly when the viewer was torn down first', () => {
+    const { child, stop } = watchMoves();
+    child.off.mockImplementation(() => {
+      throw new TypeError('Cannot read properties of null');
+    });
+
+    expect(stop).not.toThrow();
+  });
+
+  it('still takes layouts apart where the window has no ResizeObserver', async () => {
+    vi.stubGlobal('ResizeObserver', undefined);
+    const { moves, scrollTo, relayout } = watchMoves();
+    scrollTo(1, 10);
+    await microtasks();
+
+    scrollTo(1, 5);
+    relayout();
+    await microtasks();
+
+    expect(moves.moved.mock.calls).toEqual([[{ page: 1, top: 10 }]]);
+    expect(moves.resized).toHaveBeenCalledOnce();
+  });
+
+  it('observes the size of the viewer it watches', () => {
+    const { viewer, observer } = watchMoves();
+
+    expect(observer?.observed).toEqual([viewer.containerEl]);
+  });
+
+  it('does nothing for a viewer it did not build', () => {
+    const { viewer, component } = makeViewer();
+    const child = makeEventChild({ isInitialViewSet: true });
+    component.ready(child);
+
+    const stop = onPdfViewMove(
+      { ...viewer },
+      { moved: vi.fn(), resized: vi.fn() }
+    );
+
+    expect(child.on).not.toHaveBeenCalled();
+    expect(FakeResizeObserver.instances).toEqual([]);
+    expect(stop).not.toThrow();
+  });
+});
+
+describe('setPdfPosition', () => {
+  it('puts the view at the page and top it is given, at its zoom, scrolled sideways as it was', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 100_000 }),
+        fc.double({ noNaN: true, noDefaultInfinity: true }),
+        fc.nat(),
+        fc.nat(),
+        (pagesCount, top, pageSeed, scrollLeft) => {
+          const page = (pageSeed % pagesCount) + 1;
+          const pdfJs = makeScrollingPdfJs(pagesCount, scrollLeft);
+          const viewer = viewerWithApp({
+            isInitialViewSet: true,
+            pdfViewer: pdfJs,
+          });
+
+          expect(setPdfPosition(viewer, { page, top })).toBe(true);
+
+          // No zoom in the destination keeps the zoom; a negative offset keeps
+          // a top in the gap above the page
+          expect(pdfJs.scrollPageIntoView.mock.calls).toEqual([
+            [
+              {
+                pageNumber: page,
+                destArray: [null, { name: 'XYZ' }, 0, top, null],
+                allowNegativeOffset: true,
+              },
+            ],
+          ]);
+          expect(pdfJs.scrollPageIntoView.mock.contexts).toEqual([pdfJs]);
+          expect(pdfJs.update.mock.contexts).toEqual([pdfJs]);
+          expect(pdfJs.container.scrollLeft).toBe(scrollLeft);
+          // Brought up to date there, sideways scroll and all
+          expect(pdfJs.scrollLeftAtUpdate).toEqual([scrollLeft]);
+        }
+      )
+    );
+  });
+
+  it('puts the view nowhere at a page the file does not have, or a top that is no number', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 1000 }),
+        fc.oneof(
+          fc.record({
+            page: fc.oneof(
+              fc.integer({ max: 0 }),
+              fc.integer({ min: 1001 }),
+              fc.double().filter((n) => !Number.isInteger(n))
+            ),
+            top: fc.double({ noNaN: true, noDefaultInfinity: true }),
+          }),
+          fc.record({
+            page: fc.constant(1),
+            top: fc.constantFrom(Number.NaN, Infinity, -Infinity),
+          })
+        ),
+        (pagesCount, position) => {
+          const pdfJs = makeScrollingPdfJs(pagesCount);
+          const viewer = viewerWithApp({
+            isInitialViewSet: true,
+            pdfViewer: pdfJs,
+          });
+
+          expect(setPdfPosition(viewer, position)).toBe(false);
+          expect(pdfJs.scrollPageIntoView).not.toHaveBeenCalled();
+          expect(pdfJs.update).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it.each<[string, Record<string, unknown>, Record<string, unknown>]>([
+    ['no file on screen yet', { isInitialViewSet: false }, {}],
+    ['no initial view set', { isInitialViewSet: undefined }, {}],
+    ['an initial view set only truthily', { isInitialViewSet: 1 }, {}],
+    ['no pdf.js viewer', { pdfViewer: undefined }, {}],
+    ['a pdf.js viewer that is no object', { pdfViewer: 'viewer' }, {}],
+    [
+      'a pdf.js viewer that cannot scroll to a page',
+      {},
+      { scrollPageIntoView: undefined },
+    ],
+    ['no page count', {}, { pagesCount: undefined }],
+    ['a page count that is no number', {}, { pagesCount: '5' }],
+  ])('puts the view nowhere with %s', (_, appChanges, pdfJsChanges) => {
+    const pdfJs = makeScrollingPdfJs();
+    const { update } = pdfJs;
+    Object.assign(pdfJs, pdfJsChanges);
+    const viewer = viewerWithApp({
+      isInitialViewSet: true,
+      pdfViewer: pdfJs,
+      ...appChanges,
+    });
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    expect(setPdfPosition(viewer, { page: 1, top: 700 })).toBe(false);
+    expect(update).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['no child yet', null],
+    ['a child without pdf.js', {}],
+  ])('puts the view nowhere with %s', (_, child) => {
+    const { viewer, component } = makeViewer();
+    component.child = child;
+
+    expect(setPdfPosition(viewer, { page: 1, top: 700 })).toBe(false);
+  });
+
+  it('puts nowhere the view of a viewer it did not build', () => {
+    const pdfJs = makeScrollingPdfJs();
+    const viewer = viewerWithApp({ isInitialViewSet: true, pdfViewer: pdfJs });
+
+    expect(setPdfPosition({ ...viewer }, { page: 1, top: 700 })).toBe(false);
+    expect(pdfJs.scrollPageIntoView).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['cannot bring its position up to date', { update: undefined }],
+    ['has no container', { container: undefined }],
+    ['has a container that is no object', { container: 'container' }],
+  ])('puts the view there when pdf.js %s', (_, changes) => {
+    const pdfJs = Object.assign(makeScrollingPdfJs(), changes);
+    const viewer = viewerWithApp({ isInitialViewSet: true, pdfViewer: pdfJs });
+
+    expect(setPdfPosition(viewer, { page: 2, top: 300 })).toBe(true);
+    expect(pdfJs.scrollPageIntoView).toHaveBeenCalledOnce();
+  });
+
+  it('leaves alone a container with no sideways scroll to keep', () => {
+    const container = {};
+    const pdfJs = Object.assign(makeScrollingPdfJs(), { container });
+    const viewer = viewerWithApp({ isInitialViewSet: true, pdfViewer: pdfJs });
+
+    expect(setPdfPosition(viewer, { page: 2, top: 300 })).toBe(true);
+    expect(container).toStrictEqual({});
+  });
+
+  it('says it could not, and why, when pdf.js fails to scroll there', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const failure = new TypeError('page view gone');
+    const pdfJs = makeScrollingPdfJs();
+    pdfJs.scrollPageIntoView.mockImplementation(() => {
+      throw failure;
+    });
+    const viewer = viewerWithApp({ isInitialViewSet: true, pdfViewer: pdfJs });
+
+    expect(setPdfPosition(viewer, { page: 2, top: 300 })).toBe(false);
+    expect(pdfJs.update).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledOnce();
+    const [message, detail] = warn.mock.calls[0] as unknown[];
+    expect(message).toMatch(/^Incremental Reading: \S/);
+    expect(detail).toBe(failure);
   });
 });
 
