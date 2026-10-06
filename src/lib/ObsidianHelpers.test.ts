@@ -3,6 +3,7 @@ import {
   ARTICLE_TAG,
   CARD_DIRECTORY,
   CARD_TAG,
+  CONTENT_TITLE_MAX_BYTES,
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
   FORBIDDEN_TITLE_CHARS,
@@ -23,6 +24,7 @@ import {
   type TFile,
   normalizePath,
 } from 'obsidian';
+import { posix } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #region HELPERS
@@ -156,6 +158,265 @@ const frontMatterUpdatesArb = fc.oneof(
     { requiredKeys: [] }
   )
 );
+
+/**
+ * C0 controls (`\x00`–`\x1f`), DEL, C1 controls (U+0080–U+009F) and the
+ * line and paragraph separators (U+2028, U+2029): invalid or invisible in a
+ * file name, or breaking it across lines.
+ */
+const controlCharArb = fc
+  .oneof(
+    fc.integer({ min: 0x00, max: 0x1f }),
+    fc.integer({ min: 0x7f, max: 0x9f }),
+    fc.constantFrom(0x2028, 0x2029)
+  )
+  .map((code) => String.fromCharCode(code));
+/**
+ * Default-ignorable code points that a title always drops: the bidi controls
+ * (U+202A–U+202E, U+2066–U+2069), LRM, RLM and ALM, and the soft hyphen,
+ * Hangul fillers, CGJ, zero-width space, BOM and the like. Not the joiners,
+ * variation selectors or tag characters: emoji and scripts need those, where
+ * they stand in a sequence.
+ */
+const invisibleCharArb = fc
+  .oneof(
+    fc.integer({ min: 0x202a, max: 0x202e }),
+    fc.integer({ min: 0x2066, max: 0x2069 }),
+    fc.constantFrom(0x200e, 0x200f, 0x061c),
+    fc.constantFrom(
+      0xad,
+      0x34f,
+      0x115f,
+      0x1160,
+      0x17b4,
+      0x17b5,
+      0x180e,
+      0x200b,
+      0x2060,
+      0x206f,
+      0x3164,
+      0xfeff,
+      0xffa0,
+      0xfff0,
+      0xfff8,
+      0x1bca0,
+      0x1bca3,
+      0x1d173,
+      0x1d17a
+    ),
+    fc.integer({ min: 0xe0000, max: 0xe001f }),
+    fc.integer({ min: 0xe0080, max: 0xe00ff }),
+    fc.integer({ min: 0xe01f0, max: 0xe0fff })
+  )
+  .map((code) => String.fromCodePoint(code));
+/** Zero-width non-joiner and joiner: invisible, but emoji and scripts need them. */
+const joinerArb = fc
+  .constantFrom(0x200c, 0x200d)
+  .map((code) => String.fromCodePoint(code));
+/** Variation selectors, standard and ideographic, and Mongolian ones. */
+const variationSelectorArb = fc
+  .oneof(
+    fc.integer({ min: 0xfe00, max: 0xfe0f }),
+    fc.integer({ min: 0xe0100, max: 0xe01ef }),
+    fc.constantFrom(0x180b, 0x180c, 0x180d, 0x180f)
+  )
+  .map((code) => String.fromCodePoint(code));
+/** Tag characters, and the cancel tag that ends an emoji tag sequence. */
+const tagCharArb = fc
+  .integer({ min: 0xe0020, max: 0xe007f })
+  .map((code) => String.fromCodePoint(code));
+/** Half of a surrogate pair, alone: text from a PDF can hold one. */
+const loneSurrogateArb = fc
+  .integer({ min: 0xd800, max: 0xdfff })
+  .map((code) => String.fromCharCode(code));
+/**
+ * Code points NFC turns into more of them (U+1D160 into three), combining
+ * marks that compose with what comes before, and code points at the edges of
+ * each UTF-8 length.
+ */
+const unicodeEdgeArb = fc
+  .oneof(
+    fc.constantFrom(0x1d160, 0x1d15e, 0x0958, 0xfb2a, 0x2adc, 0x0344),
+    fc.integer({ min: 0x300, max: 0x36f }),
+    fc.constantFrom(0x7e, 0xa0, 0x7ff, 0x800, 0xffff, 0x10000, 0x10ffff)
+  )
+  .map((code) => String.fromCodePoint(code));
+
+const fromCodes = (...codes: number[]) => String.fromCodePoint(...codes);
+const BLACK_FLAG = fromCodes(0x1f3f4);
+const CANCEL_TAG = fromCodes(0xe007f);
+/** Sequences a title must keep whole: emoji, and scripts that need a joiner. */
+const SEQUENCES = {
+  heart: fromCodes(0x2764, 0xfe0f),
+  keycap: fromCodes(0x31, 0xfe0f, 0x20e3),
+  rainbowFlag: fromCodes(0x1f3f3, 0xfe0f, 0x200d, 0x1f308),
+  englandFlag: fromCodes(
+    0x1f3f4,
+    0xe0067,
+    0xe0062,
+    0xe0065,
+    0xe006e,
+    0xe0067,
+    0xe007f
+  ),
+  family: fromCodes(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467),
+  heartOnFire: fromCodes(0x2764, 0xfe0f, 0x200d, 0x1f525),
+  persianZwnj: fromCodes(0x645, 0x6cc, 0x200c, 0x62e, 0x648, 0x627, 0x647),
+  devanagariZwj: fromCodes(0x915, 0x94d, 0x200d, 0x937),
+  ideographicVariant: fromCodes(0x845b, 0xe0100),
+  mongolianVariant: fromCodes(0x1820, 0x180b),
+};
+const sequenceArb = fc.constantFrom(...Object.values(SEQUENCES));
+
+function isControlChar(char: string) {
+  const code = char.charCodeAt(0);
+  return (
+    char.length === 1 &&
+    (code <= 0x1f ||
+      (code >= 0x7f && code <= 0x9f) ||
+      code === 0x2028 ||
+      code === 0x2029)
+  );
+}
+const isJoiner = (char: string | undefined) =>
+  char === fromCodes(0x200c) || char === fromCodes(0x200d);
+function isVariationSelector(char: string | undefined) {
+  const code = char?.codePointAt(0) ?? -1;
+  return (
+    (code >= 0xfe00 && code <= 0xfe0f) ||
+    (code >= 0xe0100 && code <= 0xe01ef) ||
+    (code >= 0x180b && code <= 0x180d) ||
+    code === 0x180f
+  );
+}
+/** A tag character other than the cancel tag. */
+function isTag(char: string | undefined) {
+  const code = char?.codePointAt(0) ?? -1;
+  return code >= 0xe0020 && code <= 0xe007e;
+}
+/** Kept by a title only where a sequence around it needs it. */
+const isSequenceChar = (char: string) =>
+  isJoiner(char) ||
+  isVariationSelector(char) ||
+  isTag(char) ||
+  char === CANCEL_TAG;
+/** A default-ignorable code point that a title drops wherever it stands. */
+function isInvisibleChar(char: string) {
+  return (
+    /\p{Default_Ignorable_Code_Point}/u.test(char) && !isSequenceChar(char)
+  );
+}
+/** A character a sequence can build on: something that shows, not a dot. */
+function isBase(char: string | undefined) {
+  return (
+    char !== undefined &&
+    !/\s/.test(char) &&
+    char !== '.' &&
+    !isControlChar(char) &&
+    !/\p{Default_Ignorable_Code_Point}/u.test(char)
+  );
+}
+/**
+ * Where in `text` a joiner, variation selector or tag character stands
+ * outside a sequence that needs it, or `null`.
+ */
+function strayInSequence(text: string): number | null {
+  const chars = Array.from(text);
+  for (let i = 0; i < chars.length; i++) {
+    const [prev, char, next] = [chars[i - 1], chars[i], chars[i + 1]];
+    if (isVariationSelector(char) && !isBase(prev)) return i;
+    if (
+      isJoiner(char) &&
+      (prev === undefined ||
+        /\s/.test(prev) ||
+        prev === '.' ||
+        isJoiner(prev) ||
+        !isBase(next))
+    ) {
+      return i;
+    }
+    if (isTag(char) || char === CANCEL_TAG) {
+      let start = i;
+      while (isTag(chars[start - 1])) start--;
+      let end = i;
+      while (isTag(chars[end])) end++;
+      const whole =
+        chars[start - 1] === BLACK_FLAG &&
+        end > start &&
+        chars[end] === CANCEL_TAG &&
+        (char === CANCEL_TAG ? end === i : true);
+      if (!whole) return i;
+    }
+  }
+  return null;
+}
+/** A code point, as `for…of` yields them, that is half a surrogate pair. */
+function isLoneSurrogate(char: string) {
+  const code = char.charCodeAt(0);
+  return char.length === 1 && code >= 0xd800 && code <= 0xdfff;
+}
+/** How many bytes `text` takes in UTF-8. */
+function utf8Length(text: string) {
+  return new TextEncoder().encode(text).length;
+}
+/** The longest run of `text`'s first code points that fits in `maxBytes`. */
+function takeBytes(text: string, maxBytes: number) {
+  let taken = '';
+  for (const char of text) {
+    if (utf8Length(taken + char) > maxBytes) break;
+    taken += char;
+  }
+  return taken;
+}
+
+/** One code point of any kind, but none that only a sequence keeps. */
+const sequenceFreeUnitArb = fc.oneof(
+  controlCharArb,
+  invisibleCharArb,
+  loneSurrogateArb,
+  unicodeEdgeArb,
+  fc.constantFrom(...FORBIDDEN_TITLE_CHARS, '.', ' '),
+  fc
+    .string({ unit: 'binary', minLength: 1, maxLength: 1 })
+    .filter((char) => !isSequenceChar(char))
+);
+/**
+ * Any text, thick with control and invisible characters, and with every other
+ * code point (the forbidden title characters, astral ones, ones NFC changes)
+ * in the mix too, but none that only a sequence keeps.
+ */
+const controlRichTextArb = fc.string({ unit: sequenceFreeUnitArb });
+/**
+ * Any text at all: that, with joiners, variation selectors and tag
+ * characters, whole emoji and script sequences, and the black flag that
+ * starts a tag sequence, anywhere in it.
+ */
+const anyTextArb = fc.string({
+  unit: fc.oneof(
+    sequenceFreeUnitArb,
+    joinerArb,
+    variationSelectorArb,
+    tagCharArb,
+    sequenceArb,
+    fc.constantFrom(BLACK_FLAG, 'a')
+  ),
+});
+
+/** What one code point of NFC text, in no sequence, becomes in a title. */
+function expectedMidTitleChar(char: string) {
+  if (isControlChar(char)) return ' ';
+  if (isInvisibleChar(char)) return '';
+  if (isLoneSurrogate(char)) return '';
+  if (FORBIDDEN_TITLE_CHARS.has(char)) return '';
+  return char;
+}
+/** What the middle of a title holding `text`, in no sequence, reads, as NFC. */
+function expectedMidTitle(text: string) {
+  return Array.from(text.normalize('NFC'))
+    .map(expectedMidTitleChar)
+    .join('')
+    .normalize('NFC');
+}
 
 // #endregion
 
@@ -345,6 +606,59 @@ describe('sanitizeForTitle', () => {
     );
   });
 
+  it('cuts a name to maxLength code points, never splitting a surrogate pair', () => {
+    fc.assert(
+      fc.property(
+        controlRichTextArb,
+        fc.boolean(),
+        fc.integer({ min: 1, max: 60 }),
+        (text, checkFinalChar, maxLength) => {
+          const whole = ObsidianHelpers.sanitizeForTitle(text, checkFinalChar);
+          expect(
+            ObsidianHelpers.sanitizeForTitle(text, checkFinalChar, maxLength)
+          ).toBe(Array.from(whole).slice(0, maxLength).join(''));
+        }
+      )
+    );
+  });
+
+  it('keeps every character either side of the surrogate range', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.integer({ min: 0xa0, max: 0xd7ff }),
+          fc.integer({ min: 0xe000, max: 0xffff })
+        ),
+        (code) => {
+          const char = String.fromCharCode(code);
+          fc.pre(
+            !isInvisibleChar(char) &&
+              !isControlChar(char) &&
+              !/\s/.test(char) &&
+              char.normalize('NFC') === char
+          );
+          expect(ObsidianHelpers.sanitizeForTitle(`a${char}b`, false)).toBe(
+            `a${char}b`
+          );
+        }
+      )
+    );
+    for (const code of [0xd7ff, 0xe000, 0xfffd, 0xffff]) {
+      const char = String.fromCharCode(code);
+      expect(ObsidianHelpers.sanitizeForTitle(`a${char}b`, false)).toBe(
+        `a${char}b`
+      );
+    }
+  });
+
+  it('drops half a surrogate pair standing alone', () => {
+    fc.assert(
+      fc.property(loneSurrogateArb, (half) => {
+        expect(ObsidianHelpers.sanitizeForTitle(`a${half}b`, false)).toBe('ab');
+      })
+    );
+  });
+
   it('respects maxLength when provided', () => {
     fc.assert(
       fc.property(
@@ -373,6 +687,393 @@ describe('sanitizeForTitle', () => {
     [...FORBIDDEN_TITLE_CHARS].forEach((c) => expect(result).not.toContain(c));
   });
 
+  it('leaves no control, DEL or bidi character in the output', () => {
+    fc.assert(
+      fc.property(
+        controlRichTextArb,
+        fc.boolean(),
+        fc.option(fc.nat(), { nil: undefined }),
+        (text, checkFinalChar, maxLength) => {
+          const result = ObsidianHelpers.sanitizeForTitle(
+            text,
+            checkFinalChar,
+            maxLength
+          );
+          for (const char of result) {
+            expect(isControlChar(char)).toBe(false);
+            expect(isInvisibleChar(char)).toBe(false);
+            expect(isLoneSurrogate(char)).toBe(false);
+          }
+        }
+      )
+    );
+  });
+
+  it('turns a control or DEL character into a space so the words around it stay apart', () => {
+    fc.assert(
+      fc.property(controlCharArb, fc.boolean(), (control, checkFinalChar) => {
+        expect(
+          ObsidianHelpers.sanitizeForTitle(`a${control}b`, checkFinalChar)
+        ).toBe('a b');
+      })
+    );
+  });
+
+  it('drops an invisible character outright', () => {
+    fc.assert(
+      fc.property(invisibleCharArb, fc.boolean(), (bidi, checkFinalChar) => {
+        expect(
+          ObsidianHelpers.sanitizeForTitle(`a${bidi}b`, checkFinalChar)
+        ).toBe('ab');
+      })
+    );
+  });
+
+  it('keeps the zero-width joiner and non-joiner that emoji and scripts need', () => {
+    fc.assert(
+      fc.property(joinerArb, fc.boolean(), (joiner, checkFinalChar) => {
+        expect(
+          ObsidianHelpers.sanitizeForTitle(`a${joiner}b`, checkFinalChar)
+        ).toBe(`a${joiner}b`);
+      })
+    );
+  });
+
+  it('returns NFC text, whatever it is given', () => {
+    fc.assert(
+      fc.property(
+        controlRichTextArb,
+        fc.boolean(),
+        fc.option(fc.nat(), { nil: undefined }),
+        fc.option(fc.nat(), { nil: undefined }),
+        (text, checkFinalChar, maxLength, maxBytes) => {
+          const result = ObsidianHelpers.sanitizeForTitle(
+            text,
+            checkFinalChar,
+            maxLength,
+            maxBytes
+          );
+          expect(result.normalize('NFC')).toBe(result);
+        }
+      )
+    );
+  });
+
+  it('reads the text as NFC before dropping anything, so a composed character survives', () => {
+    // `<` and a combining long solidus overlay compose to U+226E, which a name can hold
+    const lessThan = '<' + String.fromCodePoint(0x338);
+    expect(ObsidianHelpers.sanitizeForTitle(`a${lessThan}b`, false)).toBe(
+      `a${String.fromCodePoint(0x226e)}b`
+    );
+  });
+
+  it('composes what a dropped character stood between', () => {
+    const rlm = String.fromCodePoint(0x200f);
+    const acute = String.fromCodePoint(0x301);
+    expect(ObsidianHelpers.sanitizeForTitle(`ae${rlm}${acute}`, false)).toBe(
+      `a${String.fromCodePoint(0xe9)}`
+    );
+  });
+
+  it('cuts a name to maxBytes of UTF-8, by whole code points', () => {
+    fc.assert(
+      fc.property(
+        controlRichTextArb,
+        fc.boolean(),
+        fc.nat({ max: 80 }),
+        (text, checkFinalChar, maxBytes) => {
+          const whole = ObsidianHelpers.sanitizeForTitle(text, checkFinalChar);
+          const result = ObsidianHelpers.sanitizeForTitle(
+            text,
+            checkFinalChar,
+            undefined,
+            maxBytes
+          );
+          expect(result).toBe(takeBytes(whole, maxBytes));
+          expect(utf8Length(result)).toBeLessThanOrEqual(maxBytes);
+        }
+      )
+    );
+  });
+
+  it('counts each code point at its UTF-8 length when cutting by bytes', () => {
+    // One code point of each length either side of its edge, then a letter
+    const cases: [number, number][] = [
+      [0x7e, 1],
+      [0xa1, 2],
+      [0x7ff, 2],
+      [0x800, 3],
+      [0xffff, 3],
+      [0x10000, 4],
+      [0x10ffff, 4],
+    ];
+    for (const [code, bytes] of cases) {
+      const char = String.fromCodePoint(code);
+      expect(
+        ObsidianHelpers.sanitizeForTitle(`${char}z`, false, undefined, bytes)
+      ).toBe(char);
+      expect(
+        ObsidianHelpers.sanitizeForTitle(
+          `${char}z`,
+          false,
+          undefined,
+          bytes - 1
+        )
+      ).toBe('');
+    }
+  });
+
+  it('keeps emoji and script sequences whole: variation selectors, joiners and tag sequences', () => {
+    fc.assert(
+      fc.property(sequenceArb, fc.boolean(), (sequence, checkFinalChar) => {
+        expect(
+          ObsidianHelpers.sanitizeForTitle(`x ${sequence} y`, checkFinalChar)
+        ).toBe(`x ${sequence} y`);
+        expect(ObsidianHelpers.sanitizeForTitle(sequence, checkFinalChar)).toBe(
+          sequence
+        );
+      })
+    );
+  });
+
+  it('leaves no joiner, variation selector or tag character outside a sequence that needs it', () => {
+    fc.assert(
+      fc.property(
+        anyTextArb,
+        fc.boolean(),
+        fc.option(fc.nat(), { nil: undefined }),
+        fc.option(fc.nat({ max: 80 }), { nil: undefined }),
+        (text, checkFinalChar, maxLength, maxBytes) => {
+          const result = ObsidianHelpers.sanitizeForTitle(
+            text,
+            checkFinalChar,
+            maxLength,
+            maxBytes
+          );
+          expect(strayInSequence(result)).toBeNull();
+        }
+      )
+    );
+  });
+
+  it('keeps one variation selector after something that shows, and no other', () => {
+    fc.assert(
+      fc.property(
+        variationSelectorArb,
+        fc.array(variationSelectorArb, { minLength: 1 }),
+        (first, more) => {
+          const heart = fromCodes(0x2764);
+          expect(
+            ObsidianHelpers.sanitizeForTitle(
+              `a ${heart}${first}${more.join('')} ${more.join('')}b`,
+              false
+            )
+          ).toBe(`a ${heart}${first} b`);
+        }
+      )
+    );
+  });
+
+  it('keeps one joiner between two characters that show, and drops runs and strays', () => {
+    fc.assert(
+      fc.property(
+        joinerArb,
+        fc.array(joinerArb, { minLength: 1 }),
+        fc.constantFrom(' ', '.', ''),
+        (joiner, more, edge) => {
+          expect(
+            ObsidianHelpers.sanitizeForTitle(
+              `a${joiner}${more.join('')}b${edge}${joiner}c${joiner}`,
+              false
+            )
+          ).toBe(
+            `a${more[more.length - 1]}b${edge}${edge === '' ? joiner : ''}c`
+          );
+        }
+      )
+    );
+  });
+
+  it('keeps tag characters only in a whole tag sequence after the black flag', () => {
+    const tags = fromCodes(0xe0067, 0xe0062);
+    const cases: [string, string][] = [
+      [
+        `a${BLACK_FLAG}${tags}${CANCEL_TAG}b`,
+        `a${BLACK_FLAG}${tags}${CANCEL_TAG}b`,
+      ],
+      [`a${BLACK_FLAG}${tags}b`, `a${BLACK_FLAG}b`],
+      [`a${BLACK_FLAG}${CANCEL_TAG}b`, `a${BLACK_FLAG}b`],
+      [`a${tags}${CANCEL_TAG}b`, 'ab'],
+      [`a${BLACK_FLAG}${tags} ${CANCEL_TAG}b`, `a${BLACK_FLAG} b`],
+      [`a${CANCEL_TAG}${tags}b`, 'ab'],
+    ];
+    for (const [text, expected] of cases) {
+      expect(ObsidianHelpers.sanitizeForTitle(text, false)).toBe(expected);
+    }
+  });
+
+  it('tells each kind of sequence character by its whole range', () => {
+    // Kept after a letter: the first and last of each range
+    for (const code of [
+      0xfe00, 0xfe0f, 0xe0100, 0xe01ef, 0x180b, 0x180d, 0x180f,
+    ]) {
+      expect(
+        ObsidianHelpers.sanitizeForTitle(`a${fromCodes(code)}b`, false)
+      ).toBe(`a${fromCodes(code)}b`);
+    }
+    // Dropped after a letter: just outside them
+    for (const code of [0xe01f0, 0x180e, 0xe001f, 0xe0080]) {
+      expect(
+        ObsidianHelpers.sanitizeForTitle(`a${fromCodes(code)}b`, false)
+      ).toBe('ab');
+    }
+    const edgeTags = fromCodes(0xe0020, 0xe007e);
+    expect(
+      ObsidianHelpers.sanitizeForTitle(
+        `a${BLACK_FLAG}${edgeTags}${CANCEL_TAG}b`,
+        false
+      )
+    ).toBe(`a${BLACK_FLAG}${edgeTags}${CANCEL_TAG}b`);
+  });
+
+  it('builds no sequence on a dot, or on nothing at all', () => {
+    const selector = fromCodes(0xfe0f);
+    const joiner = fromCodes(0x200d);
+    expect(ObsidianHelpers.sanitizeForTitle(`a.${selector}b`, false)).toBe(
+      'a.b'
+    );
+    expect(ObsidianHelpers.sanitizeForTitle(`a${joiner}.b`, false)).toBe('a.b');
+    expect(ObsidianHelpers.sanitizeForTitle(`${selector}a`, false)).toBe('a');
+    expect(ObsidianHelpers.sanitizeForTitle(`${joiner}a`, false)).toBe('a');
+  });
+
+  it('joins across what is dropped between a joiner and the next character', () => {
+    const joiner = fromCodes(0x200d);
+    const rlm = fromCodes(0x200f);
+    expect(ObsidianHelpers.sanitizeForTitle(`a${joiner}${rlm}b`, false)).toBe(
+      `a${joiner}b`
+    );
+    expect(ObsidianHelpers.sanitizeForTitle(`a${joiner}${rlm}`, false)).toBe(
+      'a'
+    );
+  });
+
+  it('cuts a tag sequence or joined emoji down to what still stands whole', () => {
+    const { englandFlag, family } = SEQUENCES;
+    expect(ObsidianHelpers.sanitizeForTitle(`a${englandFlag}`, false, 4)).toBe(
+      `a${BLACK_FLAG}`
+    );
+    expect(ObsidianHelpers.sanitizeForTitle(`a${family}`, false, 3)).toBe(
+      `a${fromCodes(0x1f468)}`
+    );
+  });
+
+  it('cuts text holding sequences to a prefix within maxBytes', () => {
+    fc.assert(
+      fc.property(
+        anyTextArb,
+        fc.boolean(),
+        fc.nat({ max: 80 }),
+        (text, checkFinalChar, maxBytes) => {
+          const whole = ObsidianHelpers.sanitizeForTitle(text, checkFinalChar);
+          const result = ObsidianHelpers.sanitizeForTitle(
+            text,
+            checkFinalChar,
+            undefined,
+            maxBytes
+          );
+          expect(whole.startsWith(result)).toBe(true);
+          expect(utf8Length(result)).toBeLessThanOrEqual(maxBytes);
+        }
+      )
+    );
+  });
+
+  it('names a reversed-extension spoof so that it reads in order', () => {
+    expect(ObsidianHelpers.sanitizeForTitle('report\u202efdp.exe', false)).toBe(
+      'reportfdp.exe'
+    );
+  });
+
+  it('maps each character inside a title on its own, keeping every one that is allowed', () => {
+    // Bracketed by letters, so the leading-dot and end-of-title rules stay out of it
+    fc.assert(
+      fc.property(controlRichTextArb, fc.boolean(), (text, checkFinalChar) => {
+        expect(
+          ObsidianHelpers.sanitizeForTitle(`x${text}y`, checkFinalChar)
+        ).toBe(expectedMidTitle(`x${text}y`));
+      })
+    );
+  });
+
+  it('never starts a name with a dot or whitespace, whatever was dropped before it', () => {
+    // A note whose name starts with a dot is hidden, and Obsidian never indexes it
+    fc.assert(
+      fc.property(
+        controlRichTextArb,
+        fc.boolean(),
+        fc.option(fc.nat(), { nil: undefined }),
+        (text, checkFinalChar, maxLength) => {
+          const result = ObsidianHelpers.sanitizeForTitle(
+            text,
+            checkFinalChar,
+            maxLength
+          );
+          expect(result).not.toMatch(/^[\s.]/);
+        }
+      )
+    );
+  });
+
+  it('checkFinalChar=true never ends a name with whitespace or a dot, whatever was dropped after it', () => {
+    fc.assert(
+      fc.property(controlRichTextArb, (text) => {
+        expect(ObsidianHelpers.sanitizeForTitle(text, true)).not.toMatch(
+          /[\s.]$/
+        );
+      })
+    );
+  });
+
+  it('checkFinalChar=true keeps what precedes the dots and whitespace a name would end with', () => {
+    fc.assert(
+      fc.property(
+        fc.string({
+          unit: fc.oneof(
+            controlCharArb,
+            invisibleCharArb,
+            fc.constantFrom('.', ' ', '#')
+          ),
+        }),
+        (suffix) => {
+          expect(ObsidianHelpers.sanitizeForTitle(`name${suffix}`, true)).toBe(
+            'name'
+          );
+        }
+      )
+    );
+  });
+
+  it('keeps what follows the dots and whitespace a name would start with', () => {
+    fc.assert(
+      fc.property(
+        fc.string({
+          unit: fc.oneof(
+            controlCharArb,
+            invisibleCharArb,
+            fc.constantFrom('.', ' ', '#')
+          ),
+        }),
+        fc.boolean(),
+        (prefix, checkFinalChar) => {
+          expect(
+            ObsidianHelpers.sanitizeForTitle(`${prefix}name`, checkFinalChar)
+          ).toBe('name');
+        }
+      )
+    );
+  });
+
   it('leaves clean strings unchanged', () => {
     fc.assert(
       fc.property(
@@ -381,9 +1082,8 @@ describe('sanitizeForTitle', () => {
             return false;
           }
           if (s.startsWith('.')) return false;
-          // Leading whitespace is trimmed from all-but-last chars, so strings
-          // longer than 1 with leading whitespace are NOT returned unchanged.
-          if (s.length > 1 && s !== s.trimStart()) return false;
+          // Leading whitespace is trimmed, a lone whitespace char included
+          if (s !== s.trimStart()) return false;
           return true;
         }),
         (text) => {
@@ -413,6 +1113,26 @@ describe('createTitle', () => {
     const title = ObsidianHelpers.createTitle(content);
     // title should start with a sanitized content segment
     expect(title.startsWith('Hello world')).toBe(true);
+  });
+
+  it('keeps the content segment within CONTENT_TITLE_SLICE_LENGTH code points, astral ones whole', () => {
+    fc.assert(
+      fc.property(controlRichTextArb, (content) => {
+        const title = ObsidianHelpers.createTitle(content);
+        const sep = title.lastIndexOf(' - ');
+        const segment = sep === -1 ? '' : title.slice(0, sep);
+        expect(Array.from(segment).length).toBeLessThanOrEqual(
+          CONTENT_TITLE_SLICE_LENGTH
+        );
+      })
+    );
+    const emoji = '😀';
+    const title = ObsidianHelpers.createTitle(
+      `${'a'.repeat(CONTENT_TITLE_SLICE_LENGTH - 1)}${emoji}rest`
+    );
+    expect(title.split(' - ')[0]).toBe(
+      `${'a'.repeat(CONTENT_TITLE_SLICE_LENGTH - 1)}${emoji}`
+    );
   });
 
   it('does not exceed CONTENT_TITLE_SLICE_LENGTH for the content segment', () => {
@@ -482,6 +1202,61 @@ describe('createTitle', () => {
     const url = `www.example.com/${'a'.repeat(CONTENT_TITLE_SLICE_LENGTH)}`;
     const title = ObsidianHelpers.createTitle(`[short label](${url})`);
     expect(title.split(' - ')[0]).toBe('short label');
+  });
+
+  it('names a note in at most 255 bytes of UTF-8, after NFC, whatever its text', () => {
+    // U+1D160 is one code point, and three once NFC has read it
+    const expandingArb = fc.string({
+      unit: fc
+        .constantFrom(0x1d160, 0x0958, 0x10000, 0x41)
+        .map((code) => String.fromCodePoint(code)),
+      minLength: CONTENT_TITLE_SLICE_LENGTH,
+    });
+    fc.assert(
+      fc.property(fc.oneof(controlRichTextArb, expandingArb), (content) => {
+        const fileName = `${ObsidianHelpers.createTitle(content)}.md`;
+        expect(utf8Length(fileName.normalize('NFC'))).toBeLessThanOrEqual(255);
+        expect(fileName.normalize('NFC')).toBe(fileName);
+      })
+    );
+    const title = ObsidianHelpers.createTitle(
+      String.fromCodePoint(0x1d160).repeat(CONTENT_TITLE_SLICE_LENGTH)
+    );
+    const segment = title.split(' - ')[0];
+    expect(Array.from(segment)).toHaveLength(CONTENT_TITLE_SLICE_LENGTH);
+    expect(utf8Length(segment)).toBeLessThanOrEqual(CONTENT_TITLE_MAX_BYTES);
+  });
+
+  it('never holds a control, DEL or bidi character', () => {
+    fc.assert(
+      fc.property(controlRichTextArb, (content) => {
+        for (const char of ObsidianHelpers.createTitle(content)) {
+          expect(isControlChar(char)).toBe(false);
+          expect(isInvisibleChar(char)).toBe(false);
+          expect(isLoneSurrogate(char)).toBe(false);
+        }
+      })
+    );
+  });
+
+  it('names a note after its text, less its control and bidi characters', () => {
+    // No link syntax, and short enough that the whole text makes the name
+    const textArb = fc.string({
+      unit: fc.oneof(
+        controlCharArb,
+        invisibleCharArb,
+        fc.constantFrom('a', 'Z', '7', ' ', '.', '-', 'é')
+      ),
+      maxLength: CONTENT_TITLE_SLICE_LENGTH - 2,
+    });
+    fc.assert(
+      fc.property(textArb, (text) => {
+        const title = ObsidianHelpers.createTitle(`x${text}y`);
+        expect(title.slice(0, title.lastIndexOf(' - '))).toBe(
+          expectedMidTitle(`x${text}y`)
+        );
+      })
+    );
   });
 
   it('preserves a trailing period in the content segment (checkFinalChar=false)', () => {
@@ -1452,6 +2227,298 @@ describe('editNote', () => {
 });
 
 // ---------------------------------------------------------------------------
+// isValidRename
+// ---------------------------------------------------------------------------
+describe('isValidRename', () => {
+  /**
+   * A character that titles refuse since task 0040, and an old name may hold
+   * from before: a control or invisible character, or half a surrogate pair.
+   */
+  const newlyRefusedCharArb = fc.oneof(
+    controlCharArb.filter((char) => !FORBIDDEN_TITLE_CHARS.has(char)),
+    invisibleCharArb,
+    loneSurrogateArb
+  );
+  /** A character a new title can't hold. */
+  const refusedCharArb = fc.oneof(
+    newlyRefusedCharArb,
+    fc.constantFrom(...FORBIDDEN_TITLE_CHARS)
+  );
+  /** Text a title can hold anywhere in it. */
+  const plainArb = fc.string({
+    unit: fc.constantFrom('a', 'Z', '7', '-', 'é', ' ', '.'),
+  });
+  /**
+   * A name with the `refused` characters inside it, each after a letter: two
+   * halves of a surrogate pair side by side would make one character.
+   */
+  const nameWith = (refused: string[], plain: string[]) =>
+    `a${refused.map((char, i) => `${plain[i] ?? ''}b${char}`).join('')}z`;
+
+  it('accepts a name holding only characters a title can hold, start and end clean', () => {
+    fc.assert(
+      fc.property(plainArb, fc.string(), (plain, oldName) => {
+        expect(ObsidianHelpers.isValidRename(`a${plain}z`, oldName)).toBe(true);
+      })
+    );
+  });
+
+  it('accepts a name holding emoji and script sequences whole', () => {
+    fc.assert(
+      fc.property(fc.array(sequenceArb), plainArb, (sequences, plain) => {
+        expect(
+          ObsidianHelpers.isValidRename(
+            `a${plain}${sequences.join(' ')}z`,
+            'Old name'
+          )
+        ).toBe(true);
+      })
+    );
+  });
+
+  it('refuses a name adding a joiner, variation selector or tag character outside a sequence', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          joinerArb.map((joiner) => `a ${joiner}b`),
+          variationSelectorArb.map((selector) => `a ${selector}b`),
+          variationSelectorArb.map(
+            (selector) => `a${fromCodes(0x2764, 0xfe0f)}${selector}`
+          ),
+          tagCharArb.map((tag) => `a${tag}b`)
+        ),
+        (name) => {
+          expect(ObsidianHelpers.isValidRename(name, 'Old name')).toBe(false);
+        }
+      )
+    );
+  });
+
+  it('accepts a name keeping characters titles newly refuse that the old name held, as many times', () => {
+    fc.assert(
+      fc.property(
+        fc.array(newlyRefusedCharArb, { minLength: 1 }),
+        fc.array(plainArb),
+        fc.array(plainArb),
+        (refused, plainOld, plainNew) => {
+          const oldName = nameWith(refused, plainOld);
+          // The same characters, in reverse and fewer of them
+          const kept = refused.slice(1).reverse();
+          expect(
+            ObsidianHelpers.isValidRename(nameWith(kept, plainNew), oldName)
+          ).toBe(true);
+        }
+      )
+    );
+  });
+
+  it('refuses a name holding a character titles always refused, though the old name held it', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...FORBIDDEN_TITLE_CHARS),
+        fc.array(plainArb),
+        (char, plain) => {
+          const oldName = nameWith([char], plain);
+          expect(ObsidianHelpers.isValidRename(`${oldName}2`, oldName)).toBe(
+            false
+          );
+          expect(ObsidianHelpers.isValidRename(oldName, oldName)).toBe(false);
+        }
+      )
+    );
+  });
+
+  it('refuses a name holding a newly refused character more times than the old name', () => {
+    const rlm = fromCodes(0x200f);
+    expect(ObsidianHelpers.isValidRename(`a${rlm}b${rlm}c`, `a${rlm}b`)).toBe(
+      false
+    );
+    expect(ObsidianHelpers.isValidRename(`a${rlm}c`, `a${rlm}b`)).toBe(true);
+  });
+
+  it('allows only what the old name held outside a sequence, not what a sequence there needed', () => {
+    const selector = fromCodes(0xfe0f);
+    const joiner = fromCodes(0x200d);
+    const heart = `${fromCodes(0x2764)}${selector}`;
+    const family = fromCodes(0x1f468, 0x200d, 0x1f469);
+    expect(
+      ObsidianHelpers.isValidRename(`${selector}Heart`, `${heart} Heart`)
+    ).toBe(false);
+    expect(
+      ObsidianHelpers.isValidRename(`${joiner}${fromCodes(0x1f469)}`, family)
+    ).toBe(false);
+    // A stray in the old name grants one in the new
+    expect(
+      ObsidianHelpers.isValidRename(`a ${selector}b2`, `a ${selector}b`)
+    ).toBe(true);
+  });
+
+  it('refuses to keep the path an imported note name can hide in backslashes', () => {
+    const oldName = 'Paper\\..\\..\\pwn';
+    expect(ObsidianHelpers.isValidRename('Paper\\..\\..\\pwn2', oldName)).toBe(
+      false
+    );
+    expect(ObsidianHelpers.isValidRename('Paper 2', oldName)).toBe(true);
+  });
+
+  it('refuses a name adding a character a title can not hold, more times than the old name had it', () => {
+    fc.assert(
+      fc.property(
+        fc.array(newlyRefusedCharArb),
+        refusedCharArb,
+        fc.array(plainArb),
+        fc.array(plainArb),
+        (refused, added, plainOld, plainNew) => {
+          const oldName = nameWith(refused, plainOld);
+          expect(
+            ObsidianHelpers.isValidRename(
+              nameWith([...refused, added], plainNew),
+              oldName
+            )
+          ).toBe(false);
+        }
+      )
+    );
+  });
+
+  it('refuses an empty name, which would leave only the extension', () => {
+    fc.assert(
+      fc.property(fc.string(), (oldName) => {
+        expect(ObsidianHelpers.isValidRename('', oldName)).toBe(false);
+      })
+    );
+  });
+
+  it('refuses a name starting or ending with whitespace or a dot, whatever the old name was', () => {
+    fc.assert(
+      fc.property(
+        plainArb,
+        fc.constantFrom(' ', '.', '\t'),
+        fc.boolean(),
+        (plain, edge, atStart) => {
+          const name = atStart ? `${edge}a${plain}` : `a${plain}${edge}`;
+          expect(ObsidianHelpers.isValidRename(name, name)).toBe(false);
+        }
+      )
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// restoreName
+// ---------------------------------------------------------------------------
+describe('restoreName', () => {
+  /** No parent, the vault root, or a folder any number of levels deep. */
+  const parentArb = fc.oneof(
+    fc.constant(null),
+    fc.constant('/'),
+    fc
+      .array(
+        fc
+          .string({ minLength: 1 })
+          .filter((s) => !/[\\/]/.test(s) && s !== '..' && s !== '.'),
+        { minLength: 1 }
+      )
+      .map((segments) => segments.join('/'))
+  );
+  const extensionArb = fc.oneof(
+    fc.constantFrom('md', 'pdf'),
+    fc.string().filter((ext) => !/[\\/]/.test(ext))
+  );
+  /** Any name, path separators, dots and `..` included. */
+  const nameArb = fc.string({
+    unit: fc.oneof(
+      controlCharArb,
+      invisibleCharArb,
+      fc.constantFrom(
+        ...FORBIDDEN_TITLE_CHARS,
+        '.',
+        ' ',
+        '..',
+        '\\..\\',
+        '/../'
+      ),
+      fc.string({ unit: 'binary', minLength: 1, maxLength: 1 })
+    ),
+  });
+
+  function makeRestore(parentPath: string | null, extension: string) {
+    const renameFile = vi
+      .fn<(file: TFile, path: string) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const app = makeApp({
+      fileManager: { renameFile } as unknown as App['fileManager'],
+    });
+    const file = makeTFile({
+      extension,
+      parent: (parentPath === null
+        ? null
+        : { path: parentPath }) as TFile['parent'],
+    });
+    return { renameFile, app, file };
+  }
+
+  it('puts back any name without a path separator in place, one renameFile would refuse included', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        nameArb.filter((name) => !/[\\/]/.test(name)),
+        parentArb,
+        extensionArb,
+        async (name, parentPath, extension) => {
+          const { renameFile, app, file } = makeRestore(parentPath, extension);
+
+          await ObsidianHelpers.restoreName(file, name, app);
+
+          const folder =
+            parentPath === null || parentPath === '/' ? '' : `${parentPath}/`;
+          expect(renameFile.mock.calls).toEqual([
+            [file, `${folder}${name}.${extension}`],
+          ]);
+        }
+      )
+    );
+  });
+
+  it('refuses a name holding `/` or `\\`, which Obsidian reads as a path', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        nameArb,
+        fc.constantFrom('/', '\\'),
+        nameArb,
+        parentArb,
+        async (before, separator, after, parentPath) => {
+          const { renameFile, app, file } = makeRestore(parentPath, 'md');
+          await expect(
+            ObsidianHelpers.restoreName(
+              file,
+              `${before}${separator}${after}`,
+              app
+            )
+          ).rejects.toThrow(INVALID_TITLE_MESSAGE);
+          expect(renameFile).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('never moves a note out of its folder, whatever the name', async () => {
+    await fc.assert(
+      fc.asyncProperty(nameArb, parentArb, async (name, parentPath) => {
+        const { renameFile, app, file } = makeRestore(parentPath, 'md');
+        await ObsidianHelpers.restoreName(file, name, app).catch(() => {});
+        for (const [, path] of renameFile.mock.calls) {
+          // As Obsidian's normalizePath reads it, `\` a separator too
+          const resolved = posix.normalize(path.replace(/\\/g, '/'));
+          const folder =
+            parentPath === null || parentPath === '/' ? '.' : parentPath;
+          expect(posix.dirname(resolved)).toBe(posix.normalize(folder));
+        }
+      })
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // renameFile
 // ---------------------------------------------------------------------------
 describe('renameFile', () => {
@@ -1478,6 +2545,52 @@ describe('renameFile', () => {
           await expect(
             ObsidianHelpers.renameFile(file, name, app)
           ).rejects.toThrow();
+        }
+      )
+    );
+  });
+
+  it('refuses a name holding a control, DEL or bidi character', async () => {
+    const renameFile = vi.fn().mockResolvedValue(undefined);
+    const app = makeApp({
+      fileManager: {
+        renameFile,
+        processFrontMatter: vi.fn(),
+        generateMarkdownLink: vi.fn(),
+      } as unknown as App['fileManager'],
+    });
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(controlCharArb, invisibleCharArb),
+        async (ch) => {
+          await expect(
+            ObsidianHelpers.renameFile(makeTFile(), `valid${ch}name`, app)
+          ).rejects.toThrow(INVALID_TITLE_MESSAGE);
+        }
+      )
+    );
+    expect(renameFile).not.toHaveBeenCalled();
+  });
+
+  it('renames a note whose name already holds a control or invisible character, kept in the new name', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(
+          controlCharArb.filter((char) => !FORBIDDEN_TITLE_CHARS.has(char)),
+          invisibleCharArb
+        ),
+        async (ch) => {
+          const renameFile = vi
+            .fn<(file: TFile, path: string) => Promise<void>>()
+            .mockResolvedValue(undefined);
+          const app = makeApp({
+            fileManager: { renameFile } as unknown as App['fileManager'],
+          });
+          const file = makeTFile({ basename: `old${ch}name` });
+          await ObsidianHelpers.renameFile(file, `old${ch}name 2`, app);
+          expect(renameFile.mock.calls).toEqual([
+            [file, `${file.parent!.path}/old${ch}name 2.md`],
+          ]);
         }
       )
     );
@@ -1918,6 +3031,31 @@ describe('createFromText', () => {
       .map(([, text]) => text)
       .join('');
     expect(written).toBe(String.raw`\[\[Note\|alias]] more`);
+  });
+
+  it('names the note without the tabs, carriage returns and bidi overrides in its text', async () => {
+    const create = vi.fn().mockResolvedValue(makeTFile());
+    const app = makeApp({
+      vault: {
+        getAbstractFileByPath: vi.fn().mockReturnValue(null),
+        createFolder: vi.fn().mockResolvedValue(undefined),
+        create,
+        append: vi.fn().mockResolvedValue(undefined),
+      } as unknown as App['vault'],
+    });
+
+    await ObsidianHelpers.createFromText(
+      '\tOne\r\ntwo\tthree report\u202efdp.exe',
+      `${DATA_DIRECTORY}/snippets`,
+      app
+    );
+
+    const [path] = create.mock.calls[0] as [string];
+    expect(path).toMatch(
+      new RegExp(
+        `^${DATA_DIRECTORY}/snippets/One  two three reportfdp\\.exe - [^/]+\\.md$`
+      )
+    );
   });
 
   it('throws when createNote returns undefined (e.g., createFile fails)', async () => {

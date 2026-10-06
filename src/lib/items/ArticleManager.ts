@@ -904,16 +904,17 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
+   * Rename an article's note, saying why when the name is refused.
    * @param newName The basename excluding the file extension
+   * @returns whether it was renamed: if not, it keeps its old name
    */
-  async rename(article: ReviewArticle, newName: string) {
-    const sanitized = Obsidian.sanitizeForTitle(newName, true);
-    if (sanitized !== newName) {
+  async rename(article: ReviewArticle, newName: string): Promise<boolean> {
+    const { file } = article;
+    if (!Obsidian.isValidRename(newName, file.basename)) {
       Obsidian.notify(INVALID_TITLE_MESSAGE);
-      return;
+      return false;
     }
 
-    const { file } = article;
     const currentName = file.basename;
     try {
       await Obsidian.renameFile(file, newName, this.app);
@@ -925,9 +926,12 @@ export class ArticleManager extends ItemManager {
         `UPDATE article SET reference = $1 WHERE id = $2`,
         [newPath, article.data.id]
       );
+      return true;
     } catch (error) {
       console.error(error);
-      await Obsidian.renameFile(file, currentName, this.app);
+      // Unchecked: a name made before a title rule changed is still its own
+      await Obsidian.restoreName(file, currentName, this.app);
+      return false;
     }
   }
 

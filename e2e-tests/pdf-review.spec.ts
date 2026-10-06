@@ -45,6 +45,10 @@ const PDF_PATH = 'sources/PDF fixture.pdf';
 const NO_TEXT_PDF_PATH = 'sources/PDF fixture - no text.pdf';
 /** Its sibling whose text is Markdown, Obsidian syntax and a Templater command. */
 const HOSTILE_PDF_PATH = 'sources/PDF fixture - hostile.pdf';
+/** Its sibling whose one line holds a tab and a right-to-left override. */
+const CONTROLS_PDF_PATH = 'sources/PDF fixture - controls.pdf';
+/** That line, as the PDF reads. */
+const CONTROLS_LINE = 'Tabbed\there report\u202efdp.exe';
 /** The hostile fixture's paragraphs, as the PDF reads. */
 const HOSTILE_PARAGRAPHS = [
   '# Heading #ir-card #ir-text-snippet ![[Secret note]] ' +
@@ -989,6 +993,46 @@ test.describe('Snippets and cards from a PDF article', () => {
       await readMarkdown(window, card.body!),
       last.slice(0, answer) + `${left} b ${right}` + last.slice(answer + 1)
     );
+  });
+
+  test('makes a snippet and a card of text holding a tab and a right-to-left override, named without either so it reads as the text', async () => {
+    await importFixture(window, CONTROLS_PDF_PATH);
+    await beginReview(window);
+    await expect(textItem(window, 1, 0)).toBeAttached();
+    const notices = await watchNotices(window);
+
+    // The card first: the snippet's highlight splits the text it selects in
+    await selectText(window, [1, 0, 0], [1, 0, CONTROLS_LINE.length]);
+    await expect.poll(() => viewerSelection(window)).toBe(CONTROLS_LINE);
+    await actionBar(window)
+      .getByRole('button', { name: 'Create card' })
+      .click();
+    await expect(answerText(window)).toHaveText(CONTROLS_LINE);
+    await selectAnswer(window, 'here');
+    await window.keyboard.press('Enter');
+    await expect.poll(() => cards(window)).toHaveLength(1);
+
+    await selectText(window, [1, 0, 0], [1, 0, CONTROLS_LINE.length]);
+    await expect.poll(() => viewerSelection(window)).toBe(CONTROLS_LINE);
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+
+    // On Windows a tab in the name fails the create: getting here is the test
+    expect(await notices()).not.toContainEqual(expect.stringMatching(/fail/i));
+    const [snippet] = await snippets(window);
+    const [card] = await cards(window);
+    // The note's name, less the id after its last ` - `
+    const named = (reference: string) =>
+      reference
+        .slice(reference.lastIndexOf('/') + 1)
+        .replace(/ - \w+\.md$/, '');
+    const [left, right] = CLOZE_DELIMITERS;
+    expect(named(snippet.reference)).toBe('Tabbed here reportfdp.exe');
+    expect(named(card.reference)).toBe(
+      `Tabbed ${left} here ${right} reportfdp.exe`
+    );
+    // The text itself keeps them
+    expect(snippet.body).toBe(Markdown.escape(CONTROLS_LINE));
   });
 
   /**
