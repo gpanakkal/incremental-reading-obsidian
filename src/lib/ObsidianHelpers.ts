@@ -83,9 +83,11 @@ export class ObsidianHelpers {
   /**
    * Remove characters that cannot be used for file names
    * or Obsidian note titles. Control characters become a space, and invisible
-   * ones are dropped so a name always reads as its text. So is half a
+   * ones are dropped so a name always reads as its text, and holds nothing
+   * that doesn't show: joiners and variation selectors stay only in the emoji
+   * and script sequences that need them (see `keepSequences`). So is half a
    * surrogate pair standing alone, which the file system can't store as it is.
-   * Leading whitespace and periods are always removed.
+   * Leading whitespace, periods and combining marks are always removed.
    *
    * The text is read as NFC, as Obsidian stores a path, so the cuts measure
    * the name the file will have.
@@ -100,20 +102,22 @@ export class ObsidianHelpers {
     maxBytes?: number
   ) {
     // By code point, so a surrogate pair is one character
-    const cleaned = keepSequences(
-      Array.from(text.normalize('NFC')).map(titleChar)
-    )
+    const kept = titleChars(Array.from(text.normalize('NFC')))
       .join('')
       // What a dropped character stood between may compose
-      .normalize('NFC')
-      // No leading dot, which hides the note, or whitespace, once what came
-      // before them is dropped too
-      .replace(/^[\s.]+/, '');
+      .normalize('NFC');
+    // Settling a joiner changes only what comes after it, and no two kept
+    // joiners stand together, so a name cut to `limit` code points needs no
+    // more than twice as many settled. Text built to drop one joiner a round
+    // would otherwise cost a round per joiner in it.
+    const limit = Math.min(maxLength ?? Infinity, maxBytes ?? Infinity);
+    const cleaned = settle(
+      Array.from(kept)
+        .slice(0, 2 * limit + 2)
+        .join('')
+    );
 
-    // Nor, when asked, a trailing one, whatever was dropped after it
-    const trimmed = checkFinalChar ? cleaned.replace(/[\s.]+$/, '') : cleaned;
-
-    let chars = Array.from(trimmed).slice(0, maxLength);
+    let chars = Array.from(cleaned).slice(0, maxLength);
     if (maxBytes !== undefined) {
       let bytes = 0;
       const fits = chars.findIndex((char) => {
@@ -122,15 +126,19 @@ export class ObsidianHelpers {
       });
       if (fits >= 0) chars = chars.slice(0, fits);
     }
-    // A cut can leave a joiner, or tags, whose sequence is cut off
-    return keepSequences(chars).join('');
+    const cut = chars.join('');
+    // Nor, when asked, a trailing one, whatever was dropped or cut after it
+    const trimmed = checkFinalChar ? cut.replace(/[\s.]+$/, '') : cut;
+    // A cut can leave a joiner whose sequence is cut off
+    return settle(trimmed);
   }
 
   /**
    * Whether `newName` may replace `oldName` as a note's name. It may not be
    * empty, start or end with whitespace or a dot, or hold a forbidden title
-   * character. A control or invisible character, or a joiner, variation
-   * selector or tag character outside a sequence that needs it, is refused
+   * character. A control or invisible character, a joiner or variation
+   * selector outside a sequence that needs it, or a combining mark the name
+   * starts with, is refused
    * only where the new name adds it: one the old name held already, made
    * before titles refused it, may stay, as many times as the old name had it.
    */
@@ -609,46 +617,225 @@ function isLoneSurrogate(char: string) {
  * bidi controls (U+202A–U+202E, U+2066–U+2069) and the implicit marks LRM, RLM
  * and ALM, which reorder how a name reads: `report`, U+202E, `fdp.exe` shows
  * as `reportexe.pdf`, and `1`, RLM, `-`, RLM, `2` as `12-`. The rest (soft
- * hyphen, Hangul fillers, CGJ and the like) can make a name look blank, or
- * hide text in it.
+ * hyphen, Hangul fillers, CGJ, tag characters and the like) can make a name
+ * look blank, or hide text in it.
  */
 const DEFAULT_IGNORABLE = /\p{Default_Ignorable_Code_Point}/u;
+/**
+ * Format characters. Those outside Default_Ignorable can draw as nothing too:
+ * Chromium draws none for the interlinear annotation marks (U+FFF9–U+FFFB),
+ * and the Egyptian hieroglyph format controls (U+13430–U+1343F) only shape a
+ * group of signs, though a font that lacks them draws a box.
+ */
+const FORMAT = /\p{Cf}/u;
+/** A combining mark, which draws on the character before it. */
+const MARK = /\p{M}/u;
+
+/**
+ * Unicode's prepended concatenation marks (PropList.txt, Unicode 17): format
+ * characters that show, as a sign over or before the number after them.
+ */
+const PREPENDED_CONCATENATION_MARKS = new Set(
+  [
+    0x600, 0x601, 0x602, 0x603, 0x604, 0x605, 0x6dd, 0x70f, 0x890, 0x891, 0x8e2,
+    0x110bd, 0x110cd,
+  ].map((code) => String.fromCodePoint(code))
+);
+
+/**
+ * Whether `char`, one code point, is a prepended concatenation mark: a format
+ * character that shows, so a title keeps it.
+ */
+export function isPrependedConcatenationMark(char: string) {
+  return PREPENDED_CONCATENATION_MARKS.has(char);
+}
 
 /** ZWNJ or ZWJ: emoji sequences and some scripts join with them. */
-function isJoiner(char: string) {
+export function isJoiner(char: string) {
   const code = char.codePointAt(0);
   return code === 0x200c || code === 0x200d;
 }
+const ZWJ = String.fromCodePoint(0x200d);
 
 /**
- * A variation selector, standard (U+FE00–U+FE0F) or ideographic
- * (U+E0100–U+E01EF), or a Mongolian free variation selector: each picks a
- * form of the character before it, an emoji's colour one among them.
+ * A variation selector a title can keep, after a base of its kind: U+FE0E
+ * and U+FE0F pick an emoji's text or colour form, and the Mongolian free
+ * variation selectors (U+180B–U+180D, U+180F) a Mongolian letter's. The rest
+ * pick nothing a name needs: U+FE00–U+FE0D math and CJK compatibility forms,
+ * and the ideographic ones (U+E0100–U+E01EF) glyphs most fonts lack, so they
+ * mostly draw the bare ideograph.
  */
-function isVariationSelector(char: string) {
+export function isVariationSelector(char: string) {
   const code = char.codePointAt(0) ?? 0;
   return (
-    (code >= 0xfe00 && code <= 0xfe0f) ||
-    (code >= 0xe0100 && code <= 0xe01ef) ||
+    code === 0xfe0e ||
+    code === 0xfe0f ||
     (code >= 0x180b && code <= 0x180d) ||
     code === 0x180f
   );
 }
+/** U+FE0F, which asks for an emoji's colour form. */
+const EMOJI_SELECTOR = String.fromCodePoint(0xfe0f);
 
-/** A tag character, which spells out a flag after the black flag emoji. */
-function isTag(char: string) {
-  const code = char.codePointAt(0) ?? 0;
-  return code >= 0xe0020 && code <= 0xe007e;
+/** What a selector of each kind must follow: an emoji, or Mongolian. */
+const EMOJI = /\p{Emoji}/u;
+const MONGOLIAN = /\p{Script=Mongolian}/u;
+/**
+ * A keycap's base, which U+FE0E or U+FE0F may follow only before the keycap.
+ * `#` and `*` are ones too, but a title drops them.
+ */
+const KEYCAP_BASE = /[0-9]/;
+
+/** A pictograph, which a ZWJ joins to another to make one emoji. */
+const PICTOGRAPH = /\p{Extended_Pictographic}/u;
+/** A pictograph that draws as an emoji with no selector after it. */
+const EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u;
+/** A skin tone, and an emoji it colours. */
+const EMOJI_MODIFIER = /\p{Emoji_Modifier}/u;
+const EMOJI_MODIFIER_BASE = /\p{Emoji_Modifier_Base}/u;
+
+/**
+ * Whether a title keeps `selector`, a variation selector, between `base` and
+ * `next`: a Mongolian one after a Mongolian character (they are Mongolian
+ * themselves: one only); U+FE0E or U+FE0F after a digit when a keycap
+ * follows, or after an emoji pictograph.
+ */
+function selectorFits(
+  selector: string,
+  base: string,
+  next: string | undefined
+) {
+  if (isVariationSelector(base)) return false;
+  if ((selector.codePointAt(0) ?? 0) < 0xfe00) return MONGOLIAN.test(base);
+  if (KEYCAP_BASE.test(base)) return next === KEYCAP;
+  return PICTOGRAPH.test(base) && EMOJI.test(base);
 }
-/** The black flag emoji, which a tag sequence turns into a region's flag. */
-const BLACK_FLAG = String.fromCodePoint(0x1f3f4);
-/** The cancel tag, which ends a tag sequence. */
-const CANCEL_TAG = String.fromCodePoint(0xe007f);
 
-/** Something a sequence can build on: it shows, and isn't a dot. */
-function isBase(char: string) {
+/**
+ * Whether `char`, with `following` after it, draws as an emoji: a pictograph
+ * that does so on its own, or one that U+FE0F after it asks to.
+ */
+function drawsAsEmoji(char: string, following: string | undefined) {
   return (
-    char !== '' &&
+    PICTOGRAPH.test(char) &&
+    (EMOJI_PRESENTATION.test(char) ||
+      (EMOJI.test(char) && following === EMOJI_SELECTOR))
+  );
+}
+
+/**
+ * Viramas: the marks of canonical combining class 9 (DerivedCombiningClass.txt,
+ * Unicode 17). A joiner after one picks how the consonants around it join,
+ * or, at the end of a word, spells a Malayalam chillu as encoded before
+ * Unicode 5.1. JavaScript can't read the class, so they are listed.
+ */
+const VIRAMAS = new Set(
+  [
+    0x94d, 0x9cd, 0xa4d, 0xacd, 0xb4d, 0xbcd, 0xc4d, 0xccd, 0xd3b, 0xd3c, 0xd4d,
+    0xdca, 0xe3a, 0xeba, 0xf84, 0x1039, 0x103a, 0x1714, 0x1715, 0x1734, 0x17d2,
+    0x1a60, 0x1b44, 0x1baa, 0x1bab, 0x1bf2, 0x1bf3, 0x2d7f, 0xa806, 0xa82c,
+    0xa8c4, 0xa953, 0xa9c0, 0xaaf6, 0xabed, 0x10a3f, 0x11046, 0x11070, 0x1107f,
+    0x110b9, 0x11133, 0x11134, 0x111c0, 0x11235, 0x112ea, 0x1134d, 0x113ce,
+    0x113cf, 0x113d0, 0x11442, 0x114c2, 0x115bf, 0x1163f, 0x116b6, 0x1172b,
+    0x11839, 0x1193d, 0x1193e, 0x119e0, 0x11a34, 0x11a47, 0x11a99, 0x11c3f,
+    0x11d44, 0x11d45, 0x11d97, 0x11f41, 0x11f42, 0x1612f,
+  ].map((code) => String.fromCodePoint(code))
+);
+
+/**
+ * The scripts whose letters a joiner may follow, or the marks on them: the
+ * cursive ones (ArabicShaping.txt), and the Brahmic ones, which have a
+ * virama. By script, not script extension: that would take in the Latin
+ * diacritics and the modifier apostrophe some of these scripts share.
+ * Only scripts of Unicode 11 or before: a script name the engine doesn't know is a
+ * syntax error, and iOS's JavaScriptCore read Unicode 11 tables until 2022.
+ * Text in a later script keeps a joiner after its viramas only.
+ */
+const JOINING_SCRIPT = new RegExp(
+  `[${[
+    'Arabic',
+    'Syriac',
+    'Nko',
+    'Mongolian',
+    'Mandaic',
+    'Manichaean',
+    'Psalter_Pahlavi',
+    'Phags_Pa',
+    'Adlam',
+    'Hanifi_Rohingya',
+    'Sogdian',
+    'Devanagari',
+    'Bengali',
+    'Gurmukhi',
+    'Gujarati',
+    'Oriya',
+    'Tamil',
+    'Telugu',
+    'Kannada',
+    'Malayalam',
+    'Sinhala',
+    'Thai',
+    'Lao',
+    'Tibetan',
+    'Myanmar',
+    'Tagalog',
+    'Hanunoo',
+    'Khmer',
+    'Tai_Tham',
+    'Balinese',
+    'Sundanese',
+    'Batak',
+    'Syloti_Nagri',
+    'Saurashtra',
+    'Rejang',
+    'Javanese',
+    'Meetei_Mayek',
+    'Kharoshthi',
+    'Brahmi',
+    'Kaithi',
+    'Chakma',
+    'Sharada',
+    'Khojki',
+    'Khudawadi',
+    'Grantha',
+    'Newa',
+    'Tirhuta',
+    'Siddham',
+    'Modi',
+    'Takri',
+    'Ahom',
+    'Dogra',
+    'Zanabazar_Square',
+    'Soyombo',
+    'Bhaiksuki',
+    'Masaram_Gondi',
+    'Gunjala_Gondi',
+  ]
+    .map((script) => `\\p{Script=${script}}`)
+    .join('')}]`,
+  'u'
+);
+const LETTER = /\p{L}/u;
+
+/** A letter of a script that joins, which a joiner may follow. */
+function isJoiningLetter(char: string) {
+  return LETTER.test(char) && JOINING_SCRIPT.test(char);
+}
+
+/** The index of the first code point in `chars` from `from` on not dropped. */
+function nextKept(chars: readonly string[], from: number) {
+  let i = from;
+  while (chars[i] === '') i++;
+  return i;
+}
+
+/** The enclosing keycap, drawn around the character before it. */
+const KEYCAP = String.fromCodePoint(0x20e3);
+
+/** Something a joiner can join to: it shows, and isn't a dot. */
+function isBase(char: string | undefined) {
+  return (
+    char !== undefined &&
     !/\s/.test(char) &&
     char !== '.' &&
     !DEFAULT_IGNORABLE.test(char)
@@ -656,10 +843,25 @@ function isBase(char: string) {
 }
 
 /**
+ * Whether `char`, one code point, shows as nothing and is no part of a
+ * sequence a title can keep: a default-ignorable or format character, but a
+ * joiner, a variation selector a title can keep, or a prepended concatenation
+ * mark. A title drops it wherever it stands.
+ */
+export function isInvisibleTitleChar(char: string) {
+  return (
+    (DEFAULT_IGNORABLE.test(char) || FORMAT.test(char)) &&
+    !isJoiner(char) &&
+    !isVariationSelector(char) &&
+    !isPrependedConcatenationMark(char)
+  );
+}
+
+/**
  * What `char`, one code point, becomes in a title: a space for a control or
  * a forbidden whitespace character, nothing for any other forbidden, invisible
- * or lone-surrogate one, and itself otherwise. Joiners, variation selectors
- * and tag characters stay, for {@link keepSequences} to judge in context.
+ * or lone-surrogate one, and itself otherwise. Joiners and variation
+ * selectors stay, for {@link keepSequences} to judge in context.
  */
 function titleChar(char: string) {
   if (FORBIDDEN_TITLE_CHARS.has(char)) {
@@ -669,61 +871,115 @@ function titleChar(char: string) {
   }
   if (CONTROL_TITLE_CHARS.has(char)) return ' ';
   if (isLoneSurrogate(char)) return '';
-  if (
-    isJoiner(char) ||
-    isVariationSelector(char) ||
-    isTag(char) ||
-    char === CANCEL_TAG
-  ) {
-    return char;
-  }
-  if (DEFAULT_IGNORABLE.test(char)) return '';
+  if (isInvisibleTitleChar(char)) return '';
   return char;
 }
 
 /**
- * `chars`, code points as {@link titleChar} leaves them, with every joiner,
- * variation selector and tag character dropped (`''`) that no sequence needs:
- * - a variation selector right after something that shows, one only;
- * - a joiner between something that shows and the next that does, one only;
- * - tag characters after the black flag, ended by the cancel tag.
+ * `chars`, the code points of a name, as a title has them: each mapped by
+ * {@link titleChar} (`''` where dropped), then
+ * - a keycap dropped whose base, or the selector after it, was;
+ * - what the name would start with dropped, until something that shows and
+ *   needs nothing before it: whitespace, dots, combining marks and joiners;
+ * - the joiners and variation selectors no sequence keeps dropped
+ *   ({@link keepSequences}).
+ */
+function titleChars(chars: readonly string[]): string[] {
+  const mapped = chars.map(titleChar);
+  chars.forEach((char, i) => {
+    if (char !== KEYCAP) return;
+    // `#` and `*` are forbidden: their keycap would draw on the character
+    // before them, or start the name on a dotted circle. One that starts the
+    // name goes as a leading mark below.
+    let base = i - 1;
+    while (isVariationSelector(chars[base] ?? '')) base--;
+    if (mapped[base] === chars[base]) return;
+    // Its selectors go with it, or they would fall to the character before
+    for (let j = base + 1; j <= i; j++) mapped[j] = '';
+  });
+  for (let i = 0; i < mapped.length; i++) {
+    const char = mapped[i];
+    if (char === '') continue;
+    // A leading dot hides the note; a mark or joiner has nothing to draw on
+    if (!/[\s.]/.test(char) && !MARK.test(char) && !isJoiner(char)) break;
+    mapped[i] = '';
+  }
+  return keepSequences(mapped);
+}
+
+/**
+ * `chars`, code points as {@link titleChar} leaves them, with every joiner
+ * and variation selector dropped (`''`) that no sequence needs:
+ * - U+FE0E or U+FE0F right after an emoji pictograph, or after a digit right
+ *   before a keycap;
+ * - a Mongolian selector right after a Mongolian character, one only;
+ * - a ZWJ between two characters that draw as emoji, the first perhaps
+ *   coloured by a skin tone;
+ * - a joiner right after a virama, whatever follows it;
+ * - a joiner after a letter of a script that joins, or a mark on one, and
+ *   before something that shows.
+ * A run of joiners keeps one at most.
  */
 function keepSequences(chars: readonly string[]): string[] {
   const kept = [...chars];
+  // The last two code points kept, and the last kept that is no mark or
+  // joiner: the letter a mark after it sits on
   let prev = '';
-  // Where the code point a joiner joins to is: it only moves on, so a run of
-  // joiners costs no more than the text
-  let scan = 0;
+  let beforePrev = '';
+  let letter = '';
   for (let i = 0; i < kept.length; i++) {
     const char = kept[i];
-    if (char === BLACK_FLAG) {
-      let end = i + 1;
-      while (end < kept.length && isTag(kept[end])) end++;
-      if (end > i + 1 && kept[end] === CANCEL_TAG) {
-        prev = CANCEL_TAG;
-        i = end;
-        continue;
+    // What comes next is the next code point not dropped already: one a later
+    // step may still drop, but never a base, so what joins to it is sure
+    if (isVariationSelector(char)) {
+      if (!selectorFits(char, prev, kept[nextKept(kept, i + 1)])) {
+        kept[i] = '';
       }
-    } else if (isVariationSelector(char)) {
-      if (!isBase(prev)) kept[i] = '';
     } else if (isJoiner(char)) {
-      const joinsOn =
-        prev !== '' && !/\s/.test(prev) && prev !== '.' && !isJoiner(prev);
-      // The next code point not dropped already, past this one
-      while (scan <= i || kept[scan] === '') scan++;
-      if (!joinsOn || !isBase(kept[scan] ?? '')) kept[i] = '';
-    } else if (isTag(char) || char === CANCEL_TAG) {
-      kept[i] = '';
+      const at = nextKept(kept, i + 1);
+      const next = kept[at];
+      const emojiBefore =
+        drawsAsEmoji(prev, undefined) ||
+        (prev === EMOJI_SELECTOR && PICTOGRAPH.test(beforePrev)) ||
+        (EMOJI_MODIFIER.test(prev) && EMOJI_MODIFIER_BASE.test(beforePrev));
+      const joinsEmoji =
+        char === ZWJ &&
+        emojiBefore &&
+        drawsAsEmoji(next, kept[nextKept(kept, at + 1)]);
+      // A mark is judged by its letter: a script's own marks follow its
+      // letters, but some it shares with Latin and the like
+      const scriptBefore =
+        isJoiningLetter(prev) || (MARK.test(prev) && isJoiningLetter(letter));
+      const joinsScript = VIRAMAS.has(prev) || (scriptBefore && isBase(next));
+      if (!joinsEmoji && !joinsScript) kept[i] = '';
     }
-    if (kept[i] !== '') prev = kept[i];
+    if (kept[i] !== '') {
+      beforePrev = prev;
+      prev = kept[i];
+      if (!MARK.test(prev) && !isJoiner(prev)) letter = prev;
+    }
   }
   return kept;
+}
+
+/**
+ * `text`, NFC, with the joiners and variation selectors no sequence keeps
+ * dropped, and NFC again, until neither changes it: a dropped joiner can
+ * leave marks out of canonical order, and putting them in order can move
+ * another away from the virama a joiner needs before it.
+ */
+function settle(text: string) {
+  for (;;) {
+    const next = keepSequences(Array.from(text)).join('').normalize('NFC');
+    if (next === text) return next;
+    text = next;
+  }
 }
 
 /** The code points of `name` that a title drops or changes where they stand. */
 function refusedChars(name: string) {
   const chars = Array.from(name);
-  const kept = keepSequences(chars.map(titleChar));
+  const kept = titleChars(chars);
   return chars.filter((char, i) => kept[i] !== char);
 }
 

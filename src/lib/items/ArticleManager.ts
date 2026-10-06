@@ -431,24 +431,36 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * A name in the articles folder for a copy of `file`: its own when
-   * `isFree` says so, otherwise its basename with a random suffix until
-   * `isFree` accepts one, warning that it couldn't keep its own.
+   * A name in the articles folder for a copy of `file`: its own, read as a
+   * title reads text, so a name that arrived by sync, git or zip brings no
+   * control, bidi or other invisible character into the copy's, and a
+   * generated id when nothing is left of it; warning when that changed it.
+   * When `isFree` refuses the name, it gets a random suffix until `isFree`
+   * accepts one, with a warning that it couldn't keep its own.
    */
   private async nameForCopy(
     file: TFile,
     isFree: (name: string) => boolean | Promise<boolean>
   ): Promise<string> {
-    let name = file.name;
-    if (await isFree(name)) return name;
-
-    Obsidian.notify(
-      `Warning: article with name already exists "${file.name}"`,
-      true
-    );
-    do {
-      name = `${file.basename} - ${generateId()}.${file.extension}`;
-    } while (!(await isFree(name)));
+    const basename =
+      Obsidian.sanitizeForTitle(file.basename, true) || Obsidian.createTitle();
+    let name = `${basename}.${file.extension}`;
+    if (!(await isFree(name))) {
+      Obsidian.notify(
+        `Warning: article with name already exists "${name}"`,
+        true
+      );
+      do {
+        name = `${basename} - ${generateId()}.${file.extension}`;
+      } while (!(await isFree(name)));
+    }
+    // Obsidian keeps paths as NFC, so a name only NFC changes is its own
+    if (basename !== file.basename.normalize('NFC')) {
+      Obsidian.notify(
+        `Warning: removed characters a note name can't hold; the copy is named "${name}"`,
+        true
+      );
+    }
     return name;
   }
 

@@ -12,6 +12,7 @@ import {
   openNote,
   selectParagraph,
   setNativeMenus,
+  watchNotices,
 } from './helpers';
 import {
   closeElectron,
@@ -245,5 +246,43 @@ test.describe('Importing a note cards were made from', () => {
         })
       )
       .toEqual({ file: COPY_PATH, shown: [{ path: COPY_PATH, text: embed }] });
+  });
+});
+
+test.describe('Importing a note as a copy', () => {
+  test('names the copy without the bidi override its name holds, and says so', async () => {
+    // Shows as "invoiceexe.pdf", as sync, git or a zip can deliver it
+    const sourcePath = 'sources/invoice\u202efdp.exe.md';
+    const copyPath = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/invoicefdp.exe.md`;
+    await window.evaluate(async (notePath) => {
+      const { app } = window as unknown as {
+        app: PageApp & {
+          vault: { create(path: string, data: string): Promise<unknown> };
+        };
+      };
+      const note = await app.vault.create(
+        notePath,
+        'An invoice, or so it says.'
+      );
+      await app.workspace.getLeaf('tab').openFile(note);
+      app.plugins.plugins['incremental-reading'].toggleAdvancedCommands(true);
+    }, sourcePath);
+    const notices = await watchNotices(window);
+
+    await executeCommandById(window, 'incremental-reading:import-article-copy');
+
+    await expect
+      .poll(async () => (await articleRows(window)).map((r) => r.reference))
+      .toEqual([copyPath]);
+    expect(await fs.readFile(path.join(vaultPath, copyPath), 'utf8')).toContain(
+      'An invoice, or so it says.'
+    );
+    await expect
+      .poll(notices)
+      .toContainEqual(
+        expect.stringContaining(
+          `removed characters a note name can't hold; the copy is named "invoicefdp.exe.md"`
+        )
+      );
   });
 });
