@@ -1379,7 +1379,7 @@ test.describe('PDF articles', () => {
         type: string
       ): { view: { file?: { path: string } }; working: boolean }[];
       getLeaf(newLeaf: 'tab' | false): {
-        openFile(file: unknown): Promise<void>;
+        openFile(file: unknown, openState?: unknown): Promise<void>;
       };
     };
     plugins: {
@@ -1408,6 +1408,15 @@ test.describe('PDF articles', () => {
     }, PDF_ID);
 
   const pdfBytes = (at: string) => fs.readFile(path.join(vaultPath, at));
+
+  /** How many writes of the database file are still under way. */
+  const pendingSaves = (page: Page) =>
+    page.evaluate(() => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading']
+        .reviewManager as unknown as { repo: { pendingSaveCount: number } };
+      return repo.pendingSaveCount;
+    });
 
   /** Whether Obsidian has indexed a file at `at`. */
   const hasFile = (page: Page, at: string) =>
@@ -1584,12 +1593,9 @@ test.describe('PDF articles', () => {
     // covering them
     const toolbar = activePdf.locator('.view-content > .pdf-toolbar');
     await expect(toolbar).toBeVisible();
-    const expectBarAboveToolbar = async () => {
-      const barBox = (await bar.boundingBox())!;
-      const toolbarBox = (await toolbar.boundingBox())!;
-      expect(barBox.y + barBox.height).toBeLessThanOrEqual(toolbarBox.y + 1);
-    };
-    await expectBarAboveToolbar();
+    const barBox = (await bar.boundingBox())!;
+    const toolbarBox = (await toolbar.boundingBox())!;
+    expect(barBox.y + barBox.height).toBeLessThanOrEqual(toolbarBox.y + 1);
 
     // The same tab, swapped to a PDF that isn't an article and back
     await open(OTHER_PATH, false);
@@ -1636,16 +1642,112 @@ test.describe('PDF articles', () => {
     }, OTHER_PATH);
     await expect(bar).toHaveCount(1);
     expect(await pdfTabCount()).toBe(2);
-
-    // Mobile moves the bars on notes to the bottom; this one stays on top
-    // The reload into mobile starts from an empty workspace
-    await emulateMobile(window, true);
-    await window.setViewportSize({ width: 400, height: 850 });
-    await open(RENAMED_PATH, false);
-    await expect(toolbar).toBeVisible();
-    await expect(bar).toHaveCount(1);
-    await expectBarAboveToolbar();
   });
+
+  for (const device of [
+    { name: 'phone', viewport: { width: 400, height: 850 }, isPhone: true },
+    { name: 'tablet', viewport: { width: 1280, height: 800 }, isPhone: false },
+  ]) {
+    test(`puts a PDF article tab's action bar at the bottom on a ${device.name}, where a note's goes`, async () => {
+      const NOTE = 'sources/Security Principles';
+      await seedPdfArticle();
+      await importArticle(window, NOTE);
+      // Reloading under a database write leaves a file the plugin can't load
+      await expect.poll(() => pendingSaves(window)).toBe(0);
+
+      // The reload into mobile starts from an empty workspace. The window is
+      // sized before the PDF opens: resizing an open PDF moves pdf.js around.
+      await emulateMobile(window, true);
+      await window.setViewportSize(device.viewport);
+      const body = window.locator('body');
+      if (device.isPhone) await expect(body).toHaveClass(/\bis-phone\b/);
+      else await expect(body).not.toHaveClass(/\bis-phone\b/);
+
+      /** Shows `at` in the active tab, a note in reading mode. */
+      const open = (at: string) =>
+        window.evaluate(async (p) => {
+          const { app } = window as unknown as { app: PageApp };
+          await app.workspace
+            .getLeaf(false)
+            .openFile(app.vault.getFileByPath(p), {
+              active: true,
+              state: { mode: 'preview' },
+            });
+        }, at);
+      const leaf = window.locator('.workspace-leaf.mod-active');
+      const bottomOf = async (locator: Locator) => {
+        const box = (await locator.boundingBox())!;
+        return box.y + box.height;
+      };
+
+      const viewContent = leaf.locator(
+        '.workspace-leaf-content > .view-content'
+      );
+      /**
+       * Where `bar` settles while the navbar is hidden. Auto full screen hides
+       * a phone's navbar by putting `is-hidden-nav` on <body> (read from
+       * obsidian.asar), and the bar drops to its tab's bottom edge with it, on
+       * a 0.3s transition. The navbar comes back before this returns.
+       */
+      const bottomWithNavHidden = async (bar: Locator) => {
+        const shown = await bottomOf(bar);
+        await window.evaluate(() =>
+          document.body.classList.add('is-hidden-nav')
+        );
+        const viewBottom = await bottomOf(viewContent);
+        await expect
+          .poll(async () => Math.abs((await bottomOf(bar)) - viewBottom))
+          .toBeLessThan(1);
+        const hidden = await bottomOf(bar);
+        await window.evaluate(() =>
+          document.body.classList.remove('is-hidden-nav')
+        );
+        await expect
+          .poll(async () => Math.abs((await bottomOf(bar)) - shown))
+          .toBeLessThan(1);
+        return hidden;
+      };
+
+      // Where a note puts its bar on this device: the bottom, clear of the
+      // navbar wherever there is one
+      await open(`${NOTE}.md`);
+      const noteBar = leaf.locator('.ir-reading-mode-bar');
+      await expect(noteBar).toBeVisible();
+      const noteBarBottom = await bottomOf(noteBar);
+      const noteHiddenNavBottom = device.isPhone
+        ? await bottomWithNavHidden(noteBar)
+        : null;
+
+      await open(PDF_PATH);
+      const pdfBar = leaf.locator('.ir-pdf-leaf-bar');
+      const container = leaf.locator('.view-content > .pdf-container');
+      await expect(pdfBar).toBeVisible();
+      await expect(container).toBeVisible();
+
+      // Below the viewer, taking room rather than covering it, and level with
+      // the note's bar
+      expect((await pdfBar.boundingBox())!.y).toBeGreaterThanOrEqual(
+        (await bottomOf(container)) - 1
+      );
+      expect(Math.abs((await bottomOf(pdfBar)) - noteBarBottom)).toBeLessThan(
+        1
+      );
+      if (noteHiddenNavBottom === null) return;
+
+      // Clear of the phone's navbar, rather than level with a note's bar that
+      // might itself have slipped under it
+      const navbar = window.locator('.mobile-navbar');
+      await expect(navbar).toBeVisible();
+      expect(await bottomOf(pdfBar)).toBeLessThanOrEqual(
+        (await navbar.boundingBox())!.y + 1
+      );
+
+      // And down with the navbar when it hides, as far as the note's bar goes
+      expect(
+        Math.abs((await bottomWithNavHidden(pdfBar)) - noteHiddenNavBottom)
+      ).toBeLessThan(1);
+    });
+  }
 
   test('follows a PDF article through renames and moves, and back out of the trash', async () => {
     await seedPdfArticle();
@@ -1746,16 +1848,7 @@ test.describe('PDF articles', () => {
   test('finds a PDF article moved while Obsidian was closed by its filename, and gives it back to its own file', async () => {
     await seedPdfArticle();
     // Quitting under a database write would lose the row being tested
-    await expect
-      .poll(() =>
-        window.evaluate(() => {
-          const { app } = window as unknown as { app: PageApp };
-          const { repo } = app.plugins.plugins['incremental-reading']
-            .reviewManager as unknown as { repo: { pendingSaveCount: number } };
-          return repo.pendingSaveCount;
-        })
-      )
-      .toBe(0);
+    await expect.poll(() => pendingSaves(window)).toBe(0);
     await expect
       .poll(async () => (await articleRow(window))?.reference)
       .toBe(PDF_PATH);
