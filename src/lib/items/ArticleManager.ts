@@ -17,6 +17,13 @@ import {
   supportsFrontmatter,
 } from '#/lib/mime';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import {
+  applyFrontmatterLinkEdits,
+  rebaseLinks,
+  resolveLinks,
+  type FrontmatterLinkEdit,
+  type ResolvedLink,
+} from '#/lib/rebase-links';
 import type {
   ArticleDisplay,
   ArticleRow,
@@ -556,6 +563,51 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
+   * The text of `copy`, which is being made of `file`'s text `content`, and
+   * the edits its frontmatter needs: each of `links` (see `resolveLinks`)
+   * re-based so it resolves from `copy` to what it did from `file`, or to
+   * `copy` where that was `file` (see `rebaseLinks`). Read while `copy` is
+   * there, so a link by name alone that it would take is seen to. With no
+   * `links`, which `file`'s cache couldn't say, or when re-basing fails, the
+   * text is as it was. Then, or when some link couldn't be re-based, a
+   * warning says so: a copy with some links that don't resolve beats none.
+   */
+  private rebaseCopy(
+    file: TFile,
+    copy: TFile,
+    content: string,
+    links: ResolvedLink[] | null
+  ): { text: string; frontmatter: FrontmatterLinkEdit[] } {
+    const { metadataCache } = this.app;
+    try {
+      if (links) {
+        const { missed, ...rebased } = rebaseLinks(content, links, {
+          original: file,
+          copy,
+          resolve: (linkpath) =>
+            metadataCache.getFirstLinkpathDest(linkpath, copy.path),
+          linktext: (target, omitMd) =>
+            metadataCache.fileToLinktext(target, copy.path, omitMd),
+        });
+        if (missed > 0) this.warnLinksKept(file);
+        return rebased;
+      }
+    } catch (error) {
+      console.error(error);
+    }
+    this.warnLinksKept(file);
+    return { text: content, frontmatter: [] };
+  }
+
+  /** Say that links in the copy of `file` may not lead where they did. */
+  private warnLinksKept(file: TFile) {
+    Obsidian.notify(
+      `Warning: couldn't update the links in the copy of "${file.basename}"; some may not lead where they did`,
+      true
+    );
+  }
+
+  /**
    * Copy a file to the data directory, then import the copy
    */
   private async importCopy(
@@ -574,8 +626,6 @@ export class ArticleManager extends ItemManager {
       return this.importBinaryCopy(file, priority, fixedIntervalDays);
     }
 
-    // Read the content of the current file
-    const content = await this.app.vault.cachedRead(file);
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
     if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
       Obsidian.notify(`Note contains a snippet or card tag; canceling import`);
@@ -610,11 +660,27 @@ export class ArticleManager extends ItemManager {
       );
     }
 
+    // Read once Obsidian has read the note, so its cache describes this text
+    await Obsidian.settleMetadataCache(this.app);
+    const content = await this.app.vault.cachedRead(file);
+    // Where its links go from it, before a copy is there to take any
+    const links = resolveLinks(
+      content,
+      this.app.metadataCache.getFileCache(file),
+      (linkpath) =>
+        this.app.metadataCache.getFirstLinkpathDest(linkpath, file.path)
+    );
+
     return this.withCopyTarget(file, async (importFileName) => {
       const taken = await this.takenFrom(file);
+      let frontmatterLinks: FrontmatterLinkEdit[] = [];
       // Create a copy in the articles directory
       const articleFile = await Obsidian.createNote({
-        content,
+        content: (copy) => {
+          const rebased = this.rebaseCopy(file, copy, content, links);
+          frontmatterLinks = rebased.frontmatter;
+          return rebased.text;
+        },
         frontmatter: {
           created: new Date().toISOString(),
         },
@@ -644,10 +710,12 @@ export class ArticleManager extends ItemManager {
         );
         frontmatterUpdates[`${SOURCE_PROPERTY_NAME}`] = sourceLink;
       }
+      // With its frontmatter links re-based, in the same write
       await Obsidian.updateFrontMatter(
         articleFile,
         frontmatterUpdates,
-        this.app
+        this.app,
+        (properties) => applyFrontmatterLinkEdits(properties, frontmatterLinks)
       );
 
       await this.insertImported(

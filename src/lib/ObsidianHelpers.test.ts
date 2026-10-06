@@ -4881,3 +4881,129 @@ describe('smartGetline', () => {
     expect(result.end).toBe(bulletLine.length);
   });
 });
+
+describe('updateFrontMatter with an edit', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('runs the edit first, in the same write as the updates, whichever form they take, so the updates win', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.string(),
+        fc.string(),
+        async (asFunction, id, link) => {
+          const fm: Record<string, unknown> = { related: 'old' };
+          const processFrontMatter = vi.fn(
+            async (
+              _file: TFile,
+              write: (fm: Record<string, unknown>) => void
+            ) => write(fm)
+          );
+          const app = makeApp({ fileManager: { processFrontMatter } as never });
+          const order: string[] = [];
+          const edit = (properties: Record<string, unknown>) => {
+            order.push('edit');
+            properties.related = link;
+            properties['ir-id'] = `edited ${id}`;
+          };
+          const updates = asFunction
+            ? (properties: Record<string, unknown>) => {
+                order.push('updates');
+                properties['ir-id'] = id;
+              }
+            : { 'ir-id': id };
+
+          await ObsidianHelpers.updateFrontMatter(
+            makeTFile(),
+            updates,
+            app,
+            edit
+          );
+
+          expect(processFrontMatter).toHaveBeenCalledTimes(1);
+          expect(fm).toEqual({ related: link, 'ir-id': id });
+          expect(order).toEqual(asFunction ? ['edit', 'updates'] : ['edit']);
+        }
+      )
+    );
+  });
+});
+
+describe('createNote with its text given by the new note', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('asks for the text once the note exists, empty, and writes what it gives', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.string(), async (text) => {
+        const createdFile = makeTFile();
+        const create = vi.fn().mockResolvedValue(createdFile);
+        const append = vi.fn().mockResolvedValue(undefined);
+        const app = makeApp({
+          vault: {
+            getAbstractFileByPath: vi.fn().mockReturnValue(null),
+            createFolder: vi.fn().mockResolvedValue(undefined),
+            create,
+            append,
+          } as unknown as App['vault'],
+        });
+        const content = vi.fn((file: TFile) => {
+          // Made, and nothing written to it yet
+          expect(create).toHaveBeenCalledWith(
+            `${DATA_DIRECTORY}/articles/note.md`,
+            ''
+          );
+          expect(append).not.toHaveBeenCalled();
+          return `${file.path}:${text}`;
+        });
+
+        const result = await ObsidianHelpers.createNote({
+          content,
+          fileName: 'note.md',
+          directory: `${DATA_DIRECTORY}/articles`,
+          app,
+        });
+
+        expect(content).toHaveBeenCalledExactlyOnceWith(createdFile);
+        expect(append).toHaveBeenCalledExactlyOnceWith(
+          createdFile,
+          `${createdFile.path}:${text}`
+        );
+        expect(result).toBe(createdFile);
+      })
+    );
+  });
+});
+
+describe('settleMetadataCache', () => {
+  it('settles once the metadata cache says it is clean', async () => {
+    let clean = () => {};
+    const onCleanCache = vi.fn((done: () => void) => {
+      clean = done;
+    });
+    const app = makeApp({
+      // Undocumented: MetadataCache.onCleanCache
+      metadataCache: { onCleanCache } as unknown as App['metadataCache'],
+    });
+    let settled = false;
+
+    const settling = ObsidianHelpers.settleMetadataCache(app).then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    clean();
+    await settling;
+
+    expect(settled).toBe(true);
+    expect(onCleanCache).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles at once where Obsidian has no onCleanCache', async () => {
+    const app = makeApp({
+      metadataCache: {} as unknown as App['metadataCache'],
+    });
+    await expect(ObsidianHelpers.settleMetadataCache(app)).resolves.toBe(
+      undefined
+    );
+  });
+});

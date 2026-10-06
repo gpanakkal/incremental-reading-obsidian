@@ -738,6 +738,26 @@ export async function askBeforeUpdatingLinks(window: Page) {
 }
 
 /**
+ * Set Obsidian's "New link format" for this vault: how a new link names its
+ * file. The test vault ships with the default, the shortest path.
+ *
+ * Undocumented: the setting is the `newLinkFormat` vault config, set through
+ * `Vault.setConfig`.
+ */
+export async function setNewLinkFormat(
+  window: Page,
+  format: 'shortest' | 'relative' | 'absolute'
+) {
+  await waitForLayoutReady(window);
+  await window.evaluate((value) => {
+    const { app } = window as unknown as {
+      app: { vault: { setConfig(key: string, value: unknown): void } };
+    };
+    app.vault.setConfig('newLinkFormat', value);
+  }, format);
+}
+
+/**
  * Rename the file at `from` to `to` as the file explorer does, through
  * `FileManager.renameFile`, and answer "Do not update" when Obsidian offers to
  * update the links to it (see {@link askBeforeUpdatingLinks}).

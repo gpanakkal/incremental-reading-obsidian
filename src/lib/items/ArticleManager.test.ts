@@ -31,6 +31,7 @@ import { getEndOfDay } from '#/lib/utils';
 // The mock the vitest config aliases `obsidian` to — imported by path so its
 // recorded notices are visible to the type checker as well as at runtime.
 import { Notice } from '#/test/__mocks__/obsidian';
+import { cachePosition, makeLinkVault, sectionsOf } from '#/test/link-vault';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
@@ -325,7 +326,15 @@ function makeNoteCopyPlugin(
   });
   return {
     ...plugin,
-    app: { ...plugin.app, vault: { ...vault, create, append: vi.fn() } },
+    app: {
+      ...plugin.app,
+      // `source` read by Obsidian, as a note is by the time it is imported:
+      // no links. The copy is not read yet.
+      metadataCache: {
+        getFileCache: vi.fn((file: TFile) => (file === source ? {} : null)),
+      },
+      vault: { ...vault, create, append: vi.fn() },
+    },
   };
 }
 
@@ -559,6 +568,80 @@ function makeTakenNoteCopyPlugin(note: TFile, paths: readonly string[] = []) {
       : (copy() ?? note)
   );
   return plugin;
+}
+
+/** The note {@link makeLinkedCopyPlugin} imports as a copy, and its copy. */
+const LINKING_NOTE = 'notes/Note.md';
+const LINKING_COPY = `${ARTICLES_FOLDER}/Note.md`;
+/** The files that note links to: `x` has a namesake beside the copy. */
+const LINKED = ['notes/x.md', `${ARTICLES_FOLDER}/x.md`, 'cards/c.md'];
+
+/** What the metadata cache says of a link written in `text`. */
+function linkIn(text: string, written: string, link: string) {
+  const start = text.indexOf(written);
+  return {
+    link,
+    original: written,
+    position: cachePosition(start, start + written.length),
+  };
+}
+
+/**
+ * A copy import of the note at {@link LINKING_NOTE}, whose text is `text` and
+ * whose metadata cache says `cache`, in a vault that also holds
+ * {@link LINKED} and resolves links as Obsidian does, writing new ones in the
+ * relative format. The copy, once made, is resolved to as well.
+ */
+function makeLinkedCopyPlugin(text: string, cache: unknown) {
+  const vault = makeLinkVault(
+    Object.fromEntries([LINKING_NOTE, ...LINKED].map((path) => [path, null])),
+    { linkFormat: 'relative' }
+  );
+  const note = vault.files.get(LINKING_NOTE)!;
+  const plugin = makeNoteCopyPlugin(note, { folders: [ARTICLES_FOLDER] });
+  for (const [path, file] of vault.files) plugin.files.set(path, file);
+  const synced = () => {
+    for (const [path, file] of plugin.files) {
+      if (!vault.files.has(path)) vault.files.set(path, file);
+    }
+  };
+  plugin.app.vault.cachedRead.mockResolvedValue(text);
+  const metadataCache = {
+    getFileCache: vi.fn((file: TFile) => (file === note ? cache : null)),
+    getFirstLinkpathDest: vi.fn((linkpath: string, from: string) => {
+      synced();
+      return vault.resolve(linkpath, from);
+    }),
+    fileToLinktext: vi.fn((file: TFile, from: string, omitMd: boolean) => {
+      synced();
+      return vault.app.metadataCache.fileToLinktext(file, from, omitMd);
+    }),
+  };
+  Object.assign(plugin.app.metadataCache, metadataCache);
+  return { plugin, note, metadataCache };
+}
+
+/** The notice a copy whose links weren't all re-based is made with. */
+const LINKS_KEPT_WARNING = `Warning: couldn't update the links in the copy of "Note"; some may not lead where they did`;
+
+/**
+ * The edit the copy's frontmatter is given in the write that makes it
+ * the article, applied to `properties`.
+ */
+function editedInImportWrite(
+  updateFrontMatter: { mock: { calls: unknown[][] } },
+  copy: TFile | undefined,
+  properties: Record<string, unknown>
+) {
+  const write = updateFrontMatter.mock.calls.find(
+    ([file, updates]) =>
+      file === copy &&
+      typeof updates === 'object' &&
+      updates !== null &&
+      'ir-id' in updates
+  );
+  (write?.[3] as (fm: Record<string, unknown>) => void)(properties);
+  return properties;
 }
 
 // #endregion
@@ -4333,6 +4416,252 @@ describe('import', () => {
         new Error(`Failed to create note ${ARTICLES}/my-note.md`)
       );
       expect(retry?.file.path).toBe(`${ARTICLES}/my-note.md`);
+    });
+  });
+
+  describe('a note holding links, as a copy', () => {
+    beforeEach(() => {
+      Notice.reset();
+      // The copy is created by the real helpers, so its path follows from
+      // its name and its text is what the vault is given
+      vi.spyOn(Obsidian, 'getDirectory').mockRestore();
+      vi.spyOn(Obsidian, 'getTargetPath').mockRestore();
+      vi.spyOn(Obsidian, 'createNote').mockRestore();
+    });
+
+    it('writes the copy with each link that would lead elsewhere from it re-based, before its text is written, and never writes the original', async () => {
+      const text =
+        '# Note\n\nSee [[x]] and [[Note#Part]].\n\n![[../cards/c|ir-hide-title]]\n';
+      const { plugin, note } = makeLinkedCopyPlugin(text, {
+        links: [
+          linkIn(text, '[[x]]', 'x'),
+          linkIn(text, '[[Note#Part]]', 'Note#Part'),
+        ],
+        embeds: [linkIn(text, '![[../cards/c|ir-hide-title]]', '../cards/c')],
+        sections: sectionsOf(text),
+      });
+      const { repo } = await makeSqlJsRepo();
+
+      const result = await new ArticleManager(plugin as never, repo).import(
+        note,
+        DEFAULT_PRIORITY,
+        null,
+        true
+      );
+
+      const copy = plugin.files.get(LINKING_COPY);
+      expect(result?.file).toBe(copy);
+      const { vault, fileManager } = plugin.app;
+      expect(vault.create.mock.calls).toEqual([[LINKING_COPY, '']]);
+      // The namesake beside the copy would take `[[x]]`; the copy has its
+      // own `Note`, and the embed's relative path climbs one folder short
+      expect(vault.append.mock.calls).toEqual([
+        [
+          copy,
+          '# Note\n\nSee [[../../notes/x]] and [[Note#Part]].\n\n![[../../cards/c|ir-hide-title]]\n',
+        ],
+      ]);
+      for (const write of [
+        vault.modify,
+        vault.process,
+        vault.rename,
+        vault.trash,
+        vault.delete,
+        fileManager.renameFile,
+        fileManager.trashFile,
+      ]) {
+        expect(write).not.toHaveBeenCalled();
+      }
+      expect(Notice.messages).not.toContain(LINKS_KEPT_WARNING);
+    });
+
+    it('re-bases a frontmatter link in the copy by its key, in the write that makes the copy the article', async () => {
+      const text = '---\nrelated: "[[x]]"\nup: "[[../cards/c]]"\n---\nBody\n';
+      const { plugin, note } = makeLinkedCopyPlugin(text, {
+        frontmatterLinks: [
+          { key: 'related', link: 'x', original: '[[x]]' },
+          { key: 'up', link: '../cards/c', original: '[[../cards/c]]' },
+        ],
+        sections: sectionsOf(text),
+      });
+      const { repo } = await makeSqlJsRepo();
+      const updateFrontMatter = vi.spyOn(Obsidian, 'updateFrontMatter');
+      updateFrontMatter.mockClear();
+
+      const result = await new ArticleManager(plugin as never, repo).import(
+        note,
+        DEFAULT_PRIORITY,
+        null,
+        true
+      );
+
+      expect(plugin.app.vault.append.mock.calls).toEqual([
+        [result?.file, text],
+      ]);
+      expect(
+        editedInImportWrite(updateFrontMatter, result?.file, {
+          related: '[[x]]',
+          up: '[[../cards/c]]',
+          other: 1,
+        })
+      ).toEqual({
+        related: '[[../../notes/x]]',
+        up: '[[../../cards/c]]',
+        other: 1,
+      });
+      expect(Notice.messages).not.toContain(LINKS_KEPT_WARNING);
+    });
+
+    it('edits no frontmatter link that needs no change', async () => {
+      const text = '---\nrelated: "[[notes/x]]"\n---\n';
+      const { plugin, note } = makeLinkedCopyPlugin(text, {
+        frontmatterLinks: [
+          { key: 'related', link: 'notes/x', original: '[[notes/x]]' },
+        ],
+        sections: sectionsOf(text),
+      });
+      const { repo } = await makeSqlJsRepo();
+      const updateFrontMatter = vi.spyOn(Obsidian, 'updateFrontMatter');
+      updateFrontMatter.mockClear();
+
+      const result = await new ArticleManager(plugin as never, repo).import(
+        note,
+        DEFAULT_PRIORITY,
+        null,
+        true
+      );
+
+      expect(
+        editedInImportWrite(updateFrontMatter, result?.file, {
+          related: '[[notes/x]]',
+        })
+      ).toEqual({ related: '[[notes/x]]' });
+    });
+
+    it("copies the text as it is, with a lasting warning, when the note's cache is missing or was read from other text", async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.constantFrom('missing', 'stale'), async (state) => {
+          const text = 'See [[x]].\n';
+          const { plugin, note } = makeLinkedCopyPlugin(
+            text,
+            state === 'missing'
+              ? null
+              : {
+                  // Read before "See " was written
+                  links: [
+                    {
+                      link: 'x',
+                      original: '[[x]]',
+                      position: cachePosition(0, 5),
+                    },
+                  ],
+                  sections: sectionsOf('[[x]].'),
+                }
+          );
+          const { repo } = await makeSqlJsRepo();
+          const notify = vi.spyOn(Obsidian, 'notify');
+          notify.mockClear();
+
+          const result = await new ArticleManager(plugin as never, repo).import(
+            note,
+            DEFAULT_PRIORITY,
+            null,
+            true
+          );
+
+          expect(result?.file.path).toBe(LINKING_COPY);
+          expect(plugin.app.vault.append.mock.calls).toEqual([
+            [result?.file, text],
+          ]);
+          expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, true);
+        })
+      );
+    });
+
+    it('warns, lastingly, when a link that needed re-basing is left as written', async () => {
+      // The cache reads `x` where the note holds `y`: no path this can trust
+      const text = 'See [[y]].\n';
+      const { plugin, note } = makeLinkedCopyPlugin(text, {
+        links: [linkIn(text, '[[y]]', 'x')],
+        sections: sectionsOf(text),
+      });
+      const { repo } = await makeSqlJsRepo();
+      const notify = vi.spyOn(Obsidian, 'notify');
+      notify.mockClear();
+
+      const result = await new ArticleManager(plugin as never, repo).import(
+        note,
+        DEFAULT_PRIORITY,
+        null,
+        true
+      );
+
+      expect(plugin.app.vault.append.mock.calls).toEqual([
+        [result?.file, text],
+      ]);
+      expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, true);
+    });
+
+    it('copies the text as it is, warning lastingly and logging why, when re-basing fails', async () => {
+      const logged = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => undefined);
+      const text = 'See [[x]].\n';
+      const { plugin, note, metadataCache } = makeLinkedCopyPlugin(text, {
+        links: [linkIn(text, '[[x]]', 'x')],
+        sections: sectionsOf(text),
+      });
+      const failure = new Error('resolver failed');
+      metadataCache.getFirstLinkpathDest.mockImplementation(
+        (_linkpath: string, from: string) => {
+          if (from === LINKING_COPY) throw failure;
+          return plugin.files.get('notes/x.md') ?? null;
+        }
+      );
+      const { repo } = await makeSqlJsRepo();
+      const notify = vi.spyOn(Obsidian, 'notify');
+      notify.mockClear();
+
+      const result = await new ArticleManager(plugin as never, repo).import(
+        note,
+        DEFAULT_PRIORITY,
+        null,
+        true
+      );
+
+      expect(result?.file.path).toBe(LINKING_COPY);
+      expect(plugin.app.vault.append.mock.calls).toEqual([
+        [result?.file, text],
+      ]);
+      expect(logged).toHaveBeenCalledWith(failure);
+      expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, true);
+    });
+
+    it('reads the note only once Obsidian has finished reading the vault', async () => {
+      const text = 'Plain.\n';
+      const { plugin, note } = makeLinkedCopyPlugin(text, {
+        sections: sectionsOf(text),
+      });
+      let settle = () => {};
+      // Undocumented: MetadataCache.onCleanCache
+      const onCleanCache = vi.fn((done: () => void) => {
+        settle = done;
+      });
+      Object.assign(plugin.app.metadataCache, { onCleanCache });
+      const { repo } = await makeSqlJsRepo();
+
+      const imported = new ArticleManager(plugin as never, repo).import(
+        note,
+        DEFAULT_PRIORITY,
+        null,
+        true
+      );
+      await vi.waitFor(() => expect(onCleanCache).toHaveBeenCalled());
+      expect(plugin.app.vault.cachedRead).not.toHaveBeenCalled();
+      settle();
+
+      expect((await imported)?.file.path).toBe(LINKING_COPY);
+      expect(plugin.app.vault.cachedRead).toHaveBeenCalledWith(note);
     });
   });
 

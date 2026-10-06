@@ -115,10 +115,21 @@ export function parseSourceLink(text: string): SourceLink | null {
 }
 
 /**
+ * `target` encoded as Obsidian encodes a bare markdown link's: only spaces,
+ * backslashes and control characters (`YE` in its bundle, read from the app;
+ * undocumented).
+ */
+export function encodeLinkTarget(target: string): string {
+  // eslint-disable-next-line no-control-regex -- the characters Obsidian encodes
+  return target.replace(/[\\\x00\x08\x0B\x0C\x0E-\x1F ]/g, (c) =>
+    encodeURIComponent(c)
+  );
+}
+
+/**
  * `link` written out as {@link parseSourceLink} reads it, the way Obsidian
  * writes one: a markdown link's target encoded only where Obsidian encodes it
- * (spaces, backslashes and control characters: `YE` in its bundle, read from
- * the app; undocumented), a wikilink's and an angled one's as they are.
+ * (see {@link encodeLinkTarget}), a wikilink's and an angled one's as they are.
  */
 export function formatSourceLink({
   form,
@@ -130,12 +141,7 @@ export function formatSourceLink({
   if (form === 'wiki') {
     return `[[${target}${alias === null ? '' : `|${alias}`}]]`;
   }
-  const written =
-    form === 'angled'
-      ? `<${target}>`
-      : target.replace(/[\\\x00\x08\x0B\x0C\x0E-\x1F ]/g, (c) =>
-          encodeURIComponent(c)
-        );
+  const written = form === 'angled' ? `<${target}>` : encodeLinkTarget(target);
   return `[${alias ?? ''}](${written})`;
 }
 
