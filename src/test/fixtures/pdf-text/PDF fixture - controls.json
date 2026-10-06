@@ -1,0 +1,59 @@
+{
+  "source": "e2e-tests/setup/test-vault/sources/PDF fixture - controls.pdf",
+  "obsidian": "1.13.7",
+  "pdfjs": {
+    "version": "5.3.34",
+    "build": 34,
+    "commit": "cc1e2a3e0"
+  },
+  "getTextContent": {
+    "includeMarkedContent": true,
+    "disableNormalization": true
+  },
+  "pages": [
+    {
+      "view": [
+        0,
+        0,
+        612,
+        792
+      ],
+      "items": [
+        {
+          "str": "Tabbed\there report\u202efdp.exe",
+          "dir": "ltr",
+          "width": 127.18199999999996,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            700
+          ],
+          "fontName": "g_d4_f1",
+          "hasEOL": true,
+          "chars": []
+        },
+        {
+          "str": "Fla Rep\ufe00o\udb40\udd00rt",
+          "dir": "ltr",
+          "width": 39.115999999999985,
+          "height": 11,
+          "transform": [
+            11,
+            0,
+            0,
+            11,
+            72,
+            685
+          ],
+          "fontName": "g_d4_f1",
+          "hasEOL": false,
+          "chars": []
+        }
+      ]
+    }
+  ]
+}

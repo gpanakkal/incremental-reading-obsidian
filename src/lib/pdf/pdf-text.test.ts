@@ -1,3 +1,5 @@
+import { Markdown } from '#/lib/Markdown';
+import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import fc from 'fast-check';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
@@ -227,7 +229,181 @@ function toRoman(n: number) {
     .join('');
 }
 
+const fromCodes = (...codes: number[]) => String.fromCodePoint(...codes);
+
+/**
+ * The bidi embeddings and overrides (U+202A–U+202E) and isolates
+ * (U+2066–U+2069).
+ */
+const BIDI_CONTROLS = [
+  0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069,
+].map((code) => fromCodes(code));
+const BIDI_CONTROL_PATTERN = new RegExp(`[${BIDI_CONTROLS.join('')}]`);
+
+/** LRM, RLM and ALM, which text taken from a PDF keeps. */
+const DIRECTION_MARKS = [0x200e, 0x200f, 0x061c].map((code) => fromCodes(code));
+const RLM = DIRECTION_MARKS[1];
+
+/** Default-ignorable and format characters: what shows as nothing. */
+const INVISIBLE = /[\p{Default_Ignorable_Code_Point}\p{Cf}]/u;
+
+/**
+ * Unicode's prepended concatenation marks: format characters that show, as a
+ * sign over the number after them.
+ */
+const PREPENDED_MARKS = [
+  0x600, 0x601, 0x602, 0x603, 0x604, 0x605, 0x6dd, 0x70f, 0x890, 0x891, 0x8e2,
+  0x110bd, 0x110cd,
+].map((code) => fromCodes(code));
+
+/**
+ * A joiner or one of the variation selectors a note's name can keep:
+ * invisible, but kept where a sequence needs it.
+ */
+function isSequenceChar(char: string) {
+  const code = char.codePointAt(0)!;
+  return (
+    code === 0x200c ||
+    code === 0x200d ||
+    code === 0xfe0e ||
+    code === 0xfe0f ||
+    (code >= 0x180b && code <= 0x180d) ||
+    code === 0x180f
+  );
+}
+
+/** Whether `char` shows, or is a direction mark that text keeps. */
+const isKeptOutright = (char: string) =>
+  !INVISIBLE.test(char) ||
+  PREPENDED_MARKS.includes(char) ||
+  DIRECTION_MARKS.includes(char);
+
+/** Whether text taken from a PDF may hold `char`, in the right context. */
+const keepsChar = (char: string) =>
+  isKeptOutright(char) || isSequenceChar(char);
+
+/**
+ * `text` without its code points beyond the BMP, halves of pairs alone
+ * included, nor U+FFFD, which half a pair alone becomes.
+ */
+const inBmp = (text: string) => text.replace(/[\uD800-\uDFFF\uFFFD]/g, '');
+
+/** `text` without its invisible characters, the direction marks aside. */
+const withoutInvisible = (text: string) =>
+  Array.from(text).filter(isKeptOutright).join('');
+
+/** `text` with each run of direction marks cut down to its last. */
+const lastMarks = (text: string) =>
+  Array.from(text)
+    .filter(
+      (char, i, chars) =>
+        !DIRECTION_MARKS.includes(char) ||
+        !DIRECTION_MARKS.includes(chars[i + 1])
+    )
+    .join('');
+
 // Arbitraries
+
+/**
+ * Invisible characters: the bidi controls, the direction marks, joiners,
+ * variation selectors, tag characters, and the other default-ignorables.
+ */
+const invisibleCharArb = fc.oneof(
+  fc.constantFrom(...BIDI_CONTROLS, ...DIRECTION_MARKS),
+  fc
+    .constantFrom(
+      0xad,
+      0x34f,
+      0x115f,
+      0x180b,
+      0x180e,
+      0x200b,
+      0x200c,
+      0x200d,
+      0x2060,
+      0x3164,
+      0xfe0f,
+      0xfeff,
+      0xffa0,
+      0x1d173,
+      0xe0100,
+      // Format characters outside the default-ignorables, and one that shows
+      0xfff9,
+      0x13430,
+      0x600
+    )
+    .map((code) => fromCodes(code)),
+  // Variation selectors no name keeps, tag characters and unassigned
+  // default-ignorables
+  fc.integer({ min: 0xfe00, max: 0xfe0d }).map((code) => fromCodes(code)),
+  fc.integer({ min: 0xe0000, max: 0xe0fff }).map((code) => fromCodes(code))
+);
+
+/**
+ * Sequences text keeps whole, invisible characters and all: emoji, and
+ * scripts that need a joiner or a variation selector.
+ */
+const SEQUENCES = [
+  fromCodes(0x2764, 0xfe0f),
+  fromCodes(0x31, 0xfe0f, 0x20e3),
+  fromCodes(0x1f3f3, 0xfe0f, 0x200d, 0x1f308),
+  fromCodes(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467),
+  fromCodes(0x645, 0x6cc, 0x200c, 0x62e, 0x648, 0x627, 0x647),
+  fromCodes(0x915, 0x94d, 0x200d, 0x937),
+  fromCodes(0x2764, 0xfe0e),
+  fromCodes(0x23, 0xfe0f, 0x20e3),
+  fromCodes(0x2a, 0xfe0f, 0x20e3),
+  fromCodes(0x1820, 0x180b),
+];
+
+/** Characters text always drops: bidi controls and other invisible ones. */
+const droppedCharArb = fc.oneof(
+  fc.constantFrom(...BIDI_CONTROLS),
+  fc
+    .constantFrom(0x34f, 0x115f, 0x200b, 0x2060, 0x3164, 0x1d173)
+    .map((code) => fromCodes(code))
+);
+
+/**
+ * Text of whole sequences, letters and spaces, with characters text always
+ * drops between them.
+ */
+const sequenceTextArb = fc
+  .array(
+    fc.oneof(
+      fc.constantFrom(...SEQUENCES),
+      droppedCharArb,
+      fc.constantFrom('a', 'Z', ' ')
+    ),
+    { minLength: 1, maxLength: 6 }
+  )
+  .map((units) => units.join(''));
+
+/**
+ * Any text, thick with invisible characters, and with what they can stand
+ * beside in a sequence: letters, emoji, whitespace.
+ */
+const invisibleRichTextArb = fc.string({
+  unit: fc.oneof(
+    invisibleCharArb,
+    fc.constantFrom(
+      'a',
+      'Z',
+      ' ',
+      '\t',
+      '\n',
+      '-',
+      '.',
+      '#',
+      fromCodes(0x5d0),
+      fromCodes(0x628),
+      fromCodes(0x1f3f4),
+      fromCodes(0x1f600)
+    ),
+    fc.string({ unit: 'binary', minLength: 1, maxLength: 1 })
+  ),
+  maxLength: 10,
+});
 
 const LIGATURE_PATTERN = new RegExp(`[${LIGATURE_CHARS.join('')}]`);
 
@@ -337,6 +513,7 @@ const bodyYArb = fc.double({ min: 80, max: 712, noNaN: true });
 const rewrittenTextArb = fc.string({
   unit: fc.oneof(
     fc.constantFrom(...HYPHENS, ...LIGATURE_CHARS),
+    invisibleCharArb,
     fc.string({ unit: 'binary', minLength: 1, maxLength: 1 })
   ),
   maxLength: 10,
@@ -757,6 +934,32 @@ describe('extractText', () => {
       ],
     ]);
     expect(extractText(pages, at(1, 0, 6), at(1, 1, 7))).toBe('what matters');
+  });
+
+  it('drops a bidi control that would reorder the text, and keeps the tab beside it', () => {
+    const rlo = fromCodes(0x202e);
+    expect(extractAll([makeItem(`Tabbed\there report${rlo}fdp.exe`)])).toBe(
+      'Tabbed\there reportfdp.exe'
+    );
+  });
+
+  it('reads half a surrogate pair standing alone as the replacement character, so no hidden character forms where an invisible one is dropped', () => {
+    const replacement = fromCodes(0xfffd);
+    // Each two halves would spell a tag character, joined
+    expect(
+      extractAll([makeItem('a\uDB40\u200B\uDC41\uDB40\u00AD\uDC42b')])
+    ).toBe(`a${replacement.repeat(4)}b`);
+  });
+
+  it('keeps the direction marks that set punctuation in right-to-left text', () => {
+    const shalom = fromCodes(0x5e9, 0x5dc, 0x5d5, 0x5dd);
+    const text = `${shalom}${RLM}. 1${RLM}-${RLM}2`;
+    expect(extractAll([makeItem(text)])).toBe(text);
+  });
+
+  it('gives text that escapes as it reads: a tag after a dropped control is escaped', () => {
+    const text = extractAll([makeItem(`word ${fromCodes(0x202e)}#tag`)]);
+    expect(Markdown.escape(text)).toBe('word \\#tag');
   });
 });
 
@@ -1622,16 +1825,69 @@ describe('extractText properties', () => {
             expect(text).toBe('');
             return;
           }
-          const expected = spellOut(raw);
-          expect(withoutHyphens(compact(text))).toBe(
-            withoutHyphens(compact(expected))
+          // Invisible characters are dropped, all but the direction marks
+          // and those a sequence needs, the soft hyphen among them. Code
+          // points beyond the BMP aren't compared: a cut or a join can split
+          // or pair their halves, and half a pair alone reads as U+FFFD
+          const expected = withoutInvisible(inBmp(spellOut(raw)));
+          const visible = withoutInvisible(inBmp(text));
+          // A run of direction marks keeps its last
+          expect(lastMarks(withoutHyphens(compact(visible)))).toBe(
+            lastMarks(withoutHyphens(compact(expected)))
           );
-          const dropped = hyphenCount(expected) - hyphenCount(text);
+          const dropped = hyphenCount(expected) - hyphenCount(visible);
           expect(dropped).toBeGreaterThanOrEqual(0);
           expect(dropped).toBeLessThanOrEqual(droppable);
           expect(text).not.toMatch(LIGATURE_PATTERN);
         }
       )
+    );
+  });
+
+  it('never gives a bidi control, nor an invisible character but a direction mark or one a sequence needs', () => {
+    fc.assert(
+      fc.property(
+        viewArb().chain((view) =>
+          fc.tuple(
+            fc.constant(view),
+            itemsArb(
+              invisibleRichTextArb,
+              fc.double({ min: view[1], max: view[3], noNaN: true })
+            )
+          )
+        ),
+        ([view, items]) => {
+          const pages = new Map([[1, makePage(items, view)]]);
+          const [start, end] = wholeRange([items]);
+          const text = extractText(pages, start, end);
+          expect(text).not.toMatch(BIDI_CONTROL_PATTERN);
+          // Nor two direction marks side by side
+          expect(lastMarks(text)).toBe(text);
+          expect(Array.from(text).filter((char) => !keepsChar(char))).toEqual(
+            []
+          );
+          // Nor a joiner, variation selector or tag character out of the
+          // sequence that keeps it there
+          expect(
+            ObsidianHelpers.stripInvisible(text, { keepDirectionMarks: true })
+          ).toBe(text);
+        }
+      )
+    );
+  });
+
+  it('keeps every joiner and variation selector of a whole sequence', () => {
+    fc.assert(
+      fc.property(itemsArb(sequenceTextArb, bodyYArb), (items) => {
+        const pages = new Map([[1, makePage(items)]]);
+        const [start, end] = wholeRange([items]);
+        const text = extractText(pages, start, end);
+        const sequenceChars = (str: string) =>
+          Array.from(str).filter(isSequenceChar);
+        expect(sequenceChars(text)).toEqual(
+          items.flatMap((item) => sequenceChars(item.str))
+        );
+      })
     );
   });
 
@@ -1658,7 +1914,12 @@ describe('extractText properties', () => {
               ? `${head}${tail}`
               : `${head}${hyphen}${tail}`;
           }
-          expect(extractAll(items)).toBe(spellOut(expected));
+          // A soft hyphen kept, before a capital, is invisible: dropped too
+          expect(extractAll(items)).toBe(
+            ObsidianHelpers.stripInvisible(spellOut(expected), {
+              keepDirectionMarks: true,
+            })
+          );
         }
       )
     );
@@ -1919,6 +2180,7 @@ describe("extractText over the text content of Obsidian's pdf.js", () => {
   const layout = loadTextFixture('PDF fixture - layout');
   const noText = loadTextFixture('PDF fixture - no text');
   const hostile = loadTextFixture('PDF fixture - hostile');
+  const controls = loadTextFixture('PDF fixture - controls');
 
   async function extract(fixture: TextFixture, start: number, end: number) {
     const pages = await readPageTexts(fixtureDocument(fixture), start, end);
@@ -1976,6 +2238,26 @@ describe("extractText over the text content of Obsidian's pdf.js", () => {
         '--- 1. a list - item + more\n\n' +
         last
     );
+  });
+
+  it('reads a line whose glyphs map to a tab and a right-to-left override without the override, as the line shows', async () => {
+    const start = anchorAt(controls, 1, 'Tabbed', 0);
+    expect(
+      await extract(controls, start, anchorAt(controls, 1, 'Tabbed', 26))
+    ).toBe('Tabbed\there reportfdp.exe');
+    // Where the user's own drag ended, as the text layer reorders the line
+    expect(
+      await extract(controls, start, anchorAt(controls, 1, 'Tabbed', 21))
+    ).toBe('Tabbed\there reportfd');
+  });
+
+  it('reads a line hiding variation selectors in its words without them, as the line shows', async () => {
+    const hidden = anchorAt(controls, 1, 'Fla', 0);
+    const line =
+      'Fla Rep' + fromCodes(0xfe00) + 'o' + fromCodes(0xe0100) + 'rt';
+    expect(
+      await extract(controls, hidden, anchorAt(controls, 1, 'Fla', line.length))
+    ).toBe('Fla Report');
   });
 
   it('reads columns in turn, rejoining words across the gutter and the page', async () => {

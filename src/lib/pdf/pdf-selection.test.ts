@@ -643,6 +643,77 @@ describe('readPdfSelection', () => {
     expect(read).toBeNull();
   });
 
+  it('reads a right-to-left override out of its text, and links to where it was as before, override and all', async () => {
+    const controls = loadTextFixture('PDF fixture - controls');
+    const viewerEl = buildViewer(controls.pages);
+    const line = spanAt(viewerEl, 1, 0).firstChild!;
+
+    // Where the user's own drag ended: right after `fd`, the override before
+    const read = await readPdfSelection(
+      rangeBetween([line, 0], [line, 21]),
+      viewerEl,
+      makeDocument(controls.pages)
+    );
+
+    expect(read).toEqual({
+      start: at(1, 0, 0),
+      end: at(1, 0, 21),
+      text: 'Tabbed\there reportfd',
+      subpath: '#page=1&selection=0,0,0,21',
+    });
+  });
+
+  it('is null for a selection of nothing but invisible characters, direction marks and blank text', async () => {
+    const [rlo, rli, lrm, rlm, alm] = [
+      0x202e, 0x2067, 0x200e, 0x200f, 0x061c,
+    ].map((code) => String.fromCodePoint(code));
+    const pages = [
+      {
+        view: [0, 0, 612, 792],
+        items: ['Hello', rlo, ' ', rli, 'world', rlm, ' ', lrm + alm].map((s) =>
+          makeItem(s)
+        ),
+      },
+    ];
+    const viewerEl = buildViewer(pages);
+    const doc = makeDocument(pages);
+    const point = (idx: number, char: number): [Node, number] => [
+      spanAt(viewerEl, 1, idx).firstChild!,
+      char,
+    ];
+
+    expect(
+      await readPdfSelection(
+        rangeBetween(point(1, 0), point(1, 1)),
+        viewerEl,
+        doc
+      )
+    ).toBeNull();
+    // The override and isolate dropped, the space between them is all left
+    expect(
+      await readPdfSelection(
+        rangeBetween(point(1, 0), point(3, 1)),
+        viewerEl,
+        doc
+      )
+    ).toBeNull();
+    // The marks are kept in text, but are no text on their own
+    expect(
+      await readPdfSelection(
+        rangeBetween(point(5, 0), point(7, 2)),
+        viewerEl,
+        doc
+      )
+    ).toBeNull();
+    expect(
+      await readPdfSelection(
+        rangeBetween(point(4, 4), point(5, 1)),
+        viewerEl,
+        doc
+      )
+    ).toMatchObject({ text: `d${rlm}` });
+  });
+
   it('is null, and says why in the console, for a text layer no anchor can hold', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const viewerEl = buildViewer(fixture.pages);

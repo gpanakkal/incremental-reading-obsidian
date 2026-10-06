@@ -39,6 +39,14 @@ export const CONTROL_TITLE_CHARS = new Set([
   ...charRange(0x7f, 0x9f),
   ...[0x2028, 0x2029].map((code) => String.fromCharCode(code)),
 ]);
+/**
+ * LRM, RLM and ALM: marks that only move punctuation and digits at a change
+ * of direction, which right-to-left text sets with them. Text taken from a PDF
+ * keeps them; a title doesn't.
+ */
+export const DIRECTION_MARKS: ReadonlySet<string> = new Set(
+  [0x200e, 0x200f, 0x061c].map((code) => String.fromCodePoint(code))
+);
 export const INVALID_TITLE_MESSAGE =
   `Titles cannot contain control or invisible characters, ` +
   `or any of the following: ` +

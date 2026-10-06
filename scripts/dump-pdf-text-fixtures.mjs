@@ -29,6 +29,7 @@ const FIXTURES = [
   'PDF fixture - layout.pdf',
   'PDF fixture - no text.pdf',
   'PDF fixture - hostile.pdf',
+  'PDF fixture - controls.pdf',
 ];
 
 /** The options Obsidian's text layer renders with, as in pdf-text.ts. */
@@ -36,6 +37,19 @@ const TEXT_CONTENT_OPTIONS = {
   includeMarkedContent: true,
   disableNormalization: true,
 };
+
+/**
+ * `json` with every invisible character written as a `\uXXXX` escape, which
+ * reads back the same: a raw bidi control would reorder the file as shown.
+ */
+function escapeInvisible(json) {
+  return json.replace(/[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu, (char) =>
+    Array.from(
+      { length: char.length },
+      (_, i) => `\\u${char.charCodeAt(i).toString(16).padStart(4, '0')}`
+    ).join('')
+  );
+}
 
 function findAsar() {
   const candidates = [
@@ -100,7 +114,7 @@ try {
       getTextContent: TEXT_CONTENT_OPTIONS,
       pages,
     };
-    await writeFile(out, `${JSON.stringify(json, null, 2)}\n`);
+    await writeFile(out, `${escapeInvisible(JSON.stringify(json, null, 2))}\n`);
     console.log(`wrote ${out}`);
   }
 } finally {

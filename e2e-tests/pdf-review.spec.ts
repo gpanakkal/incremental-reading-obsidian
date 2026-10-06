@@ -49,6 +49,8 @@ const HOSTILE_PDF_PATH = 'sources/PDF fixture - hostile.pdf';
 const CONTROLS_PDF_PATH = 'sources/PDF fixture - controls.pdf';
 /** That line, as the PDF reads. */
 const CONTROLS_LINE = 'Tabbed\there report\u202efdp.exe';
+/** That line as it shows, without the override: what a note takes of it. */
+const CONTROLS_TEXT = 'Tabbed\there reportfdp.exe';
 /**
  * The line after it, as the PDF reads. It shows as "Flag Report", and its
  * ToUnicode CMap reads a tag sequence spelling an instruction after the "g",
@@ -1114,7 +1116,7 @@ test.describe('Snippets and cards from a PDF article', () => {
     );
   });
 
-  test('makes a snippet and a card of text holding a tab and a right-to-left override, named without either so it reads as the text', async () => {
+  test('makes a snippet and a card of text holding a tab and a right-to-left override, named without either and written without the override so they read as the text, linked and highlighted as the PDF holds it', async () => {
     await importFixture(window, CONTROLS_PDF_PATH);
     await beginReview(window);
     await expect(textItem(window, 1, 0)).toBeAttached();
@@ -1125,8 +1127,12 @@ test.describe('Snippets and cards from a PDF article', () => {
     await actionBar(window)
       .getByRole('button', { name: 'Create card' })
       .click();
-    await expect(answerText(window)).toHaveText(CONTROLS_LINE);
-    await selectAnswer(window, 'here');
+    // The answer is chosen from the text as a note takes it
+    await expect
+      .poll(() => answerText(window).evaluate((el) => el.textContent))
+      .toBe(CONTROLS_TEXT);
+    // After where the override stood: its offsets are in the text as taken
+    await selectAnswer(window, 'fdp');
     await window.keyboard.press('Enter');
     await expect.poll(() => cards(window)).toHaveLength(1);
 
@@ -1148,13 +1154,47 @@ test.describe('Snippets and cards from a PDF article', () => {
     const [left, right] = CLOZE_DELIMITERS;
     expect(named(snippet.reference)).toBe('Tabbed here reportfdp.exe');
     expect(named(card.reference)).toBe(
-      `Tabbed ${left} here ${right} reportfdp.exe`
+      `Tabbed here report${left} fdp ${right}.exe`
     );
-    // The text itself keeps them
-    expect(snippet.body).toBe(Markdown.escape(CONTROLS_LINE));
+    // The text keeps the tab, but not the override that would reverse it
+    expect(snippet.body).toBe(Markdown.escape(CONTROLS_TEXT));
+    const answer = CONTROLS_TEXT.indexOf('fdp');
+    const escaped = Markdown.escapeAround(CONTROLS_TEXT, [
+      answer,
+      answer + 'fdp'.length,
+    ]);
+    const [from, to] = escaped.range;
+    expect(card.body).toBe(
+      escaped.text.slice(0, from) +
+        `${left} ${escaped.text.slice(from, to)} ${right}` +
+        escaped.text.slice(to)
+    );
+    // Linked to the PDF's own text, override and all: the whole item
+    const subpath = `#page=1&selection=0,0,0,${CONTROLS_LINE.length}`;
+    expect(snippet.source).toContain(subpath);
+    expect(card.source).toContain(subpath);
+    // Highlighted over the whole of it
+    await expect
+      .poll(async () =>
+        (await highlightsIn(textItem(window, 1, 0)))
+          .filter(([ref]) => ref === snippet.reference)
+          .map(([, text]) => text)
+          .join('')
+      )
+      .toBe(CONTROLS_LINE);
+
+    // And its context lights up the same text
+    await goToContextFrom(window, snippet.reference);
+    await expect
+      .poll(() =>
+        highlighted(window).evaluateAll((els) =>
+          els.map((el) => el.textContent).join('')
+        )
+      )
+      .toBe(CONTROLS_LINE);
   });
 
-  test('names a snippet of text hiding variation selectors without them', async () => {
+  test('names a snippet of text hiding variation selectors without them, and writes it without them', async () => {
     await importFixture(window, CONTROLS_PDF_PATH);
     await beginReview(window);
     await expect(textItem(window, 1, 1)).toBeAttached();
@@ -1173,7 +1213,8 @@ test.describe('Snippets and cards from a PDF article', () => {
       .replace(/ - \w+\.md$/, '');
     // `Re`, U+FE00, `port` would look like `Report` and be another name
     expect(name).toBe('Fla Report');
-    expect(snippet.body).toBe(Markdown.escape(HIDDEN_LINE));
+    // Nor does its text carry them
+    expect(snippet.body).toBe(Markdown.escape('Fla Report'));
   });
 
   /**

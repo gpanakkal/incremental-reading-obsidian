@@ -313,8 +313,8 @@ function isVariationSelector(char: string | undefined) {
 }
 /**
  * Whether a title keeps `selector` between `base` and `next`: U+FE0E or
- * U+FE0F after an emoji pictograph, or after a digit when a keycap comes
- * next; a Mongolian one after Mongolian. U+FE00–U+FE0D and the ideographic
+ * U+FE0F after an emoji pictograph, or after a digit, `#` or `*` (which only
+ * text keeps) when a keycap comes next; a Mongolian one after Mongolian. U+FE00–U+FE0D and the ideographic
  * ones after nothing.
  */
 function selectorFits(
@@ -325,7 +325,7 @@ function selectorFits(
   if (base === undefined || isVariationSelector(base)) return false;
   const code = selector.codePointAt(0) ?? -1;
   if (code === 0xfe0e || code === 0xfe0f) {
-    if (/^[0-9]$/.test(base)) return next === KEYCAP;
+    if (/^[0-9#*]$/.test(base)) return next === KEYCAP;
     return /\p{Emoji}/u.test(base) && /\p{Extended_Pictographic}/u.test(base);
   }
   if (code >= 0x180b && code <= 0x180f) {
@@ -667,6 +667,97 @@ function expectedMidTitle(text: string) {
     .join('')
     .normalize('NFC');
 }
+
+/** LRM, RLM and ALM, which a body keeps: they set where punctuation shows. */
+const DIRECTION_MARKS = new Set([
+  fromCodes(0x200e),
+  fromCodes(0x200f),
+  fromCodes(0x061c),
+]);
+const isDirectionMark = (char: string) => DIRECTION_MARKS.has(char);
+/** Whether `sub`'s code points all stand in `text`, in the same order. */
+function isSubsequence(sub: string, text: string) {
+  const rest = Array.from(text);
+  return Array.from(sub).every((char) => {
+    const at = rest.indexOf(char);
+    if (at < 0) return false;
+    rest.splice(0, at + 1);
+    return true;
+  });
+}
+/** The replacement character, which stands for half a surrogate pair. */
+const REPLACEMENT = fromCodes(0xfffd);
+/** `text` with each half of a surrogate pair standing alone replaced. */
+const replaceLoneSurrogates = (text: string) =>
+  Array.from(text)
+    .map((char) => (isLoneSurrogate(char) ? REPLACEMENT : char))
+    .join('');
+/**
+ * Text thick with halves of surrogate pairs standing either side of
+ * characters text drops, which would join them if dropped first, and of
+ * joiners, selectors and tags, which a sequence may keep or drop.
+ */
+const surrogateRichTextArb = fc.string({
+  unit: fc.oneof(
+    loneSurrogateArb,
+    fc.constant(String.fromCharCode(0xdb40)),
+    fc.integer({ min: 0xdc00, max: 0xdc7f }).map((c) => String.fromCharCode(c)),
+    invisibleCharArb,
+    joinerArb,
+    variationSelectorArb,
+    tagCharArb,
+    fc.constantFrom(BLACK_FLAG, 'a', ' ')
+  ),
+});
+/** Any text, with LRM, RLM and ALM, singly and in runs, anywhere in it. */
+const markRichTextArb = fc
+  .array(
+    fc.oneof(anyTextArb, fc.constantFrom(...DIRECTION_MARKS), sequenceArb),
+    { maxLength: 8 }
+  )
+  .map((parts) => parts.join(''));
+/** `text` with each run of direction marks cut down to its last. */
+const lastMarks = (text: string) =>
+  Array.from(text)
+    .filter(
+      (char, i, chars) =>
+        !isDirectionMark(char) || !isDirectionMark(chars[i + 1] ?? '')
+    )
+    .join('');
+/**
+ * Whether the joiner at `i` in `chars` stands where a script needs it: right
+ * after a virama, or after a letter of a script that joins, or a mark on one,
+ * and before something that shows.
+ */
+function scriptJoinerFits(chars: readonly string[], i: number) {
+  const [prev, next] = [chars[i - 1], chars[i + 1]];
+  const scriptBefore =
+    isJoiningLetter(prev) ||
+    (prev !== undefined &&
+      /\p{M}/u.test(prev) &&
+      isJoiningLetter(letterBefore(chars, i - 1)));
+  return isVirama(prev) || (scriptBefore && isBase(next));
+}
+/** Whether `text` holds a tag character, or a code point a title drops. */
+const holdsHidden = (text: string) =>
+  Array.from(text).some((char) => isTagChar(char) || isInvisibleChar(char));
+
+/**
+ * Text a title reads as it is, but for what it drops of it: visible letters,
+ * spaces and dots, whole sequences, and every invisible character, joiners,
+ * variation selectors and tag characters among them, anywhere. Nothing NFC
+ * changes, no control, no forbidden character: a title changes those.
+ */
+const titleSafeTextArb = fc.string({
+  unit: fc.oneof(
+    invisibleCharArb,
+    joinerArb,
+    variationSelectorArb,
+    tagCharArb,
+    sequenceArb,
+    fc.constantFrom(BLACK_FLAG, 'a', 'Z', ' ', '.')
+  ),
+});
 
 // #endregion
 
@@ -2235,6 +2326,219 @@ describe('createTitle', () => {
     const title = ObsidianHelpers.createTitle('content ending in period.');
     const contentSegment = title.split(' - ')[0];
     expect(contentSegment).toMatch(/\.$/);
+  });
+});
+
+describe('stripInvisible', () => {
+  it('drops every invisible character a title drops, and keeps every other character where it stands, controls and whitespace included', () => {
+    fc.assert(
+      fc.property(controlRichTextArb, (text) => {
+        expect(ObsidianHelpers.stripInvisible(text)).toBe(
+          Array.from(replaceLoneSurrogates(text))
+            .filter((char) => !isInvisibleChar(char))
+            .join('')
+        );
+      })
+    );
+  });
+
+  it('keeps LRM, RLM and ALM where they stand when asked, the last of a run, and drops every other invisible character', () => {
+    fc.assert(
+      fc.property(controlRichTextArb, (text) => {
+        expect(
+          ObsidianHelpers.stripInvisible(text, { keepDirectionMarks: true })
+        ).toBe(
+          lastMarks(
+            Array.from(replaceLoneSurrogates(text))
+              .filter((char) => !isInvisibleChar(char) || isDirectionMark(char))
+              .join('')
+          )
+        );
+      })
+    );
+  });
+
+  it('keeps only what it would keep again: every visible character, and invisible ones only as allowed', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(anyTextArb, surrogateRichTextArb),
+        fc.boolean(),
+        (input, keepDirectionMarks) => {
+          const options = { keepDirectionMarks };
+          const kept = ObsidianHelpers.stripInvisible(input, options);
+          // Half a surrogate pair reads as the replacement character
+          const text = replaceLoneSurrogates(input);
+          expect(Array.from(kept).filter(isLoneSurrogate)).toEqual([]);
+          const visible = (s: string) =>
+            Array.from(s).filter(
+              (char) =>
+                !/[\p{Default_Ignorable_Code_Point}\p{Cf}]/u.test(char) ||
+                PREPENDED_MARKS.includes(char) ||
+                (keepDirectionMarks && isDirectionMark(char))
+            );
+          expect(lastMarks(visible(kept).join(''))).toBe(
+            lastMarks(visible(text).join(''))
+          );
+          expect(isSubsequence(kept, text)).toBe(true);
+          expect(
+            Array.from(kept).filter(
+              (char) => isInvisibleChar(char) && !visible(char).length
+            )
+          ).toEqual([]);
+          // Each joiner, selector or tag in a sequence as a title judges one:
+          // a control is no base there, and a kept mark is not there at all
+          expect(
+            strayInSequence(
+              Array.from(kept)
+                .filter((char) => !isDirectionMark(char))
+                .map((char) => (isControlChar(char) ? ' ' : char))
+                .join('')
+            )
+          ).toBeNull();
+          expect(ObsidianHelpers.stripInvisible(kept, options)).toBe(kept);
+        }
+      )
+    );
+  });
+
+  it('replaces half a surrogate pair standing alone, so dropping what stood between two halves never joins them into a hidden character', () => {
+    const tagA = '\uDB40\u200B\uDC41';
+    expect(ObsidianHelpers.stripInvisible(tagA)).toBe(
+      REPLACEMENT + REPLACEMENT
+    );
+    const hidden = `hi ${tagA}\uDB40\u00AD\uDC42\uDB40\u2060\uDC43`;
+    expect(
+      ObsidianHelpers.stripInvisible(hidden, { keepDirectionMarks: true })
+    ).toBe(`hi ${REPLACEMENT.repeat(6)}`);
+  });
+
+  it('gives no tag character, nor anything a title drops, out of text with halves of surrogate pairs around what it drops, and nor does a title', () => {
+    fc.assert(
+      fc.property(surrogateRichTextArb, fc.boolean(), (text, marks) => {
+        const kept = ObsidianHelpers.stripInvisible(text, {
+          keepDirectionMarks: marks,
+        });
+        expect(
+          holdsHidden(
+            Array.from(kept)
+              .filter((char) => !isDirectionMark(char))
+              .join('')
+          )
+        ).toBe(false);
+        expect(Array.from(kept).filter(isLoneSurrogate)).toEqual([]);
+        const title = ObsidianHelpers.sanitizeForTitle(text, false);
+        expect(holdsHidden(title)).toBe(false);
+        expect(Array.from(title).filter(isLoneSurrogate)).toEqual([]);
+      })
+    );
+  });
+
+  it('keeps a joiner or variation selector just where a title keeps it, and no tag character, in text a title keeps as it is but for what it drops', () => {
+    fc.assert(
+      fc.property(titleSafeTextArb, (text) => {
+        // Letters either end: a title drops leading and trailing spaces and dots
+        const guarded = `a${text}a`;
+        expect(ObsidianHelpers.stripInvisible(guarded)).toBe(
+          ObsidianHelpers.sanitizeForTitle(guarded, false)
+        );
+      })
+    );
+  });
+
+  it('lets a kept direction mark break a selector, emoji or keycap sequence but not a script joiner, and keeps one mark of a run', () => {
+    fc.assert(
+      fc.property(markRichTextArb, (text) => {
+        const kept = Array.from(
+          ObsidianHelpers.stripInvisible(text, { keepDirectionMarks: true })
+        );
+        const isMark = (char: string | undefined) =>
+          char !== undefined && isDirectionMark(char);
+        const withoutMarks = kept.filter((char) => !isMark(char));
+        let shown = 0;
+        kept.forEach((char, i) => {
+          const [prev, next] = [kept[i - 1], kept[i + 1]];
+          if (isMark(char)) {
+            expect(isMark(next)).toBe(false);
+            return;
+          }
+          if (isVariationSelector(char)) {
+            expect(isMark(prev)).toBe(false);
+            if (/^[0-9#*]$/.test(prev ?? '')) expect(next).toBe(KEYCAP);
+          }
+          if (isJoiner(char) && (isMark(prev) || isMark(next))) {
+            expect(scriptJoinerFits(withoutMarks, shown)).toBe(true);
+          }
+          shown++;
+        });
+        // The marks aside, every sequence is one a title keeps
+        expect(
+          strayInSequence(
+            withoutMarks
+              .map((char) => (isControlChar(char) ? ' ' : char))
+              .join('')
+          )
+        ).toBeNull();
+        expect(isSubsequence(kept.join(''), replaceLoneSurrogates(text))).toBe(
+          true
+        );
+      })
+    );
+  });
+
+  it('drops a selector, emoji joiner or keycap selector a kept mark breaks off, keeps a script joiner beside one, and a run of marks as its last', () => {
+    const [lrm, rlm, alm, zwsp] = [0x200e, 0x200f, 0x061c, 0x200b].map((code) =>
+      fromCodes(code)
+    );
+    const [heart, man, woman] = [0x2764, 0x1f468, 0x1f469].map((code) =>
+      fromCodes(code)
+    );
+    const [vs16, beh, teh] = [0xfe0f, 0x628, 0x62a].map((code) =>
+      fromCodes(code)
+    );
+    const strip = (text: string) =>
+      ObsidianHelpers.stripInvisible(text, { keepDirectionMarks: true });
+    expect(strip(`${heart}${rlm}${vs16}`)).toBe(`${heart}${rlm}`);
+    expect(strip(`${man}${lrm}${ZWJ}${woman}`)).toBe(`${man}${lrm}${woman}`);
+    expect(strip(`${man}${ZWJ}${lrm}${woman}`)).toBe(`${man}${lrm}${woman}`);
+    expect(strip(`1${vs16}${lrm}${KEYCAP}`)).toBe(`1${lrm}${KEYCAP}`);
+    expect(strip(`${beh}${rlm}${ZWNJ}${teh}`)).toBe(
+      `${beh}${rlm}${ZWNJ}${teh}`
+    );
+    expect(strip(`a${lrm}${rlm}${alm}b`)).toBe(`a${alm}b`);
+    expect(strip(`a${lrm}${zwsp}${rlm}b${lrm}`)).toBe(`a${rlm}b${lrm}`);
+    expect(strip(`a${lrm}${ZWJ}${rlm}b`)).toBe(`a${rlm}b`);
+    // Nor does a script's joiner join to a control, mark or no mark between
+    const control = String.fromCharCode(1);
+    expect(strip(`${beh}${ZWNJ}${control}`)).toBe(`${beh}${control}`);
+    expect(strip(`${beh}${ZWNJ}${rlm}${control}`)).toBe(
+      `${beh}${rlm}${control}`
+    );
+  });
+
+  it('reads a right-to-left override out of text, as a body of a hostile PDF holds it, keeping its tab', () => {
+    expect(
+      ObsidianHelpers.stripInvisible(
+        `Tabbed\there report${fromCodes(0x202e)}fdp.exe`,
+        { keepDirectionMarks: true }
+      )
+    ).toBe('Tabbed\there reportfdp.exe');
+  });
+
+  it('keeps the hash and asterisk keycaps whole, which a title cannot hold', () => {
+    for (const base of ['#', '*']) {
+      const keycap = `${base}${fromCodes(0xfe0f)}${KEYCAP}`;
+      expect(ObsidianHelpers.stripInvisible(`a ${keycap} b`)).toBe(
+        `a ${keycap} b`
+      );
+    }
+  });
+
+  it('keeps a Persian ZWNJ that a kept RLM follows', () => {
+    const [beh, teh] = [fromCodes(0x628), fromCodes(0x62a)];
+    const text = `${beh}${fromCodes(0x200c, 0x200f)}${teh}`;
+    expect(
+      ObsidianHelpers.stripInvisible(text, { keepDirectionMarks: true })
+    ).toBe(text);
   });
 });
 
