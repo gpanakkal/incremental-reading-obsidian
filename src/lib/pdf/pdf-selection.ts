@@ -1,6 +1,11 @@
 import type { ReviewArticle } from '#/lib/types';
 import type { TFile } from 'obsidian';
-import { decodeAnchor, rangeToAnchors } from './pdf-anchor';
+import {
+  type AnchorRange,
+  decodeAnchor,
+  encodeAnchor,
+  rangeToAnchors,
+} from './pdf-anchor';
 import {
   extractText,
   type PdfDocument,
@@ -98,6 +103,43 @@ export function pageSelectionSubpath({
   range: [[beginIdx, beginChar], [endIdx, endChar]],
 }: PageSelection): string {
   return `#page=${page}&selection=${beginIdx},${beginChar},${endIdx},${endChar}`;
+}
+
+/** A whole number as a subpath writes one: digits only. */
+const DIGITS = /^\d+$/;
+
+/**
+ * The anchors of the selection a link's subpath names, as
+ * {@link pageSelectionSubpath} writes it: `#page=N&selection=a,b,c,d`. Other
+ * parameters are ignored, as Obsidian ignores them in highlighting it.
+ *
+ * Undocumented: read as `PdfViewerChild.applySubpath` reads it (strip the
+ * `#`, then `URLSearchParams`; see plans/reference/obsidian-pdf-internals.md).
+ *
+ * @returns null when the subpath names no page, or no selection of four
+ *   whole numbers an anchor holds, or one that doesn't end after it starts.
+ */
+export function parseSelectionSubpath(subpath: string): AnchorRange | null {
+  const params = new URLSearchParams(subpath.replace(/^#/, ''));
+  const page = params.get('page') ?? '';
+  const parts = params.get('selection')?.split(',') ?? [];
+  if (
+    !DIGITS.test(page) ||
+    parts.length !== 4 ||
+    !parts.every((part) => DIGITS.test(part))
+  ) {
+    return null;
+  }
+  const [beginIdx, beginChar, endIdx, endChar] = parts.map(Number);
+  let start, end;
+  try {
+    start = encodeAnchor({ page: +page, idx: beginIdx, char: beginChar });
+    end = encodeAnchor({ page: +page, idx: endIdx, char: endChar });
+  } catch {
+    // Out of what an anchor holds: no selection of a PDF Obsidian shows
+    return null;
+  }
+  return start < end ? { start, end } : null;
 }
 
 /**

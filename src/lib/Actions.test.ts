@@ -2597,6 +2597,31 @@ describe('Actions.createPdfSnippet', () => {
     ]);
   });
 
+  it('takes the highlight off the PDF where it is now, renamed since the snippet was made', async () => {
+    const snippet = { data: { id: 'snippet-1' }, file: { basename: 'A' } };
+    const wired = wirePdfSnippet({
+      read: { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' },
+      snippet,
+      item: null,
+    });
+    await wired.actions.createPdfSnippet({
+      pdfViewer: wired.reviewView.pdfViewer,
+      currentItemFile: () => wired.file,
+      takesAnyPdf: true,
+    });
+    // Obsidian renames a file by changing its TFile's path in place
+    (wired.file as { path: string }).path = 'papers/renamed.pdf';
+
+    await wired.actions.undo();
+
+    expect(wired.removeHighlight.mock.calls).toEqual([
+      ['papers/renamed.pdf', 'snippet-1'],
+    ]);
+    expect(wired.trigger.mock.calls).toEqual([
+      ['ir-highlights-changed', 'papers/renamed.pdf'],
+    ]);
+  });
+
   it('says so, and makes nothing, in review on a PDF that is no article', async () => {
     const read = { start: 1e10, end: 1e10 + 1, text: 'a', subpath: '#page=1' };
     for (const item of [
@@ -2649,6 +2674,8 @@ describe('Actions.createPdfCard', () => {
     card = null,
     item,
     noViewer = false,
+    deleted = true,
+    adoptedBy = null,
   }: {
     read?: pdfSelection.PdfSelection | null | Error;
     selection?: Range | null;
@@ -2657,6 +2684,10 @@ describe('Actions.createPdfCard', () => {
     answer?: readonly [number, number] | null;
     card?: unknown;
     item?: unknown;
+    /** Whether deleting the card, to undo it, succeeds. */
+    deleted?: boolean;
+    /** The PDF of the article that took the card over meanwhile. */
+    adoptedBy?: TFile | null;
   }) {
     const file = pdfFile('pdf', 'paper');
     const article =
@@ -2665,12 +2696,25 @@ describe('Actions.createPdfCard', () => {
         : item;
     const plugin = makePlugin();
     const createFromPdf = vi.fn().mockResolvedValue(card);
-    const deleteCard = vi.fn().mockResolvedValue(true);
+    const deleteCard = vi.fn().mockResolvedValue(deleted);
+    const trigger = vi.fn();
     const getReviewItemFromFile = vi.fn().mockResolvedValue(article);
+    const fetchCard = vi.fn((id: string) =>
+      Promise.resolve(
+        adoptedBy ? { data: { id, parent: 'adopter' } } : { data: { id } }
+      )
+    );
+    const getReviewItemFromId = vi.fn((id: string) =>
+      Promise.resolve(
+        adoptedBy && id === 'adopter' ? { data: { id }, file: adoptedBy } : null
+      )
+    );
     Object.assign(plugin.reviewManager, {
       getReviewItemFromFile,
-      cards: { createFromPdf, delete: deleteCard },
+      getReviewItemFromId,
+      cards: { createFromPdf, delete: deleteCard, fetch: fetchCard },
     });
+    Object.assign(plugin.app.workspace, { trigger });
     const actions = new Actions(plugin);
     const readPdfSelection = vi
       .spyOn(pdfSelection, 'readPdfSelection')
@@ -2700,6 +2744,7 @@ describe('Actions.createPdfCard', () => {
       getReviewItemFromFile,
       createFromPdf,
       deleteCard,
+      trigger,
     };
   }
 
@@ -2745,6 +2790,12 @@ describe('Actions.createPdfCard', () => {
           });
           // A PDF never held the card's embed, so there is nothing to put back
           expect(wired.editNote).not.toHaveBeenCalled();
+          // Its row is deleted outright, which the repository reports no
+          // change for
+          expect(wired.trigger).toHaveBeenCalledExactlyOnceWith(
+            'ir-highlights-changed',
+            wired.file.path
+          );
           vi.restoreAllMocks();
         }
       )
@@ -2785,10 +2836,68 @@ describe('Actions.createPdfCard', () => {
           expect(wired.deleteCard).toHaveBeenCalledExactlyOnceWith(id, {
             prompt: false,
           });
+          expect(wired.trigger).toHaveBeenCalledExactlyOnceWith(
+            'ir-highlights-changed',
+            wired.file.path
+          );
           vi.restoreAllMocks();
         }
       )
     );
+  });
+
+  it('takes the highlight off the copy that took the card over too, when it is undone', async () => {
+    const card = { data: { id: 'card-1' }, file: { basename: 'A' } };
+    const copy = pdfFile('pdf', 'copy');
+    const wired = wirePdfCard({
+      read: READ,
+      card,
+      item: null,
+      adoptedBy: copy,
+    });
+    await wired.actions.createPdfCard({
+      pdfViewer: wired.reviewView.pdfViewer,
+      currentItemFile: () => wired.file,
+      takesAnyPdf: true,
+    });
+
+    await wired.actions.undo();
+
+    expect(wired.trigger.mock.calls).toEqual([
+      ['ir-highlights-changed', wired.file.path],
+      ['ir-highlights-changed', copy.path],
+    ]);
+  });
+
+  it('takes the highlight off the PDF where it is now, renamed since the card was made', async () => {
+    const card = { data: { id: 'card-1' }, file: { basename: 'A' } };
+    const wired = wirePdfCard({ read: READ, card, item: null });
+    await wired.actions.createPdfCard({
+      pdfViewer: wired.reviewView.pdfViewer,
+      currentItemFile: () => wired.file,
+      takesAnyPdf: true,
+    });
+    // Obsidian renames a file by changing its TFile's path in place
+    (wired.file as { path: string }).path = 'papers/renamed.pdf';
+
+    await wired.actions.undo();
+
+    expect(wired.trigger.mock.calls).toEqual([
+      ['ir-highlights-changed', 'papers/renamed.pdf'],
+    ]);
+  });
+
+  it('leaves the highlight when undo could not delete the card', async () => {
+    const card = { data: { id: 'card-1' }, file: { basename: 'A' } };
+    const wired = wirePdfCard({ read: READ, card, deleted: false });
+    await wired.actions.createPdfCard(wired.reviewView);
+
+    await wired.actions.undo();
+
+    expect(wired.deleteCard).toHaveBeenCalledExactlyOnceWith('card-1', {
+      prompt: false,
+    });
+    expect(wired.trigger).not.toHaveBeenCalled();
   });
 
   it('makes nothing when the answer is not chosen', async () => {

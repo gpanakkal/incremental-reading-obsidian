@@ -1,3 +1,5 @@
+import { CARD_TAG } from '#/lib/constants';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { isPdfView, pdfTabSelection } from '#/lib/pdf/obsidian-pdf';
 import {
   createPdfHighlightLayer,
@@ -9,26 +11,74 @@ import type IncrementalReadingPlugin from '#/main';
 import { FileView, type TFile, type WorkspaceLeaf } from 'obsidian';
 import {
   MIDDLE_MOUSE_BUTTON,
-  openSnippetFromEvent,
+  openHighlightFromEvent,
 } from './SnippetHighlightExtension';
 
 function toPdfHighlight(highlight: SnippetHighlight): PdfHighlight {
   return {
     ref: highlight.reference,
+    kind: 'snippet',
     start: highlight.start_offset,
     end: highlight.end_offset,
   };
 }
 
+function sameHighlights(
+  a: readonly PdfHighlight[],
+  b: readonly PdfHighlight[]
+): boolean {
+  return (
+    a.length === b.length &&
+    a.every(
+      (h, i) =>
+        h.ref === b[i].ref &&
+        h.kind === b[i].kind &&
+        h.start === b[i].start &&
+        h.end === b[i].end
+    )
+  );
+}
+
 /**
- * Open the snippet of the highlight a press in `containerEl` lands on, as a
- * markdown highlight does, in whichever window the viewer is: the plugin's
+ * `read`, run one at a time, then `done`: calls made while one is under way,
+ * as a bulk write makes many, call for one more after it, not one each. A
+ * read that fails is logged, and `done` follows all the same.
+ */
+function oneAtATime(
+  read: () => Promise<void>,
+  done: () => void,
+  stopped: () => boolean
+): () => Promise<void> {
+  let reading = false;
+  let readAgain = false;
+  return async () => {
+    if (reading) {
+      readAgain = true;
+      return;
+    }
+    reading = true;
+    do {
+      readAgain = false;
+      try {
+        await read();
+      } catch (error) {
+        console.warn('Incremental Reading: PDF highlights not read', error);
+      }
+    } while (readAgain && !stopped());
+    reading = false;
+    done();
+  };
+}
+
+/**
+ * Open the snippet or card of the highlight a press in `containerEl` lands
+ * on, as a markdown highlight does, in whichever window the viewer is: the plugin's
  * own handler covers only the main one. Returns what stops it.
  *
  * A click that ends a drag selecting text opens nothing, and goes no further:
- * the text was selected to be extracted, maybe from inside a snippet.
+ * the text was selected to be extracted, maybe from inside a snippet or card.
  */
-function openSnippetsOnPress(
+function openItemsOnPress(
   plugin: IncrementalReadingPlugin,
   containerEl: HTMLElement
 ): () => void {
@@ -40,7 +90,7 @@ function openSnippetsOnPress(
       evt.stopPropagation();
       return;
     }
-    openSnippetFromEvent(plugin, evt);
+    openHighlightFromEvent(plugin, evt);
   };
   // A middle click fires `auxclick`; a right click does too, for the menu
   const onAuxClick = (evt: MouseEvent) => {
@@ -64,9 +114,10 @@ function openSnippetsOnPress(
 
 /**
  * Highlight, in the PDF viewer in `containerEl`, the passages of the PDF
- * `file` that snippets were extracted from (task 0023). A click on one opens
- * its snippet (see {@link openSnippetsOnPress}). Returns what stops it and
- * takes the highlights off.
+ * `file` that snippets were extracted from (task 0023) and cards were made
+ * from (task 0041). A click on one opens its snippet or card (see
+ * {@link openItemsOnPress}). Returns what stops it and takes the highlights
+ * off.
  *
  * The snippets are read from the database at once and whenever a snippet row
  * changes, which covers one being made, reviewed, dismissed or deleted with
@@ -74,61 +125,87 @@ function openSnippetsOnPress(
  * reports no change for, and a database swapped in from disk reports none
  * either: both take it out of the offset tracker and say so with
  * `ir-highlights-changed`, and then the tracker's copy is shown.
+ *
+ * The cards are read likewise (`CardManager.getPdfHighlights`), at once,
+ * whenever a card row changes, and on `ir-highlights-changed`. A PDF never
+ * changes under them, so no tracker keeps them. Their selections are in their
+ * notes' `source` links, so they are read again too when the metadata cache
+ * has a card note changed that is shown, or that now links to `file`: an
+ * edited link moves or drops its card's highlight.
  */
-export function showPdfSnippetHighlights(
+export function showPdfItemHighlights(
   plugin: IncrementalReadingPlugin,
   file: TFile,
   containerEl: HTMLElement
 ): () => void {
   const { reviewManager } = plugin;
-  const { workspace } = plugin.app;
+  const { workspace, metadataCache } = plugin.app;
   const tracker = reviewManager.snippets.offsetTracker;
   const layer = createPdfHighlightLayer(containerEl);
-  const stopOpening = openSnippetsOnPress(plugin, containerEl);
+  const stopOpening = openItemsOnPress(plugin, containerEl);
   let stopped = false;
+  let cards: readonly PdfHighlight[] = [];
+  let shown: readonly PdfHighlight[] = [];
 
   const show = () => {
     if (stopped) return;
-    layer.set(tracker.getHighlights(file.path).map(toPdfHighlight));
+    const next = [
+      ...tracker.getHighlights(file.path).map(toPdfHighlight),
+      ...cards,
+    ];
+    // A review updates its card's row at each grade, which changes nothing
+    // here
+    if (sameHighlights(next, shown)) return;
+    shown = next;
+    layer.set(next);
   };
 
-  // One read at a time: changes made while one is under way, as a bulk write
-  // makes many, call for one more after it, not one each
-  let reading = false;
-  let readAgain = false;
-  const read = async () => {
-    if (reading) {
-      readAgain = true;
-      return;
-    }
-    reading = true;
-    do {
-      readAgain = false;
-      try {
-        await reviewManager.getSnippetHighlights(file);
-      } catch (error) {
-        console.warn('Incremental Reading: PDF highlights not read', error);
-      }
-    } while (readAgain && !stopped);
-    reading = false;
-    show();
-  };
+  const isStopped = () => stopped;
+  const readSnippets = oneAtATime(
+    async () => {
+      await reviewManager.getSnippetHighlights(file);
+    },
+    show,
+    isStopped
+  );
+  const readCards = oneAtATime(
+    async () => {
+      cards = await reviewManager.cards.getPdfHighlights(file);
+    },
+    show,
+    isStopped
+  );
+
+  /** Whether `note` is a card note whose `source` link resolves to `file`. */
+  const linksHere = (note: TFile) =>
+    Obsidian.getFrontMatter(note, plugin.app)?.tags?.includes(CARD_TAG) &&
+    Obsidian.sourceIs(note, file, plugin.app);
 
   const unsubscribe = reviewManager.repo.onDataChange((event) => {
-    if (event.table === 'snippet') void read();
+    if (event.table === 'snippet') void readSnippets();
+    if (event.table === 'card') void readCards();
   });
   const changedRef = workspace.on(
     'ir-highlights-changed',
     (...args: unknown[]) => {
-      if (args[0] === file.path) show();
+      if (args[0] !== file.path) return;
+      show();
+      void readCards();
     }
   );
-  void read();
+  const metadataRef = metadataCache.on('changed', (note) => {
+    if (cards.some(({ ref }) => ref === note.path) || linksHere(note)) {
+      void readCards();
+    }
+  });
+  void readSnippets();
+  void readCards();
 
   return () => {
     stopped = true;
     unsubscribe();
     workspace.offref(changedRef);
+    metadataCache.offref(metadataRef);
     stopOpening();
     layer.destroy();
   };
@@ -141,9 +218,9 @@ interface LeafHighlights {
 }
 
 /**
- * Keep snippet highlights on every one of Obsidian's own PDF tabs, as
- * {@link showPdfSnippetHighlights} does in review: an article's snippets, or
- * for a PDF that is no article, the parentless ones taken from it.
+ * Keep snippet and card highlights on every one of Obsidian's own PDF tabs,
+ * as {@link showPdfItemHighlights} does in review: an article's snippets and
+ * cards, or for a PDF that is no article, the parentless ones taken from it.
  *
  * Also follows the selection in each of them, from when it is first found,
  * for the snippet and card commands: picking one from the palette, or a tap
@@ -174,7 +251,7 @@ export function registerPdfLeafHighlights(
       // every pdf.js page div, once loaded (plans/reference/obsidian-pdf-internals.md)
       shown.set(leaf, {
         file,
-        stop: showPdfSnippetHighlights(plugin, file, pdfView.contentEl),
+        stop: showPdfItemHighlights(plugin, file, pdfView.contentEl),
       });
     });
     for (const [leaf, { stop }] of shown) {

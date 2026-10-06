@@ -1,4 +1,4 @@
-import { registerPdfLeafHighlights } from '#/lib/extensions/PdfSnippetHighlights';
+import { registerPdfLeafHighlights } from '#/lib/extensions/PdfItemHighlights';
 import { checkImportable } from '#/lib/items/ArticleManager';
 import { appendLog } from '#/lib/log-file';
 import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
@@ -25,7 +25,7 @@ import { registerFileExplorerActiveFileClick } from './lib/extensions/FileExplor
 import { registerReadingModeActionBar } from './lib/extensions/ReadingModeActionBar';
 import {
   MIDDLE_MOUSE_BUTTON,
-  openSnippetFromEvent,
+  openHighlightFromEvent,
 } from './lib/extensions/SnippetHighlightExtension';
 import {
   registerHighlightRefreshListener,
@@ -295,7 +295,7 @@ export default class IncrementalReadingPlugin extends Plugin {
           const target = evt.target as HTMLElement | null;
           // Skip if inside a CM editor — the CM extension handles that
           if (target?.closest('.cm-editor')) return;
-          openSnippetFromEvent(this, evt);
+          openHighlightFromEvent(this, evt);
         };
 
         this.registerDomEvent(document, 'click', openHighlightInReadingMode);

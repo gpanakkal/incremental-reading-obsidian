@@ -122,7 +122,7 @@ If you import a note as an article later, the snippets and cards you already mad
 ### PDFs
 - Snippets and cards from a PDF that isn't an article find it by their link alone. If the PDF is moved while Obsidian is closed, they lose their highlights, **Go to context** won't work, and importing the PDF won't pick them up.
 - Text from a PDF goes into its snippet or card as plain text: anything in it that would turn into Markdown (links, tags, headings, math and so on) or a Templater command gets a backslash, so it reads exactly as the PDF does. Source mode, and the line you're editing, show those backslashes, and a search that spans one won't find the text: `US$5` won't find `US\$5`.
-- A snippet that runs onto the next page is highlighted up to the end of its first page. 
+- A snippet or card that runs onto the next page is highlighted up to the end of its first page.
 - A scanned PDF has no text to select, so nothing can be made from it.
 
 ## Third-party tools

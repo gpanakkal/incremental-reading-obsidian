@@ -83,6 +83,13 @@ body {
   --ir-transclusion-rule-color: hsl(
     var(--ir-transclusion-hue) var(--accent-s, 80%) var(--accent-l, 68%)
   );
+  /* A card's highlight in a PDF. Opaque, for the same reason as
+     --ir-pdf-snippet-highlight-color: Obsidian draws a PDF's text layer at
+     `opacity: 0.2`, so an opaque p in it reads as 0.2p + 0.8w over a white
+     page w. Matching the tint above (c at alpha a = 0.1, read as
+     ac + (1 - a)w) takes p = w + 5a(c - w) = (c + w) / 2: the same hue, halfway
+     from 50% lightness to white, so no channel clamps. */
+  --ir-pdf-card-highlight-color: hsl(var(--ir-transclusion-hue) 100% 75%);
 }
 
 /* Keep Obsidian's accent rule, which now marks the run of transcluded text
@@ -1154,6 +1161,13 @@ body.is-phone .ir-header-standin {
 .textLayer span.ir-snippet-highlight:hover {
   background-color: var(--ir-pdf-snippet-highlight-color);
   box-shadow: 0 0 0 2px var(--text-accent);
+}
+
+/* A card's highlight is orange, as its embed is in a note; hover keeps the
+   ring above */
+.textLayer span.ir-snippet-highlight.ir-card-highlight,
+.textLayer span.ir-snippet-highlight.ir-card-highlight:hover {
+  background-color: var(--ir-pdf-card-highlight-color);
 }
 
 /* Style for potentially corrupted highlights (overlapping edits) */

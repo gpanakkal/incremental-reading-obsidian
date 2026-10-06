@@ -1,4 +1,8 @@
-import { MAX_SQL_QUERY_PARAMS, SOURCE_PROPERTY_NAME } from '#/lib/constants';
+import {
+  MAX_SQL_QUERY_PARAMS,
+  SOURCE_INDEX_TIMEOUT_MS,
+  SOURCE_PROPERTY_NAME,
+} from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { supportsFrontmatter } from '#/lib/mime';
 import {
@@ -159,7 +163,28 @@ export class ItemManager {
     return rows.filter((row) => {
       const note = Obsidian.getNote(row.reference, this.app);
       if (!note) return false;
-      return Obsidian.getSourceFile(note, this.app)?.path === file.path;
+      return Obsidian.sourceIs(note, file, this.app);
+    });
+  }
+
+  /**
+   * Settles once the metadata cache has `note`'s `source` link resolving to
+   * `source`, or after {@link SOURCE_INDEX_TIMEOUT_MS} whatever it has.
+   */
+  protected sourceIndexed(note: TFile, source: TFile): Promise<void> {
+    const indexed = () => Obsidian.sourceIs(note, source, this.app);
+    if (indexed()) return Promise.resolve();
+    const { metadataCache } = this.app;
+    return new Promise((resolve) => {
+      const done = () => {
+        metadataCache.offref(ref);
+        window.clearTimeout(timer);
+        resolve();
+      };
+      const ref = metadataCache.on('changed', (file) => {
+        if (file.path === note.path && indexed()) done();
+      });
+      const timer = window.setTimeout(done, SOURCE_INDEX_TIMEOUT_MS);
     });
   }
 

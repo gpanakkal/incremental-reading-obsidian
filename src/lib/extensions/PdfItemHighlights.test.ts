@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import { encodeAnchor } from '#/lib/pdf/pdf-anchor';
+import type { PdfHighlight } from '#/lib/pdf/pdf-highlights';
+import * as PdfHighlights from '#/lib/pdf/pdf-highlights';
 import {
   type SnippetHighlight,
   SnippetOffsetTracker,
@@ -11,8 +14,8 @@ import { FileView, type TFile, type WorkspaceLeaf } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   registerPdfLeafHighlights,
-  showPdfSnippetHighlights,
-} from './PdfSnippetHighlights';
+  showPdfItemHighlights,
+} from './PdfItemHighlights';
 import * as SnippetHighlightExtension from './SnippetHighlightExtension';
 
 // #region HELPERS
@@ -41,6 +44,23 @@ const marked = (el: Element) =>
     span.textContent,
   ]);
 
+/** The references the viewer's card highlights mark, and their text. */
+const markedCards = (el: Element) =>
+  Array.from(
+    el.querySelectorAll('.ir-snippet-highlight.ir-card-highlight'),
+    (span) => [span.getAttribute('data-snippet-ref'), span.textContent]
+  );
+
+/** A card of page 1's item 0, characters `from` to `to`. */
+function makeCard(ref: string, from: number, to: number): PdfHighlight {
+  return {
+    ref,
+    kind: 'card',
+    start: encodeAnchor({ page: 1, idx: 0, char: from }),
+    end: encodeAnchor({ page: 1, idx: 0, char: to }),
+  };
+}
+
 /** A snippet of page 1's item 0, characters `from` to `to`. */
 function makeHighlight(
   reference: string,
@@ -63,16 +83,20 @@ function makeHighlight(
 
 /**
  * A plugin whose database holds `rows` per parent path, read into a real
- * offset tracker as `ReviewManager.getSnippetHighlights` does.
+ * offset tracker as `ReviewManager.getSnippetHighlights` does, and the
+ * highlights of `cards` per PDF path, as `CardManager.getPdfHighlights` reads
+ * them.
  */
 function makePlugin(leaves: { view: unknown }[] = []) {
   const rows = new Map<string, SnippetHighlight[]>();
+  const cards = new Map<string, PdfHighlight[]>();
   const tracker = new SnippetOffsetTracker();
   const dataListeners = new Set<(event: DataChangeEvent) => void>();
   const workspaceHandlers = new Map<
     string,
     Set<(...args: unknown[]) => void>
   >();
+  const metadataHandlers = new Set<(file: TFile) => void>();
   const cleanups: (() => void)[] = [];
 
   const getSnippetHighlights = vi.fn(async (file: TFile) => {
@@ -82,6 +106,19 @@ function makePlugin(leaves: { view: unknown }[] = []) {
     tracker.loadHighlights(file.path, found);
     return found;
   });
+  const getPdfHighlights = vi.fn(async (file: TFile) => {
+    await Promise.resolve();
+    return [...(cards.get(file.path) ?? [])];
+  });
+  const metadataCache = {
+    on: vi.fn((_name: string, cb: (file: TFile) => void) => {
+      metadataHandlers.add(cb);
+      return cb;
+    }),
+    offref: vi.fn((ref: (file: TFile) => void) => {
+      metadataHandlers.delete(ref);
+    }),
+  };
   const workspace = {
     on: vi.fn((name: string, cb: (...args: unknown[]) => void) => {
       const set = workspaceHandlers.get(name) ?? new Set();
@@ -98,10 +135,11 @@ function makePlugin(leaves: { view: unknown }[] = []) {
       leaves.forEach((leaf) => cb(leaf as WorkspaceLeaf)),
   };
   const plugin = {
-    app: { workspace },
+    app: { workspace, metadataCache },
     reviewManager: {
       getSnippetHighlights,
       snippets: { offsetTracker: tracker },
+      cards: { getPdfHighlights },
       repo: {
         onDataChange: (listener: (event: DataChangeEvent) => void) => {
           dataListeners.add(listener);
@@ -115,9 +153,15 @@ function makePlugin(leaves: { view: unknown }[] = []) {
   return {
     plugin: plugin as unknown as IncrementalReadingPlugin,
     rows,
+    cards,
     tracker,
     workspace,
     getSnippetHighlights,
+    getPdfHighlights,
+    /** The metadata cache reports `file` changed. */
+    metadataChanged: (file: TFile) =>
+      [...metadataHandlers].forEach((cb) => cb(file)),
+    metadataHandlerCount: () => metadataHandlers.size,
     dataChange: (table: DataChangeEvent['table']) =>
       dataListeners.forEach((cb) => cb({ table, op: 'update', ids: [] })),
     dataListenerCount: () => dataListeners.size,
@@ -130,6 +174,27 @@ function makePlugin(leaves: { view: unknown }[] = []) {
 /** Lets loads, and the observer's repaints, settle. */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/** A card note, tagged as one or not, whose source resolves to `source`. */
+function cardNote(
+  path: string,
+  source: TFile | null,
+  tags: string[] = ['ir-card']
+) {
+  const note = { path, extension: 'md' } as TFile;
+  return { note, source, tags };
+}
+
+/** The metadata cache holding `notes`' tags and resolved source links. */
+function withNotes(notes: ReturnType<typeof cardNote>[]) {
+  const find = (file: TFile) => notes.find(({ note }) => note === file);
+  vi.spyOn(Obsidian, 'getFrontMatter').mockImplementation(
+    (file) => ({ tags: find(file)?.tags ?? [] }) as never
+  );
+  vi.spyOn(Obsidian, 'getSourceFile').mockImplementation(
+    (file) => find(file)?.source ?? null
+  );
+}
+
 // #endregion
 
 afterEach(() => {
@@ -137,13 +202,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('showPdfSnippetHighlights', () => {
+describe('showPdfItemHighlights', () => {
   it("marks the PDF's snippets once they are read from the database", async () => {
     const { plugin, rows } = makePlugin();
     rows.set(PDF.path, [makeHighlight('Snippets/a.md', 0, 5)]);
     const { containerEl } = makeViewer();
 
-    const stop = showPdfSnippetHighlights(plugin, PDF, containerEl);
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
     expect(marked(containerEl)).toEqual([]);
     await flush();
 
@@ -154,7 +219,7 @@ describe('showPdfSnippetHighlights', () => {
   it('reads them again when a snippet row changes, and only then', async () => {
     const { plugin, rows, getSnippetHighlights, dataChange } = makePlugin();
     const { containerEl } = makeViewer();
-    const stop = showPdfSnippetHighlights(plugin, PDF, containerEl);
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
     await flush();
 
     rows.set(PDF.path, [makeHighlight('Snippets/b.md', 6, 11)]);
@@ -173,7 +238,7 @@ describe('showPdfSnippetHighlights', () => {
   it('reads them once more, not once each, for changes made while it reads', async () => {
     const { plugin, rows, getSnippetHighlights, dataChange } = makePlugin();
     const { containerEl } = makeViewer();
-    const stop = showPdfSnippetHighlights(plugin, PDF, containerEl);
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
     rows.set(PDF.path, [makeHighlight('Snippets/b.md', 6, 11)]);
     dataChange('snippet');
     dataChange('snippet');
@@ -191,7 +256,7 @@ describe('showPdfSnippetHighlights', () => {
     rows.set(PDF.path, [makeHighlight('Snippets/a.md', 0, 5)]);
     const file = { ...PDF } as TFile;
     const { containerEl } = makeViewer();
-    const stop = showPdfSnippetHighlights(plugin, file, containerEl);
+    const stop = showPdfItemHighlights(plugin, file, containerEl);
     await flush();
 
     // Undoing a snippet takes it out of the tracker, then says so
@@ -224,7 +289,7 @@ describe('showPdfSnippetHighlights', () => {
     } = makePlugin();
     rows.set(PDF.path, [makeHighlight('Snippets/a.md', 0, 5)]);
     const { containerEl, item } = makeViewer();
-    const stop = showPdfSnippetHighlights(plugin, PDF, containerEl);
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
     await flush();
     dataChange('snippet');
 
@@ -245,7 +310,7 @@ describe('showPdfSnippetHighlights', () => {
     rows.set(PDF.path, [makeHighlight('Snippets/a.md', 0, 5)]);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { containerEl } = makeViewer();
-    const stop = showPdfSnippetHighlights(plugin, PDF, containerEl);
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
     await flush();
 
     const error = new Error('locked');
@@ -261,7 +326,272 @@ describe('showPdfSnippetHighlights', () => {
   });
 });
 
-describe('a press on a highlight shown by showPdfSnippetHighlights', () => {
+describe('showPdfItemHighlights, for cards', () => {
+  it("marks the PDF's cards beside its snippets, as cards, once read", async () => {
+    const { plugin, rows, cards } = makePlugin();
+    rows.set(PDF.path, [makeHighlight('Snippets/a.md', 0, 5)]);
+    cards.set(PDF.path, [makeCard('Cards/c.md', 6, 11)]);
+    const { containerEl } = makeViewer();
+
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
+    await flush();
+
+    expect(marked(containerEl)).toEqual([
+      ['Snippets/a.md', 'Hello'],
+      ['Cards/c.md', 'world'],
+    ]);
+    expect(markedCards(containerEl)).toEqual([['Cards/c.md', 'world']]);
+    stop();
+  });
+
+  it('nests a card inside a snippet over the very same text', async () => {
+    const { plugin, rows, cards } = makePlugin();
+    rows.set(PDF.path, [makeHighlight('Snippets/z.md', 0, 5)]);
+    cards.set(PDF.path, [makeCard('Cards/a.md', 0, 5)]);
+    const { containerEl, item } = makeViewer();
+
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
+    await flush();
+
+    const card = item.querySelector('.ir-card-highlight')!;
+    expect(card.parentElement!.getAttribute('data-snippet-ref')).toBe(
+      'Snippets/z.md'
+    );
+    expect(card.querySelector('.ir-snippet-highlight')).toBeNull();
+    stop();
+  });
+
+  it('reads the cards again when a card row changes, and only then', async () => {
+    const { plugin, cards, getPdfHighlights, dataChange } = makePlugin();
+    const { containerEl } = makeViewer();
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
+    await flush();
+    expect(getPdfHighlights).toHaveBeenCalledExactlyOnceWith(PDF);
+
+    cards.set(PDF.path, [makeCard('Cards/c.md', 6, 11)]);
+    dataChange('snippet');
+    dataChange('article');
+    await flush();
+    expect(markedCards(containerEl)).toEqual([]);
+    expect(getPdfHighlights).toHaveBeenCalledOnce();
+
+    dataChange('card');
+    await flush();
+    expect(markedCards(containerEl)).toEqual([['Cards/c.md', 'world']]);
+
+    // Soft-deleted with its note, say
+    cards.set(PDF.path, []);
+    dataChange('card');
+    await flush();
+    expect(markedCards(containerEl)).toEqual([]);
+    stop();
+  });
+
+  it('reads the cards once more, not once each, for changes made while it reads', async () => {
+    const { plugin, cards, getPdfHighlights, dataChange } = makePlugin();
+    const { containerEl } = makeViewer();
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
+    cards.set(PDF.path, [makeCard('Cards/c.md', 6, 11)]);
+    dataChange('card');
+    dataChange('card');
+    dataChange('card');
+    await flush();
+    await flush();
+
+    expect(getPdfHighlights).toHaveBeenCalledTimes(2);
+    expect(markedCards(containerEl)).toEqual([['Cards/c.md', 'world']]);
+    stop();
+  });
+
+  it('reads the cards again when told its highlights changed, at its path as it is now, and for no other path', async () => {
+    const { plugin, cards, workspace, getPdfHighlights } = makePlugin();
+    cards.set(PDF.path, [makeCard('Cards/c.md', 6, 11)]);
+    const file = { ...PDF } as TFile;
+    const { containerEl } = makeViewer();
+    const stop = showPdfItemHighlights(plugin, file, containerEl);
+    await flush();
+
+    // Undoing a card deletes its row outright, then says so
+    cards.set(PDF.path, []);
+    workspace.trigger('ir-highlights-changed', 'papers/Other.pdf');
+    await flush();
+    expect(getPdfHighlights).toHaveBeenCalledOnce();
+    expect(markedCards(containerEl)).toEqual([['Cards/c.md', 'world']]);
+    workspace.trigger('ir-highlights-changed', file.path);
+    await flush();
+    expect(markedCards(containerEl)).toEqual([]);
+
+    (file as { path: string }).path = 'papers/Renamed.pdf';
+    cards.set(file.path, [makeCard('Cards/d.md', 0, 1)]);
+    workspace.trigger('ir-highlights-changed', file.path);
+    await flush();
+    expect(markedCards(containerEl)).toEqual([['Cards/d.md', 'H']]);
+    stop();
+  });
+
+  it("reads the cards again when a shown card's note changes, or a card note's link comes to name this PDF, and for no other note", async () => {
+    const { plugin, cards, metadataChanged, getPdfHighlights } = makePlugin();
+    const shown = cardNote('Cards/c.md', null);
+    const other = { path: 'papers/Other.pdf' } as TFile;
+    const elsewhere = cardNote('Cards/e.md', other);
+    const notACard = cardNote('Notes/n.md', PDF, ['ir-snippet']);
+    const untagged = cardNote('Notes/u.md', PDF, []);
+    const moved = cardNote('Cards/m.md', PDF);
+    withNotes([shown, elsewhere, notACard, untagged, moved]);
+    // Another card shown beside it, whose note doesn't change
+    cards.set(PDF.path, [
+      makeCard('Cards/b.md', 0, 1),
+      makeCard('Cards/c.md', 6, 11),
+    ]);
+    const { containerEl } = makeViewer();
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
+    await flush();
+
+    for (const { note } of [elsewhere, notACard, untagged]) {
+      metadataChanged(note);
+    }
+    await flush();
+    expect(getPdfHighlights).toHaveBeenCalledOnce();
+
+    // Its link edited to name another selection, or none: it stays shown
+    // until read again, which finds where it now is
+    cards.set(PDF.path, [makeCard('Cards/c.md', 0, 5)]);
+    metadataChanged(shown.note);
+    await flush();
+    expect(getPdfHighlights).toHaveBeenCalledTimes(2);
+    expect(markedCards(containerEl)).toEqual([['Cards/c.md', 'Hello']]);
+
+    // A card's link edited to name this PDF
+    cards.set(PDF.path, [
+      makeCard('Cards/c.md', 0, 5),
+      makeCard('Cards/m.md', 6, 11),
+    ]);
+    metadataChanged(moved.note);
+    await flush();
+    expect(getPdfHighlights).toHaveBeenCalledTimes(3);
+    expect(markedCards(containerEl)).toEqual([
+      ['Cards/c.md', 'Hello'],
+      ['Cards/m.md', 'world'],
+    ]);
+    stop();
+  });
+
+  it('keeps the cards it shows when reading them fails, and says so', async () => {
+    const { plugin, cards, getPdfHighlights, dataChange } = makePlugin();
+    cards.set(PDF.path, [makeCard('Cards/c.md', 6, 11)]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { containerEl } = makeViewer();
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
+    await flush();
+
+    const error = new Error('locked');
+    getPdfHighlights.mockRejectedValueOnce(error);
+    dataChange('card');
+    await flush();
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(/PDF highlights/),
+      error
+    );
+    expect(markedCards(containerEl)).toEqual([['Cards/c.md', 'world']]);
+    stop();
+  });
+
+  it('sets nothing new on the page when what it reads is what it shows', async () => {
+    const set = vi.fn();
+    const create = PdfHighlights.createPdfHighlightLayer;
+    vi.spyOn(PdfHighlights, 'createPdfHighlightLayer').mockImplementation(
+      (el) => {
+        const layer = create(el);
+        return {
+          set: (highlights) => {
+            set(highlights);
+            layer.set(highlights);
+          },
+          destroy: () => layer.destroy(),
+        };
+      }
+    );
+    const { plugin, rows, cards, dataChange, workspace } = makePlugin();
+    rows.set(PDF.path, [makeHighlight('Snippets/a.md', 0, 5)]);
+    cards.set(PDF.path, [makeCard('Cards/c.md', 6, 11)]);
+    const { containerEl } = makeViewer();
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
+    await flush();
+    const shown = set.mock.calls.length;
+
+    // A review updates the card's row each grade
+    cards.set(PDF.path, [makeCard('Cards/c.md', 6, 11)]);
+    dataChange('card');
+    dataChange('snippet');
+    workspace.trigger('ir-highlights-changed', PDF.path);
+    await flush();
+    await flush();
+    expect(set).toHaveBeenCalledTimes(shown);
+
+    // Anything else that differs is set: its end, its start, its ref, or its
+    // kind
+    const changes: [SnippetHighlight[], PdfHighlight[]][] = [
+      [[makeHighlight('Snippets/a.md', 0, 5)], [makeCard('Cards/c.md', 6, 10)]],
+      [[makeHighlight('Snippets/a.md', 0, 5)], [makeCard('Cards/c.md', 7, 10)]],
+      [[makeHighlight('Snippets/a.md', 0, 5)], [makeCard('Cards/d.md', 7, 10)]],
+      [
+        [
+          makeHighlight('Snippets/a.md', 0, 5),
+          makeHighlight('Cards/d.md', 7, 10),
+        ],
+        [],
+      ],
+    ];
+    for (const [i, [snippetRows, cardRows]] of changes.entries()) {
+      rows.set(PDF.path, snippetRows);
+      cards.set(PDF.path, cardRows);
+      dataChange('snippet');
+      dataChange('card');
+      await flush();
+      await flush();
+      expect(set).toHaveBeenCalledTimes(shown + i + 1);
+    }
+    expect(marked(containerEl)).toEqual([
+      ['Snippets/a.md', 'Hello'],
+      ['Cards/d.md', 'orl'],
+    ]);
+    expect(markedCards(containerEl)).toEqual([]);
+    stop();
+  });
+
+  it('when stopped, listens to the metadata cache no more, and shows no cards read after', async () => {
+    const {
+      plugin,
+      cards,
+      dataChange,
+      metadataChanged,
+      metadataHandlerCount,
+      getPdfHighlights,
+    } = makePlugin();
+    const shown = cardNote('Cards/c.md', PDF);
+    withNotes([shown]);
+    cards.set(PDF.path, [makeCard('Cards/c.md', 6, 11)]);
+    const { containerEl, item } = makeViewer();
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
+    await flush();
+    expect(metadataHandlerCount()).toBe(1);
+    // Read under way as it stops, finding what it never shows
+    cards.set(PDF.path, [makeCard('Cards/d.md', 0, 5)]);
+    dataChange('card');
+
+    stop();
+    await flush();
+    expect(metadataHandlerCount()).toBe(0);
+    expect(markedCards(containerEl)).toEqual([]);
+    metadataChanged(shown.note);
+    item.textContent = 'Hello world';
+    await flush();
+    expect(getPdfHighlights).toHaveBeenCalledTimes(2);
+    expect(markedCards(containerEl)).toEqual([]);
+  });
+});
+
+describe('a press on a highlight shown by showPdfItemHighlights', () => {
   /**
    * The PDF's viewer, in whichever window, with "Hello" highlighted, and the
    * snippet opener spied on.
@@ -270,10 +600,10 @@ describe('a press on a highlight shown by showPdfSnippetHighlights', () => {
     const { plugin, rows } = makePlugin();
     rows.set(PDF.path, [makeHighlight('Snippets/a.md', 0, 5)]);
     const { containerEl, item } = makeViewer();
-    const stop = showPdfSnippetHighlights(plugin, PDF, containerEl);
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
     await flush();
     const open = vi
-      .spyOn(SnippetHighlightExtension, 'openSnippetFromEvent')
+      .spyOn(SnippetHighlightExtension, 'openHighlightFromEvent')
       .mockReturnValue(true);
     const reached = vi.fn();
     document.addEventListener('click', reached);
@@ -322,10 +652,10 @@ describe('a press on a highlight shown by showPdfSnippetHighlights', () => {
     Object.assign(frame.contentWindow!, { createSpan: window.createSpan });
     const { containerEl } = makeViewer();
     popout.body.append(popout.adoptNode(containerEl));
-    const stop = showPdfSnippetHighlights(plugin, PDF, containerEl);
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
     await flush();
     const open = vi
-      .spyOn(SnippetHighlightExtension, 'openSnippetFromEvent')
+      .spyOn(SnippetHighlightExtension, 'openHighlightFromEvent')
       .mockReturnValue(true);
     const reached = vi.fn();
     document.addEventListener('click', reached);

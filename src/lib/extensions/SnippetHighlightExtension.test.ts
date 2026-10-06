@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoteType } from '../types';
 import {
   isExternalSync,
-  openSnippetFromEvent,
+  openHighlightFromEvent,
   refreshHighlightsEffect,
   snippetHighlightExtension,
 } from './SnippetHighlightExtension';
@@ -826,8 +826,57 @@ describe('click event handler', () => {
     const event = new MouseEvent('click', { cancelable: true });
     Object.defineProperty(event, 'target', { value: span });
 
-    expect(openSnippetFromEvent(plugin as never, event)).toBe(true);
+    expect(openHighlightFromEvent(plugin as never, event)).toBe(true);
     expect(plugin.app.workspace.openLinkText).not.toHaveBeenCalled();
+  });
+
+  it('leaves alone, unconsumed, a click on no highlight or on one with no ref', () => {
+    const plugin = makePlugin(makeReviewManager());
+    const bare = document.createElement('span');
+    const unnamed = document.createElement('span');
+    unnamed.className = 'ir-snippet-highlight';
+    for (const target of [bare, unnamed]) {
+      const event = new MouseEvent('click', { cancelable: true });
+      Object.defineProperty(event, 'target', { value: target });
+
+      expect(openHighlightFromEvent(plugin as never, event)).toBe(false);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(plugin.app.workspace.openLinkText).not.toHaveBeenCalled();
+  });
+
+  it('says to relink the card, not a snippet, for a missing card’s highlight in a PDF', () => {
+    Notice.reset();
+    const plugin = makePlugin(makeReviewManager());
+    plugin.app.vault.getFileByPath = () => null;
+    const span = document.createElement('span');
+    span.className = 'ir-snippet-highlight ir-card-highlight';
+    span.setAttribute('data-snippet-ref', 'cards/c.md');
+    const event = new MouseEvent('click', { cancelable: true });
+    Object.defineProperty(event, 'target', { value: span });
+
+    expect(openHighlightFromEvent(plugin as never, event)).toBe(true);
+    expect(plugin.app.workspace.openLinkText).not.toHaveBeenCalled();
+    expect(Notice.messages).toEqual([
+      'No file at "cards/c.md". Relink the card from the review queue.',
+    ]);
+  });
+
+  it('opens the card of a card’s highlight in a PDF, as a snippet’s opens the snippet', () => {
+    const plugin = makePlugin(makeReviewManager());
+    plugin.app.vault.getFileByPath = (path: string) => ({ path }) as never;
+    const span = document.createElement('span');
+    span.className = 'ir-snippet-highlight ir-card-highlight';
+    span.setAttribute('data-snippet-ref', 'cards/c.md');
+    const event = new MouseEvent('click', { cancelable: true });
+    Object.defineProperty(event, 'target', { value: span });
+
+    expect(openHighlightFromEvent(plugin as never, event)).toBe(true);
+    expect(plugin.app.workspace.openLinkText).toHaveBeenCalledExactlyOnceWith(
+      'cards/c.md',
+      '',
+      false
+    );
   });
 
   it('opens nothing for a snippet missing its file, and says why', () => {

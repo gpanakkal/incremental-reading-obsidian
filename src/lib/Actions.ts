@@ -408,22 +408,17 @@ export class Actions {
       ...read.selection,
     });
     if (snippet) {
-      const pdfPath = originFile(read.origin).path;
+      const pdf = originFile(read.origin);
       this._pushUndo({
         item: snippet,
         description: `creating snippet "${snippet.file.basename}"`,
         undo: async () => {
-          const { reviewManager } = this.plugin;
-          const { snippets } = reviewManager;
+          const { snippets } = this.plugin.reviewManager;
           const { id } = snippet.data;
-          // Highlighted in its PDF, and in the copy of it imported since,
-          // which took the snippet over
-          const now = await snippets.fetch(id);
-          const parent = now?.data.parent
-            ? await reviewManager.getReviewItemFromId(now.data.parent)
-            : null;
-          const paths = new Set([pdfPath]);
-          if (parent?.file) paths.add(parent.file.path);
+          const paths = await this._pdfsHighlighting(
+            pdf,
+            await snippets.fetch(id)
+          );
           // Without a prompt, which would offer to delete the PDF too
           const deleted = await snippets.delete(id, { prompt: false });
           if (!deleted) return;
@@ -440,6 +435,23 @@ export class Actions {
   };
 
   /**
+   * The paths of the PDFs that show the highlight of the snippet or card
+   * `item`, made from the PDF `pdf`: that one, where it is now, and the copy
+   * of it imported since, which took the item over.
+   */
+  private _pdfsHighlighting = async (
+    pdf: TFile,
+    item: { data: { parent?: string | null } } | null
+  ): Promise<Set<string>> => {
+    const parent = item?.data.parent
+      ? await this.plugin.reviewManager.getReviewItemFromId(item.data.parent)
+      : null;
+    const paths = new Set([pdf.path]);
+    if (parent?.file) paths.add(parent.file.path);
+    return paths;
+  };
+
+  /**
    * Make a card of the text selected in the PDF on screen in `host` (review,
    * or a PDF tab), asking for its answer as selection mode does: see
    * `CardManager.createFromPdf`. Says so, and makes nothing, when there is no
@@ -448,7 +460,8 @@ export class Actions {
    * Undo only deletes the card: unlike a card from a note, it left no embed
    * behind in its parent to put the text back in place of. It does so without
    * Obsidian's prompts, which would offer to delete the PDF as well once no
-   * note links to it.
+   * note links to it. Its row is deleted outright, which the repository
+   * reports no change for, so its highlight is taken off by hand.
    */
   createPdfCard = async (
     host: PdfSelectionHost
@@ -465,14 +478,23 @@ export class Actions {
       answer,
     });
     if (card) {
+      const pdf = originFile(origin);
       this._pushUndo({
         item: card,
         description: `creating card "${card.file.basename}"`,
         undo: async () => {
+          const { cards } = this.plugin.reviewManager;
+          const { id } = card.data;
+          const paths = await this._pdfsHighlighting(
+            pdf,
+            await cards.fetch(id)
+          );
           // Without a prompt, which would offer to delete the PDF too
-          await this.plugin.reviewManager.cards.delete(card.data.id, {
-            prompt: false,
-          });
+          const deleted = await cards.delete(id, { prompt: false });
+          if (!deleted) return;
+          for (const path of paths) {
+            this.plugin.app.workspace.trigger('ir-highlights-changed', path);
+          }
         },
       });
     }

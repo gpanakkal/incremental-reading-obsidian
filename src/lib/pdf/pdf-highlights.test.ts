@@ -70,10 +70,11 @@ const anchorPoolArb = (page: number, items: PageItem[]) =>
   fc.uniqueArray(anchorNearArb(page, items), { minLength: 1, maxLength: 5 });
 
 /**
- * Snippets as the database holds them: unique references, and mostly a start
- * before the end, though a corrupt row may have them the other way round.
- * Their ends come from a few `anchors`, so snippets often start or end
- * together, meet, nest or leave gaps between them in one item.
+ * Snippets and cards as the database and card notes hold them: unique
+ * references (a card's note is never a snippet's), and mostly a start before
+ * the end, though a corrupt row may have them the other way round. Their ends
+ * come from a few `anchors`, so they often start or end together, meet, nest
+ * or leave gaps between them in one item.
  */
 const highlightsFromArb = (anchors: number[]) =>
   fc.uniqueArray(
@@ -86,9 +87,11 @@ const highlightsFromArb = (anchors: number[]) =>
         a: fc.constantFrom(...anchors),
         b: fc.constantFrom(...anchors),
         ordered: fc.nat({ max: 5 }),
+        kind: fc.constantFrom<PdfHighlight['kind']>('snippet', 'card'),
       })
-      .map(({ ref, a, b, ordered }) => ({
+      .map(({ ref, a, b, ordered, kind }) => ({
         ref,
+        kind,
         start: ordered > 0 ? Math.min(a, b) : a,
         end: ordered > 0 ? Math.max(a, b) : b,
       })),
@@ -113,12 +116,15 @@ const caseArb = fc
 
 /**
  * Nesting order: one that starts earlier wraps one that starts later, a
- * longer one a shorter one, and otherwise the references decide.
+ * longer one a shorter one, a snippet a card over the very same text, and
+ * otherwise the references decide.
  */
 function outerFirst(a: PdfHighlight, b: PdfHighlight) {
+  const inner = (h: PdfHighlight) => (h.kind === 'card' ? 1 : 0);
   return (
     a.start - b.start ||
     b.end - a.end ||
+    inner(a) - inner(b) ||
     (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0)
   );
 }
@@ -293,10 +299,35 @@ function emptyTextNodes(root: Node) {
   return count;
 }
 
-/** The segments of `idx` alone, to compare one item's runs. */
-function segmentsOf(segments: HighlightSegment[], idx: number) {
-  return JSON.stringify(segments.filter((segment) => segment.idx === idx));
+/**
+ * The segments of `idx` alone, each ref with its kind among `highlights`, to
+ * compare one item's runs.
+ */
+function segmentsOf(
+  segments: HighlightSegment[],
+  idx: number,
+  highlights: readonly PdfHighlight[]
+) {
+  const kinds = new Map(highlights.map((h) => [h.ref, h.kind]));
+  return JSON.stringify(
+    segments
+      .filter((segment) => segment.idx === idx)
+      .map((segment) => ({
+        ...segment,
+        refs: segment.refs.map((ref) => [ref, kinds.get(ref)]),
+      }))
+  );
 }
+
+/**
+ * Each highlight span under `root`, as its ref and whether it is marked as a
+ * card's.
+ */
+const spanKinds = (root: Element) =>
+  Array.from(root.querySelectorAll('.ir-snippet-highlight'), (span) => [
+    span.getAttribute('data-snippet-ref'),
+    span.classList.contains('ir-card-highlight'),
+  ]);
 
 // #endregion
 
@@ -386,7 +417,8 @@ describe('paintPageHighlights', () => {
         const was = highlightSegments(before, page, items);
         const now = highlightSegments(after, page, items);
         const unchanged = items.filter(
-          ({ idx }) => segmentsOf(was, idx) === segmentsOf(now, idx)
+          ({ idx }) =>
+            segmentsOf(was, idx, before) === segmentsOf(now, idx, after)
         );
 
         const changes = watch(pageEl);
@@ -403,6 +435,25 @@ describe('paintPageHighlights', () => {
       })
     );
   });
+
+  it("marks a card's spans, and only a card's, as a card's, whatever the same refs were before", () => {
+    fc.assert(
+      fc.property(paintCaseArb, ({ page, firstIdx, models, before, after }) => {
+        document.body.replaceChildren();
+        const { pageEl } = buildPage(page, firstIdx, models);
+        const cards = new Set(
+          after.filter((h) => h.kind === 'card').map((h) => h.ref)
+        );
+
+        paintPageHighlights(pageEl, before);
+        paintPageHighlights(pageEl, after);
+
+        for (const [ref, card] of spanKinds(pageEl)) {
+          expect(card).toBe(cards.has(ref as string));
+        }
+      })
+    );
+  });
 });
 
 describe('highlightSegments and paintPageHighlights, on cases too rare to draw', () => {
@@ -410,9 +461,15 @@ describe('highlightSegments and paintPageHighlights, on cases too rare to draw',
     document.body.replaceChildren();
   });
 
-  /** Characters `from` to `to` of page 1's item 0, as snippet `ref`. */
-  const chars = (ref: string, from: number, to: number): PdfHighlight => ({
+  /** Characters `from` to `to` of page 1's item 0, as snippet (or card) `ref`. */
+  const chars = (
+    ref: string,
+    from: number,
+    to: number,
+    kind: PdfHighlight['kind'] = 'snippet'
+  ): PdfHighlight => ({
     ref,
+    kind,
     start: encodeAnchor({ page: 1, idx: 0, char: from }),
     end: encodeAnchor({ page: 1, idx: 0, char: to }),
   });
@@ -478,6 +535,82 @@ describe('highlightSegments and paintPageHighlights, on cases too rare to draw',
     expect(changes()).toEqual([]);
   });
 
+  it('nests a card inside a snippet and a snippet inside a card by extent, the innermost on top', () => {
+    const { pageEl, items } = helloWorld();
+    paintPageHighlights(pageEl, [
+      chars('card', 0, 11, 'card'),
+      chars('snippet', 2, 4),
+      chars('inner card', 2, 3, 'card'),
+    ]);
+    expect(readSegments(items)).toEqual([
+      { idx: 0, start: 0, end: 2, refs: ['card'] },
+      { idx: 0, start: 2, end: 3, refs: ['card', 'snippet', 'inner card'] },
+      { idx: 0, start: 3, end: 4, refs: ['card', 'snippet'] },
+      { idx: 0, start: 4, end: 11, refs: ['card'] },
+    ]);
+    const innermost = items[0].el.querySelector(
+      '[data-snippet-ref="inner card"]'
+    )!;
+    expect(innermost.closest('.ir-snippet-highlight')).toBe(innermost);
+    expect(innermost.classList.contains('ir-card-highlight')).toBe(true);
+  });
+
+  it('puts a card inside a snippet over the very same text, whichever ref sorts first', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.string({ maxLength: 4 }), {
+          minLength: 2,
+          maxLength: 2,
+        }),
+        fc.boolean(),
+        ([cardRef, snippetRef], cardFirst) => {
+          const card = chars(cardRef, 1, 4, 'card');
+          const snippet = chars(snippetRef, 1, 4);
+          expect(
+            highlightSegments(
+              cardFirst ? [card, snippet] : [snippet, card],
+              1,
+              [{ idx: 0, length: 5 }]
+            )
+          ).toEqual([
+            { idx: 0, start: 1, end: 4, refs: [snippetRef, cardRef] },
+          ]);
+        }
+      )
+    );
+  });
+
+  it('changes nothing when painting cards and snippets already there', () => {
+    const { pageEl } = helloWorld();
+    const mixed = [chars('A', 0, 11, 'card'), chars('B', 6, 8)];
+    paintPageHighlights(pageEl, mixed);
+    const changes = watch(pageEl);
+    paintPageHighlights(pageEl, mixed);
+    expect(changes()).toEqual([]);
+    expect(spanKinds(pageEl)).toEqual([
+      ['A', true],
+      ['A', true],
+      ['A', true],
+      ['B', false],
+      ['A', true],
+    ]);
+  });
+
+  it('marks a run afresh when only the kind of what covers it changes', () => {
+    const { pageEl } = helloWorld();
+    paintPageHighlights(pageEl, [chars('A', 0, 7)]);
+    paintPageHighlights(pageEl, [chars('A', 0, 7, 'card')]);
+    expect(spanKinds(pageEl)).toEqual([
+      ['A', true],
+      ['A', true],
+    ]);
+    paintPageHighlights(pageEl, [chars('A', 0, 7)]);
+    expect(spanKinds(pageEl)).toEqual([
+      ['A', false],
+      ['A', false],
+    ]);
+  });
+
   it('wraps nothing past a run that ends where a text node starts', () => {
     const { pageEl } = helloWorld();
     paintPageHighlights(pageEl, [chars('A', 0, 5)]);
@@ -515,6 +648,7 @@ describe('createPdfHighlightLayer', () => {
   /** "lo world" on page 1 through "Second" on page 2. */
   const ACROSS: PdfHighlight = {
     ref: 'Snippets/across.md',
+    kind: 'snippet',
     start: encodeAnchor({ page: 1, idx: 0, char: 3 }),
     end: encodeAnchor({ page: 2, idx: 0, char: 6 }),
   };
@@ -606,6 +740,7 @@ describe('createPdfHighlightLayer', () => {
     layer.set([ACROSS]);
     const other: PdfHighlight = {
       ref: 'Snippets/other.md',
+      kind: 'snippet',
       start: encodeAnchor({ page: 2, idx: 0, char: 7 }),
       end: encodeAnchor({ page: 2, idx: 0, char: 11 }),
     };
@@ -624,6 +759,7 @@ describe('createPdfHighlightLayer', () => {
   /** "el" of page 1's "Hello " marked, which splits it into three nodes. */
   const EL: PdfHighlight = {
     ref: 'Snippets/el.md',
+    kind: 'snippet',
     start: encodeAnchor({ page: 1, idx: 0, char: 1 }),
     end: encodeAnchor({ page: 1, idx: 0, char: 3 }),
   };

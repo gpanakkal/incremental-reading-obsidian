@@ -4,6 +4,7 @@ import {
   CLOZE_DELIMITERS,
   MS_PER_DAY,
   MS_PER_YEAR,
+  SOURCE_INDEX_TIMEOUT_MS,
   VALID_DELIMITER_PATTERN,
 } from '#/lib/constants';
 import { Markdown } from '#/lib/Markdown';
@@ -13,6 +14,7 @@ import {
   encodeAnchor,
   MAX_ANCHOR_PAGE,
 } from '#/lib/pdf/pdf-anchor';
+import { formatSourceLink } from '#/lib/source-link';
 import type {
   ISRSCard,
   ISRSCardDisplay,
@@ -28,6 +30,7 @@ import initSqlJs from 'sql.js';
 import type { FSRSParameters, Grade } from 'ts-fsrs';
 import { fsrs, generatorParameters, Rating, State } from 'ts-fsrs';
 import {
+  afterAll,
   afterEach,
   beforeAll,
   beforeEach,
@@ -414,6 +417,38 @@ const pdfTextArb = fc
       answer: [Math.min(x, y), Math.max(x, y)] as [number, number],
     }))
   );
+
+/**
+ * A repo backed by a real in-memory database. Params are coerced exactly as
+ * SQLJSRepository.coerceParams does, so placeholder binding behaves the same
+ * way it does in production.
+ */
+function makeRealRepo(db: Database): SQLiteRepository {
+  const run = (sql: string, params: unknown[] = []) => {
+    const bound = params.map((param) => {
+      if (typeof param === 'boolean') return Number(param);
+      if (param === undefined) return null;
+      return param;
+    });
+    const results = db.exec(sql, bound as never);
+    if (!results.length) return [];
+    const { columns, values } = results[0];
+    return values.map((row) =>
+      Object.fromEntries(columns.map((col, i) => [col, row[i]]))
+    );
+  };
+  return {
+    query: vi.fn().mockImplementation(run),
+    mutate: vi.fn().mockImplementation((sql: string, params: unknown[]) => {
+      run(sql, params);
+      return [[]];
+    }),
+    _execSql: vi.fn(),
+    transaction: vi.fn(async (work: () => unknown) => work()),
+    handleFileChange: vi.fn(),
+    onDataChange: vi.fn(() => vi.fn()),
+  } as unknown as SQLiteRepository;
+}
 
 // #endregion
 
@@ -2138,38 +2173,6 @@ describe('review — against the production schema', () => {
   const REVIEW_AT = new Date('2026-01-01T00:00:00.000Z');
   const TEN_MINUTES_MS = 10 * 60 * 1000;
 
-  /**
-   * A repo backed by a real in-memory database. Params are coerced exactly as
-   * SQLJSRepository.coerceParams does, so placeholder binding behaves the same
-   * way it does in production.
-   */
-  function makeRealRepo(db: Database): SQLiteRepository {
-    const run = (sql: string, params: unknown[] = []) => {
-      const bound = params.map((param) => {
-        if (typeof param === 'boolean') return Number(param);
-        if (param === undefined) return null;
-        return param;
-      });
-      const results = db.exec(sql, bound as never);
-      if (!results.length) return [];
-      const { columns, values } = results[0];
-      return values.map((row) =>
-        Object.fromEntries(columns.map((col, i) => [col, row[i]]))
-      );
-    };
-    return {
-      query: vi.fn().mockImplementation(run),
-      mutate: vi.fn().mockImplementation((sql: string, params: unknown[]) => {
-        run(sql, params);
-        return [[]];
-      }),
-      _execSql: vi.fn(),
-      transaction: vi.fn(async (work: () => unknown) => work()),
-      handleFileChange: vi.fn(),
-      onDataChange: vi.fn(() => vi.fn()),
-    } as unknown as SQLiteRepository;
-  }
-
   /** A database at the current production schema with one card row in it. */
   function makeDbWithCard(overrides: Partial<SRSCardRow> = {}): {
     db: Database;
@@ -2376,6 +2379,8 @@ describe('review — against the production schema', () => {
       undefined as never
     );
     const pdf = { path: 'p.pdf', basename: 'p', extension: 'pdf' } as TFile;
+    // The cache has the card's link to it at once
+    vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(pdf);
     const manager = new CardManager(
       makePlugin({
         fileManager: { generateMarkdownLink: () => '[[p.pdf]]' },
@@ -2743,7 +2748,10 @@ describe('createFromPdf', () => {
    * every call that could write to a file spied on, and the row it saves read
    * back as `saved`.
    */
-  function wirePdfCard(saved: unknown = { data: { id: 'card' } }) {
+  function wirePdfCard(
+    saved: unknown = { data: { id: 'card' } },
+    indexedAtOnce = true
+  ) {
     const writes = {
       processFrontMatter: vi.fn().mockResolvedValue(undefined),
       process: vi.fn(),
@@ -2765,9 +2773,32 @@ describe('createFromPdf', () => {
     const getNoteType = vi.spyOn(Obsidian, 'getNoteType');
     const notify = vi.spyOn(Obsidian, 'notify').mockImplementation(() => {});
     const repo = makeRepo();
+    // The metadata cache: it has the card note's source link, resolving to
+    // the file it was written for, once `index()` says so
+    let indexed = indexedAtOnce;
+    const listeners = new Set<(file: TFile) => void>();
+    const metadataCache = {
+      getFileCache: () => ({}),
+      on: vi.fn((_name: string, cb: (file: TFile) => void) => {
+        listeners.add(cb);
+        return cb;
+      }),
+      offref: vi.fn((ref: (file: TFile) => void) => listeners.delete(ref)),
+    };
+    const getSourceFile = vi
+      .spyOn(Obsidian, 'getSourceFile')
+      .mockImplementation((note) =>
+        note === CARD_FILE && indexed
+          ? (generateMarkdownLink.mock.calls.at(-1)?.[0] ?? null)
+          : null
+      );
+    const index = (file: TFile = CARD_FILE as TFile) => {
+      indexed = true;
+      for (const cb of [...listeners]) cb(file);
+    };
     const app = {
       vault,
-      metadataCache: { getFileCache: () => ({}) },
+      metadataCache,
       fileManager: {
         processFrontMatter,
         generateMarkdownLink,
@@ -2789,6 +2820,9 @@ describe('createFromPdf', () => {
       getNoteType,
       notify,
       fetch,
+      listeners,
+      index,
+      getSourceFile,
     };
   }
 
@@ -2999,6 +3033,129 @@ describe('createFromPdf', () => {
       )
     );
   });
+
+  describe("waiting for the metadata cache to have the card's source link", () => {
+    const ARTICLE = {
+      data: { id: 'article-1', type: 'article', reference: 'papers/a.pdf' },
+      file: { path: 'papers/a.pdf', basename: 'a', extension: 'pdf' },
+    } as never;
+    const LOOSE = {
+      path: 'loose.pdf',
+      basename: 'loose',
+      extension: 'pdf',
+    } as TFile;
+    const origins = [
+      ['an article', { article: ARTICLE }],
+      ['a PDF that is no article', { pdf: LOOSE }],
+    ] as const;
+
+    /** Starts making a card of the first 4 characters of page 1. */
+    function make(wired: ReturnType<typeof wirePdfCard>, origin: object) {
+      return wired.manager.createFromPdf({
+        ...(origin as { pdf: TFile }),
+        text: 'text',
+        start: 1e10,
+        end: 1e10 + 4,
+        subpath: '#page=1&selection=0,0,0,4',
+        answer: [0, 4],
+      });
+    }
+
+    const inserted = (wired: ReturnType<typeof wirePdfCard>) =>
+      (wired.repo.mutate as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([sql]) => String(sql).startsWith('INSERT INTO srs_card')
+      ).length;
+
+    beforeEach(() => {
+      // Timers are the window's, which Node has none of
+      vi.stubGlobal('window', globalThis);
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it.each(origins)(
+      "saves the row of a card from %s only once its source link is indexed, so the PDF's highlights can read it",
+      async (_, origin) => {
+        const wired = wirePdfCard(undefined, false);
+
+        const made = make(wired, origin);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(inserted(wired)).toBe(0);
+        expect(wired.listeners.size).toBe(1);
+
+        wired.index();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(inserted(wired)).toBe(1);
+        expect(await made).toEqual({ data: { id: 'card' } });
+        expect(wired.listeners.size).toBe(0);
+      }
+    );
+
+    it.each(origins)(
+      'waits for no change but its own note, for a card from %s',
+      async (_, origin) => {
+        const wired = wirePdfCard(undefined, false);
+
+        void make(wired, origin);
+        await vi.advanceTimersByTimeAsync(0);
+        wired.index({ path: 'other.md' } as TFile);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(inserted(wired)).toBe(0);
+
+        wired.index();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(inserted(wired)).toBe(1);
+      }
+    );
+
+    it.each(origins)(
+      "waits for its note's change to resolve to the PDF, for a card from %s",
+      async (_, origin) => {
+        const wired = wirePdfCard(undefined, false);
+        // The note changed, but its link resolves elsewhere so far
+        wired.getSourceFile.mockReturnValue(null);
+
+        void make(wired, origin);
+        await vi.advanceTimersByTimeAsync(0);
+        for (const cb of [...wired.listeners]) cb(CARD_FILE as TFile);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(inserted(wired)).toBe(0);
+      }
+    );
+
+    it.each(origins)(
+      'saves the row of a card from %s anyway once the cache has had long enough',
+      async (_, origin) => {
+        const wired = wirePdfCard(undefined, false);
+
+        const made = make(wired, origin);
+        await vi.advanceTimersByTimeAsync(SOURCE_INDEX_TIMEOUT_MS - 1);
+        expect(inserted(wired)).toBe(0);
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect(await made).toEqual({ data: { id: 'card' } });
+        expect(inserted(wired)).toBe(1);
+        expect(wired.listeners.size).toBe(0);
+      }
+    );
+
+    it.each(origins)(
+      'waits for nothing when the cache has the link already, for a card from %s',
+      async (_, origin) => {
+        const wired = wirePdfCard();
+
+        void make(wired, origin);
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(inserted(wired)).toBe(1);
+        expect(wired.listeners.size).toBe(0);
+      }
+    );
+  });
 });
 
 describe('createFromPdf without an article', () => {
@@ -3076,6 +3233,8 @@ describe('createFromPdf without an article', () => {
             .spyOn(Obsidian, 'updateFrontMatter')
             .mockResolvedValue(undefined as never);
           const getNoteType = vi.spyOn(Obsidian, 'getNoteType');
+          // The cache has the card's link to it at once
+          vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(pdf);
           const repo = makeRepo();
           const manager = new CardManager(
             { app, settings: { dayRolloverOffset: 4 } } as never,
@@ -3240,6 +3399,291 @@ describe('adoptOrphans', () => {
         }
       )
     );
+  });
+});
+
+describe('getPdfHighlights', () => {
+  let SQL: SqlJsStatic;
+  /** One database for every case: {@link wire} empties it for each. */
+  let db: Database;
+
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+    db = new SQL.Database();
+    db.exec(readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8'));
+  });
+
+  afterAll(() => {
+    db.close();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // #region PDF-HIGHLIGHT HELPERS
+
+  const PDF = {
+    path: 'papers/Paper.pdf',
+    basename: 'Paper',
+    extension: 'pdf',
+  } as TFile;
+  const PDF_ARTICLE_ID = 'pdf-article';
+
+  /** A selection on one page, as the anchors of its ends: begin before end. */
+  const selectionArb = fc
+    .record({
+      page: fc.integer({ min: 1, max: MAX_ANCHOR_PAGE }),
+      a: fc.integer({ min: 0, max: 99_999 }),
+      b: fc.integer({ min: 0, max: 99_999 }),
+      c: fc.integer({ min: 0, max: 99_999 }),
+      d: fc.integer({ min: 0, max: 99_999 }),
+    })
+    .filter(({ a, b, c, d }) => a < c || (a === c && b < d));
+
+  /**
+   * A card note's `source` property: a link to a selection, written in any
+   * form, maybe with a parameter Obsidian may add; a link to no selection, or
+   * one no highlight can be read from; or no link at all.
+   */
+  const sourceArb = fc.oneof(
+    fc
+      .record({
+        selection: selectionArb,
+        form: fc.constantFrom<'wiki' | 'markdown' | 'angled'>(
+          'wiki',
+          'markdown',
+          'angled'
+        ),
+        extra: fc.constantFrom('', '&color=yellow'),
+        alias: fc.constantFrom(null, 'Paper, page 1'),
+      })
+      .map(({ selection, form, extra, alias }) => {
+        const { page, a, b, c, d } = selection;
+        return {
+          value: formatSourceLink({
+            form,
+            path: 'papers/Some Paper.pdf',
+            subpath: `#page=${page}${extra}&selection=${a},${b},${c},${d}`,
+            alias,
+          }) as unknown,
+          range: {
+            start: encodeAnchor({ page, idx: a, char: b }),
+            end: encodeAnchor({ page, idx: c, char: d }),
+          } as { start: number; end: number } | null,
+        };
+      }),
+    fc
+      .constantFrom<unknown>(
+        '[[papers/Paper.pdf]]',
+        '[[papers/Paper.pdf#page=2|Paper, page 2]]',
+        '[[papers/Paper.pdf#page=1&selection=0,4,0,1]]',
+        '[[papers/Paper.pdf#page=1&selection=0,4,0,4]]',
+        '[[papers/Paper.pdf#page=1&selection=0,-1,0,4]]',
+        '[[papers/Paper.pdf#selection=0,1,0,4]]',
+        'page=1&selection=0,1,0,4',
+        '',
+        ['[[papers/Paper.pdf#page=1&selection=0,1,0,4]]'],
+        42,
+        undefined
+      )
+      .map((value) => ({
+        value,
+        range: null as { start: number; end: number } | null,
+      }))
+  );
+
+  /** A card as a PDF's highlights meet it. */
+  const cardSpecArb = fc.record({
+    parent: fc.constantFrom<'pdf' | 'other' | null>('pdf', 'other', null),
+    deleted: fc.boolean(),
+    dismissed: fc.boolean(),
+    exists: fc.boolean(),
+    // The note at its reference may be another item's, which took the path
+    // over: its `ir-id` says so. One with none is the card's own.
+    irId: fc.constantFrom<'own' | 'other' | 'none'>('own', 'other', 'none'),
+    resolves: fc.constantFrom<'pdf' | 'elsewhere' | 'nowhere'>(
+      'pdf',
+      'elsewhere',
+      'nowhere'
+    ),
+    source: sourceArb,
+  });
+  type CardSpec = typeof cardSpecArb extends fc.Arbitrary<infer T> ? T : never;
+
+  /** Card `i`'s spec, by its note's path `cards/card-i.md`. */
+  const specAt = (specs: CardSpec[], path: string) =>
+    specs[Number(/card-(\d+)/.exec(path)?.[1])];
+
+  /**
+   * A manager over a database holding `PDF`'s article row when `isArticle`,
+   * another article's, and a card row per spec, whose notes are as the specs
+   * say. Card `i`'s note is `cards/card-i.md`.
+   */
+  function wire(specs: CardSpec[], isArticle: boolean) {
+    db.exec('DELETE FROM srs_card; DELETE FROM article;');
+    const insertArticle = (id: string, reference: string) =>
+      db.exec(
+        `INSERT INTO article (id, reference, due, interval, priority)
+         VALUES ($1, $2, 0, 1, 20)`,
+        [id, reference]
+      );
+    if (isArticle) insertArticle(PDF_ARTICLE_ID, PDF.path);
+    insertArticle('other-article', 'papers/Other.pdf');
+    specs.forEach((spec, i) =>
+      db.exec(
+        `INSERT INTO srs_card (id, reference, parent, created_at, due,
+           stability, difficulty, elapsed_days, scheduled_days, state,
+           dismissed, deleted)
+         VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0, $4, $5)`,
+        [
+          `card-${i}`,
+          `cards/card-${i}.md`,
+          spec.parent === 'pdf'
+            ? PDF_ARTICLE_ID
+            : spec.parent && 'other-article',
+          Number(spec.dismissed),
+          Number(spec.deleted),
+        ]
+      )
+    );
+    vi.spyOn(Obsidian, 'getNote').mockImplementation((reference) =>
+      specAt(specs, reference)?.exists
+        ? ({ path: reference, extension: 'md' } as TFile)
+        : null
+    );
+    vi.spyOn(Obsidian, 'getFrontMatter').mockImplementation((note) => {
+      const { irId, source } = specAt(specs, note.path);
+      const own = /card-\d+/.exec(note.path)![0];
+      return {
+        ...(irId === 'none' ? {} : { 'ir-id': irId === 'own' ? own : 'other' }),
+        source: source.value,
+      } as never;
+    });
+    const getSourceFile = vi
+      .spyOn(Obsidian, 'getSourceFile')
+      .mockImplementation((note) => {
+        const { resolves } = specAt(specs, note.path);
+        if (resolves === 'nowhere') return null;
+        return (
+          resolves === 'pdf' ? PDF : { path: 'papers/Other.pdf' }
+        ) as TFile;
+      });
+    const manager = new CardManager(makePlugin(), makeRealRepo(db));
+    return { manager, getSourceFile };
+  }
+
+  const byRef = (a: { ref: string }, b: { ref: string }) =>
+    a.ref < b.ref ? -1 : 1;
+
+  // #endregion
+
+  it('highlights the selection of each live card of a PDF article, dismissed or not, wherever its link now resolves, and of no other card', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(cardSpecArb, { maxLength: 8 }),
+        async (specs) => {
+          vi.restoreAllMocks();
+          const { manager, getSourceFile } = wire(specs, true);
+
+          const highlights = await manager.getPdfHighlights(PDF);
+
+          const expected = specs.flatMap((spec, i) =>
+            spec.parent === 'pdf' &&
+            !spec.deleted &&
+            spec.exists &&
+            spec.irId !== 'other' &&
+            spec.source.range
+              ? [
+                  {
+                    ref: `cards/card-${i}.md`,
+                    kind: 'card',
+                    ...spec.source.range,
+                  },
+                ]
+              : []
+          );
+          expect([...highlights].sort(byRef)).toEqual(expected.sort(byRef));
+          // Its parent says which PDF it is from
+          expect(getSourceFile).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('highlights, in a PDF that is no article, the selection of each live parentless card whose link resolves to it, dismissed or not, resolving only links that name a selection', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(cardSpecArb, { maxLength: 8 }),
+        async (specs) => {
+          vi.restoreAllMocks();
+          const { manager, getSourceFile } = wire(specs, false);
+
+          const highlights = await manager.getPdfHighlights(PDF);
+
+          const expected = specs.flatMap((spec, i) =>
+            spec.parent === null &&
+            !spec.deleted &&
+            spec.exists &&
+            spec.irId !== 'other' &&
+            spec.source.range &&
+            spec.resolves === 'pdf'
+              ? [
+                  {
+                    ref: `cards/card-${i}.md`,
+                    kind: 'card',
+                    ...spec.source.range,
+                  },
+                ]
+              : []
+          );
+          expect([...highlights].sort(byRef)).toEqual(expected.sort(byRef));
+          for (const [note] of getSourceFile.mock.calls) {
+            expect(specAt(specs, note.path).source.range).not.toBeNull();
+          }
+        }
+      )
+    );
+  });
+
+  it('shows a card a copy import took over on the copy, and no longer on the PDF it was copied from', async () => {
+    const db = new SQL.Database();
+    db.exec(readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8'));
+    const copy = { path: 'Articles/Paper.pdf', extension: 'pdf' } as TFile;
+    db.exec(
+      `INSERT INTO article (id, reference, due, interval, priority)
+       VALUES ('copy', $1, 0, 1, 20)`,
+      [copy.path]
+    );
+    db.exec(
+      `INSERT INTO srs_card (id, reference, parent, created_at, due,
+         stability, difficulty, elapsed_days, scheduled_days, state)
+       VALUES ('card', 'cards/c.md', 'copy', 0, 0, 0, 0, 0, 0, 0)`
+    );
+    vi.spyOn(Obsidian, 'getNote').mockReturnValue({
+      path: 'cards/c.md',
+      extension: 'md',
+    } as TFile);
+    vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+      source: '[[Articles/Paper.pdf#page=1&selection=0,1,0,4|Paper, page 1]]',
+    } as never);
+    // Re-pointed at the copy, though a stale cache may say otherwise
+    vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(PDF);
+    const manager = new CardManager(makePlugin(), makeRealRepo(db));
+    onTestFinished(() => db.close());
+
+    expect(await manager.getPdfHighlights(PDF)).toEqual([]);
+    expect(await manager.getPdfHighlights(copy)).toEqual([
+      {
+        ref: 'cards/c.md',
+        kind: 'card',
+        start: encodeAnchor({ page: 1, idx: 0, char: 1 }),
+        end: encodeAnchor({ page: 1, idx: 0, char: 4 }),
+      },
+    ]);
   });
 });
 

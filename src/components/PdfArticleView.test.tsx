@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import * as PdfSnippetHighlights from '#/lib/extensions/PdfSnippetHighlights';
+import * as PdfItemHighlights from '#/lib/extensions/PdfItemHighlights';
 import type { PdfOpenResult, PdfViewer } from '#/lib/pdf/obsidian-pdf';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import { packPdfPosition, type PdfPosition } from '#/lib/pdf/position';
@@ -69,7 +69,7 @@ function wireContext(saved: number | null = null) {
   } as never);
   const stopHighlights = vi.fn();
   const showHighlights = vi
-    .spyOn(PdfSnippetHighlights, 'showPdfSnippetHighlights')
+    .spyOn(PdfItemHighlights, 'showPdfItemHighlights')
     .mockReturnValue(stopHighlights);
   const modify = (f: TFile) => {
     for (const handler of handlers) handler(f);
