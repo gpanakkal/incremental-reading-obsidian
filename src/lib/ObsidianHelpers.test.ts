@@ -759,6 +759,27 @@ const titleSafeTextArb = fc.string({
   ),
 });
 
+/**
+ * An app whose read of a note fails with `reason`, and whose disk then says
+ * whether the note is still there (`onDisk`) or fails to say (`existsFails`).
+ */
+function makeAppFailingRead(
+  reason: unknown,
+  disk: { onDisk: boolean } | { existsFails: unknown }
+) {
+  const exists =
+    'onDisk' in disk
+      ? vi.fn().mockResolvedValue(disk.onDisk)
+      : vi.fn().mockRejectedValue(disk.existsFails);
+  const app = makeApp({
+    vault: { adapter: { exists } } as unknown as App['vault'],
+    fileManager: {
+      processFrontMatter: vi.fn().mockRejectedValue(reason),
+    } as unknown as App['fileManager'],
+  });
+  return { app, exists };
+}
+
 // #endregion
 
 // ---------------------------------------------------------------------------
@@ -3024,6 +3045,53 @@ describe('getNoteType', () => {
         ).resolves.toBeNull();
         expect(processFrontMatter).not.toHaveBeenCalled();
       })
+    );
+  });
+
+  it('answers null for a note already gone from the disk when it is read', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.anything(), fc.string(), async (reason, path) => {
+        const { app, exists } = makeAppFailingRead(reason, { onDisk: false });
+        await expect(
+          ObsidianHelpers.getNoteType(makeTFile({ path }), app)
+        ).resolves.toBeNull();
+        expect(exists).toHaveBeenCalledExactlyOnceWith(path);
+      })
+    );
+  });
+
+  it("rejects with the read's error for a note still on disk, or one the disk can't answer for", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.anything(),
+        fc.string(),
+        fc.oneof(
+          fc.constant({ onDisk: true }),
+          fc.record({ existsFails: fc.anything() })
+        ),
+        async (reason, path, disk) => {
+          const { app, exists } = makeAppFailingRead(reason, disk);
+          await expect(
+            ObsidianHelpers.getNoteType(makeTFile({ path }), app)
+          ).rejects.toBe(reason);
+          expect(exists).toHaveBeenCalledExactlyOnceWith(path);
+        }
+      )
+    );
+  });
+
+  it('never asks the disk about a note it read', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.option(fc.array(fc.string()), { nil: undefined }),
+        async (tags) => {
+          const exists = vi.fn();
+          const app = makeAppWithTags(tags);
+          (app.vault as unknown as { adapter: unknown }).adapter = { exists };
+          await ObsidianHelpers.getNoteType(makeTFile(), app);
+          expect(exists).not.toHaveBeenCalled();
+        }
+      )
     );
   });
 });

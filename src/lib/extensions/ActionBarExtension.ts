@@ -339,13 +339,19 @@ export function renderStandaloneActionBarDOM(
       unsubscribe = reviewManager.repo.onDataChange((event) => {
         if (!event.ids.includes(watchedId)) return;
         void (async () => {
-          const current = await reviewManager.getReviewItemFromFile(file);
-          // A row that has gone (deleted, or the note untagged) leaves the
-          // last known label alone: the click handler re-reads before acting
-          // and reports for itself, which beats a button relabelled by a
-          // lookup that found nothing.
-          if (disposed || !current) return;
-          updateButtonLabel(current.data.dismissed);
+          try {
+            const current = await reviewManager.getReviewItemFromFile(file);
+            // A row that has gone (deleted, or the note untagged) leaves the
+            // last known label alone: the click handler re-reads before
+            // acting and reports for itself, which beats a button relabelled
+            // by a lookup that found nothing.
+            if (disposed || !current) return;
+            updateButtonLabel(current.data.dismissed);
+          } catch (error) {
+            // A failed re-read leaves the label alone too. Nothing awaits
+            // this, so an error let through would surface as an uncaught one.
+            console.error('Failed to refresh item status:', error);
+          }
         })();
       });
 
