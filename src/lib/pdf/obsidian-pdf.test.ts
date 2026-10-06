@@ -127,23 +127,24 @@ function setShown(el: HTMLElement, shown: boolean) {
   });
 }
 
-/** A viewer built over a fake component, already loaded. */
+/**
+ * A viewer built over a fake component, already loaded. `afterEach` unloads
+ * it.
+ */
 function makeViewer(): { viewer: PdfViewer; component: FakeViewerComponent } {
-  const viewer = createPdfViewer(makeApp())!;
-  const component = FakeViewerComponent.instances.at(-1)!;
-  viewer.load();
-  return { viewer, component };
+  return makeViewerWith(() => {});
 }
 
 /**
  * A viewer built over a fake component, with `prepare` run on its container
- * before it is loaded.
+ * before it is loaded. `afterEach` unloads it.
  */
 function makeViewerWith(prepare: (containerEl: HTMLElement) => void) {
   const viewer = createPdfViewer(makeApp())!;
   const component = FakeViewerComponent.instances.at(-1)!;
   prepare(viewer.containerEl);
   viewer.load();
+  builtViewers.push(() => viewer.unload());
   return { viewer, component };
 }
 
@@ -231,16 +232,23 @@ const pageNumberArb = () =>
     fc.constantFrom(null, undefined)
   );
 
-/** Anything pdf.js's `location.top` could hold, valid or not. */
+/**
+ * Anything pdf.js's `location.top` could hold, valid or not. `-0` is drawn
+ * often: pdf.js rounds the top with `Math.round`, which makes one of any top
+ * just below the page's bottom edge.
+ */
 const topArb = () =>
   fc.oneof(
     fc.integer({ min: -1000, max: 100000 }),
     fc.double(),
     fc.string(),
-    fc.constantFrom(null, undefined, Number.NaN, Infinity, -Infinity)
+    fc.constantFrom(null, undefined, Number.NaN, Infinity, -Infinity, -0)
   );
 
-/** The position a pdf.js location names, as the adapter should read it. */
+/**
+ * The position a pdf.js location names, as the adapter should read it from
+ * a pdf.js viewer with no page views to measure a border on.
+ */
 function expectedPosition(
   initialViewSet: unknown,
   pageNumber: unknown,
@@ -251,7 +259,8 @@ function expectedPosition(
     Number.isSafeInteger(pageNumber) &&
     (pageNumber as number) >= 1 &&
     Number.isFinite(top);
-  return valid ? { page: pageNumber, top } : null;
+  // Read with no border to add, a -0 top reads as 0
+  return valid ? { page: pageNumber, top: (top as number) + 0 } : null;
 }
 
 /** pdf.js's `updateviewarea` event, with the view's top at `top` on a page. */
@@ -411,6 +420,18 @@ function viewerWithApp(app: Record<string, unknown>) {
   component.ready(makeEventChild(app));
   builtViewers.push(() => viewer.unload());
   return viewer;
+}
+
+/**
+ * What tears down each viewer {@link makeViewer} and {@link makeViewerWith}
+ * built and left running. A loaded viewer follows the document's selection,
+ * so the many a property builds would slow every later test down.
+ */
+const builtViewers: (() => void)[] = [];
+
+/** Tear down the viewers left running so far. */
+function tearDownViewers() {
+  builtViewers.splice(0).forEach((tearDown) => tearDown());
 }
 
 /**
@@ -682,6 +703,7 @@ describe('PdfViewer lifecycle', () => {
     setShown(viewer.containerEl, true);
 
     viewer.load();
+    builtViewers.push(() => viewer.unload());
     const pending = viewer.open(file);
     fail(failure);
 
@@ -1502,6 +1524,25 @@ describe('getPdfLocation', () => {
         }
       )
     );
+  });
+
+  it("reads as 0 the -0 top pdf.js rounds a top just below a page's bottom edge to", () => {
+    // pdf.js's `PDFViewer._updateLocation` rounds with `Math.round`
+    const top = Math.round(-0.25);
+    const { viewer, component } = makeViewer();
+    const child = makeEventChild({
+      isInitialViewSet: true,
+      location: { pageNumber: 2, top },
+    });
+    component.ready(child);
+    const listener = vi.fn();
+    onPdfViewChange(viewer, listener);
+
+    child.dispatch('updateviewarea', at(2, top));
+
+    // toEqual tells -0 from 0
+    expect(getPdfLocation(viewer)).toEqual({ page: 2, top: 0 });
+    expect(listener.mock.calls).toEqual([[{ page: 2, top: 0 }]]);
   });
 
   it.each([
@@ -2710,9 +2751,7 @@ describe('pdfTabSelection', () => {
           expect(pdfTabSelection(screen.tab)).toBe(source);
           screen.close();
         }
-      ),
-      // Each selection reaches every viewer earlier tests left following it
-      { numRuns: 20 }
+      )
     );
   });
 
