@@ -758,27 +758,261 @@ export function onPdfViewChange(
 ): () => void {
   const component = viewerComponents.get(viewer);
   if (!component) return () => {};
-  let stopped = false;
-  let listening: PdfViewerChildEvents | null = null;
-  const onUpdate = (evt: unknown) => {
+  return onChildEvent(component, 'updateviewarea', (evt) => {
     const location = isObject(evt) ? evt.location : null;
     const position = positionAt(pdfJsApp(component), location);
     if (position) listener(position);
-  };
+  });
+}
+
+/**
+ * Call `listener` with each `name` event on the pdf.js eventBus of
+ * `component`'s child, once the child is built. Returns the function that
+ * stops it.
+ */
+function onChildEvent(
+  component: PdfViewerComponent,
+  name: string,
+  listener: (evt: unknown) => void
+): () => void {
+  let stopped = false;
+  let listening: PdfViewerChildEvents | null = null;
   component.then((child) => {
     if (stopped || !hasEvents(child)) return;
-    child.on('updateviewarea', onUpdate);
+    child.on(name, listener);
     listening = child;
   });
   return () => {
     stopped = true;
     try {
-      listening?.off('updateviewarea', onUpdate);
+      listening?.off(name, listener);
     } catch {
       // Unloaded first: its eventBus, and the listener with it, is gone.
     }
     listening = null;
   };
+}
+
+/** What {@link onPdfViewMove} reports to. */
+export interface PdfViewMoves {
+  /**
+   * The view moved to `position`: the reader scrolled or zoomed it, or a file
+   * opened in it. Reported once the task that moved it ends, and never as a
+   * move to where the view last was.
+   */
+  moved(position: PdfPosition): void;
+  /**
+   * The viewer was resized, or pdf.js laid its view out again, which may
+   * have moved the view: put it back. Called a microtask later. Whatever the
+   * view does while this runs is not reported.
+   */
+  resized(): void;
+}
+
+/**
+ * Report each move of `viewer`'s view to `moves`, telling the moves a resize
+ * makes apart from the rest. Returns the function that stops it.
+ *
+ * A resize can move the view twice. First, in the frame the container's size
+ * changes between two sizes on screen (hiding the view and showing it again
+ * is no change), pdf.js can report a move with no scroll behind it, and the
+ * new size can scroll the view to the end, as a taller container leaves less
+ * to scroll: a move in such a frame is a resize's, unless pdf.js's scroll
+ * position moved somewhere else, which is the reader scrolling. A scroll the
+ * resize made that pdf.js reports only a frame later is caught when the
+ * browser reports the resize. Then, a while after the size stops changing,
+ * Obsidian has pdf.js lay the view out again, re-fitting the zoom: a move
+ * made while pdf.js handles its `resize` event is a resize's, whatever caused
+ * the event. Moves are told apart once the task that made them ends, as
+ * pdf.js handles the event before any listener added later hears of it.
+ *
+ * Undocumented: pdf.js's `resize` event on the child's eventBus, which
+ * Obsidian dispatches from a `ResizeObserver` debounced by 200ms
+ * (`PdfViewerChild.onResize`), as do pdf.js's sidebar and the end of a
+ * transition of the viewer's container. pdf.js's own handler for it re-fits a
+ * zoom that fits the page (`auto`, `page-width`, `page-fit`), and reports the
+ * moves that makes before returning. Also pdf.js's `PDFViewer.container`, the
+ * element it scrolls, reached through the app object's `pdfViewer`.
+ */
+export function onPdfViewMove(
+  viewer: PdfViewer,
+  moves: PdfViewMoves
+): () => void {
+  const component = viewerComponents.get(viewer);
+  if (!component) return () => {};
+  const { containerEl } = viewer;
+  let stopped = false;
+  /** The container's size on screen, `null` before it has been on screen. */
+  let size: { width: number; height: number } | null = null;
+  /** pdf.js's scroll position at the last move it reported. */
+  let reportedScroll: number | null = null;
+  /** The latest move in this task, until it is told apart. */
+  let held: PdfPosition | null = null;
+  let restoreQueued = false;
+  /** Set while {@link PdfViewMoves.resized} runs. */
+  let restoring = false;
+  /** Where the view was last reported, or found after a resize, at. */
+  let last: PdfPosition | null = null;
+
+  /** pdf.js's scrolling element, if it can be read. */
+  const scroller = (): Record<string, unknown> | null => {
+    const app = pdfJsApp(component);
+    const pdfJs = isObject(app) ? app.pdfViewer : null;
+    const element = isObject(pdfJs) ? pdfJs.container : null;
+    return isObject(element) ? element : null;
+  };
+  /** pdf.js's scroll position, or `null` when it can't be read. */
+  const scrollTop = (): number | null => {
+    const top = scroller()?.scrollTop;
+    return typeof top === 'number' ? top : null;
+  };
+  /**
+   * Whether a resize could have put pdf.js's scroll position where it is:
+   * where it was at the last move reported, or as far down as it goes.
+   */
+  const scrolledByResize = (top: number | null): boolean => {
+    if (top === reportedScroll) return true;
+    const element = scroller();
+    const { scrollHeight, clientHeight } = element ?? {};
+    return (
+      typeof top === 'number' &&
+      typeof scrollHeight === 'number' &&
+      typeof clientHeight === 'number' &&
+      top >= scrollHeight - clientHeight - 1
+    );
+  };
+  /**
+   * Note the container's size. Whether it changed from one size on screen to
+   * another.
+   */
+  const measure = (): boolean => {
+    const { clientWidth: width, clientHeight: height } = containerEl;
+    if (width === 0 || height === 0) return false;
+    const changed =
+      size !== null && (size.width !== width || size.height !== height);
+    size = { width, height };
+    return changed;
+  };
+  const restore = () => {
+    if (restoreQueued) return;
+    restoreQueued = true;
+    queueMicrotask(() => {
+      restoreQueued = false;
+      if (stopped) return;
+      restoring = true;
+      try {
+        moves.resized();
+      } finally {
+        restoring = false;
+      }
+    });
+  };
+  /** Report the move held back, unless it went to where the view was. */
+  const report = () => {
+    const position = held;
+    held = null;
+    if (stopped || !position) return;
+    if (last && last.page === position.page && last.top === position.top) {
+      return;
+    }
+    last = position;
+    moves.moved(position);
+  };
+
+  measure();
+  const stopUpdates = onPdfViewChange(viewer, (position) => {
+    const top = scrollTop();
+    const byResize = !restoring && measure() && scrolledByResize(top);
+    reportedScroll = top;
+    if (restoring || byResize) {
+      last = position;
+      if (byResize) restore();
+      return;
+    }
+    held = position;
+    queueMicrotask(report);
+  });
+  const stopLayouts = onChildEvent(component, 'resize', () => {
+    // The moves pdf.js made laying the view out, held back till now
+    if (held) last = held;
+    held = null;
+    restore();
+  });
+  // The browser reports a resize after laying the page out, and so before
+  // the scroll that made, which pdf.js reports a frame later
+  const Observer = window.ResizeObserver;
+  const observer =
+    typeof Observer === 'function'
+      ? new Observer(() => {
+          if (measure() && scrollTop() !== reportedScroll) restore();
+        })
+      : null;
+  observer?.observe(containerEl);
+
+  return () => {
+    stopped = true;
+    stopUpdates();
+    stopLayouts();
+    observer?.disconnect();
+  };
+}
+
+/**
+ * Put `viewer`'s view at `position` without reopening its file: the page and
+ * top it names at the top edge, at the zoom it has now, scrolled sideways as
+ * it is now. Whether it could: not before a file is on screen, not at a page
+ * the file doesn't have, and not when pdf.js isn't what this adapter knows.
+ *
+ * Undocumented: the pdf.js app object's `isInitialViewSet` (see
+ * {@link positionAt}) and its `pdfViewer`, pdf.js's `PDFViewer`. Of that:
+ * `scrollPageIntoView` with an `XYZ` destination and no zoom, as pdf.js keeps
+ * its own place through a zoom; `pagesCount`; `container`, the element it
+ * scrolls, whose sideways scroll that moves to the destination's x; and
+ * `update`, which brings `location` up to date at once rather than on the
+ * scroll event a frame later.
+ */
+export function setPdfPosition(
+  viewer: PdfViewer,
+  position: PdfPosition
+): boolean {
+  const component = viewerComponents.get(viewer);
+  const app = component ? pdfJsApp(component) : null;
+  if (!isObject(app) || app.isInitialViewSet !== true) return false;
+  const pdfJs = app.pdfViewer;
+  if (!isObject(pdfJs) || typeof pdfJs.scrollPageIntoView !== 'function') {
+    return false;
+  }
+  const { page, top } = position;
+  const { pagesCount } = pdfJs;
+  if (
+    typeof pagesCount !== 'number' ||
+    !Number.isInteger(page) ||
+    page < 1 ||
+    page > pagesCount ||
+    !Number.isFinite(top)
+  ) {
+    return false;
+  }
+  const container = isObject(pdfJs.container) ? pdfJs.container : null;
+  const scrollLeft = container?.scrollLeft;
+  try {
+    (pdfJs.scrollPageIntoView as (params: unknown) => void).call(pdfJs, {
+      pageNumber: page,
+      destArray: [null, { name: 'XYZ' }, 0, top, null],
+      // As pdf.js keeps its place: a top in the gap above the page stays
+      allowNegativeOffset: true,
+    });
+    if (container && typeof scrollLeft === 'number') {
+      container.scrollLeft = scrollLeft;
+    }
+    if (typeof pdfJs.update === 'function') {
+      (pdfJs.update as () => void).call(pdfJs);
+    }
+  } catch (error) {
+    console.warn("Incremental Reading: can't move the PDF view", error);
+    return false;
+  }
+  return true;
 }
 
 // #endregion
