@@ -276,6 +276,240 @@ function readBackslashes(text: string) {
   return { pairs, escaping };
 }
 
+/** Where each character of `text` is read, by index in {@link unescape}d text: a backslash pair's both at its char's. */
+function readOffsets(text: string): number[] {
+  const at: number[] = [];
+  let read = 0;
+  for (let k = 0; k < text.length; k++) {
+    at.push(read);
+    if (text[k] === '\\' && ASCII_PUNCTUATION.test(text[k + 1] ?? '')) {
+      at.push(read);
+      k++;
+    }
+    read++;
+  }
+  at.push(read);
+  return at;
+}
+
+/** The offset in `text` where the line holding `j` starts. */
+const lineStartOf = (text: string, j: number) =>
+  j - /[^\r\n]*$/.exec(text.slice(0, j))![0].length;
+
+/**
+ * Whether what stands at `from` in `source` starts a block as the start of a
+ * line does: only an indent of up to three spaces, quote markers, list
+ * markers before whitespace and a task's checkbox come before it on its line
+ * (`- # x` holds a heading, `> - x` a list; `    # x` is code, or a
+ * paragraph's lazy continuation).
+ */
+function startsBlock(source: string, from: number): boolean {
+  let rest = source
+    .slice(lineStartOf(source, from), from)
+    .replace(/^ {0,3}/, '');
+  if (/^\s/.test(rest)) return false;
+  for (;;) {
+    const shorter = rest.replace(
+      /^(?:>|(?:[-+*]|\d+[.)])\s(?:\s*\[.\]\s)?)\s*/,
+      ''
+    );
+    if (shorter === rest) return rest === '';
+    rest = shorter;
+  }
+}
+
+/**
+ * What the character at `j` of `plain` is as syntax, as {@link syntaxAt}
+ * finds it, told apart where a cut's start needs it: a heading from a tag,
+ * and the blocks a note that isn't escaped can start, which escaped text
+ * never holds bare: a `*` list or rule, a `_` rule, a code fence, a link or
+ * footnote definition. A `$` at the very start forms nothing: Obsidian opens
+ * math after anything (task 0043's probe), and nothing is there for it to
+ * close.
+ */
+function meaningsAt(text: string, at: number, prevEscaped: boolean): string[] {
+  const reasons = syntaxAt(text, at, prevEscaped);
+  const line = restOfLine(text, at);
+  const atLineStart = at === 0 || isLineBreak(text[at - 1]);
+  const meanings = reasons.flatMap((reason) => {
+    if (reason === 'heading or tag') {
+      // A tag as after whitespace, but for `#1`, which is none. Taken as
+      // the rules take it, a `#` that could start one: `##tag` at a line's
+      // start forms none in Obsidian 1.13.7, but escaping it is harmless
+      const tag = /^#[^\s\d]|^#\d+(?![\s,.)]|\d|$)/.test(line);
+      return [
+        ...(/^#{1,6}(?:\s|$)/.test(line) ? ['heading'] : []),
+        ...(tag ? ['tag'] : []),
+      ];
+    }
+    // Only `$$` opens math that needs no closer
+    return reason === 'math' && at === 0 && text[1] !== '$' ? [] : [reason];
+  });
+  if (atLineStart) {
+    if (text[at] === '*' && isBlank(text[at + 1] ?? ' ')) meanings.push('list');
+    if (/^([*_])(?:\s*\1){2,}\s*$/.test(line)) meanings.push('rule');
+    if (/^\[[^\]\r\n]+\]:/.test(line)) meanings.push('definition');
+    // Escaping its first char is enough: Obsidian then reads no fence
+    if (/^(?:`{3,}(?![^\r\n]*`)|~{3})/.test(line)) meanings.push('fence');
+  }
+  return meanings;
+}
+
+/**
+ * A note's source, rich in syntax both escaped and bare: an ordinary note's
+ * Markdown, or a PDF snippet's escaped text, or both.
+ */
+const cutSourceArb = fc
+  .array(
+    fc.oneof(
+      markdownishArb,
+      markdownishArb.map((text) => Markdown.escape(text)),
+      fc.constantFrom(
+        'word#evil',
+        'see #tag',
+        'C# and',
+        '# ',
+        '## ',
+        '##tag',
+        '>#',
+        '> ',
+        '* ',
+        '***',
+        '_ _ _',
+        '```',
+        '~~~',
+        '[a]: x',
+        '[^1]: y',
+        '- [ ] ',
+        '2. ',
+        '_b c_',
+        '$x$',
+        '\\#',
+        '\\_',
+        '\\'
+      )
+    ),
+    { maxLength: 4 }
+  )
+  .map((parts) => parts.join(''));
+
+/** Where a cut's text goes: the start of a note, or after a cloze delimiter. */
+const intoArb = fc.constantFrom('note' as const, 'answer' as const);
+
+/**
+ * A cut of a source, from anywhere to anywhere after, for either place, its
+ * ends off escape pairs as the managers snap them.
+ */
+const cutArb = cutSourceArb.chain((source) =>
+  fc
+    .tuple(fc.nat(source.length), fc.nat(source.length), intoArb)
+    .map(([x, y, into]) => ({
+      source,
+      range: Markdown.snapOffEscapes(source, [Math.min(x, y), Math.max(x, y)]),
+      into,
+    }))
+);
+
+/** A cut of a source from anywhere to the end of that line, for either place. */
+const lineCutArb = cutSourceArb.chain((source) =>
+  fc.tuple(fc.nat(source.length), intoArb).map(([from, into]) => ({
+    source,
+    from,
+    to: from + restOfLine(source, from).length,
+    into,
+  }))
+);
+
+/**
+ * The text a cut of `source` reads as: whitespace from mid-line that would
+ * start a note is dropped, as an indent it would be one.
+ */
+function cutText(
+  source: string,
+  [from, to]: readonly [number, number],
+  into: 'note' | 'answer'
+) {
+  const text = source.slice(from, to);
+  const midLine = from > 0 && !isLineBreak(source[from - 1]);
+  return into === 'note' && midLine ? text.replace(/^[^\S\r\n]+/, '') : text;
+}
+
+/** Where the first char of {@link cutText} stands in `source`. */
+const firstKept = (
+  source: string,
+  [from, to]: readonly [number, number],
+  into: 'note' | 'answer'
+) => to - cutText(source, [from, to], into).length;
+
+/**
+ * Each character of the first line of {@link Markdown.escapeCutStart}'s cut
+ * of `source`, read where the cut goes, with what it forms there and what
+ * it formed in `parentSource`, which holds `source` up to the cut's end at
+ * least: none for a character escaped.
+ */
+function cutMeanings(
+  source: string,
+  [from, to]: readonly [number, number],
+  into: 'note' | 'answer',
+  parentSource = source
+) {
+  const cut = Markdown.escapeCutStart(source, [from, to], into);
+  const before = into === 'answer' ? '(} ' : '';
+  const child = before + unescape(cut);
+  const childFlags = [...before].map(() => false).concat(escapedFlags(cut));
+  const start = firstKept(source, [from, to], into);
+  const at = readOffsets(parentSource)[start];
+  // Where it starts a block after list or quote markers, it reads as at the
+  // line's start: the markers, never escaped, are cut from the reading
+  const markers = startsBlock(source, start)
+    ? at - lineStartOf(unescape(parentSource), at)
+    : 0;
+  const parent =
+    unescape(parentSource).slice(0, at - markers) +
+    unescape(parentSource).slice(at);
+  const parentFlags = escapedFlags(parentSource);
+  parentFlags.splice(at - markers, markers);
+  const first = at - markers;
+  const firstLine = before.length + restOfLine(unescape(cut), 0).length;
+  /**
+   * `plain` with each escaped char but the one at `keep` read as a char no
+   * rule takes for syntax, for the rules that look beside one: `^\[` is no
+   * footnote, `e\.x/` no domain. Braces and parentheses stay: the plugin
+   * reads cloze delimiters escaped or not, so `\}}` holds `}}`.
+   */
+  const masked = (plain: string, flags: boolean[], keep: number) =>
+    plain
+      .split('')
+      .map((char, k) =>
+        flags[k] && k !== keep && !'(){}'.includes(char) ? '' : char
+      )
+      .join('');
+  const chars = [];
+  for (let c = before.length; c < firstLine; c++) {
+    const j = first + c - before.length;
+    chars.push({
+      char: child[c],
+      c,
+      escaped: childFlags[c],
+      newlyEscaped: childFlags[c] && !parentFlags[j],
+      // As it would be, left bare where it stands
+      bare: meaningsAt(
+        masked(child, childFlags, c),
+        c,
+        childFlags[c - 1] ?? false
+      ),
+      parent: parentFlags[j]
+        ? []
+        : meaningsAt(
+            masked(parent, parentFlags, j),
+            j,
+            parentFlags[j - 1] ?? false
+          ),
+    });
+  }
+  return { cut, chars };
+}
+
 // #endregion
 
 describe('getListItemText', () => {
@@ -1034,6 +1268,297 @@ describe('snapOffEscapes', () => {
           delimited: true,
         })
       ).toEqual([4, 9]);
+    });
+  });
+});
+
+describe('escapeCutStart', () => {
+  it('reads as the cut, every escape kept, but for mid-line whitespace that would start a note', () => {
+    fc.assert(
+      fc.property(cutArb, ({ source, range, into }) => {
+        const expected = cutText(source, range, into);
+
+        const cut = Markdown.escapeCutStart(source, range, into);
+
+        expect(unescape(cut)).toBe(unescape(expected));
+        const kept = escapedFlags(expected);
+        expect(escapedFlags(cut).filter((_, j) => kept[j])).toEqual(
+          kept.filter(Boolean)
+        );
+      }),
+      { numRuns: 1000 }
+    );
+  });
+
+  it('changes nothing past the first line of the cut', () => {
+    fc.assert(
+      fc.property(cutArb, ({ source, range, into }) => {
+        const expected = cutText(source, range, into);
+        const rest = (text: string) => text.slice(restOfLine(text, 0).length);
+
+        expect(rest(Markdown.escapeCutStart(source, range, into))).toBe(
+          rest(expected)
+        );
+      }),
+      { numRuns: 1000 }
+    );
+  });
+
+  it('changes nothing of a cut from the start of a line', () => {
+    fc.assert(
+      fc.property(cutArb, ({ source, range, into }) => {
+        const [from] = range;
+        fc.pre(from === 0 || isLineBreak(source[from - 1]));
+
+        expect(Markdown.escapeCutStart(source, range, into)).toBe(
+          source.slice(...range)
+        );
+      }),
+      { numRuns: 300 }
+    );
+  });
+
+  it('escapes nothing of a cut where a block starts in its source, after list or quote markers', () => {
+    fc.assert(
+      fc.property(cutArb, ({ source, range, into }) => {
+        fc.pre(startsBlock(source, firstKept(source, range, into)));
+
+        expect(Markdown.escapeCutStart(source, range, into)).toBe(
+          cutText(source, range, into)
+        );
+      }),
+      { numRuns: 300 }
+    );
+  });
+
+  it('forms no syntax at the start of the cut that its source, ending where it does, did not form there', () => {
+    fc.assert(
+      fc.property(cutArb, ({ source, range, into }) => {
+        // What the cut's end does is out of scope: the source ends there too
+        const { chars } = cutMeanings(
+          source,
+          range,
+          into,
+          source.slice(0, range[1])
+        );
+
+        const formed = chars.filter(
+          ({ escaped, bare, parent }) =>
+            !escaped && bare.some((meaning) => !parent.includes(meaning))
+        );
+        expect(formed).toEqual([]);
+      }),
+      { numRuns: 3000 }
+    );
+  });
+
+  it('escapes nothing new that by the rules would form no syntax its source did not form there', () => {
+    fc.assert(
+      // To its line's end: a cut that ends sooner may escape what its end
+      // would make syntax of, as a block id
+      fc.property(lineCutArb, ({ source, from, to, into }) => {
+        const { chars } = cutMeanings(source, [from, to], into);
+
+        const needless = chars.filter(
+          ({ newlyEscaped, bare, parent }) =>
+            newlyEscaped && bare.every((meaning) => parent.includes(meaning))
+        );
+        expect(needless).toEqual([]);
+      }),
+      { numRuns: 3000 }
+    );
+  });
+
+  describe('for a note', () => {
+    const cut = (source: string, from: number, to = source.length) =>
+      Markdown.escapeCutStart(source, [from, to], 'note');
+
+    it('escapes a tag, heading, quote or list its start would form', () => {
+      expect(cut('word#evil', 4)).toBe(String.raw`\#evil`);
+      expect(cut('see # x', 4)).toBe(String.raw`\# x`);
+      expect(cut('C# and x < 5', 1)).toBe(String.raw`\# and x < 5`);
+      expect(cut('a > q', 2)).toBe(String.raw`\> q`);
+      expect(cut('x - item', 2)).toBe(String.raw`\- item`);
+      expect(cut('x + more', 2)).toBe(String.raw`\+ more`);
+      expect(cut('a 1. list', 2)).toBe(String.raw`1\. list`);
+      expect(cut('a 12) x', 3)).toBe(String.raw`2\) x`);
+      expect(cut('x ---', 2)).toBe(String.raw`\---`);
+      expect(cut('x ===', 2)).toBe(String.raw`\===`);
+      expect(cut('see ## x', 4)).toBe(String.raw`\## x`);
+      // A marker at the cut's end, which ends the note as whitespace would
+      expect(cut('x +', 2)).toBe(String.raw`\+`);
+      expect(cut('a 1.', 2)).toBe(String.raw`1\.`);
+    });
+
+    it('escapes the blocks an unescaped note can hold bare: a `*` list, a rule, a fence, a definition', () => {
+      expect(cut('5 * 3', 2)).toBe(String.raw`\* 3`);
+      expect(cut('x ***', 2)).toBe(String.raw`\***`);
+      expect(cut('x * * *', 2)).toBe(String.raw`\* * *`);
+      expect(cut('x ___', 2)).toBe(String.raw`\___`);
+      expect(cut('x _ _ _', 2)).toBe(String.raw`\_ _ _`);
+      expect(cut('x *', 2)).toBe(String.raw`\*`);
+      expect(cut('x ~~~ y', 2)).toBe(String.raw`\~~~ y`);
+      expect(cut('x ```js', 2)).toBe('\\```js');
+      expect(cut('see [a]: https://e.x', 4)).toBe(
+        String.raw`\[a]: https://e.x`
+      );
+      expect(cut('see [^1]: x', 4)).toBe(String.raw`\[^1]: x`);
+    });
+
+    it('leaves what forms no block, or what its source formed there too', () => {
+      // Inline code, closed on its line
+      expect(cut('x ```a``` y', 2)).toBe('```a``` y');
+      expect(cut('x **a** y', 2)).toBe('**a** y');
+      expect(cut('x ***a', 2)).toBe('***a');
+      expect(cut('x ___a', 2)).toBe('___a');
+      expect(cut('see [a](b): x', 4)).toBe('[a](b): x');
+      // A tag after whitespace was one there, and math opens after anything
+      expect(cut('see #tag', 4)).toBe('#tag');
+      expect(cut('a\t#tag', 2)).toBe('#tag');
+      expect(cut('see ##tag', 4)).toBe('##tag');
+      // A backtick later on the line makes the run inline code, no fence
+      expect(cut('x ```ab` c', 2)).toBe('```ab` c');
+      // A number is no tag, nor a heading without its space
+      expect(cut('see #1 x', 4)).toBe('#1 x');
+      expect(cut('a#1, b', 1)).toBe('#1, b');
+      expect(cut('a $x$ b', 2)).toBe('$x$ b');
+      expect(cut('US$5 and 6$', 2)).toBe('$5 and 6$');
+      expect(cut('x -5 and 1.5', 2)).toBe('-5 and 1.5');
+      expect(cut('a  _b c_', 3)).toBe('_b c_');
+    });
+
+    it('escapes what its first escape would turn into a tag', () => {
+      expect(cut('a##tag', 1)).toBe(String.raw`\#\#tag`);
+      expect(cut('a###tag', 1)).toBe(String.raw`\#\#\#tag`);
+      expect(cut('a>#tag', 1)).toBe(String.raw`\>\#tag`);
+      expect(cut('x -#tag', 2)).toBe('-#tag');
+      expect(cut('x ~~~#tag', 2)).toBe(String.raw`\~~~#tag`);
+      expect(cut('a##1 x', 1)).toBe(String.raw`\##1 x`);
+    });
+
+    it('escapes a `_` taken from between letters, which could open emphasis', () => {
+      expect(cut('a_b c_ d', 1)).toBe(String.raw`\_b c_ d`);
+      expect(cut('snake_case', 5)).toBe(String.raw`\_case`);
+    });
+
+    it('drops mid-line whitespace that would indent it, and reads what follows as its start', () => {
+      expect(cut('a    code', 1)).toBe('code');
+      expect(cut('a \t# x', 1)).toBe(String.raw`\# x`);
+      expect(cut('see #tag', 3)).toBe('#tag');
+      expect(cut('a  \n  b', 1)).toBe('\n  b');
+      expect(cut('a  ', 1)).toBe('');
+    });
+
+    it('re-escapes a start that splits an escape pair, as its source read it', () => {
+      expect(cut(String.raw`a \#tag`, 3)).toBe(String.raw`\#tag`);
+      expect(cut(String.raw`\> x`, 1)).toBe(String.raw`\> x`);
+      expect(cut(String.raw`a\_#tag`, 2)).toBe(String.raw`\_#tag`);
+      // A tag after an escaped char was one there
+      expect(cut(String.raw`a\.#tag`, 3)).toBe('#tag');
+    });
+
+    it('leaves a start where a block starts in its source, after list or quote markers', () => {
+      expect(cut('- # x', 2)).toBe('# x');
+      expect(cut('> - x', 2)).toBe('- x');
+      expect(cut('>#tag', 1)).toBe('#tag');
+      expect(cut('- [ ] # x', 6)).toBe('# x');
+      expect(cut('  1. > q', 5)).toBe('> q');
+      expect(cut('  # x', 2)).toBe('# x');
+      expect(cut('12. # x', 4)).toBe('# x');
+      expect(cut('-  [ ] # x', 7)).toBe('# x');
+      expect(cut('a\n# x', 2)).toBe('# x');
+      expect(cut('a\r# x', 2)).toBe('# x');
+      // But for whitespace from mid-line, which would make it code
+      expect(cut('-    x', 1)).toBe('x');
+    });
+
+    it('leaves a cut from the start of a line, indent and all', () => {
+      expect(cut('    # x', 0)).toBe('    # x');
+      expect(cut('a\n    - x', 2)).toBe('    - x');
+    });
+
+    it('treats as no block start a marker that is no list, or one escaped', () => {
+      expect(cut('-# x', 1)).toBe(String.raw`\# x`);
+      expect(cut(String.raw`\- # x`, 3)).toBe(String.raw`\# x`);
+      expect(cut('1.# x', 2)).toBe(String.raw`\# x`);
+      expect(cut('- x[ ] # y', 7)).toBe(String.raw`\# y`);
+    });
+
+    it('treats as no block start an indent of four spaces or a tab: code, or a lazy continuation', () => {
+      expect(cut('foo\n    # x', 8)).toBe(String.raw`\# x`);
+      expect(cut('foo\n    > x', 8)).toBe(String.raw`\> x`);
+      expect(cut('\t- # x', 3)).toBe(String.raw`\# x`);
+      expect(cut('   \t# x', 4)).toBe(String.raw`\# x`);
+      expect(cut('   - # x', 5)).toBe('# x');
+    });
+
+    it('takes time linear in the length of its source, its lines and its runs of `#`', () => {
+      const timed = (source: string, from: number) => {
+        const started = performance.now();
+        cut(source, from);
+        return performance.now() - started;
+      };
+      const best = (source: string, from: number) =>
+        Math.min(...Array.from({ length: 5 }, () => timed(source, from)));
+      // Sixteen times the text takes nowhere near 256 times as long
+      for (const make of [
+        // Long lines before the one it starts on
+        (n: number) => `${'x'.repeat(n)}\n`.repeat(4) + 'a #tag',
+        // A run of `#` escaped one by one after the first
+        (n: number) => `a${'#'.repeat(n)}x`,
+      ]) {
+        const short = make(10_000);
+        const long = make(160_000);
+        const fromShort = short.lastIndexOf('a') + 1;
+        const fromLong = long.lastIndexOf('a') + 1;
+        expect(best(long, fromLong)).toBeLessThan(
+          Math.max(best(short, fromShort), 0.5) * 64
+        );
+      }
+      expect(cut('a###x', 1)).toBe(String.raw`\#\#\#x`);
+    });
+
+    it('escapes a block id its first word would make, ending the cut', () => {
+      expect(cut('x^2 y', 1, 3)).toBe(String.raw`\^2`);
+      expect(cut('x^2 y', 1)).toBe('^2 y');
+    });
+
+    it('reads a line break after its first char as the end of its line, not of the line before', () => {
+      expect(cut('a #\nb', 2)).toBe(String.raw`\#` + '\nb');
+      expect(cut('a #\rb', 2)).toBe(String.raw`\#` + '\rb');
+    });
+
+    it('changes only the first line', () => {
+      expect(cut('a#b\n# c', 1)).toBe(String.raw`\#b` + '\n# c');
+      expect(cut('x - a', 2, 3)).toBe(String.raw`\-`);
+      expect(cut('x', 1)).toBe('');
+    });
+  });
+
+  describe('for an answer, after a cloze delimiter and a space', () => {
+    const cut = (source: string, from: number, to = source.length) =>
+      Markdown.escapeCutStart(source, [from, to], 'answer');
+
+    it('escapes a tag or emphasis its start would form', () => {
+      expect(cut('word#evil', 4)).toBe(String.raw`\#evil`);
+      expect(cut('a_b c_', 1)).toBe(String.raw`\_b c_`);
+      expect(cut('a##x', 1)).toBe(String.raw`\#\#x`);
+    });
+
+    it('leaves what forms no syntax after a space, or what its source formed there too', () => {
+      expect(cut('see #tag', 4)).toBe('#tag');
+      expect(cut('#tag', 0)).toBe('#tag');
+      expect(cut('- #tag', 2)).toBe('#tag');
+      expect(cut('>#tag', 1)).toBe('#tag');
+      expect(cut('a > q', 2)).toBe('> q');
+      expect(cut('x - y', 2)).toBe('- y');
+      expect(cut('a 1. b', 2)).toBe('1. b');
+      expect(cut('see # x', 4)).toBe('# x');
+      expect(cut('a $x$', 2)).toBe('$x$');
+      expect(cut('a  b', 1)).toBe('  b');
+      expect(cut('a#1 b', 1)).toBe('#1 b');
+      expect(cut('_b c_', 0)).toBe('_b c_');
+      expect(cut('see #1 x', 4)).toBe('#1 x');
     });
   });
 });

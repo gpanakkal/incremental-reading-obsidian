@@ -3013,7 +3013,7 @@ describe('create', () => {
     );
   });
 
-  it('takes an escape pair the main selection splits whole, in its text and its offsets alike', async () => {
+  it('takes an escape pair the main selection splits whole, in its text and its offsets alike, its start escaped as cut from the note', async () => {
     await fc.assert(
       fc.asyncProperty(escapedNoteArb, async (note) => {
         vi.restoreAllMocks();
@@ -3022,7 +3022,9 @@ describe('create', () => {
 
         const [start, end] = Markdown.snapOffEscapes(note.doc, [from, to]);
         const bodyStart = Obsidian.getBodyStartOffset(note.doc);
-        expect(text).toBe(note.doc.slice(start, end));
+        expect(text).toBe(
+          Markdown.escapeCutStart(note.doc, [start, end], 'note')
+        );
         expect(offsets).toEqual({
           start: start - bodyStart,
           end: end - bodyStart,
@@ -3071,7 +3073,7 @@ describe('create', () => {
     );
   });
 
-  it("makes a snippet of the editor's selection as the note holds it, and named so, whatever reading view's", async () => {
+  it("makes a snippet of the editor's selection as cut from the note, and named so, whatever reading view's", async () => {
     await fc.assert(
       fc.asyncProperty(
         escapedNoteArb,
@@ -3085,11 +3087,29 @@ describe('create', () => {
           );
 
           const [start, end] = Markdown.snapOffEscapes(note.doc, [from, to]);
-          expect(text).toBe(note.doc.slice(start, end));
+          expect(text).toBe(
+            Markdown.escapeCutStart(note.doc, [start, end], 'note')
+          );
           expect(title).toBeUndefined();
         }
       )
     );
+  });
+
+  it('makes a snippet selected from mid-line of no tag, heading, quote or list its note did not hold there', async () => {
+    const snip = async (doc: string, from: number) => {
+      vi.restoreAllMocks();
+      return (await snipSelection({ doc, ranges: [[from, doc.length]] })).text;
+    };
+
+    expect(await snip('word#evil', 4)).toBe(String.raw`\#evil`);
+    expect(await snip('C# and x', 1)).toBe(String.raw`\# and x`);
+    expect(await snip('x > y', 2)).toBe(String.raw`\> y`);
+    expect(await snip('a 1. b', 2)).toBe(String.raw`1\. b`);
+    // A tag after whitespace was one there too
+    expect(await snip('see #tag', 4)).toBe('#tag');
+    // A snippet from a line's start is as it was
+    expect(await snip('a\n# b', 2)).toBe('# b');
   });
 
   it('brings back no Templater command, link, embed, tag or HTML that the note escaped, selected in reading view', async () => {
