@@ -219,8 +219,16 @@ export class CardManager extends ItemManager {
       { delimited: true }
     );
 
+    // The line starts a block in the note, its list marker cut off, so only
+    // the answer's start can form syntax there that the note didn't
+    const [a, b] = bounds;
+    const answer = Markdown.escapeCutStart(line, bounds, 'answer');
+
     try {
-      const withDelimiters = this.delimitText(line, bounds)[0];
+      const withDelimiters = this.delimitText(
+        line.slice(0, a) + answer + line.slice(b),
+        [a, a + answer.length]
+      )[0];
       const reviewCard = await this.createAndEmbed(
         editor,
         currentFile,
@@ -292,13 +300,20 @@ export class CardManager extends ItemManager {
     const start = editor.offsetToPos(from);
     const end = editor.offsetToPos(to);
 
+    const [a, b] = Markdown.snapOffEscapes(
+      text,
+      [answer[0] + shift, answer[1] + shift],
+      { delimited: true }
+    );
+    // Each start escaped where it forms syntax the note didn't there
+    const pre = Markdown.escapeCutStart(doc, [from, from + a], 'note');
+    const hidden = Markdown.escapeCutStart(doc, [from + a, from + b], 'answer');
+
     try {
-      const withDelimiters = this.delimitText(
-        text,
-        Markdown.snapOffEscapes(text, [answer[0] + shift, answer[1] + shift], {
-          delimited: true,
-        })
-      )[0];
+      const withDelimiters = this.delimitText(pre + hidden + text.slice(b), [
+        pre.length,
+        pre.length + hidden.length,
+      ])[0];
       const reviewCard = await this.createAndEmbed(
         editor,
         currentFile,

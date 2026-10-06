@@ -1659,6 +1659,76 @@ test.describe('Snippets and cards from a PDF article', () => {
     await expect(cardViewer(window)).toContainText('#ir-card');
   });
 
+  test('escapes the start of a snippet and a card made from mid-line of a PDF snippet, where the PDF formed no heading or list', async () => {
+    await setDefaultEditingMode(window, 'source');
+    const parent = await hostileSnippet(window);
+    await window.evaluate(async (reference) => {
+      const { app } = window as unknown as {
+        app: PageApp & {
+          workspace: {
+            setActiveLeaf(leaf: unknown, params: { focus: boolean }): void;
+          };
+        };
+      };
+      const leaf = app.workspace.getLeaf('tab');
+      await leaf.openFile(app.vault.getFileByPath(reference));
+      app.workspace.setActiveLeaf(leaf, { focus: true });
+    }, parent.reference);
+    // `C#` stays bare in the escaped note: no tag starts after a letter
+    const heading = 'C# and x < 5';
+    await expect.poll(() => editorDoc(window, 'active')).toContain(heading);
+
+    // From the `#`, which would start a heading
+    await selectInEditor(window, 'active', heading, [1, heading.length]);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+
+    await expect.poll(() => snippets(window)).toHaveLength(2);
+    const child = (await snippets(window)).find(
+      (s) => s.reference !== parent.reference
+    )!;
+    expect(child.body).toBe(String.raw`\# and x < 5`);
+    await expect
+      .poll(() => noteSyntax(window, child.reference))
+      .toEqual({
+        ...CLEAN_NOTE,
+        sections: ['yaml', 'paragraph'],
+        frontmatterTags: ['ir-text-snippet'],
+      });
+
+    // A card in selection mode, its span from the `1` of a mid-line `1.`,
+    // which would start a list
+    await reviewNow(
+      window,
+      'snippet',
+      await rowId(window, 'snippet', parent.reference)
+    );
+    const list = '1. a list - item + more';
+    await expect.poll(() => editorDoc(window, 'review')).toContain(list);
+    await actionBar(window)
+      .getByRole('button', { name: 'Create card' })
+      .click();
+    await expect(confirmButton(window)).toBeVisible();
+    await selectInEditor(window, 'review', list, [0, list.length]);
+    await confirmButton(window).click();
+    await expect(answerText(window)).toHaveText(list);
+    await selectAnswer(window, 'item');
+    await window.keyboard.press('Enter');
+
+    await expect.poll(() => cards(window)).toHaveLength(1);
+    const [card] = await cards(window);
+    const [left, right] = CLOZE_DELIMITERS;
+    expect(card.body).toBe(
+      String.raw`1\. a list - ${left} item ${right} + more`
+    );
+    await expect
+      .poll(() => noteSyntax(window, card.reference))
+      .toEqual({
+        ...CLEAN_NOTE,
+        sections: ['yaml', 'paragraph'],
+        frontmatterTags: ['ir-card'],
+      });
+  });
+
   test('says a scanned page has no selectable text, and makes nothing', async () => {
     await importFixture(window, NO_TEXT_PDF_PATH);
     await beginReview(window);

@@ -118,6 +118,7 @@ If you import a note as an article later, the snippets and cards you already mad
 ## Known limitations and issues
 
 - Creating snippets and cards on partial code blocks, blockquotes, LaTeX, and other types of special formatting can break the formatting. It is recommended to include the entire formatted section (such as the entire code block) when making the snippet or card, and then editing it afterwards as desired.
+- A snippet or card made from the middle of a line reads as it did there. If its start would turn into a tag, heading, list, quote, emphasis, rule, code block or link definition the note didn't show (`word#tag` selected from the `#`), a backslash goes before the character that would start it, which source mode shows, and spaces it would start with are dropped. A tag that was one in the note, like `#tag` in `see #tag`, stays a tag, though one inside inline code or math is taken for a tag too.
 - When you rename or move a file and Obsidian doesn't update links (**Automatically update internal links** is off and you choose **Do not update**), the plugin still points every snippet's, card's and copied article's `source` link at where the file went, once Obsidian is done asking.
 ### PDFs
 - Snippets and cards from a PDF that isn't an article find it by their link alone. If the PDF is moved while Obsidian is closed, they lose their highlights, **Go to context** won't work, and importing the PDF won't pick them up.

@@ -140,6 +140,44 @@ function markerAt(
 }
 
 /**
+ * What can stand before a block on its line and still let it start there:
+ * up to three spaces of indent (more is code, or a paragraph's lazy
+ * continuation), quote markers, list markers before whitespace, and a
+ * task's checkbox. `- # x` holds a heading, `> - x` a list.
+ */
+const CONTAINERS = /^ {0,3}(?:(?:>|(?:[-+*]|\d+[.)])\s(?:\s*\[.\]\s)?)\s*)*$/;
+
+/** Whether what stands at `i` in `text` starts a block, as at a line's start. */
+function startsBlock(text: string, i: number): boolean {
+  const lineStart =
+    Math.max(text.lastIndexOf('\n', i - 1), text.lastIndexOf('\r', i - 1)) + 1;
+  return CONTAINERS.test(text.slice(lineStart, i));
+}
+
+/**
+ * The indices of what makes the line starting at `i` in `text` a block that
+ * text cut from mid-line would start without being one in its source:
+ * besides {@link markerAt}'s, a quote, a heading, a `*` list, a `*` or `_`
+ * rule, a code fence, and a link or footnote definition. An escaped note
+ * escapes every `*`, `` ` ``, `[` and doubled `~`; an ordinary note holds them
+ * bare.
+ */
+function blockMarks(text: string, i: number): number[] {
+  const line = restOfLine(text, i);
+  if (line === '') return [];
+  const marker = markerAt(text, i, (index) => isBlank(text[index] ?? ' '));
+  if (marker !== undefined) return [marker];
+  const block =
+    line[0] === '>' ||
+    /^#{1,6}(?:\s|$)/.test(line) ||
+    /^(?:`{3,}(?!.*`)|~{3})/.test(line) ||
+    (line[0] === '*' && isBlank(line[1] ?? ' ')) ||
+    /^([*_])(?:\s*\1){2,}\s*$/.test(line) ||
+    /^\[[^\]]+\]:/.test(line);
+  return block ? [i] : [];
+}
+
+/**
  * Where a character stands in the escaped note, as the rules need to know.
  */
 type Context = {
@@ -181,7 +219,15 @@ function isSyntax(text: string, i: number, context: Context): boolean {
     case ')':
       return prev === '{';
     case '#':
-      return atLineStart || isTagStart(text, i, context);
+      return (
+        atLineStart ||
+        isTagStart(
+          text,
+          i,
+          isBlank(prev) || context.afterEscape,
+          context.boundaryWithin
+        )
+      );
     // Math closes at a `$` after anything but a space or a tab, even a line
     // break: one after a space opens, and only display math, `$$`, needs no
     // closer of that kind
@@ -240,18 +286,19 @@ function isSyntax(text: string, i: number, context: Context): boolean {
 
 /**
  * Whether the `#` at `i`, not at the start of its line, could start a tag:
- * one after whitespace, or after an escape (reading view starts a tag there
- * too), before a character a tag can hold. Obsidian doesn't read a number as
- * a tag, so `#1` before whitespace, `,`, `.` or `)` is left, unless an end
- * of the answer could change what follows it.
+ * one `afterBlank`, after whitespace or after an escape (reading view starts
+ * a tag there too), before a character a tag can hold. Obsidian doesn't read
+ * a number as a tag, so `#1` before whitespace, `,`, `.` or `)` is left,
+ * unless an end of the answer could change what follows it.
  */
 function isTagStart(
   text: string,
   i: number,
-  { prev, afterEscape, boundaryWithin }: Context
+  afterBlank: boolean,
+  boundaryWithin: Context['boundaryWithin']
 ): boolean {
   // The end of the text ends a tag as whitespace does
-  if (!(isBlank(prev) || afterEscape) || isBlank(text[i + 1] ?? ' ')) {
+  if (!afterBlank || isBlank(text[i + 1] ?? ' ')) {
     return false;
   }
   const number = /^\d+/.exec(text.slice(i + 1));
@@ -398,6 +445,83 @@ export class Markdown {
     const start =
       (delimited && escapesNext(text, from)) || splits(from) ? from - 1 : from;
     return [start, splits(to) ? to + 1 : to];
+  }
+
+  /**
+   * The text from `from` to `to` in `source`, a note's source, cut out to
+   * start a new note (`'note'`: a snippet, or a card's text before its
+   * answer), or to stand after a cloze delimiter and a space (`'answer'`),
+   * with its start escaped where it would form syntax that it didn't form in
+   * `source`. Escaped text leaves some characters bare where they form
+   * nothing (`word#evil`), and cut from mid-line, they could: `#evil` alone
+   * is a tag, `# x` a heading, `> x` a quote, `- x` and `1. x` lists, and an
+   * ordinary note's `* x`, `***`, a fence or `[a]: x` blocks of their own.
+   * What `source` formed there is kept: `#tag` cut from `see #tag` is still a
+   * tag, as it was. Run it after {@link snapOffEscapes}; a start that splits
+   * an escape pair is escaped again all the same.
+   *
+   * Only the start changes: whitespace from mid-line that would start a note,
+   * and indent it, is dropped, and the first char is escaped if it needs it,
+   * as is what follows an escape that would form a tag after it (reading view
+   * starts one there: `\##tag`). The rest of the cut reads as it did. A cut
+   * that starts a block in `source`, at the start of its line or after list
+   * and quote markers, is escaped nowhere.
+   *
+   * Left bare: a `$`, since math opens after anything in Obsidian and nothing
+   * is left before the start for it to close; text in code, which the rules
+   * can't see, as with a cut from the start of a line.
+   */
+  static escapeCutStart(
+    source: string,
+    [from, to]: readonly [number, number],
+    into: 'note' | 'answer'
+  ): string {
+    const text = source.slice(from, to);
+    const midLine = from > 0 && !isLineBreak(source[from - 1]);
+    const first = into === 'note' && midLine ? text.search(/[\S\r\n]|$/) : 0;
+    const at = from + first;
+    // There it reads as at a line's start: as it does where it goes, or
+    // after a space, where it forms nothing a line's start doesn't
+    if (startsBlock(source, at)) return text.slice(first);
+    const nowhere = () => false;
+    const lastWord = (of: string) => (i: number) =>
+      !/\s/.test(restOfLine(of, i));
+    // The first char as `source` reads it, and as it reads after whitespace,
+    // as a line's start does for a tag: the marks find what a line's start
+    // makes a block. A `$` closes no math after either
+    const context: Context = {
+      // Never the start of `source`, a block's start
+      prev: source[at - 1],
+      atLineStart: false,
+      afterEscape:
+        escapesNext(source, at - 1) && ASCII_PUNCTUATION.test(source[at - 1]),
+      boundaryWithin: nowhere,
+      isLastWord: lastWord(source),
+    };
+    const wasSyntax = !escapesNext(source, at) && isSyntax(source, at, context);
+    const isSyntaxNow = isSyntax(text, first, {
+      ...context,
+      prev: ' ',
+      isLastWord: lastWord(text),
+    });
+    const escapes = new Set(into === 'note' ? blockMarks(text, first) : []);
+    if (isSyntaxNow && !wasSyntax) escapes.add(first);
+    // Reading view starts a tag after an escape: one `source` didn't hold,
+    // unless the char before it was escaped there too
+    let next = Math.max(-1, ...escapes) + 1;
+    while (
+      next > 0 &&
+      text[next] === '#' &&
+      isTagStart(text, next, true, nowhere) &&
+      !escapesNext(source, from + next - 1)
+    ) {
+      escapes.add(next++);
+    }
+    let out = '';
+    for (let i = first; i < text.length; i++) {
+      out += escapes.has(i) ? `\\${text[i]}` : text[i];
+    }
+    return out;
   }
 
   /**

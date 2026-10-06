@@ -2421,7 +2421,7 @@ describe('create', () => {
     vi.restoreAllMocks();
   });
 
-  it("makes a card of the cursor's line, its answer the selection moved off any backslash that would escape a delimiter", async () => {
+  it("makes a card of the cursor's line, its answer the selection moved off any backslash that would escape a delimiter, its start escaped as cut from the line", async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.constantFrom('', '- ', '  1. '),
@@ -2460,10 +2460,9 @@ describe('create', () => {
           const [a, b] = Markdown.snapOffEscapes(line, [from, to], {
             delimited: true,
           });
+          const answer = Markdown.escapeCutStart(line, [a, b], 'answer');
           expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
-            line.slice(0, a) +
-              `${LEFT} ${line.slice(a, b)} ${RIGHT}` +
-              line.slice(b),
+            line.slice(0, a) + `${LEFT} ${answer} ${RIGHT}` + line.slice(b),
             sourceFile
           );
           vi.restoreAllMocks();
@@ -2471,6 +2470,48 @@ describe('create', () => {
       ),
       { numRuns: 300 }
     );
+  });
+
+  it('makes no tag or emphasis of an answer selected from mid-line that its line did not hold there', async () => {
+    const card = async (line: string, from: number) => {
+      const manager = new CardManager(makePlugin(), makeRepo());
+      const createFileAndEntry = vi
+        .spyOn(
+          manager as unknown as {
+            createFileAndEntry: (text: string) => Promise<unknown>;
+          },
+          'createFileAndEntry'
+        )
+        .mockResolvedValue({ file: {}, data: {} });
+      vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue('[[c]]');
+      vi.spyOn(Obsidian, 'transcludeLink').mockReturnValue(undefined);
+      vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
+        line,
+        lineNumber: 0,
+        start: 0,
+        end: line.length,
+      });
+      vi.spyOn(Obsidian, 'getSelectionWithBounds').mockReturnValue({
+        selection: line.slice(from),
+        start: { line: 0, ch: from },
+        end: { line: 0, ch: line.length },
+        startOffset: from,
+        endOffset: line.length,
+      });
+      await manager.create(
+        { setSelection: vi.fn() } as never,
+        { file: sourceFile } as never
+      );
+      vi.restoreAllMocks();
+      return createFileAndEntry.mock.calls[0][0];
+    };
+
+    expect(await card('word#evil', 4)).toBe(
+      String.raw`word${LEFT} \#evil ${RIGHT}`
+    );
+    expect(await card('a_b c_', 1)).toBe(String.raw`a${LEFT} \_b c_ ${RIGHT}`);
+    // A tag after whitespace was one there too
+    expect(await card('see #tag', 4)).toBe(`see ${LEFT} #tag ${RIGHT}`);
   });
 });
 
@@ -2501,11 +2542,12 @@ describe('createFromSelection', () => {
     vi.restoreAllMocks();
   });
 
-  it('makes a card of the span, with the answer hidden, from the note it is in', async () => {
+  it('makes a card of the span, with the answer hidden, from the note it is in, each start escaped as cut from it', async () => {
     await fc.assert(
       fc.asyncProperty(unescapedCardSelectionArb, async (c) => {
         const { manager, createFileAndEntry } = setUp();
-        const editor = makeEditor(c.before + c.text + c.after);
+        const doc = c.before + c.text + c.after;
+        const editor = makeEditor(doc);
 
         await manager.createFromSelection(
           editor as never,
@@ -2514,8 +2556,16 @@ describe('createFromSelection', () => {
           c.answerBounds
         );
 
+        const { from } = c.selection;
+        const [a, b] = c.answerBounds;
+        const pre = Markdown.escapeCutStart(doc, [from, from + a], 'note');
+        const answer = Markdown.escapeCutStart(
+          doc,
+          [from + a, from + b],
+          'answer'
+        );
         expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
-          c.pre + `${LEFT} ${c.answer} ${RIGHT}` + c.post,
+          pre + `${LEFT} ${answer} ${RIGHT}` + c.post,
           sourceFile
         );
         vi.restoreAllMocks();
@@ -2574,7 +2624,7 @@ describe('createFromSelection', () => {
     );
   });
 
-  it('makes the card of the span widened off the escape pairs it splits, its answer off any backslash that would escape a delimiter', async () => {
+  it('makes the card of the span widened off the escape pairs it splits, its answer off any backslash that would escape a delimiter, each start escaped as cut from the note', async () => {
     await fc.assert(
       fc.asyncProperty(
         escapedCardSelectionArb,
@@ -2600,10 +2650,14 @@ describe('createFromSelection', () => {
             [answer[0] + shift, answer[1] + shift],
             { delimited: true }
           );
+          const pre = Markdown.escapeCutStart(doc, [start, start + a], 'note');
+          const hidden = Markdown.escapeCutStart(
+            doc,
+            [start + a, start + b],
+            'answer'
+          );
           expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
-            text.slice(0, a) +
-              `${LEFT} ${text.slice(a, b)} ${RIGHT}` +
-              text.slice(b),
+            pre + `${LEFT} ${hidden} ${RIGHT}` + text.slice(b),
             sourceFile
           );
           expect(editor.text).toBe(
@@ -2668,6 +2722,45 @@ describe('createFromSelection', () => {
       start: 2,
       end: 8,
     });
+  });
+
+  it('makes no tag, heading, quote or list of a span or answer selected from mid-line that the note did not hold there', async () => {
+    const card = async (
+      doc: string,
+      from: number,
+      answer: readonly [number, number]
+    ) => {
+      const { manager, createFileAndEntry } = setUp();
+      await manager.createFromSelection(
+        makeEditor(doc) as never,
+        { file: sourceFile } as never,
+        { from, to: doc.length, text: doc.slice(from) },
+        answer
+      );
+      vi.restoreAllMocks();
+      return createFileAndEntry.mock.calls[0][0];
+    };
+
+    // The span from the `#` of `word#evil`
+    expect(await card('word#evil x', 4, [6, 7])).toBe(
+      String.raw`\#evil ${LEFT} x ${RIGHT}`
+    );
+    expect(await card('a > b c', 2, [4, 5])).toBe(
+      String.raw`\> b ${LEFT} c ${RIGHT}`
+    );
+    expect(await card('a - b c', 2, [4, 5])).toBe(
+      String.raw`\- b ${LEFT} c ${RIGHT}`
+    );
+    // The answer from it
+    expect(await card('x word#evil', 0, [6, 11])).toBe(
+      String.raw`x word${LEFT} \#evil ${RIGHT}`
+    );
+    // The span from its `#`, the answer too
+    expect(await card('a##b', 1, [0, 3])).toBe(
+      String.raw`${LEFT} \#\#b ${RIGHT}`
+    );
+    // A tag after whitespace was one there too
+    expect(await card('see #tag x', 4, [5, 6])).toBe(`#tag ${LEFT} x ${RIGHT}`);
   });
 
   it('makes nothing without a note to make it from', async () => {

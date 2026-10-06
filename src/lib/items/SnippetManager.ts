@@ -242,10 +242,11 @@ export class SnippetManager extends ItemManager {
     }
 
     // The selection's range in the note, snapped off any escape pair it
-    // splits so the snippet reads as the selection did, and its text and
-    // body-relative offsets for highlighting. `editor.cm`, the CodeMirror
-    // view, is undocumented Obsidian API. Its main range is the one
-    // `getSelection` reads.
+    // splits so the snippet reads as the selection did, and its text, its
+    // start escaped where it forms syntax the note didn't, and body-relative
+    // offsets for highlighting. `editor.cm`, the CodeMirror view, is
+    // undocumented Obsidian API. Its main range is the one `getSelection`
+    // reads.
     const cm = editor.cm as Editor['cm'] | undefined;
     let source: {
       text: string;
@@ -257,7 +258,7 @@ export class SnippetManager extends ItemManager {
       const [start, end] = Markdown.snapOffEscapes(doc, [from, to]);
       const bodyStart = Obsidian.getBodyStartOffset(doc);
       source = {
-        text: doc.slice(start, end),
+        text: Markdown.escapeCutStart(doc, [start, end], 'note'),
         offsets: { start: start - bodyStart, end: end - bodyStart },
       };
     } else {
