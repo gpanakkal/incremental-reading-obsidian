@@ -1,10 +1,10 @@
 import { CARD_TAG } from '#/lib/constants';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { isPdfView, pdfTabSelection } from '#/lib/pdf/obsidian-pdf';
-import { PAGE_SELECTOR } from '#/lib/pdf/pdf-anchor';
+import { createPdfHighlightHover } from '#/lib/pdf/pdf-highlight-hover';
 import {
   createPdfHighlightLayer,
-  highlightAt,
+  highlightUnder,
   type PdfHighlight,
 } from '#/lib/pdf/pdf-highlights';
 import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
@@ -90,16 +90,10 @@ function openItemsOnPress(
   plugin: IncrementalReadingPlugin,
   containerEl: HTMLElement
 ): () => void {
-  const highlightUnder = (evt: MouseEvent) => {
-    // Undocumented: pdf.js's `div.textLayer` and `div.canvasWrapper`, inside
-    // the page div
-    const pageEl = (evt.target as Element)
-      .closest('.textLayer, .canvasWrapper')
-      ?.closest(PAGE_SELECTOR);
-    return pageEl ? highlightAt(pageEl, evt.clientX, evt.clientY) : null;
-  };
+  const highlightOf = (evt: MouseEvent) =>
+    highlightUnder(evt.target as Element, evt.clientX, evt.clientY);
   const onClick = (evt: MouseEvent) => {
-    const highlight = highlightUnder(evt);
+    const highlight = highlightOf(evt);
     if (!highlight) return;
     if (!containerEl.ownerDocument.getSelection()!.isCollapsed) {
       evt.stopPropagation();
@@ -113,7 +107,7 @@ function openItemsOnPress(
   };
   // A middle press scrolls on Windows and pastes on Linux
   const onMouseDown = (evt: MouseEvent) => {
-    if (evt.button === MIDDLE_MOUSE_BUTTON && highlightUnder(evt)) {
+    if (evt.button === MIDDLE_MOUSE_BUTTON && highlightOf(evt)) {
       evt.preventDefault();
     }
   };
@@ -156,7 +150,10 @@ export function showPdfItemHighlights(
   const { reviewManager } = plugin;
   const { workspace, metadataCache } = plugin.app;
   const tracker = reviewManager.snippets.offsetTracker;
-  const layer = createPdfHighlightLayer(containerEl);
+  const layer = createPdfHighlightLayer(
+    containerEl,
+    createPdfHighlightHover(containerEl)
+  );
   const stopOpening = openItemsOnPress(plugin, containerEl);
   let stopped = false;
   let cards: readonly PdfHighlight[] = [];

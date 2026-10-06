@@ -2945,4 +2945,450 @@ test.describe('Snippets and cards from a PDF article', () => {
   });
 
   // #endregion
+
+  // #region HOVER
+
+  /** The middle of `box` on screen. */
+  async function middleOf(box: Locator) {
+    const { x, y, width, height } = (await box.boundingBox())!;
+    return { x: x + width / 2, y: y + height / 2 };
+  }
+
+  /**
+   * What the mouse shows at (`x`, `y`): the cursor of what is on top there,
+   * and each highlight box marked as hovered, as [reference, ring], its ring
+   * the box shadow it has.
+   */
+  const hoverAt = (page: Page, { x, y }: { x: number; y: number }) =>
+    page.evaluate(
+      ([x, y]) => ({
+        cursor: getComputedStyle(document.elementFromPoint(x, y)!).cursor,
+        hovered: Array.from(
+          document.querySelectorAll<HTMLElement>('.ir-hovered'),
+          (box) => [box.dataset.snippetRef, getComputedStyle(box).boxShadow]
+        ),
+      }),
+      [x, y]
+    );
+
+  /** The box shadow a box in the document's body painted with `shadow` has. */
+  const shadowOf = (page: Page, shadow: string) =>
+    page.evaluate((shadow) => {
+      const probe = document.body.appendChild(document.createElement('div'));
+      probe.style.boxShadow = shadow;
+      const seen = getComputedStyle(probe).boxShadow;
+      probe.remove();
+      return seen;
+    }, shadow);
+
+  /** Every text layer's markup in the document, to tell it was left alone. */
+  const textLayers = (page: Page) =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll('.textLayer'), (el) => el.outerHTML)
+    );
+
+  test("rings the highlight under the mouse with a pointer, a card's in the card colour, in review and in the PDF's tab, and clears both off it, writing nothing into the text layer", async () => {
+    await importFixture(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 9)).toBeAttached();
+    await selectChars(window, [1, 9, 2], [1, 9, 12]);
+    await expect.poll(() => viewerSelection(window)).not.toBeNull();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await expect.poll(() => snippets(window)).toHaveLength(1);
+    const [snippet] = await snippets(window);
+    const card = await cardInReview(
+      window,
+      [1, 2, 0],
+      [1, 2, FIRST_LINE.length],
+      'long text'
+    );
+    await window.evaluate(() => document.getSelection()!.removeAllRanges());
+    const snippetBox = itemBoxes(article(window), 1, 9);
+    const cardBox = itemBoxes(article(window), 1, 2, 'ir-card-highlight');
+    await expect(cardBox).toHaveCount(1);
+    const accentRing = await shadowOf(window, '0 0 0 2px var(--text-accent)');
+    const cardRing = await shadowOf(
+      window,
+      '0 0 0 2px var(--ir-transclusion-rule-color)'
+    );
+    expect(cardRing).not.toBe(accentRing);
+    const layers = await textLayers(window);
+
+    const onSnippet = await middleOf(snippetBox);
+    await window.mouse.move(onSnippet.x, onSnippet.y);
+    await expect
+      .poll(() => hoverAt(window, onSnippet))
+      .toEqual({
+        cursor: 'pointer',
+        hovered: [[snippet.reference, accentRing]],
+      });
+
+    const onCard = await middleOf(cardBox);
+    await window.mouse.move(onCard.x, onCard.y);
+    await expect
+      .poll(() => hoverAt(window, onCard))
+      .toEqual({ cursor: 'pointer', hovered: [[card.reference, cardRing]] });
+
+    // The end of item 9, past the snippet
+    const item = (await textItem(window, 1, 9).boundingBox())!;
+    const box = (await snippetBox.boundingBox())!;
+    const plain = { x: item.x + item.width - 2, y: onSnippet.y };
+    expect(plain.x).toBeGreaterThan(box.x + box.width);
+    await window.mouse.move(plain.x, plain.y);
+    await expect
+      .poll(() => hoverAt(window, plain))
+      .toEqual({ cursor: 'text', hovered: [] });
+    expect(await textLayers(window)).toEqual(layers);
+
+    // The PDF's own tab
+    await window
+      .locator('.workspace-tab-header', { hasText: 'PDF fixture' })
+      .first()
+      .click();
+    const tab = window.locator('.workspace-leaf.mod-active .pdf-container');
+    const tabBox = itemBoxes(tab, 1, 9);
+    await expect(tabBox).toHaveCount(1);
+    const onTabSnippet = await middleOf(tabBox);
+    await window.mouse.move(onTabSnippet.x, onTabSnippet.y);
+    await expect
+      .poll(() => hoverAt(window, onTabSnippet))
+      .toEqual({
+        cursor: 'pointer',
+        hovered: [[snippet.reference, accentRing]],
+      });
+    // Out of the window's content, past the tab's header
+    await window.mouse.move(onTabSnippet.x, 5);
+    await expect
+      .poll(() => hoverAt(window, onTabSnippet))
+      .toEqual({ cursor: 'text', hovered: [] });
+  });
+
+  /**
+   * Record, from now on, every change to a box's hover ring made while a
+   * mouse button is down.
+   */
+  const watchHoverWhilePressed = (page: Page) =>
+    page.evaluate(() => {
+      const root = document.querySelector('.ir-pdf-article')!;
+      const w = window as unknown as { __irHoverChanges: string[] };
+      w.__irHoverChanges = [];
+      let pressed = false;
+      // Before the plugin's own listeners, which are on the container
+      document.addEventListener('pointerdown', () => (pressed = true), true);
+      document.addEventListener('pointerup', () => (pressed = false), true);
+      new MutationObserver((records) => {
+        for (const { target, oldValue } of records) {
+          const now = (target as Element).className;
+          if (pressed && /ir-hovered/.test(`${oldValue} ${now}`)) {
+            w.__irHoverChanges.push(`${oldValue} -> ${now}`);
+          }
+        }
+      }).observe(root, {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['class'],
+        attributeOldValue: true,
+      });
+    });
+  /** What {@link watchHoverWhilePressed} has recorded since it last read. */
+  const hoverChangesWhilePressed = (page: Page) =>
+    page.evaluate(() => {
+      const w = window as unknown as { __irHoverChanges: string[] };
+      return w.__irHoverChanges.splice(0);
+    });
+
+  test('keeps the hover as it is through a drag across a highlighted line, from it or from the margin, with the text cursor; selects as before; and follows the mouse again once let go', async () => {
+    await reviewWithFirstLineSnippet(window);
+    const item = (await textItem(window, 1, 2).boundingBox())!;
+    const y = item.y + item.height / 2;
+    const start = { x: item.x + 1, y };
+    const middle = { x: item.x + item.width / 2, y };
+    // Past the line's end, off the highlight
+    const past = { x: item.x + item.width + 30, y };
+    await window.mouse.move(start.x, start.y);
+    await expect
+      .poll(async () => (await hoverAt(window, start)).hovered)
+      .toHaveLength(1);
+    await watchHoverWhilePressed(window);
+
+    // From the highlight
+    await window.mouse.down();
+    await window.mouse.move(middle.x, middle.y, { steps: 8 });
+    // Ringed still, but the text cursor while selecting
+    expect(await hoverAt(window, middle)).toMatchObject({
+      cursor: 'text',
+      hovered: [expect.anything()],
+    });
+    await window.mouse.move(past.x, past.y, { steps: 8 });
+    expect(await hoverChangesWhilePressed(window)).toEqual([]);
+    await window.mouse.up();
+    await expect
+      .poll(() => viewerSelection(window))
+      .toMatch(/^Incremental reading turns a long text/);
+    // Let go, the mouse at rest off the box: the ring goes
+    await expect
+      .poll(() => hoverAt(window, past))
+      .toEqual({ cursor: expect.not.stringMatching('pointer'), hovered: [] });
+    // Back on the box, the selection still standing: ring and pointer
+    await window.mouse.move(middle.x, middle.y);
+    await expect
+      .poll(() => hoverAt(window, middle))
+      .toMatchObject({ cursor: 'pointer', hovered: [expect.anything()] });
+
+    // From the margin beside the line, across it and past its end. (The e2e
+    // setup's own viewer may select nothing from a margin, plugin or not:
+    // task 0046. Only the hover is checked here.)
+    const margin = { x: item.x - 12, y };
+    await window.mouse.move(margin.x, margin.y);
+    await expect
+      .poll(async () => (await hoverAt(window, margin)).hovered)
+      .toEqual([]);
+    await window.mouse.down();
+    await window.mouse.move(middle.x, middle.y, { steps: 8 });
+    await window.mouse.move(past.x, past.y, { steps: 8 });
+    expect(await hoverChangesWhilePressed(window)).toEqual([]);
+    await window.mouse.up();
+  });
+
+  test('rings the box now under the mouse after a zoom, the mouse at rest or moving', async () => {
+    await reviewWithFirstLineSnippet(window);
+    const box = itemBoxes(article(window), 1, 2);
+    const at = await middleOf(box);
+    await window.mouse.move(at.x, at.y);
+    await expect
+      .poll(async () => (await hoverAt(window, at)).hovered)
+      .toHaveLength(1);
+
+    /** Whether `point` is over the box now, as the page lays it out. */
+    const overBox = async ({ x, y }: { x: number; y: number }) => {
+      const now = (await box.boundingBox())!;
+      return (
+        x >= now.x &&
+        x < now.x + now.width &&
+        y >= now.y &&
+        y < now.y + now.height
+      );
+    };
+
+    // At rest at the box's far end: zoomed out by a click the page makes
+    // itself, the mouse never moving, the box shrinks out from under it
+    const before = (await box.boundingBox())!;
+    const end = { x: before.x + before.width - 2, y: at.y };
+    await window.mouse.move(end.x, end.y);
+    await expect
+      .poll(async () => (await hoverAt(window, end)).hovered)
+      .toHaveLength(1);
+    await article(window)
+      .locator('[aria-label="Zoom out"]')
+      .evaluate((button) => (button as HTMLElement).click());
+    await settled(window);
+    expect(await overBox(end)).toBe(false);
+    await expect
+      .poll(async () => (await hoverAt(window, end)).hovered)
+      .toEqual([]);
+
+    // Moving: from the toolbar, then onto the box where it is now, and past
+    // its end
+    await article(window).locator('[aria-label="Zoom in"]').click();
+    await settled(window);
+    const middle = await middleOf(box);
+    await window.mouse.move(middle.x, middle.y);
+    await expect
+      .poll(() => hoverAt(window, middle))
+      .toMatchObject({ cursor: 'pointer' });
+    const now = (await box.boundingBox())!;
+    const past = { x: now.x + now.width + 4, y: middle.y };
+    await window.mouse.move(past.x, past.y);
+    await expect
+      .poll(async () => (await hoverAt(window, past)).hovered)
+      .toEqual([]);
+  });
+
+  /**
+   * Count and time, from now on, the plugin's own hover work in the page:
+   * each `pointermove` listener it adds and each run of one, each frame it
+   * asks for, and each `elementFromPoint` it calls; and the frames the page
+   * paints (`ticks`). Told apart by the stack: Obsidian loads a plugin as
+   * `plugin:<id>`.
+   */
+  const watchHoverWork = (page: Page) =>
+    page.evaluate(() => {
+      type Work = {
+        listeners: number;
+        moves: number;
+        moveMs: number;
+        frames: number;
+        frameMs: number;
+        lookups: number;
+        ticks: number;
+      };
+      const w = window as unknown as { __irHover: Work };
+      w.__irHover = {
+        listeners: 0,
+        moves: 0,
+        moveMs: 0,
+        frames: 0,
+        frameMs: 0,
+        lookups: 0,
+        ticks: 0,
+      };
+      const ours = () =>
+        /plugin:incremental-reading/.test(new Error().stack ?? '');
+      const timed = new WeakMap<object, EventListener>();
+      type Listen = (
+        this: EventTarget,
+        type: string,
+        listener: EventListenerOrEventListenerObject | null,
+        options?: boolean | AddEventListenerOptions
+      ) => void;
+      const { prototype } = EventTarget;
+      const original = (name: string) =>
+        Object.getOwnPropertyDescriptor(prototype, name)!.value as Listen;
+      const add = original('addEventListener');
+      const remove = original('removeEventListener');
+      prototype.addEventListener = function (
+        this: EventTarget,
+        type: string,
+        listener: EventListenerOrEventListenerObject | null,
+        options?: boolean | AddEventListenerOptions
+      ) {
+        // On a PDF viewer, or what holds one: the review screen's own
+        // components listen too
+        if (
+          typeof listener === 'function' &&
+          type === 'pointermove' &&
+          this instanceof Element &&
+          (this.closest('.pdfViewer') || this.querySelector('.pdfViewer')) &&
+          ours()
+        ) {
+          w.__irHover.listeners++;
+          const wrapped: EventListener = (evt) => {
+            const start = performance.now();
+            listener.call(this, evt);
+            w.__irHover.moveMs += performance.now() - start;
+            w.__irHover.moves++;
+          };
+          timed.set(listener, wrapped);
+          add.call(this, type, wrapped, options);
+          return;
+        }
+        add.call(this, type, listener, options);
+      };
+      prototype.removeEventListener = function (
+        this: EventTarget,
+        type: string,
+        listener: EventListenerOrEventListenerObject | null,
+        options?: boolean | EventListenerOptions
+      ) {
+        const wrapped = listener && timed.get(listener);
+        remove.call(this, type, wrapped ?? listener, options);
+      };
+      // `window` here is the page's: the spec's own is shadowed only at run time
+      const page = globalThis as unknown as {
+        requestAnimationFrame: (cb: FrameRequestCallback) => number;
+      };
+      const frame = page.requestAnimationFrame;
+      const request = (cb: FrameRequestCallback) =>
+        frame.call(page, cb) as number;
+      const tick = () => {
+        w.__irHover.ticks++;
+        request(tick);
+      };
+      request(tick);
+      page.requestAnimationFrame = (cb: FrameRequestCallback) =>
+        request(
+          ours()
+            ? (time: number) => {
+                const start = performance.now();
+                cb(time);
+                w.__irHover.frameMs += performance.now() - start;
+                w.__irHover.frames++;
+              }
+            : cb
+        );
+      const lookup = Object.getOwnPropertyDescriptor(
+        Document.prototype,
+        'elementFromPoint'
+      )!.value as (this: Document, x: number, y: number) => Element | null;
+      Document.prototype.elementFromPoint = function (
+        this: Document,
+        x: number,
+        y: number
+      ) {
+        if (ours()) w.__irHover.lookups++;
+        return lookup.call(this, x, y) as Element | null;
+      };
+    });
+  /** What {@link watchHoverWork} has counted since it last read. */
+  const hoverWork = (page: Page) =>
+    page.evaluate(() => {
+      const w = window as unknown as {
+        __irHover: Record<string, number>;
+      };
+      const work = { ...w.__irHover };
+      for (const key of Object.keys(w.__irHover)) w.__irHover[key] = 0;
+      return work;
+    });
+
+  /** Sweep the mouse over page 1 of the review tab's PDF, `steps` moves. */
+  async function sweep(page: Page, steps: number) {
+    const pageBox = (await pdfPage(page, 1).boundingBox())!;
+    const top = Math.max(pageBox.y + 20, 120);
+    await page.mouse.move(pageBox.x + 20, top);
+    await page.mouse.move(
+      pageBox.x + pageBox.width - 20,
+      Math.min(pageBox.y + pageBox.height - 20, 700),
+      { steps }
+    );
+  }
+
+  test('does no hover work on a PDF with no highlights, and on one with some looks at most once a frame', async () => {
+    await importFixture(window);
+    await watchHoverWork(window);
+    await beginReview(window);
+    await expect(textItem(window, 1, 2)).toBeAttached();
+    await settled(window);
+    expect((await hoverWork(window)).listeners).toBe(0);
+
+    await sweep(window, 60);
+    expect(await hoverWork(window)).toMatchObject({
+      listeners: 0,
+      moves: 0,
+      moveMs: 0,
+      frames: 0,
+      frameMs: 0,
+      lookups: 0,
+    });
+
+    await selectText(window, [1, 2, 0], [1, 2, FIRST_LINE.length]);
+    await expect.poll(() => viewerSelection(window)).not.toBeNull();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await expect(itemBoxes(article(window), 1, 2)).toHaveCount(1);
+    await window.evaluate(() => document.getSelection()!.removeAllRanges());
+    await settled(window);
+    expect((await hoverWork(window)).listeners).toBeGreaterThan(0);
+
+    await sweep(window, 60);
+    // The last frame asked for
+    await window.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(resolve))
+    );
+    const work = await hoverWork(window);
+    expect(work.moves).toBeGreaterThanOrEqual(60);
+    expect(work.lookups).toBeGreaterThan(0);
+    // At most one look a frame painted, the last maybe still to come
+    expect(work.lookups).toBeLessThanOrEqual(work.ticks + 1);
+    expect(work.lookups).toBeLessThanOrEqual(work.moves);
+    test.info().annotations.push({
+      type: 'hover cost',
+      description: JSON.stringify({
+        ...work,
+        msPerMove: work.moveMs / work.moves,
+        msPerFrame: work.frameMs / work.frames,
+      }),
+    });
+    console.log('hover cost', JSON.stringify(work));
+  });
+
+  // #endregion
 });

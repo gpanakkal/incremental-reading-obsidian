@@ -1097,6 +1097,7 @@ body.is-phone .ir-header-standin {
 :root {
   --ir-snippet-highlight-color: rgba(255, 235, 59, 0.3);
   --ir-snippet-highlight-color-hover: rgba(255, 235, 59, 0.5);
+  --ir-snippet-highlight-border-color-hover-pdf: rgba(255, 235, 59, 0.9);
 }
 
 /* Snippet highlight styles */
@@ -1145,10 +1146,10 @@ body.is-phone .ir-header-standin {
  its text layer (src/lib/pdf/pdf-highlights.ts), positioned in percent of the
  page so they follow a zoom with no script. They take no pointer events: the
  text above them stays selectable, and a click there is looked up by where it
- is. So they have no hover, and nothing of the markdown highlight's border or
- transition. Out of Obsidian's faded text layer, they take the markdown colors
- as they are. Clipped to the page, as pdf.js clips its text layer: text it
- places past the page's edge stays unmarked. */
+ is, as is the mouse for the hover below. Nothing of the markdown highlight's
+ border or transition. Out of Obsidian's faded text layer, they take the
+ markdown colors as they are. Clipped to the page, as pdf.js clips its text
+ layer: text it places past the page's edge stays unmarked. */
 .ir-pdf-highlights {
   position: absolute;
   inset: 0;
@@ -1165,6 +1166,28 @@ body.is-phone .ir-header-standin {
 /* A card's highlight is orange, as its embed is tinted in a note */
 .ir-pdf-highlights > .ir-snippet-highlight.ir-card-highlight {
   background-color: var(--ir-transclusion-tint);
+}
+
+/* The highlight under the mouse gets a ring, as PDF highlights had in the
+ text layer, a card's in the card color. The boxes take no pointer events, so
+ the plugin marks the one under the mouse itself
+ (src/lib/pdf/pdf-highlight-hover.ts). */
+.ir-pdf-highlights > .ir-snippet-highlight.ir-hovered {
+  box-shadow: 0 0 0 2px var(--ir-snippet-highlight-border-color-hover-pdf);
+}
+
+.ir-pdf-highlights > .ir-snippet-highlight.ir-card-highlight.ir-hovered {
+  box-shadow: 0 0 0 2px var(--ir-transclusion-rule-color);
+}
+
+/* And the pointer cursor, over the text above it and over the canvas while
+ pdf.js hides the text through a zoom, from a class on the viewer's container
+ that the plugin drops while a mouse button is down: nothing is written into
+ pdf.js's text layer. Outranks pdf.js's `.textLayer span { cursor: text }`.
+ `.textLayer` and `.canvasWrapper` are pdf.js's own DOM, undocumented (see
+ plans/reference/obsidian-pdf-internals.md). */
+.ir-pdf-highlight-pointer :is(.textLayer, .textLayer *, .canvasWrapper) {
+  cursor: pointer;
 }
 
 /* Style for potentially corrupted highlights (overlapping edits) */

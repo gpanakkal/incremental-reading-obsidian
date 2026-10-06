@@ -299,6 +299,24 @@ export function highlightAt(
   return null;
 }
 
+/**
+ * The highlight box under the point (`x`, `y`) on screen ({@link
+ * highlightAt}), where `el` is what the pointer is on there: only a page's
+ * text layer or canvas wrapper, or something in one, has a highlight under
+ * it. A link or form field over the text, in pdf.js's annotation layer, is
+ * the link's.
+ */
+export function highlightUnder(
+  el: Element | null,
+  x: number,
+  y: number
+): Element | null {
+  const pageEl = el
+    ?.closest(`.${TEXT_LAYER_CLASS}, .${CANVAS_WRAPPER_CLASS}`)
+    ?.closest(PAGE_SELECTOR);
+  return pageEl ? highlightAt(pageEl, x, y) : null;
+}
+
 /** Whether `node` is pdf.js's `div.endOfContent`, one per text layer. */
 function isEndOfContent(node: Node) {
   return (
@@ -343,8 +361,23 @@ export interface PdfHighlightLayer {
 }
 
 /**
+ * What a {@link createPdfHighlightLayer} tells of its boxes, for what follows
+ * them on screen, such as the hover ring.
+ */
+export interface HighlightBoxWatcher {
+  /** Called with true when the layer has boxes to show, and false when not. */
+  enable(on: boolean): void;
+  /**
+   * Called when boxes may have changed under a pointer at rest: drawn afresh,
+   * or moved with their page, as when pdf.js hides or shows a text layer for
+   * a zoom.
+   */
+  refresh(): void;
+}
+
+/**
  * Keep `highlights` drawn on the pages of the PDF viewer in `containerEl`
- * (see {@link drawPageHighlights}).
+ * (see {@link drawPageHighlights}), and tell `watcher` of them.
  *
  * The boxes are measured once per text layer pdf.js renders, and again when
  * the highlights change or a page turns. A zoom needs nothing: pdf.js keeps
@@ -356,7 +389,8 @@ export interface PdfHighlightLayer {
  * With no highlights at all, it watches nothing.
  */
 export function createPdfHighlightLayer(
-  containerEl: HTMLElement
+  containerEl: HTMLElement,
+  watcher?: HighlightBoxWatcher
 ): PdfHighlightLayer {
   let highlights: readonly PdfHighlight[] = [];
   /** Pages to draw once they can be measured. */
@@ -374,16 +408,29 @@ export function createPdfHighlightLayer(
     return drawPageHighlights(pageEl, highlights);
   };
 
+  /** Draw the pages waiting to be, and say whether any was. */
   const drawPending = () => {
+    let drew = false;
     for (const pageEl of pending) {
-      if (!pageEl.isConnected || draw(pageEl)) pending.delete(pageEl);
+      if (!pageEl.isConnected) {
+        pending.delete(pageEl);
+      } else if (draw(pageEl)) {
+        pending.delete(pageEl);
+        drew = true;
+      }
     }
+    return drew;
   };
 
   const mutations = new MutationObserver((records) => {
+    /** Whether pdf.js hid or showed a text layer: a zoom moved the boxes. */
+    let moved = false;
     for (const record of records) {
       const target = record.target as Element;
       if (record.type === 'attributes') {
+        moved ||=
+          record.attributeName === 'hidden' &&
+          target.classList.contains(TEXT_LAYER_CLASS);
         // Shown again: a pending page may be drawn now. A text layer turned:
         // measure anew. The annotation layer carries the attribute too
         if (
@@ -411,16 +458,24 @@ export function createPdfHighlightLayer(
         pagesBuiltIn(node).forEach((page) => pending.add(page))
       );
     }
-    drawPending();
+    if (drawPending() || moved) watcher?.refresh();
   });
 
-  // Showing a hidden viewer takes it from no size to some size
+  // Showing a hidden viewer takes it from no size to some size. A resize may
+  // move the pages, boxes and all
   const Resize = window.ResizeObserver;
-  const resizes = typeof Resize === 'function' ? new Resize(drawPending) : null;
+  const resizes =
+    typeof Resize === 'function'
+      ? new Resize(() => {
+          drawPending();
+          watcher?.refresh();
+        })
+      : null;
 
   const watch = (on: boolean) => {
     if (on === watching) return;
     watching = on;
+    watcher?.enable(on);
     if (on) {
       mutations.observe(containerEl, {
         childList: true,
@@ -455,6 +510,7 @@ export function createPdfHighlightLayer(
     for (const page of new Set([...rendered, ...drawnOn])) {
       if (!draw(page)) pending.add(page);
     }
+    watcher?.refresh();
   };
 
   return { set: show, destroy: () => show([]) };
