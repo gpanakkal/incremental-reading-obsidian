@@ -370,6 +370,7 @@ async function snipWith(
   return {
     result,
     text: createFromText.mock.calls[0]?.[0],
+    title: createFromText.mock.calls[0]?.[3],
     offsets: entryArgs?.[5] as { start: number; end: number } | undefined,
     notify,
     warn,
@@ -379,18 +380,21 @@ async function snipWith(
 /**
  * Snip from a markdown note, no item itself, holding `doc` with each
  * `[anchor, head]` of `ranges` selected in its editor, the one at `mainIndex`
- * main: what the editor reports, and the snippet's text and offsets as they
- * were made.
+ * main, and `viewSelection` selected in reading view: what the editor
+ * reports, and the snippet's text, title and offsets as they were made.
  */
-async function snipSelection({
-  doc,
-  ranges,
-  mainIndex = 0,
-}: {
-  doc: string;
-  ranges: [number, number][];
-  mainIndex?: number;
-}) {
+async function snipSelection(
+  {
+    doc,
+    ranges,
+    mainIndex = 0,
+  }: {
+    doc: string;
+    ranges: [number, number][];
+    mainIndex?: number;
+  },
+  viewSelection = ''
+) {
   const state = EditorState.create({
     doc,
     selection: EditorSelection.create(
@@ -401,12 +405,54 @@ async function snipSelection({
   });
   // What `Editor.getSelection` reads
   const { from, to } = state.selection.main;
-  const { text, offsets } = await snipWith({
-    getSelection: () => doc.slice(from, to),
-    cm: { state },
-  });
-  return { from, to, text, offsets };
+  const { text, title, offsets } = await snipWith(
+    {
+      getSelection: () => doc.slice(from, to),
+      cm: { state },
+    },
+    viewSelection
+  );
+  return { from, to, text, title, offsets };
 }
+
+/**
+ * Text as reading view's selection reads it, thick with what Markdown,
+ * Obsidian and its plugins would read as syntax were it written back as is:
+ * links, embeds, tags, Templater commands, HTML, escapes.
+ */
+const renderedTextArb = fc.string({
+  unit: fc.oneof(
+    fc.constantFrom(
+      '<%*',
+      '<%',
+      '%>',
+      '[[',
+      ']]',
+      '![[',
+      '#',
+      '#tag',
+      '\\',
+      '<iframe ',
+      '>',
+      '[',
+      '](',
+      ')',
+      '`',
+      '$',
+      '*',
+      '_',
+      '|',
+      '^',
+      '%%',
+      ' ',
+      '\n',
+      'a'
+    ),
+    fc.string({ minLength: 1, maxLength: 1 })
+  ),
+  minLength: 1,
+  maxLength: 30,
+});
 // #endregion
 
 describe('rowToBase', () => {
@@ -2996,18 +3042,71 @@ describe('create', () => {
     expect(offsets).toEqual({ start: 4, end: 9 });
   });
 
-  it("makes a snippet of reading view's selection as it reads, the editor's being empty", async () => {
+  it("makes a snippet of reading view's selection, the editor's being empty, escaped and named as it reads, and without offsets", async () => {
+    const doc = '---\ntags: x\n---\nsee \\#tag';
+    await fc.assert(
+      fc.asyncProperty(
+        renderedTextArb,
+        fc.boolean(),
+        fc.nat(doc.length),
+        async (viewSelection, hasCm, cursor) => {
+          vi.restoreAllMocks();
+          // The editor hidden behind reading view keeps a cursor of its own
+          const state = EditorState.create({
+            doc,
+            selection: { anchor: cursor },
+          });
+
+          const { text, title, offsets } = await snipWith(
+            { getSelection: () => '', ...(hasCm ? { cm: { state } } : {}) },
+            viewSelection
+          );
+
+          expect(text).toBe(Markdown.escape(viewSelection));
+          expect(title).toBe(viewSelection);
+          // Not CodeMirror's hidden cursor, which marks nothing selected
+          expect(offsets).toBeUndefined();
+        }
+      )
+    );
+  });
+
+  it("makes a snippet of the editor's selection as the note holds it, and named so, whatever reading view's", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        escapedNoteArb,
+        renderedTextArb,
+        async (note, viewSelection) => {
+          vi.restoreAllMocks();
+
+          const { from, to, text, title } = await snipSelection(
+            note,
+            viewSelection
+          );
+
+          const [start, end] = Markdown.snapOffEscapes(note.doc, [from, to]);
+          expect(text).toBe(note.doc.slice(start, end));
+          expect(title).toBeUndefined();
+        }
+      )
+    );
+  });
+
+  it('brings back no Templater command, link, embed, tag or HTML that the note escaped, selected in reading view', async () => {
     const state = EditorState.create({
-      doc: String.raw`see \#tag`,
-      selection: { anchor: 5 },
+      doc: String.raw`see <\%* tp.x %> \[\[x]] !\[\[y]] \#tag \<iframe src=z>`,
     });
 
     const { text } = await snipWith(
       { getSelection: () => '', cm: { state } },
-      'see #tag'
+      'see <%* tp.x %> [[x]] ![[y]] #tag <iframe src=z>'
     );
 
-    expect(text).toBe('see #tag');
+    // Templater ignores escapes, so no `<%` at all; the rest only bare
+    expect(text).not.toContain('<%');
+    for (const syntax of [/(?<!\\)\[\[/, /(?<!\\)#tag/, /(?<!\\)<iframe/]) {
+      expect(text).not.toMatch(syntax);
+    }
   });
 
   it('makes a snippet of the selection as it is, and without offsets, when there is no CodeMirror view to read', async () => {
