@@ -1144,6 +1144,78 @@ describe('createPdfHighlightLayer', () => {
     layer.destroy();
   });
 
+  it('tells its watcher whether it has boxes, and to look again whenever boxes are drawn or moved, and only then', async () => {
+    const { containerEl, toolbar, pages } = buildViewer();
+    const watcher = {
+      enable: vi.fn<(on: boolean) => void>(),
+      refresh: vi.fn<() => void>(),
+    };
+    const calls = () => {
+      const made = {
+        enable: watcher.enable.mock.calls.map(([on]) => on),
+        refresh: watcher.refresh.mock.calls.length,
+      };
+      watcher.enable.mockClear();
+      watcher.refresh.mockClear();
+      return made;
+    };
+    const layer = createPdfHighlightLayer(containerEl, watcher);
+    const [resizes] = FakeResizeObserver.instances;
+    layer.set([]);
+    expect(calls()).toEqual({ enable: [], refresh: 1 });
+
+    layer.set([ACROSS]);
+    expect(calls()).toEqual({ enable: [true], refresh: 1 });
+    layer.set([{ ...ACROSS, ref: 'Snippets/other.md' }]);
+    expect(calls()).toEqual({ enable: [], refresh: 1 });
+
+    // A zoom: pdf.js hides each text layer, sets its rotation again, and
+    // shows it once redrawn
+    pages[0].textLayer.hidden = true;
+    pages[0].textLayer.setAttribute('data-main-rotation', '0');
+    await flush();
+    expect(calls()).toEqual({ enable: [], refresh: 1 });
+    pages[0].textLayer.hidden = false;
+    await flush();
+    expect(calls()).toEqual({ enable: [], refresh: 1 });
+
+    // Nothing drawn, nothing moved: the toolbar, another layer hidden, a
+    // rotation set to what it was
+    toolbar.appendChild(document.createElement('button'));
+    const annotations = pages[1].pageEl.appendChild(
+      document.createElement('div')
+    );
+    annotations.className = 'annotationLayer';
+    await flush();
+    annotations.hidden = true;
+    pages[1].textLayer.setAttribute('data-main-rotation', '0');
+    await flush();
+    expect(calls()).toEqual({ enable: [], refresh: 0 });
+
+    // A page turned while the viewer has no size waits, drawn on nothing,
+    // and is drawn once rendered afresh with a size
+    frame = { ...FRAME, width: 0 };
+    pages[1].textLayer.setAttribute('data-main-rotation', '90');
+    await flush();
+    expect(calls()).toEqual({ enable: [], refresh: 0 });
+    frame = FRAME;
+    pages[1].pageEl.append(pages[1].textLayer);
+    await flush();
+    expect(runsOn(pages)[1]).toEqual(
+      ACROSS_PAGE2.map((run) => ({ ...run, ref: 'Snippets/other.md' }))
+    );
+    expect(calls()).toEqual({ enable: [], refresh: 1 });
+    // Any resize may move the pages
+    resizes.fire();
+    expect(calls()).toEqual({ enable: [], refresh: 1 });
+
+    layer.set([]);
+    expect(calls()).toEqual({ enable: [false], refresh: 1 });
+    layer.set([ACROSS]);
+    layer.destroy();
+    expect(calls()).toEqual({ enable: [true, false], refresh: 2 });
+  });
+
   it('draws without a ResizeObserver, where there is none', () => {
     vi.stubGlobal('ResizeObserver', undefined);
     const { containerEl, pages } = buildViewer();

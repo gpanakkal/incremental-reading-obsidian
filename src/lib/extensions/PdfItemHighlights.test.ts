@@ -233,6 +233,7 @@ beforeEach(() => {
 afterEach(() => {
   layout.restore();
   document.body.replaceChildren();
+  delete (document as Partial<Document>).elementFromPoint;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -815,6 +816,60 @@ describe('a press on a highlight shown by showPdfItemHighlights', () => {
     expect(press(item, 'mousedown', 0).defaultPrevented).toBe(false);
     done();
     stop();
+  });
+
+  it('rings the highlight under the mouse, listening for it only while the PDF has highlights', async () => {
+    const { plugin, rows, dataChange } = makePlugin();
+    const { containerEl, item } = makeViewer();
+    const listen = vi.spyOn(containerEl, 'addEventListener');
+    const unlisten = vi.spyOn(containerEl, 'removeEventListener');
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    document.elementFromPoint = () => item;
+    const moveTo = ({ clientX, clientY }: typeof ON_HELLO) => {
+      item.dispatchEvent(
+        new PointerEvent('pointermove', {
+          bubbles: true,
+          pointerType: 'mouse',
+          clientX,
+          clientY,
+        })
+      );
+      frames.splice(0).forEach((cb) => cb(0));
+    };
+    const stop = showPdfItemHighlights(plugin, PDF, containerEl);
+    await flush();
+    const pointerListeners = () =>
+      listen.mock.calls.filter(([type]) => type.startsWith('pointer'));
+    expect(pointerListeners()).toEqual([]);
+
+    rows.set(PDF.path, [makeHighlight('Snippets/a.md', 0, 5)]);
+    dataChange('snippet');
+    await flush();
+    expect(pointerListeners()).not.toEqual([]);
+    moveTo(ON_HELLO);
+    const box = containerEl.querySelector('.ir-snippet-highlight')!;
+    expect(box.classList.contains('ir-hovered')).toBe(true);
+    expect(containerEl.classList.contains('ir-pdf-highlight-pointer')).toBe(
+      true
+    );
+    moveTo(ON_WORLD);
+    expect(box.classList.contains('ir-hovered')).toBe(false);
+    expect(containerEl.classList.contains('ir-pdf-highlight-pointer')).toBe(
+      false
+    );
+
+    moveTo(ON_HELLO);
+    stop();
+    expect(containerEl.classList.contains('ir-pdf-highlight-pointer')).toBe(
+      false
+    );
+    expect(
+      unlisten.mock.calls.filter(([type]) => type.startsWith('pointer'))
+    ).toEqual(pointerListeners());
   });
 
   it('once stopped, leaves every press alone', async () => {
