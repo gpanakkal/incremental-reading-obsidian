@@ -108,6 +108,13 @@ export class FuzzySuggestModal<T> extends Modal {
 }
 export class FileView {
   /**
+   * Stands in for the tab's `.workspace-leaf-content`. A real element under
+   * jsdom; absent in the `node` environment, which has no DOM to build one.
+   */
+  containerEl: HTMLElement | undefined =
+    typeof document === 'undefined' ? undefined : document.createElement('div');
+
+  /**
    * Cleanups handed to `Component.register`. Exposed so tests can run them and
    * assert that a view releases its subscriptions on unload.
    */

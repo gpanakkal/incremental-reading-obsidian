@@ -20,6 +20,7 @@ import {
   expectPlainText,
   finalizeArticleImport,
   openFileInActiveLeaf,
+  pendingSaves,
   readMarkdown,
   renameDecliningLinkUpdate,
   REVIEW_VIEW_TYPE,
@@ -286,6 +287,8 @@ test.describe('Reviewing a PDF article', () => {
 
   test('fits between the header and the action bar on a phone', async () => {
     await importFixture(window);
+    // Emulating reloads the app, and a reload mid-write empties the database
+    await expect.poll(() => pendingSaves(window)).toBe(0);
     await emulateMobile(window, true);
     await window.setViewportSize({ width: 420, height: 900 });
     await expect(window.locator('body')).toHaveClass(/\bis-phone\b/);
@@ -308,6 +311,75 @@ test.describe('Reviewing a PDF article', () => {
     expect(viewer!.y + viewer!.height).toBeLessThanOrEqual(bar!.y + 1);
     expect(bar!.y + bar!.height).toBeLessThanOrEqual(900);
     expect(viewer!.height).toBeGreaterThan(400);
+  });
+
+  test("looks like a PDF tab on a phone: the item's name in the header, the toolbar as high", async () => {
+    /** Each fixture's name, by its page count: what tells them apart on screen. */
+    const nameByPages = new Map([
+      [3, path.basename(PDF_PATH, '.pdf')],
+      [1, path.basename(NO_TEXT_PDF_PATH, '.pdf')],
+    ]);
+    for (const pdfPath of [PDF_PATH, NO_TEXT_PDF_PATH]) {
+      await importFixture(window, pdfPath);
+    }
+    // Emulating reloads the app, and a reload mid-write empties the database
+    await expect.poll(() => pendingSaves(window)).toBe(0);
+    await emulateMobile(window, true);
+    await window.setViewportSize({ width: 420, height: 900 });
+    const body = window.locator('body');
+    await expect(body).toHaveClass(/\bis-phone\b/);
+    // The setting under which Obsidian hides a note's header title on phones
+    await expect(body).toHaveClass(/\bshow-inline-title\b/);
+    // The floating header, which is what gives a PDF tab its top spacing
+    await expect(body).toHaveClass(/\bis-floating-nav\b/);
+
+    // Obsidian's own PDF tab, for reference
+    await openFileInActiveLeaf(window, PDF_PATH);
+    const pdfTab = window.locator(
+      '.workspace-leaf.mod-active .workspace-leaf-content[data-type="pdf"]'
+    );
+    await expect(pdfTab.locator('.view-header-title')).toBeVisible();
+    const pdfTabToolbar = pdfTab.locator('.view-content > .pdf-toolbar');
+    await expect(pdfTabToolbar).toBeVisible();
+    const expectedTop = (await pdfTabToolbar.boundingBox())?.y;
+    expect(expectedTop).toBeDefined();
+
+    const leaf = window.locator(
+      `.workspace-leaf.mod-active [data-type="${REVIEW_VIEW_TYPE}"]`
+    );
+    const title = leaf.locator('> .view-header .view-header-title');
+    // The home screen keeps its header title hidden, as a note does
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(window.locator('css=#begin-review-button')).toBeVisible();
+    await expect(title).toBeHidden();
+    await window.locator('css=#begin-review-button').click();
+
+    const toolbar = article(window).locator('.ir-pdf-viewer > .pdf-toolbar');
+    let pages = 0;
+    for (let i = 0; i < nameByPages.size; i++) {
+      if (i > 0) {
+        await window.getByRole('button', { name: 'Mark reviewed' }).click();
+      }
+      // The next fixture's pages, once its viewer has laid them out
+      const previous = pages;
+      await expect
+        .poll(async () => {
+          pages = await article(window).locator('.page').count();
+          return nameByPages.has(pages) && pages !== previous;
+        })
+        .toBe(true);
+      const name = nameByPages.get(pages);
+      await expect(toolbar).toBeVisible();
+      await expect(title).toBeVisible();
+      await expect(title).toHaveText(name!);
+      const box = await toolbar.boundingBox();
+      expect(box).toBeTruthy();
+      expect(Math.abs(box!.y - expectedTop!)).toBeLessThanOrEqual(1);
+    }
+    // Past the last PDF, no item: the header title hides again
+    await window.getByRole('button', { name: 'Mark reviewed' }).click();
+    await expect(article(window)).toHaveCount(0);
+    await expect(title).toBeHidden();
   });
 });
 

@@ -302,9 +302,14 @@ body {
   --view-top-spacing: 0;
 }
 
-/* hide the header title on mobile */
+/* Hide the header title on phones while the inline title shows, as Obsidian
+   does for a note. An item whose file isn't text, such as a PDF article, has
+   no inline title, so it keeps the header title, as a PDF tab does. ReviewView
+   sets `.ir-non-text-item` from the item's file. */
 .is-phone.show-inline-title
-  .workspace-leaf-content[data-type='incremental-reading-review']
+  .workspace-leaf-content[data-type='incremental-reading-review']:not(
+    .ir-non-text-item
+  )
   .view-header-title-container {
   display: none;
 }
@@ -350,15 +355,21 @@ body {
 
 /* On phones the review tab zeroes `--view-top-spacing` so editor text scrolls
    under the floating header; the PDF toolbar doesn't scroll, so it starts
-   below the header instead, as the home screen does. */
+   below the header instead, exactly as high as in a PDF tab. A PDF tab drops
+   its `.view-content` by `--view-top-spacing` (Obsidian's
+   `.is-phone .mod-root .workspace-leaf-content .view-content`), so the value is
+   taken on `.mod-root`, above the leaf that zeroes it. Not
+   `--view-top-spacing-markdown`, which is 8px more: room for text, not for a
+   toolbar. */
+.is-phone .mod-root {
+  --ir-view-top-spacing: var(--view-top-spacing, 0px);
+}
+
 .is-phone
   .mod-root
   .workspace-leaf-content[data-type='incremental-reading-review']
   .ir-pdf-article {
-  padding-top: var(
-    --view-top-spacing-markdown,
-    var(--safe-area-inset-top, 0px)
-  );
+  padding-top: var(--ir-view-top-spacing);
 }
 
 .ir-review-placeholder {

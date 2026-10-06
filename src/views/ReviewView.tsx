@@ -4,6 +4,7 @@ import {
   PLACEHOLDER_PLUGIN_ICON,
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
+import { isEditableText } from '#/lib/mime';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type { PdfViewer } from '#/lib/pdf/obsidian-pdf';
@@ -43,6 +44,13 @@ import { render } from 'preact';
 
 /** Shown whenever the review tab is not displaying an item. */
 export const REVIEW_VIEW_DEFAULT_TITLE = 'Incremental reading';
+
+/**
+ * On the tab while it shows an item whose file isn't text, such as a PDF
+ * article: one with no inline title above it. styles.css keeps the phone
+ * header title for such an item, as Obsidian's PDF tab does.
+ */
+export const NON_TEXT_ITEM_CLASS = 'ir-non-text-item';
 
 /**
  * Whether keys pressed at `target` edit text: a form field, or anything inside
@@ -185,8 +193,17 @@ export default class ReviewView extends FileView {
    * own window instead — the same branch Obsidian's `setActiveLeaf` takes.
    *
    * The breadcrumb goes first, matching the order `FileView.loadFile` uses.
+   *
+   * Also marks the tab with {@link NON_TEXT_ITEM_CLASS} from the item's file
+   * rather than from what has rendered, so the mark holds while the next item
+   * loads and when a PDF falls back to its placeholder.
    */
   setTitle() {
+    const item = this.currentItemFile();
+    this.containerEl.classList.toggle(
+      NON_TEXT_ITEM_CLASS,
+      item !== null && !isEditableText(item)
+    );
     this.renderTitleParent();
     this.titleEl.setText(this.getDisplayText());
     this.updateTitleEditable();
