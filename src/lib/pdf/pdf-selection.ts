@@ -1,3 +1,4 @@
+import { DIRECTION_MARKS } from '#/lib/constants';
 import type { ReviewArticle } from '#/lib/types';
 import type { TFile } from 'obsidian';
 import {
@@ -175,8 +176,8 @@ export function pageLinkAlias(basename: string, page: number): string {
  *
  * @returns null when the range holds no text to extract: none of the
  *   viewer's text, as on a scanned page with no text layer, or only blank
- *   text. Also null, with a warning in the console, when the text layer is
- *   one an anchor can't hold, or disagrees with `doc`.
+ *   or invisible text. Also null, with a warning in the console, when the
+ *   text layer is one an anchor can't hold, or disagrees with `doc`.
  * @throws whatever reading `doc` throws.
  */
 export async function readPdfSelection(
@@ -199,14 +200,27 @@ export async function readPdfSelection(
   } catch (error) {
     return unreadable(error);
   }
-  // Never blank otherwise: `extractText` keeps only items with some text
-  if (text === '') return null;
+  // `extractText` keeps only items with some text, but then drops invisible
+  // characters, which can leave the spaces between them
+  if (!shows(text)) return null;
   const subpath = selectionSubpath(
     start,
     end,
     pages.get(decodeAnchor(start).page)!
   );
   return { start, end, text, subpath };
+}
+
+/**
+ * Whether `text`, as `extractText` gives it, shows anything. The direction
+ * marks it keeps show as nothing alone; a joiner, variation selector or tag
+ * character it keeps stands by something that does.
+ */
+function shows(text: string) {
+  for (const char of text) {
+    if (/\S/.test(char) && !DIRECTION_MARKS.has(char)) return true;
+  }
+  return false;
 }
 
 /** @throws `error` unless it is a `RangeError`, which is logged instead. */

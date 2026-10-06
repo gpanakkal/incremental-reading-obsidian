@@ -22,6 +22,7 @@ import {
   CONTENT_TITLE_SLICE_LENGTH,
   CONTROL_TITLE_CHARS,
   DATA_DIRECTORY,
+  DIRECTION_MARKS,
   FORBIDDEN_TITLE_CHARS,
   FRONTMATTER_PATTERN,
   INVALID_TITLE_MESSAGE,
@@ -131,6 +132,55 @@ export class ObsidianHelpers {
     const trimmed = checkFinalChar ? cut.replace(/[\s.]+$/, '') : cut;
     // A cut can leave a joiner whose sequence is cut off
     return settle(trimmed);
+  }
+
+  /**
+   * `text` without the invisible characters a title drops, by the same rules:
+   * every default-ignorable or format code point (the bidi embeddings,
+   * overrides and isolates, and every tag character, among them) but a joiner
+   * or variation selector that a sequence around it needs, and a prepended
+   * concatenation mark, which shows. Everything else stays as it is,
+   * controls, tabs and newlines included, though a sequence can't build on a
+   * control any more than in a title. Half a surrogate pair standing alone
+   * becomes U+FFFD, as it would written to a file, first: two halves either
+   * side of a dropped character would otherwise join, into a tag character
+   * or another invisible one no rule judged.
+   *
+   * @param keepDirectionMarks keep LRM, RLM and ALM too, where they stand,
+   *   but only the last of a run. They only move punctuation and digits at a
+   *   change of direction, which right-to-left text sets with them. One
+   *   breaks an emoji or keycap sequence, or a selector, it stands in, as it
+   *   ends a grapheme cluster: the selector or joiner it breaks off is
+   *   dropped (a keycap, which shows, stays). A script's
+   *   joiner is judged as though it weren't there.
+   */
+  static stripInvisible(
+    text: string,
+    { keepDirectionMarks = false }: { keepDirectionMarks?: boolean } = {}
+  ): string {
+    // By code point, so a surrogate pair is one character
+    const chars = Array.from(text, (char) =>
+      isLoneSurrogate(char) ? REPLACEMENT_CHAR : char
+    );
+    // Judged as in a title, where a control is a space: nothing builds on it
+    const kept = keepSequences(
+      chars.map((char) => {
+        if (CONTROL_TITLE_CHARS.has(char)) return ' ';
+        if (keepDirectionMarks && DIRECTION_MARKS.has(char)) return char;
+        return invisibleChar(char);
+      })
+    );
+    const out = chars.map((char, i) => (kept[i] === '' ? '' : char));
+    // A run of marks keeps its last, which sets the direction it leaves
+    out.forEach((char, i) => {
+      if (
+        DIRECTION_MARKS.has(char) &&
+        DIRECTION_MARKS.has(out[nextKept(out, i + 1)])
+      ) {
+        out[i] = '';
+      }
+    });
+    return out.join('');
   }
 
   /**
@@ -650,6 +700,9 @@ export function isPrependedConcatenationMark(char: string) {
   return PREPENDED_CONCATENATION_MARKS.has(char);
 }
 
+/** U+FFFD, which stands in for a character that can't be read. */
+const REPLACEMENT_CHAR = String.fromCodePoint(0xfffd);
+
 /** ZWNJ or ZWJ: emoji sequences and some scripts join with them. */
 export function isJoiner(char: string) {
   const code = char.codePointAt(0);
@@ -682,9 +735,9 @@ const EMOJI = /\p{Emoji}/u;
 const MONGOLIAN = /\p{Script=Mongolian}/u;
 /**
  * A keycap's base, which U+FE0E or U+FE0F may follow only before the keycap.
- * `#` and `*` are ones too, but a title drops them.
+ * A title drops `#` and `*`, but text keeps them.
  */
-const KEYCAP_BASE = /[0-9]/;
+const KEYCAP_BASE = /[0-9#*]/;
 
 /** A pictograph, which a ZWJ joins to another to make one emoji. */
 const PICTOGRAPH = /\p{Extended_Pictographic}/u;
@@ -871,8 +924,17 @@ function titleChar(char: string) {
   }
   if (CONTROL_TITLE_CHARS.has(char)) return ' ';
   if (isLoneSurrogate(char)) return '';
-  if (isInvisibleTitleChar(char)) return '';
-  return char;
+  return invisibleChar(char);
+}
+
+/**
+ * What `char`, one code point, becomes in text that drops invisible
+ * characters: nothing for one {@link isInvisibleTitleChar}, and itself
+ * otherwise. Joiners and variation selectors stay, for {@link keepSequences}
+ * to judge in context.
+ */
+function invisibleChar(char: string) {
+  return isInvisibleTitleChar(char) ? '' : char;
 }
 
 /**
@@ -919,6 +981,10 @@ function titleChars(chars: readonly string[]): string[] {
  * - a joiner after a letter of a script that joins, or a mark on one, and
  *   before something that shows.
  * A run of joiners keeps one at most.
+ *
+ * A direction mark (only text keeps one; a title drops them first) breaks an
+ * emoji or keycap sequence and any selector, as it ends a grapheme cluster,
+ * but a script's joiner is judged as though it weren't there.
  */
 function keepSequences(chars: readonly string[]): string[] {
   const kept = [...chars];
@@ -927,6 +993,8 @@ function keepSequences(chars: readonly string[]): string[] {
   let prev = '';
   let beforePrev = '';
   let letter = '';
+  // The last code point kept that is no direction mark
+  let shownPrev = '';
   for (let i = 0; i < kept.length; i++) {
     const char = kept[i];
     // What comes next is the next code point not dropped already: one a later
@@ -949,14 +1017,23 @@ function keepSequences(chars: readonly string[]): string[] {
       // A mark is judged by its letter: a script's own marks follow its
       // letters, but some it shares with Latin and the like
       const scriptBefore =
-        isJoiningLetter(prev) || (MARK.test(prev) && isJoiningLetter(letter));
-      const joinsScript = VIRAMAS.has(prev) || (scriptBefore && isBase(next));
+        isJoiningLetter(shownPrev) ||
+        (MARK.test(shownPrev) && isJoiningLetter(letter));
+      let shownNext = at;
+      while (DIRECTION_MARKS.has(kept[shownNext])) {
+        shownNext = nextKept(kept, shownNext + 1);
+      }
+      const joinsScript =
+        VIRAMAS.has(shownPrev) || (scriptBefore && isBase(kept[shownNext]));
       if (!joinsEmoji && !joinsScript) kept[i] = '';
     }
     if (kept[i] !== '') {
       beforePrev = prev;
       prev = kept[i];
-      if (!MARK.test(prev) && !isJoiner(prev)) letter = prev;
+      if (!DIRECTION_MARKS.has(prev)) {
+        shownPrev = prev;
+        if (!MARK.test(prev) && !isJoiner(prev)) letter = prev;
+      }
     }
   }
   return kept;

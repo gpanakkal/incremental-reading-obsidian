@@ -1,3 +1,4 @@
+import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import { type AnchorParts, decodeAnchor } from './pdf-anchor';
 
 /** A text item from pdf.js `getTextContent`: one that has a `str`. */
@@ -491,6 +492,12 @@ function piecesBetween(
  * out between pages. A page break reads as a line break: where text sits
  * can't tell whether a paragraph ends at the foot of a page.
  *
+ * Invisible characters are dropped last, as a note's name drops them (see
+ * `ObsidianHelpers.stripInvisible`), but for LRM, RLM and ALM, which set
+ * punctuation in right-to-left text: a PDF can map a glyph to a bidi override
+ * that would reverse the text after it. So the text no longer lines up with
+ * the items' own, which the anchors index.
+ *
  * @param pages each page's text content, keyed by page number: every page of
  *   the range, and as many of the two pages either side of it as the PDF has,
  *   to tell running heads by. `readPageTexts` reads these.
@@ -518,9 +525,10 @@ export function extractText(
     const brk = breakBetween(layouts, spacing, pieces[i - 1], pieces[i]);
     join(out, brk, pieces[i].text);
   }
-  return out
-    .toString()
-    .replace(LIGATURES, (ligature) => ligature.normalize('NFKC'));
+  return ObsidianHelpers.stripInvisible(
+    out.toString().replace(LIGATURES, (ligature) => ligature.normalize('NFKC')),
+    { keepDirectionMarks: true }
+  );
 }
 
 /** The part of a pdf.js `PDFDocumentProxy` that `readPageTexts` uses. */
