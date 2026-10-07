@@ -3185,12 +3185,18 @@ test.describe('Snippets and cards from a PDF article', () => {
     const snippetBox = itemBoxes(article(window), 1, 9);
     const cardBox = itemBoxes(article(window), 1, 2, 'ir-card-highlight');
     await expect(cardBox).toHaveCount(1);
-    const accentRing = await shadowOf(window, '0 0 0 2px var(--text-accent)');
+    const snippetRing = await shadowOf(
+      window,
+      '0 0 0 2px var(--ir-snippet-highlight-border-color-hover-pdf)'
+    );
     const cardRing = await shadowOf(
       window,
       '0 0 0 2px var(--ir-transclusion-rule-color)'
     );
-    expect(cardRing).not.toBe(accentRing);
+    // A colour that fails to resolve leaves no ring at all, on the probe and
+    // the box alike
+    expect(snippetRing).not.toBe('none');
+    expect(cardRing).not.toBe(snippetRing);
     const layers = await textLayers(window);
 
     const onSnippet = await middleOf(snippetBox);
@@ -3199,7 +3205,7 @@ test.describe('Snippets and cards from a PDF article', () => {
       .poll(() => hoverAt(window, onSnippet))
       .toEqual({
         cursor: 'pointer',
-        hovered: [[snippet.reference, accentRing]],
+        hovered: [[snippet.reference, snippetRing]],
       });
 
     const onCard = await middleOf(cardBox);
@@ -3233,7 +3239,7 @@ test.describe('Snippets and cards from a PDF article', () => {
       .poll(() => hoverAt(window, onTabSnippet))
       .toEqual({
         cursor: 'pointer',
-        hovered: [[snippet.reference, accentRing]],
+        hovered: [[snippet.reference, snippetRing]],
       });
     // Out of the window's content, past the tab's header
     await window.mouse.move(onTabSnippet.x, 5);
