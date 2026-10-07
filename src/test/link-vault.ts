@@ -1,5 +1,6 @@
 import type { SectionCache, TFile } from 'obsidian';
 import { vi } from 'vitest';
+import { noteText } from './note-text';
 
 /** The "New link format" setting: how Obsidian writes a new link's path. */
 export type LinkFormat = 'shortest' | 'relative' | 'absolute';
@@ -15,7 +16,7 @@ export type LinkFormat = 'shortest' | 'relative' | 'absolute';
  * first. Case is ignored, spaces around a link not. New links are written in
  * `linkFormat`, as `MetadataCache.fileToLinktext` writes them (full paths by
  * default). `processFrontMatter` edits a note's frontmatter in place, and the
- * metadata cache reads it as it is.
+ * metadata cache and `cachedRead` read it as it is.
  */
 export function makeLinkVault(
   notes: Record<string, Record<string, unknown> | null> = {},
@@ -129,7 +130,12 @@ export function makeLinkVault(
     }
   );
   const app = {
-    vault: { getFileByPath: (path: string) => files.get(path) ?? null },
+    vault: {
+      getFileByPath: (path: string) => files.get(path) ?? null,
+      cachedRead: vi.fn(async (file: TFile) =>
+        noteText(frontmatter.get(file.path) ?? null)
+      ),
+    },
     metadataCache: {
       getFileCache: vi.fn((file: TFile) => {
         const fm = frontmatter.get(file.path);

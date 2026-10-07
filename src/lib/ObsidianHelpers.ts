@@ -10,8 +10,10 @@ import {
   type TFile,
   editorEditorField,
   editorInfoField,
+  getFrontMatterInfo,
   normalizePath,
   Notice,
+  parseYaml,
 } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
@@ -290,34 +292,81 @@ export class ObsidianHelpers {
   }
 
   /**
-   * Gets the type of a note based on its tags.
+   * A note's frontmatter properties, read and parsed the way
+   * `processFrontMatter` parses them, but without writing the note.
+   *
+   * `processFrontMatter` is a write: it re-serializes the block after its
+   * callback even when nothing changed, so a lookup through it rewrites any
+   * frontmatter not in Obsidian's own form (flow lists, quotes, comments),
+   * strips an empty block, and can recreate a note deleted between its read and
+   * its write. The text comes from `cachedRead`, which the vault keeps current
+   * with every write made through it, the plugin's own included, so a note just
+   * written reads back as written.
+   *
+   * Values are as the YAML has them, unchecked against `PluginFrontMatter`.
+   * @returns the properties, `{}` when the note has no frontmatter block, its
+   *   block holds no mapping, or the file can't have frontmatter (a PDF, say,
+   *   which is never read)
+   * @throws the read's own error when the note can't be read, and the parser's
+   *   when its frontmatter isn't valid YAML
+   */
+  static async readFrontMatter(
+    note: TFile,
+    app: App
+  ): Promise<Record<string, unknown>> {
+    if (!supportsFrontmatter(note)) return {};
+    const info = getFrontMatterInfo(await app.vault.cachedRead(note));
+    // Equivalent to parsing the empty block it reports, which YAML reads as
+    // null, but spares the parser, as Obsidian does
+    if (!info.exists) return {};
+    // Obsidian's own frontmatter parse is this public pair (read from
+    // obsidian.asar: `processFrontMatter` runs `getFrontMatterInfo`, then
+    // `parseYaml`, then takes a non-object as `{}`). A list it keeps as is,
+    // which names no properties either, so it is `{}` here too
+    const parsed: unknown = parseYaml(info.frontmatter);
+    return parsed !== null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  }
+
+  /**
+   * The note type a frontmatter `tags` value names, the article tag ranking
+   * over the snippet tag over the card tag; null when it names none, or isn't a
+   * list or a string. A lone string is searched rather than compared, as it
+   * always has been, so `ir-article, other` names an article.
+   */
+  static typeOfTags(tags: unknown): NoteType | null {
+    if (!Array.isArray(tags) && typeof tags !== 'string') return null;
+    if (tags.includes(ARTICLE_TAG)) return 'article';
+    if (tags.includes(SNIPPET_TAG)) return 'snippet';
+    if (tags.includes(CARD_TAG)) return 'card';
+    return null;
+  }
+
+  /**
+   * Gets the type of a note based on its tags, without writing the note (see
+   * {@link readFrontMatter}).
    *
    * Notes only: a file with no frontmatter, a PDF say, has no tags to go by and
    * is never read, so it answers `null` here even when it is an item. Code that
    * can meet one asks the item layer instead (`ItemManager.getItemType`), which
    * knows such a file by the row at its path.
    *
-   * A note already gone from the disk when it is read has no type either. The
-   * tags are read off the disk, and a delete reaches the disk before the vault
-   * reports it, so any caller can meet a note that is already gone: the action
-   * bar re-reads its note's type when the delete marks the row. A failed read
-   * of a note still on disk, or one the disk can't answer for, rejects with
-   * the read's own error.
+   * A deleted note has no type either, though the vault may still hold its
+   * text: any caller can meet one, as the action bar re-reads its note's type
+   * when the delete marks the row. Gone is either no longer the vault's file at
+   * its path, or, for a note the vault holds no text for and so reads off the
+   * disk, already gone from there: a delete reaches the disk before the vault
+   * reports it. A failed read of a note still on disk, or one the disk can't
+   * answer for, rejects with the read's own error, and frontmatter that isn't
+   * valid YAML with the parser's.
    */
   static async getNoteType(note: TFile, app: App): Promise<NoteType | null> {
-    if (!supportsFrontmatter(note)) return null;
-
-    let type: NoteType | null = null;
+    let frontmatter: Record<string, unknown>;
     try {
-      await app.fileManager.processFrontMatter(
-        note,
-        (frontmatter: PluginFrontMatter) => {
-          if (frontmatter.tags === undefined) type = null;
-          else if (frontmatter.tags.includes(ARTICLE_TAG)) type = 'article';
-          else if (frontmatter.tags.includes(SNIPPET_TAG)) type = 'snippet';
-          else if (frontmatter.tags.includes(CARD_TAG)) type = 'card';
-        }
-      );
+      frontmatter = await this.readFrontMatter(note, app);
     } catch (error) {
       // A disk that can't say is taken to still have it
       const onDisk = await app.vault.adapter
@@ -326,7 +375,9 @@ export class ObsidianHelpers {
       if (!onDisk) return null;
       throw error;
     }
-    return type;
+    // Deleted once the vault reports it, though its text may still be cached
+    if (app.vault.getFileByPath(note.path) !== note) return null;
+    return this.typeOfTags(frontmatter.tags);
   }
 
   /**

@@ -25,6 +25,7 @@ import type {
 } from '#/lib/types';
 import { getEndOfDay } from '#/lib/utils';
 import { makeLinkVault } from '#/test/link-vault';
+import { noteText } from '#/test/note-text';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { App, TAbstractFile, TFile } from 'obsidian';
@@ -382,10 +383,15 @@ function wireBinary(file: TFile, table: ItemTable | null) {
   return { manager, app, row, touches, repo };
 }
 
-const itemTableArb = fc.option(
-  fc.constantFrom<ItemTable>('article', 'snippet', 'srs_card'),
-  { nil: null }
-);
+const tableArb = fc.constantFrom<ItemTable>('article', 'snippet', 'srs_card');
+const itemTableArb = fc.option(tableArb, { nil: null });
+
+/** The tag that makes a note an item of each table's type. */
+const TABLE_TAG = {
+  article: ARTICLE_TAG,
+  snippet: SNIPPET_TAG,
+  srs_card: CARD_TAG,
+} as const;
 
 const SCHEMA = readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8');
 let SQL: SqlJsStatic;
@@ -2298,23 +2304,13 @@ describe('ReviewManager.handleExternalRename', () => {
       snippet: 'ir-text-snippet',
       card: 'ir-card',
     };
-    const tags = noteType ? [tagMap[noteType]] : undefined;
     const frontmatterContent = noteType
-      ? `---\ntags: [${tagMap[noteType]}]\n---\n`
+      ? noteText({ tags: [tagMap[noteType]] })
       : 'no frontmatter here';
     return {
       vault: {
         getFileByPath: vi.fn().mockReturnValue(file),
         cachedRead: vi.fn().mockResolvedValue(frontmatterContent),
-      },
-      fileManager: {
-        processFrontMatter: vi
-          .fn()
-          .mockImplementation(
-            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-              cb(tags !== undefined ? { tags } : {});
-            }
-          ),
       },
       metadataCache: {
         getFileCache: vi.fn(),
@@ -2430,16 +2426,9 @@ describe('ReviewManager.handleExternalRename', () => {
     const appObj = {
       vault: {
         getFileByPath: vi.fn().mockReturnValue(sameFile),
-        cachedRead: vi.fn().mockResolvedValue('---\ntags: [ir-article]\n---\n'),
-      },
-      fileManager: {
-        processFrontMatter: vi
+        cachedRead: vi
           .fn()
-          .mockImplementation(
-            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-              cb({ tags: ['ir-article'] });
-            }
-          ),
+          .mockResolvedValue(noteText({ tags: ['ir-article'] })),
       },
       metadataCache: {
         getFileCache: vi.fn(),
@@ -2483,19 +2472,7 @@ describe('ReviewManager.handleExternalRename', () => {
           getFileByPath: vi.fn().mockReturnValue(file),
           cachedRead: vi
             .fn()
-            .mockResolvedValue(`---\ntags: [${tagMap[noteType]}]\n---\n`),
-        },
-        fileManager: {
-          processFrontMatter: vi
-            .fn()
-            .mockImplementation(
-              async (
-                _f: unknown,
-                cb: (fm: Record<string, unknown>) => void
-              ) => {
-                cb({ tags: [tagMap[noteType]] });
-              }
-            ),
+            .mockResolvedValue(noteText({ tags: [tagMap[noteType]] })),
         },
         metadataCache: {
           getFileCache: vi.fn(),
@@ -2882,16 +2859,7 @@ describe('ReviewManager.handleExternalRename rowId branch', () => {
         cachedRead: vi
           .fn()
           .mockResolvedValue(
-            `---\ntags: [${tagMap[noteType]}]\nir-id: ${irId}\n---\n`
-          ),
-      },
-      fileManager: {
-        processFrontMatter: vi
-          .fn()
-          .mockImplementation(
-            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-              cb({ tags: [tagMap[noteType]], 'ir-id': irId });
-            }
+            noteText({ tags: [tagMap[noteType]], 'ir-id': irId })
           ),
       },
       metadataCache: {
@@ -3039,16 +3007,9 @@ describe('ReviewManager.handleExternalRename CARD_TAG condition', () => {
     const appObj = {
       vault: {
         getFileByPath: vi.fn().mockReturnValue(file),
-        cachedRead: vi.fn().mockResolvedValue('---\ntags: [ir-article]\n---\n'),
-      },
-      fileManager: {
-        processFrontMatter: vi
+        cachedRead: vi
           .fn()
-          .mockImplementation(
-            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-              cb({ tags: ['ir-article'] });
-            }
-          ),
+          .mockResolvedValue(noteText({ tags: ['ir-article'] })),
       },
       metadataCache: {
         getFileCache: vi.fn(),
@@ -3083,16 +3044,7 @@ describe('ReviewManager.handleExternalRename CARD_TAG condition', () => {
         getFileByPath: vi.fn().mockReturnValue(file),
         cachedRead: vi
           .fn()
-          .mockResolvedValue('---\ntags: [some-other-tag]\n---\n'),
-      },
-      fileManager: {
-        processFrontMatter: vi
-          .fn()
-          .mockImplementation(
-            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-              cb({ tags: ['some-other-tag'] });
-            }
-          ),
+          .mockResolvedValue(noteText({ tags: ['some-other-tag'] })),
       },
       metadataCache: {
         getFileCache: vi.fn(),
@@ -3136,15 +3088,10 @@ describe('ReviewManager.handleCreation copy detection', () => {
         getFileByPath: vi.fn(
           (path: string): TFile | null => files.get(path) ?? null
         ),
-      },
-      fileManager: {
-        processFrontMatter: vi
+        // The created note, whatever its path
+        cachedRead: vi
           .fn()
-          .mockImplementation(
-            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-              cb({ tags: ['ir-article'], 'ir-id': irId });
-            }
-          ),
+          .mockResolvedValue(noteText({ tags: ['ir-article'], 'ir-id': irId })),
       },
       metadataCache: {
         getFileCache: vi.fn((file: TFile) => ({
@@ -3254,16 +3201,9 @@ describe('ReviewManager.handleExternalRename console.warn mutant', () => {
     const appObj = {
       vault: {
         getFileByPath: vi.fn().mockReturnValue(file),
-        cachedRead: vi.fn().mockResolvedValue('---\ntags: [ir-article]\n---\n'),
-      },
-      fileManager: {
-        processFrontMatter: vi
+        cachedRead: vi
           .fn()
-          .mockImplementation(
-            async (_f: unknown, cb: (fm: Record<string, unknown>) => void) => {
-              cb({ tags: ['ir-article'] });
-            }
-          ),
+          .mockResolvedValue(noteText({ tags: ['ir-article'] })),
       },
       metadataCache: {
         getFileCache: vi.fn(),
@@ -4403,6 +4343,104 @@ describe('ReviewManager following source links on rename', () => {
       'second',
       'y.pdf',
       wired.files.get('b.pdf')
+    );
+  });
+});
+
+describe('ReviewManager reads the frontmatter of a renamed or created note without writing it', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('follows a renamed item note by its tags and ir-id, never writing a note', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        tableArb,
+        fc.boolean(),
+        fc.boolean(),
+        async (table, carriesId, lone) => {
+          const tag = TABLE_TAG[table];
+          const wired = wireRenames({
+            'IR/a.md': {
+              ...(carriesId ? { 'ir-id': 'row' } : {}),
+              // A lone string, as a hand-written note can have it
+              tags: lone ? tag : [tag],
+            },
+          });
+          wired.insert(table, 'row', 'IR/a.md');
+
+          await wired.rename('IR/a.md', 'IR/b.md');
+          await wired.drained();
+
+          expect(wired.repo.rows(table)).toStrictEqual([
+            { id: 'row', reference: 'IR/b.md', deleted: false },
+          ]);
+          expect(wired.processFrontMatter).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('restores the row of a note created with its ir-id, never writing the note', async () => {
+    await fc.assert(
+      fc.asyncProperty(tableArb, fc.boolean(), async (table, lone) => {
+        const tag = TABLE_TAG[table];
+        const wired = wireRenames({});
+        wired.insert(table, 'row', 'IR/gone.md');
+        wired.repo.mutate(`UPDATE ${table} SET deleted = TRUE WHERE id = $1`, [
+          'row',
+        ]);
+
+        const file = wired.add('IR/back.md', {
+          'ir-id': 'row',
+          tags: lone ? tag : [tag],
+        });
+        await wired.manager.handleCreation(file);
+
+        expect(wired.repo.rows(table)).toStrictEqual([
+          { id: 'row', reference: 'IR/back.md', deleted: false },
+        ]);
+        expect(wired.processFrontMatter).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('leaves the rows alone for a created note with no ir-id, or no type tag', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        tableArb,
+        fc.oneof(
+          fc.constant({ tags: ['ir-article'] }),
+          fc.constant({ 'ir-id': 'row', tags: ['other'] }),
+          fc.constant({ 'ir-id': 'row' }),
+          // Not an id: a number matches no row by id
+          fc.constant({ 'ir-id': 7, tags: ['ir-article'] }),
+          fc.constant({ 'ir-id': '', tags: ['ir-article'] })
+        ),
+        async (table, frontmatter) => {
+          const wired = wireRenames({});
+          wired.insert(table, 'row', 'IR/gone.md');
+          wired.repo.mutate(
+            `UPDATE ${table} SET deleted = TRUE WHERE id = $1`,
+            ['row']
+          );
+          const mutate = vi.spyOn(wired.repo, 'mutate');
+
+          await wired.manager.handleCreation(
+            wired.add('IR/back.md', frontmatter)
+          );
+
+          expect(mutate).not.toHaveBeenCalled();
+          expect(wired.processFrontMatter).not.toHaveBeenCalled();
+        }
+      )
     );
   });
 });

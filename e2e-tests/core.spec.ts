@@ -2017,11 +2017,14 @@ test.describe("Deleting an item's note", () => {
    * Unofficial: `window.app`, `app.plugins.plugins`.
    */
   type PageApp = {
-    vault: { getFileByPath(path: string): unknown };
+    // Properties, not methods: the probe below swaps the reads for wrappers
+    vault: {
+      getFileByPath(path: string): unknown;
+      cachedRead: (...args: unknown[]) => Promise<unknown>;
+    };
     fileManager: {
       trashFile(file: unknown): Promise<void>;
-      // A property, not a method: the probe below swaps it for a wrapper
-      processFrontMatter: (...args: unknown[]) => Promise<void>;
+      processFrontMatter: (...args: unknown[]) => Promise<unknown>;
     };
     plugins: {
       plugins: Record<
@@ -2048,24 +2051,36 @@ test.describe("Deleting an item's note", () => {
 
   /**
    * Count frontmatter reads still under way, so the test can wait for the
-   * ones a delete sets off to settle before saying none of them failed.
+   * ones a delete sets off to settle before saying none of them failed. The
+   * plugin reads a note's frontmatter through `cachedRead`, and writes it
+   * through `processFrontMatter`, which reads it first.
+   *
+   * A note open in a tab has its text cached, so its type is read from the
+   * cache rather than the disk, and the deleted note is known by the vault no
+   * longer holding it: these tests no longer reach the read of a note already
+   * gone from the disk, which the unit tests of `getNoteType` cover.
    */
   const countFrontmatterReads = (page: Page) =>
     page.evaluate(() => {
       const w = window as unknown as Probe & { app: PageApp };
-      const { fileManager } = w.app;
-      const original: (...args: unknown[]) => Promise<void> =
-        fileManager.processFrontMatter;
       let inFlight = 0;
       w.__irFrontmatterReads = 0;
-      fileManager.processFrontMatter = async (...args: unknown[]) => {
-        w.__irFrontmatterReads = ++inFlight;
-        try {
-          await original.apply(fileManager, args);
-        } finally {
-          w.__irFrontmatterReads = --inFlight;
-        }
+      const count = <K extends string>(
+        owner: Record<K, (...args: unknown[]) => Promise<unknown>>,
+        key: K
+      ) => {
+        const original = owner[key];
+        owner[key] = async (...args: unknown[]) => {
+          w.__irFrontmatterReads = ++inFlight;
+          try {
+            return await Reflect.apply(original, owner, args);
+          } finally {
+            w.__irFrontmatterReads = --inFlight;
+          }
+        };
       };
+      count(w.app.vault, 'cachedRead');
+      count(w.app.fileManager, 'processFrontMatter');
     });
 
   /**
@@ -2205,5 +2220,347 @@ test.describe("Deleting an item's note", () => {
       .poll(async () => (await itemRows(window, snippet.table)).length)
       .toBe(0);
     expect(await pageErrors()).toEqual([]);
+  });
+});
+
+test.describe("Looking up a note's type", () => {
+  const SOURCE = 'sources/Security Principles';
+
+  /**
+   * What the page-side calls below reach on Obsidian and the plugin.
+   * Unofficial: `window.app`, `app.plugins.plugins`, `adapter.getFullPath`,
+   * `adapter.process`.
+   */
+  type PageApp = {
+    // Properties, not methods, where the probes below swap in a wrapper
+    vault: {
+      getFileByPath(path: string): unknown;
+      cachedRead: (file: unknown) => Promise<string>;
+      read(file: unknown): Promise<string>;
+      modify(file: unknown, text: string): Promise<void>;
+      create(path: string, text: string): Promise<unknown>;
+      on(name: 'modify', cb: (file: { path: string }) => void): unknown;
+      adapter: {
+        read(path: string): Promise<string>;
+        exists(path: string): Promise<boolean>;
+        getFullPath(path: string): string;
+        process: (
+          path: string,
+          fn: (text: string) => string,
+          options?: unknown
+        ) => Promise<string>;
+      };
+    };
+    metadataCache: {
+      getFileCache(
+        file: unknown
+      ): { frontmatter?: Record<string, unknown> } | null;
+    };
+    fileManager: {
+      renameFile(file: unknown, path: string): Promise<void>;
+      processFrontMatter: (...args: unknown[]) => Promise<void>;
+    };
+    plugins: {
+      plugins: Record<
+        string,
+        {
+          reviewManager: {
+            repo: {
+              query(
+                sql: string
+              ): { id: string; reference: string; deleted: number }[];
+            };
+            handleCreation: (file: { path: string }) => Promise<void>;
+          };
+        }
+      >;
+    };
+  };
+  type Probe = {
+    app: PageApp;
+    /** Paths of the notes the vault reported modified. */
+    __irModified?: string[];
+    /** Frontmatter reads and writes under way: see {@link watchLookups}. */
+    __irLookups?: number;
+    /** Paths of the files the plugin's create handler is done with. */
+    __irCreated?: string[];
+    /** Whether a write to the note set out, and its delete landed mid-write. */
+    __irDeletedMidWrite?: boolean;
+    /** Electron's renderer has Node's `require`: desktop only. */
+    require(id: 'fs'): { unlinkSync: (path: string) => void };
+  };
+
+  /** The article rows, as the plugin's database holds them. */
+  const articleRows = (page: Page) =>
+    page.evaluate(() => {
+      const { app } = window as unknown as Probe;
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      return repo.query('SELECT id, reference, deleted FROM article');
+    });
+
+  /** Whether the note at `path` is on disk, asked of the disk itself. */
+  const isOnDisk = (path: string) =>
+    window.evaluate(
+      (path) => (window as unknown as Probe).app.vault.adapter.exists(path),
+      path
+    );
+
+  /** The note's bytes on disk, read past the vault's cache. */
+  const onDisk = (path: string) =>
+    window.evaluate(
+      (path) => (window as unknown as Probe).app.vault.adapter.read(path),
+      path
+    );
+
+  /**
+   * Import {@link SOURCE} as an article, then rewrite its note's frontmatter
+   * the way a person might by hand, in a form Obsidian never writes itself: a
+   * comment, a flow list, double-quoted strings. Returns the note's path.
+   */
+  async function importHandWrittenArticle() {
+    await importArticle(window, SOURCE);
+    await expect.poll(async () => (await articleRows(window)).length).toBe(1);
+    const [{ id, reference }] = await articleRows(window);
+
+    await window.evaluate(
+      async ({ path, id }) => {
+        const { app } = window as unknown as Probe;
+        const file = app.vault.getFileByPath(path);
+        const text = await app.vault.read(file);
+        const fence = '\n---\n';
+        const close = text.indexOf(fence, 3);
+        if (!text.startsWith('---\n') || close < 0) {
+          throw new Error(`No frontmatter in ${path}`);
+        }
+        const kept = Object.entries(
+          app.metadataCache.getFileCache(file)?.frontmatter ?? {}
+        )
+          .filter(([key]) => key !== 'tags' && key !== 'ir-id')
+          .map(([key, value]) => `${key}: ${JSON.stringify(value)}`);
+        const frontmatter = [
+          '# written by hand',
+          'tags: [ir-article]   # a flow list',
+          `ir-id: "${id}"`,
+          ...kept,
+        ].join('\n');
+        await app.vault.modify(
+          file,
+          `---\n${frontmatter}${fence}${text.slice(close + fence.length)}`
+        );
+      },
+      { path: reference, id }
+    );
+    // Lookups below go by the note as rewritten
+    await expect
+      .poll(() =>
+        window.evaluate((path) => {
+          const { app } = window as unknown as Probe;
+          const file = app.vault.getFileByPath(path);
+          return app.metadataCache.getFileCache(file)?.frontmatter?.tags;
+        }, reference)
+      )
+      .toEqual(['ir-article']);
+    return reference;
+  }
+
+  /**
+   * The precondition both tests rest on: the note on disk is still as written
+   * by hand, so nothing has rewritten it before the test starts watching.
+   */
+  const expectHandWritten = (text: string) => {
+    expect(text).toContain('# written by hand');
+    expect(text).toContain('tags: [ir-article]   # a flow list');
+  };
+
+  /**
+   * From now on, count the frontmatter reads and writes under way, which the
+   * plugin makes through `cachedRead` and `processFrontMatter`, and record each
+   * file the plugin's create handler is done with: the positive signals the
+   * tests wait on before saying nothing was written.
+   */
+  const watchLookups = () =>
+    window.evaluate(() => {
+      const w = window as unknown as Probe;
+      let inFlight = 0;
+      w.__irLookups = 0;
+      w.__irCreated = [];
+      const count = <K extends string>(
+        owner: Record<K, (...args: never[]) => Promise<unknown>>,
+        key: K
+      ) => {
+        const original = owner[key];
+        owner[key] = (async (...args: never[]) => {
+          w.__irLookups = ++inFlight;
+          try {
+            return await Reflect.apply(original, owner, args);
+          } finally {
+            w.__irLookups = --inFlight;
+          }
+        }) as (typeof owner)[K];
+      };
+      count(w.app.vault, 'cachedRead');
+      count(w.app.fileManager, 'processFrontMatter');
+      const manager =
+        w.app.plugins.plugins['incremental-reading'].reviewManager;
+      const handleCreation = manager.handleCreation;
+      manager.handleCreation = async (file) => {
+        try {
+          await Reflect.apply(handleCreation, manager, [file]);
+        } finally {
+          w.__irCreated?.push(file.path);
+        }
+      };
+    });
+
+  /** Settles once no frontmatter read or write is under way, a macrotask on. */
+  const lookupsSettled = async () => {
+    await window.evaluate(() => new Promise((done) => setTimeout(done, 0)));
+    await expect
+      .poll(() =>
+        window.evaluate(() => (window as unknown as Probe).__irLookups)
+      )
+      .toBe(0);
+  };
+
+  /** Show `path` in the active tab, in `mode`, with its action bar up. */
+  async function showWithActionBar(path: string, mode: 'editing' | 'reading') {
+    await openFileInActiveLeaf(window, path);
+    if (mode === 'reading') {
+      await executeCommandById(window, 'markdown:toggle-preview');
+    }
+    // The bar shows once it has looked the note's type up
+    await expect(
+      window
+        .locator('.workspace-leaf.mod-active .ir-action-bar')
+        .getByRole('button', { name: 'Dismiss', exact: true })
+        .filter({ visible: true })
+    ).toBeVisible();
+  }
+
+  test('leaves hand-written frontmatter byte for byte as it was, through opening, review, rename and a copy', async () => {
+    const reference = await importHandWrittenArticle();
+    const written = await onDisk(reference);
+    expectHandWritten(written);
+    await window.evaluate(() => {
+      const w = window as unknown as Probe;
+      w.__irModified = [];
+      // Notes only: the plugin's database is a file in the vault too
+      w.app.vault.on('modify', (file) => {
+        if (file.path.endsWith('.md')) w.__irModified?.push(file.path);
+      });
+    });
+    await watchLookups();
+
+    await showWithActionBar(reference, 'editing');
+    await showWithActionBar(reference, 'reading');
+
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await window.getByRole('button', { name: 'Mark reviewed' }).click();
+    await expect(
+      window
+        .locator('.ir-review-summary')
+        .getByRole('heading', { name: 'Review complete' })
+    ).toBeVisible();
+
+    const renamed = reference.replace(/\.md$/, ' renamed.md');
+    await window.evaluate(
+      async ({ from, to }) => {
+        const { app } = window as unknown as Probe;
+        await app.fileManager.renameFile(app.vault.getFileByPath(from), to);
+      },
+      { from: reference, to: renamed }
+    );
+    await expect
+      .poll(async () => (await articleRows(window))[0]?.reference)
+      .toBe(renamed);
+    // Open again where it went, so the lookups run on the renamed note too
+    await showWithActionBar(renamed, 'editing');
+    // A copy, ir-id and all, made as a file manager or a sync would: the
+    // plugin's create handler looks its ir-id and tags up
+    const copy = renamed.replace(/\.md$/, ' copy.md');
+    await window.evaluate(
+      async ({ path, text }) => {
+        await (window as unknown as Probe).app.vault.create(path, text);
+      },
+      { path: copy, text: written }
+    );
+    await expect
+      .poll(() =>
+        window.evaluate(() => (window as unknown as Probe).__irCreated)
+      )
+      .toContain(copy);
+    // Not the item, so no bar comes up for it: open it, and let its lookups
+    // settle
+    await openFileInActiveLeaf(window, copy);
+    await lookupsSettled();
+
+    expect(await onDisk(renamed)).toBe(written);
+    expect(await onDisk(copy)).toBe(written);
+    expect(
+      await window.evaluate(() => (window as unknown as Probe).__irModified)
+    ).toEqual([]);
+  });
+
+  test('leaves deleted a note whose delete lands while its type is looked up', async () => {
+    const reference = await importHandWrittenArticle();
+    await watchLookups();
+
+    // Delete the note off the disk the moment anything sets out to write it,
+    // between that write's read and the write itself: the delete a lookup made
+    // through a write could undo
+    await window.evaluate((path) => {
+      const w = window as unknown as Probe;
+      const { adapter } = w.app.vault;
+      const { unlinkSync } = w.require('fs');
+      const original = adapter.process;
+      adapter.process = (target, fn, options) => {
+        const deleteMidWrite = (text: string) => {
+          const out = fn(text);
+          if (target === path && !w.__irDeletedMidWrite) {
+            w.__irDeletedMidWrite = true;
+            unlinkSync(adapter.getFullPath(path));
+          }
+          return out;
+        };
+        return Reflect.apply(original, adapter, [
+          target,
+          deleteMidWrite,
+          options,
+        ]);
+      };
+    }, reference);
+
+    expectHandWritten(await onDisk(reference));
+
+    const deletedMidWrite = () =>
+      window.evaluate(() => !!(window as unknown as Probe).__irDeletedMidWrite);
+    await openFileInActiveLeaf(window, reference);
+    // Its type looked up: the action bar is up for it, or the lookup set out to
+    // write the note and the delete landed under it
+    const dismiss = window
+      .locator('.workspace-leaf.mod-active .ir-action-bar')
+      .getByRole('button', { name: 'Dismiss', exact: true })
+      .filter({ visible: true });
+    await expect
+      .poll(
+        async () => (await deletedMidWrite()) || (await dismiss.isVisible())
+      )
+      .toBe(true);
+    // Nothing set out to write it: delete it all the same, as a sync or
+    // another app would, now its type has been looked up
+    await window.evaluate((path) => {
+      const w = window as unknown as Probe;
+      if (w.__irDeletedMidWrite) return;
+      w.__irDeletedMidWrite = true;
+      w.require('fs').unlinkSync(w.app.vault.adapter.getFullPath(path));
+    }, reference);
+
+    // Past any write a lookup made, which ends within its `processFrontMatter`
+    await lookupsSettled();
+    expect(await isOnDisk(reference)).toBe(false);
+    await expect
+      .poll(async () => (await articleRows(window))[0]?.deleted)
+      .toBe(1);
   });
 });
