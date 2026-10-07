@@ -4,6 +4,8 @@
  * is erased by TypeScript and requires no stub entry.
  */
 
+import { parse } from 'yaml';
+
 export const normalizePath = (path: string) => path;
 
 /** A frontmatter block opens with `---` on the very first line. */
@@ -46,6 +48,19 @@ export function getFrontMatterInfo(content: string) {
     to: close.index,
     contentStart: FRONTMATTER_CLOSE.lastIndex,
   };
+}
+
+/**
+ * Obsidian's `parseYaml`, on the parser it bundles. Read from obsidian.asar
+ * (1.13.7): it is the `yaml` package's `parse(text, null, {})`, which is
+ * `parse(text)`: the package defaults (YAML 1.2 core schema, unique keys,
+ * strict), so blank text parses to null and malformed YAML throws a
+ * `YAMLParseError`. The bundled copy is 2.6 or later (it knows the `stringKeys`
+ * option); this one is pinned in devDependencies and may differ from it in
+ * patch-level fixes.
+ */
+export function parseYaml(text: string): unknown {
+  return parse(text);
 }
 
 export class Notice {

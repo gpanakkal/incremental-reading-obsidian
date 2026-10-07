@@ -5,7 +5,6 @@ import type {
   QueueScheduling,
   QueueSubset,
 } from '#/components/types';
-import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from '#/lib/constants';
 import { batchAfterLinkUpdates } from '#/lib/link-update-queue';
 import { appendLog } from '#/lib/log-file';
 import {
@@ -26,7 +25,6 @@ import {
   type ISRSCardDisplay,
   type MaybeMissingItem,
   type NoteType,
-  type PluginFrontMatter,
   type ReviewArticle,
   type ReviewCard,
   type ReviewItem,
@@ -72,6 +70,15 @@ function isFollowable({ from, file }: FileMove): boolean {
     isImportable(file) &&
     getMimeType({ extension: extensionOfPath(from) }) === getMimeType(file)
   );
+}
+
+/**
+ * The `ir-id` a note's frontmatter holds. An id is a string; anything else
+ * there, a number say, matches no row by id, so it counts as no id.
+ */
+function irIdOf(frontmatter: Record<string, unknown>): string | undefined {
+  const id = frontmatter['ir-id'];
+  return typeof id === 'string' ? id : undefined;
 }
 
 export default class ReviewManager {
@@ -716,18 +723,10 @@ export default class ReviewManager {
       return [];
     }
 
-    let type: string | null = null,
-      rowId: string | undefined;
-    await this.app.fileManager.processFrontMatter(
-      concreteFile,
-      (frontmatter: PluginFrontMatter) => {
-        if (frontmatter.tags === undefined) return;
-        rowId = frontmatter['ir-id'];
-        if (frontmatter.tags.includes(ARTICLE_TAG)) type = 'article';
-        else if (frontmatter.tags.includes(SNIPPET_TAG)) type = 'snippet';
-        else if (frontmatter.tags.includes(CARD_TAG)) type = 'card';
-      }
-    );
+    // Read only: a write here would rewrite the note's frontmatter
+    const frontmatter = await Obsidian.readFrontMatter(concreteFile, this.app);
+    const type = Obsidian.typeOfTags(frontmatter.tags);
+    let rowId = irIdOf(frontmatter);
     this.snippets.offsetTracker.renameFile(oldPath, file.path);
     // A plain note may be what snippets and cards were taken from
     if (!type) return [{ from: oldPath, file: concreteFile }];
@@ -956,18 +955,11 @@ export default class ReviewManager {
       return;
     }
 
-    let id: string | undefined;
-    let type: string | null = null;
-    await this.app.fileManager.processFrontMatter(
-      concreteFile,
-      (frontmatter: PluginFrontMatter) => {
-        if (!frontmatter?.['ir-id']) return;
-        id = frontmatter['ir-id'];
-        if (frontmatter.tags?.includes(ARTICLE_TAG)) type = 'article';
-        else if (frontmatter.tags?.includes(SNIPPET_TAG)) type = 'snippet';
-        else if (frontmatter.tags?.includes(CARD_TAG)) type = 'card';
-      }
-    );
+    // Read only: a write to a note just created could recreate it, were it
+    // deleted again between the write's read and its write
+    const frontmatter = await Obsidian.readFrontMatter(concreteFile, this.app);
+    const id = irIdOf(frontmatter);
+    const type = Obsidian.typeOfTags(frontmatter.tags);
 
     if (!id || type === null) return;
 

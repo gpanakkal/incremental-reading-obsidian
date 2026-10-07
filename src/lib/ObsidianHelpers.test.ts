@@ -14,6 +14,7 @@ import {
 } from '#/lib/constants';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import type { NoteType } from '#/lib/types';
+import { noteText } from '#/test/note-text';
 import type { EditorState } from '@codemirror/state';
 import fc from 'fast-check';
 import {
@@ -22,7 +23,9 @@ import {
   type EditorPosition,
   type FrontMatterCache,
   type TFile,
+  getFrontMatterInfo,
   normalizePath,
+  parseYaml,
 } from 'obsidian';
 import { posix } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -772,12 +775,133 @@ function makeAppFailingRead(
       ? vi.fn().mockResolvedValue(disk.onDisk)
       : vi.fn().mockRejectedValue(disk.existsFails);
   const app = makeApp({
-    vault: { adapter: { exists } } as unknown as App['vault'],
-    fileManager: {
-      processFrontMatter: vi.fn().mockRejectedValue(reason),
-    } as unknown as App['fileManager'],
+    vault: {
+      adapter: { exists },
+      cachedRead: vi.fn().mockRejectedValue(reason),
+    } as unknown as App['vault'],
   });
   return { app, exists };
+}
+
+/**
+ * An app whose vault holds one note, `file`, whose text is `text`, with every
+ * way of writing a note spied on so a test can show none was taken. Its disk
+ * says the note is there, should anything ask.
+ */
+function makeNoteApp(text: string, file: TFile = makeTFile()) {
+  const writes = {
+    processFrontMatter: vi.fn().mockResolvedValue(undefined),
+    process: vi.fn().mockResolvedValue(text),
+    modify: vi.fn().mockResolvedValue(undefined),
+  };
+  const cachedRead = vi.fn().mockResolvedValue(text);
+  const exists = vi.fn().mockResolvedValue(true);
+  const getFileByPath = vi.fn((path: string): TFile | null =>
+    path === file.path ? file : null
+  );
+  const app = makeApp({
+    vault: {
+      cachedRead,
+      getFileByPath,
+      process: writes.process,
+      modify: writes.modify,
+      adapter: { exists },
+    } as unknown as App['vault'],
+    fileManager: {
+      processFrontMatter: writes.processFrontMatter,
+    } as unknown as App['fileManager'],
+  });
+  return { app, file, cachedRead, exists, getFileByPath, writes };
+}
+
+/** Asserts that nothing wrote the note through any of `makeNoteApp`'s writers. */
+function expectNoWrites(writes: ReturnType<typeof makeNoteApp>['writes']) {
+  expect(writes.processFrontMatter).not.toHaveBeenCalled();
+  expect(writes.process).not.toHaveBeenCalled();
+  expect(writes.modify).not.toHaveBeenCalled();
+}
+
+/** Any JSON value, as JSON reads it back: `-0` comes back as `0`, say. */
+const jsonRoundTripArb = fc
+  .jsonValue()
+  .map((value) => JSON.parse(JSON.stringify(value)) as unknown);
+
+/** Any text that doesn't open a frontmatter block. */
+const textWithoutFrontmatterArb = fc
+  .string()
+  .filter((text) => !getFrontMatterInfo(text).exists);
+
+const typeTagArb = fc.constantFrom(ARTICLE_TAG, SNIPPET_TAG, CARD_TAG);
+/** Any entry a `tags` list can hold, type tags well represented. */
+const typedTagEntryArb = fc.oneof(typeTagArb, jsonRoundTripArb);
+/**
+ * A `tags` list as a person might write it by hand, with the tags it holds:
+ * a flow or a block list, each tag plain, single- or double-quoted, nested
+ * (`topic/sub`) or not, and maybe comments: after a flow list, and after the
+ * `tags:` line and each entry of a block list.
+ */
+const handWrittenTagsArb = fc
+  .record({
+    tags: fc.array(
+      fc.oneof(typeTagArb, fc.stringMatching(/^[a-zA-Z][\w/-]{0,11}$/))
+    ),
+    quotes: fc.array(fc.constantFrom('', "'", '"')),
+    flow: fc.boolean(),
+    comment: fc.boolean(),
+  })
+  .map(({ tags, quotes, flow, comment }) => {
+    const written = tags.map((tag, i) => {
+      const quote = quotes[i % Math.max(quotes.length, 1)] ?? '';
+      return `${quote}${tag}${quote}`;
+    });
+    const note = comment ? '  # written by hand' : '';
+    const yaml = flow
+      ? `tags: [${written.join(', ')}]${note}`
+      : `tags:${note}${written.map((tag) => `\n  - ${tag}${note}`).join('')}`;
+    return { tags, yaml };
+  });
+
+/** Any lone string, type tags well represented anywhere in it. */
+const loneTagStringArb = fc
+  .array(fc.oneof(typeTagArb, fc.string()))
+  .map((parts) => parts.join(''));
+/**
+ * Any frontmatter `tags` value: a list, a lone string with or without type
+ * tags in it, anything else YAML can hold there, or none at all.
+ */
+const tagsValueArb = fc.oneof(
+  fc.array(typedTagEntryArb),
+  loneTagStringArb,
+  jsonRoundTripArb,
+  fc.constant(undefined)
+);
+
+/** The type the highest-ranked type tag in `has` names. */
+function rankedType(has: (tag: string) => boolean): NoteType | null {
+  if (has(ARTICLE_TAG)) return 'article';
+  if (has(SNIPPET_TAG)) return 'snippet';
+  if (has(CARD_TAG)) return 'card';
+  return null;
+}
+
+/**
+ * The type a `tags` value names, worked out apart from the code under test: a
+ * list holds its tags as entries, a lone string anywhere in its text.
+ */
+function expectedTypeOf(tags: unknown): NoteType | null {
+  if (Array.isArray(tags)) return rankedType((tag) => tags.includes(tag));
+  if (typeof tags === 'string') return rankedType((tag) => tags.includes(tag));
+  return null;
+}
+
+/** The error the `parseYaml` stub throws for `block`, to compare a rejection to. */
+function parseErrorOf(block: string): unknown {
+  try {
+    parseYaml(block);
+  } catch (error) {
+    return error;
+  }
+  throw new Error(`Parses: ${block}`);
 }
 
 // #endregion
@@ -2964,86 +3088,325 @@ describe('getFrontMatter', () => {
 });
 
 // ---------------------------------------------------------------------------
+// readFrontMatter
+// ---------------------------------------------------------------------------
+describe('readFrontMatter', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('reads the properties a note holds, without writing the note', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.dictionary(fc.string(), jsonRoundTripArb),
+        fc.string(),
+        async (frontmatter, body) => {
+          const { app, file, cachedRead, writes } = makeNoteApp(
+            noteText(frontmatter, body)
+          );
+          // As JSON reads it back: `fc.dictionary` builds objects with no prototype
+          await expect(
+            ObsidianHelpers.readFrontMatter(file, app)
+          ).resolves.toStrictEqual(JSON.parse(JSON.stringify(frontmatter)));
+          expect(cachedRead).toHaveBeenCalledExactlyOnceWith(file);
+          expectNoWrites(writes);
+        }
+      )
+    );
+  });
+
+  it('reads a note with no frontmatter block as having no properties', async () => {
+    await fc.assert(
+      fc.asyncProperty(textWithoutFrontmatterArb, async (text) => {
+        const { app, file, writes } = makeNoteApp(text);
+        await expect(
+          ObsidianHelpers.readFrontMatter(file, app)
+        ).resolves.toStrictEqual({});
+        expectNoWrites(writes);
+      })
+    );
+  });
+
+  it('reads an empty block, or one that holds no mapping, as having no properties', async () => {
+    const blockArb = fc.oneof(
+      // Blank, which the parser reads as null
+      fc.stringMatching(/^[ \t\n]*$/),
+      // A scalar or a list where the mapping should be
+      jsonRoundTripArb
+        .filter((value) => value === null || typeof value !== 'object')
+        .map((value) => JSON.stringify(value)),
+      fc.array(jsonRoundTripArb).map((list) => JSON.stringify(list))
+    );
+    await fc.assert(
+      fc.asyncProperty(
+        // An empty block: its fences on adjacent lines
+        fc.oneof(
+          fc.constant('---\n---\n'),
+          blockArb.map((block) => `---\n${block}\n---\n`)
+        ),
+        fc.string(),
+        async (block, body) => {
+          const { app, file, writes } = makeNoteApp(block + body);
+          await expect(
+            ObsidianHelpers.readFrontMatter(file, app)
+          ).resolves.toStrictEqual({});
+          expectNoWrites(writes);
+        }
+      )
+    );
+  });
+
+  it('reads hand-written YAML as Obsidian parses it: comments, flow lists, quoted values', async () => {
+    const { app, file, writes } = makeNoteApp(
+      [
+        '---',
+        '# written by hand',
+        'tags: [ir-article, \'quoted\', "double"]   # a flow list',
+        "ir-id: 'abc-123'",
+        'source: "[[a note]]"',
+        'empty:',
+        '---',
+        'body',
+      ].join('\n')
+    );
+    await expect(
+      ObsidianHelpers.readFrontMatter(file, app)
+    ).resolves.toStrictEqual({
+      tags: ['ir-article', 'quoted', 'double'],
+      'ir-id': 'abc-123',
+      source: '[[a note]]',
+      empty: null,
+    });
+    expectNoWrites(writes);
+  });
+
+  it('reads every type tag a hand-written tags list holds, never writing the note', async () => {
+    await fc.assert(
+      fc.asyncProperty(handWrittenTagsArb, async ({ tags, yaml }) => {
+        const { app, file, writes } = makeNoteApp(`---\n${yaml}\n---\nbody`);
+        const read = await ObsidianHelpers.readFrontMatter(file, app);
+        // Only the type tags: a plain `true` or `null` among the others is
+        // YAML for something other than a string
+        const typeTags = [ARTICLE_TAG, SNIPPET_TAG, CARD_TAG];
+        // A block list with no entries is an empty `tags:`, which is null
+        const list = (read.tags ?? []) as unknown[];
+        expect(list).toHaveLength(tags.length);
+        expect(
+          list.filter((tag) => typeTags.includes(tag as string))
+        ).toStrictEqual(tags.filter((tag) => typeTags.includes(tag)));
+        expectNoWrites(writes);
+      })
+    );
+  });
+
+  it("rejects with the parser's own error for a block that isn't valid YAML", async () => {
+    const block = '{"tags": [';
+    const { app, file, writes } = makeNoteApp(`---\n${block}\n---\nbody`);
+    await expect(ObsidianHelpers.readFrontMatter(file, app)).rejects.toThrow(
+      parseErrorOf(`${block}\n`) as Error
+    );
+    expectNoWrites(writes);
+  });
+
+  it("rejects with the read's own error when the note can't be read", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.anything(), async (reason) => {
+        const { app, exists } = makeAppFailingRead(reason, { onDisk: false });
+        await expect(
+          ObsidianHelpers.readFrontMatter(makeTFile(), app)
+        ).rejects.toBe(reason);
+        // Whether a failed read means the note is gone is the caller's call
+        expect(exists).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('answers no properties for a file without frontmatter, never reading it', async () => {
+    await fc.assert(
+      fc.asyncProperty(binaryExtensionArb, async (extension) => {
+        const { app, cachedRead, writes } = makeNoteApp(
+          noteText({ tags: [ARTICLE_TAG] }),
+          makeTFile({ extension })
+        );
+        await expect(
+          ObsidianHelpers.readFrontMatter(makeTFile({ extension }), app)
+        ).resolves.toStrictEqual({});
+        expect(cachedRead).not.toHaveBeenCalled();
+        expectNoWrites(writes);
+      })
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// typeOfTags
+// ---------------------------------------------------------------------------
+describe('typeOfTags', () => {
+  it('names the type of the highest-ranked type tag in a list', () => {
+    fc.assert(
+      fc.property(fc.array(typedTagEntryArb), (tags) => {
+        expect(ObsidianHelpers.typeOfTags(tags)).toBe(
+          rankedType((tag) => tags.includes(tag))
+        );
+      })
+    );
+  });
+
+  it('reads a lone type tag as that type', () => {
+    expect(ObsidianHelpers.typeOfTags(ARTICLE_TAG)).toBe('article');
+    expect(ObsidianHelpers.typeOfTags(SNIPPET_TAG)).toBe('snippet');
+    expect(ObsidianHelpers.typeOfTags(CARD_TAG)).toBe('card');
+  });
+
+  it('names the type of any type tag a lone string holds, ranked as in a list', () => {
+    // As before this was its own function: a lone string is searched, not
+    // compared, so `ir-article, ir-card` reads as both tags
+    fc.assert(
+      fc.property(loneTagStringArb, (tags) => {
+        expect(ObsidianHelpers.typeOfTags(tags)).toBe(
+          rankedType((tag) => tags.includes(tag))
+        );
+      })
+    );
+  });
+
+  it('answers null for tags that are neither a list nor a string', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.constant(undefined),
+          jsonRoundTripArb.filter(
+            (value) => typeof value !== 'string' && !Array.isArray(value)
+          )
+        ),
+        (tags) => {
+          expect(ObsidianHelpers.typeOfTags(tags)).toBeNull();
+        }
+      )
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // getNoteType
 // ---------------------------------------------------------------------------
 describe('getNoteType', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  function makeAppWithTags(tags: string[] | undefined): App {
-    return makeApp({
-      fileManager: {
-        processFrontMatter: vi
-          .fn()
-          .mockImplementation(
-            async (
-              _file: unknown,
-              cb: (fm: Record<string, unknown>) => void
-            ) => {
-              cb(tags !== undefined ? { tags } : {});
-            }
-          ),
-      } as unknown as App['fileManager'],
-    });
+  function makeAppWithTags(tags: unknown) {
+    return makeNoteApp(noteText(tags === undefined ? {} : { tags }, 'body'));
   }
 
   it('returns null when frontmatter has no tags', async () => {
-    const app = makeAppWithTags(undefined);
-    await expect(
-      ObsidianHelpers.getNoteType(makeTFile(), app)
-    ).resolves.toBeNull();
+    const { app, file } = makeAppWithTags(undefined);
+    await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBeNull();
+  });
+
+  it('returns null when the note has no frontmatter at all', async () => {
+    const { app, file } = makeNoteApp('just a body');
+    await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBeNull();
   });
 
   it('returns "article" when tags include ARTICLE_TAG', async () => {
-    const app = makeAppWithTags([ARTICLE_TAG]);
-    await expect(ObsidianHelpers.getNoteType(makeTFile(), app)).resolves.toBe(
+    const { app, file } = makeAppWithTags([ARTICLE_TAG]);
+    await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBe(
       'article'
     );
   });
 
   it('returns "snippet" when tags include SNIPPET_TAG', async () => {
-    const app = makeAppWithTags([SNIPPET_TAG]);
-    await expect(ObsidianHelpers.getNoteType(makeTFile(), app)).resolves.toBe(
+    const { app, file } = makeAppWithTags([SNIPPET_TAG]);
+    await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBe(
       'snippet'
     );
   });
 
   it('returns "card" when tags include CARD_TAG', async () => {
-    const app = makeAppWithTags([CARD_TAG]);
-    await expect(ObsidianHelpers.getNoteType(makeTFile(), app)).resolves.toBe(
-      'card'
+    const { app, file } = makeAppWithTags([CARD_TAG]);
+    await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBe('card');
+  });
+
+  it('returns the type of a lone string tag', async () => {
+    const { app, file } = makeAppWithTags(SNIPPET_TAG);
+    await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBe(
+      'snippet'
     );
   });
 
   it('returns null when tags do not include any known type tag', async () => {
-    const app = makeAppWithTags(['random-tag', 'another-tag']);
-    await expect(
-      ObsidianHelpers.getNoteType(makeTFile(), app)
-    ).resolves.toBeNull();
+    const { app, file } = makeAppWithTags(['random-tag', 'another-tag']);
+    await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBeNull();
+  });
+
+  it('returns null for an empty tags entry', async () => {
+    const { app, file } = makeAppWithTags(null);
+    await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBeNull();
   });
 
   it('prioritizes "article" over "snippet" when both tags are present', async () => {
-    const app = makeAppWithTags([ARTICLE_TAG, SNIPPET_TAG]);
-    await expect(ObsidianHelpers.getNoteType(makeTFile(), app)).resolves.toBe(
+    const { app, file } = makeAppWithTags([ARTICLE_TAG, SNIPPET_TAG]);
+    await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBe(
       'article'
     );
   });
 
   it('prioritizes "snippet" over "card" when both tags are present', async () => {
-    const app = makeAppWithTags([SNIPPET_TAG, CARD_TAG]);
-    await expect(ObsidianHelpers.getNoteType(makeTFile(), app)).resolves.toBe(
+    const { app, file } = makeAppWithTags([SNIPPET_TAG, CARD_TAG]);
+    await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBe(
       'snippet'
+    );
+  });
+
+  it('answers the type its tags name, never writing the note', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.dictionary(fc.string(), jsonRoundTripArb),
+        tagsValueArb,
+        fc.string(),
+        async (rest, tags, body) => {
+          const frontmatter = { ...rest, tags };
+          const { app, file, writes } = makeNoteApp(
+            noteText(frontmatter, body)
+          );
+          await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBe(
+            expectedTypeOf(tags)
+          );
+          expectNoWrites(writes);
+        }
+      )
+    );
+  });
+
+  it('answers null for a note the vault no longer holds, though its text is still to be read', async () => {
+    // A delete the vault has reported: the text is still in its cache, but the
+    // file is no longer the one at its path, if any is
+    await fc.assert(
+      fc.asyncProperty(typeTagArb, fc.boolean(), async (tag, replaced) => {
+        const { app, getFileByPath, writes } = makeNoteApp(
+          noteText({ tags: [tag] })
+        );
+        const gone = makeTFile();
+        if (!replaced) {
+          getFileByPath.mockReturnValue(null);
+        }
+        await expect(
+          ObsidianHelpers.getNoteType(gone, app)
+        ).resolves.toBeNull();
+        expectNoWrites(writes);
+      })
     );
   });
 
   it('answers null for a file without frontmatter, never reading it', async () => {
     await fc.assert(
       fc.asyncProperty(binaryExtensionArb, async (extension) => {
-        const processFrontMatter = vi.fn();
-        const app = makeApp({ fileManager: { processFrontMatter } as never });
+        const { app, file, cachedRead, writes } = makeNoteApp(
+          noteText({ tags: [ARTICLE_TAG] }),
+          makeTFile({ extension })
+        );
         await expect(
-          ObsidianHelpers.getNoteType(makeTFile({ extension }), app)
+          ObsidianHelpers.getNoteType(file, app)
         ).resolves.toBeNull();
-        expect(processFrontMatter).not.toHaveBeenCalled();
+        expect(cachedRead).not.toHaveBeenCalled();
+        expectNoWrites(writes);
       })
     );
   });
@@ -3080,18 +3443,34 @@ describe('getNoteType', () => {
     );
   });
 
+  it('answers the type a hand-written tags list names, never writing the note', async () => {
+    await fc.assert(
+      fc.asyncProperty(handWrittenTagsArb, async ({ tags, yaml }) => {
+        const { app, file, writes } = makeNoteApp(`---\n${yaml}\n---\nbody`);
+        await expect(ObsidianHelpers.getNoteType(file, app)).resolves.toBe(
+          rankedType((tag) => tags.includes(tag))
+        );
+        expectNoWrites(writes);
+      })
+    );
+  });
+
+  it("rejects with the parser's own error for a note whose frontmatter isn't valid YAML", async () => {
+    const block = 'tags: [';
+    const { app, file, writes } = makeNoteApp(`---\n${block}\n---\nbody`);
+    await expect(ObsidianHelpers.getNoteType(file, app)).rejects.toThrow(
+      parseErrorOf(`${block}\n`) as Error
+    );
+    expectNoWrites(writes);
+  });
+
   it('never asks the disk about a note it read', async () => {
     await fc.assert(
-      fc.asyncProperty(
-        fc.option(fc.array(fc.string()), { nil: undefined }),
-        async (tags) => {
-          const exists = vi.fn();
-          const app = makeAppWithTags(tags);
-          (app.vault as unknown as { adapter: unknown }).adapter = { exists };
-          await ObsidianHelpers.getNoteType(makeTFile(), app);
-          expect(exists).not.toHaveBeenCalled();
-        }
-      )
+      fc.asyncProperty(tagsValueArb, async (tags) => {
+        const { app, file, exists } = makeAppWithTags(tags);
+        await ObsidianHelpers.getNoteType(file, app);
+        expect(exists).not.toHaveBeenCalled();
+      })
     );
   });
 });
