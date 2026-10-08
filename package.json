@@ -22,6 +22,9 @@
 		"e2e:codegen": "pnpm exec concurrently -k --timings \"pnpm run dev\" \"pnpm exec wait-on main.js && pnpm exec tsx e2e-tests/setup/codegen.ts\"",
 		"e2e:docker": "node scripts/docker-e2e.mjs",
 		"e2e:repeat": "pnpm run build && cross-env E2E_CLEANUP=1 E2E_HEADLESS=1 pnpm exec playwright test --project e2e --repeat-each 10",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
 		"format": "prettier --write \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\" && eslint --fix \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\"",
 		"lint": "eslint \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\"",
 		"version": "node version-bump.mjs && git add manifest.json versions.json package.json",
@@ -78,6 +81,7 @@
 		"tslib": "2.4.0",
 		"typescript": "5.9.3",
 		"typescript-eslint": "8.57.1",
+    "vitepress": "1.6.4",
 		"vitest": "~4.1.5",
 		"wait-on": "9.0.5",
 		"yaml": "2.8.4"
