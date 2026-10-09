@@ -1,0 +1,18 @@
+/* Brand colors based on Obsidian's accent purple */
+:root {
+  --vp-c-brand-1: #6a57d9;
+  --vp-c-brand-2: #7f6df2;
+  --vp-c-brand-3: #8a7cf8;
+  --vp-c-brand-soft: rgba(127, 109, 242, 0.14);
+}
+
+.dark {
+  --vp-c-brand-1: #a99df7;
+  --vp-c-brand-2: #8f81f5;
+  --vp-c-brand-3: #7f6df2;
+  --vp-c-brand-soft: rgba(127, 109, 242, 0.2);
+}
+
+:root {
+  --vp-home-hero-name-color: var(--vp-c-brand-1);
+}
