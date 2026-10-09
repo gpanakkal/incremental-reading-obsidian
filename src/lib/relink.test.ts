@@ -15,6 +15,7 @@ import {
   vi,
 } from 'vitest';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
+import { refusedPathsWarning } from './item-path-guard';
 import { ITEM_TABLES, type ItemTable, evictedSpot } from './moved-note-scan';
 import {
   type RelinkFile,
@@ -682,6 +683,35 @@ describe('relinkItem', () => {
       expect(written).toEqual({
         'new.md': { 'ir-id': 'i', tags: ['mine', tag], other: 1 },
       });
+    }
+  );
+
+  it.each([
+    ['x|y/new.md', true],
+    ['x y/new.md', false],
+  ])(
+    'relinks to %s, warning when its path breaks links to the item: %s',
+    async (path, warned) => {
+      const repo = TestRepository.create();
+      insertItem(repo, {
+        table: 'article',
+        id: 'i',
+        reference: 'gone.md',
+        deleted: false,
+      });
+      const { plugin } = makePlugin(repo);
+
+      const result = await relinkItem(
+        plugin as never,
+        { table: 'article', id: 'i' },
+        makeFile(path) as TFile
+      );
+
+      expect(result).toEqual({ ok: true, from: 'gone.md' });
+      expect(Notice.messages).toStrictEqual([
+        `Relinked to "${path}"`,
+        ...(warned ? [refusedPathsWarning([path])] : []),
+      ]);
     }
   );
 

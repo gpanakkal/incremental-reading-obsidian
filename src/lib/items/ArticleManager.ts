@@ -11,6 +11,11 @@ import {
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import {
+  listChars,
+  refusedCharsIn,
+  refusedPathWarning,
+} from '#/lib/item-path-guard';
+import {
   isCopyImportable,
   isImportable,
   sniffMimeType,
@@ -57,6 +62,31 @@ export function checkImportable(file: TFile): boolean {
   if (isImportable(file)) return true;
   Obsidian.notify(`"${file.name}" can't be imported as an article`);
   return false;
+}
+
+/**
+ * Whether `file` must not become an article where it is, saying why: its path
+ * holds a character that breaks links to it (see `REFUSED_PATH_CHARS`). A copy
+ * is named from text, which drops them; every type that can be imported in
+ * place can be copied today.
+ */
+function refusedInPlace(file: TFile): boolean {
+  const chars = refusedCharsIn(file.path);
+  if (chars.length === 0) return false;
+  Obsidian.notify(
+    `Can't import "${file.name}" in place: its name or folder contains ` +
+      `${listChars(chars)}. Rename it or import a copy`
+  );
+  return true;
+}
+
+/**
+ * Tell the user when an existing article, relinked or restored, is now at a
+ * path that breaks links to it: it stays there, as existing paths do.
+ */
+function warnIfRefused(path: string) {
+  const warning = refusedPathWarning(path);
+  if (warning) Obsidian.notify(warning);
 }
 
 /** How an import says it scheduled the article, for its notice. */
@@ -318,7 +348,8 @@ export class ArticleManager extends ItemManager {
         `Another article is already at this file path; canceling import`
       );
       return null;
-    } else if (existingId) {
+    }
+    if (existingId) {
       const rows = await this.repo.query(
         'SELECT id FROM article WHERE id = $1',
         [existingId]
@@ -332,11 +363,15 @@ export class ArticleManager extends ItemManager {
         Obsidian.notify(
           `Linked "${file.basename}" to existing article with the same ID`
         );
+        warnIfRefused(file.path);
         return this.fetch(existingId);
       }
       // Orphaned id + no reference match: fall through to fresh import
     }
 
+    // Past here a new article is made where the note is. An article it
+    // already was, above, keeps its path, as existing paths do
+    if (refusedInPlace(file)) return null;
     const id = crypto.randomUUID();
     await Obsidian.updateFrontMatter(
       file,
@@ -403,7 +438,6 @@ export class ArticleManager extends ItemManager {
       Obsidian.notify(`"${file.name}" is already an article; canceling import`);
       return this.fetch(existing.id);
     }
-
     const titleSlice = getContentSlice(
       file.basename,
       CONTENT_TITLE_SLICE_LENGTH,
@@ -425,9 +459,13 @@ export class ArticleManager extends ItemManager {
       Obsidian.notify(
         `Restored the article "${titleSlice}" to the queue with its earlier schedule`
       );
+      warnIfRefused(file.path);
       return this.fetch(existing.id);
     }
 
+    // Past here a new article is made where the file is. One it was before,
+    // above, comes back at its path, as existing paths do
+    if (refusedInPlace(file)) return null;
     const id = crypto.randomUUID();
     await this.insertImported(id, file.path, priority, fixedIntervalDays);
     await this.claimInPlace(file, id);
@@ -650,6 +688,7 @@ export class ArticleManager extends ItemManager {
         Obsidian.notify(
           `Linked "${file.basename}" to existing article with the same ID`
         );
+        warnIfRefused(file.path);
         return this.fetch(existingId);
       }
       // Orphaned ir-id: warn but proceed with creating the copy
@@ -753,7 +792,16 @@ export class ArticleManager extends ItemManager {
 
       let targetDirectory = Obsidian.getDirectory('article');
       if (directory && this.plugin.settings.createEmptyInCurrentFolder) {
-        targetDirectory = directory;
+        // Not in a folder whose path would break links to it
+        const refused = refusedCharsIn(directory);
+        if (refused.length === 0) {
+          targetDirectory = directory;
+        } else {
+          Obsidian.notify(
+            `The current folder contains ${listChars(refused)}; created the ` +
+              `article in "${targetDirectory}" instead`
+          );
+        }
       }
 
       const articleFile = await Obsidian.createNote({
@@ -1011,7 +1059,11 @@ export class ArticleManager extends ItemManager {
       console.error(error);
       // Unchecked: a name made before a title rule changed is still its own
       await Obsidian.restoreName(file, currentName, this.app);
-      return false;
+      // Should the old name break links, the guard puts the new one back
+      // (see `ItemPathGuard`), and the article is renamed after all. Known
+      // here only when its undo joins the restore's link update, which it
+      // does wherever Obsidian has `runAsyncLinkUpdate`
+      return file.basename !== currentName;
     }
   }
 

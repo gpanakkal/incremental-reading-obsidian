@@ -32,6 +32,26 @@ const makeSession = (deviceId = 'device-a', itemId = 'item-1') => ({
 // #endregion
 
 describe('parsePluginData', () => {
+  it('reads the item paths the user was warned of, as strings only, and none from a file without them', () => {
+    expect(
+      parsePluginData({
+        settings: {},
+        warnedRefusedPaths: ['a|.md', 7, null, 'b#.md'],
+      }).warnedRefusedPaths
+    ).toStrictEqual(['a|.md', 'b#.md']);
+    expect(
+      parsePluginData({ settings: {}, warnedRefusedPaths: 'a|.md' })
+        .warnedRefusedPaths
+    ).toStrictEqual([]);
+    expect(parsePluginData({ settings: {} }).warnedRefusedPaths).toStrictEqual(
+      []
+    );
+    expect(
+      parsePluginData({ defaultPriority: 42, warnedRefusedPaths: ['a|.md'] })
+        .warnedRefusedPaths
+    ).toStrictEqual(['a|.md']);
+  });
+
   it('reads a file written before session state existed as settings', () => {
     const data = parsePluginData({ defaultPriority: 42, skipHomeScreen: true });
 

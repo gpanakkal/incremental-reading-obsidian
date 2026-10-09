@@ -613,7 +613,7 @@ const ITEM_ROW_KINDS = [
 /** Insert the `kind` row `x`, live or a tombstone. */
 function insertItemRow(
   repo: SQLJSRepository,
-  kind: (typeof ITEM_ROW_KINDS)[number],
+  kind: { table: (typeof ITEM_ROW_KINDS)[number]['table']; reference: string },
   deleted: boolean
 ) {
   if (kind.table === 'srs_card') {
@@ -631,6 +631,43 @@ function insertItemRow(
     [kind.reference, deleted, YEAR_2000_MS]
   );
 }
+
+/**
+ * A manager over `notes` and a real database holding one live row (or, when
+ * `deleted`, a tombstone) of `table`, with id `x`, naming `reference`.
+ */
+function wireItem(
+  table: 'article' | 'snippet' | 'srs_card',
+  reference: string,
+  notes: Record<string, Record<string, unknown> | null>,
+  deleted = false
+) {
+  const vault = makeLinkVault(notes);
+  const repo = TestRepository.create();
+  insertItemRow(
+    repo,
+    { ...ITEM_ROW_KINDS.find((kind) => kind.table === table)!, reference },
+    deleted
+  );
+  const manager = new ReviewManager(makePlugin(vault.app), repo);
+  return { ...vault, repo, manager };
+}
+
+/** A name for a file or folder: any text but a slash. */
+const segmentArb = fc
+  .string({ unit: 'grapheme', minLength: 1, maxLength: 6 })
+  .filter((name) => !name.includes('/'));
+
+/**
+ * A path of a name or a few, some of them names that sort next to `a` and
+ * `a/`, as a folder's range of paths must tell apart.
+ */
+const pathArb = fc
+  .array(fc.oneof(segmentArb, fc.constantFrom('a', 'a0', 'a.', 'b')), {
+    minLength: 1,
+    maxLength: 3,
+  })
+  .map((segments) => segments.join('/'));
 
 // #endregion
 
@@ -4442,5 +4479,265 @@ describe('ReviewManager reads the frontmatter of a renamed or created note witho
         }
       )
     );
+  });
+});
+
+describe('ReviewManager.isItemFileAt', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("answers at once that a note is an item's only at a live row's path, carrying that row's ir-id", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('article', 'snippet', 'srs_card' as const),
+        fc.array(segmentArb, { minLength: 1, maxLength: 3 }),
+        fc.oneof(fc.constant('x'), fc.jsonValue()),
+        fc.boolean(),
+        fc.boolean(),
+        (table, segments, irId, deleted, sameNote) => {
+          const reference = `${segments.join('/')}.md`;
+          const asked = sameNote ? reference : `other/${reference}`;
+          const { files, manager } = wireItem(
+            table,
+            reference,
+            { [asked]: { 'ir-id': irId } },
+            deleted
+          );
+
+          expect(manager.isItemFileAt(files.get(asked)!, asked)).toBe(
+            !deleted && sameNote && irId === 'x'
+          );
+        }
+      )
+    );
+  });
+
+  it('knows a file with no frontmatter by its path alone', () => {
+    fc.assert(
+      fc.property(
+        fc.array(segmentArb, { minLength: 1, maxLength: 3 }),
+        fc.boolean(),
+        fc.boolean(),
+        (segments, deleted, samePath) => {
+          const reference = `${segments.join('/')}.pdf`;
+          const asked = samePath ? reference : `other/${reference}`;
+          const { files, manager } = wireItem(
+            'article',
+            reference,
+            {
+              [asked]: null,
+            },
+            deleted
+          );
+
+          expect(manager.isItemFileAt(files.get(asked)!, asked)).toBe(
+            !deleted && samePath
+          );
+        }
+      )
+    );
+  });
+
+  it("answers no for a repository that can't answer at once, which a rename event can't wait on", () => {
+    const vault = makeLinkVault({ 'articles/x.md': { 'ir-id': 'x' } });
+    const repo = makeRepo();
+    (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: 'x' }]);
+    const manager = new ReviewManager(makePlugin(vault.app), repo);
+
+    expect(
+      manager.isItemFileAt(vault.files.get('articles/x.md')!, 'articles/x.md')
+    ).toBe(false);
+    expect(manager.referencesUnder('articles')).toStrictEqual(new Set());
+  });
+});
+
+describe('ReviewManager.handleDeletion at the path the database has', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  it('marks the row at the path it is given deleted, not one at where the file was deleted from', async () => {
+    const wired = wirePaths(['x|y/a.pdf']);
+    wired.insertArticle('a', 'xy/a.pdf');
+    wired.insertArticle('b', 'x|y/a.pdf');
+
+    await wired.manager.handleDeletion(
+      wired.files.get('x|y/a.pdf')!,
+      'xy/a.pdf'
+    );
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'a', reference: 'xy/a.pdf', deleted: true },
+      { id: 'b', reference: 'x|y/a.pdf', deleted: false },
+    ]);
+  });
+});
+
+describe('ReviewManager.referencesUnder', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  it('names every path at any depth in a folder that a live row of any table holds, and no other', () => {
+    const tables = ['article', 'snippet', 'srs_card'] as const;
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(
+          fc.record({
+            path: pathArb,
+            table: fc.constantFrom(...tables),
+            deleted: fc.boolean(),
+          }),
+          { selector: ({ path }) => path, maxLength: 8 }
+        ),
+        fc.oneof(pathArb, fc.constantFrom('a', 'a/b')),
+        (rows, folder) => {
+          const wired = wireRenames({});
+          rows.forEach(({ path, table, deleted }, i) => {
+            wired.insert(table, `row-${i}`, path);
+            if (deleted) {
+              wired.repo.mutate(
+                `UPDATE ${table} SET deleted = TRUE WHERE id = $1`,
+                [`row-${i}`]
+              );
+            }
+          });
+
+          expect(wired.manager.referencesUnder(folder)).toStrictEqual(
+            new Set(
+              rows
+                .filter(
+                  ({ path, deleted }) =>
+                    !deleted && path.startsWith(`${folder}/`)
+                )
+                .map(({ path }) => path)
+            )
+          );
+        }
+      )
+    );
+  });
+});
+
+describe('ReviewManager.handleCreation reports an item arriving where its path breaks links', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  it.each([
+    ['moved to a path that breaks links', 'a.md', false, 'x|y/a.md', true],
+    ['moved to a plain path', 'a.md', false, 'xy/a.md', false],
+    ['brought back where it breaks links', 'x|y/a.md', true, 'x|y/a.md', true],
+    ['made again where it already was', 'x|y/a.md', false, 'x|y/a.md', false],
+  ])('for a note %s', async (_, reference, deleted, arrives, reported) => {
+    const wired = wireRenames({});
+    wired.insert('article', 'x', reference);
+    if (deleted) {
+      wired.repo.mutate(`UPDATE article SET deleted = TRUE WHERE id = 'x'`);
+    }
+
+    const refused = await wired.manager.handleCreation(
+      wired.add(arrives, note('x', ARTICLE_TAG))
+    );
+
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'x', reference: arrives, deleted: false },
+    ]);
+    expect(refused).toBe(reported ? arrives : null);
+  });
+
+  it('reports nothing for a note no row is waiting for, or one that is a copy', async () => {
+    const wired = wireRenames({ 'a.md': note('x', ARTICLE_TAG) });
+    wired.insert('article', 'x', 'a.md');
+
+    expect(
+      await wired.manager.handleCreation(
+        wired.add('x|y/copy.md', note('x', ARTICLE_TAG))
+      )
+    ).toBeNull();
+    expect(
+      await wired.manager.handleCreation(
+        wired.add('x|y/b.md', note('nobody', ARTICLE_TAG))
+      )
+    ).toBeNull();
+    expect(
+      await wired.manager.handleCreation(wired.add('x|y/plain.md', null))
+    ).toBeNull();
+  });
+
+  it.each([
+    ['p|q.pdf', true, 'p|q.pdf'],
+    ['pq.pdf', true, null],
+    ['p|q.pdf', false, null],
+  ])(
+    'for a file with no frontmatter at %s, a tombstone there: %s',
+    async (path, tombstone, reported) => {
+      const wired = wirePaths([]);
+      if (tombstone) wired.insertArticle('x', path, true);
+
+      expect(await wired.create(path)).toBe(reported);
+    }
+  );
+
+  it('reports nothing for a file that is gone again', async () => {
+    const wired = wirePaths([]);
+
+    expect(
+      await wired.manager.handleCreation({ path: 'x|y.pdf' } as TFile)
+    ).toBeNull();
+  });
+});
+
+describe('ReviewManager.itemPathsWithRefusedChars', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  it("lists, in order, every live item's path holding a refused character whose file is there", async () => {
+    const wired = wireRenames({
+      'b|card.md': note('card', CARD_TAG),
+      'x>y/snippet.md': note('snippet', SNIPPET_TAG),
+      'a#b.pdf': null,
+      'gone#.md': null,
+      'plain.md': note('plain', ARTICLE_TAG),
+      'dead|.md': note('dead', ARTICLE_TAG),
+      'not hers#.md': { 'ir-id': 'someone else' },
+    });
+    wired.insert('srs_card', 'card', 'b|card.md');
+    wired.insert('snippet', 'snippet', 'x>y/snippet.md');
+    wired.insert('article', 'pdf', 'a#b.pdf');
+    wired.insert('article', 'plain', 'plain.md');
+    wired.insert('article', 'dead', 'dead|.md');
+    wired.repo.mutate(`UPDATE article SET deleted = TRUE WHERE id = 'dead'`);
+    wired.insert('article', 'missing', 'missing#.md');
+    wired.insert('article', 'hers', 'not hers#.md');
+    // Its file is no note: the path names nothing
+    wired.files.delete('gone#.md');
+
+    expect(await wired.manager.itemPathsWithRefusedChars()).toStrictEqual([
+      'a#b.pdf',
+      'b|card.md',
+      'x>y/snippet.md',
+    ]);
   });
 });

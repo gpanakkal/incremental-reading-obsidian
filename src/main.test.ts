@@ -1,4 +1,6 @@
+import { refusedPathsWarning } from '#/lib/item-path-guard';
 import ReviewManager from '#/lib/items/ReviewManager';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import type { ReviewSession } from '#/lib/plugin-data';
 import { queryClient } from '#/lib/query-client';
@@ -13,7 +15,7 @@ import { Menu, Notice, type MenuItem } from '#/test/__mocks__/obsidian';
 import { ImportModal } from '#/views/ImportModal';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
-import { MarkdownView, type TFile, type WorkspaceLeaf } from 'obsidian';
+import { MarkdownView, TFile, TFolder, type WorkspaceLeaf } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // `main.ts` pulls the schema in as a raw `.sql` import, which Vite cannot parse
@@ -245,8 +247,14 @@ const item = (id: string) => ({ data: { id } }) as unknown as ReviewItem;
  * `one.md` and a vault holding its note — at `moved/one.md` when `moved`.
  * `indexingSignal` false stands for an Obsidian without `onCleanCache`, which
  * falls back to the `resolved` event; `finishIndexing` fires whichever it used.
+ * `refusedPaths` are the item paths that already hold a refused character.
  */
-function makeFollowReceiver({ moved = true, indexingSignal = true } = {}) {
+function makeFollowReceiver({
+  moved = true,
+  indexingSignal = true,
+  refusedPaths = [] as string[],
+  warned = [] as string[],
+} = {}) {
   const unloaders: (() => void)[] = [];
   let whenIndexed: (() => void) | undefined;
   const note = { path: moved ? 'moved/one.md' : 'one.md' } as TFile;
@@ -262,6 +270,7 @@ function makeFollowReceiver({ moved = true, indexingSignal = true } = {}) {
   const refreshAllHighlights = vi.fn(() => Promise.resolve());
   const followChildSources = vi.fn(() => Promise.resolve());
   const claimMovedFiles = vi.fn(() => Promise.resolve());
+  const itemPathsWithRefusedChars = vi.fn(() => Promise.resolve(refusedPaths));
   const resolvedRef = { event: 'resolved' };
   const metadataCache = {
     getFileCache: vi.fn(() => ({ frontmatter: { 'ir-id': 'a' } })),
@@ -276,13 +285,22 @@ function makeFollowReceiver({ moved = true, indexingSignal = true } = {}) {
     }),
     offref: vi.fn(),
   };
+  const saveData = vi.fn(() => Promise.resolve());
   const receiver = {
+    data: { warnedRefusedPaths: [...warned] },
+    saveData,
+    rememberWarnedPaths: (
+      IncrementalReadingPlugin.prototype as unknown as {
+        rememberWarnedPaths: unknown;
+      }
+    ).rememberWarnedPaths,
     register: vi.fn((unloader: () => void) => unloaders.push(unloader)),
     registerEvent: vi.fn(),
     reviewManager: {
       refreshAllHighlights,
       followChildSources,
       claimMovedFiles,
+      itemPathsWithRefusedChars,
     },
     app: {
       vault: {
@@ -302,6 +320,8 @@ function makeFollowReceiver({ moved = true, indexingSignal = true } = {}) {
     refreshAllHighlights,
     followChildSources,
     claimMovedFiles,
+    itemPathsWithRefusedChars,
+    saveData,
     finishIndexing: () => whenIndexed?.(),
     unload: () => unloaders.forEach((unloader) => unloader()),
   };
@@ -565,6 +585,140 @@ async function startDatabase(resync: (() => void) | undefined) {
     }
   ).initReviewManager.call(receiver);
   return { reload: () => onReloadFromDisk!() };
+}
+
+/**
+ * A plugin over a stub database whose rows name `items`, hearing renames and
+ * deletes as its listeners do. Each undo the guard asks for is a
+ * `Vault.rename` run at once through `runAsyncLinkUpdate`, moving the file
+ * back and firing `rename` for it.
+ */
+async function startRenames(items: readonly string[] = []) {
+  vi.spyOn(SQLJSRepository, 'start').mockResolvedValue({
+    onDataChange: vi.fn(() => () => {}),
+  } as unknown as SQLJSRepository);
+  vi.spyOn(ReviewManager.prototype, 'isItemFileAt').mockImplementation(
+    (_file, path) => items.includes(path)
+  );
+  vi.spyOn(ReviewManager.prototype, 'referencesUnder').mockImplementation(
+    (folder) => new Set(items.filter((path) => path.startsWith(`${folder}/`)))
+  );
+  const follow = vi
+    .spyOn(ReviewManager.prototype, 'handleExternalRename')
+    .mockResolvedValue(undefined);
+  const deletion = vi
+    .spyOn(ReviewManager.prototype, 'handleDeletion')
+    .mockResolvedValue(undefined);
+  const notify = vi.spyOn(Obsidian, 'notify');
+  const plugin = IncrementalReadingPlugin.prototype as unknown as Record<
+    string,
+    unknown
+  >;
+  /** What the vault holds, by path. */
+  const entries = new Map<string, TFile | TFolder>();
+  const vaultRename = vi.fn(async (entry: TFile | TFolder, to: string) => {
+    const from = entry.path;
+    entries.delete(from);
+    entry.path = to;
+    entries.set(to, entry);
+    rename(entry, from);
+  });
+  const receiver: Record<string, unknown> = {
+    app: {
+      vault: {
+        on: vi.fn(),
+        getAbstractFileByPath: (path: string) => entries.get(path) ?? null,
+        rename: vaultRename,
+      },
+      // Runs each op at once, as a job of its own
+      fileManager: { runAsyncLinkUpdate: (op: () => Promise<void>) => op() },
+    },
+    register: vi.fn(),
+    registerEvent: vi.fn(),
+    followMovedNotes: vi.fn(),
+    onVaultRename: plugin.onVaultRename,
+    onVaultDelete: plugin.onVaultDelete,
+    followRename: plugin.followRename,
+  };
+  /** Hear that `entry`, now in the vault at its path, moved from `oldPath`. */
+  const rename = (entry: TFile | TFolder, oldPath: string) => {
+    entries.delete(oldPath);
+    entries.set(entry.path, entry);
+    (receiver.onVaultRename as (entry: unknown, oldPath: string) => void).call(
+      receiver,
+      entry,
+      oldPath
+    );
+  };
+  /** Hear that `entry` was deleted. */
+  const remove = (entry: TFile) => {
+    entries.delete(entry.path);
+    (receiver.onVaultDelete as (entry: unknown) => void).call(receiver, entry);
+  };
+  const start = async () => {
+    await (plugin.initReviewManager as () => Promise<void>).call(receiver);
+  };
+  return {
+    rename,
+    remove,
+    start,
+    follow,
+    deletion,
+    notify,
+    entries,
+    vaultRename,
+  };
+}
+
+/** A vault file at `path`, as `instanceof TFile` tells it. */
+const tFileAt = (path: string) =>
+  Object.assign(new TFile(), {
+    path,
+    name: path.slice(path.lastIndexOf('/') + 1),
+  });
+
+/** A plugin hearing creations, and what it is left holding. */
+function makeCreationReceiver(refused: (string | null)[]) {
+  let created: ((file: unknown) => void) | undefined;
+  let fire: (() => void) | undefined;
+  const unloaders: (() => void)[] = [];
+  const handleCreation = vi.fn(() => Promise.resolve(refused.shift() ?? null));
+  const receiver = {
+    data: { warnedRefusedPaths: ['old|.md'] },
+    saveData: vi.fn(() => Promise.resolve()),
+    rememberWarnedPaths: (
+      IncrementalReadingPlugin.prototype as unknown as {
+        rememberWarnedPaths: unknown;
+      }
+    ).rememberWarnedPaths,
+    reviewManager: undefined as unknown,
+    app: {
+      vault: {
+        on: vi.fn((_name: string, callback: (file: unknown) => void) => {
+          created = callback;
+          return {};
+        }),
+      },
+    },
+    register: vi.fn((unloader: () => void) => unloaders.push(unloader)),
+    registerEvent: vi.fn(),
+  };
+  const timer = vi.fn((run: () => void) => {
+    fire = run;
+    return () => (fire = undefined);
+  });
+  (
+    IncrementalReadingPlugin.prototype as unknown as {
+      watchCreations(timer: unknown): void;
+    }
+  ).watchCreations.call(receiver, timer);
+  return {
+    receiver,
+    handleCreation,
+    create: (file: unknown) => created!(file),
+    fire: () => fire?.(),
+    unload: () => unloaders.forEach((unloader) => unloader()),
+  };
 }
 
 // #endregion
@@ -1423,6 +1577,93 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
     expect(invalidate).not.toHaveBeenCalled();
   });
 
+  it.each([true, false])(
+    'warns once, in a notice that stays, of item paths that already break links, after following moves (moved: %s)',
+    async (moved) => {
+      Notice.reset();
+      const notify = vi.spyOn(Obsidian, 'notify');
+      const paths = ['a|b.md', 'x>y/c.md'];
+      const follow = makeFollowReceiver({ moved, refusedPaths: paths });
+
+      followMovedNotes(follow);
+      follow.finishIndexing();
+
+      await vi.waitFor(() =>
+        expect(Notice.messages).toStrictEqual([refusedPathsWarning(paths)])
+      );
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        refusedPathsWarning(paths),
+        true
+      );
+      expect(follow.itemPathsWithRefusedChars).toHaveBeenCalledOnce();
+      if (moved) {
+        expect(
+          follow.itemPathsWithRefusedChars.mock.invocationCallOrder[0]
+        ).toBeGreaterThan(follow.claimMovedFiles.mock.invocationCallOrder[0]);
+      }
+    }
+  );
+
+  it('warns again only when a path the user has not heard of appears, keeping the list when it changes', async () => {
+    const notify = vi.spyOn(Obsidian, 'notify');
+    const heard = makeFollowReceiver({
+      refusedPaths: ['a|b.md'],
+      warned: ['a|b.md', 'gone#.md'],
+    });
+
+    followMovedNotes(heard);
+    heard.finishIndexing();
+    await vi.waitFor(() =>
+      expect(heard.saveData).toHaveBeenCalledExactlyOnceWith({
+        warnedRefusedPaths: ['a|b.md'],
+      })
+    );
+    expect(notify).not.toHaveBeenCalled();
+
+    const same = makeFollowReceiver({
+      refusedPaths: ['a|b.md'],
+      warned: ['a|b.md'],
+    });
+    followMovedNotes(same);
+    same.finishIndexing();
+    await vi.waitFor(() =>
+      expect(same.itemPathsWithRefusedChars).toHaveBeenCalled()
+    );
+    await settle();
+    expect(same.saveData).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+
+    const fresh = makeFollowReceiver({
+      refusedPaths: ['a|b.md', 'c>.md'],
+      warned: ['a|b.md'],
+    });
+    followMovedNotes(fresh);
+    fresh.finishIndexing();
+    await vi.waitFor(() =>
+      expect(fresh.saveData).toHaveBeenCalledExactlyOnceWith({
+        warnedRefusedPaths: ['a|b.md', 'c>.md'],
+      })
+    );
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      refusedPathsWarning(['a|b.md', 'c>.md']),
+      true
+    );
+  });
+
+  it('says nothing when no item path breaks links', async () => {
+    Notice.reset();
+    const follow = makeFollowReceiver();
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+    await vi.waitFor(() =>
+      expect(follow.itemPathsWithRefusedChars).toHaveBeenCalled()
+    );
+    await settle();
+
+    expect(Notice.messages).toStrictEqual([]);
+  });
+
   it('abandons the scan when the plugin unloads', async () => {
     const follow = makeFollowReceiver();
 
@@ -1433,6 +1674,51 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
 
     expect(follow.repo.query).not.toHaveBeenCalled();
     expect(follow.repo.mutate).not.toHaveBeenCalled();
+  });
+
+  it('still warns of item paths that break links when following the moves fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notify = vi.spyOn(Obsidian, 'notify');
+    const follow = makeFollowReceiver({ refusedPaths: ['a|b.md'] });
+    follow.claimMovedFiles.mockRejectedValue(new Error('disk full'));
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+
+    await vi.waitFor(() =>
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        refusedPathsWarning(['a|b.md']),
+        true
+      )
+    );
+  });
+
+  it('reports a failed look for item paths that break links rather than letting it escape', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failure = new Error('no database');
+    const follow = makeFollowReceiver({ moved: false });
+    follow.itemPathsWithRefusedChars.mockRejectedValue(failure);
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+
+    await vi.waitFor(() =>
+      expect(error).toHaveBeenCalledWith(
+        'Incremental Reading - failed to look for item paths that break links:',
+        failure
+      )
+    );
+  });
+
+  it('looks for no item paths once the plugin unloads', async () => {
+    const follow = makeFollowReceiver({ refusedPaths: ['a|b.md'] });
+
+    followMovedNotes(follow);
+    follow.unload();
+    follow.finishIndexing();
+    await settle();
+
+    expect(follow.itemPathsWithRefusedChars).not.toHaveBeenCalled();
   });
 
   it('reports a failed scan rather than letting it escape', async () => {
@@ -1451,6 +1737,135 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
       )
     );
     expect(follow.refreshAllHighlights).not.toHaveBeenCalled();
+  });
+});
+
+describe('IncrementalReadingPlugin renames', () => {
+  it('hears no rename before the review manager is up', async () => {
+    const { rename, follow } = await startRenames(['a.md']);
+
+    rename(tFileAt('a|b.md'), 'a.md');
+
+    expect(follow).not.toHaveBeenCalled();
+  });
+
+  it('follows a renamed file, but not a folder, when the rename breaks no link', async () => {
+    const renames = await startRenames(['a.md']);
+    await renames.start();
+    const file = tFileAt('b.md');
+
+    renames.rename(file, 'a.md');
+    renames.rename(Object.assign(new TFolder(), { path: 'x|y' }), 'xy');
+
+    expect(renames.follow).toHaveBeenCalledExactlyOnceWith(file, 'a.md');
+    expect(renames.vaultRename).not.toHaveBeenCalled();
+  });
+
+  it('puts back a rename that breaks links to an item, following neither it nor its undo', async () => {
+    const renames = await startRenames(['a.md']);
+    await renames.start();
+    const file = tFileAt('a|b.md');
+
+    renames.rename(file, 'a.md');
+
+    await vi.waitFor(() => expect(renames.notify).toHaveBeenCalledOnce());
+    expect(file.path).toBe('a.md');
+    expect(renames.notify).toHaveBeenCalledWith(
+      expect.stringContaining('cannot contain |')
+    );
+    expect(renames.follow).not.toHaveBeenCalled();
+  });
+
+  it("follows each file of a folder holding an item, from where it was, when the folder couldn't be put back", async () => {
+    const renames = await startRenames(['notes/card.md']);
+    renames.vaultRename.mockRejectedValue(new Error('taken'));
+    await renames.start();
+    const folder = Object.assign(new TFolder(), {
+      path: 'no|tes',
+      name: 'no|tes',
+    });
+    const card = Object.assign(tFileAt('notes/card.md'), { parent: folder });
+    folder.children.push(card);
+
+    renames.rename(folder, 'notes');
+    card.path = 'no|tes/card.md';
+    renames.rename(card, 'notes/card.md');
+
+    await vi.waitFor(() =>
+      expect(renames.follow).toHaveBeenCalledExactlyOnceWith(
+        card,
+        'notes/card.md'
+      )
+    );
+    expect(renames.notify).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining(`couldn't move "no|tes" back`)
+    );
+  });
+
+  it('marks a deleted file deleted where it was, or, while its rename was being put back, where the database has it', async () => {
+    const renames = await startRenames(['a.md']);
+    const plain = tFileAt('b.md');
+    renames.remove(plain);
+    expect(renames.deletion).not.toHaveBeenCalled();
+
+    await renames.start();
+    renames.vaultRename.mockImplementation(() => new Promise(() => {}));
+    renames.remove(plain);
+    const file = tFileAt('a|b.md');
+    renames.rename(file, 'a.md');
+    renames.remove(file);
+
+    expect(renames.deletion.mock.calls).toStrictEqual([
+      [plain, 'b.md'],
+      [file, 'a.md'],
+    ]);
+  });
+});
+
+describe('IncrementalReadingPlugin.watchCreations', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('tells once of the items a burst brought to paths that break links, and counts them as heard of', async () => {
+    vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue(undefined);
+    const notify = vi.spyOn(Obsidian, 'notify');
+    const watch = makeCreationReceiver(['a|.md', null, 'b#.md']);
+
+    watch.create({ path: 'early.md' });
+    expect(watch.handleCreation).not.toHaveBeenCalled();
+    watch.receiver.reviewManager = { handleCreation: watch.handleCreation };
+    for (const path of ['a|.md', 'plain.md', 'b#.md']) watch.create({ path });
+    await vi.waitFor(() =>
+      expect(watch.handleCreation).toHaveBeenCalledTimes(3)
+    );
+    await settle();
+    expect(notify).not.toHaveBeenCalled();
+    watch.fire();
+
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      refusedPathsWarning(['a|.md', 'b#.md'])
+    );
+    await vi.waitFor(() =>
+      expect(watch.receiver.saveData).toHaveBeenCalledExactlyOnceWith({
+        warnedRefusedPaths: ['old|.md', 'a|.md', 'b#.md'],
+      })
+    );
+  });
+
+  it('drops a waiting notice when the plugin unloads', async () => {
+    vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue(undefined);
+    const notify = vi.spyOn(Obsidian, 'notify');
+    const watch = makeCreationReceiver(['a|.md']);
+    watch.receiver.reviewManager = { handleCreation: watch.handleCreation };
+    watch.create({ path: 'a|.md' });
+    await vi.waitFor(() => expect(watch.handleCreation).toHaveBeenCalled());
+    await settle();
+
+    watch.unload();
+    watch.fire();
+
+    expect(notify).not.toHaveBeenCalled();
   });
 });
 

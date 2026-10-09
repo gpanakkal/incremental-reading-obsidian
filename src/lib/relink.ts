@@ -1,6 +1,7 @@
 import type IncrementalReadingPlugin from '#/main';
 import type { App, TFile } from 'obsidian';
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
+import { refusedPathWarning } from './item-path-guard';
 import { extensionOfPath, getMimeType, supportsFrontmatter } from './mime';
 import {
   ITEM_TABLES,
@@ -343,5 +344,8 @@ export async function relinkItem(
     console.error(error);
   }
   Obsidian.notify(notice);
+  // Relinked where the user found it, but its path breaks links to it
+  const warning = refusedPathWarning(target.path);
+  if (warning) Obsidian.notify(warning);
   return result;
 }

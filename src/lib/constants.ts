@@ -20,7 +20,7 @@ export const NOTICE_SCALED_DURATION_PER_WORD_MS = 750;
 export const NOTICE_MIN_DURATION_MS = 5000;
 
 /** characters that should never be permitted in note titles */
-export const FORBIDDEN_TITLE_CHARS = new Set(`#^[]|*"\\/<>:?\n`.split(''));
+export const FORBIDDEN_TITLE_CHARS = new Set(`#^[]*"\\/<>:|?\n`.split(''));
 /** The characters with char codes `from` to `to`, both included. */
 const charRange = (from: number, to: number) =>
   Array.from({ length: to - from + 1 }, (_, i) =>
@@ -48,9 +48,8 @@ export const DIRECTION_MARKS: ReadonlySet<string> = new Set(
   [0x200e, 0x200f, 0x061c].map((code) => String.fromCodePoint(code))
 );
 export const INVALID_TITLE_MESSAGE =
-  `Titles cannot contain control or invisible characters, ` +
-  `or any of the following: ` +
-  `${[...FORBIDDEN_TITLE_CHARS.keys()].join(', ')}`;
+  `IR file names cannot contain any of these characters: ` +
+  `${[...FORBIDDEN_TITLE_CHARS.keys()].join(' ')}`;
 export const CONTENT_TITLE_SLICE_LENGTH = 50;
 /**
  * The most UTF-8 bytes a title made from text may take, the ` - <id>.md` after

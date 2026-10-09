@@ -85,6 +85,21 @@ export class Notice {
 export const editorInfoField = {};
 export const editorEditorField = {};
 
+// The vault's files and folders, for code that tells them apart by `instanceof`.
+// Build one with `Object.assign(new TFile(), { path, ... })`.
+export class TAbstractFile {
+  path = '';
+  name = '';
+  parent: TFolder | null = null;
+}
+export class TFile extends TAbstractFile {
+  basename = '';
+  extension = '';
+}
+export class TFolder extends TAbstractFile {
+  children: TAbstractFile[] = [];
+}
+
 // Commonly imported Obsidian classes — stubbed as no-ops so transitive imports resolve
 export class Plugin {}
 export class PluginSettingTab {}

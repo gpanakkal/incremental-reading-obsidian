@@ -1,7 +1,7 @@
 import fc from 'fast-check';
 import type { App } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { batchAfterLinkUpdates } from './link-update-queue';
+import { afterLinkUpdates, batchAfterLinkUpdates } from './link-update-queue';
 
 // #region HELPERS
 /**
@@ -195,6 +195,44 @@ describe('batchAfterLinkUpdates', () => {
           await flush();
 
           expect(run).toHaveBeenCalledExactlyOnceWith(items);
+        }
+      )
+    );
+  });
+});
+
+describe('afterLinkUpdates', () => {
+  it('settles only once every link update queued before it is done, one that failed too', async () => {
+    const { queue, hold, drained } = makeQueue();
+    void queue.queue(() => Promise.reject(new Error('rename failed')));
+    const release = hold();
+    let settled = false;
+
+    void afterLinkUpdates(appWith({ updateQueue: queue })).then(
+      () => (settled = true)
+    );
+    await flush();
+    expect(settled).toBe(false);
+
+    release();
+    await drained();
+    expect(settled).toBe(true);
+  });
+
+  it('settles as soon as the moment that asked is over, where Obsidian has no queue to wait on', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(
+          undefined,
+          {},
+          { updateQueue: null },
+          { updateQueue: {} },
+          { updateQueue: { queue: 'not a function' } }
+        ),
+        async (fileManager) => {
+          await expect(
+            afterLinkUpdates(appWith(fileManager))
+          ).resolves.toBeUndefined();
         }
       )
     );

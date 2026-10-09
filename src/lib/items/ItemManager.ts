@@ -41,7 +41,9 @@ export class ItemManager {
     this.repo = repo;
   }
 
-  async findSnippet(snippetFile: TAbstractFile): Promise<SnippetRow | null> {
+  async findSnippet(
+    snippetFile: Pick<TAbstractFile, 'path'>
+  ): Promise<SnippetRow | null> {
     const results = await this.repo.query(
       'SELECT * FROM snippet WHERE reference = $1',
       [normalizePath(snippetFile.path)]
@@ -50,7 +52,9 @@ export class ItemManager {
     return (results[0] as SnippetRow) ?? null;
   }
 
-  async findCard(cardFile: TAbstractFile): Promise<SRSCardRow | null> {
+  async findCard(
+    cardFile: Pick<TAbstractFile, 'path'>
+  ): Promise<SRSCardRow | null> {
     const results = await this.repo.query(
       'SELECT * FROM srs_card WHERE reference = $1',
       [normalizePath(cardFile.path)]
@@ -59,7 +63,9 @@ export class ItemManager {
     return (results[0] as SRSCardRow) ?? null;
   }
 
-  async findArticle(articleFile: TAbstractFile): Promise<ArticleRow | null> {
+  async findArticle(
+    articleFile: Pick<TAbstractFile, 'path'>
+  ): Promise<ArticleRow | null> {
     const results = await this.repo.query(
       'SELECT * FROM article WHERE reference = $1',
       [normalizePath(articleFile.path)]
@@ -68,7 +74,7 @@ export class ItemManager {
     return (results[0] as ArticleRow) ?? null;
   }
 
-  async findItem(file: TAbstractFile): Promise<{
+  async findItem(file: Pick<TAbstractFile, 'path'>): Promise<{
     row: SnippetRow | SRSCardRow | ArticleRow;
     table: Extract<TableName, 'srs_card' | 'snippet' | 'article'>;
   } | null> {

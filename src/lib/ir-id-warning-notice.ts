@@ -36,7 +36,7 @@ export type Timer = (run: () => void, ms: number) => () => void;
  * timers set on one that has closed never fire, which would leave the notice up
  * for good.
  */
-const hostTimer: Timer = (run, ms) => {
+export const hostTimer: Timer = (run, ms) => {
   const id = window.setTimeout(run, ms);
   return () => window.clearTimeout(id);
 };

@@ -5386,3 +5386,20 @@ describe('settleMetadataCache', () => {
     );
   });
 });
+
+describe('names made from text, and renames, keep out `>` and `|`', () => {
+  // Pinned by name: they end a link's path early (`|` a wikilink's, `>` an
+  // angled markdown target's), whatever the forbidden set comes to hold.
+  // The forbidden set as a whole is covered by the tests above
+  it('drops them from a title made from text', () => {
+    expect(ObsidianHelpers.sanitizeForTitle('a>b|c', false)).toBe('abc');
+    expect(ObsidianHelpers.createTitle('a>b|c')).toMatch(/^abc - /);
+  });
+
+  it('refuses a rename to a name holding one, even one the old name held', () => {
+    expect(ObsidianHelpers.isValidRename('a>b', 'ab')).toBe(false);
+    expect(ObsidianHelpers.isValidRename('a|b', 'ab')).toBe(false);
+    expect(ObsidianHelpers.isValidRename('a>b', 'a>b')).toBe(false);
+    expect(ObsidianHelpers.isValidRename('a|b', 'a|b')).toBe(false);
+  });
+});

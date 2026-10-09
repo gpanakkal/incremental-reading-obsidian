@@ -6,11 +6,10 @@ describe('INVALID_TITLE_MESSAGE', () => {
     const list = INVALID_TITLE_MESSAGE.slice(
       INVALID_TITLE_MESSAGE.indexOf(': ') + ': '.length
     );
-    expect(list.split(', ')).toEqual([...FORBIDDEN_TITLE_CHARS]);
+    expect(list.split(' ')).toEqual([...FORBIDDEN_TITLE_CHARS]);
   });
 
-  it('says control and invisible characters are refused too', () => {
-    expect(INVALID_TITLE_MESSAGE).toMatch(/control/);
-    expect(INVALID_TITLE_MESSAGE).toMatch(/invisible/);
+  it('says it is about the names of IR files', () => {
+    expect(INVALID_TITLE_MESSAGE).toMatch(/^IR file names cannot contain/);
   });
 });

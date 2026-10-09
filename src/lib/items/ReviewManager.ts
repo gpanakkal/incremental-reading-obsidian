@@ -5,6 +5,7 @@ import type {
   QueueScheduling,
   QueueSubset,
 } from '#/components/types';
+import { refusedCharsIn } from '#/lib/item-path-guard';
 import { batchAfterLinkUpdates } from '#/lib/link-update-queue';
 import { appendLog } from '#/lib/log-file';
 import {
@@ -71,6 +72,10 @@ function isFollowable({ from, file }: FileMove): boolean {
     getMimeType({ extension: extensionOfPath(from) }) === getMimeType(file)
   );
 }
+
+/** `path`, when it breaks links to the item there; else `null`. */
+const refusedAt = (path: string) =>
+  refusedCharsIn(path).length > 0 ? path : null;
 
 /**
  * The `ir-id` a note's frontmatter holds. An id is a string; anything else
@@ -674,6 +679,78 @@ export default class ReviewManager {
   }
 
   /**
+   * Whether `file`, which was at `path`, is an item's file: a live row names
+   * `path`, and a note there carries that row's `ir-id` (see
+   * `ItemPathGuard`). A file with no frontmatter, a PDF say, is known by its
+   * path alone.
+   *
+   * Answers at once, for the `rename` event it is asked from: sql.js answers a
+   * query at once, and (undocumented, read from obsidian.asar: its
+   * `MetadataCache.onRename` is a `rename` listener registered before any
+   * plugin's) the metadata cache moves a note's cache before a plugin hears
+   * of the rename. A repository that answers later can't be waited on there,
+   * so it gets no.
+   */
+  isItemFileAt(file: TFile, path: string): boolean {
+    const rows = this.#repo.query(
+      `SELECT id FROM article WHERE reference = $1 AND deleted = FALSE
+       UNION ALL SELECT id FROM snippet WHERE reference = $1 AND deleted = FALSE
+       UNION ALL SELECT id FROM srs_card WHERE reference = $1 AND deleted = FALSE`,
+      [path]
+    );
+    if (!Array.isArray(rows)) return false;
+    if (!supportsFrontmatter(file)) return rows.length > 0;
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    const id = irIdOf(frontmatter ?? {});
+    return (rows as unknown as { id: string }[]).some((row) => row.id === id);
+  }
+
+  /**
+   * The paths in the folder at `folder`, at any depth, that live item rows
+   * name: one look for a whole folder (see `ItemPathGuard`). Answers at once,
+   * as {@link isItemFileAt} does, or not at all.
+   */
+  referencesUnder(folder: string): ReadonlySet<string> {
+    // `0` sorts right after `/`, so the range is every path under the folder
+    const rows = this.#repo.query(
+      `SELECT reference FROM article
+         WHERE deleted = FALSE AND reference >= $1 AND reference < $2
+       UNION ALL SELECT reference FROM snippet
+         WHERE deleted = FALSE AND reference >= $1 AND reference < $2
+       UNION ALL SELECT reference FROM srs_card
+         WHERE deleted = FALSE AND reference >= $1 AND reference < $2`,
+      [`${folder}/`, `${folder}0`]
+    );
+    if (!Array.isArray(rows)) return new Set();
+    return new Set(
+      (rows as unknown as { reference: string }[]).map(
+        ({ reference }) => reference
+      )
+    );
+  }
+
+  /**
+   * The paths, in order, of the items' files whose paths hold a character
+   * that breaks links to them (see `REFUSED_PATH_CHARS`): made before the
+   * rule, or moved while Obsidian was closed. For the startup warning.
+   */
+  async itemPathsWithRefusedChars(): Promise<string[]> {
+    const rows = (await this.#repo.query(
+      `SELECT reference FROM article WHERE deleted = FALSE
+       UNION SELECT reference FROM snippet WHERE deleted = FALSE
+       UNION SELECT reference FROM srs_card WHERE deleted = FALSE
+       ORDER BY reference`
+    )) as unknown as { reference: string }[];
+    return rows
+      .map(({ reference }) => reference)
+      .filter((path) => {
+        if (refusedCharsIn(path).length === 0) return false;
+        const file = this.app.vault.getFileByPath(path);
+        return file !== null && this.isItemFileAt(file, path);
+      });
+  }
+
+  /**
    * Update database references in response to Obsidian rename events, and
    * once Obsidian's own link update for the rename is done, point the `source`
    * links that still name where the file was at where it is (see
@@ -885,9 +962,10 @@ export default class ReviewManager {
       'SELECT id FROM article WHERE reference = $1 AND deleted = TRUE',
       [path]
     )) as unknown as { id: string }[];
-    if (!tombstone) return;
+    if (!tombstone) return false;
     await this.articles.markUndeleted(tombstone.id, 'article');
     if (claim) await this.#claimAtPath(path, tombstone.id);
+    return true;
   }
 
   /**
@@ -915,9 +993,11 @@ export default class ReviewManager {
 
   /**
    * Mark rows as deleted
+   * @param path where the database has the file, if not where it was deleted
+   *   from: one whose rename was being put back (see `ItemPathGuard`)
    */
-  async handleDeletion(file: TAbstractFile) {
-    const match = await this.articles.findItem(file);
+  async handleDeletion(file: TAbstractFile, path = file.path) {
+    const match = await this.articles.findItem({ path });
     if (!match) return;
 
     const { row, table } = match;
@@ -936,23 +1016,27 @@ export default class ReviewManager {
     }
     await this.#repo.mutate(
       `UPDATE ${table} SET deleted = TRUE WHERE reference = $1`,
-      [file.path]
+      [path]
     );
   }
 
   /**
    * Mark rows as un-deleted where appropriate
+   * @returns the file's path when an item came to it just now whose path
+   *   breaks links to it (see `REFUSED_PATH_CHARS`), for the user to hear of:
+   *   arriving as a new file, by a move Obsidian didn't see as one, it is left
+   *   where it is, as at startup; else `null`
    */
-  async handleCreation(file: TAbstractFile) {
+  async handleCreation(file: TAbstractFile): Promise<string | null> {
     const concreteFile = this.app.vault.getFileByPath(file.path);
-    if (!concreteFile) return;
+    if (!concreteFile) return null;
     // Everything below goes by frontmatter, which a PDF has none of
     if (!supportsFrontmatter(concreteFile)) {
       // A reclaim only ever takes a path no row names, and a restore only a
       // path a tombstone names, so at most one of the two acts
-      await this.#reclaimAtPath(file.path, { claim: true });
-      await this.#restoreAtPath(file.path, { claim: true });
-      return;
+      const reclaimed = await this.#reclaimAtPath(file.path, { claim: true });
+      const restored = await this.#restoreAtPath(file.path, { claim: true });
+      return reclaimed || restored ? refusedAt(file.path) : null;
     }
 
     // Read only: a write to a note just created could recreate it, were it
@@ -961,24 +1045,25 @@ export default class ReviewManager {
     const id = irIdOf(frontmatter);
     const type = Obsidian.typeOfTags(frontmatter.tags);
 
-    if (!id || type === null) return;
+    if (!id || type === null) return null;
 
     const table = type === 'card' ? 'srs_card' : type;
 
     // Copying a note also triggers a creation event; check that the original
     // note exists and has the right ir-id in frontmatter to ignore copies
     const row = (
-      await this.#repo.query(`SELECT reference FROM ${table} WHERE id = $1`, [
-        id,
-      ])
-    )[0] as { reference: string } | undefined;
+      await this.#repo.query(
+        `SELECT reference, deleted FROM ${table} WHERE id = $1`,
+        [id]
+      )
+    )[0] as { reference: string; deleted: unknown } | undefined;
     if (row && row.reference !== file.path) {
       const referencedFile = this.app.vault.getFileByPath(row.reference);
       if (
         referencedFile &&
         Obsidian.getFrontMatter(referencedFile, this.app)?.['ir-id'] === id
       ) {
-        return;
+        return null;
       }
     }
 
@@ -986,7 +1071,10 @@ export default class ReviewManager {
       `UPDATE ${table} SET deleted = FALSE, reference = $1 WHERE id = $2`,
       [file.path, id]
     );
+    const came = row && (row.reference !== file.path || Boolean(row.deleted));
+    return came ? refusedAt(file.path) : null;
   }
+
   /**
    * Save the scroll anchor for an article or snippet. Cards are excluded.
    *

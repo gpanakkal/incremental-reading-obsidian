@@ -25,6 +25,19 @@ function linkUpdateQueue(app: App): PromisedQueue | null {
 }
 
 /**
+ * Settles once every link update queued so far is done, the rename running
+ * now included, failed or not: a job of nothing queued after them. Where
+ * Obsidian has no queue, once the moment that asked is over.
+ *
+ * Not to be awaited inside a job on Obsidian's queue, which it would wait
+ * behind.
+ */
+export function afterLinkUpdates(app: App): Promise<void> {
+  const queue = linkUpdateQueue(app);
+  return queue ? queue.queue(async () => {}) : Promise.resolve();
+}
+
+/**
  * Gather what the returned function is given and hand it to `run` in batches,
  * each once Obsidian's own link update for the rename that gave it is done:
  * links it updates are then already right, and a note it would rewrite by

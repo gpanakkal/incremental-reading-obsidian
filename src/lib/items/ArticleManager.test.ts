@@ -18,6 +18,11 @@ import {
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
+import {
+  listChars,
+  REFUSED_PATH_CHARS,
+  refusedPathsWarning,
+} from '#/lib/item-path-guard';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   ArticleRow,
@@ -642,6 +647,24 @@ function editedInImportWrite(
   );
   (write?.[3] as (fm: Record<string, unknown>) => void)(properties);
   return properties;
+}
+
+/** Create an empty article asked for in `directory`; where it was made. */
+async function createIn(directory: string | undefined, inCurrent: boolean) {
+  const createNote = vi
+    .spyOn(Obsidian, 'createNote')
+    .mockResolvedValue(fileAt(`${directory}/new.md`));
+  vi.spyOn(Obsidian, 'updateFrontMatter').mockResolvedValue(undefined);
+  const plugin = {
+    app: makeApp(),
+    settings: { createEmptyInCurrentFolder: inCurrent },
+  };
+  const manager = new ArticleManager(plugin as never, makeSimpleRepo());
+  vi.spyOn(manager, 'fetch').mockResolvedValue(null);
+
+  await manager.create(DEFAULT_PRIORITY, directory);
+
+  return createNote.mock.lastCall?.[0].directory;
 }
 
 // #endregion
@@ -2378,6 +2401,42 @@ describe('fetchMany (includeDeleted option)', () => {
   });
 });
 
+describe('rename, when the database write fails', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['not renamed when its old name is put back', true, false],
+    ['renamed when the old name is kept from coming back', false, true],
+  ])('reports it %s', async (_, restores, renamed) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const file = {
+      basename: 'C# notes',
+      extension: 'md',
+      path: 'a/C# notes.md',
+      parent: { path: 'a' },
+    } as unknown as TFile;
+    vi.spyOn(Obsidian, 'renameFile').mockImplementation(async (f, name) => {
+      f.basename = name;
+    });
+    // The guard puts back a restore that adds `#`, once the name has none
+    vi.spyOn(Obsidian, 'restoreName').mockImplementation(async (f, name) => {
+      if (restores) f.basename = name;
+    });
+    const repo = {
+      ...makeSimpleRepo(),
+      mutate: vi.fn(() => Promise.reject(new Error('db error'))),
+    } as unknown as SQLiteRepository;
+    const manager = new ArticleManager({ app: {} } as never, repo);
+
+    await expect(
+      manager.rename({ data: makeArticle(), file } as ReviewArticle, 'Notes')
+    ).resolves.toBe(renamed);
+    expect(file.basename).toBe(renamed ? 'Notes' : 'C# notes');
+  });
+});
+
 describe('rename (no-parent path)', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -3202,6 +3261,76 @@ describe('import', () => {
       expect(result?.file).toBe(PDF_FILE);
       expect(Notice.messages).toEqual([
         `"${PDF_FILE.name}" is already an article; canceling import`,
+      ]);
+    });
+
+    it('refuses a PDF whose path breaks links, adding no row', async () => {
+      Notice.reset();
+      const file = fileAt('pa|pers/Paper.pdf');
+      const { repo } = await makeSqlJsRepo();
+      const before = allRows(repo);
+
+      const result = await new ArticleManager(
+        makePdfImportPlugin(file) as never,
+        repo
+      ).import(file, MINIMUM_PRIORITY, null, false);
+
+      expect(result).toBeNull();
+      expect(allRows(repo)).toEqual(before);
+      expect(Notice.messages).toStrictEqual([
+        `Can't import "Paper.pdf" in place: its name or folder contains |. ` +
+          `Rename it or import a copy`,
+      ]);
+    });
+
+    it('brings back the deleted article at a path that breaks links, made before the rule', async () => {
+      Notice.reset();
+      const file = fileAt('pa|pers/Paper.pdf');
+      const { repo, db } = await makeSqlJsRepo();
+      insertArticleRow(db, {
+        id: 'deleted',
+        due: 1234,
+        due_fuzz: null,
+        priority: MAXIMUM_PRIORITY,
+      });
+      db.exec(
+        `UPDATE article SET reference = $1, deleted = TRUE WHERE id = 'deleted'`,
+        [file.path]
+      );
+
+      const result = await new ArticleManager(
+        makePdfImportPlugin(file) as never,
+        repo
+      ).import(file, MINIMUM_PRIORITY, null, false);
+
+      expect(result?.data.id).toBe('deleted');
+      expect(Notice.messages).toStrictEqual([
+        `Restored the article "Paper" to the queue with its earlier schedule`,
+        refusedPathsWarning([file.path]),
+      ]);
+    });
+
+    it('gives back the article already at a path that breaks links, made before the rule', async () => {
+      const file = fileAt('C# papers/Paper.pdf');
+      const { repo, db } = await makeSqlJsRepo();
+      insertArticleRow(db, {
+        id: 'existing',
+        due: 1234,
+        due_fuzz: 5,
+        priority: MAXIMUM_PRIORITY,
+      });
+      db.exec(`UPDATE article SET reference = $1 WHERE id = 'existing'`, [
+        file.path,
+      ]);
+
+      const result = await new ArticleManager(
+        makePdfImportPlugin(file) as never,
+        repo
+      ).import(file, MINIMUM_PRIORITY, null, false);
+
+      expect(result?.data.id).toBe('existing');
+      expect(Notice.messages).toEqual([
+        `"Paper.pdf" is already an article; canceling import`,
       ]);
     });
 
@@ -4798,6 +4927,109 @@ describe('import', () => {
       const [sql] = lastMutateCall(repo);
       expect(sql).toContain('INSERT INTO article');
     });
+
+    it('refuses a note whose name or folder holds a character that breaks links, writing nothing and saying why', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom(...REFUSED_PATH_CHARS),
+          fc.boolean(),
+          // Whether it carries an id no article has
+          fc.boolean(),
+          async (char, inFolder, orphaned) => {
+            Notice.reset();
+            const path = inFolder
+              ? `no${char}tes/my-note.md`
+              : `notes/my${char}note.md`;
+            const file = fileAt(path);
+            const repo = makeSimpleRepo();
+            (repo.query as ReturnType<typeof vi.fn>).mockImplementation(
+              () => []
+            );
+            const updateFrontMatter = vi.spyOn(Obsidian, 'updateFrontMatter');
+            updateFrontMatter.mockClear();
+            vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue(
+              (orphaned ? { 'ir-id': 'orphaned' } : undefined) as never
+            );
+            const manager = new ArticleManager(makeImportPlugin(false), repo);
+
+            const result = await manager.import(
+              file,
+              DEFAULT_PRIORITY,
+              null,
+              false
+            );
+
+            expect(result).toBeNull();
+            expect(lastMutateCall(repo)).toBeUndefined();
+            expect(updateFrontMatter).not.toHaveBeenCalled();
+            expect(Notice.messages).toStrictEqual([
+              `Can't import "${file.name}" in place: its name or folder ` +
+                `contains ${listChars([char])}. Rename it or import a copy`,
+            ]);
+          }
+        )
+      );
+    });
+
+    it('relinks a note at a path that breaks links to the article whose id it carries, as existing paths are left', async () => {
+      Notice.reset();
+      const file = fileAt('x>y/my-note.md');
+      const repo = makeSimpleRepo();
+      (repo.query as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: 'elsewhere' }]);
+      vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+        'ir-id': 'elsewhere',
+      } as never);
+      const manager = new ArticleManager(makeImportPlugin(false), repo);
+
+      await manager.import(file, DEFAULT_PRIORITY, null, false);
+
+      expect(lastMutateCall(repo)).toEqual([
+        'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
+        [file.path, 'elsewhere'],
+      ]);
+      expect(Notice.messages).toStrictEqual([
+        'Linked "my-note" to existing article with the same ID',
+        refusedPathsWarning([file.path]),
+      ]);
+    });
+
+    it('still repairs an article already at a path that breaks links, made before the rule', async () => {
+      Notice.reset();
+      const file = fileAt('C# notes/my-note.md');
+      const repo = makeSimpleRepo();
+      (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: 'existing' },
+      ]);
+      vi.spyOn(Obsidian, 'getFrontMatter').mockReturnValue({
+        'ir-id': 'existing',
+      } as never);
+      const snippets = makeSnippetsStub();
+      const manager = new ArticleManager(
+        makeImportPluginWithSnippets(false, snippets),
+        repo
+      );
+
+      await manager.import(file, DEFAULT_PRIORITY, null, false);
+
+      expect(snippets.adoptOrphans).toHaveBeenCalledWith(file, 'existing');
+      expect(Notice.messages).toStrictEqual([
+        'Note is already an article; canceling import',
+      ]);
+    });
+
+    it('imports a copy of a note whose folder breaks links', async () => {
+      Notice.reset();
+      const repo = makeSimpleRepo();
+      const manager = new ArticleManager(makeImportPlugin(true), repo);
+      const createNote = vi.spyOn(Obsidian, 'createNote');
+
+      await manager.import(fileAt('x>y/my-note.md'), DEFAULT_PRIORITY, null);
+
+      expect(createNote).toHaveBeenCalled();
+      expect(Notice.messages.join(' ')).not.toContain("Can't import");
+    });
   });
 
   describe('snippets that predate the import', () => {
@@ -5369,5 +5601,38 @@ describe('import', () => {
       const [, params] = lastMutateCall(repo);
       expect(params[1]).toBe(IMPORT_FILE.path);
     });
+  });
+});
+
+describe('create', () => {
+  const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
+
+  beforeEach(() => {
+    Notice.reset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('makes the article in the current folder when asked to, and in the articles folder otherwise', async () => {
+    expect(await createIn('notes/reading', true)).toBe('notes/reading');
+    expect(await createIn('notes/reading', false)).toBe(ARTICLES);
+    expect(await createIn(undefined, true)).toBe(ARTICLES);
+    expect(Notice.messages).toStrictEqual([]);
+  });
+
+  it("makes it in the articles folder, saying why, when the current folder's path breaks links", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.constantFrom(...REFUSED_PATH_CHARS), async (char) => {
+        Notice.reset();
+
+        expect(await createIn(`notes/x${char}y`, true)).toBe(ARTICLES);
+        expect(Notice.messages).toStrictEqual([
+          `The current folder contains ${listChars([char])}; created the ` +
+            `article in "${ARTICLES}" instead`,
+        ]);
+      })
+    );
   });
 });

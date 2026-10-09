@@ -1,4 +1,10 @@
 import { registerPdfLeafHighlights } from '#/lib/extensions/PdfItemHighlights';
+import {
+  createArrivalWarning,
+  ItemPathGuard,
+  refusedPathsWarning,
+  startupWarning,
+} from '#/lib/item-path-guard';
 import { checkImportable } from '#/lib/items/ArticleManager';
 import { appendLog } from '#/lib/log-file';
 import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
@@ -35,7 +41,9 @@ import { registerTransclusionHostPostProcessor } from './lib/extensions/Transclu
 import { createIrIdRepairer } from './lib/ir-id-repair';
 import {
   type IrIdWarning,
+  type Timer,
   createIrIdWarning,
+  hostTimer,
   IR_ID_WARNING_MESSAGE,
   persistentNotice,
 } from './lib/ir-id-warning-notice';
@@ -88,6 +96,11 @@ export default class IncrementalReadingPlugin extends Plugin {
    * registered alongside it.
    */
   irIdLockedWarning?: IrIdWarning;
+  /**
+   * Puts back a rename that would break links to an item. Unset until the
+   * review manager it asks is up.
+   */
+  private itemPathGuard?: ItemPathGuard;
 
   MarkdownEditor!: typeof ExtractedMarkdownEditor;
 
@@ -175,27 +188,15 @@ export default class IncrementalReadingPlugin extends Plugin {
     // review manager exists, and moves made while Obsidian was closed, are
     // caught by `followMovedNotes` instead.
     this.registerEvent(
-      this.app.vault.on('rename', (file, oldPath) => {
-        if (!this.reviewManager || file instanceof TFolder) {
-          return;
-        }
-        void this.reviewManager
-          .handleExternalRename(file, oldPath)
-          .then(() => invalidateCacheOnMatch(file, this.reviewManager));
-      })
+      this.app.vault.on('rename', (file, oldPath) =>
+        this.onVaultRename(file, oldPath)
+      )
     );
 
     // listen for file deletions, mark items deleted, and go to next item if
     // the current item was deleted
     this.registerEvent(
-      this.app.vault.on('delete', (file) => {
-        if (!this.reviewManager) {
-          return;
-        }
-        void this.reviewManager
-          .handleDeletion(file)
-          .then(() => resetCurrentOnMatch(file, this.reviewManager));
-      })
+      this.app.vault.on('delete', (file) => this.onVaultDelete(file))
     );
 
     this.addSettingTab(new IRSettingTab(this.app, this));
@@ -274,17 +275,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         // otherwise swallows a plain click on the active file's row
         registerFileExplorerActiveFileClick(this);
 
-        // listen for file creations and handle, especially restored item notes
-        this.registerEvent(
-          this.app.vault.on('create', (file) => {
-            if (!this.reviewManager) {
-              return;
-            }
-            void this.reviewManager
-              .handleCreation(file)
-              .then(() => invalidateCacheOnMatch(file, this.reviewManager));
-          })
-        );
+        this.watchCreations(hostTimer);
 
         this.watchIrIdFrontmatter();
 
@@ -473,6 +464,13 @@ export default class IncrementalReadingPlugin extends Plugin {
       })
     );
     this.reviewManager = new ReviewManager(this, repo);
+    this.itemPathGuard = new ItemPathGuard({
+      app: this.app,
+      isItemFile: (file, path) => this.reviewManager.isItemFileAt(file, path),
+      referencesUnder: (folder) => this.reviewManager.referencesUnder(folder),
+      follow: (file, oldPath) => this.followRename(file, oldPath),
+      notify: (message) => Obsidian.notify(message),
+    });
     this.followMovedNotes(repo);
 
     // Keep the review-queue table live: when a row on a cached page changes,
@@ -482,6 +480,73 @@ export default class IncrementalReadingPlugin extends Plugin {
         void applyQueueChange(event, this.reviewManager);
       })
     );
+  }
+
+  /**
+   * Follow a file or folder Obsidian renamed or moved from `oldPath`. A rename
+   * that would break links to an item is put back instead, and neither it nor
+   * its undo is followed: the guard is asked first, and at once (see
+   * {@link ItemPathGuard}). A folder's files each fire their own rename.
+   */
+  private onVaultRename(file: TAbstractFile, oldPath: string) {
+    if (!this.reviewManager) return;
+    if (this.itemPathGuard?.handleRename(file, oldPath)) return;
+    if (file instanceof TFolder) return;
+    this.followRename(file, oldPath);
+  }
+
+  /**
+   * Listen for file creations and handle them, especially restored item
+   * notes. One notice names every item a burst brings to a path that breaks
+   * links to it, and those paths count as heard of at the next startup.
+   */
+  private watchCreations(timer: Timer) {
+    const arrivals = createArrivalWarning({
+      notify: (message, paths) => {
+        Obsidian.notify(message);
+        void this.rememberWarnedPaths([
+          ...this.data.warnedRefusedPaths,
+          ...paths,
+        ]);
+      },
+      timer,
+    });
+    this.register(() => arrivals.dispose());
+    this.registerEvent(
+      this.app.vault.on('create', (file) => {
+        if (!this.reviewManager) return;
+        void this.reviewManager.handleCreation(file).then((refused) => {
+          if (refused !== null) arrivals.add(refused);
+          return invalidateCacheOnMatch(file, this.reviewManager);
+        });
+      })
+    );
+  }
+
+  /** Keep `paths` as the item paths that break links the user has heard of. */
+  private async rememberWarnedPaths(paths: readonly string[]) {
+    this.data.warnedRefusedPaths = [...new Set(paths)];
+    await this.saveData(this.data);
+  }
+
+  /**
+   * Mark the rows of a deleted file deleted, where the database has them:
+   * elsewhere, if its rename was being put back. Review moves on if it was
+   * showing it.
+   */
+  private onVaultDelete(file: TAbstractFile) {
+    if (!this.reviewManager) return;
+    const path = this.itemPathGuard?.pathBeforeDeletion(file) ?? file.path;
+    void this.reviewManager
+      .handleDeletion(file, path)
+      .then(() => resetCurrentOnMatch(file, this.reviewManager));
+  }
+
+  /** Point the database at where `file` moved from `oldPath`. */
+  private followRename(file: TAbstractFile, oldPath: string) {
+    void this.reviewManager
+      .handleExternalRename(file, oldPath)
+      .then(() => invalidateCacheOnMatch(file, this.reviewManager));
   }
 
   /**
@@ -576,6 +641,25 @@ export default class IncrementalReadingPlugin extends Plugin {
         .catch((error: unknown) => {
           console.error(
             'Incremental Reading - failed to follow moved notes:',
+            error
+          );
+        })
+        // Once every row is where its file is, whether or not following them
+        // went well: paths that break links to their items are left as they
+        // are, but the user hears of them
+        .then(async () => {
+          if (controller.signal.aborted) return;
+          const paths = await this.reviewManager.itemPathsWithRefusedChars();
+          const { warn, remember } = startupWarning(
+            paths,
+            this.data.warnedRefusedPaths
+          );
+          if (warn) Obsidian.notify(refusedPathsWarning(paths)!, true);
+          if (remember) await this.rememberWarnedPaths(remember);
+        })
+        .catch((error: unknown) => {
+          console.error(
+            'Incremental Reading - failed to look for item paths that break links:',
             error
           );
         });

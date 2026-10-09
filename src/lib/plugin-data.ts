@@ -31,6 +31,11 @@ export interface ReviewSession {
 export interface IRPluginData {
   settings: IRPluginSettings;
   session: ReviewSession | null;
+  /**
+   * The item paths that break links the user was last told of, so that the
+   * startup notice comes back only for new ones (see `startupWarning`).
+   */
+  warnedRefusedPaths: string[];
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -51,6 +56,11 @@ export function parsePluginData(raw: unknown): IRPluginData {
   return {
     settings: { ...DEFAULT_SETTINGS, ...saved },
     session: legacy ? null : parseSession(data.session),
+    warnedRefusedPaths: Array.isArray(data.warnedRefusedPaths)
+      ? data.warnedRefusedPaths.filter(
+          (path): path is string => typeof path === 'string'
+        )
+      : [],
   };
 }
 
