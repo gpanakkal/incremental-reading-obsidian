@@ -883,6 +883,7 @@ export default class IncrementalReadingPlugin extends Plugin {
    * in the mode, the command for its kind confirms it and the other is refused.
    * In a note, which has no selection mode, they make it at once either way.
    * So they do in a PDF open in Obsidian's own tab, through the PDF's viewer.
+   * Both are off in a note in reading mode.
    */
   private addExtractCommands() {
     // The commands follow the selection in PDF tabs, which outlive the plugin
@@ -912,59 +913,50 @@ export default class IncrementalReadingPlugin extends Plugin {
       if (!checking) void this.actions.extractFromPdfTab(kind, view);
       return true;
     };
+    /**
+     * Whether `view` is a note in reading mode, where both commands are off.
+     * Its editor is still there, hidden behind the rendered note, and keeps
+     * whatever it had selected before the switch; it never sees what the user
+     * selects on screen. A snippet or card made through it would be of text
+     * the user can't see selected, or refused for want of a selection that is
+     * plainly there. Obsidian's own editor commands are off there the same
+     * way (undocumented: its `editorCallback` wrapper skips a view whose
+     * `getMode()` is `'preview'`, as of 1.13.7). `currentMode` and
+     * `previewMode` are public API.
+     */
+    const inReadingMode = (view: MarkdownView | ReviewView) =>
+      view instanceof MarkdownView && view.currentMode === view.previewMode;
+    /** The one check both commands make, so they can't drift apart. */
+    const extractCallback =
+      (kind: 'snippet' | 'card') =>
+      (checking: boolean): boolean | void => {
+        if (!this.reviewManager) return false;
+        if (extractFromPdf(kind, checking)) return true;
+        if (!this.app.workspace.activeEditor?.editor) return false;
+
+        const view =
+          this.getActiveReviewView() ??
+          this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view || inReadingMode(view)) return false;
+        if (checking) return true;
+
+        if (view instanceof ReviewView) void this.actions.extract(kind, view);
+        else if (kind === 'snippet') void this.actions.createSnippet();
+        else void this.actions.createCard();
+      };
 
     this.addCommand({
       id: 'extract-selection',
       name: 'Extract selection to snippet',
       // hotkeys: [{ key: 'X', modifiers: ['Alt'] }],
-      checkCallback: (checking) => {
-        if (!this.reviewManager) return false;
-        if (extractFromPdf('snippet', checking)) return true;
-
-        const editor = this.app.workspace.activeEditor?.editor;
-        if (!editor) return false;
-
-        const view =
-          this.getActiveReviewView() ??
-          this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (!view) return false;
-        if (
-          view.getViewType() === 'markdown' &&
-          view instanceof MarkdownView &&
-          view.currentMode === view.previewMode
-        ) {
-          // disable in reading mode
-          return false;
-        }
-        if (checking) return true;
-
-        void (view instanceof ReviewView
-          ? this.actions.extract('snippet', view)
-          : this.actions.createSnippet());
-      },
+      checkCallback: extractCallback('snippet'),
     });
 
     this.addCommand({
       id: 'create-card',
       name: 'Create spaced repetition card',
       // hotkeys: [{ key: 'Z', modifiers: ['Alt'] }],
-      checkCallback: (checking) => {
-        if (!this.reviewManager) return false;
-        if (extractFromPdf('card', checking)) return true;
-
-        const view =
-          this.getActiveReviewView() ??
-          this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (!view) return false;
-
-        const editor = this.app.workspace.activeEditor?.editor;
-        if (!editor) return false;
-        if (checking) return true;
-
-        void (view instanceof ReviewView
-          ? this.actions.extract('card', view)
-          : this.actions.createCard());
-      },
+      checkCallback: extractCallback('card'),
     });
   }
 

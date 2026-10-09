@@ -376,6 +376,7 @@ function makeExtractReceiver({
   itemExtension = null as string | null,
   tabFile = { path: 'papers/a.pdf', extension: 'pdf' } as TFile | null,
   otherViewType = 'image',
+  loaded = true,
 } = {}) {
   const reviewView = Object.create(ReviewView.prototype) as ReviewView;
   // The review tab's item, by its file's extension; `null` for none
@@ -400,7 +401,8 @@ function makeExtractReceiver({
   const commands = new Map<string, (checking: boolean) => boolean | void>();
   const unloaders: (() => void)[] = [];
   const receiver = {
-    reviewManager: {},
+    // Absent until the plugin has finished loading
+    reviewManager: loaded ? {} : undefined,
     actions,
     register: vi.fn((unloader: () => void) => unloaders.push(unloader)),
     addCommand: vi.fn(
@@ -1462,11 +1464,94 @@ describe('IncrementalReadingPlugin.addExtractCommands', () => {
     stop.mockRestore();
   });
 
-  it('extracts no snippet from a note in reading mode, but still makes a card', () => {
-    const { run } = makeExtractReceiver({ where: 'note', reading: true });
+  it('makes neither a snippet nor a card from a note in reading mode', () => {
+    // Reading view's editor is hidden: what it has selected is not what the
+    // user selected on screen, so neither is made of it.
+    fc.assert(
+      fc.property(kinds, fc.boolean(), (kind, checking) => {
+        const { actions, run } = makeExtractReceiver({
+          where: 'note',
+          reading: true,
+        });
 
-    expect(run('snippet', true)).toBe(false);
-    expect(run('card', true)).toBe(true);
+        expect(run(kind, checking)).toBe(false);
+
+        expect(actions.createSnippet).not.toHaveBeenCalled();
+        expect(actions.createCard).not.toHaveBeenCalled();
+        expect(actions.extract).not.toHaveBeenCalled();
+        expect(actions.extractFromPdfTab).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  /** Whatever tab is active, in whatever state, as `makeExtractReceiver` takes it. */
+  const anywhere = fc.record({
+    where: fc.constantFrom(
+      'review' as const,
+      'note' as const,
+      'pdf' as const,
+      'other' as const,
+      'none' as const
+    ),
+    reading: fc.boolean(),
+    editor: fc.boolean(),
+    itemExtension: fc.option(fc.constantFrom('md', 'pdf', 'PDF', 'png', ''), {
+      nil: null,
+    }),
+    tabFile: fc.option(
+      fc
+        .constantFrom('pdf', 'PDF', 'md', 'png')
+        .map((extension) => ({ path: `a.${extension}`, extension }) as TFile),
+      { nil: null }
+    ),
+    otherViewType: fc.constantFrom('image', 'pdf', 'markdown', ''),
+  });
+
+  it('is available to the snippet and card commands alike, wherever the user is', () => {
+    // One guard for both: neither is ever offered where the other is not
+    fc.assert(
+      fc.property(anywhere, (state) => {
+        const { run } = makeExtractReceiver(state);
+
+        expect(run('card', true)).toBe(run('snippet', true));
+      })
+    );
+  });
+
+  it('is unavailable, and makes nothing, until the plugin has loaded', () => {
+    fc.assert(
+      fc.property(kinds, anywhere, (kind, state) => {
+        const { actions, run } = makeExtractReceiver({
+          ...state,
+          loaded: false,
+        });
+
+        expect(run(kind, true)).toBe(false);
+        run(kind);
+
+        expect(actions.extract).not.toHaveBeenCalled();
+        expect(actions.extractFromPdfTab).not.toHaveBeenCalled();
+        expect(actions.createSnippet).not.toHaveBeenCalled();
+        expect(actions.createCard).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('names the commands in the palette for what they make', () => {
+    const { receiver } = makeExtractReceiver();
+
+    expect(receiver.addCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'extract-selection',
+        name: 'Extract selection to snippet',
+      })
+    );
+    expect(receiver.addCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'create-card',
+        name: 'Create spaced repetition card',
+      })
+    );
   });
 });
 

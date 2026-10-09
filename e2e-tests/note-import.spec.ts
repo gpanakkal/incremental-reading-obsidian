@@ -301,6 +301,112 @@ test.describe('Importing a note cards were made from', () => {
   });
 });
 
+test.describe('Making a card in a note', () => {
+  const CREATE_CARD = 'incremental-reading:create-card';
+  /** A line other than {@link BULLET_TEXT}, as it reads in the source. */
+  const OTHER_TEXT = 'Introduce ISO/IEC 19249.';
+
+  /**
+   * What the page-side calls below reach. Undocumented: `app.commands`,
+   * Obsidian's command registry, and its `commands` map of them by id.
+   */
+  type CommandsApp = {
+    commands: {
+      commands: Record<
+        string,
+        { checkCallback(checking: boolean): boolean | void }
+      >;
+      executeCommandById(id: string): boolean;
+    };
+    workspace: {
+      activeEditor: {
+        editor?: {
+          getSelection(): string;
+          getValue(): string;
+          offsetToPos(offset: number): unknown;
+          setSelection(anchor: unknown, head: unknown): void;
+          focus(): void;
+        };
+      } | null;
+    };
+  };
+
+  /** Whether the command palette would offer to make a card here. */
+  const offered = (page: Page) =>
+    page.evaluate((id) => {
+      const { app } = window as unknown as { app: CommandsApp };
+      return app.commands.commands[id].checkCallback(true);
+    }, CREATE_CARD);
+
+  /** What the active note's editor, shown or not, has selected and holds. */
+  const editorState = (page: Page) =>
+    page.evaluate(() => {
+      const { app } = window as unknown as { app: CommandsApp };
+      const editor = app.workspace.activeEditor?.editor;
+      if (!editor) throw new Error('No active editor');
+      return { selection: editor.getSelection(), doc: editor.getValue() };
+    });
+
+  test('is off in reading view, whatever its hidden editor and the screen have selected, and on in live preview and source mode', async () => {
+    await openNote(window, 'sources/Security Principles');
+    // Selected in live preview: what the editor keeps once reading view hides it
+    await selectParagraph(window, BULLET_TEXT);
+    await executeCommandById(window, 'markdown:toggle-preview');
+    await expect(
+      window.locator('.workspace-leaf.mod-active .markdown-reading-view')
+    ).toBeVisible();
+    await selectParagraph(window, OTHER_TEXT);
+    // The case this covers: one line selected on screen, another in the
+    // hidden editor, which the card used to be made of
+    expect(
+      await window.evaluate(() =>
+        (window as unknown as Window).getSelection()?.toString()
+      )
+    ).toContain(OTHER_TEXT);
+    const before = await editorState(window);
+    expect(before.selection).toContain(BULLET_TEXT);
+    const noteBytes = await readNote();
+
+    expect(await offered(window)).toBe(false);
+    await window.keyboard.press('Alt+Z');
+    // Run as the palette would, past its check. What this returns says
+    // nothing: Obsidian answers true whenever the callback doesn't throw.
+    await window.evaluate((id) => {
+      const { app } = window as unknown as { app: CommandsApp };
+      app.commands.executeCommandById(id);
+    }, CREATE_CARD);
+    // Long enough for a card, and its embed's save, to have landed
+    await window.waitForTimeout(2500);
+    expect(await cards(window)).toEqual([]);
+    expect((await editorState(window)).doc).toBe(before.doc);
+    expect(await readNote()).toEqual(noteBytes);
+
+    // Back in live preview, the same hotkey makes the card
+    await executeCommandById(window, 'markdown:toggle-preview');
+    await selectParagraph(window, BULLET_TEXT);
+    expect(await offered(window)).toBe(true);
+    await window.keyboard.press('Alt+Z');
+    await expect.poll(() => cards(window)).toHaveLength(1);
+
+    // And in source mode
+    await executeCommandById(window, 'editor:toggle-source');
+    await window.evaluate((text) => {
+      const { app } = window as unknown as { app: CommandsApp };
+      const editor = app.workspace.activeEditor!.editor!;
+      const start = editor.getValue().indexOf(text);
+      if (start < 0) throw new Error(`${text} is not in the note`);
+      editor.setSelection(
+        editor.offsetToPos(start),
+        editor.offsetToPos(start + text.length)
+      );
+      editor.focus();
+    }, OTHER_TEXT);
+    expect(await offered(window)).toBe(true);
+    await window.keyboard.press('Alt+Z');
+    await expect.poll(() => cards(window)).toHaveLength(2);
+  });
+});
+
 test.describe('Importing a note as a copy', () => {
   test('names the copy without the bidi override its name holds, and says so', async () => {
     // Shows as "invoiceexe.pdf", as sync, git or a zip can deliver it

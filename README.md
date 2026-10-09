@@ -100,7 +100,7 @@ Choose:
 
 ### Other workflows
 
-Snippets and cards can be created from any note, so don't feel limited to only doing this during study sessions.
+Snippets and cards can be created from any note, so don't feel limited to only doing this during study sessions. Note: this is currently disabled in reading mode.
 
 This is especially handy for:
 
