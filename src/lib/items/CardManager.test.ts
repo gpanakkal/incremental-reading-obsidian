@@ -2542,7 +2542,7 @@ describe('createFromSelection', () => {
     vi.restoreAllMocks();
   });
 
-  it('makes a card of the span, with the answer hidden, from the note it is in, each start escaped as cut from it', async () => {
+  it('makes a card of the span, with the answer hidden, from the note it is in, each start escaped as cut from it, and its second line kept from underlining its first', async () => {
     await fc.assert(
       fc.asyncProperty(unescapedCardSelectionArb, async (c) => {
         const { manager, createFileAndEntry } = setUp();
@@ -2565,7 +2565,11 @@ describe('createFromSelection', () => {
           'answer'
         );
         expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
-          pre + `${LEFT} ${answer} ${RIGHT}` + c.post,
+          Markdown.escapeCutUnderline(
+            doc,
+            from,
+            pre + `${LEFT} ${answer} ${RIGHT}` + c.post
+          ),
           sourceFile
         );
         vi.restoreAllMocks();
@@ -2624,7 +2628,7 @@ describe('createFromSelection', () => {
     );
   });
 
-  it('makes the card of the span widened off the escape pairs it splits, its answer off any backslash that would escape a delimiter, each start escaped as cut from the note', async () => {
+  it('makes the card of the span widened off the escape pairs it splits, its answer off any backslash that would escape a delimiter, each start escaped as cut from the note, and its second line kept from underlining its first', async () => {
     await fc.assert(
       fc.asyncProperty(
         escapedCardSelectionArb,
@@ -2657,7 +2661,11 @@ describe('createFromSelection', () => {
             'answer'
           );
           expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
-            pre + `${LEFT} ${hidden} ${RIGHT}` + text.slice(b),
+            Markdown.escapeCutUnderline(
+              doc,
+              start,
+              pre + `${LEFT} ${hidden} ${RIGHT}` + text.slice(b)
+            ),
             sourceFile
           );
           expect(editor.text).toBe(
@@ -2724,43 +2732,125 @@ describe('createFromSelection', () => {
     });
   });
 
-  it('makes no tag, heading, quote or list of a span or answer selected from mid-line that the note did not hold there', async () => {
-    const card = async (
-      doc: string,
-      from: number,
-      answer: readonly [number, number]
-    ) => {
-      const { manager, createFileAndEntry } = setUp();
-      await manager.createFromSelection(
-        makeEditor(doc) as never,
-        { file: sourceFile } as never,
-        { from, to: doc.length, text: doc.slice(from) },
-        answer
-      );
-      vi.restoreAllMocks();
-      return createFileAndEntry.mock.calls[0][0];
-    };
+  /**
+   * The text of the card made of `doc` from `from` to its end, its answer at
+   * `answer` in that span.
+   */
+  async function cardFromSelection(
+    doc: string,
+    from: number,
+    answer: readonly [number, number]
+  ) {
+    const { manager, createFileAndEntry } = setUp();
+    await manager.createFromSelection(
+      makeEditor(doc) as never,
+      { file: sourceFile } as never,
+      { from, to: doc.length, text: doc.slice(from) },
+      answer
+    );
+    vi.restoreAllMocks();
+    return createFileAndEntry.mock.calls[0][0];
+  }
 
+  it('makes no tag, heading, quote or list of a span or answer selected from mid-line that the note did not hold there', async () => {
     // The span from the `#` of `word#evil`
-    expect(await card('word#evil x', 4, [6, 7])).toBe(
+    expect(await cardFromSelection('word#evil x', 4, [6, 7])).toBe(
       String.raw`\#evil ${LEFT} x ${RIGHT}`
     );
-    expect(await card('a > b c', 2, [4, 5])).toBe(
+    expect(await cardFromSelection('a > b c', 2, [4, 5])).toBe(
       String.raw`\> b ${LEFT} c ${RIGHT}`
     );
-    expect(await card('a - b c', 2, [4, 5])).toBe(
+    expect(await cardFromSelection('a - b c', 2, [4, 5])).toBe(
       String.raw`\- b ${LEFT} c ${RIGHT}`
     );
     // The answer from it
-    expect(await card('x word#evil', 0, [6, 11])).toBe(
+    expect(await cardFromSelection('x word#evil', 0, [6, 11])).toBe(
       String.raw`x word${LEFT} \#evil ${RIGHT}`
     );
     // The span from its `#`, the answer too
-    expect(await card('a##b', 1, [0, 3])).toBe(
+    expect(await cardFromSelection('a##b', 1, [0, 3])).toBe(
       String.raw`${LEFT} \#\#b ${RIGHT}`
     );
     // A tag after whitespace was one there too
-    expect(await card('see #tag x', 4, [5, 6])).toBe(`#tag ${LEFT} x ${RIGHT}`);
+    expect(await cardFromSelection('see #tag x', 4, [5, 6])).toBe(
+      `#tag ${LEFT} x ${RIGHT}`
+    );
+    // Inside inline code, a tag was none
+    expect(await cardFromSelection('`see #tag` x', 5, [6, 7])).toBe(
+      String.raw`\#tag${'`'} ${LEFT} x ${RIGHT}`
+    );
+  });
+
+  it('makes no heading of a span from mid-line whose next line would underline it, but where the note showed one', async () => {
+    // A rule under a list item stays a rule, and text under a heading text
+    expect(await cardFromSelection('- buy milk\n---', 2, [4, 8])).toBe(
+      `buy ${LEFT} milk ${RIGHT}\n\n---`
+    );
+    expect(await cardFromSelection('# T x\n===', 4, [0, 1])).toBe(
+      `${LEFT} x ${RIGHT}\n` + String.raw`\===`
+    );
+    // The underline of a paragraph of one line was one there too
+    expect(await cardFromSelection('a x\n---', 2, [0, 1])).toBe(
+      `${LEFT} x ${RIGHT}\n---`
+    );
+  });
+
+  describe('keeps the second line of a span from mid-line what it was in the note: an underline of a heading, a rule, or text', () => {
+    const PREFIXES = ['- ', '> ', '# ', '', 'a\n', '- a\n'];
+    const UNDERS = ['---', '===', '-', '--', '-----', '---\t'];
+    const cases = PREFIXES.flatMap((prefix) =>
+      UNDERS.flatMap((under) =>
+        ['\n', '\r\n'].map((lineBreak) => ({ prefix, under, lineBreak }))
+      )
+    );
+
+    // Only `buy milk` after nothing, a one-line paragraph, was a heading (in
+    // live preview at least); reading view takes no rule with a tab after it
+    it.each(cases)(
+      'over $under after $prefix',
+      async ({ prefix, under, lineBreak }) => {
+        const doc = `${prefix}buy milk${lineBreak}${under}`;
+        const from = doc.indexOf('milk');
+
+        const [first, second, third] = (
+          await cardFromSelection(doc, from, [0, 4])
+        ).split(/\r\n?|\n/);
+
+        expect(first).toBe(`${LEFT} milk ${RIGHT}`);
+        if (prefix === '') {
+          expect(second).toBe(under);
+        } else if (/^-{3,}$/.test(under)) {
+          expect([second, third]).toEqual(['', under]);
+        } else {
+          expect(second).toBe(`\\${under}`);
+        }
+      }
+    );
+
+    it.each(cases)(
+      'over $under after $prefix, with the line in its answer',
+      async ({ prefix, under, lineBreak }) => {
+        const doc = `${prefix}buy milk${lineBreak}${under}`;
+        const from = doc.indexOf('milk');
+
+        const lines = (
+          await cardFromSelection(doc, from, [
+            4,
+            4 + lineBreak.length + under.length,
+          ])
+        ).split(/\r\n?|\n/);
+
+        // The answer's closing delimiter keeps it from underlining anything.
+        // Under a heading, text that is no rule or list started a paragraph
+        // of its own, which a blank line keeps apart
+        const own = prefix === '# ' && ['===', '--', '---\t'].includes(under);
+        expect(lines).toEqual(
+          own
+            ? [`milk${LEFT} `, '', `${under} ${RIGHT}`]
+            : [`milk${LEFT} `, `${under} ${RIGHT}`]
+        );
+      }
+    );
   });
 
   it('makes nothing without a note to make it from', async () => {

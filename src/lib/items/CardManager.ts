@@ -310,10 +310,15 @@ export class CardManager extends ItemManager {
     const hidden = Markdown.escapeCutStart(doc, [from + a, from + b], 'answer');
 
     try {
-      const withDelimiters = this.delimitText(pre + hidden + text.slice(b), [
-        pre.length,
-        pre.length + hidden.length,
-      ])[0];
+      // Its second line kept from underlining its first, as delimited
+      const withDelimiters = Markdown.escapeCutUnderline(
+        doc,
+        from,
+        this.delimitText(pre + hidden + text.slice(b), [
+          pre.length,
+          pre.length + hidden.length,
+        ])[0]
+      );
       const reviewCard = await this.createAndEmbed(
         editor,
         currentFile,

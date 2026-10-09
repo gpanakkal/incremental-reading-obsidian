@@ -258,7 +258,13 @@ export class SnippetManager extends ItemManager {
       const [start, end] = Markdown.snapOffEscapes(doc, [from, to]);
       const bodyStart = Obsidian.getBodyStartOffset(doc);
       source = {
-        text: Markdown.escapeCutStart(doc, [start, end], 'note'),
+        // Its start escaped, and its second line kept from underlining its
+        // first into a heading the note didn't show
+        text: Markdown.escapeCutUnderline(
+          doc,
+          start,
+          Markdown.escapeCutStart(doc, [start, end], 'note')
+        ),
         offsets: { start: start - bodyStart, end: end - bodyStart },
       };
     } else {

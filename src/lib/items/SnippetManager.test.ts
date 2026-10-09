@@ -3013,7 +3013,7 @@ describe('create', () => {
     );
   });
 
-  it('takes an escape pair the main selection splits whole, in its text and its offsets alike, its start escaped as cut from the note', async () => {
+  it('takes an escape pair the main selection splits whole, in its text and its offsets alike, its start escaped as cut from the note, and its second line kept from underlining its first', async () => {
     await fc.assert(
       fc.asyncProperty(escapedNoteArb, async (note) => {
         vi.restoreAllMocks();
@@ -3023,7 +3023,11 @@ describe('create', () => {
         const [start, end] = Markdown.snapOffEscapes(note.doc, [from, to]);
         const bodyStart = Obsidian.getBodyStartOffset(note.doc);
         expect(text).toBe(
-          Markdown.escapeCutStart(note.doc, [start, end], 'note')
+          Markdown.escapeCutUnderline(
+            note.doc,
+            start,
+            Markdown.escapeCutStart(note.doc, [start, end], 'note')
+          )
         );
         expect(offsets).toEqual({
           start: start - bodyStart,
@@ -3042,6 +3046,15 @@ describe('create', () => {
 
     expect(text).toBe(String.raw`\#tag`);
     expect(offsets).toEqual({ start: 4, end: 9 });
+  });
+
+  it('makes a snippet over a rule under a list item of no heading, the rule kept a rule', async () => {
+    const { text } = await snipSelection({
+      doc: '- buy milk\n---',
+      ranges: [[6, 14]],
+    });
+
+    expect(text).toBe('milk\n\n---');
   });
 
   it("makes a snippet of reading view's selection, the editor's being empty, escaped and named as it reads, and without offsets", async () => {
@@ -3073,7 +3086,7 @@ describe('create', () => {
     );
   });
 
-  it("makes a snippet of the editor's selection as cut from the note, and named so, whatever reading view's", async () => {
+  it("makes a snippet of the editor's selection as cut from the note, its second line kept from underlining its first, and named so, whatever reading view's", async () => {
     await fc.assert(
       fc.asyncProperty(
         escapedNoteArb,
@@ -3088,7 +3101,11 @@ describe('create', () => {
 
           const [start, end] = Markdown.snapOffEscapes(note.doc, [from, to]);
           expect(text).toBe(
-            Markdown.escapeCutStart(note.doc, [start, end], 'note')
+            Markdown.escapeCutUnderline(
+              note.doc,
+              start,
+              Markdown.escapeCutStart(note.doc, [start, end], 'note')
+            )
           );
           expect(title).toBeUndefined();
         }
