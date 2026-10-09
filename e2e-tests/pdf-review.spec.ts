@@ -20,6 +20,8 @@ import {
   expectPlainText,
   finalizeArticleImport,
   openFileInActiveLeaf,
+  PDF_FIXTURE_FOLDER,
+  PDF_FIXTURE_PATH,
   pendingSaves,
   readMarkdown,
   renameDecliningLinkUpdate,
@@ -41,13 +43,13 @@ let window: Page;
 let vaultPath: string;
 
 /** The three-page fixture `scripts/make-pdf-fixtures.mjs` writes. */
-const PDF_PATH = 'sources/PDF fixture.pdf';
+const PDF_PATH = PDF_FIXTURE_PATH;
 /** Its one-page sibling with no text layer. */
-const NO_TEXT_PDF_PATH = 'sources/PDF fixture - no text.pdf';
+const NO_TEXT_PDF_PATH = `${PDF_FIXTURE_FOLDER}/PDF fixture - no text.pdf`;
 /** Its sibling whose text is Markdown, Obsidian syntax and a Templater command. */
-const HOSTILE_PDF_PATH = 'sources/PDF fixture - hostile.pdf';
+const HOSTILE_PDF_PATH = `${PDF_FIXTURE_FOLDER}/PDF fixture - hostile.pdf`;
 /** Its sibling whose one line holds a tab and a right-to-left override. */
-const CONTROLS_PDF_PATH = 'sources/PDF fixture - controls.pdf';
+const CONTROLS_PDF_PATH = `${PDF_FIXTURE_FOLDER}/PDF fixture - controls.pdf`;
 /** That line, as the PDF reads. */
 const CONTROLS_LINE = 'Tabbed\there report\u202efdp.exe';
 /** That line as it shows, without the override: what a note takes of it. */

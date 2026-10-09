@@ -1,5 +1,5 @@
 {
-  "source": "e2e-tests/setup/test-vault/sources/PDF fixture - no text.pdf",
+  "source": "e2e-tests/setup/test-vault/testing/PDF fixture - no text.pdf",
   "obsidian": "1.13.7",
   "pdfjs": {
     "version": "5.3.34",

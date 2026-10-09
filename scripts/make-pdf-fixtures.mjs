@@ -1,5 +1,5 @@
 // Writes the PDF fixtures the e2e tests import, into the test vault's
-// `sources` folder. Run with `pnpm run fixtures:pdf`; commit what it writes.
+// `testing` folder. Run with `pnpm run fixtures:pdf`; commit what it writes.
 //
 // The PDFs are written by hand rather than through a library: they need only
 // the standard Helvetica font, uncompressed page streams and one raw image,
@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const OUT_DIR = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  '../e2e-tests/setup/test-vault/sources'
+  '../e2e-tests/setup/test-vault/testing'
 );
 
 /** US Letter, in PDF points. */

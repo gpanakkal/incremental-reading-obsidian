@@ -21,7 +21,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const SOURCES = join(ROOT, 'e2e-tests/setup/test-vault/sources');
+const SOURCES = join(ROOT, 'e2e-tests/setup/test-vault/testing');
 const OUT_DIR = join(ROOT, 'src/test/fixtures/pdf-text');
 
 const FIXTURES = [
@@ -108,7 +108,7 @@ try {
     await doc.destroy();
     const out = join(OUT_DIR, `${basename(name, '.pdf')}.json`);
     const json = {
-      source: `e2e-tests/setup/test-vault/sources/${name}`,
+      source: `e2e-tests/setup/test-vault/testing/${name}`,
       obsidian: obsidianVersion,
       pdfjs: version,
       getTextContent: TEXT_CONTENT_OPTIONS,

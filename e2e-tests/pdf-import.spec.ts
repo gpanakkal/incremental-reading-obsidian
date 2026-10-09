@@ -16,6 +16,8 @@ import {
   executeCommandById,
   finalizeArticleImport,
   openFileInActiveLeaf,
+  PDF_FIXTURE_FOLDER,
+  PDF_FIXTURE_PATH,
   setNativeMenus,
   setPluginSetting,
   watchFileReads,
@@ -34,7 +36,7 @@ let window: Page;
 let vaultPath: string;
 
 /** The main fixture `scripts/make-pdf-fixtures.mjs` writes. */
-const PDF_PATH = 'sources/PDF fixture.pdf';
+const PDF_PATH = PDF_FIXTURE_PATH;
 
 /** The folder copies are imported into. */
 const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
@@ -173,7 +175,7 @@ test.describe('Importing a PDF', () => {
     await setPluginSetting(window, 'showAdvancedImportMenuItems', true);
     const before = await sha256(PDF_PATH);
 
-    await window.getByText('sources', { exact: true }).click();
+    await window.getByText(PDF_FIXTURE_FOLDER, { exact: true }).click();
     const fileRow = window.locator(`.nav-file-title[data-path="${PDF_PATH}"]`);
     await fileRow.click({ button: 'right' });
     const menu = window.locator('.menu');
@@ -230,7 +232,7 @@ test.describe('Importing a PDF', () => {
     await setPluginSetting(window, 'showAdvancedImportMenuItems', true);
     const before = await sha256(PDF_PATH);
 
-    await window.getByText('sources', { exact: true }).click();
+    await window.getByText(PDF_FIXTURE_FOLDER, { exact: true }).click();
     const fileRow = window.locator(`.nav-file-title[data-path="${PDF_PATH}"]`);
     await fileRow.click({ button: 'right' });
     await window

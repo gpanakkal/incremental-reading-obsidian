@@ -6,6 +6,7 @@ import {
   executeCommandById,
   finalizeArticleImport,
   openFileInActiveLeaf,
+  PDF_FIXTURE_PATH,
   REVIEW_VIEW_TYPE,
   watchFileReads,
 } from './helpers';
@@ -95,7 +96,7 @@ test('Can open the review interface by executing the command', async () => {
 });
 
 test("Reviews a PDF article in Obsidian's own PDF viewer", async () => {
-  await openFileInActiveLeaf(window, 'sources/PDF fixture.pdf');
+  await openFileInActiveLeaf(window, PDF_FIXTURE_PATH);
   await executeCommandById(window, 'incremental-reading:import-article');
   await finalizeArticleImport(window);
   await executeCommandById(window, 'incremental-reading:learn');
@@ -167,7 +168,7 @@ test('Imports a large PDF in place, reading only its leading bytes if it can', a
   await createLargePdf(
     window,
     largePath,
-    await fs.readFile(path.join(sourceVaultPath, 'sources/PDF fixture.pdf')),
+    await fs.readFile(path.join(sourceVaultPath, PDF_FIXTURE_PATH)),
     20 * 1024 * 1024
   );
   const reads = await watchFileReads(window, largePath);

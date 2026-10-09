@@ -336,6 +336,12 @@ export async function importArticle(window: Page, path: string) {
 /** The review tab's view type, as `ReviewView.viewType` registers it. */
 export const REVIEW_VIEW_TYPE = 'incremental-reading-review';
 
+/** The test-vault folder `scripts/make-pdf-fixtures.mjs` writes its PDFs to. */
+export const PDF_FIXTURE_FOLDER = 'testing';
+
+/** The three-page PDF fixture most PDF tests import. */
+export const PDF_FIXTURE_PATH = `${PDF_FIXTURE_FOLDER}/PDF fixture.pdf`;
+
 /**
  * Set Settings -> Editor -> "Default editing mode", which is the `livePreview`
  * vault config underneath.
