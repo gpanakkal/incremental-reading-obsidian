@@ -1,3 +1,7 @@
 # Fixtures are compared byte for byte, and a PDF's xref holds byte offsets:
 # never let a checkout rewrite their line endings.
 *.pdf binary
+# A Windows checkout would otherwise hand the test vault CRLF notes, and
+# Obsidian rewrites those as LF the first time an editor saves one, so a test
+# that a note was left alone fails on Windows only.
+e2e-tests/setup/test-vault/** -text

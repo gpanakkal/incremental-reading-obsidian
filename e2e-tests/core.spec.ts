@@ -850,17 +850,18 @@ test.describe('Extracting snippets', () => {
     const text =
       `Flag ${flag}${tags}${codes(0xe007f)} Re${codes(0xfe00)}port ` +
       `pay${codes(0x200c)}roll ${heart} ${keycap} ${family}`;
-    await window.evaluate(
-      (content) =>
-        (
-          window as unknown as {
-            app: {
-              vault: { create(path: string, data: string): Promise<unknown> };
-            };
-          }
-        ).app.vault.create('sources/Hidden channels.md', content),
-      text
-    );
+    // Block body, resolving to nothing: handed back, the TFile would have
+    // Playwright serialize everything it reaches, the whole app, which never
+    // finished in CI
+    await window.evaluate(async (content) => {
+      await (
+        window as unknown as {
+          app: {
+            vault: { create(path: string, data: string): Promise<unknown> };
+          };
+        }
+      ).app.vault.create('sources/Hidden channels.md', content);
+    }, text);
     await openNote(window, 'sources/Hidden channels');
     await selectParagraph(window, 'Flag');
     await executeCommandById(window, 'incremental-reading:extract-selection');

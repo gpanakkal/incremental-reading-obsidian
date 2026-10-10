@@ -125,9 +125,10 @@ test("Reviews a PDF article in Obsidian's own PDF viewer", async () => {
   await executeCommandById(window, 'editor:open-search');
   const findBar = article.locator('.pdf-findbar');
   await expect(findBar).toBeVisible();
-  const findInput = findBar.locator('input[type="text"], input:not([type])');
-  await findInput.first().fill('snippet');
-  await findInput.first().press('Enter');
+  // Obsidian builds the field with its SearchComponent: `<input type="search">`
+  const findInput = findBar.getByRole('searchbox');
+  await findInput.fill('snippet');
+  await findInput.press('Enter');
   await expect(article.locator('.textLayer .highlight').first()).toBeVisible();
   await window.keyboard.press('Escape');
   await expect(findBar).toBeHidden();
