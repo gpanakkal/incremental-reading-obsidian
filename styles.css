@@ -658,6 +658,43 @@ body.show-view-header
   opacity: 0.4;
 }
 
+/* How much of a view's bottom edge Obsidian's navbar covers on mobile.
+
+   It covers any only while it's `position: fixed`, which Obsidian sets through
+   `--navbar-position: fixed` under `.is-mobile.is-floating-nav` and
+   `.is-phone.auto-full-screen` (obsidian.asar), and a tablet hides it outright
+   (`body.is-tablet .mobile-navbar { display: none }`). Everywhere else it's in
+   normal flow below the views, so they already end above it and clearing it
+   again would leave a navbar-high strip of empty view under the bar.
+
+   Where it does cover the view, its footprint is measured live into
+   `--ir-mobile-toolbar-height` (`trackNavbarFootprint`, navbar-footprint.ts).
+   Switching either setting only flips a class on <body>, which is why the
+   choice is made here rather than in that measurement. Declared on <body>,
+   where the measurement and Obsidian's own tokens live. */
+body.is-mobile {
+  --ir-navbar-overlap: 0px;
+  /* The bottom safe area, less the keyboard that already shrank the app — see
+     the panel host rule below. Every bar clears it. */
+  --ir-bottom-inset-lift: max(
+    0px,
+    var(--safe-area-inset-bottom, 0px) - var(--keyboard-height, 0px)
+  );
+}
+
+body.is-phone.is-floating-nav,
+body.is-phone.auto-full-screen {
+  --ir-navbar-overlap: var(--ir-mobile-toolbar-height, 0px);
+}
+
+/* A navbar in normal flow also takes the bottom safe area on itself (its own
+   `padding-bottom: var(--navbar-bottom-offset)`), and Obsidian drops the views'
+   share in the same state (`.is-phone { --view-bottom-spacing: 0 }`, raised only
+   with the fixed navbar). */
+body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
+  --ir-bottom-inset-lift: 0px;
+}
+
 /* Mobile: Move action bar to bottom using flex order.
 
    The standalone bars outside review are prepended to a flex column: a note's
@@ -666,13 +703,17 @@ body.show-view-header
    puts the bar below `.pdf-container`, while Obsidian's PDF toolbar stays on
    top, as it does on every platform.
 
-   The bar has to clear the Obsidian navbar, whose footprint is measured live
-   into `--ir-mobile-toolbar-height` by `configureNavbarPosition` in main.ts.
-   That whole distance is the bar's own margin here; the one host that pays
-   part of it for us is handled in the next rule. */
+   The bar has to clear the Obsidian navbar wherever it covers the view (see
+   `--ir-navbar-overlap` above), and the bottom safe area — on a tablet, which
+   has no navbar, the same lift Obsidian gives its bottom panels in edit mode
+   (see the panel host rule below), and like Obsidian's, in every pane, even
+   one that ends at a split rather than the screen edge. A navbar covering the
+   view already stands clear of the safe area, so the larger of the two is all
+   the bar owes. That whole distance is the bar's own margin here; the one
+   host that pays part of it for us is handled in the next rule. */
 .is-mobile .ir-action-bar {
   order: 1;
-  margin-bottom: var(--ir-mobile-toolbar-height, 0px);
+  margin-bottom: max(var(--ir-navbar-overlap), var(--ir-bottom-inset-lift));
   /* Same duration and curve Obsidian gives `.mobile-navbar`, so the bar and the
      navbar read as one moving surface. Deliberately not disabled under
      `prefers-reduced-motion`: Obsidian animates the navbar unconditionally, so
@@ -707,17 +748,14 @@ body.show-view-header
 .is-mobile
   .markdown-source-view.mod-cm6
   .cm-panels.cm-panels-bottom.ir-action-bar-host {
-  --ir-panel-host-lift: max(
-    0px,
-    var(--safe-area-inset-bottom, 0px) - var(--keyboard-height, 0px)
-  );
+  --ir-panel-host-lift: var(--ir-bottom-inset-lift);
   margin-bottom: var(--ir-panel-host-lift);
 }
 
 .is-mobile .cm-panels-bottom.ir-action-bar-host .ir-action-bar {
   margin-bottom: max(
     0px,
-    var(--ir-mobile-toolbar-height, 0px) - var(--ir-panel-host-lift, 0px)
+    var(--ir-navbar-overlap) - var(--ir-panel-host-lift, 0px)
   );
 }
 

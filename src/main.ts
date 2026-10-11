@@ -9,6 +9,7 @@ import { withTag } from '#/lib/item-tags';
 import { checkImportable } from '#/lib/items/ArticleManager';
 import { appendLog } from '#/lib/log-file';
 import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
+import { trackNavbarFootprint } from '#/lib/navbar-footprint';
 import { isPdfView, stopPdfTabSelections } from '#/lib/pdf/obsidian-pdf';
 import { REBIND_LOG_TOPIC } from '#/lib/rebind-records';
 import { goToReviewPlace } from '#/lib/review-history';
@@ -1120,6 +1121,8 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   private configureNavbarPosition() {
+    // `app.mobileNavbar` and its `containerEl` are undocumented Obsidian
+    // internals, read here for the navbar's element.
     if (!this.app.mobileNavbar || !('containerEl' in this.app.mobileNavbar)) {
       throw new Error(`Failed to find navbar container element.`);
     }
@@ -1127,29 +1130,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     const navbarBox = this.app.mobileNavbar.containerEl as
       | HTMLElement
       | undefined;
-    if (navbarBox) {
-      const setNavbarHeightProp = (height?: number) => {
-        let calculatedHeight: number =
-          height ?? navbarBox.getBoundingClientRect().height;
-        const marginBottom =
-          parseFloat(getComputedStyle(navbarBox).marginBottom) || 0;
-        calculatedHeight += marginBottom;
-
-        document.body.style.setProperty(
-          '--ir-mobile-toolbar-height',
-          `${calculatedHeight}px`
-        );
-      };
-
-      const observer = new ResizeObserver(() => setNavbarHeightProp());
-
-      observer.observe(navbarBox);
-      setNavbarHeightProp();
-      this.register(function cleanupNavbarObserver() {
-        observer.disconnect();
-        document.body.style.removeProperty('--ir-mobile-toolbar-height');
-      });
-    }
+    if (navbarBox) this.register(trackNavbarFootprint(navbarBox));
   }
 
   private verifySyncSettings(app: App): boolean {

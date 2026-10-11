@@ -646,6 +646,137 @@ test.describe('Action Bar', () => {
       .poll(async () => Math.abs((await lift())! - navbarFootprint))
       .toBeLessThanOrEqual(1);
   });
+
+  for (const device of [
+    { name: 'phone', viewport: { width: 420, height: 900 }, isPhone: true },
+    { name: 'tablet', viewport: { width: 1280, height: 800 }, isPhone: false },
+  ]) {
+    test(`action bars sit right on the navbar, or on the bottom safe area where there is none, on a ${device.name}, floating or not`, async () => {
+      const NOTE =
+        'sources/Memorizing a programming language using spaced repetition';
+      await importArticle(window, NOTE);
+      // Emulating reloads the app, and a reload mid-write empties the database
+      await expect.poll(() => pendingSaves(window)).toBe(0);
+      await emulateMobile(window, true);
+      await window.setViewportSize(device.viewport);
+      const body = window.locator('body');
+      if (device.isPhone) await expect(body).toHaveClass(/\bis-phone\b/);
+      else await expect(body).not.toHaveClass(/\bis-phone\b/);
+
+      /**
+       * The two appearance settings that decide whether the navbar floats
+       * over the view or sits below it. Obsidian answers each by toggling a
+       * class on <body> (`is-floating-nav`, `auto-full-screen`; obsidian.asar).
+       *
+       * Undocumented: the `floatingNavigation` and `autoFullScreen` vault
+       * configs, set through `Vault.setConfig`.
+       */
+      const setNavigation = async (floating: boolean, autoFull: boolean) => {
+        await window.evaluate(
+          ([f, a]) => {
+            const { vault } = (
+              window as unknown as {
+                app: {
+                  vault: { setConfig(key: string, value: unknown): void };
+                };
+              }
+            ).app;
+            vault.setConfig('floatingNavigation', f);
+            vault.setConfig('autoFullScreen', a);
+          },
+          [floating, autoFull]
+        );
+        await expect(body).toHaveClass(
+          floating ? /\bis-floating-nav\b/ : /^(?!.*\bis-floating-nav\b)/
+        );
+        await expect(body).toHaveClass(
+          autoFull ? /\bauto-full-screen\b/ : /^(?!.*\bauto-full-screen\b)/
+        );
+      };
+      const modes = [
+        { floating: false, autoFull: false },
+        { floating: true, autoFull: false },
+        { floating: false, autoFull: true },
+        { floating: true, autoFull: true },
+      ];
+
+      const bottomOf = (locator: Locator) =>
+        locator.evaluate((el) => el.getBoundingClientRect().bottom);
+      const leaf = window.locator('.workspace-leaf.mod-active');
+
+      /**
+       * On a phone: the bar's bottom edge meets the navbar's top edge in every
+       * mode — no strip of empty view between them when the navbar sits below
+       * the view, and no overlap when it floats over it.
+       *
+       * On a tablet there's no navbar to clear (Obsidian hides it there), only
+       * the bottom safe area, which the bar clears in every mode just as a
+       * note's editing-mode bar does (Obsidian lifts its bottom panels by
+       * `--safe-area-inset-bottom`; 34px under emulation).
+       */
+      const expectOnNavbar = async (bar: Locator) => {
+        await expect(bar).toBeVisible();
+        const viewContent = window.locator(
+          '.workspace-leaf.mod-active .workspace-leaf-content > .view-content'
+        );
+        for (const { floating, autoFull } of modes) {
+          await setNavigation(floating, autoFull);
+          const mode = JSON.stringify({ floating, autoFull });
+          if (device.isPhone) {
+            const navbar = window.locator('.mobile-navbar');
+            await expect(navbar).toBeVisible();
+            await expect
+              .poll(
+                async () =>
+                  Math.round(
+                    (await navbar.evaluate(
+                      (el) => el.getBoundingClientRect().top
+                    )) - (await bottomOf(bar))
+                  ),
+                { message: `navbar top − bar bottom, ${mode}` }
+              )
+              .toBe(0);
+          } else {
+            await expect(window.locator('.mobile-navbar')).toBeHidden();
+            const inset = await body.evaluate((el) =>
+              Number.parseFloat(
+                getComputedStyle(el).getPropertyValue(
+                  '--safe-area-inset-bottom'
+                )
+              )
+            );
+            expect(inset).toBeGreaterThan(0);
+            await expect
+              .poll(
+                async () =>
+                  Math.round(
+                    (await bottomOf(viewContent)) - (await bottomOf(bar))
+                  ),
+                { message: `view bottom − bar bottom, ${mode}` }
+              )
+              .toBe(inset);
+          }
+        }
+      };
+
+      await openNote(window, NOTE);
+      await expectOnNavbar(
+        leaf.locator('.markdown-source-view .ir-action-bar-panel')
+      );
+
+      await executeCommandById(window, 'markdown:toggle-preview');
+      await expectOnNavbar(leaf.locator('.ir-reading-mode-bar'));
+
+      await executeCommandById(window, 'incremental-reading:learn');
+      await window.locator('css=#begin-review-button').click();
+      await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
+      await expectOnNavbar(
+        window.locator(
+          '.workspace-leaf.mod-active .ir-review-interface .ir-action-bar'
+        )
+      );
+    });
+  }
 });
 
 test.describe('Review editor', () => {
