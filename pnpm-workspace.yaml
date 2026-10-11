@@ -8,3 +8,5 @@ minimumReleaseAge: 20000
 trustPolicyIgnoreAfter: 20000
 trustPolicyExclude:
   - 'react-redux' # required due to a change in their publishing process https://github.com/reduxjs/reselect/issues/752
+overrides:
+  'obsidian-typings>obsidian': '$obsidian'
