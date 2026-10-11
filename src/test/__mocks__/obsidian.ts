@@ -83,6 +83,34 @@ export class Notice {
   hide() {}
 }
 
+type Pos = { line: number; col: number; offset: number };
+
+/**
+ * A heading (`#Heading`) or block (`#^id`) a link names, as Obsidian's finds
+ * it in a note's cache: from its start to the next heading's, or the note's
+ * end; a block over its own span. Footnotes and nested heading paths, which
+ * nothing here links to, find nothing.
+ */
+export function resolveSubpath(
+  cache: {
+    headings?: { heading: string; position: { start: Pos } }[];
+    blocks?: Record<string, { position: { start: Pos; end: Pos } }>;
+  },
+  subpath: string
+): { start: Pos; end: Pos | null } | null {
+  if (subpath.startsWith('#^')) {
+    const block = cache.blocks?.[subpath.slice(2)];
+    return block ? { ...block.position } : null;
+  }
+  const headings = cache.headings ?? [];
+  const at = headings.findIndex(({ heading }) => `#${heading}` === subpath);
+  if (at === -1) return null;
+  return {
+    start: headings[at].position.start,
+    end: headings[at + 1]?.position.start ?? null,
+  };
+}
+
 // CodeMirror state field stubs — imported by ObsidianHelpers but not called in tests
 export const editorInfoField = {};
 export const editorEditorField = {};
@@ -385,8 +413,20 @@ export function setIcon(parent: HTMLElement, iconId: string): void {
 }
 
 export class MarkdownView {}
-export class Component {}
-export class MarkdownRenderer {}
+export class Component {
+  load(): void {}
+  unload(): void {}
+}
+/** Renders nothing; tests spy on `render` to put markup in its place. */
+export class MarkdownRenderer {
+  static async render(
+    _app: unknown,
+    _markdown: string,
+    _el: HTMLElement,
+    _sourcePath: string,
+    _component: Component
+  ): Promise<void> {}
+}
 export const Platform = {
   isMobile: false,
   isMobileApp: false,

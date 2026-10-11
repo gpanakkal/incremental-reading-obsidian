@@ -37,7 +37,7 @@ import { Notice } from '#/test/__mocks__/obsidian';
 import * as CardAnswerModal from '#/views/CardAnswerModal';
 import type ReviewView from '#/views/ReviewView';
 import { EditorState } from '@codemirror/state';
-import type { FileView, TFile } from 'obsidian';
+import type { FileView, PaneType, TFile } from 'obsidian';
 import {
   afterEach,
   beforeEach,
@@ -273,11 +273,14 @@ function wireGoToContext({
   registered?: string[];
 }) {
   const openFile = vi.fn().mockResolvedValue(undefined);
-  const getLeaf = vi.fn(() => ({ openFile }));
+  const getLeaf = vi.fn((_newLeaf?: PaneType | boolean) => ({ openFile }));
   const openWithDefaultApp = vi.fn();
   const getReviewItemFromFile = vi.fn().mockResolvedValue(item);
+  // No review tab, unless a test opens one
+  const getOpenReviewLeaf = vi.fn((): unknown => null);
   const plugin = {
     reviewManager: { getReviewItemFromFile },
+    getOpenReviewLeaf,
     app: {
       workspace: { getLeaf },
       viewRegistry: {
@@ -292,6 +295,7 @@ function wireGoToContext({
     getLeaf,
     openWithDefaultApp,
     getReviewItemFromFile,
+    getOpenReviewLeaf,
   };
 }
 
@@ -333,19 +337,34 @@ const contextArb = fc.option(
 );
 
 /**
+ * Where Go to context can be asked to open: `Keymap.isModEvent`'s answers for
+ * a click, `true` as a new tab, and `false` — a plain click, or a command —
+ * for where the user already is.
+ */
+const newLeafArb = fc.constantFrom<PaneType | boolean>(
+  false,
+  true,
+  'tab',
+  'split',
+  'window'
+);
+
+/**
  * Assert that `file` opened exactly once, the way following a link to it
- * would: in a new active tab at `eState` if a view takes its extension, else
- * in the system's default app.
+ * would: in the active tab at `eState` if a view takes its extension — or in
+ * a new one of `newLeaf`'s kind when asked for — else in the system's
+ * default app.
  */
 function expectOpened(
   wired: ReturnType<typeof wireGoToContext>,
   registered: string[],
   file: TFile,
-  eState: unknown
+  eState: unknown,
+  newLeaf: PaneType | boolean = false
 ) {
   if (registered.includes(file.extension)) {
     expect(wired.openWithDefaultApp).not.toHaveBeenCalled();
-    expect(wired.getLeaf).toHaveBeenCalledExactlyOnceWith('tab');
+    expect(wired.getLeaf).toHaveBeenCalledExactlyOnceWith(newLeaf);
     expect(wired.openFile).toHaveBeenCalledOnce();
     expect(wired.openFile.mock.calls[0]).toStrictEqual([
       file,
@@ -510,6 +529,48 @@ const editorArb = fc
       .tuple(fc.nat(doc.length), fc.nat(doc.length))
       .map(([anchor, head]) => ({ doc, anchor, head }))
   );
+
+/**
+ * Go to context asked for from review on the `type` item at `itemFile`: the
+ * tab the user is in is the review tab, whose view shows a context in review
+ * when `shows`, and a new tab is another.
+ */
+function wireInReview(
+  itemFile: TFile,
+  shows: boolean,
+  type: NoteType = 'snippet'
+) {
+  const item = {
+    data: { id: 'item-1', type },
+    file: itemFile,
+  } as unknown as ReviewItem;
+  const wired = wireGoToContext({ item, registered: ['md'] });
+  const showInReview = vi.fn(
+    async (_file: TFile, _openState: unknown): Promise<boolean> => shows
+  );
+  const review = {
+    openFile: vi.fn().mockResolvedValue(undefined),
+    view: { showInReview },
+  };
+  const newTab = { openFile: vi.fn().mockResolvedValue(undefined) };
+  wired.getLeaf.mockImplementation((newLeaf) => (newLeaf ? newTab : review));
+  wired.getOpenReviewLeaf.mockReturnValue(review);
+  return { ...wired, review, newTab, showInReview };
+}
+
+/** Where in its note a snippet's or card's context is, when known. */
+const contextEStateArb = fc.option(
+  fc.record({
+    match: fc.record({
+      content: fc.string(),
+      matches: fc.array(fc.tuple(fc.nat(), fc.nat()), {
+        minLength: 1,
+        maxLength: 1,
+      }),
+    }),
+  }),
+  { nil: null }
+);
 
 // #endregion
 
@@ -1473,7 +1534,8 @@ describe('Actions.goToContext', () => {
         basenameArb,
         contextArb,
         registeredArb,
-        async (type, basename, context, registered) => {
+        newLeafArb,
+        async (type, basename, context, registered, newLeaf) => {
           vi.restoreAllMocks();
           Notice.reset();
           const itemFile = makeTFile(basename);
@@ -1486,7 +1548,7 @@ describe('Actions.goToContext', () => {
             .mockResolvedValue(context);
           const wired = wireGoToContext({ item, registered });
 
-          await new Actions(wired.plugin).goToContext(itemFile);
+          await new Actions(wired.plugin).goToContext(itemFile, newLeaf);
 
           expect(wired.getReviewItemFromFile).toHaveBeenCalledWith(itemFile);
           expect(resolve).toHaveBeenCalledWith(
@@ -1502,7 +1564,13 @@ describe('Actions.goToContext', () => {
             return;
           }
           expect(Notice.messages).toEqual([]);
-          expectOpened(wired, registered, context.file, context.eState);
+          expectOpened(
+            wired,
+            registered,
+            context.file,
+            context.eState,
+            newLeaf
+          );
         }
       )
     );
@@ -1515,7 +1583,8 @@ describe('Actions.goToContext', () => {
         fc.record({ start: fc.nat(), end: fc.nat() }),
         fc.string(),
         registeredArb,
-        async (basename, pdfRange, subpath, registered) => {
+        newLeafArb,
+        async (basename, pdfRange, subpath, registered, newLeaf) => {
           vi.restoreAllMocks();
           Notice.reset();
           const itemFile = makeTFile(basename);
@@ -1551,9 +1620,9 @@ describe('Actions.goToContext', () => {
             view,
           }));
 
-          await new Actions(wired.plugin).goToContext(itemFile);
+          await new Actions(wired.plugin).goToContext(itemFile, newLeaf);
 
-          expectOpened(wired, registered, pdf, { subpath });
+          expectOpened(wired, registered, pdf, { subpath }, newLeaf);
           if (registered.includes('pdf')) {
             expect(reveal).toHaveBeenCalledExactlyOnceWith(view, pdfRange);
             expect(order).toEqual(['open', 'reveal']);
@@ -1563,6 +1632,89 @@ describe('Actions.goToContext', () => {
         }
       )
     );
+  });
+
+  it('opens the context where the user already is when not asked for a new tab', async () => {
+    // A command has no click to read a modifier off: it navigates in place,
+    // which in review keeps review showing the parent item.
+    const itemFile = makeTFile('Item');
+    const context = { file: makeTFile('Parent'), eState: null };
+    vi.spyOn(itemContext, 'resolveItemContext').mockResolvedValue(context);
+    const wired = wireGoToContext({
+      item: {
+        data: { id: 'item-1', type: 'snippet' },
+        file: itemFile,
+      } as unknown as ReviewItem,
+      registered: [context.file.extension],
+    });
+
+    await new Actions(wired.plugin).goToContext(itemFile);
+
+    expectOpened(wired, [context.file.extension], context.file, null, false);
+  });
+
+  describe('in the review tab', () => {
+    it('hands a context review can show to review, where the user is', async () => {
+      await fc.assert(
+        fc.asyncProperty(contextEStateArb, async (eState) => {
+          vi.restoreAllMocks();
+          const itemFile = makeTFile('Item');
+          const context = { file: makeTFile('Parent'), eState };
+          vi.spyOn(itemContext, 'resolveItemContext').mockResolvedValue(
+            context
+          );
+          const wired = wireInReview(itemFile, true);
+
+          await new Actions(wired.plugin).goToContext(itemFile);
+
+          expect(wired.showInReview).toHaveBeenCalledExactlyOnceWith(
+            context.file,
+            eState ? { active: true, eState } : { active: true }
+          );
+          expect(wired.review.openFile).not.toHaveBeenCalled();
+          expect(wired.newTab.openFile).not.toHaveBeenCalled();
+        })
+      );
+    });
+
+    it('opens a context review cannot show in a new tab, leaving review as it is', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom('snippet', 'article'),
+          contextEStateArb,
+          async (type, eState) => {
+            vi.restoreAllMocks();
+            const itemFile = makeTFile('Item');
+            const contextFile = makeTFile('Source');
+            vi.spyOn(itemContext, 'resolveItemContext').mockResolvedValue({
+              file: contextFile,
+              eState,
+            });
+            vi.spyOn(itemContext, 'findArticleSource').mockReturnValue({
+              file: contextFile,
+            });
+            const wired = wireInReview(itemFile, false, type);
+
+            await new Actions(wired.plugin).goToContext(itemFile);
+
+            const opened =
+              type === 'snippet' && eState
+                ? { active: true, eState }
+                : { active: true };
+            expect(wired.showInReview).toHaveBeenCalledExactlyOnceWith(
+              contextFile,
+              opened
+            );
+            expect(wired.review.openFile).not.toHaveBeenCalled();
+            expect(wired.newTab.openFile).toHaveBeenCalledExactlyOnceWith(
+              contextFile,
+              opened
+            );
+            expect(wired.getLeaf).toHaveBeenLastCalledWith('tab');
+          }
+        )
+      );
+    });
   });
 
   it('highlights nothing more for a context with no PDF passage', async () => {
@@ -1601,7 +1753,8 @@ describe('Actions.goToContext', () => {
           )
         ),
         registeredArb,
-        async (basename, source, registered) => {
+        newLeafArb,
+        async (basename, source, registered, newLeaf) => {
           vi.restoreAllMocks();
           Notice.reset();
           const itemFile = makeTFile(basename);
@@ -1615,7 +1768,7 @@ describe('Actions.goToContext', () => {
           const resolve = vi.spyOn(itemContext, 'resolveItemContext');
           const wired = wireGoToContext({ item: article, registered });
 
-          await new Actions(wired.plugin).goToContext(itemFile);
+          await new Actions(wired.plugin).goToContext(itemFile, newLeaf);
 
           expect(find).toHaveBeenCalledExactlyOnceWith(
             wired.plugin.app,
@@ -1633,7 +1786,7 @@ describe('Actions.goToContext', () => {
             return;
           }
           expect(Notice.messages).toEqual([]);
-          expectOpened(wired, registered, source.file, null);
+          expectOpened(wired, registered, source.file, null, newLeaf);
         }
       )
     );

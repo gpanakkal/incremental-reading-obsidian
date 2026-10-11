@@ -3,6 +3,7 @@ import {
   MORE_OPTIONS_SECTIONS,
   PLACEHOLDER_PLUGIN_ICON,
 } from '#/lib/constants';
+import { isPositionalEState } from '#/lib/ephemeral-position';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { isEditableText } from '#/lib/mime';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
@@ -10,6 +11,7 @@ import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type { PdfViewer } from '#/lib/pdf/obsidian-pdf';
 import {
   actionsToReach,
+  goToReviewPlace,
   isDestination,
   placeOf,
   placeToEphemeralState,
@@ -24,10 +26,11 @@ import {
   setSelectionMode,
   type ReviewPage,
 } from '#/lib/store';
-import type { ReviewItem } from '#/lib/types';
+import type { MaybeMissingItem, ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import {
   FileView,
+  Keymap,
   Menu,
   MenuItem,
   Platform,
@@ -35,6 +38,7 @@ import {
   WorkspaceWindow,
   type IconName,
   type MarkdownEditView,
+  type OpenViewState,
   type TFile,
   type ViewStateResult,
   type WorkspaceLeaf,
@@ -149,6 +153,18 @@ export default class ReviewView extends FileView {
   #selectionScope: Scope;
   /** See {@link pdfViewer}. */
   #pdfViewer: PdfViewer | null = null;
+  /** Undoes {@link interceptOpenFile}; `null` while nothing is wrapped. */
+  #restoreOpenFile: (() => void) | null = null;
+  /**
+   * Where in an item a link followed in this tab opened it, until the item's
+   * editor mounts to take it — see {@link onArrival}.
+   */
+  #arrival: { itemId: string; eState: unknown } | null = null;
+  /** The editors on screen listening for {@link onArrival}. */
+  readonly #positioners = new Set<{
+    itemId: string;
+    position: (eState: unknown) => void;
+  }>();
 
   /**
    * The PDF viewer on screen, or `null` when the item isn't a PDF article —
@@ -178,6 +194,7 @@ export default class ReviewView extends FileView {
 
     const unsub = plugin.store.subscribe(() => {
       this.syncSelectionScope();
+      this.dropStaleArrival();
       this.trackPlace(placeOf(plugin.store.getState()));
       const currentPage = plugin.store.getState().page;
       if (currentPage !== this.#page) {
@@ -448,6 +465,8 @@ export default class ReviewView extends FileView {
   goToPlace(place: ReviewPlace): void {
     const { store } = this.plugin;
     this.#lastRecorded = null;
+    // A move through history is no link followed to a place
+    this.#arrival = null;
     this.#applyingHistory = true;
     try {
       // Every move there ends selection mode on its own, bar one: to where
@@ -668,7 +687,160 @@ export default class ReviewView extends FileView {
     this.registerEvent(
       this.leaf.on('history-change', () => this.refreshMobileNavbar())
     );
+    this.interceptOpenFile();
     this.#open = true;
+  }
+
+  /**
+   * Have every link followed in this tab to an item show that item in review,
+   * rather than swap review out for a note view of it.
+   *
+   * Whatever opens a file in the tab — a wikilink, a card embed's open button,
+   * the `source` property, a snippet highlight, Go to context, the file
+   * explorer, search — ends in the leaf's `openFile`. Obsidian picks the leaf
+   * first: a plain click reuses this one, a new-tab click (Ctrl/Cmd, middle
+   * button) makes another, whose `openFile` is its own and opens the note view
+   * as always. So wrapping this leaf's alone keeps review in review exactly
+   * when the link would have replaced it.
+   *
+   * Undocumented: `WorkspaceLeaf.openFile` is documented, but replacing it on
+   * the instance relies on Obsidian calling it through the leaf
+   * (`leaf.openLinkText` and the workspace's `openLinkText` do,
+   * `this.openFile(...)`), read from obsidian.asar 1.13. Undone by
+   * {@link onClose}, before the leaf moves on to another view.
+   */
+  interceptOpenFile(): void {
+    const { leaf } = this;
+    // Obsidian's is on the prototype; one of the leaf's own, from whoever
+    // wrapped it before, is what goes back
+    const own = Object.getOwnPropertyDescriptor(leaf, 'openFile');
+    // Looked up at each call, not kept: a plugin may patch the prototype's
+    // after review opened
+    const original = (file: TFile, openState?: OpenViewState) => {
+      const openFile: unknown = own
+        ? own.value
+        : Reflect.get(Object.getPrototypeOf(leaf) as object, 'openFile');
+      return Reflect.apply(openFile as WorkspaceLeaf['openFile'], leaf, [
+        file,
+        openState,
+      ]);
+    };
+    // Off once the tab closes, after which a wrapper left in place because
+    // something wrapped it again only passes links on
+    let active = true;
+    const wrapper = async (
+      file: TFile,
+      openState?: OpenViewState
+    ): Promise<void> => {
+      if (active) {
+        if (await this.showInReview(file, openState)) return;
+        // Closed while it was looked up: the leaf is gone, or showing what
+        // the user moved on to, which a late open would replace
+        if (!active) return;
+      }
+      await original(file, openState);
+    };
+    leaf.openFile = wrapper;
+    this.#restoreOpenFile = () => {
+      this.#restoreOpenFile = null;
+      active = false;
+      // Something wrapped it again since: taking ours out would drop theirs
+      if (leaf.openFile !== wrapper) return;
+      if (own) Object.defineProperty(leaf, 'openFile', own);
+      else delete (leaf as Partial<WorkspaceLeaf>).openFile;
+    };
+  }
+
+  /**
+   * Show `file` in review when it is an item's note, bringing the tab forward
+   * when `openState` asks for it as `openFile` would.
+   *
+   * The note has to be one review shows as that item: the row the path names
+   * may be a tombstone, or one the note's `ir-id` disowns, and review would
+   * land on nothing while the note never opened. One that can't be looked up
+   * isn't shown either, and opens as it would have.
+   * @returns whether review now shows it
+   */
+  async showInReview(file: TFile, openState?: OpenViewState): Promise<boolean> {
+    let item: ReviewItem | null;
+    let shown: MaybeMissingItem | null;
+    try {
+      item = await this.#reviewManager.getReviewItemFromFile(file);
+      if (!item) return false;
+      shown = await this.#reviewManager.getItemOrMissingFromId(item.data.id);
+    } catch (error) {
+      // A link that can't be looked up still opens, as it would have
+      console.error('Incremental Reading: could not look a link up', error);
+      return false;
+    }
+    if (!this.#open || shown?.file?.path !== file.path) return false;
+    this.arrive(item.data.id, openState?.eState);
+    goToReviewPlace(this.plugin.store, item.data.id);
+    if (openState?.active) {
+      this.app.workspace.setActiveLeaf(this.leaf, { focus: true });
+    }
+    return true;
+  }
+
+  /**
+   * Show the item whose file is missing from `reference` in review, as review
+   * shows any item missing its file: in its place, with the way to relink it.
+   * For a highlight clicked in this tab whose item has no note to open.
+   * @returns whether a live item has that reference, and review now shows it
+   */
+  async showMissingInReview(reference: string): Promise<boolean> {
+    const id = await this.#reviewManager.liveItemIdAt(reference);
+    if (!this.#open || id === null) return false;
+    goToReviewPlace(this.plugin.store, id);
+    return true;
+  }
+
+  /**
+   * Hand where a link put `itemId` — a heading, a block, a Go to context
+   * range — to the editor showing it: the one already on screen, or else the
+   * next to mount for it. Nothing is handed on for a link that names no place,
+   * which leaves the editor to restore where the reader last was.
+   */
+  arrive(itemId: string, eState: unknown): void {
+    this.#arrival = null;
+    if (!isPositionalEState(eState)) return;
+    let taken = false;
+    for (const positioner of this.#positioners) {
+      if (positioner.itemId !== itemId) continue;
+      positioner.position(eState);
+      taken = true;
+    }
+    if (!taken) this.#arrival = { itemId, eState };
+  }
+
+  /**
+   * Listen, while an editor shows `itemId`, for links that put the item at a
+   * place in it, starting with one followed before the editor mounted. An
+   * editor calls this as it mounts, and the returned function as it goes.
+   */
+  onArrival(itemId: string, position: (eState: unknown) => void): () => void {
+    const arrival = this.#arrival;
+    if (arrival?.itemId === itemId) {
+      this.#arrival = null;
+      position(arrival.eState);
+    }
+    const positioner = { itemId, position };
+    this.#positioners.add(positioner);
+    return () => {
+      this.#positioners.delete(positioner);
+    };
+  }
+
+  /**
+   * Forget a place no editor took by the time review moved on to some other
+   * item: arriving there later, from the queue or through history, is not
+   * following that link.
+   */
+  dropStaleArrival(): void {
+    const { currentItemId } = this.plugin.store.getState();
+    if (currentItemId === null) return;
+    if (this.#arrival?.itemId === currentItemId) return;
+    this.#arrival = null;
   }
 
   /**
@@ -769,6 +941,7 @@ export default class ReviewView extends FileView {
 
   async onClose() {
     this.#open = false;
+    this.#restoreOpenFile?.();
     await super.onClose();
     render(null, this.contentEl);
     this.activeEditor = null;
@@ -872,8 +1045,8 @@ export default class ReviewView extends FileView {
         .setTitle('Go to context')
         .setIcon('lucide-locate')
         .setSection('pane')
-        .onClick(() => {
-          void this.plugin.actions.goToContext(file);
+        .onClick((evt) => {
+          void this.plugin.actions.goToContext(file, Keymap.isModEvent(evt));
         })
     );
 

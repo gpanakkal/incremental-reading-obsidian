@@ -759,6 +759,21 @@ export default class ReviewManager {
   }
 
   /**
+   * The id of the live item — article, snippet or card — whose reference is
+   * `reference`, or `null` when none is: for an item missing its file, which
+   * no note at the path can name by its `ir-id`.
+   */
+  async liveItemIdAt(reference: string): Promise<string | null> {
+    const rows = (await this.#repo.query(
+      `SELECT id FROM article WHERE reference = $1 AND deleted = FALSE
+       UNION ALL SELECT id FROM snippet WHERE reference = $1 AND deleted = FALSE
+       UNION ALL SELECT id FROM srs_card WHERE reference = $1 AND deleted = FALSE`,
+      [reference]
+    )) as { id: string }[];
+    return rows[0]?.id ?? null;
+  }
+
+  /**
    * Whether `file`, which was at `path`, is an item's file: a live row names
    * `path`, and a note there carries that row's `ir-id` (see
    * `ItemPathGuard`). A file with no frontmatter, a PDF say, is known by its

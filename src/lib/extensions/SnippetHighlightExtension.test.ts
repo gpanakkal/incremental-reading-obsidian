@@ -74,6 +74,8 @@ type FakeEventRef = { name: string; callback: (...args: unknown[]) => unknown };
 
 type FakePlugin = {
   reviewManager: FakeReviewManager | null;
+  /** The review tab, when one is open; none unless a test opens one. */
+  getOpenReviewLeaf: () => unknown;
   app: {
     vault: { getFileByPath: (path: string) => unknown };
     workspace: {
@@ -97,6 +99,7 @@ function makePlugin(
   const handlers = new Map<string, Set<(...args: unknown[]) => unknown>>();
   return {
     reviewManager,
+    getOpenReviewLeaf: () => null,
     app: {
       // Every snippet's file is there, unless a test says otherwise
       vault: { getFileByPath: (path: string) => ({ path }) },
@@ -398,6 +401,55 @@ function placeChanges(
   }
   return specs;
 }
+
+/**
+ * A plugin whose items are all missing their files, with a review tab open
+ * that shows the missing item in review as it is asked to — or says it has
+ * none at the reference, when `known` is false.
+ */
+function wireMissing(known = true) {
+  Notice.reset();
+  const plugin = makePlugin(makeReviewManager());
+  plugin.app.vault.getFileByPath = () => null;
+  const containerEl = document.body.appendChild(document.createElement('div'));
+  const showMissingInReview = vi.fn(async (_ref: string) => known);
+  plugin.getOpenReviewLeaf = () => ({
+    view: { containerEl, showMissingInReview },
+  });
+  return { plugin, containerEl, showMissingInReview };
+}
+
+/** A highlight in `parent` of the snippet, or the card, at `snippets/a.md`. */
+function highlightIn(parent: HTMLElement, card = false): HTMLElement {
+  const span = parent.appendChild(document.createElement('span'));
+  span.className = card
+    ? 'ir-snippet-highlight ir-card-highlight'
+    : 'ir-snippet-highlight';
+  span.setAttribute('data-snippet-ref', 'snippets/a.md');
+  return span;
+}
+
+/** A click on `target`, as the document's listener receives it. */
+function clickOn(target: HTMLElement, init: MouseEventInit = {}): MouseEvent {
+  const event = new MouseEvent('click', { cancelable: true, ...init });
+  Object.defineProperty(event, 'target', { value: target });
+  return event;
+}
+
+/** Modifier keys a click on a highlight can carry, and the button: left or middle. */
+const clickInitArb = fc.record({
+  button: fc.constantFrom(0, 1),
+  ctrlKey: fc.boolean(),
+  metaKey: fc.boolean(),
+  altKey: fc.boolean(),
+  shiftKey: fc.boolean(),
+});
+/** Whether Obsidian reads a click as one for the tab the user is in. */
+const isPlain = (init: MouseEventInit) =>
+  init.button === 0 && !init.ctrlKey && !init.metaKey;
+
+/** Let a lookup the click started settle. */
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 // #endregion
 
@@ -2541,5 +2593,90 @@ describe('ir-highlights-changed subscription', () => {
     expect(() =>
       irPlugin.app.workspace.trigger('ir-highlights-changed', FILE_PATH)
     ).not.toThrow();
+  });
+});
+
+describe('openHighlightFromEvent, for an item missing its file', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+  });
+
+  it('shows the item in review for a plain click in the review tab, and anywhere else says to relink it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        clickInitArb,
+        fc.boolean(),
+        fc.boolean(),
+        async (init, inReview, card) => {
+          const { plugin, containerEl, showMissingInReview } = wireMissing();
+          const parent = inReview
+            ? containerEl
+            : document.body.appendChild(document.createElement('div'));
+          const event = clickOn(highlightIn(parent, card), init);
+
+          expect(openHighlightFromEvent(plugin as never, event)).toBe(true);
+          await flush();
+
+          expect(event.defaultPrevented).toBe(true);
+          expect(plugin.app.workspace.openLinkText).not.toHaveBeenCalled();
+          if (inReview && isPlain(init)) {
+            expect(showMissingInReview).toHaveBeenCalledExactlyOnceWith(
+              'snippets/a.md'
+            );
+            expect(Notice.messages).toEqual([]);
+          } else {
+            expect(showMissingInReview).not.toHaveBeenCalled();
+            expect(Notice.messages).toEqual([
+              `No file at "snippets/a.md". Relink the ${card ? 'card' : 'snippet'} from the review queue.`,
+            ]);
+          }
+        }
+      )
+    );
+  });
+
+  it('says to relink it when review has no item at the reference to show', async () => {
+    const { plugin, containerEl } = wireMissing(false);
+
+    openHighlightFromEvent(plugin as never, clickOn(highlightIn(containerEl)));
+    await flush();
+
+    expect(Notice.messages).toEqual([
+      'No file at "snippets/a.md". Relink the snippet from the review queue.',
+    ]);
+  });
+
+  it('says to relink it when review cannot look the reference up', async () => {
+    const { plugin, containerEl, showMissingInReview } = wireMissing();
+    const error = new Error('database closed');
+    showMissingInReview.mockRejectedValueOnce(error);
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    openHighlightFromEvent(plugin as never, clickOn(highlightIn(containerEl)));
+    await flush();
+
+    expect(Notice.messages).toEqual([
+      'No file at "snippets/a.md". Relink the snippet from the review queue.',
+    ]);
+    expect(logged).toHaveBeenCalledExactlyOnceWith(
+      'Incremental Reading: could not look a link up',
+      error
+    );
+  });
+
+  it('says to relink it when no review tab is open', async () => {
+    const { plugin } = wireMissing();
+    plugin.getOpenReviewLeaf = () => null;
+
+    openHighlightFromEvent(
+      plugin as never,
+      clickOn(highlightIn(document.body))
+    );
+    await flush();
+
+    expect(Notice.messages).toEqual([
+      'No file at "snippets/a.md". Relink the snippet from the review queue.',
+    ]);
   });
 });

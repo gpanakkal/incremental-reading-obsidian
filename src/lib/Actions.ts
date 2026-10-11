@@ -15,6 +15,7 @@ import type ReviewView from '#/views/ReviewView';
 import {
   type FileView,
   MarkdownView,
+  type PaneType,
   type TFile,
   type WorkspaceLeaf,
 } from 'obsidian';
@@ -880,10 +881,17 @@ export class Actions {
    *
    * Takes the item's note rather than a view, since it is reached from
    * anywhere a file menu opens — the file explorer included, where no view
-   * shows the note at all. Always opens in a new tab, so wherever it was
-   * reached from stays as it was.
+   * shows the note at all.
+   *
+   * Opens where the user is, as following a link does: in review, a context
+   * that is an item is shown in review (see `ReviewView.interceptOpenFile`),
+   * at the highlight or link when it is known. One review can't show — an
+   * article's source, a note that is no item — opens in a new tab instead, as
+   * Go to context always did, rather than put review out of its tab.
+   * @param newLeaf where to open it instead: a new tab, split or window, as
+   *   `Keymap.isModEvent` answers for a modified or middle click
    */
-  goToContext = async (file: TFile) => {
+  goToContext = async (file: TFile, newLeaf: PaneType | boolean = false) => {
     const itemTitle = getContentSlice(
       file.basename,
       CONTENT_TITLE_SLICE_LENGTH,
@@ -907,7 +915,7 @@ export class Actions {
         );
         return;
       }
-      await this._openInNewTab(source.file, null);
+      await this._openFile(source.file, null, newLeaf);
       return;
     }
 
@@ -920,7 +928,7 @@ export class Actions {
       Obsidian.notify(`"${itemTitle}" has no parent or local source to open`);
       return;
     }
-    const leaf = await this._openInNewTab(context.file, context.eState);
+    const leaf = await this._openFile(context.file, context.eState, newLeaf);
     if (leaf && context.pdfRange) {
       await revealPdfContext(leaf.view, context.pdfRange);
     }
@@ -1020,30 +1028,50 @@ export class Actions {
   };
 
   /**
-   * Open a vault file the way following a link to it would, in a new tab: in
-   * whichever view is registered for its extension — markdown, PDF, or one a
-   * core or community plugin adds.
-   *
-   * A file no view is registered for goes straight to the system's default
-   * app. `WorkspaceLeaf.openFile` would do the same, but only after the new
-   * tab exists, leaving it behind empty.
-   *
-   * @returns the new tab, or null when the file went to the default app.
+   * Open a vault file the way following a link to it would, in a new tab.
+   * See {@link _openFile}.
    */
   _openInNewTab = async (
     file: TFile,
     eState: ItemContext['eState']
+  ): Promise<WorkspaceLeaf | null> => this._openFile(file, eState, 'tab');
+
+  /**
+   * Open a vault file the way following a link to it would: in whichever view
+   * is registered for its extension — markdown, PDF, or one a core or
+   * community plugin adds — in the leaf `Workspace.getLeaf(newLeaf)` picks,
+   * which for `false` is the tab the user is in.
+   *
+   * A file no view is registered for goes straight to the system's default
+   * app. `WorkspaceLeaf.openFile` would do the same, but only after a new
+   * tab exists, leaving it behind empty.
+   *
+   * When the tab the user is in is the review tab, the review view takes the
+   * file, and shows it in review when it is an item it can show; anything
+   * else opens in a new tab instead, rather than replace review.
+   *
+   * @returns the leaf, or null when the file went to the default app.
+   */
+  _openFile = async (
+    file: TFile,
+    eState: ItemContext['eState'],
+    newLeaf: PaneType | boolean
   ): Promise<WorkspaceLeaf | null> => {
     const { app } = this.plugin;
     if (!app.viewRegistry.isExtensionRegistered(file.extension)) {
       app.openWithDefaultApp(file.path);
       return null;
     }
-    const leaf = app.workspace.getLeaf('tab');
-    await leaf.openFile(file, {
-      active: true,
-      ...(eState && { eState }),
-    });
+    const openState = { active: true, ...(eState && { eState }) };
+    let leaf = app.workspace.getLeaf(newLeaf);
+    if (leaf === this.plugin.getOpenReviewLeaf()) {
+      // Asked of the view itself, so this and a link followed in review agree
+      // on what review shows
+      const review = leaf.view as ReviewView;
+      if (await review.showInReview(file, openState)) return leaf;
+      leaf = app.workspace.getLeaf('tab');
+    }
+    await leaf.openFile(file, openState);
     return leaf;
   };
 

@@ -12,9 +12,11 @@ import {
   importArticle,
   leafSnapshot,
   openFileInActiveLeaf,
+  openNote,
   REVIEW_VIEW_DEFAULT_TITLE,
   REVIEW_VIEW_TYPE,
   reviewHeader,
+  selectParagraph,
   setNativeMenus,
   setPluginSetting,
   setReviewTitleBar,
@@ -1066,6 +1068,309 @@ test.describe('Review button on a note', () => {
     });
   }
 });
+test.describe('Links followed in review', () => {
+  const SOURCE = 'sources/Security Principles';
+  const SOURCE_PATH = `${SOURCE}.md`;
+  const SOURCE_TITLE = 'Security Principles';
+  const PARAGRAPH =
+    'Before we start discussing the different security principles';
+  const BULLET =
+    'Explain the security functions: Confidentiality, Integrity and Availability (CIA).';
+  /** A paragraph far enough down the article to be centered on screen. */
+  const LOW_PARAGRAPH =
+    'Consider the following analogy: you have a locked drawer';
+  /**
+   * How long a link may take to land: well under `CURRENT_ITEM_REFETCH_TIME`
+   * (5s), whose poll would otherwise put review right after a missed move and
+   * pass a test of a navigation that never happened.
+   */
+  const LANDS_WITHIN = { timeout: 3000 };
+
+  let pageErrors: string[];
+
+  test.beforeEach(async () => {
+    pageErrors = [];
+    window.on('pageerror', (error) => pageErrors.push(error.message));
+    await window.setViewportSize({ width: 1280, height: 800 });
+  });
+
+  test.afterEach(() => {
+    const testInfo = test.info();
+    if (testInfo.status !== testInfo.expectedStatus) return;
+    expect(pageErrors).toEqual([]);
+  });
+
+  type LinkTestWindow = {
+    app: {
+      workspace: {
+        activeLeaf: {
+          view: { getViewType(): string; file?: { path: string } | null };
+        } | null;
+        getLeavesOfType(type: string): {
+          view: { getViewType(): string; file?: { path: string } | null };
+        }[];
+        activeEditor: {
+          editor: {
+            getValue(): string;
+            offsetToPos(offset: number): { line: number; ch: number };
+            getLine(line: number): string;
+            setSelection(
+              from: { line: number; ch: number },
+              to: { line: number; ch: number }
+            ): void;
+          } | null;
+        } | null;
+      };
+      vault: {
+        getFileByPath(path: string): unknown;
+        read(file: unknown): Promise<string>;
+        process(file: unknown, fn: (text: string) => string): Promise<string>;
+      };
+      plugins: {
+        plugins: Record<
+          string,
+          {
+            store: {
+              getState(): { page: string; currentItemId: string | null };
+            };
+            reviewManager: {
+              repo: { query(sql: string): Record<string, unknown>[] };
+            };
+          }
+        >;
+      };
+    };
+  };
+
+  /** The review tab's state, wherever the active tab is. */
+  const reviewTab = () =>
+    window.evaluate((viewType) => {
+      const { app } = window as unknown as LinkTestWindow;
+      const [leaf] = app.workspace.getLeavesOfType(viewType);
+      const { page, currentItemId } =
+        app.plugins.plugins['incremental-reading'].store.getState();
+      return {
+        open: !!leaf,
+        active: leaf === app.workspace.activeLeaf,
+        file: leaf?.view.file?.path ?? null,
+        page,
+        currentItemId,
+      };
+    }, REVIEW_VIEW_TYPE);
+
+  /** The active tab's view type and file. */
+  const activeTab = () =>
+    window.evaluate(() => {
+      const { app } = window as unknown as LinkTestWindow;
+      const view = app.workspace.activeLeaf?.view;
+      return {
+        type: view?.getViewType() ?? null,
+        file: view?.file?.path ?? null,
+      };
+    });
+
+  /** Import the source as an article, unless it is already, and review it. */
+  async function reviewSource({ imported = false } = {}) {
+    if (!imported) await importArticle(window, SOURCE);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    const article = await waitForReviewItem(window);
+    expect(article.title).toBe(SOURCE_TITLE);
+    return article;
+  }
+
+  /** The review editor's highlight of the snippet just extracted. */
+  const highlight = () =>
+    window.locator(
+      `[data-type="${REVIEW_VIEW_TYPE}"] .cm-content .ir-snippet-highlight`
+    );
+
+  /** Extract the paragraph to a snippet, from review; its note's path. */
+  async function extractInReview() {
+    await selectParagraph(window, PARAGRAPH);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+    await expect(highlight()).toHaveCount(1);
+    const reference = await highlight().getAttribute('data-snippet-ref');
+    if (!reference) throw new Error('The highlight names no snippet');
+    return reference;
+  }
+
+  /**
+   * Wait for review, in the active tab, to show the item whose note is at
+   * `path`, as fast as a link lands; the item's id.
+   */
+  async function expectReviewShowing(path: string) {
+    await expect
+      .poll(reviewTab, LANDS_WITHIN)
+      .toMatchObject({ active: true, page: 'review', file: path });
+    const { currentItemId } = await reviewTab();
+    expect(currentItemId).not.toBeNull();
+    return currentItemId!;
+  }
+
+  /**
+   * Extract the paragraph starting `text` to a snippet in a note tab of the
+   * article, wherever it is down the note; the snippet's note's path.
+   */
+  async function extractInNote(text: string) {
+    await openNote(window, SOURCE);
+    await window.evaluate((text) => {
+      const { app } = window as unknown as LinkTestWindow;
+      const editor = app.workspace.activeEditor!.editor!;
+      const { line } = editor.offsetToPos(editor.getValue().indexOf(text));
+      editor.setSelection(
+        { line, ch: 0 },
+        { line, ch: editor.getLine(line).length }
+      );
+    }, text);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+    const references = () =>
+      window.evaluate(() => {
+        const { app } = window as unknown as LinkTestWindow;
+        return app.plugins.plugins['incremental-reading'].reviewManager.repo
+          .query('SELECT reference FROM snippet')
+          .map((row) => row.reference as string);
+      });
+    await expect.poll(references).toHaveLength(1);
+    return (await references())[0];
+  }
+
+  /** The card embed review wrote into the article: the card's link text. */
+  const cardLinkInSource = () =>
+    window.evaluate(async (path) => {
+      const { app } = window as unknown as LinkTestWindow;
+      const text = await app.vault.read(app.vault.getFileByPath(path));
+      return /!\[\[([^\]|]+)\|ir-hide-title\]\]/.exec(text)?.[1] ?? null;
+    }, SOURCE_PATH);
+
+  test('a plain click on a snippet highlight shows the snippet in review, and back returns to the article', async () => {
+    const article = await reviewSource();
+    const reference = await extractInReview();
+
+    await highlight().click();
+
+    const snippet = await expectReviewShowing(reference);
+    expect(snippet).not.toBe(article.id);
+    expect(await activeTab()).toEqual({
+      type: REVIEW_VIEW_TYPE,
+      file: reference,
+    });
+
+    await executeCommandById(window, 'app:go-back');
+    await expectReviewOn(window, article);
+    await executeCommandById(window, 'app:go-forward');
+    expect(await expectReviewShowing(reference)).toBe(snippet);
+  });
+
+  for (const how of ['Ctrl+click', 'middle click'] as const) {
+    test(`${how} on a snippet highlight opens the snippet's note in a new tab, leaving review as it was`, async () => {
+      const article = await reviewSource();
+      const reference = await extractInReview();
+
+      await highlight().click(
+        how === 'Ctrl+click'
+          ? { modifiers: ['ControlOrMeta'] }
+          : { button: 'middle' }
+      );
+
+      await expect
+        .poll(activeTab, LANDS_WITHIN)
+        .toEqual({ type: 'markdown', file: reference });
+      expect(await reviewTab()).toMatchObject({
+        open: true,
+        active: false,
+        page: 'review',
+        currentItemId: article.id,
+        file: SOURCE_PATH,
+      });
+    });
+  }
+
+  test('a plain click on a wikilink to a card shows the card in review', async () => {
+    // Made in a note tab: in review the bullet is out of view, and unrendered
+    await openNote(window, SOURCE);
+    await selectParagraph(window, BULLET);
+    await executeCommandById(window, 'incremental-reading:create-card');
+    await expect.poll(cardLinkInSource, { timeout: 10_000 }).not.toBeNull();
+    const card = (await cardLinkInSource())!;
+    const article = await reviewSource();
+    // A wikilink to the card at the top of the article's body, written from
+    // outside review, which picks the change up
+    await window.evaluate(
+      async ([path, target]) => {
+        const { app } = window as unknown as LinkTestWindow;
+        await app.vault.process(app.vault.getFileByPath(path), (text) =>
+          text.replace(
+            /^(---\n[\s\S]*?\n---\n)/,
+            `$1See [[${target}|the card]].\n`
+          )
+        );
+      },
+      [SOURCE_PATH, card] as const
+    );
+    const link = window
+      .locator(`[data-type="${REVIEW_VIEW_TYPE}"] .cm-content`)
+      .getByText('the card', { exact: true });
+    await expect(link).toBeVisible();
+
+    await link.click();
+
+    const cardName = card.slice(card.lastIndexOf('/') + 1).replace(/\.md$/, '');
+    await expect
+      .poll(
+        async () => (await reviewTab()).file?.endsWith(`/${cardName}.md`),
+        LANDS_WITHIN
+      )
+      .toBe(true);
+    expect(await reviewTab()).toMatchObject({ active: true, page: 'review' });
+    const shown = await expectReviewShowing((await reviewTab()).file!);
+    expect(shown).not.toBe(article.id);
+    // The card, as review shows one: its question, the answer hidden
+    await expect(
+      window.locator(`[data-type="${REVIEW_VIEW_TYPE}"] .ir-card-viewer`)
+    ).toBeVisible();
+  });
+
+  test('Go to context from a snippet in review shows its article in review, with the passage centered', async () => {
+    await importArticle(window, SOURCE);
+    const reference = await extractInNote(LOW_PARAGRAPH);
+    const article = await reviewSource({ imported: true });
+    // Review onto the snippet as the file explorer would take it there
+    await openFileInActiveLeaf(window, reference);
+    const snippet = await expectReviewShowing(reference);
+
+    await executeCommandById(window, 'incremental-reading:go-to-context');
+
+    await expect.poll(reviewTab, LANDS_WITHIN).toMatchObject({
+      active: true,
+      page: 'review',
+      currentItemId: article.id,
+    });
+    await expectReviewOn(window, article);
+    // The passage sits in the middle of the editor, not where it was read
+    const offCenter = () =>
+      window.evaluate((viewType) => {
+        const scroller = document.querySelector<HTMLElement>(
+          `[data-type="${viewType}"] .cm-scroller`
+        );
+        const passage = document.querySelector<HTMLElement>(
+          `[data-type="${viewType}"] .cm-content .ir-snippet-highlight`
+        );
+        if (!scroller || !passage) return null;
+        const box = scroller.getBoundingClientRect();
+        const at = passage.getBoundingClientRect();
+        return Math.abs((at.top + at.bottom) / 2 - (box.top + box.bottom) / 2);
+      }, REVIEW_VIEW_TYPE);
+    await expect.poll(offCenter, LANDS_WITHIN).toBeLessThan(80);
+    // And stays there, rather than being thrown back by scroll restore
+    await window.waitForTimeout(1000);
+    expect(await offCenter()).toBeLessThan(80);
+
+    await executeCommandById(window, 'app:go-back');
+    expect(await expectReviewShowing(reference)).toBe(snippet);
+  });
+});
+
 /** The slice of Obsidian's `window.app` the race test reaches into. */
 type TestWindowLike = {
   app: {

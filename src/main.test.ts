@@ -148,6 +148,33 @@ function titles(menu: Menu): MenuItem['title'][] {
   return menu.items.map((item) => item.title);
 }
 
+/** A click on a menu entry: any button Obsidian reports one for, any keys. */
+const menuClickArb = fc.record({
+  button: fc.constantFrom(0, 1),
+  ctrlKey: fc.boolean(),
+  metaKey: fc.boolean(),
+  altKey: fc.boolean(),
+  shiftKey: fc.boolean(),
+});
+
+/**
+ * Where Obsidian opens a link clicked that way: a middle click is a new tab
+ * whatever keys are held; Ctrl/Cmd is a new tab, +Alt a split, +Alt+Shift a
+ * window; anything else is the tab the user is in.
+ */
+function paneFor(click: {
+  button: number;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+}): string | false {
+  if (click.button === 1) return 'tab';
+  if (!click.ctrlKey && !click.metaKey) return false;
+  if (!click.altKey) return 'tab';
+  return click.shiftKey ? 'window' : 'split';
+}
+
 /**
  * Fire an entry's callback the way clicking it would. Obsidian hands the
  * callback the click event; the import entries ignore it, so none is built and
@@ -967,7 +994,25 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
 
     click(menu.items.find((i) => i.title === 'Go to context'));
 
-    expect(goToContext).toHaveBeenCalledExactlyOnceWith(file);
+    expect(goToContext).toHaveBeenCalledExactlyOnceWith(file, false);
+  });
+
+  it('goes to the context where a modified click asks', () => {
+    fc.assert(
+      fc.property(menuClickArb, (init) => {
+        const { receiver, goToContext, file } = makeReceiver({
+          frontmatter: { 'ir-id': 'abc' },
+        });
+        const menu = raiseMenu(receiver);
+
+        menu.items.find((i) => i.title === 'Go to context')?.callback?.(init);
+
+        expect(goToContext).toHaveBeenCalledExactlyOnceWith(
+          file,
+          paneFor(init)
+        );
+      })
+    );
   });
 });
 

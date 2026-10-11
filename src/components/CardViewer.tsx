@@ -1,6 +1,7 @@
+import { MIDDLE_MOUSE_BUTTON } from '#/lib/extensions/SnippetHighlightExtension';
 import { CardManager } from '#/lib/items/CardManager';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
-import { Component, MarkdownRenderer } from 'obsidian';
+import { Component, Keymap, MarkdownRenderer } from 'obsidian';
 import { useEffect, useRef } from 'react';
 import { useReviewContext } from './ReviewContext';
 
@@ -47,18 +48,44 @@ export function CardViewer({
       component
     );
 
+    const linkAt = (evt: MouseEvent) =>
+      (evt.target as HTMLElement).closest<HTMLAnchorElement>(
+        'a.internal-link[data-href]'
+      );
+    // Where the modifier keys say, as a link in a note opens: the review tab
+    // for a plain click, which shows an item in review, and a new tab, split
+    // or window otherwise, which shows the note
     const handleLinkClick = (evt: MouseEvent) => {
-      const anchor = (evt.target as HTMLElement).closest<HTMLAnchorElement>('a.internal-link[data-href]');
+      const anchor = linkAt(evt);
       if (!anchor) return;
       evt.preventDefault();
       evt.stopPropagation();
-      void reviewView.app.workspace.openLinkText(anchor.dataset.href!, cardFilePath);
+      void reviewView.app.workspace.openLinkText(
+        anchor.dataset.href!,
+        cardFilePath,
+        Keymap.isModEvent(evt)
+      );
+    };
+    // A middle click fires `auxclick` rather than `click`; a right click does
+    // too, for the context menu, which is left alone
+    const handleAuxClick = (evt: MouseEvent) => {
+      if (evt.button === MIDDLE_MOUSE_BUTTON) handleLinkClick(evt);
+    };
+    // A middle press autoscrolls on Windows and pastes on Linux
+    const handleMouseDown = (evt: MouseEvent) => {
+      if (evt.button === MIDDLE_MOUSE_BUTTON && linkAt(evt)) {
+        evt.preventDefault();
+      }
     };
     container.addEventListener('click', handleLinkClick);
+    container.addEventListener('auxclick', handleAuxClick);
+    container.addEventListener('mousedown', handleMouseDown);
 
     return () => {
       component.unload();
       container.removeEventListener('click', handleLinkClick);
+      container.removeEventListener('auxclick', handleAuxClick);
+      container.removeEventListener('mousedown', handleMouseDown);
     };
   }, [cardText, cardFilePath, reviewView.app]);
 

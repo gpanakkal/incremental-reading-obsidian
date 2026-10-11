@@ -19,6 +19,7 @@ import {
   type TAbstractFile,
   type TFile,
   type WorkspaceLeaf,
+  Keymap,
   MarkdownView,
   Plugin,
   TFolder,
@@ -878,8 +879,8 @@ export default class IncrementalReadingPlugin extends Plugin {
           .setTitle('Go to context')
           .setIcon('lucide-locate')
           .setSection('incremental-reading')
-          .onClick(async () => {
-            await this.actions.goToContext(file);
+          .onClick(async (evt) => {
+            await this.actions.goToContext(file, Keymap.isModEvent(evt));
           });
       });
     }

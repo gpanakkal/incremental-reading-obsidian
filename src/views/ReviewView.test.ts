@@ -10,6 +10,7 @@ import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import type { PdfViewer } from '#/lib/pdf/obsidian-pdf';
 import {
+  goToReviewPlace,
   isDestination,
   placeOf,
   placeToEphemeralState,
@@ -30,6 +31,7 @@ import {
   type ReviewPage,
   type SelectionKind,
 } from '#/lib/store';
+import type { ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 // The mock is what `obsidian` resolves to at runtime (see vitest.config.ts), so
 // importing it by path is the same module — but with the stub's own surface
@@ -49,11 +51,43 @@ import ReviewView, {
   REVIEW_VIEW_DEFAULT_TITLE,
 } from '#/views/ReviewView';
 import fc from 'fast-check';
-import { WorkspaceWindow, type TFile, type WorkspaceLeaf } from 'obsidian';
+import {
+  WorkspaceWindow,
+  type OpenViewState,
+  type TFile,
+  type WorkspaceLeaf,
+} from 'obsidian';
 import type { WorkspaceLeafHistoryState } from 'obsidian-typings';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #region HELPERS
+
+/** A click on a menu entry: any button Obsidian reports one for, any keys. */
+const menuClickArb = fc.record({
+  button: fc.constantFrom(0, 1),
+  ctrlKey: fc.boolean(),
+  metaKey: fc.boolean(),
+  altKey: fc.boolean(),
+  shiftKey: fc.boolean(),
+});
+
+/**
+ * Where Obsidian opens a link clicked that way: a middle click is a new tab
+ * whatever keys are held; Ctrl/Cmd is a new tab, +Alt a split, +Alt+Shift a
+ * window; anything else is the tab the user is in.
+ */
+function paneFor(click: {
+  button: number;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+}): string | false {
+  if (click.button === 1) return 'tab';
+  if (!click.ctrlKey && !click.metaKey) return false;
+  if (!click.altKey) return 'tab';
+  return click.shiftKey ? 'window' : 'split';
+}
 
 /**
  * `showSearch` reads only `activeEditor`, so it can be exercised against a bare
@@ -442,6 +476,10 @@ function makeHistoryLeaf() {
   };
   return {
     history,
+    /** Obsidian's own, which loads a file into the leaf in place of review. */
+    openFile: vi.fn(
+      async (_file: TFile, _openState?: OpenViewState): Promise<void> => {}
+    ),
     recordHistory: vi.fn((entry: WorkspaceLeafHistoryState) => {
       history.backHistory.push(entry);
     }),
@@ -474,12 +512,15 @@ async function openHistoryView({
   resume = async () => {},
   mobileNavbar = { onLeafChange: vi.fn() },
   itemExists = true,
+  items = new Map(),
 }: {
   file?: TFile | null;
   /** Stands in for the page and item a mounting tab settles on. */
   resume?: () => Promise<void>;
   mobileNavbar?: { onLeafChange: () => void } | null;
   itemExists?: boolean;
+  /** The item each note is the file of, for the database to answer with. */
+  items?: Map<TFile, ReviewItem>;
 } = {}) {
   vi.spyOn(ReviewInterface, 'createReviewInterface').mockReturnValue(
     null as never
@@ -492,9 +533,21 @@ async function openHistoryView({
     .mockImplementation(resume);
   const leaf = makeHistoryLeaf();
   const reviewManager = {
-    getItemOrMissingFromId: vi.fn(async (id: string) =>
-      itemExists ? { data: { id } } : null
+    getItemOrMissingFromId: vi.fn(async (id: string) => {
+      for (const item of items.values()) {
+        if (item.data.id === id) return item;
+      }
+      return itemExists ? { data: { id } } : null;
+    }),
+    getReviewItemFromFile: vi.fn(
+      async (note: TFile): Promise<ReviewItem | null> => items.get(note) ?? null
     ),
+    liveItemIdAt: vi.fn(async (reference: string): Promise<string | null> => {
+      for (const [note, item] of items) {
+        if (note.path === reference) return item.data.id;
+      }
+      return null;
+    }),
   };
   const sessionTracker = { commit: vi.fn() };
   const view = new ReviewView(
@@ -515,12 +568,25 @@ async function openHistoryView({
     app: {
       isMobile: true,
       mobileNavbar,
-      workspace: { on: () => ({}), getLeavesOfType: () => [leaf] },
+      workspace: {
+        on: () => ({}),
+        getLeavesOfType: () => [leaf],
+        setActiveLeaf: vi.fn(),
+      },
     },
   });
+  // Taken before `onOpen`, which may put a wrapper of its own in its place
+  const obsidianOpenFile = leaf.openFile;
   await view.onOpen();
   resumeUnclaimedSession.mockRestore();
-  return { view, leaf, reviewManager, sessionTracker, mobileNavbar };
+  return {
+    view,
+    leaf,
+    reviewManager,
+    sessionTracker,
+    mobileNavbar,
+    obsidianOpenFile,
+  };
 }
 
 /** The places a leaf's back stack holds, oldest first. */
@@ -747,6 +813,74 @@ function makePdfViewer(appScope?: Scope) {
     selectedText: vi.fn(() => 'selected in the PDF'),
   };
   return { viewer: viewer as unknown as PdfViewer, escape, raw: viewer };
+}
+
+/** What Obsidian hands `openFile` alongside the file, or nothing. */
+const openStateArb: fc.Arbitrary<OpenViewState | undefined> = fc.option(
+  fc.record(
+    {
+      active: fc.boolean(),
+      eState: fc.option(
+        fc.oneof(
+          fc.record({ subpath: fc.string() }),
+          fc.record({ focus: fc.boolean() })
+        ),
+        { nil: undefined }
+      ),
+    },
+    { requiredKeys: [] }
+  ),
+  { nil: undefined }
+);
+
+/** Where in a note a link can open it, as Obsidian hands it over. */
+const positionalArb = fc.oneof(
+  fc.record({ subpath: fc.string() }),
+  fc.record({
+    match: fc.record({
+      content: fc.string(),
+      matches: fc.array(fc.tuple(fc.nat(), fc.nat()), { maxLength: 2 }),
+    }),
+  }),
+  fc.record({ subpath: fc.string(), focus: fc.boolean() })
+);
+/** Ephemeral state that puts the note nowhere in particular. */
+const unpositionalArb = fc.option(
+  fc.oneof(fc.record({ focus: fc.boolean() }), fc.constant({})),
+  { nil: undefined }
+);
+
+/** A note in the vault at `path`. */
+const noteAt = (path: string) =>
+  ({ path, basename: path, extension: 'md' }) as unknown as TFile;
+
+/** The snippet `id`, whose note is `file`. */
+const itemOf = (id: string, file: TFile) =>
+  ({ data: { id, type: 'snippet' }, file }) as unknown as ReviewItem;
+
+/** The live item `id` whose note is missing from `path`. */
+const missingAt = (path: string, id: string) =>
+  new Map([
+    [
+      { path } as unknown as TFile,
+      { data: { id, type: 'snippet' } } as unknown as ReviewItem,
+    ],
+  ]);
+
+/**
+ * An open review tab over the snippet `id` at `Snippets/target.md`, and a way
+ * to follow a link to it there carrying `eState`.
+ */
+async function openWithTarget(id: string) {
+  const note = noteAt('Snippets/target.md');
+  const opened = await openHistoryView({
+    items: new Map([[note, itemOf(id, note)]]),
+  });
+  const follow = (eState: unknown) =>
+    (opened.leaf as unknown as WorkspaceLeaf).openFile(note, {
+      eState: eState as Record<string, unknown>,
+    });
+  return { ...opened, note, follow };
 }
 
 // #endregion
@@ -1985,14 +2119,21 @@ describe('ReviewView.onPaneMenu', () => {
     expect(entry?.icon).toBe('lucide-locate');
   });
 
-  it("goes to the context of the tab's item", () => {
-    const goToContext = vi.fn().mockResolvedValue(undefined);
-    const { view, file } = makeMenuReceiver();
-    Object.assign(view.plugin, { actions: { goToContext } });
+  it("goes to the context of the tab's item in place, or where a modified click asks", () => {
+    fc.assert(
+      fc.property(menuClickArb, (init) => {
+        const goToContext = vi.fn().mockResolvedValue(undefined);
+        const { view, file } = makeMenuReceiver();
+        Object.assign(view.plugin, { actions: { goToContext } });
 
-    click(itemTitled(paneMenu(view), 'Go to context'));
+        itemTitled(paneMenu(view), 'Go to context')?.callback?.(init);
 
-    expect(goToContext).toHaveBeenCalledExactlyOnceWith(file);
+        expect(goToContext).toHaveBeenCalledExactlyOnceWith(
+          file,
+          paneFor(init)
+        );
+      })
+    );
   });
 });
 
@@ -3132,5 +3273,502 @@ describe('ReviewView with a PDF viewer on screen', () => {
     } finally {
       unload(keyed.view);
     }
+  });
+});
+
+describe('ReviewView links followed in its tab', () => {
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  afterEach(() => {
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  it('shows an item it opens in review, keeping the review view', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        destinationArb,
+        itemIdArb,
+        openStateArb,
+        async (from, id, openState) => {
+          store.dispatch(resetSession());
+          moveStore(from);
+          const note = noteAt('Snippets/target.md');
+          const { view, leaf, obsidianOpenFile } = await openHistoryView({
+            items: new Map([[note, itemOf(id, note)]]),
+          });
+          try {
+            await (leaf as unknown as WorkspaceLeaf).openFile(note, openState);
+
+            expect(obsidianOpenFile).not.toHaveBeenCalled();
+            expect(placeOf(store.getState())).toEqual({
+              page: 'review',
+              itemId: id,
+            });
+          } finally {
+            await view.onClose();
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('lets Obsidian open anything that is not an item, as it would have', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        destinationArb,
+        openStateArb,
+        async (from, openState) => {
+          store.dispatch(resetSession());
+          moveStore(from);
+          const note = noteAt('Notes/plain.md');
+          const { view, leaf, obsidianOpenFile } = await openHistoryView();
+          try {
+            await (leaf as unknown as WorkspaceLeaf).openFile(note, openState);
+
+            expect(obsidianOpenFile).toHaveBeenCalledOnce();
+            expect(obsidianOpenFile.mock.calls[0]).toStrictEqual([
+              note,
+              openState,
+            ]);
+            expect(obsidianOpenFile.mock.contexts[0]).toBe(leaf);
+            expect(placeOf(store.getState())).toEqual(from);
+          } finally {
+            await view.onClose();
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('brings the tab forward when the opener asks for it, as Obsidian would', async () => {
+    await fc.assert(
+      fc.asyncProperty(openStateArb, async (openState) => {
+        store.dispatch(resetSession());
+        const note = noteAt('Snippets/target.md');
+        const { view, leaf } = await openHistoryView({
+          items: new Map([[note, itemOf('target', note)]]),
+        });
+        const { setActiveLeaf } = (
+          view.app as unknown as {
+            workspace: { setActiveLeaf: ReturnType<typeof vi.fn> };
+          }
+        ).workspace;
+        try {
+          await (leaf as unknown as WorkspaceLeaf).openFile(note, openState);
+
+          if (openState?.active) {
+            expect(setActiveLeaf).toHaveBeenCalledExactlyOnceWith(leaf, {
+              focus: true,
+            });
+          } else {
+            expect(setActiveLeaf).not.toHaveBeenCalled();
+          }
+        } finally {
+          await view.onClose();
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('follows nothing when the tab closes before the item is found', async () => {
+    // By then the leaf is gone or showing whatever the user moved on to, which
+    // a late open would replace.
+    const note = noteAt('Snippets/target.md');
+    const { view, leaf, reviewManager, obsidianOpenFile } =
+      await openHistoryView({
+        items: new Map([[note, itemOf('target', note)]]),
+      });
+    let found: () => void = () => {};
+    reviewManager.getReviewItemFromFile.mockImplementationOnce(
+      (file: TFile) =>
+        new Promise((resolve) => {
+          found = () => resolve(itemOf('target', file));
+        })
+    );
+    const opening = (leaf as unknown as WorkspaceLeaf).openFile(note);
+    await view.onClose();
+    unload(view);
+    found();
+    await opening;
+
+    expect(obsidianOpenFile).not.toHaveBeenCalled();
+    expect(store.getState().currentItemId).toBeNull();
+  });
+
+  it('lets Obsidian open a note once the tab has closed, though something wrapped openFile over it', async () => {
+    // Another plugin's wrapper still calls ours; closed, ours must pass through
+    const note = noteAt('Snippets/target.md');
+    const { view, leaf, obsidianOpenFile } = await openHistoryView({
+      items: new Map([[note, itemOf('target', note)]]),
+    });
+    const ours = leaf.openFile;
+    const theirs = vi.fn(
+      (file: TFile, openState?: OpenViewState): Promise<void> =>
+        ours.call(leaf, file, openState) as Promise<void>
+    );
+    leaf.openFile = theirs;
+    await view.onClose();
+    unload(view);
+
+    await (leaf as unknown as WorkspaceLeaf).openFile(note);
+
+    expect(leaf.openFile).toBe(theirs);
+    expect(obsidianOpenFile).toHaveBeenCalledExactlyOnceWith(note, undefined);
+  });
+
+  it('lets Obsidian open the note when the item cannot be looked up', async () => {
+    const note = noteAt('Snippets/target.md');
+    const { view, leaf, reviewManager, obsidianOpenFile } =
+      await openHistoryView({
+        items: new Map([[note, itemOf('target', note)]]),
+      });
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const error = new Error('database closed');
+    reviewManager.getReviewItemFromFile.mockRejectedValueOnce(error);
+    try {
+      await (leaf as unknown as WorkspaceLeaf).openFile(note);
+
+      expect(obsidianOpenFile).toHaveBeenCalledExactlyOnceWith(note, undefined);
+      expect(store.getState().currentItemId).toBeNull();
+      expect(logged).toHaveBeenCalledExactlyOnceWith(
+        'Incremental Reading: could not look a link up',
+        error
+      );
+    } finally {
+      await view.onClose();
+      unload(view);
+    }
+  });
+
+  it('lets Obsidian open a note whose row review would not show as it', async () => {
+    // A tombstone at the path, or a row the note's ir-id disowns: review would
+    // land on nothing, and the note would never open
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('gone', 'elsewhere', 'missing'),
+        async (shown) => {
+          store.dispatch(resetSession());
+          const note = noteAt('Snippets/target.md');
+          const { view, leaf, reviewManager, obsidianOpenFile } =
+            await openHistoryView({
+              items: new Map([[note, itemOf('target', note)]]),
+            });
+          reviewManager.getItemOrMissingFromId.mockResolvedValueOnce(
+            shown === 'gone'
+              ? null
+              : shown === 'elsewhere'
+                ? itemOf('target', noteAt('Snippets/other.md'))
+                : ({ data: { id: 'target' } } as unknown as ReviewItem)
+          );
+          try {
+            await (leaf as unknown as WorkspaceLeaf).openFile(note);
+
+            expect(obsidianOpenFile).toHaveBeenCalledOnce();
+            expect(store.getState().currentItemId).toBeNull();
+          } finally {
+            await view.onClose();
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('opens a non-item with whatever openFile the leaf has by then', async () => {
+    // Obsidian's is on the prototype, which a plugin can patch after review
+    // opened
+    const proto = { openFile: vi.fn(async () => {}) };
+    const { view, leaf } = await openHistoryView();
+    const own = leaf as unknown as Record<string, unknown>;
+    delete own.openFile;
+    Object.setPrototypeOf(leaf, proto);
+    await view.onClose();
+    view.interceptOpenFile();
+    const patched = vi.fn(async () => {});
+    proto.openFile = patched;
+    const note = noteAt('Notes/plain.md');
+    try {
+      await (leaf as unknown as WorkspaceLeaf).openFile(note);
+
+      expect(patched).toHaveBeenCalledExactlyOnceWith(note, undefined);
+      expect(patched.mock.contexts[0]).toBe(leaf);
+    } finally {
+      unload(view);
+    }
+  });
+
+  it("hands the leaf Obsidian's own openFile back when it closes", async () => {
+    const { view, leaf, obsidianOpenFile } = await openHistoryView();
+    expect(leaf.openFile).not.toBe(obsidianOpenFile);
+
+    await view.onClose();
+    unload(view);
+
+    expect(leaf.openFile).toBe(obsidianOpenFile);
+  });
+});
+
+describe('ReviewView places in an item a link names', () => {
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  afterEach(() => {
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  it('hands the place to the editor that mounts for the item, once', async () => {
+    await fc.assert(
+      fc.asyncProperty(itemIdArb, positionalArb, async (id, eState) => {
+        store.dispatch(resetSession());
+        const { view, follow } = await openWithTarget(id);
+        try {
+          await follow(eState);
+          const position = vi.fn();
+          const again = vi.fn();
+
+          view.onArrival(id, position)();
+          view.onArrival(id, again)();
+
+          expect(position).toHaveBeenCalledExactlyOnceWith(eState);
+          expect(again).not.toHaveBeenCalled();
+        } finally {
+          await view.onClose();
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('hands the place at once to an editor already showing the item', async () => {
+    await fc.assert(
+      fc.asyncProperty(itemIdArb, positionalArb, async (id, eState) => {
+        store.dispatch(resetSession());
+        const { view, follow } = await openWithTarget(id);
+        const position = vi.fn();
+        const stop = view.onArrival(id, position);
+        try {
+          await follow(eState);
+          await follow(eState);
+          // Taken: an editor mounting for the item after has nothing to take
+          const later = vi.fn();
+          view.onArrival(id, later)();
+
+          expect(position).toHaveBeenCalledTimes(2);
+          expect(position).toHaveBeenNthCalledWith(1, eState);
+          expect(position).toHaveBeenNthCalledWith(2, eState);
+          expect(later).not.toHaveBeenCalled();
+        } finally {
+          stop();
+          await view.onClose();
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('hands the place to no editor once it has stopped listening', async () => {
+    const { view, follow } = await openWithTarget('target');
+    const position = vi.fn();
+    try {
+      view.onArrival('target', position)();
+      await follow({ subpath: '#Heading' });
+
+      expect(position).not.toHaveBeenCalled();
+    } finally {
+      await view.onClose();
+      unload(view);
+    }
+  });
+
+  it("never hands the place to another item's editor", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        itemIdArb,
+        itemIdArb,
+        positionalArb,
+        async (id, other, eState) => {
+          fc.pre(id !== other);
+          store.dispatch(resetSession());
+          const { view, follow } = await openWithTarget(id);
+          const position = vi.fn();
+          const stop = view.onArrival(other, position);
+          try {
+            await follow(eState);
+            view.onArrival(other, position)();
+
+            expect(position).not.toHaveBeenCalled();
+          } finally {
+            stop();
+            await view.onClose();
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('hands nothing on for a link that names no place in the item', async () => {
+    await fc.assert(
+      fc.asyncProperty(itemIdArb, unpositionalArb, async (id, eState) => {
+        store.dispatch(resetSession());
+        const { view, follow } = await openWithTarget(id);
+        const live = vi.fn();
+        const stop = view.onArrival(id, live);
+        try {
+          await follow(eState);
+          const mounting = vi.fn();
+          view.onArrival(id, mounting)();
+
+          expect(live).not.toHaveBeenCalled();
+          expect(mounting).not.toHaveBeenCalled();
+        } finally {
+          stop();
+          await view.onClose();
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('drops a place no editor took once review moves to another item', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        itemIdArb,
+        itemIdArb,
+        positionalArb,
+        async (id, other, eState) => {
+          fc.pre(id !== other);
+          store.dispatch(resetSession());
+          const { view, follow } = await openWithTarget(id);
+          try {
+            await follow(eState);
+            goToReviewPlace(store, other);
+            goToReviewPlace(store, id);
+            const position = vi.fn();
+            view.onArrival(id, position)();
+
+            expect(position).not.toHaveBeenCalled();
+          } finally {
+            await view.onClose();
+            unload(view);
+          }
+        }
+      )
+    );
+  });
+
+  it('drops a place no editor took when history moves review', async () => {
+    await fc.assert(
+      fc.asyncProperty(destinationArb, positionalArb, async (to, eState) => {
+        store.dispatch(resetSession());
+        const { view, follow } = await openWithTarget('target');
+        try {
+          await follow(eState);
+          view.setEphemeralState(placeToEphemeralState(to));
+          view.setEphemeralState(
+            placeToEphemeralState({ page: 'review', itemId: 'target' })
+          );
+          const position = vi.fn();
+          view.onArrival('target', position)();
+
+          expect(position).not.toHaveBeenCalled();
+        } finally {
+          await view.onClose();
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('keeps the place while review is still on its way to the item', async () => {
+    // Home first, as Begin Review would leave it, then review between items
+    const { view, follow } = await openWithTarget('target');
+    try {
+      store.dispatch(setPage('home'));
+      await follow({ subpath: '#Heading' });
+      store.dispatch(resetCurrentItem());
+      const position = vi.fn();
+      view.onArrival('target', position)();
+
+      expect(position).toHaveBeenCalledExactlyOnceWith({
+        subpath: '#Heading',
+      });
+    } finally {
+      await view.onClose();
+      unload(view);
+    }
+  });
+});
+
+describe('ReviewView.showMissingInReview', () => {
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  afterEach(() => {
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  it('shows the item a link to a missing file belongs to in review, as review shows a missing item', async () => {
+    await fc.assert(
+      fc.asyncProperty(destinationArb, itemIdArb, async (from, id) => {
+        store.dispatch(resetSession());
+        moveStore(from);
+        const { view } = await openHistoryView({
+          items: missingAt('Snippets/gone.md', id),
+        });
+        try {
+          expect(await view.showMissingInReview('Snippets/gone.md')).toBe(true);
+          expect(placeOf(store.getState())).toEqual({
+            page: 'review',
+            itemId: id,
+          });
+        } finally {
+          await view.onClose();
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('shows nothing for a reference no live item has', async () => {
+    await fc.assert(
+      fc.asyncProperty(destinationArb, async (from) => {
+        store.dispatch(resetSession());
+        moveStore(from);
+        const { view } = await openHistoryView({
+          items: missingAt('Snippets/gone.md', 'gone'),
+        });
+        try {
+          expect(await view.showMissingInReview('Snippets/other.md')).toBe(
+            false
+          );
+          expect(placeOf(store.getState())).toEqual(from);
+        } finally {
+          await view.onClose();
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it('shows nothing once the tab has closed', async () => {
+    const { view } = await openHistoryView({
+      items: missingAt('Snippets/gone.md', 'gone'),
+    });
+    await view.onClose();
+    unload(view);
+
+    expect(await view.showMissingInReview('Snippets/gone.md')).toBe(false);
+    expect(store.getState().currentItemId).toBeNull();
   });
 });

@@ -52,10 +52,31 @@ function wireContext(saved: number | null = null) {
     }),
     offref: vi.fn((ref: ModifyHandler) => handlers.delete(ref)),
   };
+  // Where a link followed in the review tab put an item, until an editor
+  // for it listens, as `ReviewView.onArrival` hands it over
+  const arrivals = new Map<string, unknown>();
+  const positioners = new Map<string, (eState: unknown) => void>();
   const reviewView = {
     containerEl: document.createElement('div'),
     attachPdfViewer: vi.fn(),
     detachPdfViewer: vi.fn(),
+    onArrival: vi.fn((id: string, position: (eState: unknown) => void) => {
+      if (arrivals.has(id)) {
+        const eState = arrivals.get(id);
+        arrivals.delete(id);
+        position(eState);
+      }
+      positioners.set(id, position);
+      return () => {
+        positioners.delete(id);
+      };
+    }),
+  };
+  /** Follow a link to `id` at `eState`, as the review tab hands it on. */
+  const arrive = (id: string, eState: unknown) => {
+    const position = positioners.get(id);
+    if (position) position(eState);
+    else arrivals.set(id, eState);
   };
   const app = { vault };
   const reviewManager = {
@@ -84,6 +105,7 @@ function wireContext(saved: number | null = null) {
     modify,
     showHighlights,
     stopHighlights,
+    arrive,
   };
 }
 
@@ -160,6 +182,15 @@ const positionArb = () =>
     page: fc.integer({ min: 1, max: 100000 }),
     top: fc.integer({ min: 0, max: 99999 }),
   });
+
+/** A PDF link's subpath, in Obsidian's grammar or not. */
+const subpathArb = fc.oneof(
+  fc
+    .tuple(fc.integer({ min: 1, max: 500 }), fc.nat(), fc.nat())
+    .map(([page, a, b]) => `#page=${page}&selection=${a},0,${b},4`),
+  fc.integer({ min: 1, max: 500 }).map((page) => `#page=${page}`),
+  fc.string({ minLength: 1 })
+);
 
 // #endregion
 
@@ -741,5 +772,97 @@ describe('PdfArticleView reading position', () => {
       [renamed, '#page=5&offset=0,120'],
     ]);
     expect(reviewManager.loadScrollPosition).toHaveBeenCalledOnce();
+  });
+});
+
+describe('PdfArticleView places a link names', () => {
+  it('opens the article at the place a link followed in review names, not where its reader stopped', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        subpathArb,
+        fc.option(positionArb(), { nil: null }),
+        async (subpath, saved) => {
+          vi.restoreAllMocks();
+          const { arrive } = wireContext(
+            saved && packPdfPosition(saved.page, saved.top)
+          );
+          const viewer = makeViewer();
+          vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
+          arrive(item.data.id, { subpath });
+
+          const { unmount } = mount();
+          await settle();
+
+          expect(viewer.open.mock.calls).toEqual([[file, subpath]]);
+          unmount();
+        }
+      )
+    );
+  });
+
+  it('moves the open article to the place a later link names', async () => {
+    await fc.assert(
+      fc.asyncProperty(subpathArb, async (subpath) => {
+        vi.restoreAllMocks();
+        const { arrive } = wireContext(AT_PAGE_3);
+        const viewer = makeViewer();
+        vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
+        const { unmount } = mount();
+        await settle();
+
+        arrive(item.data.id, { subpath });
+        await settle();
+
+        expect(viewer.open.mock.calls).toEqual([
+          [file, '#page=3&offset=0,700'],
+          [file, subpath],
+        ]);
+        unmount();
+      })
+    );
+  });
+
+  it('opens where its reader stopped for a link that names no page', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(
+          fc.constant(undefined),
+          fc.record({ subpath: fc.constant('') }),
+          fc.record({ match: fc.anything() }),
+          fc.record({ subpath: fc.nat() })
+        ),
+        async (eState) => {
+          vi.restoreAllMocks();
+          const { arrive } = wireContext(AT_PAGE_3);
+          const viewer = makeViewer();
+          vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
+          arrive(item.data.id, eState);
+          const { unmount } = mount();
+          await settle();
+
+          arrive(item.data.id, eState);
+          await settle();
+
+          expect(viewer.open.mock.calls).toEqual([
+            [file, '#page=3&offset=0,700'],
+          ]);
+          unmount();
+        }
+      )
+    );
+  });
+
+  it('leaves the viewer alone for a link followed once unmounted', async () => {
+    const { arrive } = wireContext();
+    const viewer = makeViewer();
+    vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
+    const { unmount } = mount();
+    await settle();
+
+    unmount();
+    arrive(item.data.id, { subpath: '#page=2' });
+    await settle();
+
+    expect(viewer.open.mock.calls).toEqual([[file, undefined]]);
   });
 });

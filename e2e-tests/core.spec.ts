@@ -808,6 +808,8 @@ test.describe('Extracting snippets', () => {
     );
     await executeCommandById(window, 'incremental-reading:extract-selection');
 
+    // In a tab of its own: opened in the review tab, an item shows in review
+    await executeCommandById(window, 'workspace:new-tab');
     await openNote(
       window,
       `incremental-reading/snippets/Before we start discussing`
@@ -849,6 +851,8 @@ test.describe('Extracting snippets', () => {
     await selectParagraph(window, 'Before we start discussing');
     await executeCommandById(window, 'incremental-reading:extract-selection');
 
+    // In a tab of its own: opened in the review tab, an item shows in review
+    await executeCommandById(window, 'workspace:new-tab');
     await openNote(
       window,
       `incremental-reading/snippets/Before we start discussing`
@@ -3172,7 +3176,9 @@ test.describe("Looking up a note's type", () => {
     await expect
       .poll(async () => (await articleRows(window))[0]?.reference)
       .toBe(renamed);
-    // Open again where it went, so the lookups run on the renamed note too
+    // Open again where it went, so the lookups run on the renamed note too:
+    // in a tab of its own, since in the review tab an item shows in review
+    await executeCommandById(window, 'workspace:new-tab');
     await showWithActionBar(renamed, 'editing');
     // A copy, ir-id and all, made as a file manager or a sync would: the
     // plugin's create handler looks its ir-id and tags up

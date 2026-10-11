@@ -13,6 +13,7 @@ import { type ExtractedMarkdownEditor,
   getMarkdownController,
   setInsertMode } from '#/lib/obsidian-editor';
 import { computeMinimalChange } from '#/lib/minimal-change';
+import { positionOnArrival, subpathResolver } from '#/lib/review-position';
 import { createSaveCoalescer } from '#/lib/save-coalescer';
 import { isEditing, setHasSelection, setShowAnswer } from '#/lib/store';
 import {
@@ -483,6 +484,17 @@ export function IREditor({
       // The listener reports changes from here on; this is where it starts.
       syncHasSelection(!cm.state.selection.main.empty);
 
+      // A link followed in the review tab to a heading, a block or a Go to
+      // context range of this item: put the editor there, as a note tab would,
+      // instead of where the reader last scrolled to.
+      const stopArrivals = positionOnArrival({
+        reviewView,
+        itemId: itemRef.current.data.id,
+        owner: controller,
+        editor: editor.editor,
+        resolveSubpath: subpathResolver(app, () => itemRef.current.file),
+      });
+
       const onShow = () => {
         // elRef.current?.scrollIntoView({ block: 'end' });
       };
@@ -500,6 +512,7 @@ export function IREditor({
       }
 
       const cleanupEffect = () => {
+        stopArrivals();
         titleContainer?.remove();
         setTitlePortalEl(null);
 

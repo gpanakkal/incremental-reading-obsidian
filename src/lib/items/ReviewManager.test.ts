@@ -5085,3 +5085,37 @@ describe('ReviewManager.deleteRow', () => {
     );
   });
 });
+
+describe('ReviewManager.liveItemIdAt', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('names the live item a reference belongs to, of any kind, and none for a tombstone or another path', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article', 'snippet', 'srs_card' as const),
+        fc.array(segmentArb, { minLength: 1, maxLength: 3 }),
+        fc.boolean(),
+        fc.boolean(),
+        async (table, segments, deleted, samePath) => {
+          const reference = `${segments.join('/')}.md`;
+          const asked = samePath ? reference : `other/${reference}`;
+          // No note anywhere: the item is missing its file
+          const { manager } = wireItem(table, reference, {}, deleted);
+
+          expect(await manager.liveItemIdAt(asked)).toBe(
+            !deleted && samePath ? 'x' : null
+          );
+        }
+      )
+    );
+  });
+});

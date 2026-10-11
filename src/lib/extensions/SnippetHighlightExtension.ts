@@ -3,6 +3,7 @@
 import { narrowChanges } from '#/lib/minimal-change';
 import { CARD_HIGHLIGHT_CLASS } from '#/lib/pdf/pdf-highlights';
 import type IncrementalReadingPlugin from '#/main';
+import type ReviewView from '#/views/ReviewView';
 import { invertedEffects } from '@codemirror/commands';
 import {
   Annotation,
@@ -131,7 +132,9 @@ export const MIDDLE_MOUSE_BUTTON = 1;
  * An item missing its file (see `MissingItem`) keeps its highlight, but is
  * not opened: following the link would create an empty note at its reference,
  * which the next review fetch would take for the item's own, leaving its
- * real file no longer relinkable.
+ * real file no longer relinkable. A plain click in the review tab shows it in
+ * review instead, as review shows any missing item, with the way to relink
+ * it; anywhere else there is no review to show it in, so a notice says how.
  *
  * @param highlight the highlight to open, when the event's target isn't in
  *   it: a PDF's highlights lie under its text layer, out of the pointer's way.
@@ -153,12 +156,31 @@ export function openHighlightFromEvent(
   event.stopPropagation();
 
   if (!Obsidian.getNote(ref, plugin.app)) {
-    const kind = highlight.classList.contains(CARD_HIGHLIGHT_CLASS)
-      ? 'card'
-      : 'snippet';
-    Obsidian.notify(
-      `No file at "${ref}". Relink the ${kind} from the review queue.`
-    );
+    const notify = () => {
+      const kind = highlight.classList.contains(CARD_HIGHLIGHT_CLASS)
+        ? 'card'
+        : 'snippet';
+      Obsidian.notify(
+        `No file at "${ref}". Relink the ${kind} from the review queue.`
+      );
+    };
+    const review = plugin.getOpenReviewLeaf()?.view as ReviewView | undefined;
+    if (
+      review?.containerEl.contains(highlight) &&
+      Keymap.isModEvent(event) === false
+    ) {
+      void review
+        .showMissingInReview(ref)
+        .catch((error: unknown) => {
+          console.error('Incremental Reading: could not look a link up', error);
+          return false;
+        })
+        .then((shown) => {
+          if (!shown) notify();
+        });
+    } else {
+      notify();
+    }
     return true;
   }
 

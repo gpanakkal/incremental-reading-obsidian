@@ -46,6 +46,7 @@ export function PdfArticleView({
   const { plugin, reviewView } = useReviewContext();
   const { vault } = plugin.app;
   const { reviewManager } = plugin;
+  const itemId = item.data.id;
   const hostRef = useRef<HTMLDivElement>(null);
   // Built during the first render, so a missing viewer shows the fallback on
   // the first frame rather than flashing an empty pane. Building loads nothing.
@@ -125,36 +126,52 @@ export function PdfArticleView({
         if (active && result === 'unsupported') setUnsupported(true);
       });
     };
+
+    // A link followed in the review tab to a page or passage of this article
+    // — Go to context from one of its snippets — opens it there instead: at
+    // once if one was followed before this mounted, else as it is followed.
+    let started = false;
+    let linkedAt: string | null = null;
+    const stopArrivals = reviewView.onArrival(itemId, (eState) => {
+      const subpath = (eState as { subpath?: unknown } | null)?.subpath;
+      if (typeof subpath !== 'string' || subpath === '') return;
+      if (started) open(subpath);
+      else linkedAt = subpath;
+    });
+    started = true;
     const modifyRef = vault.on('modify', (changed) => {
       if (changed !== file) return;
       // Reopening drops the view to page 1: put it back where it was
       open(position ? pdfPositionSubpath(position) : undefined);
     });
 
-    // Where it opens: where the reader is, carried over, or else where the
-    // item's row says they stopped
-    const start = position
-      ? Promise.resolve(pdfPositionSubpath(position))
-      : reviewManager
-          .loadScrollPosition(file)
-          .catch(() => null)
-          .then((saved) => {
-            stored = saved;
-            position ??= saved === null ? null : unpackPdfPosition(saved);
-            return position ? pdfPositionSubpath(position) : undefined;
-          });
+    // Where it opens: where a link put it, where the reader is, carried over,
+    // or else where the item's row says they stopped
+    const start = linkedAt
+      ? Promise.resolve(linkedAt)
+      : position
+        ? Promise.resolve(pdfPositionSubpath(position))
+        : reviewManager
+            .loadScrollPosition(file)
+            .catch(() => null)
+            .then((saved) => {
+              stored = saved;
+              position ??= saved === null ? null : unpackPdfPosition(saved);
+              return position ? pdfPositionSubpath(position) : undefined;
+            });
     void start.then((at) => {
       if (active) open(at);
     });
 
     return () => {
       active = false;
+      stopArrivals();
       vault.offref(modifyRef);
       stopWatching();
       // Left before the view rested long enough to be saved
       save();
     };
-  }, [shown, item.file, vault, reviewManager]);
+  }, [shown, item.file, itemId, reviewView, vault, reviewManager]);
 
   if (!shown) return <>{fallback}</>;
   return <div className="ir-pdf-article" ref={hostRef} />;

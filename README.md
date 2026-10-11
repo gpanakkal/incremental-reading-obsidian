@@ -59,6 +59,9 @@ Once you've imported some material, begin a study session by selecting the **Inc
 > [!warning]
 > For spaced repetition to work properly, make sure you're actually attempting to recall the answer before revealing it.
 
+> [!tip]
+> In review, clicking a link to another article, snippet or card shows that item in review. **Go to context** does the same, except for a note that isn't an item, such as an article's source, which opens in a new tab. Ctrl-click (Cmd-click on macOS) or middle-click a link to open its note in a new tab instead.
+
 #### Revise snippets
 
 You may find the phrasing of a snippet can be improved by revising wording, removing fluff, etc. This is a key step in incremental reading.
