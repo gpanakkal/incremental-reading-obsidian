@@ -1,5 +1,9 @@
 import type { App } from 'obsidian';
-import { DEFAULT_SETTINGS, type IRPluginSettings } from './settings';
+import {
+  DEFAULT_SETTINGS,
+  isReviewTitleBar,
+  type IRPluginSettings,
+} from './settings';
 
 /**
  * localStorage key holding this device's id. Obsidian namespaces
@@ -52,9 +56,15 @@ export function parsePluginData(raw: unknown): IRPluginData {
   const data = isRecord(raw) ? raw : {};
   const legacy = !('settings' in data);
   const saved = legacy ? data : isRecord(data.settings) ? data.settings : {};
+  const settings = { ...DEFAULT_SETTINGS, ...saved };
+  // A hand-edited or newer file can hold any value here; one the review tab
+  // doesn't know would leave it matching none of its three choices.
+  if (!isReviewTitleBar(settings.reviewTitleBar)) {
+    settings.reviewTitleBar = DEFAULT_SETTINGS.reviewTitleBar;
+  }
 
   return {
-    settings: { ...DEFAULT_SETTINGS, ...saved },
+    settings,
     session: legacy ? null : parseSession(data.session),
     warnedRefusedPaths: Array.isArray(data.warnedRefusedPaths)
       ? data.warnedRefusedPaths.filter(

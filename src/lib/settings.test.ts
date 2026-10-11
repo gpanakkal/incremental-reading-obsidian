@@ -10,6 +10,9 @@ import type {
 } from 'obsidian';
 import type { StepUnit } from 'ts-fsrs';
 import { describe, expect, it, vi } from 'vitest';
+// The mock is what `obsidian` resolves to at runtime (see vitest.config.ts);
+// imported by path for its writable `Platform`.
+import { Platform } from '#/test/__mocks__/obsidian';
 import {
   DATA_DIRECTORY,
   MAXIMUM_PRIORITY,
@@ -23,6 +26,7 @@ import {
   formatRolloverHour,
   IRSettingTab,
   parseSteps,
+  REVIEW_TITLE_BAR_OPTIONS,
   SETTINGS_TAB_CLASS,
   type IRPluginSettings,
 } from './settings';
@@ -30,6 +34,9 @@ import {
 // #region HELPERS
 
 const STEP_PATTERN = /^[1-9]\d*[mhd]$/;
+
+/** Each review title bar choice, as stored. */
+const REVIEW_TITLE_BARS = ['obsidian', 'show', 'hide'] as const;
 
 /** Any text at all, not just the printable ASCII `fc.string()` defaults to. */
 const textArb = (constraints: fc.StringConstraints = {}) =>
@@ -89,6 +96,7 @@ const settingsArb = fc.record({
     showAdvancedImportMenuItems: fc.boolean(),
     fuzzTextReviews: fc.boolean(),
     skipHomeScreen: fc.boolean(),
+    reviewTitleBar: fc.constantFrom(...REVIEW_TITLE_BARS),
     fsrsParams: fc.record({
       request_retention: fc.double(),
       maximum_interval: fc.integer(),
@@ -137,6 +145,9 @@ function makeTab(settings: IRPluginSettings) {
     }),
     toggleAdvancedCommands: vi.fn((enable: boolean) => {
       events.push(`toggle:${enable}`);
+    }),
+    syncReviewTitleBars: vi.fn(() => {
+      events.push(`title-bars:${settings.reviewTitleBar}`);
     }),
   };
   const tab = new IRSettingTab(
@@ -216,6 +227,8 @@ function editArb(
       return edit(fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER }));
     case 'text':
       return edit(typedFieldArb);
+    case 'dropdown':
+      return edit(fc.constantFrom(...Object.keys(control.options)));
     default:
       throw new Error(`No edits generated for ${control.type} controls`);
   }
@@ -411,6 +424,7 @@ describe('IRSettingTab.getControlValue', () => {
           dayRolloverOffset: tab.getControlValue('dayRolloverOffset'),
           fuzzTextReviews: tab.getControlValue('fuzzTextReviews'),
           skipHomeScreen: tab.getControlValue('skipHomeScreen'),
+          reviewTitleBar: tab.getControlValue('reviewTitleBar'),
           showAdvancedImportCommands: tab.getControlValue(
             'showAdvancedImportCommands'
           ),
@@ -431,6 +445,7 @@ describe('IRSettingTab.getControlValue', () => {
           dayRolloverOffset: settings.dayRolloverOffset,
           fuzzTextReviews: settings.fuzzTextReviews,
           skipHomeScreen: settings.skipHomeScreen,
+          reviewTitleBar: settings.reviewTitleBar,
           showAdvancedImportCommands: settings.showAdvancedImportCommands,
           showAdvancedImportMenuItems: settings.showAdvancedImportMenuItems,
           retention: fsrsParams.request_retention,
@@ -486,6 +501,7 @@ describe('IRSettingTab.setControlValue', () => {
       ['dayRolloverOffset', fc.integer()],
       ['fuzzTextReviews', fc.boolean()],
       ['skipHomeScreen', fc.boolean()],
+      ['reviewTitleBar', fc.constantFrom(...REVIEW_TITLE_BARS)],
       ['showAdvancedImportCommands', fc.boolean()],
       ['showAdvancedImportMenuItems', fc.boolean()],
     ] as const;
@@ -590,6 +606,52 @@ describe('IRSettingTab.setControlValue', () => {
     );
   });
 
+  it('updates the open review tabs to a new title bar choice without waiting on the save', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        settingsArb,
+        fc.constantFrom(...REVIEW_TITLE_BARS),
+        async (generated, choice) => {
+          const { tab, events } = makeTab(buildSettings(generated));
+
+          await tab.setControlValue('reviewTitleBar', choice);
+
+          expect(events).toEqual([`title-bars:${choice}`, 'save']);
+        }
+      )
+    );
+  });
+
+  it('leaves the review tabs alone when another setting changes', async () => {
+    await fc.assert(
+      fc.asyncProperty(settingsArb, editsArb(), async (generated, edits) => {
+        const { tab, plugin } = makeTab(buildSettings(generated));
+        const rows = declaredRows(tab.getSettingDefinitions());
+        const others = edits.filter(
+          (edit) => rows[edit.row].control.key !== 'reviewTitleBar'
+        );
+
+        for (const edit of others) {
+          await tab.setControlValue(rows[edit.row].control.key, edit.value);
+        }
+
+        expect(plugin.syncReviewTitleBars).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('names every review title bar choice in its dropdown', () => {
+    const [control] = declaredControls()
+      .map((row) => row.control)
+      .filter((row) => row.key === 'reviewTitleBar');
+
+    expect(control).toMatchObject({ type: 'dropdown' });
+    expect(control.type === 'dropdown' && control.options).toEqual(
+      REVIEW_TITLE_BAR_OPTIONS
+    );
+    expect(Object.keys(REVIEW_TITLE_BAR_OPTIONS)).toEqual(REVIEW_TITLE_BARS);
+  });
+
   it('leaves the extra import hotkeys alone when another setting changes', async () => {
     await fc.assert(
       fc.asyncProperty(settingsArb, editsArb(), async (generated, edits) => {
@@ -624,6 +686,7 @@ describe('IRSettingTab.setControlValue', () => {
           expect(plugin.settings).toEqual(before);
           expect(plugin.saveSettings).not.toHaveBeenCalled();
           expect(plugin.toggleAdvancedCommands).not.toHaveBeenCalled();
+          expect(plugin.syncReviewTitleBars).not.toHaveBeenCalled();
         }
       )
     );
@@ -631,6 +694,45 @@ describe('IRSettingTab.setControlValue', () => {
 });
 
 describe('IRSettingTab.getSettingDefinitions', () => {
+  it('offers the review title bar choice wherever Obsidian offers its own, which is everywhere but a phone', () => {
+    const before = { ...Platform };
+    // Every platform Obsidian reports: desktop, a tablet, or a phone, whose
+    // two flags it recomputes as the window resizes.
+    const platforms = [
+      { isMobile: false, isPhone: false, isTablet: false },
+      { isMobile: true, isPhone: false, isTablet: true },
+      { isMobile: true, isPhone: true, isTablet: false },
+    ];
+    try {
+      const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
+      const definitions = tab.getSettingDefinitions();
+      for (const platform of platforms) {
+        Object.assign(Platform, platform, { isDesktop: !platform.isMobile });
+        const visible = definitions.flatMap((group) =>
+          'items' in group && group.items
+            ? group.items.flatMap((item) => {
+                if (!('control' in item) || !item.control) return [];
+                const shown =
+                  typeof item.visible === 'function'
+                    ? item.visible()
+                    : (item.visible ?? true);
+                return shown ? [item.control.key] : [];
+              })
+            : []
+        );
+
+        expect(visible.includes('reviewTitleBar')).toBe(!platform.isPhone);
+        expect(visible.filter((key) => key !== 'reviewTitleBar')).toEqual(
+          declaredControls()
+            .map(({ control }) => control.key)
+            .filter((key) => key !== 'reviewTitleBar')
+        );
+      }
+    } finally {
+      Object.assign(Platform, before);
+    }
+  });
+
   it('lists every setting under its heading, with its description and control', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
     const validate = expect.any(Function) as unknown;
@@ -694,6 +796,20 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         name: 'Skip home screen',
         desc: 'Jump to the first due item when opening review.',
         control: toggle('skipHomeScreen'),
+      },
+      {
+        heading: 'Reviews',
+        name: 'Show review tab title bar',
+        desc: 'Show the title bar above the review tab, or leave it to the "Show tab title bar" appearance setting.',
+        control: {
+          type: 'dropdown',
+          key: 'reviewTitleBar',
+          options: {
+            obsidian: 'Follow Obsidian setting',
+            show: 'Show',
+            hide: 'Hide',
+          },
+        },
       },
       {
         heading: 'Shortcuts',

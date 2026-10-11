@@ -17,6 +17,7 @@ import {
   reviewHeader,
   setNativeMenus,
   setPluginSetting,
+  setReviewTitleBar,
   setShowViewHeader,
   waitForReviewItem,
   watchNotices,
@@ -803,6 +804,109 @@ test.describe('Review history navigation', () => {
       for (const button of standIns) await expect(button).toBeHidden();
     });
 
+    /** The action bar's stand-ins for the header's back, forward and ⋮. */
+    const standIns = () =>
+      [
+        '#navigate-back-button',
+        '#navigate-forward-button',
+        '#more-options-button',
+      ].map((id) => window.locator(`css=${id}`));
+
+    /** The header shows, and the stand-ins don't, or the other way round. */
+    async function expectHeaderShown(shown: boolean) {
+      const header = reviewHeader(window);
+      if (shown) await expect(header).toBeVisible();
+      else await expect(header).toBeHidden();
+      for (const button of standIns()) {
+        if (shown) await expect(button).toBeHidden();
+        else await expect(button).toBeVisible();
+      }
+    }
+
+    const CHOICES = ['obsidian', 'show', 'hide'] as const;
+
+    test('the review title bar setting overrides Obsidian’s, on the tab already open', async () => {
+      // Pinned: CI's headed window is ~1024px, where the bar scrolls and a
+      // stand-in can sit outside it — visible to CSS, but not on screen.
+      await window.setViewportSize({ width: 1600, height: 900 });
+      await importTwoArticles();
+      await beginReview();
+
+      // Off first, so "Hide" goes straight to "Follow" while Obsidian shows the
+      // header: the one step a "Hide" left behind would show up in.
+      for (const obsidianShows of [false, true]) {
+        await setShowViewHeader(window, obsidianShows);
+        for (const choice of CHOICES) {
+          await test.step(`${choice}, Obsidian ${obsidianShows ? 'on' : 'off'}`, async () => {
+            await setReviewTitleBar(window, choice);
+            await expectHeaderShown(
+              choice === 'show' || (choice === 'obsidian' && obsidianShows)
+            );
+          });
+        }
+      }
+    });
+
+    test('on a phone the review title bar always shows, as Obsidian’s does, whatever either setting says', async () => {
+      // A tablet first, where both settings act, as on desktop.
+      await emulateMobile(window, true);
+      await window.setViewportSize({ width: 1600, height: 900 });
+      await expect(window.locator('body')).toHaveClass(/\bis-tablet\b/);
+      await importTwoArticles();
+      const x = await beginReview();
+      await setShowViewHeader(window, true);
+      await setReviewTitleBar(window, 'hide');
+      await expectHeaderShown(false);
+
+      // Down to a phone, the stored "Hide" lets go of the tab already open.
+      await window.setViewportSize({ width: 420, height: 900 });
+      await expect(window.locator('body')).toHaveClass(/\bis-phone\b/);
+      await expectHeaderShown(true);
+      await skipTo(x);
+
+      for (const obsidianShows of [false, true]) {
+        await setShowViewHeader(window, obsidianShows);
+        for (const choice of CHOICES) {
+          await test.step(`${choice}, Obsidian ${obsidianShows ? 'on' : 'off'}`, async () => {
+            await setReviewTitleBar(window, choice);
+            await expectHeaderShown(true);
+          });
+        }
+      }
+
+      // Obsidian's own header buttons and navbar are what a phone navigates by.
+      await window.locator('.mobile-navbar-action-back button').click();
+      await expectReviewOn(window, x);
+    });
+
+    test('the review title bar setting leaves other tabs to Obsidian’s', async () => {
+      await window.setViewportSize({ width: 1600, height: 900 });
+      await importTwoArticles();
+      await beginReview();
+      await window.evaluate(async (path) => {
+        const { app } = window as unknown as HeaderTestWindow;
+        const file = app.vault.getFileByPath(path);
+        if (!file) throw new Error(`No such file: ${path}`);
+        await app.workspace.getLeaf('split').openFile(file);
+      }, PLAIN_NOTE);
+      const noteHeader = window
+        .locator('.workspace-leaf [data-type="markdown"] > .view-header')
+        .filter({ hasText: PLAIN_NOTE_TITLE });
+      const reviewTabHeader = window.locator(
+        `.workspace-leaf [data-type="${REVIEW_VIEW_TYPE}"] > .view-header`
+      );
+
+      await setShowViewHeader(window, true);
+      await setReviewTitleBar(window, 'hide');
+      await expect(reviewTabHeader).toBeHidden();
+      await expect(noteHeader).toBeVisible();
+
+      await setShowViewHeader(window, false);
+      await setReviewTitleBar(window, 'show');
+      await expect(reviewTabHeader).toBeVisible();
+      await expect(noteHeader).toBeHidden();
+    });
+
     test('names the item on screen after the folder it is in, and nothing on the home screen', async () => {
       await importTwoArticles();
       await moveArticle(MOVED_ARTICLE, MOVED_TO);
@@ -985,11 +1089,15 @@ type HeaderTestWindow = {
   app: {
     vault: {
       getMarkdownFiles(): { basename: string; name: string; path: string }[];
+      getFileByPath(path: string): unknown;
       getFolderByPath(path: string): unknown;
       createFolder(path: string): Promise<unknown>;
     };
     fileManager: {
       renameFile(file: unknown, newPath: string): Promise<void>;
+    };
+    workspace: {
+      getLeaf(where: 'split'): { openFile(file: unknown): Promise<void> };
     };
   };
 };

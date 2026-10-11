@@ -764,6 +764,30 @@ function makeCreationReceiver(refused: (string | null)[]) {
   };
 }
 
+/**
+ * A workspace holding `views` in leaves of the review type: each a review
+ * tab, or a leaf Obsidian has not built its view for yet (a deferred view).
+ */
+function makeWorkspaceReceiver(views: ('review' | 'deferred')[]) {
+  const synced: number[] = [];
+  const leaves = views.map((kind, i) => {
+    // A deferred view answers to the type it stands in for.
+    if (kind === 'deferred') {
+      return { view: { getViewType: (): string => ReviewView.viewType } };
+    }
+    const view = Object.create(ReviewView.prototype) as ReviewView;
+    view.syncTitleBar = vi.fn(() => {
+      synced.push(i);
+    });
+    return { view };
+  });
+  const getLeavesOfType = vi.fn((type: string) =>
+    type === ReviewView.viewType ? leaves : []
+  );
+  const receiver = { app: { workspace: { getLeavesOfType } } };
+  return { receiver, synced };
+}
+
 // #endregion
 
 afterEach(() => {
@@ -1289,6 +1313,32 @@ describe('IncrementalReadingPlugin.learn', () => {
 
       expect(receiver.app.workspace.getLeaf).toHaveBeenCalledWith(paneType);
     }
+  });
+});
+
+describe('IncrementalReadingPlugin.syncReviewTitleBars', () => {
+  it('brings every open review tab, and nothing else, up to the setting', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.constantFrom<('review' | 'deferred')[]>('review', 'deferred'),
+          {
+            maxLength: 5,
+          }
+        ),
+        (views) => {
+          const { receiver, synced } = makeWorkspaceReceiver(views);
+
+          IncrementalReadingPlugin.prototype.syncReviewTitleBars.call(
+            receiver as unknown as IncrementalReadingPlugin
+          );
+
+          expect(synced).toEqual(
+            views.flatMap((kind, i) => (kind === 'review' ? [i] : []))
+          );
+        }
+      )
+    );
   });
 });
 

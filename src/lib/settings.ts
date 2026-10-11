@@ -1,5 +1,6 @@
 import type IncrementalReadingPlugin from '#/main';
 import {
+  Platform,
   PluginSettingTab,
   type App,
   type SettingDefinitionItem,
@@ -28,8 +29,32 @@ export interface IRPluginSettings {
   showAdvancedImportMenuItems: boolean;
   fuzzTextReviews: boolean; // intra-day fuzzing for items except cards
   skipHomeScreen: boolean;
+  reviewTitleBar: ReviewTitleBar;
   fsrsParams: FSRSParameters;
 }
+
+/**
+ * Whether the review tab shows its title bar: as Obsidian's "Show tab title
+ * bar" setting says, or always, or never. ReviewView applies it to the tab.
+ */
+export type ReviewTitleBar = 'obsidian' | 'show' | 'hide';
+
+/** Each {@link ReviewTitleBar} choice, as the settings dropdown names it. */
+export const REVIEW_TITLE_BAR_OPTIONS: Readonly<
+  Record<ReviewTitleBar, string>
+> = Object.freeze({
+  obsidian: 'Follow Obsidian setting',
+  show: 'Show',
+  hide: 'Hide',
+});
+
+/**
+ * Whether `value` is a {@link ReviewTitleBar} choice. The `typeof` check is not
+ * redundant: `Object.hasOwn` turns its key into a string, so `['show']` would
+ * pass without it.
+ */
+export const isReviewTitleBar = (value: unknown): value is ReviewTitleBar =>
+  typeof value === 'string' && Object.hasOwn(REVIEW_TITLE_BAR_OPTIONS, value);
 
 const FSRS_PARAMETER_DEFAULTS = Object.freeze(generatorParameters());
 
@@ -43,6 +68,7 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   showAdvancedImportMenuItems: false,
   fuzzTextReviews: true,
   skipHomeScreen: false,
+  reviewTitleBar: 'obsidian',
   fsrsParams: FSRS_PARAMETER_DEFAULTS,
 };
 
@@ -148,6 +174,7 @@ const CONTROL_BINDINGS = {
   dayRolloverOffset: topLevel('dayRolloverOffset'),
   fuzzTextReviews: topLevel('fuzzTextReviews'),
   skipHomeScreen: topLevel('skipHomeScreen'),
+  reviewTitleBar: topLevel('reviewTitleBar'),
   showAdvancedImportCommands: topLevel('showAdvancedImportCommands'),
   showAdvancedImportMenuItems: topLevel('showAdvancedImportMenuItems'),
   'fsrsParams.request_retention': fsrsParam('request_retention'),
@@ -259,6 +286,20 @@ export class IRSettingTab extends PluginSettingTab {
             desc: 'Jump to the first due item when opening review.',
             control: { type: 'toggle', key: 'skipHomeScreen' },
           },
+          {
+            name: 'Show review tab title bar',
+            desc: 'Show the title bar above the review tab, or leave it to the "Show tab title bar" appearance setting.',
+            control: {
+              type: 'dropdown',
+              key: 'reviewTitleBar',
+              options: REVIEW_TITLE_BAR_OPTIONS,
+            },
+            // Hidden where Obsidian hides its own "Show tab title bar": a phone
+            // always shows the header, and styles.css ignores this setting
+            // there too. A function, so each render reads `isPhone` afresh —
+            // Obsidian recomputes it as the window resizes.
+            visible: () => !Platform.isPhone,
+          },
         ],
       },
       {
@@ -356,6 +397,10 @@ export class IRSettingTab extends PluginSettingTab {
       this.plugin.settings,
       value
     );
+    // Before the save, which the tabs don't depend on: they read the setting
+    // from memory, and a failed write must not leave the open ones behind the
+    // ones opened after it.
+    if (key === 'reviewTitleBar') this.plugin.syncReviewTitleBars();
     await this.plugin.saveSettings();
 
     if (key === 'showAdvancedImportCommands') {

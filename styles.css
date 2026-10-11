@@ -307,6 +307,30 @@ body {
   display: none;
 }
 
+/* The "Show review tab title bar" setting, which ReviewView marks on the tab as
+   `.ir-header-shown` ("Show") or `.ir-header-hidden` ("Hide"); "Follow Obsidian
+   setting" marks neither. "Show" undoes Obsidian's own rule,
+   `body:not(.show-view-header):not(.is-phone) .view-header { display: none; }`,
+   so it has to outrank that selector. Kept to `.mod-root`, the main area and
+   popout windows: Obsidian hides every header in a sidebar, and so does this.
+
+   Neither applies on a phone, which always shows the header: Obsidian neither
+   offers its own setting there nor lets it act, and the settings tab hides
+   this one to match. Left to `body.is-phone` rather than to ReviewView, as
+   Obsidian sets that class afresh whenever the window resizes. */
+body:not(.is-phone)
+  .mod-root
+  .workspace-leaf-content[data-type='incremental-reading-review'].ir-header-shown
+  > .view-header {
+  display: flex;
+}
+
+body:not(.is-phone)
+  .workspace-leaf-content[data-type='incremental-reading-review'].ir-header-hidden
+  > .view-header {
+  display: none;
+}
+
 /* A PDF article in review: its name and a way to open it, centred. An item
    missing its file gets the same: where it was, and a way to relink it. */
 .ir-binary-item,
@@ -574,11 +598,22 @@ body {
 }
 
 /* The review bar's stand-ins for the view header's back, forward and ⋮ buttons
-   (`.ir-header-standin`, see ActionBar.tsx) show only while Obsidian hides the
-   header. These are the cases its own rule leaves the header up:
-   `body:not(.show-view-header):not(.is-phone) .view-header { display: none; }` */
-body.show-view-header .ir-header-standin,
-body.is-phone .ir-header-standin {
+   (`.ir-header-standin`, see ActionBar.tsx) show only while the header is
+   hidden. These are the cases it is up: a phone always shows it, and elsewhere
+   Obsidian's own rule leaves it up,
+   `body:not(.show-view-header):not(.is-phone) .view-header { display: none; }`,
+   unless the review tab is set to hide it — and the tab can be set to show it
+   whatever that rule says (`.ir-header-shown`/`.ir-header-hidden`, above).
+   The two setting-driven arms only in `.mod-root`: a desktop or tablet
+   sidebar never shows a header, so a tab docked there keeps its stand-ins
+   whatever either setting says. The phone arm is unscoped, as it was before
+   these settings existed. */
+body.is-phone .ir-header-standin,
+body.show-view-header
+  .mod-root
+  .workspace-leaf-content:not(.ir-header-hidden)
+  .ir-header-standin,
+.mod-root .workspace-leaf-content.ir-header-shown .ir-header-standin {
   display: none;
 }
 

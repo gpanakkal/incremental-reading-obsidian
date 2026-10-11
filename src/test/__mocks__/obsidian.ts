@@ -369,6 +369,9 @@ export const Platform = {
   isMobile: false,
   isMobileApp: false,
   isDesktop: true,
+  /** Obsidian recomputes these two from the window size, on mobile only. */
+  isPhone: false,
+  isTablet: false,
 };
 
 /**

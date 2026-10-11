@@ -37,6 +37,7 @@ import {
   setDefaultEditingMode,
   setNativeMenus,
   setPluginSetting,
+  setShowViewHeader,
   toggleReviewSourceMode,
   waitForReviewItem,
   watchNotices,
@@ -3366,6 +3367,33 @@ test.describe('Settings tab', () => {
       .toBe(await resolveColor('--background-modifier-border'));
   });
 
+  test('shows or hides the open review tab’s title bar as its dropdown says', async () => {
+    await executeCommandById(window, 'incremental-reading:learn');
+    const header = reviewHeader(window);
+    await expect(header).toBeVisible();
+    // By role: Obsidian sizes the dropdown off a hidden copy of the select.
+    const select = settingRow('Show review tab title bar').getByRole(
+      'combobox'
+    );
+    await expect(select).toHaveValue('obsidian');
+
+    await select.selectOption({ label: 'Hide' });
+    await expect(header).toBeHidden();
+    await expect.poll(readPluginData).toMatchObject({
+      settings: { reviewTitleBar: 'hide' },
+    });
+
+    await setShowViewHeader(window, false);
+    await select.selectOption({ label: 'Show' });
+    await expect(header).toBeVisible();
+
+    await select.selectOption({ label: 'Follow Obsidian setting' });
+    await expect(header).toBeHidden();
+    await expect.poll(readPluginData).toMatchObject({
+      settings: { reviewTitleBar: 'obsidian' },
+    });
+  });
+
   test("leaves an invalid field on Obsidian's own tabs as Obsidian styles it", async () => {
     await window.evaluate(() =>
       (window as Page & { app: App }).app.setting.openTabById('file')
@@ -3431,5 +3459,74 @@ test.describe('Settings tab', () => {
       .click();
 
     await expect.poll(hasCommand).toBe(true);
+  });
+});
+
+test.describe('Settings tab on mobile', () => {
+  /**
+   * Whether settings tab `tabId` shows a row named `name`, once it has rendered
+   * the row named `first`.
+   */
+  async function showsSettingRow(tabId: string, first: string, name: string) {
+    let found = false;
+    await expect(async () => {
+      await window.evaluate((id) => {
+        const { setting } = (window as Page & { app: App }).app;
+        setting.open();
+        setting.openTabById(id);
+      }, tabId);
+      // A modal over the vault on mobile, a window of its own on desktop.
+      for (const page of app.windows()) {
+        const names = page.locator('.vertical-tab-content .setting-item-name');
+        if (!(await names.getByText(first, { exact: true }).isVisible())) {
+          continue;
+        }
+        // Obsidian keeps a row it hides (`visible`) in the DOM, undisplayed.
+        found = await names.getByText(name, { exact: true }).isVisible();
+        return;
+      }
+      throw new Error(`No window is showing the ${tabId} settings yet`);
+    }).toPass({ timeout: 20_000 });
+    await window.evaluate(() =>
+      (window as Page & { app: App }).app.setting.close()
+    );
+    return found;
+  }
+
+  /** Whether Obsidian's own "Show tab title bar", and this plugin's, show. */
+  const titleBarRows = async () => ({
+    // on the Interface tab, beside "Floating navigation", which every mobile
+    // device has
+    obsidian: await showsSettingRow(
+      'interface',
+      'Floating navigation',
+      'Show tab title bar'
+    ),
+    review: await showsSettingRow(
+      'incremental-reading',
+      'Default article priority',
+      'Show review tab title bar'
+    ),
+  });
+
+  /** Start the app as a mobile device of this size, as it would boot on one. */
+  async function bootMobileAt(width: number) {
+    await window.setViewportSize({ width, height: 900 });
+    // Obsidian builds its own Interface tab's rows once, for the device it
+    // started on, so it has to start at this size for them to be comparable.
+    await emulateMobile(window, true);
+  }
+
+  // Where Obsidian offers "Show tab title bar", so does the plugin: everywhere
+  // but a phone, which always shows the header.
+  test('offers the review title bar choice on a tablet but not on a phone, as Obsidian does its own', async () => {
+    await bootMobileAt(1600);
+    await expect(window.locator('body')).toHaveClass(/\bis-tablet\b/);
+    expect(await titleBarRows()).toEqual({ obsidian: true, review: true });
+
+    await emulateMobile(window, false);
+    await bootMobileAt(420);
+    await expect(window.locator('body')).toHaveClass(/\bis-phone\b/);
+    expect(await titleBarRows()).toEqual({ obsidian: false, review: false });
   });
 });

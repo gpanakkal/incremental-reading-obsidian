@@ -53,6 +53,21 @@ export const REVIEW_VIEW_DEFAULT_TITLE = 'Incremental reading';
 export const NON_TEXT_ITEM_CLASS = 'ir-non-text-item';
 
 /**
+ * On the tab while the "Show review tab title bar" setting says "Show":
+ * styles.css shows its view header whatever Obsidian's own "Show tab title bar"
+ * setting says. See {@link ReviewView.syncTitleBar}. Neither class does
+ * anything on a phone, which always shows the header, as Obsidian does.
+ */
+export const HEADER_SHOWN_CLASS = 'ir-header-shown';
+
+/**
+ * On the tab while that setting says "Hide": styles.css hides its view header,
+ * everywhere but a phone, and shows the action bar's stand-ins for its buttons
+ * instead.
+ */
+export const HEADER_HIDDEN_CLASS = 'ir-header-hidden';
+
+/**
  * Whether keys pressed at `target` edit text: a form field, or anything inside
  * an element made editable. The review editor in selection mode is not one —
  * its `contenteditable` is `false`.
@@ -155,6 +170,7 @@ export default class ReviewView extends FileView {
     this.#place = placeOf(plugin.store.getState());
     this.sourceMode = !plugin.app.vault.getConfig('livePreview');
     this.#selectionScope = new Scope(plugin.app.scope);
+    this.syncTitleBar();
     this.#selectionScope.register([], 'Escape', (evt) =>
       this.onSelectionEscape(evt)
     );
@@ -214,6 +230,24 @@ export default class ReviewView extends FileView {
     } else {
       this.app.workspace.updateTitle();
     }
+  }
+
+  /**
+   * Mark the tab with the "Show review tab title bar" choice, for styles.css.
+   * "Follow Obsidian setting" carries neither class, which leaves the header to
+   * Obsidian's own rule. Run at construction, before the tab is first drawn,
+   * and again by the plugin whenever the setting changes.
+   */
+  syncTitleBar() {
+    const { reviewTitleBar } = this.plugin.settings;
+    this.containerEl.classList.toggle(
+      HEADER_SHOWN_CLASS,
+      reviewTitleBar === 'show'
+    );
+    this.containerEl.classList.toggle(
+      HEADER_HIDDEN_CLASS,
+      reviewTitleBar === 'hide'
+    );
   }
 
   static get viewType() {

@@ -18,6 +18,7 @@ import {
   samePlace,
   type ReviewPlace,
 } from '#/lib/review-history';
+import type { IRPluginSettings, ReviewTitleBar } from '#/lib/settings';
 import {
   resetCurrentItem,
   resetSession,
@@ -42,6 +43,8 @@ import {
   type MenuItem,
 } from '#/test/__mocks__/obsidian';
 import ReviewView, {
+  HEADER_HIDDEN_CLASS,
+  HEADER_SHOWN_CLASS,
   NON_TEXT_ITEM_CLASS,
   REVIEW_VIEW_DEFAULT_TITLE,
 } from '#/views/ReviewView';
@@ -185,14 +188,26 @@ function makePluginApp(livePreview = true) {
   };
 }
 
+/**
+ * The slice of `plugin.settings` the constructor reads: the title bar choice
+ * it marks the tab with. Every construction needs it, like {@link makePluginApp}.
+ */
+function makePluginSettings(
+  reviewTitleBar: ReviewTitleBar = 'obsidian'
+): Pick<IRPluginSettings, 'reviewTitleBar'> {
+  return { reviewTitleBar };
+}
+
 function makeView(
   store: ReturnType<typeof makeFakeStore>,
-  livePreview = true
+  livePreview = true,
+  settings = makePluginSettings()
 ): ReviewView {
   return new ReviewView(
     {} as WorkspaceLeaf,
     {
       store,
+      settings,
       app: makePluginApp(livePreview),
     } as unknown as IncrementalReadingPlugin,
     {} as ReviewManager
@@ -487,6 +502,7 @@ async function openHistoryView({
     {
       store,
       sessionTracker,
+      settings: makePluginSettings(),
       app: makePluginApp(),
     } as unknown as IncrementalReadingPlugin,
     reviewManager as unknown as ReviewManager
@@ -658,6 +674,7 @@ function makeKeyedView() {
     {} as WorkspaceLeaf,
     {
       store,
+      settings: makePluginSettings(),
       app: { ...makePluginApp(), scope: appScope },
       actions: { cancelSelection },
     } as unknown as IncrementalReadingPlugin,
@@ -1350,6 +1367,88 @@ describe('ReviewView construction', () => {
     const view = makeView(makeFakeStore('home'));
 
     expect(view.allowNoFile).toBe(true);
+  });
+});
+
+describe('ReviewView title bar', () => {
+  const choiceArb = fc.constantFrom<ReviewTitleBar[]>(
+    'obsidian',
+    'show',
+    'hide'
+  );
+
+  /** Classes the tab carries for other reasons: Obsidian's, and the view's own. */
+  const otherClassesArb = fc
+    .uniqueArray(
+      fc.oneof(
+        fc.constantFrom(NON_TEXT_ITEM_CLASS, 'workspace-leaf-content', 'is-x'),
+        fc.stringMatching(/^[a-z][a-z-]{0,10}$/)
+      ),
+      { maxLength: 4 }
+    )
+    .map((classes) =>
+      classes.filter(
+        (name) => name !== HEADER_SHOWN_CLASS && name !== HEADER_HIDDEN_CLASS
+      )
+    );
+
+  /** The tab's classes styles.css reads the title bar choice from. */
+  const titleBarClasses = (view: ReviewView) => ({
+    shown: view.containerEl.classList.contains(HEADER_SHOWN_CLASS),
+    hidden: view.containerEl.classList.contains(HEADER_HIDDEN_CLASS),
+  });
+
+  const expected = (choice: ReviewTitleBar) => ({
+    shown: choice === 'show',
+    hidden: choice === 'hide',
+  });
+
+  it('marks the tab with the title bar choice it opens with', () => {
+    fc.assert(
+      fc.property(choiceArb, (choice) => {
+        const view = makeView(
+          makeFakeStore('home'),
+          true,
+          makePluginSettings(choice)
+        );
+
+        expect(titleBarClasses(view)).toEqual(expected(choice));
+        unload(view);
+      })
+    );
+  });
+
+  it('follows each new choice it is told of, leaving its other classes alone', () => {
+    fc.assert(
+      fc.property(
+        choiceArb,
+        otherClassesArb,
+        fc.array(choiceArb, { maxLength: 6 }),
+        (initial, others, choices) => {
+          const settings = makePluginSettings(initial);
+          const view = makeView(makeFakeStore('home'), true, settings);
+          view.containerEl.classList.add(...others);
+
+          for (const choice of choices) {
+            settings.reviewTitleBar = choice;
+            view.syncTitleBar();
+
+            expect(titleBarClasses(view)).toEqual(expected(choice));
+            for (const name of others) {
+              expect(view.containerEl.classList).toContain(name);
+            }
+          }
+          unload(view);
+        }
+      )
+    );
+  });
+
+  it('uses the class names styles.css keys on', () => {
+    expect([HEADER_SHOWN_CLASS, HEADER_HIDDEN_CLASS]).toEqual([
+      'ir-header-shown',
+      'ir-header-hidden',
+    ]);
   });
 });
 
@@ -2313,7 +2412,11 @@ describe('ReviewView history recording', () => {
     const leaf = makeHistoryLeaf();
     const view = new ReviewView(
       leaf as unknown as WorkspaceLeaf,
-      { store, app: makePluginApp() } as unknown as IncrementalReadingPlugin,
+      {
+        store,
+        settings: makePluginSettings(),
+        app: makePluginApp(),
+      } as unknown as IncrementalReadingPlugin,
       {} as ReviewManager
     );
     try {

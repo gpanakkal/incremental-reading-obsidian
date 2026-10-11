@@ -1079,6 +1079,20 @@ export default class IncrementalReadingPlugin extends Plugin {
     });
   }
 
+  /**
+   * Re-apply the "Show review tab title bar" setting to every review tab open.
+   * A leaf whose view Obsidian has not built yet holds a stand-in view rather
+   * than a ReviewView; it is passed over and picks the setting up when it is
+   * built, in ReviewView's constructor.
+   */
+  syncReviewTitleBars() {
+    for (const leaf of this.app.workspace.getLeavesOfType(
+      ReviewView.viewType
+    )) {
+      if (leaf.view instanceof ReviewView) leaf.view.syncTitleBar();
+    }
+  }
+
   toggleAdvancedCommands(enable: boolean) {
     if (enable) {
       this.addImportCommand('import-article-copy', 'Import article as copy', {

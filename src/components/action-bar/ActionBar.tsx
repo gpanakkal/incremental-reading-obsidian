@@ -154,13 +154,16 @@ function HomeActions() {
 
 /**
  * Class for the controls that stand in for the view header's own, which
- * styles.css shows only while Obsidian hides the header: the "Show tab title bar"
- * setting turned off, on anything but a phone. The header is back the moment
- * the setting is, and a second set of the same buttons would only crowd the bar.
+ * styles.css shows only while the header is hidden: Obsidian's "Show tab title
+ * bar" setting turned off, on anything but a phone, unless the plugin's "Show
+ * review tab title bar" setting overrides it either way. The header is back the
+ * moment either setting brings it back, and a second set of the same buttons
+ * would only crowd the bar. A phone always shows the header, so none of
+ * them show there.
  *
- * Left to CSS rather than read from the vault config, so the bar follows the
- * setting from the same `body` class Obsidian's own rule keys on, with nothing
- * to subscribe to.
+ * Left to CSS rather than read from the settings, so the bar follows them from
+ * the same classes the header rules key on — Obsidian's on `body`, the
+ * plugin's on the tab — with nothing to subscribe to.
  */
 const HEADER_STANDIN_CLASS = 'ir-header-standin';
 

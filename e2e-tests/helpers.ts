@@ -402,6 +402,27 @@ export async function setShowViewHeader(window: Page, show: boolean) {
 }
 
 /**
+ * Set the plugin's "Show review tab title bar" choice and bring the open review
+ * tabs up to it — the same two steps its settings dropdown takes, minus the
+ * save. The settings window itself is exercised in core.spec.ts.
+ */
+export async function setReviewTitleBar(
+  window: Page,
+  choice: 'obsidian' | 'show' | 'hide'
+) {
+  await window.evaluate((value) => {
+    const plugin = (window as unknown as TestWindow).app.plugins.plugins[
+      'incremental-reading'
+    ] as unknown as {
+      settings: Record<string, unknown>;
+      syncReviewTitleBars(): void;
+    };
+    plugin.settings.reviewTitleBar = value;
+    plugin.syncReviewTitleBars();
+  }, choice);
+}
+
+/**
  * Set Settings -> Appearance -> "Native menus", the `nativeMenus` vault
  * config. On macOS it defaults to on, and a native menu is drawn by Electron
  * outside the page, where no locator can see it. Turn it off before asserting

@@ -87,6 +87,37 @@ describe('parsePluginData', () => {
     }
   });
 
+  it('follows Obsidian for the review title bar unless told otherwise', () => {
+    expect(DEFAULT_SETTINGS.reviewTitleBar).toBe('obsidian');
+    expect(parsePluginData({ settings: {} }).settings.reviewTitleBar).toBe(
+      'obsidian'
+    );
+  });
+
+  it('keeps a known review title bar choice and replaces anything else with the default', () => {
+    const CHOICES: unknown[] = ['obsidian', 'show', 'hide'];
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.constantFrom(...CHOICES),
+          fc.constantFrom('Show', 'HIDE', ' show', '', 'toString', '__proto__'),
+          // not strings, though each reads as a choice once made one
+          fc.constantFrom(['show'], ['hide'], { toString: () => 'hide' }),
+          fc.anything()
+        ),
+        fc.boolean(),
+        (stored, legacy) => {
+          const saved = { reviewTitleBar: stored };
+          const data = parsePluginData(legacy ? saved : { settings: saved });
+
+          expect(data.settings.reviewTitleBar).toBe(
+            CHOICES.includes(stored) ? stored : 'obsidian'
+          );
+        }
+      )
+    );
+  });
+
   it('keeps saved settings and drops nothing, whatever else the file holds', () => {
     fc.assert(
       fc.property(
