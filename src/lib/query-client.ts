@@ -59,7 +59,10 @@ export const currentItemQueryKey = (id: string | null) =>
  * each reader, so the hooks, `getCurrentItemSync` and `fetchCurrentItem` all
  * find the same nothing.
  *
- * The `null` entry belongs to no item and is left to `useCurrentItem`.
+ * The `null` entry, the advance's, is dropped the same way once review leaves
+ * `null`. It holds whatever the last advance came to, and coming back to it
+ * later finds that stale: an item `useCurrentItem` would only hide, or a
+ * failure it would show until the refetch landed.
  */
 export function startItemCacheEviction(): () => void {
   const cache = queryClient.getQueryCache();
@@ -77,7 +80,7 @@ export function startItemCacheEviction(): () => void {
    * mid-fetch cancels the fetch, rejecting whoever awaits it through
    * `fetchQuery` — `setCardsOnly` would never get as far as its toggle.
    */
-  const tryRemove = (query: Query, id: string): boolean => {
+  const tryRemove = (query: Query, id: string | null): boolean => {
     if (store.getState().currentItemId === id) return true;
     if (query.getObserversCount() > 0 || query.state.fetchStatus !== 'idle') {
       return false;
@@ -87,7 +90,7 @@ export function startItemCacheEviction(): () => void {
   };
 
   /** Remove `query` now, or once nothing holds it any more. */
-  const release = (query: Query, id: string) => {
+  const release = (query: Query, id: string | null) => {
     if (tryRemove(query, id)) return;
     function stopWaiting() {
       unsubscribe();
@@ -105,7 +108,7 @@ export function startItemCacheEviction(): () => void {
     if (currentItemId === shownId) return;
     const leftId = shownId;
     shownId = currentItemId;
-    if (leftId === null) return;
+    // Under `null` only the advance's own entry: no ['item', null] key exists
     const entries = [
       ...cache.findAll({ queryKey: currentItemQueryKey(leftId) }),
       ...cache.findAll({ queryKey: ['item', leftId] }),

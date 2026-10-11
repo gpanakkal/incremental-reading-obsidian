@@ -1,13 +1,22 @@
 // @vitest-environment jsdom
 import * as ReviewContext from '#/components/ReviewContext';
+import { CURRENT_ITEM_REFETCH_TIME } from '#/lib/constants';
+import type ReviewManager from '#/lib/items/ReviewManager';
+import { queryClient } from '#/lib/query-client';
+import { resetSession, store } from '#/lib/store';
 import type { MaybeMissingItem, NoteType, ReviewItem } from '#/lib/types';
 import type * as ReactQueryModule from '@tanstack/react-query';
-import type { UseQueryOptions } from '@tanstack/react-query';
+import {
+  QueryClientProvider,
+  type UseQueryOptions,
+} from '@tanstack/react-query';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { render } from 'preact';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'preact/test-utils';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  useCurrentItem,
   useCurrentItemFileText,
   useQueue,
   useReviewItems,
@@ -15,7 +24,13 @@ import {
 
 // #region HELPERS
 
-type QueryResult = { data: unknown; isLoading: boolean };
+type QueryResult = {
+  data: unknown;
+  isLoading: boolean;
+  isError?: boolean;
+  /** Whether a fetch has settled since the hook took up the key. */
+  isFetchedAfterMount?: boolean;
+};
 
 /**
  * What react-query has cached, keyed the way react-query keys it: by the whole
@@ -30,7 +45,12 @@ let optionsSeen: UseQueryOptions[] = [];
 const keyOf = (queryKey: unknown) => JSON.stringify(queryKey);
 
 /** What react-query answers for a key it has nothing for: a fetch in flight. */
-const MISS: QueryResult = { data: undefined, isLoading: true };
+const MISS: QueryResult = {
+  data: undefined,
+  isLoading: true,
+  isError: false,
+  isFetchedAfterMount: false,
+};
 
 // react-query is mocked rather than spied on so the two queries this hook
 // chains can be driven independently: the point of the hook is how it combines
@@ -39,13 +59,21 @@ const MISS: QueryResult = { data: undefined, isLoading: true };
 // Partial, because `QueryClient` is constructed at import time further down the
 // hook's dependency chain (query-client.ts), so a bare factory breaks the
 // module graph before any test runs.
-vi.mock('@tanstack/react-query', async (importOriginal) => ({
-  ...(await importOriginal<typeof ReactQueryModule>()),
-  useQuery: (options: UseQueryOptions) => {
-    optionsSeen.push(options);
-    return cache.get(keyOf(options.queryKey)) ?? MISS;
-  },
-}));
+//
+// Except where a case sets `liveQueries`: whether the error survives the
+// poll is react-query's timing, so those cases run on the real hook.
+let liveQueries = false;
+vi.mock('@tanstack/react-query', async (importOriginal) => {
+  const actual = await importOriginal<typeof ReactQueryModule>();
+  return {
+    ...actual,
+    useQuery: (options: UseQueryOptions) => {
+      if (liveQueries) return actual.useQuery(options);
+      optionsSeen.push(options);
+      return cache.get(keyOf(options.queryKey)) ?? MISS;
+    },
+  };
+});
 
 /** The slice of the store the hook reads. Replaced per case by `wireQueries`. */
 let reduxState: { currentItemId: string | null } = { currentItemId: null };
@@ -127,6 +155,8 @@ function wireQueries({
   seedCurrentItem(item?.data.id ?? null, {
     data: item,
     isLoading: itemLoading,
+    isError: false,
+    isFetchedAfterMount: true,
   });
   cache.set(keyOf(['item', item?.data.id, 'file-text']), {
     data: text,
@@ -169,6 +199,108 @@ const currentQueryOptions = () => queryOptions('current-review-item');
 const twoIdsArb = fc
   .tuple(fc.string(), fc.string())
   .filter(([a, b]) => a !== b);
+
+/** Let the fetch, react-query's notification and preact's render land. */
+const settle = () =>
+  act(async () => {
+    for (let i = 0; i < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  });
+
+/** Run the next poll, and let what it started land. */
+const poll = async () => {
+  await act(() => {
+    vi.advanceTimersByTime(CURRENT_ITEM_REFETCH_TIME);
+  });
+  await settle();
+};
+
+/** Mount the hook for `currentItemId` and record what every render returned. */
+async function mountLive(
+  currentItemId: string | null,
+  reviewManager: Partial<ReviewManager>
+) {
+  reduxState = { currentItemId };
+  vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
+    plugin: { app: { vault: { read: vi.fn() } } },
+    reviewManager,
+    reviewView: {
+      file: null,
+      setFile: vi.fn(),
+      onLoadFile: vi.fn(),
+      onUnloadFile: vi.fn(),
+    },
+  } as never);
+  const renders: ReturnType<typeof useCurrentItem>[] = [];
+  function Probe() {
+    renders.push(useCurrentItem());
+    return null;
+  }
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  await act(() =>
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Probe />
+      </QueryClientProvider>,
+      container
+    )
+  );
+  await settle();
+  return renders;
+}
+
+/**
+ * A read that fails (or, from `start`, hangs) until told otherwise; a hung
+ * read waits to be settled, so a case can look at the hook while a fetch is
+ * still in flight.
+ */
+function controlledRead(start: 'fail' | 'hold' = 'fail') {
+  let mode = start;
+  let release: (outcome: 'fail' | 'succeed') => void = () => {};
+  const read = vi.fn(
+    () =>
+      new Promise<'succeed'>((resolve, reject) => {
+        const failure = new Error('read failed');
+        if (mode === 'fail') return reject(failure);
+        release = (outcome) =>
+          outcome === 'fail' ? reject(failure) : resolve('succeed');
+      })
+  );
+  return {
+    read,
+    hold: () => {
+      mode = 'hold';
+    },
+    release: (outcome: 'fail' | 'succeed') => release(outcome),
+  };
+}
+
+/**
+ * The review manager the current-item query reads through: the queue for the
+ * `null` key, the item lookup for an id. Either resolves to `item` once its
+ * read does.
+ */
+function readingManager(
+  currentItemId: string | null,
+  read: () => Promise<unknown>,
+  item: ReviewItem
+): Partial<ReviewManager> {
+  return (currentItemId === null
+    ? {
+        getDue: vi.fn(async () => {
+          await read();
+          return { all: [item], cards: [], snippets: [], articles: [item] };
+        }),
+      }
+    : {
+        getItemOrMissingFromId: vi.fn(async () => {
+          await read();
+          return item;
+        }),
+      }) as unknown as Partial<ReviewManager>;
+}
 
 // #endregion
 
@@ -283,7 +415,12 @@ describe('useCurrentItemFileText', () => {
           const { enabled, queryFn } = textQueryOptions();
           const text = await (queryFn as () => Promise<unknown>)();
 
-          expect(result).toEqual({ item, text: undefined, isLoading: false });
+          expect(result).toEqual({
+            item,
+            text: undefined,
+            isLoading: false,
+            isError: false,
+          });
           expect(enabled).toBe(false);
           expect(text).toBeUndefined();
           expect(vault.read).not.toHaveBeenCalled();
@@ -416,6 +553,259 @@ describe('useCurrentItemFileText', () => {
     expect(result.item).toBeNull();
     expect(result.isLoading).toBe(false);
   });
+
+  it('reports a failed advance, or an item that failed before it was ever read, as an error, never as an item, an empty queue or loading', () => {
+    // A failed advance has no data, which the advance rule above would read as
+    // loading forever, or the stale data of an earlier advance; either way the
+    // caller is told it failed, and handed nothing to show or act on. An item
+    // whose first read failed has nothing to show either.
+    fc.assert(
+      fc.property(
+        fc.option(fc.string(), { nil: null }),
+        // What the last good fetch left: nothing at all (`undefined`) after
+        // a first fetch that failed, else a resolved null or item
+        fc.option(fc.option(fc.string(), { nil: null }), { nil: undefined }),
+        fc.boolean(),
+        (currentItemId, cachedId, itemLoading) => {
+          wireQueries({
+            item: null,
+            itemLoading: false,
+            text: undefined,
+            textLoading: false,
+            currentItemId,
+          });
+          // An item's own key holds data only once it has been read
+          const cached =
+            currentItemId !== null || cachedId === undefined
+              ? undefined
+              : cachedId === null
+                ? null
+                : makeItem(cachedId);
+          seedCurrentItem(currentItemId, {
+            data: cached,
+            isLoading: itemLoading,
+            isError: true,
+            isFetchedAfterMount: true,
+          });
+          // With no item the text query is disabled, and a disabled query is
+          // not loading; the stub's miss would say it is
+          cache.set(keyOf(['item', undefined, 'file-text']), {
+            data: undefined,
+            isLoading: false,
+          });
+
+          const result = callHook();
+
+          expect(result.item).toBeNull();
+          expect(result.text).toBeUndefined();
+          expect(result.isError).toBe(true);
+          expect(result.isLoading).toBe(false);
+        }
+      )
+    );
+  });
+
+  it('keeps showing what an item last read as when a refetch of it fails', () => {
+    // Swapping the item for the error would unmount the editor under the
+    // user over one failed poll; the next good poll replaces it anyway.
+    fc.assert(
+      fc.property(
+        fc.string(),
+        fc.boolean(),
+        fc.option(fc.string(), { nil: undefined }),
+        (id, stillThere, text) => {
+          const item = stillThere ? makeItem(id) : null;
+          wireQueries({
+            item,
+            itemLoading: false,
+            text,
+            textLoading: false,
+            currentItemId: id,
+          });
+          seedCurrentItem(id, {
+            data: item,
+            isLoading: false,
+            isError: true,
+            isFetchedAfterMount: true,
+          });
+
+          const result = callHook();
+
+          expect(result.item).toBe(item);
+          expect(result.isError).toBe(false);
+          expect(result.isLoading).toBe(false);
+        }
+      )
+    );
+  });
+
+  it('reports no error while the current item query has not failed', () => {
+    fc.assert(
+      fc.property(
+        fc.option(fc.string(), { nil: null }),
+        fc.option(fc.string(), { nil: null }),
+        fc.boolean(),
+        (currentItemId, cachedId, itemLoading) => {
+          wireQueries({
+            item: cachedId === null ? null : makeItem(cachedId),
+            itemLoading,
+            text: undefined,
+            textLoading: false,
+            currentItemId,
+          });
+
+          expect(callHook().isError).toBe(false);
+        }
+      )
+    );
+  });
+
+  // The option is the behavior here, as for `useQueue` below: react-query is
+  // mocked out in this file, and what `retry: false` does is react-query's own
+  it('asks react-query to report a failed current item fetch at once, not retry it', () => {
+    wireQueries({
+      item: null,
+      itemLoading: false,
+      text: undefined,
+      textLoading: false,
+    });
+
+    callHook();
+
+    // Each retry would hold the spinner up a while longer before the error
+    // shows; the five-second poll is what tries again
+    expect(currentQueryOptions().retry).toBe(false);
+  });
+});
+
+describe('useCurrentItem on a live query client', () => {
+  beforeEach(() => {
+    liveQueries = true;
+    // Only the poll's clock: rendering and react-query's notifications keep
+    // running on real timeouts
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  });
+
+  afterEach(() => {
+    liveQueries = false;
+    vi.useRealTimers();
+    queryClient.clear();
+    store.dispatch(resetSession());
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  const item = makeItem('item-1');
+
+  it.each([
+    { label: 'an advance', currentItemId: null },
+    { label: 'an item never read', currentItemId: 'item-1' },
+  ])(
+    'reports a failed read of $label through every poll that retries it, never as loading, until a poll succeeds',
+    async ({ currentItemId }) => {
+      const reads = controlledRead();
+      const renders = await mountLive(
+        currentItemId,
+        readingManager(currentItemId, reads.read, item)
+      );
+      // Loading until the first read has failed, never an error ahead of it
+      expect(renders[0]).toEqual({
+        data: undefined,
+        isLoading: true,
+        isError: false,
+      });
+      expect(renders.at(-1)).toEqual({
+        data: undefined,
+        isLoading: false,
+        isError: true,
+      });
+
+      // A poll in flight, then failing again: the error throughout
+      reads.hold();
+      const before = renders.length;
+      await poll();
+      expect(reads.read).toHaveBeenCalledTimes(2);
+      reads.release('fail');
+      await settle();
+      for (const shown of renders.slice(before)) {
+        expect(shown).toEqual({
+          data: undefined,
+          isLoading: false,
+          isError: true,
+        });
+      }
+
+      // The next good poll clears it, with nothing reopened
+      await poll();
+      expect(reads.read).toHaveBeenCalledTimes(3);
+      reads.release('succeed');
+      await settle();
+      const recovered = renders.at(-1);
+      expect(recovered?.isError).toBe(false);
+      // Off the advance, review moves onto the item; the store that does
+      // that is not the one this hook reads here, so it is still advancing
+      expect(recovered?.data).toBe(currentItemId === null ? undefined : item);
+      expect(store.getState().currentItemId).toBe(
+        currentItemId === null ? item.data.id : null
+      );
+    }
+  );
+
+  // Examples rather than properties: what varies here is the key's shape (the
+  // advance or an item) and what the cache held, not the id itself, which the
+  // mocked cases above already draw at random
+  it.each([
+    { label: 'an advance', currentItemId: null, emptyBefore: false },
+    {
+      label: 'an advance that had come back empty',
+      currentItemId: null,
+      emptyBefore: true,
+    },
+    {
+      label: 'an item never read',
+      currentItemId: 'item-1',
+      emptyBefore: false,
+    },
+  ])(
+    'shows loading, not what was cached before a failure from before it mounted, while its first read of $label is in flight',
+    async ({ currentItemId, emptyBefore }) => {
+      // A review tab closed on the error leaves it cached; the next one to
+      // open asks again, and nothing it has seen has failed yet. An empty
+      // queue that failed after is no more an answer than the failure: the
+      // summary it stands for would say nothing is due.
+      if (emptyBefore) {
+        queryClient.setQueryData(['current-review-item', currentItemId], null);
+      }
+      await queryClient.prefetchQuery({
+        queryKey: ['current-review-item', currentItemId],
+        queryFn: () => Promise.reject(new Error('read failed')),
+        retry: false,
+        // Fetch even over the empty answer just cached
+        staleTime: 0,
+      });
+      expect(
+        queryClient.getQueryState(['current-review-item', currentItemId])
+          ?.status
+      ).toBe('error');
+      const reads = controlledRead('hold');
+      const renders = await mountLive(
+        currentItemId,
+        readingManager(currentItemId, reads.read, item)
+      );
+      expect(reads.read).toHaveBeenCalledTimes(1);
+      for (const shown of renders) {
+        expect(shown).toEqual({
+          data: undefined,
+          isLoading: true,
+          isError: false,
+        });
+      }
+
+      reads.release('succeed');
+      await settle();
+      expect(renders.at(-1)?.isError).toBe(false);
+    }
+  );
 });
 
 describe('useQueue', () => {

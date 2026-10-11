@@ -65,11 +65,13 @@ function wireItem({
   text,
   isLoading,
   showAnswer,
+  isError = false,
 }: {
   item: MaybeMissingItem | null;
   text: string | undefined;
   isLoading: boolean;
   showAnswer: boolean;
+  isError?: boolean;
 }) {
   // Each property case is an independent render, and `vi.spyOn` on an
   // already-spied export hands back the existing spy, so without this the call
@@ -92,6 +94,7 @@ function wireItem({
     item,
     text,
     isLoading,
+    isError,
   });
   // An empty fragment rather than null: both viewers are declared as returning
   // an element, and rendering nothing is all the stubs need to do.
@@ -145,6 +148,10 @@ const binaryExtensionArb = fc.oneof(
 
 function spinner(container: HTMLElement): HTMLElement | null {
   return container.querySelector('.ir-loading');
+}
+
+function errorMessage(container: HTMLElement): HTMLElement | null {
+  return container.querySelector('.ir-review-error');
 }
 
 /** Every item shape the component can be handed, plus the absence of one. */
@@ -250,6 +257,90 @@ describe('ReviewItem', () => {
           expect(spinner(container)).toBeNull();
           expect(cardViewer).not.toHaveBeenCalled();
           expect(editor).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('says the item could not be loaded when its query failed, never that nothing is due', () => {
+    // A failed read of the database is unknown, not empty: the summary would
+    // tell the user their queue is clear. Whatever else the hook reports
+    // alongside the failure, the error is all that shows.
+    fc.assert(
+      fc.property(
+        itemArb,
+        fc.option(fc.string(), { nil: undefined }),
+        fc.boolean(),
+        fc.boolean(),
+        // Text, PDF and anything else: each has its own screen to stay off
+        fc.oneof(fc.constant('md'), binaryExtensionArb),
+        (itemSpec, text, isLoading, showAnswer, extension) => {
+          const { cardViewer, editor, summary, pdfView, openRelinkPicker } =
+            wireItem({
+              item: itemSpec && makeItem({ ...itemSpec, extension }),
+              text,
+              isLoading,
+              showAnswer,
+              isError: true,
+            });
+
+          const container = mount(<ReviewItem />);
+
+          expect(errorMessage(container)?.textContent).toBe(
+            "Couldn't load the review item. See the developer console for details."
+          );
+          expect(spinner(container)).toBeNull();
+          expect(summary).not.toHaveBeenCalled();
+          expect(cardViewer).not.toHaveBeenCalled();
+          expect(editor).not.toHaveBeenCalled();
+          expect(pdfView).not.toHaveBeenCalled();
+          expect(missingPlaceholder(container)).toBeNull();
+          expect(binaryPlaceholder(container)).toBeNull();
+          expect(openRelinkPicker).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('leaves the error behind once the query next succeeds, showing just what that success alone would', () => {
+    // The poll that follows a failure is what brings review back, onto
+    // whatever it reads: an item of any kind, a missing one, or nothing due
+    // after all. Nothing about the failure may outlast it.
+    fc.assert(
+      fc.property(
+        itemArb,
+        fc.oneof(fc.constant('md'), binaryExtensionArb),
+        fc.boolean(),
+        fc.option(fc.string(), { nil: undefined }),
+        fc.boolean(),
+        fc.boolean(),
+        (itemSpec, extension, missing, text, isLoading, showAnswer) => {
+          const recovered: MaybeMissingItem | null =
+            itemSpec === null
+              ? null
+              : missing
+                ? ({
+                    data: { ...itemSpec, reference: itemSpec.path },
+                    file: null,
+                  } as unknown as MissingItem)
+                : makeItem({ ...itemSpec, extension });
+          const settled = { item: recovered, text, isLoading, isError: false };
+          wireItem({
+            item: null,
+            text: undefined,
+            isLoading: false,
+            showAnswer,
+            isError: true,
+          });
+          const container = mount(<ReviewItem />);
+          expect(errorMessage(container)).not.toBeNull();
+
+          vi.mocked(ReactQuery.useCurrentItemFileText).mockReturnValue(settled);
+          void act(() => render(<ReviewItem />, container));
+          const fresh = mount(<ReviewItem />);
+
+          expect(errorMessage(container)).toBeNull();
+          expect(container.innerHTML).toBe(fresh.innerHTML);
         }
       )
     );
@@ -463,6 +554,7 @@ describe('ReviewItem', () => {
         item,
         text: undefined,
         isLoading: false,
+        isError: false,
       });
       void act(() => render(<ReviewItem />, container));
     };

@@ -2050,23 +2050,95 @@ describe('ReviewManager.manageFixedInterval', () => {
 // getDue — error path
 // ---------------------------------------------------------------------------
 
-describe('ReviewManager.getDue error handling', () => {
+describe('ReviewManager.getDue on a database it cannot read', () => {
+  const TABLE_OF_TYPE = {
+    article: 'article',
+    snippet: 'snippet',
+    card: 'srs_card',
+  } as const;
+
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('returns empty arrays when a sub-manager throws', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(manager.articles, 'getDue').mockRejectedValue(
-      new Error('db error')
+  it('property: rejects, rather than reporting nothing due, whenever a table of an included type cannot be queried', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.subarray(['article', 'snippet', 'srs_card'] as const),
+        fc.subarray(['article', 'snippet', 'card'] as const),
+        fc.option(fc.integer({ min: 1, max: 5 }), { nil: undefined }),
+        fc.option(fc.integer({ min: 0, max: 4_102_444_800_000 }), {
+          nil: undefined,
+        }),
+        fc.option(fc.array(fc.uuid(), { maxLength: 5 }), { nil: undefined }),
+        async (unreadable, includedTypes, limit, dueBy, excludeIds) => {
+          const repo = TestRepository.create();
+          try {
+            for (const table of unreadable) {
+              repo.db?.exec(`DROP TABLE ${table}`);
+            }
+            const manager = new ReviewManager(makePlugin(), repo);
+            const typesToInclude = Object.fromEntries(
+              includedTypes.map((type) => [type, true as const])
+            ) as Partial<Record<NoteType, true>>;
+            const readsUnreadable = includedTypes.some((type) =>
+              (unreadable as readonly string[]).includes(TABLE_OF_TYPE[type])
+            );
+
+            const due = manager.getDue({
+              typesToInclude,
+              limit,
+              dueBy,
+              excludeIds,
+            });
+
+            if (readsUnreadable) {
+              await expect(due).rejects.toThrow();
+            } else {
+              // An empty database: every table it reads is readable and empty
+              await expect(due).resolves.toEqual({
+                all: [],
+                cards: [],
+                snippets: [],
+                articles: [],
+              });
+            }
+          } finally {
+            repo.db?.close();
+          }
+        }
+      )
     );
+  });
+
+  it('rejects when a sub-manager does, even with the others resolving, and logs why', async () => {
+    const manager = new ReviewManager(makePlugin(), makeRepo());
+    const failure = new Error('db error');
+    vi.spyOn(manager.articles, 'getDue').mockRejectedValue(failure);
     vi.spyOn(manager.snippets, 'getDue').mockResolvedValue([]);
     vi.spyOn(manager.cards, 'getDue').mockResolvedValue([]);
-    const result = await manager.getDue({
-      typesToInclude: { article: true, snippet: true, card: true },
-    });
-    expect(result).toEqual({ all: [], cards: [], snippets: [], articles: [] });
+
+    await expect(
+      manager.getDue({
+        typesToInclude: { article: true, snippet: true, card: true },
+      })
+    ).rejects.toBe(failure);
+    // Review's error message sends the user to the console for the cause
+    expect(vi.mocked(console.error)).toHaveBeenCalledWith(
+      'Incremental Reading - Failed to get due items:',
+      failure
+    );
   });
 });
 

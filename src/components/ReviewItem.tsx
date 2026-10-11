@@ -63,17 +63,30 @@ function MissingItem({ item }: { item: TMissingItem }) {
   );
 }
 
+const LOAD_ERROR_MESSAGE =
+  "Couldn't load the review item. See the developer console for details.";
+
 /**
  * TODO:
  * - indicate if the item is a snippet, card, or article
- * - error element
  */
 export default function ReviewItem() {
   const showAnswer = useAppSelector((state) => state.showAnswer);
 
-  const { item, text: fileText, isLoading } = useCurrentItemFileText();
+  const { item, text: fileText, isLoading, isError } = useCurrentItemFileText();
 
-  // Loading comes first, and is its own screen rather than a missing item: the
+  // A query that failed is unknown, not empty: falling through to the summary
+  // would say nothing is due over a database that could not be read. First, so
+  // nothing the failed fetch left behind can show either.
+  if (isError) {
+    return (
+      <div className="ir-review-error" role="alert">
+        {LOAD_ERROR_MESSAGE}
+      </div>
+    );
+  }
+
+  // Loading comes next, and is its own screen rather than a missing item: the
   // item and its file text settle as two separate queries, and moving between
   // items reads the next file while the previous item is still cached, so there
   // is always a window where there is no text to show yet. Falling through to

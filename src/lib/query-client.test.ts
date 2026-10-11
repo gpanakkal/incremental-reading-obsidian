@@ -496,6 +496,20 @@ describe('currentItemQueryFn', () => {
     expect(store.getState().currentItemId).toBeNull();
   });
 
+  it('rejects with the failure, rather than reporting an exhausted queue, when the queue cannot be read', async () => {
+    // A resolved null is how an empty queue reports itself, so a failure has
+    // to come back as one: the review page shows it instead of "nothing due",
+    // and the store is left between items for the next poll to retry.
+    const failure = new Error('read failed');
+    const getDue = vi.fn().mockRejectedValue(failure);
+
+    await expect(
+      currentItemQueryFn({ getDue } as unknown as ReviewManager, null)
+    ).rejects.toBe(failure);
+    expect(store.getState().currentItemId).toBeNull();
+    expect(queryClient.getQueryCache().getAll()).toEqual([]);
+  });
+
   it('asks the queue to pass over items already seen this session', async () => {
     // The queue reads one item at a time (`getDue`'s default limit), so a seen
     // item it is not told to exclude comes back in place of the unseen ones
@@ -737,8 +751,8 @@ describe('startItemCacheEviction', () => {
     // has still been left, an item never left keeps its entries through any
     // number of moves among the others, and a dispatch that leaves the id
     // where it was — the same id again, or another slice changing — is no
-    // move at all. The `null` entry is the advance's, not an item's, and is
-    // never dropped.
+    // move at all. The `null` entry, the advance's, goes the same way once
+    // review has left `null`.
     const moveArb = (ids: string[]) =>
       fc.oneof(
         fc.record({ to: fc.option(fc.constantFrom(...ids), { nil: null }) }),
@@ -769,7 +783,7 @@ describe('startItemCacheEviction', () => {
         }
         queryClient.setQueryData(currentItemQueryKey(null), 'advance');
 
-        const left = new Set<string>();
+        const left = new Set<string | null>();
         let shown = shownAtStart;
         const stop = startItemCacheEviction();
         try {
@@ -779,7 +793,7 @@ describe('startItemCacheEviction', () => {
               continue;
             }
             store.dispatch(setCurrentItemId(move.to));
-            if (shown !== null && shown !== move.to) left.add(shown);
+            if (shown !== move.to) left.add(shown);
             shown = move.to;
           }
           // Nothing here was watched or fetching, so nothing is left waiting.
@@ -796,7 +810,7 @@ describe('startItemCacheEviction', () => {
           }
         }
         expect(queryClient.getQueryData(currentItemQueryKey(null))).toBe(
-          'advance'
+          left.has(null) ? undefined : 'advance'
         );
       })
     );
@@ -942,6 +956,52 @@ describe('startItemCacheEviction', () => {
           stop();
         }
       })
+    );
+  });
+
+  it('drops what an advance came to once review moves off it, a failure included, unless review comes back first', async () => {
+    // Coming back to `null` later (after picking an item from the queue
+    // table, say, then finishing it) would otherwise find the last advance's
+    // outcome: an item review would only hide, or a failure it would put on
+    // screen until the refetch landed.
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.integer({ min: 0, max: 2 }),
+        fc.boolean(),
+        fc.constantFrom('error', 'success'),
+        async (nextId, watcherCount, comesBack, outcome) => {
+          resetCacheAndStore();
+          const key = currentItemQueryKey(null);
+          await queryClient.prefetchQuery({
+            queryKey: key,
+            queryFn: () =>
+              outcome === 'error'
+                ? Promise.reject(new Error('read failed'))
+                : Promise.resolve(makeReviewItem(nextId)),
+            retry: false,
+          });
+          expect(queryClient.getQueryState(key)?.status).toBe(outcome);
+          const unwatches = Array.from({ length: watcherCount }, () =>
+            watch(key)
+          );
+          const stop = startItemCacheEviction();
+          try {
+            store.dispatch(setCurrentItemId(nextId));
+            if (comesBack) store.dispatch(setCurrentItemId(null));
+            for (const unwatch of unwatches) {
+              expect(isCached(key)).toBe(true);
+              unwatch();
+            }
+
+            // Unwatched, it goes the moment review leaves, before any return
+            expect(isCached(key)).toBe(comesBack && watcherCount > 0);
+            expect(queryClient.getQueryCache().hasListeners()).toBe(false);
+          } finally {
+            stop();
+          }
+        }
+      )
     );
   });
 

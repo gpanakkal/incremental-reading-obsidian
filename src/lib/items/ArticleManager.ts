@@ -845,6 +845,10 @@ export class ArticleManager extends ItemManager {
     }
   }
 
+  /**
+   * Articles ready for review.
+   * @throws if the article table cannot be read
+   */
   async getDue(
     dueBy?: number,
     limit?: number,
@@ -854,39 +858,36 @@ export class ArticleManager extends ItemManager {
       dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
     let allExcluded = [...(excludeIds ?? [])];
     let due: (ReviewArticle | MissingItem<IArticleBase>)[];
-    try {
-      // keep fetching until all fetched rows have a note
-      let lastMissingNotes = 0;
-      do {
-        lastMissingNotes = 0;
-        due = (
-          await this.fetchMany({
-            dueBy: dueTime,
-            limit,
-            excludeIds: allExcluded,
-          })
-        )
-          .map((row) => {
-            const item =
-              this.rowToReviewArticle(row) ??
-              this.asMissing(ArticleManager.rowToBase(row));
-            if (!item) {
-              allExcluded.push(row.id);
-              lastMissingNotes += 1;
-            }
-            return item;
-          }, this)
-          .filter((article) => article !== null);
+    // keep fetching until all fetched rows have a note
+    let lastMissingNotes = 0;
+    do {
+      lastMissingNotes = 0;
+      due = (
+        await this.fetchMany({
+          dueBy: dueTime,
+          limit,
+          excludeIds: allExcluded,
+          // A failed read is not an empty queue
+          throwOnError: true,
+        })
+      )
+        .map((row) => {
+          const item =
+            this.rowToReviewArticle(row) ??
+            this.asMissing(ArticleManager.rowToBase(row));
+          if (!item) {
+            allExcluded.push(row.id);
+            lastMissingNotes += 1;
+          }
+          return item;
+        }, this)
+        .filter((article) => article !== null);
 
-        if (this.plugin.settings.fuzzTextReviews) {
-          due.sort((a, b) => compareFuzzedDue(a.data, b.data));
-        }
-      } while (lastMissingNotes > 0);
-      return due;
-    } catch (error) {
-      console.error(error);
-      return [];
-    }
+      if (this.plugin.settings.fuzzTextReviews) {
+        due.sort((a, b) => compareFuzzedDue(a.data, b.data));
+      }
+    } while (lastMissingNotes > 0);
+    return due;
   }
 
   async fetch(id: string): Promise<ReviewArticle | null> {

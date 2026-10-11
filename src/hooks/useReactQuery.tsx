@@ -6,6 +6,7 @@ import {
   currentItemQueryFn,
   currentItemQueryKey,
   invalidateCurrentItemQuery,
+  queryClient,
 } from '#/lib/query-client';
 import type { MaybeMissingItem, ReviewItem } from '#/lib/types';
 import { useQuery } from '@tanstack/react-query';
@@ -55,7 +56,8 @@ export function useReviewItems(ids: string[]) {
 }
 
 /**
- * The item review is showing, or nothing while it is still being resolved.
+ * The item review is showing, or nothing while it is still being resolved or
+ * after it failed to resolve.
  *
  * Narrower than the query result it is built from, deliberately: the two fields
  * here are corrected below for the cache holding an item the store has already
@@ -68,6 +70,7 @@ export function useReviewItems(ids: string[]) {
 export function useCurrentItem(): {
   data: MaybeMissingItem | null | undefined;
   isLoading: boolean;
+  isError: boolean;
 } {
   const { reviewManager, reviewView } = useReviewContext();
   // In the key, not merely subscribed to: see `currentItemQueryKey`. Picking a
@@ -78,7 +81,24 @@ export function useCurrentItem(): {
     refetchInterval: CURRENT_ITEM_REFETCH_TIME,
     queryKey: currentItemQueryKey(currentItemId),
     queryFn: async () => currentItemQueryFn(reviewManager, currentItemId),
+    // A failed read of the database fails again on retry, and each retry
+    // would hold the spinner up a while longer before the error shows. The
+    // refetch interval keeps polling an errored query, so the next poll after
+    // the database recovers brings review back.
+    retry: false,
   });
+
+  // Whether the cache's last answer under this key was a failure, which holds
+  // until a fetch succeeds. Not `query.isError` alone: react-query puts a
+  // query with no data back to pending for each refetch, so the poll would
+  // swap the error for a spinner every five seconds. A pending query that has
+  // failed before has only ever failed, since a success would have left it
+  // with data. Read off the cache rather than the result, so that the error's
+  // timestamp does not become a field this hook re-renders on.
+  const state = queryClient.getQueryState(currentItemQueryKey(currentItemId));
+  const lastAnswerFailed =
+    state?.status === 'error' ||
+    (state?.status === 'pending' && state.errorUpdatedAt > 0);
 
   // A null id is review between items: the queue has not named the next one
   // yet, so the entry under that key is whatever the *last* advance resolved
@@ -86,10 +106,25 @@ export function useCurrentItem(): {
   // on screen. The one value it can be trusted for is `null`, which is the
   // advance having come back empty and is how an exhausted queue reports
   // itself; treating that as unresolved would leave the empty queue spinning.
-  const advancing = currentItemId === null && query.data !== null;
+  // Unless a failure came after it: then it is no longer the queue's answer.
+  const advancing =
+    currentItemId === null && (query.data !== null || lastAnswerFailed);
 
-  const data = advancing ? undefined : query.data;
-  const isLoading = advancing || query.isLoading;
+  // Only a failure since this hook took up the key is reported: one cached
+  // from before, by a review tab closed on it, is no answer to the fetch a
+  // new one makes, and showing it would put a stale error up in place of
+  // loading.
+  const lastFetchFailed =
+    query.isFetchedAfterMount && (query.isError || lastAnswerFailed);
+  // A failed advance outranks the rule above, which would read its missing
+  // data as loading forever and its stale data as unresolved: either way the
+  // queue could not be read, and the summary would say nothing is due. A
+  // failed refetch of an item keeps showing the item it last read rather than
+  // unmounting it under the user; only an item never read shows the failure.
+  const isError =
+    lastFetchFailed && (currentItemId === null || query.data === undefined);
+  const data = isError || advancing ? undefined : query.data;
+  const isLoading = !isError && (advancing || query.isLoading);
 
   // Still needed with the id in the key, for the one transition the key cannot
   // drive: arriving back on the `null` key with a cached, still-fresh advance
@@ -112,7 +147,7 @@ export function useCurrentItem(): {
     void viewHandleFileChange();
   }, [data?.file, reviewView]);
 
-  return { data, isLoading };
+  return { data, isLoading, isError };
 }
 
 /**
@@ -127,9 +162,15 @@ export function useCurrentItemFileText(): {
   item: MaybeMissingItem | null;
   text: string | undefined;
   isLoading: boolean;
+  /** The item could not be resolved; see {@link useCurrentItem}. */
+  isError: boolean;
 } {
   const { plugin } = useReviewContext();
-  const { data: currentItem, isLoading: itemLoading } = useCurrentItem();
+  const {
+    data: currentItem,
+    isLoading: itemLoading,
+    isError,
+  } = useCurrentItem();
 
   // Only text is read: a PDF read as text is what the review editor would
   // show, and then save back over the PDF.
@@ -155,5 +196,6 @@ export function useCurrentItemFileText(): {
     // this stuck true — once the item resolves to null, neither leg is loading
     // and the caller is free to say nothing is due.
     isLoading: itemLoading || textLoading,
+    isError,
   };
 }

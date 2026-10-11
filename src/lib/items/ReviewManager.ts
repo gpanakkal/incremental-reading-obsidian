@@ -280,6 +280,8 @@ export default class ReviewManager {
    * TODO:
    * - paginate
    * @param dueBy Unix timestamp. Defaults to the end of the day plus the rollover offset.
+   * @throws if a table of an included type cannot be read. A failed read must
+   * not pass for an empty queue: review would report nothing due.
    */
   async getDue({
     dueBy,
@@ -315,8 +317,10 @@ export default class ReviewManager {
         articles: articlesDue,
       };
     } catch (error) {
-      console.error(error);
-      return { all: [], cards: [], snippets: [], articles: [] };
+      // Logged here because review's message points the user at the console,
+      // and only a failed query logs itself on the way up
+      console.error('Incremental Reading - Failed to get due items:', error);
+      throw error;
     }
   }
   /**

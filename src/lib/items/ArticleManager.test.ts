@@ -1087,22 +1087,57 @@ describe('getDue', () => {
     expect(results.map((r) => r.data.id)).toContain('has-file');
   });
 
-  it('returns an empty array when the repo throws', async () => {
+  it('rejects, rather than reporting nothing due, when its query fails', async () => {
+    const failure = new Error('db error');
     const repo = {
-      query: vi.fn().mockRejectedValue(new Error('db error')),
+      // As the repository does: a failed read rejects only when asked to
+      query: vi.fn(
+        async (
+          _sql: string,
+          _params: unknown[],
+          opts?: { throwOnError?: boolean }
+        ) => {
+          if (opts?.throwOnError) throw failure;
+          return [];
+        }
+      ),
       mutate: vi.fn(),
       _execSql: vi.fn(),
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
-    const plugin = {
-      app: makeApp(),
-      settings: { dayRolloverOffset: 0 },
-    } as never;
-    const manager = new ArticleManager(plugin, repo);
-    const results = await manager.getDue();
-    expect(results).toEqual([]);
+    // Whatever it is asked for, under whatever settings
+    await fc.assert(
+      fc.asyncProperty(
+        fc.option(fc.integer({ min: 0, max: 4_102_444_800_000 }), {
+          nil: undefined,
+        }),
+        fc.option(fc.nat({ max: 50 }), { nil: undefined }),
+        fc.option(fc.array(fc.uuid(), { maxLength: 5 }), { nil: undefined }),
+        fc.integer({
+          min: DAY_ROLLOVER_OFFSET_HOURS.MIN,
+          max: DAY_ROLLOVER_OFFSET_HOURS.MAX,
+        }),
+        fc.boolean(),
+        async (
+          dueBy,
+          limit,
+          excludeIds,
+          dayRolloverOffset,
+          fuzzTextReviews
+        ) => {
+          const plugin = {
+            app: makeApp(),
+            settings: { dayRolloverOffset, fuzzTextReviews },
+          } as never;
+          const manager = new ArticleManager(plugin, repo);
+          await expect(manager.getDue(dueBy, limit, excludeIds)).rejects.toBe(
+            failure
+          );
+        }
+      )
+    );
   });
 });
 

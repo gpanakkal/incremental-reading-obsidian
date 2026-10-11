@@ -166,6 +166,7 @@ export class CardManager extends ItemManager {
    * on, when the day is 25 hours long. Rare enough to leave.
    *
    * @param now The current time, as a Unix timestamp.
+   * @throws if the card table cannot be read
    */
   async getDue(
     dueBy?: number,
@@ -179,36 +180,33 @@ export class CardManager extends ItemManager {
     const learningDueTime = Math.min(now, dueTime);
     let allExcluded = [...(excludeIds ?? [])];
     let due: (ReviewCard | MissingItem<ISRSCardDisplay>)[];
-    try {
-      // keep fetching until all fetched rows have a note
-      let lastMissingNotes = 0;
-      do {
-        lastMissingNotes = 0;
-        due = (
-          await this.fetchMany({
-            dueBy: dueTime,
-            learningDueBy: learningDueTime,
-            limit,
-            excludeIds: allExcluded,
-          })
-        )
-          .map((row) => {
-            const item =
-              this.rowToReviewCard(row) ??
-              this.asMissing(CardManager.rowToDisplay(row));
-            if (!item) {
-              allExcluded.push(row.id);
-              lastMissingNotes += 1;
-            }
-            return item;
-          }, this)
-          .filter((card) => card !== null);
-      } while (lastMissingNotes !== 0);
-      return due;
-    } catch (error) {
-      console.error(error);
-      return [];
-    }
+    // keep fetching until all fetched rows have a note
+    let lastMissingNotes = 0;
+    do {
+      lastMissingNotes = 0;
+      due = (
+        await this.fetchMany({
+          dueBy: dueTime,
+          learningDueBy: learningDueTime,
+          limit,
+          excludeIds: allExcluded,
+          // A failed read is not an empty queue
+          throwOnError: true,
+        })
+      )
+        .map((row) => {
+          const item =
+            this.rowToReviewCard(row) ??
+            this.asMissing(CardManager.rowToDisplay(row));
+          if (!item) {
+            allExcluded.push(row.id);
+            lastMissingNotes += 1;
+          }
+          return item;
+        }, this)
+        .filter((card) => card !== null);
+    } while (lastMissingNotes !== 0);
+    return due;
   }
 
   async create(editor: Editor, view: MarkdownView | ReviewView) {
