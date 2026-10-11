@@ -1140,6 +1140,50 @@ describe('fetchMany', () => {
       /ORDER BY \(due IS NULL\), due \+ COALESCE\(due_fuzz, 0\)/i
     );
   });
+
+  describe('with a real SQLite database', () => {
+    it('fetches exactly the snippets due at or before any dueBy, zero and below included', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      const manager = new SnippetManager({} as never, repo);
+      /** A due time: around zero, where a falsy check reads the cutoff as none, or real. */
+      const timeArb = fc.oneof(
+        fc.integer({ min: -3, max: 3 }),
+        fc.integer({ min: -MS_PER_DAY, max: MS_PER_DAY }),
+        fc.integer({
+          min: new Date('2000-01-01T00:00:00Z').getTime(),
+          max: new Date('2100-01-01T00:00:00Z').getTime(),
+        })
+      );
+      await fc.assert(
+        fc.asyncProperty(
+          // As getDue passes it, as the queue passes it, or none at all
+          fc.option(fc.oneof(timeArb, fc.constant(Number.POSITIVE_INFINITY)), {
+            nil: undefined,
+          }),
+          fc.uniqueArray(fc.record({ id: fc.uuid(), due: timeArb }), {
+            selector: ({ id }) => id,
+            maxLength: 8,
+          }),
+          async (dueBy, specs) => {
+            db.exec('DELETE FROM snippet');
+            for (const { id, due } of specs) {
+              insertSnippetRow(db, { id, due, due_fuzz: null, priority: 50 });
+            }
+
+            const rows = await manager.fetchMany({ dueBy });
+
+            expect(new Set(rows.map(({ id }) => id))).toEqual(
+              new Set(
+                specs
+                  .filter(({ due }) => dueBy === undefined || due <= dueBy)
+                  .map(({ id }) => id)
+              )
+            );
+          }
+        )
+      );
+    });
+  });
 });
 
 describe('fetch', () => {
@@ -1269,6 +1313,25 @@ describe('getDue', () => {
 
       expect(results.map((r) => r.data.id)).toEqual(['earlier-fuzzed']);
     });
+
+    it('treats an explicit dueBy of 0 as a cutoff, not as no cutoff', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      for (const [id, due] of [
+        ['at-zero', 0],
+        ['after-zero', 1],
+      ] as const) {
+        insertSnippetRow(db, { id, due, due_fuzz: null, priority: 50 });
+      }
+      const plugin = {
+        app: makeApp(),
+        settings: { dayRolloverOffset: 0, fuzzTextReviews: false },
+      } as never;
+      const manager = new SnippetManager(plugin, repo);
+
+      const results = await manager.getDue(0);
+
+      expect(results.map((r) => r.data.id)).toEqual(['at-zero']);
+    });
   });
 
   it('returns snippets due at or before the offset-adjusted end of day, but not after', async () => {
@@ -1339,7 +1402,7 @@ describe('getDue', () => {
       settings: { dayRolloverOffset: 0 },
     } as never;
     const manager = new SnippetManager(plugin, repo);
-    const results = await manager.getDue(0);
+    const results = await manager.getDue();
 
     expect(results).toEqual([
       { data: SnippetManager.rowToBase(rowA), file: null },
@@ -1373,7 +1436,7 @@ describe('getDue', () => {
       settings: { dayRolloverOffset: 0 },
     } as never;
     const manager = new SnippetManager(plugin, repo);
-    await manager.getDue(0, undefined, [rowA.id]);
+    await manager.getDue(undefined, undefined, [rowA.id]);
 
     const firstCallParams = queryCalls[0];
     expect(firstCallParams).toContain(rowA.id);

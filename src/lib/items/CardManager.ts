@@ -18,6 +18,7 @@ import type {
   SRSCardReviewRow,
   SRSCardRow,
 } from '#/lib/types';
+import { getEndOfDay, reviewDayOf, searchAll } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import {
@@ -47,7 +48,6 @@ import {
   VALID_DELIMITER_PATTERN,
 } from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
-import { getEndOfDay, searchAll } from '../utils';
 import { ItemManager } from './ItemManager';
 import SRSCard from './SRSCard';
 import SRSCardReview from './SRSCardReview';
@@ -152,13 +152,31 @@ export class CardManager extends ItemManager {
     };
   }
 
+  /**
+   * Cards ready for review, soonest due first.
+   *
+   * New and Review cards are due once their due time falls on or before
+   * `dueBy`, by default the end of the review day `now` falls in. Learning and
+   * Relearning cards wait for their due time itself: they are the only states
+   * whose steps are shorter than a day, so one graded minutes ago is still due
+   * "today" and would otherwise come straight back.
+   *
+   * A Review card is always scheduled a whole day or more out, which clears
+   * the end of its review day on every day but the one the clocks go back
+   * on, when the day is 25 hours long. Rare enough to leave.
+   *
+   * @param now The current time, as a Unix timestamp.
+   */
   async getDue(
     dueBy?: number,
     limit?: number,
-    excludeIds?: string[]
+    excludeIds?: string[],
+    now = Date.now()
   ): Promise<(ReviewCard | MissingItem<ISRSCardDisplay>)[]> {
+    const offset = this.plugin.settings.dayRolloverOffset;
     const dueTime =
-      dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
+      dueBy ?? getEndOfDay(offset, reviewDayOf(new Date(now), offset));
+    const learningDueTime = Math.min(now, dueTime);
     let allExcluded = [...(excludeIds ?? [])];
     let due: (ReviewCard | MissingItem<ISRSCardDisplay>)[];
     try {
@@ -169,6 +187,7 @@ export class CardManager extends ItemManager {
         due = (
           await this.fetchMany({
             dueBy: dueTime,
+            learningDueBy: learningDueTime,
             limit,
             excludeIds: allExcluded,
           })
@@ -728,8 +747,15 @@ export class CardManager extends ItemManager {
     return this.rowToReviewCard(result[0] as SRSCardRow);
   }
 
+  /**
+   * @param opts.dueBy Only cards due at or before this Unix timestamp.
+   * @param opts.learningDueBy With `dueBy`, the earlier cutoff Learning and
+   * Relearning cards are held to; New and Review cards keep `dueBy`. One later
+   * than `dueBy` is no different from `dueBy`.
+   */
   async fetchMany(opts?: {
     dueBy?: number;
+    learningDueBy?: number;
     limit?: number;
     includeDismissed?: boolean;
     includeDeleted?: boolean;
@@ -738,9 +764,18 @@ export class CardManager extends ItemManager {
     let query = 'SELECT * FROM srs_card';
     const conditions = [];
     const params = [];
-    if (opts?.dueBy) {
-      params.push(opts?.dueBy);
+    if (opts?.dueBy !== undefined) {
+      params.push(opts.dueBy);
       conditions.push(`due <= $${params.length}`);
+      if (opts.learningDueBy !== undefined) {
+        // Placeholders have to appear in the text in order of N: SQLite numbers
+        // `$N` names by first appearance, not by N.
+        params.push(opts.learningDueBy);
+        conditions.push(
+          `(state IN (${State.New}, ${State.Review}) ` +
+            `OR due <= $${params.length})`
+        );
+      }
     }
     if (!opts?.includeDismissed) {
       conditions.push('dismissed = 0');

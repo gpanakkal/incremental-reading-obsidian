@@ -2,6 +2,7 @@ import {
   CARD_ANSWER_REPLACEMENT,
   CARD_TAG,
   CLOZE_DELIMITERS,
+  DAY_ROLLOVER_OFFSET_HOURS,
   MS_PER_DAY,
   MS_PER_YEAR,
   SOURCE_INDEX_TIMEOUT_MS,
@@ -27,8 +28,14 @@ import type { TFile } from 'obsidian';
 import { resolve } from 'path';
 import type { Database, SqlJsStatic } from 'sql.js';
 import initSqlJs from 'sql.js';
-import type { FSRSParameters, Grade } from 'ts-fsrs';
-import { fsrs, generatorParameters, Rating, State } from 'ts-fsrs';
+import type { FSRSParameters, Grade, StepUnit } from 'ts-fsrs';
+import {
+  createEmptyCard,
+  fsrs,
+  generatorParameters,
+  Rating,
+  State,
+} from 'ts-fsrs';
 import {
   afterAll,
   afterEach,
@@ -449,6 +456,59 @@ function makeRealRepo(db: Database): SQLiteRepository {
     onDataChange: vi.fn(() => vi.fn()),
   } as unknown as SQLiteRepository;
 }
+
+let sqlJs: SqlJsStatic | undefined;
+
+/** A fresh in-memory database at the current production schema. */
+async function makeSchemaDb(): Promise<Database> {
+  sqlJs ??= await initSqlJs({
+    wasmBinary: readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    ) as unknown as ArrayBuffer,
+  });
+  const db = new sqlJs.Database();
+  db.exec(readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8'));
+  return db;
+}
+
+/** Make `rows` the only cards in `db`, each at a note of its own. */
+function replaceCards(db: Database, rows: SRSCardRow[]) {
+  db.exec('DELETE FROM srs_card');
+  for (const row of rows) {
+    db.exec(
+      `INSERT INTO srs_card
+        (id, reference, created_at, due, dismissed, deleted, stability,
+         difficulty, elapsed_days, scheduled_days, learning_steps, reps,
+         lapses, state)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+      [
+        row.id,
+        // Unique per row, as the schema requires
+        `cards/${row.id}.md`,
+        row.created_at,
+        row.due,
+        row.dismissed,
+        Number(row.deleted),
+        row.stability,
+        row.difficulty,
+        row.elapsed_days,
+        row.scheduled_days,
+        row.learning_steps,
+        row.reps,
+        row.lapses,
+        row.state,
+      ] as never
+    );
+  }
+}
+
+/** Any of the four grades. */
+const gradeArb = fc.constantFrom<Grade>(
+  Rating.Again,
+  Rating.Hard,
+  Rating.Good,
+  Rating.Easy
+);
 
 // #endregion
 
@@ -1266,6 +1326,57 @@ describe('fetchMany', () => {
     ).resolves.not.toThrow();
   });
 
+  describe('against the production schema', () => {
+    let db: Database;
+
+    beforeAll(async () => {
+      db = await makeSchemaDb();
+    });
+
+    afterAll(() => {
+      db.close();
+    });
+
+    /** The ids `fetchMany(opts)` returns of a live, a dismissed and a deleted card. */
+    async function fetchedIds(
+      opts: Parameters<CardManager['fetchMany']>[0]
+    ): Promise<string[]> {
+      replaceCards(db, [
+        makeCardRow({ id: 'live', due: 1 }),
+        makeCardRow({ id: 'dismissed', due: 2, dismissed: 1 }),
+        makeCardRow({ id: 'deleted', due: 3, deleted: true }),
+      ]);
+      const manager = new CardManager(makePlugin(), makeRealRepo(db));
+      return (await manager.fetchMany(opts)).map(({ id }) => id);
+    }
+
+    it('leaves out dismissed and deleted cards by default', async () => {
+      expect(await fetchedIds(undefined)).toEqual(['live']);
+    });
+
+    it('keeps deleted cards when includeDeleted is true', async () => {
+      expect(await fetchedIds({ includeDeleted: true })).toEqual([
+        'live',
+        'deleted',
+      ]);
+    });
+
+    it('returns every card when nothing filters them', async () => {
+      expect(
+        await fetchedIds({ includeDismissed: true, includeDeleted: true })
+      ).toEqual(['live', 'dismissed', 'deleted']);
+    });
+  });
+
+  it('names the param count in the error when it exceeds the limit', async () => {
+    const repo = makeRepo();
+    const manager = new CardManager(makePlugin(), repo);
+    const excludeIds = Array.from({ length: 1000 }, (_, i) => `id-${i}`);
+    await expect(manager.fetchMany({ excludeIds })).rejects.toThrow(
+      /^Param count 1000 exceeded the limit for query "SELECT \* FROM srs_card WHERE/
+    );
+  });
+
   it('uses AND to join multiple WHERE conditions', async () => {
     const repo = makeRepo();
     const manager = new CardManager(makePlugin(), repo);
@@ -1404,7 +1515,7 @@ describe('getDue', () => {
     } as unknown as SQLiteRepository;
 
     const manager = new CardManager(makePlugin(), repo);
-    const results = await manager.getDue(0);
+    const results = await manager.getDue();
 
     expect(results).toEqual([
       { data: CardManager.rowToDisplay(rowA), file: null },
@@ -1443,7 +1554,7 @@ describe('getDue', () => {
       onDataChange: vi.fn(() => vi.fn()),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
-    await manager.getDue(0, undefined, ['excluded-id']);
+    await manager.getDue(undefined, undefined, ['excluded-id']);
     expect(queryCalls[0]).toContain('excluded-id');
   });
 
@@ -1478,7 +1589,7 @@ describe('getDue', () => {
     } as unknown as SQLiteRepository;
 
     const manager = new CardManager(makePlugin(claiming(rowA.reference)), repo);
-    const results = await manager.getDue(0);
+    const results = await manager.getDue();
     const ids = results.map((r) => r.data.id);
     expect(ids).not.toContain('null-file');
     expect(ids).toContain('has-file');
@@ -1516,10 +1627,347 @@ describe('getDue', () => {
       makePlugin(claiming(rowNoFile.reference)),
       repo
     );
-    await manager.getDue(0);
+    await manager.getDue();
     // Should have retried — the refused row's id must appear in the second call's params
     expect(queryCalls.length).toBeGreaterThanOrEqual(2);
     expect(queryCalls[1]).toContain('missing');
+  });
+
+  describe('against the production schema', () => {
+    /** One database for every case: {@link dueIds} empties it for each. */
+    let db: Database;
+
+    beforeAll(async () => {
+      db = await makeSchemaDb();
+    });
+
+    afterAll(() => {
+      db.close();
+    });
+
+    // #region REAL-DB GETDUE HELPERS
+
+    const MINUTE = 60 * 1000;
+    /** The plugin's rollover offset in {@link makePlugin}. */
+    const ROLLOVER = 4;
+    /** Noon, well inside its review day, which ends 16 hours later. */
+    const NOON = new Date(2026, 0, 15, 12).getTime();
+    /** The end of {@link NOON}'s review day: 04:00 the next morning. */
+    const END_OF_DAY = new Date(2026, 0, 16, ROLLOVER).getTime();
+
+    /**
+     * The ids `getDue` returns, when called at `now` with `rows` as the only
+     * cards in the database and the day rolling over at `offset` hours.
+     */
+    async function dueIds(
+      rows: SRSCardRow[],
+      now: number,
+      {
+        dueBy,
+        limit,
+        excludeIds,
+        offset = ROLLOVER,
+      }: {
+        dueBy?: number;
+        limit?: number;
+        excludeIds?: string[];
+        offset?: number;
+      } = {}
+    ): Promise<string[]> {
+      replaceCards(db, rows);
+      const plugin = makePlugin() as unknown as {
+        settings: { dayRolloverOffset: number };
+      };
+      plugin.settings.dayRolloverOffset = offset;
+      const manager = new CardManager(plugin as never, makeRealRepo(db));
+      const due = await manager.getDue(dueBy, limit, excludeIds, now);
+      return due.map(({ data }) => data.id);
+    }
+
+    /** A card in the property below, its due time relative to a cutoff. */
+    const cardSpecArb = fc.record({
+      id: fc.uuid(),
+      state: stateArb,
+      // Spread over the day either side, with the cutoffs themselves likely
+      due: fc.oneof(
+        fc.integer({ min: -MS_PER_DAY, max: 2 * MS_PER_DAY }),
+        fc.constantFrom(-1, 0, 1)
+      ),
+      dueFromEndOfDay: fc.boolean(),
+      dismissed: fc.boolean(),
+      deleted: fc.boolean(),
+      excluded: fc.boolean(),
+    });
+
+    // #endregion
+
+    it('leaves out a Learning card due a minute from now', async () => {
+      const ids = await dueIds(
+        [
+          makeCardRow({
+            id: 'learning',
+            state: State.Learning,
+            due: NOON + MINUTE,
+          }),
+        ],
+        NOON
+      );
+      expect(ids).toEqual([]);
+    });
+
+    it('returns a Learning card due a minute ago', async () => {
+      const ids = await dueIds(
+        [
+          makeCardRow({
+            id: 'learning',
+            state: State.Learning,
+            due: NOON - MINUTE,
+          }),
+        ],
+        NOON
+      );
+      expect(ids).toEqual(['learning']);
+    });
+
+    it('leaves out a Relearning card due a minute from now', async () => {
+      const ids = await dueIds(
+        [
+          makeCardRow({
+            id: 'relearning',
+            state: State.Relearning,
+            due: NOON + MINUTE,
+          }),
+        ],
+        NOON
+      );
+      expect(ids).toEqual([]);
+    });
+
+    it('returns a Relearning card due a minute ago', async () => {
+      const ids = await dueIds(
+        [
+          makeCardRow({
+            id: 'relearning',
+            state: State.Relearning,
+            due: NOON - MINUTE,
+          }),
+        ],
+        NOON
+      );
+      expect(ids).toEqual(['relearning']);
+    });
+
+    it('returns a Review card due later in the review day', async () => {
+      const ids = await dueIds(
+        [
+          makeCardRow({
+            id: 'review',
+            state: State.Review,
+            due: END_OF_DAY - MINUTE,
+          }),
+        ],
+        NOON
+      );
+      expect(ids).toEqual(['review']);
+    });
+
+    it('returns a New card due later in the review day', async () => {
+      const ids = await dueIds(
+        [makeCardRow({ id: 'new', state: State.New, due: END_OF_DAY })],
+        NOON
+      );
+      expect(ids).toEqual(['new']);
+    });
+
+    it('treats an explicit dueBy of 0 as a cutoff, not as no cutoff', async () => {
+      const ids = await dueIds(
+        [
+          makeCardRow({ id: 'at-zero', state: State.Review, due: 0 }),
+          makeCardRow({ id: 'after-zero', state: State.Review, due: 1 }),
+        ],
+        NOON,
+        { dueBy: 0 }
+      );
+      expect(ids).toEqual(['at-zero']);
+    });
+
+    it('returns exactly the live cards due by their own state’s cutoff, soonest first', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          // A review day, by its calendar date, and an instant inside it
+          fc.date({
+            min: new Date(2000, 0, 1),
+            max: new Date(2100, 0, 1),
+            noInvalidDate: true,
+          }),
+          fc.double({ min: 0, max: 1, maxExcluded: true, noNaN: true }),
+          fc.integer({
+            min: DAY_ROLLOVER_OFFSET_HOURS.MIN,
+            max: DAY_ROLLOVER_OFFSET_HOURS.MAX,
+          }),
+          fc.option(fc.integer({ min: -MS_PER_DAY, max: 2 * MS_PER_DAY })),
+          // Review asks for one at a time, the queue for all; never for none
+          fc.option(fc.integer({ min: 1, max: 14 })),
+          fc.uniqueArray(cardSpecArb, {
+            selector: ({ id }) => id,
+            maxLength: 12,
+          }),
+          async (day, fraction, offset, dueByOffset, limit, specs) => {
+            const start = new Date(
+              day.getFullYear(),
+              day.getMonth(),
+              day.getDate(),
+              offset
+            ).getTime();
+            const end = new Date(
+              day.getFullYear(),
+              day.getMonth(),
+              day.getDate() + 1,
+              offset
+            ).getTime();
+            const now = start + Math.floor(fraction * (end - start));
+            const dueBy = dueByOffset === null ? undefined : now + dueByOffset;
+            const rows = specs.map((spec) =>
+              makeCardRow({
+                id: spec.id,
+                state: spec.state,
+                due: spec.dueFromEndOfDay ? end + spec.due : now + spec.due,
+                dismissed: spec.dismissed ? 1 : 0,
+                deleted: spec.deleted,
+              })
+            );
+            const excludeIds = specs
+              .filter(({ excluded }) => excluded)
+              .map(({ id }) => id);
+
+            const ids = await dueIds(rows, now, {
+              dueBy,
+              limit: limit ?? undefined,
+              excludeIds,
+              offset,
+            });
+
+            const cutoff = dueBy ?? end;
+            const learning = new Set<number>([
+              State.Learning,
+              State.Relearning,
+            ]);
+            const eligible = rows
+              .filter(
+                (row) =>
+                  !row.dismissed &&
+                  !row.deleted &&
+                  !excludeIds.includes(row.id) &&
+                  row.due <=
+                    (learning.has(row.state) ? Math.min(now, cutoff) : cutoff)
+              )
+              .sort((a, b) => a.due - b.due);
+            const expectedDues = eligible
+              .slice(0, limit ?? eligible.length)
+              .map(({ due }) => due);
+            // Ties in `due` may come back in either order, and either side of
+            // the limit
+            expect(new Set(ids).size).toBe(ids.length);
+            for (const id of ids) {
+              expect(eligible.map((row) => row.id)).toContain(id);
+            }
+            expect(
+              ids.map((id) => rows.find((row) => row.id === id)!.due)
+            ).toEqual(expectedDues);
+          }
+        )
+      );
+    });
+
+    it('passes limit and excludeIds on alongside the split cutoff', async () => {
+      const rows = [
+        makeCardRow({ id: 'a', state: State.Learning, due: NOON - 3 }),
+        makeCardRow({ id: 'b', state: State.Review, due: NOON - 2 }),
+        makeCardRow({ id: 'c', state: State.New, due: NOON - 1 }),
+      ];
+      expect(await dueIds(rows, NOON, { limit: 1, excludeIds: ['a'] })).toEqual(
+        ['b']
+      );
+      expect(await dueIds(rows, NOON, { excludeIds: ['a', 'b'] })).toEqual([
+        'c',
+      ]);
+    });
+  });
+});
+
+describe('getFsrs — what getDue relies on', () => {
+  // #region SCHEDULING HELPERS
+
+  /**
+   * A count of steps or days with no ceiling but the settings tab's: small
+   * ones, which are what people use, and huge ones, which it also accepts.
+   */
+  const countArb = fc.oneof(
+    fc.integer({ min: 1, max: 2000 }),
+    fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER })
+  );
+
+  /** A learning or relearning step, as the settings tab accepts one. */
+  const stepArb = fc
+    .tuple(countArb, fc.constantFrom('m', 'h', 'd'))
+    .map(([count, unit]): StepUnit => `${count}${unit}`);
+
+  /** Every FSRS setting the settings tab exposes, a little past its bounds. */
+  const fsrsParamsArb = fc.record({
+    request_retention: fc.double({ min: 0.7, max: 0.99, noNaN: true }),
+    maximum_interval: countArb,
+    enable_fuzz: fc.boolean(),
+    enable_short_term: fc.boolean(),
+    learning_steps: fc.array(stepArb, { maxLength: 12 }),
+    relearning_steps: fc.array(stepArb, { maxLength: 12 }),
+  });
+
+  /** A review: its grade, and how long after the one before it came. */
+  const reviewArb = fc.record({
+    grade: gradeArb,
+    delay: fc.integer({ min: 0, max: 400 * MS_PER_DAY }),
+  });
+
+  // #endregion
+
+  it('schedules a card less than a day out only while it is Learning or Relearning', () => {
+    // A review day lasts at most a day, bar the one the clocks go back on, so
+    // a card scheduled a day or more out is never due again in the review day
+    // it was graded in. getDue holds back only Learning and Relearning cards
+    // to their exact due time; this is why that is enough.
+    fc.assert(
+      fc.property(
+        fsrsParamsArb,
+        fc.date({
+          min: new Date(2000, 0, 1),
+          max: new Date(2100, 0, 1),
+          noInvalidDate: true,
+        }),
+        fc.array(reviewArb, { minLength: 1, maxLength: 12 }),
+        (fsrsParams, createdAt, reviews) => {
+          const plugin = makePlugin() as unknown as {
+            settings: { fsrsParams: unknown };
+          };
+          plugin.settings.fsrsParams = {
+            ...generatorParameters(),
+            ...fsrsParams,
+          };
+          const scheduler = new CardManager(
+            plugin as never,
+            makeRepo()
+          ).getFsrs();
+          let card = createEmptyCard(createdAt);
+          let time = createdAt.getTime();
+          for (const { grade, delay } of reviews) {
+            time += delay;
+            card = scheduler.next(card, new Date(time), grade).card;
+            if (card.due.getTime() - time < MS_PER_DAY) {
+              expect([State.Learning, State.Relearning]).toContain(card.state);
+            }
+          }
+        }
+      )
+    );
   });
 });
 
@@ -1779,13 +2227,6 @@ describe('review — FSRS settings', () => {
       repo,
     };
   }
-
-  const gradeArb = fc.constantFrom<Grade>(
-    Rating.Again,
-    Rating.Hard,
-    Rating.Good,
-    Rating.Easy
-  );
 
   /** request_retention slider range from settings.ts (0.8..0.95, step 0.01). */
   const retentionArb = fc
@@ -2257,47 +2698,32 @@ describe('review — against the production schema', () => {
       difficulty: state === State.New ? 0 : 5.2,
     }));
 
-  const anyGradeArb = fc.constantFrom<Grade>(
-    Rating.Again,
-    Rating.Hard,
-    Rating.Good,
-    Rating.Easy
-  );
-
   // #endregion
 
   it('executes both write statements without a SQL error, for every grade and starting state', async () => {
     await fc.assert(
-      fc.asyncProperty(
-        anyGradeArb,
-        startingCardArb,
-        async (grade, overrides) => {
-          const { db } = makeDbWithCard(overrides);
-          const manager = new CardManager(makePlugin(), makeRealRepo(db));
+      fc.asyncProperty(gradeArb, startingCardArb, async (grade, overrides) => {
+        const { db } = makeDbWithCard(overrides);
+        const manager = new CardManager(makePlugin(), makeRealRepo(db));
 
-          await manager.review(readCard(db, 'card-1'), grade, REVIEW_AT);
+        await manager.review(readCard(db, 'card-1'), grade, REVIEW_AT);
 
-          db.close();
-        }
-      )
+        db.close();
+      })
     );
   });
 
   it('writes exactly one review-log row per review', async () => {
     await fc.assert(
-      fc.asyncProperty(
-        anyGradeArb,
-        startingCardArb,
-        async (grade, overrides) => {
-          const { db } = makeDbWithCard(overrides);
-          const manager = new CardManager(makePlugin(), makeRealRepo(db));
+      fc.asyncProperty(gradeArb, startingCardArb, async (grade, overrides) => {
+        const { db } = makeDbWithCard(overrides);
+        const manager = new CardManager(makePlugin(), makeRealRepo(db));
 
-          await manager.review(readCard(db, 'card-1'), grade, REVIEW_AT);
+        await manager.review(readCard(db, 'card-1'), grade, REVIEW_AT);
 
-          expect(readReviewLogs(db, 'card-1')).toHaveLength(1);
-          db.close();
-        }
-      )
+        expect(readReviewLogs(db, 'card-1')).toHaveLength(1);
+        db.close();
+      })
     );
   });
 

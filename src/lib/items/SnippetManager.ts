@@ -550,8 +550,8 @@ export class SnippetManager extends ItemManager {
     let query = 'SELECT * FROM snippet';
     const conditions = [];
     const params = [];
-    if (opts?.dueBy) {
-      params.push(opts?.dueBy);
+    if (opts?.dueBy !== undefined) {
+      params.push(opts.dueBy);
       conditions.push(`due <= $${params.length}`);
     }
     if (!opts?.includeDismissed) {

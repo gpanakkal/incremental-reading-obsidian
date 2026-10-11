@@ -1,4 +1,8 @@
-import { DATA_DIRECTORY, SNIPPET_DIRECTORY } from '#/lib/constants';
+import {
+  CURRENT_ITEM_REFETCH_TIME,
+  DATA_DIRECTORY,
+  SNIPPET_DIRECTORY,
+} from '#/lib/constants';
 import test, {
   expect,
   type ElectronApplication,
@@ -1036,6 +1040,101 @@ test.describe('Review session', () => {
 
     await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
     await expect(window.locator('css=#begin-review-button')).toHaveCount(0);
+  });
+});
+
+test.describe('Card grading', () => {
+  /** Unofficial: `window.app`, `app.plugins.plugins`. */
+  type CardRepoWindow = {
+    app: {
+      plugins: {
+        plugins: Record<
+          string,
+          {
+            reviewManager: {
+              repo: {
+                query(sql: string): Record<string, unknown>[] | undefined;
+                mutate(sql: string, params?: unknown[]): Promise<unknown>;
+              };
+            };
+          }
+        >;
+      };
+    };
+  };
+
+  /** Move every card's due time to `due`, straight in the database. */
+  const setCardsDue = (page: Page, due: number) =>
+    page.evaluate(async (at) => {
+      const { app } = window as unknown as CardRepoWindow;
+      await app.plugins.plugins[
+        'incremental-reading'
+      ].reviewManager.repo.mutate('UPDATE srs_card SET due = $1', [at]);
+    }, due);
+
+  /** The id of the one card in the vault, or null while there is not one. */
+  const onlyCardId = (page: Page) =>
+    page.evaluate(() => {
+      const { app } = window as unknown as CardRepoWindow;
+      const rows =
+        app.plugins.plugins['incremental-reading'].reviewManager.repo.query(
+          'SELECT id FROM srs_card'
+        ) ?? [];
+      return rows.length === 1 ? (rows[0].id as string) : null;
+    });
+
+  /** Whether review is on the card `id`, waiting for its answer to be shown. */
+  const expectReviewOnCard = async (page: Page, id: string) => {
+    await expect
+      .poll(async () => {
+        const { page: reviewPage, currentItemId } = await leafSnapshot(page);
+        return { reviewPage, currentItemId };
+      })
+      .toEqual({ reviewPage: 'review', currentItemId: id });
+    await expect(
+      page.getByRole('button', { name: 'Show answer' })
+    ).toBeVisible();
+  };
+
+  test('holds a card graded Again back until its step is up, then brings it back', async () => {
+    await openNote(window, 'sources/Security Principles');
+    await selectParagraph(
+      window,
+      'Explain the security functions: Confidentiality, Integrity and Availability (CIA).'
+    );
+    await executeCommandById(window, 'incremental-reading:create-card');
+    await expect.poll(() => onlyCardId(window)).not.toBeNull();
+    const cardId = (await onlyCardId(window))!;
+    // New cards are filed for tomorrow
+    await setCardsDue(window, Date.now());
+
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await expectReviewOnCard(window, cardId);
+    await window.getByRole('button', { name: 'Show answer' }).click();
+    await window.getByRole('button', { name: 'Forgot' }).click();
+
+    // Its first learning step is a minute out, which is still today: it used
+    // to come straight back as the next item.
+    const summary = window.locator('.ir-review-summary');
+    await expect(
+      summary.getByRole('heading', { name: 'Review complete' })
+    ).toBeVisible();
+    // And stays away past the next look at the queue
+    await window.waitForTimeout(CURRENT_ITEM_REFETCH_TIME + 1_000);
+    expect((await leafSnapshot(window)).currentItemId).toBeNull();
+    await expect(summary).toBeVisible();
+
+    // Once it is due, the same look at the queue brings it back, with review
+    // left open on the summary all along
+    await setCardsDue(window, Date.now());
+    await expect
+      .poll(async () => (await leafSnapshot(window)).currentItemId, {
+        timeout: CURRENT_ITEM_REFETCH_TIME + 2_000,
+        intervals: [100],
+      })
+      .toBe(cardId);
+    await expectReviewOnCard(window, cardId);
   });
 });
 
