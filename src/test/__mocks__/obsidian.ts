@@ -427,7 +427,7 @@ export class MarkdownRenderer {
     _component: Component
   ): Promise<void> {
     // Minimal stub: write textContent = markdown so tests can control rendered output
-    el.textContent = markdown;
+    _el.textContent = _markdown;
   }
 }
 export const Platform = {
