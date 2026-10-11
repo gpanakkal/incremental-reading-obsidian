@@ -1,7 +1,8 @@
 /**
  * Polyfills the DOM helpers Obsidian injects at runtime: the global
- * `createEl` / `createDiv` / `createSpan` / `createFragment` factories, the same
- * factories on `Document`, and the `activeDocument` / `activeWindow` bindings.
+ * `createEl` / `createDiv` / `createSpan` / `createFragment` factories, the
+ * appending `createEl` / `createDiv` / `createSpan` methods on `Node`, and the
+ * `activeDocument` / `activeWindow` bindings.
  *
  * The `obsidianmd` lint rules require plugin code to use these in place of the
  * plain `document.*` APIs, so source files reach for them and jsdom has no idea
@@ -86,8 +87,10 @@ function installObsidianDomGlobals(): void {
     createEl,
     createDiv: (info?: ElementInfo, callback?: (el: HTMLDivElement) => void) =>
       createEl('div', info, callback),
-    createSpan: (info?: ElementInfo, callback?: (el: HTMLSpanElement) => void) =>
-      createEl('span', info, callback),
+    createSpan: (
+      info?: ElementInfo,
+      callback?: (el: HTMLSpanElement) => void
+    ) => createEl('span', info, callback),
     createFragment: (callback?: (frag: DocumentFragment) => void) => {
       const frag = document.createDocumentFragment();
       callback?.(frag);
@@ -95,16 +98,42 @@ function installObsidianDomGlobals(): void {
     },
   };
 
-  // Obsidian exposes these both as bare globals and as `Document` methods.
+  // Obsidian exposes the factories as bare globals, which make a detached
+  // element, and as `Node` methods, which append the element to the node they
+  // are called on (`Node.prototype.createEl` passes `parent: this`; see
+  // enhance.js in obsidian.asar). On a `Document` that append throws, as it
+  // does in Obsidian: a detached element comes from the global only.
   const globalScope = globalThis as unknown as Record<string, unknown>;
-  const documentProto = Document.prototype as unknown as Record<
-    string,
-    unknown
-  >;
+  const nodeProto = Node.prototype as unknown as Record<string, unknown>;
   for (const [name, helper] of Object.entries(helpers)) {
     globalScope[name] = helper;
-    documentProto[name] = helper;
   }
+  const appendTo = (parent: Node, info?: ElementInfo): DomElementInfo => ({
+    ...(typeof info === 'string' ? { cls: info } : info),
+    parent,
+  });
+  nodeProto.createEl = function <K extends keyof HTMLElementTagNameMap>(
+    this: Node,
+    tag: K,
+    info?: ElementInfo,
+    callback?: (el: HTMLElementTagNameMap[K]) => void
+  ) {
+    return createEl(tag, appendTo(this, info), callback);
+  };
+  nodeProto.createDiv = function (
+    this: Node,
+    info?: ElementInfo,
+    callback?: (el: HTMLDivElement) => void
+  ) {
+    return createEl('div', appendTo(this, info), callback);
+  };
+  nodeProto.createSpan = function (
+    this: Node,
+    info?: ElementInfo,
+    callback?: (el: HTMLSpanElement) => void
+  ) {
+    return createEl('span', appendTo(this, info), callback);
+  };
 
   // Getters, not values: Obsidian resolves these per popout window, and each
   // jsdom test file gets a fresh document.

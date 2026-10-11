@@ -425,7 +425,10 @@ export class MarkdownRenderer {
     _el: HTMLElement,
     _sourcePath: string,
     _component: Component
-  ): Promise<void> {}
+  ): Promise<void> {
+    // Minimal stub: write textContent = markdown so tests can control rendered output
+    el.textContent = markdown;
+  }
 }
 export const Platform = {
   isMobile: false,
