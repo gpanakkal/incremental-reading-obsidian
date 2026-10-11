@@ -1,3 +1,4 @@
+import { DISMISS_ICON_STROKE, PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { fetchByFile, invalidateCacheOnMatch } from '#/lib/query-client';
@@ -19,7 +20,7 @@ import {
   showPanel,
   ViewPlugin,
 } from '@codemirror/view';
-import { type App, type EventRef, Keymap, type TFile } from 'obsidian';
+import { type App, type EventRef, Keymap, setIcon, type TFile } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
 
 /**
@@ -295,7 +296,7 @@ export function renderStandaloneActionBarDOM(
   if (!reviewManager) return noTeardown;
 
   // Create dismiss button with loading state, then fetch actual status
-  const dismissToggleBtn = createButton('Loading...', async () => {});
+  const dismissToggleBtn = createFaceButton(FACES.loading, async () => {});
   dismissToggleBtn.disabled = true;
   container.appendChild(dismissToggleBtn);
 
@@ -314,13 +315,16 @@ export function renderStandaloneActionBarDOM(
       if (disposed) return;
 
       if (!item) {
-        dismissToggleBtn.textContent = 'Not in database';
+        showFace(dismissToggleBtn, FACES.notInDatabase);
         return;
       }
 
       // Update button label based on dismissed status
       const updateButtonLabel = (isDismissed: boolean) => {
-        dismissToggleBtn.textContent = isDismissed ? 'Un-dismiss' : 'Dismiss';
+        showFace(
+          dismissToggleBtn,
+          isDismissed ? FACES.unDismiss : FACES.dismiss
+        );
       };
 
       updateButtonLabel(item.data.dismissed);
@@ -389,15 +393,15 @@ export function renderStandaloneActionBarDOM(
       };
     } catch (error) {
       console.error('Failed to fetch item status:', error);
-      dismissToggleBtn.textContent = 'Error';
+      showFace(dismissToggleBtn, FACES.error);
     }
   })();
 
   // Open in review button. Modifier keys and a middle click pick the pane the
   // way Obsidian's own links do; `learn` still reuses an open review tab, so
   // they only matter when there is none.
-  const openInReviewBtn = createButton(
-    'Review',
+  const openInReviewBtn = createFaceButton(
+    FACES.review,
     async (evt) => {
       // Build a ReviewItem from this file to pass to the review interface
       const reviewItem = await fetchByFile(file, reviewManager);
@@ -465,6 +469,65 @@ function createButton(
       if (e.button === MIDDLE_MOUSE_BUTTON) e.preventDefault();
     });
   }
+  return btn;
+}
+
+/**
+ * What a standalone bar button shows: an Obsidian icon, named for its tooltip
+ * and for screen readers by `label`, or — for a status with no action behind
+ * it — plain text, which needs no tooltip to be read.
+ */
+type ButtonFace =
+  | { icon: string; label: string; stroke?: string }
+  | { text: string };
+
+const FACES = {
+  // Same size as the icon that replaces it, so the bar doesn't shift when the
+  // lookup lands
+  loading: { icon: 'loader', label: 'Loading...' },
+  notInDatabase: { text: 'Not in database' },
+  error: { text: 'Error' },
+  dismiss: { icon: 'ban', label: 'Dismiss', stroke: DISMISS_ICON_STROKE },
+  unDismiss: {
+    icon: 'archive-restore',
+    label: 'Un-dismiss',
+    stroke: DISMISS_ICON_STROKE,
+  },
+  review: { icon: PLACEHOLDER_PLUGIN_ICON, label: 'Review' },
+} satisfies Record<string, ButtonFace>;
+
+/**
+ * Paint `face` onto `btn`, replacing whatever it showed before.
+ *
+ * An icon's label goes on the button, never the `<svg>`: Obsidian shows a
+ * tooltip for any `[aria-label]` under the pointer, and its handler throws on
+ * an SVG target. No `title` either, which would stack the browser's own
+ * tooltip on Obsidian's.
+ */
+function showFace(btn: HTMLButtonElement, face: ButtonFace) {
+  btn.replaceChildren();
+  const isIcon = 'icon' in face;
+  btn.classList.toggle('clickable-icon', isIcon);
+  btn.classList.toggle('ir-action-bar-status', !isIcon);
+  if (!isIcon) {
+    btn.removeAttribute('aria-label');
+    btn.textContent = face.text;
+    return;
+  }
+  btn.setAttribute('aria-label', face.label);
+  setIcon(btn, face.icon);
+  if (face.stroke)
+    btn.querySelector('svg')?.setAttribute('stroke', face.stroke);
+}
+
+/** {@link createButton}, showing `face` instead of a text label. */
+function createFaceButton(
+  face: ButtonFace,
+  onClick: Parameters<typeof createButton>[1],
+  options?: Parameters<typeof createButton>[2]
+): HTMLButtonElement {
+  const btn = createButton('', onClick, options);
+  showFace(btn, face);
   return btn;
 }
 

@@ -362,6 +362,28 @@ export class Menu {
 export class WorkspaceWindow {
   updateTitle() {}
 }
+/**
+ * Partial port of Obsidian's `setIcon`, deminified from obsidian.asar: it swaps
+ * out the element's first child only (whatever it is) for a fresh `<svg>`
+ * classed `svg-icon lucide-<name>`, stroked in `currentColor`, unless that
+ * child is already an `<svg>` carrying the id as given. Every name is treated as a
+ * Lucide icon, where the real one appends nothing for a name it doesn't know,
+ * so this can't catch a wrong icon id; paths are left out too, since tests
+ * only read the shell.
+ */
+export function setIcon(parent: HTMLElement, iconId: string): void {
+  const first = parent.firstChild;
+  if (first instanceof SVGSVGElement && first.classList.contains(iconId)) {
+    return;
+  }
+  const name = iconId.startsWith('lucide-') ? iconId : `lucide-${iconId}`;
+  if (first) parent.removeChild(first);
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.classList.add('svg-icon', name);
+  svg.setAttribute('stroke', 'currentColor');
+  parent.appendChild(svg);
+}
+
 export class MarkdownView {}
 export class Component {}
 export class MarkdownRenderer {}

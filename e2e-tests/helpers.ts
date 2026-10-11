@@ -1,4 +1,9 @@
-import { expect, type ElectronApplication, type Page } from '@playwright/test';
+import {
+  expect,
+  type ElectronApplication,
+  type Locator,
+  type Page,
+} from '@playwright/test';
 import type { App } from 'obsidian';
 import { waitForLayoutReady } from './setup/helpers';
 
@@ -299,6 +304,74 @@ export async function openNote(window: Page, path: string) {
  */
 export function reviewTitle(window: Page, title: string) {
   return window.locator('.ir-title', { hasText: title });
+}
+
+/**
+ * Assert that a note's action bar — the editing panel, reading mode's or a PDF
+ * tab's — is the compact icon row: every button an Obsidian icon the size of
+ * Obsidian's own, named by the `aria-label` its tooltip reads (on the button,
+ * never the icon) with no `title`, and the bar padded like Obsidian's find
+ * panel, `var(--size-4-2)` above and below, with no height beyond that.
+ *
+ * Waits for the dismiss toggle to settle first, since it shows a loader until
+ * the item's lookup lands.
+ */
+export async function expectCompactIconBar(bar: Locator) {
+  await expect(
+    bar.getByRole('button', { name: /^(Dismiss|Un-dismiss)$/ })
+  ).toBeVisible();
+  await expect(
+    bar.getByRole('button', { name: 'Review', exact: true })
+  ).toBeVisible();
+
+  const measured = await bar.evaluate((el) => {
+    const px = (value: string) => Number.parseFloat(value);
+    const step = px(
+      getComputedStyle(el.ownerDocument.body).getPropertyValue('--size-4-2')
+    );
+    const style = getComputedStyle(el);
+    return {
+      step,
+      paddingTop: px(style.paddingTop),
+      paddingBottom: px(style.paddingBottom),
+      height: el.getBoundingClientRect().height,
+      buttons: [...el.querySelectorAll('button')].map((button) => {
+        const svg = button.querySelector(':scope > svg.svg-icon');
+        return {
+          label: button.getAttribute('aria-label'),
+          hasTitle: button.hasAttribute('title'),
+          text: button.textContent,
+          iconLabelled: svg?.hasAttribute('aria-label') ?? null,
+          iconWidth: svg?.getBoundingClientRect().width ?? null,
+          iconSize: svg
+            ? px(getComputedStyle(svg).getPropertyValue('--icon-size'))
+            : null,
+          height: button.getBoundingClientRect().height,
+        };
+      }),
+    };
+  });
+
+  expect(measured.buttons.map((b) => b.label)).toEqual([
+    expect.stringMatching(/^(Dismiss|Un-dismiss)$/),
+    'Review',
+  ]);
+  for (const button of measured.buttons) {
+    expect(button).toMatchObject({
+      hasTitle: false,
+      text: '',
+      iconLabelled: false,
+    });
+    expect(button.iconSize).toBeGreaterThan(0);
+    expect(button.iconWidth).toBeCloseTo(button.iconSize!, 0);
+  }
+  expect(measured.step).toBeGreaterThan(0);
+  expect(measured.paddingTop).toBe(measured.step);
+  expect(measured.paddingBottom).toBe(measured.step);
+  const tallest = Math.max(...measured.buttons.map((b) => b.height));
+  expect(measured.height).toBeLessThanOrEqual(tallest + 2 * measured.step + 1);
+  // The bar this replaced was at least 50px tall
+  expect(measured.height).toBeLessThan(50);
 }
 
 /**

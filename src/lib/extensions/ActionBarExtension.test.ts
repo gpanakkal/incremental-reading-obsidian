@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { DISMISS_ICON_STROKE, PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   DataChangeEvent,
@@ -141,6 +142,23 @@ const buttons = (container: HTMLElement) =>
 
 const dismissButton = (container: HTMLElement) => buttons(container)[0];
 
+const reviewButton = (container: HTMLElement) => buttons(container)[1];
+
+/**
+ * What a button is called, as `getByRole(name)` and Obsidian's tooltip read
+ * it: its `aria-label`, or failing that its text.
+ */
+const buttonName = (btn: Element) =>
+  btn.getAttribute('aria-label') ?? btn.textContent;
+
+/** The `<svg>` Obsidian's `setIcon` put in a button, if any. */
+const iconSvg = (btn: Element) => btn.querySelector(':scope > svg.svg-icon');
+
+/** The Lucide icon a button shows, by its `lucide-*` class, or null. */
+const iconOf = (btn: Element) =>
+  [...(iconSvg(btn)?.classList ?? [])].find((c) => c.startsWith('lucide-')) ??
+  null;
+
 function makeContainer(): HTMLElement {
   const el = document.createElement('div');
   document.body.appendChild(el);
@@ -205,13 +223,42 @@ function mountPanel(
       info = null;
     },
     barButtons: () =>
-      [...parent.querySelectorAll('.ir-action-bar button')].map(
-        (b) => b.textContent
-      ),
+      [...parent.querySelectorAll('.ir-action-bar button')].map(buttonName),
     /** The CodeMirror panel slot the bar was mounted into. */
     host: () => parent.querySelector('.ir-action-bar-host'),
     topSlotBar: () => parent.querySelector('.cm-panels-top .ir-action-bar'),
   };
+}
+
+/**
+ * Assert `btn` shows the review bar's dismiss or restore icon — whichever
+ * names the action a click would take on an item stored as `dismissed` — in
+ * the same amber stroke, with the old text label kept as its name.
+ */
+function expectDismissFace(btn: HTMLButtonElement, dismissed: boolean) {
+  expect(iconOf(btn)).toBe(dismissed ? 'lucide-archive-restore' : 'lucide-ban');
+  expect(iconSvg(btn)?.getAttribute('stroke')).toBe(DISMISS_ICON_STROKE);
+  expect(btn.getAttribute('aria-label')).toBe(
+    dismissed ? 'Un-dismiss' : 'Dismiss'
+  );
+  expect(btn.classList.contains('clickable-icon')).toBe(true);
+  expect(btn.classList.contains('ir-action-bar-status')).toBe(false);
+  expect(btn.textContent).toBe('');
+  expect(btn.childNodes).toHaveLength(1);
+}
+
+/**
+ * Assert `btn` reads `text` as plain muted status text: no icon, and no
+ * `aria-label` tooltip repeating what is already on screen.
+ */
+function expectStatusText(btn: HTMLButtonElement, text: string) {
+  expect(btn.textContent).toBe(text);
+  expect(iconSvg(btn)).toBeNull();
+  expect(btn.hasAttribute('aria-label')).toBe(false);
+  expect(btn.classList.contains('clickable-icon')).toBe(false);
+  expect(btn.classList.contains('ir-action-bar-status')).toBe(true);
+  expect(btn.classList.contains('ir-review-button')).toBe(true);
+  expect(btn.disabled).toBe(true);
 }
 
 // #endregion
@@ -233,7 +280,7 @@ describe('renderStandaloneActionBarDOM', () => {
 
     renderStandaloneActionBarDOM(makeFile(), plugin, container);
 
-    expect(dismissButton(container).textContent).toBe('Loading...');
+    expect(buttonName(dismissButton(container))).toBe('Loading...');
     expect(dismissButton(container).disabled).toBe(true);
   });
 
@@ -252,7 +299,7 @@ describe('renderStandaloneActionBarDOM', () => {
           renderStandaloneActionBarDOM(file, plugin, container);
           await tick();
 
-          expect(dismissButton(container).textContent).toBe(
+          expect(buttonName(dismissButton(container))).toBe(
             dismissed ? 'Un-dismiss' : 'Dismiss'
           );
           expect(dismissButton(container).disabled).toBe(false);
@@ -262,6 +309,21 @@ describe('renderStandaloneActionBarDOM', () => {
     );
   });
 
+  it('holds the loader icon in the toggle slot while the lookup runs', () => {
+    const { plugin } = makeHarness();
+    const container = makeContainer();
+
+    renderStandaloneActionBarDOM(makeFile(), plugin, container);
+
+    const btn = dismissButton(container);
+    expect(iconOf(btn)).toBe('lucide-loader');
+    expect(iconSvg(btn)?.getAttribute('stroke')).toBe('currentColor');
+    expect(btn.getAttribute('aria-label')).toBe('Loading...');
+    expect(btn.classList.contains('clickable-icon')).toBe(true);
+    expect(btn.classList.contains('ir-action-bar-status')).toBe(false);
+    expect(btn.textContent).toBe('');
+  });
+
   it('says so when the note has no row, and stays disabled', async () => {
     const { plugin } = makeHarness({ item: null });
     const container = makeContainer();
@@ -269,8 +331,7 @@ describe('renderStandaloneActionBarDOM', () => {
     renderStandaloneActionBarDOM(makeFile(), plugin, container);
     await tick();
 
-    expect(dismissButton(container).textContent).toBe('Not in database');
-    expect(dismissButton(container).disabled).toBe(true);
+    expectStatusText(dismissButton(container), 'Not in database');
   });
 
   it('says so when the lookup throws, and reports why', async () => {
@@ -281,7 +342,7 @@ describe('renderStandaloneActionBarDOM', () => {
     renderStandaloneActionBarDOM(makeFile(), plugin, container);
     await tick();
 
-    expect(dismissButton(container).textContent).toBe('Error');
+    expectStatusText(dismissButton(container), 'Error');
     expect(logged).toHaveBeenCalledWith(
       'Failed to fetch item status:',
       expect.any(Error)
@@ -319,7 +380,7 @@ describe('renderStandaloneActionBarDOM', () => {
     await tick();
 
     expect(Notice.messages).toEqual(['Failed to update item']);
-    expect(dismissButton(container).textContent).toBe('Dismiss');
+    expect(buttonName(dismissButton(container))).toBe('Dismiss');
     expect(logged).toHaveBeenCalledWith(
       'Failed to toggle dismiss status:',
       expect.any(Error)
@@ -523,6 +584,24 @@ describe('renderStandaloneActionBarDOM', () => {
     });
   });
 
+  it('shows Review as the plugin icon, named by its tooltip and not by text', async () => {
+    const { plugin } = makeHarness();
+    const container = makeContainer();
+
+    renderStandaloneActionBarDOM(makeFile(), plugin, container);
+    await tick();
+
+    const btn = reviewButton(container);
+    expect(iconOf(btn)).toBe(`lucide-${PLACEHOLDER_PLUGIN_ICON}`);
+    expect(iconSvg(btn)?.getAttribute('stroke')).toBe('currentColor');
+    expect(btn.classList.contains('ir-review-button')).toBe(true);
+    expect(btn.getAttribute('aria-label')).toBe('Review');
+    expect(btn.classList.contains('clickable-icon')).toBe(true);
+    expect(btn.textContent).toBe('');
+    expect(btn.hasAttribute('title')).toBe(false);
+    expect(iconSvg(btn)?.hasAttribute('aria-label')).toBe(false);
+  });
+
   it('adds a Review button alongside the dismiss toggle', async () => {
     const { plugin } = makeHarness();
     const container = makeContainer();
@@ -530,10 +609,7 @@ describe('renderStandaloneActionBarDOM', () => {
     renderStandaloneActionBarDOM(makeFile(), plugin, container);
     await tick();
 
-    expect(buttons(container).map((b) => b.textContent)).toEqual([
-      'Dismiss',
-      'Review',
-    ]);
+    expect(buttons(container).map(buttonName)).toEqual(['Dismiss', 'Review']);
   });
 
   it('toggles the stored state on click and relabels for the opposite action', async () => {
@@ -558,11 +634,49 @@ describe('renderStandaloneActionBarDOM', () => {
           expect(harness.reviewManager.unDismissItem).not.toHaveBeenCalled();
           expect(Notice.messages).toContain('Item dismissed');
         }
-        expect(dismissButton(container).textContent).toBe(
+        expect(buttonName(dismissButton(container))).toBe(
           dismissed ? 'Dismiss' : 'Un-dismiss'
         );
         container.remove();
       })
+    );
+  });
+
+  it('keeps showing the icon for the next action through clicks and outside writes', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.array(fc.option(fc.boolean(), { nil: undefined }), {
+          maxLength: 6,
+        }),
+        async (initial, steps) => {
+          const file = makeFile();
+          const harness = makeHarness({
+            item: makeItem({ id: 'watched', dismissed: initial, file }),
+          });
+          const container = makeContainer();
+          let stored = initial;
+
+          renderStandaloneActionBarDOM(file, harness.plugin, container);
+          await tick();
+          expectDismissFace(dismissButton(container), stored);
+
+          // `undefined` is a click here; a boolean, a write made elsewhere
+          for (const step of steps) {
+            if (step === undefined) {
+              dismissButton(container).click();
+              stored = !stored;
+            } else {
+              harness.setStored('watched', step);
+              harness.emit({ ids: ['watched'] });
+              stored = step;
+            }
+            await tick();
+            expectDismissFace(dismissButton(container), stored);
+          }
+          container.remove();
+        }
+      )
     );
   });
 
@@ -587,7 +701,7 @@ describe('renderStandaloneActionBarDOM', () => {
               harness.emit({ ids: ['watched'] });
               await tick();
 
-              expect(dismissButton(container).textContent).toBe(
+              expect(buttonName(dismissButton(container))).toBe(
                 dismissed ? 'Un-dismiss' : 'Dismiss'
               );
             }
@@ -614,7 +728,7 @@ describe('renderStandaloneActionBarDOM', () => {
       expect(
         harness.reviewManager.getReviewItemFromFile
       ).not.toHaveBeenCalled();
-      expect(dismissButton(container).textContent).toBe('Dismiss');
+      expect(buttonName(dismissButton(container))).toBe('Dismiss');
     });
 
     it('keeps the label and reports why when re-reading the item fails', async () => {
@@ -640,7 +754,7 @@ describe('renderStandaloneActionBarDOM', () => {
             harness.emit({ ids: ['watched'] });
             await tick();
 
-            expect(dismissButton(container).textContent).toBe(
+            expect(buttonName(dismissButton(container))).toBe(
               dismissed ? 'Un-dismiss' : 'Dismiss'
             );
             expect(logged).toHaveBeenCalledExactlyOnceWith(
@@ -667,7 +781,7 @@ describe('renderStandaloneActionBarDOM', () => {
       harness.emit({ ids: ['watched'] });
       await tick();
 
-      expect(dismissButton(container).textContent).toBe('Un-dismiss');
+      expect(buttonName(dismissButton(container))).toBe('Un-dismiss');
     });
 
     it('stops listening once torn down, and leaves no listener behind', async () => {
@@ -692,7 +806,7 @@ describe('renderStandaloneActionBarDOM', () => {
       harness.emit({ ids: ['watched'] });
       await tick();
 
-      expect(dismissButton(container).textContent).toBe('Dismiss');
+      expect(buttonName(dismissButton(container))).toBe('Dismiss');
     });
 
     it('never subscribes when torn down before the lookup resolves', async () => {

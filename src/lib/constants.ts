@@ -1,5 +1,8 @@
 export const PLACEHOLDER_PLUGIN_ICON = 'book-open-text';
 
+/** Stroke for the dismiss and restore icons, on every bar that shows them. */
+export const DISMISS_ICON_STROKE = '#f7b500';
+
 // TODO: move to settings
 export const DATA_DIRECTORY = 'incremental-reading';
 export const DATABASE_FILE_PATH = `${DATA_DIRECTORY}/ir-user-data.sqlite`;

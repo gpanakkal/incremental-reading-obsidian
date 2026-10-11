@@ -20,6 +20,7 @@ import {
   bodyStartOf,
   emulateMobile,
   executeCommandById,
+  expectCompactIconBar,
   expectReviewOn,
   finalizeArticleImport,
   importArticle,
@@ -510,6 +511,36 @@ test.describe('Action Bar', () => {
 
     await expect(dismiss(editBar)).toBeVisible();
     await expect(unDismiss(editBar)).toHaveCount(0);
+  });
+
+  test('note bars are compact icon rows in editing and reading mode, on desktop and on a phone', async () => {
+    const NOTE =
+      'sources/Memorizing a programming language using spaced repetition';
+    await importArticle(window, NOTE);
+    // Pinned, so the layout checks below don't depend on the window CI gets
+    await window.setViewportSize({ width: 1280, height: 800 });
+
+    const leaf = '.workspace-leaf.mod-active';
+    const editBar = window.locator(
+      `${leaf} .markdown-source-view .ir-action-bar-panel`
+    );
+    const readingBar = window.locator(`${leaf} .ir-reading-mode-bar`);
+
+    await expectCompactIconBar(editBar);
+    await executeCommandById(window, 'markdown:toggle-preview');
+    await expectCompactIconBar(readingBar);
+    await executeCommandById(window, 'markdown:toggle-preview');
+
+    // Emulating reloads the app, and a reload mid-write empties the database
+    await expect.poll(() => pendingSaves(window)).toBe(0);
+    await emulateMobile(window, true);
+    await window.setViewportSize({ width: 420, height: 900 });
+    await expect(window.locator('body')).toHaveClass(/\bis-phone\b/);
+    await openNote(window, NOTE);
+
+    await expectCompactIconBar(editBar);
+    await executeCommandById(window, 'markdown:toggle-preview');
+    await expectCompactIconBar(readingBar);
   });
 
   test('Can change priority from the review pane', async () => {
@@ -2142,6 +2173,22 @@ test.describe('PDF articles', () => {
       ).toBeLessThan(1);
     });
   }
+
+  test("a PDF article tab's bar is the same compact icon row", async () => {
+    await seedPdfArticle();
+    // Pinned, so the layout checks below don't depend on the window CI gets
+    await window.setViewportSize({ width: 1280, height: 800 });
+    await window.evaluate(async (at) => {
+      const { app } = window as unknown as { app: PageApp };
+      await app.workspace.getLeaf('tab').openFile(app.vault.getFileByPath(at));
+    }, PDF_PATH);
+
+    await expectCompactIconBar(
+      window.locator(
+        '.workspace-leaf.mod-active .workspace-leaf-content[data-type="pdf"] .ir-pdf-leaf-bar'
+      )
+    );
+  });
 
   test('follows a PDF article through renames and moves, and back out of the trash', async () => {
     await seedPdfArticle();

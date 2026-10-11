@@ -4,7 +4,10 @@ import { useAppSelector } from '#/hooks/useAppSelector';
 import { useLeafHistory } from '#/hooks/useLeafHistory';
 import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
-import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
+import {
+  DISMISS_ICON_STROKE,
+  QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
+} from '#/lib/constants';
 import { goToReviewPlace } from '#/lib/review-history';
 import {
   type IRPluginState,
@@ -472,14 +475,14 @@ function DismissAction({ item }: { item: MaybeMissingItem }) {
       tooltip="Restore item to queue"
       handleClick={async () => await actions.unDismissItem(item)}
     >
-      <ArchiveRestore stroke="#f7b500" />
+      <ArchiveRestore stroke={DISMISS_ICON_STROKE} />
     </ButtonWithIcon>
   ) : (
     <ButtonWithIcon
       tooltip="Stop scheduling this item for review"
       handleClick={async () => await actions.dismissItem(item)}
     >
-      <Ban stroke="#f7b500" />
+      <Ban stroke={DISMISS_ICON_STROKE} />
     </ButtonWithIcon>
   );
 }

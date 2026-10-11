@@ -629,6 +629,35 @@ body.show-view-header
   margin-inline-end: auto;
 }
 
+/* The bars on a note — the editing panel, reading mode and a PDF tab, all
+   `.ir-action-bar-panel` — hold a short row of icon buttons, so they take no
+   more room than Obsidian's own button bars: the find panel
+   (`.document-search-container`) pads `var(--size-4-2)` above and below its
+   buttons and sits `var(--size-4-4)` in from the sides. The review bar keeps
+   the roomier box above. */
+.ir-action-bar.ir-action-bar-panel {
+  align-items: center;
+  min-height: 0;
+  padding: var(--size-4-2) var(--size-4-4);
+}
+
+/* On mobile the find panel comes in to `var(--size-4-3)` from the sides
+   (`.is-mobile .document-search-container`); its taller mobile padding above
+   and below is left out, to keep the bar compact. */
+.is-mobile .ir-action-bar.ir-action-bar-panel {
+  padding-inline: var(--size-4-3);
+}
+
+/* A disabled icon in a note's bar — the loader, while the item's lookup runs —
+   looks the way Obsidian draws one (`.clickable-icon[aria-disabled='true']`):
+   muted, faded, and with no hover fill to suggest it can be pressed. */
+.ir-action-bar-panel .clickable-icon:disabled,
+.ir-action-bar-panel .clickable-icon:disabled:hover {
+  background-color: unset;
+  color: var(--text-muted);
+  opacity: 0.4;
+}
+
 /* Mobile: Move action bar to bottom using flex order.
 
    The standalone bars outside review are prepended to a flex column: a note's
@@ -767,6 +796,26 @@ body.show-view-header
 
 .ir-review-button.clickable-icon {
   padding: var(--size-2-2) var(--size-2-3);
+}
+
+/* A status in a note's bar — no row in the database, or a failed lookup — sits
+   where the dismiss toggle would, as quiet text rather than a button. The
+   selectors outrank every Obsidian rule that dresses a text button — the
+   `button:not(.clickable-icon)` fill, its `.mobile-tap` and `:hover` states,
+   `.is-tablet`'s wider padding and `button[disabled]`'s fade, which would
+   dim the muted text twice — and `--text-color` is what Obsidian's rule
+   colors the text from. */
+.ir-action-bar button.ir-review-button.ir-action-bar-status,
+.ir-action-bar button.ir-review-button.ir-action-bar-status:hover,
+.ir-action-bar button.ir-review-button.ir-action-bar-status.mobile-tap {
+  --text-color: var(--text-muted);
+  height: auto;
+  padding: var(--size-2-2) var(--size-2-3);
+  background-color: transparent;
+  box-shadow: none;
+  cursor: default;
+  font-size: var(--font-ui-small);
+  opacity: 1;
 }
 
 .ir-review-button:active {
