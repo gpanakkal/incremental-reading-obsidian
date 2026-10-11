@@ -117,6 +117,9 @@ jobs:
     timeout-minutes: 45
     env:
       ANDROID_API_LEVEL: 34
+      # Also read by scripts/e2e-android-ci.sh, to boot a replacement emulator
+      # with the same flags.
+      EMULATOR_OPTIONS: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
     steps:
       - uses: actions/checkout@v7
       - name: Install pnpm
@@ -187,14 +190,16 @@ jobs:
           target: google_apis
           arch: x86_64
           force-avd-creation: false
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          emulator-options: ${{ env.EMULATOR_OPTIONS }}
           disable-animations: true
-          script: pnpm run e2e:android
+          script: bash ./scripts/e2e-android-ci.sh
 
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: e2e-results-android
-          path: e2e-tests/test-results/
+          path: |
+            e2e-tests/test-results/
+            e2e-tests/test-results-emulator-died/
           retention-days: 7
