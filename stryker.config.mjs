@@ -4,9 +4,11 @@ const config = {
   _comment:
     "This config was generated using 'stryker init'. Please take a look at: https://stryker-mutator.io/docs/stryker-js/configuration/ for more information.",
   packageManager: 'pnpm',
+  // Resolved from here, not by name: Stryker imports bare plugin names from its
+  // own package dir, which can't see our devDeps under pnpm's global virtual store
   plugins: [
-    '@stryker-mutator/vitest-runner',
-    '@stryker-mutator/typescript-checker',
+    import.meta.resolve('@stryker-mutator/vitest-runner'),
+    import.meta.resolve('@stryker-mutator/typescript-checker'),
   ],
   reporters: ['html', 'clear-text', 'progress'],
   testRunner: 'vitest',
