@@ -14,6 +14,7 @@ import {
   isImportable,
   supportsFrontmatter,
 } from '#/lib/mime';
+import { type ItemTable, evictedSpot } from '#/lib/moved-note-scan';
 import {
   describeReclaim,
   REBIND_LOG_TOPIC,
@@ -45,7 +46,6 @@ import {
 } from 'obsidian';
 import type { Grade } from 'ts-fsrs';
 import IRScheduler from '../IRScheduler';
-import { evictedSpot } from '../moved-note-scan';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
 import {
@@ -85,6 +85,13 @@ function irIdOf(frontmatter: Record<string, unknown>): string | undefined {
   const id = frontmatter['ir-id'];
   return typeof id === 'string' ? id : undefined;
 }
+
+/** Each item table's review log, and the column there naming the item. */
+const REVIEW_LOG_OF: Readonly<Record<ItemTable, readonly [string, string]>> = {
+  article: ['article_review', 'article_id'],
+  snippet: ['snippet_review', 'snippet_id'],
+  srs_card: ['srs_card_review', 'card_id'],
+};
 
 export default class ReviewManager {
   plugin: IncrementalReadingPlugin;
@@ -681,6 +688,74 @@ export default class ReviewManager {
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 0 WHERE id = $1`, [
       item.data.id,
     ]);
+  }
+
+  /**
+   * Remove the `table` row `id` for good, leaving its note, if any, alone.
+   *
+   * Its review history and any startup rebind of it go with it. Deleted by
+   * hand rather than left to their `ON DELETE CASCADE`: sql.js's `export`,
+   * which every save runs, reopens the database with foreign keys off. The
+   * snippets and cards taken from it stay, with no parent, as if taken from
+   * nothing: `parent` has no foreign key to clear it, and one left naming a
+   * row that no longer exists would be a parent no lookup can find. All in one
+   * transaction, so a failed delete leaves everything as it was.
+   *
+   * A hard `DELETE` reports no data change (see
+   * `SQLJSRepository.registerUpdateHook`), so whatever shows the row must be
+   * refreshed by the caller. An id no row of `table` holds changes nothing.
+   * @throws whatever the delete throws, after rolling it back
+   */
+  async deleteRow(table: ItemTable, id: string): Promise<void> {
+    // An article's row has no `parent`, and reads as having none
+    const [row] = (await this.#repo.query(
+      `SELECT * FROM ${table} WHERE id = $1`,
+      [id]
+    )) as { parent?: string | null }[];
+    if (!row) return;
+    const parent = row.parent ? await this.articles.findById(row.parent) : null;
+
+    try {
+      await this.#repo.transaction(async () => {
+        await this.#repo.mutate(
+          'UPDATE snippet SET parent = NULL WHERE parent = $1',
+          [id]
+        );
+        await this.#repo.mutate(
+          'UPDATE srs_card SET parent = NULL WHERE parent = $1',
+          [id]
+        );
+        const [log, column] = REVIEW_LOG_OF[table];
+        await this.#repo.mutate(`DELETE FROM ${log} WHERE ${column} = $1`, [
+          id,
+        ]);
+        // Only an article is ever rebound; for anything else this is a no-op
+        await this.#repo.mutate('DELETE FROM rebind WHERE article_id = $1', [
+          id,
+        ]);
+        await this.#repo.mutate(`DELETE FROM ${table} WHERE id = $1`, [id]);
+      });
+    } catch (error) {
+      // A save failing after the commit throws as well, with the delete held
+      // in memory for the next save to write: only a rolled-back one failed
+      const [left] = await this.#repo.query(
+        `SELECT id FROM ${table} WHERE id = $1`,
+        [id]
+      );
+      if (left) throw error;
+      // Lost if Obsidian closes before anything else saves
+      Obsidian.notify("Deleted, but the database couldn't be saved yet");
+    }
+
+    // Here, as in `dismissItem`, so a session left on the row cannot resume
+    // onto an id that no longer exists
+    this.plugin.sessionTracker?.forgetIf(id);
+    if (parent) {
+      // Off the note it was taken from, a PDF's included
+      const parentPath = parent.row.reference;
+      this.snippets.offsetTracker.removeHighlight(parentPath, id);
+      this.plugin.app.workspace.trigger('ir-highlights-changed', parentPath);
+    }
   }
 
   /**

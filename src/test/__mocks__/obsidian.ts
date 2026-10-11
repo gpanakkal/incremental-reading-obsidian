@@ -115,13 +115,22 @@ export class PluginSettingTab {
 export class Setting {}
 export class Modal {
   app: unknown;
-  /** Built in the constructor, so only jsdom tests can instantiate a modal. */
+  /**
+   * `.modal-container`, `.modal` and `.modal-content`. Built in the
+   * constructor, so only jsdom tests can instantiate a modal. Not nested as
+   * Obsidian nests them (`containerEl` > `modalEl` > `contentEl`): a test that
+   * stubs the document with bare objects to build one has no `appendChild`.
+   */
+  containerEl: HTMLElement;
+  modalEl: HTMLElement;
   contentEl: HTMLElement;
   /** Stands in for the `.modal-title` element above `contentEl`. */
   readonly titleEl: { textContent: string | null } = { textContent: null };
 
   constructor(app: unknown) {
     this.app = app;
+    this.containerEl = document.createElement('div');
+    this.modalEl = document.createElement('div');
     this.contentEl = document.createElement('div');
   }
 
@@ -132,6 +141,39 @@ export class Modal {
 
   open() {}
   close() {}
+}
+/**
+ * A `<button>` appended to its container, classed as Obsidian's is:
+ * `setWarning` is `setDestructive().setCta()` there (read from obsidian.asar).
+ */
+export class ButtonComponent {
+  readonly buttonEl: HTMLButtonElement;
+
+  constructor(containerEl: HTMLElement) {
+    this.buttonEl = document.createElement('button');
+    containerEl.appendChild(this.buttonEl);
+  }
+
+  setButtonText(text: string) {
+    this.buttonEl.textContent = text;
+    return this;
+  }
+  setCta() {
+    this.buttonEl.classList.add('mod-cta');
+    return this;
+  }
+  setWarning() {
+    this.buttonEl.classList.add('mod-destructive', 'mod-cta');
+    return this;
+  }
+  setClass(cls: string) {
+    this.buttonEl.classList.add(cls);
+    return this;
+  }
+  onClick(callback: (evt: MouseEvent) => unknown) {
+    this.buttonEl.addEventListener('click', callback);
+    return this;
+  }
 }
 /** Only what `RelinkModal` reaches: a modal that lists items to pick from. */
 export class FuzzySuggestModal<T> extends Modal {

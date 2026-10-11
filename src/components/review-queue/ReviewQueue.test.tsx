@@ -3,6 +3,7 @@ import * as ReviewContext from '#/components/ReviewContext';
 import type { QueuePage, QueueRow } from '#/components/types';
 import * as ReactQuery from '#/hooks/useReactQuery';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
+import * as DeleteMissingItemModule from '#/lib/delete-missing-item';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import {
   resetSession,
@@ -787,6 +788,7 @@ describe('queue row menu', () => {
 
     expect(menu.items.map((item) => [item.title, item.icon])).toEqual([
       ['Relink file…', 'link'],
+      ['Permanently delete', 'trash-2'],
     ]);
     const [relink] = menu.items;
     expect(relink.disabled).toBe(false);
@@ -841,6 +843,28 @@ describe('queue row menu', () => {
     const menu = shown.mock.contexts[0] as Menu;
     expect(menu.items.map((item) => [item.title, item.disabled])).toEqual([
       ['Relink file…', false],
+      ['Permanently delete', false],
     ]);
   });
+
+  it.each(['article', 'snippet', 'card'] as const)(
+    'offers to permanently delete a missing %s, as a warning, once picked',
+    (type) => {
+      const deleteMissingItem = vi
+        .spyOn(DeleteMissingItemModule, 'deleteMissingItem')
+        .mockResolvedValue(true);
+      const plugin = { name: 'plugin' };
+      const row = makeQueueRow({ id: 'x', type, file: null });
+
+      const menu = queueRowMenu(plugin as never, row) as unknown as Menu;
+
+      const item = menu.items.find(
+        ({ title }) => title === 'Permanently delete'
+      );
+      expect(item?.warning).toBe(true);
+      expect(deleteMissingItem).not.toHaveBeenCalled();
+      item?.callback?.(undefined);
+      expect(deleteMissingItem).toHaveBeenCalledExactlyOnceWith(plugin, row);
+    }
+  );
 });

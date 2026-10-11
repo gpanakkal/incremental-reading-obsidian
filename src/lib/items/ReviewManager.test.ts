@@ -10,6 +10,7 @@ import { evictedSpot } from '#/lib/moved-note-scan';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { describeReclaim, recordRebind } from '#/lib/rebind-records';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
+import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
 import type {
   ArticleRow,
   IArticleBase,
@@ -410,7 +411,12 @@ class TestRepository extends SQLJSRepository {
     return repo;
   }
 
-  protected override async save() {}
+  /** What saving throws, after the write it saves has landed; `null` saves. */
+  saveError: Error | null = null;
+
+  protected override async save() {
+    if (this.saveError) throw this.saveError;
+  }
 
   /** Every row of `table`, read straight off the database. */
   rows(table: 'article' | 'snippet' | 'srs_card') {
@@ -4778,5 +4784,304 @@ describe('ReviewManager.itemPathsWithRefusedChars', () => {
       'b|card.md',
       'x>y/snippet.md',
     ]);
+  });
+});
+
+describe('ReviewManager.deleteRow', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The review log table of each item table, and its column naming the item. */
+  const LOG_OF = {
+    article: ['article_review', 'article_id'],
+    snippet: ['snippet_review', 'snippet_id'],
+    srs_card: ['srs_card_review', 'card_id'],
+  } as const;
+
+  /**
+   * A manager over a real database, enforcing foreign keys only when
+   * `foreignKeys`. `SQLJSRepository` turns them on as it opens a database, but
+   * sql.js's `export`, which every save runs, reopens it with them off again,
+   * so after the first save their `ON DELETE CASCADE` does nothing.
+   */
+  function wireDeletion({ foreignKeys = false } = {}) {
+    const repo = TestRepository.create();
+    repo.db!.exec(`PRAGMA foreign_keys = ${foreignKeys ? 'ON' : 'OFF'}`);
+    const forgetIf = vi.fn();
+    const trigger = vi.fn();
+    const plugin = makePlugin({ workspace: { trigger } });
+    Object.assign(plugin, { sessionTracker: { forgetIf } });
+    const manager = new ReviewManager(plugin, repo);
+
+    const insert = (table: ItemTable, id: string, parent: string | null) => {
+      if (table === 'article') {
+        repo.mutate(
+          `INSERT INTO article (id, reference, due, interval, priority)
+           VALUES ($1, $2, $3, 86400000, 30)`,
+          [id, `${table}/${id}.md`, YEAR_2000_MS]
+        );
+      } else if (table === 'snippet') {
+        repo.mutate(
+          `INSERT INTO snippet (id, reference, parent, due, interval, priority)
+           VALUES ($1, $2, $3, $4, 86400000, 30)`,
+          [id, `${table}/${id}.md`, parent, YEAR_2000_MS]
+        );
+      } else {
+        repo.mutate(
+          `INSERT INTO srs_card (id, reference, parent, created_at, due,
+             stability, difficulty, elapsed_days, scheduled_days, state)
+           VALUES ($1, $2, $3, $4, $4, 0, 0, 0, 0, 0)`,
+          [id, `${table}/${id}.md`, parent, YEAR_2000_MS]
+        );
+      }
+    };
+    const log = (table: ItemTable, id: string, n: number) => {
+      const logId = `${id}-log-${n}`;
+      if (table === 'srs_card') {
+        repo.mutate(
+          `INSERT INTO srs_card_review (id, card_id, due, review, stability,
+             difficulty, elapsed_days, last_elapsed_days, scheduled_days,
+             rating, state)
+           VALUES ($1, $2, $3, $3, 1, 1, 0, 0, 1, 3, 2)`,
+          [logId, id, YEAR_2000_MS]
+        );
+        return;
+      }
+      const [logTable, column] = LOG_OF[table];
+      repo.mutate(
+        `INSERT INTO ${logTable} (id, ${column}, review_time) VALUES ($1, $2, $3)`,
+        [logId, id, YEAR_2000_MS]
+      );
+    };
+    const rebind = (id: string) =>
+      repo.mutate(
+        `INSERT INTO rebind (article_id, old_reference, new_reference, rebound_at)
+         VALUES ($1, 'old.pdf', $2, $3)`,
+        [id, `article/${id}.md`, YEAR_2000_MS]
+      );
+
+    /** Every row the database holds, item, log and rebind alike. */
+    const dump = () =>
+      Object.fromEntries(
+        [
+          ['article', 'SELECT id, NULL FROM article'],
+          ['snippet', 'SELECT id, parent FROM snippet'],
+          ['srs_card', 'SELECT id, parent FROM srs_card'],
+          ['article_review', 'SELECT id, article_id FROM article_review'],
+          ['snippet_review', 'SELECT id, snippet_id FROM snippet_review'],
+          ['srs_card_review', 'SELECT id, card_id FROM srs_card_review'],
+          ['rebind', 'SELECT article_id, NULL FROM rebind'],
+        ].map(([table, sql]) => [
+          table,
+          (repo.db!.exec(`${sql} ORDER BY 1`)[0]?.values ?? []).map(
+            ([id, other]) => [id, other]
+          ),
+        ])
+      );
+
+    return { repo, manager, forgetIf, trigger, insert, log, rebind, dump };
+  }
+
+  const childTableArb = fc.constantFrom<ItemTable>('snippet', 'srs_card');
+
+  /**
+   * An item to delete, with its review history, and items around it: some
+   * taken from it, some from another item, some from nothing, each with a
+   * history of its own.
+   */
+  const scenarioArb = fc.record({
+    foreignKeys: fc.boolean(),
+    table: tableArb,
+    logs: fc.nat({ max: 3 }),
+    rebound: fc.boolean(),
+    others: fc.array(
+      fc.record({
+        table: fc.oneof(tableArb, childTableArb),
+        parent: fc.constantFrom('target', 'elsewhere', null),
+        logs: fc.nat({ max: 2 }),
+      }),
+      { maxLength: 6 }
+    ),
+  });
+
+  it('removes the row and its review history, and leaves what was taken from it with no parent', async () => {
+    await fc.assert(
+      fc.asyncProperty(scenarioArb, async (scenario) => {
+        const wired = wireDeletion(scenario);
+        wired.insert('article', 'elsewhere', null);
+        wired.insert(scenario.table, 'target', null);
+        for (let n = 0; n < scenario.logs; n++)
+          wired.log(scenario.table, 'target', n);
+        if (scenario.rebound && scenario.table === 'article')
+          wired.rebind('target');
+        scenario.others.forEach(({ table, parent, logs }, i) => {
+          // Articles are taken from nothing
+          wired.insert(
+            table,
+            `other-${i}`,
+            table === 'article' ? null : parent
+          );
+          for (let n = 0; n < logs; n++) wired.log(table, `other-${i}`, n);
+        });
+        const before = wired.dump();
+
+        await wired.manager.deleteRow(scenario.table, 'target');
+
+        const [logTable] = LOG_OF[scenario.table];
+        const expected = {
+          ...before,
+          [scenario.table]: before[scenario.table].filter(
+            ([id]) => id !== 'target'
+          ),
+          [logTable]: before[logTable].filter(([, item]) => item !== 'target'),
+          rebind: before.rebind.filter(([id]) => id !== 'target'),
+          snippet: before.snippet
+            .filter(([id]) => scenario.table !== 'snippet' || id !== 'target')
+            .map(([id, parent]) => [id, parent === 'target' ? null : parent]),
+          srs_card: before.srs_card
+            .filter(([id]) => scenario.table !== 'srs_card' || id !== 'target')
+            .map(([id, parent]) => [id, parent === 'target' ? null : parent]),
+        };
+        expect(wired.dump()).toStrictEqual(expected);
+      })
+    );
+  });
+
+  it.each(['article', 'snippet', 'srs_card'] as const)(
+    'drops a remembered session pointing at the deleted %s row',
+    async (table) => {
+      const wired = wireDeletion();
+      wired.insert(table, 'target', null);
+
+      await wired.manager.deleteRow(table, 'target');
+
+      expect(wired.forgetIf).toHaveBeenCalledExactlyOnceWith('target');
+    }
+  );
+
+  it('deletes without a session tracker running', async () => {
+    const wired = wireDeletion();
+    Object.assign(wired.manager.plugin, { sessionTracker: undefined });
+    wired.insert('article', 'target', null);
+
+    await wired.manager.deleteRow('article', 'target');
+
+    expect(wired.dump().article).toStrictEqual([]);
+  });
+
+  it('changes nothing for an id no table holds', async () => {
+    await fc.assert(
+      fc.asyncProperty(tableArb, async (table) => {
+        const wired = wireDeletion();
+        wired.insert('article', 'other', null);
+        wired.insert('snippet', 'child', 'other');
+        const before = wired.dump();
+
+        await wired.manager.deleteRow(table, 'nothing');
+
+        expect(wired.dump()).toStrictEqual(before);
+        expect(wired.trigger).not.toHaveBeenCalled();
+        expect(wired.forgetIf).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('finishes the delete when only saving it failed, the row being gone all the same', async () => {
+    // A save that fails after the commit throws out of the transaction too.
+    // The database in memory holds the delete, and the next save writes it.
+    const wired = wireDeletion();
+    wired.insert('article', 'parent', null);
+    wired.insert('snippet', 'target', 'parent');
+    wired.manager.snippets.offsetTracker.loadHighlights('article/parent.md', [
+      {
+        id: 'target',
+        parent: 'parent',
+        start_offset: 0,
+        end_offset: 1,
+      } as SnippetHighlight,
+    ]);
+    wired.repo.saveError = new Error('disk full');
+    const notify = vi.spyOn(Obsidian, 'notify').mockImplementation(() => {});
+
+    await wired.manager.deleteRow('snippet', 'target');
+
+    expect(wired.dump().snippet).toStrictEqual([]);
+    // Lost if Obsidian closes before anything else saves, so the user hears
+    expect(notify.mock.calls).toStrictEqual([
+      ["Deleted, but the database couldn't be saved yet"],
+    ]);
+    expect(wired.forgetIf).toHaveBeenCalledExactlyOnceWith('target');
+    expect(
+      wired.manager.snippets.offsetTracker.getHighlights('article/parent.md')
+    ).toStrictEqual([]);
+  });
+
+  it('leaves every parent as it was when the delete fails', async () => {
+    const wired = wireDeletion();
+    wired.insert('article', 'target', null);
+    wired.insert('snippet', 'child', 'target');
+    wired.insert('srs_card', 'card', 'target');
+    const before = wired.dump();
+    wired.repo.db!.exec(
+      `CREATE TRIGGER refuse BEFORE DELETE ON article
+       BEGIN SELECT RAISE(ABORT, 'disk full'); END`
+    );
+
+    await expect(wired.manager.deleteRow('article', 'target')).rejects.toThrow(
+      'disk full'
+    );
+
+    expect(wired.dump()).toStrictEqual(before);
+    expect(wired.forgetIf).not.toHaveBeenCalled();
+  });
+
+  it('takes the deleted row’s highlight off its parent’s note and repaints it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        tableArb,
+        fc.option(tableArb, { nil: null }),
+        fc.boolean(),
+        async (table, parentTable, parentExists) => {
+          const wired = wireDeletion();
+          const parentPath = `${parentTable}/parent.md`;
+          if (parentTable && parentExists)
+            wired.insert(parentTable, 'parent', null);
+          wired.insert(table, 'target', parentTable && 'parent');
+          const { offsetTracker } = wired.manager.snippets;
+          const highlight = (id: string) =>
+            ({
+              id,
+              parent: 'parent',
+              start_offset: 0,
+              end_offset: 1,
+            }) as SnippetHighlight;
+          offsetTracker.loadHighlights(parentPath, [
+            highlight('target'),
+            highlight('sibling'),
+          ]);
+
+          await wired.manager.deleteRow(table, 'target');
+
+          // Only a snippet or card has a parent, and only one that is still
+          // there has a note to paint
+          const painted =
+            table !== 'article' && parentTable !== null && parentExists;
+          expect(
+            offsetTracker.getHighlights(parentPath).map(({ id }) => id)
+          ).toStrictEqual(painted ? ['sibling'] : ['target', 'sibling']);
+          expect(wired.trigger.mock.calls).toStrictEqual(
+            painted ? [['ir-highlights-changed', parentPath]] : []
+          );
+        }
+      )
+    );
   });
 });

@@ -3,6 +3,7 @@ import { useReviewContext } from '#/components/ReviewContext';
 import type { QueueRow } from '#/components/types';
 import { useQueue } from '#/hooks/useReactQuery';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
+import { deleteMissingItem } from '#/lib/delete-missing-item';
 import { tableOf } from '#/lib/relink';
 import { goToReviewPlace } from '#/lib/review-history';
 import type { IRPluginState } from '#/lib/store';
@@ -31,12 +32,14 @@ const QUEUE_ERROR_MESSAGE =
 /**
  * The menu for one queue row. "Relink file…" is offered on every row so the
  * menu reads the same throughout, but only a row missing its file can take it.
+ * "Permanently delete" is offered only there: a row with its note is deleted
+ * by deleting the note.
  */
 export function queueRowMenu(
   plugin: IncrementalReadingPlugin,
   row: QueueRow
 ): Menu {
-  return new Menu().addItem((item) =>
+  const menu = new Menu().addItem((item) =>
     item
       .setTitle('Relink file…')
       .setIcon('link')
@@ -49,6 +52,18 @@ export function queueRowMenu(
         });
       })
   );
+  if (row.file === null) {
+    menu.addItem((item) =>
+      item
+        .setTitle('Permanently delete')
+        .setIcon('trash-2')
+        .setWarning(true)
+        .onClick(() => {
+          void deleteMissingItem(plugin, row);
+        })
+    );
+  }
+  return menu;
 }
 
 export function ReviewQueue() {
