@@ -1,7 +1,10 @@
 import {
+  ARTICLE_TAG,
+  CARD_TAG,
   CURRENT_ITEM_REFETCH_TIME,
   DATA_DIRECTORY,
   SNIPPET_DIRECTORY,
+  SNIPPET_TAG,
 } from '#/lib/constants';
 import test, {
   expect,
@@ -36,6 +39,7 @@ import {
   setPluginSetting,
   toggleReviewSourceMode,
   waitForReviewItem,
+  watchNotices,
 } from './helpers';
 import {
   closeElectron,
@@ -2617,6 +2621,245 @@ test.describe("Deleting an item's note", () => {
       .toBe(0);
     expect(await pageErrors()).toEqual([]);
   });
+});
+
+test.describe("Removing an item note's type tag", () => {
+  const SOURCE = 'sources/Security Principles';
+
+  /**
+   * What the page-side calls below reach on Obsidian and the plugin.
+   * Unofficial: `window.app`, `app.plugins.plugins`,
+   * `workspace.activeEditor.editor`.
+   */
+  type PageApp = {
+    vault: { getFileByPath(path: string): unknown };
+    metadataCache: {
+      getFileCache(
+        file: unknown
+      ): { frontmatter?: Record<string, unknown> } | null;
+    };
+    fileManager: {
+      processFrontMatter(
+        file: unknown,
+        fn: (frontmatter: Record<string, unknown>) => void
+      ): Promise<void>;
+    };
+    workspace: {
+      activeEditor: {
+        editor?: {
+          getValue(): string;
+          offsetToPos(offset: number): { line: number; ch: number };
+          setSelection(
+            from: { line: number; ch: number },
+            to: { line: number; ch: number }
+          ): void;
+          focus(): void;
+        };
+      } | null;
+    };
+    plugins: {
+      plugins: Record<
+        string,
+        {
+          reviewManager: {
+            repo: { query(sql: string): { reference: string }[] };
+          };
+        }
+      >;
+    };
+  };
+
+  /** The live rows in `table`, as the plugin's database holds them. */
+  const itemRows = (table: string) =>
+    window.evaluate((table) => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      return repo.query(`SELECT reference FROM ${table} WHERE deleted = 0`);
+    }, table);
+
+  /** The note's frontmatter, as the metadata cache last read it. */
+  const frontmatterAt = (path: string) =>
+    window.evaluate((path) => {
+      const { app } = window as unknown as { app: PageApp };
+      const file = app.vault.getFileByPath(path);
+      return file
+        ? (app.metadataCache.getFileCache(file)?.frontmatter ?? null)
+        : null;
+    }, path);
+
+  const kinds = [
+    {
+      kind: 'article',
+      table: 'article',
+      tag: ARTICLE_TAG,
+      make: () => importArticle(window, SOURCE),
+    },
+    {
+      kind: 'snippet',
+      table: 'snippet',
+      tag: SNIPPET_TAG,
+      make: async () => {
+        await openNote(window, SOURCE);
+        await selectParagraph(
+          window,
+          'Before we start discussing the different security principles'
+        );
+        await executeCommandById(
+          window,
+          'incremental-reading:extract-selection'
+        );
+      },
+    },
+    {
+      kind: 'card',
+      table: 'srs_card',
+      tag: CARD_TAG,
+      make: async () => {
+        await openNote(window, SOURCE);
+        await selectParagraph(
+          window,
+          'Explain the security functions: Confidentiality, Integrity and Availability (CIA).'
+        );
+        await executeCommandById(window, 'incremental-reading:create-card');
+      },
+    },
+  ];
+
+  /**
+   * Make an item, give its note tags and a property of the user's own on either
+   * side of the type tag, and show it in the active tab. Returns its path and
+   * the frontmatter it then carries.
+   */
+  async function showTaggedItemNote(
+    make: () => Promise<void>,
+    table: string,
+    tag: string
+  ) {
+    await make();
+    await expect.poll(async () => (await itemRows(table)).length).toBe(1);
+    const [{ reference }] = await itemRows(table);
+
+    await window.evaluate(
+      async ({ path, tag }) => {
+        const { app } = window as unknown as { app: PageApp };
+        await app.fileManager.processFrontMatter(
+          app.vault.getFileByPath(path),
+          (frontmatter) => {
+            frontmatter.tags = ['mine', tag, 'also-mine'];
+            frontmatter.extra = 'kept';
+          }
+        );
+      },
+      { path: reference, tag }
+    );
+    await expect
+      .poll(async () => (await frontmatterAt(reference))?.tags)
+      .toEqual(['mine', tag, 'also-mine']);
+    const before = await frontmatterAt(reference);
+
+    await openFileInActiveLeaf(window, reference);
+    return { reference, before };
+  }
+
+  /** The type tag's pill in the active tab's properties, in `view`. */
+  const tagPill = (
+    view: '.markdown-source-view' | '.markdown-reading-view',
+    tag: string
+  ) =>
+    window
+      .locator(
+        `.workspace-leaf.mod-active ${view} .metadata-property[data-property-key="tags"] .multi-select-pill`
+      )
+      .filter({ hasText: new RegExp(`^${tag}$`) })
+      .filter({ visible: true });
+
+  /**
+   * Waits for the tag to be back, last, with nothing else changed, and for the
+   * `round`th notice saying so; then dismisses it, so the next round's notice
+   * is a fresh one rather than a count bumped on this one.
+   */
+  async function expectTagRestored(
+    reference: string,
+    before: Record<string, unknown> | null,
+    tag: string,
+    notices: () => Promise<string[]>,
+    round: number
+  ) {
+    const message = `restored the ${tag} tag`;
+    await expect
+      .poll(async () => await frontmatterAt(reference), { timeout: 5_000 })
+      .toEqual({ ...before, tags: ['mine', 'also-mine', tag] });
+    await expect
+      .poll(
+        async () =>
+          (await notices()).filter((text) => text.includes(message)).length
+      )
+      .toBe(round);
+    const notice = window.locator('.notice').filter({ hasText: message });
+    await notice.click();
+    await expect(notice).toHaveCount(0);
+  }
+
+  for (const { kind, table, tag, make } of kinds) {
+    test(`puts back a ${kind} note's type tag removed in live preview, source mode or reading mode`, async () => {
+      await setDefaultEditingMode(window, 'live-preview');
+      const { reference, before } = await showTaggedItemNote(make, table, tag);
+      const notices = await watchNotices(window);
+
+      // Live preview's properties editor
+      await tagPill('.markdown-source-view', tag)
+        .locator('.multi-select-pill-remove-button')
+        .click();
+      await expectTagRestored(reference, before, tag, notices, 1);
+
+      // Back where it was for the next round: the restore appends it
+      const reset = async () => {
+        await window.evaluate(
+          async ({ path, tag }) => {
+            const { app } = window as unknown as { app: PageApp };
+            await app.fileManager.processFrontMatter(
+              app.vault.getFileByPath(path),
+              (frontmatter) => {
+                frontmatter.tags = ['mine', tag, 'also-mine'];
+              }
+            );
+          },
+          { path: reference, tag }
+        );
+        await expect
+          .poll(async () => (await frontmatterAt(reference))?.tags)
+          .toEqual(['mine', tag, 'also-mine']);
+      };
+      await reset();
+
+      // Source mode: the tag's YAML line selected and deleted from the keyboard
+      await executeCommandById(window, 'editor:toggle-source');
+      await window.evaluate((tag) => {
+        const { app } = window as unknown as { app: PageApp };
+        const editor = app.workspace.activeEditor?.editor;
+        if (!editor) throw new Error('No editor in the active tab');
+        const line = `  - ${tag}\n`;
+        const from = editor.getValue().indexOf(line);
+        if (from < 0) throw new Error(`No ${tag} line in the note`);
+        editor.focus();
+        editor.setSelection(
+          editor.offsetToPos(from),
+          editor.offsetToPos(from + line.length)
+        );
+      }, tag);
+      await window.keyboard.press('Backspace');
+      await expectTagRestored(reference, before, tag, notices, 2);
+      await executeCommandById(window, 'editor:toggle-source');
+      await reset();
+
+      // Reading mode's properties, which write past the editor
+      await executeCommandById(window, 'markdown:toggle-preview');
+      await tagPill('.markdown-reading-view', tag)
+        .locator('.multi-select-pill-remove-button')
+        .click();
+      await expectTagRestored(reference, before, tag, notices, 3);
+    });
+  }
 });
 
 test.describe("Looking up a note's type", () => {

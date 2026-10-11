@@ -14,6 +14,7 @@ import {
   it,
   vi,
 } from 'vitest';
+import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
 import {
   type ClaimContext,
   type ClaimedRow,
@@ -23,11 +24,13 @@ import {
   PATH_BATCH,
   claimsIdentity,
   classifyClaim,
+  classifyTag,
   createIrIdRepairer,
   readsAsTampering,
   rowsById,
   undeleteStatement,
 } from './ir-id-repair';
+import { TAG_BY_TABLE, hasTag, withTag } from './item-tags';
 import {
   type Holder,
   ITEM_TABLES,
@@ -102,8 +105,19 @@ function readRows(repo: TestRepository): StoredRow[] {
 
 interface FakeNote {
   path: string;
-  /** Absent means the note has no frontmatter at all. */
+  /** Absent, along with `tags`, means the note has no frontmatter at all. */
   irId?: unknown;
+  /** The frontmatter `tags` value; absent leaves the property out. */
+  tags?: unknown;
+}
+
+/** The frontmatter a fake note starts out with, if any. */
+function frontmatterOf(note: FakeNote): Record<string, unknown> | undefined {
+  if (!('irId' in note) && !('tags' in note)) return undefined;
+  const frontmatter: Record<string, unknown> = {};
+  if ('irId' in note) frontmatter['ir-id'] = note.irId;
+  if ('tags' in note) frontmatter.tags = note.tags;
+  return frontmatter;
 }
 
 /**
@@ -113,12 +127,7 @@ interface FakeNote {
  */
 function makeVault(initial: readonly FakeNote[]) {
   const notes = new Map(
-    initial.map((note) => [
-      note.path,
-      'irId' in note
-        ? ({ 'ir-id': note.irId } as Record<string, unknown>)
-        : undefined,
-    ])
+    initial.map((note) => [note.path, frontmatterOf(note)])
   );
   const files = new Map<string, TFile>();
   const fileAt = (path: string) => {
@@ -141,9 +150,26 @@ function makeVault(initial: readonly FakeNote[]) {
         return { frontmatter: notes.get(file.path) } as CachedMetadata;
       }),
     },
-    writeIrId: vi.fn(async (file: TFile, id: string) => {
-      notes.set(file.path, { ...(notes.get(file.path) ?? {}), 'ir-id': id });
+    writeIrId: vi.fn(async (file: TFile, id: string, tag?: string) => {
+      const frontmatter = notes.get(file.path) ?? {};
+      notes.set(file.path, {
+        ...frontmatter,
+        'ir-id': id,
+        ...(tag === undefined ? {} : { tags: withTag(frontmatter.tags, tag) }),
+      });
     }),
+    /** Adds `tag` the way the plugin's write does, to the note as it is now. */
+    writeTag: vi.fn(async (file: TFile, tag: string) => {
+      const frontmatter = notes.get(file.path) ?? {};
+      notes.set(file.path, {
+        ...frontmatter,
+        tags: withTag(frontmatter.tags, tag),
+      });
+    }),
+    /** The `tags` each note carries now. */
+    tagsAt(path: string): unknown {
+      return notes.get(path)?.tags;
+    },
     /** The `ir-id` each note carries now, for comparing against a snapshot. */
     snapshot(): Map<string, unknown> {
       return new Map(
@@ -207,6 +233,7 @@ function wire(
     vault: vault.vault,
     metadataCache: vault.metadataCache,
     writeIrId: vault.writeIrId,
+    writeTag: vault.writeTag,
     onRepaired,
     yieldToHost: pause,
     schedule: scheduler.schedule,
@@ -269,6 +296,26 @@ const storedRowArb: fc.Arbitrary<StoredRow> = fc
 const holdersArb = fc.array(
   fc.record({ table: tableArb, id: idArb, deleted: fc.boolean() }),
   { maxLength: 5 }
+);
+
+/** A tag a note might carry: an item tag, a lookalike, or anything else. */
+const tagEntryArb: fc.Arbitrary<unknown> = fc.oneof(
+  fc.constantFrom<unknown>(
+    ...Object.values(TAG_BY_TABLE),
+    ...Object.values(TAG_BY_TABLE).map((tag) => `#${tag}`),
+    'other',
+    null
+  ),
+  fc.string({ maxLength: 8 })
+);
+
+/** Every shape a frontmatter `tags` value can take. */
+const tagsArb: fc.Arbitrary<unknown> = fc.oneof(
+  fc.array(tagEntryArb, { maxLength: 4 }),
+  fc
+    .array(tagEntryArb, { maxLength: 3 })
+    .map((tags) => tags.filter((tag) => typeof tag === 'string').join(', ')),
+  fc.constantFrom<unknown>(undefined, null, 0, { nested: 'ir-article' })
 );
 
 // #endregion
@@ -777,6 +824,234 @@ describe('classifyClaim', () => {
   });
 });
 
+describe('classifyTag', () => {
+  /** `tags` lacking `tag`, as a list or a lone string. */
+  const tagsLackingArb = (tag: string) =>
+    tagsArb.filter((tags) => !hasTag(tags, tag));
+
+  /** `tags` carrying `tag` as an entry, as a list or a lone string. */
+  const tagsCarryingArb = (tag: string) =>
+    fc.oneof(
+      fc
+        .tuple(fc.array(tagEntryArb, { maxLength: 3 }), fc.nat())
+        .map(([others, at]) => {
+          const tags = [...others];
+          tags.splice(at % (others.length + 1), 0, tag);
+          return tags as unknown;
+        }),
+      fc.constantFrom(`${tag}`, `other, ${tag}`, `${tag} other`)
+    );
+
+  /**
+   * A note that belongs to one live row at its path: it names the row's id, with
+   * any other rows about, live or not, so long as none of them answers to that
+   * id; or it makes no claim, and every other row at the path is a tombstone.
+   */
+  const ownedArb = fc
+    .record({
+      path: pathArb,
+      owner: fc.record({ table: tableArb, id: idArb }),
+      claims: fc.boolean(),
+      noClaim: noClaimArb,
+      others: holdersArb,
+      at: fc.nat(),
+    })
+    .map(({ path, owner, claims, noClaim, others, at }) => {
+      const rest = others
+        .filter(({ id }) => id !== owner.id)
+        .map((row) => (claims ? row : { ...row, deleted: true }));
+      const holders = [...rest];
+      holders.splice(at % (rest.length + 1), 0, holder(owner.table, owner.id));
+      return { path, owner, irId: claims ? owner.id : noClaim, holders };
+    });
+
+  /**
+   * A note that belongs to no live row at its path, or could belong to more
+   * than one: it makes no claim and the path has no live row or several; it
+   * names an id no live row there holds; or two live rows there share its id.
+   */
+  const unownedArb = fc.oneof(
+    fc
+      .record({
+        path: pathArb,
+        irId: noClaimArb,
+        holders: holdersArb,
+      })
+      .filter(
+        ({ holders }) => holders.filter(({ deleted }) => !deleted).length !== 1
+      ),
+    fc
+      .record({
+        path: pathArb,
+        irId: someClaimArb,
+        holders: holdersArb,
+      })
+      .map(({ path, irId, holders }) => ({
+        path,
+        irId,
+        holders: holders.map((row) =>
+          row.id === irId ? { ...row, deleted: true } : row
+        ),
+      })),
+    fc
+      .record({
+        path: pathArb,
+        id: idArb,
+        tables: fc.uniqueArray(tableArb, { minLength: 2, maxLength: 3 }),
+        others: holdersArb,
+      })
+      .map(({ path, id, tables, others }) => ({
+        path,
+        irId: id,
+        holders: [...others, ...tables.map((table) => holder(table, id))],
+      }))
+  );
+
+  it('restores the tag of the live row a note belongs to, when the note lacks it', () => {
+    fc.assert(
+      fc.property(
+        ownedArb.chain((owned) =>
+          tagsLackingArb(TAG_BY_TABLE[owned.owner.table]).map((tags) => ({
+            ...owned,
+            tags,
+          }))
+        ),
+        ({ path, owner, irId, holders, tags }) => {
+          expect(classifyTag({ path, irId }, tags, holders)).toStrictEqual({
+            kind: 'restore-tag',
+            row: { table: owner.table, id: owner.id },
+            path,
+            tag: TAG_BY_TABLE[owner.table],
+          });
+        }
+      )
+    );
+  });
+
+  it("leaves alone a note that already carries its row's tag", () => {
+    fc.assert(
+      fc.property(
+        ownedArb.chain((owned) =>
+          tagsCarryingArb(TAG_BY_TABLE[owned.owner.table]).map((tags) => ({
+            ...owned,
+            tags,
+          }))
+        ),
+        ({ path, irId, holders, tags }) => {
+          expect(classifyTag({ path, irId }, tags, holders)).toBeNull();
+        }
+      )
+    );
+  });
+
+  it('never tags a note no single live row at its path answers to, whatever its tags', () => {
+    fc.assert(
+      fc.property(unownedArb, tagsArb, ({ path, irId, holders }, tags) => {
+        expect(classifyTag({ path, irId }, tags, holders)).toBeNull();
+      })
+    );
+  });
+
+  it('restores the tag of the one live row at a path when the note makes no claim', () => {
+    fc.assert(
+      fc.property(
+        pathArb,
+        noClaimArb,
+        tableArb,
+        idArb,
+        fc.array(fc.record({ table: tableArb, id: idArb }), { maxLength: 3 }),
+        (path, irId, table, id, tombstones) => {
+          const holders = [
+            ...tombstones.map((row) => holder(row.table, row.id, true)),
+            holder(table, id),
+          ];
+          expect(classifyTag({ path, irId }, ['other'], holders)).toStrictEqual(
+            {
+              kind: 'restore-tag',
+              row: { table, id },
+              path,
+              tag: TAG_BY_TABLE[table],
+            }
+          );
+        }
+      )
+    );
+  });
+
+  it('leaves a note alone that claims an id no live row at its path holds', () => {
+    expect(
+      classifyTag(
+        { path: 'a.md', irId: 'typed-over' },
+        [],
+        [holder('article', 'a1')]
+      )
+    ).toBeNull();
+    expect(
+      classifyTag(
+        { path: 'a.md', irId: 'a1' },
+        [],
+        [holder('article', 'a1', true)]
+      )
+    ).toBeNull();
+    expect(classifyTag({ path: 'a.md', irId: undefined }, [], [])).toBeNull();
+  });
+
+  it('leaves a note alone that more than one live row could own', () => {
+    const holders = [holder('article', 'a1'), holder('snippet', 's1')];
+    expect(
+      classifyTag({ path: 'a.md', irId: undefined }, [], holders)
+    ).toBeNull();
+    expect(
+      classifyTag(
+        { path: 'a.md', irId: 'a1' },
+        [],
+        [holder('article', 'a1'), holder('snippet', 'a1')]
+      )
+    ).toBeNull();
+  });
+
+  it('reads a lone string of tags as a list of them', () => {
+    const holders = [holder('snippet', 's1')];
+    expect(
+      classifyTag(
+        { path: 'a.md', irId: 's1' },
+        'other ir-text-snippet',
+        holders
+      )
+    ).toBeNull();
+    expect(
+      classifyTag({ path: 'a.md', irId: 's1' }, 'ir-text-snippet-x', holders)
+    ).toStrictEqual({
+      kind: 'restore-tag',
+      row: { table: 'snippet', id: 's1' },
+      path: 'a.md',
+      tag: SNIPPET_TAG,
+    });
+  });
+
+  it('settles in one step: once the tag is written there is nothing more to do', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          ownedArb.chain((owned) =>
+            tagsArb.map((tags) => ({ ...owned, tags }))
+          ),
+          unownedArb.chain((unowned) =>
+            tagsArb.map((tags) => ({ ...unowned, tags }))
+          )
+        ),
+        ({ path, irId, holders, tags }) => {
+          const first = classifyTag({ path, irId }, tags, holders);
+          fc.pre(first !== null);
+          expect(
+            classifyTag({ path, irId }, withTag(tags, first.tag), holders)
+          ).toBeNull();
+        }
+      )
+    );
+  });
+});
+
 describe('undeleteStatement', () => {
   it('clears the tombstone and repoints it at the note, guarded on it still being one', () => {
     fc.assert(
@@ -855,6 +1130,422 @@ describe('rowsById', () => {
 });
 
 describe('createIrIdRepairer', () => {
+  describe('putting back a type tag', () => {
+    it('restores the tag of the live row whose note lost it, keeping the other tags in order', async () => {
+      const onTagRestored = vi.fn();
+      const { repairer, vault, onRepaired } = wire(
+        [
+          {
+            table: 'article',
+            id: 'a1',
+            reference: 'notes/one.md',
+            deleted: false,
+          },
+        ],
+        [{ path: 'notes/one.md', irId: 'a1', tags: ['b', 'a'] }],
+        { onTagRestored }
+      );
+
+      repairer.handleChange(changed('notes/one.md'));
+      // Nothing for the rows' readers to refresh over: no row changed
+      expect(await repairer.flush()).toStrictEqual([]);
+
+      expect(vault.writeTag).toHaveBeenCalledTimes(1);
+      expect(vault.tagsAt('notes/one.md')).toStrictEqual([
+        'b',
+        'a',
+        ARTICLE_TAG,
+      ]);
+      expect(vault.writeIrId).not.toHaveBeenCalled();
+      expect(onRepaired).not.toHaveBeenCalled();
+      expect(onTagRestored).toHaveBeenCalledExactlyOnceWith([
+        {
+          kind: 'restore-tag',
+          row: { table: 'article', id: 'a1' },
+          path: 'notes/one.md',
+          tag: ARTICLE_TAG,
+        },
+      ]);
+    });
+
+    it('turns a lone string of tags into a list ending in the type tag, and settles there', async () => {
+      const onTagRestored = vi.fn();
+      const { repairer, vault } = wire(
+        [
+          {
+            table: 'srs_card',
+            id: 'c1',
+            reference: 'cards/c.md',
+            deleted: false,
+          },
+        ],
+        [{ path: 'cards/c.md', irId: 'c1', tags: 'mine, also-mine' }],
+        { onTagRestored }
+      );
+
+      repairer.handleChange(changed('cards/c.md'));
+      await repairer.flush();
+      // The write raises `changed` again; that pass finds the tag in place
+      repairer.handleChange(changed('cards/c.md'));
+      await repairer.flush();
+
+      expect(vault.writeTag).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ path: 'cards/c.md' }),
+        CARD_TAG
+      );
+      expect(vault.tagsAt('cards/c.md')).toStrictEqual([
+        'mine',
+        'also-mine',
+        CARD_TAG,
+      ]);
+      expect(onTagRestored).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves alone a note whose tags already carry its type tag, however written', async () => {
+      const onTagRestored = vi.fn();
+      const { repairer, vault } = wire(
+        [
+          { table: 'article', id: 'a1', reference: 'a.md', deleted: false },
+          { table: 'snippet', id: 's1', reference: 's.md', deleted: false },
+        ],
+        [
+          { path: 'a.md', irId: 'a1', tags: ['x', ARTICLE_TAG] },
+          { path: 's.md', irId: 's1', tags: `x ${SNIPPET_TAG}` },
+        ],
+        { onTagRestored }
+      );
+
+      repairer.handleChange(changed('a.md'));
+      repairer.handleChange(changed('s.md'));
+      await repairer.flush();
+
+      expect(vault.writeTag).not.toHaveBeenCalled();
+      expect(onTagRestored).not.toHaveBeenCalled();
+    });
+
+    it('never tags a note no live row at its path answers to', async () => {
+      const onTagRestored = vi.fn();
+      const { repairer, vault } = wire(
+        [
+          {
+            table: 'article',
+            id: 'a1',
+            reference: 'typed-over.md',
+            deleted: false,
+          },
+          {
+            table: 'article',
+            id: 'a2',
+            reference: 'tombstone.md',
+            deleted: true,
+          },
+        ],
+        [
+          { path: 'plain.md', tags: ['x'] },
+          { path: 'stray-id.md', irId: 'nobody', tags: ['x'] },
+          { path: 'typed-over.md', irId: 'someone-else', tags: ['x'] },
+          { path: 'tombstone.md', tags: ['x'] },
+        ],
+        { onTagRestored }
+      );
+
+      for (const path of [
+        'plain.md',
+        'stray-id.md',
+        'typed-over.md',
+        'tombstone.md',
+      ]) {
+        repairer.handleChange(changed(path));
+      }
+      await repairer.flush();
+
+      expect(vault.writeTag).not.toHaveBeenCalled();
+      expect(onTagRestored).not.toHaveBeenCalled();
+    });
+
+    it('puts back both the id and the tag of a note whose properties were cleared, in one write', async () => {
+      const onTagRestored = vi.fn();
+      const { repairer, vault } = wire(
+        [{ table: 'snippet', id: 's1', reference: 's.md', deleted: false }],
+        [{ path: 's.md' }],
+        { onTagRestored }
+      );
+
+      repairer.handleChange(changed('s.md'));
+      await repairer.flush();
+
+      expect(vault.snapshot().get('s.md')).toBe('s1');
+      expect(vault.tagsAt('s.md')).toStrictEqual([SNIPPET_TAG]);
+      expect(onTagRestored).toHaveBeenCalledExactlyOnceWith([
+        {
+          kind: 'restore-tag',
+          row: { table: 'snippet', id: 's1' },
+          path: 's.md',
+          tag: SNIPPET_TAG,
+        },
+      ]);
+
+      repairer.handleChange(changed('s.md'));
+      await repairer.flush();
+      expect(vault.writeIrId).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ path: 's.md' }),
+        's1',
+        SNIPPET_TAG
+      );
+      expect(vault.writeTag).not.toHaveBeenCalled();
+    });
+
+    it('writes only the id of a note that lost its id but kept its tag', async () => {
+      const onTagRestored = vi.fn();
+      const { repairer, vault } = wire(
+        [{ table: 'snippet', id: 's1', reference: 's.md', deleted: false }],
+        [{ path: 's.md', tags: ['x', SNIPPET_TAG] }],
+        { onTagRestored }
+      );
+
+      repairer.handleChange(changed('s.md'));
+      await repairer.flush();
+
+      expect(vault.writeIrId).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ path: 's.md' }),
+        's1',
+        undefined
+      );
+      expect(vault.writeTag).not.toHaveBeenCalled();
+      expect(onTagRestored).not.toHaveBeenCalled();
+    });
+
+    it('carries on with the rest of the batch when an id write fails', async () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const onTagRestored = vi.fn();
+      const { repairer, vault } = wire(
+        [
+          { table: 'article', id: 'a1', reference: 'bad.md', deleted: false },
+          { table: 'article', id: 'a2', reference: 'next.md', deleted: false },
+          {
+            table: 'article',
+            id: 'a3',
+            reference: 'tagless.md',
+            deleted: false,
+          },
+        ],
+        [
+          { path: 'bad.md', tags: ['x'] },
+          { path: 'next.md', tags: [ARTICLE_TAG] },
+          { path: 'tagless.md', irId: 'a3', tags: [] },
+        ],
+        { onTagRestored }
+      );
+      const write = vault.writeIrId.getMockImplementation()!;
+      vault.writeIrId.mockImplementation(
+        async (file: TFile, id: string, tag?: string) => {
+          if (file.path === 'bad.md') throw new Error('bad YAML');
+          await write(file, id, tag);
+        }
+      );
+
+      repairer.handleChange(changed('bad.md'));
+      repairer.handleChange(changed('next.md'));
+      repairer.handleChange(changed('tagless.md'));
+      const applied = await repairer.flush();
+
+      expect(error).toHaveBeenCalledExactlyOnceWith(
+        'Incremental Reading - failed to restore an ir-id:',
+        expect.objectContaining({ message: 'bad YAML' })
+      );
+      expect(applied).toStrictEqual([
+        {
+          kind: 'restore-id',
+          row: { table: 'article', id: 'a2' },
+          path: 'next.md',
+        },
+      ]);
+      expect(vault.tagsAt('bad.md')).toStrictEqual(['x']);
+      expect(vault.tagsAt('tagless.md')).toStrictEqual([ARTICLE_TAG]);
+      expect(onTagRestored).toHaveBeenCalledExactlyOnceWith([
+        expect.objectContaining({ path: 'tagless.md' }),
+      ]);
+    });
+
+    it('tags a note whose row it brings back, even one evicted off every real path', async () => {
+      const onTagRestored = vi.fn();
+      const { repairer, vault, repo } = wire(
+        [
+          {
+            table: 'article',
+            id: 'a1',
+            reference: evictedSpot({ table: 'article', id: 'a1' }),
+            deleted: true,
+          },
+        ],
+        [{ path: 'back.md', irId: 'a1', tags: ['x'] }],
+        { onTagRestored }
+      );
+
+      repairer.handleChange(changed('back.md'));
+      await repairer.flush();
+
+      expect(readRows(repo)[0]).toMatchObject({
+        reference: 'back.md',
+        deleted: false,
+      });
+      expect(vault.tagsAt('back.md')).toStrictEqual(['x', ARTICLE_TAG]);
+      expect(onTagRestored).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves the tag off a note whose row could not be brought back', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { repairer, vault, repo } = wire(
+        [{ table: 'article', id: 'a1', reference: 'old.md', deleted: true }],
+        [{ path: 'back.md', irId: 'a1', tags: ['x'] }]
+      );
+      vi.spyOn(repo, 'bulkMutate').mockRejectedValue(new Error('unique'));
+
+      repairer.handleChange(changed('back.md'));
+      await repairer.flush();
+
+      expect(vault.writeTag).not.toHaveBeenCalled();
+    });
+
+    it('writes nothing when the tag came back between the read and the write', async () => {
+      const { repairer, vault } = wire(
+        [{ table: 'article', id: 'a1', reference: 'a.md', deleted: false }],
+        [{ path: 'a.md', irId: 'a1', tags: ['x'] }]
+      );
+      // The first read sees the tag gone; by the second, another writer (a
+      // review fetch's own repair, say) has put it back
+      const read = vault.metadataCache.getFileCache.getMockImplementation()!;
+      vault.metadataCache.getFileCache.mockImplementationOnce((file: TFile) => {
+        const cache = read(file);
+        vault.notes.set('a.md', { 'ir-id': 'a1', tags: ['x', ARTICLE_TAG] });
+        return cache;
+      });
+
+      repairer.handleChange(changed('a.md'));
+      await repairer.flush();
+
+      expect(vault.writeTag).not.toHaveBeenCalled();
+    });
+
+    it("writes nothing when the note stopped being the row's between the read and the write", async () => {
+      const { repairer, vault } = wire(
+        [{ table: 'article', id: 'a1', reference: 'a.md', deleted: false }],
+        [{ path: 'a.md', irId: 'a1', tags: ['x'] }]
+      );
+      const read = vault.metadataCache.getFileCache.getMockImplementation()!;
+      vault.metadataCache.getFileCache.mockImplementationOnce((file: TFile) => {
+        const cache = read(file);
+        vault.notes.set('a.md', { 'ir-id': 'someone-else', tags: ['x'] });
+        return cache;
+      });
+
+      repairer.handleChange(changed('a.md'));
+      await repairer.flush();
+
+      expect(vault.writeTag).not.toHaveBeenCalled();
+    });
+
+    it('writes nothing for a note gone between the read and the write', async () => {
+      const { repairer, vault } = wire(
+        [{ table: 'article', id: 'a1', reference: 'a.md', deleted: false }],
+        [{ path: 'a.md', irId: 'a1', tags: ['x'] }]
+      );
+      const read = vault.metadataCache.getFileCache.getMockImplementation()!;
+      vault.metadataCache.getFileCache.mockImplementationOnce((file: TFile) => {
+        const cache = read(file);
+        vault.remove('a.md');
+        return cache;
+      });
+
+      repairer.handleChange(changed('a.md'));
+      await repairer.flush();
+
+      expect(vault.writeTag).not.toHaveBeenCalled();
+    });
+
+    it('carries on tagging the rest of a burst when one write fails, and reports only what it wrote', async () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const onTagRestored = vi.fn();
+      const rows = ['a1', 'a2', 'a3'].map((id) => ({
+        table: 'article' as const,
+        id,
+        reference: `${id}.md`,
+        deleted: false,
+      }));
+      const { repairer, vault } = wire(
+        rows,
+        rows.map(({ id, reference }) => ({
+          path: reference,
+          irId: id,
+          tags: [],
+        })),
+        { onTagRestored, pathBatch: 2 }
+      );
+      const write = vault.writeTag.getMockImplementation()!;
+      vault.writeTag.mockImplementation(async (file: TFile, tag: string) => {
+        if (file.path === 'a1.md') throw new Error('bad YAML');
+        await write(file, tag);
+      });
+
+      for (const { reference } of rows) {
+        repairer.handleChange(changed(reference));
+      }
+      await repairer.flush();
+
+      expect(vault.tagsAt('a2.md')).toStrictEqual([ARTICLE_TAG]);
+      expect(vault.tagsAt('a3.md')).toStrictEqual([ARTICLE_TAG]);
+      expect(error).toHaveBeenCalledExactlyOnceWith(
+        'Incremental Reading - failed to restore an item tag:',
+        expect.objectContaining({ message: 'bad YAML' })
+      );
+      // One report for the whole pass, across batches
+      expect(onTagRestored).toHaveBeenCalledExactlyOnceWith(
+        ['a2.md', 'a3.md'].map((path): unknown =>
+          expect.objectContaining({ path, tag: ARTICLE_TAG })
+        )
+      );
+    });
+
+    it('stops tagging partway through a pass once disposed, and reports nothing', async () => {
+      const onTagRestored = vi.fn();
+      const rows = ['a1', 'a2'].map((id) => ({
+        table: 'article' as const,
+        id,
+        reference: `${id}.md`,
+        deleted: false,
+      }));
+      const harness = wire(
+        rows,
+        rows.map(({ id, reference }) => ({ path: reference, irId: id })),
+        { onTagRestored }
+      );
+      harness.vault.writeTag.mockImplementation(async () => {
+        harness.repairer.dispose();
+      });
+
+      for (const { reference } of rows) {
+        harness.repairer.handleChange(changed(reference));
+      }
+      await harness.repairer.flush();
+
+      expect(harness.vault.writeTag).toHaveBeenCalledTimes(1);
+      expect(onTagRestored).not.toHaveBeenCalled();
+    });
+
+    it('never tags a note the cache is still re-reading', async () => {
+      const { repairer, vault } = wire(
+        [{ table: 'article', id: 'a1', reference: 'a.md', deleted: false }],
+        [{ path: 'a.md', irId: 'a1' }]
+      );
+      vault.metadataCache.getFileCache.mockReturnValue(null);
+
+      repairer.handleChange(changed('a.md'));
+      await repairer.flush();
+
+      expect(vault.writeTag).not.toHaveBeenCalled();
+    });
+  });
+
   it('puts back the id of the live row whose note lost it', async () => {
     const { repairer, vault, repo, onRepaired } = wire(
       [

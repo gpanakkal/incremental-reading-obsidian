@@ -598,16 +598,20 @@ export class ObsidianHelpers {
     );
   }
 
+  /**
+   * A note's cached frontmatter, with a lone `tags` string read as a list of
+   * one. The list is a copy: the cache's own object is what every other reader
+   * of the note sees, the ir-id repairer included, and rewriting it there made
+   * `tags: a, b` read as the single entry `a, b` until the note was reparsed.
+   */
   static getFrontMatter(
     file: TFile,
     app: App
   ): (PluginFrontMatter & FrontMatterCache) | undefined {
     const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
-    if (frontmatter && 'tags' in frontmatter) {
-      const { tags } = frontmatter;
-      frontmatter.tags = Array.isArray(tags) ? tags : [tags];
-    }
-    return frontmatter;
+    if (!frontmatter || !('tags' in frontmatter)) return frontmatter;
+    const { tags } = frontmatter;
+    return Array.isArray(tags) ? frontmatter : { ...frontmatter, tags: [tags] };
   }
 
   /**

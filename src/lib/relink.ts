@@ -1,7 +1,7 @@
 import type IncrementalReadingPlugin from '#/main';
 import type { App, TFile } from 'obsidian';
-import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
 import { refusedPathWarning } from './item-path-guard';
+import { TAG_BY_TABLE, hasTag } from './item-tags';
 import { extensionOfPath, getMimeType, supportsFrontmatter } from './mime';
 import {
   ITEM_TABLES,
@@ -51,12 +51,6 @@ export type RelinkResult =
       ok: false;
       reason: 'no-row' | 'not-missing' | 'wrong-type' | Unavailable;
     };
-
-const TAG_BY_TABLE: Readonly<Record<ItemTable, string>> = {
-  article: ARTICLE_TAG,
-  snippet: SNIPPET_TAG,
-  srs_card: CARD_TAG,
-};
 
 /** The table rows of item type `type` live in. */
 export function tableOf(type: NoteType): ItemTable {
@@ -205,17 +199,6 @@ export async function relinkRow<F extends RelinkFile>(
 }
 
 /**
- * A note's frontmatter `tags`, whether written as a list or a single string.
- * Only ever searched for an item tag, so a list's other entries, whatever
- * they are, are left as they come.
- */
-function tagsOf(frontmatter: Record<string, unknown> | undefined): unknown[] {
-  const tags = frontmatter?.tags;
-  if (Array.isArray(tags)) return tags as unknown[];
-  return typeof tags === 'string' ? tags.split(/[\s,]+/) : [];
-}
-
-/**
  * The vault as relinking reads it: notes' `ir-id` and tags from the metadata
  * cache, and files by path. A file without frontmatter has neither id nor tags,
  * and is never asked.
@@ -233,9 +216,9 @@ export function vaultReader(app: App): RelinkVault<TFile> {
       return typeof irId === 'string' ? irId : undefined;
     },
     taggedTableOf: (file) => {
-      const tags = tagsOf(frontmatterOf(file));
+      const tags = frontmatterOf(file)?.tags;
       return (
-        ITEM_TABLES.find((table) => tags.includes(TAG_BY_TABLE[table])) ?? null
+        ITEM_TABLES.find((table) => hasTag(tags, TAG_BY_TABLE[table])) ?? null
       );
     },
     hasFileAt: (path) => Obsidian.getNote(path, app) !== null,

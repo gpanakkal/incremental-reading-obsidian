@@ -2,13 +2,16 @@
 import { Notice } from '#/test/__mocks__/obsidian';
 import fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
 import {
   createIrIdWarning,
+  createTypeTagNotices,
   IR_ID_WARNING_MAX_LIFETIME_MS,
   IR_ID_WARNING_MESSAGE,
   IR_ID_WARNING_WINDOW_MS,
   irIdWarningMessage,
   persistentNotice,
+  typeTagRestoredMessage,
   type IrIdWarningDeps,
   type NoticeFactory,
   type NoticeTarget,
@@ -159,6 +162,18 @@ const capFor = (gaps: readonly number[], windowMs: number, slack = 0) =>
   gaps.reduce((sum, gap) => sum + gap, 0) + windowMs + slack + 1;
 
 // #endregion
+
+describe('typeTagRestoredMessage', () => {
+  it('names the tag it put back, in a message short enough to read on a phone', () => {
+    for (const tag of [ARTICLE_TAG, SNIPPET_TAG, CARD_TAG]) {
+      const message = typeTagRestoredMessage(tag);
+      expect(message).toBe(
+        `Incremental Reading: restored the ${tag} tag. Item notes need it.`
+      );
+      expect(message.length).toBeLessThanOrEqual(140);
+    }
+  });
+});
 
 describe('irIdWarningMessage', () => {
   it('warns about ir-id in a message short enough to read on a phone', () => {
@@ -799,5 +814,53 @@ describe('createIrIdWarning', () => {
     expect(raised[0].hides).toBe(0);
     vi.advanceTimersByTime(1);
     expect(raised[0].hides).toBe(1);
+  });
+});
+
+describe('createTypeTagNotices', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const typeTagArb = fc.constantFrom(ARTICLE_TAG, SNIPPET_TAG, CARD_TAG);
+
+  it('raises one notice per tag in a burst, naming it and counting the notes it went back on', () => {
+    fc.assert(
+      fc.property(fc.array(typeTagArb, { maxLength: 12 }), (tags) => {
+        vi.clearAllTimers();
+        document.body.replaceChildren();
+        const { raised, createNotice } = makeNotices();
+        const notices = createTypeTagNotices({ createNotice });
+
+        for (const tag of tags) notices.warn(tag);
+
+        const distinct = [...new Set(tags)];
+        expect(raised.map(({ messages }) => messages[0])).toStrictEqual(
+          distinct.map(typeTagRestoredMessage)
+        );
+        for (const [i, tag] of distinct.entries()) {
+          const count = tags.filter((each) => each === tag).length;
+          expect(raised[i].messages.at(-1)).toBe(
+            irIdWarningMessage(typeTagRestoredMessage(tag), count)
+          );
+        }
+      })
+    );
+  });
+
+  it('hides every notice it has up when disposed', () => {
+    const { raised, createNotice } = makeNotices();
+    const notices = createTypeTagNotices({ createNotice });
+    notices.warn(ARTICLE_TAG);
+    notices.warn(CARD_TAG);
+
+    notices.dispose();
+
+    expect(raised.map(({ hides }) => hides)).toStrictEqual([1, 1]);
   });
 });

@@ -3069,6 +3069,37 @@ describe('getFrontMatter', () => {
     expect(result!.tags).toContain('ir-article');
   });
 
+  it("leaves the metadata cache's own frontmatter as Obsidian parsed it", () => {
+    // The cache object is Obsidian's, read by every other reader of the note:
+    // a lone string turned into a list there makes `tags: a, b` read as the
+    // single entry `a, b` until the note is next parsed
+    fc.assert(
+      fc.property(
+        // The tags as a list, and whether the note holds a lone one bare
+        fc.oneof(
+          fc.array(fc.string(), { maxLength: 3 }).map((list) => ({
+            list: list as unknown[],
+            tags: list as unknown,
+          })),
+          fc
+            .oneof(fc.string(), fc.constantFrom<unknown>(null, 0))
+            .map((lone) => ({ list: [lone], tags: lone }))
+        ),
+        ({ list, tags }) => {
+          const fm = { tags, other: 'kept' };
+          const app = makeApp({
+            metadataCache: {
+              getFileCache: vi.fn().mockReturnValue({ frontmatter: fm }),
+            } as unknown as App['metadataCache'],
+          });
+          const result = ObsidianHelpers.getFrontMatter(makeTFile(), app);
+          expect(fm).toStrictEqual({ tags, other: 'kept' });
+          expect(result).toStrictEqual({ tags: list, other: 'kept' });
+        }
+      )
+    );
+  });
+
   it('keeps tags array unchanged when it is already an array', () => {
     const fm = {
       tags: ['ir-article', 'ir-source'],

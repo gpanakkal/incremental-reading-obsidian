@@ -4,6 +4,7 @@ import {
   type TFile,
   type Vault,
 } from 'obsidian';
+import { hasTag, TAG_BY_TABLE } from './item-tags';
 import { supportsFrontmatter } from './mime';
 import {
   holdersOf,
@@ -195,6 +196,49 @@ export function classifyClaim(
   return { kind: 'undelete', row: toRowId(row), path };
 }
 
+/** A note's type tag to put back, for the row the note belongs to. */
+export interface TagRepair {
+  kind: 'restore-tag';
+  row: RowId;
+  path: string;
+  tag: string;
+}
+
+/**
+ * Whether the note at a path has lost its item's type tag, and which tag to put
+ * back if so.
+ *
+ * Removing a type tag is never taken as deliberate: without one the note stops
+ * reading as an item at all (`ObsidianHelpers.getNoteType`), and no editor path
+ * can tell a user's removal from a sync. So any note that belongs to a live row
+ * at its path gets that row's tag back, by the same reading of `ir-id` that
+ * {@link classifyClaim} makes: a claim names its row, and a note making none is
+ * the note of the one live row at its path.
+ *
+ * Kept apart from {@link classifyClaim} because the two are independent: a
+ * cleared properties block loses the `ir-id` and the tags at once, and calls for
+ * both repairs.
+ *
+ * A note no row at its path answers to is never touched — a plain note, an id
+ * typed over, a copy, a tombstone's old path — nor one two live rows could own,
+ * for want of knowing whose tag it should carry.
+ */
+export function classifyTag(
+  { path, irId }: NoteClaim,
+  tags: unknown,
+  holders: readonly Holder[]
+): TagRepair | null {
+  const live = holders.filter((holder) => !holder.deleted);
+  const owners = claimsIdentity(irId)
+    ? live.filter((holder) => holder.id === irId)
+    : live;
+  if (owners.length !== 1) return null;
+  const [owner] = owners;
+  const tag = TAG_BY_TABLE[owner.table];
+  if (hasTag(tags, tag)) return null;
+  return { kind: 'restore-tag', row: toRowId(owner), path, tag };
+}
+
 /**
  * Bring a row back, pointed at the note that asked for it.
  *
@@ -257,8 +301,17 @@ export interface IrIdRepairDeps {
   repo: Pick<SQLiteRepository, 'query' | 'bulkMutate'>;
   vault: Pick<Vault, 'getFileByPath'>;
   metadataCache: Pick<MetadataCache, 'getFileCache'>;
-  /** Writes `ir-id` into a note's frontmatter, leaving the rest of it alone. */
-  writeIrId: (file: TFile, id: string) => Promise<void>;
+  /**
+   * Writes `ir-id` into a note's frontmatter, leaving the rest of it alone, and
+   * adds `tag` to its `tags` in the same write when one is given (see
+   * {@link writeTag}).
+   */
+  writeIrId: (file: TFile, id: string, tag?: string) => Promise<void>;
+  /**
+   * Adds `tag` to a note's frontmatter `tags`, leaving its other tags and the
+   * rest of its frontmatter alone (see `withTag`).
+   */
+  writeTag: (file: TFile, tag: string) => Promise<void>;
   /** Told what a pass wrote, so callers can refresh what read it. */
   onRepaired?: (repairs: readonly Repair[]) => void | Promise<void>;
   /**
@@ -268,6 +321,11 @@ export interface IrIdRepairDeps {
    * Sync can name a great many at once.
    */
   onDamage?: (paths: readonly string[]) => void;
+  /**
+   * Told the type tags a pass put back, once per pass that puts any back.
+   * Telling the user is the caller's business, as with {@link onDamage}.
+   */
+  onTagRestored?: (repairs: readonly TagRepair[]) => void;
   yieldToHost?: () => Promise<void>;
   /** Runs `pass` after `ms`; returns a function that cancels it. */
   schedule?: (pass: () => void, ms: number) => () => void;
@@ -326,8 +384,10 @@ export function createIrIdRepairer({
   vault,
   metadataCache,
   writeIrId,
+  writeTag,
   onRepaired,
   onDamage,
+  onTagRestored,
   yieldToHost: pause = yieldToHost,
   schedule = (pass, ms) => {
     const timer = window.setTimeout(pass, ms);
@@ -362,13 +422,15 @@ export function createIrIdRepairer({
    * way to hit it. Nothing is lost by passing over it, because the parse
    * finishing is what raises `changed`, and that brings the note back.
    */
-  const claimAt = (path: string): { claim: NoteClaim; file: TFile } | null => {
+  const claimAt = (
+    path: string
+  ): { claim: NoteClaim; tags: unknown; file: TFile } | null => {
     const file = fileAt(path);
     if (!file) return null;
     const cache = metadataCache.getFileCache(file);
     if (!cache) return null;
     const irId: unknown = cache.frontmatter?.['ir-id'];
-    return { claim: { path, irId }, file };
+    return { claim: { path, irId }, tags: cache.frontmatter?.tags, file };
   };
 
   const heldElsewhere = (row: ClaimedRow) =>
@@ -380,16 +442,22 @@ export function createIrIdRepairer({
     applied: Repair[];
     conflicts: Conflict[];
     damaged: string[];
+    tagged: TagRepair[];
   }> {
     const claims: NoteClaim[] = [];
+    const tagsAt = new Map<string, unknown>();
     for (const path of batch) {
       // Gone since the change was remembered: a deletion is the vault delete
       // handler's business, not this one's. Or mid-parse, which the `changed`
       // ending the parse comes back for.
       const found = claimAt(path);
-      if (found) claims.push(found.claim);
+      if (!found) continue;
+      claims.push(found.claim);
+      tagsAt.set(path, found.tags);
     }
-    if (claims.length === 0) return { applied: [], conflicts: [], damaged: [] };
+    if (claims.length === 0) {
+      return { applied: [], conflicts: [], damaged: [], tagged: [] };
+    }
 
     const holders = await holdersOf(
       repo,
@@ -462,6 +530,22 @@ export function createIrIdRepairer({
       }
     }
 
+    // Judged after the undeletes, so a row brought back here counts as the live
+    // row its note belongs to. A settling round only revisits notes held back by
+    // a conflict, which have no live row of their own until their undelete
+    // lands, so no note is tagged twice in one pass. Nothing but undeletes has
+    // been applied yet.
+    const revived = new Map(applied.map(({ row, path }) => [path, row]));
+    const rowsAt = (path: string): Holder[] => {
+      const atPath = holders.get(path) ?? [];
+      const row = revived.get(path);
+      return row ? [...atPath, { ...row, deleted: false }] : atPath;
+    };
+    const tagged: TagRepair[] = [];
+    // Notes an `ir-id` write set out for, which carried their tag with it: one
+    // that failed is not tried again for its tag alone
+    const attempted = new Set<string>();
+
     for (const repair of repairs) {
       if (repair.kind !== 'restore-id') continue;
       if (disposed) break;
@@ -469,10 +553,56 @@ export function createIrIdRepairer({
       // these writes, and every one of them hands the thread back
       const found = claimAt(repair.path);
       if (!found || claimsIdentity(found.claim.irId)) continue;
-      await writeIrId(found.file, repair.row.id);
+      // A cleared properties block loses the tags with the id, and both go back
+      // in the one write
+      const tagRepair = classifyTag(
+        found.claim,
+        found.tags,
+        rowsAt(repair.path)
+      );
+      attempted.add(repair.path);
+      try {
+        await writeIrId(found.file, repair.row.id, tagRepair?.tag);
+      } catch (error) {
+        // Contained so the rest of the batch is still repaired. Frontmatter
+        // that is not valid YAML refuses the write, and the edit that fixes it
+        // raises `changed` again.
+        console.error(
+          'Incremental Reading - failed to restore an ir-id:',
+          error
+        );
+        continue;
+      }
       applied.push(repair);
+      if (tagRepair) tagged.push(tagRepair);
     }
-    return { applied, conflicts, damaged };
+
+    for (const claim of claims) {
+      if (disposed) break;
+      if (attempted.has(claim.path)) continue;
+      const repair = classifyTag(
+        claim,
+        tagsAt.get(claim.path),
+        rowsAt(claim.path)
+      );
+      if (!repair) continue;
+      // Read again right before writing, as above
+      const found = claimAt(repair.path);
+      if (!found) continue;
+      const still = classifyTag(found.claim, found.tags, rowsAt(repair.path));
+      if (still?.tag !== repair.tag) continue;
+      try {
+        await writeTag(found.file, repair.tag);
+        tagged.push(repair);
+      } catch (error) {
+        // Contained, as the `ir-id` writes are
+        console.error(
+          'Incremental Reading - failed to restore an item tag:',
+          error
+        );
+      }
+    }
+    return { applied, conflicts, damaged, tagged };
   }
 
   /**
@@ -499,6 +629,7 @@ export function createIrIdRepairer({
     // A settling round looks at paths an earlier one already judged, so the same
     // note must not be reported twice for the one edit
     const damaged = new Set<string>();
+    const tagged: TagRepair[] = [];
     for (;;) {
       const round: Repair[] = [];
       const conflicts: Conflict[] = [];
@@ -508,6 +639,7 @@ export function createIrIdRepairer({
         round.push(...batch.applied);
         conflicts.push(...batch.conflicts);
         for (const path of batch.damaged) damaged.add(path);
+        tagged.push(...batch.tagged);
         // Nothing after the last batch waits on the thread being free, so only
         // the gaps between batches are paid for
         if (i + pathBatch < paths.length) await pause();
@@ -538,6 +670,7 @@ export function createIrIdRepairer({
     // repairer, in no guaranteed order, and raising a notice as the plugin
     // unloads would leave one on screen with nothing behind it
     if (!disposed && damaged.size > 0) onDamage?.([...damaged]);
+    if (!disposed && tagged.length > 0) onTagRestored?.(tagged);
     if (applied.length > 0) await onRepaired?.(applied);
     return applied;
   }

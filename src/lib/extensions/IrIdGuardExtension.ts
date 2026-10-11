@@ -152,10 +152,10 @@ export function irIdProtectedRange(
  *
  * Same criterion as `ObsidianHelpers.getNoteType` — an `ir-article`,
  * `ir-text-snippet` or `ir-card` tag — but read off the metadata cache, because
- * a change filter has to answer synchronously and `getNoteType` goes through the
- * asynchronous `processFrontMatter`. A cache that has not caught up with a tag
- * written moments ago only leaves the guard off for that moment, and the write
- * that put the tag there is exempt anyway.
+ * a change filter has to answer synchronously and `getNoteType` reads the note
+ * itself, asynchronously (`readFrontMatter`, over `vault.cachedRead`). A cache
+ * that has not caught up with a tag written moments ago only leaves the guard
+ * off for that moment, and the write that put the tag there is exempt anyway.
  */
 function isItemNote(state: EditorState): boolean {
   const { info } = Obsidian.getFileInfoFromState(state);

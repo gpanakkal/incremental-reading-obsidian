@@ -5,6 +5,7 @@ import {
   refusedPathsWarning,
   startupWarning,
 } from '#/lib/item-path-guard';
+import { withTag } from '#/lib/item-tags';
 import { checkImportable } from '#/lib/items/ArticleManager';
 import { appendLog } from '#/lib/log-file';
 import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
@@ -46,6 +47,7 @@ import {
   type NoticeTarget,
   type Timer,
   createIrIdWarning,
+  createTypeTagNotices,
   hostTimer,
   IR_ID_WARNING_MESSAGE,
   persistentNotice,
@@ -609,8 +611,9 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   /**
-   * Put back `ir-id` frontmatter that was changed outside the plugin, and bring
-   * a row back when a mangled id is undone. See {@link createIrIdRepairer}.
+   * Put back `ir-id` frontmatter and item type tags that were changed outside
+   * the plugin, and bring a row back when a mangled id is undone. See
+   * {@link createIrIdRepairer}.
    *
    * Registered here rather than in {@link onload} for two reasons. The repairs
    * read and write the database, which does not exist until
@@ -630,16 +633,32 @@ export default class IncrementalReadingPlugin extends Plugin {
       message: IR_ID_WARNING_MESSAGE,
     });
     this.register(() => warning.dispose());
+    const tagNotices = createTypeTagNotices({ createNotice: persistentNotice });
+    this.register(() => tagNotices.dispose());
 
     const repairer = createIrIdRepairer({
       repo: this.reviewManager.repo,
       vault,
       metadataCache,
-      writeIrId: (file, id) =>
+      // A tag is added inside the write, off the note as it is on disk now, so
+      // another writer's edit since the cache read is kept and the tag never
+      // doubles
+      writeIrId: (file, id, tag) =>
         Obsidian.updateFrontMatter(
           file,
           (frontmatter) => {
             frontmatter['ir-id'] = id;
+            if (tag !== undefined) {
+              frontmatter.tags = withTag(frontmatter.tags, tag);
+            }
+          },
+          this.app
+        ),
+      writeTag: (file, tag) =>
+        Obsidian.updateFrontMatter(
+          file,
+          (frontmatter) => {
+            frontmatter.tags = withTag(frontmatter.tags, tag);
           },
           this.app
         ),
@@ -654,6 +673,8 @@ export default class IncrementalReadingPlugin extends Plugin {
       // Once per damaged note; the warning folds them into the one notice and
       // counts them off on it
       onDamage: (paths) => paths.forEach(() => warning.warn()),
+      onTagRestored: (repairs) =>
+        repairs.forEach(({ tag }) => tagNotices.warn(tag)),
     });
     this.register(() => repairer.dispose());
 

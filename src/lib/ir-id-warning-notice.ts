@@ -48,6 +48,14 @@ export const hostTimer: Timer = (run, ms) => {
 export const IR_ID_WARNING_MESSAGE =
   "Incremental Reading: don't edit the ir-id property. It's how a note finds its review data.";
 
+/**
+ * What the user is told once the repair path has put back a type tag they
+ * removed, one notice per tag however many notes the burst touched.
+ */
+export function typeTagRestoredMessage(tag: string): string {
+  return `Incremental Reading: restored the ${tag} tag. Item notes need it.`;
+}
+
 /** How long the notice stays up after the most recent damage event. */
 export const IR_ID_WARNING_WINDOW_MS = NOTICE_MIN_DURATION_MS;
 
@@ -267,5 +275,39 @@ export function createIrIdWarning({
       state.bump();
     },
     dispose: close,
+  };
+}
+
+export interface TypeTagNotices {
+  /** Report one note whose type tag `tag` was put back. */
+  warn(tag: string): void;
+  /** Hide every notice up and cancel their timers. For plugin unload. */
+  dispose(): void;
+}
+
+/**
+ * The repair path's notices about type tags it put back: one warning per tag,
+ * so each notice names its tag, and a burst putting the same tag back on many
+ * notes folds into the one notice and counts them off on it.
+ */
+export function createTypeTagNotices(
+  deps: Omit<IrIdWarningDeps, 'message'>
+): TypeTagNotices {
+  const warnings = new Map<string, IrIdWarning>();
+  return {
+    warn(tag) {
+      let warning = warnings.get(tag);
+      if (!warning) {
+        warning = createIrIdWarning({
+          ...deps,
+          message: typeTagRestoredMessage(tag),
+        });
+        warnings.set(tag, warning);
+      }
+      warning.warn();
+    },
+    dispose() {
+      warnings.forEach((warning) => warning.dispose());
+    },
   };
 }
