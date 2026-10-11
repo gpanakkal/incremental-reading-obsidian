@@ -1218,3 +1218,82 @@ export function expectPlainText(readings: MarkdownReadings, text: string) {
     readings.cache.sections.map(() => 'paragraph')
   );
 }
+
+/**
+ * A note's body: its text past the frontmatter, which snippet offsets count
+ * from.
+ */
+export const noteBody = (text: string) =>
+  /^---\n[\s\S]*?\n---\n([\s\S]*)$/.exec(text)?.[1] ?? text;
+
+/** Where a note's body starts in its text. */
+export const bodyStartOf = (text: string) =>
+  text.length - noteBody(text).length;
+
+/** One snippet row's offsets, as the database or the tracker holds them. */
+export type SnippetSpan = {
+  id: string;
+  start_offset: number;
+  end_offset: number;
+};
+
+/**
+ * Everything a test needs to tell where `path`'s snippets are, read as it is
+ * now: every snippet row the database holds (by start; any note), the offsets the plugin's
+ * tracker holds, the active editor's text (if any), the note's text on disk,
+ * and the text each snippet's highlight paints in the active tab.
+ *
+ * Unofficial: `window.app`, `app.plugins.plugins`, `reviewManager.repo`,
+ * `reviewManager.snippets`.
+ */
+export function readSnippetState(page: Page, path: string) {
+  return page.evaluate(async (path) => {
+    const { app } = window as unknown as {
+      app: App & {
+        plugins: {
+          plugins: Record<
+            string,
+            {
+              reviewManager: {
+                repo: { query(sql: string): SnippetSpan[] };
+                snippets: {
+                  offsetTracker: { getHighlights(path: string): SnippetSpan[] };
+                };
+              };
+            }
+          >;
+        };
+      };
+    };
+    const { reviewManager } = app.plugins.plugins['incremental-reading'];
+    const rows = reviewManager.repo.query(
+      'SELECT id, start_offset, end_offset FROM snippet ORDER BY start_offset'
+    );
+    const file = app.vault.getFileByPath(path);
+    return {
+      rows,
+      tracked: Object.fromEntries(
+        reviewManager.snippets.offsetTracker
+          .getHighlights(path)
+          .map(({ id, start_offset, end_offset }) => [
+            id,
+            [start_offset, end_offset] as const,
+          ])
+      ),
+      editorText: app.workspace.activeEditor?.editor?.getValue() ?? null,
+      diskText: file ? await app.vault.read(file) : '',
+      painted: Object.fromEntries(
+        rows.map(({ id }) => [
+          id,
+          Array.from(
+            document.querySelectorAll(
+              `.workspace-leaf.mod-active .ir-snippet-highlight[data-snippet-id="${id}"]`
+            )
+          )
+            .map((el) => el.textContent)
+            .join(''),
+        ])
+      ),
+    };
+  }, path);
+}

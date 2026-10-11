@@ -5,7 +5,10 @@ import { answerRevealExtension } from './AnswerRevealExtension';
 import { irIdGuardExtension } from './IrIdGuardExtension';
 import { irPluginFacet } from './irPluginFacet';
 import { scrollPositionExtension } from './ScrollPositionExtension';
-import { snippetHighlightExtension } from './SnippetHighlightExtension';
+import {
+  snippetHighlightExtension,
+  snippetHighlightHistory,
+} from './SnippetHighlightExtension';
 import { transclusionGeometryExtension } from './TransclusionGeometryExtension';
 
 // Re-export for convenience
@@ -55,6 +58,9 @@ export function createIRExtensions(
 
     // Snippet highlight decorations with click navigation
     snippetHighlightExtension,
+
+    // Undo and redo put snippet highlights back where they were
+    snippetHighlightHistory,
 
     // Fading highlight on a card's answer at the moment it is revealed
     answerRevealExtension,

@@ -1,10 +1,13 @@
-import { ChangeSet, Text } from '@codemirror/state';
+import { ChangeSet, Text, type ChangeSpec } from '@codemirror/state';
 import * as fc from 'fast-check';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { narrowChanges } from './minimal-change';
 import {
   SnippetOffsetTracker,
   type SnippetHighlight,
 } from './SnippetOffsetTracker';
+
+// #region HELPERS
 
 function createHighlight(
   id: string,
@@ -20,6 +23,193 @@ function createHighlight(
   } as SnippetHighlight;
 }
 
+type Span = readonly [number, number];
+
+/** Whether two spans share any text; a zero-length one shares none. */
+const overlaps = (a: Span, b: Span) =>
+  Math.max(a[0], b[0]) < Math.min(a[1], b[1]);
+
+/** Whether `pos` lies inside `span`, not at either end. */
+const inside = (pos: number, [start, end]: Span) => start < pos && pos < end;
+
+/** A document of few letters, so edits often border like text. */
+const docTextArb = fc.string({
+  unit: fc.constantFrom('a', 'b', ' ', '\n'),
+  maxLength: 30,
+});
+
+/** Any edits to a document of `length`: deletions, insertions, replacements. */
+const changeSetArb = (length: number) =>
+  fc
+    .array(
+      fc.record({
+        a: fc.nat({ max: length }),
+        b: fc.nat({ max: length }),
+        insert: docTextArb.map((t) => t.slice(0, 6)),
+      }),
+      { maxLength: 3 }
+    )
+    .map((edits) => {
+      // Sorted and kept apart, as one ChangeSet's edits must be
+      const specs: ChangeSpec[] = [];
+      let end = -1;
+      for (const { a, b, insert } of edits
+        .map((e) => ({ ...e, a: Math.min(e.a, e.b), b: Math.max(e.a, e.b) }))
+        .sort((x, y) => x.a - y.a || x.b - y.b)) {
+        if (a <= end) continue;
+        specs.push({ from: a, to: b, insert });
+        end = b;
+      }
+      return ChangeSet.of(specs, length);
+    });
+
+/**
+ * An edit and another placement of it: as `SnippetHighlightExtension` makes
+ * them of an edit (narrowed latest and earliest), or any two edits at all.
+ */
+const editPairFor = (doc: string) => {
+  const text = Text.of(doc.split('\n'));
+  const narrowed = (changes: ChangeSet) => ({
+    changes: narrowChanges(changes, text, 'latest'),
+    alternative: narrowChanges(changes, text, 'earliest'),
+  });
+  return fc.oneof(
+    // A whole-document replacement, as `editor.setValue` makes
+    docTextArb.map((next) =>
+      narrowed(
+        ChangeSet.of({ from: 0, to: doc.length, insert: next }, doc.length)
+      )
+    ),
+    changeSetArb(doc.length).map(narrowed),
+    fc.record({
+      changes: changeSetArb(doc.length),
+      alternative: changeSetArb(doc.length),
+    })
+  );
+};
+
+/** Body-relative highlights in a body of `max` characters. */
+type SpansArb = (max: number) => fc.Arbitrary<Span[]>;
+
+/** In any order, as rows can load in any. */
+const shuffled = (spans: Span[]) =>
+  fc.shuffledSubarray(spans, {
+    minLength: spans.length,
+    maxLength: spans.length,
+  });
+
+/**
+ * Highlights that all share text with one another, each running across one
+ * point of the body — and maybe one collapsed at that point, nested in all.
+ */
+const crossingSpansArb: SpansArb = (max) =>
+  max < 2
+    ? fc.constant([])
+    : fc.integer({ min: 1, max: max - 1 }).chain((point) =>
+        fc
+          .tuple(
+            fc.array(
+              fc.tuple(
+                fc.integer({ min: 0, max: point - 1 }),
+                fc.integer({ min: point + 1, max })
+              ),
+              { minLength: 1, maxLength: 5 }
+            ),
+            fc.boolean()
+          )
+          .map(([spans, nested]): Span[] =>
+            nested ? [...spans, [point, point]] : spans
+          )
+          .chain(shuffled)
+      );
+
+/** Any highlights at all: overlapping, nested, collapsed anywhere. */
+const anySpansArb: SpansArb = (max) =>
+  fc
+    .array(
+      fc
+        .tuple(fc.nat({ max }), fc.nat({ max }))
+        .map(([a, b]): Span => [Math.min(a, b), Math.max(a, b)]),
+      { maxLength: 6 }
+    )
+    .chain(shuffled);
+
+/** A document, its body start, highlights in its body, and an edit pair. */
+const trackedEditArb = (spansArb: SpansArb) =>
+  docTextArb.chain((doc) =>
+    fc.nat({ max: doc.length }).chain((oldBodyStart) =>
+      fc.record({
+        oldBodyStart: fc.constant(oldBodyStart),
+        newBodyStart: fc.nat({ max: 40 }),
+        spans: spansArb(doc.length - oldBodyStart),
+        pair: editPairFor(doc),
+      })
+    )
+  );
+
+/**
+ * Where `updateOffsetsWithMapping` puts each of `spans`, the `i`th with the id
+ * `ids[i]`.
+ */
+function mapSpans(
+  spans: readonly Span[],
+  changes: ChangeSet,
+  oldBodyStart: number,
+  newBodyStart: number,
+  alternative?: ChangeSet,
+  ids = spans.map((_, i) => `${i}`)
+): Span[] {
+  const tracker = new SnippetOffsetTracker();
+  tracker.loadHighlights(
+    'f.md',
+    spans.map(([start, end], i) => createHighlight(ids[i], start, end))
+  );
+  tracker.updateOffsetsWithMapping(
+    'f.md',
+    changes,
+    oldBodyStart,
+    newBodyStart,
+    alternative
+  );
+  return tracker
+    .getHighlights('f.md')
+    .map((h) => [h.start_offset, h.end_offset] as const);
+}
+
+const length = ([start, end]: Span) => end - start;
+
+/** Each span on its own, as the edit alone and its alternative move it. */
+const alone = (
+  spans: readonly Span[],
+  pair: { changes: ChangeSet; alternative: ChangeSet },
+  oldBodyStart: number,
+  newBodyStart: number
+) =>
+  spans.map((span) => ({
+    span,
+    edit: mapSpans([span], pair.changes, oldBodyStart, newBodyStart)[0],
+    alt: mapSpans([span], pair.alternative, oldBodyStart, newBodyStart)[0],
+  }));
+
+/** Whether a highlight that would take its alternative could, alone. */
+const wantsAlt = ({ span, edit, alt }: ReturnType<typeof alone>[number]) =>
+  length(span) > 0 &&
+  length(edit) !== length(span) &&
+  length(alt) === length(span);
+
+const same = (a: Span, b: Span) => a[0] === b[0] && a[1] === b[1];
+
+/**
+ * Whether two highlights share text or one sits collapsed inside the other:
+ * overlapping as the user made them, or nested.
+ */
+const related = (a: Span, b: Span) =>
+  overlaps(a, b) ||
+  (length(a) === 0 && inside(a[0], b)) ||
+  (length(b) === 0 && inside(b[0], a));
+
+// #endregion
+
 describe('SnippetOffsetTracker', () => {
   let tracker: SnippetOffsetTracker;
   const filePath = 'test/file.md';
@@ -29,6 +219,525 @@ describe('SnippetOffsetTracker', () => {
   });
 
   describe('updateOffsetsWithMapping', () => {
+    describe('with an alternative placement of the same edit', () => {
+      it('never leaves two highlights sharing text, or one collapsed inside the other, that did not before', () => {
+        fc.assert(
+          fc.property(
+            trackedEditArb(anySpansArb),
+            ({ spans, pair, oldBodyStart, newBodyStart }) => {
+              const after = mapSpans(
+                spans,
+                pair.changes,
+                oldBodyStart,
+                newBodyStart,
+                pair.alternative
+              );
+              spans.forEach((a, i) =>
+                spans.forEach((b, j) => {
+                  // Overlapping as the user made them, or nested, they map
+                  // as they will
+                  if (i === j || related(a, b)) return;
+                  expect(overlaps(after[i], after[j])).toBe(false);
+                  // Or the next edit there could re-expand it into the other
+                  if (length(after[i]) === 0) {
+                    expect(inside(after[i][0], after[j])).toBe(false);
+                  }
+                })
+              );
+            }
+          ),
+          { numRuns: 300 }
+        );
+      });
+
+      it('moves each highlight as the edit or its alternative does, or leaves one collapsed, only to keep its length or keep them apart', () => {
+        fc.assert(
+          fc.property(
+            trackedEditArb(anySpansArb),
+            ({ spans, pair, oldBodyStart, newBodyStart }) => {
+              const after = mapSpans(
+                spans,
+                pair.changes,
+                oldBodyStart,
+                newBodyStart,
+                pair.alternative
+              );
+              const each = alone(spans, pair, oldBodyStart, newBodyStart);
+              each.forEach((one, i) => {
+                const { span, edit, alt } = one;
+                if (same(after[i], edit)) {
+                  if (!wantsAlt(one) || same(alt, edit)) return;
+                  // Kept off the alternative only by another highlight where
+                  // it is, or where the edit alone puts it: in the way, or
+                  // collapsed where the alternative would take it in
+                  const blocks = (other: Span) =>
+                    overlaps(alt, other) ||
+                    (length(other) === 0 &&
+                      inside(other[0], alt) &&
+                      !inside(other[0], edit));
+                  expect(
+                    each.some(
+                      (o, j) =>
+                        j !== i &&
+                        !related(span, o.span) &&
+                        (blocks(after[j]) || blocks(o.edit))
+                    )
+                  ).toBe(true);
+                } else if (wantsAlt(one)) {
+                  expect(after[i]).toEqual(alt);
+                } else {
+                  // A re-expansion into text another collapsed one took
+                  expect(length(span)).toBe(0);
+                  expect(after[i]).toEqual([edit[0], edit[0]]);
+                  expect(
+                    each.some(
+                      (o, j) =>
+                        j !== i &&
+                        !related(span, o.span) &&
+                        length(o.span) === 0 &&
+                        overlaps(edit, after[j])
+                    )
+                  ).toBe(true);
+                }
+              });
+            }
+          ),
+          { numRuns: 300 }
+        );
+      });
+
+      it('moves highlights that all overlap or nest in one another as each would move alone', () => {
+        fc.assert(
+          fc.property(
+            trackedEditArb(crossingSpansArb),
+            ({ spans, pair, oldBodyStart, newBodyStart }) => {
+              expect(
+                mapSpans(
+                  spans,
+                  pair.changes,
+                  oldBodyStart,
+                  newBodyStart,
+                  pair.alternative
+                )
+              ).toEqual(
+                alone(spans, pair, oldBodyStart, newBodyStart).map((one) =>
+                  wantsAlt(one) ? one.alt : one.edit
+                )
+              );
+            }
+          ),
+          { numRuns: 300 }
+        );
+      });
+
+      it('takes the alternative for a lone highlight exactly when it keeps a length the edit would change', () => {
+        fc.assert(
+          fc.property(
+            trackedEditArb(anySpansArb),
+            ({ spans, pair, oldBodyStart, newBodyStart }) => {
+              for (const one of alone(
+                spans,
+                pair,
+                oldBodyStart,
+                newBodyStart
+              )) {
+                expect(
+                  mapSpans(
+                    [one.span],
+                    pair.changes,
+                    oldBodyStart,
+                    newBodyStart,
+                    pair.alternative
+                  )
+                ).toEqual([wantsAlt(one) ? one.alt : one.edit]);
+              }
+            }
+          ),
+          { numRuns: 300 }
+        );
+      });
+
+      it('moves every highlight as the edit does when there is no alternative, but a re-expansion into text another collapsed one took', () => {
+        fc.assert(
+          fc.property(
+            trackedEditArb(anySpansArb),
+            ({ spans, pair, oldBodyStart, newBodyStart }) => {
+              const after = mapSpans(
+                spans,
+                pair.changes,
+                oldBodyStart,
+                newBodyStart
+              );
+              alone(spans, pair, oldBodyStart, newBodyStart).forEach(
+                ({ span, edit }, i) => {
+                  if (same(after[i], edit)) return;
+                  expect(length(span)).toBe(0);
+                  expect(after[i]).toEqual([edit[0], edit[0]]);
+                  expect(
+                    spans.some(
+                      (other, j) =>
+                        j !== i &&
+                        length(other) === 0 &&
+                        overlaps(edit, after[j])
+                    )
+                  ).toBe(true);
+                }
+              );
+            }
+          ),
+          { numRuns: 300 }
+        );
+      });
+
+      it('moves each highlight the same, whatever order they were loaded in', () => {
+        fc.assert(
+          fc.property(
+            trackedEditArb(anySpansArb),
+            ({ spans, pair, oldBodyStart, newBodyStart }) => {
+              const ids = spans.map((_, i) => `${i}`);
+              const forward = mapSpans(
+                spans,
+                pair.changes,
+                oldBodyStart,
+                newBodyStart,
+                pair.alternative,
+                ids
+              );
+              const backward = mapSpans(
+                [...spans].reverse(),
+                pair.changes,
+                oldBodyStart,
+                newBodyStart,
+                pair.alternative,
+                [...ids].reverse()
+              );
+              expect([...backward].reverse()).toEqual(forward);
+            }
+          ),
+          { numRuns: 300 }
+        );
+      });
+
+      it('re-nests a highlight collapsed inside another when its text comes back, whichever comes first', () => {
+        // A snippet of 'cd' inside one of 'abcdef', its text erased, then
+        // put back by undo
+        for (const order of [
+          [
+            [0, 4],
+            [2, 2],
+          ],
+          [
+            [2, 2],
+            [0, 4],
+          ],
+        ] as Span[][]) {
+          const after = mapSpans(
+            order,
+            ChangeSet.of({ from: 2, insert: 'cd' }, 4),
+            0,
+            0
+          );
+          expect(after).toEqual(
+            order.map(([start]) => (start === 0 ? [0, 6] : [2, 4]))
+          );
+        }
+      });
+
+      it('gives text put back to the highlight erased from it, not one collapsed there before', () => {
+        // In 'abcdef', 'cd' highlighted, and another highlight collapsed at its
+        // start (loaded so, its text erased long ago). Erase 'cd', undo.
+        for (const [x, ghost] of [
+          ['a-x', 'b-ghost'],
+          ['b-x', 'a-ghost'],
+        ]) {
+          const tracker = new SnippetOffsetTracker();
+          tracker.loadHighlights(filePath, [
+            createHighlight(x, 2, 4),
+            createHighlight(ghost, 2, 2),
+          ]);
+          tracker.updateOffsetsWithMapping(
+            filePath,
+            ChangeSet.of({ from: 2, to: 4 }, 6),
+            0,
+            0
+          );
+          tracker.updateOffsetsWithMapping(
+            filePath,
+            ChangeSet.of({ from: 2, insert: 'cd' }, 4),
+            0,
+            0
+          );
+          expect(
+            tracker
+              .getHighlights(filePath)
+              .map((h) => [h.id, h.start_offset, h.end_offset])
+          ).toEqual([
+            [x, 2, 4],
+            [ghost, 2, 2],
+          ]);
+        }
+      });
+
+      it('gives text put back to the one of two highlights erased there last', () => {
+        // 'ab' and 'cd' side by side; 'ab' erased, then 'cd', then 'cd' back
+        for (const ids of [
+          ['1', '2'],
+          ['2', '1'],
+        ]) {
+          const tracker = new SnippetOffsetTracker();
+          tracker.loadHighlights(filePath, [
+            createHighlight(ids[0], 0, 2),
+            createHighlight(ids[1], 2, 4),
+          ]);
+          tracker.updateOffsetsWithMapping(
+            filePath,
+            ChangeSet.of({ from: 0, to: 2 }, 4),
+            0,
+            0
+          );
+          tracker.updateOffsetsWithMapping(
+            filePath,
+            ChangeSet.of({ from: 0, to: 2 }, 2),
+            0,
+            0
+          );
+          tracker.updateOffsetsWithMapping(
+            filePath,
+            ChangeSet.of({ from: 0, insert: 'cd' }, 0),
+            0,
+            0
+          );
+          expect(
+            tracker
+              .getHighlights(filePath)
+              .map((h) => [h.id, h.start_offset, h.end_offset])
+          ).toEqual([
+            [ids[0], 0, 0],
+            [ids[1], 0, 2],
+          ]);
+        }
+      });
+
+      it('of two highlights erased in one edit, gives text put back to the first by id', () => {
+        // 'a' and 'b' side by side, erased together, then put back
+        for (const ids of [
+          ['1', '2'],
+          ['2', '1'],
+        ]) {
+          const tracker = new SnippetOffsetTracker();
+          tracker.loadHighlights(filePath, [
+            createHighlight(ids[0], 0, 1),
+            createHighlight(ids[1], 1, 2),
+          ]);
+          tracker.updateOffsetsWithMapping(
+            filePath,
+            ChangeSet.of({ from: 0, to: 2 }, 2),
+            0,
+            0
+          );
+          tracker.updateOffsetsWithMapping(
+            filePath,
+            ChangeSet.of({ from: 0, insert: 'ab' }, 0),
+            0,
+            0
+          );
+          expect(
+            tracker
+              .getHighlights(filePath)
+              .map((h) => [h.id, h.start_offset, h.end_offset])
+              .sort()
+          ).toEqual([
+            ['1', 0, 2],
+            ['2', 0, 0],
+          ]);
+        }
+      });
+
+      it('gives text typed back over two snippets of one text, erased together, to the first by id', () => {
+        // The same text made a snippet twice, erased, then typed again (not
+        // undone, which puts both back): collapsed, nothing tells them from
+        // neighbours erased together, which mustn't come back overlapping
+        const tracker = new SnippetOffsetTracker();
+        tracker.loadHighlights(filePath, [
+          createHighlight('2', 2, 5),
+          createHighlight('1', 2, 5),
+        ]);
+        tracker.updateOffsetsWithMapping(
+          filePath,
+          ChangeSet.of({ from: 2, to: 5 }, 8),
+          0,
+          0
+        );
+        tracker.updateOffsetsWithMapping(
+          filePath,
+          ChangeSet.of({ from: 2, insert: 'abc' }, 5),
+          0,
+          0
+        );
+        expect(
+          tracker
+            .getHighlights(filePath)
+            .map((h) => [h.id, h.start_offset, h.end_offset])
+        ).toEqual([
+          ['2', 2, 2],
+          ['1', 2, 5],
+        ]);
+      });
+
+      it('re-expands only the first by id of two highlights loaded collapsed where text comes back', () => {
+        // Both loaded collapsed, as their text was erased in an earlier
+        // session, and the text then comes back: it can belong to one of
+        // them, not both.
+        expect(
+          mapSpans(
+            [
+              [3, 3],
+              [3, 3],
+            ],
+            ChangeSet.of({ from: 3, insert: 'abc' }, 6),
+            0,
+            0,
+            undefined,
+            ['b', 'a']
+          )
+        ).toEqual([
+          [3, 3],
+          [3, 6],
+        ]);
+      });
+
+      it('takes the alternative right up to a neighbour, or a collapsed one at its end', () => {
+        // [0,2) and [3,5), and a collapsed one at 5: the edit takes a
+        // character out of the second, the alternative the one between them
+        expect(
+          mapSpans(
+            [
+              [0, 2],
+              [3, 5],
+              [5, 5],
+            ],
+            ChangeSet.of({ from: 3, to: 4 }, 8),
+            0,
+            0,
+            ChangeSet.of({ from: 2, to: 3 }, 8)
+          )
+        ).toEqual([
+          [0, 2],
+          [2, 4],
+          [4, 4],
+        ]);
+      });
+
+      it('takes the alternative past a collapsed highlight it leaves outside', () => {
+        // [5,7), and a collapsed one at 4: the alternative puts it left of
+        // that point, ending there, where the edit leaves it right of it
+        expect(
+          mapSpans(
+            [
+              [5, 7],
+              [4, 4],
+            ],
+            ChangeSet.of({ from: 6, to: 7 }, 8),
+            0,
+            0,
+            ChangeSet.of({ from: 0, to: 3 }, 8)
+          )
+        ).toEqual([
+          [2, 4],
+          [4, 4],
+        ]);
+      });
+
+      it('takes the alternative over a collapsed highlight nested in it before, though the edit leaves that at its edge', () => {
+        // [3,9) with one collapsed inside at 6: the edit takes out what lies
+        // between their starts, the alternative as much before it
+        expect(
+          mapSpans(
+            [
+              [3, 9],
+              [6, 6],
+            ],
+            ChangeSet.of({ from: 3, to: 6 }, 10),
+            0,
+            0,
+            ChangeSet.of({ from: 0, to: 3 }, 10)
+          )
+        ).toEqual([
+          [0, 6],
+          [3, 3],
+        ]);
+      });
+
+      it('takes the alternative over a collapsed highlight nested in it already', () => {
+        // [1,7) with one collapsed inside at 4: the edit takes a character out
+        // of it, the alternative the one before it
+        expect(
+          mapSpans(
+            [
+              [1, 7],
+              [4, 4],
+            ],
+            ChangeSet.of({ from: 5, to: 6 }, 8),
+            0,
+            0,
+            ChangeSet.of({ from: 0, to: 1 }, 8)
+          )
+        ).toEqual([
+          [0, 6],
+          [4, 4],
+        ]);
+      });
+
+      it('keeps a collapsed highlight out of the one whose alternative would take it in', () => {
+        // In 'aaaab', 'aab' and a collapsed highlight at its start; one 'a'
+        // goes. The alternative would keep 'aab' whole by moving it left over
+        // the collapsed one, which the next 'x' typed there would re-expand
+        // inside it.
+        const doc = Text.of(['aaaab']);
+        const whole = ChangeSet.of({ from: 0, to: 5, insert: 'aaab' }, 5);
+        const first = mapSpans(
+          [
+            [2, 5],
+            [2, 2],
+          ],
+          narrowChanges(whole, doc, 'latest'),
+          0,
+          0,
+          narrowChanges(whole, doc, 'earliest')
+        );
+        expect(first).toEqual([
+          [2, 4],
+          [2, 2],
+        ]);
+        const typed = ChangeSet.of({ from: 2, insert: 'x' }, 4);
+        const second = mapSpans(first, typed, 0, 0, typed);
+        expect(overlaps(second[0], second[1])).toBe(false);
+      });
+
+      it('shrinks the highlight that would have to move into its neighbour, rather than overlap them', () => {
+        // 'ab' and 'bc' touch in 'abbc'; one 'b' goes, and the text can't say
+        // whose. 'ab' keeps its text, as the edit leaves it, and 'bc', which
+        // only the alternative would keep whole, gives up its 'b'.
+        const doc = Text.of(['abbc']);
+        const whole = ChangeSet.of({ from: 0, to: 4, insert: 'abc' }, 4);
+        expect(
+          mapSpans(
+            [
+              [0, 2],
+              [2, 4],
+            ],
+            narrowChanges(whole, doc, 'latest'),
+            0,
+            0,
+            narrowChanges(whole, doc, 'earliest')
+          )
+        ).toEqual([
+          [0, 2],
+          [2, 3],
+        ]);
+      });
+    });
+
     it('should prevent zero-width highlights when content before snippet is deleted', () => {
       // Scenario: Two snippets both at offset 100-150, deleting content before them
       // that causes them to collapse to the same position
@@ -104,7 +813,10 @@ describe('SnippetOffsetTracker', () => {
 
       // Undo: CodeMirror re-inserts the 5 chars at position 10
       const collapsedDoc = Text.of(['x'.repeat(95)]);
-      const undo = ChangeSet.of({ from: 10, insert: 'hello' }, collapsedDoc.length);
+      const undo = ChangeSet.of(
+        { from: 10, insert: 'hello' },
+        collapsedDoc.length
+      );
       tracker.updateOffsetsWithMapping(filePath, undo, 0, 0);
 
       updated = tracker.getHighlights(filePath);
@@ -285,7 +997,10 @@ describe('SnippetOffsetTracker', () => {
 
       // Insert 5 chars at absolute position 60 (body-relative 10 — snippet start)
       const oldDoc = Text.of(['x'.repeat(200)]);
-      const changes = ChangeSet.of({ from: 60, insert: 'abcde' }, oldDoc.length);
+      const changes = ChangeSet.of(
+        { from: 60, insert: 'abcde' },
+        oldDoc.length
+      );
 
       // oldBodyStart = 50, newBodyStart = 50 (frontmatter unchanged)
       tracker.updateOffsetsWithMapping(filePath, changes, 50, 50);
@@ -323,7 +1038,10 @@ describe('SnippetOffsetTracker', () => {
 
       // Insert 5 chars exactly at position 20 (= absoluteEnd when bodyStart=0)
       const oldDoc = Text.of(['x'.repeat(100)]);
-      const changes = ChangeSet.of({ from: 20, insert: 'hello' }, oldDoc.length);
+      const changes = ChangeSet.of(
+        { from: 20, insert: 'hello' },
+        oldDoc.length
+      );
 
       tracker.updateOffsetsWithMapping(filePath, changes, 0, 0);
 
@@ -342,7 +1060,10 @@ describe('SnippetOffsetTracker', () => {
 
       // Insert 5 chars exactly at position 10 (= absoluteStart when bodyStart=0)
       const oldDoc = Text.of(['x'.repeat(100)]);
-      const changes = ChangeSet.of({ from: 10, insert: 'hello' }, oldDoc.length);
+      const changes = ChangeSet.of(
+        { from: 10, insert: 'hello' },
+        oldDoc.length
+      );
 
       tracker.updateOffsetsWithMapping(filePath, changes, 0, 0);
 
@@ -628,6 +1349,53 @@ describe('SnippetOffsetTracker', () => {
     });
   });
 
+  describe('restoreHighlights', () => {
+    it('puts the highlights named back where it says, and leaves the rest and other notes alone', () => {
+      fc.assert(
+        fc.property(
+          fc.array(
+            fc.record({
+              start: fc.nat(50),
+              end: fc.nat(50),
+              back: fc.boolean(),
+            }),
+            { maxLength: 6 }
+          ),
+          fc.array(fc.tuple(fc.nat(50), fc.nat(50)), { maxLength: 6 }),
+          (rows, backTo) => {
+            const tracker = new SnippetOffsetTracker();
+            tracker.loadHighlights(
+              filePath,
+              rows.map(({ start, end }, i) =>
+                createHighlight(`${i}`, start, end)
+              )
+            );
+            tracker.loadHighlights('other.md', [createHighlight('0', 1, 2)]);
+            const spans = rows.flatMap(({ back }, i) =>
+              back ? [[`${i}`, ...(backTo[i] ?? [0, 0])] as const] : []
+            );
+
+            tracker.restoreHighlights(filePath, [...spans, ['gone', 3, 4]]);
+
+            expect(
+              tracker
+                .getHighlights(filePath)
+                .map((h) => [h.start_offset, h.end_offset])
+            ).toEqual(
+              rows.map(({ start, end, back }, i) =>
+                back ? (backTo[i] ?? [0, 0]) : [start, end]
+              )
+            );
+            expect(tracker.getHighlights('other.md')[0]).toMatchObject({
+              start_offset: 1,
+              end_offset: 2,
+            });
+          }
+        )
+      );
+    });
+  });
+
   describe('removeHighlight', () => {
     it('should remove the highlight with the matching id', () => {
       const h1 = createHighlight('x', 0, 5);
@@ -647,9 +1415,7 @@ describe('SnippetOffsetTracker', () => {
     });
 
     it('should be a no-op when no highlights are cached for the path', () => {
-      expect(() =>
-        tracker.removeHighlight(filePath, 'any')
-      ).not.toThrow();
+      expect(() => tracker.removeHighlight(filePath, 'any')).not.toThrow();
     });
 
     it('should not affect highlights for other paths (property-based)', () => {

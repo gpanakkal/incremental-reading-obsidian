@@ -10,16 +10,19 @@ import * as path from 'node:path';
 import type { App } from 'obsidian';
 import {
   askBeforeUpdatingLinks,
+  bodyStartOf,
   emulateMobile,
   executeCommandById,
   expectReviewOn,
   finalizeArticleImport,
   importArticle,
   leafSnapshot,
+  noteBody,
   openFileInActiveLeaf,
   openNote,
   openPluginSettings,
   pendingSaves,
+  readSnippetState,
   renameDecliningLinkUpdate,
   reviewHeader,
   reviewTitle,
@@ -1230,6 +1233,297 @@ test.describe('Card embeds', () => {
         );
       }).toPass({ timeout: 15_000 });
     }
+  });
+});
+
+test.describe('Making a card', () => {
+  const SOURCE = 'sources/Security Principles';
+  /** A list item, and the one right after it. */
+  const BULLET =
+    'Explain the security functions: Confidentiality, Integrity and Availability (CIA).';
+  const NEXT_BULLET =
+    'Present the opposite of the security triad, CIA: Disclosure, Alteration, and Destruction/Denial (DAD).';
+  /** A plain paragraph, and the one right after it. */
+  const PLAIN_LINE =
+    'It is impossible to achieve perfect security; no solution is 100% secure.';
+  const NEXT_PARAGRAPH = 'The objective of this room is to:';
+  /** A list item a few lines below both cards. */
+  const FURTHER_DOWN = 'Introduce ISO/IEC 19249.';
+
+  /**
+   * Each snippet's text twice over: as its highlight shows it in the active
+   * tab, and as its stored offsets cut it from `path`'s body on disk. With
+   * the offsets themselves, and whether the note on disk has a card's embed.
+   */
+  const highlights = async (page: Page, path: string) => {
+    const { rows, diskText, painted } = await readSnippetState(page, path);
+    const body = noteBody(diskText);
+    return rows.map(({ id, start_offset, end_offset }) => ({
+      offsets: [start_offset, end_offset],
+      embedSaved: diskText.includes('ir-hide-title'),
+      shown: painted[id],
+      stored: body.slice(start_offset, end_offset),
+    }));
+  };
+
+  async function extract(text: string) {
+    await selectParagraph(window, text);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+  }
+
+  /**
+   * Extract `below` and {@link FURTHER_DOWN}, make a card of `line`, and check
+   * both highlights sit on the text they did before, on screen and on disk.
+   */
+  async function expectCardKeepsHighlights(
+    path: string,
+    line: string,
+    below: string
+  ) {
+    await extract(below);
+    await extract(FURTHER_DOWN);
+    // Settled: both painted, and both stored where the extract put them
+    await expect
+      .poll(async () =>
+        (await highlights(window, path)).map(
+          ({ shown, stored }) => shown.length > 0 && shown === stored
+        )
+      )
+      .toEqual([true, true]);
+    const before = await highlights(window, path);
+    expect(before.map(({ stored }) => stored).join('\n')).toContain(
+      FURTHER_DOWN
+    );
+
+    await selectParagraph(window, line);
+    await executeCommandById(window, 'incremental-reading:create-card');
+    await expect(
+      window.locator(
+        '.workspace-leaf.mod-active .internal-embed[alt*="ir-hide-title"]'
+      )
+    ).toHaveCount(1);
+
+    // Polled: the note and the offsets reach the disk on their own debounces.
+    // Both must have landed — the card's text is a different length from the
+    // embed, so every offset below it moves — or the old text cut by the old
+    // offsets would pass for the right answer.
+    await expect
+      .poll(async () =>
+        (await highlights(window, path)).map(
+          ({ embedSaved, offsets }, i) =>
+            embedSaved && offsets[0] !== before[i].offsets[0]
+        )
+      )
+      .toEqual([true, true]);
+    const text = ({ shown, stored }: { shown: string; stored: string }) => ({
+      shown,
+      stored,
+    });
+    expect((await highlights(window, path)).map(text)).toEqual(
+      before.map(text)
+    );
+  }
+
+  test('keeps the highlight of the list item below one made from a list item', async () => {
+    await openNote(window, SOURCE);
+    await expectCardKeepsHighlights(`${SOURCE}.md`, BULLET, NEXT_BULLET);
+  });
+
+  test('keeps the highlight of the paragraph below one made from a paragraph', async () => {
+    await openNote(window, SOURCE);
+    await expectCardKeepsHighlights(`${SOURCE}.md`, PLAIN_LINE, NEXT_PARAGRAPH);
+  });
+
+  /** Import {@link SOURCE} and review it; returns the article's path. */
+  async function reviewArticle() {
+    await importArticle(window, SOURCE);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await expect(
+      window.getByRole('button', { name: 'Mark reviewed' })
+    ).toBeVisible();
+    // Unofficial: `window.app`, `app.plugins.plugins`, `reviewManager.repo`
+    return window.evaluate(() => {
+      const { app } = window as unknown as {
+        app: {
+          plugins: {
+            plugins: Record<
+              string,
+              {
+                reviewManager: {
+                  repo: { query(sql: string): { reference: string }[] };
+                };
+              }
+            >;
+          };
+        };
+      };
+      return app.plugins.plugins[
+        'incremental-reading'
+      ].reviewManager.repo.query('SELECT reference FROM article')[0].reference;
+    });
+  }
+
+  test('keeps the highlight of the list item below one made from a list item in review', async () => {
+    await expectCardKeepsHighlights(await reviewArticle(), BULLET, NEXT_BULLET);
+  });
+
+  test('keeps the highlight of the paragraph below one made from a paragraph in review', async () => {
+    await expectCardKeepsHighlights(
+      await reviewArticle(),
+      PLAIN_LINE,
+      NEXT_PARAGRAPH
+    );
+  });
+});
+
+test.describe('Undoing an erasure', () => {
+  /**
+   * Longer than history joins edits over (CodeMirror's `newGroupDelay`,
+   * 500ms by default), so each erasure is a step of its own.
+   */
+  const PAST_HISTORY_GROUPING_MS = 600;
+  const SOURCE = 'sources/Security Principles';
+  /**
+   * Two snippets that touch, cut from one sentence mid-word, so text put back
+   * between them could, by position alone, belong to either.
+   */
+  const FIRST = 'It is impossible to achieve perfect secu';
+  const SECOND = 'rity; no solution is 100% secure.';
+
+  /**
+   * The active editor, as the page-side calls below reach it.
+   *
+   * Unofficial: `window.app`.
+   */
+  type PageApp = {
+    workspace: {
+      activeEditor: {
+        editor: {
+          getValue(): string;
+          offsetToPos(offset: number): unknown;
+          replaceRange(text: string, from: unknown, to: unknown): void;
+          setSelection(anchor: unknown, head: unknown): void;
+          undo(): void;
+        };
+      };
+    };
+  };
+
+  /**
+   * For each snippet, by id: the text its tracked offsets cut from the active
+   * editor, the text its stored offsets cut from the note on disk, and the
+   * text its highlight paints.
+   */
+  const snippets = async (page: Page) => {
+    const state = await readSnippetState(page, `${SOURCE}.md`);
+    const shown = noteBody(state.editorText ?? '');
+    const saved = noteBody(state.diskText);
+    return [...state.rows]
+      .sort((a, b) => (a.id < b.id ? -1 : 1))
+      .map(({ id, start_offset, end_offset }) => ({
+        // Not the same as a collapsed one's '' if the tracker lost it
+        shown: state.tracked[id] ? shown.slice(...state.tracked[id]) : null,
+        saved: saved.slice(start_offset, end_offset),
+        painted: state.painted[id],
+      }));
+  };
+
+  /** Erase the text from the `first`th snippet's start to the `last`th's end. */
+  const erase = async (page: Page, first: number, last: number) => {
+    const { rows, editorText } = await readSnippetState(page, `${SOURCE}.md`);
+    const bodyStart = bodyStartOf(editorText ?? '');
+    // Read and written in two round trips: nothing edits the note between
+    // them here, the tests having waited for it to settle
+    await page.evaluate(
+      ([from, to]) => {
+        const { editor } = (window as unknown as { app: PageApp }).app.workspace
+          .activeEditor;
+        editor.replaceRange(
+          '',
+          editor.offsetToPos(from),
+          editor.offsetToPos(to)
+        );
+      },
+      [bodyStart + rows[first].start_offset, bodyStart + rows[last].end_offset]
+    );
+  };
+
+  /** Undo in the active editor, as Ctrl+Z there does. */
+  const undo = (page: Page) =>
+    page.evaluate(() => {
+      const { app } = window as unknown as { app: PageApp };
+      app.workspace.activeEditor.editor.undo();
+    });
+
+  async function extractBoth() {
+    await openNote(window, SOURCE);
+    for (const text of [FIRST, SECOND]) {
+      await window.evaluate((text) => {
+        const { app } = window as unknown as { app: PageApp };
+        const { editor } = app.workspace.activeEditor;
+        const at = editor.getValue().indexOf(text);
+        editor.setSelection(
+          editor.offsetToPos(at),
+          editor.offsetToPos(at + text.length)
+        );
+      }, text);
+      await executeCommandById(window, 'incremental-reading:extract-selection');
+    }
+    await expect
+      .poll(async () =>
+        (await snippets(window)).map(
+          ({ shown, saved, painted }) =>
+            !!shown && shown === saved && painted.length > 0
+        )
+      )
+      .toEqual([true, true]);
+    const both = await snippets(window);
+    // Touching, as cut: the case mapping alone can't settle
+    expect(both.map(({ shown }) => shown).sort()).toEqual(
+      [FIRST, SECOND].sort()
+    );
+    return both;
+  }
+
+  /** Both on their text again, painted, and saved so. */
+  async function expectBothBack(before: Awaited<ReturnType<typeof snippets>>) {
+    // Polled: the note and the offsets reach the disk on their own debounces
+    await expect.poll(() => snippets(window)).toEqual(before);
+  }
+
+  test('puts back both highlights one erasure took', async () => {
+    const before = await extractBoth();
+    await window.waitForTimeout(PAST_HISTORY_GROUPING_MS);
+
+    await erase(window, 0, 1);
+    await expect
+      .poll(async () => (await snippets(window)).map(({ shown }) => shown))
+      .toEqual(['', '']);
+    await undo(window);
+
+    await expectBothBack(before);
+  });
+
+  test('puts back neighbours erased one at a time, undone one at a time', async () => {
+    const before = await extractBoth();
+    const firstIndex = before.findIndex(({ shown }) => shown?.includes(FIRST));
+    await window.waitForTimeout(PAST_HISTORY_GROUPING_MS);
+
+    await erase(window, 1, 1);
+    await window.waitForTimeout(PAST_HISTORY_GROUPING_MS);
+    await erase(window, 0, 0);
+    await expect
+      .poll(async () => (await snippets(window)).map(({ shown }) => shown))
+      .toEqual(['', '']);
+    await undo(window);
+    // One step back: the first's text, and only it
+    await expect
+      .poll(async () => (await snippets(window)).map(({ shown }) => shown))
+      .toEqual(before.map(({ shown }, i) => (i === firstIndex ? shown : '')));
+    await undo(window);
+
+    await expectBothBack(before);
   });
 });
 

@@ -1,8 +1,16 @@
 // Whatever paints a PDF's highlights must keep this class on a card's, for the
 // notice below to name it a card
+import { narrowChanges } from '#/lib/minimal-change';
 import { CARD_HIGHLIGHT_CLASS } from '#/lib/pdf/pdf-highlights';
 import type IncrementalReadingPlugin from '#/main';
-import { Annotation, RangeSetBuilder, StateEffect } from '@codemirror/state';
+import { invertedEffects } from '@codemirror/commands';
+import {
+  Annotation,
+  RangeSetBuilder,
+  StateEffect,
+  type EditorState,
+  type Transaction,
+} from '@codemirror/state';
 import {
   Decoration,
   ViewPlugin,
@@ -32,6 +40,82 @@ export const isExternalSync = Annotation.define<boolean>();
  * CodeMirror, but a transaction carrying an effect is always processed.
  */
 export const refreshHighlightsEffect = StateEffect.define<null>();
+
+/**
+ * Whether a transaction is a sync, whose text arrives with the tracker already
+ * moved by the editor that made the edit:
+ *   - isExternalSync: IREditor's value prop update after React Query invalidation
+ *   - userEvent 'set': Obsidian's cross-pane sync when the same file is open in
+ *     several panes, and its reload of a note changed on disk (undocumented:
+ *     what Obsidian's MarkdownEditor `set` dispatches)
+ */
+const isSync = (tr: Transaction) =>
+  !!tr.annotation(isExternalSync) || tr.isUserEvent('set');
+
+/**
+ * A note's highlights, by id, at absolute positions in one document. Ids are
+ * enough to find them again, even if the note was renamed since.
+ */
+type HighlightSnapshot = (readonly [id: string, start: number, end: number])[];
+
+/**
+ * Where a note's highlights were before an edit, for undoing (or redoing) it
+ * to put them back exactly. It stands for the one document it was taken of,
+ * so any mapping drops it: the history maps a step's effects through changes
+ * it doesn't keep as though they were in today's document, which they aren't,
+ * and a step of joined edits needs only its earliest, which it never maps.
+ * Undoing a step without one maps the highlights, as before.
+ */
+export const restoreHighlightsEffect = StateEffect.define<HighlightSnapshot>({
+  map: () => undefined,
+});
+
+/**
+ * The states each editor last mapped the tracker to, with the tracker and the
+ * note: where an edit's starting state is among them, the tracker says where
+ * the note's highlights were before it.
+ */
+const syncedStates = new WeakMap<
+  EditorState,
+  { tracker: SnippetOffsetTracker; path: string }
+>();
+
+/**
+ * Hands the history, with each edit made here, where the note's highlights
+ * were before it. Undoing an edit then puts every highlight it moved or
+ * erased back where it was — which mapping can't, as text put back says
+ * nothing of whose it was — and redoing it puts them where the edit took
+ * them.
+ */
+export const snippetHighlightHistory = invertedEffects.of((tr) => {
+  // Not for a sync, whose text arrives with the offsets moved already, nor
+  // where the tracker wasn't mapped to the edit's starting state, as between
+  // transactions dispatched together: undoing those maps, as before. Nor for
+  // one that changes no text — which history would then keep as a step of
+  // its own, as cursor moves — unless it's the undo or redo of a step whose
+  // edits cancel out, which redo or undo again needs to put back.
+  const synced = syncedStates.get(tr.startState);
+  if (!synced || isSync(tr)) return [];
+  if (
+    tr.changes.empty &&
+    !tr.effects.some((e) => e.is(restoreHighlightsEffect))
+  ) {
+    return [];
+  }
+  const highlights = synced.tracker.getHighlights(synced.path);
+  if (highlights.length === 0) return [];
+  // All of them, not just those the edit reaches: one it doesn't reach can
+  // still move, as when the edit makes or unmakes the frontmatter
+  const bodyStart = Obsidian.getBodyStartOffset(tr.startState.doc.toString());
+  return [
+    restoreHighlightsEffect.of(
+      highlights.map(
+        (h) =>
+          [h.id, h.start_offset + bodyStart, h.end_offset + bodyStart] as const
+      )
+    ),
+  ];
+});
 
 /** `MouseEvent.button` value for the middle mouse button. */
 export const MIDDLE_MOUSE_BUTTON = 1;
@@ -187,54 +271,62 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
             reviewManager.snippets.offsetTracker,
             reviewManager
           );
+          syncedStates.set(update.state, {
+            tracker: reviewManager.snippets.offsetTracker,
+            path: this.file.path,
+          });
         }
         return;
       }
 
       // If document changed, update offsets in tracker
       if (update.docChanged) {
-        // Check if this is a direct user edit (input, delete, undo, redo).
-        // Non-user changes include:
-        //   - isExternalSync: IREditor's value prop update after React Query invalidation
-        //   - Obsidian's cross-pane sync when the same file is open in multiple panes
-        // Neither ChangeSet describes the edit a user made here — the sync one is
-        // a diff against text that arrived already saved, and the cross-pane one
-        // is a full replacement — so we don't map positions from either.
-        const hasUserEvent = update.transactions.some(
-          (tr) =>
-            tr.isUserEvent('input') ||
-            tr.isUserEvent('delete') ||
-            tr.isUserEvent('undo') ||
-            tr.isUserEvent('redo')
-        );
-
-        if (!hasUserEvent) {
-          if (!this.isReviewInterface) {
-            // Standard editor: cross-pane sync → reload from DB.
-            // The other pane (which owns the edit) has already persisted.
-            void this.reloadHighlightsFromDB(update.view, reviewManager);
-          }
-          // Review interface: the shared snippetTracker already has correct
-          // offsets from the standard editor's mapping. Just rebuild decorations
-          // (which happens unconditionally below).
+        // Every edit made in this editor moves the highlights, whoever made
+        // it: typing, undo, and edits with no userEvent at all, such as
+        // Obsidian's `editor.replaceRange` (how a card's embed goes in) and
+        // other plugins'. Only a sync (see `isSync`) is left alone.
+        if (!this.isReviewInterface && update.transactions.some(isSync)) {
+          // Standard editor: cross-pane sync → reload from DB.
+          // The other pane (which owns the edit) has already persisted.
+          void this.reloadHighlightsFromDB(update.view, reviewManager);
           return;
         }
 
-        // Direct user edit → map offsets using the ChangeSet.
-        // The ChangeSet correctly represents the transformation (or its inverse
-        // for undo), so mapPos() handles everything - even when Obsidian groups
-        // multiple edits into a single undo action.
-        const oldDocContent = update.startState.doc.toString();
-        const oldBodyStart = Obsidian.getBodyStartOffset(oldDocContent);
-        const newDocContent = update.state.doc.toString();
-        const newBodyStart = Obsidian.getBodyStartOffset(newDocContent);
-
-        reviewManager.snippets.offsetTracker.updateOffsetsWithMapping(
-          this.file.path,
-          update.changes,
-          oldBodyStart,
-          newBodyStart
-        );
+        // A sync's offsets the shared tracker has already, from the editor
+        // that made the edit (in review, that's the standard editor), so only
+        // the edits made here are mapped, each from the document it was made
+        // to, and the decorations are rebuilt from the tracker below.
+        for (const tr of update.transactions) {
+          if (!tr.docChanged || isSync(tr)) continue;
+          const newBodyStart = Obsidian.getBodyStartOffset(
+            tr.state.doc.toString()
+          );
+          // The ChangeSet correctly represents the transformation (or its
+          // inverse for undo), so mapPos() handles everything - even when
+          // Obsidian groups multiple edits into a single undo action.
+          reviewManager.snippets.offsetTracker.updateOffsetsWithMapping(
+            this.file.path,
+            // Narrowed, or a highlight in a span replaced with itself (as
+            // `editor.setValue` replaces the whole document) would collapse
+            narrowChanges(tr.changes, tr.startState.doc),
+            Obsidian.getBodyStartOffset(tr.startState.doc.toString()),
+            newBodyStart,
+            // Where only the text says where the edit was, it may have been
+            // beside a highlight rather than at its edge, inside it
+            narrowChanges(tr.changes, tr.startState.doc, 'earliest')
+          );
+          // Undo and redo then put back where the step found them
+          for (const effect of tr.effects) {
+            if (!effect.is(restoreHighlightsEffect)) continue;
+            reviewManager.snippets.offsetTracker.restoreHighlights(
+              this.file.path,
+              effect.value.map(
+                ([id, start, end]) =>
+                  [id, start - newBodyStart, end - newBodyStart] as const
+              )
+            );
+          }
+        }
 
         // In regular Obsidian editor, we handle persistence here with debouncing.
         // In the review interface, ReviewItem.saveNote() handles persistence.
@@ -253,6 +345,10 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         reviewManager.snippets.offsetTracker,
         reviewManager
       );
+      syncedStates.set(update.state, {
+        tracker: reviewManager.snippets.offsetTracker,
+        path: this.file.path,
+      });
     }
 
     /**

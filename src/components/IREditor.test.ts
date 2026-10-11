@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 
 import {
-  computeMinimalChange,
   isPersistableChange,
   reconcileIncomingValue,
   selectionModeExtension,
   selectionPresenceListener,
 } from '#/components/IREditor';
 import { isExternalSync } from '#/lib/extensions/SnippetHighlightExtension';
+import { computeMinimalChange } from '#/lib/minimal-change';
 import { EditorSelection, EditorState } from '@codemirror/state';
 import { EditorView, type ViewUpdate } from '@codemirror/view';
 import fc from 'fast-check';
@@ -86,27 +86,6 @@ function conditionalReplacement(
   return true;
 }
 
-/** Applies a change the way CodeMirror's ChangeSet does, for round-tripping. */
-function applyChange(
-  current: string,
-  change: { from: number; to: number; insert: string }
-): string {
-  return (
-    current.slice(0, change.from) + change.insert + current.slice(change.to)
-  );
-}
-
-const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
-const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
-
-/** True when position `i` falls between the two halves of a surrogate pair. */
-function splitsSurrogatePair(text: string, i: number): boolean {
-  return (
-    isHighSurrogate(text.charCodeAt(i - 1)) &&
-    isLowSurrogate(text.charCodeAt(i))
-  );
-}
-
 /**
  * A document built from a shared head, a differing middle, and a shared tail —
  * the shape every real external sync takes, since a note edited elsewhere keeps
@@ -129,182 +108,6 @@ const localEditArb = fc
   );
 
 // #endregion
-
-describe('computeMinimalChange narrows a whole-document swap to the differing span', () => {
-  it('returns null when the incoming text already matches the document', () => {
-    expect(computeMinimalChange('same text', 'same text')).toBeNull();
-  });
-
-  it('returns null for two empty strings', () => {
-    expect(computeMinimalChange('', '')).toBeNull();
-  });
-
-  it('reports the exact span when a card line is undone out of the middle of a note', () => {
-    const before = 'intro\ncard line\noutro';
-    const after = 'intro\noutro';
-
-    expect(computeMinimalChange(before, after)).toEqual({
-      from: 6,
-      to: 16,
-      insert: '',
-    });
-  });
-
-  it('reports an insertion as a zero-width replacement at the insertion point', () => {
-    expect(computeMinimalChange('ab', 'aXb')).toEqual({
-      from: 1,
-      to: 1,
-      insert: 'X',
-    });
-  });
-
-  it('replaces the whole document when nothing at all is shared', () => {
-    expect(computeMinimalChange('abc', 'xyz')).toEqual({
-      from: 0,
-      to: 3,
-      insert: 'xyz',
-    });
-  });
-
-  it('reconstructs the incoming text exactly (property-based)', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.string({ unit: 'binary', maxLength: 120 }),
-        fc.string({ unit: 'binary', maxLength: 120 }),
-        async (current, next) => {
-          const change = computeMinimalChange(current, next);
-          // A null result must mean the texts already match; anything else
-          // would silently drop an external edit.
-          if (change === null) {
-            expect(current).toBe(next);
-            return;
-          }
-          expect(applyChange(current, change)).toBe(next);
-        }
-      ),
-      { numRuns: 500 }
-    );
-  });
-
-  it('keeps from and to inside the current document and in order (property-based)', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.string({ unit: 'binary', maxLength: 120 }),
-        fc.string({ unit: 'binary', maxLength: 120 }),
-        async (current, next) => {
-          const change = computeMinimalChange(current, next);
-          if (change === null) return;
-          expect(change.from).toBeGreaterThanOrEqual(0);
-          expect(change.to).toBeGreaterThanOrEqual(change.from);
-          expect(change.to).toBeLessThanOrEqual(current.length);
-        }
-      ),
-      { numRuns: 500 }
-    );
-  });
-
-  it('leaves the shared head and tail outside the changed span (property-based)', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        localEditArb,
-        async ({ head, tail, oldMiddle, newMiddle }) => {
-          const current = head + oldMiddle + tail;
-          const next = head + newMiddle + tail;
-
-          const change = computeMinimalChange(current, next);
-
-          // Anything less than this and the scroll anchor — a position in the
-          // head — would fall inside the deleted range and collapse.
-          expect(change).not.toBeNull();
-          expect(change!.from).toBeGreaterThanOrEqual(head.length);
-          expect(change!.to).toBeLessThanOrEqual(
-            head.length + oldMiddle.length
-          );
-        }
-      ),
-      { numRuns: 300 }
-    );
-  });
-
-  it('never places a boundary inside a surrogate pair (property-based)', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.string({ unit: 'binary', maxLength: 80 }),
-        fc.string({ unit: 'binary', maxLength: 80 }),
-        async (current, next) => {
-          const change = computeMinimalChange(current, next);
-          if (change === null) return;
-          // A boundary inside an astral character hands CodeMirror a position
-          // that is not a valid cursor location.
-          expect(splitsSurrogatePair(current, change.from)).toBe(false);
-          expect(splitsSurrogatePair(current, change.to)).toBe(false);
-        }
-      ),
-      { numRuns: 500 }
-    );
-  });
-
-  it('widens past a shared astral character rather than splitting it', () => {
-    // Both strings start with the same emoji, so a naive scan would stop the
-    // prefix between its two code units.
-    const change = computeMinimalChange('\u{1F600}a', '\u{1F600}b');
-
-    expect(change).toEqual({ from: 2, to: 3, insert: 'b' });
-  });
-
-  it('widens when the two texts share only the leading half of a pair', () => {
-    // \u{1F600} and \u{1F601} share their high surrogate but differ in the low
-    // one, so the scan would otherwise cut the pair in half.
-    const change = computeMinimalChange('\u{1F600}', '\u{1F601}');
-
-    expect(change).not.toBeNull();
-    expect(change!.from).toBe(0);
-    expect(applyChange('\u{1F600}', change!)).toBe('\u{1F601}');
-  });
-
-  it('widens when the two texts share only the trailing half of a pair', () => {
-    // \u{1F600} is D83D DE00 and \u{1FA00} is D83E DE00: the suffix scan matches
-    // the shared low surrogate and stops mid-pair, putting the boundary between
-    // the halves of the character still in the document.
-    const change = computeMinimalChange('\u{1F600}', '\u{1FA00}');
-
-    expect(change).toEqual({ from: 0, to: 2, insert: '\u{1FA00}' });
-  });
-
-  it('handles astral characters that share either surrogate half (property-based)', async () => {
-    // Emoji drawn at random almost never share a surrogate half, so a pool of
-    // characters chosen to share one or the other is needed to reach the
-    // boundary adjustments at all. D83D DE00 / D83E DE00 share the low half;
-    // D83D DE00 / D83D DE01 share the high half.
-    const astralText = fc
-      .array(
-        fc.constantFrom(
-          '\u{1F600}',
-          '\u{1FA00}',
-          '\u{1F601}',
-          '\u{1F9A0}',
-          'a',
-          '\n'
-        ),
-        { maxLength: 12 }
-      )
-      .map((chars) => chars.join(''));
-
-    await fc.assert(
-      fc.asyncProperty(astralText, astralText, async (current, next) => {
-        const change = computeMinimalChange(current, next);
-        if (change === null) {
-          expect(current).toBe(next);
-          return;
-        }
-        expect(applyChange(current, change)).toBe(next);
-        expect(splitsSurrogatePair(current, change.from)).toBe(false);
-        expect(splitsSurrogatePair(current, change.to)).toBe(false);
-      }),
-      { numRuns: 1000 }
-    );
-  });
-});
 
 describe('updateEditorContent keeps CodeMirror scroll anchor mappable', () => {
   // CodeMirror holds the viewport still by remapping the position of the line
