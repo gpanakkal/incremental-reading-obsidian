@@ -649,6 +649,7 @@ export class SQLJSRepository implements SQLiteRepository {
   protected async save() {
     if (!this.db) throw new Error('Database was not initialized on repository');
     this.pendingSaveCount++;
+    let wroteFresh = false;
     try {
       const source = this.db;
       const data = source.export().buffer;
@@ -667,11 +668,21 @@ export class SQLJSRepository implements SQLiteRepository {
       // A reload that swapped the database meanwhile loaded the file this
       // would write over, and memory is that file now
       if (this.#disposed || this.db !== source) return;
+      // The file this writes is this database's own from here on. Cleared
+      // before the write, not after: Obsidian's adapter reports the file it
+      // wrote (`reconcileInternalFile`, undocumented) before the write
+      // settles, and `handleFileChange` must take that for this save's echo.
+      // Reloading it instead swapped `db` under the writes made meanwhile,
+      // and a save still waiting then dropped one for good.
+      wroteFresh = this.#fresh;
+      this.#fresh = false;
       return await this.app.vault.adapter.writeBinary(
         normalizePath(this.#dbFilePath),
         data as ArrayBuffer
       );
     } catch (error) {
+      // Nothing was written that this database can count as its file
+      if (wroteFresh) this.#fresh = true;
       if (error instanceof Error) {
         console.error('Incremental Reading - Failed to save database:', {
           error: 'message' in error ? error.message : error,

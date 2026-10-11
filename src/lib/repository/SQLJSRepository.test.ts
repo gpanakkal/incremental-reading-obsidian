@@ -1953,6 +1953,60 @@ describe('start', () => {
       )
     );
   });
+
+  it('property: a database started without a file keeps every write made while its own first save is reported back', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        indexViewArb,
+        fc.boolean(),
+        fc.nat({ max: 12 }),
+        async (index, slowExists, hops) => {
+          const { app, files, adapter } = makeVault(
+            index,
+            new Map(),
+            slowExists
+          );
+          const onReloadFromDisk = vi.fn();
+          const repo = await startRepo(app, { onReloadFromDisk });
+          // Obsidian's adapter reports a file it wrote as created or modified
+          // before the write settles (`reconcileInternalFile`), and the plugin
+          // hands that event to `handleFileChange` unawaited
+          adapter.writeBinary.mockImplementation(async (path, data) => {
+            files.set(path, new Uint8Array(data.slice(0)));
+            if (path === DATABASE_FILE_PATH) {
+              void repo.handleFileChange(dbFileChange);
+            }
+          });
+          // A disk read, finishing whenever the test lets it
+          let release = () => {};
+          const released = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          adapter.readBinary.mockImplementation(async (path) => {
+            await released;
+            const bytes = files.get(path);
+            if (!bytes) throw new Error(`ENOENT: ${path}`);
+            return bytes.slice().buffer;
+          });
+
+          insertArticleRow(repo, 'first');
+          await settle();
+          // The next write lands `hops` microtasks after any read finishes,
+          // as a write can land at any moment relative to one
+          release();
+          for (let i = 0; i < hops; i++) await Promise.resolve();
+          insertArticleRow(repo, 'second');
+          await settle();
+
+          expect(articleIds(repo).sort()).toEqual(['first', 'second']);
+          expect((await idsInFile(files)).sort()).toEqual(['first', 'second']);
+          // Its own save is no change to load
+          expect(onReloadFromDisk).not.toHaveBeenCalled();
+          repo.db?.close();
+        }
+      )
+    );
+  });
 });
 
 describe('reloading a file that changed on disk', () => {
