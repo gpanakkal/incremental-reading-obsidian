@@ -6,6 +6,14 @@ allowBuilds:
 saveExact: true
 minimumReleaseAge: 20000
 trustPolicyIgnoreAfter: 20000
+packageExtensions:
+  # requires typescript/package.json without declaring it; breaks under the global virtual store (no hoisting)
+  eslint-plugin-import-x:
+    peerDependencies:
+      typescript: '*'
+    peerDependenciesMeta:
+      typescript:
+        optional: true
 trustPolicyExclude:
   - 'react-redux' # required due to a change in their publishing process https://github.com/reduxjs/reselect/issues/752
 overrides:

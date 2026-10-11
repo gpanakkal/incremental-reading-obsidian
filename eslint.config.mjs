@@ -2,6 +2,7 @@ import react from '@eslint-react/eslint-plugin';
 import css from '@eslint/css';
 import js from '@eslint/js';
 import tsparser from '@typescript-eslint/parser';
+import { createTypeScriptImportResolver } from 'eslint-import-resolver-typescript';
 import { importX } from 'eslint-plugin-import-x';
 import obsidianmd from 'eslint-plugin-obsidianmd';
 import reactHooks from 'eslint-plugin-react-hooks';
@@ -69,12 +70,14 @@ export default defineConfig([
       react: {
         version: 'detect',
       },
-      'import/resolver': {
-        typescript: {
+      // Pass the resolver as an object: name lookup (`import/resolver: { typescript }`) requires
+      // it from import-x's own location, which can't see our devDeps under pnpm's global virtual store
+      'import-x/resolver-next': [
+        createTypeScriptImportResolver({
           alwaysTryTypes: true,
           project: './tsconfig.json',
-        },
-      },
+        }),
+      ],
       'import/internal-regex': '^#/',
     },
     rules: {
