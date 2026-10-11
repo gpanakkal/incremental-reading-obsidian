@@ -693,6 +693,13 @@ export function isPageClosedError(error: unknown) {
  */
 const OPTIONAL_ELEMENT_TIMEOUT_MS = 5000;
 
+/**
+ * How long to keep trying to click the trust button once it is visible. Longer
+ * than the optional bound: on a loaded machine the dialog can take a few
+ * seconds to settle enough for Playwright's stability check.
+ */
+const TRUST_CLICK_TIMEOUT_MS = 20_000;
+
 /** How long to wait for the vault window to appear among the app's windows. */
 const VAULT_WINDOW_TIMEOUT_MS = 10_000;
 
@@ -938,15 +945,17 @@ async function dismissFirstLaunchPrompts(
   const trustButton = window.getByRole('button', {
     name: 'Trust author and enable plugins',
   });
-  try {
-    await trustButton.waitFor({
-      state: 'visible',
-      timeout: OPTIONAL_ELEMENT_TIMEOUT_MS,
-    });
-    await trustButton.click({ timeout: OPTIONAL_ELEMENT_TIMEOUT_MS });
-  } catch {
-    // Dialog didn't appear - vault was previously trusted, continue
-  }
+  const trustShown = await trustButton
+    .waitFor({ state: 'visible', timeout: OPTIONAL_ELEMENT_TIMEOUT_MS })
+    .then(
+      () => true,
+      // Dialog didn't appear - vault was previously trusted, continue
+      () => false
+    );
+  // Once the dialog is up, clicking it is not optional: swallowing a failed
+  // click leaves the vault in Restricted Mode, and the test then fails far
+  // from here on a plugin command that "does not exist".
+  if (trustShown) await trustButton.click({ timeout: TRUST_CLICK_TIMEOUT_MS });
 
   // Close the community plugins modal if it appears.
   //
@@ -1098,8 +1107,17 @@ async function closeNonVaultWindows(app: ElectronApplication) {
       // the next poll rather than risk closing the vault itself.
       if (!vaultWindow) return 0;
 
+      // Only windows that have been shown. Obsidian opens settings with a
+      // synchronous `window.open` from the vault renderer, and Chromium pauses
+      // the opener's task queues until the popup is shown. Closing the popup
+      // before that never releases the pause: the vault window stays painted
+      // and answers CDP, but no timer, IPC, or `beforeunload` ever runs again —
+      // so `layoutReady` polling and `app.close()` both hang.
       const others = windows.filter(
-        (candidate) => candidate !== vaultWindow && !candidate.isDestroyed()
+        (candidate) =>
+          candidate !== vaultWindow &&
+          !candidate.isDestroyed() &&
+          candidate.isVisible()
       );
       others.forEach((candidate) => {
         // Re-check: closing an earlier window in this loop can trigger
