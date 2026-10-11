@@ -822,6 +822,20 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
   background-color: var(--background-modifier-border);
 }
 
+/* The separator closing the review bar's leading zone (`.ir-bar-joint`, see
+   ActionBar.tsx) parts undo from the item's first action, and is wanted only
+   where the two meet: once the zones pack together (`.is-packed`, measured by
+   usePacked), and always on mobile. Hidden by `visibility` so it keeps its
+   place either way — showing it must not widen the zone it is measured in. */
+.ir-bar-joint {
+  visibility: hidden;
+}
+
+.ir-bar-lead.is-packed > .ir-bar-joint,
+.is-mobile .ir-bar-joint {
+  visibility: visible;
+}
+
 .ir-review-button {
   padding: 8px 16px;
   background-color: transparent;

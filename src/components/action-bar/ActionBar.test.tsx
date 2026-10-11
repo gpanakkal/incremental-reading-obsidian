@@ -167,6 +167,18 @@ function zoneChildren(container: HTMLElement, name: Zone): Element[] {
 }
 
 /**
+ * The separator closing the start edge, shown between undo and the item's
+ * first action once the bar packs them together.
+ */
+function jointSeparator(container: HTMLElement): HTMLElement {
+  const el = zone(container, 'lead').querySelector<HTMLElement>(
+    ':scope > .ir-bar-joint'
+  );
+  if (!el) throw new Error('joint separator not rendered');
+  return el;
+}
+
+/**
  * Stand-in for `Actions` covering what the undo button touches: an array
  * mutated in place, and an emit after each mutation. `listeners` is exposed so
  * a test can check the button lets go of its subscription.
@@ -367,6 +379,26 @@ function makeMissing(type: NoteType, dismissed = false): MaybeMissingItem {
     },
     file: null,
   } as never;
+}
+
+/**
+ * Lay the start edge out `width` px wide, against no content: jsdom lays
+ * nothing out, so everything else stays a 0px box with no client rects.
+ */
+function layOutLead(width: number) {
+  const isLead = (el: HTMLElement) => el.classList.contains('ir-bar-lead');
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+    function (this: HTMLElement) {
+      return new DOMRect(0, 0, isLead(this) ? width : 0, isLead(this) ? 30 : 0);
+    }
+  );
+  vi.spyOn(HTMLElement.prototype, 'getClientRects').mockImplementation(
+    function (this: HTMLElement) {
+      return (isLead(this)
+        ? [new DOMRect(0, 0, width, 30)]
+        : []) as unknown as DOMRectList;
+    }
+  );
 }
 
 // #endregion
@@ -897,6 +929,7 @@ describe('ActionBar', () => {
         getButton(container, 'Go to home screen'),
         typeFilter(container),
         undoButton(container),
+        jointSeparator(container),
       ]);
     });
 
@@ -941,6 +974,52 @@ describe('ActionBar', () => {
       );
     });
 
+    it('close the start edge with a separator after undo, whatever the item', async () => {
+      // Whatever leads the middle zone — mark reviewed, show answer, a grade,
+      // skip, confirm — sits right after undo once the bar packs.
+      const screens = [
+        ...ITEM_TYPES.map((type) => ({ item: makeItem(type) })),
+        { item: makeItem('card'), showAnswer: true },
+        { item: makeMissing('article') },
+        { item: makeItem('article'), selectionMode: 'snippet' as const },
+      ];
+      for (const { item, ...state } of screens) {
+        const container = mountItemBar(item, state);
+        await settle();
+
+        const lead = zoneChildren(container, 'lead');
+        expect(lead.slice(-2)).toEqual([
+          undoButton(container),
+          jointSeparator(container),
+        ]);
+        // Drawn as the bar's other separators are
+        expect(jointSeparator(container).getAttribute('role')).toBe(
+          'separator'
+        );
+        expect(jointSeparator(container).classList).toContain(
+          'ir-bar-separator'
+        );
+        render(null, container);
+      }
+    });
+
+    it('leave the separator out while there is no item for it to part undo from', async () => {
+      // Review before the first item arrives, and the summary once the queue
+      // runs out: the middle zone is empty
+      reduxState.page = 'review';
+      const container = mountBar();
+      await settle();
+
+      expect(zoneChildren(container, 'center')).toEqual([]);
+      expect(zoneChildren(container, 'lead')).toEqual([
+        navigateButton(container, 'back'),
+        navigateButton(container, 'forward'),
+        getButton(container, 'Go to home screen'),
+        typeFilter(container),
+        undoButton(container),
+      ]);
+    });
+
     it('leave the end edge empty wherever there is no ⋮', async () => {
       // The home screen has no item behind one, and neither does review
       // before the first item arrives.
@@ -951,6 +1030,68 @@ describe('ActionBar', () => {
 
         expect(zoneChildren(container, 'trail')).toEqual([]);
         render(null, container);
+      }
+    });
+  });
+
+  describe('start edge packing', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        'ResizeObserver',
+        class {
+          observe() {}
+          disconnect() {}
+        }
+      );
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('marks the start edge packed once it has no room to spare', async () => {
+      layOutLead(0);
+      const container = mountItemBar(makeItem('article'));
+      await settle();
+
+      expect(zone(container, 'lead').classList).toContain('is-packed');
+    });
+
+    it('leaves it unmarked while it has room', async () => {
+      layOutLead(500);
+      const container = mountItemBar(makeItem('article'));
+      await settle();
+
+      expect(zone(container, 'lead').classList).not.toContain('is-packed');
+      expect(zone(container, 'lead').classList).toContain('ir-bar-lead');
+    });
+
+    it('keeps the classes others put on the start edge as it packs', async () => {
+      // Obsidian hears of a tab moving windows (`onWindowMigrated`) by a
+      // class on the element it is asked to watch
+      Object.defineProperty(HTMLElement.prototype, 'onWindowMigrated', {
+        configurable: true,
+        value(this: HTMLElement) {
+          this.classList.add('node-insert-event');
+          return () => {};
+        },
+      });
+      try {
+        layOutLead(0);
+        const container = mountItemBar(makeItem('article'));
+        await settle();
+
+        expect([...zone(container, 'lead').classList]).toEqual(
+          expect.arrayContaining([
+            'ir-bar-lead',
+            'node-insert-event',
+            'is-packed',
+          ])
+        );
+      } finally {
+        Reflect.deleteProperty(HTMLElement.prototype, 'onWindowMigrated');
       }
     });
   });

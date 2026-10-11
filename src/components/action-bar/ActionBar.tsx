@@ -2,6 +2,7 @@ import { CardCogPlus } from '#/components/icons/CardCog';
 import { ScissorsPlus } from '#/components/icons/ScissorsPlus';
 import { useAppSelector } from '#/hooks/useAppSelector';
 import { useLeafHistory } from '#/hooks/useLeafHistory';
+import { usePacked } from '#/hooks/usePacked';
 import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
 import {
@@ -40,7 +41,7 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { useSyncExternalStore } from 'react';
+import { useLayoutEffect, useRef, useSyncExternalStore } from 'react';
 import { useDispatch, useStore } from 'react-redux';
 import { Rating } from 'ts-fsrs';
 import { useReviewContext } from '../ReviewContext';
@@ -65,11 +66,20 @@ export function ActionBar() {
   const selectionMode = useAppSelector((state) => state.selectionMode);
   const dispatch = useDispatch();
   const itemActions = page !== 'home' && currentItem;
+  const leadRef = useRef<HTMLDivElement>(null);
+  const leadPacked = usePacked(leadRef);
+  // Toggled on the element rather than rendered into `className`: a changed
+  // className is written over whole, and would wipe `node-insert-event`, the
+  // class Obsidian puts on the zone to hear of the tab moving windows
+  // (undocumented; see usePacked)
+  useLayoutEffect(() => {
+    leadRef.current?.classList.toggle(PACKED_CLASS, leadPacked);
+  }, [leadPacked]);
 
   return (
     <div className="ir-action-bar" tabIndex={-1}>
       {/* setting a tabIndex makes the action bar focusable */}
-      <div className="ir-bar-lead">
+      <div ref={leadRef} className="ir-bar-lead">
         <GlobalActions />
         {page !== 'home' && (
           <>
@@ -83,6 +93,7 @@ export function ActionBar() {
             </ButtonWithIcon>
             <ReviewTypeFilter />
             <UndoAction />
+            {itemActions && <Separator className={JOINT_SEPARATOR_CLASS} />}
           </>
         )}
       </div>
@@ -112,6 +123,25 @@ export function ActionBar() {
     </div>
   );
 }
+
+/**
+ * On the leading zone while it has shrunk to its contents (see
+ * {@link usePacked}), which is when undo, its last button, sits right against
+ * the middle zone's first.
+ */
+const PACKED_CLASS = 'is-packed';
+
+/**
+ * The separator that closes the leading zone. It parts undo from the item's
+ * first action — mark reviewed, show answer — so it is there only while an
+ * item is, and styles.css shows it only where the two meet: on a packed bar,
+ * and on mobile, where the bar is packed or close to it.
+ *
+ * It takes its width whether shown or not (`visibility`, never `display`), so
+ * showing it moves nothing: were it to widen the zone, the zone would read as
+ * packed for having grown and the bar could flicker across the threshold.
+ */
+const JOINT_SEPARATOR_CLASS = 'ir-bar-joint';
 
 function HomeActions() {
   const store = useStore<IRPluginState>();
