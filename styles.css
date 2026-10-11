@@ -2149,3 +2149,40 @@ input.ir-queue-page-input {
 .metadata-property[data-property-key='ir-id'] {
   display: none;
 }
+
+/* #region Settings tab */
+
+/* A setting whose `validate` rejected the last edit. Obsidian marks the row
+   `is-invalid` and adds a `.setting-item-error` message under the control,
+   but its own rules only lay the message out and colour it amber
+   (--text-warning). Outline the field in --text-error and match the message to
+   it. The tab's class keeps other settings tabs as they are, and lifts the
+   border rule above Obsidian's `input[type='text']:focus` one, so the field
+   stays red while the user types into it. */
+.ir-settings-tab
+  .setting-item.is-invalid
+  :is(input[type='text'], input[type='number'], textarea) {
+  border-color: var(--text-error);
+}
+
+/* Obsidian's keyboard-focus ring is drawn in the accent colour around the
+   border; recolour it so a focused invalid field reads as one red outline. */
+.ir-settings-tab
+  .setting-item.is-invalid
+  :is(input[type='text'], input[type='number'], textarea):focus-visible {
+  box-shadow: 0 0 0 var(--input-border-width-focus) var(--text-error);
+}
+
+.ir-settings-tab .setting-item.is-invalid .setting-item-error {
+  color: var(--text-error);
+}
+
+/* A slider's value is a flex item beside it with no width of its own, so it
+   shrinks to its widest word and a formatted value like "4 AM" breaks at the
+   space. Keep it on one line and let the slider give up the room. */
+.ir-settings-tab .setting-item-control .slider-value {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* #endregion */

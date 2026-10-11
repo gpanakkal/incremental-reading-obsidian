@@ -80,7 +80,9 @@ import ReviewView from './views/ReviewView';
 export default class IncrementalReadingPlugin extends Plugin {
   /** Everything persisted to `data.json`; `settings` is this object's own half. */
   data!: IRPluginData;
-  settings!: IRPluginSettings;
+  // `declare`: Obsidian 1.13 types `Plugin.settings` as `unknown`, so this
+  // narrows it without emitting a class field.
+  declare settings: IRPluginSettings;
   sessionTracker?: SessionTracker;
   reviewManager!: ReviewManager;
   store!: typeof store;

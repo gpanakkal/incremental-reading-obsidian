@@ -7,6 +7,7 @@ import test, {
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import type { App } from 'obsidian';
 import {
   askBeforeUpdatingLinks,
   emulateMobile,
@@ -17,6 +18,7 @@ import {
   leafSnapshot,
   openFileInActiveLeaf,
   openNote,
+  openPluginSettings,
   pendingSaves,
   renameDecliningLinkUpdate,
   reviewHeader,
@@ -2563,5 +2565,235 @@ test.describe("Looking up a note's type", () => {
     await expect
       .poll(async () => (await articleRows(window))[0]?.deleted)
       .toBe(1);
+  });
+});
+
+test.describe('Settings tab', () => {
+  /** The separate window Obsidian shows settings in. */
+  let settings: Page;
+
+  /** A row of the plugin's settings tab, found by its exact name. */
+  const settingRow = (name: string) =>
+    settings.locator('.vertical-tab-content .setting-item').filter({
+      has: settings
+        .locator('.setting-item-name')
+        .getByText(name, { exact: true }),
+    });
+
+  /** `data.json` as last written, or null before the plugin first saves. */
+  const readPluginData = async () => {
+    const dataPath = path.join(
+      vaultPath,
+      '.obsidian/plugins/incremental-reading/data.json'
+    );
+    try {
+      return JSON.parse(await fs.readFile(dataPath, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * A theme colour token as the settings window resolves it, in the
+   * `rgb(...)` form computed styles report. The tokens live on `body`.
+   */
+  const resolveColor = (token: string) =>
+    settings.evaluate((token) => {
+      const probe = document.body.createDiv();
+      probe.style.color = `var(${token})`;
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    }, token);
+
+  /** An element's border colour. Polled: Obsidian transitions input borders. */
+  const borderColor = (locator: Locator) =>
+    locator.evaluate((el) => getComputedStyle(el).borderColor);
+
+  test.beforeEach(async () => {
+    settings = await openPluginSettings(app, window);
+  });
+
+  // Obsidian 1.13 renders the tab from `getSettingDefinitions` and binds each
+  // control through the tab's `getControlValue`/`setControlValue`. Its own
+  // binding would save the settings object as the whole of `data.json`.
+  test('saves an edit as the settings half of the plugin data', async () => {
+    const steps = settingRow('Learning steps');
+    await expect(steps.locator('input')).toHaveValue('1m, 10m');
+
+    await steps.locator('input').fill('2m, 20m');
+
+    await expect.poll(readPluginData).toMatchObject({
+      settings: { fsrsParams: { learning_steps: ['2m', '20m'] } },
+    });
+    expect(Object.keys((await readPluginData()) ?? {}).sort()).toEqual([
+      'session',
+      'settings',
+      'warnedRefusedPaths',
+    ]);
+  });
+
+  test('flags malformed steps inline and keeps the saved ones', async () => {
+    const steps = settingRow('Learning steps');
+
+    await steps.locator('input').fill('2m, soon');
+
+    await expect(steps).toHaveClass(/is-invalid/);
+    await expect(steps.locator('.setting-item-error')).toBeVisible();
+    const learningSteps = await window.evaluate(
+      () =>
+        (
+          window as Page & {
+            app: App & {
+              plugins: {
+                plugins: Record<
+                  string,
+                  { settings: { fsrsParams: { learning_steps: string[] } } }
+                >;
+              };
+            };
+          }
+        ).app.plugins.plugins['incremental-reading']?.settings.fsrsParams
+          .learning_steps
+    );
+    expect(learningSteps).toEqual(['1m', '10m']);
+    // The inline message replaces the toast the pre-1.13 tab raised. Counted
+    // once rather than polled: a toast fades, so polling for none would pass.
+    expect(await window.locator('.notice').count()).toBe(0);
+    expect(await settings.locator('.notice').count()).toBe(0);
+  });
+
+  test('outlines a malformed steps field in red until it is fixed', async () => {
+    const steps = settingRow('Learning steps');
+    const input = steps.locator('input');
+    const error = await resolveColor('--text-error');
+
+    await input.fill('2m, soon');
+
+    await expect(steps).toHaveClass(/is-invalid/);
+    await expect(input).toBeFocused();
+    await expect.poll(() => borderColor(input)).toBe(error);
+    // the focus ring around it, accent-coloured on a valid field
+    await expect
+      .poll(() => input.evaluate((el) => getComputedStyle(el).boxShadow))
+      .toContain(error);
+    await expect(steps.locator('.setting-item-error')).toHaveCSS(
+      'color',
+      error
+    );
+
+    await input.blur();
+    await expect.poll(() => borderColor(input)).toBe(error);
+
+    await input.fill('2m, 20m');
+    await expect(steps).not.toHaveClass(/is-invalid/);
+    await expect
+      .poll(() => borderColor(input))
+      .toBe(await resolveColor('--background-modifier-border-focus'));
+
+    await input.blur();
+    await expect
+      .poll(() => borderColor(input))
+      .toBe(await resolveColor('--background-modifier-border'));
+  });
+
+  test('outlines a maximum interval below one day in red until it is fixed', async () => {
+    const interval = settingRow('Maximum review interval');
+    const input = interval.locator('input');
+    const error = await resolveColor('--text-error');
+
+    // The number control checks its value on Enter or blur, not per keystroke;
+    // Enter on a value it rejects leaves the field focused.
+    await input.fill('0');
+    await input.press('Enter');
+
+    await expect(interval).toHaveClass(/is-invalid/);
+    await expect(interval.locator('.setting-item-error')).toHaveText(/1/);
+    await expect(input).toBeFocused();
+    await expect.poll(() => borderColor(input)).toBe(error);
+    await expect(interval.locator('.setting-item-error')).toHaveCSS(
+      'color',
+      error
+    );
+
+    await input.blur();
+    await expect.poll(() => borderColor(input)).toBe(error);
+
+    await input.fill('100');
+    await input.press('Enter');
+    await expect(interval).not.toHaveClass(/is-invalid/);
+    await expect
+      .poll(() => borderColor(input))
+      .toBe(await resolveColor('--background-modifier-border'));
+  });
+
+  test("leaves an invalid field on Obsidian's own tabs as Obsidian styles it", async () => {
+    await window.evaluate(() =>
+      (window as Page & { app: App }).app.setting.openTabById('file')
+    );
+    const row = settings
+      .locator('.vertical-tab-content .setting-item')
+      .filter({ has: settings.locator("input[type='text']") })
+      .first();
+    const input = row.locator("input[type='text']");
+
+    // Obsidian's file tab has no validated text field to break, so the row is
+    // flagged directly, as `Setting.setErrorMessage` would flag it.
+    await row.evaluate((el) => {
+      el.addClass('is-invalid');
+      el.querySelector('.setting-item-control')?.createDiv({
+        cls: 'setting-item-error',
+        text: 'Invalid',
+      });
+    });
+
+    await expect
+      .poll(() => borderColor(input))
+      .toBe(await resolveColor('--background-modifier-border'));
+    await expect(row.locator('.setting-item-error')).toHaveCSS(
+      'color',
+      await resolveColor('--text-warning')
+    );
+  });
+
+  test('shows the end-of-day shift as a clock time while it is moved', async () => {
+    const shift = settingRow('End-of-day shift');
+    const value = shift.locator('.slider-value');
+
+    await expect(value).toHaveText('4 AM');
+
+    await shift.locator("input[type='range']").focus();
+    await settings.keyboard.press('ArrowRight');
+
+    await expect(value).toHaveText('5 AM');
+
+    // One line box per wrapped line: "5" over "AM" gives two distinct tops.
+    const lineTops = await value.evaluate((el) => {
+      const range = el.ownerDocument.createRange();
+      range.selectNodeContents(el);
+      return new Set(
+        Array.from(range.getClientRects(), (rect) => Math.round(rect.top))
+      ).size;
+    });
+    expect(lineTops).toBe(1);
+  });
+
+  test('adds the extra import commands when their toggle is turned on', async () => {
+    const commandId = 'incremental-reading:import-article-copy';
+    const hasCommand = () =>
+      window.evaluate(
+        (id) => id in (window as Page & { app: App }).app.commands.commands,
+        commandId
+      );
+    expect(await hasCommand()).toBe(false);
+
+    await settingRow('Enable extra import hotkeys')
+      .locator('.checkbox-container')
+      .click();
+
+    await expect.poll(hasCommand).toBe(true);
   });
 });

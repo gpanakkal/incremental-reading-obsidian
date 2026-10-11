@@ -102,7 +102,14 @@ export class TFolder extends TAbstractFile {
 
 // Commonly imported Obsidian classes — stubbed as no-ops so transitive imports resolve
 export class Plugin {}
-export class PluginSettingTab {}
+export class PluginSettingTab {
+  /**
+   * Stands in for the tab's `.vertical-tab-content`. A real element under
+   * jsdom; absent in the `node` environment, which has no DOM to build one.
+   */
+  containerEl: HTMLElement | undefined =
+    typeof document === 'undefined' ? undefined : document.createElement('div');
+}
 export class Setting {}
 export class Modal {
   app: unknown;

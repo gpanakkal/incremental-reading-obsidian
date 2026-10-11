@@ -1,4 +1,4 @@
-import { expect, type Page } from '@playwright/test';
+import { expect, type ElectronApplication, type Page } from '@playwright/test';
 import type { App } from 'obsidian';
 import { waitForLayoutReady } from './setup/helpers';
 
@@ -691,6 +691,45 @@ export async function pendingSaves(window: Page): Promise<number> {
     ] as unknown as { reviewManager: { repo: { pendingSaveCount: number } } };
     return reviewManager.repo.pendingSaveCount;
   });
+}
+
+/**
+ * Open settings on this plugin's tab, returning the page it shows in.
+ *
+ * From Obsidian 1.13, settings open in a window of their own rather than a
+ * modal over `window`, so the rows have to be looked for in every other window.
+ * Retried until this plugin's first row shows: the window takes a moment to
+ * appear, and checking for this plugin's row rather than any row also catches
+ * settings opening on the tab they last showed instead.
+ */
+export async function openPluginSettings(
+  app: ElectronApplication,
+  window: Page
+): Promise<Page> {
+  await waitForLayoutReady(window);
+
+  let settingsPage: Page | undefined;
+  await expect(async () => {
+    await window.evaluate(() => {
+      const { setting } = (window as Page & { app: App }).app;
+      setting.open();
+      setting.openTabById('incremental-reading');
+    });
+    for (const page of app.windows()) {
+      if (page === window) continue;
+      const firstRow = page
+        .locator('.vertical-tab-content .setting-item-name')
+        .getByText('Default article priority', { exact: true });
+      if (await firstRow.isVisible()) {
+        settingsPage = page;
+        return;
+      }
+    }
+    throw new Error("No settings window is showing this plugin's tab yet");
+  }).toPass({ timeout: SWITCHER_TIMEOUT_MS });
+
+  if (!settingsPage) throw new Error('Settings window was not found');
+  return settingsPage;
 }
 
 /**
