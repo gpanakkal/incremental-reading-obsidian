@@ -328,18 +328,20 @@ export const Platform = {
 };
 
 /**
- * Mirrors Obsidian's Keymap.isModEvent: Mod-click (Ctrl on Win/Linux, Cmd on
- * macOS) or a middle click opens a tab, +Alt splits, +Alt+Shift opens a window.
+ * Mirrors Obsidian's Keymap.isModEvent: a middle click opens a tab whatever
+ * keys are held (the app checks the button first), and otherwise Mod-click
+ * (Ctrl on Win/Linux, Cmd on macOS) opens a tab, +Alt splits, +Alt+Shift opens
+ * a window.
  */
 export class Keymap {
   static isModEvent(
     evt?: MouseEvent | KeyboardEvent | TouchEvent | null
   ): 'tab' | 'split' | 'window' | boolean {
     if (!evt) return false;
+    if ('button' in evt && evt.button === 1) return 'tab';
     const mod = evt.ctrlKey || evt.metaKey;
     if (mod && evt.altKey) return evt.shiftKey ? 'window' : 'split';
-    const isMiddleClick = 'button' in evt && evt.button === 1;
-    return mod || isMiddleClick ? 'tab' : false;
+    return mod ? 'tab' : false;
   }
 }
 

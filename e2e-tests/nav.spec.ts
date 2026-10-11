@@ -628,28 +628,66 @@ test.describe('Review history navigation', () => {
     await expect(navButton('forward')).toHaveAttribute('aria-disabled', 'true');
   });
 
-  test('begin review after going back home opens the item left last', async () => {
-    await importTwoArticles();
-    const x = await beginReview();
+  /**
+   * Poll for the item review lands on, bounded well inside
+   * `CURRENT_ITEM_REFETCH_TIME`: a navigation that only lands once the
+   * current-item poll comes around is not the navigation under test.
+   */
+  async function expectLandedOn(item: ShownItem) {
+    await expect
+      .poll(async () => (await leafSnapshot(window)).currentItemId, {
+        timeout: 3_000,
+      })
+      .toBe(item.id);
+    await expectReviewOn(window, item);
+    await expectOpeningText(item);
+  }
 
-    // Home again, with X still the item review last had.
+  /**
+   * From review on `first`, open the other article from the queue table, so
+   * review holds an item that is not the first due.
+   */
+  async function openOtherFromQueue(first: ShownItem) {
     await executeCommandById(window, 'incremental-reading:learn');
     await expectReviewHome(window);
-
     const otherTitle = Object.keys(OPENING_TEXT).find(
-      (title) => title !== x.title
+      (title) => title !== first.title
     );
     if (!otherTitle) throw new Error('No second article');
     await window.locator('.ir-queue-row', { hasText: otherTitle }).click();
-    const y = await waitForReviewItem(window);
-    expect(y.title).toBe(otherTitle);
+    const other = await waitForReviewItem(window);
+    expect(other.title).toBe(otherTitle);
+    return other;
+  }
+
+  test('begin review after going back home opens the first item due, not the one left last', async () => {
+    await importTwoArticles();
+    // Nothing skipped or reviewed yet, so this is the top of the queue, and
+    // opening another item below does not move it.
+    const first = await beginReview();
+    await openOtherFromQueue(first);
 
     await executeCommandById(window, 'app:go-back');
     await expectReviewHome(window);
 
     await window.locator('css=#begin-review-button').click();
-    await expectReviewOn(window, y);
-    await expectOpeningText(y);
+    await expectLandedOn(first);
+
+    await executeCommandById(window, 'app:go-back');
+    await expectReviewHome(window);
+  });
+
+  test('the learn command from the home screen opens the first item due, not the one left last', async () => {
+    await importTwoArticles();
+    const first = await beginReview();
+    await openOtherFromQueue(first);
+
+    // Home, with the other item still the one review last had.
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expectReviewHome(window);
+
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expectLandedOn(first);
   });
 
   test('going back while review advances lands on the item left', async () => {
@@ -861,6 +899,68 @@ test.describe('Review history navigation', () => {
       expect((await leafSnapshot(window)).file).toBe(`${folder}/${renamed}.md`);
     });
   });
+});
+
+test.describe('Review button on a note', () => {
+  const NOTE = `sources/${ARTICLE_TITLE}`;
+  const NOTE_PATH = `${NOTE}.md`;
+
+  /** Every tab's view type and file, and which one is active. */
+  async function tabs() {
+    return await window.evaluate(() => {
+      const { app } = window as unknown as {
+        app: {
+          workspace: {
+            activeLeaf: unknown;
+            iterateRootLeaves(
+              fn: (leaf: {
+                view: { getViewType(): string; file?: { path: string } | null };
+              }) => void
+            ): void;
+          };
+        };
+      };
+      const found: { type: string; file: string | null; active: boolean }[] =
+        [];
+      app.workspace.iterateRootLeaves((leaf) => {
+        found.push({
+          type: leaf.view.getViewType(),
+          file: leaf.view.file?.path ?? null,
+          active: leaf === app.workspace.activeLeaf,
+        });
+      });
+      return found;
+    });
+  }
+
+  for (const how of ['Ctrl+click', 'middle click'] as const) {
+    test(`${how} with no review tab opens review in a new tab, leaving the note's open`, async () => {
+      await importArticle(window, NOTE);
+      const button = window
+        .locator('.workspace-leaf.mod-active .ir-action-bar-panel')
+        .getByRole('button', { name: 'Review' });
+      await expect(button).toBeVisible();
+      expect((await tabs()).map(({ type }) => type)).not.toContain(
+        REVIEW_VIEW_TYPE
+      );
+
+      await button.click(
+        how === 'Ctrl+click'
+          ? { modifiers: ['ControlOrMeta'] }
+          : { button: 'middle' }
+      );
+
+      await expect.poll(tabs).toEqual(
+        expect.arrayContaining([
+          { type: 'markdown', file: NOTE_PATH, active: false },
+          { type: REVIEW_VIEW_TYPE, file: NOTE_PATH, active: true },
+        ])
+      );
+      expect(await tabs()).toHaveLength(2);
+      const item = await waitForReviewItem(window);
+      expect(`sources/${item.title}.md`).toBe(NOTE_PATH);
+    });
+  }
 });
 /** The slice of Obsidian's `window.app` the race test reaches into. */
 type TestWindowLike = {

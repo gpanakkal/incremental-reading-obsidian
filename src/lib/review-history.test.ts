@@ -4,6 +4,7 @@ import fc from 'fast-check';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   actionsToReach,
+  goToReviewPlace,
   isDestination,
   placeOf,
   placeToEphemeralState,
@@ -569,6 +570,49 @@ describe('actionsToReach', () => {
         const { final } = applyActions(actionsToReach(state, place));
 
         expect(unrelatedSlices(final)).toEqual(unrelatedSlices(before));
+      })
+    );
+  });
+});
+
+describe('goToReviewPlace', () => {
+  it('puts review on the item named, or between items when none is', () => {
+    fc.assert(
+      fc.property(seededStateArb, itemIdArb, (state, itemId) => {
+        seedStore(state);
+
+        goToReviewPlace(store, itemId);
+
+        expect(placeOf(store.getState())).toEqual({ page: 'review', itemId });
+      })
+    );
+  });
+
+  it('resets the per-item state on arriving at a different item', () => {
+    // A card picked from the queue or opened from a note starts with its
+    // answer hidden, whatever the card left behind showed.
+    fc.assert(
+      fc.property(seededStateArb, itemIdArb, (state, itemId) => {
+        fc.pre(itemId !== state.currentItemId);
+        seedStore(state);
+
+        goToReviewPlace(store, itemId);
+
+        expect(store.getState().showAnswer).toBe(false);
+        expect(store.getState().editState).toBe(EditingState.cancel);
+      })
+    );
+  });
+
+  it('keeps the per-item state when review stays on the same item', () => {
+    fc.assert(
+      fc.property(seededStateArb, (state) => {
+        const before = seedStore(state);
+
+        goToReviewPlace(store, state.currentItemId);
+
+        expect(store.getState().showAnswer).toBe(before.showAnswer);
+        expect(store.getState().editState).toEqual(before.editState);
       })
     );
   });

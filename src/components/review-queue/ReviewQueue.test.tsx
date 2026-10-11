@@ -4,6 +4,12 @@ import type { QueuePage, QueueRow } from '#/components/types';
 import * as ReactQuery from '#/hooks/useReactQuery';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
+import {
+  resetSession,
+  setCurrentItemId,
+  setShowAnswer,
+  store,
+} from '#/lib/store';
 import { Menu } from '#/test/__mocks__/obsidian';
 import * as RelinkModalModule from '#/views/RelinkModal';
 import type { TFile } from 'obsidian';
@@ -147,7 +153,9 @@ vi.mock('lucide-react', () => ({
 vi.mock('react-redux', () => ({
   useDispatch: () => vi.fn(),
   useSelector: () => undefined,
-  useStore: () => ({ getState: () => ({}) }),
+  // The module's own store, so a row click is read back from where review
+  // reads it.
+  useStore: () => store,
 }));
 
 describe('ReviewQueue', () => {
@@ -729,6 +737,21 @@ describe('queue row menu', () => {
     expect(menu.items.map((item) => [item.title, item.disabled])).toEqual([
       ['Relink file…', true],
     ]);
+  });
+
+  it('opens a clicked row in review, with the item left open reset', () => {
+    // A card left with its answer shown must not hand that to the row picked.
+    wireQueue({ rows: [makeQueueRow({ id: 'picked' })] });
+    store.dispatch(resetSession());
+    store.dispatch(setCurrentItemId('left-open'));
+    store.dispatch(setShowAnswer(true));
+    const container = mount(<ReviewQueue />);
+
+    container.querySelector<HTMLElement>('.ir-queue-row')?.click();
+
+    expect(store.getState().currentItemId).toBe('picked');
+    expect(store.getState().page).toBe('review');
+    expect(store.getState().showAnswer).toBe(false);
   });
 
   it('opens the row’s menu where the table asks', () => {

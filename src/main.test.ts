@@ -5,7 +5,14 @@ import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import type { ReviewSession } from '#/lib/plugin-data';
 import { queryClient } from '#/lib/query-client';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
-import { resetSession, setPage, store, type ReviewPage } from '#/lib/store';
+import {
+  resetSession,
+  setCurrentItemId,
+  setPage,
+  setShowAnswer,
+  store,
+  type ReviewPage,
+} from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import IncrementalReadingPlugin from '#/main';
 // The Vitest alias points `obsidian` at this same file, so the `Menu` built
@@ -191,14 +198,20 @@ function resumeSession(
 }
 
 /**
- * Bare receiver for `learn` with no review tab open, which is the branch that
- * picks the landing page. The store is the module's own, so the page it lands
- * on is read back from there.
+ * Bare receiver for `learn`. By default no review tab is open, which is the
+ * branch that picks the landing page; `reviewTab` puts one up, focused or not.
+ * The store is the module's own, so the page it lands on is read back from
+ * there.
  */
 function makeLearnReceiver({
   resumed = false,
   skipHomeScreen = false,
-}: { resumed?: boolean; skipHomeScreen?: boolean } = {}) {
+  reviewTab = 'none',
+}: {
+  resumed?: boolean;
+  skipHomeScreen?: boolean;
+  reviewTab?: 'none' | 'focused' | 'unfocused';
+} = {}) {
   /**
    * What the store said as the view mounted. `setViewState` runs `onOpen`,
    * which renders the interface against the store as it finds it, so this is
@@ -215,8 +228,10 @@ function makeLearnReceiver({
   };
   const receiver = {
     settings: { skipHomeScreen },
-    getOpenReviewLeaf: vi.fn(() => null),
-    getActiveReviewView: vi.fn(() => null),
+    getOpenReviewLeaf: vi.fn(() => (reviewTab === 'none' ? null : leaf)),
+    getActiveReviewView: vi.fn(() =>
+      reviewTab === 'focused' ? { leaf } : null
+    ),
     resumeSession: vi.fn((): Promise<boolean> => Promise.resolve(resumed)),
     app: {
       workspace: {
@@ -231,11 +246,13 @@ function makeLearnReceiver({
 /** Run `learn` against a bare receiver. */
 function learn(
   receiver: ReturnType<typeof makeLearnReceiver>['receiver'],
-  initialItem?: ReviewItem
+  initialItem?: ReviewItem,
+  ...newLeaf: [] | [Parameters<IncrementalReadingPlugin['learn']>[1]]
 ): Promise<void> {
   return IncrementalReadingPlugin.prototype.learn.call(
     receiver as unknown as IncrementalReadingPlugin,
-    initialItem
+    initialItem,
+    ...newLeaf
   ) as Promise<void>;
 }
 
@@ -1163,6 +1180,91 @@ describe('IncrementalReadingPlugin.learn', () => {
 
     expect(receiver.resumeSession).not.toHaveBeenCalled();
     expect(store.getState().currentItemId).toBe('item-9');
+  });
+
+  it('opens the top of the queue when toggled on from the home screen', async () => {
+    // The store keeps the last item while home is up; toggling back must not
+    // resume it.
+    const { receiver } = makeLearnReceiver({ reviewTab: 'focused' });
+    store.dispatch(setCurrentItemId('left-open'));
+    store.dispatch(setPage('home'));
+
+    await learn(receiver);
+
+    expect(store.getState().currentItemId).toBeNull();
+    expect(store.getState().page).toBe('review');
+  });
+
+  it('toggles back to the home screen from review, keeping the item', async () => {
+    const { receiver } = makeLearnReceiver({ reviewTab: 'focused' });
+    store.dispatch(setCurrentItemId('on-screen'));
+    store.dispatch(setPage('review'));
+
+    await learn(receiver);
+
+    expect(store.getState().currentItemId).toBe('on-screen');
+    expect(store.getState().page).toBe('home');
+  });
+
+  it('leaves an unfocused review tab where it is, only focusing it', async () => {
+    const { receiver } = makeLearnReceiver({ reviewTab: 'unfocused' });
+    store.dispatch(setCurrentItemId('on-screen'));
+    store.dispatch(setPage('home'));
+
+    await learn(receiver);
+
+    expect(store.getState().currentItemId).toBe('on-screen');
+    expect(store.getState().page).toBe('home');
+  });
+
+  it('resets the per-item state when handed an item on an open review tab', async () => {
+    // A card left with its answer shown must not hand that to the item opened.
+    for (const reviewTab of ['focused', 'unfocused'] as const) {
+      store.dispatch(resetSession());
+      const { receiver } = makeLearnReceiver({ reviewTab });
+      store.dispatch(setCurrentItemId('left-open'));
+      store.dispatch(setPage('review'));
+      store.dispatch(setShowAnswer(true));
+
+      await learn(receiver, item('item-9'));
+
+      expect(store.getState().currentItemId).toBe('item-9');
+      expect(store.getState().page).toBe('review');
+      expect(store.getState().showAnswer).toBe(false);
+    }
+  });
+
+  it('reuses an open review tab whatever pane type it is asked for', async () => {
+    for (const newLeaf of [false, true, 'tab', 'split', 'window'] as const) {
+      const { receiver, leaf } = makeLearnReceiver({ reviewTab: 'unfocused' });
+
+      await learn(receiver, item('item-9'), newLeaf);
+
+      expect(receiver.app.workspace.getLeaf).not.toHaveBeenCalled();
+      expect(receiver.app.workspace.revealLeaf).toHaveBeenCalledWith(leaf);
+    }
+  });
+
+  it('opens review where it is asked to when no review tab is open', async () => {
+    const cases = [
+      [undefined, 'tab'],
+      [true, 'tab'],
+      [false, false],
+      ['tab', 'tab'],
+      ['split', 'split'],
+      ['window', 'window'],
+    ] as const;
+    for (const [newLeaf, paneType] of cases) {
+      const { receiver } = makeLearnReceiver();
+
+      await learn(
+        receiver,
+        item('item-9'),
+        ...(newLeaf === undefined ? [] : ([newLeaf] as const))
+      );
+
+      expect(receiver.app.workspace.getLeaf).toHaveBeenCalledWith(paneType);
+    }
   });
 });
 

@@ -357,6 +357,172 @@ describe('renderStandaloneActionBarDOM', () => {
     expect(learn).toHaveBeenCalledWith();
   });
 
+  describe('the Review button', () => {
+    /** The bar for a known item, with `learn` stubbed to record its calls. */
+    async function renderReviewButton() {
+      const file = makeFile();
+      const item = makeItem({ file });
+      const harness = makeHarness({ item });
+      const learn = vi.fn(async () => {});
+      const plugin = Object.assign(harness.plugin, { learn });
+      const container = makeContainer();
+      renderStandaloneActionBarDOM(file, plugin, container);
+      await tick();
+      return {
+        item,
+        learn,
+        reviewManager: harness.reviewManager,
+        button: buttons(container)[1],
+        dismiss: dismissButton(container),
+      };
+    }
+
+    const modifiersArb = fc.record({
+      ctrlKey: fc.boolean(),
+      metaKey: fc.boolean(),
+      altKey: fc.boolean(),
+      shiftKey: fc.boolean(),
+    });
+
+    /**
+     * Where Obsidian's own links open for these keys: a middle click a tab
+     * whatever is held, else Mod+Alt+Shift a window, Mod+Alt a split, Mod a
+     * tab, anything else in place. Mod is Ctrl or Cmd (the mock accepts
+     * either; the app reads the platform's one).
+     */
+    function expectedPane(
+      {
+        ctrlKey,
+        metaKey,
+        altKey,
+        shiftKey,
+      }: Record<'ctrlKey' | 'metaKey' | 'altKey' | 'shiftKey', boolean>,
+      middle: boolean
+    ): 'tab' | 'split' | 'window' | false {
+      if (middle) return 'tab';
+      const mod = ctrlKey || metaKey;
+      if (mod && altKey) return shiftKey ? 'window' : 'split';
+      return mod ? 'tab' : false;
+    }
+
+    function press(
+      target: HTMLElement,
+      type: 'click' | 'auxclick' | 'mousedown',
+      init: MouseEventInit = {}
+    ): MouseEvent {
+      const event = new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        ...init,
+      });
+      target.dispatchEvent(event);
+      return event;
+    }
+
+    it('opens review in a new tab on Ctrl+click', async () => {
+      const { item, learn, button } = await renderReviewButton();
+
+      press(button, 'click', { ctrlKey: true });
+      await tick();
+
+      expect(learn).toHaveBeenCalledWith(item, 'tab');
+    });
+
+    it('opens review in a new tab on a middle click', async () => {
+      // A middle click never fires `click`: browsers emit `auxclick` for it.
+      const { item, learn, button } = await renderReviewButton();
+
+      press(button, 'auxclick', { button: 1 });
+      await tick();
+
+      expect(learn).toHaveBeenCalledWith(item, 'tab');
+    });
+
+    it('opens review in place on a plain click', async () => {
+      const { item, learn, button } = await renderReviewButton();
+
+      press(button, 'click');
+      await tick();
+
+      expect(learn).toHaveBeenCalledWith(item, false);
+    });
+
+    it('opens review where the modifier keys say, as Obsidian links do', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          modifiersArb,
+          fc.constantFrom(
+            { type: 'click', button: 0 } as const,
+            { type: 'auxclick', button: 1 } as const
+          ),
+          async (modifiers, { type, button: mouseButton }) => {
+            document.body.replaceChildren();
+            const { item, learn, button } = await renderReviewButton();
+
+            press(button, type, { ...modifiers, button: mouseButton });
+            await tick();
+
+            expect(learn).toHaveBeenCalledTimes(1);
+            expect(learn).toHaveBeenCalledWith(
+              item,
+              expectedPane(modifiers, mouseButton === 1)
+            );
+          }
+        )
+      );
+    });
+
+    it('ignores the other non-primary buttons', async () => {
+      // `auxclick` fires for the right button too, ahead of the context menu.
+      await fc.assert(
+        fc.asyncProperty(
+          modifiersArb,
+          fc.integer({ min: 2, max: 4 }),
+          async (modifiers, mouseButton) => {
+            document.body.replaceChildren();
+            const { learn, button } = await renderReviewButton();
+
+            press(button, 'auxclick', { ...modifiers, button: mouseButton });
+            await tick();
+
+            expect(learn).not.toHaveBeenCalled();
+          }
+        )
+      );
+    });
+
+    it('claims the middle-button press, and only that one', async () => {
+      // Middle-mousedown starts autoscroll on Windows and pastes the primary
+      // selection on Linux, neither of which belongs in front of a new tab.
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({ min: 0, max: 4 }),
+          async (mouseButton) => {
+            document.body.replaceChildren();
+            const { button } = await renderReviewButton();
+
+            const event = press(button, 'mousedown', { button: mouseButton });
+
+            expect(event.defaultPrevented).toBe(mouseButton === 1);
+          }
+        )
+      );
+    });
+
+    it('leaves the dismiss toggle to plain clicks', async () => {
+      // Nothing opens from it, so a middle press keeps its default as well.
+      const { reviewManager, learn, dismiss } = await renderReviewButton();
+
+      const pressed = press(dismiss, 'mousedown', { button: 1 });
+      press(dismiss, 'auxclick', { button: 1 });
+      await tick();
+
+      expect(pressed.defaultPrevented).toBe(false);
+      expect(reviewManager.dismissItem).not.toHaveBeenCalled();
+      expect(learn).not.toHaveBeenCalled();
+    });
+  });
+
   it('adds a Review button alongside the dismiss toggle', async () => {
     const { plugin } = makeHarness();
     const container = makeContainer();

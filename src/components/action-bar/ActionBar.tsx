@@ -5,7 +5,13 @@ import { useLeafHistory } from '#/hooks/useLeafHistory';
 import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
-import { type SelectionKind, setPage, setShowAnswer } from '#/lib/store';
+import { goToReviewPlace } from '#/lib/review-history';
+import {
+  type IRPluginState,
+  type SelectionKind,
+  setPage,
+  setShowAnswer,
+} from '#/lib/store';
 import {
   isMissingItem,
   isReviewArticle,
@@ -32,7 +38,7 @@ import {
   X,
 } from 'lucide-react';
 import { useSyncExternalStore } from 'react';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useStore } from 'react-redux';
 import { Rating } from 'ts-fsrs';
 import { useReviewContext } from '../ReviewContext';
 import { ButtonWithIcon, Separator, TextButton } from './BarButtons';
@@ -105,7 +111,7 @@ export function ActionBar() {
 }
 
 function HomeActions() {
-  const dispatch = useDispatch();
+  const store = useStore<IRPluginState>();
   // The same slice the queue table asks for, so both read one cache entry
   // under the ['queue', subset] key rather than each fetching the queue.
   // React Query compares keys structurally, so the matching shape is enough.
@@ -131,7 +137,8 @@ function HomeActions() {
       id="begin-review-button"
       disabled={nothingDue}
       handleClick={() => {
-        dispatch(setPage('review'));
+        // The top of the queue, not the item the store kept while home was up
+        goToReviewPlace(store, null);
       }}
     >
       Begin Review

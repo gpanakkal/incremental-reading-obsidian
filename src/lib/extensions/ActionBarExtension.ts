@@ -2,14 +2,14 @@ import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { fetchByFile, invalidateCacheOnMatch } from '#/lib/query-client';
 import {
+  isReviewArticle,
+  isReviewCard,
+  isReviewSnippet,
   type NoteType,
   type ReviewArticle,
   type ReviewCard,
   type ReviewItem,
   type ReviewSnippet,
-  isReviewArticle,
-  isReviewCard,
-  isReviewSnippet,
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import { type Extension, StateEffect, StateField } from '@codemirror/state';
@@ -19,7 +19,7 @@ import {
   showPanel,
   ViewPlugin,
 } from '@codemirror/view';
-import { type App, type EventRef, type TFile } from 'obsidian';
+import { type App, type EventRef, Keymap, type TFile } from 'obsidian';
 import { irPluginFacet } from './irPluginFacet';
 
 /**
@@ -393,17 +393,23 @@ export function renderStandaloneActionBarDOM(
     }
   })();
 
-  // Open in review button
-  const openInReviewBtn = createButton('Review', async () => {
-    // Build a ReviewItem from this file to pass to the review interface
-    const reviewItem = await fetchByFile(file, reviewManager);
-    if (reviewItem) {
-      await plugin.learn(reviewItem, false);
-    } else {
-      // Item not in database, just open the review interface
-      await plugin.learn();
-    }
-  });
+  // Open in review button. Modifier keys and a middle click pick the pane the
+  // way Obsidian's own links do; `learn` still reuses an open review tab, so
+  // they only matter when there is none.
+  const openInReviewBtn = createButton(
+    'Review',
+    async (evt) => {
+      // Build a ReviewItem from this file to pass to the review interface
+      const reviewItem = await fetchByFile(file, reviewManager);
+      if (reviewItem) {
+        await plugin.learn(reviewItem, Keymap.isModEvent(evt));
+      } else {
+        // Item not in database, just open the review interface
+        await plugin.learn();
+      }
+    },
+    { middleClick: true }
+  );
   container.appendChild(openInReviewBtn);
 
   return dispose;
@@ -425,21 +431,40 @@ function renderStandaloneModeActions(
   return renderStandaloneActionBarDOM(info.file, plugin, container);
 }
 
+const MIDDLE_MOUSE_BUTTON = 1;
+
 /**
  * Helper to create a button element.
+ *
+ * @param options.middleClick whether a middle click counts as a click too, for
+ * a button that opens something and so can open it in a new tab.
  */
 function createButton(
   label: string,
-  onClick: () => void | Promise<void>
+  onClick: (evt: MouseEvent) => void | Promise<void>,
+  { middleClick = false }: { middleClick?: boolean } = {}
 ): HTMLButtonElement {
   const btn = createEl('button');
   btn.className = 'ir-review-button';
   btn.textContent = label;
-  btn.addEventListener('click', (e) => {
+  const handle = (e: MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    void onClick();
-  });
+    void onClick(e);
+  };
+  btn.addEventListener('click', handle);
+  if (middleClick) {
+    // A middle click never fires `click` — browsers emit `auxclick` for every
+    // non-primary button, the right one included, hence the button check.
+    btn.addEventListener('auxclick', (e) => {
+      if (e.button === MIDDLE_MOUSE_BUTTON) handle(e);
+    });
+    // Middle-mousedown starts autoscroll on Windows and pastes the primary
+    // selection on Linux. Claim it so the auxclick that follows only opens.
+    btn.addEventListener('mousedown', (e) => {
+      if (e.button === MIDDLE_MOUSE_BUTTON) e.preventDefault();
+    });
+  }
   return btn;
 }
 

@@ -10,9 +10,11 @@ import { appendLog } from '#/lib/log-file';
 import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
 import { isPdfView, stopPdfTabSelections } from '#/lib/pdf/obsidian-pdf';
 import { REBIND_LOG_TOPIC } from '#/lib/rebind-records';
+import { goToReviewPlace } from '#/lib/review-history';
 import {
   type App,
   type Menu,
+  type PaneType,
   type TAbstractFile,
   type TFile,
   type WorkspaceLeaf,
@@ -691,26 +693,28 @@ export default class IncrementalReadingPlugin extends Plugin {
    * no such tab exists. If the review tab is already focused, toggle between
    * the home screen or item review.
    * @param initialItem
-   * @param newLeaf whether we're opening review in a new tab or in the one
-   * from which the command was executed
+   * @param newLeaf where to open review when no review tab exists: a pane type
+   * (`Keymap.isModEvent` hands one over for a modified click), `true` for a
+   * new tab, or `false` for the tab the command was executed from. An open
+   * review tab is reused whatever this says, since there is only ever one.
    */
-  async learn(initialItem?: ReviewItem, newLeaf: boolean = true) {
+  async learn(initialItem?: ReviewItem, newLeaf: PaneType | boolean = true) {
     const openReviewLeaf: WorkspaceLeaf | null = this.getOpenReviewLeaf();
     const alreadyActive = openReviewLeaf === this.getActiveReviewView()?.leaf;
     // A tab closed mid-review keeps its item; put it back before the view mounts
     // so review resumes there rather than at the top of the queue.
     const resumed = initialItem ? false : await this.resumeSession();
     const leaf =
-      openReviewLeaf ?? this.app.workspace.getLeaf(newLeaf ? 'tab' : false);
+      openReviewLeaf ??
+      this.app.workspace.getLeaf(newLeaf === true ? 'tab' : newLeaf);
 
     // Everything the interface reads is settled before the view mounts:
     // `setViewState` runs `onOpen`, which renders against the store as it finds
     // it, and `resetSession` left `page` on 'home' when the last tab closed.
     // Choosing afterwards paints the queue table for a frame first.
     if (initialItem) {
-      store.dispatch(setCurrentItemId(initialItem.data.id));
       // An explicit item always lands in review, never on the home screen
-      store.dispatch(setPage('review'));
+      goToReviewPlace(store, initialItem.data.id);
     } else if (!openReviewLeaf) {
       // Only pick the landing page when instantiating a fresh view; an existing
       // view keeps its page (e.g. mid-review) regardless of skipHomeScreen.
@@ -721,9 +725,11 @@ export default class IncrementalReadingPlugin extends Plugin {
       const landOnItem = resumed || this.settings.skipHomeScreen;
       store.dispatch(setPage(landOnItem ? 'review' : 'home'));
     } else if (alreadyActive) {
-      // review is open and focused, so toggle between home and item review pages
-      const currentPage = store.getState().page;
-      store.dispatch(setPage(currentPage === 'home' ? 'review' : 'home'));
+      // review is open and focused, so toggle between home and item review
+      // pages. Review from home is the top of the queue, as Begin Review is,
+      // not the item the store kept while home was up.
+      if (store.getState().page === 'home') goToReviewPlace(store, null);
+      else store.dispatch(setPage('home'));
     }
 
     await leaf.setViewState({

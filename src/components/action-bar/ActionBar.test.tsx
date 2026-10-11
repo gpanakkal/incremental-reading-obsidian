@@ -3,7 +3,15 @@ import { ReviewContextProvider } from '#/components/ReviewContext';
 import type { QueuePage } from '#/components/types';
 import * as ReactQuery from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
-import { type SelectionKind, setPage, setShowAnswer } from '#/lib/store';
+import { currentItemQueryFn } from '#/lib/query-client';
+import {
+  resetSession,
+  type SelectionKind,
+  setCurrentItemId,
+  setPage,
+  setShowAnswer,
+  store,
+} from '#/lib/store';
 import type { MaybeMissingItem, NoteType, ReviewItem } from '#/lib/types';
 import fc from 'fast-check';
 import { type ComponentChild, render } from 'preact';
@@ -388,6 +396,7 @@ const dispatch = vi.fn();
 // through the selector at render time, which is after this initializes.
 const defaultReduxState = {
   page: 'home' as 'home' | 'review',
+  currentItemId: null as string | null,
   showAnswer: false,
   typesToReview: { article: true, snippet: true, card: true },
   selectionMode: null as SelectionKind | null,
@@ -397,7 +406,7 @@ const reduxState = { ...defaultReduxState };
 vi.mock('react-redux', () => ({
   useDispatch: () => dispatch,
   useSelector: (selector: (state: unknown) => unknown) => selector(reduxState),
-  useStore: () => ({ getState: () => reduxState }),
+  useStore: () => ({ getState: () => reduxState, dispatch }),
 }));
 
 describe('ActionBar', () => {
@@ -405,6 +414,7 @@ describe('ActionBar', () => {
     document.body.innerHTML = '';
     dispatch.mockClear();
     Object.assign(reduxState, defaultReduxState);
+    store.dispatch(resetSession());
     vi.restoreAllMocks();
   });
 
@@ -453,6 +463,31 @@ describe('ActionBar', () => {
       expect(dispatch).toHaveBeenCalledWith(
         expect.objectContaining({ payload: 'review' })
       );
+    });
+
+    it('starts at the top of the queue, not at the item left open', async () => {
+      // The store keeps the last item while the home screen is up. Landing on
+      // it would resume wherever the user last was; the queue picks the first
+      // due item once review holds none.
+      wireQueue({ totalRows: 3 });
+      reduxState.currentItemId = 'left-open';
+      store.dispatch(setCurrentItemId('left-open'));
+      const [first, second] = [makeItem('article'), makeItem('snippet')];
+      const getDue = vi.fn().mockResolvedValue({ all: [first, second] });
+
+      const container = mountBar();
+      beginReviewButton(container).click();
+      for (const [action] of dispatch.mock.calls) store.dispatch(action);
+
+      expect(store.getState().currentItemId).toBeNull();
+      expect(store.getState().page).toBe('review');
+      // What the review pane shows for that: the queue's first due item.
+      const shown = await currentItemQueryFn(
+        { getDue } as never,
+        store.getState().currentItemId
+      );
+      expect(shown).toBe(first);
+      expect(store.getState().currentItemId).toBe(first.data.id);
     });
 
     it('explains why it is unavailable when nothing is due', () => {

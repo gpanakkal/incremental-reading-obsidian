@@ -100,3 +100,28 @@ export function actionsToReach(
   if (place.page !== state.page) actions.push(setPage(place.page));
   return actions;
 }
+
+/** The part of the store a move through review reads and dispatches on. */
+export type ReviewStore = {
+  getState(): Pick<IRPluginState, 'page' | 'currentItemId'>;
+  dispatch(action: UnknownAction): unknown;
+};
+
+/**
+ * Put review on `itemId`, or with `null` on whatever the queue has due first.
+ *
+ * The one way code moves review to an item: Begin Review, `learn`, a queue row.
+ * Each goes through {@link actionsToReach}, so arriving at a different item
+ * resets its per-item state the way advancing does, and `null` asks the queue
+ * the way advancing does — `getDue()[0]`, skipped items and the type filter
+ * included — rather than reopening the item the store kept while home was up.
+ */
+export function goToReviewPlace(
+  store: ReviewStore,
+  itemId: string | null
+): void {
+  const place: ReviewPlace = { page: 'review', itemId };
+  for (const action of actionsToReach(store.getState(), place)) {
+    store.dispatch(action);
+  }
+}

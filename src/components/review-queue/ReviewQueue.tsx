@@ -4,13 +4,14 @@ import type { QueueRow } from '#/components/types';
 import { useQueue } from '#/hooks/useReactQuery';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import { tableOf } from '#/lib/relink';
-import { setCurrentItemId, setPage } from '#/lib/store';
+import { goToReviewPlace } from '#/lib/review-history';
+import type { IRPluginState } from '#/lib/store';
 import { currentReviewDay, reviewDayOf } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import { openRelinkPicker } from '#/views/RelinkModal';
 import { Menu } from 'obsidian';
 import { useRef, useState } from 'react';
-import { useDispatch } from 'react-redux';
+import { useStore } from 'react-redux';
 import {
   buildQueueColumns,
   QUEUE_COLUMN_HEADERS,
@@ -50,7 +51,7 @@ export function queueRowMenu(
 
 export function ReviewQueue() {
   const { plugin, reviewManager } = useReviewContext();
-  const dispatch = useDispatch();
+  const store = useStore<IRPluginState>();
   const [pageNumber, setPageNumber] = useState(0);
   /** Ticket for the most recent date lookup; older results are discarded. */
   const latestJump = useRef(0);
@@ -69,8 +70,7 @@ export function ReviewQueue() {
   });
 
   function handleRowClick(row: QueueRow) {
-    dispatch(setCurrentItemId(row.id));
-    dispatch(setPage('review'));
+    goToReviewPlace(store, row.id);
   }
 
   /**
