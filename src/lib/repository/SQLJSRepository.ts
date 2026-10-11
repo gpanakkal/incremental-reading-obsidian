@@ -53,6 +53,17 @@ const ITEM_TABLE_TO_NOTE_TYPE: Readonly<Record<string, NoteType>> = {
   srs_card: 'card',
 };
 
+/**
+ * The database file is on disk but could not be loaded. Nothing was written
+ * to it.
+ */
+export class DatabaseLoadError extends Error {
+  constructor(readonly dbFilePath: string) {
+    super(`Db file found at ${dbFilePath}, but failed to load`);
+    this.name = 'DatabaseLoadError';
+  }
+}
+
 export class SQLJSRepository implements SQLiteRepository {
   app: App;
   adapter: DataAdapter;
@@ -82,6 +93,31 @@ export class SQLJSRepository implements SQLiteRepository {
    * transaction settles. See {@link handleFileChange}.
    */
   #reloadPending = false;
+  /**
+   * Why writes are refused, or null while they are allowed. Set when the file
+   * on disk is one this repository could not load, or one it did not expect
+   * to find, so that nothing it holds in memory is saved over that file. A
+   * reload that loads the file clears it. See {@link blockWrites}.
+   */
+  #writeBlock: Error | null = null;
+  #onWriteBlocked?: (error: Error) => void;
+  #onWritesResumed?: () => void;
+  /**
+   * Whether `db` is a new database made because no file was on disk at
+   * startup, rather than one loaded from the file. Its saves wait on one
+   * check that the path is still free; see {@link save}.
+   */
+  #fresh = false;
+  /** The check, made by the first save, that a fresh database's path is free. */
+  #freshPathCheck: Promise<void> | null = null;
+  /** Set by {@link dispose}; nothing is read from or written to disk after. */
+  #disposed = false;
+  /** The reload under way, if any. See {@link #reloadFromDisk}. */
+  #reloading: Promise<void> | null = null;
+  /** Whether the file changed again while {@link #reloading} was under way. */
+  #reloadAgain = false;
+  /** Creation of the data folder, while one is under way. */
+  #creatingDataDir: Promise<void> | null = null;
 
   /**
    * Use .start to instantiate
@@ -92,6 +128,8 @@ export class SQLJSRepository implements SQLiteRepository {
     schema: string;
     onMigrationFailure?: (error: MigrationVerificationError) => void;
     onReloadFromDisk?: () => void | Promise<void>;
+    onWriteBlocked?: (error: Error) => void;
+    onWritesResumed?: () => void;
   }) {
     this.app = params.app;
     this.adapter = params.app.vault.adapter;
@@ -99,15 +137,27 @@ export class SQLJSRepository implements SQLiteRepository {
     this.#schema = params.schema;
     this.#onMigrationFailure = params.onMigrationFailure;
     this.onReloadFromDisk = params.onReloadFromDisk;
+    this.#onWriteBlocked = params.onWriteBlocked;
+    this.#onWritesResumed = params.onWritesResumed;
     this.handleFileChange = this.handleFileChange.bind(this) as (
       file: TAbstractFile
     ) => Promise<void>;
   }
 
   /**
-   * Asynchronous factory function
+   * Asynchronous factory function.
+   *
+   * Loads the database file, or starts on a new, empty database when there is
+   * no file on disk. A file that is there but cannot be loaded is never
+   * replaced: the factory throws and leaves it as it is.
    * @param plugin the plugin instance
    * @param schema the SQL schema as a string
+   * @param onWriteBlocked called when writes start being refused; see
+   * {@link blockWrites}
+   * @param onWritesResumed called when a reload ends the refusal
+   * @throws {DatabaseLoadError} if the file exists but cannot be loaded
+   * @throws {MigrationVerificationError} if migrating the file loses data
+   * @throws if no database can be created
    */
   static async start(params: {
     plugin: Plugin;
@@ -115,20 +165,56 @@ export class SQLJSRepository implements SQLiteRepository {
     schema: string;
     onMigrationFailure?: (error: MigrationVerificationError) => void;
     onReloadFromDisk?: () => void | Promise<void>;
+    onWriteBlocked?: (error: Error) => void;
+    onWritesResumed?: () => void;
   }): Promise<SQLJSRepository> {
     const repo = new SQLJSRepository({ ...params, app: params.plugin.app });
-    // load the database file or create it if loading fails
-    if (repo.dbExists()) {
+    if (await repo.dbExists()) {
       const result = await repo.loadDb();
-      if (result === null) {
-        throw new Error(
-          `Db file found at ${params.dbFilePath}, but failed to load`
-        );
-      }
+      if (result === null) throw new DatabaseLoadError(repo.dbFilePath);
+    } else if ((await repo.initDb()) === null) {
+      throw new Error('Failed to create a database');
     } else {
-      await repo.initDb();
+      repo.#fresh = true;
     }
     return repo;
+  }
+
+  /**
+   * Stop for good: refuse every later write, drop a reload still waiting to
+   * run, and close the database. For plugin unload, so an instance being
+   * replaced — by an update installed in place, say — can never write its
+   * copy of the database over the file the new instance is loading.
+   *
+   * A save already handed to the adapter cannot be called back, but every
+   * save captures its bytes before its first `await`, so none is left holding
+   * data newer than what it was asked to write; one that is still waiting to
+   * reach the adapter is dropped.
+   */
+  dispose() {
+    this.#disposed = true;
+    this.db?.close();
+    this.db = null;
+  }
+
+  /**
+   * Refuse writes until a reload loads the file on disk, and say why through
+   * `onWriteBlocked`. Told once per run of refusals, not once per write.
+   * @returns `error`, for throwing
+   */
+  protected blockWrites(error: Error): Error {
+    const alreadyBlocked = this.#writeBlock !== null;
+    this.#writeBlock = error;
+    if (!alreadyBlocked) this.#onWriteBlocked?.(error);
+    return error;
+  }
+
+  /** @throws if writes are refused (see {@link blockWrites}, {@link dispose}) */
+  #assertWritable() {
+    if (this.#disposed) {
+      throw new Error('Database repository was disposed');
+    }
+    if (this.#writeBlock) throw this.#writeBlock;
   }
 
   get dbFilePath() {
@@ -136,11 +222,14 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   async handleFileChange(file: TAbstractFile) {
+    if (this.#disposed) return;
     if (file.path !== this.dbFilePath || file.deleted) {
       return;
     }
-    // skip reload if the changes resulted from saving this db instance to disk
-    if (this.pendingSaveCount > 0) {
+    // skip reload if the changes resulted from saving this db instance to disk.
+    // Not for a database made without a file, whose saves have not written
+    // one yet: the file is someone else's, and its save must not win.
+    if (this.pendingSaveCount > 0 && !this.#fresh) {
       return;
     }
     // A reload replaces `this.db` wholesale, which would orphan an open
@@ -156,18 +245,79 @@ export class SQLJSRepository implements SQLiteRepository {
     await this.#reloadFromDisk();
   }
 
-  /** Reload the database file, reporting rather than throwing on failure. */
-  async #reloadFromDisk() {
+  /**
+   * Reload the database file, reporting rather than throwing on failure.
+   *
+   * One reload runs at a time. A change that lands while one is under way is
+   * folded into a single reload after it, which reads the file as it is by
+   * then: reloads run side by side could finish out of order, leaving an
+   * older read in memory, or refusing writes over a file a newer read loaded.
+   */
+  #reloadFromDisk(): Promise<void> {
+    if (this.#reloading) {
+      this.#reloadAgain = true;
+      return this.#reloading;
+    }
+    const run = async () => {
+      try {
+        do {
+          // A transaction opened while the last pass was under way holds
+          // the next one back, as it would any reload
+          if (this.#txDepth > 0) {
+            this.#reloadPending = true;
+            break;
+          }
+          this.#reloadAgain = false;
+          await this.#reloadOnce();
+        } while (this.#reloadAgain && !this.#disposed);
+      } finally {
+        this.#reloading = null;
+      }
+    };
+    this.#reloading = run();
+    return this.#reloading;
+  }
+
+  /**
+   * One pass of {@link #reloadFromDisk}.
+   *
+   * A file that fails to load leaves the database in memory as it was, still
+   * readable, but refuses writes until a later reload succeeds: the file on
+   * disk is newer than memory, and saving memory over it would discard
+   * whatever another device wrote. A failure is passed over when the file has
+   * changed again since, as the reload that follows decides instead.
+   */
+  async #reloadOnce() {
     try {
-      await this.reloadDb();
+      const db = await this.reloadDb();
+      if (this.#disposed) return;
+      if (db === null) {
+        if (this.#reloadAgain) return;
+        this.blockWrites(
+          new Error(
+            'The database file changed on disk but could not be loaded. ' +
+              'Changes will not be saved until it loads.'
+          )
+        );
+        return;
+      }
       await this.onReloadFromDisk?.();
     } catch (error) {
+      if (this.#reloadAgain) {
+        console.error(error);
+        return;
+      }
       if (
         error instanceof MigrationVerificationError &&
         this.#onMigrationFailure
       ) {
+        // Refused without `onWriteBlocked`: the handler tells the user
+        this.#writeBlock = error;
         this.#onMigrationFailure(error);
       } else {
+        if (error instanceof MigrationVerificationError) {
+          this.blockWrites(error);
+        }
         console.error(error);
       }
     }
@@ -188,10 +338,16 @@ export class SQLJSRepository implements SQLiteRepository {
   /**
    * Execute a read query and return an array of objects corresponding to table rows
    * @param query
+   * @param options `throwOnError` rejects on a failed query instead of
+   * resolving to no rows, for a caller that must tell the two apart
    * @returns an array of rows
    */
-  query(query: string, params: Primitive[] = []) {
-    const result = this._execSql(query, params);
+  query(
+    query: string,
+    params: Primitive[] = [],
+    options?: { throwOnError?: boolean }
+  ) {
+    const result = this._execSql(query, params, options);
     const rows = result[0];
     return rows;
   }
@@ -208,6 +364,7 @@ export class SQLJSRepository implements SQLiteRepository {
    * @throws if the statement fails
    */
   mutate(query: string, params: Primitive[] = []) {
+    this.#assertWritable();
     if (this.#txDepth > 0) {
       // Inside a transaction the caller owns commit/rollback, so changes are
       // buffered and flushed there — a statement that is later rolled back
@@ -218,7 +375,8 @@ export class SQLJSRepository implements SQLiteRepository {
     this.#pendingChanges.clear();
     const result = this._execSql(query, params, { throwOnError: true });
     this.#flushChanges();
-    void this.save();
+    // `save` logs its own failures, and the caller has its result already
+    this.save().catch(() => undefined);
     return result as [][];
   }
 
@@ -244,6 +402,7 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   async transaction<T>(work: () => T | Promise<T>): Promise<T> {
     if (!this.db) throw new Error('Database was not initialized on repository');
+    this.#assertWritable();
 
     if (this.#txDepth > 0) {
       this.#txDepth++;
@@ -272,8 +431,13 @@ export class SQLJSRepository implements SQLiteRepository {
     this.#txDepth--;
     this.db.exec('COMMIT');
     this.#flushChanges();
-    await this.save();
-    this.#runPendingReload();
+    try {
+      await this.save();
+    } finally {
+      // Even past a failed save: the reload may be what lifts the refusal
+      // that failed it
+      this.#runPendingReload();
+    }
     return result;
   }
 
@@ -471,19 +635,38 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   /**
-   * Overwrite or create the database file
+   * Overwrite or create the database file.
+   *
+   * The first save of a database made because no file was on disk checks
+   * that there still is none. One that has appeared since — brought down by
+   * Obsidian Sync, or missed at startup — holds data this database has never
+   * seen, so writes stop rather than overwrite it.
+   *
+   * Refused writes are turned away before they reach memory, by `mutate` and
+   * `transaction`, so a save is never asked for while writes are refused.
+   * @throws if the path is no longer free, or the write fails
    */
   protected async save() {
     if (!this.db) throw new Error('Database was not initialized on repository');
     this.pendingSaveCount++;
     try {
-      const data = this.db.export().buffer;
+      const source = this.db;
+      const data = source.export().buffer;
       // sql.js `export()` tears down the update hook
       this.registerUpdateHook();
-      const dataDir = this.app.vault.getFolderByPath(DATA_DIRECTORY);
-      if (!dataDir) {
-        await this.app.vault.createFolder(DATA_DIRECTORY);
+      if (this.#fresh) {
+        // Shared, so saves started together all wait on one check rather
+        // than a later one finding the file an earlier one just wrote
+        this.#freshPathCheck ??= this.#checkFreshPath();
+        await this.#freshPathCheck;
       }
+      // Awaited only when there is something to wait for, so a save with its
+      // folder in place reaches the disk without yielding first
+      const creatingDataDir = this.#ensureDataDir();
+      if (creatingDataDir) await creatingDataDir;
+      // A reload that swapped the database meanwhile loaded the file this
+      // would write over, and memory is that file now
+      if (this.#disposed || this.db !== source) return;
       return await this.app.vault.adapter.writeBinary(
         normalizePath(this.#dbFilePath),
         data as ArrayBuffer
@@ -499,6 +682,49 @@ export class SQLJSRepository implements SQLiteRepository {
       }
     } finally {
       this.pendingSaveCount--;
+    }
+  }
+
+  /**
+   * Create the data folder if it is missing. Saves that find it missing
+   * together share one creation, since a second would fail on the folder the
+   * first made, and every save waits it out, even one that finds the folder
+   * already indexed: one that did not would write ahead of the saves still
+   * waiting, and an older one would land last. A folder the vault index
+   * misses but the disk holds is fine.
+   */
+  #ensureDataDir(): Promise<void> | undefined {
+    if (this.#creatingDataDir) return this.#creatingDataDir;
+    if (this.app.vault.getFolderByPath(DATA_DIRECTORY)) return;
+    this.#creatingDataDir ??= this.app.vault
+      .createFolder(DATA_DIRECTORY)
+      .then(
+        () => undefined,
+        async (error: unknown) => {
+          if (!(await this.adapter.exists(normalizePath(DATA_DIRECTORY)))) {
+            throw error;
+          }
+        }
+      )
+      .finally(() => {
+        this.#creatingDataDir = null;
+      });
+    return this.#creatingDataDir;
+  }
+
+  /**
+   * Settle once a fresh database may take its path, or block writes and throw
+   * if a file is already there.
+   */
+  async #checkFreshPath() {
+    if (await this.adapter.exists(normalizePath(this.#dbFilePath))) {
+      throw this.blockWrites(
+        new Error(
+          'A database file appeared on disk after the plugin started without ' +
+            'one. Changes will not be saved, so the file is left as it is; ' +
+            'reload the plugin to load it.'
+        )
+      );
     }
   }
 
@@ -522,15 +748,15 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   /**
-   * Check if the database file exists
+   * Check if the database file exists on disk.
+   *
+   * Asks the adapter rather than the vault's file index: the index can miss a
+   * file that is there — while Obsidian Sync rewrites it, or while the index
+   * churns around a plugin reload — and a miss here would start the plugin on
+   * an empty database that its first write then saves over the real one.
    */
   protected dbExists() {
-    const dataDir = this.app.vault.getFolderByPath(DATA_DIRECTORY);
-    if (!dataDir) return false;
-
-    return !!this.app.vault.getAbstractFileByPath(
-      normalizePath(this.#dbFilePath)
-    );
+    return this.adapter.exists(normalizePath(this.#dbFilePath));
   }
 
   /**
@@ -562,23 +788,32 @@ export class SQLJSRepository implements SQLiteRepository {
    * current version, or if post-migration verification fails
    */
   protected async reloadDb() {
+    const previous = this.db;
+    let candidate: Database | null = null;
     try {
       this.#sql ||= await this.loadWasm();
       const dbArrayBuffer = await this.app.vault.adapter.readBinary(
         normalizePath(this.#dbFilePath)
       );
+      if (this.#disposed) return null;
       // Use browser-compatible Uint8Array instead of Node.js Buffer
       // for mobile compatibility
-      this.db = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
-      this.db.exec('PRAGMA foreign_keys = ON');
-      this.registerUpdateHook();
-      const result = this.db.exec('PRAGMA integrity_check');
+      candidate = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
+      candidate.exec('PRAGMA foreign_keys = ON');
+      const result = candidate.exec('PRAGMA integrity_check');
       const status = result[0]?.values[0]?.[0] as string;
       if (status !== 'ok') {
         throw new Error(`integrity_check failed: ${status}`);
       }
+      // SQLite opens a file too short to hold a header as an empty database,
+      // which would pass for one at schema version 0 and be migrated and saved
+      // over whatever the file was meant to hold — a sync still in progress,
+      // say. Every database this plugin writes has tables.
+      if (candidate.exec('SELECT 1 FROM sqlite_master LIMIT 1').length === 0) {
+        throw new Error('the file holds no database');
+      }
 
-      const currentDbVersion = getSchemaVersion(this.db);
+      const currentDbVersion = getSchemaVersion(candidate);
       const latestSchemaVersion = migrations[migrations.length - 1].version;
       if (currentDbVersion > latestSchemaVersion) {
         throw new Error(
@@ -586,6 +821,13 @@ export class SQLJSRepository implements SQLiteRepository {
             `Please ensure the plugin is fully updated, then re-enable it.`
         );
       }
+
+      // Only a file that loaded replaces the database in memory: one that did
+      // not leaves the previous one in place, never a broken or empty stand-in
+      // that a later write would save over the file.
+      this.db = candidate;
+      this.registerUpdateHook();
+      this.#fresh = false;
 
       const pending = getPendingMigrations(this.db, migrations);
       if (pending.length > 0) {
@@ -640,8 +882,22 @@ export class SQLJSRepository implements SQLiteRepository {
         }
       }
 
+      if (this.#writeBlock) {
+        this.#writeBlock = null;
+        this.#onWritesResumed?.();
+      }
+      // Nothing holds the replaced database across an await: reloads wait
+      // out transactions, and every other use is synchronous
+      previous?.close();
       return this.db;
     } catch (error) {
+      if (candidate) {
+        if (this.db === candidate) {
+          this.db = previous;
+          this.registerUpdateHook();
+        }
+        candidate.close();
+      }
       if (error instanceof MigrationVerificationError) throw error;
       if (error instanceof Error) {
         console.error('Incremental Reading - Failed to reload database:', {

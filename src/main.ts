@@ -43,6 +43,7 @@ import { registerTransclusionHostPostProcessor } from './lib/extensions/Transclu
 import { createIrIdRepairer } from './lib/ir-id-repair';
 import {
   type IrIdWarning,
+  type NoticeTarget,
   type Timer,
   createIrIdWarning,
   hostTimer,
@@ -67,10 +68,14 @@ import {
   applyQueueChange,
   invalidateCacheOnMatch,
   invalidateCurrentItemQuery,
+  queryClient,
   resetCurrentOnMatch,
   startItemCacheEviction,
 } from './lib/query-client';
-import { SQLJSRepository } from './lib/repository/SQLJSRepository';
+import {
+  DatabaseLoadError,
+  SQLJSRepository,
+} from './lib/repository/SQLJSRepository';
 import { initReviewCommands } from './lib/review-commands';
 import { SessionTracker } from './lib/SessionTracker';
 import { type IRPluginSettings, IRSettingTab } from './lib/settings';
@@ -78,6 +83,23 @@ import { setCurrentItemId, setPage, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
 import { ImportModal } from './views/ImportModal';
 import ReviewView from './views/ReviewView';
+
+/**
+ * The notice for a startup that failed with `error`. A database file that
+ * would not load gets its own, saying it was not touched: a general "failed
+ * to initialize" over a database that holds everything the user has reads as
+ * data loss.
+ */
+export function startupFailureMessage(error: unknown): string {
+  if (error instanceof DatabaseLoadError) {
+    return (
+      `Incremental reading: the database file ${error.dbFilePath} could not ` +
+      `be loaded, so the plugin did not start. The file was left unchanged. ` +
+      `See the console for details.`
+    );
+  }
+  return `Failed to initialize plugin. See the console for details.`;
+}
 
 export default class IncrementalReadingPlugin extends Plugin {
   /** Everything persisted to `data.json`; `settings` is this object's own half. */
@@ -312,16 +334,27 @@ export default class IncrementalReadingPlugin extends Plugin {
         });
       } catch (error) {
         console.error(error);
-        Obsidian.notify(
-          `Failed to initialize plugin. See the console for details.`,
-          true
-        );
+        Obsidian.notify(startupFailureMessage(error), true);
         this.unload();
       }
     });
   }
 
-  onunload() {}
+  /**
+   * Runs last in `Component.unload`, after every child, registered view and
+   * listener is gone, so nothing torn down above can still be writing. (That
+   * order is undocumented; it is what `Component.prototype.unload` in
+   * obsidian.asar does.) The repository goes then: an instance being replaced
+   * in place — by an update or a disable and re-enable — must never save its
+   * copy of the database over the file the next instance is loading and
+   * migrating.
+   *
+   * A teardown write that is still waiting on an `await` when this runs, such
+   * as a PDF tab saving its scroll position, is refused rather than saved.
+   */
+  onunload() {
+    this.reviewManager?.repo.dispose();
+  }
 
   async loadSettings() {
     this.data = parsePluginData(await this.loadData());
@@ -431,6 +464,7 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   private async initReviewManager() {
+    let writesBlockedNotice: NoticeTarget | null = null;
     const repo: SQLiteRepository = await SQLJSRepository.start({
       plugin: this,
       dbFilePath: DATABASE_FILE_PATH,
@@ -447,8 +481,22 @@ export default class IncrementalReadingPlugin extends Plugin {
         );
         this.unload();
       },
+      // Up until saving resumes, which is when the notice stops being true
+      onWriteBlocked: (error) => {
+        writesBlockedNotice?.hide();
+        writesBlockedNotice = persistentNotice(
+          `Incremental reading: ${error.message}`
+        );
+      },
+      onWritesResumed: () => {
+        writesBlockedNotice?.hide();
+        writesBlockedNotice = null;
+      },
       onReloadFromDisk: async () => {
         await invalidateCurrentItemQuery();
+        // A swapped-in database reports no change to any row, so the queue
+        // would keep what it last read, a failed read included
+        await queryClient.invalidateQueries({ queryKey: ['queue'] });
         // A PDF is an article only by its row, and a swapped-in database
         // reports no change to any row
         this.resyncLeafActionBars?.();
@@ -461,9 +509,16 @@ export default class IncrementalReadingPlugin extends Plugin {
         await this.reviewManager.refreshAllHighlights();
       },
     });
-    // listen for sync updates to the database and re-read the file
+    // listen for sync updates to the database and re-read the file. Sync
+    // reports a file it downloads for the first time — to a device that
+    // started without one — as `create`, not `modify`.
     this.registerEvent(
       this.app.vault.on('modify', (file) => {
+        void repo.handleFileChange(file);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on('create', (file) => {
         void repo.handleFileChange(file);
       })
     );

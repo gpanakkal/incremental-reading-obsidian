@@ -247,7 +247,14 @@ export interface BulkMutateOptions {
 }
 
 export interface SQLiteRepository {
-  query(query: string, params?: Primitive[]): RowTypes[] | Promise<RowTypes[]>;
+  /**
+   * Run a read. A failed one resolves to no rows unless `throwOnError` is set.
+   */
+  query(
+    query: string,
+    params?: Primitive[],
+    options?: { throwOnError?: boolean }
+  ): RowTypes[] | Promise<RowTypes[]>;
   /** @throws if the statement fails */
   mutate(query: string, params?: Primitive[]): [][] | Promise<[][]>;
   /**
@@ -274,6 +281,11 @@ export interface SQLiteRepository {
     options?: { throwOnError?: boolean }
   ): RowTypes[][] | Promise<RowTypes[][]>;
   handleFileChange(file: TAbstractFile): Promise<void>;
+  /**
+   * Stop for good: refuse later writes, skip pending saves and reloads, and
+   * close the database. For plugin unload.
+   */
+  dispose(): void;
   /**
    * Subscribe to row-level changes on item tables. Returns an unsubscribe fn.
    */

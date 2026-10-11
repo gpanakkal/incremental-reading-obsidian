@@ -902,6 +902,8 @@ export class ArticleManager extends ItemManager {
     includeDismissed?: boolean;
     includeDeleted?: boolean;
     excludeIds?: string[];
+    /** Reject on a failed query rather than resolve to no rows */
+    throwOnError?: boolean;
   }) {
     let query = 'SELECT * FROM article';
     const conditions = [];
@@ -946,7 +948,10 @@ export class ArticleManager extends ItemManager {
         `Param count ${params.length} exceeded the limit for query "${query}"`
       );
     }
-    return ((await this.repo.query(query, params)) ?? []) as ArticleRow[];
+    const rows = opts?.throwOnError
+      ? await this.repo.query(query, params, { throwOnError: true })
+      : await this.repo.query(query, params);
+    return (rows ?? []) as ArticleRow[];
   }
 
   protected async getLastReview(article: IArticleBase) {

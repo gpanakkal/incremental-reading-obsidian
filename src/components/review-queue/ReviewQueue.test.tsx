@@ -12,6 +12,7 @@ import {
 } from '#/lib/store';
 import { Menu } from '#/test/__mocks__/obsidian';
 import * as RelinkModalModule from '#/views/RelinkModal';
+import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import type { ComponentChild } from 'preact';
 import { render } from 'preact';
@@ -65,6 +66,13 @@ function wireQueue({
    */
   dataWhileLoading,
   findPageForDate = vi.fn().mockResolvedValue(0),
+  /**
+   * Whether the last fetch failed. The page given is then what the query
+   * still holds from before the failure, unless `rows` is undefined.
+   */
+  isError = false,
+  /** Whether the query still holds a page; false models a failed first load. */
+  hasData = true,
 }: {
   rows?: QueueRow[];
   totalRows?: number;
@@ -73,6 +81,8 @@ function wireQueue({
   lastDue?: Date | null;
   dataWhileLoading?: Partial<QueuePage>;
   findPageForDate?: ReturnType<typeof vi.fn>;
+  isError?: boolean;
+  hasData?: boolean;
 } = {}) {
   const page: QueuePage = { rows, totalRows, firstDue, lastDue };
   const reviewManager = { findPageForDate } as unknown as ReviewManager;
@@ -81,10 +91,13 @@ function wireQueue({
     reviewManager,
   } as never);
   vi.spyOn(ReactQuery, 'useQueue').mockReturnValue({
-    data: isLoading
-      ? dataWhileLoading && { ...page, ...dataWhileLoading }
-      : page,
+    data: !hasData
+      ? undefined
+      : isLoading
+        ? dataWhileLoading && { ...page, ...dataWhileLoading }
+        : page,
     isLoading,
+    isError,
   } as never);
   return { findPageForDate };
 }
@@ -239,6 +252,23 @@ describe('ReviewQueue', () => {
     expect(date.getMonth()).toBe(7);
     expect(date.getDate()).toBe(1);
     expect(pageIndicator(container)).toBe('1 of 6');
+  });
+
+  it('stays on its page when a date lookup fails', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const findPageForDate = vi.fn().mockRejectedValue(new Error('unreadable'));
+    wireQueue({ totalRows: 100, findPageForDate });
+    const container = mount(<ReviewQueue />);
+
+    enterDate(container, '2026-08-01');
+    await flush();
+    await flush();
+
+    expect(pageIndicator(container)).toMatch(/^1 /);
+    expect(error).toHaveBeenCalledWith(
+      'Incremental Reading - Date lookup failed:',
+      expect.any(Error)
+    );
   });
 
   it('ignores a stale lookup that resolves after a newer one', async () => {
@@ -658,6 +688,44 @@ describe('ReviewQueue', () => {
       expect(isMarked(container)).toBe(true);
       // A different DOM node, which is what restarts the animation.
       expect(second).not.toBe(first);
+    });
+  });
+
+  describe('unreadable queue', () => {
+    it('property: says the queue could not be loaded, never that nothing is due', () => {
+      fc.assert(
+        fc.property(
+          fc.boolean(),
+          fc.nat({ max: 500 }),
+          (hasData, totalRows) => {
+            wireQueue({
+              isError: true,
+              hasData,
+              totalRows,
+              rows: totalRows ? [makeQueueRow()] : [],
+            });
+
+            try {
+              const container = mount(<ReviewQueue />);
+
+              const panel = container.querySelector('.ir-queue-panel');
+              expect(panel?.querySelector('.ir-queue-title')?.textContent).toBe(
+                'Upcoming'
+              );
+              const message = panel?.querySelector('.ir-review-placeholder');
+              expect(message?.textContent).toContain("Couldn't load the queue");
+              expect(container.textContent).not.toContain('Nothing due');
+              // Rows held from before the failure may be gone from the
+              // database, and the controls would page through them
+              expect(container.querySelector('.ir-queue-table')).toBeNull();
+              expect(container.querySelector('.ir-queue-controls')).toBeNull();
+            } finally {
+              document.body.innerHTML = '';
+              vi.restoreAllMocks();
+            }
+          }
+        )
+      );
     });
   });
 

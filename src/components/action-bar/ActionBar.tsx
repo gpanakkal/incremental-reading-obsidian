@@ -115,7 +115,7 @@ function HomeActions() {
   // The same slice the queue table asks for, so both read one cache entry
   // under the ['queue', subset] key rather than each fetching the queue.
   // React Query compares keys structurally, so the matching shape is enough.
-  const { data, isLoading } = useQueue({
+  const { data, isLoading, isError } = useQueue({
     slice: {
       pageNumber: 0,
       entriesPerPage: QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
@@ -127,15 +127,21 @@ function HomeActions() {
   // screen below, and the two cannot disagree. Held disabled while loading as
   // well, since a button that starts a review of an unknown queue is worse
   // than one that is briefly inert.
+  // A queue that failed to load is unknown rather than empty, and is told
+  // apart from one, as the table below it does.
   const nothingDue = isLoading || !data || data.totalRows === 0;
 
   return (
     <TextButton
       tooltip={
-        nothingDue ? 'Nothing due for review' : 'Start reviewing the queue'
+        isError
+          ? "Couldn't load the queue"
+          : nothingDue
+            ? 'Nothing due for review'
+            : 'Start reviewing the queue'
       }
       id="begin-review-button"
-      disabled={nothingDue}
+      disabled={isError || nothingDue}
       handleClick={() => {
         // The top of the queue, not the item the store kept while home was up
         goToReviewPlace(store, null);

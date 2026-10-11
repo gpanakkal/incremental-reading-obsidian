@@ -1,13 +1,19 @@
-import { BATCHED_MUTATION_SLICE_MS } from '#/lib/constants';
+import { MigrationVerificationError } from '#/db/migration-helpers';
+import {
+  BACKUP_DIRECTORY,
+  BATCHED_MUTATION_SLICE_MS,
+  DATA_DIRECTORY,
+  DATABASE_FILE_PATH,
+} from '#/lib/constants';
 import type { DataChangeEvent, MutationStatement, NoteType } from '#/lib/types';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
-import type { App, TAbstractFile } from 'obsidian';
+import type { App, Plugin, TAbstractFile } from 'obsidian';
 import { resolve } from 'path';
 import type { Database, SqlValue } from 'sql.js';
 import initSqlJs from 'sql.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SQLJSRepository } from './SQLJSRepository';
+import { DatabaseLoadError, SQLJSRepository } from './SQLJSRepository';
 
 // #region HELPERS
 
@@ -468,6 +474,270 @@ function expectedIdsByTable(
     srs_card: idsIn('srs_card'),
   };
 }
+// --- startup ---
+
+/** What the vault's file index reports for the data folder and the db file. */
+interface IndexView {
+  folder: boolean;
+  file: boolean;
+}
+
+/**
+ * A vault whose file index and disk can disagree, as they do while Obsidian
+ * Sync rewrites a file or the index churns around a plugin reload. `files` is
+ * the disk; the index answers from `index` alone.
+ */
+function makeVault(
+  indexAtStart: IndexView,
+  files: Map<string, Uint8Array> = new Map(),
+  /**
+   * Whether `exists` answers a macrotask late, as a real disk can, while the
+   * other calls answer at once. That is long enough for a write issued after
+   * the question to land before the answer does.
+   */
+  slowExists = false
+) {
+  // A copy, since creating the folder changes it
+  const index = { ...indexAtStart };
+  const adapter = {
+    exists: vi.fn(async (path: string) => {
+      if (slowExists) await nextMacrotask();
+      return files.has(path);
+    }),
+    readBinary: vi.fn(async (path: string) => {
+      const bytes = files.get(path);
+      if (!bytes) throw new Error(`ENOENT: ${path}`);
+      return bytes.slice().buffer;
+    }),
+    writeBinary: vi.fn(async (path: string, data: ArrayBuffer) => {
+      files.set(path, new Uint8Array(data.slice(0)));
+    }),
+    mkdir: vi.fn(async () => {}),
+    write: vi.fn(async () => {}),
+  };
+  const vault = {
+    adapter,
+    getFolderByPath: () => (index.folder ? {} : null),
+    getAbstractFileByPath: () => (index.file ? {} : null),
+    // Rejects for a folder that is already there, as Obsidian's does
+    createFolder: vi.fn(async () => {
+      if (index.folder) throw new Error('Folder already exists.');
+      index.folder = true;
+    }),
+  };
+  return { app: { vault } as unknown as App, files, adapter, vault };
+}
+
+/**
+ * Point the production WASM loader at the shared test module. Spied once per
+ * test, not per {@link startRepo} call: a property starts hundreds of
+ * repositories, and each spy would wrap the last.
+ */
+function stubWasm() {
+  vi.spyOn(
+    SQLJSRepository.prototype as unknown as {
+      loadWasm(): Promise<initSqlJs.SqlJsStatic>;
+    },
+    'loadWasm'
+  ).mockImplementation(getSharedSql);
+}
+
+/** Run the production factory against `app`. Needs {@link stubWasm}. */
+function startRepo(
+  app: App,
+  params: Partial<Parameters<typeof SQLJSRepository.start>[0]> = {}
+) {
+  return SQLJSRepository.start({
+    plugin: { app } as Plugin,
+    dbFilePath: DATABASE_FILE_PATH,
+    schema: getSharedSchema(),
+    ...params,
+  });
+}
+
+/**
+ * Bytes of a database file holding exactly `ids`. Uncached, unlike
+ * {@link remoteDbBytes}: its cache keys on the ids joined by commas, which
+ * the ids generated here may themselves contain.
+ */
+async function dbFileWith(ids: readonly string[]): Promise<Uint8Array> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(await getEmptyDbBytes());
+  for (const id of ids)
+    db.exec(INSERT_ARTICLE_SQL, articleRow(id) as SqlValue[]);
+  const bytes = db.export();
+  db.close();
+  return bytes;
+}
+
+const SQLITE_HEADER = new TextEncoder().encode('SQLite format 3\0');
+
+/**
+ * A file no database can be loaded from: anything that is not a SQLite file
+ * (a sync placeholder, a foreign file); a real database cut short, as a write
+ * or download still under way leaves it, at a `truncated` fraction of the way
+ * through all but its last page; or a database written by a newer version of
+ * the plugin, `ahead` schema versions past this one.
+ *
+ * Truncation stops short of the last page because SQLite reads a partial last
+ * page as whole, and the database then loads intact.
+ */
+type UnloadableFile =
+  | { bytes: Uint8Array }
+  | { truncated: number }
+  | { ahead: number };
+
+const unloadableFileArb: fc.Arbitrary<UnloadableFile> = fc.oneof(
+  fc
+    .uint8Array({ minLength: 1, maxLength: 4096 })
+    .filter((bytes) => SQLITE_HEADER.some((byte, i) => bytes[i] !== byte))
+    .map((bytes) => ({ bytes })),
+  fc
+    .double({ min: 0, max: 1, maxExcluded: true, noNaN: true })
+    .map((truncated) => ({ truncated })),
+  fc.integer({ min: 1, max: 2 ** 20 }).map((ahead) => ({ ahead }))
+);
+
+/** SQLite's default page size, which sql.js writes databases with. */
+const PAGE_SIZE = 4096;
+
+let fullDbBytes: Promise<Uint8Array> | null = null;
+
+/** A database of several pages, for cutting short. */
+function getFullDbBytes(): Promise<Uint8Array> {
+  return (fullDbBytes ??= dbFileWith(
+    Array.from({ length: 200 }, (_, i) => `full-${i}`)
+  ));
+}
+
+/**
+ * A file that opens as a database but fails its migrations, which is only
+ * found out once a backup of it is taken: a database from before migrations
+ * were tracked (schema version 0) that lacks the tables they alter.
+ */
+const UNMIGRATABLE = { unmigratable: true } as const;
+
+/** The bytes of an {@link UnloadableFile}, or of {@link UNMIGRATABLE}. */
+async function unloadableBytes(
+  file: UnloadableFile | typeof UNMIGRATABLE
+): Promise<Uint8Array> {
+  if ('bytes' in file) return file.bytes;
+  if ('truncated' in file) {
+    const full = await getFullDbBytes();
+    const cut = 1 + Math.floor(file.truncated * (full.length - PAGE_SIZE - 1));
+    return full.slice(0, cut);
+  }
+  const SQL = await getSharedSql();
+  if ('unmigratable' in file) {
+    const db = new SQL.Database();
+    db.exec('CREATE TABLE unrelated (x INTEGER)');
+    const bytes = db.export();
+    db.close();
+    return bytes;
+  }
+  const db = new SQL.Database(await getEmptyDbBytes());
+  const version = db.exec('PRAGMA user_version')[0].values[0][0] as number;
+  db.exec(`PRAGMA user_version = ${version + file.ahead}`);
+  const bytes = db.export();
+  db.close();
+  return bytes;
+}
+
+/** Ids of every article row in the database file in `files`. */
+async function idsInFile(files: Map<string, Uint8Array>): Promise<string[]> {
+  const bytes = files.get(DATABASE_FILE_PATH);
+  if (!bytes) return [];
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(bytes);
+  const result = db.exec('SELECT id FROM article');
+  db.close();
+  return (result[0]?.values ?? []).map((row) => row[0] as string);
+}
+
+/**
+ * `setImmediate` rather than a zero `setTimeout`, which Windows rounds up to
+ * its timer resolution: properties wait out several of these a run.
+ */
+function nextMacrotask(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * Let floating saves run to completion. Against the fake adapter each takes
+ * at most one macrotask plus a handful of microtasks.
+ */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 3; i++) await nextMacrotask();
+}
+
+/** An index that sees both the data folder and the database file. */
+const INDEXED: IndexView = { folder: true, file: true };
+
+/**
+ * Bytes of a schema version 9 database file holding `ids`: what a device still
+ * on 0.6 writes, before the `rebind` table of version 10.
+ */
+async function staleFileWith(ids: readonly string[]): Promise<Uint8Array> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(await dbFileWith(ids));
+  db.exec('DROP TABLE rebind; PRAGMA user_version = 9');
+  const bytes = db.export();
+  db.close();
+  return bytes;
+}
+
+/** Make every migration's verification fail, as data loss would. */
+function failMigrationVerification() {
+  vi.spyOn(
+    SQLJSRepository.prototype as unknown as {
+      verifyMigration(): { passed: boolean; errors: string[] };
+    },
+    'verifyMigration'
+  ).mockReturnValue({ passed: false, errors: ['rows went missing'] });
+}
+
+/** Paths written under the backup folder. */
+function backupWrites(adapter: ReturnType<typeof makeVault>['adapter']) {
+  return adapter.writeBinary.mock.calls
+    .map(([path]) => path)
+    .filter((path) => path.startsWith(`${BACKUP_DIRECTORY}/`));
+}
+
+/** The schema version of the database file in `files`. */
+async function readVersion(files: Map<string, Uint8Array>): Promise<number> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(files.get(DATABASE_FILE_PATH));
+  const version = db.exec('PRAGMA user_version')[0].values[0][0] as number;
+  db.close();
+  return version;
+}
+
+/** The `modify` or `create` event Obsidian fires for the database file. */
+const dbFileChange = { path: DATABASE_FILE_PATH } as TAbstractFile;
+
+/** A started repository over a file holding `ids`. */
+async function startOver(ids: readonly string[], index = INDEXED) {
+  const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(ids)]]);
+  const vault = makeVault(index, files);
+  const onReloadFromDisk = vi.fn();
+  const onWriteBlocked = vi.fn();
+  const onWritesResumed = vi.fn();
+  const repo = await startRepo(vault.app, {
+    onReloadFromDisk,
+    onWriteBlocked,
+    onWritesResumed,
+  });
+  return { ...vault, repo, onReloadFromDisk, onWriteBlocked, onWritesResumed };
+}
+
+/** Every combination of what the index can report. */
+const indexViewArb = fc.record({ folder: fc.boolean(), file: fc.boolean() });
+
+/** Article ids for a database file, unique and NUL-free (see `rowWritesArb`). */
+const articleIdsArb = fc.uniqueArray(
+  fc.string({ unit: 'binary' }).filter((id) => !id.includes('\0')),
+  { maxLength: 20 }
+);
 // #endregion
 
 describe('onDataChange', () => {
@@ -1482,5 +1752,784 @@ describe('external sync while a transaction is open (model-based)', () => {
         }
       )
     );
+  });
+});
+
+describe('start', () => {
+  beforeEach(() => {
+    stubWasm();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'debug').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('property: loads the database file on disk whatever the vault index reports', async () => {
+    await fc.assert(
+      fc.asyncProperty(indexViewArb, articleIdsArb, async (index, ids) => {
+        const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(ids)]]);
+        const { app } = makeVault(index, files);
+
+        const repo = await startRepo(app);
+
+        expect(articleIds(repo).sort()).toEqual([...ids].sort());
+        repo.db?.close();
+      })
+    );
+  });
+
+  it('property: starts on an empty database, writing nothing, when no file is on disk', async () => {
+    await fc.assert(
+      fc.asyncProperty(indexViewArb, async (index) => {
+        const { app, adapter } = makeVault(index);
+
+        const repo = await startRepo(app);
+
+        expect(articleIds(repo)).toEqual([]);
+        expect(adapter.writeBinary).not.toHaveBeenCalled();
+        repo.db?.close();
+      })
+    );
+  });
+
+  it('property: refuses to start, writing nothing, when the file on disk cannot be loaded', async () => {
+    await fc.assert(
+      fc.asyncProperty(indexViewArb, unloadableFileArb, async (index, file) => {
+        const bytes = await unloadableBytes(file);
+        const files = new Map([[DATABASE_FILE_PATH, bytes]]);
+        const { app, adapter } = makeVault(index, files);
+
+        await expect(startRepo(app)).rejects.toThrow();
+
+        // The very bytes it started with: a write would have replaced them.
+        // Compared by identity, since deep-comparing a database's worth of
+        // bytes costs a third of a second a run.
+        expect(files.get(DATABASE_FILE_PATH)).toBe(bytes);
+        // Nor a backup of it: there is nothing in it to restore
+        expect(adapter.writeBinary).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('property: migrates a v9 file, keeping every row and backing it up', async () => {
+    await fc.assert(
+      fc.asyncProperty(indexViewArb, articleIdsArb, async (index, ids) => {
+        const files = new Map([[DATABASE_FILE_PATH, await staleFileWith(ids)]]);
+        const { app, adapter } = makeVault(index, files);
+
+        const repo = await startRepo(app);
+
+        expect(articleIds(repo).sort()).toEqual([...ids].sort());
+        expect((await idsInFile(files)).sort()).toEqual([...ids].sort());
+        expect(backupWrites(adapter)).toHaveLength(1);
+        repo.db?.close();
+      })
+    );
+  });
+
+  it('refuses to start, leaving the file as it was, when migrating it loses data', async () => {
+    failMigrationVerification();
+    const stale = await staleFileWith(['a']);
+    const files = new Map([[DATABASE_FILE_PATH, stale]]);
+    const { app } = makeVault(INDEXED, files);
+
+    await expect(startRepo(app)).rejects.toBeInstanceOf(
+      MigrationVerificationError
+    );
+    expect(files.get(DATABASE_FILE_PATH)).toBe(stale);
+  });
+
+  it('names the file it could not load in the error it refuses to start with', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, new Uint8Array([0])]]);
+    const { app } = makeVault(INDEXED, files);
+
+    const error = await startRepo(app).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(DatabaseLoadError);
+    expect(error).toMatchObject({
+      name: 'DatabaseLoadError',
+      dbFilePath: DATABASE_FILE_PATH,
+      message: `Db file found at ${DATABASE_FILE_PATH}, but failed to load`,
+    });
+  });
+
+  it('says why a file too short to hold a database was refused', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const files = new Map([[DATABASE_FILE_PATH, new Uint8Array([0])]]);
+    const { app } = makeVault(INDEXED, files);
+
+    await expect(startRepo(app)).rejects.toThrow();
+
+    expect(errors).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ error: 'the file holds no database' })
+    );
+  });
+
+  it('enforces foreign keys on the database it loads', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith([])]]);
+    const { app } = makeVault(INDEXED, files);
+    const repo = await startRepo(app);
+
+    expect(() =>
+      repo.mutate(
+        `INSERT INTO article_review (id, article_id, review_time)
+         VALUES ('r', 'no-such-article', 0)`
+      )
+    ).toThrow(/FOREIGN KEY/);
+    repo.db?.close();
+  });
+
+  it('refuses to start when no file is on disk and no database can be created', async () => {
+    const { app, adapter } = makeVault({ folder: true, file: false });
+
+    await expect(startRepo(app, { schema: 'not a statement' })).rejects.toThrow(
+      /create a database/
+    );
+    expect(adapter.writeBinary).not.toHaveBeenCalled();
+  });
+
+  it('property: a database started without a file saves every write, however many land together', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        indexViewArb,
+        articleIdsArb.filter((ids) => ids.length > 0),
+        fc.boolean(),
+        async (index, ids, slowExists) => {
+          const { app, files } = makeVault(index, new Map(), slowExists);
+          const onWriteBlocked = vi.fn();
+          const repo = await startRepo(app, { onWriteBlocked });
+
+          // Not awaited between writes: each save is still in flight when the
+          // next write starts its own.
+          for (const id of ids) insertArticleRow(repo, id);
+          await settle();
+
+          expect(onWriteBlocked).not.toHaveBeenCalled();
+          expect((await idsInFile(files)).sort()).toEqual([...ids].sort());
+          repo.db?.close();
+        }
+      )
+    );
+  });
+
+  it('property: a database started without a file never saves over one that appears later', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        indexViewArb,
+        articleIdsArb,
+        fc.uniqueArray(fc.constantFrom('local-1', 'local-2', 'local-3'), {
+          minLength: 1,
+        }),
+        fc.boolean(),
+        async (index, remoteIds, localIds, slowExists) => {
+          const { app, files } = makeVault(index, new Map(), slowExists);
+          const onWriteBlocked = vi.fn();
+          const repo = await startRepo(app, { onWriteBlocked });
+          // Brought down by Sync after startup, which Obsidian reports as a
+          // `create` that the repository does not hear
+          const arrived = await dbFileWith(remoteIds);
+          files.set(DATABASE_FILE_PATH, arrived);
+
+          insertArticleRow(repo, localIds[0]);
+          await settle();
+
+          expect(files.get(DATABASE_FILE_PATH)).toBe(arrived);
+          expect(onWriteBlocked).toHaveBeenCalledOnce();
+          expect((onWriteBlocked.mock.calls[0] as [Error])[0].message).toMatch(
+            /^A database file appeared on disk .* not be saved.* reload the plugin to load it\.$/
+          );
+          for (const id of localIds.slice(1)) {
+            expect(() => insertArticleRow(repo, id)).toThrow();
+          }
+          await expect(repo.transaction(() => {})).rejects.toThrow();
+          await settle();
+          expect(files.get(DATABASE_FILE_PATH)).toBe(arrived);
+          expect(onWriteBlocked).toHaveBeenCalledOnce();
+          repo.db?.close();
+        }
+      )
+    );
+  });
+});
+
+describe('reloading a file that changed on disk', () => {
+  beforeEach(() => {
+    stubWasm();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'debug').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('property: keeps what it had, and stops saving, until the changed file can be loaded', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        articleIdsArb,
+        fc.oneof(unloadableFileArb, fc.constant(UNMIGRATABLE)),
+        articleIdsArb,
+        async (localIds, unloadable, laterIds) => {
+          fc.pre(![...localIds, ...laterIds].includes('local-write'));
+          const files = new Map([
+            [DATABASE_FILE_PATH, await dbFileWith(localIds)],
+          ]);
+          const { app } = makeVault({ folder: true, file: true }, files);
+          const onWriteBlocked = vi.fn();
+          const onWritesResumed = vi.fn();
+          const onReloadFromDisk = vi.fn();
+          const repo = await startRepo(app, {
+            onWriteBlocked,
+            onWritesResumed,
+            onReloadFromDisk,
+          });
+
+          const broken = await unloadableBytes(unloadable);
+          files.set(DATABASE_FILE_PATH, broken);
+          await repo.handleFileChange(dbFileChange);
+          // A second change that fails the same way says nothing new
+          await repo.handleFileChange(dbFileChange);
+
+          expect(articleIds(repo).sort()).toEqual([...localIds].sort());
+          expect(() => insertArticleRow(repo, 'local-write')).toThrow();
+          await expect(repo.transaction(() => {})).rejects.toThrow();
+          await settle();
+          expect(files.get(DATABASE_FILE_PATH)).toBe(broken);
+          expect(onWriteBlocked).toHaveBeenCalledOnce();
+          expect((onWriteBlocked.mock.calls[0] as [Error])[0].message).toMatch(
+            /^The database file changed on disk but could not be loaded\. Changes will not be saved until it loads\.$/
+          );
+          expect(onReloadFromDisk).not.toHaveBeenCalled();
+          expect(onWritesResumed).not.toHaveBeenCalled();
+
+          files.set(DATABASE_FILE_PATH, await dbFileWith(laterIds));
+          await repo.handleFileChange(dbFileChange);
+          // Told once, as writes resume, and not again by a later reload
+          await repo.handleFileChange(dbFileChange);
+          expect(onWritesResumed).toHaveBeenCalledOnce();
+
+          expect(onReloadFromDisk).toHaveBeenCalledTimes(2);
+          expect(articleIds(repo).sort()).toEqual([...laterIds].sort());
+          insertArticleRow(repo, 'local-write');
+          await settle();
+          expect((await idsInFile(files)).sort()).toEqual(
+            [...laterIds, 'local-write'].sort()
+          );
+          repo.db?.close();
+        }
+      )
+    );
+  });
+
+  it('property: migrates a v9 file another device wrote, and keeps saving', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        articleIdsArb,
+        articleIdsArb,
+        async (localIds, staleIds) => {
+          fc.pre(!staleIds.includes('local-write'));
+          const files = new Map([
+            [DATABASE_FILE_PATH, await dbFileWith(localIds)],
+          ]);
+          const { app, adapter } = makeVault(INDEXED, files);
+          const onReloadFromDisk = vi.fn();
+          const repo = await startRepo(app, { onReloadFromDisk });
+
+          files.set(DATABASE_FILE_PATH, await staleFileWith(staleIds));
+          await repo.handleFileChange(dbFileChange);
+
+          expect(onReloadFromDisk).toHaveBeenCalledOnce();
+          expect(backupWrites(adapter)).toHaveLength(1);
+          expect(articleIds(repo).sort()).toEqual([...staleIds].sort());
+          insertArticleRow(repo, 'local-write');
+          await settle();
+          expect((await idsInFile(files)).sort()).toEqual(
+            [...staleIds, 'local-write'].sort()
+          );
+          repo.db?.close();
+        }
+      )
+    );
+  });
+
+  it.each([
+    { handler: true, warned: 'the migration failure handler' },
+    { handler: false, warned: 'onWriteBlocked' },
+  ])(
+    'stops saving when migrating a changed file loses data, warning through $warned',
+    async ({ handler }) => {
+      const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+      const { app } = makeVault(INDEXED, files);
+      const onWriteBlocked = vi.fn();
+      const onMigrationFailure = vi.fn();
+      const repo = await startRepo(app, {
+        onWriteBlocked,
+        ...(handler ? { onMigrationFailure } : {}),
+      });
+      failMigrationVerification();
+      const stale = await staleFileWith(['b']);
+      files.set(DATABASE_FILE_PATH, stale);
+
+      await repo.handleFileChange(dbFileChange);
+
+      expect(articleIds(repo)).toEqual(['a']);
+      expect(() => insertArticleRow(repo, 'c')).toThrow(
+        MigrationVerificationError
+      );
+      await settle();
+      expect(files.get(DATABASE_FILE_PATH)).toBe(stale);
+      if (handler) {
+        expect(onMigrationFailure).toHaveBeenCalledWith(
+          expect.any(MigrationVerificationError)
+        );
+        expect(onWriteBlocked).not.toHaveBeenCalled();
+      } else {
+        expect(onWriteBlocked).toHaveBeenCalledWith(
+          expect.any(MigrationVerificationError)
+        );
+      }
+      repo.db?.close();
+    }
+  );
+
+  it('migrates and saves a v9 file even while saving is refused', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const { app } = makeVault(INDEXED, files);
+    const onWriteBlocked = vi.fn();
+    const repo = await startRepo(app, { onWriteBlocked });
+    files.set(DATABASE_FILE_PATH, new Uint8Array([0]));
+    await repo.handleFileChange(dbFileChange);
+    expect(onWriteBlocked).toHaveBeenCalledOnce();
+
+    files.set(DATABASE_FILE_PATH, await staleFileWith(['b']));
+    await repo.handleFileChange(dbFileChange);
+
+    expect(await readVersion(files)).toBe(10);
+    insertArticleRow(repo, 'c');
+    await settle();
+    expect((await idsInFile(files)).sort()).toEqual(['b', 'c']);
+    repo.db?.close();
+  });
+
+  it('keeps saving when a reload succeeds but what runs after it fails', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const { app } = makeVault(INDEXED, files);
+    const onWriteBlocked = vi.fn();
+    const repo = await startRepo(app, {
+      onWriteBlocked,
+      onReloadFromDisk: () => {
+        throw new Error('a listener failed');
+      },
+    });
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['b']));
+
+    await repo.handleFileChange(dbFileChange);
+    insertArticleRow(repo, 'c');
+    await settle();
+
+    expect(onWriteBlocked).not.toHaveBeenCalled();
+    expect((await idsInFile(files)).sort()).toEqual(['b', 'c']);
+    repo.db?.close();
+  });
+
+  it('property: a database started without a file takes on one that arrives, and saves over it from then on', async () => {
+    await fc.assert(
+      fc.asyncProperty(articleIdsArb, async (remoteIds) => {
+        fc.pre(!remoteIds.includes('local-write'));
+        const { app, files } = makeVault(INDEXED);
+        const onWriteBlocked = vi.fn();
+        const repo = await startRepo(app, { onWriteBlocked });
+        files.set(DATABASE_FILE_PATH, await dbFileWith(remoteIds));
+
+        await repo.handleFileChange(dbFileChange);
+        insertArticleRow(repo, 'local-write');
+        await settle();
+
+        expect(onWriteBlocked).not.toHaveBeenCalled();
+        expect((await idsInFile(files)).sort()).toEqual(
+          [...remoteIds, 'local-write'].sort()
+        );
+        repo.db?.close();
+      })
+    );
+  });
+
+  it('closes the database a reload replaced', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const { app } = makeVault(INDEXED, files);
+    const repo = await startRepo(app);
+    const replaced = repo.db!;
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['b']));
+
+    await repo.handleFileChange(dbFileChange);
+
+    expect(articleIds(repo)).toEqual(['b']);
+    expect(() => replaced.exec('SELECT 1')).toThrow(/closed/);
+    repo.db?.close();
+  });
+
+  it('property: overlapping reloads end on the newest file, however their reads finish', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(unloadableFileArb, fc.constant(UNMIGRATABLE)),
+        fc.boolean(),
+        async (unloadable, slowFirst) => {
+          const files = new Map([
+            [DATABASE_FILE_PATH, await dbFileWith(['a'])],
+          ]);
+          const { app, adapter } = makeVault(INDEXED, files);
+          const onWriteBlocked = vi.fn();
+          const repo = await startRepo(app, { onWriteBlocked });
+          // Sync writes the file in two passes, each firing `modify`. Each
+          // read sees the file as it was when the read was issued, and the
+          // first may finish after the second.
+          let releaseFirst!: () => void;
+          const firstHeld = new Promise<void>((r) => (releaseFirst = r));
+          let reads = 0;
+          adapter.readBinary.mockImplementation(async (path: string) => {
+            const bytes = files.get(path)!;
+            if (reads++ === 0 && slowFirst) await firstHeld;
+            return bytes.slice().buffer;
+          });
+
+          files.set(DATABASE_FILE_PATH, await unloadableBytes(unloadable));
+          const first = repo.handleFileChange(dbFileChange);
+          // Otherwise the first reload finishes before the second change
+          if (!slowFirst) await first;
+          await settle();
+          files.set(DATABASE_FILE_PATH, await dbFileWith(['b']));
+          const second = repo.handleFileChange(dbFileChange);
+          await settle();
+          releaseFirst();
+          await Promise.all([first, second]);
+          await settle();
+
+          expect(articleIds(repo)).toEqual(['b']);
+          insertArticleRow(repo, 'c');
+          await settle();
+          expect((await idsInFile(files)).sort()).toEqual(['b', 'c']);
+          // Told only of a failure no newer file had already overtaken
+          expect(onWriteBlocked).toHaveBeenCalledTimes(slowFirst ? 0 : 1);
+          repo.db?.close();
+        }
+      )
+    );
+  });
+
+  it('saves when the vault index misses a data folder that is on disk', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const { app, adapter, vault } = makeVault(
+      { folder: false, file: true },
+      files
+    );
+    vault.createFolder.mockRejectedValue(new Error('Folder already exists.'));
+    const exists = adapter.exists.getMockImplementation()!;
+    adapter.exists.mockImplementation(
+      async (path: string) => path === DATA_DIRECTORY || exists(path)
+    );
+    const repo = await startRepo(app);
+
+    insertArticleRow(repo, 'b');
+    await settle();
+
+    expect((await idsInFile(files)).sort()).toEqual(['a', 'b']);
+    repo.db?.close();
+  });
+
+  it('reports a data folder it could not create, saving nothing', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const before = files.get(DATABASE_FILE_PATH);
+    const { app, vault } = makeVault({ folder: false, file: true }, files);
+    vault.createFolder.mockRejectedValueOnce(new Error('EACCES'));
+    const repo = await startRepo(app);
+
+    insertArticleRow(repo, 'b');
+    await settle();
+
+    expect(files.get(DATABASE_FILE_PATH)).toBe(before);
+    expect(errors).toHaveBeenCalledWith(
+      'Incremental Reading - Failed to save database:',
+      expect.objectContaining({ error: 'EACCES' })
+    );
+
+    // The next save tries again rather than failing on the first attempt
+    insertArticleRow(repo, 'c');
+    await settle();
+    expect((await idsInFile(files)).sort()).toEqual(['a', 'b', 'c']);
+    repo.db?.close();
+  });
+
+  it('passes over a failed migration of a file that changed again before it finished', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const { app, adapter } = makeVault(INDEXED, files);
+    const onMigrationFailure = vi.fn();
+    const onWriteBlocked = vi.fn();
+    const repo = await startRepo(app, { onMigrationFailure, onWriteBlocked });
+    failMigrationVerification();
+    let releaseFirst!: () => void;
+    const firstHeld = new Promise<void>((r) => (releaseFirst = r));
+    const read = adapter.readBinary.getMockImplementation()!;
+    adapter.readBinary.mockImplementationOnce(async (path: string) => {
+      const bytes = await read(path);
+      await firstHeld;
+      return bytes;
+    });
+
+    files.set(DATABASE_FILE_PATH, await staleFileWith(['stale']));
+    const first = repo.handleFileChange(dbFileChange);
+    await settle();
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['b']));
+    const second = repo.handleFileChange(dbFileChange);
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(onMigrationFailure).not.toHaveBeenCalled();
+    expect(onWriteBlocked).not.toHaveBeenCalled();
+    expect(articleIds(repo)).toEqual(['b']);
+    insertArticleRow(repo, 'c');
+    repo.db?.close();
+  });
+
+  it('does not reload the file its own save is writing', async () => {
+    const { repo, adapter } = await startOver(['a']);
+    let finishWrite!: () => void;
+    const write = adapter.writeBinary.getMockImplementation()!;
+    adapter.writeBinary.mockImplementationOnce(async (path, data) => {
+      await new Promise<void>((resolve) => (finishWrite = resolve));
+      return write(path, data);
+    });
+    adapter.readBinary.mockClear();
+
+    insertArticleRow(repo, 'b');
+    await settle();
+    // Obsidian reports the write in progress as a change to the file
+    await repo.handleFileChange(dbFileChange);
+    finishWrite();
+    await settle();
+
+    expect(adapter.readBinary).not.toHaveBeenCalled();
+    repo.db?.close();
+  });
+
+  it('takes on a file Sync brings down while its first save is still checking the path, writing nothing over it', async () => {
+    const { app, files, adapter } = makeVault(INDEXED);
+    const repo = await startRepo(app);
+    // The first save asks whether the path is free; the answer is no file,
+    // but it reaches the save only after Sync has written one
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    adapter.exists.mockImplementationOnce(async (path: string) => {
+      const exists = files.has(path);
+      await answered;
+      return exists;
+    });
+
+    insertArticleRow(repo, 'local');
+    await settle();
+    const arrived = await dbFileWith(['remote']);
+    files.set(DATABASE_FILE_PATH, arrived);
+    await repo.handleFileChange(dbFileChange);
+    answer();
+    await settle();
+
+    expect(files.get(DATABASE_FILE_PATH)).toBe(arrived);
+    expect(articleIds(repo)).toEqual(['remote']);
+    insertArticleRow(repo, 'later');
+    await settle();
+    expect((await idsInFile(files)).sort()).toEqual(['later', 'remote']);
+    repo.db?.close();
+  });
+
+  it('holds a reload that comes due while a transaction is open until it settles', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const { app } = makeVault(INDEXED, files);
+    let finishListener!: () => void;
+    const listenerHeld = new Promise<void>((r) => (finishListener = r));
+    const onReloadFromDisk = vi
+      .fn()
+      .mockImplementationOnce(() => listenerHeld)
+      .mockResolvedValue(undefined);
+    const repo = await startRepo(app, { onReloadFromDisk });
+    // A reload still telling its listener when the file changes again, so a
+    // second one is due as soon as the first is done
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['b']));
+    const firstReload = repo.handleFileChange(dbFileChange);
+    await settle();
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['c']));
+    void repo.handleFileChange(dbFileChange);
+    let finishWork!: () => void;
+    const transaction = repo.transaction(async () => {
+      insertArticleRow(repo, 'x');
+      await new Promise<void>((resolve) => (finishWork = resolve));
+      insertArticleRow(repo, 'y');
+    });
+
+    finishListener();
+    await firstReload;
+    await settle();
+    finishWork();
+
+    await expect(transaction).resolves.toBeUndefined();
+    expect(articleIds(repo).sort()).toEqual(['b', 'x', 'y']);
+    await settle();
+    expect(onReloadFromDisk).toHaveBeenCalledTimes(2);
+    repo.db?.close();
+  });
+
+  it('runs a reload a transaction held back even when saving its commit fails', async () => {
+    // Started without a file, so the commit's save finds the one that
+    // arrived meanwhile and refuses to write over it
+    const { app, files } = makeVault(INDEXED);
+    const repo = await startRepo(app);
+    let finishWork!: () => void;
+    const transaction = repo.transaction(async () => {
+      insertArticleRow(repo, 'local');
+      await new Promise<void>((resolve) => (finishWork = resolve));
+    });
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    await repo.handleFileChange(dbFileChange);
+
+    finishWork();
+    await expect(transaction).rejects.toThrow();
+    await settle();
+
+    expect(articleIds(repo)).toEqual(['remote']);
+    insertArticleRow(repo, 'later');
+    await settle();
+    expect((await idsInFile(files)).sort()).toEqual(['later', 'remote']);
+    repo.db?.close();
+  });
+});
+
+describe('dispose', () => {
+  beforeEach(() => {
+    stubWasm();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('refuses every write afterwards, leaving the file as it was', async () => {
+    const { repo, files } = await startOver(['a']);
+    const before = files.get(DATABASE_FILE_PATH);
+
+    repo.dispose();
+
+    expect(() => insertArticleRow(repo, 'b')).toThrow(/disposed/);
+    await expect(repo.transaction(() => {})).rejects.toThrow();
+    await expect(repo.bulkMutate([{ query: 'SELECT 1' }])).rejects.toThrow();
+    await settle();
+    expect(files.get(DATABASE_FILE_PATH)).toBe(before);
+  });
+
+  it('closes the database', async () => {
+    const { repo } = await startOver(['a']);
+    const db = repo.db!;
+
+    repo.dispose();
+
+    expect(repo.db).toBeNull();
+    expect(() => db.exec('SELECT 1')).toThrow(/closed/);
+  });
+
+  it('ignores the file changing on disk afterwards', async () => {
+    const { repo, adapter, onReloadFromDisk } = await startOver(['a']);
+    adapter.readBinary.mockClear();
+
+    repo.dispose();
+    await repo.handleFileChange(dbFileChange);
+
+    expect(adapter.readBinary).not.toHaveBeenCalled();
+    expect(onReloadFromDisk).not.toHaveBeenCalled();
+    expect(repo.db).toBeNull();
+  });
+
+  it('drops a reload that was reading the file when it was disposed', async () => {
+    const { repo, adapter, files, onReloadFromDisk, onWriteBlocked } =
+      await startOver(['a']);
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['b']));
+    let release!: () => void;
+    const read = adapter.readBinary.getMockImplementation()!;
+    adapter.readBinary.mockImplementationOnce(async (path: string) => {
+      await new Promise<void>((resolve) => (release = resolve));
+      return read(path);
+    });
+
+    const reload = repo.handleFileChange(dbFileChange);
+    await settle();
+    repo.dispose();
+    release();
+    await reload;
+
+    expect(repo.db).toBeNull();
+    expect(onReloadFromDisk).not.toHaveBeenCalled();
+    // A reload that was dropped did not fail, and is nothing to warn about
+    expect(onWriteBlocked).not.toHaveBeenCalled();
+  });
+
+  it('drops a reload an open transaction was holding back', async () => {
+    const { repo, adapter } = await startOver(['a']);
+    let finishWork!: () => void;
+    const transaction = repo.transaction(
+      () => new Promise<void>((resolve) => (finishWork = resolve))
+    );
+    await repo.handleFileChange(dbFileChange);
+    adapter.readBinary.mockClear();
+
+    repo.dispose();
+    finishWork();
+    await transaction.catch(() => undefined);
+    await settle();
+
+    expect(adapter.readBinary).not.toHaveBeenCalled();
+  });
+
+  it('leaves nothing open when disposed while migrating a changed file', async () => {
+    const { repo, adapter, files } = await startOver(['a']);
+    files.set(DATABASE_FILE_PATH, await staleFileWith(['b']));
+    // The reload reads the file, then the backup reads it again: hold that one
+    const read = adapter.readBinary.getMockImplementation()!;
+    let release!: () => void;
+    adapter.readBinary
+      .mockImplementationOnce(read)
+      .mockImplementationOnce(async (path: string) => {
+        await new Promise<void>((resolve) => (release = resolve));
+        return read(path);
+      });
+
+    const reload = repo.handleFileChange(dbFileChange);
+    await settle();
+    repo.dispose();
+    release();
+    await reload;
+
+    expect(repo.db).toBeNull();
+  });
+
+  it('drops a save that had not reached the disk yet', async () => {
+    // The data folder missing from the index sends a save through
+    // `createFolder` first, which is held here
+    const { repo, adapter, vault } = await startOver(['a'], {
+      folder: false,
+      file: true,
+    });
+    let release!: () => void;
+    vault.createFolder.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (release = resolve))
+    );
+
+    insertArticleRow(repo, 'b');
+    await settle();
+    repo.dispose();
+    release();
+    await settle();
+
+    expect(adapter.writeBinary).not.toHaveBeenCalled();
   });
 });

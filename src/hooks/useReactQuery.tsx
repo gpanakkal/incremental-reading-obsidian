@@ -20,6 +20,9 @@ export function useQueue(subset: QueueSubset) {
   return useQuery({
     queryKey: ['queue', subset],
     queryFn: async () => reviewManager.getQueue(subset),
+    // A failed read of the database fails again on retry, and each retry
+    // would keep the error from showing a while longer
+    retry: false,
   });
 }
 

@@ -760,6 +760,8 @@ export class CardManager extends ItemManager {
     includeDismissed?: boolean;
     includeDeleted?: boolean;
     excludeIds?: string[];
+    /** Reject on a failed query rather than resolve to no rows */
+    throwOnError?: boolean;
   }) {
     let query = 'SELECT * FROM srs_card';
     const conditions = [];
@@ -812,7 +814,10 @@ export class CardManager extends ItemManager {
         `Param count ${params.length} exceeded the limit for query "${query}"`
       );
     }
-    return ((await this.repo.query(query, params)) ?? []) as SRSCardRow[];
+    const rows = opts?.throwOnError
+      ? await this.repo.query(query, params, { throwOnError: true })
+      : await this.repo.query(query, params);
+    return (rows ?? []) as SRSCardRow[];
   }
 
   getFsrs() {

@@ -4,7 +4,10 @@ import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import type { ReviewSession } from '#/lib/plugin-data';
 import { queryClient } from '#/lib/query-client';
-import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
+import {
+  DatabaseLoadError,
+  SQLJSRepository,
+} from '#/lib/repository/SQLJSRepository';
 import {
   resetSession,
   setCurrentItemId,
@@ -14,7 +17,7 @@ import {
   type ReviewPage,
 } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
-import IncrementalReadingPlugin from '#/main';
+import IncrementalReadingPlugin, { startupFailureMessage } from '#/main';
 // The Vitest alias points `obsidian` at this same file, so the `Menu` built
 // here is the one the plugin fills — importing it by path is what gives TS the
 // stub's recorded `items`, which the real class does not expose.
@@ -581,10 +584,16 @@ function makeImportReceiver() {
  */
 async function startDatabase(resync: (() => void) | undefined) {
   let onReloadFromDisk: (() => void | Promise<void>) | undefined;
+  let onWriteBlocked: ((error: Error) => void) | undefined;
+  let onWritesResumed: (() => void) | undefined;
+  const handleFileChange = vi.fn(async () => {});
   vi.spyOn(SQLJSRepository, 'start').mockImplementation((params) => {
     onReloadFromDisk = params.onReloadFromDisk;
+    onWriteBlocked = params.onWriteBlocked;
+    onWritesResumed = params.onWritesResumed;
     return Promise.resolve({
       onDataChange: vi.fn(() => () => {}),
+      handleFileChange,
     } as unknown as SQLJSRepository);
   });
   vi.spyOn(ReviewManager.prototype, 'refreshAllHighlights').mockResolvedValue(
@@ -603,7 +612,22 @@ async function startDatabase(resync: (() => void) | undefined) {
       initReviewManager(): Promise<void>;
     }
   ).initReviewManager.call(receiver);
-  return { reload: () => onReloadFromDisk!() };
+  /** Fire the vault event `name` for `file`, as Obsidian would. */
+  const fireVault = (name: string, file: unknown) => {
+    for (const [event, handler] of receiver.app.vault.on.mock.calls as [
+      string,
+      (file: unknown) => void,
+    ][]) {
+      if (event === name) handler(file);
+    }
+  };
+  return {
+    reload: () => onReloadFromDisk!(),
+    blockWrites: (error: Error) => onWriteBlocked!(error),
+    resumeWrites: () => onWritesResumed!(),
+    fireVault,
+    handleFileChange,
+  };
 }
 
 /**
@@ -2075,5 +2099,110 @@ describe('IncrementalReadingPlugin database reload', () => {
     const { reload } = await startDatabase(undefined);
 
     await expect(reload()).resolves.toBeUndefined();
+  });
+
+  it('tells the user why changes are no longer saved, until they are again', async () => {
+    Notice.reset();
+    const hide = vi.spyOn(Notice.prototype, 'hide');
+    const { blockWrites, resumeWrites } = await startDatabase(undefined);
+
+    blockWrites(new Error('The file could not be loaded.'));
+
+    expect(Notice.messages).toEqual([
+      'Incremental reading: The file could not be loaded.',
+    ]);
+    expect(hide).not.toHaveBeenCalled();
+
+    resumeWrites();
+
+    expect(hide).toHaveBeenCalledOnce();
+    expect(hide.mock.contexts[0]).toBeInstanceOf(Notice);
+  });
+
+  it('resumes quietly when no notice is up', async () => {
+    const hide = vi.spyOn(Notice.prototype, 'hide');
+    const { resumeWrites } = await startDatabase(undefined);
+
+    resumeWrites();
+
+    expect(hide).not.toHaveBeenCalled();
+  });
+
+  it('refetches the queue when the database is swapped in from disk', async () => {
+    const { reload } = await startDatabase(undefined);
+    // The spy `startDatabase` set up, handed back rather than replaced
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+
+    await reload();
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['queue'] });
+  });
+});
+
+describe('IncrementalReadingPlugin database file events', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each(['modify', 'create'])(
+    'hands the database a file the vault reports as %s',
+    async (event) => {
+      const { fireVault, handleFileChange } = await startDatabase(undefined);
+      const file = { path: 'any/path.sqlite' };
+
+      fireVault(event, file);
+
+      expect(handleFileChange).toHaveBeenCalledWith(file);
+    }
+  );
+});
+
+describe('startupFailureMessage', () => {
+  it('property: says a database file that would not load was left as it was', () => {
+    fc.assert(
+      fc.property(fc.string(), (path) => {
+        expect(startupFailureMessage(new DatabaseLoadError(path))).toBe(
+          `Incremental reading: the database file ${path} could not be ` +
+            'loaded, so the plugin did not start. The file was left ' +
+            'unchanged. See the console for details.'
+        );
+      })
+    );
+  });
+
+  it.each([new Error('boom'), 'not an error', undefined])(
+    'falls back to a general message for %s',
+    (error) => {
+      expect(startupFailureMessage(error)).toBe(
+        'Failed to initialize plugin. See the console for details.'
+      );
+    }
+  );
+});
+
+describe('IncrementalReadingPlugin unload', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('disposes the database repository', () => {
+    const dispose = vi.fn();
+    const receiver = { reviewManager: { repo: { dispose } } };
+
+    IncrementalReadingPlugin.prototype.onunload.call(
+      receiver as unknown as IncrementalReadingPlugin
+    );
+
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it('unloads when the database never started', () => {
+    const receiver = { reviewManager: undefined };
+
+    expect(() => {
+      IncrementalReadingPlugin.prototype.onunload.call(
+        receiver as unknown as IncrementalReadingPlugin
+      );
+    }).not.toThrow();
   });
 });

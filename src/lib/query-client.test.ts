@@ -253,6 +253,28 @@ describe('applyQueueChange', () => {
     expect(getQueueRow).toHaveBeenCalledWith('a99');
   });
 
+  it('leaves a page whose last fetch failed as it was, still failed', async () => {
+    seedQueue(QUEUE_KEY, {
+      rows: [makeQueueRow({ id: 'a1' })],
+      totalRows: 1,
+    });
+    const query = queryClient.getQueryCache().find({ queryKey: QUEUE_KEY })!;
+    query.setState({ status: 'error', error: new Error('queue unreadable') });
+    const manager = makeManager({ a1: null });
+
+    await applyQueueChange(
+      { table: 'article', op: 'update', ids: ['a1'] },
+      manager
+    );
+
+    // Still failed: the refetch the change asks for fails again here, as
+    // this cache has no fetcher to run
+    expect(queryClient.getQueryState(QUEUE_KEY)?.status).toBe('error');
+    expect(
+      queryClient.getQueryData<QueuePage>(QUEUE_KEY)?.rows.map((r) => r.id)
+    ).toEqual(['a1']);
+  });
+
   it('patches every cached page, not just the active one', async () => {
     const KEY_A = ['queue', { slice: { pageNumber: 0, entriesPerPage: 10 } }];
     const KEY_B = ['queue', { slice: { pageNumber: 1, entriesPerPage: 10 } }];

@@ -352,6 +352,9 @@ async function patchQueuePages(
 
   for (const [queryKey, page] of entries) {
     if (!page) continue;
+    // Patching would mark the page fetched and clear its error, bringing back
+    // rows the failed fetch could not vouch for
+    if (queryClient.getQueryState(queryKey)?.status === 'error') continue;
     let changed = false;
     let removed = 0;
     const rows: QueueRow[] = [];

@@ -25,6 +25,8 @@ import { QueueTable } from './QueueTable';
 import { VisibleRangeLabel } from './VisibleRangeLabel';
 
 const QUEUE_TABLE_TITLE = 'Upcoming';
+const QUEUE_ERROR_MESSAGE =
+  "Couldn't load the queue. See the developer console for details.";
 
 /**
  * The menu for one queue row. "Relink file…" is offered on every row so the
@@ -62,7 +64,7 @@ export function ReviewQueue() {
    */
   const renderedPage = useRef<number | null>(null);
 
-  const { data, isLoading } = useQueue({
+  const { data, isLoading, isError } = useQueue({
     slice: {
       pageNumber,
       entriesPerPage: QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
@@ -88,7 +90,24 @@ export function ReviewQueue() {
       .findPageForDate(date, QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE)
       .then((page) => {
         if (token === latestJump.current) setPageNumber(page);
+      })
+      .catch((error: unknown) => {
+        // The queue itself shows the failure once it refetches
+        console.error('Incremental Reading - Date lookup failed:', error);
       });
+  }
+
+  // A queue that could not be read says so rather than passing for an empty
+  // one. Rows still held from before the failure are not shown either: they
+  // are as stale as the database they came from, which may since have been
+  // swapped for one that does not hold them.
+  if (isError) {
+    return (
+      <div className="ir-queue-panel">
+        <div className="ir-queue-title">{QUEUE_TABLE_TITLE}</div>
+        <div className="ir-review-placeholder">{QUEUE_ERROR_MESSAGE}</div>
+      </div>
+    );
   }
 
   // First load has nothing to frame the spinner with; later page changes do,

@@ -436,15 +436,20 @@ export default class ReviewManager {
    * Fetch a whole review-queue subset as one sorted, flat array of `QueueRow`.
    * Unlike {@link getDue}, this fetches everything in the subset (no DB
    * pagination / limit).
+   *
+   * @throws if the queue cannot be read. An unreadable table must not pass
+   * for an empty one: the queue is where the user sees what they have, and
+   * "nothing due" over a database that failed to load reads as data loss.
    */
   async getQueue(subset?: QueueSubset): Promise<QueuePage> {
     const dueBy = subset?.date?.getTime() ?? Number.POSITIVE_INFINITY;
+    const fetch = { dueBy, throwOnError: true };
 
     const [articleRows, snippetRows, cardRows, parentPaths] = await Promise.all(
       [
-        this.articles.fetchMany({ dueBy }),
-        this.snippets.fetchMany({ dueBy }),
-        this.cards.fetchMany({ dueBy }),
+        this.articles.fetchMany(fetch),
+        this.snippets.fetchMany(fetch),
+        this.cards.fetchMany(fetch),
         this.#getParentPaths(),
       ]
     );

@@ -7,7 +7,11 @@ import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { render } from 'preact';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { useCurrentItemFileText, useReviewItems } from './useReactQuery';
+import {
+  useCurrentItemFileText,
+  useQueue,
+  useReviewItems,
+} from './useReactQuery';
 
 // #region HELPERS
 
@@ -411,6 +415,33 @@ describe('useCurrentItemFileText', () => {
 
     expect(result.item).toBeNull();
     expect(result.isLoading).toBe(false);
+  });
+});
+
+describe('useQueue', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    optionsSeen = [];
+    vi.restoreAllMocks();
+  });
+
+  // The option is the behavior here: react-query is mocked out in this file,
+  // and what `retry: false` does is react-query's own
+  it('asks react-query to report a failed fetch at once, not retry it', () => {
+    vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
+      reviewManager: { getQueue: vi.fn() },
+    } as never);
+    function Probe() {
+      useQueue({});
+      return null;
+    }
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(<Probe />, container);
+
+    // A failed read of the database fails again on retry, and each retry
+    // holds the spinner up a while longer before the error shows
+    expect(queryOptions('queue').retry).toBe(false);
   });
 });
 

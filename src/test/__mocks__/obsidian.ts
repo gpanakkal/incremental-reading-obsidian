@@ -79,6 +79,8 @@ export class Notice {
   constructor(message: string, _duration?: number) {
     Notice.messages.push(message);
   }
+
+  hide() {}
 }
 
 // CodeMirror state field stubs — imported by ObsidianHelpers but not called in tests

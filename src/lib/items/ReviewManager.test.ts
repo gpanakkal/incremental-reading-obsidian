@@ -1280,7 +1280,9 @@ describe('ReviewManager.getQueue', () => {
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(null);
     const date = new Date(YEAR_2000_MS);
     await manager.getQueue({ date });
-    expect(articleFetch).toHaveBeenCalledWith({ dueBy: date.getTime() });
+    expect(articleFetch).toHaveBeenCalledWith(
+      expect.objectContaining({ dueBy: date.getTime() })
+    );
   });
 
   describe('pagination', () => {
@@ -1524,6 +1526,43 @@ describe('ReviewManager.getQueue', () => {
       expect(page.firstDue).toBeNull();
       expect(page.lastDue).toBeNull();
     });
+  });
+});
+
+describe('ReviewManager.getQueue on a database it cannot read', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('property: rejects, rather than reporting an empty queue, when a table it reads cannot be queried', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.subarray(['article', 'snippet', 'srs_card'] as const, {
+          minLength: 1,
+        }),
+        async (unreadable) => {
+          const repo = TestRepository.create();
+          for (const table of unreadable) {
+            repo.db?.exec(`DROP TABLE ${table}`);
+          }
+          const manager = new ReviewManager(makePlugin(), repo);
+
+          await expect(manager.getQueue()).rejects.toThrow();
+          repo.db?.close();
+        }
+      )
+    );
   });
 });
 

@@ -3,6 +3,7 @@ import { ReviewContextProvider } from '#/components/ReviewContext';
 import type { QueuePage } from '#/components/types';
 import * as ReactQuery from '#/hooks/useReactQuery';
 import type { ActionStackEntry } from '#/lib/Actions';
+import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import { currentItemQueryFn } from '#/lib/query-client';
 import {
   resetSession,
@@ -37,10 +38,13 @@ function wireQueue({
   totalRows = 1,
   isLoading = false,
   hasData = true,
+  isError = false,
 }: {
   totalRows?: number;
   isLoading?: boolean;
   hasData?: boolean;
+  /** Whether the last fetch failed; any page given is from before it. */
+  isError?: boolean;
 } = {}) {
   const page: QueuePage = {
     rows: [],
@@ -51,6 +55,7 @@ function wireQueue({
   vi.spyOn(ReactQuery, 'useQueue').mockReturnValue({
     data: hasData ? page : undefined,
     isLoading,
+    isError,
   } as never);
   vi.spyOn(ReactQuery, 'useCurrentItem').mockReturnValue({
     data: undefined,
@@ -497,6 +502,63 @@ describe('ActionBar', () => {
 
       expect(beginReviewButton(container).getAttribute('aria-label')).toBe(
         'Nothing due for review'
+      );
+    });
+  });
+
+  describe('begin review button, beyond whether it is enabled', () => {
+    it('invites starting a review when items are due', () => {
+      wireQueue({ totalRows: 3 });
+
+      const container = mountBar();
+
+      expect(beginReviewButton(container).getAttribute('aria-label')).toBe(
+        'Start reviewing the queue'
+      );
+    });
+
+    // A contract on the cache key rather than on what renders: the button and
+    // the table must ask for the same page, or the two read separate cache
+    // entries that can disagree about whether anything is due
+    it('reads the queue page the table shows, so both share one fetch', () => {
+      wireQueue({ totalRows: 3 });
+
+      mountBar();
+
+      expect(ReactQuery.useQueue).toHaveBeenCalledWith({
+        slice: {
+          pageNumber: 0,
+          entriesPerPage: QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
+        },
+      });
+    });
+  });
+
+  describe('begin review button over a queue that cannot be read', () => {
+    it('property: is disabled, and says the queue could not be loaded', () => {
+      fc.assert(
+        fc.property(
+          fc.boolean(),
+          fc.nat({ max: 500 }),
+          (hasData, totalRows) => {
+            wireQueue({ isError: true, hasData, totalRows });
+            try {
+              const container = mountBar();
+              const button = beginReviewButton(container);
+              button.click();
+
+              expect(button.disabled).toBe(true);
+              expect(button.getAttribute('aria-label')).toBe(
+                "Couldn't load the queue"
+              );
+              expect(dispatch).not.toHaveBeenCalled();
+            } finally {
+              document.body.innerHTML = '';
+              dispatch.mockClear();
+              vi.restoreAllMocks();
+            }
+          }
+        )
       );
     });
   });
