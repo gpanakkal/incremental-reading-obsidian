@@ -811,10 +811,10 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
 
   // Maximizing is about giving a *visible* window enough room for the layout
   // under test. In headless mode the window is deliberately off-screen and its
-  // maximize() is a no-op, so the click can only ever cost a full timeout —
-  // set the viewport directly instead, which is what maximizing was buying us.
+  // maximize() is a no-op — set the viewport directly instead, which is what
+  // maximizing was buying us.
   //
-  // Best-effort, like the maximize click it replaces. Obsidian can close and
+  // Best-effort, like maximizing. Obsidian can close and
   // recreate windows during boot, and `waitForBootedVaultWindow` deliberately
   // returns its handle rather than throwing when the app dies — so this can be
   // reached holding a page that is already gone. Sizing the window is cosmetic;
@@ -823,12 +823,7 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
   if (isHeadless) {
     await window.setViewportSize(HEADLESS_VIEWPORT).catch(() => {});
   } else {
-    const maximizeButton = window.getByLabel('Maximize');
-    try {
-      await maximizeButton.click({ timeout: OPTIONAL_ELEMENT_TIMEOUT_MS });
-    } catch {
-      // Already maximized (Obsidian restores window state on reopen)
-    }
+    await maximizeVaultWindow(app);
 
     // Guarantee the vault window is the one receiving keyboard input. On a
     // relaunch no settings window is created, but the vault window is not
@@ -849,6 +844,33 @@ export async function openVault(app: ElectronApplication, vaultPath: string) {
   await assertVaultWindowIsAlone(app);
 
   return window;
+}
+
+/**
+ * Maximize the vault window through Electron rather than Obsidian's titlebar.
+ *
+ * The titlebar's Maximize button is drawn only off macOS, where the native
+ * traffic lights stand in for it, so clicking it there burned a full
+ * `OPTIONAL_ELEMENT_TIMEOUT_MS` on every launch — about 15 minutes of the macOS
+ * CI job — and left the window unmaximized anyway. The button also toggles, so
+ * on a relaunch that restored a maximized window it was labelled "Restore down"
+ * and cost the same timeout there. `maximize()` is idempotent on every platform.
+ *
+ * Best-effort, like the click it replaces: sizing is cosmetic, and an app
+ * already tearing down should fail on the caller's assertions, not here.
+ */
+async function maximizeVaultWindow(app: ElectronApplication) {
+  try {
+    await app.evaluate(({ BrowserWindow }, urlFragment) => {
+      BrowserWindow.getAllWindows()
+        .find((candidate) =>
+          candidate.webContents.getURL().includes(urlFragment)
+        )
+        ?.maximize();
+    }, VAULT_WINDOW_URL);
+  } catch {
+    // See above
+  }
 }
 
 /**
