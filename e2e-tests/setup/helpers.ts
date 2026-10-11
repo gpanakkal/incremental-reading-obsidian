@@ -198,6 +198,55 @@ async function applyStabilityPatches(app: ElectronApplication) {
 /** Hosts Obsidian's auto-updater contacts on every launch. */
 const UPDATE_HOSTS = ['releases.obsidian.md', 'raw.githubusercontent.com'];
 
+/** How often Electron checks that the worker that launched it is still alive. */
+const OWNER_POLL_MS = 1_000;
+
+/**
+ * Make Electron exit on its own once the test worker that launched it is gone.
+ *
+ * Playwright kills its Electron children from the worker's `exit` handler, and
+ * a worker that is terminated outright never runs one. On Windows that is how
+ * a worker always dies when the runner gives up on it (teardown timeout,
+ * interrupt, a killed `pnpm` tree that missed the grandchildren), and the OS
+ * does not take children down with their parent — so every such worker leaves
+ * an Obsidian running with no window on screen, holding the vault, the
+ * user-data dir, and the checkout it was launched from. Those piled up by the
+ * dozen and blocked worktree deletion hours later.
+ *
+ * The worker PID is passed in rather than read from `process.ppid`: on Windows
+ * Playwright launches Electron through `cmd.exe`, so the parent is a shell that
+ * lives exactly as long as Electron does.
+ *
+ * Installed right after launch, so a worker killed during the launch itself
+ * still leaks; `global-cleanup.ts` sweeps those up at the start and end of the
+ * next run.
+ */
+async function exitWhenOwnerDies(app: ElectronApplication) {
+  try {
+    await app.evaluate(
+      ({ app: electronApp }, { ownerPid, pollMs }) => {
+        const timer = setInterval(() => {
+          try {
+            // Signal 0 tests for existence without delivering anything.
+            process.kill(ownerPid, 0);
+          } catch (error) {
+            // EPERM: alive, just not ours to signal.
+            if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
+            clearInterval(timer);
+            // `exit`, not `quit`: nobody is left to answer a `beforeunload`.
+            electronApp.exit(0);
+          }
+        }, pollMs);
+        // Must never be what keeps an otherwise finished app alive.
+        timer.unref();
+      },
+      { ownerPid: process.pid, pollMs: OWNER_POLL_MS }
+    );
+  } catch {
+    // Best-effort, like the patches above.
+  }
+}
+
 /**
  * Answer renderer dialogs — `alert`, `confirm`, `beforeunload` — ourselves, for
  * every window this app opens.
@@ -310,6 +359,9 @@ export async function launchElectron(vaultPath: string) {
     // launches. Omitting the key lets Playwright supply a sanitized environment.
   });
 
+  // First: the sooner it is in, the shorter the window in which a killed worker
+  // leaks this process.
+  await exitWhenOwnerDies(app);
   await applyStabilityPatches(app);
   answerRendererDialogs(app);
 
@@ -317,6 +369,7 @@ export async function launchElectron(vaultPath: string) {
   stderrTails.set(app, tail);
 
   const proc = app.process();
+  launchedProcesses.set(app, proc);
   proc.stderr?.on('data', (chunk: Buffer) => {
     tail.push(chunk.toString());
     if (tail.length > STDERR_TAIL_LINES)
@@ -332,6 +385,13 @@ export async function launchElectron(vaultPath: string) {
 
   return app;
 }
+
+/**
+ * The process each app was launched as, kept because `app.process()` stops
+ * answering once Playwright disposes its handle — which can happen while the
+ * process itself is still running.
+ */
+const launchedProcesses = new WeakMap<ElectronApplication, ChildProcess>();
 
 /** OS-level exit, recorded only when the child process genuinely exits. */
 const exitedForReal = new WeakMap<
@@ -449,6 +509,14 @@ function hasExited(app: ElectronApplication) {
   }
 }
 
+function handleDisposed(app: ElectronApplication) {
+  try {
+    return !app.process();
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Close the Electron app and wait for the process to fully exit.
  * On Windows/Linux CI, app.close() can resolve before the Node ChildProcess
@@ -457,14 +525,17 @@ function hasExited(app: ElectronApplication) {
  * always escape the wait, preventing afterEach timeouts in CI.
  */
 export async function closeElectron(app: ElectronApplication) {
+  const proc = launchedProcesses.get(app);
+  if (!proc) return;
+
   // If the app already crashed, Playwright has torn down its internal handle
-  // and `process()` throws. There is nothing left to close, and letting this
-  // throw from afterEach would replace the test's real failure with a
-  // confusing "Cannot read properties of undefined" error.
-  let proc: ReturnType<ElectronApplication['process']>;
-  try {
-    proc = app.process();
-  } catch {
+  // and `process()` throws or returns nothing. There is nothing left to close,
+  // and letting this throw from afterEach would replace the test's real failure
+  // with a confusing "Cannot read properties of undefined" error. A disposed
+  // handle does not prove the process died, though, and one left running
+  // outlives the whole suite.
+  if (handleDisposed(app)) {
+    if (proc.exitCode === null) killProcessTree(proc);
     return;
   }
 

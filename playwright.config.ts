@@ -3,6 +3,9 @@ import { defineConfig } from '@playwright/test';
 // See https://playwright.dev/docs/test-configuration.
 export default defineConfig({
   outputDir: './e2e-tests/test-results',
+  // Kills Electrons orphaned by earlier runs, before and after this one.
+  globalSetup: './e2e-tests/setup/global-cleanup.ts',
+  globalTeardown: './e2e-tests/setup/global-cleanup.ts',
   fullyParallel: false,
   forbidOnly: !!process.env['CI'],
   workers: process.env['CI'] ? 1 : 5,
