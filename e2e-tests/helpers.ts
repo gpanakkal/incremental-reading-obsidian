@@ -326,9 +326,21 @@ export async function expectCompactIconBar(bar: Locator) {
 
   const measured = await bar.evaluate((el) => {
     const px = (value: string) => Number.parseFloat(value);
-    const step = px(
-      getComputedStyle(el.ownerDocument.body).getPropertyValue('--size-4-2')
-    );
+    /**
+     * The length `token`, a CSS custom property, holds where `host` sits, in
+     * pixels. Read through a box sized by it, since a custom property computes
+     * to its tokens unevaluated: on a phone Obsidian 1.14 sets `--icon-size` to
+     * `calc(20px * 1)`, which no parse reads.
+     */
+    const resolve = (host: Element, token: string) => {
+      const probe = host.ownerDocument.createElement('div');
+      probe.style.cssText = `position: absolute; visibility: hidden; width: var(${token});`;
+      host.appendChild(probe);
+      const width = px(getComputedStyle(probe).width);
+      probe.remove();
+      return width;
+    };
+    const step = resolve(el.ownerDocument.body, '--size-4-2');
     const style = getComputedStyle(el);
     return {
       step,
@@ -343,9 +355,7 @@ export async function expectCompactIconBar(bar: Locator) {
           text: button.textContent,
           iconLabelled: svg?.hasAttribute('aria-label') ?? null,
           iconWidth: svg?.getBoundingClientRect().width ?? null,
-          iconSize: svg
-            ? px(getComputedStyle(svg).getPropertyValue('--icon-size'))
-            : null,
+          iconSize: svg ? resolve(button, '--icon-size') : null,
           height: button.getBoundingClientRect().height,
         };
       }),
@@ -391,6 +401,43 @@ export async function selectParagraph(
     .click({ clickCount: 3 });
   // wait for Obsidian
   await window.waitForTimeout(waitMs);
+}
+
+/**
+ * Scroll the active editor until `text` is centred on screen, as a reader
+ * scrolls to a line before selecting it.
+ *
+ * CodeMirror only draws the lines near what is on screen, so a line further
+ * down may not be in the DOM at all: {@link selectParagraph} cannot find it,
+ * and its highlights paint nothing. How far it draws depends on the window, on
+ * everything above the line, and on when it last measured. On CI the review
+ * editor drew nothing past the image above the Security Principles list for
+ * 30s, though the same lines are drawn at once locally at CI's window size.
+ * Scrolling makes it measure and draw them, whatever the reason.
+ *
+ * Waits for an editor holding `text` first: the review tab shows its action
+ * bar a frame or so before its editor mounts and becomes the active one.
+ *
+ * Unofficial: `window.app`. `workspace.activeEditor` and `Editor.scrollIntoView`
+ * are API.
+ *
+ * @param text a sequence uniquely identifying the target line
+ */
+export async function scrollToText(window: Page, text: string) {
+  await window.waitForFunction((text) => {
+    const { app } = window as unknown as { app: App };
+    const editor = app.workspace.activeEditor?.editor;
+    const at = editor?.getValue().indexOf(text) ?? -1;
+    if (!editor || at < 0) return false;
+    editor.scrollIntoView(
+      {
+        from: editor.offsetToPos(at),
+        to: editor.offsetToPos(at + text.length),
+      },
+      true
+    );
+    return true;
+  }, text);
 }
 
 /**
@@ -1390,4 +1437,33 @@ export function readSnippetState(page: Page, path: string) {
       ),
     };
   }, path);
+}
+
+/**
+ * Wait until the extraction just run from the note at `path` has finished:
+ * `count` snippets in the vault, each tracked and painted in `path`, and the
+ * active editor holding what is on disk.
+ *
+ * `executeCommandById` returns while the command is still running, so a test
+ * that selects the next text straight away races it. The first extraction
+ * from a note tags it `ir-source`, a write the open editor takes as a reload,
+ * and a selection made before that lands can be lost to it: the next
+ * extraction then makes nothing, or a snippet without its highlight. Seen on
+ * CI's slower runners, and locally under CPU throttling.
+ */
+export async function expectExtractSettled(
+  page: Page,
+  path: string,
+  count: number
+) {
+  await expect
+    .poll(async () => {
+      const { rows, tracked, painted, editorText, diskText } =
+        await readSnippetState(page, path);
+      return {
+        settled: rows.filter(({ id }) => tracked[id] && painted[id]).length,
+        synced: editorText === diskText,
+      };
+    })
+    .toEqual({ settled: count, synced: true });
 }

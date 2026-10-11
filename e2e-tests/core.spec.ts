@@ -21,6 +21,7 @@ import {
   emulateMobile,
   executeCommandById,
   expectCompactIconBar,
+  expectExtractSettled,
   expectReviewOn,
   finalizeArticleImport,
   importArticle,
@@ -34,6 +35,7 @@ import {
   renameDecliningLinkUpdate,
   reviewHeader,
   reviewTitle,
+  scrollToText,
   selectParagraph,
   setDefaultEditingMode,
   setNativeMenus,
@@ -1401,8 +1403,14 @@ test.describe('Making a card', () => {
     }));
   };
 
-  async function extract(text: string) {
+  /** Select `text`, scrolled to first: see {@link scrollToText}. */
+  async function select(text: string) {
+    await scrollToText(window, text);
     await selectParagraph(window, text);
+  }
+
+  async function extract(text: string) {
+    await select(text);
     await executeCommandById(window, 'incremental-reading:extract-selection');
   }
 
@@ -1416,7 +1424,9 @@ test.describe('Making a card', () => {
     below: string
   ) {
     await extract(below);
+    await expectExtractSettled(window, path, 1);
     await extract(FURTHER_DOWN);
+    await expectExtractSettled(window, path, 2);
     // Settled: both painted, and both stored where the extract put them
     await expect
       .poll(async () =>
@@ -1430,7 +1440,7 @@ test.describe('Making a card', () => {
       FURTHER_DOWN
     );
 
-    await selectParagraph(window, line);
+    await select(line);
     await executeCommandById(window, 'incremental-reading:create-card');
     await expect(
       window.locator(
@@ -1593,7 +1603,7 @@ test.describe('Undoing an erasure', () => {
 
   async function extractBoth() {
     await openNote(window, SOURCE);
-    for (const text of [FIRST, SECOND]) {
+    for (const [i, text] of [FIRST, SECOND].entries()) {
       await window.evaluate((text) => {
         const { app } = window as unknown as { app: PageApp };
         const { editor } = app.workspace.activeEditor;
@@ -1604,6 +1614,7 @@ test.describe('Undoing an erasure', () => {
         );
       }, text);
       await executeCommandById(window, 'incremental-reading:extract-selection');
+      await expectExtractSettled(window, `${SOURCE}.md`, i + 1);
     }
     await expect
       .poll(async () =>
