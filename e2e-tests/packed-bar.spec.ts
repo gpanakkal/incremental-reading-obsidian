@@ -8,9 +8,8 @@ import {
   emulateMobile,
   executeCommandById,
   importArticle,
-  openNote,
   REVIEW_VIEW_TYPE,
-  selectParagraph,
+  reviewNewCard,
   waitForReviewItem,
 } from './helpers';
 import {
@@ -127,59 +126,6 @@ async function reviewArticle(page: Page) {
   await waitForReviewItem(page);
 }
 
-/** Unofficial: `window.app`, `app.plugins.plugins`. */
-type RepoWindow = {
-  app: {
-    plugins: {
-      plugins: Record<
-        string,
-        {
-          reviewManager: {
-            repo: {
-              query(sql: string): Record<string, unknown>[] | undefined;
-              mutate(sql: string, params?: unknown[]): Promise<unknown>;
-            };
-          };
-        }
-      >;
-    };
-  };
-};
-
-async function reviewCard(page: Page) {
-  await openNote(page, 'sources/Security Principles');
-  await selectParagraph(
-    page,
-    'Explain the security functions: Confidentiality, Integrity and Availability (CIA).'
-  );
-  await executeCommandById(page, 'incremental-reading:create-card');
-  const repo = () =>
-    page.evaluate(
-      () =>
-        (window as unknown as RepoWindow).app.plugins.plugins[
-          'incremental-reading'
-        ].reviewManager.repo.query('SELECT due FROM srs_card') ?? []
-    );
-  await expect.poll(async () => (await repo()).length).toBe(1);
-  // New cards are filed for tomorrow, so it is brought forward to now. Until
-  // the card is fully made, a later write of the row can put its due date
-  // back, so the change is repeated until it is seen to hold.
-  await expect(async () => {
-    await page.evaluate(async (at) => {
-      await (window as unknown as RepoWindow).app.plugins.plugins[
-        'incremental-reading'
-      ].reviewManager.repo.mutate('UPDATE srs_card SET due = $1', [at]);
-    }, Date.now());
-    await page.waitForTimeout(500);
-    const [{ due }] = await repo();
-    expect(due).toBeLessThanOrEqual(Date.now());
-  }).toPass();
-  await executeCommandById(page, 'incremental-reading:learn');
-  await page.locator('css=#begin-review-button').click();
-  // A card has no title line for waitForReviewItem; its bar says it is up
-  await expect(page.getByRole('button', { name: 'Show answer' })).toBeVisible();
-}
-
 test.describe('Separator between undo and the item actions', () => {
   test('shows only once a narrow bar packs undo against mark reviewed', async () => {
     await window.setViewportSize(WIDE);
@@ -213,7 +159,7 @@ test.describe('Separator between undo and the item actions', () => {
 
   test('parts undo from show answer on a card the same way', async () => {
     await window.setViewportSize(WIDE);
-    await reviewCard(window);
+    await reviewNewCard(window);
     await expectBar(window, {
       packed: false,
       shown: false,

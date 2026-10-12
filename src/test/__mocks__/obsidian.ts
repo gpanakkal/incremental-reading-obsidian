@@ -421,8 +421,8 @@ export class Component {
 export class MarkdownRenderer {
   static async render(
     _app: unknown,
-    markdown: string,
-    el: HTMLElement,
+    _markdown: string,
+    _el: HTMLElement,
     _sourcePath: string,
     _component: Component
   ): Promise<void> {

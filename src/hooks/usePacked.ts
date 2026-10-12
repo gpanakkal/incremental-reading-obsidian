@@ -41,18 +41,43 @@ export function isPacked(
  * row.
  */
 export function isZonePacked(zone: HTMLElement): boolean {
-  const win = zone.ownerDocument.defaultView ?? window;
-  const px = (value: string) => Number.parseFloat(value) || 0;
-  const widths = Array.from(zone.children)
+  return isPacked(
+    laidOutWidths(Array.from(zone.children)),
+    columnGap(zone),
+    zone.getBoundingClientRect().width
+  );
+}
+
+/**
+ * The room each of `children`, of a flex row, takes along it: its border box
+ * and its margins, and none at all for one out of layout (see
+ * {@link isZonePacked}).
+ */
+export function laidOutWidths(children: readonly Element[]): number[] {
+  return children
     .filter((child) => child.getClientRects().length > 0)
     .map((child) => {
-      const { marginLeft, marginRight } = win.getComputedStyle(child);
+      const { marginLeft, marginRight } =
+        windowOf(child).getComputedStyle(child);
       return (
         child.getBoundingClientRect().width + px(marginLeft) + px(marginRight)
       );
     });
-  const gap = px(win.getComputedStyle(zone).columnGap);
-  return isPacked(widths, gap, zone.getBoundingClientRect().width);
+}
+
+/** The flex row's `column-gap`, which is none when `normal`. */
+export function columnGap(zone: HTMLElement): number {
+  return px(windowOf(zone).getComputedStyle(zone).columnGap);
+}
+
+/** A computed length in px; 0 for one that is not a number, like `normal`. */
+export function px(value: string): number {
+  return Number.parseFloat(value) || 0;
+}
+
+/** The window `el` is laid out in, or this one for a windowless document. */
+export function windowOf(el: Element): typeof window {
+  return el.ownerDocument.defaultView ?? window;
 }
 
 /**
@@ -79,13 +104,44 @@ export function isZonePacked(zone: HTMLElement): boolean {
  * mounted, which would wipe that class: toggle classes on it instead.
  */
 export function usePacked(ref: RefObject<HTMLElement | null>): boolean {
-  const [packed, setPacked] = useState(false);
+  return useLayoutMeasure(ref, false, isZonePacked);
+}
+
+/**
+ * `measure` of the element under `ref`, kept current as it lays out again —
+ * the machinery under {@link usePacked}, which says what it watches and what
+ * it asks of the element and its caller.
+ *
+ * `depth` is how far down the observers reach: 1 watches the element and its
+ * children, 2 their children too. `initial` is the answer until the first
+ * measurement, and for good where there is no ResizeObserver to keep one
+ * current. A measurement of `undefined` — nothing to measure yet — keeps the
+ * last answer. A new `measure` or `depth` watches afresh, so pass a function that
+ * keeps its identity — a module-level one, say.
+ *
+ * `bodyClass` measures again whenever the classes on the window's <body>
+ * change too, for a `measure` that reads them: Obsidian flags the platform
+ * there, and can change it with no box under `ref` changing size.
+ */
+export function useLayoutMeasure<T>(
+  ref: RefObject<HTMLElement | null>,
+  initial: T,
+  measure: (el: HTMLElement) => T | undefined,
+  depth = 1,
+  { bodyClass = false }: { bodyClass?: boolean } = {}
+): T {
+  const [value, setValue] = useState(initial);
 
   useLayoutEffect(() => {
     const zone = ref.current;
     if (!zone) return;
 
-    let stop = watchZone(zone, zone.ownerDocument.defaultView, setPacked);
+    const watch = (win: typeof window | null) =>
+      watchLayout(zone, win, depth, bodyClass, () => {
+        const measured = measure(zone);
+        if (measured !== undefined) setValue(measured);
+      });
+    let stop = watch(zone.ownerDocument.defaultView);
     // Obsidian's own DOM extension, which a test document lacks. A tab moved
     // to a popout keeps its DOM, and an observer goes on reporting only the
     // layouts of the window it was made in.
@@ -93,39 +149,45 @@ export function usePacked(ref: RefObject<HTMLElement | null>): boolean {
       typeof (zone.onWindowMigrated as unknown) === 'function'
         ? zone.onWindowMigrated((win) => {
             stop();
-            stop = watchZone(zone, win.document.defaultView, setPacked);
+            stop = watch(win.document.defaultView);
           })
         : null;
     return () => {
       stop();
       stopMigrated?.();
     };
-  }, [ref]);
+  }, [ref, measure, depth, bodyClass]);
 
-  return packed;
+  return value;
 }
 
 /**
- * Report whether `zone` is packed, now and whenever it may have changed, with
- * observers from `win`. Returns what stops it.
+ * Call `onLayout` now and whenever `root` may have laid out anew, with
+ * observers from `win`: whenever it, or anything down to `depth` levels below
+ * it, resizes or comes and goes — and with `bodyClass`, whenever the classes
+ * on `win`'s <body> change. Returns what stops it.
  */
-function watchZone(
-  zone: HTMLElement,
+function watchLayout(
+  root: HTMLElement,
   win: typeof window | null,
-  report: (packed: boolean) => void
+  depth: number,
+  bodyClass: boolean,
+  onLayout: () => void
 ): () => void {
   if (typeof win?.ResizeObserver !== 'function') return () => {};
 
   // A zone out of layout — its tab in the background — measures 0px wide,
   // which says nothing about the row it is in once shown again
   const measure = () => {
-    if (zone.getClientRects().length > 0) report(isZonePacked(zone));
+    if (root.getClientRects().length > 0) onLayout();
   };
   const resizes = new win.ResizeObserver(measure);
   const observeAll = () => {
     resizes.disconnect();
-    for (const el of [zone, ...Array.from(zone.children)]) {
-      resizes.observe(el, { box: 'border-box' });
+    let level: Element[] = [root];
+    for (let i = 0; i <= depth; i++) {
+      for (const el of level) resizes.observe(el, { box: 'border-box' });
+      level = level.flatMap((el) => Array.from(el.children));
     }
   };
   const childChanges = new win.MutationObserver(() => {
@@ -134,10 +196,20 @@ function watchZone(
   });
 
   observeAll();
-  childChanges.observe(zone, { childList: true });
+  // The whole subtree, though only `depth` levels are watched for size: a
+  // change below them is rare, and costs no more than a measurement
+  childChanges.observe(root, { childList: true, subtree: true });
+  const bodyChanges = new win.MutationObserver(measure);
+  if (bodyClass) {
+    bodyChanges.observe(win.document.body, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+  }
   measure();
   return () => {
     resizes.disconnect();
     childChanges.disconnect();
+    bodyChanges.disconnect();
   };
 }

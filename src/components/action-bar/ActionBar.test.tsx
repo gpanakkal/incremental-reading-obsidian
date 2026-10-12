@@ -93,12 +93,28 @@ function mountBar({
     <ReviewContextProvider
       plugin={{ actions, app: {} } as never}
       reviewView={reviewView as never}
-      reviewManager={{} as never}
+      reviewManager={REVIEW_MANAGER as never}
     >
       <ActionBar />
     </ReviewContextProvider>
   );
 }
+
+/**
+ * Stand-in for the review manager covering what the grades read: a preview
+ * of when each would put the card, here all ten minutes out.
+ */
+const REVIEW_MANAGER = {
+  cards: {
+    previewDue: () =>
+      Object.fromEntries(
+        [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy].map((grade) => [
+          grade,
+          new Date(Date.now() + 10 * 60_000),
+        ])
+      ),
+  },
+};
 
 function moreOptionsButton(container: HTMLElement): HTMLButtonElement | null {
   return container.querySelector<HTMLButtonElement>('#more-options-button');
@@ -344,15 +360,45 @@ function getButton(container: HTMLElement, label: string): HTMLButtonElement {
   return found;
 }
 
-/** Grade buttons carry no tooltip, so they are found by their text. */
+/**
+ * A grade button, found by the word it shows, never the copy of the grades
+ * laid out only for the bar to measure, which is hidden from everyone.
+ */
 function queryGradeButton(
   container: HTMLElement,
   grade: string
 ): HTMLButtonElement | null {
   return (
-    Array.from(container.querySelectorAll('button')).find((b) =>
-      b.textContent?.includes(grade)
+    Array.from(container.querySelectorAll('button')).find(
+      (b) =>
+        b.querySelector('.ir-grade-word')?.textContent === grade &&
+        !b.closest('[aria-hidden="true"]')
     ) ?? null
+  );
+}
+
+/** The real grade group, wherever it is, or null when there is none. */
+function gradeGroup(container: HTMLElement): HTMLElement | null {
+  return container.querySelector<HTMLElement>(
+    '.ir-grade-group:not([aria-hidden="true"])'
+  );
+}
+
+/**
+ * Lay the bar out `width` px wide, everything in it 0px: room to spare for
+ * the grades inline, at any width but none.
+ */
+function layOutBar(width: number) {
+  const isBar = (el: HTMLElement) => el.classList.contains('ir-action-bar');
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+    function (this: HTMLElement) {
+      return new DOMRect(0, 0, isBar(this) ? width : 0, 30);
+    }
+  );
+  vi.spyOn(HTMLElement.prototype, 'getClientRects').mockImplementation(
+    function (this: HTMLElement) {
+      return [this.getBoundingClientRect()] as unknown as DOMRectList;
+    }
   );
 }
 
@@ -1368,6 +1414,7 @@ describe('ActionBar', () => {
         for (const [grade] of GRADES) {
           expect(queryGradeButton(container, grade)).toBeNull();
         }
+        expect(container.querySelector('.ir-grade-group')).toBeNull();
       });
     });
 
@@ -1380,6 +1427,143 @@ describe('ActionBar', () => {
         queryGradeButton(container, grade)?.click();
 
         expect(actions.gradeCard).toHaveBeenCalledWith(card, rating);
+      });
+
+      it('puts the grades in a row of their own after the bar until they are measured', () => {
+        // jsdom has no ResizeObserver to measure with
+        const container = mountItemBar(makeItem('card'), { showAnswer: true });
+
+        const row = container.querySelector('.ir-action-bar')
+          ?.nextElementSibling as HTMLElement | null;
+        expect(row?.className).toBe('ir-grade-row');
+        expect(Array.from(row?.children ?? [])).toEqual([
+          gradeGroup(container),
+        ]);
+      });
+
+      describe('where the grades do not fit inline', () => {
+        beforeEach(() => {
+          vi.useFakeTimers();
+          vi.stubGlobal(
+            'ResizeObserver',
+            class {
+              observe() {}
+              disconnect() {}
+            }
+          );
+          // No room at all
+          layOutBar(0);
+        });
+
+        afterEach(() => {
+          vi.useRealTimers();
+          vi.unstubAllGlobals();
+        });
+
+        it('puts them in a row of their own after the bar, and the middle zone goes on without them', async () => {
+          const container = mountItemBar(makeItem('card'), {
+            showAnswer: true,
+          });
+          await settle();
+
+          const row = container.querySelector('.ir-action-bar')
+            ?.nextElementSibling as HTMLElement | null;
+          expect(row?.className).toBe('ir-grade-row');
+          expect(Array.from(row?.children ?? [])).toEqual([
+            gradeGroup(container),
+          ]);
+          expect(
+            zone(container, 'center').querySelector('.ir-grade-group')
+          ).toBeNull();
+          expect(zoneChildren(container, 'center')[0]).toBe(
+            getButton(container, 'Create snippet')
+          );
+        });
+      });
+
+      describe('where the grades fit inline', () => {
+        beforeEach(() => {
+          vi.useFakeTimers();
+          vi.stubGlobal(
+            'ResizeObserver',
+            class {
+              observe() {}
+              disconnect() {}
+            }
+          );
+          layOutBar(1000);
+        });
+
+        afterEach(() => {
+          vi.useRealTimers();
+          vi.unstubAllGlobals();
+        });
+
+        it('puts them first in the middle zone, and has no row', async () => {
+          const container = mountItemBar(makeItem('card'), {
+            showAnswer: true,
+          });
+          await settle();
+
+          expect(zoneChildren(container, 'center')[0]).toBe(
+            gradeGroup(container)
+          );
+          expect(container.querySelector('.ir-grade-row')).toBeNull();
+        });
+
+        it.each(GRADES)(
+          'grades the card %s from there',
+          async (grade, rating) => {
+            const actions = makeActions();
+            const card = makeItem('card');
+            const container = mountItemBar(card, { showAnswer: true, actions });
+            await settle();
+            expect(
+              zone(container, 'center').contains(gradeGroup(container))
+            ).toBe(true);
+
+            queryGradeButton(container, grade)?.click();
+
+            expect(actions.gradeCard).toHaveBeenCalledExactlyOnceWith(
+              card,
+              rating
+            );
+          }
+        );
+      });
+
+      it('gives way to the selection controls in selection mode', () => {
+        const container = mountItemBar(makeItem('card'), {
+          showAnswer: true,
+          selectionMode: 'snippet',
+        });
+
+        expect(container.querySelector('.ir-grade-group')).toBeNull();
+        expect(container.querySelector('.ir-grade-row')).toBeNull();
+      });
+
+      it('shows no grades on the home screen, though the store keeps the card', () => {
+        reduxState.showAnswer = true;
+        reduxState.page = 'home';
+        wireQueue();
+        vi.spyOn(ReactQuery, 'useCurrentItem').mockReturnValue({
+          data: makeItem('card'),
+        } as never);
+
+        const container = mountBar();
+
+        expect(container.querySelector('.ir-grade-group')).toBeNull();
+        expect(container.querySelector('.ir-grade-row')).toBeNull();
+      });
+
+      it('lays a hidden copy of the grades out last in the bar, for it to measure', () => {
+        const container = mountItemBar(makeItem('card'), { showAnswer: true });
+
+        const ghost = barChildren(container).at(-1);
+        expect(ghost?.className).toBe('ir-grade-ghost');
+        expect(
+          ghost?.querySelector('.ir-grade-group')?.getAttribute('aria-hidden')
+        ).toBe('true');
       });
 
       it('stops offering to reveal or skip', () => {

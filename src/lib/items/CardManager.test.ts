@@ -2629,6 +2629,162 @@ describe('review — FSRS settings', () => {
       )
     );
   });
+
+  describe('previewDue', () => {
+    // #region PREVIEW HELPERS
+
+    /** A learning or relearning step, as the settings tab accepts one. */
+    const stepArb = fc
+      .tuple(
+        fc.oneof(
+          fc.integer({ min: 1, max: 2000 }),
+          fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER })
+        ),
+        fc.constantFrom('m', 'h', 'd')
+      )
+      .map(([count, unit]): StepUnit => `${count}${unit}`);
+
+    /** Every FSRS setting the settings tab exposes. */
+    const fsrsParamsArb = fc
+      .record({
+        request_retention: fc.double({ min: 0.7, max: 0.99, noNaN: true }),
+        // The settings tab takes any positive integer
+        maximum_interval: fc.oneof(
+          fc.integer({ min: 1, max: 36500 }),
+          fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER })
+        ),
+        enable_fuzz: fc.boolean(),
+        enable_short_term: fc.boolean(),
+        learning_steps: fc.array(stepArb, { maxLength: 6 }),
+        relearning_steps: fc.array(stepArb, { maxLength: 6 }),
+      })
+      .map((params) => generatorParameters(params));
+
+    /**
+     * A card in whatever state a history of reviews under `params` leaves it —
+     * New for no history, then Learning, Review or Relearning — in the display
+     * shape review reads, and a moment after its last review to preview it at.
+     */
+    function cardAndTimeArb(params: FSRSParameters) {
+      return fc
+        .record({
+          createdAt: fc.date({
+            min: new Date(2000, 0, 1),
+            max: new Date(2100, 0, 1),
+            noInvalidDate: true,
+          }),
+          reviews: fc.array(
+            fc.record({
+              grade: gradeArb,
+              delay: fc.integer({ min: 0, max: 400 * MS_PER_DAY }),
+            }),
+            { maxLength: 8 }
+          ),
+          previewDelay: fc.integer({ min: 0, max: 800 * MS_PER_DAY }),
+        })
+        .map(({ createdAt, reviews, previewDelay }) => {
+          const scheduler = fsrs(params);
+          let card = createEmptyCard(createdAt);
+          let time = createdAt.getTime();
+          for (const { grade, delay } of reviews) {
+            time += delay;
+            card = scheduler.next(card, new Date(time), grade).card;
+          }
+          const display = makeCardDisplay({
+            ...card,
+            state: State[card.state] as ISRSCardDisplay['state'],
+          });
+          return { card: display, now: new Date(time + previewDelay) };
+        });
+    }
+
+    // #endregion
+
+    it('property: shows the due date grading would write, for each grade, any card and any settings', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fsrsParamsArb.chain((params) =>
+            fc.tuple(fc.constant(params), cardAndTimeArb(params), gradeArb)
+          ),
+          async ([params, { card, now }, grade]) => {
+            const repo = makeReviewRepo(makeCardRow({ id: card.id }));
+            const manager = new CardManager(makePluginWithFsrs(params), repo);
+
+            const preview = manager.previewDue(card, now);
+            // A step past the last date a Date can hold leaves the card due
+            // at no date at all, which review refuses to write
+            const written = await manager.review(card, grade, now).then(
+              () => updateParamsFrom(repo)[UPDATE_PARAM.due],
+              () => NaN
+            );
+
+            expect(preview[grade].getTime()).toBe(written);
+          }
+        )
+      );
+    });
+
+    it('property: still shows what grading writes when the grade comes later than the preview, fuzz off', async () => {
+      // The buttons preview the card as they render, and the click lands
+      // whenever the reader gets to it. With fuzz on, ts-fsrs seeds the fuzz
+      // from the moment of the review, so the two can differ by a fuzzed
+      // interval: accepted until task 0087.
+      await fc.assert(
+        fc.asyncProperty(
+          fsrsParamsArb
+            .map((params) => ({ ...params, enable_fuzz: false }))
+            .chain((params) =>
+              fc.tuple(
+                fc.constant(params),
+                cardAndTimeArb(params),
+                gradeArb,
+                fc.integer({ min: 1, max: 10 * 60_000 })
+              )
+            ),
+          async ([params, { card, now }, grade, later]) => {
+            const repo = makeReviewRepo(makeCardRow({ id: card.id }));
+            const manager = new CardManager(makePluginWithFsrs(params), repo);
+
+            const gradedAt = new Date(now.getTime() + later);
+            // ts-fsrs counts the days since the last review by UTC date, so a
+            // grade on the next UTC day is a day further on — and rightly
+            // schedules from there
+            fc.pre(gradedAt.getUTCDate() === now.getUTCDate());
+            const preview = manager.previewDue(card, now);
+            const written = await manager.review(card, grade, gradedAt).then(
+              () => updateParamsFrom(repo)[UPDATE_PARAM.due] as number,
+              () => NaN
+            );
+
+            // Every interval is measured from the moment it is graded at
+            expect(written - gradedAt.getTime()).toBe(
+              preview[grade].getTime() - now.getTime()
+            );
+          }
+        )
+      );
+    });
+
+    it('property: previews all four grades and nothing else', () => {
+      fc.assert(
+        fc.property(
+          fsrsParamsArb.chain((params) =>
+            fc.tuple(fc.constant(params), cardAndTimeArb(params))
+          ),
+          ([params, { card, now }]) => {
+            const manager = new CardManager(
+              makePluginWithFsrs(params),
+              makeReviewRepo(makeCardRow())
+            );
+
+            expect(
+              Object.keys(manager.previewDue(card, now)).map(Number)
+            ).toEqual([Rating.Again, Rating.Hard, Rating.Good, Rating.Easy]);
+          }
+        )
+      );
+    });
+  });
 });
 
 describe('review — against the production schema', () => {

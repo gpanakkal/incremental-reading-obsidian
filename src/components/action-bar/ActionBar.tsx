@@ -1,6 +1,10 @@
 import { CardCogPlus } from '#/components/icons/CardCog';
 import { ScissorsPlus } from '#/components/icons/ScissorsPlus';
 import { useAppSelector } from '#/hooks/useAppSelector';
+import {
+  GRADE_GHOST_CLASS,
+  useGradePlacement,
+} from '#/hooks/useGradePlacement';
 import { useLeafHistory } from '#/hooks/useLeafHistory';
 import { usePacked } from '#/hooks/usePacked';
 import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
@@ -43,9 +47,9 @@ import {
 } from 'lucide-react';
 import { useLayoutEffect, useRef, useSyncExternalStore } from 'react';
 import { useDispatch, useStore } from 'react-redux';
-import { Rating } from 'ts-fsrs';
 import { useReviewContext } from '../ReviewContext';
 import { ButtonWithIcon, Separator, TextButton } from './BarButtons';
+import { GradeGroup } from './GradeGroup';
 import { ReviewTypeFilter } from './ReviewTypeFilter';
 import { TextScheduler } from './TextScheduler';
 
@@ -59,13 +63,28 @@ import { TextScheduler } from './TextScheduler';
  * Leading zone: the actions that act on the review session rather than on the
  * item in it — the tab's history, home, the type filter, undo. Middle: the
  * item's own actions. Trailing: the ⋮, which belongs to the view.
+ *
+ * A card's grades lead the middle zone while they fit there, and take a row of
+ * their own after the bar where they don't (see {@link useGradePlacement}),
+ * which styles.css puts between the bar and the card wherever the bar is.
  */
 export function ActionBar() {
   const page = useAppSelector((state) => state.page);
   const { data: currentItem } = useCurrentItem();
   const selectionMode = useAppSelector((state) => state.selectionMode);
+  const showAnswer = useAppSelector((state) => state.showAnswer);
   const dispatch = useDispatch();
   const itemActions = page !== 'home' && currentItem;
+  const gradedCard =
+    itemActions &&
+    selectionMode === null &&
+    !isMissingItem(currentItem) &&
+    isReviewCard(currentItem) &&
+    showAnswer
+      ? currentItem
+      : null;
+  const barRef = useRef<HTMLDivElement>(null);
+  const gradePlacement = useGradePlacement(barRef);
   const leadRef = useRef<HTMLDivElement>(null);
   const leadPacked = usePacked(leadRef);
   // Toggled on the element rather than rendered into `className`: a changed
@@ -77,50 +96,69 @@ export function ActionBar() {
   }, [leadPacked]);
 
   return (
-    <div className="ir-action-bar" tabIndex={-1}>
-      {/* setting a tabIndex makes the action bar focusable */}
-      <div ref={leadRef} className="ir-bar-lead">
-        <GlobalActions />
-        {page !== 'home' && (
-          <>
-            <ButtonWithIcon
-              tooltip="Go to home screen"
-              handleClick={() => {
-                dispatch(setPage('home'));
-              }}
-            >
-              <House />
-            </ButtonWithIcon>
-            <ReviewTypeFilter />
-            <UndoAction />
-            {itemActions && <Separator className={JOINT_SEPARATOR_CLASS} />}
-          </>
-        )}
-      </div>
-      <div className="ir-bar-center">
-        {page === 'home' && <HomeActions />}
-        {itemActions && selectionMode !== null && (
-          <SelectionActions kind={selectionMode} />
-        )}
-        {itemActions &&
-          selectionMode === null &&
-          isMissingItem(currentItem) && <MissingActions item={currentItem} />}
-        {itemActions &&
-          selectionMode === null &&
-          !isMissingItem(currentItem) && (
+    <>
+      <div ref={barRef} className="ir-action-bar" tabIndex={-1}>
+        {/* setting a tabIndex makes the action bar focusable */}
+        <div ref={leadRef} className="ir-bar-lead">
+          <GlobalActions />
+          {page !== 'home' && (
             <>
-              {isReviewArticle(currentItem) && (
-                <ArticleActions article={currentItem} />
-              )}
-              {isReviewSnippet(currentItem) && (
-                <SnippetActions snippet={currentItem} />
-              )}
-              {isReviewCard(currentItem) && <CardActions card={currentItem} />}
+              <ButtonWithIcon
+                tooltip="Go to home screen"
+                handleClick={() => {
+                  dispatch(setPage('home'));
+                }}
+              >
+                <House />
+              </ButtonWithIcon>
+              <ReviewTypeFilter />
+              <UndoAction />
+              {itemActions && <Separator className={JOINT_SEPARATOR_CLASS} />}
             </>
           )}
+        </div>
+        <div className="ir-bar-center">
+          {page === 'home' && <HomeActions />}
+          {itemActions && selectionMode !== null && (
+            <SelectionActions kind={selectionMode} />
+          )}
+          {itemActions &&
+            selectionMode === null &&
+            isMissingItem(currentItem) && <MissingActions item={currentItem} />}
+          {itemActions &&
+            selectionMode === null &&
+            !isMissingItem(currentItem) && (
+              <>
+                {isReviewArticle(currentItem) && (
+                  <ArticleActions article={currentItem} />
+                )}
+                {isReviewSnippet(currentItem) && (
+                  <SnippetActions snippet={currentItem} />
+                )}
+                {isReviewCard(currentItem) && (
+                  <CardActions
+                    card={currentItem}
+                    gradesInline={gradePlacement === 'inline'}
+                  />
+                )}
+              </>
+            )}
+        </div>
+        <div className="ir-bar-trail">
+          {itemActions && <MoreOptionsAction />}
+        </div>
+        {gradedCard && (
+          <div className={GRADE_GHOST_CLASS}>
+            <GradeGroup card={gradedCard} ghost />
+          </div>
+        )}
       </div>
-      <div className="ir-bar-trail">{itemActions && <MoreOptionsAction />}</div>
-    </div>
+      {gradedCard && gradePlacement === 'row' && (
+        <div className="ir-grade-row">
+          <GradeGroup card={gradedCard} />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -325,13 +363,23 @@ function SnippetActions({ snippet }: { snippet: ReviewSnippet }) {
   );
 }
 
-function CardActions({ card }: { card: ReviewCard }) {
+/**
+ * Once the answer is shown the grades lead, where they are inline; otherwise
+ * the bar has put them in their own row.
+ */
+function CardActions({
+  card,
+  gradesInline,
+}: {
+  card: ReviewCard;
+  gradesInline: boolean;
+}) {
   const showAnswer = useAppSelector((state) => state.showAnswer);
 
   return (
     <>
       {showAnswer ? (
-        <GradeActions card={card} />
+        gradesInline && <GradeGroup card={card} />
       ) : (
         <>
           <ShowAnswerAction />
@@ -386,35 +434,6 @@ function ShowAnswerAction() {
     >
       <Eye stroke="#00a700" />
     </ButtonWithIcon>
-  );
-}
-
-function GradeActions({ card }: { card: ReviewCard }) {
-  const { actions } = useReviewContext();
-
-  return (
-    <>
-      <ButtonWithIcon
-        handleClick={async () => await actions.gradeCard(card, Rating.Again)}
-      >
-        🔁 Forgot
-      </ButtonWithIcon>
-      <ButtonWithIcon
-        handleClick={async () => await actions.gradeCard(card, Rating.Hard)}
-      >
-        👎 Hard
-      </ButtonWithIcon>
-      <ButtonWithIcon
-        handleClick={async () => await actions.gradeCard(card, Rating.Good)}
-      >
-        👍 Good
-      </ButtonWithIcon>
-      <ButtonWithIcon
-        handleClick={async () => await actions.gradeCard(card, Rating.Easy)}
-      >
-        ✅ Easy
-      </ButtonWithIcon>
-    </>
   );
 }
 

@@ -32,6 +32,7 @@ import {
   type StateType,
   fsrs,
   generatorParameters,
+  Grades,
   State,
 } from 'ts-fsrs';
 import {
@@ -821,6 +822,20 @@ export class CardManager extends ItemManager {
   getFsrs() {
     const params = generatorParameters(this.plugin.settings.fsrsParams);
     return fsrs(params);
+  }
+
+  /**
+   * When each grade would make `card` due next, were it graded at `now`: the
+   * same scheduler {@link review} grades it with, so the two agree for as long
+   * as the settings and the moment do. With fuzz on, ts-fsrs seeds the fuzz
+   * from the moment of the review, so a grade made later than the preview can
+   * land a fuzzed interval away from it.
+   */
+  previewDue(card: ISRSCardDisplay, now: Date): Record<Grade, Date> {
+    const preview = this.getFsrs().repeat(card, now);
+    return Object.fromEntries(
+      Grades.map((grade) => [grade, preview[grade].card.due])
+    ) as Record<Grade, Date>;
   }
 
   async review(card: ISRSCardDisplay, grade: Grade, reviewTime?: Date) {

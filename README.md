@@ -54,7 +54,7 @@ Once you've imported some material, begin a study session by selecting the **Inc
 > [!tip]
 > If you don't want to see an item again, select **Dismiss from future review** instead.
 
-3. Cards you've made will appear in review on subsequent days. Mentally fill in the blank or answer the question, then show the answer. Grade yourself per [these criteria](#grading-cards).
+3. Cards you've made will appear in review on subsequent days. Mentally fill in the blank or answer the question, then show the answer. Grade yourself per [these criteria](#grade-cards).
 
 > [!warning]
 > For spaced repetition to work properly, make sure you're actually attempting to recall the answer before revealing it.
@@ -92,14 +92,14 @@ You can also create cards spanning multiple blocks, or from a portion of a block
 
 #### Grade cards
 
-After showing the answer for a card, you'll have four grading options to choose from.
+After showing the answer for a card, you'll have four grades to choose from. Each grade shows how long until the card comes back if you pick it, such as `10m` or `4d`.
 
 Choose:
 
 - **Easy** if you recalled the correct answer immediately
 - **Good** if the correct answer came to you fairly quickly, but not effortlessly
 - **Hard** if you were able to recall roughly the correct answer, but it took time and effort
-- **Again** if you didn't recall the answer
+- **Forgot** if you didn't recall the answer
 
 ### Other workflows
 

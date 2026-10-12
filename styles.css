@@ -875,6 +875,180 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
   color: var(--text-on-accent);
 }
 
+/* A card's grades (`.ir-grade-group`, GradeGroup.tsx): one segmented control
+   dressed as a single Obsidian button — its fill and shadow — so it follows
+   the theme and stands apart from the bar's bare icons. Thin dividers between
+   four equal segments — a grid of equal columns, each as wide as the widest
+   needs inline, and a quarter of the row in the row; each segment is its
+   grade's word, tinted with the theme's color for it, over the interval in
+   muted text.
+
+   The corners are `--radius-m` rather than the button radius, which mobile
+   turns into a full pill (`--input-radius`). */
+.ir-grade-group {
+  /* A step darker than `--background-modifier-border`, which a dark theme
+     fills buttons with (`--interactive-normal`), desktop and mobile alike */
+  --ir-grade-divider: var(--background-modifier-border-hover);
+  display: grid;
+  grid-auto-columns: 1fr;
+  grid-auto-flow: column;
+  border-radius: var(--radius-m);
+  background-color: var(--interactive-normal);
+  box-shadow: var(--input-shadow);
+  overflow: hidden;
+}
+
+/* Mobile draws its buttons with no shadow, and a light theme fills them with
+   `--background-secondary` — the bar's own surface, against which the group
+   would vanish. So it is filled as Obsidian fills a light mobile menu
+   (`.is-mobile.theme-light .menu`) and ringed by an outline, which paints
+   over the segments rather than under them. */
+.is-mobile .ir-grade-group {
+  outline: 1px solid var(--ir-grade-divider);
+  outline-offset: -1px;
+}
+
+.is-mobile.theme-light .ir-grade-group {
+  background-color: var(--background-primary);
+}
+
+/* Outranks Obsidian's dressing of every button — `button:not(.clickable-icon)`
+   and its `.mobile-tap` state, `button:hover`, and `.is-tablet`'s padding —
+   which would draw each segment as a button of its own.
+
+   Inline, the two lines fit the height of the bar's other buttons
+   (`--input-height`) with no padding above or below, so showing the grades
+   doesn't grow the bar. */
+.ir-grade-group > .ir-grade-button:not(.clickable-icon) {
+  /* For the divider below */
+  position: relative;
+  flex-direction: column;
+  gap: 0;
+  height: auto;
+  padding: 0 var(--size-4-3);
+  border-radius: 0;
+  background-color: transparent;
+  box-shadow: none;
+  line-height: 1.1;
+}
+
+/* Drawn over the segment rather than as its border, which would make every
+   segment after the first a pixel wider than the first in the equal row. */
+.ir-grade-group > .ir-grade-button + .ir-grade-button::before {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 1px;
+  background-color: var(--ir-grade-divider);
+}
+
+.ir-grade-group > .ir-grade-button:not(.clickable-icon):hover,
+.ir-grade-group > .ir-grade-button:not(.clickable-icon).mobile-tap {
+  background-color: var(--interactive-hover);
+  cursor: pointer;
+  box-shadow: none;
+}
+
+/* Inset: an outset ring would be clipped by the group's rounded corners. */
+.ir-grade-group > .ir-grade-button:not(.clickable-icon):focus-visible {
+  box-shadow: inset 0 0 0 2px var(--background-modifier-border-focus);
+}
+
+.ir-grade-group > .ir-grade-button:not(.clickable-icon):active {
+  background-color: var(--interactive-accent);
+}
+
+/* The theme's colors live on <body>, so they are read here, where each
+   segment inherits them, never aliased in `:root`. */
+.ir-grade-button.mod-forgot {
+  --ir-grade-tint: var(--color-red);
+}
+
+.ir-grade-button.mod-hard {
+  --ir-grade-tint: var(--color-orange);
+}
+
+.ir-grade-button.mod-good {
+  --ir-grade-tint: var(--color-green);
+}
+
+.ir-grade-button.mod-easy {
+  --ir-grade-tint: var(--color-blue);
+}
+
+.ir-grade-word {
+  color: var(--ir-grade-tint);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+}
+
+.ir-grade-interval {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+}
+
+.ir-grade-group > .ir-grade-button:not(.clickable-icon):active > span {
+  color: var(--text-on-accent);
+}
+
+/* Where the grades don't fit inline they take a row of their own
+   (`.ir-grade-row`, see useGradePlacement), the bar's surface carried on
+   between it and the card: below the bar at the top of the view, above it
+   where mobile moves the bar to the bottom. Four equal segments, full width. */
+.ir-grade-row {
+  display: flex;
+  flex-shrink: 0;
+  padding: 0 15px 10px;
+  background: var(--background-secondary);
+}
+
+.ir-grade-row > .ir-grade-group {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.ir-grade-row > .ir-grade-group > .ir-grade-button:not(.clickable-icon) {
+  padding-block: var(--size-4-1);
+}
+
+/* The bar's own order (1, with the views' bar rules above) put after it, so
+   the row sits between the card and the bar. */
+.is-mobile .ir-grade-row {
+  order: 1;
+  padding: 10px 15px 0;
+}
+
+.is-mobile .ir-review-interface > .ir-action-bar {
+  order: 2;
+}
+
+.is-phone
+  .ir-grade-row
+  > .ir-grade-group
+  > .ir-grade-button:not(.clickable-icon) {
+  padding-block: var(--size-4-2);
+}
+
+/* The copy of the grades the bar measures (`.ir-grade-ghost`, see
+   useGradePlacement), laid out at the width the group would take inline, and
+   taken out of the bar's layout entirely: absolutely placed, 0×0 and clipped,
+   it adds no width, no gap and nothing to scroll to. Hidden, so it's neither
+   seen nor clicked. */
+.ir-grade-ghost {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.ir-grade-ghost > .ir-grade-group {
+  width: max-content;
+}
+
 .ir-priority-label,
 .ir-fixed-interval-label,
 .ir-toggle-label {

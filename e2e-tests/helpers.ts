@@ -1467,3 +1467,68 @@ export async function expectExtractSettled(
     })
     .toEqual({ settled: count, synced: true });
 }
+
+/**
+ * The plugin's database, as a test reaches it from inside the page.
+ * Unofficial: `window.app`, `app.plugins.plugins`.
+ */
+export type RepoWindow = {
+  app: {
+    plugins: {
+      plugins: Record<
+        string,
+        {
+          reviewManager: {
+            repo: {
+              query(
+                sql: string
+              ):
+                | Record<string, unknown>[]
+                | Promise<Record<string, unknown>[]>
+                | undefined;
+              mutate(sql: string, params?: unknown[]): Promise<unknown>;
+            };
+          };
+        }
+      >;
+    };
+  };
+};
+
+/**
+ * Make a card of a paragraph in Security Principles, bring it due, and start
+ * reviewing it: returns with its Show answer button up.
+ */
+export async function reviewNewCard(page: Page) {
+  await openNote(page, 'sources/Security Principles');
+  await selectParagraph(
+    page,
+    'Explain the security functions: Confidentiality, Integrity and Availability (CIA).'
+  );
+  await executeCommandById(page, 'incremental-reading:create-card');
+  const repo = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as RepoWindow).app.plugins.plugins[
+          'incremental-reading'
+        ].reviewManager.repo.query('SELECT due FROM srs_card') ?? []
+    );
+  await expect.poll(async () => (await repo()).length).toBe(1);
+  // New cards are filed for tomorrow, so it is brought forward to now. Until
+  // the card is fully made, a later write of the row can put its due date
+  // back, so the change is repeated until it is seen to hold.
+  await expect(async () => {
+    await page.evaluate(async (at) => {
+      await (window as unknown as RepoWindow).app.plugins.plugins[
+        'incremental-reading'
+      ].reviewManager.repo.mutate('UPDATE srs_card SET due = $1', [at]);
+    }, Date.now());
+    await page.waitForTimeout(500);
+    const [{ due }] = await repo();
+    expect(due).toBeLessThanOrEqual(Date.now());
+  }).toPass();
+  await executeCommandById(page, 'incremental-reading:learn');
+  await page.locator('css=#begin-review-button').click();
+  // A card has no title line for waitForReviewItem; its bar says it is up
+  await expect(page.getByRole('button', { name: 'Show answer' })).toBeVisible();
+}

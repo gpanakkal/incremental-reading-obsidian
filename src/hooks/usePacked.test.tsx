@@ -4,7 +4,12 @@ import { type ComponentChildren, render } from 'preact';
 import { useRef } from 'preact/hooks';
 import { act } from 'preact/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isPacked, isZonePacked, usePacked } from './usePacked';
+import {
+  isPacked,
+  isZonePacked,
+  useLayoutMeasure,
+  usePacked,
+} from './usePacked';
 
 // #region HELPERS
 
@@ -562,5 +567,144 @@ describe('usePacked across boxes and windows', () => {
 
     migrate();
     expect(FakeResizeObserver.watched()).toEqual([]);
+  });
+});
+
+describe('useLayoutMeasure', () => {
+  /**
+   * What the tree under the ref measures as, by the test: the sum of every
+   * `data-width` in it, or undefined while it holds a `data-blank` element.
+   */
+  function totalWidth(root: HTMLElement): number | undefined {
+    if (root.querySelector('[data-blank]')) return undefined;
+    return Array.from(
+      root.querySelectorAll<HTMLElement>('[data-width]')
+    ).reduce((sum, el) => sum + Number(el.dataset.width), 0);
+  }
+
+  /** A root holding rows of cells, `depth` levels watched under it. */
+  function Tree({
+    rows,
+    depth,
+    blank = false,
+    measure = totalWidth,
+    bodyClass,
+  }: {
+    rows: readonly (readonly number[])[];
+    depth: number;
+    blank?: boolean;
+    measure?: (root: HTMLElement) => number | undefined;
+    bodyClass?: boolean;
+  }) {
+    const ref = useRef<HTMLDivElement>(null);
+    const total = useLayoutMeasure(
+      ref,
+      -1,
+      measure,
+      depth,
+      bodyClass === undefined ? undefined : { bodyClass }
+    );
+    return (
+      <div ref={ref} data-total={String(total)}>
+        {rows.map((cells, r) => (
+          // eslint-disable-next-line @eslint-react/no-array-index-key -- positional on purpose
+          <div key={r}>
+            {cells.map((width, c) => (
+              // eslint-disable-next-line @eslint-react/no-array-index-key -- positional on purpose
+              <span key={c} data-width={String(width)}>
+                <b />
+              </span>
+            ))}
+          </div>
+        ))}
+        {blank && <i data-blank="" />}
+      </div>
+    );
+  }
+
+  const renderTree = (props: Parameters<typeof Tree>[0]) => {
+    void act(() => render(<Tree {...props} />, container));
+  };
+  const rootEl = () => container.firstElementChild as HTMLElement;
+  const totalShown = () => rootEl().dataset.total;
+
+  it('watches exactly `depth` levels below the element', () => {
+    renderTree({ rows: [[10, 20]], depth: 2 });
+    const row = rootEl().children[0];
+    expect(FakeResizeObserver.watched()).toEqual([
+      rootEl(),
+      row,
+      ...Array.from(row.children),
+    ]);
+
+    render(null, container);
+    renderTree({ rows: [[10, 20]], depth: 1 });
+    expect(FakeResizeObserver.watched()).toEqual([
+      rootEl(),
+      rootEl().children[0],
+    ]);
+  });
+
+  it('watches afresh, without remounting, for a new depth or measure', () => {
+    renderTree({ rows: [[10, 20]], depth: 2 });
+    renderTree({ rows: [[10, 20]], depth: 1 });
+    expect(FakeResizeObserver.watched()).toEqual([
+      rootEl(),
+      rootEl().children[0],
+    ]);
+
+    renderTree({ rows: [[10, 20]], depth: 1, measure: () => 99 });
+    expect(totalShown()).toBe('99');
+  });
+
+  it('measures again when the deepest level it watches resizes', () => {
+    renderTree({ rows: [[10, 20]], depth: 2 });
+    expect(totalShown()).toBe('30');
+
+    renderTree({ rows: [[10, 50]], depth: 2 });
+    void act(() => FakeResizeObserver.resize(rootEl().children[0].children[1]));
+    expect(totalShown()).toBe('60');
+  });
+
+  it('measures again when anything below comes or goes, however deep', async () => {
+    renderTree({ rows: [[10]], depth: 1 });
+
+    renderTree({ rows: [[10, 5]], depth: 1 });
+    await act(flushMutations);
+    expect(totalShown()).toBe('15');
+  });
+
+  it('measures again as the classes on <body> change only when asked to', async () => {
+    // Reads the body's classes, as a placement reading `is-phone` does
+    const classCount = () => document.body.classList.length;
+    for (const bodyClass of [undefined, false, true]) {
+      document.body.className = '';
+      renderTree({ rows: [[10]], depth: 1, measure: classCount, bodyClass });
+      expect(totalShown()).toBe('0');
+
+      document.body.classList.add('is-phone');
+      await act(flushMutations);
+      expect(totalShown()).toBe(bodyClass ? '1' : '0');
+      render(null, container);
+    }
+    document.body.className = '';
+  });
+
+  it('keeps its last answer while a measurement has none', async () => {
+    renderTree({ rows: [[10]], depth: 2 });
+
+    renderTree({ rows: [[10, 5]], depth: 2, blank: true });
+    await act(flushMutations);
+    expect(totalShown()).toBe('10');
+  });
+
+  it('answers `initial` until there is a measurement, and where nothing can watch', () => {
+    renderTree({ rows: [[10]], depth: 2, blank: true });
+    expect(totalShown()).toBe('-1');
+
+    render(null, container);
+    vi.stubGlobal('ResizeObserver', undefined);
+    renderTree({ rows: [[10]], depth: 2 });
+    expect(totalShown()).toBe('-1');
   });
 });
