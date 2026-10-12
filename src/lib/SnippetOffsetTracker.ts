@@ -21,6 +21,17 @@ const related = (live: Span, other: Span) =>
   overlaps(live, other) || inside(other[0], live);
 
 /**
+ * How far a highlight's offsets reach past the end of a document of
+ * `docLength` whose body starts at `bodyStart`: by its end, or by its start
+ * where the two are out of order. Zero when both are in it.
+ */
+const pastEnd = (
+  { start_offset: start, end_offset: end }: SnippetHighlight,
+  bodyStart: number,
+  docLength: number
+) => Math.max(0, Math.max(start, end) + bodyStart - docLength);
+
+/**
  * Service for tracking snippet highlights and updating their offsets in real-time
  * as documents are edited.
  *
@@ -50,6 +61,9 @@ export class SnippetOffsetTracker {
    */
   private lastLive = new Map<string, number>();
   private edits = 0;
+
+  /** Ids of the highlights warned of as reaching past their note's end. */
+  private warnedPastEnd = new Set<string>();
 
   /**
    * Load highlights for a file into the cache
@@ -106,6 +120,14 @@ export class SnippetOffsetTracker {
    * doubling a character into two. (Undo and redo map here like any edit;
    * then `restoreHighlights` puts back exactly what they return to.)
    *
+   * Offsets past the document's end (the note shortened behind the plugin's
+   * back) stay as far past the end as they were: a highlight with none of
+   * its text in the document moves by as much as the body grows or shrinks,
+   * so text the note grows by never lands in it; one running past the end
+   * maps its part in the document while its end keeps its distance (text
+   * typed at the end shows in it, as all text up to the end does, without
+   * using that distance up).
+   *
    * @param filePath The file being edited
    * @param changes The CodeMirror ChangeSet from the transaction
    * @param oldBodyStart Body start offset in the old document (before changes)
@@ -129,10 +151,30 @@ export class SnippetOffsetTracker {
       return;
     }
 
-    const mapped = highlights.map((highlight) => {
+    // Offsets past the end of the document the edit was made to — the note
+    // shortened behind the plugin's back — are stale, and `mapPos` throws on
+    // them (see `pastEnd`)
+    const docLength = changes.length;
+    // How much the body grows (or shrinks) with the edit
+    const growth =
+      changes.newLength - newBodyStart - (docLength - oldBodyStart);
+    const mapped = highlights.flatMap((highlight) => {
+      const { start_offset: start } = highlight;
       // Convert body-relative to absolute positions in old document
-      const absoluteStart = highlight.start_offset + oldBodyStart;
-      const absoluteEnd = highlight.end_offset + oldBodyStart;
+      const absoluteStart = start + oldBodyStart;
+      const overhang = pastEnd(highlight, oldBodyStart, docLength);
+      // None of its text in the document: no edit to this text says where it
+      // goes, so it stays as far past the end, never taking in text the
+      // document grows by
+      if (overhang > 0 && absoluteStart >= docLength) {
+        highlight.start_offset += growth;
+        highlight.end_offset += growth;
+        return [];
+      }
+      // Running past the end: mapped as its part in the document, its end
+      // staying as far past the end (see below)
+      const end = highlight.end_offset - overhang;
+      const absoluteEnd = end + oldBodyStart;
 
       // Association controls which side of inserted text a mapped position
       // sticks to. mapPos(pos, 1) stays with content to the RIGHT of the change
@@ -146,7 +188,7 @@ export class SnippetOffsetTracker {
       // it back. Re-expansion only works if re-inserted text lands INSIDE the
       // range, so a collapsed highlight uses OUTWARD association (start=-1,
       // end=1): its start stays left of the insertion and its end stays right.
-      const isCollapsed = highlight.start_offset === highlight.end_offset;
+      const isCollapsed = start === end;
       const startAssoc = isCollapsed ? -1 : 1;
       const endAssoc = isCollapsed ? 1 : -1;
 
@@ -168,15 +210,15 @@ export class SnippetOffsetTracker {
         return [newStart, newEnd];
       };
 
-      const length = highlight.end_offset - highlight.start_offset;
+      const length = end - start;
       const span = map(changes);
       let wanted: Span | null = null;
       if (alternative && !isCollapsed && span[1] - span[0] !== length) {
         const alt = map(alternative);
         if (alt[1] - alt[0] === length) wanted = alt;
       }
-      const before: Span = [highlight.start_offset, highlight.end_offset];
-      return { span, wanted, isCollapsed, highlight, before };
+      const before: Span = [start, end];
+      return [{ span, wanted, isCollapsed, highlight, before, overhang }];
     });
 
     // Ties go by id, whatever order the rows were loaded in
@@ -219,12 +261,57 @@ export class SnippetOffsetTracker {
 
     // Those erased in one edit rank alike, then by id
     const now = ++this.edits;
-    mapped.forEach(({ highlight, span, isCollapsed }) => {
-      [highlight.start_offset, highlight.end_offset] = span;
+    // One running past the end stays as far past the new one: text typed at
+    // the end, though shown in it as all text up to the end is, doesn't use
+    // the overhang up, which would leave it a highlight over that text. (Its
+    // mapped part ends at the new end at most; the max only guards a body
+    // start past the document's end.)
+    const newEnd = changes.newLength - newBodyStart;
+    mapped.forEach(({ highlight, span, isCollapsed, overhang }) => {
+      highlight.start_offset = span[0];
+      // Its text in the document erased, it collapses as any highlight does
+      const live = span[0] < span[1];
+      highlight.end_offset =
+        overhang > 0 && live ? Math.max(span[1], newEnd) + overhang : span[1];
       if (!isCollapsed) this.lastLive.set(highlight.id, now);
     });
 
     this.highlightCache.set(filePath, highlights);
+  }
+
+  /**
+   * The absolute range `highlight` shows at in `filePath`'s document of
+   * `docLength`, whose body starts at `bodyStart`: cut at the document's
+   * end, or null where it shows nowhere — collapsed, out of order, starting
+   * before the document, or with none of its text in it.
+   *
+   * Offsets past the end are stale: the note was shortened behind the
+   * plugin's back, or they were saved wrong. This leaves them as they are,
+   * and the console hears of each such highlight once.
+   */
+  shownRange(
+    filePath: string,
+    highlight: SnippetHighlight,
+    bodyStart: number,
+    docLength: number
+  ): Span | null {
+    const start = highlight.start_offset + bodyStart;
+    const end = Math.min(highlight.end_offset + bodyStart, docLength);
+    const range: Span | null = start < 0 || start >= end ? null : [start, end];
+    if (
+      pastEnd(highlight, bodyStart, docLength) > 0 &&
+      !this.warnedPastEnd.has(highlight.id)
+    ) {
+      this.warnedPastEnd.add(highlight.id);
+      console.warn(
+        `Incremental Reading: the highlight of snippet "${highlight.reference}" ` +
+          `(offsets ${highlight.start_offset}-${highlight.end_offset}) reaches ` +
+          `past the end of "${filePath}" (body ${docLength - bodyStart} ` +
+          `characters long); ` +
+          (range ? 'it shows up to the end' : "it isn't shown")
+      );
+    }
+    return range;
   }
 
   /**

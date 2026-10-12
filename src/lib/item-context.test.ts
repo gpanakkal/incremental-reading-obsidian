@@ -400,7 +400,7 @@ describe('findContextFile', () => {
 });
 
 describe('highlightRange', () => {
-  it('maps valid body offsets to the same text in the full note, and rejects the rest', () => {
+  it('maps body offsets to the same text in the full note, cut at its end, and rejects the rest', () => {
     fc.assert(
       fc.property(highlightCaseArb, ({ note, offsets: { start, end } }) => {
         const snippet = makeSnippet({
@@ -410,23 +410,30 @@ describe('highlightRange', () => {
 
         const range = highlightRange(snippet, note.content);
 
+        // Past the note's end, the snippet's text is cut there, as its
+        // highlight is
+        const shownEnd = end === null ? null : Math.min(end, note.body.length);
         const valid =
-          start !== null &&
-          end !== null &&
-          start >= 0 &&
-          start < end &&
-          end <= note.body.length;
+          start !== null && shownEnd !== null && start >= 0 && start < shownEnd;
         if (!valid) {
           expect(range).toBeNull();
           return;
         }
         expect(range).toEqual([
           note.prefix.length + start,
-          note.prefix.length + end,
+          note.prefix.length + shownEnd,
         ]);
-        expect(note.content.slice(...range!)).toBe(note.body.slice(start, end));
+        expect(note.content.slice(...range!)).toBe(
+          note.body.slice(start, shownEnd)
+        );
       })
     );
+  });
+
+  it('cuts a highlight running past the end of the note at its end', () => {
+    const snippet = makeSnippet({ start_offset: 1, end_offset: 30 });
+
+    expect(highlightRange(snippet, '---\nk: v\n---\nabc')).toEqual([14, 16]);
   });
 
   it('accepts a highlight that ends exactly at the end of the note', () => {

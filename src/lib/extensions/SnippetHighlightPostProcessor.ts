@@ -42,18 +42,20 @@ export function registerSnippetHighlightPostProcessor(
 
       // The text this section was rendered from, frontmatter and all
       const { text, lineStart, lineEnd } = sectionInfo;
-      const section = readingSection(
-        text,
-        lineStart,
-        lineEnd,
-        ObsidianHelpers.getBodyStartOffset(text)
-      );
+      const bodyStart = ObsidianHelpers.getBodyStartOffset(text);
+      const section = readingSection(text, lineStart, lineEnd, bodyStart);
       if (!section) return;
 
       await reviewManager.getSnippetHighlights(file);
-      const highlights = reviewManager.snippets.offsetTracker.getHighlights(
-        file.path
-      );
+      const tracker = reviewManager.snippets.offsetTracker;
+      // Those live preview shows, so the console hears of one past the
+      // note's end here too. Painting cuts each to the section anyway, but
+      // would paint one starting before the note from the section's start.
+      const highlights = tracker
+        .getHighlights(file.path)
+        .filter((h) =>
+          tracker.shownRange(file.path, h, bodyStart, text.length)
+        );
 
       const component = new Component();
       component.load();

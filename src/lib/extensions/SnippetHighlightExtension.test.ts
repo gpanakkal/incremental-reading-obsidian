@@ -451,6 +451,84 @@ const isPlain = (init: MouseEventInit) =>
 /** Let a lookup the click started settle. */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/** Where the view paints each highlight, with its snippet's id. */
+function paintedRanges(view: EditorView) {
+  const painted: [from: number, to: number, id: string][] = [];
+  view
+    .plugin(snippetHighlightExtension)
+    ?.decorations.between(0, view.state.doc.length, (from, to, value) => {
+      painted.push([
+        from,
+        to,
+        String(
+          (value.spec as { attributes?: Record<string, string> }).attributes?.[
+            'data-snippet-id'
+          ]
+        ),
+      ]);
+    });
+  return painted;
+}
+
+/**
+ * What can happen to an open note: edits of {@link historyEditsArb}'s kind,
+ * each as a user's or a plugin's (any userEvent) or a sync (Obsidian's `set`,
+ * or the review editor's external sync), then undos and redos.
+ */
+const noteScriptArb = fc.record({
+  edits: historyEditsArb.chain((edits) =>
+    fc.tuple(
+      ...edits.map(
+        (e) =>
+          fc.record({
+            ...Object.fromEntries(
+              Object.entries(e).map(([k, v]) => [k, fc.constant(v)])
+            ),
+            as: fc.oneof(
+              mappedUserEvent.map((userEvent) => ({ userEvent })),
+              fc.constant({ userEvent: 'set' }),
+              fc.constant({ sync: true })
+            ),
+          }) as fc.Arbitrary<
+            (typeof edits)[number] & {
+              as: { userEvent?: string; sync?: boolean };
+            }
+          >
+      )
+    )
+  ),
+  history: fc.array(fc.constantFrom(undo, redo), { maxLength: 6 }),
+});
+
+/**
+ * Play `script` on `view`, calling `step` after each edit, undo and redo
+ * with what it was: a sync, an edit, or an undo or redo.
+ */
+function playScript(
+  view: EditorView,
+  {
+    edits,
+    history: commands,
+  }: typeof noteScriptArb extends fc.Arbitrary<infer T> ? T : never,
+  step: (kind: 'sync' | 'edit' | 'history') => void = () => {}
+) {
+  for (const { changes, joinable, as } of edits) {
+    view.dispatch({
+      changes: placeChanges(changes, view.state.doc.length),
+      userEvent: as.userEvent,
+      annotations: [
+        ...(joinable ? [] : [isolateHistory.of('full')]),
+        ...(as.sync ? [isExternalSync.of(true)] : []),
+      ],
+    });
+    step(as.sync || as.userEvent === 'set' ? 'sync' : 'edit');
+  }
+  for (const command of commands) {
+    command(view);
+    step('history');
+  }
+}
+
 // #endregion
 
 // ---------------------------------------------------------------------------
@@ -1212,17 +1290,6 @@ describe('update() — undo and redo put highlights back', () => {
                 changes: specs,
                 annotations: joinable ? [] : isolateHistory.of('full'),
               });
-              // An edit that unmakes the frontmatter can leave highlights
-              // past the body's end, which mapping can't yet take (0077)
-              fc.pre(
-                rm.snippets.offsetTracker
-                  .getHighlights(FILE_PATH)
-                  .every(
-                    (h) =>
-                      h.end_offset + bodyStartOf(view.state.doc.toString()) <=
-                      view.state.doc.length
-                  )
-              );
               // Joined to the step before, or a step of its own
               if (undoDepth(view.state) > depth) {
                 steps.push({ before, after: offsetsOf(rm) });
@@ -1596,7 +1663,8 @@ describe('buildDecorations', () => {
     view.destroy();
   });
 
-  it('skips highlights where absoluteEnd > docLength', async () => {
+  it('paints nothing of a highlight wholly past the note’s end', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const rm = makeReviewManager();
     rm.snippets.offsetTracker.loadHighlights(FILE_PATH, [
       makeHighlight({ id: 'oob', start_offset: 9000, end_offset: 9010 }),
@@ -1624,7 +1692,8 @@ describe('buildDecorations', () => {
     view.destroy();
   });
 
-  it('skips highlights where absoluteEnd > docLength (out of bounds at end)', async () => {
+  it('paints a highlight running past the note’s end up to its end', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const rm = makeReviewManager();
     // doc is 5 chars, bodyStart=0, highlight end_offset=10 → absoluteEnd=10 > 5
     stubFileInfo(FILE_PATH, 'article');
@@ -1634,8 +1703,7 @@ describe('buildDecorations', () => {
     const irPlugin = makePlugin(rm);
     const view = makeView('hello', irPlugin); // 5 chars
     await flushAsync();
-    const plugin = view.plugin(snippetHighlightExtension);
-    expect(plugin!.decorations.size).toBe(0);
+    expect(paintedRanges(view)).toEqual([[2, 5, 'oob2']]);
     view.destroy();
   });
 
@@ -1656,6 +1724,7 @@ describe('buildDecorations', () => {
   });
 
   it('property: no throw for arbitrary highlight offsets and doc strings', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     stubFileInfo(FILE_PATH, 'article');
     await fc.assert(
       fc.asyncProperty(
@@ -2502,7 +2571,7 @@ describe('mutant-killing: highlightsLoaded set correctly after async load', () =
 // When absoluteEnd === docLength exactly, > allows it (decoration produced)
 // while >= skips it. Test with a highlight ending exactly at doc.length.
 // ---------------------------------------------------------------------------
-describe('mutant-killing: absoluteEnd boundary check (> vs >=)', () => {
+describe('mutant-killing: a highlight’s end at or past the note’s end', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('highlight ending at exactly docLength is included (not skipped)', async () => {
@@ -2529,8 +2598,9 @@ describe('mutant-killing: absoluteEnd boundary check (> vs >=)', () => {
     view.destroy();
   });
 
-  it('highlight ending one past docLength is skipped', async () => {
-    // doc = 'hello' (length=5), bodyStart=0, highlight end_offset=6 > 5 → skipped
+  it('highlight ending one past docLength is cut at the end', async () => {
+    // doc = 'hello' (length=5), bodyStart=0, highlight end_offset=6 > 5 → cut to 5
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const rm = makeReviewManager();
     rm.snippets.offsetTracker.loadHighlights(FILE_PATH, [
       makeHighlight({ id: 'oob', start_offset: 0, end_offset: 6 }),
@@ -2540,8 +2610,7 @@ describe('mutant-killing: absoluteEnd boundary check (> vs >=)', () => {
     stubFileInfo(FILE_PATH, 'article');
     const view = makeView('hello', irPlugin);
     await flushAsync();
-    const plugin = view.plugin(snippetHighlightExtension);
-    expect(plugin!.decorations.size).toBe(0);
+    expect(paintedRanges(view)).toEqual([[0, 5, 'oob']]);
     view.destroy();
   });
 });
@@ -2678,5 +2747,445 @@ describe('openHighlightFromEvent, for an item missing its file', () => {
     expect(Notice.messages).toEqual([
       'No file at "snippets/a.md". Relink the snippet from the review queue.',
     ]);
+  });
+});
+
+describe('highlights whose offsets lie past the note’s end', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([false, true])(
+    'an edit leaves the plugin running, and stale offsets as far past the end (review: %s)',
+    (review) => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const errors: unknown[] = [];
+      const { view, rm } = makeTrackedView(
+        'hello world',
+        [
+          makeHighlight({ id: 'live', start_offset: 6, end_offset: 11 }),
+          makeHighlight({ id: 'stale', start_offset: 40, end_offset: 50 }),
+        ],
+        review,
+        [EditorView.exceptionSink.of((e) => errors.push(e))]
+      );
+
+      view.dispatch({ changes: { from: 0, insert: '>> ' } });
+
+      expect(errors).toEqual([]);
+      expect(view.plugin(snippetHighlightExtension)).not.toBeNull();
+      expect(offsetsOf(rm)).toEqual({ live: [9, 14], stale: [43, 53] });
+      view.destroy();
+    }
+  );
+
+  it.each([false, true])(
+    'paints one running past the end up to the end, and none of one wholly past it (review: %s)',
+    (review) => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { view } = makeTrackedView(
+        'hello world',
+        [
+          makeHighlight({ id: 'live', start_offset: 0, end_offset: 5 }),
+          makeHighlight({ id: 'over', start_offset: 6, end_offset: 30 }),
+          makeHighlight({ id: 'stale', start_offset: 40, end_offset: 50 }),
+        ],
+        review
+      );
+
+      expect(paintedRanges(view)).toEqual([
+        [0, 5, 'live'],
+        [6, 11, 'over'],
+      ]);
+      view.destroy();
+    }
+  );
+
+  it('keeps what it painted in the note while a sync that shortened it waits on the database', () => {
+    const { view, rm } = makeTrackedView(
+      'hello world',
+      [makeHighlight({ id: 'end', start_offset: 6, end_offset: 11 })],
+      false
+    );
+    // The reload a sync starts in the standard editor never settles here
+    view.dispatch({ changes: { from: 0, to: 6 }, userEvent: 'set' });
+
+    expect(() =>
+      view.dispatch({ changes: { from: 0, insert: '>' }, userEvent: 'set' })
+    ).not.toThrow();
+    expect(paintedRanges(view)).toEqual([[1, 6, 'end']]);
+    expect(rm.getSnippetHighlights).toHaveBeenCalledTimes(2);
+    view.destroy();
+  });
+
+  it('never crashes the plugin, whatever the offsets, edits, syncs, undos and redos, in either editor', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fc.assert(
+      fc.property(
+        fc.tuple(frontmatterArb, bodyArb).map(([fm, body]) => fm + body),
+        fc.array(
+          fc.tuple(
+            fc.integer({ min: -20, max: 120 }),
+            fc.integer({ min: -20, max: 120 })
+          ),
+          { maxLength: 5 }
+        ),
+        noteScriptArb,
+        fc.boolean(),
+        (doc, spans, script, review) => {
+          fc.pre(!doc.includes('\r'));
+          const errors: unknown[] = [];
+          const { view } = makeTrackedView(
+            doc,
+            spans.map(([start, end], i) =>
+              makeHighlight({
+                id: `h${i}`,
+                start_offset: start,
+                end_offset: end,
+              })
+            ),
+            review,
+            [
+              history(),
+              snippetHighlightHistory,
+              EditorView.exceptionSink.of((e) => errors.push(e)),
+            ]
+          );
+          try {
+            playScript(view, script, () => {
+              expect(errors).toEqual([]);
+              expect(view.plugin(snippetHighlightExtension)).not.toBeNull();
+            });
+          } finally {
+            view.destroy();
+          }
+        }
+      ),
+      { numRuns: 150 }
+    );
+  });
+
+  it('maps and paints the highlights in the note as it would without those past its end, which edits but not syncs carry along past it, unpainted', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fc.assert(
+      fc.property(
+        fc.tuple(frontmatterArb, bodyArb).map(([fm, body]) => fm + body),
+        fc.array(fc.tuple(fc.nat(), fc.nat()), { maxLength: 4 }),
+        // Past any end the script's edits can take the note to
+        fc.array(fc.tuple(fc.nat({ max: 50 }), fc.nat({ max: 50 })), {
+          minLength: 1,
+          maxLength: 3,
+        }),
+        noteScriptArb,
+        fc.boolean(),
+        (doc, rawSpans, rawStale, script, review) => {
+          fc.pre(!doc.includes('\r'));
+          const bodyLength = doc.length - bodyStartOf(doc);
+          const inNote = rawSpans.map(([a, b], i) => {
+            const [x, y] = [a % (bodyLength + 1), b % (bodyLength + 1)];
+            return makeHighlight({
+              id: `in${i}`,
+              start_offset: Math.min(x, y),
+              end_offset: Math.max(x, y),
+            });
+          });
+          const stale = rawStale.map(([a, b], i) =>
+            makeHighlight({
+              id: `stale${i}`,
+              start_offset: doc.length + 1000 + a,
+              end_offset: doc.length + 1000 + b,
+            })
+          );
+          const extensions = [history(), snippetHighlightHistory];
+          const alone = makeTrackedView(
+            doc,
+            inNote.map((h) => ({ ...h })),
+            review,
+            extensions
+          );
+          const withStale = makeTrackedView(
+            doc,
+            [...inNote, ...stale],
+            review,
+            extensions
+          );
+          const offsets = (rm: FakeReviewManager) =>
+            Object.entries(offsetsOf(rm)).filter(([id]) => id.startsWith('in'));
+          try {
+            const seen: object[] = [];
+            playScript(alone.view, script, () =>
+              seen.push([offsets(alone.rm), paintedRanges(alone.view)])
+            );
+            // Where the stale rows should be: moved by as much as each edit
+            // grows the body, and not at all by a sync, which arrives with
+            // the offsets already right. (Undo and redo, which put back
+            // what a step found, have their own property below.)
+            const bodyLength = () => {
+              const text = withStale.view.state.doc.toString();
+              return text.length - bodyStartOf(text);
+            };
+            const expected = stale.map((h): [string, number[]] => [
+              h.id,
+              [h.start_offset, h.end_offset],
+            ]);
+            let before = bodyLength();
+            let i = 0;
+            let undone = false;
+            playScript(withStale.view, script, (kind) => {
+              expect([
+                offsets(withStale.rm),
+                paintedRanges(withStale.view),
+              ]).toEqual(seen[i++]);
+              const growth = kind === 'edit' ? bodyLength() - before : 0;
+              before = bodyLength();
+              undone ||= kind === 'history';
+              if (undone) return;
+              expected.forEach(([, span]) => {
+                span[0] += growth;
+                span[1] += growth;
+              });
+              expect(
+                Object.entries(offsetsOf(withStale.rm)).filter(([id]) =>
+                  id.startsWith('stale')
+                )
+              ).toEqual(expected);
+            });
+          } finally {
+            alone.view.destroy();
+            withStale.view.destroy();
+          }
+        }
+      ),
+      // Two editors a run: kept few, to stay well inside the test timeout
+      { numRuns: 100 }
+    );
+  });
+
+  it('keeps one with none of its text in the note as far past the end through any edits, undos and redos: never on the note’s text, never painted, so never saved over it', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fc.assert(
+      fc.property(
+        fc.tuple(frontmatterArb, bodyArb).map(([fm, body]) => fm + body),
+        fc.array(fc.tuple(fc.nat(), fc.nat()), { maxLength: 3 }),
+        // Just past the end, where the least growth would reach it; in
+        // either order, as an old bug could have saved them
+        fc
+          .array(
+            fc.tuple(fc.nat({ max: 10 }), fc.integer({ min: -3, max: 10 })),
+            { minLength: 1, maxLength: 3 }
+          )
+          .filter((rows) =>
+            rows.every(([past, width]) => past + width > 0 || past > 0)
+          ),
+        historyEditsArb,
+        fc.array(mappedUserEvent, { minLength: 4, maxLength: 4 }),
+        fc.array(fc.constantFrom(undo, redo), { maxLength: 6 }),
+        fc.boolean(),
+        (doc, rawSpans, rawStale, edits, userEvents, commands, review) => {
+          fc.pre(!doc.includes('\r'));
+          const bodyLength = (text: string) => text.length - bodyStartOf(text);
+          const length = bodyLength(doc);
+          const stale = rawStale.map(([past, width], i) =>
+            makeHighlight({
+              id: `stale${i}`,
+              start_offset: length + past,
+              end_offset: length + past + width,
+            })
+          );
+          const { view, rm } = makeHistoryView(
+            doc,
+            [
+              ...rawSpans.map(([a, b], i) => {
+                const [x, y] = [a % (length + 1), b % (length + 1)];
+                return makeHighlight({
+                  id: `in${i}`,
+                  start_offset: Math.min(x, y),
+                  end_offset: Math.max(x, y),
+                });
+              }),
+              ...stale.map((h) => ({ ...h })),
+            ],
+            review
+          );
+          try {
+            // What the standard editor saves is these very rows, so where
+            // they are is what reaches the database
+            const tracked = () =>
+              rm.snippets.offsetTracker
+                .getHighlights(FILE_PATH)
+                .filter((h) => h.id.startsWith('stale'));
+            playScript(
+              view,
+              {
+                edits: edits.map((e, i) => ({
+                  ...e,
+                  as: { userEvent: userEvents[i] },
+                })),
+                history: commands,
+              },
+              () => {
+                const now = bodyLength(view.state.doc.toString());
+                expect(
+                  tracked().map((h) => [
+                    h.start_offset - now,
+                    h.end_offset - now,
+                  ])
+                ).toEqual(
+                  stale.map((h) => [
+                    h.start_offset - length,
+                    h.end_offset - length,
+                  ])
+                );
+                expect(
+                  paintedRanges(view).filter(([, , id]) =>
+                    id.startsWith('stale')
+                  )
+                ).toEqual([]);
+              }
+            );
+          } finally {
+            view.destroy();
+          }
+        }
+      ),
+      { numRuns: 150 }
+    );
+  });
+
+  it('keeps one running past the end as far past it through edits, painted up to the end, and undo and redo put it back', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fc.assert(
+      fc.property(
+        fc.tuple(frontmatterArb, bodyArb).map(([fm, body]) => fm + body),
+        fc.array(fc.tuple(fc.nat(), fc.nat()), { maxLength: 3 }),
+        fc.array(fc.tuple(fc.nat(), fc.integer({ min: 1, max: 30 })), {
+          minLength: 1,
+          maxLength: 3,
+        }),
+        historyEditsArb,
+        fc.array(mappedUserEvent, { minLength: 4, maxLength: 4 }),
+        fc.boolean(),
+        (doc, rawSpans, rawOver, edits, userEvents, review) => {
+          fc.pre(!doc.includes('\r'));
+          const bodyLength = (text: string) => text.length - bodyStartOf(text);
+          const length = bodyLength(doc);
+          const highlights = [
+            ...rawSpans.map(([a, b], i) => {
+              const [x, y] = [a % (length + 1), b % (length + 1)];
+              return makeHighlight({
+                id: `in${i}`,
+                start_offset: Math.min(x, y),
+                end_offset: Math.max(x, y),
+              });
+            }),
+            ...rawOver.map(([start, overhang], i) =>
+              makeHighlight({
+                id: `over${i}`,
+                start_offset: start % length,
+                end_offset: length + overhang,
+              })
+            ),
+          ];
+          const { view, rm } = makeHistoryView(doc, highlights, review);
+          const over = () =>
+            rm.snippets.offsetTracker
+              .getHighlights(FILE_PATH)
+              .filter((h) => h.id.startsWith('over'))
+              .map((h) => ({ ...h }));
+          try {
+            const initial = offsetsOf(rm);
+            let before = over();
+            let beforeLength = length;
+            playScript(
+              view,
+              {
+                edits: edits.map((e, i) => ({
+                  ...e,
+                  as: { userEvent: userEvents[i] },
+                })),
+                history: [],
+              },
+              () => {
+                const text = view.state.doc.toString();
+                const now = bodyLength(text);
+                const painted = paintedRanges(view);
+                over().forEach((h, i) => {
+                  const was = before[i];
+                  // In the note, the note having grown to it, or its text
+                  // erased: mapped as any
+                  if (was.end_offset <= beforeLength) return;
+                  // Wholly past the end before: left as stored
+                  if (was.start_offset >= beforeLength) {
+                    expect(h).toEqual(was);
+                    return;
+                  }
+                  // Its text in the note erased: collapsed, as any is
+                  if (h.start_offset === h.end_offset) return;
+                  expect(h.end_offset - now).toBe(
+                    was.end_offset - beforeLength
+                  );
+                  const shown = painted.filter(([, , id]) => id === h.id);
+                  expect(shown).toEqual(
+                    h.start_offset < now
+                      ? [
+                          [
+                            bodyStartOf(text) + h.start_offset,
+                            text.length,
+                            h.id,
+                          ],
+                        ]
+                      : []
+                  );
+                });
+                before = over();
+                beforeLength = now;
+              }
+            );
+            const final = offsetsOf(rm);
+            while (undoDepth(view.state) > 0) undo(view);
+            expect(offsetsOf(rm)).toEqual(initial);
+            while (redo(view));
+            expect(offsetsOf(rm)).toEqual(final);
+          } finally {
+            view.destroy();
+          }
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+
+  it('warns once for each such highlight, however often it is painted', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { view } = makeTrackedView(
+      'hello world',
+      [
+        makeHighlight({
+          id: 'live',
+          reference: 'snippets/live.md',
+          start_offset: 0,
+          end_offset: 11,
+        }),
+        makeHighlight({
+          id: 'over',
+          reference: 'snippets/over.md',
+          start_offset: 6,
+          end_offset: 30,
+        }),
+        makeHighlight({
+          id: 'stale',
+          reference: 'snippets/stale.md',
+          start_offset: 40,
+          end_offset: 50,
+        }),
+      ],
+      false
+    );
+    view.dispatch({ changes: { from: 0, insert: 'a' } });
+    view.dispatch({ changes: { from: 0, insert: 'b' } });
+
+    expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
+      expect.stringContaining('"snippets/over.md"'),
+      expect.stringContaining('"snippets/stale.md"'),
+    ]);
+    view.destroy();
   });
 });

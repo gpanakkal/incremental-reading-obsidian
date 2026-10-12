@@ -310,6 +310,10 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
         if (!this.isReviewInterface && update.transactions.some(isSync)) {
           // Standard editor: cross-pane sync → reload from DB.
           // The other pane (which owns the edit) has already persisted.
+          // Until the reload paints them anew, the painted ones move with the
+          // text: left in the old document's positions, they could lie past
+          // the new one's end, where CodeMirror throws on the next update.
+          this.decorations = this.decorations.map(update.changes);
           void this.reloadHighlightsFromDB(update.view, reviewManager);
           return;
         }
@@ -440,8 +444,6 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       // Calculate body start offset for converting body-relative to absolute
       const docContent = view.state.doc.toString();
       const bodyStart = Obsidian.getBodyStartOffset(docContent);
-
-      const docLength = view.state.doc.length;
       const builder = new RangeSetBuilder<Decoration>();
 
       // Sort highlights by start offset for RangeSetBuilder
@@ -451,18 +453,13 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
       );
 
       for (const highlight of sortedHighlights) {
-        // Convert body-relative to absolute offsets for decoration
-        const absoluteStart = highlight.start_offset + bodyStart;
-        const absoluteEnd = highlight.end_offset + bodyStart;
-
-        // Validate offsets are within document bounds
-        if (
-          absoluteStart < 0 ||
-          absoluteEnd > docLength ||
-          absoluteStart >= absoluteEnd
-        ) {
-          continue;
-        }
+        const range = tracker.shownRange(
+          this.file.path,
+          highlight,
+          bodyStart,
+          view.state.doc.length
+        );
+        if (!range) continue;
 
         const decoration = Decoration.mark({
           class: 'ir-snippet-highlight',
@@ -472,7 +469,7 @@ export const snippetHighlightExtension = ViewPlugin.fromClass(
           },
         });
 
-        builder.add(absoluteStart, absoluteEnd, decoration);
+        builder.add(...range, decoration);
       }
 
       return builder.finish();

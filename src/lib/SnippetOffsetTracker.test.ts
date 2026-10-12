@@ -1,6 +1,6 @@
 import { ChangeSet, Text, type ChangeSpec } from '@codemirror/state';
 import * as fc from 'fast-check';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { narrowChanges } from './minimal-change';
 import {
   SnippetOffsetTracker,
@@ -207,6 +207,47 @@ const related = (a: Span, b: Span) =>
   overlaps(a, b) ||
   (length(a) === 0 && inside(a[0], b)) ||
   (length(b) === 0 && inside(b[0], a));
+
+/**
+ * Stored offsets of which one, at least, lies past the end of a body of
+ * `max` characters, as a note shortened behind the plugin's back leaves
+ * them: in either order, from before the body to well past its end.
+ */
+const pastEndSpanArb = (max: number) =>
+  fc
+    .tuple(
+      fc.integer({ min: -5, max: max + 20 }),
+      fc.integer({ min: -5, max: max + 20 })
+    )
+    .filter(([a, b]) => a > max || b > max)
+    .map((span): Span => span);
+
+/**
+ * A document, its body start, highlights in its body, one or more whose
+ * offsets reach past its end, and an edit pair.
+ */
+const pastEndEditArb = (pastEnd: (max: number) => fc.Arbitrary<Span>) =>
+  trackedEditArb(anySpansArb).chain((tracked) => {
+    const max = tracked.pair.changes.length - tracked.oldBodyStart;
+    return fc.record({
+      ...Object.fromEntries(
+        Object.entries(tracked).map(([k, v]) => [k, fc.constant(v)])
+      ),
+      stale: fc.array(pastEnd(max), { minLength: 1, maxLength: 3 }),
+      max: fc.constant(max),
+    }) as fc.Arbitrary<typeof tracked & { stale: Span[]; max: number }>;
+  });
+
+/** Whether none of a span's text lies in a body of `max` characters. */
+const whollyPast = ([start]: Span, max: number) => start >= max;
+
+/** Stored offsets in any order and range, and a document to show them in. */
+const shownCaseArb = fc.record({
+  start: fc.integer({ min: -30, max: 60 }),
+  end: fc.integer({ min: -30, max: 60 }),
+  bodyStart: fc.nat({ max: 20 }),
+  docLength: fc.nat({ max: 50 }),
+});
 
 // #endregion
 
@@ -1107,6 +1148,85 @@ describe('SnippetOffsetTracker', () => {
         )
       );
     });
+    describe('with offsets past the document’s end', () => {
+      it('keeps a highlight running past the end as far past it when text is typed at the end', () => {
+        // Its end inward, as a live one's: alone, it would stay before the
+        // text typed, and the overhang would take that text in
+        const typed = ChangeSet.of({ from: 10, insert: 'x' }, 10);
+        expect(mapSpans([[5, 15]], typed, 0, 0)).toEqual([[5, 16]]);
+      });
+
+      it('collapses a highlight running past the end whose text in the document is erased, as any erased one', () => {
+        const erased = ChangeSet.of({ from: 5, to: 9 }, 9);
+        expect(mapSpans([[5, 12]], erased, 0, 0)).toEqual([[5, 5]]);
+      });
+
+      it('keeps a highlight with none of its text in the document as far past the end, and maps the rest as without it', () => {
+        fc.assert(
+          fc.property(
+            pastEndEditArb((max) =>
+              pastEndSpanArb(max).filter((span) => whollyPast(span, max))
+            ),
+            ({ spans, stale, max, pair, oldBodyStart, newBodyStart }) => {
+              const args = [
+                pair.changes,
+                oldBodyStart,
+                newBodyStart,
+                pair.alternative,
+              ] as const;
+              const after = mapSpans([...spans, ...stale], ...args);
+              expect(after.slice(0, spans.length)).toEqual(
+                mapSpans(spans, ...args)
+              );
+              // Each offset as far from the body's end as before the edit
+              const newMax = pair.changes.newLength - newBodyStart;
+              expect(after.slice(spans.length)).toEqual(
+                stale.map(([start, end]) => [
+                  newMax + start - max,
+                  newMax + end - max,
+                ])
+              );
+            }
+          ),
+          { numRuns: 300 }
+        );
+      });
+
+      it('maps a highlight running past the end as its part in the document, its end staying as far past the end', () => {
+        fc.assert(
+          fc.property(
+            pastEndEditArb((max) =>
+              pastEndSpanArb(max).filter((span) => !whollyPast(span, max))
+            ),
+            ({ spans, stale, max, pair, oldBodyStart, newBodyStart }) => {
+              const args = [
+                pair.changes,
+                oldBodyStart,
+                newBodyStart,
+                pair.alternative,
+              ] as const;
+              const visible = stale.map(([start]): Span => [start, max]);
+              const expected = mapSpans([...spans, ...visible], ...args);
+              const after = mapSpans([...spans, ...stale], ...args);
+              expect(after.slice(0, spans.length)).toEqual(
+                expected.slice(0, spans.length)
+              );
+              const newEnd = pair.changes.newLength - newBodyStart;
+              stale.forEach(([, end], i) => {
+                const [start, visibleEnd] = expected[spans.length + i];
+                expect(after[spans.length + i]).toEqual(
+                  // Its text in the document erased: collapsed, as any is
+                  start === visibleEnd
+                    ? [start, start]
+                    : [start, Math.max(visibleEnd, newEnd) + end - max]
+                );
+              });
+            }
+          ),
+          { numRuns: 300 }
+        );
+      });
+    });
   });
 
   // #region HELPERS
@@ -1289,6 +1409,97 @@ describe('SnippetOffsetTracker', () => {
       }
 
       expect(visited).toEqual(['a.md', 'b.md', 'c.md']);
+    });
+  });
+
+  describe('shownRange', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it('spans the characters of the document its offsets cover, or is null where it covers none or starts before the document', () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fc.assert(
+        fc.property(shownCaseArb, ({ start, end, bodyStart, docLength }) => {
+          // Each character of the document, by whether the offsets cover it
+          const covered = Array.from({ length: docLength }, (_, i) => i).filter(
+            (i) => start + bodyStart <= i && i < end + bodyStart
+          );
+          expect(
+            tracker.shownRange(
+              filePath,
+              createHighlight('h', start, end),
+              bodyStart,
+              docLength
+            )
+          ).toEqual(
+            start + bodyStart < 0 || covered.length === 0
+              ? null
+              : [covered[0], covered[covered.length - 1] + 1]
+          );
+        })
+      );
+    });
+
+    it('shows one starting at the document’s very start', () => {
+      expect(
+        tracker.shownRange(filePath, createHighlight('h', -2, 3), 2, 9)
+      ).toEqual([0, 5]);
+    });
+
+    it('warns once of each highlight reaching past the end, and of no other', () => {
+      fc.assert(
+        fc.property(
+          fc.array(shownCaseArb, { minLength: 1, maxLength: 5 }),
+          fc.integer({ min: 1, max: 3 }),
+          (cases, times) => {
+            // Cleared each case: one spy serves them all, and afterEach runs
+            // per test, not per case
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            warn.mockClear();
+            const fresh = new SnippetOffsetTracker();
+            for (let i = 0; i < times; i++) {
+              cases.forEach(({ start, end, bodyStart, docLength }, id) =>
+                fresh.shownRange(
+                  filePath,
+                  createHighlight(`${id}`, start, end),
+                  bodyStart,
+                  docLength
+                )
+              );
+            }
+            const past = cases.flatMap(
+              ({ start, end, bodyStart, docLength }, id) =>
+                [start, end].some((offset) => offset + bodyStart > docLength)
+                  ? [id]
+                  : []
+            );
+            expect(warn.mock.calls).toEqual(
+              past.map((id) => [
+                expect.stringMatching(
+                  new RegExp(`test-ref-${id}.*${filePath}`)
+                ) as string,
+              ])
+            );
+          }
+        )
+      );
+    });
+
+    it('names the snippet, its offsets, the note, how long its body is, and whether it shows', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      tracker.shownRange(filePath, createHighlight('h', 3, 40), 4, 14);
+      tracker.shownRange(filePath, createHighlight('g', 10, 40), 4, 14);
+      expect(warn.mock.calls).toEqual([
+        [
+          'Incremental Reading: the highlight of snippet "test-ref-h" ' +
+            '(offsets 3-40) reaches past the end of "test/file.md" ' +
+            '(body 10 characters long); it shows up to the end',
+        ],
+        [
+          'Incremental Reading: the highlight of snippet "test-ref-g" ' +
+            '(offsets 10-40) reaches past the end of "test/file.md" ' +
+            "(body 10 characters long); it isn't shown",
+        ],
+      ]);
     });
   });
 

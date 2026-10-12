@@ -1808,6 +1808,225 @@ test.describe('Undoing an erasure', () => {
   });
 });
 
+test.describe('Highlights past the note’s end', () => {
+  const SOURCE = 'sources/Security Principles';
+  /** Three snippets' texts, in the order the note has them. */
+  const TEXTS = [
+    'The objective of this room is to:',
+    'Explain the security functions: Confidentiality, Integrity and Availability (CIA).',
+    'Introduce ISO/IEC 19249.',
+  ];
+
+  /**
+   * The active editor, as the page-side calls below reach it.
+   *
+   * Unofficial: `window.app`, `app.plugins.plugins`, `reviewManager.repo`.
+   */
+  type PageApp = {
+    workspace: {
+      activeEditor: {
+        editor: {
+          getValue(): string;
+          offsetToPos(offset: number): unknown;
+          setSelection(anchor: unknown, head?: unknown): void;
+          focus(): void;
+        };
+      };
+    };
+    plugins: {
+      plugins: Record<
+        string,
+        {
+          reviewManager: {
+            repo: {
+              query(sql: string): unknown[];
+              mutate(sql: string, params: unknown[]): unknown;
+            };
+            refreshAllHighlights(): Promise<void>;
+          };
+        }
+      >;
+    };
+  };
+
+  /** Extract each of {@link TEXTS} from the note at `path`, open in the active tab. */
+  async function extractAll(path: string) {
+    for (const [i, text] of TEXTS.entries()) {
+      await scrollToText(window, text);
+      await window.evaluate((text) => {
+        const { editor } = (window as unknown as { app: PageApp }).app.workspace
+          .activeEditor;
+        const at = editor.getValue().indexOf(text);
+        editor.setSelection(
+          editor.offsetToPos(at),
+          editor.offsetToPos(at + text.length)
+        );
+      }, text);
+      await executeCommandById(window, 'incremental-reading:extract-selection');
+      await expectExtractSettled(window, path, i + 1);
+    }
+  }
+
+  /**
+   * Store the second snippet's offsets as running past the note's end, and
+   * the third's as wholly past it, as a note shortened behind the plugin's
+   * back leaves them; then have open views read them, as a synced database
+   * does. Returns the offsets stored.
+   */
+  async function makeStale(path: string) {
+    const { rows, diskText } = await readSnippetState(window, path);
+    const bodyLength = noteBody(diskText).length;
+    const stale = [
+      [rows[1].start_offset, bodyLength + 40],
+      [bodyLength + 100, bodyLength + 120],
+    ];
+    await window.evaluate(
+      async ([ids, stale]) => {
+        const { reviewManager } = (window as unknown as { app: PageApp }).app
+          .plugins.plugins['incremental-reading'];
+        ids.forEach((id, i) =>
+          reviewManager.repo.mutate(
+            'UPDATE snippet SET start_offset = $1, end_offset = $2 WHERE id = $3',
+            [...stale[i], id]
+          )
+        );
+        await reviewManager.refreshAllHighlights();
+      },
+      [[rows[1].id, rows[2].id], stale] as const
+    );
+    return { ids: rows.map(({ id }) => id), stale };
+  }
+
+  /** Errors the page throws or logs from now on that a crash would raise. */
+  function watchCrashes() {
+    const crashes: string[] = [];
+    window.on('pageerror', (error) => crashes.push(error.message));
+    window.on('console', (message) => {
+      if (
+        message.type() === 'error' &&
+        /RangeError|plugin crashed/i.test(message.text())
+      ) {
+        crashes.push(message.text());
+      }
+    });
+    return crashes;
+  }
+
+  /** Type `text` at the start of the active editor's body, as a reader does. */
+  async function typeAtBodyStart(text: string) {
+    await window.evaluate(() => {
+      const { editor } = (window as unknown as { app: PageApp }).app.workspace
+        .activeEditor;
+      const value = editor.getValue();
+      const body = /^---\n[\s\S]*?\n---\n/.exec(value)?.[0].length ?? 0;
+      editor.setSelection(editor.offsetToPos(body));
+      editor.focus();
+    });
+    await window.keyboard.type(text);
+  }
+
+  /**
+   * Make two of three snippets of the note at `path` stale, reopen it with
+   * `open` so it loads them so, type in it, and check the first is painted and
+   * moved, the other two shown as far as they are in the note and kept as far
+   * past its end, and nothing threw. Returns the snippets' ids, in
+   * the note's order.
+   */
+  async function expectNoCrash(path: string, open: () => Promise<void>) {
+    const crashes = watchCrashes();
+    await extractAll(path);
+    const { ids, stale } = await makeStale(path);
+    await executeCommandById(window, 'workspace:close');
+    await open();
+    await scrollToText(window, TEXTS[0]);
+
+    await typeAtBodyStart('Z');
+
+    // Polled: the edit, then its offsets, reach the disk on their debounces.
+    // The first is still painted on its text, so the plugin still runs; the
+    // second up to the note's end; the third nowhere. Both stored as far past
+    // the end as before, the note one character longer.
+    await expect
+      .poll(async () => {
+        const { rows, diskText, painted } = await readSnippetState(
+          window,
+          path
+        );
+        const byId = Object.fromEntries(rows.map((row) => [row.id, row]));
+        const body = noteBody(diskText);
+        const [first, second, third] = ids.map((id) => byId[id]);
+        return {
+          saved: body.startsWith('Z'),
+          firstShown: painted[first.id],
+          firstStored: body.slice(first.start_offset, first.end_offset),
+          secondShownFromItsStart: painted[second.id].startsWith(TEXTS[1]),
+          secondStored: [second.start_offset, second.end_offset],
+          thirdShown: painted[third.id],
+          thirdStored: [third.start_offset, third.end_offset],
+        };
+      })
+      .toEqual({
+        saved: true,
+        firstShown: TEXTS[0],
+        firstStored: TEXTS[0],
+        secondShownFromItsStart: true,
+        secondStored: stale[0].map((offset) => offset + 1),
+        thirdShown: '',
+        thirdStored: stale[1].map((offset) => offset + 1),
+      });
+    expect(crashes).toEqual([]);
+    return ids;
+  }
+
+  test('neither crash the editor nor keep the others from being painted and moved', async () => {
+    const open = () => openNote(window, SOURCE);
+    await open();
+    const ids = await expectNoCrash(`${SOURCE}.md`, open);
+
+    // Reading mode paints them as live preview does
+    const crashes = watchCrashes();
+    await executeCommandById(window, 'markdown:toggle-preview');
+    const painted = (id: string) =>
+      window
+        .locator(
+          `.workspace-leaf.mod-active .markdown-reading-view .ir-snippet-highlight[data-snippet-id="${id}"]`
+        )
+        .allTextContents()
+        .then((texts) => texts.join(''));
+    await expect
+      .poll(async () => ({
+        first: await painted(ids[0]),
+        secondFromItsStart: (await painted(ids[1])).startsWith(TEXTS[1]),
+        third: await painted(ids[2]),
+      }))
+      .toEqual({ first: TEXTS[0], secondFromItsStart: true, third: '' });
+    expect(crashes).toEqual([]);
+  });
+
+  test('neither crash review nor keep the others from being painted and moved', async () => {
+    await importArticle(window, SOURCE);
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    const markReviewed = window.getByRole('button', { name: 'Mark reviewed' });
+    await expect(markReviewed).toBeVisible();
+    const reference = await window.evaluate(
+      () =>
+        (
+          (window as unknown as { app: PageApp }).app.plugins.plugins[
+            'incremental-reading'
+          ].reviewManager.repo.query('SELECT reference FROM article') as {
+            reference: string;
+          }[]
+        )[0].reference
+    );
+    // Review opens again on the article it was on
+    await expectNoCrash(reference, async () => {
+      await executeCommandById(window, 'incremental-reading:learn');
+      await expect(markReviewed).toBeVisible();
+    });
+  });
+});
+
 test.describe('Frontmatter', () => {
   /** The note the import writes `ir-id` and `tags` into, as a quick-switcher prefix. */
   const SOURCE_NOTE =

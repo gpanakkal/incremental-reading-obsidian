@@ -4,7 +4,10 @@
 // are installed by src/test/obsidian-globals.setup.ts via setupFiles.
 
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
-import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
+import {
+  SnippetOffsetTracker,
+  type SnippetHighlight,
+} from '#/lib/SnippetOffsetTracker';
 import {
   registerHighlightRefreshListener,
   registerSnippetHighlightPostProcessor,
@@ -70,11 +73,13 @@ function setUp({
   const getNoteType = vi
     .spyOn(ObsidianHelpers, 'getNoteType')
     .mockResolvedValue(noteType);
+  const offsetTracker = new SnippetOffsetTracker();
+  const getHighlights = vi
+    .spyOn(offsetTracker, 'getHighlights')
+    .mockReturnValue(highlights);
   const reviewManager = {
     getSnippetHighlights: vi.fn().mockResolvedValue(undefined),
-    snippets: {
-      offsetTracker: { getHighlights: vi.fn().mockReturnValue(highlights) },
-    },
+    snippets: { offsetTracker },
   };
   const plugin = {
     registerMarkdownPostProcessor: vi.fn(),
@@ -84,7 +89,7 @@ function setUp({
   registerSnippetHighlightPostProcessor(plugin as never);
   const processor = plugin.registerMarkdownPostProcessor.mock
     .calls[0][0] as PostProcessor;
-  return { plugin, reviewManager, processor, getNoteType };
+  return { plugin, reviewManager, processor, getNoteType, getHighlights };
 }
 
 /** Paragraph sections' elements, as reading mode renders `text`'s lines. */
@@ -204,6 +209,63 @@ describe('registerSnippetHighlightPostProcessor', () => {
     );
   });
 
+  it('paints any stored offsets on their part in the note, whatever their order or range', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.array(paragraphArb, { minLength: 1, maxLength: 4 }),
+        fc.nat(),
+        fc.array(
+          fc.tuple(
+            fc.integer({ min: -40, max: 80 }),
+            fc.integer({ min: -40, max: 80 })
+          ),
+          { minLength: 1, maxLength: 4 }
+        ),
+        async (withFrontmatter, paragraphs, rawIndex, offsets) => {
+          const body = paragraphs.join('\n\n');
+          const bodyStart = withFrontmatter ? FRONTMATTER.length : 0;
+          const text = (withFrontmatter ? FRONTMATTER : '') + body;
+          const index = rawIndex % paragraphs.length;
+          const paragraph = paragraphs[index];
+          const paragraphStart = paragraphs
+            .slice(0, index)
+            .reduce((sum, p) => sum + p.length + 2, 0);
+          const { processor } = setUp({
+            highlights: offsets.map(([start, end], i) =>
+              makeHighlight({
+                id: `${i}`,
+                start_offset: start,
+                end_offset: end,
+              })
+            ),
+          });
+          const line = (withFrontmatter ? 4 : 0) + 2 * index;
+          const el = paragraphEl(paragraph);
+          await processor(el, {
+            sourcePath: 'notes/a.md',
+            getSectionInfo: () => ({ text, lineStart: line, lineEnd: line }),
+          });
+          const result = painted(el);
+          offsets.forEach(([start, end], i) => {
+            // In the note: from its start, if that's in it, to the end
+            const shown =
+              start >= -bodyStart && start < Math.min(end, body.length);
+            const at = (offset: number) =>
+              Math.min(Math.max(offset - paragraphStart, 0), paragraph.length);
+            expect(result[`${i}`] ?? '').toBe(
+              shown
+                ? paragraph.slice(at(start), at(Math.min(end, body.length)))
+                : ''
+            );
+          });
+        }
+      ),
+      { numRuns: 300 }
+    );
+  });
+
   it('renders with the note as source path and a component it unloads after', async () => {
     const load = vi.spyOn(Component.prototype, 'load');
     const unload = vi.spyOn(Component.prototype, 'unload');
@@ -280,7 +342,7 @@ describe('registerSnippetHighlightPostProcessor', () => {
     ['a source note', { noteType: null, isSource: true }],
   ])('paints the highlights of %s', async (_, options) => {
     const text = 'Some words here';
-    const { reviewManager, processor } = setUp({
+    const { reviewManager, processor, getHighlights } = setUp({
       highlights: [makeHighlight({ start_offset: 0, end_offset: 4 })],
       ...options,
     });
@@ -292,10 +354,50 @@ describe('registerSnippetHighlightPostProcessor', () => {
     expect(reviewManager.getSnippetHighlights).toHaveBeenCalledWith({
       path: 'notes/a.md',
     });
-    expect(
-      reviewManager.snippets.offsetTracker.getHighlights
-    ).toHaveBeenCalledWith('notes/a.md');
+    expect(getHighlights).toHaveBeenCalledWith('notes/a.md');
     expect(painted(el)).toEqual({ 'snippet-1': 'Some' });
+  });
+
+  it('paints a highlight running past the note’s end up to it, none wholly past it, and warns once of each', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const text = `${FRONTMATTER}Some words`;
+    const { processor } = setUp({
+      highlights: [
+        makeHighlight({
+          id: 'live',
+          reference: 'snippets/live.md',
+          start_offset: 0,
+          end_offset: 4,
+        }),
+        makeHighlight({
+          id: 'over',
+          reference: 'snippets/over.md',
+          start_offset: 5,
+          end_offset: 30,
+        }),
+        makeHighlight({
+          id: 'stale',
+          reference: 'snippets/stale.md',
+          start_offset: 40,
+          end_offset: 50,
+        }),
+      ],
+    });
+    const els = [paragraphEl('Some words'), paragraphEl('Some words')];
+    for (const el of els) {
+      await processor(el, {
+        sourcePath: 'notes/a.md',
+        getSectionInfo: () => ({ text, lineStart: 4, lineEnd: 4 }),
+      });
+    }
+
+    for (const el of els) {
+      expect(painted(el)).toEqual({ live: 'Some', over: 'words' });
+    }
+    expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
+      expect.stringContaining('"snippets/over.md"'),
+      expect.stringContaining('"snippets/stale.md"'),
+    ]);
   });
 
   it('paints nothing in the frontmatter', async () => {

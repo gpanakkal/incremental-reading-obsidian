@@ -95,8 +95,9 @@ export async function findContextFile(
 }
 
 /**
- * The absolute range of a snippet's highlight in `content`, or null when its
- * offsets are unset or no longer describe a range inside the note's body.
+ * The absolute range of a snippet's highlight in `content`, cut at the note's
+ * end as the highlight is painted, or null when its offsets are unset or no
+ * longer describe a range starting inside the note's body.
  */
 export function highlightRange(
   snippet: ReviewSnippet,
@@ -105,10 +106,9 @@ export function highlightRange(
   const { start_offset: start, end_offset: end } = snippet.data;
   if (start === null || end === null) return null;
   const bodyStart = Obsidian.getBodyStartOffset(content);
-  if (start < 0 || start >= end || bodyStart + end > content.length) {
-    return null;
-  }
-  return [bodyStart + start, bodyStart + end];
+  const shownEnd = Math.min(end, content.length - bodyStart);
+  if (start < 0 || start >= shownEnd) return null;
+  return [bodyStart + start, bodyStart + shownEnd];
 }
 
 /**

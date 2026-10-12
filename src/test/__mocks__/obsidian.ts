@@ -417,12 +417,12 @@ export class Component {
   load(): void {}
   unload(): void {}
 }
-/** Renders nothing; tests spy on `render` to put markup in its place. */
+/** Renders the markdown as plain text; tests spy on `render` to put markup in its place. */
 export class MarkdownRenderer {
   static async render(
     _app: unknown,
-    _markdown: string,
-    _el: HTMLElement,
+    markdown: string,
+    el: HTMLElement,
     _sourcePath: string,
     _component: Component
   ): Promise<void> {
