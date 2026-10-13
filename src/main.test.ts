@@ -1387,6 +1387,43 @@ describe('IncrementalReadingPlugin.syncReviewTitleBars', () => {
   });
 });
 
+describe('IncrementalReadingPlugin.saveSettings', () => {
+  it('tells every listener still subscribed of the change, before writing it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.boolean(), { maxLength: 4 }),
+        async (staySubscribed) => {
+          const plugin = new IncrementalReadingPlugin({} as never, {} as never);
+          plugin.data = { settings: {} } as never;
+          const events: string[] = [];
+          // The obsidian mock's Plugin has no saveData to spy on
+          const saveData = vi.fn(() => {
+            events.push('write');
+            return Promise.resolve();
+          });
+          plugin.saveData = saveData;
+          for (const [i, stays] of staySubscribed.entries()) {
+            const unsubscribe = plugin.onSettingsChange(() => {
+              events.push(`listener ${i}`);
+            });
+            if (!stays) unsubscribe();
+          }
+
+          await plugin.saveSettings();
+
+          expect(events).toEqual([
+            ...staySubscribed.flatMap((stays, i) =>
+              stays ? [`listener ${i}`] : []
+            ),
+            'write',
+          ]);
+          expect(saveData).toHaveBeenCalledExactlyOnceWith(plugin.data);
+        }
+      )
+    );
+  });
+});
+
 describe('IncrementalReadingPlugin.resumeSession', () => {
   beforeEach(() => {
     store.dispatch(resetSession());

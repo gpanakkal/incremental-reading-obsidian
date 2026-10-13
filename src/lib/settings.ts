@@ -30,6 +30,8 @@ export interface IRPluginSettings {
   fuzzTextReviews: boolean; // intra-day fuzzing for items except cards
   skipHomeScreen: boolean;
   reviewTitleBar: ReviewTitleBar;
+  /** Whether each grade button shows the interval it would schedule. */
+  showGradeIntervals: boolean;
   fsrsParams: FSRSParameters;
 }
 
@@ -69,6 +71,7 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   fuzzTextReviews: true,
   skipHomeScreen: false,
   reviewTitleBar: 'obsidian',
+  showGradeIntervals: false,
   fsrsParams: FSRS_PARAMETER_DEFAULTS,
 };
 
@@ -177,6 +180,7 @@ const CONTROL_BINDINGS = {
   reviewTitleBar: topLevel('reviewTitleBar'),
   showAdvancedImportCommands: topLevel('showAdvancedImportCommands'),
   showAdvancedImportMenuItems: topLevel('showAdvancedImportMenuItems'),
+  showGradeIntervals: topLevel('showGradeIntervals'),
   'fsrsParams.request_retention': fsrsParam('request_retention'),
   'fsrsParams.enable_fuzz': fsrsParam('enable_fuzz'),
   'fsrsParams.maximum_interval': fsrsParam('maximum_interval'),
@@ -339,6 +343,11 @@ export class IRSettingTab extends PluginSettingTab {
             name: 'Fuzz review intervals',
             desc: `Add controlled randomness to subsequent card reviews. Does not affect articles or snippets.`,
             control: { type: 'toggle', key: 'fsrsParams.enable_fuzz' },
+          },
+          {
+            name: 'Show intervals on grade buttons',
+            desc: "Show when the card's next review would be for each grade. A ~ marks an interval that fuzzing can change.",
+            control: { type: 'toggle', key: 'showGradeIntervals' },
           },
           {
             name: 'Maximum review interval',

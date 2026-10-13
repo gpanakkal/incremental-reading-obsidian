@@ -94,6 +94,30 @@ describe('parsePluginData', () => {
     );
   });
 
+  it('hides the intervals on grade buttons unless turned on, saved data without the setting included', () => {
+    expect(DEFAULT_SETTINGS.showGradeIntervals).toBe(false);
+    fc.assert(
+      fc.property(
+        fc.dictionary(
+          fc
+            .string()
+            .filter((key) => !['showGradeIntervals', 'settings'].includes(key)),
+          fc.anything()
+        ),
+        fc.boolean(),
+        (saved, legacy) => {
+          const data = parsePluginData(legacy ? saved : { settings: saved });
+
+          expect(data.settings.showGradeIntervals).toBe(false);
+        }
+      )
+    );
+    expect(
+      parsePluginData({ settings: { showGradeIntervals: true } }).settings
+        .showGradeIntervals
+    ).toBe(true);
+  });
+
   it('keeps a known review title bar choice and replaces anything else with the default', () => {
     const CHOICES: unknown[] = ['obsidian', 'show', 'hide'];
     fc.assert(

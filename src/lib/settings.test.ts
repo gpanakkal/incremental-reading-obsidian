@@ -97,6 +97,7 @@ const settingsArb = fc.record({
     fuzzTextReviews: fc.boolean(),
     skipHomeScreen: fc.boolean(),
     reviewTitleBar: fc.constantFrom(...REVIEW_TITLE_BARS),
+    showGradeIntervals: fc.boolean(),
     fsrsParams: fc.record({
       request_retention: fc.double(),
       maximum_interval: fc.integer(),
@@ -433,6 +434,7 @@ describe('IRSettingTab.getControlValue', () => {
           ),
           retention: tab.getControlValue('fsrsParams.request_retention'),
           fuzz: tab.getControlValue('fsrsParams.enable_fuzz'),
+          showGradeIntervals: tab.getControlValue('showGradeIntervals'),
           maximumInterval: tab.getControlValue('fsrsParams.maximum_interval'),
           shortTerm: tab.getControlValue('fsrsParams.enable_short_term'),
           learningSteps: tab.getControlValue('fsrsParams.learning_steps'),
@@ -450,6 +452,7 @@ describe('IRSettingTab.getControlValue', () => {
           showAdvancedImportMenuItems: settings.showAdvancedImportMenuItems,
           retention: fsrsParams.request_retention,
           fuzz: fsrsParams.enable_fuzz,
+          showGradeIntervals: settings.showGradeIntervals,
           maximumInterval: fsrsParams.maximum_interval,
           shortTerm: fsrsParams.enable_short_term,
           learningSteps: fsrsParams.learning_steps.join(', '),
@@ -504,6 +507,7 @@ describe('IRSettingTab.setControlValue', () => {
       ['reviewTitleBar', fc.constantFrom(...REVIEW_TITLE_BARS)],
       ['showAdvancedImportCommands', fc.boolean()],
       ['showAdvancedImportMenuItems', fc.boolean()],
+      ['showGradeIntervals', fc.boolean()],
     ] as const;
     const fsrsKeys = [
       ['request_retention', fc.double()],
@@ -842,6 +846,12 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         name: 'Fuzz review intervals',
         desc: 'Add controlled randomness to subsequent card reviews. Does not affect articles or snippets.',
         control: toggle('fsrsParams.enable_fuzz'),
+      },
+      {
+        heading: 'Spaced repetition',
+        name: 'Show intervals on grade buttons',
+        desc: "Show when the card's next review would be for each grade. A ~ marks an interval that fuzzing can change.",
+        control: toggle('showGradeIntervals'),
       },
       {
         heading: 'Spaced repetition',

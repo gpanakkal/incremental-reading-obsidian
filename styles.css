@@ -880,8 +880,8 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
    the theme and stands apart from the bar's bare icons. Thin dividers between
    four equal segments — a grid of equal columns, each as wide as the widest
    needs inline, and a quarter of the row in the row; each segment is its
-   grade's word, tinted with the theme's color for it, over the interval in
-   muted text.
+   grade's word, tinted with the theme's color for it, and, while "Show
+   intervals on grade buttons" is on, the interval under it in muted text.
 
    The corners are `--radius-m` rather than the button radius, which mobile
    turns into a full pill (`--input-radius`). */
@@ -918,18 +918,33 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
 
    Inline, the two lines fit the height of the bar's other buttons
    (`--input-height`) with no padding above or below, so showing the grades
-   doesn't grow the bar. */
+   doesn't grow the bar.
+
+   With "Show intervals on grade buttons" off a segment is its word alone, yet
+   it keeps the height of both lines, the word centred in it (`button`'s own
+   `justify-content`, down the column), so turning the setting on or off never
+   resizes the segments, the row or the bar. The height is held in the
+   content box, so each placement's padding still adds to it. */
 .ir-grade-group > .ir-grade-button:not(.clickable-icon) {
+  /* Read by the two lines below and by the height they reserve together */
+  --ir-grade-line-height: 1.1;
+  --ir-grade-word-size: var(--font-ui-small);
+  --ir-grade-interval-size: var(--font-ui-smaller);
   /* For the divider below */
   position: relative;
   flex-direction: column;
   gap: 0;
+  box-sizing: content-box;
   height: auto;
+  min-height: calc(
+    var(--ir-grade-line-height) *
+      (var(--ir-grade-word-size) + var(--ir-grade-interval-size))
+  );
   padding: 0 var(--size-4-3);
   border-radius: 0;
   background-color: transparent;
   box-shadow: none;
-  line-height: 1.1;
+  line-height: var(--ir-grade-line-height);
 }
 
 /* Drawn over the segment rather than as its border, which would make every
@@ -979,13 +994,13 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
 
 .ir-grade-word {
   color: var(--ir-grade-tint);
-  font-size: var(--font-ui-small);
+  font-size: var(--ir-grade-word-size);
   font-weight: var(--font-semibold);
 }
 
 .ir-grade-interval {
   color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-size: var(--ir-grade-interval-size);
   font-variant-numeric: tabular-nums;
 }
 

@@ -31,6 +31,15 @@ function mount(node: ComponentChild): HTMLElement {
 }
 
 /**
+ * The plugin's half the grades read: "Show intervals on grade buttons" on, and
+ * nothing to hear of it changing.
+ */
+const GRADE_INTERVALS_ON = {
+  settings: { showGradeIntervals: true },
+  onSettingsChange: () => () => {},
+};
+
+/**
  * Stub the queue query behind the begin-review button. `totalRows` is what the
  * button reads; the rows themselves are irrelevant to it, so they stay empty.
  */
@@ -91,7 +100,7 @@ function mountBar({
 } = {}): HTMLElement {
   return mount(
     <ReviewContextProvider
-      plugin={{ actions, app: {} } as never}
+      plugin={{ actions, app: {}, ...GRADE_INTERVALS_ON } as never}
       reviewView={reviewView as never}
       reviewManager={REVIEW_MANAGER as never}
     >
@@ -267,7 +276,9 @@ function mountReviewBar(actions: ReturnType<typeof makeActions>): HTMLElement {
   } as never);
   return mount(
     <ReviewContextProvider
-      plugin={{ actions, app: { isMobile: false } } as never}
+      plugin={
+        { actions, app: { isMobile: false }, ...GRADE_INTERVALS_ON } as never
+      }
       reviewView={{ showMoreOptionsMenu: vi.fn(), leaf: makeLeaf() } as never}
       reviewManager={{} as never}
     >

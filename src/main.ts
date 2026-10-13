@@ -1,3 +1,4 @@
+import { createEmitter } from '#/lib/emitter';
 import { registerPdfLeafHighlights } from '#/lib/extensions/PdfItemHighlights';
 import {
   createArrivalWarning,
@@ -111,6 +112,14 @@ export default class IncrementalReadingPlugin extends Plugin {
   // `declare`: Obsidian 1.13 types `Plugin.settings` as `unknown`, so this
   // narrows it without emitting a class field.
   declare settings: IRPluginSettings;
+  /** Announces each {@link saveSettings}; see {@link onSettingsChange}. */
+  private readonly settingsChanged = createEmitter();
+  /**
+   * Hear of each change to the settings, as `useSyncExternalStore` subscribes:
+   * returns the unsubscribe. Heard on every {@link saveSettings}, which every
+   * writer of a setting calls, so a listener rereads what it needs.
+   */
+  readonly onSettingsChange = this.settingsChanged.subscribe;
   sessionTracker?: SessionTracker;
   reviewManager!: ReviewManager;
   store!: typeof store;
@@ -376,7 +385,13 @@ export default class IncrementalReadingPlugin extends Plugin {
     return leaves[0] ?? null;
   }
 
+  /**
+   * Write the settings, telling each {@link onSettingsChange} listener first:
+   * the open views read the settings from memory, and a failed write must not
+   * leave them behind the views opened after it.
+   */
   async saveSettings() {
+    this.settingsChanged.emit();
     await this.saveData(this.data);
   }
 

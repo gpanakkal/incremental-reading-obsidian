@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import { ReviewContextProvider } from '#/components/ReviewContext';
+import { createEmitter } from '#/lib/emitter';
 import { formatInterval } from '#/lib/format-interval';
 import { CardManager } from '#/lib/items/CardManager';
 import type { ReviewCard } from '#/lib/types';
 import fc from 'fast-check';
 import { type ComponentChild, render } from 'preact';
+import { act } from 'preact/test-utils';
 import { generatorParameters, type Grade, Rating } from 'ts-fsrs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GradeGroup } from './GradeGroup';
@@ -15,7 +17,10 @@ import { GradeGroup } from './GradeGroup';
 function mount(node: ComponentChild): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
-  render(node as never, container);
+  // Synchronous: act flushes the effects, where the setting is subscribed to
+  void act(() => {
+    render(node as never, container);
+  });
   return container;
 }
 
@@ -76,10 +81,32 @@ const nameOf = (word: string, offset: number, approximate = false) =>
     : `${word}, next review in ${labelOf(offset, approximate)}`;
 
 /**
+ * A plugin holding the "Show intervals on grade buttons" setting, which
+ * announces each change to its settings the way the real one does.
+ */
+function makePlugin(showGradeIntervals: boolean, actions: object = {}) {
+  const emitter = createEmitter();
+  const settings = { showGradeIntervals };
+  return {
+    plugin: {
+      actions,
+      settings,
+      onSettingsChange: emitter.subscribe,
+    },
+    /** Change the setting and save it, as the settings tab does. */
+    setShowGradeIntervals: (show: boolean) =>
+      void act(() => {
+        settings.showGradeIntervals = show;
+        emitter.emit();
+      }),
+  };
+}
+
+/**
  * Mount the group for `card`, its preview putting each grade `offsets` out,
- * each `approximate` or not. Mocks are made here rather than shared: the
- * properties below mount many times per `it`, and a spy counted across cases
- * would read as a click the group never made.
+ * each `approximate` or not, with the intervals shown or not. Mocks are made
+ * here rather than shared: the properties below mount many times per `it`, and
+ * a spy counted across cases would read as a click the group never made.
  */
 function mountGroup(
   card: ReviewCard,
@@ -87,7 +114,12 @@ function mountGroup(
   {
     ghost = false,
     approximate = [false, false, false, false],
-  }: { ghost?: boolean; approximate?: readonly boolean[] } = {}
+    showIntervals = true,
+  }: {
+    ghost?: boolean;
+    approximate?: readonly boolean[];
+    showIntervals?: boolean;
+  } = {}
 ) {
   document.body.innerHTML = '';
   const gradeCard = vi.fn();
@@ -97,17 +129,49 @@ function mountGroup(
     ),
     inMs: Object.fromEntries(GRADES.map(([, grade], i) => [grade, offsets[i]])),
   }));
+  const { plugin, setShowGradeIntervals } = makePlugin(showIntervals, {
+    gradeCard,
+  });
   const container = mount(
     <ReviewContextProvider
-      plugin={{ actions: { gradeCard } } as never}
+      plugin={plugin as never}
       reviewView={{} as never}
       reviewManager={{ cards: { gradePreview } } as never}
     >
       <GradeGroup card={card} ghost={ghost} />
     </ReviewContextProvider>
   );
-  return { container, gradeCard, gradePreview };
+  return { container, gradeCard, gradePreview, setShowGradeIntervals };
 }
+
+/** Each segment's word, interval line (null for none) and accessible name. */
+const segmentsShown = (container: HTMLElement) =>
+  segments(container).map((button) => ({
+    word: button.querySelector('.ir-grade-word')?.textContent,
+    interval: button.querySelector('.ir-grade-interval')?.textContent ?? null,
+    name: button.getAttribute('aria-label'),
+  }));
+
+/**
+ * What the group shows for `offsets` with intervals on, or off. A ghost names
+ * nothing: it is hidden from assistive technology.
+ */
+const expectedSegments = (
+  offsets: readonly number[],
+  approximate: readonly boolean[],
+  showIntervals: boolean,
+  ghost = false
+) =>
+  GRADES.map(([word], i) => {
+    const shown = showIntervals
+      ? {
+          word,
+          interval: intervalShown(offsets[i], approximate[i]),
+          name: nameOf(word, offsets[i], approximate[i]),
+        }
+      : { word, interval: null, name: word };
+    return ghost ? { ...shown, name: null } : shown;
+  });
 
 /**
  * A card under review, as the current-item poll hands it over: a new object
@@ -202,6 +266,55 @@ describe('GradeGroup', () => {
     );
   });
 
+  it('property: shows and names each grade with its interval only while the setting is on, previewing nothing while it is off', () => {
+    fc.assert(
+      fc.property(
+        offsetsArb,
+        approximateArb,
+        fc.boolean(),
+        fc.boolean(),
+        (offsets, approximate, showIntervals, ghost) => {
+          const { container, gradePreview } = mountGroup(makeCard(), offsets, {
+            approximate,
+            showIntervals,
+            ghost,
+          });
+
+          expect(segmentsShown(container)).toEqual(
+            expectedSegments(offsets, approximate, showIntervals, ghost)
+          );
+          expect(gradePreview).toHaveBeenCalledTimes(showIntervals ? 1 : 0);
+        }
+      )
+    );
+  });
+
+  it('property: follows the setting as it is turned on and off, without being mounted again', () => {
+    fc.assert(
+      fc.property(
+        offsetsArb,
+        approximateArb,
+        fc.boolean(),
+        fc.array(fc.boolean(), { minLength: 1, maxLength: 4 }),
+        fc.boolean(),
+        (offsets, approximate, initially, flips, ghost) => {
+          const { container, setShowGradeIntervals } = mountGroup(
+            makeCard(),
+            offsets,
+            { approximate, showIntervals: initially, ghost }
+          );
+
+          for (const show of flips) {
+            setShowGradeIntervals(show);
+            expect(segmentsShown(container)).toEqual(
+              expectedSegments(offsets, approximate, show, ghost)
+            );
+          }
+        }
+      )
+    );
+  });
+
   it('asks for the preview of the card on screen', () => {
     const card = makeCard();
 
@@ -226,7 +339,7 @@ describe('GradeGroup', () => {
     const shown = (card: ReviewCard) => {
       render(
         <ReviewContextProvider
-          plugin={{ actions: {} } as never}
+          plugin={makePlugin(true).plugin as never}
           reviewView={{} as never}
           reviewManager={{ cards } as never}
         >

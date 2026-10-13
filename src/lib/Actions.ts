@@ -22,6 +22,7 @@ import {
 import { type Grade, Rating } from 'ts-fsrs';
 import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from './constants';
 import { flashSnippetContext } from './context-flash';
+import { createEmitter } from './emitter';
 import IRScheduler from './IRScheduler';
 import {
   type ItemContext,
@@ -135,7 +136,7 @@ export class Actions {
   constructor(plugin: IncrementalReadingPlugin) {
     this.plugin = plugin;
     this.undoStack = [];
-    this.emitter = this._createEmitter();
+    this.emitter = createEmitter();
     this.subscribe = this.emitter.subscribe;
   }
 
@@ -1085,19 +1086,6 @@ export class Actions {
     await leaf.openFile(file, openState);
     return leaf;
   };
-
-  _createEmitter() {
-    const listeners = new Set<() => void>();
-    return {
-      subscribe: (fn: () => void) => {
-        listeners.add(fn);
-        return () => void listeners.delete(fn);
-      },
-      emit() {
-        listeners.forEach((fn) => fn());
-      },
-    };
-  }
 
   /**
    * Record an undoable action. Every push goes through here: the stack is a

@@ -130,10 +130,11 @@ async function expectPlacement(
 }
 
 /**
- * All four segments, in order, each word over its interval, fully on screen
- * and inside what clips them, so none is scrolled out of reach.
+ * All four segments, in order, each word over its interval (or the word
+ * alone, with the intervals off), fully on screen and inside what clips them,
+ * so none is scrolled out of reach.
  */
-function expectAllReachable(layout: GradeLayout) {
+function expectAllReachable(layout: GradeLayout, { intervals = true } = {}) {
   expect(layout.segments.map((s) => s.word)).toEqual([...WORDS]);
   for (const { box, interval, label, word } of layout.segments) {
     expect(box.left).toBeGreaterThanOrEqual(
@@ -144,8 +145,13 @@ function expectAllReachable(layout: GradeLayout) {
     );
     expect(box.top).toBeGreaterThanOrEqual(0);
     expect(box.bottom).toBeLessThanOrEqual(layout.viewport.height);
-    expect(() => labelMs(interval)).not.toThrow();
-    expect(label).toBe(`${word}, next review in ${interval}`);
+    if (intervals) {
+      expect(() => labelMs(interval)).not.toThrow();
+      expect(label).toBe(`${word}, next review in ${interval}`);
+    } else {
+      expect(interval).toBe('');
+      expect(label).toBe(word);
+    }
   }
 }
 
@@ -205,6 +211,12 @@ async function gradeAs(page: Page, word: (typeof WORDS)[number]) {
 /** Unofficial: `window.app`, `app.plugins.plugins`. */
 type PluginWindow = {
   app: {
+    setting: {
+      pluginTabs: {
+        plugin: unknown;
+        setControlValue: (key: string, value: unknown) => Promise<void>;
+      }[];
+    };
     plugins: {
       plugins: Record<
         string,
@@ -233,6 +245,59 @@ function setFuzz(page: Page, on: boolean) {
   }, on);
 }
 
+/**
+ * Turn "Show intervals on grade buttons" on or off through the plugin's
+ * settings tab, as its toggle does, without opening the settings window.
+ * Unofficial: `app.setting.pluginTabs`.
+ */
+function setShowIntervals(page: Page, on: boolean) {
+  return page.evaluate(async (on) => {
+    const { app } = window as unknown as PluginWindow;
+    const plugin = app.plugins.plugins['incremental-reading'];
+    const tab = app.setting.pluginTabs.find((t) => t.plugin === plugin);
+    if (!tab) throw new Error('no settings tab for the plugin');
+    await tab.setControlValue('showGradeIntervals', on);
+  }, on);
+}
+
+/** Count every time the grade buttons ask for their intervals. */
+function countGradePreviews(page: Page) {
+  return page.evaluate(() => {
+    const w = window as unknown as PluginWindow;
+    const { cards } =
+      w.app.plugins.plugins['incremental-reading'].reviewManager;
+    const preview = cards.gradePreview;
+    w.__gradePreviews = 0;
+    cards.gradePreview = (...args: unknown[]): unknown => {
+      w.__gradePreviews!++;
+      return preview.apply(cards, args);
+    };
+  });
+}
+
+const gradePreviews = (page: Page) =>
+  page.evaluate(() => (window as unknown as PluginWindow).__gradePreviews!);
+
+/**
+ * Grade the card on screen as `word` from a button named by its word alone,
+ * and check grading took: the review is logged with that rating, and review
+ * moves on.
+ */
+async function gradeAsWordOnly(page: Page, word: (typeof WORDS)[number]) {
+  await page.getByRole('button', { name: word, exact: true }).click();
+
+  await expect
+    .poll(async () =>
+      (await query(page, 'SELECT rating FROM srs_card_review')).map(
+        (r) => r.rating
+      )
+    )
+    .toEqual([RATINGS[word]]);
+  await expect(
+    page.getByRole('heading', { name: 'Review complete' })
+  ).toBeVisible();
+}
+
 /** What each grade button shows, and is named, in grade order. */
 function gradeLabels(page: Page) {
   return page.evaluate(
@@ -251,23 +316,18 @@ function gradeLabels(page: Page) {
 }
 
 test.describe('Grade buttons', () => {
+  // Every case here reads the intervals, which are off until turned on
+  test.beforeEach(async () => {
+    await setShowIntervals(window, true);
+  });
+
   test('hold their intervals while the card is shown, marked approximate where fuzz can move them', async () => {
     await window.setViewportSize(WIDE);
     await reviewNewCard(window);
     await setFuzz(window, true);
     // Counts every time the buttons ask for their intervals, so the wait below
     // is known to have spanned polls and re-renders
-    await window.evaluate(() => {
-      const w = window as unknown as PluginWindow;
-      const { cards } =
-        w.app.plugins.plugins['incremental-reading'].reviewManager;
-      const preview = cards.gradePreview;
-      w.__gradePreviews = 0;
-      cards.gradePreview = (...args: unknown[]): unknown => {
-        w.__gradePreviews!++;
-        return preview.apply(cards, args);
-      };
-    });
+    await countGradePreviews(window);
     await window.getByRole('button', { name: 'Show answer' }).click();
     await expectPlacement(window, 'inline');
 
@@ -284,9 +344,7 @@ test.describe('Grade buttons', () => {
       expect(() => labelMs(interval.replace(/^~/, ''))).not.toThrow();
       expect(label).toBe(`${WORDS[i]}, next review in ${interval}`);
     });
-    const asked = await window.evaluate(
-      () => (window as unknown as PluginWindow).__gradePreviews!
-    );
+    const asked = await gradePreviews(window);
 
     // Sampled through two polls of the current item: fuzz reseeded at each one
     // used to move them a few days either way
@@ -295,11 +353,7 @@ test.describe('Grade buttons', () => {
       expect(await gradeLabels(window)).toEqual(first);
       await window.waitForTimeout(250);
     }
-    expect(
-      await window.evaluate(
-        () => (window as unknown as PluginWindow).__gradePreviews!
-      )
-    ).toBeGreaterThan(asked);
+    expect(await gradePreviews(window)).toBeGreaterThan(asked);
 
     // Fuzz off: exact, with no `~`, from the next poll
     await setFuzz(window, false);
@@ -476,4 +530,192 @@ test.describe('Grade buttons', () => {
       expect(await moves()).toBe(before);
     }
   });
+});
+
+test.describe('Grade buttons, intervals off', () => {
+  test('show each word alone by default, previewing nothing, and grade from there', async () => {
+    await window.setViewportSize(WIDE);
+    await reviewNewCard(window);
+    await countGradePreviews(window);
+    const before = (await gradeLayout(window))!.bar;
+    await window.getByRole('button', { name: 'Show answer' }).click();
+
+    const layout = await expectPlacement(window, 'inline');
+    expectAllReachable(layout, { intervals: false });
+    expectEqualSegments(layout);
+    // The bar grows nothing, and each segment, one line to the two, is still
+    // as tall as the bar's other buttons
+    expect(layout.bar.bottom - layout.bar.top).toBeCloseTo(
+      before.bottom - before.top,
+      1
+    );
+    const undo = (await window.locator('#undo-button').boundingBox())!;
+    for (const { box } of layout.segments) {
+      expect(box.bottom - box.top).toBeGreaterThanOrEqual(undo.height - 0.5);
+    }
+    // Through a poll of the current item, still asking for nothing
+    await window.waitForTimeout(CURRENT_ITEM_REFETCH_TIME + 1_000);
+    expectAllReachable((await gradeLayout(window))!, { intervals: false });
+    expect(await gradePreviews(window)).toBe(0);
+
+    await gradeAsWordOnly(window, 'Good');
+  });
+
+  test('show the intervals once turned on, and hide them once turned off, on the open card', async () => {
+    await window.setViewportSize(WIDE);
+    await reviewNewCard(window);
+    await window.getByRole('button', { name: 'Show answer' }).click();
+    expectAllReachable(await expectPlacement(window, 'inline'), {
+      intervals: false,
+    });
+
+    // Well inside a poll of the current item, which would redraw it anyway
+    const live = { timeout: CURRENT_ITEM_REFETCH_TIME / 2 };
+    await setShowIntervals(window, true);
+    await expect
+      .poll(async () => (await gradeLabels(window)).map(([i]) => i), live)
+      .not.toContain('');
+    expectAllReachable((await gradeLayout(window))!);
+
+    await setShowIntervals(window, false);
+    await expect
+      .poll(async () => (await gradeLabels(window)).map(([i]) => i), live)
+      .toEqual(['', '', '', '']);
+    expectAllReachable((await gradeLayout(window))!, { intervals: false });
+
+    await setShowIntervals(window, true);
+    await expect
+      .poll(async () => (await gradeLabels(window)).map(([i]) => i), live)
+      .not.toContain('');
+    await gradeAs(window, 'Hard');
+  });
+
+  test('take a full-width row below a narrow bar, and grade from there', async () => {
+    await window.setViewportSize(NARROW);
+    await reviewNewCard(window);
+    await window.getByRole('button', { name: 'Show answer' }).click();
+
+    const layout = await expectPlacement(window, 'row');
+    expectAllReachable(layout, { intervals: false });
+    expectFullWidthRow(layout);
+    expect(layout.row!.top).toBeGreaterThanOrEqual(layout.bar.bottom - 0.5);
+
+    // Turned on and off again in place, the row stays the row, full width
+    for (const intervals of [true, false]) {
+      await setShowIntervals(window, intervals);
+      await expect
+        .poll(async () => (await gradeLabels(window)).map(([i]) => i !== ''), {
+          timeout: CURRENT_ITEM_REFETCH_TIME / 2,
+        })
+        .toEqual([intervals, intervals, intervals, intervals]);
+      const toggled = await expectPlacement(window, 'row');
+      expectAllReachable(toggled, { intervals });
+      expectFullWidthRow(toggled);
+    }
+
+    await gradeAsWordOnly(window, 'Easy');
+  });
+
+  test('take a row above the bar on a phone, and grade from there', async () => {
+    await emulateMobile(window, true);
+    await window.setViewportSize(PHONE);
+    await expect(window.locator('body')).toHaveClass(/\bis-phone\b/);
+    await reviewNewCard(window);
+    await window.getByRole('button', { name: 'Show answer' }).click();
+
+    const layout = await expectPlacement(window, 'row');
+    expectAllReachable(layout, { intervals: false });
+    expectFullWidthRow(layout);
+    expect(layout.row!.bottom).toBeLessThanOrEqual(layout.bar.top + 0.5);
+
+    await gradeAsWordOnly(window, 'Forgot');
+  });
+
+  /** The heights toggling could change: each segment, the bar, the row. */
+  async function heights(page: Page, intervals: boolean) {
+    await setShowIntervals(page, intervals);
+    await expect
+      .poll(async () => (await gradeLabels(page)).map(([i]) => i !== ''), {
+        timeout: CURRENT_ITEM_REFETCH_TIME / 2,
+      })
+      .toEqual([intervals, intervals, intervals, intervals]);
+    const layout = (await gradeLayout(page))!;
+    // The copy the bar measures the grades' width by
+    const ghost = await page.evaluate((view) => {
+      const group = document.querySelector(
+        `${view} .ir-grade-ghost > .ir-grade-group`
+      )!;
+      return {
+        width: group.getBoundingClientRect().width,
+        segments: Array.from(
+          group.children,
+          (b) => b.getBoundingClientRect().height
+        ),
+      };
+    }, VIEW);
+    const real = layout.segments.map(({ box }) => box);
+    return {
+      layout,
+      segments: real.map((box) => box.bottom - box.top),
+      width: real[3].right - real[0].left,
+      ghost,
+      bar: layout.bar.bottom - layout.bar.top,
+      row: layout.row && layout.row.bottom - layout.row.top,
+    };
+  }
+
+  for (const [name, placement, mobile, viewport] of [
+    ['inline in a wide bar', 'inline', false, WIDE],
+    ['in the row below a narrow bar', 'row', false, NARROW],
+    ['in the row above the bar on a phone', 'row', true, PHONE],
+  ] as const) {
+    test(`keep their height ${name}, intervals or not`, async () => {
+      if (mobile) await emulateMobile(window, true);
+      await window.setViewportSize(viewport);
+      if (mobile) {
+        await expect(window.locator('body')).toHaveClass(/is-phone/);
+      }
+      await reviewNewCard(window);
+      await window.getByRole('button', { name: 'Show answer' }).click();
+      await expectPlacement(window, placement);
+
+      const on = await heights(window, true);
+      const off = await heights(window, false);
+
+      expect(on.layout.placement).toBe(placement);
+      expect(off.layout.placement).toBe(placement);
+      expect(off.segments).toHaveLength(4);
+      // Inline, the zone stretches the real group to the bar's buttons either
+      // way, so there the ghost, laid out unstretched, is what can tell
+      for (const [i, height] of off.segments.entries()) {
+        expect(height).toBeCloseTo(on.segments[i], 0);
+        expect(off.ghost.segments[i]).toBeCloseTo(on.ghost.segments[i], 0);
+      }
+      // Inline, the ghost is as wide as what it stands for, either way
+      if (placement === 'inline') {
+        expect(on.ghost.width).toBeCloseTo(on.width, 0);
+        expect(off.ghost.width).toBeCloseTo(off.width, 0);
+      }
+      expect(off.bar).toBeCloseTo(on.bar, 0);
+      if (placement === 'row') expect(off.row!).toBeCloseTo(on.row!, 0);
+      // The word sits in the middle of its segment
+      const centred = await window.evaluate(
+        (view) =>
+          Array.from(
+            document.querySelectorAll(
+              `${view} .ir-grade-group:not([aria-hidden]) > button`
+            ),
+            (b) => {
+              const box = b.getBoundingClientRect();
+              const word = b
+                .querySelector('.ir-grade-word')!
+                .getBoundingClientRect();
+              return word.top - box.top - (box.bottom - word.bottom);
+            }
+          ),
+        VIEW
+      );
+      for (const offset of centred) expect(Math.abs(offset)).toBeLessThan(1);
+    });
+  }
 });

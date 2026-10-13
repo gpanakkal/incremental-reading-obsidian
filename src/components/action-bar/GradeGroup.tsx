@@ -1,6 +1,8 @@
 import { useReviewContext } from '#/components/ReviewContext';
 import { formatInterval } from '#/lib/format-interval';
+import type { GradePreview } from '#/lib/items/CardManager';
 import type { ReviewCard } from '#/lib/types';
+import { useSyncExternalStore } from 'react';
 import { type Grade, Rating } from 'ts-fsrs';
 
 /**
@@ -30,6 +32,11 @@ export const GRADE_GROUP_CLASS = 'ir-grade-group';
  * read `~10d`, under the word and in the button's name alike. A grade it
  * cannot preview shows a dash, and is named by its word alone.
  *
+ * All of that only while "Show intervals on grade buttons" is on. Off, each
+ * segment is its word alone, in both its label and its name, and nothing is
+ * previewed. The setting is read afresh on each change to the settings, so an
+ * open group follows it.
+ *
  * A `ghost` lays out exactly as the real group would inline, for the bar to
  * measure while the real one is in its own row (see `useGradePlacement`). It
  * is hidden by styles.css and from assistive technology, takes no focus, and
@@ -42,14 +49,14 @@ export function GradeGroup({
   card: ReviewCard;
   ghost?: boolean;
 }) {
-  const { actions, reviewManager } = useReviewContext();
-  const { approximate, inMs } = reviewManager.cards.gradePreview(card.data);
-  const intervals = GRADE_SEGMENTS.map(({ grade }) =>
-    // No date: a step past the last date a Date can hold, or no preview at all
-    Number.isNaN(inMs[grade])
-      ? null
-      : `${approximate[grade] ? '~' : ''}${formatInterval(inMs[grade])}`
+  const { actions, plugin, reviewManager } = useReviewContext();
+  const showIntervals = useSyncExternalStore(
+    plugin.onSettingsChange,
+    () => plugin.settings.showGradeIntervals
   );
+  const intervals = showIntervals
+    ? previewIntervals(reviewManager.cards.gradePreview(card.data))
+    : null;
 
   return (
     <div
@@ -64,7 +71,7 @@ export function GradeGroup({
           aria-label={
             ghost
               ? undefined
-              : intervals[i] === null
+              : intervals?.[i] == null
                 ? word
                 : `${word}, next review in ${intervals[i]}`
           }
@@ -74,9 +81,27 @@ export function GradeGroup({
           }
         >
           <span className="ir-grade-word">{word}</span>
-          <span className="ir-grade-interval">{intervals[i] ?? '–'}</span>
+          {intervals && (
+            <span className="ir-grade-interval">{intervals[i] ?? '–'}</span>
+          )}
         </button>
       ))}
     </div>
+  );
+}
+
+/**
+ * Each grade's interval as its segment shows it, in {@link GRADE_SEGMENTS}
+ * order: `~` first where fuzz can move it, null where there is no date.
+ */
+function previewIntervals({
+  approximate,
+  inMs,
+}: GradePreview): (string | null)[] {
+  return GRADE_SEGMENTS.map(({ grade }) =>
+    // No date: a step past the last date a Date can hold, or no preview at all
+    Number.isNaN(inMs[grade])
+      ? null
+      : `${approximate[grade] ? '~' : ''}${formatInterval(inMs[grade])}`
   );
 }

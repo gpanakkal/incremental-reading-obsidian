@@ -92,7 +92,7 @@ You can also create cards spanning multiple blocks, or from a portion of a block
 
 #### Grade cards
 
-After showing the answer for a card, you'll have four grades to choose from. Each grade shows how long until the card comes back if you pick it, such as `10m` or `4d`.
+After showing the answer for a card, you'll have four grades to choose from. To see how long until the card comes back with each grade, such as `10m` or `4d`, turn on **Show intervals on grade buttons** in the plugin's settings.
 
 Choose:
 
