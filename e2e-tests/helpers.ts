@@ -1534,3 +1534,132 @@ export async function reviewNewCard(page: Page) {
   // A card has no title line for waitForReviewItem; its bar says it is up
   await expect(page.getByRole('button', { name: 'Show answer' })).toBeVisible();
 }
+
+/** What {@link recordFlash} notes of Go to context's flash. */
+export type RecordedFlash = {
+  /** The text of what it lit first */
+  text: string;
+  /** Whether what it lit first was drawn in its scroller's box then */
+  onScreen: boolean;
+  /** Whether a background color transition began as it lit */
+  eased: boolean;
+  /** The scroller's scroll position as it lit, and as the flash went */
+  scrollTop: number;
+  scrollTopAtGone: number | null;
+  /** When it lit, and when its last mark went, by `performance.now()` */
+  litAt: number;
+  goneAt: number | null;
+};
+
+/**
+ * From now on, note in the page, in `window.__flash`, how Go to context's
+ * flash goes: at the moment it lights — in an editor, the editor taking the
+ * class that lights its marks; in reading view, the class landing on a
+ * highlight — whether what it lit is on screen, eased in, and how far its
+ * scroller is scrolled; and when its last mark goes, and the scroll then.
+ * Read with {@link recordedFlash}.
+ */
+export function recordFlash(page: Page) {
+  return page.evaluate(() => {
+    type Flash = {
+      text: string;
+      onScreen: boolean;
+      eased: boolean;
+      scrollTop: number;
+      scrollTopAtGone: number | null;
+      litAt: number;
+      goneAt: number | null;
+    };
+    const record = window as unknown as { __flash?: Flash | null };
+    record.__flash = null;
+    let scroller: Element | null = null;
+    const observer = new MutationObserver((records) => {
+      const flash = record.__flash;
+      if (flash) {
+        if (document.querySelector('.ir-context-flash')) return;
+        flash.goneAt = performance.now();
+        flash.scrollTopAtGone = scroller?.scrollTop ?? null;
+        observer.disconnect();
+        return;
+      }
+      for (const { target, oldValue } of records) {
+        const el = target as HTMLElement;
+        const added = (cls: string) =>
+          el.classList.contains(cls) &&
+          !(oldValue ?? '').split(' ').includes(cls);
+        const lit = added('ir-context-flashing')
+          ? [...el.querySelectorAll<HTMLElement>('.ir-context-flash')]
+          : added('ir-context-flash-lit')
+            ? [el]
+            : null;
+        if (!lit) continue;
+        scroller =
+          el.querySelector('.cm-scroller') ??
+          el.closest('.cm-scroller, .markdown-preview-view');
+        const box = scroller?.getBoundingClientRect();
+        record.__flash = {
+          text: lit.map((mark) => mark.textContent ?? '').join(''),
+          // Nothing drawn counts as off screen
+          onScreen:
+            !!box &&
+            lit.some((mark) => {
+              const at = mark.getBoundingClientRect();
+              return at.bottom > box.top && at.top < box.bottom;
+            }),
+          eased: lit.some((mark) =>
+            mark
+              .getAnimations()
+              .some(
+                (animation) =>
+                  (animation as CSSTransition).transitionProperty ===
+                  'background-color'
+              )
+          ),
+          scrollTop: scroller?.scrollTop ?? -1,
+          scrollTopAtGone: null,
+          litAt: performance.now(),
+          goneAt: null,
+        };
+        return;
+      }
+    });
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['class'],
+      attributeOldValue: true,
+    });
+  });
+}
+
+/** What {@link recordFlash} noted, or null before anything is lit. */
+export const recordedFlash = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as { __flash?: RecordedFlash | null }).__flash ?? null
+  );
+
+/**
+ * The flash {@link recordFlash} watched lit `text` only once it was on screen
+ * and the scroll there done, eased in, and went 1.5s later (0.75s in, 0.75s
+ * out; see `CONTEXT_FADE_MS`), give or take a frame or two.
+ */
+export async function expectFlashLitOnceScrolled(page: Page, text: RegExp) {
+  await expect
+    .poll(async () => (await recordedFlash(page))?.goneAt ?? null, {
+      timeout: 5000,
+    })
+    .not.toBeNull();
+  const flash = (await recordedFlash(page))!;
+  expect(flash).toMatchObject({
+    text: expect.stringMatching(text),
+    onScreen: true,
+    eased: true,
+  });
+  // Nothing scrolled after it lit: it lit once the scroll was done
+  expect(flash.scrollTopAtGone).toBe(flash.scrollTop);
+  const lasted = flash.goneAt! - flash.litAt;
+  expect(lasted).toBeGreaterThanOrEqual(1500 - 50);
+  expect(lasted).toBeLessThanOrEqual(1500 + 500);
+}

@@ -2,6 +2,7 @@ import type IncrementalReadingPlugin from '#/main';
 import type { Extension } from '@codemirror/state';
 import { actionBarExtension } from './ActionBarExtension';
 import { answerRevealExtension } from './AnswerRevealExtension';
+import { contextFlashExtension } from './ContextFlashExtension';
 import { irIdGuardExtension } from './IrIdGuardExtension';
 import { irPluginFacet } from './irPluginFacet';
 import { scrollPositionExtension } from './ScrollPositionExtension';
@@ -64,6 +65,9 @@ export function createIRExtensions(
 
     // Fading highlight on a card's answer at the moment it is revealed
     answerRevealExtension,
+
+    // Fading highlight on the passage Go to context opened for a snippet
+    contextFlashExtension,
 
     // Action bar panel for IR notes
     actionBarExtension,

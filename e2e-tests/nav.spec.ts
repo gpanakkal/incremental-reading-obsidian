@@ -7,12 +7,14 @@ import * as fs from 'node:fs/promises';
 import {
   emulateMobile,
   executeCommandById,
+  expectFlashLitOnceScrolled,
   expectReviewHome,
   expectReviewOn,
   importArticle,
   leafSnapshot,
   openFileInActiveLeaf,
   openNote,
+  recordFlash,
   REVIEW_VIEW_DEFAULT_TITLE,
   REVIEW_VIEW_TYPE,
   reviewHeader,
@@ -1368,6 +1370,59 @@ test.describe('Links followed in review', () => {
 
     await executeCommandById(window, 'app:go-back');
     expect(await expectReviewShowing(reference)).toBe(snippet);
+  });
+
+  /** What the review editor shows of a flash. */
+  const reviewFlash = () =>
+    window.evaluate((viewType) => {
+      const editor = document.querySelector(
+        `[data-type="${viewType}"] .cm-editor`
+      );
+      const lit = [
+        ...(editor?.querySelectorAll(
+          '.ir-context-flashing .ir-context-flash'
+        ) ?? []),
+      ];
+      return {
+        lit: lit.map((el) => el.textContent ?? '').join(''),
+        eased:
+          lit.length > 0 &&
+          lit.every(
+            (el) => getComputedStyle(el).transitionDuration === '0.75s, 0.75s'
+          ),
+        marks: editor?.querySelectorAll('.ir-context-flash').length ?? 0,
+        obsidianFlashes: editor?.querySelectorAll('.is-flashing').length ?? 0,
+      };
+    }, REVIEW_VIEW_TYPE);
+
+  /**
+   * The review editor flashes `lit` once the scroll there is done, and then
+   * nothing is left lit, nor Obsidian's own highlight.
+   */
+  async function expectReviewFlash(lit: RegExp) {
+    await expectFlashLitOnceScrolled(window, lit);
+    expect(await reviewFlash()).toEqual({
+      lit: '',
+      eased: false,
+      marks: 0,
+      obsidianFlashes: 0,
+    });
+  }
+
+  test('Go to context in review flashes the passage for a moment and leaves nothing lit behind', async () => {
+    await importArticle(window, SOURCE);
+    const reference = await extractInNote(LOW_PARAGRAPH);
+    const article = await reviewSource({ imported: true });
+    await openFileInActiveLeaf(window, reference);
+    await expectReviewShowing(reference);
+    await recordFlash(window);
+
+    await executeCommandById(window, 'incremental-reading:go-to-context');
+
+    await expect
+      .poll(reviewTab, LANDS_WITHIN)
+      .toMatchObject({ page: 'review', currentItemId: article.id });
+    await expectReviewFlash(new RegExp(LOW_PARAGRAPH));
   });
 });
 

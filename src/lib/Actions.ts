@@ -21,6 +21,7 @@ import {
 } from 'obsidian';
 import { type Grade, Rating } from 'ts-fsrs';
 import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from './constants';
+import { flashSnippetContext } from './context-flash';
 import IRScheduler from './IRScheduler';
 import {
   type ItemContext,
@@ -37,6 +38,7 @@ import {
   invalidateItemQuery,
   queryClient,
 } from './query-client';
+import { markContextFlash } from './review-position';
 import {
   type SelectionKind,
   addCompletedReview,
@@ -60,6 +62,7 @@ import {
   type ReviewSnippet,
   type ReviewText,
   isReviewArticle,
+  isReviewSnippet,
 } from './types';
 import { getContentSlice, getEndOfDay } from './utils';
 
@@ -887,7 +890,10 @@ export class Actions {
    * that is an item is shown in review (see `ReviewView.interceptOpenFile`),
    * at the highlight or link when it is known. One review can't show — an
    * article's source, a note that is no item — opens in a new tab instead, as
-   * Go to context always did, rather than put review out of its tab.
+   * Go to context always did, rather than put review out of its tab. Either
+   * way, a snippet's highlight in a note flashes for a moment, where it is
+   * known (see `flashSnippetContext` and `markContextFlash`); one in a PDF is
+   * highlighted there instead (see `revealPdfContext`).
    * @param newLeaf where to open it instead: a new tab, split or window, as
    *   `Keymap.isModEvent` answers for a modified or middle click
    */
@@ -928,9 +934,14 @@ export class Actions {
       Obsidian.notify(`"${itemTitle}" has no parent or local source to open`);
       return;
     }
+    const snippet = isReviewSnippet(item) ? item : null;
+    // Review flashes it as it shows it
+    if (snippet && context.eState) markContextFlash(context.eState);
     const leaf = await this._openFile(context.file, context.eState, newLeaf);
     if (leaf && context.pdfRange) {
       await revealPdfContext(leaf.view, context.pdfRange);
+    } else if (leaf && snippet) {
+      flashSnippetContext(leaf.view, snippet, context);
     }
   };
 

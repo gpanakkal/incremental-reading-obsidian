@@ -1452,6 +1452,33 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
   background-color: transparent;
 }
 
+/* Go to context's flash (src/lib/extensions/ContextFlashExtension.ts, and
+ src/lib/context-flash.ts in reading view): Obsidian's own `.is-flashing` look,
+ eased in over 0.75s once the passage is on screen and straight out again over
+ as long. After the snippet highlight, whose own transition it replaces on a
+ highlight it lights. In the editor the light is a class on the editor, not on
+ the mark: a mark CodeMirror redraws mid-flash comes back as lit as the editor
+ is, with nothing to replay. */
+.ir-context-flash {
+  transition:
+    color 0.75s ease,
+    background-color 0.75s ease;
+  border-radius: var(--radius-s);
+}
+
+.ir-context-flashing .ir-context-flash,
+.ir-context-flash.ir-context-flash-lit {
+  background-color: var(--text-highlight-bg);
+  color: var(--text-normal);
+  mix-blend-mode: var(--highlight-mix-blend-mode);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ir-context-flash {
+    transition: none;
+  }
+}
+
 /* A PDF's highlights are boxes in an overlay over the page's canvas, under
  its text layer (src/lib/pdf/pdf-highlights.ts), positioned in percent of the
  page so they follow a zoom with no script. They take no pointer events: the

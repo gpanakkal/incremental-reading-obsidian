@@ -1,4 +1,6 @@
+import { flashRanges } from '#/lib/extensions/ContextFlashExtension';
 import type ReviewView from '#/views/ReviewView';
+import type { EditorView } from '@codemirror/view';
 import {
   resolveSubpath,
   type App,
@@ -80,39 +82,83 @@ export function subpathResolver(
 }
 
 /**
+ * The class of the highlight {@link positionEditor} has Obsidian put on and
+ * take straight back off for a flashed arrival, for the unfolding that comes
+ * with it. Nothing styles it, so it shows nothing in the moment it is there,
+ * nor afterwards in an editor Obsidian won't take it off of (one not on
+ * screen).
+ */
+export const UNFOLD_CLASS = 'ir-context-unfold';
+
+/** The ephemeral states Go to context opened a snippet's context with. */
+const contextFlashes = new WeakSet<object>();
+
+/**
+ * Have the review editor flash the place `eState` opens at for a moment (see
+ * {@link positionEditor}), as Go to context does a snippet's passage, rather
+ * than mark it until the next click.
+ */
+export function markContextFlash(eState: object): void {
+  contextFlashes.add(eState);
+}
+
+/** Whether `eState` was marked by {@link markContextFlash}. */
+function isContextFlash(eState: unknown): boolean {
+  // Answers false for anything that isn't an object, never throwing
+  return contextFlashes.has(eState as object);
+}
+
+/**
  * Put `ranges` on screen in `editor` the way a note tab puts search results
  * or a linked heading there (`highlightSearchMatches`, obsidian.asar 1.13):
  * all flashed, with the cursor at the start of the first, scrolled to the
  * middle.
  *
- * `addHighlights` is undocumented: the editor's `is-flashing` marks,
- * replacing any already there, and with its last argument `true` unfolding
- * whatever fold hides a range, as Obsidian passes it (obsidian.asar 1.13).
- * obsidian-typings has that argument as an `EditorSelection`, wrongly.
+ * With `flash`, as for Go to context's snippet passage, they are flashed for
+ * a moment instead (see `contextFlashExtension`), unfolded all the same, so
+ * that the snippet's own highlight is readable again once the eye has found
+ * it.
+ *
+ * `addHighlights` is undocumented: the editor's highlights of a class,
+ * replacing any of it already there, and with its last argument `true`
+ * unfolding whatever fold hides a range, as Obsidian passes it (obsidian.asar
+ * 1.13); obsidian-typings has that argument as an `EditorSelection`, wrongly.
+ * `removeHighlights`, taking a class's highlights off, and `editor.cm`, the
+ * editor's CodeMirror view, are undocumented too.
  */
 export function positionEditor(
   editor: Editor,
-  ranges: readonly OffsetRange[]
+  ranges: readonly OffsetRange[],
+  flash = false
 ): void {
   const [first] = ranges;
   if (!first) return;
   const highlighter = editor as unknown as {
     addHighlights(
       ranges: EditorRange[],
-      style: 'is-flashing',
+      style: string,
       removePrevious: boolean,
       unfold: boolean
     ): void;
+    removeHighlights(style: string): void;
   };
   highlighter.addHighlights(
     ranges.map(({ from, to }) => ({
       from: editor.offsetToPos(from),
       to: editor.offsetToPos(to),
     })),
-    'is-flashing',
+    flash ? UNFOLD_CLASS : 'is-flashing',
     true,
     true
   );
+  if (flash) {
+    highlighter.removeHighlights(UNFOLD_CLASS);
+    // Nor one an earlier link left in this editor
+    highlighter.removeHighlights('is-flashing');
+    // obsidian-typings types `cm` against CodeMirror's CommonJS declarations,
+    // which TypeScript keeps apart from the ES ones imported here
+    flashRanges(editor.cm as unknown as EditorView, ranges);
+  }
   const from = editor.offsetToPos(first.from);
   editor.setCursor(from);
   editor.scrollIntoView({ from: editor.offsetToPos(first.to), to: from }, true);
@@ -149,6 +195,6 @@ export function positionOnArrival({
     );
     if (ranges.length === 0) return;
     markEState(owner, eState);
-    positionEditor(editor, ranges);
+    positionEditor(editor, ranges, isContextFlash(eState));
   });
 }

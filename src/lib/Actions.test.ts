@@ -1,5 +1,6 @@
 import { Actions, itemName } from '#/lib/Actions';
 import { CONTENT_TITLE_SLICE_LENGTH } from '#/lib/constants';
+import * as contextFlash from '#/lib/context-flash';
 import * as itemContext from '#/lib/item-context';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as obsidianPdf from '#/lib/pdf/obsidian-pdf';
@@ -8,6 +9,7 @@ import {
   fetchCurrentItem,
   invalidateCurrentItemQuery,
 } from '#/lib/query-client';
+import * as reviewPosition from '#/lib/review-position';
 import {
   addCompletedReview,
   removeCompletedReview,
@@ -1609,6 +1611,8 @@ describe('Actions.goToContext', () => {
               order.push('reveal');
               return Promise.resolve();
             });
+          // Its passage is highlighted in the PDF, not flashed
+          const flash = vi.spyOn(contextFlash, 'flashSnippetContext');
           const wired = wireGoToContext({ item, registered });
           const view = { getViewType: () => 'pdf' };
           wired.openFile.mockImplementation(() => {
@@ -1623,12 +1627,75 @@ describe('Actions.goToContext', () => {
           await new Actions(wired.plugin).goToContext(itemFile, newLeaf);
 
           expectOpened(wired, registered, pdf, { subpath }, newLeaf);
+          expect(flash).not.toHaveBeenCalled();
           if (registered.includes('pdf')) {
             expect(reveal).toHaveBeenCalledExactlyOnceWith(view, pdfRange);
             expect(order).toEqual(['open', 'reveal']);
           } else {
             expect(reveal).not.toHaveBeenCalled();
           }
+        }
+      )
+    );
+  });
+
+  it("flashes a snippet's passage where its context opened, once it has, and marks it for review to flash; a card's, neither", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<NoteType>('snippet', 'card'),
+        contextArb.filter((context) => context !== null),
+        registeredArb,
+        newLeafArb,
+        async (type, context, registered, newLeaf) => {
+          vi.restoreAllMocks();
+          const itemFile = makeTFile('Item');
+          const item = {
+            data: { id: 'item-1', type },
+            file: itemFile,
+          } as unknown as ReviewItem;
+          vi.spyOn(itemContext, 'resolveItemContext').mockResolvedValue(
+            context
+          );
+          const order: string[] = [];
+          const flash = vi
+            .spyOn(contextFlash, 'flashSnippetContext')
+            .mockImplementation(() => void order.push('flash'));
+          const mark = vi
+            .spyOn(reviewPosition, 'markContextFlash')
+            .mockImplementation(() => void order.push('mark'));
+          const wired = wireGoToContext({ item, registered });
+          const view = { getViewType: () => 'markdown' };
+          wired.openFile.mockImplementation(() => {
+            order.push('open');
+            return Promise.resolve();
+          });
+          wired.getLeaf.mockImplementation(() => ({
+            openFile: wired.openFile,
+            view,
+          }));
+
+          await new Actions(wired.plugin).goToContext(itemFile, newLeaf);
+
+          const snippet = type === 'snippet';
+          const opened = registered.includes(context.file.extension);
+          if (snippet && context.eState) {
+            expect(mark).toHaveBeenCalledExactlyOnceWith(context.eState);
+          } else {
+            expect(mark).not.toHaveBeenCalled();
+          }
+          if (snippet && opened) {
+            expect(flash).toHaveBeenCalledExactlyOnceWith(view, item, context);
+          } else {
+            expect(flash).not.toHaveBeenCalled();
+          }
+          // Marked before review can be handed it, flashed once it has opened
+          expect(order).toEqual(
+            [
+              snippet && context.eState ? ['mark'] : [],
+              opened ? ['open'] : [],
+              snippet && opened ? ['flash'] : [],
+            ].flat()
+          );
         }
       )
     );

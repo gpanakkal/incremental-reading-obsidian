@@ -1,4 +1,7 @@
+import { contextFlashEffect } from '#/lib/extensions/ContextFlashExtension';
+import type { StateEffect, TransactionSpec } from '@codemirror/state';
 import fc from 'fast-check';
+import { readFileSync } from 'fs';
 import type {
   App,
   CachedMetadata,
@@ -6,13 +9,16 @@ import type {
   SubpathResult,
   TFile,
 } from 'obsidian';
+import { resolve } from 'path';
 import { describe, expect, it, vi } from 'vitest';
 import { wasPositioned } from './ephemeral-position';
 import {
   arrivalRanges,
+  markContextFlash,
   positionEditor,
   positionOnArrival,
   subpathResolver,
+  UNFOLD_CLASS,
   type OffsetRange,
 } from './review-position';
 
@@ -63,17 +69,38 @@ const keeps = (range: OffsetRange, a: number, b: number, length: number) => {
   );
 };
 
+/** Ranges in order, one or more, as arrivalRanges answers them. */
+const rangesArb = fc.array(
+  fc.tuple(fc.nat(100), fc.nat(100)).map(([a, b]) => ({
+    from: Math.min(a, b),
+    to: Math.max(a, b),
+  })),
+  { minLength: 1, maxLength: 3 }
+);
+
 /** An editor whose positions are offsets, recording what was done to it. */
 function makeEditor(doc = '') {
   const pos = (offset: number) => ({ line: 0, ch: offset });
   const editor = {
     offsetToPos: vi.fn(pos),
     addHighlights: vi.fn(),
+    removeHighlights: vi.fn(),
     setCursor: vi.fn(),
     scrollIntoView: vi.fn(),
     getValue: () => doc,
+    cm: { dispatch: vi.fn<(spec: TransactionSpec) => void>() },
   };
   return { editor, asEditor: editor as unknown as Editor, pos };
+}
+
+/** The ranges each flash dispatched to `editor`'s view was handed, in order. */
+function flashesOf(editor: ReturnType<typeof makeEditor>['editor']) {
+  return editor.cm.dispatch.mock.calls.flatMap(([spec]) =>
+    [spec.effects ?? []]
+      .flat()
+      .filter((effect: StateEffect<unknown>) => effect.is(contextFlashEffect))
+      .map((effect) => effect.value)
+  );
 }
 
 /** A review tab that hands each listener what `arrive` is given. */
@@ -343,6 +370,8 @@ describe('positionEditor', () => {
             true,
             true
           );
+          expect(editor.removeHighlights).not.toHaveBeenCalled();
+          expect(flashesOf(editor)).toEqual([]);
           const [first] = ranges;
           expect(editor.setCursor).toHaveBeenCalledExactlyOnceWith(
             pos(first.from)
@@ -356,14 +385,57 @@ describe('positionEditor', () => {
     );
   });
 
+  it('for Go to context, flashes every range for a moment instead, leaving no highlight until a click, and puts it on screen the same way', () => {
+    fc.assert(
+      fc.property(rangesArb, (ranges) => {
+        const { editor, asEditor, pos } = makeEditor();
+
+        positionEditor(asEditor, ranges, true);
+
+        expect(flashesOf(editor)).toEqual([ranges]);
+        // Obsidian's highlight unfolds what hides a range; one of a class
+        // nothing styles, taken straight back off, leaves no mark that stays
+        // lit until the reader clicks
+        expect(editor.addHighlights).toHaveBeenCalledExactlyOnceWith(
+          ranges.map(({ from, to }) => ({ from: pos(from), to: pos(to) })),
+          UNFOLD_CLASS,
+          true,
+          true
+        );
+        // Nor the one an earlier link left until a click
+        expect(editor.removeHighlights.mock.calls).toEqual([
+          [UNFOLD_CLASS],
+          ['is-flashing'],
+        ]);
+        const [first] = ranges;
+        expect(editor.setCursor).toHaveBeenCalledExactlyOnceWith(
+          pos(first.from)
+        );
+        expect(editor.scrollIntoView).toHaveBeenCalledExactlyOnceWith(
+          { from: pos(first.to), to: pos(first.from) },
+          true
+        );
+      })
+    );
+  });
+
+  it('unfolds with a highlight of a class nothing styles', () => {
+    const css = readFileSync(resolve(process.cwd(), 'styles.css'), 'utf8');
+
+    expect(css).not.toContain(UNFOLD_CLASS);
+  });
+
   it('does nothing with no range', () => {
-    const { editor, asEditor } = makeEditor();
+    for (const flash of [false, true]) {
+      const { editor, asEditor } = makeEditor();
 
-    positionEditor(asEditor, []);
+      positionEditor(asEditor, [], flash);
 
-    expect(editor.addHighlights).not.toHaveBeenCalled();
-    expect(editor.setCursor).not.toHaveBeenCalled();
-    expect(editor.scrollIntoView).not.toHaveBeenCalled();
+      expect(editor.addHighlights).not.toHaveBeenCalled();
+      expect(flashesOf(editor)).toEqual([]);
+      expect(editor.setCursor).not.toHaveBeenCalled();
+      expect(editor.scrollIntoView).not.toHaveBeenCalled();
+    }
   });
 });
 
@@ -382,6 +454,34 @@ describe('positionOnArrival', () => {
           wired.pos(range.from)
         );
         expect(wasPositioned(wired.owner)).toBe(true);
+      })
+    );
+  });
+
+  it('flashes a place Go to context marked, and marks one any other link opens until a click', () => {
+    fc.assert(
+      fc.property(fc.string(), matchArb, fc.boolean(), (doc, match, marked) => {
+        const wired = wireArrivals(doc, null);
+        const eState = { match };
+        if (marked) markContextFlash(eState);
+
+        wired.arrive('item', eState);
+
+        const ranges = arrivalRanges(eState, doc.length, () => null);
+        if (ranges.length === 0) {
+          expect(wired.editor.addHighlights).not.toHaveBeenCalled();
+          return;
+        }
+        expect(flashesOf(wired.editor)).toEqual(marked ? [ranges] : []);
+        expect(wired.editor.addHighlights).toHaveBeenCalledExactlyOnceWith(
+          ranges.map(({ from, to }) => ({
+            from: wired.pos(from),
+            to: wired.pos(to),
+          })),
+          marked ? UNFOLD_CLASS : 'is-flashing',
+          true,
+          true
+        );
       })
     );
   });
