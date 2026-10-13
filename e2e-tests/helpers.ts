@@ -1500,11 +1500,13 @@ export type RepoWindow = {
  * reviewing it: returns with its Show answer button up.
  */
 export async function reviewNewCard(page: Page) {
+  const paragraph =
+    'Explain the security functions: Confidentiality, Integrity and Availability (CIA).';
   await openNote(page, 'sources/Security Principles');
-  await selectParagraph(
-    page,
-    'Explain the security functions: Confidentiality, Integrity and Availability (CIA).'
-  );
+  // In a narrow tab the paragraph sits far enough below the image above it
+  // that CodeMirror may not have drawn it yet: on CI at 640px it never was
+  await scrollToText(page, paragraph);
+  await selectParagraph(page, paragraph);
   await executeCommandById(page, 'incremental-reading:create-card');
   const repo = () =>
     page.evaluate(
