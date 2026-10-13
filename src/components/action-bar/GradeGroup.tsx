@@ -1,7 +1,6 @@
 import { useReviewContext } from '#/components/ReviewContext';
 import { formatInterval } from '#/lib/format-interval';
 import type { ReviewCard } from '#/lib/types';
-import { useMemo } from 'react';
 import { type Grade, Rating } from 'ts-fsrs';
 
 /**
@@ -25,8 +24,11 @@ export const GRADE_GROUP_CLASS = 'ir-grade-group';
 /**
  * The card's four grades as one segmented control: each segment its grade's
  * word over how far out that grade would put the card, previewed by the same
- * scheduler grading uses, at the moment the group renders. A grade it cannot
- * preview shows a dash, and is named by its word alone.
+ * scheduler grading uses, once while the card is shown (see
+ * `CardManager.gradePreview`), so it holds still through re-renders and
+ * polls. With fuzz on the intervals leave it out, and those it could move
+ * read `~10d`, under the word and in the button's name alike. A grade it
+ * cannot preview shows a dash, and is named by its word alone.
  *
  * A `ghost` lays out exactly as the real group would inline, for the bar to
  * measure while the real one is in its own row (see `useGradePlacement`). It
@@ -41,22 +43,13 @@ export function GradeGroup({
   ghost?: boolean;
 }) {
   const { actions, reviewManager } = useReviewContext();
-  const intervals = useMemo(() => {
-    const now = new Date();
-    let due: Record<Grade, Date> | null = null;
-    try {
-      due = reviewManager.cards.previewDue(card.data, now);
-    } catch (e) {
-      // A card or settings ts-fsrs refuses fails the grade on click, where it
-      // is reported; the buttons stay up to try
-      console.warn('Could not preview the grades of a card', e);
-    }
-    return GRADE_SEGMENTS.map(({ grade }) => {
-      const ms = due ? due[grade].getTime() - now.getTime() : NaN;
-      // An Invalid Date — a step past the last date a Date can hold
-      return Number.isNaN(ms) ? null : formatInterval(ms);
-    });
-  }, [card.data, reviewManager]);
+  const { approximate, inMs } = reviewManager.cards.gradePreview(card.data);
+  const intervals = GRADE_SEGMENTS.map(({ grade }) =>
+    // No date: a step past the last date a Date can hold, or no preview at all
+    Number.isNaN(inMs[grade])
+      ? null
+      : `${approximate[grade] ? '~' : ''}${formatInterval(inMs[grade])}`
+  );
 
   return (
     <div

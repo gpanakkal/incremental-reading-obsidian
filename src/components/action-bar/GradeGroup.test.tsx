@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { ReviewContextProvider } from '#/components/ReviewContext';
 import { formatInterval } from '#/lib/format-interval';
+import { CardManager } from '#/lib/items/CardManager';
 import type { ReviewCard } from '#/lib/types';
 import fc from 'fast-check';
 import { type ComponentChild, render } from 'preact';
-import { type Grade, Rating } from 'ts-fsrs';
+import { generatorParameters, type Grade, Rating } from 'ts-fsrs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GradeGroup } from './GradeGroup';
 
@@ -57,66 +58,84 @@ const offsetsArb = fc.tuple(
   )
 );
 
+/** Which grades fuzz could move, each its own. */
+const approximateArb = fc.tuple(...GRADES.map(() => fc.boolean()));
+
+/** An interval as shown: `~` before it while fuzz makes it approximate. */
+const labelOf = (offset: number, approximate: boolean) =>
+  `${approximate ? '~' : ''}${formatInterval(offset)}`;
+
 /** What a segment shows under its word for `offset`: none for no date. */
-const intervalShown = (offset: number) =>
-  Number.isNaN(offset) ? '–' : formatInterval(offset);
+const intervalShown = (offset: number, approximate = false) =>
+  Number.isNaN(offset) ? '–' : labelOf(offset, approximate);
 
 /** A segment's accessible name for `offset`: the word alone for no date. */
-const nameOf = (word: string, offset: number) =>
+const nameOf = (word: string, offset: number, approximate = false) =>
   Number.isNaN(offset)
     ? word
-    : `${word}, next review in ${formatInterval(offset)}`;
-
-/** Any moment a review could happen at, with a century past it to schedule in. */
-const reviewTimeArb = fc.date({
-  min: new Date(1970, 0, 1),
-  max: new Date(2200, 0, 1),
-  noInvalidDate: true,
-});
+    : `${word}, next review in ${labelOf(offset, approximate)}`;
 
 /**
- * Mount the group for `card`, previewing `offsets` past the current (faked)
- * time. Mocks are made here rather than shared: the properties below mount
- * many times per `it`, and a spy counted across cases would read as a click
- * the group never made.
+ * Mount the group for `card`, its preview putting each grade `offsets` out,
+ * each `approximate` or not. Mocks are made here rather than shared: the
+ * properties below mount many times per `it`, and a spy counted across cases
+ * would read as a click the group never made.
  */
 function mountGroup(
   card: ReviewCard,
   offsets: readonly number[],
-  { ghost = false }: { ghost?: boolean } = {}
+  {
+    ghost = false,
+    approximate = [false, false, false, false],
+  }: { ghost?: boolean; approximate?: readonly boolean[] } = {}
 ) {
   document.body.innerHTML = '';
-  const now = Date.now();
   const gradeCard = vi.fn();
-  const previewDue = vi.fn(() => dueAt(now, offsets));
-  const reviewManager = { cards: { previewDue } };
-  const node = (shown: ReviewCard) => (
+  const gradePreview = vi.fn(() => ({
+    approximate: Object.fromEntries(
+      GRADES.map(([, grade], i) => [grade, approximate[i]])
+    ),
+    inMs: Object.fromEntries(GRADES.map(([, grade], i) => [grade, offsets[i]])),
+  }));
+  const container = mount(
     <ReviewContextProvider
       plugin={{ actions: { gradeCard } } as never}
       reviewView={{} as never}
-      reviewManager={reviewManager as never}
+      reviewManager={{ cards: { gradePreview } } as never}
     >
-      <GradeGroup card={shown} ghost={ghost} />
+      <GradeGroup card={card} ghost={ghost} />
     </ReviewContextProvider>
   );
-  const container = mount(node(card));
-  return {
-    container,
-    gradeCard,
-    previewDue,
-    now,
-    /** Render the group again, in place, for `next`. */
-    rerender: (next: ReviewCard) => {
-      render(node(next) as never, container);
-    },
-  };
+  return { container, gradeCard, gradePreview };
 }
 
-/** A preview putting each grade `offsets` past `now`, in grade order. */
-function dueAt(now: number, offsets: readonly number[]) {
-  return Object.fromEntries(
-    GRADES.map(([, grade], i) => [grade, new Date(now + offsets[i])])
-  );
+/**
+ * A card under review, as the current-item poll hands it over: a new object
+ * each time, equal in every field.
+ */
+function polledCard(id = 'card-id'): ReviewCard {
+  return {
+    data: {
+      id,
+      type: 'card',
+      reference: `${id}.md`,
+      state: 'Review',
+      stability: 60,
+      difficulty: 5,
+      reps: 6,
+      lapses: 0,
+      learning_steps: 0,
+      elapsed_days: 0,
+      scheduled_days: 30,
+      last_review: new Date(2026, 8, 12, 12),
+      due: new Date(2026, 9, 12, 11),
+      created_at: new Date(2026, 0, 1),
+      dismissed: false,
+      deleted: false,
+      parent: null,
+    },
+    file: {},
+  } as never;
 }
 
 function segments(container: HTMLElement): HTMLButtonElement[] {
@@ -147,9 +166,8 @@ describe('GradeGroup', () => {
 
   it('property: shows each grade, in order, as its word over when it would put the card next', () => {
     fc.assert(
-      fc.property(reviewTimeArb, offsetsArb, (at, offsets) => {
-        vi.setSystemTime(at);
-        const { container } = mountGroup(makeCard(), offsets);
+      fc.property(offsetsArb, approximateArb, (offsets, approximate) => {
+        const { container } = mountGroup(makeCard(), offsets, { approximate });
 
         const shown = segments(container).map((button) => [
           button.querySelector('.ir-grade-word')?.textContent,
@@ -157,7 +175,10 @@ describe('GradeGroup', () => {
         ]);
 
         expect(shown).toEqual(
-          GRADES.map(([word], i) => [word, intervalShown(offsets[i])])
+          GRADES.map(([word], i) => [
+            word,
+            intervalShown(offsets[i], approximate[i]),
+          ])
         );
       })
     );
@@ -165,12 +186,12 @@ describe('GradeGroup', () => {
 
   it('property: names each grade by its word and interval, on the button', () => {
     fc.assert(
-      fc.property(offsetsArb, (offsets) => {
-        const { container } = mountGroup(makeCard(), offsets);
+      fc.property(offsetsArb, approximateArb, (offsets, approximate) => {
+        const { container } = mountGroup(makeCard(), offsets, { approximate });
 
         segments(container).forEach((button, i) => {
           expect(button.getAttribute('aria-label')).toBe(
-            nameOf(GRADES[i][0], offsets[i])
+            nameOf(GRADES[i][0], offsets[i], approximate[i])
           );
           expect(button.hasAttribute('title')).toBe(false);
           for (const inner of Array.from(button.querySelectorAll('*'))) {
@@ -181,60 +202,70 @@ describe('GradeGroup', () => {
     );
   });
 
-  it('previews the card on screen at the time it renders', () => {
-    vi.setSystemTime(new Date(2026, 9, 11, 9, 30));
+  it('asks for the preview of the card on screen', () => {
     const card = makeCard();
 
-    const { previewDue, now } = mountGroup(card, [0, 0, 0, 0]);
+    const { gradePreview } = mountGroup(card, [0, 0, 0, 0]);
 
-    expect(previewDue).toHaveBeenCalledExactlyOnceWith(
-      card.data,
-      new Date(now)
-    );
+    expect(gradePreview).toHaveBeenCalledWith(card.data);
   });
 
-  it('previews again once another card is on screen, and only then', () => {
-    const card = makeCard();
-    const { container, previewDue, now, rerender } = mountGroup(
-      card,
-      [0, 0, 0, 0]
+  it('keeps its intervals while the same card is polled, fuzz on, and moves on with the card', () => {
+    vi.setSystemTime(new Date(2026, 9, 12, 12));
+    const cards = new CardManager(
+      {
+        settings: {
+          dayRolloverOffset: 4,
+          fsrsParams: generatorParameters({ enable_fuzz: true }),
+        },
+        app: {},
+      } as never,
+      {} as never
     );
-    const intervals = () =>
-      segments(container).map(
-        (b) => b.querySelector('.ir-grade-interval')?.textContent
+    const container = document.body.appendChild(document.createElement('div'));
+    const shown = (card: ReviewCard) => {
+      render(
+        <ReviewContextProvider
+          plugin={{ actions: {} } as never}
+          reviewView={{} as never}
+          reviewManager={{ cards } as never}
+        >
+          <GradeGroup card={card} />
+        </ReviewContextProvider>,
+        container
       );
+      return segments(container).map((b) => [
+        b.querySelector('.ir-grade-interval')?.textContent,
+        b.getAttribute('aria-label'),
+      ]);
+    };
 
-    rerender({ ...card });
-    expect(previewDue).toHaveBeenCalledTimes(1);
+    // Each poll at a new moment reseeded the fuzz: Easy went 5mo, 6mo, 5mo
+    const first = shown(polledCard());
+    for (let poll = 0; poll < 6; poll++) {
+      vi.advanceTimersByTime(5_000);
+      expect(shown(polledCard())).toEqual(first);
+    }
+    // Approximate where fuzz can move it, under the word and in the button's
+    // name alike; Forgot's relearning step is never fuzzed
+    expect(first.map(([interval]) => interval?.startsWith('~'))).toEqual([
+      false,
+      true,
+      true,
+      true,
+    ]);
+    first.forEach(([interval, label], i) => {
+      expect(label).toBe(`${GRADES[i][0]}, next review in ${interval}`);
+    });
 
-    previewDue.mockReturnValue(dueAt(now, [60_000, 3_600_000, 86_400_000, 0]));
-    rerender({ ...card, data: { ...card.data } });
-
-    expect(previewDue).toHaveBeenCalledTimes(2);
-    expect(intervals()).toEqual(['1m', '1h', '1d', '<1m']);
+    const preview = vi.spyOn(cards, 'previewDue');
+    shown(polledCard('other-card'));
+    expect(preview).toHaveBeenCalledOnce();
   });
 
   it('still offers every grade, by its word alone, when the card cannot be previewed', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const actions = { gradeCard: vi.fn() };
     const card = makeCard();
-    const container = mount(
-      <ReviewContextProvider
-        plugin={{ actions } as never}
-        reviewView={{} as never}
-        reviewManager={
-          {
-            cards: {
-              previewDue: () => {
-                throw new Error('a card ts-fsrs will not schedule');
-              },
-            },
-          } as never
-        }
-      >
-        <GradeGroup card={card} />
-      </ReviewContextProvider>
-    );
+    const { container, gradeCard } = mountGroup(card, [NaN, NaN, NaN, NaN]);
 
     expect(
       segments(container).map((b) => [
@@ -243,14 +274,7 @@ describe('GradeGroup', () => {
       ])
     ).toEqual(GRADES.map(([word]) => [word, '–']));
     segments(container)[2]?.click();
-    expect(actions.gradeCard).toHaveBeenCalledExactlyOnceWith(
-      card,
-      Rating.Good
-    );
-    expect(warn).toHaveBeenCalledExactlyOnceWith(
-      'Could not preview the grades of a card',
-      expect.any(Error)
-    );
+    expect(gradeCard).toHaveBeenCalledExactlyOnceWith(card, Rating.Good);
   });
 
   it.each(GRADES)('grades the card %s', (word, rating: Grade) => {

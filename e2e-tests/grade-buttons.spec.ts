@@ -1,3 +1,4 @@
+import { CURRENT_ITEM_REFETCH_TIME } from '#/lib/constants';
 import test, {
   expect,
   type ElectronApplication,
@@ -201,7 +202,121 @@ async function gradeAs(page: Page, word: (typeof WORDS)[number]) {
   ).toBeVisible();
 }
 
+/** Unofficial: `window.app`, `app.plugins.plugins`. */
+type PluginWindow = {
+  app: {
+    plugins: {
+      plugins: Record<
+        string,
+        {
+          settings: { fsrsParams: Record<string, unknown> };
+          reviewManager: {
+            cards: { gradePreview: (...args: unknown[]) => unknown };
+          };
+        }
+      >;
+    };
+  };
+  __gradePreviews?: number;
+};
+
+/** Turn FSRS fuzz on or off, as the settings tab's toggle does. */
+function setFuzz(page: Page, on: boolean) {
+  return page.evaluate((on) => {
+    const plugin = (window as unknown as PluginWindow).app.plugins.plugins[
+      'incremental-reading'
+    ];
+    plugin.settings.fsrsParams = {
+      ...plugin.settings.fsrsParams,
+      enable_fuzz: on,
+    };
+  }, on);
+}
+
+/** What each grade button shows, and is named, in grade order. */
+function gradeLabels(page: Page) {
+  return page.evaluate(
+    (view) =>
+      Array.from(
+        document.querySelectorAll(
+          `${view} .ir-grade-group:not([aria-hidden]) > button`
+        ),
+        (b) => [
+          b.querySelector('.ir-grade-interval')?.textContent ?? '',
+          b.getAttribute('aria-label') ?? '',
+        ]
+      ),
+    VIEW
+  );
+}
+
 test.describe('Grade buttons', () => {
+  test('hold their intervals while the card is shown, marked approximate where fuzz can move them', async () => {
+    await window.setViewportSize(WIDE);
+    await reviewNewCard(window);
+    await setFuzz(window, true);
+    // Counts every time the buttons ask for their intervals, so the wait below
+    // is known to have spanned polls and re-renders
+    await window.evaluate(() => {
+      const w = window as unknown as PluginWindow;
+      const { cards } =
+        w.app.plugins.plugins['incremental-reading'].reviewManager;
+      const preview = cards.gradePreview;
+      w.__gradePreviews = 0;
+      cards.gradePreview = (...args: unknown[]): unknown => {
+        w.__gradePreviews!++;
+        return preview.apply(cards, args);
+      };
+    });
+    await window.getByRole('button', { name: 'Show answer' }).click();
+    await expectPlacement(window, 'inline');
+
+    // A new card: three learning steps fuzz never touches, then Easy's first
+    // interval, which it does
+    const first = await gradeLabels(window);
+    expect(first.map(([interval]) => interval.startsWith('~'))).toEqual([
+      false,
+      false,
+      false,
+      true,
+    ]);
+    first.forEach(([interval, label], i) => {
+      expect(() => labelMs(interval.replace(/^~/, ''))).not.toThrow();
+      expect(label).toBe(`${WORDS[i]}, next review in ${interval}`);
+    });
+    const asked = await window.evaluate(
+      () => (window as unknown as PluginWindow).__gradePreviews!
+    );
+
+    // Sampled through two polls of the current item: fuzz reseeded at each one
+    // used to move them a few days either way
+    const deadline = Date.now() + 2 * CURRENT_ITEM_REFETCH_TIME + 1_000;
+    while (Date.now() < deadline) {
+      expect(await gradeLabels(window)).toEqual(first);
+      await window.waitForTimeout(250);
+    }
+    expect(
+      await window.evaluate(
+        () => (window as unknown as PluginWindow).__gradePreviews!
+      )
+    ).toBeGreaterThan(asked);
+
+    // Fuzz off: exact, with no `~`, from the next poll
+    await setFuzz(window, false);
+    await expect
+      .poll(async () => (await gradeLabels(window)).map(([i]) => i[0]), {
+        timeout: CURRENT_ITEM_REFETCH_TIME + 2_000,
+      })
+      .not.toContain('~');
+    const exact = await gradeLabels(window);
+    exact.forEach(([interval, label], i) => {
+      expect(() => labelMs(interval)).not.toThrow();
+      expect(label).toBe(`${WORDS[i]}, next review in ${interval}`);
+    });
+
+    await gradeAs(window, 'Easy');
+  });
+
   test('sit inline in a wide bar, tinted, and grade from there', async () => {
     await window.setViewportSize(WIDE);
     await reviewNewCard(window);

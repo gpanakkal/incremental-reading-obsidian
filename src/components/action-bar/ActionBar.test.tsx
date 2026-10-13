@@ -106,13 +106,13 @@ function mountBar({
  */
 const REVIEW_MANAGER = {
   cards: {
-    previewDue: () =>
-      Object.fromEntries(
-        [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy].map((grade) => [
-          grade,
-          new Date(Date.now() + 10 * 60_000),
-        ])
-      ),
+    gradePreview: () => {
+      const grades = [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy];
+      return {
+        approximate: Object.fromEntries(grades.map((grade) => [grade, false])),
+        inMs: Object.fromEntries(grades.map((grade) => [grade, 10 * 60_000])),
+      };
+    },
   },
 };
 

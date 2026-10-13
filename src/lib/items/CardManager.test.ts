@@ -35,6 +35,7 @@ import {
   generatorParameters,
   Rating,
   State,
+  StrategyMode,
 } from 'ts-fsrs';
 import {
   afterAll,
@@ -2605,8 +2606,9 @@ describe('review — FSRS settings', () => {
             enable_short_term: shortTerm,
           });
           // Disable fuzz is NOT required: we drive the reference computation with
-          // the very same params, so any fuzz is reproduced identically because
-          // FSRS fuzz is seeded from the card's interval, not wall-clock RNG.
+          // the very same params, card and review time, and ts-fsrs seeds its
+          // fuzz from those alone (review time, reps, difficulty × stability),
+          // so any fuzz is reproduced identically.
           const card = makeCardDisplay();
           const storedRow = makeCardRow({ id: card.id, state: State.New });
           const repo = makeReviewRepo(storedRow);
@@ -2630,76 +2632,76 @@ describe('review — FSRS settings', () => {
     );
   });
 
-  describe('previewDue', () => {
-    // #region PREVIEW HELPERS
+  // #region PREVIEW HELPERS
 
-    /** A learning or relearning step, as the settings tab accepts one. */
-    const stepArb = fc
-      .tuple(
-        fc.oneof(
-          fc.integer({ min: 1, max: 2000 }),
-          fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER })
-        ),
-        fc.constantFrom('m', 'h', 'd')
-      )
-      .map(([count, unit]): StepUnit => `${count}${unit}`);
+  /** A learning or relearning step, as the settings tab accepts one. */
+  const stepArb = fc
+    .tuple(
+      fc.oneof(
+        fc.integer({ min: 1, max: 2000 }),
+        fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER })
+      ),
+      fc.constantFrom('m', 'h', 'd')
+    )
+    .map(([count, unit]): StepUnit => `${count}${unit}`);
 
-    /** Every FSRS setting the settings tab exposes. */
-    const fsrsParamsArb = fc
+  /** Every FSRS setting the settings tab exposes. */
+  const fsrsParamsArb = fc
+    .record({
+      request_retention: fc.double({ min: 0.7, max: 0.99, noNaN: true }),
+      // The settings tab takes any positive integer
+      maximum_interval: fc.oneof(
+        fc.integer({ min: 1, max: 36500 }),
+        fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER })
+      ),
+      enable_fuzz: fc.boolean(),
+      enable_short_term: fc.boolean(),
+      learning_steps: fc.array(stepArb, { maxLength: 6 }),
+      relearning_steps: fc.array(stepArb, { maxLength: 6 }),
+    })
+    .map((params) => generatorParameters(params));
+
+  /**
+   * A card in whatever state a history of reviews under `params` leaves it —
+   * New for no history, then Learning, Review or Relearning — in the display
+   * shape review reads, and a moment after its last review to preview it at.
+   */
+  function cardAndTimeArb(params: FSRSParameters) {
+    return fc
       .record({
-        request_retention: fc.double({ min: 0.7, max: 0.99, noNaN: true }),
-        // The settings tab takes any positive integer
-        maximum_interval: fc.oneof(
-          fc.integer({ min: 1, max: 36500 }),
-          fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER })
-        ),
-        enable_fuzz: fc.boolean(),
-        enable_short_term: fc.boolean(),
-        learning_steps: fc.array(stepArb, { maxLength: 6 }),
-        relearning_steps: fc.array(stepArb, { maxLength: 6 }),
-      })
-      .map((params) => generatorParameters(params));
-
-    /**
-     * A card in whatever state a history of reviews under `params` leaves it —
-     * New for no history, then Learning, Review or Relearning — in the display
-     * shape review reads, and a moment after its last review to preview it at.
-     */
-    function cardAndTimeArb(params: FSRSParameters) {
-      return fc
-        .record({
-          createdAt: fc.date({
-            min: new Date(2000, 0, 1),
-            max: new Date(2100, 0, 1),
-            noInvalidDate: true,
+        createdAt: fc.date({
+          min: new Date(2000, 0, 1),
+          max: new Date(2100, 0, 1),
+          noInvalidDate: true,
+        }),
+        reviews: fc.array(
+          fc.record({
+            grade: gradeArb,
+            delay: fc.integer({ min: 0, max: 400 * MS_PER_DAY }),
           }),
-          reviews: fc.array(
-            fc.record({
-              grade: gradeArb,
-              delay: fc.integer({ min: 0, max: 400 * MS_PER_DAY }),
-            }),
-            { maxLength: 8 }
-          ),
-          previewDelay: fc.integer({ min: 0, max: 800 * MS_PER_DAY }),
-        })
-        .map(({ createdAt, reviews, previewDelay }) => {
-          const scheduler = fsrs(params);
-          let card = createEmptyCard(createdAt);
-          let time = createdAt.getTime();
-          for (const { grade, delay } of reviews) {
-            time += delay;
-            card = scheduler.next(card, new Date(time), grade).card;
-          }
-          const display = makeCardDisplay({
-            ...card,
-            state: State[card.state] as ISRSCardDisplay['state'],
-          });
-          return { card: display, now: new Date(time + previewDelay) };
+          { maxLength: 8 }
+        ),
+        previewDelay: fc.integer({ min: 0, max: 800 * MS_PER_DAY }),
+      })
+      .map(({ createdAt, reviews, previewDelay }) => {
+        const scheduler = fsrs(params);
+        let card = createEmptyCard(createdAt);
+        let time = createdAt.getTime();
+        for (const { grade, delay } of reviews) {
+          time += delay;
+          card = scheduler.next(card, new Date(time), grade).card;
+        }
+        const display = makeCardDisplay({
+          ...card,
+          state: State[card.state] as ISRSCardDisplay['state'],
         });
-    }
+        return { card: display, now: new Date(time + previewDelay) };
+      });
+  }
 
-    // #endregion
+  // #endregion
 
+  describe('previewDue', () => {
     it('property: shows the due date grading would write, for each grade, any card and any settings', async () => {
       await fc.assert(
         fc.asyncProperty(
@@ -2725,10 +2727,10 @@ describe('review — FSRS settings', () => {
     });
 
     it('property: still shows what grading writes when the grade comes later than the preview, fuzz off', async () => {
-      // The buttons preview the card as they render, and the click lands
-      // whenever the reader gets to it. With fuzz on, ts-fsrs seeds the fuzz
-      // from the moment of the review, so the two can differ by a fuzzed
-      // interval: accepted until task 0087.
+      // A preview taken at one moment and a grade made later agree, fuzz
+      // off. With fuzz on, ts-fsrs seeds the fuzz from the moment of the
+      // review, so the two can differ by a fuzzed interval; the buttons show
+      // the unfuzzed interval, marked approximate (see gradePreview).
       await fc.assert(
         fc.asyncProperty(
           fsrsParamsArb
@@ -2782,6 +2784,342 @@ describe('review — FSRS settings', () => {
             ).toEqual([Rating.Again, Rating.Hard, Rating.Good, Rating.Easy]);
           }
         )
+      );
+    });
+  });
+
+  describe('gradePreview', () => {
+    // #region GRADE PREVIEW HELPERS
+
+    /**
+     * The card as the next poll of the current item hands it over: equal in
+     * every field, but a new object, its dates new objects too.
+     */
+    const repolled = (card: ISRSCardDisplay): ISRSCardDisplay => ({
+      ...card,
+      created_at: new Date(card.created_at),
+      due: new Date(card.due),
+      last_review: card.last_review && new Date(card.last_review),
+    });
+
+    /** How far past `now` each grade puts `card`, fuzz left out. */
+    function unfuzzed(
+      params: FSRSParameters,
+      card: ISRSCardDisplay,
+      now: Date
+    ) {
+      const log = fsrs({ ...params, enable_fuzz: false }).repeat(card, now);
+      return Object.fromEntries(
+        ([Rating.Again, Rating.Hard, Rating.Good, Rating.Easy] as const).map(
+          (g) => [g, log[g].card.due.getTime() - now.getTime()]
+        )
+      );
+    }
+
+    /** The four grades, in order. */
+    const GRADE_LIST = [
+      Rating.Again,
+      Rating.Hard,
+      Rating.Good,
+      Rating.Easy,
+    ] as const;
+
+    /**
+     * How far past `now` each grade puts `card` with fuzz on, its fuzz seeded
+     * by `seed` rather than the moment: each seed is one roll of the fuzz.
+     */
+    function fuzzedWith(
+      seed: string,
+      params: FSRSParameters,
+      card: ISRSCardDisplay,
+      now: Date
+    ) {
+      const log = fsrs({ ...params, enable_fuzz: true })
+        .useStrategy(StrategyMode.SEED, () => seed)
+        .repeat(card, now);
+      return GRADE_LIST.map((g) => log[g].card.due.getTime() - now.getTime());
+    }
+
+    /** Preview `card` at `now` under `params`. */
+    function previewOf(
+      params: FSRSParameters,
+      card: ISRSCardDisplay,
+      now: Date
+    ) {
+      return new CardManager(
+        makePluginWithFsrs(params),
+        makeReviewRepo(makeCardRow())
+      ).gradePreview(card, now);
+    }
+
+    /** A card in Review, last reviewed `elapsedDays` ago, as of `now`. */
+    function reviewCard(now: Date, elapsedDays = 30): ISRSCardDisplay {
+      return makeCardDisplay({
+        state: 'Review',
+        stability: 60,
+        difficulty: 5,
+        reps: 6,
+        last_review: new Date(now.getTime() - elapsedDays * MS_PER_DAY),
+        due: now,
+      });
+    }
+
+    // #endregion
+
+    it('property: shows each grade unfuzzed, approximate only while fuzz is on', () => {
+      fc.assert(
+        fc.property(
+          fsrsParamsArb.chain((params) =>
+            fc.tuple(fc.constant(params), cardAndTimeArb(params))
+          ),
+          ([params, { card, now }]) => {
+            const preview = previewOf(params, card, now);
+
+            // NaN where a step runs past the last date a Date can hold
+            expect(preview.inMs).toEqual(unfuzzed(params, card, now));
+            for (const g of GRADE_LIST) {
+              if (preview.approximate[g]) {
+                expect(params.enable_fuzz).toBe(true);
+                expect(Number.isNaN(preview.inMs[g])).toBe(false);
+              }
+            }
+          }
+        )
+      );
+    });
+
+    it('property: marks approximate every grade some roll of the fuzz moves', () => {
+      fc.assert(
+        fc.property(
+          fsrsParamsArb.chain((params) =>
+            fc.tuple(
+              fc.constant({ ...params, enable_fuzz: true }),
+              cardAndTimeArb(params)
+            )
+          ),
+          ([params, { card, now }]) => {
+            const preview = previewOf(params, card, now);
+            const exact = unfuzzed(params, card, now);
+
+            for (let roll = 0; roll < 50; roll++) {
+              const fuzzed = fuzzedWith(`roll-${roll}`, params, card, now);
+              GRADE_LIST.forEach((g, i) => {
+                if (!Object.is(fuzzed[i], exact[g])) {
+                  expect(preview.approximate[g]).toBe(true);
+                }
+              });
+            }
+          }
+        )
+      );
+    });
+
+    it('marks only the grades fuzz can move: a new card’s steps are exact, its first interval is not', () => {
+      const now = new Date(2026, 9, 12, 12);
+      const preview = previewOf(
+        generatorParameters({ enable_fuzz: true }),
+        makeCardDisplay(),
+        now
+      );
+
+      // 1m, 6m, 10m and 8d under ts-fsrs's defaults
+      expect(preview.approximate).toEqual({
+        [Rating.Again]: false,
+        [Rating.Hard]: false,
+        [Rating.Good]: false,
+        [Rating.Easy]: true,
+      });
+    });
+
+    it('marks the review intervals of a card in review, not its relearning step', () => {
+      const now = new Date(2026, 9, 12, 12);
+      const preview = previewOf(
+        generatorParameters({ enable_fuzz: true }),
+        reviewCard(now),
+        now
+      );
+
+      expect(preview.approximate).toEqual({
+        [Rating.Again]: false,
+        [Rating.Hard]: true,
+        [Rating.Good]: true,
+        [Rating.Easy]: true,
+      });
+    });
+
+    it('leaves exact the review intervals too short to fuzz', () => {
+      const now = new Date(2026, 9, 12, 12);
+      const preview = previewOf(
+        generatorParameters({ enable_fuzz: true }),
+        { ...reviewCard(now, 1), stability: 0.5, difficulty: 8 },
+        now
+      );
+
+      // 10m (relearning), 1d, 2d, 3d: ts-fsrs fuzzes only the 3d
+      expect(preview.inMs).toEqual({
+        [Rating.Again]: 10 * 60_000,
+        [Rating.Hard]: MS_PER_DAY,
+        [Rating.Good]: 2 * MS_PER_DAY,
+        [Rating.Easy]: 3 * MS_PER_DAY,
+      });
+      expect(preview.approximate).toEqual({
+        [Rating.Again]: false,
+        [Rating.Hard]: false,
+        [Rating.Good]: false,
+        [Rating.Easy]: true,
+      });
+    });
+
+    it('leaves exact a learning step days long, which ts-fsrs never fuzzes', () => {
+      const now = new Date(2026, 9, 12, 12);
+      const preview = previewOf(
+        generatorParameters({ enable_fuzz: true, learning_steps: ['3d'] }),
+        makeCardDisplay(),
+        now
+      );
+
+      expect(preview.inMs[Rating.Again]).toBe(3 * MS_PER_DAY);
+      expect(preview.approximate[Rating.Again]).toBe(false);
+    });
+
+    it('marks every interval it shows approximate when it cannot tell which fuzz moves', () => {
+      const manager = new CardManager(
+        makePluginWithFsrs(generatorParameters({ enable_fuzz: true })),
+        makeReviewRepo(makeCardRow())
+      );
+      // Private, so reached past its type
+      (manager as unknown as { fuzzEdgeDue: () => never }).fuzzEdgeDue = () => {
+        throw new Error('ts-fsrs changed under us');
+      };
+
+      const preview = manager.gradePreview(
+        makeCardDisplay(),
+        new Date(2026, 9, 12, 12)
+      );
+
+      expect(Object.values(preview.approximate)).toEqual([
+        true,
+        true,
+        true,
+        true,
+      ]);
+    });
+
+    it('marks nothing while fuzz is off', () => {
+      const now = new Date(2026, 9, 12, 12);
+      const preview = previewOf(
+        generatorParameters({ enable_fuzz: false }),
+        reviewCard(now),
+        now
+      );
+
+      expect(Object.values(preview.approximate)).toEqual([
+        false,
+        false,
+        false,
+        false,
+      ]);
+    });
+
+    it('property: previews a card once while it is shown, however often it is asked and whenever', () => {
+      fc.assert(
+        fc.property(
+          fsrsParamsArb.chain((params) =>
+            fc.tuple(fc.constant(params), cardAndTimeArb(params))
+          ),
+          fc.array(fc.integer({ min: 0, max: 400 * MS_PER_DAY }), {
+            minLength: 1,
+            maxLength: 6,
+          }),
+          ([params, { card, now }], laterBy) => {
+            const manager = new CardManager(
+              makePluginWithFsrs(params),
+              makeReviewRepo(makeCardRow())
+            );
+            const previewDue = vi.spyOn(manager, 'previewDue');
+
+            const first = manager.gradePreview(card, now);
+            for (const later of laterBy) {
+              expect(
+                manager.gradePreview(
+                  repolled(card),
+                  new Date(now.getTime() + later)
+                )
+              ).toBe(first);
+            }
+
+            expect(previewDue).toHaveBeenCalledOnce();
+          }
+        )
+      );
+    });
+
+    it('previews again for another card, a graded card, or new settings, holding only the last', () => {
+      const params = generatorParameters({ enable_fuzz: true });
+      const plugin = makePluginWithFsrs(params) as unknown as {
+        settings: { fsrsParams: FSRSParameters };
+      };
+      const manager = new CardManager(
+        plugin as never,
+        makeReviewRepo(makeCardRow())
+      );
+      const previewDue = vi.spyOn(manager, 'previewDue');
+      const now = new Date(2026, 9, 12, 12);
+      const a = makeCardDisplay({ id: 'card-a' });
+      const b = makeCardDisplay({ id: 'card-b' });
+
+      manager.gradePreview(a, now);
+      manager.gradePreview(b, now);
+      manager.gradePreview(a, now);
+      expect(previewDue).toHaveBeenCalledTimes(3);
+
+      // Graded: the same card in another state
+      manager.gradePreview({ ...a, reps: 1, state: 'Learning' }, now);
+      expect(previewDue).toHaveBeenCalledTimes(4);
+
+      plugin.settings.fsrsParams = { ...params, enable_fuzz: false };
+      const unfuzzedPreview = manager.gradePreview(
+        { ...a, reps: 1, state: 'Learning' },
+        now
+      );
+      expect(previewDue).toHaveBeenCalledTimes(5);
+      expect(Object.values(unfuzzedPreview.approximate)).not.toContain(true);
+    });
+
+    it('shows no interval for a card ts-fsrs will not preview, and asks once', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const manager = new CardManager(
+        makePluginWithFsrs(generatorParameters({ enable_fuzz: true })),
+        makeReviewRepo(makeCardRow())
+      );
+      const previewDue = vi
+        .spyOn(manager, 'previewDue')
+        .mockImplementation(() => {
+          throw new Error('a card ts-fsrs will not schedule');
+        });
+      const card = makeCardDisplay();
+
+      const preview = manager.gradePreview(card, new Date());
+      manager.gradePreview(repolled(card), new Date());
+
+      expect(preview).toEqual({
+        approximate: {
+          [Rating.Again]: false,
+          [Rating.Hard]: false,
+          [Rating.Good]: false,
+          [Rating.Easy]: false,
+        },
+        inMs: {
+          [Rating.Again]: NaN,
+          [Rating.Hard]: NaN,
+          [Rating.Good]: NaN,
+          [Rating.Easy]: NaN,
+        },
+      });
+      expect(previewDue).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        'Could not preview the grades of a card',
+        expect.any(Error)
       );
     });
   });

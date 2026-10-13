@@ -28,10 +28,12 @@ import {
   type TFile,
 } from 'obsidian';
 import {
+  type FSRS,
   type Grade,
   type StateType,
   fsrs,
   generatorParameters,
+  get_fuzz_range,
   Grades,
   State,
 } from 'ts-fsrs';
@@ -52,6 +54,20 @@ import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import { ItemManager } from './ItemManager';
 import SRSCard from './SRSCard';
 import SRSCardReview from './SRSCardReview';
+
+/**
+ * What the grade buttons show for a card (see {@link CardManager.gradePreview}):
+ * how far past the moment it was previewed each grade would put it, in ms —
+ * NaN for none — and, per grade, whether that is approximate: fuzz is on and
+ * could move it.
+ */
+export type GradePreview = {
+  approximate: Record<Grade, boolean>;
+  inMs: Record<Grade, number>;
+};
+
+/** Which end of its fuzz range each fuzzed interval is pinned to. */
+type FuzzEdge = 'min_ivl' | 'max_ivl';
 
 /** A span of a note chosen to become a card: its document offsets and text. */
 export type CardSelection = { from: number; to: number; text: string };
@@ -819,6 +835,12 @@ export class CardManager extends ItemManager {
     return (rows ?? []) as SRSCardRow[];
   }
 
+  /**
+   * The scheduler grading uses, as the settings have it now. Its fuzz, when
+   * on, is seeded by ts-fsrs from the moment of the review, the card's review
+   * count and its difficulty × stability, so the same card graded a moment
+   * later can land on another fuzzed interval.
+   */
   getFsrs() {
     const params = generatorParameters(this.plugin.settings.fsrsParams);
     return fsrs(params);
@@ -827,12 +849,143 @@ export class CardManager extends ItemManager {
   /**
    * When each grade would make `card` due next, were it graded at `now`: the
    * same scheduler {@link review} grades it with, so the two agree for as long
-   * as the settings and the moment do. With fuzz on, ts-fsrs seeds the fuzz
-   * from the moment of the review, so a grade made later than the preview can
-   * land a fuzzed interval away from it.
+   * as the settings and the moment do — and, with fuzz on, only for the very
+   * same moment (see {@link getFsrs}). `unfuzzed` leaves the fuzz out, as
+   * the grade buttons ask for it ({@link gradePreview}); the fuzzed default is
+   * what grading itself would write, which the tests pin it to.
    */
-  previewDue(card: ISRSCardDisplay, now: Date): Record<Grade, Date> {
-    const preview = this.getFsrs().repeat(card, now);
+  previewDue(
+    card: ISRSCardDisplay,
+    now: Date,
+    { unfuzzed = false }: { unfuzzed?: boolean } = {}
+  ): Record<Grade, Date> {
+    const scheduler = unfuzzed
+      ? fsrs(
+          generatorParameters({
+            ...this.plugin.settings.fsrsParams,
+            enable_fuzz: false,
+          })
+        )
+      : this.getFsrs();
+    const preview = scheduler.repeat(card, now);
+    return Object.fromEntries(
+      Grades.map((grade) => [grade, preview[grade].card.due])
+    ) as Record<Grade, Date>;
+  }
+
+  /** The last {@link gradePreview}, and the card and settings it is for. */
+  private lastGradePreview: { key: string; preview: GradePreview } | null =
+    null;
+
+  /**
+   * What the grade buttons show for `card`: how far out each grade would put
+   * it, previewed once while it is the card shown and then kept, however
+   * often it is asked for and whenever. Polls hand the card over anew every
+   * few seconds, and a preview taken at each new moment would reseed the fuzz
+   * (see {@link getFsrs}), so the buttons would change under the reader.
+   *
+   * Asked for another card, a new state of this one (graded, say) or with
+   * other settings, it previews afresh; only the last preview is kept, so a
+   * card shown again after another is previewed again. A card left up across
+   * a UTC midnight keeps what it first showed, though grading it then counts
+   * the day that passed (ts-fsrs counts elapsed days by UTC date).
+   *
+   * The intervals leave fuzz out. With fuzz on, those it could move are
+   * `approximate`: grading still applies it, within ts-fsrs's fuzz range of
+   * the interval shown. The rest — learning steps, intervals too short to
+   * fuzz — are exact either way (see {@link fuzzEdgeDue}).
+   *
+   * A card ts-fsrs will not preview gets NaN for every grade, and a warning,
+   * once; grading it reports why.
+   */
+  gradePreview(card: ISRSCardDisplay, now = new Date()): GradePreview {
+    const { fsrsParams } = this.plugin.settings;
+    const key = JSON.stringify([card, fsrsParams]);
+    if (this.lastGradePreview?.key === key) {
+      return this.lastGradePreview.preview;
+    }
+
+    let due: Record<Grade, Date> | null = null;
+    try {
+      due = this.previewDue(card, now, { unfuzzed: true });
+    } catch (e) {
+      console.warn('Could not preview the grades of a card', e);
+    }
+    // Null while it can't be told which intervals fuzz could move: then any
+    // could, as far as the buttons say
+    let edges: Record<Grade, Date>[] | null = [];
+    if (due && fsrsParams.enable_fuzz) {
+      try {
+        edges = [
+          this.fuzzEdgeDue(card, now, 'min_ivl'),
+          this.fuzzEdgeDue(card, now, 'max_ivl'),
+        ];
+      } catch {
+        edges = null;
+      }
+    }
+    const inMs = (dates: Record<Grade, Date> | null, grade: Grade) =>
+      dates ? dates[grade].getTime() - now.getTime() : NaN;
+    const perGrade = <T>(value: (grade: Grade) => T) =>
+      Object.fromEntries(Grades.map((g) => [g, value(g)])) as Record<Grade, T>;
+    const preview: GradePreview = {
+      approximate: perGrade(
+        (g) =>
+          !Number.isNaN(inMs(due, g)) &&
+          (edges === null ||
+            edges.some((edge) => !Object.is(inMs(edge, g), inMs(due, g))))
+      ),
+      inMs: perGrade((g) => inMs(due, g)),
+    };
+    this.lastGradePreview = { key, preview };
+    return preview;
+  }
+
+  /**
+   * When each grade would make `card` due, graded at `now` with fuzz on and
+   * every roll of it landing on `edge` of its range.
+   *
+   * Every interval ts-fsrs computes from another only takes the larger or
+   * smaller of the two, or adds a day, so each grade's interval only grows
+   * with the fuzzed ones: the two edges are its least and greatest. A grade
+   * fuzz can move differs at one edge or the other from its unfuzzed preview;
+   * one it cannot, at neither.
+   *
+   * Which intervals get fuzzed is left to ts-fsrs's own `apply_fuzz` (5.4.1):
+   * it reads the fuzz seed only once it decides to fuzz, so a read of `_seed`
+   * (internal to ts-fsrs) is what tells the two apart. A fuzzed one is then
+   * pinned to `edge` of the same `get_fuzz_range` it draws from.
+   */
+  private fuzzEdgeDue(
+    card: ISRSCardDisplay,
+    now: Date,
+    edge: FuzzEdge
+  ): Record<Grade, Date> {
+    const params = generatorParameters({
+      ...this.plugin.settings.fsrsParams,
+      enable_fuzz: true,
+    });
+    // An untouched scheduler under the same settings, asked first whether it
+    // would fuzz each interval: it reads its `_seed` only if it does
+    const reference = fsrs(params);
+    const scheduler = fsrs(params);
+    scheduler.apply_fuzz = (ivl, elapsedDays) => {
+      let fuzzes = false;
+      const probe = Object.create(reference, {
+        _seed: {
+          get() {
+            fuzzes = true;
+            return '';
+          },
+        },
+      }) as FSRS;
+      const exact = probe.apply_fuzz(ivl, elapsedDays);
+      if (!fuzzes) return exact;
+      return get_fuzz_range(ivl, elapsedDays, params.maximum_interval)[
+        edge
+      ] as typeof exact;
+    };
+    const preview = scheduler.repeat(card, now);
     return Object.fromEntries(
       Grades.map((grade) => [grade, preview[grade].card.due])
     ) as Record<Grade, Date>;
