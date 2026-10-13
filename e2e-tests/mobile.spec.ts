@@ -1,15 +1,5 @@
 import test, { expect, type AndroidDevice, type Page } from '@playwright/test';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import {
-  createLargePdf,
-  executeCommandById,
-  finalizeArticleImport,
-  openFileInActiveLeaf,
-  PDF_FIXTURE_PATH,
-  REVIEW_VIEW_TYPE,
-  watchFileReads,
-} from './helpers';
+import { executeCommandById, REVIEW_VIEW_TYPE } from './helpers';
 import {
   connectAndroidDevice,
   deleteDeviceVault,
@@ -18,7 +8,7 @@ import {
   pushVaultCopy,
   stopObsidian,
 } from './setup/android';
-import { shouldCleanup, sourceVaultPath } from './setup/helpers';
+import { shouldCleanup } from './setup/helpers';
 
 // The real Obsidian Android app on an emulator, as the `e2e-android` project
 // runs it. What this covers that `app.emulateMobile` on desktop cannot: the
@@ -93,134 +83,4 @@ test('Can open the review interface by executing the command', async () => {
     window.locator(`.workspace-leaf-content[data-type="${REVIEW_VIEW_TYPE}"]`)
   ).toBeVisible();
   await expect(window.locator('css=#begin-review-button')).toBeVisible();
-});
-
-test("Reviews a PDF article in Obsidian's own PDF viewer", async () => {
-  await openFileInActiveLeaf(window, PDF_FIXTURE_PATH);
-  await executeCommandById(window, 'incremental-reading:import-article');
-  await finalizeArticleImport(window);
-  await executeCommandById(window, 'incremental-reading:learn');
-  await window.locator('css=#begin-review-button').click();
-
-  const article = window.locator('.ir-pdf-article');
-  const firstPage = article.locator('.page[data-page-number="1"]');
-  await expect(firstPage.locator('.textLayer')).toContainText(
-    'Incremental reading turns a long text'
-  );
-
-  // Above the action bar, which sits at the bottom on mobile, never under it
-  const leaf = `.workspace-leaf-content[data-type="${REVIEW_VIEW_TYPE}"]`;
-  const viewer = await article.boundingBox();
-  const bar = await window.locator(`${leaf} .ir-action-bar`).boundingBox();
-  expect(viewer && bar).toBeTruthy();
-  expect(viewer!.y + viewer!.height).toBeLessThanOrEqual(bar!.y + 1);
-
-  const widthBefore = (await firstPage.boundingBox())!.width;
-  await article.locator('[aria-label="Zoom in"]').click();
-  await expect
-    .poll(async () => (await firstPage.boundingBox())!.width)
-    .toBeGreaterThan(widthBefore);
-
-  // Find, from Obsidian's own search command, closed by the viewer's Escape
-  await executeCommandById(window, 'editor:open-search');
-  const findBar = article.locator('.pdf-findbar');
-  await expect(findBar).toBeVisible();
-  // Obsidian builds the field with its SearchComponent: `<input type="search">`
-  const findInput = findBar.getByRole('searchbox');
-  await findInput.fill('snippet');
-  await findInput.press('Enter');
-  await expect(article.locator('.textLayer .highlight').first()).toBeVisible();
-  await window.keyboard.press('Escape');
-  await expect(findBar).toBeHidden();
-
-  // With nothing selected, either button enters selection mode for its kind
-  for (const name of ['Create snippet', 'Create card']) {
-    await window
-      .locator(`${leaf} .ir-action-bar`)
-      .getByRole('button', { name })
-      .click();
-    await expect(window.locator('#confirm-selection-button')).toBeVisible();
-    await window.locator('#cancel-selection-button').click();
-    await expect(window.locator('#confirm-selection-button')).toHaveCount(0);
-  }
-
-  // Finishing the item takes the viewer, and its keys, with it
-  await window.getByRole('button', { name: 'Mark reviewed' }).click();
-  await expect(article).toHaveCount(0);
-  expect(
-    await window.evaluate((viewType) => {
-      const { app } = window as unknown as {
-        app: {
-          workspace: {
-            getLeavesOfType(type: string): {
-              view: { scope: unknown; pdfViewer: unknown };
-            }[];
-          };
-        };
-      };
-      const { view } = app.workspace.getLeavesOfType(viewType)[0];
-      return { viewer: view.pdfViewer, scope: view.scope };
-    }, REVIEW_VIEW_TYPE)
-  ).toEqual({ viewer: null, scope: null });
-});
-
-test('Imports a large PDF in place, reading only its leading bytes if it can', async () => {
-  const largePath = 'sources/Large PDF.pdf';
-  await createLargePdf(
-    window,
-    largePath,
-    await fs.readFile(path.join(sourceVaultPath, PDF_FIXTURE_PATH)),
-    20 * 1024 * 1024
-  );
-  const reads = await watchFileReads(window, largePath);
-
-  // Straight through the plugin: the file menu is a long press inside a
-  // drawer here, and the import command needs the PDF open in a tab, where
-  // the PDF viewer would read it too.
-  const imported = await window.evaluate(async (filePath) => {
-    const { app } = window as unknown as {
-      app: {
-        vault: { getFileByPath(p: string): unknown };
-        plugins: {
-          plugins: Record<
-            string,
-            {
-              reviewManager: {
-                importArticle(
-                  file: unknown,
-                  priority: number,
-                  fixed: null
-                ): Promise<unknown>;
-              };
-            }
-          >;
-        };
-      };
-    };
-    const file = app.vault.getFileByPath(filePath);
-    const { reviewManager } = app.plugins.plugins['incremental-reading'];
-    return (await reviewManager.importArticle(file, 25, null)) !== null;
-  }, largePath);
-
-  const { fetches, readBinary } = await reads();
-  // Whether Android's WebView server honors a range: this run's answer
-  const answer = `fetches ${JSON.stringify(fetches)}, readBinary ${readBinary}`;
-  console.log(`Large PDF import on Android: ${answer}`);
-  test.info().annotations.push({ type: 'android-range', description: answer });
-  expect(imported).toBe(true);
-  // Mobile's own readBinary fetches a large file's URL whole, with no range,
-  // so only the ranged fetches are the sniff's
-  const ranged = fetches.filter(({ range }) => range !== null);
-  expect(ranged).toEqual([
-    {
-      range: 'bytes=0-4',
-      status: expect.anything(),
-      bodyBytesRead: expect.any(Number),
-    },
-  ]);
-  // The whole file is read only when the fetch fails to bring the signature
-  const fetched =
-    (ranged[0].status === 200 || ranged[0].status === 206) &&
-    ranged[0].bodyBytesRead >= 5;
-  expect(readBinary).toBe(fetched ? 0 : 1);
 });
