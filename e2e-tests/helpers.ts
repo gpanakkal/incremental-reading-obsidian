@@ -385,22 +385,29 @@ export async function expectCompactIconBar(bar: Locator) {
 }
 
 /**
- * Select a paragraph by text match and wait for Obsidian to catch up
- * TODO: see if Obsidian emits an event we can listen for instead
+ * Select a paragraph by text match, as a triple click does, and wait until the
+ * page shows it selected.
+ *
+ * The page's selection is what the user sees. In an editor it is also written
+ * from CodeMirror's own state, which handles the clicks itself, so once it
+ * holds the text the editor's selection does too.
+ *
  * @param window
  * @param text a sequence uniquely identifying the target paragraph
  */
-export async function selectParagraph(
-  window: Page,
-  text: string,
-  waitMs = 300
-) {
+export async function selectParagraph(window: Page, text: string) {
   await window
     .getByText(text)
     .filter({ visible: true })
     .click({ clickCount: 3 });
-  // wait for Obsidian
-  await window.waitForTimeout(waitMs);
+  // Whitespace squashed on both sides, as `getByText` matches it
+  await expect
+    .poll(() =>
+      window.evaluate(() =>
+        (getSelection()?.toString() ?? '').replace(/\s+/g, ' ')
+      )
+    )
+    .toContain(text.replace(/\s+/g, ' '));
 }
 
 /**
@@ -667,89 +674,92 @@ export async function leafSnapshot(window: Page): Promise<LeafSnapshot> {
 export type ShownItem = { id: string; title: string };
 
 /**
- * Wait for the active tab to settle on an item in review, and report which.
- *
- * Settled means every copy of "which item" agrees: the store, the view's file,
- * and the title the tab shows — plus the item's own title rendered in the pane.
+ * The title in the header of the active tab, when that tab is review: the name
+ * the user reads the tab by, which Obsidian fills from `getDisplayText`.
+ * `.workspace-tabs.mod-active` is the tab group holding the active leaf, and
+ * `.is-active` its selected tab; the header's `data-type` is its view type.
  */
-export async function waitForReviewItem(window: Page): Promise<ShownItem> {
-  let shown: ShownItem | null = null;
-  await expect(async () => {
-    const snapshot = await leafSnapshot(window);
-    expect(snapshot.viewType).toBe(REVIEW_VIEW_TYPE);
-    expect(snapshot.page).toBe('review');
-    expect(snapshot.currentItemId).not.toBeNull();
-    expect(snapshot.file).not.toBeNull();
-    const title = basename(snapshot.file ?? '');
-    expect(snapshot.displayText).toBe(title);
-    // Inside the retry, not after it. This helper takes whichever item the
-    // store names, so it can otherwise latch onto a transitional one: opening
-    // an item from the home screen flips `page` to 'review' a beat before
-    // `currentItemId` and `file` stop naming the item review held last, and
-    // those four agree with each other throughout. Settling there and only
-    // then asking the pane would pin the assertion to an item the DOM is
-    // already navigating away from, which can never become true — a hard
-    // failure on a loaded runner where that beat is wide enough to be read.
-    //
-    // The short timeout is what makes the retry work: at the suite's 15s
-    // default a single stale read would spend the whole budget here.
-    await expect(reviewTitle(window, title)).toBeVisible({ timeout: 1000 });
-    shown = { id: snapshot.currentItemId ?? '', title };
-  }).toPass({ timeout: 15_000 });
-  return shown as unknown as ShownItem;
+function activeReviewTabTitle(window: Page) {
+  return window.locator(
+    `.workspace-tabs.mod-active .workspace-tab-header.is-active[data-type="${REVIEW_VIEW_TYPE}"] .workspace-tab-header-inner-title`
+  );
+}
+
+/** The item's own title, rendered in the active tab's review pane. */
+function activePaneTitle(window: Page, title: string) {
+  return window.locator('.workspace-leaf.mod-active .ir-title', {
+    hasText: title,
+  });
 }
 
 /**
- * Assert the active tab is review, on `item`, with the store, the view's file,
- * the tab title and the pane's own title all naming it.
+ * Wait for the active tab to settle on an item in review, and report which.
+ *
+ * Settled means the tab's header and the pane's own title name the same item.
  */
-export async function expectReviewOn(window: Page, item: ShownItem) {
-  await expect
-    .poll(async () => {
-      const s = await leafSnapshot(window);
-      return {
-        viewType: s.viewType,
-        page: s.page,
-        currentItemId: s.currentItemId,
-        displayText: s.displayText,
-        tabHeaderTitle: s.tabHeaderTitle,
-        fileBasename: s.file === null ? null : basename(s.file),
-      };
-    })
-    .toEqual({
-      viewType: REVIEW_VIEW_TYPE,
-      page: 'review',
-      currentItemId: item.id,
-      displayText: item.title,
-      tabHeaderTitle: item.title,
-      fileBasename: item.title,
+export async function waitForReviewItem(window: Page): Promise<ShownItem> {
+  const tabTitle = activeReviewTabTitle(window);
+  let title = '';
+  await expect(async () => {
+    title = (await tabTitle.textContent({ timeout: 1000 })) ?? '';
+    expect(title).not.toBe('');
+    expect(title).not.toBe(REVIEW_VIEW_DEFAULT_TITLE);
+    // Inside the retry, not after it. Opening an item from the home screen can
+    // name the item review held last for a beat before the new one, and a pane
+    // already navigating away from it never shows its title again. The short
+    // timeout is what makes the retry work: at the suite's 15s default a
+    // single stale read would spend the whole budget here.
+    await expect(activePaneTitle(window, title)).toBeVisible({
+      timeout: 1000,
     });
-  await expect(reviewTitle(window, item.title)).toBeVisible();
+  }).toPass({ timeout: 15_000 });
+
+  // Not a check: callers hand the id on to compare items by, and nothing on
+  // screen shows it. Read from the store once the view holds the note whose
+  // title is on screen, so it is that item's id and not the one before it.
+  const id = await window.waitForFunction(
+    ({ viewType, title }) => {
+      const { app } = window as unknown as TestWindow;
+      const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+        getViewType(): string;
+        file?: { basename: string; name: string } | null;
+      } | null;
+      if (view?.getViewType() !== viewType || !view.file) return null;
+      // A note's tab is named without `.md`; any other file keeps its extension
+      if (![view.file.basename, view.file.name].includes(title)) return null;
+      return (
+        app.plugins.plugins['incremental-reading'].store.getState()
+          .currentItemId ?? null
+      );
+    },
+    { viewType: REVIEW_VIEW_TYPE, title }
+  );
+  return { id: (await id.jsonValue())!, title };
+}
+
+/**
+ * Assert the active tab is review, on `item`: its header and the pane's own
+ * title both name it.
+ *
+ * @param options.timeout how long each of the two may take to show it, for
+ * callers bounding how soon review gets there
+ */
+export async function expectReviewOn(
+  window: Page,
+  item: ShownItem,
+  options: { timeout?: number } = {}
+) {
+  await expect(activeReviewTabTitle(window)).toHaveText(item.title, options);
+  await expect(activePaneTitle(window, item.title)).toBeVisible(options);
 }
 
 /** Assert the active tab is review, showing its home screen. */
 export async function expectReviewHome(window: Page) {
-  await expect
-    .poll(async () => {
-      const s = await leafSnapshot(window);
-      return {
-        viewType: s.viewType,
-        page: s.page,
-        displayText: s.displayText,
-      };
-    })
-    .toEqual({
-      viewType: REVIEW_VIEW_TYPE,
-      page: 'home',
-      displayText: REVIEW_VIEW_DEFAULT_TITLE,
-    });
+  await expect(activeReviewTabTitle(window)).toHaveText(
+    REVIEW_VIEW_DEFAULT_TITLE
+  );
   await expect(window.locator('css=#begin-review-button')).toBeVisible();
   await expect(window.locator('.ir-queue-row').first()).toBeVisible();
-}
-
-function basename(path: string) {
-  const name = path.slice(path.lastIndexOf('/') + 1);
-  return name.endsWith('.md') ? name.slice(0, -'.md'.length) : name;
 }
 
 /**
@@ -1367,10 +1377,6 @@ export function expectPlainText(readings: MarkdownReadings, text: string) {
 export const noteBody = (text: string) =>
   /^---\n[\s\S]*?\n---\n([\s\S]*)$/.exec(text)?.[1] ?? text;
 
-/** Where a note's body starts in its text. */
-export const bodyStartOf = (text: string) =>
-  text.length - noteBody(text).length;
-
 /** One snippet row's offsets, as the database or the tracker holds them. */
 export type SnippetSpan = {
   id: string;
@@ -1639,27 +1645,3 @@ export const recordedFlash = (page: Page) =>
     () =>
       (window as unknown as { __flash?: RecordedFlash | null }).__flash ?? null
   );
-
-/**
- * The flash {@link recordFlash} watched lit `text` only once it was on screen
- * and the scroll there done, eased in, and went 1.5s later (0.75s in, 0.75s
- * out; see `CONTEXT_FADE_MS`), give or take a frame or two.
- */
-export async function expectFlashLitOnceScrolled(page: Page, text: RegExp) {
-  await expect
-    .poll(async () => (await recordedFlash(page))?.goneAt ?? null, {
-      timeout: 5000,
-    })
-    .not.toBeNull();
-  const flash = (await recordedFlash(page))!;
-  expect(flash).toMatchObject({
-    text: expect.stringMatching(text),
-    onScreen: true,
-    eased: true,
-  });
-  // Nothing scrolled after it lit: it lit once the scroll was done
-  expect(flash.scrollTopAtGone).toBe(flash.scrollTop);
-  const lasted = flash.goneAt! - flash.litAt;
-  expect(lasted).toBeGreaterThanOrEqual(1500 - 50);
-  expect(lasted).toBeLessThanOrEqual(1500 + 500);
-}

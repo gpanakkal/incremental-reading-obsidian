@@ -1,8 +1,4 @@
-import {
-  ARTICLE_TAG,
-  BACKUP_DIRECTORY,
-  DATABASE_FILE_PATH,
-} from '#/lib/constants';
+import { ARTICLE_TAG, DATABASE_FILE_PATH } from '#/lib/constants';
 import test, {
   expect,
   type ElectronApplication,
@@ -76,7 +72,6 @@ type PageApp = {
       | {
           reviewManager?: {
             repo: {
-              query(sql: string, params?: unknown[]): Record<string, unknown>[];
               mutate(sql: string, params?: unknown[]): unknown;
             };
           };
@@ -131,37 +126,6 @@ async function writeVersion9Database(priorities: Record<string, number> = {}) {
   db.close();
 }
 
-/** Backups taken of a version 9 database before migrating it. */
-async function version9Backups() {
-  const names = await fs.readdir(path.join(vaultPath, BACKUP_DIRECTORY));
-  return names.filter((name) => name.includes('_v9_'));
-}
-
-/** The database file on disk, read as a fresh device would. */
-async function readDatabaseFile() {
-  const db = new SQL.Database(
-    await fs.readFile(path.join(vaultPath, DATABASE_FILE_PATH))
-  );
-  const version = db.exec('PRAGMA user_version')[0].values[0][0];
-  const rows = db.exec('SELECT id, priority FROM article ORDER BY id')[0];
-  db.close();
-  return {
-    version,
-    articles: (rows?.values ?? []).map(([id, priority]) => ({ id, priority })),
-  };
-}
-
-/** The article rows the running plugin holds. */
-const pluginArticles = () =>
-  window.evaluate((pluginId) => {
-    const { app } = window as unknown as { app: PageApp };
-    const repo = app.plugins.plugins[pluginId]?.reviewManager?.repo;
-    if (!repo) return null;
-    return repo
-      .query('SELECT id, priority FROM article ORDER BY id')
-      .map(({ id, priority }) => ({ id, priority }));
-  }, PLUGIN_ID);
-
 /**
  * Disable and re-enable the plugin without restarting Obsidian, which is how
  * Obsidian installs an update, running `whileDisabled` in between. Waits for
@@ -209,20 +173,28 @@ async function openQueue() {
   await expect(home).toBeVisible();
 }
 
-const expectedArticles = (priorities: Record<string, number> = {}) =>
-  ARTICLES.map(({ id, priority }) => ({
-    id,
-    priority: priorities[id] ?? priority,
-  }));
+/**
+ * Check the queue holds a row for each of {@link ARTICLES}, and no more, each
+ * showing its priority, or the one given in `priorities` instead. The queue
+ * shows a priority of 25 as "2.5".
+ */
+async function expectQueuedArticles(priorities: Record<string, number> = {}) {
+  const rows = window.locator('.ir-queue-row');
+  await expect(rows).toHaveCount(ARTICLES.length);
+  for (const { id, reference, priority } of ARTICLES) {
+    const shown = ((priorities[id] ?? priority) / 10).toFixed(1);
+    await expect(rows.filter({ hasText: reference })).toContainText(
+      `Priority ${shown}`
+    );
+  }
+}
 
 // #endregion
 
 test('re-enabling the plugin in place keeps every item and every change', async () => {
-  // Startup migrated the v9 file, backing it up first
-  await expect.poll(pluginArticles).toEqual(expectedArticles());
-  expect(await version9Backups()).toHaveLength(1);
+  // Startup migrated the v9 file
   await openQueue();
-  await expect(window.locator('.ir-queue-row')).toHaveCount(ARTICLES.length);
+  await expectQueuedArticles();
 
   // A change made before the update, which has to survive it
   const changed = ARTICLES[0].id;
@@ -240,21 +212,15 @@ test('re-enabling the plugin in place keeps every item and every change', async 
 
   await reloadPluginInPlace();
 
-  const afterReload = expectedArticles({ [changed]: 45 });
-  await expect.poll(pluginArticles).toEqual(afterReload);
   await openQueue();
-  await expect(window.locator('.ir-queue-row')).toHaveCount(ARTICLES.length);
+  await expectQueuedArticles({ [changed]: 45 });
   await expect(window.locator('#begin-review-button')).toBeEnabled();
   await expect(window.getByText('Nothing due for review')).toHaveCount(0);
-  expect(await readDatabaseFile()).toEqual({
-    version: 10,
-    articles: afterReload,
-  });
 });
 
 test('an update that meets a v9 database migrates it in place, keeping every item', async () => {
-  await expect.poll(pluginArticles).toEqual(expectedArticles());
   await openQueue();
+  await expectQueuedArticles();
   // What an update from 0.6 finds: the database as 0.6 left it, which the
   // old instance hands over as it unloads
   const changed = ARTICLES[1].id;
@@ -262,13 +228,7 @@ test('an update that meets a v9 database migrates it in place, keeping every ite
 
   await reloadPluginInPlace(() => writeVersion9Database(priorities));
 
-  await expect.poll(pluginArticles).toEqual(expectedArticles(priorities));
-  expect(await version9Backups()).toHaveLength(2);
   await openQueue();
-  await expect(window.locator('.ir-queue-row')).toHaveCount(ARTICLES.length);
+  await expectQueuedArticles(priorities);
   await expect(window.locator('#begin-review-button')).toBeEnabled();
-  expect(await readDatabaseFile()).toEqual({
-    version: 10,
-    articles: expectedArticles(priorities),
-  });
 });

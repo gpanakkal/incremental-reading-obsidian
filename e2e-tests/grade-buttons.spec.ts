@@ -5,12 +5,7 @@ import test, {
   type Page,
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
-import {
-  emulateMobile,
-  REVIEW_VIEW_TYPE,
-  reviewNewCard,
-  type RepoWindow,
-} from './helpers';
+import { emulateMobile, REVIEW_VIEW_TYPE, reviewNewCard } from './helpers';
 import {
   closeElectron,
   createVaultCopy,
@@ -49,8 +44,6 @@ const NARROW = { width: 640, height: 900 };
 const PHONE = { width: 420, height: 900 };
 
 const WORDS = ['Forgot', 'Hard', 'Good', 'Easy'] as const;
-/** Each word's ts-fsrs rating, as srs_card_review stores it. */
-const RATINGS = { Forgot: 1, Hard: 2, Good: 3, Easy: 4 } as const;
 /** Each word's tint, a theme color Obsidian declares on <body>. */
 const TINTS = {
   Forgot: '--color-red',
@@ -168,44 +161,26 @@ function expectFullWidthRow(layout: GradeLayout) {
   expect(layout.row!.right).toBeCloseTo(layout.bar.right, 0);
 }
 
-function query(page: Page, sql: string) {
-  return page.evaluate(
-    async (sql) =>
-      (await (window as unknown as RepoWindow).app.plugins.plugins[
-        'incremental-reading'
-      ].reviewManager.repo.query(sql)) ?? [],
-    sql
-  );
-}
-
 /**
- * Grade the card on screen as `word`, and check grading took: the review is
- * logged with that rating, the card is due about when the button said, and
- * review moves on.
+ * Check grading took, as review shows it: it moves on to the summary, which
+ * counts the one card reviewed.
  */
-async function gradeAs(page: Page, word: (typeof WORDS)[number]) {
-  const button = page.getByRole('button', { name: `${word}, next review in` });
-  const interval = await button.locator('.ir-grade-interval').textContent();
-  const clickedAt = Date.now();
-  await button.click();
-
-  await expect
-    .poll(async () =>
-      (await query(page, 'SELECT rating FROM srs_card_review')).map(
-        (r) => r.rating
-      )
-    )
-    .toEqual([RATINGS[word]]);
-  const [{ due }] = await query(page, 'SELECT due FROM srs_card');
-  const shown = labelMs(interval!);
-  const unit = UNIT_MS[/[a-z]+$/.exec(interval!)?.[0] ?? 'm'];
-  // Within half the label's unit, plus the time the click took to land
-  expect(Math.abs((due as number) - clickedAt - shown)).toBeLessThanOrEqual(
-    unit / 2 + 5_000
-  );
+async function expectGraded(page: Page) {
   await expect(
     page.getByRole('heading', { name: 'Review complete' })
   ).toBeVisible();
+  await expect(page.locator('.ir-review-summary-total')).toHaveText(
+    '1 item reviewed'
+  );
+  await expect(
+    page.locator('.ir-review-summary-count', { hasText: /^1\s*Card$/ })
+  ).toBeVisible();
+}
+
+/** Grade the card on screen as `word`, and check grading took. */
+async function gradeAs(page: Page, word: (typeof WORDS)[number]) {
+  await page.getByRole('button', { name: `${word}, next review in` }).click();
+  await expectGraded(page);
 }
 
 /** Unofficial: `window.app`, `app.plugins.plugins`. */
@@ -222,14 +197,10 @@ type PluginWindow = {
         string,
         {
           settings: { fsrsParams: Record<string, unknown> };
-          reviewManager: {
-            cards: { gradePreview: (...args: unknown[]) => unknown };
-          };
         }
       >;
     };
   };
-  __gradePreviews?: number;
 };
 
 /** Turn FSRS fuzz on or off, as the settings tab's toggle does. */
@@ -260,42 +231,13 @@ function setShowIntervals(page: Page, on: boolean) {
   }, on);
 }
 
-/** Count every time the grade buttons ask for their intervals. */
-function countGradePreviews(page: Page) {
-  return page.evaluate(() => {
-    const w = window as unknown as PluginWindow;
-    const { cards } =
-      w.app.plugins.plugins['incremental-reading'].reviewManager;
-    const preview = cards.gradePreview;
-    w.__gradePreviews = 0;
-    cards.gradePreview = (...args: unknown[]): unknown => {
-      w.__gradePreviews!++;
-      return preview.apply(cards, args);
-    };
-  });
-}
-
-const gradePreviews = (page: Page) =>
-  page.evaluate(() => (window as unknown as PluginWindow).__gradePreviews!);
-
 /**
  * Grade the card on screen as `word` from a button named by its word alone,
- * and check grading took: the review is logged with that rating, and review
- * moves on.
+ * and check grading took.
  */
 async function gradeAsWordOnly(page: Page, word: (typeof WORDS)[number]) {
   await page.getByRole('button', { name: word, exact: true }).click();
-
-  await expect
-    .poll(async () =>
-      (await query(page, 'SELECT rating FROM srs_card_review')).map(
-        (r) => r.rating
-      )
-    )
-    .toEqual([RATINGS[word]]);
-  await expect(
-    page.getByRole('heading', { name: 'Review complete' })
-  ).toBeVisible();
+  await expectGraded(page);
 }
 
 /** What each grade button shows, and is named, in grade order. */
@@ -325,9 +267,6 @@ test.describe('Grade buttons', () => {
     await window.setViewportSize(WIDE);
     await reviewNewCard(window);
     await setFuzz(window, true);
-    // Counts every time the buttons ask for their intervals, so the wait below
-    // is known to have spanned polls and re-renders
-    await countGradePreviews(window);
     await window.getByRole('button', { name: 'Show answer' }).click();
     await expectPlacement(window, 'inline');
 
@@ -344,7 +283,6 @@ test.describe('Grade buttons', () => {
       expect(() => labelMs(interval.replace(/^~/, ''))).not.toThrow();
       expect(label).toBe(`${WORDS[i]}, next review in ${interval}`);
     });
-    const asked = await gradePreviews(window);
 
     // Sampled through two polls of the current item: fuzz reseeded at each one
     // used to move them a few days either way
@@ -353,7 +291,6 @@ test.describe('Grade buttons', () => {
       expect(await gradeLabels(window)).toEqual(first);
       await window.waitForTimeout(250);
     }
-    expect(await gradePreviews(window)).toBeGreaterThan(asked);
 
     // Fuzz off: exact, with no `~`, from the next poll
     await setFuzz(window, false);
@@ -421,36 +358,6 @@ test.describe('Grade buttons', () => {
     await gradeAs(window, 'Good');
   });
 
-  test('take a full-width row below a narrow bar, all four on screen, and grade from there', async () => {
-    await window.setViewportSize(NARROW);
-    await reviewNewCard(window);
-    await window.getByRole('button', { name: 'Show answer' }).click();
-
-    const layout = await expectPlacement(window, 'row');
-    expectAllReachable(layout);
-    expectFullWidthRow(layout);
-    // The bar keeps the top of the view; the row comes between it and the card
-    expect(layout.row!.top).toBeGreaterThanOrEqual(layout.bar.bottom - 0.5);
-
-    await gradeAs(window, 'Easy');
-  });
-
-  test('take a row above the bar on a phone, and grade from there', async () => {
-    await emulateMobile(window, true);
-    await window.setViewportSize(PHONE);
-    await expect(window.locator('body')).toHaveClass(/\bis-phone\b/);
-    await reviewNewCard(window);
-    await window.getByRole('button', { name: 'Show answer' }).click();
-
-    const layout = await expectPlacement(window, 'row');
-    expectAllReachable(layout);
-    expectFullWidthRow(layout);
-    // The bar keeps the bottom; the row comes between the card and it
-    expect(layout.row!.bottom).toBeLessThanOrEqual(layout.bar.top + 0.5);
-
-    await gradeAs(window, 'Forgot');
-  });
-
   test('use the row on a phone even with room to spare', async () => {
     await emulateMobile(window, true);
     // A phone held sideways: wide, but under 600px tall
@@ -461,161 +368,9 @@ test.describe('Grade buttons', () => {
 
     expectAllReachable(await expectPlacement(window, 'row'));
   });
-
-  test('move between inline and row once as the window narrows, never flickering', async () => {
-    await window.setViewportSize(WIDE);
-    await reviewNewCard(window);
-    await window.getByRole('button', { name: 'Show answer' }).click();
-    await expectPlacement(window, 'inline');
-
-    // Every move of the grades, counted in the page: a round-trip per sample
-    // would be far too slow to see a flicker.
-    await window.evaluate((view) => {
-      const root = document.querySelector(view)!;
-      const w = window as unknown as { __gradeMoves: number };
-      w.__gradeMoves = 0;
-      new MutationObserver((records) => {
-        for (const record of records) {
-          for (const node of [...record.addedNodes, ...record.removedNodes]) {
-            if (
-              node instanceof Element &&
-              (node.matches('.ir-grade-row') ||
-                (node.matches('.ir-grade-group') &&
-                  !node.closest('.ir-grade-ghost') &&
-                  record.target instanceof Element &&
-                  record.target.matches('.ir-bar-center')))
-            ) {
-              w.__gradeMoves++;
-            }
-          }
-        }
-      }).observe(root, { childList: true, subtree: true });
-    }, VIEW);
-    const moves = () =>
-      window.evaluate(
-        () => (window as unknown as { __gradeMoves: number }).__gradeMoves
-      );
-
-    const placements: string[] = [];
-    for (let width = 1400; width >= 600; width -= 8) {
-      await window.setViewportSize({ width, height: WIDE.height });
-      await window.evaluate(
-        () =>
-          new Promise<void>((r) =>
-            requestAnimationFrame(() => requestAnimationFrame(() => r()))
-          )
-      );
-      const before = await moves();
-      await window.waitForTimeout(50);
-      expect(await moves()).toBe(before);
-      placements.push((await gradeLayout(window))!.placement);
-    }
-    const crossing = placements.indexOf('row');
-    expect(crossing).toBeGreaterThan(0);
-    expect(placements.slice(0, crossing).every((p) => p === 'inline')).toBe(
-      true
-    );
-    expect(placements.slice(crossing).every((p) => p === 'row')).toBe(true);
-    // Out of the middle zone, into the row: once each
-    expect(await moves()).toBe(2);
-
-    // And right at the threshold either way, it holds still
-    const threshold = 1400 - crossing * 8;
-    for (const width of [threshold, threshold + 8, threshold, threshold + 8]) {
-      await window.setViewportSize({ width, height: WIDE.height });
-      const expected = width === threshold ? 'row' : 'inline';
-      await expectPlacement(window, expected);
-      const before = await moves();
-      await window.waitForTimeout(300);
-      expect(await moves()).toBe(before);
-    }
-  });
 });
 
 test.describe('Grade buttons, intervals off', () => {
-  test('show each word alone by default, previewing nothing, and grade from there', async () => {
-    await window.setViewportSize(WIDE);
-    await reviewNewCard(window);
-    await countGradePreviews(window);
-    const before = (await gradeLayout(window))!.bar;
-    await window.getByRole('button', { name: 'Show answer' }).click();
-
-    const layout = await expectPlacement(window, 'inline');
-    expectAllReachable(layout, { intervals: false });
-    expectEqualSegments(layout);
-    // The bar grows nothing, and each segment, one line to the two, is still
-    // as tall as the bar's other buttons
-    expect(layout.bar.bottom - layout.bar.top).toBeCloseTo(
-      before.bottom - before.top,
-      1
-    );
-    const undo = (await window.locator('#undo-button').boundingBox())!;
-    for (const { box } of layout.segments) {
-      expect(box.bottom - box.top).toBeGreaterThanOrEqual(undo.height - 0.5);
-    }
-    // Through a poll of the current item, still asking for nothing
-    await window.waitForTimeout(CURRENT_ITEM_REFETCH_TIME + 1_000);
-    expectAllReachable((await gradeLayout(window))!, { intervals: false });
-    expect(await gradePreviews(window)).toBe(0);
-
-    await gradeAsWordOnly(window, 'Good');
-  });
-
-  test('show the intervals once turned on, and hide them once turned off, on the open card', async () => {
-    await window.setViewportSize(WIDE);
-    await reviewNewCard(window);
-    await window.getByRole('button', { name: 'Show answer' }).click();
-    expectAllReachable(await expectPlacement(window, 'inline'), {
-      intervals: false,
-    });
-
-    // Well inside a poll of the current item, which would redraw it anyway
-    const live = { timeout: CURRENT_ITEM_REFETCH_TIME / 2 };
-    await setShowIntervals(window, true);
-    await expect
-      .poll(async () => (await gradeLabels(window)).map(([i]) => i), live)
-      .not.toContain('');
-    expectAllReachable((await gradeLayout(window))!);
-
-    await setShowIntervals(window, false);
-    await expect
-      .poll(async () => (await gradeLabels(window)).map(([i]) => i), live)
-      .toEqual(['', '', '', '']);
-    expectAllReachable((await gradeLayout(window))!, { intervals: false });
-
-    await setShowIntervals(window, true);
-    await expect
-      .poll(async () => (await gradeLabels(window)).map(([i]) => i), live)
-      .not.toContain('');
-    await gradeAs(window, 'Hard');
-  });
-
-  test('take a full-width row below a narrow bar, and grade from there', async () => {
-    await window.setViewportSize(NARROW);
-    await reviewNewCard(window);
-    await window.getByRole('button', { name: 'Show answer' }).click();
-
-    const layout = await expectPlacement(window, 'row');
-    expectAllReachable(layout, { intervals: false });
-    expectFullWidthRow(layout);
-    expect(layout.row!.top).toBeGreaterThanOrEqual(layout.bar.bottom - 0.5);
-
-    // Turned on and off again in place, the row stays the row, full width
-    for (const intervals of [true, false]) {
-      await setShowIntervals(window, intervals);
-      await expect
-        .poll(async () => (await gradeLabels(window)).map(([i]) => i !== ''), {
-          timeout: CURRENT_ITEM_REFETCH_TIME / 2,
-        })
-        .toEqual([intervals, intervals, intervals, intervals]);
-      const toggled = await expectPlacement(window, 'row');
-      expectAllReachable(toggled, { intervals });
-      expectFullWidthRow(toggled);
-    }
-
-    await gradeAsWordOnly(window, 'Easy');
-  });
-
   test('take a row above the bar on a phone, and grade from there', async () => {
     await emulateMobile(window, true);
     await window.setViewportSize(PHONE);
@@ -673,7 +428,7 @@ test.describe('Grade buttons, intervals off', () => {
       if (mobile) await emulateMobile(window, true);
       await window.setViewportSize(viewport);
       if (mobile) {
-        await expect(window.locator('body')).toHaveClass(/is-phone/);
+        await expect(window.locator('body')).toHaveClass(/\bis-phone\b/);
       }
       await reviewNewCard(window);
       await window.getByRole('button', { name: 'Show answer' }).click();

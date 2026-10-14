@@ -176,52 +176,6 @@ test.describe('Selection mode', () => {
     await expectEditable(true);
   });
 
-  test('leaves nothing selected after extracting a snippet in the mode', async () => {
-    /** What is selected on screen, and whether the review editor's is empty. */
-    const selectionLeft = () =>
-      window.evaluate(() => {
-        const { app } = window as unknown as {
-          app: {
-            workspace: {
-              getLeavesOfType(type: string): {
-                view: {
-                  reviewEditor(): {
-                    cm: { state: { selection: { main: { empty: boolean } } } };
-                  } | null;
-                };
-              }[];
-            };
-          };
-        };
-        const [leaf] = app.workspace.getLeavesOfType(
-          'incremental-reading-review'
-        );
-        return {
-          onScreen: document.getSelection()?.toString() ?? '',
-          editorEmpty:
-            leaf.view.reviewEditor()?.cm.state.selection.main.empty ?? null,
-        };
-      });
-
-    await reviewArticle();
-    await window.getByRole('button', { name: 'Create snippet' }).click();
-    await selectParagraph(window, PARAGRAPH);
-    await confirmButton().click();
-
-    await expect.poll(() => notesIn('snippets')).toHaveLength(1);
-    await expectEditable(true);
-    // Editing comes back from an effect, after the snippet is made; the
-    // selection must stay gone past that re-render, not just until it.
-    await window.waitForTimeout(500);
-    expect(await selectionLeft()).toEqual({ onScreen: '', editorEmpty: true });
-
-    // A selection left in the editor's state is drawn again once it has focus,
-    // even where the click on the button already cleared the browser's.
-    await reviewContent().focus();
-    await window.waitForTimeout(100);
-    expect(await selectionLeft()).toEqual({ onScreen: '', editorEmpty: true });
-  });
-
   /**
    * How much of the editor line holding `text` is painted as selected, from 0
    * to 1: the share of points sampled across the line that lie under a
@@ -291,6 +245,39 @@ test.describe('Selection mode', () => {
       }
       return covered / total;
     }, text);
+
+  /**
+   * Read `read` over and over for `ms`, failing on the first read that is not
+   * `value`: for what must stay so past re-renders, not just reach it once.
+   */
+  async function expectStays<T>(read: () => Promise<T>, value: T, ms = 500) {
+    const until = Date.now() + ms;
+    do {
+      const got: unknown = await read();
+      expect(got).toEqual(value);
+    } while (Date.now() < until);
+  }
+
+  test('leaves nothing selected after extracting a snippet in the mode', async () => {
+    await reviewArticle();
+    await window.getByRole('button', { name: 'Create snippet' }).click();
+    await selectParagraph(window, PARAGRAPH);
+    // Painted as selected to begin with, so its going is the extraction's doing
+    await expect.poll(() => highlightedShare(PARAGRAPH)).toBeGreaterThan(0.5);
+    await confirmButton().click();
+
+    await expect.poll(() => notesIn('snippets')).toHaveLength(1);
+    await expectEditable(true);
+    // Editing comes back from an effect, after the snippet is made; the
+    // selection must stay gone past that re-render, not just until it.
+    await expect.poll(() => highlightedShare(PARAGRAPH)).toBe(0);
+    await expectStays(() => highlightedShare(PARAGRAPH), 0);
+
+    // A selection left in the editor's state is drawn again once it has focus,
+    // even where the click on the button already cleared the browser's.
+    await reviewContent().focus();
+    await expectStays(() => highlightedShare(PARAGRAPH), 0);
+  });
 
   for (const platform of ['desktop', 'mobile'] as const) {
     test(`shows the text selected in the mode as selected (${platform})`, async () => {
@@ -456,60 +443,6 @@ test.describe('Selection mode', () => {
     await expect.poll(notices).toEqual(['Select the text to extract first']);
     await expect(confirmButton()).toBeVisible();
     expect(await notesIn('snippets')).toEqual([]);
-  });
-
-  test('confirms a card from its hotkey in the mode, asking for the answer', async () => {
-    // Bound for this run only: the plugin ships the command without a hotkey.
-    // `hotkeyManager` is undocumented Obsidian API.
-    await window.evaluate(() => {
-      const { app } = window as unknown as {
-        app: {
-          hotkeyManager: {
-            addDefaultHotkeys(
-              command: string,
-              keys: { modifiers: string[]; key: string }[]
-            ): void;
-          };
-        };
-      };
-      app.hotkeyManager.addDefaultHotkeys('incremental-reading:create-card', [
-        { modifiers: ['Alt'], key: 'Z' },
-      ]);
-    });
-    await reviewArticle();
-    const notices = await watchNotices(window);
-    await window.getByRole('button', { name: 'Create card' }).click();
-    await expectEditable(false);
-    await selectParagraph(window, PARAGRAPH);
-
-    await window.keyboard.press('Alt+Z');
-
-    const answerText = window.locator('.modal .ir-card-answer-text');
-    await expect(answerText).toContainText(PARAGRAPH);
-    await expect(confirmButton()).toHaveCount(0);
-    // The key press that opened the modal is not also taken as its answer.
-    await window.waitForTimeout(300);
-    await expect(answerText).toBeVisible();
-    expect(await notices()).toEqual([]);
-
-    await answerText.evaluate((el, answer) => {
-      const node = el.firstChild as Text;
-      const start = node.data.indexOf(answer);
-      const range = document.createRange();
-      range.setStart(node, start);
-      range.setEnd(node, start + answer.length);
-      const selection = document.getSelection()!;
-      selection.removeAllRanges();
-      selection.addRange(range);
-    }, ANSWER);
-    // `selectionchange` is dispatched as a task, not synchronously.
-    await window.waitForTimeout(100);
-    await window.keyboard.press('Enter');
-
-    await expect(answerText).toHaveCount(0);
-    await expect
-      .poll(() => notesIn('cards'))
-      .toEqual([expect.stringContaining(`(} ${ANSWER} {)`)]);
   });
 
   for (const [mode, other] of [

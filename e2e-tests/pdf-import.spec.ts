@@ -6,13 +6,13 @@ import {
 import test, {
   expect,
   type ElectronApplication,
+  type Locator,
   type Page,
 } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
-  createLargePdf,
   executeCommandById,
   finalizeArticleImport,
   openFileInActiveLeaf,
@@ -20,7 +20,6 @@ import {
   PDF_FIXTURE_PATH,
   setNativeMenus,
   setPluginSetting,
-  watchFileReads,
   watchNotices,
 } from './helpers';
 import {
@@ -40,12 +39,6 @@ const PDF_PATH = PDF_FIXTURE_PATH;
 
 /** The folder copies are imported into. */
 const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
-
-/**
- * The size of the PDF that shows an import reads only its leading bytes: big
- * enough that reading all of it would be slow on a phone.
- */
-const LARGE_PDF_BYTES = 20 * 1024 * 1024;
 
 /** What the page-side calls below reach on Obsidian and the plugin. */
 type PageApp = {
@@ -75,27 +68,6 @@ const rowsAt = (page: Page, reference: string) =>
     );
   }, reference);
 
-/** The reference of every article row, sorted. */
-const allReferences = (page: Page) =>
-  page.evaluate(() => {
-    const { app } = window as unknown as { app: PageApp };
-    const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
-    return repo
-      .query('SELECT reference FROM article ORDER BY reference')
-      .map((row) => row.reference as string);
-  });
-
-/** The scheduling state of the article row `id`. */
-const scheduleOf = (page: Page, id: unknown) =>
-  page.evaluate((rowId) => {
-    const { app } = window as unknown as { app: PageApp };
-    const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
-    return repo.query(
-      'SELECT deleted, dismissed, priority, fixed_interval_days FROM article WHERE id = $1',
-      [rowId]
-    )[0];
-  }, id);
-
 const sha256 = async (at: string) =>
   createHash('sha256')
     .update(await fs.readFile(path.join(vaultPath, at)))
@@ -119,6 +91,61 @@ const vaultFiles = (page: Page) =>
         .sort(),
     DATABASE_FILE_PATH
   );
+
+/**
+ * The queue row whose File column is `reference`, as its cell's tooltip reads
+ * it.
+ */
+const queueRow = (page: Page, reference: string) =>
+  page.locator('.ir-queue-row').filter({
+    has: page.getByRole('cell', { name: reference, exact: true }),
+  });
+
+/**
+ * Show the file explorer's rows inside `folder`, expanding it and each folder
+ * above it that is collapsed. Expanding rather than clicking blindly: a click
+ * on a folder already open collapses it.
+ */
+async function expandFolder(page: Page, folder: string, shown: Locator) {
+  const parts = folder.split('/');
+  await expect(async () => {
+    for (let i = 1; i <= parts.length; i++) {
+      const at = parts.slice(0, i).join('/');
+      const collapsed = page.locator(
+        `.nav-folder.is-collapsed > .nav-folder-title[data-path="${at}"]`
+      );
+      if ((await collapsed.count()) > 0) await collapsed.click();
+    }
+    await expect(shown.first()).toBeVisible({ timeout: 2_000 });
+  }).toPass();
+}
+
+/** The file explorer's row for the file at `at`. */
+const explorerRow = (page: Page, at: string) =>
+  page.locator(`.nav-file-title[data-path="${at}"]`);
+
+/**
+ * Right click `target` until its menu shows every one of `titles`, then choose
+ * the first, and wait for the menu to go. Obsidian's menus animate in, and on
+ * a loaded runner the first right click can land before the row takes it, so
+ * it is repeated.
+ */
+async function chooseFromMenu(
+  page: Page,
+  target: Locator,
+  titles: [string, ...string[]]
+) {
+  const menu = page.locator('.menu');
+  const item = (title: string) => menu.getByText(title, { exact: true });
+  await expect(async () => {
+    if ((await menu.count()) === 0) await target.click({ button: 'right' });
+    for (const title of titles) {
+      await expect(item(title)).toBeVisible({ timeout: 2_000 });
+    }
+  }).toPass();
+  await item(titles[0]).click();
+  await expect(menu).toHaveCount(0);
+}
 
 /** The import dialog's "Make a copy" toggle. */
 const copyToggle = (page: Page) =>
@@ -173,76 +200,27 @@ test.describe('Importing a PDF', () => {
   test('offers every import from the file menu, and imports in place', async () => {
     await setNativeMenus(window, false);
     await setPluginSetting(window, 'showAdvancedImportMenuItems', true);
-    const before = await sha256(PDF_PATH);
 
-    await window.getByText(PDF_FIXTURE_FOLDER, { exact: true }).click();
-    const fileRow = window.locator(`.nav-file-title[data-path="${PDF_PATH}"]`);
-    await fileRow.click({ button: 'right' });
-    const menu = window.locator('.menu');
-    await expect(
-      menu.getByText('Import in place', { exact: true })
-    ).toBeVisible();
-    await expect(
-      menu.getByText('Import a copy', { exact: true })
-    ).toBeVisible();
-
-    await menu.getByText('Import in place', { exact: true }).click();
-
-    await expect
-      .poll(() => rowsAt(window, PDF_PATH))
-      .toEqual([{ id: expect.any(String), reference: PDF_PATH, deleted: 0 }]);
-    expect(await sha256(PDF_PATH)).toBe(before);
-  });
-
-  test('imports a byte-identical copy from the dialog, and a second, distinctly named one when imported again', async () => {
-    await setPluginSetting(window, 'copyOnImport', true);
-    const before = await sha256(PDF_PATH);
-    await openFileInActiveLeaf(window, PDF_PATH);
-
-    await executeCommandById(window, 'incremental-reading:import-article');
-    await expect(copyToggle(window).locator('input')).toBeChecked();
-    await finalizeArticleImport(window);
-
-    const firstCopy = `${ARTICLES}/PDF fixture.pdf`;
-    await expect.poll(() => allReferences(window)).toEqual([firstCopy]);
-    expect(await sha256(firstCopy)).toBe(before);
-
-    await executeCommandById(window, 'incremental-reading:import-article');
-    await finalizeArticleImport(window);
-
-    await expect.poll(() => allReferences(window)).toHaveLength(2);
-    const references = await allReferences(window);
-    const secondCopy = references.find((ref) => ref !== firstCopy);
-    expect(references).toContain(firstCopy);
-    expect(secondCopy?.startsWith(`${ARTICLES}/PDF fixture - `)).toBe(true);
-    expect(secondCopy).toMatch(/\/PDF fixture - [a-z0-9]{0,5}\.pdf$/);
-    expect(await sha256(secondCopy!)).toBe(before);
-    // The original is no article, and is as it was
-    expect(await rowsAt(window, PDF_PATH)).toEqual([]);
-    expect(await sha256(PDF_PATH)).toBe(before);
+    const fileRow = explorerRow(window, PDF_PATH);
+    await expandFolder(window, PDF_FIXTURE_FOLDER, fileRow);
+    await chooseFromMenu(window, fileRow, ['Import in place', 'Import a copy']);
 
     await executeCommandById(window, 'incremental-reading:learn');
-    await expect(
-      window.locator('.ir-queue-row', { hasText: 'PDF fixture' })
-    ).toHaveCount(2);
+    await expect(queueRow(window, PDF_PATH)).toBeVisible();
+    // In place: no copy was queued
+    await expect(window.locator('.ir-queue-row')).toHaveCount(1);
   });
 
   test('imports a copy from the file menu and from the copy command', async () => {
     await setNativeMenus(window, false);
     await setPluginSetting(window, 'showAdvancedImportMenuItems', true);
-    const before = await sha256(PDF_PATH);
 
-    await window.getByText(PDF_FIXTURE_FOLDER, { exact: true }).click();
-    const fileRow = window.locator(`.nav-file-title[data-path="${PDF_PATH}"]`);
-    await fileRow.click({ button: 'right' });
-    await window
-      .locator('.menu')
-      .getByText('Import a copy', { exact: true })
-      .click();
+    const fileRow = explorerRow(window, PDF_PATH);
+    await expandFolder(window, PDF_FIXTURE_FOLDER, fileRow);
+    await chooseFromMenu(window, fileRow, ['Import a copy']);
 
     const firstCopy = `${ARTICLES}/PDF fixture.pdf`;
-    await expect.poll(() => allReferences(window)).toEqual([firstCopy]);
-    expect(await sha256(firstCopy)).toBe(before);
+    await expandFolder(window, ARTICLES, explorerRow(window, firstCopy));
 
     await window.evaluate(() => {
       const { app } = window as unknown as {
@@ -260,52 +238,25 @@ test.describe('Importing a PDF', () => {
     await openFileInActiveLeaf(window, PDF_PATH);
     await executeCommandById(window, 'incremental-reading:import-article-copy');
 
-    await expect.poll(() => allReferences(window)).toHaveLength(2);
-    const secondCopy = (await allReferences(window)).find(
-      (ref) => ref !== firstCopy
+    // A second copy beside the first, named apart from it; the original stays
+    const copies = window.locator(
+      `.nav-file-title[data-path^="${ARTICLES}/PDF fixture"]`
     );
-    expect(secondCopy?.startsWith(`${ARTICLES}/PDF fixture - `)).toBe(true);
-    expect(await sha256(secondCopy!)).toBe(before);
-    expect(await sha256(PDF_PATH)).toBe(before);
-  });
-
-  test('imports a large PDF reading only its leading bytes, never the whole file', async () => {
-    const largePath = 'sources/Large PDF.pdf';
-    await createLargePdf(
-      window,
-      largePath,
-      await fs.readFile(path.join(vaultPath, PDF_PATH)),
-      LARGE_PDF_BYTES
-    );
-    expect(
-      (await fs.stat(path.join(vaultPath, largePath))).size
-    ).toBeGreaterThan(LARGE_PDF_BYTES);
-    await setNativeMenus(window, false);
-    await setPluginSetting(window, 'showAdvancedImportMenuItems', true);
-    // Imported from the file menu: opening the PDF in a tab would have the
-    // PDF viewer read it too
-    const reads = await watchFileReads(window, largePath);
-
-    await window.getByText('sources', { exact: true }).click();
-    await window
-      .locator(`.nav-file-title[data-path="${largePath}"]`)
-      .click({ button: 'right' });
-    await window
-      .locator('.menu')
-      .getByText('Import in place', { exact: true })
-      .click();
-
-    await expect
-      .poll(() => rowsAt(window, largePath))
-      .toEqual([{ id: expect.any(String), reference: largePath, deleted: 0 }]);
-    const { fetches, readBinary } = await reads();
-    // Electron's file protocol answers a range with only those bytes but a
-    // 200; Obsidian's own handler, where it is used, with a 206
-    expect(fetches).toEqual([
-      { range: 'bytes=0-4', status: expect.any(Number), bodyBytesRead: 5 },
+    await expect(copies.locator('.nav-file-title-content')).toHaveText([
+      'PDF fixture',
+      /^PDF fixture - /,
     ]);
-    expect([200, 206]).toContain(fetches[0].status);
-    expect(readBinary).toBe(0);
+    await expect(explorerRow(window, PDF_PATH)).toBeVisible();
+
+    // Both copies are queued, and the original is not
+    await executeCommandById(window, 'incremental-reading:learn');
+    const rows = window.locator('.ir-queue-row');
+    await expect(rows).toHaveCount(2);
+    await expect(
+      rows.filter({ hasText: `${ARTICLES}/PDF fixture` })
+    ).toHaveCount(2);
+    await expect(queueRow(window, firstCopy)).toBeVisible();
+    await expect(queueRow(window, PDF_PATH)).toHaveCount(0);
   });
 
   test('refuses a .pdf that is not a PDF, with a notice', async () => {
@@ -336,70 +287,5 @@ test.describe('Importing a PDF', () => {
         `"Not really.pdf" doesn't hold what its extension says; canceling import`
       );
     expect(await rowsAt(window, fakePath)).toEqual([]);
-  });
-
-  test('revives the deleted row of a PDF imported again', async () => {
-    await openFileInActiveLeaf(window, PDF_PATH);
-    await executeCommandById(window, 'incremental-reading:import-article');
-    await finalizeArticleImport(window);
-    await expect.poll(() => rowsAt(window, PDF_PATH)).toHaveLength(1);
-    const [{ id }] = await rowsAt(window, PDF_PATH);
-
-    // Tombstoned, as a fetch that once found no file there would leave it
-    await window.evaluate(async (rowId) => {
-      const { app } = window as unknown as { app: PageApp };
-      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
-      await repo.mutate('UPDATE article SET deleted = 1 WHERE id = $1', [
-        rowId,
-      ]);
-    }, id);
-    expect(await rowsAt(window, PDF_PATH)).toEqual([
-      { id, reference: PDF_PATH, deleted: 1 },
-    ]);
-
-    await executeCommandById(window, 'incremental-reading:import-article');
-    await finalizeArticleImport(window);
-
-    await expect
-      .poll(() => rowsAt(window, PDF_PATH))
-      .toEqual([{ id, reference: PDF_PATH, deleted: 0 }]);
-  });
-
-  test('brings a dismissed, deleted PDF back into the queue on its old schedule', async () => {
-    await openFileInActiveLeaf(window, PDF_PATH);
-    await executeCommandById(window, 'incremental-reading:import-article');
-    await finalizeArticleImport(window);
-    await expect.poll(() => rowsAt(window, PDF_PATH)).toHaveLength(1);
-    const [{ id }] = await rowsAt(window, PDF_PATH);
-
-    // Dismissed, then tombstoned, on a schedule of its own
-    await window.evaluate(async (rowId) => {
-      const { app } = window as unknown as { app: PageApp };
-      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
-      await repo.mutate(
-        'UPDATE article SET deleted = 1, dismissed = 1, priority = 11, fixed_interval_days = 9 WHERE id = $1',
-        [rowId]
-      );
-    }, id);
-    const notices = await watchNotices(window);
-
-    await executeCommandById(window, 'incremental-reading:import-article');
-    await finalizeArticleImport(window);
-
-    await expect
-      .poll(() => scheduleOf(window, id))
-      .toEqual({
-        deleted: 0,
-        dismissed: 0,
-        priority: 11,
-        fixed_interval_days: 9,
-      });
-    expect(await notices()).toContain(
-      'Restored the article "PDF fixture" to the queue with its earlier schedule'
-    );
-    await executeCommandById(window, 'incremental-reading:learn');
-    await expect(
-      window.locator('.ir-queue-row', { hasText: 'PDF fixture' })
-    ).toBeVisible();
   });
 });

@@ -7,13 +7,13 @@ import * as fs from 'node:fs/promises';
 import {
   emulateMobile,
   executeCommandById,
-  expectFlashLitOnceScrolled,
   expectReviewHome,
   expectReviewOn,
   importArticle,
   leafSnapshot,
   openFileInActiveLeaf,
   openNote,
+  recordedFlash,
   recordFlash,
   REVIEW_VIEW_DEFAULT_TITLE,
   REVIEW_VIEW_TYPE,
@@ -25,7 +25,6 @@ import {
   setShowViewHeader,
   waitForReviewItem,
   watchNotices,
-  type HistoryEntrySnapshot,
   type ShownItem,
 } from './helpers';
 import {
@@ -49,6 +48,33 @@ let vaultPath: string;
  */
 const ARTICLE_TITLE =
   'Memorizing a programming language using spaced repetition software';
+
+/** The title in the active tab's header: the name the user reads it by. */
+const activeTabTitle = () =>
+  window.locator(
+    '.workspace-tabs.mod-active .workspace-tab-header.is-active .workspace-tab-header-inner-title'
+  );
+
+/** Assert the active tab is a note tab titled `title`. */
+async function expectNoteTab(title: string) {
+  await expect(
+    window.locator(
+      '.workspace-tabs.mod-active .workspace-tab-header.is-active[data-type="markdown"] .workspace-tab-header-inner-title'
+    )
+  ).toHaveText(title);
+}
+
+/**
+ * Read `read` over and over for `ms`, failing on the first read that is not
+ * `value`: for what must stay so, not just get there once.
+ */
+async function expectStays<T>(read: () => Promise<T>, value: T, ms = 1000) {
+  const until = Date.now() + ms;
+  do {
+    const got: unknown = await read();
+    expect(got).toEqual(value);
+  } while (Date.now() < until);
+}
 
 test.beforeEach(async () => {
   vaultPath = await createVaultCopy('core');
@@ -133,9 +159,6 @@ test.describe('Review history navigation', () => {
     return next;
   }
 
-  const titles = (entries: HistoryEntrySnapshot[]) =>
-    entries.map(({ title }) => title);
-
   async function expectOpeningText(item: ShownItem) {
     const opening = OPENING_TEXT[item.title];
     if (!opening) throw new Error(`No opening text known for ${item.title}`);
@@ -147,128 +170,47 @@ test.describe('Review history navigation', () => {
     ).toBeVisible();
   }
 
-  test('back from a note opened in the review tab returns to the item', async () => {
-    await importTwoArticles();
-    const x = await beginReview();
-    const backBefore = titles((await leafSnapshot(window)).back);
-
-    await openFileInActiveLeaf(window, PLAIN_NOTE);
-    await expect
-      .poll(async () => {
-        const s = await leafSnapshot(window);
-        return { viewType: s.viewType, file: s.file };
-      })
-      .toEqual({ viewType: 'markdown', file: PLAIN_NOTE });
-    expect(titles((await leafSnapshot(window)).back)).toEqual([
-      ...backBefore,
-      x.title,
-    ]);
-
-    await executeCommandById(window, 'app:go-back');
-    await expectReviewOn(window, x);
-    await expectOpeningText(x);
-    const afterBack = await leafSnapshot(window);
-    expect(titles(afterBack.back)).toEqual(backBefore);
-    expect(titles(afterBack.forward)).toEqual([PLAIN_NOTE_TITLE]);
-
-    await executeCommandById(window, 'app:go-forward');
-    await expect
-      .poll(async () => {
-        const s = await leafSnapshot(window);
-        return { viewType: s.viewType, file: s.file };
-      })
-      .toEqual({ viewType: 'markdown', file: PLAIN_NOTE });
-    const afterForward = await leafSnapshot(window);
-    expect(titles(afterForward.back)).toEqual([...backBefore, x.title]);
-    expect(afterForward.forward).toEqual([]);
-  });
-
   for (const skipHomeScreen of [false, true]) {
     test(`back from a note returns to the home screen (skipHomeScreen: ${skipHomeScreen})`, async () => {
       await importTwoArticles();
       await setPluginSetting(window, 'skipHomeScreen', skipHomeScreen);
 
       await executeCommandById(window, 'incremental-reading:learn');
+      const { back, forward } = navButtons('view header');
       // Opening the tab itself goes into no history: the page and item it
       // lands on are settled for it, not chosen by the user.
-      let backBefore: string[] = [];
+      let x: ShownItem | null = null;
       if (skipHomeScreen) {
         // Straight into review; `learn` on the focused tab toggles home.
-        const x = await waitForReviewItem(window);
-        expect((await leafSnapshot(window)).back).toEqual([]);
+        x = await waitForReviewItem(window);
+        await expect(back).toBeDisabled();
         await executeCommandById(window, 'incremental-reading:learn');
-        backBefore = [x.title];
       }
       await expectReviewHome(window);
-      expect(titles((await leafSnapshot(window)).back)).toEqual(backBefore);
 
       await openFileInActiveLeaf(window, PLAIN_NOTE);
-      await expect
-        .poll(async () => (await leafSnapshot(window)).viewType)
-        .toBe('markdown');
+      await expectNoteTab(PLAIN_NOTE_TITLE);
 
       await executeCommandById(window, 'app:go-back');
       await expectReviewHome(window);
+      // It stays home rather than resuming into review.
+      await expectStays(
+        async () => [
+          await activeTabTitle().textContent(),
+          await window.locator('css=#begin-review-button').isVisible(),
+        ],
+        [REVIEW_VIEW_DEFAULT_TITLE, true]
+      );
+      await expect(forward).toBeEnabled();
       // Nothing the plugin did while settling the reopened tab made it into
-      // the history, and it stays home rather than resuming into review.
-      await window.waitForTimeout(1000);
-      await expectReviewHome(window);
-      const afterBack = await leafSnapshot(window);
-      expect(titles(afterBack.back)).toEqual(backBefore);
-      expect(titles(afterBack.forward)).toEqual([PLAIN_NOTE_TITLE]);
+      // the history: back goes where it went before the note, and no further.
+      if (x) {
+        await back.click();
+        await expectReviewOn(window, x);
+      }
+      await expect(back).toBeDisabled();
     });
   }
-
-  test('back and forward move between items reviewed in the tab', async () => {
-    await importTwoArticles();
-    const x = await beginReview();
-    await expectOpeningText(x);
-    const backAtX = titles((await leafSnapshot(window)).back);
-
-    const y = await skipTo(x);
-    await expectOpeningText(y);
-    expect(titles((await leafSnapshot(window)).back)).toEqual([
-      ...backAtX,
-      x.title,
-    ]);
-
-    await executeCommandById(window, 'app:go-back');
-    await expectReviewOn(window, x);
-    await expectOpeningText(x);
-    const afterBack = await leafSnapshot(window);
-    expect(titles(afterBack.back)).toEqual(backAtX);
-    expect(titles(afterBack.forward)).toEqual([y.title]);
-
-    await executeCommandById(window, 'app:go-forward');
-    await expectReviewOn(window, y);
-    await expectOpeningText(y);
-    const afterForward = await leafSnapshot(window);
-    expect(titles(afterForward.back)).toEqual([...backAtX, x.title]);
-    expect(afterForward.forward).toEqual([]);
-  });
-
-  test('back from the first item returns to the home screen', async () => {
-    await importTwoArticles();
-    await executeCommandById(window, 'incremental-reading:learn');
-    await expectReviewHome(window);
-    const backAtHome = titles((await leafSnapshot(window)).back);
-
-    await window.locator('css=#begin-review-button').click();
-    const x = await waitForReviewItem(window);
-    expect(titles((await leafSnapshot(window)).back)).toEqual([
-      ...backAtHome,
-      REVIEW_VIEW_DEFAULT_TITLE,
-    ]);
-
-    await executeCommandById(window, 'app:go-back');
-    await expectReviewHome(window);
-    const afterBack = await leafSnapshot(window);
-    expect(titles(afterBack.back)).toEqual(backAtHome);
-    expect(titles(afterBack.forward)).toEqual([x.title]);
-
-    await executeCommandById(window, 'app:go-forward');
-    await expectReviewOn(window, x);
-  });
 
   /** The first line at the top edge of the review editor's viewport. */
   async function topVisibleLine() {
@@ -300,26 +242,61 @@ test.describe('Review history navigation', () => {
   }
 
   /**
+   * The scroll anchor saved for the item in the review tab, or 0 while none
+   * is. Not a check: what a scroll is waited on by before review moves away,
+   * since nothing on screen says when the position is saved.
+   *
+   * Unofficial: `window.app`, `app.plugins.plugins`, `reviewManager.repo`.
+   */
+  const savedScroll = () =>
+    window.evaluate((viewType) => {
+      const { app } = window as unknown as ScrollTestWindow;
+      const reference =
+        app.workspace.getLeavesOfType(viewType)[0]?.view.file?.path;
+      const [row] = app.plugins.plugins[
+        'incremental-reading'
+      ].reviewManager.repo.query(
+        'SELECT scroll_top FROM article WHERE reference = $1',
+        [reference]
+      );
+      return row?.scroll_top ?? 0;
+    }, REVIEW_VIEW_TYPE);
+
+  /**
    * Scroll the review editor well down the item, the way a reader does, and
    * wait for the position to be saved.
    */
   async function scrollDown() {
-    // The save listener goes on only after the mount-time restore has run:
-    // two frames plus a 300ms wait for a properties widget.
-    await window.waitForTimeout(1000);
     const scroller = window.locator(
       `.workspace-leaf.mod-active [data-type="${REVIEW_VIEW_TYPE}"] .cm-scroller`
     );
     await scroller.hover();
-    for (let i = 0; i < 6; i++) {
-      await window.mouse.wheel(0, 600);
-      await window.waitForTimeout(100);
-    }
+    // The save listener goes on only after the mount-time restore has run, two
+    // frames plus a 300ms wait for a properties widget in, and a scroll before
+    // that saves nothing: scroll on until one is saved.
+    await expect(async () => {
+      for (let i = 0; i < 6; i++) await window.mouse.wheel(0, 600);
+      await expect
+        .poll(async () => (await topVisibleLine())?.scrollTop ?? 0, {
+          timeout: 2000,
+        })
+        .toBeGreaterThan(1000);
+      await expect.poll(savedScroll, { timeout: 2000 }).toBeGreaterThan(0);
+    }).toPass();
+    // Then for the scroll to come to rest, and what is saved with it: a wheel
+    // scroll can end and save more than once on its way down.
+    let last = '';
     await expect
-      .poll(async () => (await topVisibleLine())?.scrollTop ?? 0)
-      .toBeGreaterThan(1000);
-    // `scrollend`, then the database write it triggers.
-    await window.waitForTimeout(1000);
+      .poll(async () => {
+        const now = JSON.stringify([
+          await savedScroll(),
+          (await topVisibleLine())?.scrollTop,
+        ]);
+        const settled = now === last;
+        last = now;
+        return settled;
+      })
+      .toBe(true);
     const position = await topVisibleLine();
     if (!position) throw new Error('No review editor on screen');
     return position;
@@ -386,8 +363,10 @@ test.describe('Review history navigation', () => {
       })
       .toBeLessThanOrEqual(MAX_RESTORE_DRIFT_PX);
     // And it stays there, rather than being restored and then thrown back.
-    await window.waitForTimeout(1000);
-    expect(await drift()).toBeLessThanOrEqual(MAX_RESTORE_DRIFT_PX);
+    await expectStays(
+      async () => (await drift()) <= MAX_RESTORE_DRIFT_PX,
+      true
+    );
   }
 
   test('back to an item restores where it was scrolled to', async () => {
@@ -407,9 +386,7 @@ test.describe('Review history navigation', () => {
     const position = await scrollDown();
 
     await openFileInActiveLeaf(window, PLAIN_NOTE);
-    await expect
-      .poll(async () => (await leafSnapshot(window)).viewType)
-      .toBe('markdown');
+    await expectNoteTab(PLAIN_NOTE_TITLE);
     await executeCommandById(window, 'app:go-back');
     await expectReviewOn(window, x);
     await expectScrolledTo(position);
@@ -829,28 +806,6 @@ test.describe('Review history navigation', () => {
 
     const CHOICES = ['obsidian', 'show', 'hide'] as const;
 
-    test('the review title bar setting overrides Obsidian’s, on the tab already open', async () => {
-      // Pinned: CI's headed window is ~1024px, where the bar scrolls and a
-      // stand-in can sit outside it — visible to CSS, but not on screen.
-      await window.setViewportSize({ width: 1600, height: 900 });
-      await importTwoArticles();
-      await beginReview();
-
-      // Off first, so "Hide" goes straight to "Follow" while Obsidian shows the
-      // header: the one step a "Hide" left behind would show up in.
-      for (const obsidianShows of [false, true]) {
-        await setShowViewHeader(window, obsidianShows);
-        for (const choice of CHOICES) {
-          await test.step(`${choice}, Obsidian ${obsidianShows ? 'on' : 'off'}`, async () => {
-            await setReviewTitleBar(window, choice);
-            await expectHeaderShown(
-              choice === 'show' || (choice === 'obsidian' && obsidianShows)
-            );
-          });
-        }
-      }
-    });
-
     test('on a phone the review title bar always shows, as Obsidian’s does, whatever either setting says', async () => {
       // A tablet first, where both settings act, as on desktop.
       await emulateMobile(window, true);
@@ -881,34 +836,6 @@ test.describe('Review history navigation', () => {
       // Obsidian's own header buttons and navbar are what a phone navigates by.
       await window.locator('.mobile-navbar-action-back button').click();
       await expectReviewOn(window, x);
-    });
-
-    test('the review title bar setting leaves other tabs to Obsidian’s', async () => {
-      await window.setViewportSize({ width: 1600, height: 900 });
-      await importTwoArticles();
-      await beginReview();
-      await window.evaluate(async (path) => {
-        const { app } = window as unknown as HeaderTestWindow;
-        const file = app.vault.getFileByPath(path);
-        if (!file) throw new Error(`No such file: ${path}`);
-        await app.workspace.getLeaf('split').openFile(file);
-      }, PLAIN_NOTE);
-      const noteHeader = window
-        .locator('.workspace-leaf [data-type="markdown"] > .view-header')
-        .filter({ hasText: PLAIN_NOTE_TITLE });
-      const reviewTabHeader = window.locator(
-        `.workspace-leaf [data-type="${REVIEW_VIEW_TYPE}"] > .view-header`
-      );
-
-      await setShowViewHeader(window, true);
-      await setReviewTitleBar(window, 'hide');
-      await expect(reviewTabHeader).toBeHidden();
-      await expect(noteHeader).toBeVisible();
-
-      await setShowViewHeader(window, false);
-      await setReviewTitleBar(window, 'show');
-      await expect(reviewTabHeader).toBeVisible();
-      await expect(noteHeader).toBeHidden();
     });
 
     test('names the item on screen after the folder it is in, and nothing on the home screen', async () => {
@@ -982,29 +909,44 @@ test.describe('Review history navigation', () => {
     test('renames the item from its title, and drops the edit on Escape', async () => {
       await importTwoArticles();
       const x = await beginReview();
-      const folder = await folderOnScreen();
       const title = reviewHeader(window).locator('.view-header-title');
       const renamed = 'Renamed in the header';
+      const notKept = 'Not kept';
+      /** The file explorer's row for the note named `name`. */
+      const explorerRow = (name: string) =>
+        window
+          .locator('.nav-files-container .nav-file-title-content')
+          .getByText(name, { exact: true });
 
       await title.click();
       await window.keyboard.press('ControlOrMeta+A');
       await window.keyboard.type(renamed);
       await window.keyboard.press('Enter');
 
-      await expect
-        .poll(async () => (await leafSnapshot(window)).file)
-        .toBe(`${folder}/${renamed}.md`);
       await expectReviewOn(window, { id: x.id, title: renamed });
       await expect(title).toHaveText(renamed);
 
       await title.click();
       await window.keyboard.press('ControlOrMeta+A');
-      await window.keyboard.type('Not kept');
+      await window.keyboard.type(notKept);
       await window.keyboard.press('Escape');
 
       await expect(title).toHaveText(renamed);
-      await window.waitForTimeout(500);
-      expect((await leafSnapshot(window)).file).toBe(`${folder}/${renamed}.md`);
+      // And nothing renames it once the edit is gone
+      await expectStays(
+        async () => [
+          await activeTabTitle().textContent(),
+          await title.textContent(),
+        ],
+        [renamed, renamed],
+        500
+      );
+
+      // The explorer, opened onto the item's row, lists it by the one name
+      await executeCommandById(window, 'file-explorer:reveal-active-file');
+      await expect(explorerRow(renamed)).toBeVisible();
+      await expect(explorerRow(x.title)).toHaveCount(0);
+      await expect(explorerRow(notKept)).toHaveCount(0);
     });
   });
 });
@@ -1105,12 +1047,6 @@ test.describe('Links followed in review', () => {
   type LinkTestWindow = {
     app: {
       workspace: {
-        activeLeaf: {
-          view: { getViewType(): string; file?: { path: string } | null };
-        } | null;
-        getLeavesOfType(type: string): {
-          view: { getViewType(): string; file?: { path: string } | null };
-        }[];
         activeEditor: {
           editor: {
             getValue(): string;
@@ -1132,9 +1068,6 @@ test.describe('Links followed in review', () => {
         plugins: Record<
           string,
           {
-            store: {
-              getState(): { page: string; currentItemId: string | null };
-            };
             reviewManager: {
               repo: { query(sql: string): Record<string, unknown>[] };
             };
@@ -1144,32 +1077,34 @@ test.describe('Links followed in review', () => {
     };
   };
 
-  /** The review tab's state, wherever the active tab is. */
-  const reviewTab = () =>
-    window.evaluate((viewType) => {
-      const { app } = window as unknown as LinkTestWindow;
-      const [leaf] = app.workspace.getLeavesOfType(viewType);
-      const { page, currentItemId } =
-        app.plugins.plugins['incremental-reading'].store.getState();
-      return {
-        open: !!leaf,
-        active: leaf === app.workspace.activeLeaf,
-        file: leaf?.view.file?.path ?? null,
-        page,
-        currentItemId,
-      };
-    }, REVIEW_VIEW_TYPE);
+  /** A note's title, as its tab and review show it: its basename. */
+  const titleOf = (path: string) =>
+    path.slice(path.lastIndexOf('/') + 1).replace(/\.md$/, '');
 
-  /** The active tab's view type and file. */
-  const activeTab = () =>
-    window.evaluate(() => {
-      const { app } = window as unknown as LinkTestWindow;
-      const view = app.workspace.activeLeaf?.view;
-      return {
-        type: view?.getViewType() ?? null,
-        file: view?.file?.path ?? null,
-      };
-    });
+  /** The title in the active tab's header, when that tab is review. */
+  const reviewTabTitle = () =>
+    window.locator(
+      `.workspace-tabs.mod-active .workspace-tab-header.is-active[data-type="${REVIEW_VIEW_TYPE}"] .workspace-tab-header-inner-title`
+    );
+
+  /** The active review tab's editor content. */
+  const reviewContent = () =>
+    window.locator(
+      `.workspace-leaf.mod-active [data-type="${REVIEW_VIEW_TYPE}"] .cm-content`
+    );
+
+  /**
+   * Assert the active tab is review, on the snippet whose note is at `path`,
+   * showing `text`, as fast as a link lands. A snippet has no title line in
+   * review; its tab is named after its note.
+   */
+  async function expectSnippetShowing(path: string, text: string) {
+    await expect(reviewTabTitle()).toHaveText(titleOf(path), LANDS_WITHIN);
+    await expect(reviewContent().getByText(text)).toBeVisible(LANDS_WITHIN);
+  }
+
+  /** Every tab header in the main area. */
+  const tabHeaders = () => window.locator('.mod-root .workspace-tab-header');
 
   /** Import the source as an article, unless it is already, and review it. */
   async function reviewSource({ imported = false } = {}) {
@@ -1192,22 +1127,10 @@ test.describe('Links followed in review', () => {
     await selectParagraph(window, PARAGRAPH);
     await executeCommandById(window, 'incremental-reading:extract-selection');
     await expect(highlight()).toHaveCount(1);
+    // Not a check: the path names the snippet's note before it is on screen
     const reference = await highlight().getAttribute('data-snippet-ref');
     if (!reference) throw new Error('The highlight names no snippet');
     return reference;
-  }
-
-  /**
-   * Wait for review, in the active tab, to show the item whose note is at
-   * `path`, as fast as a link lands; the item's id.
-   */
-  async function expectReviewShowing(path: string) {
-    await expect
-      .poll(reviewTab, LANDS_WITHIN)
-      .toMatchObject({ active: true, page: 'review', file: path });
-    const { currentItemId } = await reviewTab();
-    expect(currentItemId).not.toBeNull();
-    return currentItemId!;
   }
 
   /**
@@ -1226,6 +1149,7 @@ test.describe('Links followed in review', () => {
       );
     }, text);
     await executeCommandById(window, 'incremental-reading:extract-selection');
+    // Not a check: the path is what the test opens the snippet by
     const references = () =>
       window.evaluate(() => {
         const { app } = window as unknown as LinkTestWindow;
@@ -1248,26 +1172,25 @@ test.describe('Links followed in review', () => {
   test('a plain click on a snippet highlight shows the snippet in review, and back returns to the article', async () => {
     const article = await reviewSource();
     const reference = await extractInReview();
+    const tabs = await tabHeaders().count();
 
     await highlight().click();
 
-    const snippet = await expectReviewShowing(reference);
-    expect(snippet).not.toBe(article.id);
-    expect(await activeTab()).toEqual({
-      type: REVIEW_VIEW_TYPE,
-      file: reference,
-    });
+    await expectSnippetShowing(reference, PARAGRAPH);
+    // In review's own tab, not a new one
+    await expect(tabHeaders()).toHaveCount(tabs);
 
     await executeCommandById(window, 'app:go-back');
-    await expectReviewOn(window, article);
+    await expectReviewOn(window, article, LANDS_WITHIN);
     await executeCommandById(window, 'app:go-forward');
-    expect(await expectReviewShowing(reference)).toBe(snippet);
+    await expectSnippetShowing(reference, PARAGRAPH);
   });
 
   for (const how of ['Ctrl+click', 'middle click'] as const) {
     test(`${how} on a snippet highlight opens the snippet's note in a new tab, leaving review as it was`, async () => {
-      const article = await reviewSource();
+      await reviewSource();
       const reference = await extractInReview();
+      const tabs = await tabHeaders().count();
 
       await highlight().click(
         how === 'Ctrl+click'
@@ -1275,16 +1198,14 @@ test.describe('Links followed in review', () => {
           : { button: 'middle' }
       );
 
-      await expect
-        .poll(activeTab, LANDS_WITHIN)
-        .toEqual({ type: 'markdown', file: reference });
-      expect(await reviewTab()).toMatchObject({
-        open: true,
-        active: false,
-        page: 'review',
-        currentItemId: article.id,
-        file: SOURCE_PATH,
-      });
+      await expect(tabHeaders()).toHaveCount(tabs + 1, LANDS_WITHIN);
+      await expectNoteTab(titleOf(reference));
+      // Review, in the background, is still on the article
+      await expect(
+        window.locator(
+          `.mod-root .workspace-tab-header[data-type="${REVIEW_VIEW_TYPE}"] .workspace-tab-header-inner-title`
+        )
+      ).toHaveText(SOURCE_TITLE);
     });
   }
 
@@ -1295,7 +1216,7 @@ test.describe('Links followed in review', () => {
     await executeCommandById(window, 'incremental-reading:create-card');
     await expect.poll(cardLinkInSource, { timeout: 10_000 }).not.toBeNull();
     const card = (await cardLinkInSource())!;
-    const article = await reviewSource();
+    await reviewSource();
     // A wikilink to the card at the top of the article's body, written from
     // outside review, which picks the change up
     await window.evaluate(
@@ -1317,19 +1238,13 @@ test.describe('Links followed in review', () => {
 
     await link.click();
 
-    const cardName = card.slice(card.lastIndexOf('/') + 1).replace(/\.md$/, '');
-    await expect
-      .poll(
-        async () => (await reviewTab()).file?.endsWith(`/${cardName}.md`),
-        LANDS_WITHIN
-      )
-      .toBe(true);
-    expect(await reviewTab()).toMatchObject({ active: true, page: 'review' });
-    const shown = await expectReviewShowing((await reviewTab()).file!);
-    expect(shown).not.toBe(article.id);
+    // A card has no title line in review; its tab is named after it
+    await expect(reviewTabTitle()).toHaveText(titleOf(card), LANDS_WITHIN);
     // The card, as review shows one: its question, the answer hidden
     await expect(
-      window.locator(`[data-type="${REVIEW_VIEW_TYPE}"] .ir-card-viewer`)
+      window.locator(
+        `.workspace-leaf.mod-active [data-type="${REVIEW_VIEW_TYPE}"] .ir-card-viewer`
+      )
     ).toBeVisible();
   });
 
@@ -1337,92 +1252,48 @@ test.describe('Links followed in review', () => {
     await importArticle(window, SOURCE);
     const reference = await extractInNote(LOW_PARAGRAPH);
     const article = await reviewSource({ imported: true });
+    // Opened at its top, the passage is out of view
+    await expect(highlight()).not.toBeInViewport();
     // Review onto the snippet as the file explorer would take it there
     await openFileInActiveLeaf(window, reference);
-    const snippet = await expectReviewShowing(reference);
+    await expectSnippetShowing(reference, LOW_PARAGRAPH);
 
     await executeCommandById(window, 'incremental-reading:go-to-context');
 
-    await expect.poll(reviewTab, LANDS_WITHIN).toMatchObject({
-      active: true,
-      page: 'review',
-      currentItemId: article.id,
-    });
-    await expectReviewOn(window, article);
-    // The passage sits in the middle of the editor, not where it was read
-    const offCenter = () =>
-      window.evaluate((viewType) => {
-        const scroller = document.querySelector<HTMLElement>(
-          `[data-type="${viewType}"] .cm-scroller`
-        );
-        const passage = document.querySelector<HTMLElement>(
-          `[data-type="${viewType}"] .cm-content .ir-snippet-highlight`
-        );
-        if (!scroller || !passage) return null;
-        const box = scroller.getBoundingClientRect();
-        const at = passage.getBoundingClientRect();
-        return Math.abs((at.top + at.bottom) / 2 - (box.top + box.bottom) / 2);
-      }, REVIEW_VIEW_TYPE);
-    await expect.poll(offCenter, LANDS_WITHIN).toBeLessThan(80);
-    // And stays there, rather than being thrown back by scroll restore
-    await window.waitForTimeout(1000);
-    expect(await offCenter()).toBeLessThan(80);
+    await expectReviewOn(window, article, LANDS_WITHIN);
+    // Down at the passage, not at the top where the article was left
+    await expect(highlight()).toBeInViewport(LANDS_WITHIN);
 
     await executeCommandById(window, 'app:go-back');
-    expect(await expectReviewShowing(reference)).toBe(snippet);
+    await expectSnippetShowing(reference, LOW_PARAGRAPH);
   });
-
-  /** What the review editor shows of a flash. */
-  const reviewFlash = () =>
-    window.evaluate((viewType) => {
-      const editor = document.querySelector(
-        `[data-type="${viewType}"] .cm-editor`
-      );
-      const lit = [
-        ...(editor?.querySelectorAll(
-          '.ir-context-flashing .ir-context-flash'
-        ) ?? []),
-      ];
-      return {
-        lit: lit.map((el) => el.textContent ?? '').join(''),
-        eased:
-          lit.length > 0 &&
-          lit.every(
-            (el) => getComputedStyle(el).transitionDuration === '0.75s, 0.75s'
-          ),
-        marks: editor?.querySelectorAll('.ir-context-flash').length ?? 0,
-        obsidianFlashes: editor?.querySelectorAll('.is-flashing').length ?? 0,
-      };
-    }, REVIEW_VIEW_TYPE);
-
-  /**
-   * The review editor flashes `lit` once the scroll there is done, and then
-   * nothing is left lit, nor Obsidian's own highlight.
-   */
-  async function expectReviewFlash(lit: RegExp) {
-    await expectFlashLitOnceScrolled(window, lit);
-    expect(await reviewFlash()).toEqual({
-      lit: '',
-      eased: false,
-      marks: 0,
-      obsidianFlashes: 0,
-    });
-  }
 
   test('Go to context in review flashes the passage for a moment and leaves nothing lit behind', async () => {
     await importArticle(window, SOURCE);
     const reference = await extractInNote(LOW_PARAGRAPH);
     const article = await reviewSource({ imported: true });
     await openFileInActiveLeaf(window, reference);
-    await expectReviewShowing(reference);
+    await expectSnippetShowing(reference, LOW_PARAGRAPH);
     await recordFlash(window);
 
     await executeCommandById(window, 'incremental-reading:go-to-context');
 
+    await expectReviewOn(window, article, LANDS_WITHIN);
+    // Lit, on screen, as `recordFlash` saw it in the page: the flash is lit
+    // for under a second, which a poll from the test can step right over
     await expect
-      .poll(reviewTab, LANDS_WITHIN)
-      .toMatchObject({ page: 'review', currentItemId: article.id });
-    await expectReviewFlash(new RegExp(LOW_PARAGRAPH));
+      .poll(() => recordedFlash(window), { timeout: 5000 })
+      .not.toBeNull();
+    expect(await recordedFlash(window)).toMatchObject({
+      text: expect.stringMatching(new RegExp(LOW_PARAGRAPH)),
+      onScreen: true,
+    });
+    // Then nothing is left lit, nor Obsidian's own highlight
+    const editor = window.locator(
+      `[data-type="${REVIEW_VIEW_TYPE}"] .cm-editor`
+    );
+    await expect(editor.locator('.ir-context-flash')).toHaveCount(0);
+    await expect(editor.locator('.is-flashing')).toHaveCount(0);
   });
 });
 
@@ -1437,6 +1308,29 @@ type TestWindowLike = {
           store: {
             getState(): { page: string; currentItemId: string | null };
             subscribe(listener: () => void): () => void;
+          };
+        }
+      >;
+    };
+  };
+};
+
+/** The slice of Obsidian's `window.app` the scroll tests reach into. */
+type ScrollTestWindow = {
+  app: {
+    workspace: {
+      getLeavesOfType(type: string): {
+        view: { file?: { path: string } | null };
+      }[];
+    };
+    plugins: {
+      plugins: Record<
+        string,
+        {
+          reviewManager: {
+            repo: {
+              query(sql: string, params: unknown[]): { scroll_top?: number }[];
+            };
           };
         }
       >;

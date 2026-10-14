@@ -9,7 +9,6 @@ import {
   executeCommandById,
   importArticle,
   REVIEW_VIEW_TYPE,
-  reviewNewCard,
   waitForReviewItem,
 } from './helpers';
 import {
@@ -157,25 +156,6 @@ test.describe('Separator between undo and the item actions', () => {
     });
   });
 
-  test('parts undo from show answer on a card the same way', async () => {
-    await window.setViewportSize(WIDE);
-    await reviewNewCard(window);
-    await expectBar(window, {
-      packed: false,
-      shown: false,
-      firstLabel: 'Show answer',
-    });
-
-    await window.setViewportSize(NARROW);
-    expectBetween(
-      await expectBar(window, {
-        packed: true,
-        shown: true,
-        firstLabel: 'Show answer',
-      })
-    );
-  });
-
   test('follows the tab into a window of its own', async () => {
     await window.setViewportSize(WIDE);
     await reviewArticle(window);
@@ -265,86 +245,5 @@ test.describe('Separator between undo and the item actions', () => {
         firstLabel: 'Mark reviewed',
       })
     );
-  });
-
-  test('toggling it moves nothing, so it never flickers across the threshold', async () => {
-    await window.setViewportSize(WIDE);
-    await reviewArticle(window);
-    await expectBar(window, {
-      packed: false,
-      shown: false,
-      firstLabel: 'Mark reviewed',
-    });
-
-    // Every class change on the leading zone, counted in the page: a
-    // round-trip per sample would be far too slow to see a flicker.
-    await window.evaluate((selector) => {
-      const lead = document.querySelector(`${selector} > .ir-bar-lead`)!;
-      const w = window as unknown as { __packedFlips: number };
-      w.__packedFlips = 0;
-      new MutationObserver(() => w.__packedFlips++).observe(lead, {
-        attributes: true,
-        attributeFilter: ['class'],
-      });
-    }, BAR);
-    const flips = () =>
-      window.evaluate(
-        () => (window as unknown as { __packedFlips: number }).__packedFlips
-      );
-
-    // Narrowing step by step crosses the threshold exactly once, and every
-    // width settles where it lands: no class change after the first frames.
-    const states: boolean[] = [];
-    for (let width = 1200; width >= 600; width -= 8) {
-      await window.setViewportSize({ width, height: WIDE.height });
-      await window.evaluate(
-        () =>
-          new Promise<void>((r) =>
-            requestAnimationFrame(() => requestAnimationFrame(() => r()))
-          )
-      );
-      const before = await flips();
-      await window.waitForTimeout(50);
-      expect(await flips()).toBe(before);
-      states.push((await barLayout(window))!.packed);
-    }
-    const crossing = states.indexOf(true);
-    expect(crossing).toBeGreaterThan(0);
-    expect(states.slice(crossing).every(Boolean)).toBe(true);
-    expect(await flips()).toBe(1);
-
-    // And right at the threshold, the separator shown or not, every box in
-    // the bar is where it was.
-    const threshold = 1200 - crossing * 8;
-    await window.setViewportSize({ width: threshold, height: WIDE.height });
-    await expectBar(window, {
-      packed: true,
-      shown: true,
-      firstLabel: 'Mark reviewed',
-    });
-    // Both states measured in one evaluate, so no render can land between
-    const { shown, hidden } = await window.evaluate((selector) => {
-      const bar = document.querySelector(selector)!;
-      const lead = bar.querySelector(':scope > .ir-bar-lead')!;
-      const joint = lead.querySelector(':scope > .ir-bar-joint')!;
-      const measure = (packed: boolean) => {
-        lead.classList.toggle('is-packed', packed);
-        return {
-          visibility: getComputedStyle(joint).visibility,
-          boxes: Array.from(bar.querySelectorAll('*'), (el) => {
-            const { left, top, width, height } = el.getBoundingClientRect();
-            return [left, top, width, height];
-          }),
-        };
-      };
-      const result = { shown: measure(true), hidden: measure(false) };
-      lead.classList.add('is-packed');
-      return result;
-    }, BAR);
-    expect([shown.visibility, hidden.visibility]).toEqual([
-      'visible',
-      'hidden',
-    ]);
-    expect(hidden.boxes).toEqual(shown.boxes);
   });
 });

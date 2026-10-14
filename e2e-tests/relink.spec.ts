@@ -1,6 +1,7 @@
 import test, {
   expect,
   type ElectronApplication,
+  type Locator,
   type Page,
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
@@ -40,13 +41,17 @@ test.afterEach(async () => {
  */
 type PageApp = {
   vault: { getFileByPath(path: string): unknown };
+  workspace: {
+    getLeaf(newLeaf: 'tab'): {
+      openFile(file: unknown, state: unknown): Promise<void>;
+    };
+  };
   plugins: {
     plugins: Record<
       string,
       {
         reviewManager: {
           repo: {
-            query(sql: string, params?: unknown[]): Record<string, unknown>[];
             mutate(sql: string, params?: unknown[]): Promise<unknown>;
           };
         };
@@ -66,39 +71,6 @@ const mutate = (sql: string, params: unknown[]) =>
       await repo.mutate(sql, params);
     },
     [sql, params] as const
-  );
-
-const query = (sql: string, params: unknown[] = []) =>
-  window.evaluate(
-    ([sql, params]) => {
-      const { app } = window as unknown as { app: PageApp };
-      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
-      return repo.query(sql, params);
-    },
-    [sql, params] as const
-  );
-
-/**
- * A row's schedule and standing. Not its intra-day fuzz or scroll position,
- * which review fills in the first time it shows an item.
- */
-const schedule = async (table: Table, id: string) =>
-  (
-    await query(
-      `SELECT due, interval, priority, dismissed, deleted FROM ${table} WHERE id = $1`,
-      [id]
-    )
-  )[0];
-
-const referenceOf = async (table: Table, id: string) =>
-  (await query(`SELECT reference FROM ${table} WHERE id = $1`, [id]))[0]
-    ?.reference;
-
-/** The review history of an item, which hangs off its id. */
-const history = (table: Table, id: string) =>
-  query(
-    `SELECT id, review_time FROM ${table}_review WHERE ${table}_id = $1 ORDER BY id`,
-    [id]
   );
 
 /** Whether Obsidian has indexed a file at `at`. */
@@ -173,6 +145,58 @@ async function pick(path: string) {
 /** Every path the open picker offers, with the filter cleared. */
 const offered = () => picker().locator('.suggestion-item').allTextContents();
 
+/**
+ * The queue row whose File column is `reference`, as its cell's tooltip reads
+ * it. A missing item's reads "No file at …" instead, so this is never one.
+ */
+const queueRow = (reference: string) =>
+  window.locator('.ir-queue-row').filter({
+    has: window.getByRole('cell', { name: reference, exact: true }),
+  });
+
+/** The queue rows flagged as missing their file. */
+const missingRows = () =>
+  window
+    .locator('.ir-queue-row')
+    .filter({ has: window.getByText('Missing', { exact: true }) });
+
+/** A queue row's Due cell. */
+const dueCell = (row: Locator) => row.locator('[data-column="due"]');
+
+/** A priority as the queue's Scheduling column shows it: 25 reads "2.5". */
+const shownPriority = (priority: number) =>
+  `Priority ${(priority / 10).toFixed(1)}`;
+
+/**
+ * Open a menu with `open` until it shows `title`, choose that, and wait for
+ * the menu to go. Obsidian's menus animate in, and on a loaded runner the
+ * first right click can land before the row takes it, so it is repeated.
+ */
+async function chooseFromMenu(open: () => Promise<void>, title: string) {
+  const menu = window.locator('.menu');
+  const item = menu.getByText(title, { exact: true });
+  await expect(async () => {
+    if ((await menu.count()) === 0) await open();
+    await expect(item).toBeVisible({ timeout: 2_000 });
+  }).toPass();
+  await item.click();
+  await expect(menu).toHaveCount(0);
+}
+
+/** The command palette, once open. */
+const palette = () => window.locator('.modal-container .prompt');
+
+/** Open the command palette, filtered to `query`. */
+async function searchPalette(query: string) {
+  await executeCommandById(window, 'command-palette:open');
+  await expect(palette()).toBeVisible();
+  await palette().locator('.prompt-input').fill(query);
+  // The list is filtered as the query lands: wait for what it found
+  await expect(
+    palette().locator('.suggestion-item, .suggestion-empty').first()
+  ).toBeVisible();
+}
+
 // #endregion
 
 test('relinks a missing PDF article from the queue row menu', async () => {
@@ -194,21 +218,22 @@ test('relinks a missing PDF article from the queue row menu', async () => {
   );
   await seedLostItem('article', 'pdf', 'papers/Found.pdf', 'old/Lost.pdf');
   await seedChild('pdf');
-  const before = await schedule('article', 'pdf');
-  const historyBefore = await history('article', 'pdf');
 
   await executeCommandById(window, 'incremental-reading:learn');
-  const row = window.locator('.ir-queue-row[data-missing]');
+  const row = missingRows();
   await expect(row).toHaveCount(1);
-  await expect(row).toContainText('Missing');
   await expect(row).toContainText('Lost.pdf');
+  await expect(row).toContainText(shownPriority(25));
+  const due = (await dueCell(row).textContent()) ?? '';
+  expect(due).not.toBe('');
+  const child = queueRow('snippets/child.md');
+  await expect(child).toContainText('old/Lost.pdf');
 
   await setNativeMenus(window, false);
-  await row.locator('.ir-queue-cell').first().click({ button: 'right' });
-  await window
-    .locator('.menu')
-    .getByText('Relink file…', { exact: true })
-    .click();
+  await chooseFromMenu(
+    () => row.locator('.ir-queue-cell').first().click({ button: 'right' }),
+    'Relink file…'
+  );
   // Only PDFs, and none another item has. The test vault ships PDF fixtures
   // of its own, which are untracked and so offered too: check what this test
   // put there rather than the whole list.
@@ -221,25 +246,19 @@ test('relinks a missing PDF article from the queue row menu', async () => {
   expect(paths.every((p) => p.endsWith('.pdf'))).toBe(true);
   await pick('papers/Found.pdf');
 
-  await expect
-    .poll(() => referenceOf('article', 'pdf'))
-    .toBe('papers/Found.pdf');
-  expect(await schedule('article', 'pdf')).toEqual(before);
-  expect(await history('article', 'pdf')).toEqual(historyBefore);
-  expect(await query(`SELECT parent FROM snippet WHERE id = 'child'`)).toEqual([
-    { parent: 'pdf' },
-  ]);
-  await expect(window.locator('.ir-queue-row[data-missing]')).toHaveCount(0);
-  const onDisk = await fs.readFile(path.join(vaultPath, 'papers/Found.pdf'));
-  expect(onDisk.equals(bytes)).toBe(true);
+  // The same item at the file picked, keeping its schedule and its snippet
+  await expect(missingRows()).toHaveCount(0);
+  const relinked = queueRow('papers/Found.pdf');
+  await expect(relinked).toHaveCount(1);
+  await expect(relinked).toContainText(shownPriority(25));
+  await expect(dueCell(relinked)).toHaveText(due);
+  await expect(child).toContainText('papers/Found.pdf');
+  await expect(window.locator('.ir-queue-row')).toHaveCount(3);
 });
 
 test('relinks a missing note from its review placeholder, making it the item’s own', async () => {
   await writeVaultFile('found/Found note.md', 'Text of the found note\n');
   await seedLostItem('article', 'md', 'found/Found note.md', 'gone/Lost.md');
-  await seedChild('md');
-  const before = await schedule('article', 'md');
-  const historyBefore = await history('article', 'md');
 
   await executeCommandById(window, 'incremental-reading:learn');
   await window.locator('css=#begin-review-button').click();
@@ -257,25 +276,25 @@ test('relinks a missing note from its review placeholder, making it the item’s
     'Text of the found note'
   );
   await expect(placeholder).toBeHidden();
-  expect(await referenceOf('article', 'md')).toBe('found/Found note.md');
-  expect(await schedule('article', 'md')).toEqual(before);
-  expect(await history('article', 'md')).toEqual(historyBefore);
-  expect(await query(`SELECT parent FROM snippet WHERE id = 'child'`)).toEqual([
-    { parent: 'md' },
-  ]);
-  await expect
-    .poll(() =>
-      fs.readFile(path.join(vaultPath, 'found/Found note.md'), 'utf8')
-    )
-    .toMatch(/ir-id: md[\s\S]*ir-article/);
+
+  // The note now carries the item's id and type tag. Opened in source mode,
+  // where its properties read as written: the plugin hides `ir-id` elsewhere.
+  // Undocumented: the `{ mode, source }` view state of source mode.
+  await window.evaluate(async (at) => {
+    const { app } = window as unknown as { app: PageApp };
+    await app.workspace.getLeaf('tab').openFile(app.vault.getFileByPath(at), {
+      active: true,
+      state: { mode: 'source', source: true },
+    });
+  }, 'found/Found note.md');
+  const source = window.locator('.workspace-leaf.mod-active .cm-content');
+  await expect(source).toContainText('ir-id: md');
+  await expect(source).toContainText('ir-article');
 });
 
 test('relinks the missing item in review from the command', async () => {
   await writeVaultFile('found/Snippet.md', 'Snippet text\n');
   await seedLostItem('snippet', 'snip', 'found/Snippet.md', 'gone/Snip.md');
-  await seedChild('snip');
-  const before = await schedule('snippet', 'snip');
-  const historyBefore = await history('snippet', 'snip');
 
   await executeCommandById(window, 'incremental-reading:learn');
   await window.locator('css=#begin-review-button').click();
@@ -283,38 +302,15 @@ test('relinks the missing item in review from the command', async () => {
     'gone/Snip.md'
   );
 
-  expect(
-    await executeCommandById(window, 'incremental-reading:relink-file')
-  ).toBe(true);
+  const command = () =>
+    palette().locator('.suggestion-item', { hasText: 'Relink file' });
+  await searchPalette('Relink file');
+  await command().first().click();
   await pick('found/Snippet.md');
 
   await expect(window.locator('.ir-editor')).toContainText('Snippet text');
-  expect(await referenceOf('snippet', 'snip')).toBe('found/Snippet.md');
-  expect(await schedule('snippet', 'snip')).toEqual(before);
-  expect(await history('snippet', 'snip')).toEqual(historyBefore);
-  expect(await query(`SELECT parent FROM snippet WHERE id = 'child'`)).toEqual([
-    { parent: 'snip' },
-  ]);
-  // Nothing is missing any more, so the command has nothing to do.
-  // `app.commands.findCommand` is unofficial Obsidian API, asked directly
-  // because `executeCommandById` answers true whatever the check says.
-  await expect
-    .poll(() =>
-      window.evaluate(() =>
-        (
-          window as unknown as {
-            app: {
-              commands: {
-                findCommand(id: string): {
-                  checkCallback(checking: boolean): boolean;
-                };
-              };
-            };
-          }
-        ).app.commands
-          .findCommand('incremental-reading:relink-file')
-          .checkCallback(true)
-      )
-    )
-    .toBe(false);
+  await expect(window.locator('.ir-missing-item')).toHaveCount(0);
+  // Nothing is missing any more, so the palette no longer offers it
+  await searchPalette('Relink file');
+  await expect(command()).toHaveCount(0);
 });

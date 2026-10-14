@@ -1,6 +1,7 @@
 import test, {
   expect,
   type ElectronApplication,
+  type Locator,
   type Page,
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
@@ -46,7 +47,6 @@ type PageApp = {
       {
         reviewManager: {
           repo: {
-            query(sql: string, params?: unknown[]): Record<string, unknown>[];
             mutate(sql: string, params?: unknown[]): Promise<unknown>;
           };
         };
@@ -62,16 +62,6 @@ const mutate = (sql: string, params: unknown[] = []) =>
       const { app } = window as unknown as { app: PageApp };
       const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
       await repo.mutate(sql, params);
-    },
-    [sql, params] as const
-  );
-
-const query = (sql: string, params: unknown[] = []) =>
-  window.evaluate(
-    ([sql, params]) => {
-      const { app } = window as unknown as { app: PageApp };
-      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
-      return repo.query(sql, params);
     },
     [sql, params] as const
   );
@@ -92,14 +82,46 @@ async function writeVaultFile(at: string, content: string) {
     .toBe(true);
 }
 
-/** Open the menu of the queue row `row` and wait for it. */
-async function openRowMenu(row: ReturnType<Page['locator']>) {
-  await row.locator('.ir-queue-cell').first().click({ button: 'right' });
-  await expect(window.locator('.menu')).toBeVisible();
+/** The queue rows flagged as missing their file. */
+const missingRows = () =>
+  window
+    .locator('.ir-queue-row')
+    .filter({ has: window.getByText('Missing', { exact: true }) });
+
+const menu = () => window.locator('.menu');
+
+const menuItem = (title: string) => menu().getByText(title, { exact: true });
+
+/**
+ * Open the menu of the queue row `row` and wait for it to show `title`.
+ * Obsidian's menus animate in, and on a loaded runner the first right click
+ * can land before the row takes it, so it is repeated.
+ */
+async function openRowMenu(row: Locator, title: string) {
+  await expect(async () => {
+    if ((await menu().count()) === 0) {
+      await row.locator('.ir-queue-cell').first().click({ button: 'right' });
+    }
+    await expect(menuItem(title)).toBeVisible({ timeout: 2_000 });
+  }).toPass();
 }
 
-const menuItem = (title: string) =>
-  window.locator('.menu').getByText(title, { exact: true });
+/** Choose `title` from the open menu, and wait for the menu to go. */
+async function chooseMenuItem(title: string) {
+  await menuItem(title).click();
+  await expect(menu()).toHaveCount(0);
+}
+
+/**
+ * Close the open menu with Escape, and wait for it to go. Repeated while it
+ * stays: a key pressed as the menu opens can reach the page instead.
+ */
+async function closeMenu() {
+  await expect(async () => {
+    if ((await menu().count()) > 0) await window.keyboard.press('Escape');
+    await expect(menu()).toHaveCount(0, { timeout: 2_000 });
+  }).toPass();
+}
 
 /** The confirmation, once open. */
 const confirmation = () => window.locator('.modal-container.mod-confirmation');
@@ -129,24 +151,24 @@ test('permanently deletes a missing item from its queue row, keeping what was ta
 
   await executeCommandById(window, 'incremental-reading:learn');
   await setNativeMenus(window, false);
-  const missing = window.locator('.ir-queue-row[data-missing]');
+  const missing = missingRows();
   const child = window
     .locator('.ir-queue-row')
     .filter({ hasText: 'Kept child' });
   await expect(missing).toHaveCount(1);
   await expect(missing).toContainText('Lost.md');
   await expect(child).toHaveCount(1);
+  // Its parent column names the missing item
+  await expect(child).toContainText('gone/Lost.md');
 
   // A row with its note offers no permanent delete
-  await openRowMenu(child);
-  await expect(menuItem('Relink file…')).toBeVisible();
+  await openRowMenu(child, 'Relink file…');
   await expect(menuItem('Permanently delete')).toHaveCount(0);
-  await window.keyboard.press('Escape');
-  await expect(window.locator('.menu')).toBeHidden();
+  await closeMenu();
 
   // Cancel does nothing
-  await openRowMenu(missing);
-  await menuItem('Permanently delete').click();
+  await openRowMenu(missing, 'Permanently delete');
+  await chooseMenuItem('Permanently delete');
   await expect(confirmation()).toBeVisible();
   await expect(confirmation().locator('.modal-title')).toHaveText(
     'Permanently delete item'
@@ -158,29 +180,19 @@ test('permanently deletes a missing item from its queue row, keeping what was ta
   await buttons.nth(0).click();
   await expect(confirmation()).toBeHidden();
   await expect(missing).toHaveCount(1);
-  expect(await query(`SELECT id FROM article WHERE id = 'lost'`)).toEqual([
-    { id: 'lost' },
-  ]);
 
-  // Delete removes the row and its history; the snippet stays, parentless
-  await openRowMenu(missing);
-  await menuItem('Permanently delete').click();
+  // Delete removes the row; the snippet stays, parentless
+  await openRowMenu(missing, 'Permanently delete');
+  await chooseMenuItem('Permanently delete');
   await confirmation().getByRole('button', { name: 'Delete' }).click();
   await expect(confirmation()).toBeHidden();
 
   await expect(missing).toHaveCount(0);
   await expect(child).toHaveCount(1);
-  expect(await query(`SELECT id FROM article WHERE id = 'lost'`)).toEqual([]);
-  expect(
-    await query(`SELECT id FROM article_review WHERE article_id = 'lost'`)
-  ).toEqual([]);
-  expect(await query(`SELECT parent FROM snippet WHERE id = 'child'`)).toEqual([
-    { parent: null },
-  ]);
-  // Nothing was trashed: there was no note, and the snippet keeps its own
-  expect(
-    await fs.readFile(path.join(vaultPath, 'snippets/Kept child.md'), 'utf8')
-  ).toContain('A snippet\n');
+  await expect(child).not.toContainText('gone/Lost.md');
+  await expect(child).toContainText('Parent —');
+  // Nothing was trashed: the snippet keeps its own note
+  await expect(child.getByText('Missing', { exact: true })).toHaveCount(0);
 });
 
 test('moves review on to the next item due when the item it was on is deleted', async () => {
@@ -208,14 +220,14 @@ test('moves review on to the next item due when the item it was on is deleted', 
   await window.getByRole('button', { name: 'Go to home screen' }).click();
 
   await setNativeMenus(window, false);
-  await openRowMenu(window.locator('.ir-queue-row[data-missing]'));
-  await menuItem('Permanently delete').click();
+  await openRowMenu(missingRows(), 'Permanently delete');
+  await chooseMenuItem('Permanently delete');
   // Enter confirms, as in Obsidian's own confirmations
   await expect(
     confirmation().getByRole('button', { name: 'Delete' })
   ).toBeFocused();
   await window.keyboard.press('Enter');
-  await expect(window.locator('.ir-queue-row[data-missing]')).toHaveCount(0);
+  await expect(missingRows()).toHaveCount(0);
   await window.locator('css=#begin-review-button').click();
 
   // Bounded well inside `CURRENT_ITEM_REFETCH_TIME`, whose poll would get

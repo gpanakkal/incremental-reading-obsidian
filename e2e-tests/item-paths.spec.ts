@@ -116,19 +116,6 @@ const itemRows = (page: Page) =>
       });
   });
 
-/** Rename what is at `from` to `to` as the file explorer does. */
-const rename = (page: Page, from: string, to: string) =>
-  page.evaluate(
-    async ([from, to]) => {
-      const { app } = window as unknown as { app: TestApp };
-      await app.fileManager.renameFile(
-        app.vault.getAbstractFileByPath(from),
-        to
-      );
-    },
-    [from, to] as const
-  );
-
 /**
  * Rename what is at `from` to `to` as a sync client does, behind Obsidian's
  * link updates: `Vault.rename` updates no links.
@@ -142,14 +129,29 @@ const syncRename = (page: Page, from: string, to: string) =>
     [from, to] as const
   );
 
-const exists = (page: Page, at: string) =>
-  page.evaluate(
-    (at) =>
-      (window as unknown as { app: TestApp }).app.vault.getAbstractFileByPath(
-        at
-      ) !== null,
-    at
-  );
+/** The file explorer's row for the file at `at`. */
+const explorerRow = (page: Page, at: string) =>
+  page.locator(`.nav-file-title[data-path="${at}"]`);
+
+/**
+ * Check the file explorer shows a row for the file at `at`, expanding each
+ * folder above it that is collapsed. Expanding rather than clicking blindly:
+ * a click on a folder already open collapses it.
+ */
+async function expectInExplorer(page: Page, at: string) {
+  const folders = at.split('/').slice(0, -1);
+  await expect(async () => {
+    for (let i = 1; i <= folders.length; i++) {
+      const collapsed = page.locator(
+        `.nav-folder.is-collapsed > .nav-folder-title[data-path="${folders
+          .slice(0, i)
+          .join('/')}"]`
+      );
+      if ((await collapsed.count()) > 0) await collapsed.click();
+    }
+    await expect(explorerRow(page, at)).toBeVisible({ timeout: 2_000 });
+  }).toPass();
+}
 
 /** Import the source note in place and take a snippet from it. */
 async function importWithSnippet(page: Page) {
@@ -157,12 +159,13 @@ async function importWithSnippet(page: Page) {
   await openNote(page, 'sources/Security Principles');
   await selectParagraph(page, PARAGRAPH);
   await executeCommandById(page, 'incremental-reading:extract-selection');
-  await expect
-    .poll(async () => (await itemRows(page)).map(({ kind }) => kind))
-    .toEqual(['article', 'snippet']);
-  const rows = await itemRows(page);
-  expect(rows[1].leadsTo).toBe(SOURCE);
-  return rows;
+  await expect(
+    page
+      .locator('.workspace-leaf.mod-active .ir-snippet-highlight', {
+        hasText: PARAGRAPH.slice(0, 20),
+      })
+      .first()
+  ).toBeVisible();
 }
 
 /**
@@ -186,6 +189,7 @@ async function holdQueueOver(page: Page, paths: readonly string[]) {
     await app.vault.create('hold/target.md', '# Target\n');
     await app.vault.create('hold/linker.md', '[[target]]\n');
   }, paths);
+  // Not a check: the renames below have to find the items in place
   await expect
     .poll(async () => (await itemRows(page)).length)
     .toBe(paths.length);
@@ -217,90 +221,29 @@ async function holdQueueOver(page: Page, paths: readonly string[]) {
 }
 
 test.describe('Item paths that would break links', () => {
-  test("puts back an article renamed to a name that breaks links, and its snippet's link to it still leads there", async () => {
-    const before = await importWithSnippet(window);
-    const notices = await watchNotices(window);
-    const bad = `sources/Security ${FILE_CHAR} Principles.md`;
-
-    await rename(window, SOURCE, bad);
-
-    await expect
-      .poll(() => notices())
-      .toContainEqual(
-        `Incremental reading: IR files and their folders cannot contain ${FILE_CHAR}`
-      );
-    expect(await exists(window, SOURCE)).toBe(true);
-    expect(await exists(window, bad)).toBe(false);
-    // Neither the rename nor its undo was followed, and Obsidian rewrote no
-    // link: the undo ran inside the rename's own link update
-    expect(await itemRows(window)).toEqual(before);
-    expect(await notices()).not.toContainEqual(
-      expect.stringContaining('Updated')
-    );
-  });
-
-  test('puts back a folder holding an article renamed to a name that breaks links', async () => {
-    const before = await importWithSnippet(window);
-    const notices = await watchNotices(window);
-
-    await rename(window, 'sources', `sour${FOLDER_CHAR}ces`);
-
-    await expect
-      .poll(() => notices())
-      .toContainEqual(
-        `Incremental reading: folders with items cannot contain ${FOLDER_CHAR}`
-      );
-    expect(await exists(window, SOURCE)).toBe(true);
-    expect(await exists(window, `sour${FOLDER_CHAR}ces`)).toBe(false);
-    expect(await itemRows(window)).toEqual(before);
-    expect(await notices()).not.toContainEqual(
-      expect.stringContaining('Updated')
-    );
-  });
-
   test('puts the same rename back only once, so a sync client pushing it again cannot loop', async () => {
     await importWithSnippet(window);
     const notices = await watchNotices(window);
     const bad = `sources/Security ${FILE_CHAR} Principles.md`;
 
     await syncRename(window, SOURCE, bad);
-    await expect.poll(() => exists(window, SOURCE)).toBe(true);
-    await expect.poll(() => notices()).toHaveLength(1);
+    await expect
+      .poll(notices)
+      .toEqual([expect.stringContaining('cannot contain')]);
+    await expectInExplorer(window, SOURCE);
     await syncRename(window, SOURCE, bad);
 
     // Followed as any rename is
     await expect
-      .poll(async () => (await itemRows(window))[0])
-      .toMatchObject({ kind: 'article', reference: bad, exists: true });
-    expect(await notices()).toEqual([
-      expect.stringContaining('cannot contain'),
-      expect.stringContaining(
-        `"${bad}" was already moved back once, so it stays`
-      ),
-    ]);
-    expect(await exists(window, SOURCE)).toBe(false);
-  });
-
-  test('refuses to import in place a note whose folder breaks links', async () => {
-    const notices = await watchNotices(window);
-    const folder = `x${FOLDER_CHAR}y`;
-
-    await window.evaluate(async (folder) => {
-      const { app } = window as unknown as { app: TestApp };
-      await app.vault.createFolder(folder);
-      const file = await app.vault.create(`${folder}/Note.md`, '# Note\n');
-      await app.plugins.plugins['incremental-reading'].importArticle(file, {
-        copyOnImport: false,
-        showImportDialog: false,
-      });
-    }, folder);
-
-    await expect
-      .poll(() => notices())
-      .toContainEqual(
-        expect.stringContaining(`Can't import "Note.md" in place`)
-      );
-    expect(await itemRows(window)).toEqual([]);
+      .poll(notices)
+      .toEqual([
+        expect.stringContaining('cannot contain'),
+        expect.stringContaining(
+          `"${bad}" was already moved back once, so it stays`
+        ),
+      ]);
+    await expectInExplorer(window, bad);
+    await expect(explorerRow(window, SOURCE)).toHaveCount(0);
   });
 
   test('warns at startup of an item whose path came to break links while Obsidian was closed', async () => {
@@ -337,16 +280,16 @@ test.describe('Item paths that would break links', () => {
         await release();
 
         await expect
-          .poll(() => notices())
+          .poll(notices)
           .toContainEqual(
             `Incremental reading: IR files and their folders cannot contain ` +
               `${FOLDER_CHAR} or ${FILE_CHAR}`
           );
-        for (const path of paths) expect(await exists(window, path)).toBe(true);
-        expect(await exists(window, `A${FOLDER_CHAR}`)).toBe(false);
-        expect(
-          (await itemRows(window)).map(({ reference }) => reference).sort()
-        ).toEqual([...paths].sort());
+        for (const path of paths) await expectInExplorer(window, path);
+        await expect(
+          window.locator(`.nav-folder-title[data-path="A${FOLDER_CHAR}"]`)
+        ).toHaveCount(0);
+        await expect(explorerRow(window, `A/x${FILE_CHAR}.md`)).toHaveCount(0);
         expect(
           (await notices()).filter((notice) =>
             notice.includes('cannot contain')

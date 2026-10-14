@@ -8,11 +8,12 @@ import * as path from 'node:path';
 import type { App } from 'obsidian';
 import {
   executeCommandById,
-  expectFlashLitOnceScrolled,
   openFileInActiveLeaf,
   openNote,
   readSnippetState,
+  recordedFlash,
   recordFlash,
+  setNativeMenus,
 } from './helpers';
 import {
   closeElectron,
@@ -104,81 +105,56 @@ async function setUpNote(): Promise<string> {
   });
 }
 
-/** The active tab's note, and its mode. Unofficial: `window.app`. */
-function activeMode(page: Page) {
-  return page.evaluate(() => {
-    const { app } = window as unknown as { app: App };
-    const view = app.workspace.getMostRecentLeaf()?.view as
-      | { getMode?(): string; file?: { path: string } | null }
-      | undefined;
-    return { mode: view?.getMode?.() ?? null, path: view?.file?.path ?? null };
-  });
-}
+/** The title in the active tab's header: the name the user reads it by. */
+const activeTabTitle = () =>
+  window.locator(
+    '.workspace-tabs.mod-active .workspace-tab-header.is-active .workspace-tab-header-inner-title'
+  );
+
+/** A note's tab title: its basename. */
+const titleOf = (notePath: string) =>
+  path.posix.basename(notePath).replace(/\.md$/, '');
 
 /**
- * What the active tab shows of the flash: the text of what is lit, whether
- * the flash's own easing applies to it, and how many of Obsidian's own
- * `is-flashing` marks are left.
+ * Open the item at `itemPath` in the active tab, and choose Go to context from
+ * its view's ⋮ menu.
  */
-function flashState(page: Page) {
-  return page.evaluate(() => {
-    const leaf = document.querySelector('.workspace-leaf.mod-active');
-    const lit = [
-      ...(leaf?.querySelectorAll<HTMLElement>(
-        '.ir-context-flashing .ir-context-flash, .ir-context-flash-lit'
-      ) ?? []),
-    ];
-    return {
-      lit: lit.map((el) => el.textContent ?? '').join(''),
-      eased:
-        lit.length > 0 &&
-        lit.every(
-          (el) => getComputedStyle(el).transitionDuration === '0.75s, 0.75s'
-        ),
-      flashes: leaf?.querySelectorAll('.ir-context-flash').length ?? 0,
-      obsidianFlashes: leaf?.querySelectorAll('.is-flashing').length ?? 0,
-    };
-  });
-}
-
-/** Go to context from the item at `itemPath`, opened in the active tab. */
 async function goToContextFrom(itemPath: string) {
   await openFileInActiveLeaf(window, itemPath);
-  await expect.poll(async () => (await activeMode(window)).path).toBe(itemPath);
+  await expect(activeTabTitle()).toHaveText(titleOf(itemPath));
   await recordFlash(window);
-  // As the tab's file menu runs it. Unofficial: `window.app`,
-  // `app.plugins.plugins`
-  await window.evaluate(async (itemPath) => {
-    const { app } = window as unknown as {
-      app: App & {
-        plugins: {
-          plugins: Record<
-            string,
-            { actions: { goToContext(file: unknown): Promise<void> } }
-          >;
-        };
-      };
-    };
-    await app.plugins.plugins['incremental-reading'].actions.goToContext(
-      app.vault.getFileByPath(itemPath)
-    );
-  }, itemPath);
-  expect((await activeMode(window)).path).toBe(NOTE_PATH);
+  // macOS defaults to native menus, which Electron draws outside the page
+  await setNativeMenus(window, false);
+  await window
+    .locator('.workspace-leaf.mod-active .view-header')
+    .getByLabel('More options')
+    .click();
+  await window
+    .locator('.menu')
+    .getByText('Go to context', { exact: true })
+    .click();
+  await expect(activeTabTitle()).toHaveText(titleOf(NOTE_PATH));
 }
 
 /**
- * The flash shows on `text`, lit only once the scroll there is done, eased in
- * and out, and then goes, leaving nothing lit behind, nor Obsidian's own
- * highlight.
+ * Go to context lit `text` on screen, and then nothing is left lit, nor
+ * Obsidian's own highlight.
+ *
+ * Lit is read from what {@link recordFlash} saw in the page: the flash is lit
+ * for under a second, which a poll from the test, backing off to 1s between
+ * tries, can step right over.
  */
 async function expectFlashOn(text: RegExp) {
-  await expectFlashLitOnceScrolled(window, text);
-  expect(await flashState(window)).toEqual({
-    lit: '',
-    eased: false,
-    flashes: 0,
-    obsidianFlashes: 0,
+  await expect
+    .poll(() => recordedFlash(window), { timeout: 5000 })
+    .not.toBeNull();
+  expect(await recordedFlash(window)).toMatchObject({
+    text: expect.stringMatching(text),
+    onScreen: true,
   });
+  const leaf = window.locator('.workspace-leaf.mod-active');
+  await expect(leaf.locator('.ir-context-flash')).toHaveCount(0);
+  await expect(leaf.locator('.is-flashing')).toHaveCount(0);
 }
 
 test.describe('Go to context flashes the place it opens at', () => {
@@ -186,20 +162,25 @@ test.describe('Go to context flashes the place it opens at', () => {
     const snippet = await setUpNote();
 
     await goToContextFrom(snippet);
-    expect((await activeMode(window)).mode).toBe('source');
+    await expect(
+      window.locator(
+        '.workspace-leaf.mod-active .markdown-source-view.is-live-preview'
+      )
+    ).toBeVisible();
     await expectFlashOn(new RegExp(`^${SNIPPET_TEXT}$`));
   });
+
+  const readingView = () =>
+    window.locator('.workspace-leaf.mod-active .markdown-reading-view');
 
   test("in reading view, on a snippet's highlight", async () => {
     const snippet = await setUpNote();
     // The tab stays in reading view as it opens the item, and its context
     await executeCommandById(window, 'markdown:toggle-preview');
-    await expect
-      .poll(async () => (await activeMode(window)).mode)
-      .toBe('preview');
+    await expect(readingView()).toBeVisible();
 
     await goToContextFrom(snippet);
-    expect((await activeMode(window)).mode).toBe('preview');
+    await expect(readingView()).toBeVisible();
     await expectFlashOn(new RegExp(`^${SNIPPET_TEXT}$`));
   });
 });

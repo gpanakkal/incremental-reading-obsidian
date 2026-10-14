@@ -221,6 +221,8 @@ test.describe('Snippet highlights in reading mode', () => {
     const [id] = Object.entries(stored).find(
       ([, text]) => text === 'paragraph straight after the list'
     )!;
+    // Not a check: the snippet's note is named by nothing on screen until it
+    // opens, so its title is read from the database to know it by.
     // Unofficial: `window.app`, `app.plugins.plugins`, `reviewManager.repo`
     const reference = await window.evaluate((id) => {
       const { app } = window as unknown as {
@@ -249,22 +251,13 @@ test.describe('Snippet highlights in reading mode', () => {
         [id]
       )[0].reference;
     }, id);
-    const activePath = () =>
-      window.evaluate(
-        () =>
-          (window as unknown as { app: App }).app.workspace.getActiveFile()
-            ?.path
-      );
-    const tabCount = () =>
-      window.evaluate(() => {
-        let count = 0;
-        (window as unknown as { app: App }).app.workspace.iterateRootLeaves(
-          () => {
-            count += 1;
-          }
-        );
-        return count;
-      });
+    const snippetTitle = path.posix.basename(reference, '.md');
+    const noteTitle = path.posix.basename(NOTE);
+    /** Every tab header in the main area, and the active one's title. */
+    const tabHeaders = window.locator('.mod-root .workspace-tab-header');
+    const activeTitle = window.locator(
+      '.mod-root .workspace-tabs.mod-active .workspace-tab-header.is-active .workspace-tab-header-inner-title'
+    );
     await executeCommandById(window, 'markdown:toggle-preview');
     const highlight = window
       .locator(
@@ -272,23 +265,23 @@ test.describe('Snippet highlights in reading mode', () => {
       )
       .first();
 
-    const tabs = await tabCount();
+    const tabs = await tabHeaders.count();
     await highlight.click({ modifiers: ['ControlOrMeta'] });
-    await expect.poll(tabCount).toBe(tabs + 1);
-    await expect.poll(activePath).toBe(reference);
+    await expect(tabHeaders).toHaveCount(tabs + 1);
+    await expect(activeTitle).toHaveText(snippetTitle);
 
     await executeCommandById(window, 'workspace:close');
-    await expect.poll(activePath).toBe(NOTE_PATH);
+    await expect(activeTitle).toHaveText(noteTitle);
     // A middle click opens a new tab too, as in live preview
     await highlight.click({ button: 'middle' });
-    await expect.poll(tabCount).toBe(tabs + 1);
-    await expect.poll(activePath).toBe(reference);
+    await expect(tabHeaders).toHaveCount(tabs + 1);
+    await expect(activeTitle).toHaveText(snippetTitle);
 
     await executeCommandById(window, 'workspace:close');
-    await expect.poll(activePath).toBe(NOTE_PATH);
+    await expect(activeTitle).toHaveText(noteTitle);
     await highlight.click();
-    await expect.poll(activePath).toBe(reference);
-    expect(await tabCount()).toBe(tabs);
+    await expect(activeTitle).toHaveText(snippetTitle);
+    await expect(tabHeaders).toHaveCount(tabs);
   });
 
   test('show on a tab restored in reading mode', async () => {
