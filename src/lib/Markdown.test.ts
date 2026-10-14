@@ -831,9 +831,13 @@ const ownParagraphAfter = (sourceKinds: LineKind[], startedKinds: LineKind[]) =>
 /** The lines of `text`. */
 const linesOf = (text: string) => text.split(/\r\n?|\n/);
 
-/** The index of the line holding `j` in `text`. */
+/**
+ * The index of the line holding `j` in `text`: a `j` between the two chars
+ * of a CRLF is in the line that break ends, not a line of its own.
+ */
 const lineIndexOf = (text: string, j: number) =>
-  linesOf(text.slice(0, j)).length - 1;
+  linesOf(text.slice(0, text[j - 1] === '\r' && text[j] === '\n' ? j - 1 : j))
+    .length - 1;
 
 /**
  * A note from mid-line or the start of a line over one that could
