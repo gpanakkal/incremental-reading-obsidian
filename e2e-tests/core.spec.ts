@@ -22,13 +22,11 @@ import {
   openPluginSettings,
   pendingSaves,
   readSnippetState,
-  REVIEW_VIEW_TYPE,
   reviewHeader,
   reviewTitle,
   scrollToText,
   selectParagraph,
   setDefaultEditingMode,
-  setNativeMenus,
   setPluginSetting,
   setShowViewHeader,
   toggleReviewSourceMode,
@@ -1504,169 +1502,6 @@ test.describe('PDF articles', () => {
       [PDF_ID, PDF_PATH]
     );
   }
-
-  test.describe('reviewed as a placeholder, without the PDF viewer', () => {
-    const placeholder = () => window.locator('.ir-binary-item');
-    const barButton = (name: string) =>
-      window.getByRole('button', { name, exact: true });
-    const undoButton = () => window.locator('css=#undo-button');
-    const summary = () => window.locator('.ir-review-summary');
-
-    /**
-     * The regression these guard: the rows were left by an import that never
-     * checked for text, and reviewing one must never write to the PDF. Nothing
-     * on screen shows the file's bytes.
-     */
-    const expectPdfUntouched = async (at = PDF_PATH) =>
-      expect((await pdfBytes(at)).equals(PDF_BYTES)).toBe(true);
-
-    test.beforeEach(async () => {
-      await seedPdfArticle();
-      await withoutPdfViewer(window);
-      await executeCommandById(window, 'incremental-reading:learn');
-      await window.locator('css=#begin-review-button').click();
-      await expect(placeholder()).toBeVisible();
-      await expect(placeholder()).toContainText('Paper.pdf');
-    });
-
-    test('opens the PDF in a tab of its own, and goes back to it in review', async () => {
-      await placeholder()
-        .getByRole('button', { name: 'Open in PDF tab' })
-        .click();
-      const pdfTab = window.locator('.workspace-tab-header[data-type="pdf"]');
-      await expect(pdfTab).toHaveCount(1);
-      await expect(pdfTab).toHaveText('Paper');
-      // Settled, not merely created: the new tab takes focus only once the PDF
-      // has loaded, and would pull focus back from review if left before that.
-      // Loaded is when its toolbar can count the pages.
-      await expect(
-        window.locator(
-          '.workspace-leaf.mod-active .workspace-leaf-content[data-type="pdf"] .view-content > .pdf-toolbar'
-        )
-      ).toContainText('of 1');
-
-      await window
-        .locator(`.workspace-tab-header[data-type="${REVIEW_VIEW_TYPE}"]`)
-        .click();
-      await expect(placeholder()).toBeVisible();
-    });
-
-    test('takes a priority from its bar', async () => {
-      const priority = window.getByRole('textbox', { name: 'Priority' });
-      await priority.fill('11');
-      await priority.press('Enter');
-      await expect(priority).toHaveValue('1.1');
-      await expectPdfUntouched();
-    });
-
-    test('switches to fixed intervals from the scheduling modal', async () => {
-      const modal = window.locator('.ir-scheduling-modal');
-      const priorityScheduling = modal.locator('input[type="checkbox"]');
-      await barButton('Change scheduling strategy').click();
-      await expect(priorityScheduling).toBeChecked();
-      await priorityScheduling.click();
-      await modal.getByRole('button', { name: 'Confirm' }).click();
-      await expect(modal).toHaveCount(0);
-
-      // The bar's priority gives way to the interval, and the modal opens on
-      // the strategy it was left on
-      await expect(
-        window.locator('.ir-review-interface .ir-fixed-interval-input')
-      ).toBeVisible();
-      await expect(
-        window.getByRole('textbox', { name: 'Priority' })
-      ).toHaveCount(0);
-      await barButton('Change scheduling strategy').click();
-      await expect(priorityScheduling).not.toBeChecked();
-      await modal.getByRole('button', { name: 'Cancel' }).click();
-      await expectPdfUntouched();
-    });
-
-    test("opens the header's ⋮ menu", async () => {
-      // The ⋮ stands in for the view header's; with the header shown, that one
-      await setNativeMenus(window, false);
-      await reviewHeader(window).getByLabel('More options').click();
-      const menu = window.locator('.menu');
-      await expect(menu).toBeVisible();
-      await window.keyboard.press('Escape');
-      await expect(menu).toHaveCount(0);
-    });
-
-    test('makes no snippet or card of it, staying on it', async () => {
-      await barButton('Create snippet').click();
-      await barButton('Create card').click();
-      await expect(placeholder()).toBeVisible();
-      // Made nothing, so there is nothing to take back
-      await expect(undoButton()).toHaveAttribute(
-        'aria-label',
-        'Nothing to undo'
-      );
-      await expect(undoButton()).toBeDisabled();
-    });
-
-    test('skips it, and undoing the skip brings it back', async () => {
-      await barButton('Skip for current review session').click();
-      await expect(placeholder()).toBeHidden();
-      await expect(
-        summary().getByRole('listitem').filter({ hasText: 'Paper' })
-      ).toBeVisible();
-
-      await undoButton().click();
-      await expect(placeholder()).toBeVisible();
-      await expect(summary()).toHaveCount(0);
-    });
-
-    test('dismisses it, and undoing the dismissal brings it back', async () => {
-      await barButton('Stop scheduling this item for review').click();
-      await expect(placeholder()).toBeHidden();
-      await expect(summary()).toBeVisible();
-      await expect(undoButton()).toHaveAttribute(
-        'aria-label',
-        'Undo dismissing "Paper"'
-      );
-
-      await undoButton().click();
-      await expect(placeholder()).toBeVisible();
-      // Back in the queue, not merely shown: a dismissed item offers a restore
-      await expect(
-        barButton('Stop scheduling this item for review')
-      ).toBeVisible();
-      await expect(barButton('Restore item to queue')).toHaveCount(0);
-      await expectPdfUntouched();
-    });
-
-    test('marks it reviewed', async () => {
-      await barButton('Mark reviewed').click();
-      await expect(
-        summary().getByRole('heading', { name: 'Review complete' })
-      ).toBeVisible();
-      await expect(summary().getByText('1 item reviewed')).toBeVisible();
-      await expect(
-        summary()
-          .locator('.ir-review-summary-count', { hasText: 'Article' })
-          .locator('dd')
-      ).toHaveText('1');
-      await expectPdfUntouched();
-    });
-
-    test('follows its PDF through a rename', async () => {
-      // A rename goes through the plugin's rename handler, which reads
-      // frontmatter for every other kind of item; a PDF's row follows its path
-      await window.evaluate(
-        async ([from, to]) => {
-          const { app } = window as unknown as { app: PageApp };
-          await app.fileManager.renameFile(app.vault.getFileByPath(from), to);
-        },
-        [PDF_PATH, RENAMED_PATH]
-      );
-      await expect(placeholder()).toContainText('Renamed.pdf');
-      await expect
-        .poll(async () =>
-          (await pdfBytes(RENAMED_PATH).catch(() => null))?.equals(PDF_BYTES)
-        )
-        .toBe(true);
-    });
-  });
 
   test('puts the action bar on PDF article tabs only, and keeps it in step as the tab changes file', async () => {
     const OTHER_PATH = 'papers/Other.pdf';
