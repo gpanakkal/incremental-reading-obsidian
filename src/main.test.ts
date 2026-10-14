@@ -1,5 +1,6 @@
 import { refusedPathsWarning } from '#/lib/item-path-guard';
 import ReviewManager from '#/lib/items/ReviewManager';
+import { SYNC_HOLD_MESSAGES, SYNC_WAIT_TIMEOUT_MS } from '#/lib/obsidian-sync';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import type { ReviewSession } from '#/lib/plugin-data';
@@ -7,6 +8,8 @@ import { queryClient } from '#/lib/query-client';
 import {
   DatabaseLoadError,
   SQLJSRepository,
+  StartupCancelledError,
+  type SyncHold,
 } from '#/lib/repository/SQLJSRepository';
 import {
   resetSession,
@@ -17,7 +20,10 @@ import {
   type ReviewPage,
 } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
-import IncrementalReadingPlugin, { startupFailureMessage } from '#/main';
+import IncrementalReadingPlugin, {
+  startupFailureMessage,
+  STILL_STARTING_NOTICE,
+} from '#/main';
 // The Vitest alias points `obsidian` at this same file, so the `Menu` built
 // here is the one the plugin fills — importing it by path is what gives TS the
 // stub's recorded `items`, which the real class does not expose.
@@ -814,6 +820,36 @@ function makeWorkspaceReceiver(views: ('review' | 'deferred')[]) {
   const receiver = { app: { workspace: { getLeavesOfType } } };
   return { receiver, synced };
 }
+
+/**
+ * Obsidian Sync's plugin instance as `app.internalPlugins` hands it out
+ * (undocumented), with only what the plugin reads of it.
+ */
+function fakeSync(fields: {
+  status?: string;
+  pause?: boolean;
+  ready?: boolean;
+  allowTypes?: string[];
+}) {
+  return {
+    getStatus: () => fields.status ?? 'synced',
+    pause: fields.pause ?? false,
+    ready: fields.ready ?? true,
+    newServerFiles: [],
+    filter: {
+      allowSyncFile: () => true,
+      allowTypes: new Set(fields.allowTypes ?? ['image', 'unsupported']),
+    },
+    on: vi.fn(() => ({})),
+    offref: vi.fn(),
+  };
+}
+
+/** An `app` whose Sync plugin is `sync`, or off when null. */
+const appWithSync = (sync: unknown) => ({
+  vault: { on: vi.fn() },
+  internalPlugins: { getEnabledPluginById: vi.fn(() => sync) },
+});
 
 // #endregion
 
@@ -2287,6 +2323,255 @@ describe('IncrementalReadingPlugin database file events', () => {
       expect(handleFileChange).toHaveBeenCalledWith(file);
     }
   );
+});
+
+describe('IncrementalReadingPlugin database startup and Sync', () => {
+  beforeEach(() => {
+    // `holdForSync` keeps its timers on `window`, which the node environment
+    // lacks
+    vi.stubGlobal('window', globalThis);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Start the database as {@link startDatabase} does, over `app`, with
+   * `whileStarting` run as the repository starts.
+   */
+  function startWith(
+    app: ReturnType<typeof appWithSync>,
+    whileStarting?: (unload: () => void) => void
+  ) {
+    let hold: SyncHold | undefined;
+    let signal: AbortSignal | undefined;
+    const unloaders: (() => void)[] = [];
+    const unload = () => unloaders.forEach((run) => run());
+    const dispose = vi.fn();
+    vi.spyOn(SQLJSRepository, 'start').mockImplementation((params) => {
+      hold = params.holdForSync;
+      signal = params.signal;
+      whileStarting?.(unload);
+      return Promise.resolve({
+        onDataChange: vi.fn(() => () => {}),
+        handleFileChange: vi.fn(),
+        dispose,
+      } as unknown as SQLJSRepository);
+    });
+    const receiver = {
+      app,
+      register: vi.fn((run: () => void) => unloaders.push(run)),
+      registerEvent: vi.fn(),
+      followMovedNotes: vi.fn(),
+    };
+    const started = (
+      IncrementalReadingPlugin.prototype as unknown as {
+        initReviewManager(): Promise<void>;
+      }
+    ).initReviewManager.call(receiver) as Promise<void>;
+    return {
+      started,
+      hold: () => hold!,
+      signal: () => signal!,
+      unload,
+      receiver,
+      dispose,
+    };
+  }
+
+  it('gives the database a signal that aborts once the plugin unloads', async () => {
+    const { started, signal, unload } = startWith(appWithSync(null));
+    await started;
+    expect(signal().aborted).toBe(false);
+
+    unload();
+
+    expect(signal().aborted).toBe(true);
+  });
+
+  it('gives up, disposing of the database and registering nothing, when the plugin unloads as the database starts', async () => {
+    const { started, receiver, dispose } = startWith(
+      appWithSync(null),
+      (unload) => unload()
+    );
+
+    await expect(started).rejects.toBeInstanceOf(StartupCancelledError);
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(receiver.registerEvent).not.toHaveBeenCalled();
+  });
+
+  it("holds the database's startup on this vault's Sync", async () => {
+    const notify = vi.spyOn(Obsidian, 'notify');
+    const app = appWithSync(fakeSync({ pause: true, status: 'paused' }));
+    const { started, hold } = startWith(app);
+    await started;
+
+    await expect(hold()('migrate')).resolves.toBe('at-once');
+
+    expect(app.internalPlugins.getEnabledPluginById).toHaveBeenCalledWith(
+      'sync'
+    );
+    expect(notify).toHaveBeenCalledWith(
+      SYNC_HOLD_MESSAGES.paused.migrate,
+      undefined
+    );
+  });
+
+  it('stops holding, and says not to go ahead, once the plugin unloads', async () => {
+    const app = appWithSync(fakeSync({ ready: false }));
+    const { started, hold, unload } = startWith(app);
+    await started;
+
+    const held = hold()('migrate');
+    unload();
+
+    await expect(held).resolves.toBe('cancelled');
+  });
+
+  it('goes ahead without waiting when Sync is off', async () => {
+    const notify = vi.spyOn(Obsidian, 'notify');
+    const { started, hold } = startWith(appWithSync(null));
+    await started;
+
+    await expect(hold()('create')).resolves.toBe('at-once');
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  describe('waiting out Sync', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it.each([
+      [3000, 3000],
+      ['3000', SYNC_WAIT_TIMEOUT_MS],
+      [undefined, SYNC_WAIT_TIMEOUT_MS],
+    ])(
+      'waits for Sync as long as an e2e test set (%s), or 60 s',
+      async (testTimeout, waitsMs) => {
+        vi.spyOn(Obsidian, 'notify').mockImplementation(() => {});
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        vi.stubGlobal('window', {
+          ...globalThis,
+          setTimeout: globalThis.setTimeout,
+          clearTimeout: globalThis.clearTimeout,
+          setInterval: globalThis.setInterval,
+          clearInterval: globalThis.clearInterval,
+          __irSyncWaitTimeoutMs: testTimeout,
+        });
+        const { started, hold } = startWith(
+          appWithSync(fakeSync({ ready: false }))
+        );
+        await started;
+        const settled = vi.fn();
+
+        void hold()('migrate').then(settled);
+        await vi.advanceTimersByTimeAsync(waitsMs - 1);
+        expect(settled).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect(settled).toHaveBeenCalledWith('waited');
+      }
+    );
+  });
+});
+
+describe('the notice for review opened before the database is up', () => {
+  it('says the plugin is still starting', () => {
+    expect(STILL_STARTING_NOTICE).toBe(
+      'Incremental reading: still starting. Try again in a moment.'
+    );
+  });
+});
+
+describe('IncrementalReadingPlugin.verifySyncSettings', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', globalThis);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Run the check with `app`, its unload hooks going into `unloaders`. */
+  function verify(
+    app: ReturnType<typeof appWithSync>,
+    unloaders: (() => void)[] = []
+  ) {
+    return (
+      IncrementalReadingPlugin.prototype as unknown as {
+        verifySyncSettings(): Promise<void>;
+      }
+    ).verifySyncSettings.call({
+      app,
+      register: (run: () => void) => unloaders.push(run),
+    }) as Promise<void>;
+  }
+
+  it('asks for "Sync all other types" when Sync leaves the database out', async () => {
+    const notify = vi.spyOn(Obsidian, 'notify');
+
+    await verify(appWithSync(fakeSync({ allowTypes: ['image', 'pdf'] })));
+
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      'Incremental reading: please enable "sync all other types" before ' +
+        'using the plugin',
+      true
+    );
+  });
+
+  it.each([
+    ['Sync syncs every type', fakeSync({ allowTypes: ['unsupported'] })],
+    [
+      'Sync is not set up',
+      fakeSync({ status: 'disconnected', allowTypes: [] }),
+    ],
+    ['Sync is off', null],
+  ])('says nothing when %s', async (_case, sync) => {
+    const notify = vi.spyOn(Obsidian, 'notify');
+
+    await verify(appWithSync(sync));
+
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  describe('while Sync is starting', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it('stops waiting for Sync, saying nothing, once the plugin unloads', async () => {
+      const notify = vi.spyOn(Obsidian, 'notify');
+      const unloaders: (() => void)[] = [];
+      const settled = vi.fn();
+      const app = appWithSync(
+        fakeSync({ status: 'uninitialized', allowTypes: [] })
+      );
+      void verify(app, unloaders).then(settled);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(settled).not.toHaveBeenCalled();
+
+      unloaders.forEach((run) => run());
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(settled).toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('startupFailureMessage', () => {

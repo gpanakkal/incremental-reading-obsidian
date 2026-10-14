@@ -12,6 +12,7 @@ import {
   LOG_DIRECTORY,
   TABLE_NAMES,
 } from '#/lib/constants';
+import type { SyncHoldReason } from '#/lib/obsidian-sync';
 import { yieldToHost } from '#/lib/pacing';
 import type {
   BulkMutateOptions,
@@ -63,6 +64,28 @@ export class DatabaseLoadError extends Error {
     this.name = 'DatabaseLoadError';
   }
 }
+
+/**
+ * Startup was told to stop while it waited on Sync — the plugin is unloading.
+ * Nothing was written.
+ */
+export class StartupCancelledError extends Error {
+  constructor() {
+    super('Database startup was cancelled while waiting for Sync');
+    this.name = 'StartupCancelledError';
+  }
+}
+
+/**
+ * Holds a startup about to write the database file until Sync delivers any
+ * newer copy of it (see `holdForSync` in `obsidian-sync.ts`).
+ * @returns `'waited'` when Sync may have changed the file meanwhile,
+ * `'at-once'` when it went ahead without waiting, or `'cancelled'` when
+ * startup is not to go ahead
+ */
+export type SyncHold = (
+  reason: SyncHoldReason
+) => Promise<'waited' | 'at-once' | 'cancelled'>;
 
 export class SQLJSRepository implements SQLiteRepository {
   app: App;
@@ -118,6 +141,14 @@ export class SQLJSRepository implements SQLiteRepository {
   #reloadAgain = false;
   /** Creation of the data folder, while one is under way. */
   #creatingDataDir: Promise<void> | null = null;
+  /**
+   * Set only while {@link start} runs, and spent on first use: startup is
+   * the one write a device makes without being asked, and so the one that
+   * could overwrite a newer copy Sync has yet to deliver.
+   */
+  #syncHold: SyncHold | undefined;
+  /** Whether startup waited on Sync, which may have changed the file. */
+  #waitedOnSync = false;
 
   /**
    * Use .start to instantiate
@@ -155,8 +186,14 @@ export class SQLJSRepository implements SQLiteRepository {
    * @param onWriteBlocked called when writes start being refused; see
    * {@link blockWrites}
    * @param onWritesResumed called when a reload ends the refusal
+   * @param holdForSync awaited before migrating the file, or before starting
+   * on a new database when there is none, after which a wait has the file
+   * read afresh: Sync may have delivered a newer one meanwhile. Not awaited
+   * on a startup that does neither, nor ever again after startup.
+   * @param signal an abort stops startup wherever it has got to
    * @throws {DatabaseLoadError} if the file exists but cannot be loaded
    * @throws {MigrationVerificationError} if migrating the file loses data
+   * @throws {StartupCancelledError} if `holdForSync` says not to go ahead
    * @throws if no database can be created
    */
   static async start(params: {
@@ -167,17 +204,69 @@ export class SQLJSRepository implements SQLiteRepository {
     onReloadFromDisk?: () => void | Promise<void>;
     onWriteBlocked?: (error: Error) => void;
     onWritesResumed?: () => void;
+    holdForSync?: SyncHold;
+    signal?: AbortSignal;
   }): Promise<SQLJSRepository> {
     const repo = new SQLJSRepository({ ...params, app: params.plugin.app });
-    if (await repo.dbExists()) {
-      const result = await repo.loadDb();
-      if (result === null) throw new DatabaseLoadError(repo.dbFilePath);
-    } else if ((await repo.initDb()) === null) {
-      throw new Error('Failed to create a database');
-    } else {
+    repo.#syncHold = params.holdForSync;
+    // An unload stops startup wherever it has got to, so an instance being
+    // replaced never saves over the file its successor is loading. Only
+    // until `start` hands the repository over, which is the plugin's to
+    // dispose of from then on.
+    const { signal } = params;
+    const stop = () => repo.dispose();
+    if (signal?.aborted) stop();
+    else signal?.addEventListener('abort', stop);
+    const assertLive = () => {
+      if (!repo.#disposed) return;
+      repo.dispose(); // closes a database opened since
+      throw new StartupCancelledError();
+    };
+    try {
+      let exists = await repo.dbExists();
+      if (!exists && (await repo.#waitOnSync('create'))) {
+        exists = await repo.dbExists();
+      }
+      if (exists) {
+        const loaded = await repo.loadDb();
+        assertLive();
+        if (loaded !== null) return repo;
+        // Sync deleting the file while startup waited for it leaves nothing
+        // to load, which is no failure to load
+        if (!repo.#waitedOnSync || (await repo.dbExists())) {
+          throw new DatabaseLoadError(repo.dbFilePath);
+        }
+      }
+      const created = await repo.initDb();
+      assertLive();
+      if (created === null) throw new Error('Failed to create a database');
       repo.#fresh = true;
+      return repo;
+    } finally {
+      repo.#syncHold = undefined;
+      signal?.removeEventListener('abort', stop);
     }
-    return repo;
+  }
+
+  /**
+   * Spend the startup's Sync hold, if it has one left. A hold that fails is
+   * passed over, as if there were no Sync to wait for.
+   * @returns whether it waited, so that the file may have changed
+   * @throws {StartupCancelledError} if the hold says not to go ahead
+   */
+  async #waitOnSync(reason: SyncHoldReason): Promise<boolean> {
+    const hold = this.#syncHold;
+    if (!hold) return false;
+    this.#syncHold = undefined;
+    let outcome: Awaited<ReturnType<SyncHold>> = 'at-once';
+    try {
+      outcome = await hold(reason);
+    } catch (error) {
+      console.error('Incremental Reading - Waiting for Sync failed:', error);
+    }
+    if (outcome === 'cancelled') throw new StartupCancelledError();
+    this.#waitedOnSync = outcome === 'waited';
+    return this.#waitedOnSync;
   }
 
   /**
@@ -784,7 +873,12 @@ export class SQLJSRepository implements SQLiteRepository {
       }
       return result;
     } catch (error) {
-      if (error instanceof MigrationVerificationError) throw error;
+      if (
+        error instanceof MigrationVerificationError ||
+        error instanceof StartupCancelledError
+      ) {
+        throw error;
+      }
       console.error(error);
       return null;
     }
@@ -798,7 +892,7 @@ export class SQLJSRepository implements SQLiteRepository {
    * @throws if the latest schema version is lower than the database's
    * current version, or if post-migration verification fails
    */
-  protected async reloadDb() {
+  protected async reloadDb(): Promise<Database | null> {
     const previous = this.db;
     let candidate: Database | null = null;
     try {
@@ -831,6 +925,19 @@ export class SQLJSRepository implements SQLiteRepository {
           `Plugin is out of date with the database. ` +
             `Please ensure the plugin is fully updated, then re-enable it.`
         );
+      }
+
+      // A startup about to migrate waits for Sync first, then reads the file
+      // again if it waited: what Sync brought down meanwhile may be migrated
+      // already
+      if (
+        this.#syncHold &&
+        getPendingMigrations(candidate, migrations).length > 0 &&
+        (await this.#waitOnSync('migrate'))
+      ) {
+        candidate.close();
+        candidate = null;
+        return await this.reloadDb();
       }
 
       // Only a file that loaded replaces the database in memory: one that did
@@ -909,7 +1016,12 @@ export class SQLJSRepository implements SQLiteRepository {
         }
         candidate.close();
       }
-      if (error instanceof MigrationVerificationError) throw error;
+      if (
+        error instanceof MigrationVerificationError ||
+        error instanceof StartupCancelledError
+      ) {
+        throw error;
+      }
       if (error instanceof Error) {
         console.error('Incremental Reading - Failed to reload database:', {
           error: error?.message || error,

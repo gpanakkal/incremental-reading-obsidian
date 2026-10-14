@@ -15,7 +15,6 @@ import { isPdfView, stopPdfTabSelections } from '#/lib/pdf/obsidian-pdf';
 import { REBIND_LOG_TOPIC } from '#/lib/rebind-records';
 import { goToReviewPlace } from '#/lib/review-history';
 import {
-  type App,
   type Menu,
   type PaneType,
   type TAbstractFile,
@@ -26,7 +25,6 @@ import {
   Plugin,
   TFolder,
 } from 'obsidian';
-import type { SyncPluginInstance } from 'obsidian-typings';
 // @ts-ignore - SQL schema imported via custom esbuild plugin
 import databaseSchema from './db/schema.sql';
 import { Actions } from './lib/Actions';
@@ -61,6 +59,11 @@ import {
   type ExtractedMarkdownEditor,
   getEditorClass,
 } from './lib/obsidian-editor';
+import {
+  getSyncPlugin,
+  holdForSync,
+  syncSkipsOtherTypes,
+} from './lib/obsidian-sync';
 import { ObsidianHelpers as Obsidian } from './lib/ObsidianHelpers';
 import {
   type IRPluginData,
@@ -80,6 +83,7 @@ import {
 import {
   DatabaseLoadError,
   SQLJSRepository,
+  StartupCancelledError,
 } from './lib/repository/SQLJSRepository';
 import { initReviewCommands } from './lib/review-commands';
 import { SessionTracker } from './lib/SessionTracker';
@@ -104,6 +108,21 @@ export function startupFailureMessage(error: unknown): string {
     );
   }
   return `Failed to initialize plugin. See the console for details.`;
+}
+
+/** Shown for a way into review used before the database is up. */
+export const STILL_STARTING_NOTICE =
+  'Incremental reading: still starting. Try again in a moment.';
+
+/**
+ * For e2e tests only: how long startup waits on Sync, when a test has put a
+ * number at `window.__irSyncWaitTimeoutMs` before enabling the plugin.
+ * Otherwise undefined, for the default.
+ */
+function syncWaitTimeoutForTests(): number | undefined {
+  const value = (window as { __irSyncWaitTimeoutMs?: unknown })
+    .__irSyncWaitTimeoutMs;
+  return typeof value === 'number' ? value : undefined;
 }
 
 export default class IncrementalReadingPlugin extends Plugin {
@@ -151,6 +170,11 @@ export default class IncrementalReadingPlugin extends Plugin {
       PLACEHOLDER_PLUGIN_ICON,
       'Incremental reading',
       async (_evt: MouseEvent) => {
+        // The database can take a while to start, as when it waits on Sync
+        if (!this.reviewManager) {
+          Obsidian.notify(STILL_STARTING_NOTICE);
+          return;
+        }
         await this.learn();
       }
     );
@@ -186,7 +210,11 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addCommand({
       id: 'learn',
       name: 'Learn',
-      callback: async () => await this.learn(),
+      checkCallback: (checking: boolean) => {
+        if (!this.reviewManager) return false;
+        if (checking) return true;
+        void this.learn();
+      },
     });
 
     if (this.settings.showAdvancedImportCommands) {
@@ -250,13 +278,9 @@ export default class IncrementalReadingPlugin extends Plugin {
           throw new Error('manifest.dir is undefined');
         }
 
-        if (!this.verifySyncSettings) {
-          Obsidian.notify(
-            `Incremental reading: please enable "sync all other types"` +
-              ` before using the plugin`,
-            true
-          );
-        }
+        // Not awaited: Sync's settings may be minutes from loading, and
+        // nothing here depends on them
+        void this.verifySyncSettings();
 
         if (this.app.isMobile) {
           this.configureNavbarPosition();
@@ -346,6 +370,8 @@ export default class IncrementalReadingPlugin extends Plugin {
           evt.preventDefault();
         });
       } catch (error) {
+        // Unloaded while startup waited on Sync, so there is nothing to undo
+        if (error instanceof StartupCancelledError) return;
         console.error(error);
         Obsidian.notify(startupFailureMessage(error), true);
         this.unload();
@@ -484,10 +510,26 @@ export default class IncrementalReadingPlugin extends Plugin {
 
   private async initReviewManager() {
     let writesBlockedNotice: NoticeTarget | null = null;
+    // An instance unloaded while its database starts — by an update installed
+    // in place, say, while startup waits on Sync — must not go on to migrate
+    // and save after the instance replacing it has loaded the file
+    const unloaded = new AbortController();
+    this.register(() => unloaded.abort());
     const repo: SQLiteRepository = await SQLJSRepository.start({
       plugin: this,
       dbFilePath: DATABASE_FILE_PATH,
       schema: databaseSchema as string,
+      signal: unloaded.signal,
+      holdForSync: (reason) =>
+        holdForSync({
+          getSync: () => getSyncPlugin(this.app),
+          path: DATABASE_FILE_PATH,
+          reason,
+          signal: unloaded.signal,
+          timeoutMs: syncWaitTimeoutForTests(),
+          createNotice: persistentNotice,
+          notify: (message, persist) => Obsidian.notify(message, persist),
+        }),
       onMigrationFailure: (error) => {
         console.error(
           'Incremental Reading - Migration verification failed:',
@@ -528,6 +570,12 @@ export default class IncrementalReadingPlugin extends Plugin {
         await this.reviewManager.refreshAllHighlights();
       },
     });
+    // Unloaded just as the database finished starting: nothing below may
+    // register on a plugin that is gone
+    if (unloaded.signal.aborted) {
+      repo.dispose();
+      throw new StartupCancelledError();
+    }
     // listen for sync updates to the database and re-read the file. Sync
     // reports a file it downloads for the first time — to a device that
     // started without one — as `create`, not `modify`.
@@ -1148,13 +1196,24 @@ export default class IncrementalReadingPlugin extends Plugin {
     if (navbarBox) this.register(trackNavbarFootprint(navbarBox));
   }
 
-  private verifySyncSettings(app: App): boolean {
-    const syncPlugin = app.internalPlugins.getEnabledPluginById('sync');
-    if (!syncPlugin) return true;
-    const syncAllOtherTypesEnabled = (
-      syncPlugin as SyncPluginInstance & { allowTypes: Set<string> }
-    ).allowTypes.has('unsupported');
-
-    return syncAllOtherTypesEnabled;
+  /**
+   * Ask for "Sync all other types" when Obsidian Sync, set up for this vault,
+   * leaves the database file out, as it does by default. Sync reads its
+   * settings after the layout is ready, so this waits for them.
+   */
+  private async verifySyncSettings(): Promise<void> {
+    const unloaded = new AbortController();
+    this.register(() => unloaded.abort());
+    const skipsDatabase = await syncSkipsOtherTypes({
+      getSync: () => getSyncPlugin(this.app),
+      path: DATABASE_FILE_PATH,
+      signal: unloaded.signal,
+    });
+    if (!skipsDatabase) return;
+    Obsidian.notify(
+      `Incremental reading: please enable "sync all other types"` +
+        ` before using the plugin`,
+      true
+    );
   }
 }

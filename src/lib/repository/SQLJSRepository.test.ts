@@ -5,6 +5,7 @@ import {
   DATA_DIRECTORY,
   DATABASE_FILE_PATH,
 } from '#/lib/constants';
+import type { SyncHoldReason } from '#/lib/obsidian-sync';
 import type { DataChangeEvent, MutationStatement, NoteType } from '#/lib/types';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
@@ -13,7 +14,12 @@ import { resolve } from 'path';
 import type { Database, SqlValue } from 'sql.js';
 import initSqlJs from 'sql.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DatabaseLoadError, SQLJSRepository } from './SQLJSRepository';
+import {
+  DatabaseLoadError,
+  SQLJSRepository,
+  StartupCancelledError,
+  type SyncHold,
+} from './SQLJSRepository';
 
 // #region HELPERS
 
@@ -737,6 +743,49 @@ const indexViewArb = fc.record({ folder: fc.boolean(), file: fc.boolean() });
 const articleIdsArb = fc.uniqueArray(
   fc.string({ unit: 'binary' }).filter((id) => !id.includes('\0')),
   { maxLength: 20 }
+);
+
+/**
+ * A Sync hold that waits until the test releases it, answering `outcome`.
+ * What Sync delivers during the wait is put in place before the release.
+ */
+function makeHold() {
+  type Outcome = Awaited<ReturnType<SyncHold>>;
+  let release: (outcome: Outcome) => void = () => {};
+  const hold = vi.fn(
+    (_reason: SyncHoldReason) =>
+      new Promise<Outcome>((resolve) => {
+        release = resolve;
+      })
+  );
+  return {
+    hold,
+    release: (outcome: Outcome = 'waited') => release(outcome),
+  };
+}
+
+/** What Sync can bring down while a startup waits. */
+type Delivery =
+  | { kind: 'nothing' }
+  | { kind: 'current'; ids: string[] }
+  | { kind: 'stale'; ids: string[] };
+const deliveryArb: fc.Arbitrary<Delivery> = fc.oneof(
+  fc.constant({ kind: 'nothing' as const }),
+  articleIdsArb.map((ids) => ({ kind: 'current' as const, ids })),
+  articleIdsArb.map((ids) => ({ kind: 'stale' as const, ids }))
+);
+const deliveredBytes = (delivery: Delivery) =>
+  delivery.kind === 'current'
+    ? dbFileWith(delivery.ids)
+    : delivery.kind === 'stale'
+      ? staleFileWith(delivery.ids)
+      : null;
+
+/** Where a startup can be when the plugin unloads under it. */
+const abortPointArb = fc.oneof(
+  fc.constant({ kind: 'before' as const }),
+  fc.constant({ kind: 'while-held' as const }),
+  fc.nat({ max: 40 }).map((hops) => ({ kind: 'after-hold' as const, hops }))
 );
 // #endregion
 
@@ -2006,6 +2055,356 @@ describe('start', () => {
         }
       )
     );
+  });
+});
+
+describe('start, holding for Sync', () => {
+  beforeEach(() => {
+    stubWasm();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'debug').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('property: holds a migration, writing nothing until the hold ends, then loads the file as it is by then', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        indexViewArb,
+        articleIdsArb,
+        deliveryArb,
+        async (index, localIds, delivery) => {
+          const stale = await staleFileWith(localIds);
+          const files = new Map([[DATABASE_FILE_PATH, stale]]);
+          const { app, adapter } = makeVault(index, files);
+          const { hold, release } = makeHold();
+
+          const starting = startRepo(app, { holdForSync: hold });
+          await settle();
+          expect(hold).toHaveBeenCalledOnce();
+          expect(hold).toHaveBeenCalledWith('migrate');
+          expect(adapter.writeBinary).not.toHaveBeenCalled();
+          expect(files.get(DATABASE_FILE_PATH)).toBe(stale);
+
+          const arrived = await deliveredBytes(delivery);
+          if (arrived) files.set(DATABASE_FILE_PATH, arrived);
+          release();
+          const repo = await starting;
+
+          const ids = delivery.kind === 'nothing' ? localIds : delivery.ids;
+          expect(articleIds(repo).sort()).toEqual([...ids].sort());
+          expect(hold).toHaveBeenCalledOnce();
+          if (delivery.kind === 'current') {
+            // Already migrated elsewhere: nothing to back up or save
+            expect(adapter.writeBinary).not.toHaveBeenCalled();
+            expect(files.get(DATABASE_FILE_PATH)).toBe(arrived);
+          } else {
+            expect(backupWrites(adapter)).toHaveLength(1);
+            expect(await readVersion(files)).toBe(10);
+            expect((await idsInFile(files)).sort()).toEqual([...ids].sort());
+          }
+          repo.db?.close();
+        }
+      )
+    );
+  });
+
+  it('property: migrates the file it already read, reading it no more, when the hold went ahead at once', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), articleIdsArb, async (hasFile, ids) => {
+        const files = new Map<string, Uint8Array>(
+          hasFile ? [[DATABASE_FILE_PATH, await staleFileWith(ids)]] : []
+        );
+        const { app, adapter } = makeVault(INDEXED, files);
+        const hold = vi.fn(async () => 'at-once' as const);
+
+        const repo = await startRepo(app, { holdForSync: hold });
+
+        expect(hold).toHaveBeenCalledOnce();
+        expect(articleIds(repo).sort()).toEqual(hasFile ? [...ids].sort() : []);
+        const dbReads = adapter.readBinary.mock.calls.filter(
+          ([path]) => path === DATABASE_FILE_PATH
+        );
+        // Once to load and once to back up, with a file; never without
+        expect(dbReads).toHaveLength(hasFile ? 2 : 0);
+        expect(adapter.exists).toHaveBeenCalledTimes(hasFile ? 2 : 1);
+        repo.db?.close();
+      })
+    );
+  });
+
+  it('looks for the file once when it has no hold to wait on', async () => {
+    const { app, adapter } = makeVault(INDEXED);
+
+    const repo = await startRepo(app);
+
+    expect(adapter.exists).toHaveBeenCalledOnce();
+    repo.db?.close();
+  });
+
+  it('property: never holds a startup with nothing to migrate', async () => {
+    await fc.assert(
+      fc.asyncProperty(indexViewArb, articleIdsArb, async (index, ids) => {
+        const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(ids)]]);
+        const { app } = makeVault(index, files);
+        const hold = vi.fn(async () => 'at-once' as const);
+
+        const repo = await startRepo(app, { holdForSync: hold });
+
+        expect(hold).not.toHaveBeenCalled();
+        expect(articleIds(repo).sort()).toEqual([...ids].sort());
+        repo.db?.close();
+      })
+    );
+  });
+
+  it('property: never holds a startup over a file it cannot load', async () => {
+    await fc.assert(
+      fc.asyncProperty(unloadableFileArb, async (file) => {
+        const files = new Map([
+          [DATABASE_FILE_PATH, await unloadableBytes(file)],
+        ]);
+        const { app } = makeVault(INDEXED, files);
+        const hold = vi.fn(async () => 'at-once' as const);
+
+        await expect(startRepo(app, { holdForSync: hold })).rejects.toThrow(
+          DatabaseLoadError
+        );
+        expect(hold).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('property: holds a startup with no file, then loads one Sync delivered, or starts empty', async () => {
+    await fc.assert(
+      fc.asyncProperty(indexViewArb, deliveryArb, async (index, delivery) => {
+        const { app, files, adapter } = makeVault(index);
+        const { hold, release } = makeHold();
+        const onWriteBlocked = vi.fn();
+
+        const starting = startRepo(app, { holdForSync: hold, onWriteBlocked });
+        await settle();
+        expect(hold).toHaveBeenCalledOnce();
+        expect(hold).toHaveBeenCalledWith('create');
+
+        const arrived = await deliveredBytes(delivery);
+        if (arrived) files.set(DATABASE_FILE_PATH, arrived);
+        release();
+        const repo = await starting;
+
+        const ids = delivery.kind === 'nothing' ? [] : delivery.ids;
+        expect(articleIds(repo).sort()).toEqual([...ids].sort());
+        expect(hold).toHaveBeenCalledOnce();
+        expect(backupWrites(adapter)).toHaveLength(
+          delivery.kind === 'stale' ? 1 : 0
+        );
+        // A delivered file is this database's own, so writes save over it
+        insertArticleRow(repo, 'later');
+        await settle();
+        expect(onWriteBlocked).not.toHaveBeenCalled();
+        expect((await idsInFile(files)).sort()).toEqual(
+          [...ids, 'later'].sort()
+        );
+        repo.db?.close();
+      })
+    );
+  });
+
+  it('property: gives up starting, writing nothing, when the hold says not to go ahead', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), articleIdsArb, async (hasFile, ids) => {
+        const stale = await staleFileWith(ids);
+        const files = new Map<string, Uint8Array>(
+          hasFile ? [[DATABASE_FILE_PATH, stale]] : []
+        );
+        const { app, adapter } = makeVault(INDEXED, files);
+
+        const error = await startRepo(app, {
+          holdForSync: async () => 'cancelled' as const,
+        }).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(StartupCancelledError);
+        expect(error).toMatchObject({
+          name: 'StartupCancelledError',
+          message: 'Database startup was cancelled while waiting for Sync',
+        });
+        expect(adapter.writeBinary).not.toHaveBeenCalled();
+        expect(files.get(DATABASE_FILE_PATH)).toBe(hasFile ? stale : undefined);
+      })
+    );
+  });
+
+  it('goes ahead with the migration when the hold itself fails', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await staleFileWith(['a'])]]);
+    const { app } = makeVault(INDEXED, files);
+
+    const failure = new Error('Sync internals changed');
+    const repo = await startRepo(app, {
+      holdForSync: async () => {
+        throw failure;
+      },
+    });
+
+    expect(console.error).toHaveBeenCalledWith(
+      'Incremental Reading - Waiting for Sync failed:',
+      failure
+    );
+
+    expect(articleIds(repo)).toEqual(['a']);
+    expect(await readVersion(files)).toBe(10);
+    repo.db?.close();
+  });
+
+  it('property: refuses to start, writing nothing, when the file Sync delivered cannot be loaded', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        unloadableFileArb,
+        async (hasFile, file) => {
+          const files = new Map<string, Uint8Array>(
+            hasFile ? [[DATABASE_FILE_PATH, await staleFileWith(['a'])]] : []
+          );
+          const { app, adapter } = makeVault(INDEXED, files);
+          const broken = await unloadableBytes(file);
+
+          const error = await startRepo(app, {
+            holdForSync: async () => {
+              files.set(DATABASE_FILE_PATH, broken);
+              return 'waited' as const;
+            },
+          }).catch((e: unknown) => e);
+
+          expect(error).toBeInstanceOf(DatabaseLoadError);
+          expect(adapter.writeBinary).not.toHaveBeenCalled();
+          expect(files.get(DATABASE_FILE_PATH)).toBe(broken);
+        }
+      )
+    );
+  });
+
+  it('property: starts on an empty database, writing nothing, when Sync deleted the file it waited on', async () => {
+    await fc.assert(
+      fc.asyncProperty(indexViewArb, articleIdsArb, async (index, ids) => {
+        const files = new Map([[DATABASE_FILE_PATH, await staleFileWith(ids)]]);
+        const { app, adapter } = makeVault(index, files);
+        const onWriteBlocked = vi.fn();
+
+        const repo = await startRepo(app, {
+          onWriteBlocked,
+          holdForSync: async () => {
+            files.delete(DATABASE_FILE_PATH);
+            return 'waited' as const;
+          },
+        });
+
+        expect(articleIds(repo)).toEqual([]);
+        expect(adapter.writeBinary).not.toHaveBeenCalled();
+        // A database of its own, whose first write makes the file
+        insertArticleRow(repo, 'new');
+        await settle();
+        expect(onWriteBlocked).not.toHaveBeenCalled();
+        expect(await idsInFile(files)).toEqual(['new']);
+        repo.db?.close();
+      })
+    );
+  });
+
+  it('property: leaves a started repository open when the signal aborts after startup', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), articleIdsArb, async (hasFile, ids) => {
+        const files = new Map<string, Uint8Array>(
+          hasFile ? [[DATABASE_FILE_PATH, await staleFileWith(ids)]] : []
+        );
+        const { app } = makeVault(INDEXED, files);
+        const controller = new AbortController();
+        const repo = await startRepo(app, {
+          holdForSync: async () => 'at-once' as const,
+          signal: controller.signal,
+        });
+
+        // Disposing of it is the plugin's job from here on
+        controller.abort();
+
+        expect(articleIds(repo).sort()).toEqual(hasFile ? [...ids].sort() : []);
+        expect(() => insertArticleRow(repo, 'later')).not.toThrow();
+        await settle();
+        repo.db?.close();
+      })
+    );
+  });
+
+  it('property: a startup the plugin unloads under writes no database file and gives up', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        articleIdsArb,
+        abortPointArb,
+        async (hasFile, ids, abortAt) => {
+          const stale = await staleFileWith(ids);
+          const files = new Map<string, Uint8Array>(
+            hasFile ? [[DATABASE_FILE_PATH, stale]] : []
+          );
+          const { app, adapter } = makeVault(INDEXED, files);
+          const controller = new AbortController();
+          if (abortAt.kind === 'before') controller.abort();
+          const { hold, release } = makeHold();
+
+          const starting = startRepo(app, {
+            holdForSync: hold,
+            signal: controller.signal,
+          }).catch((e: unknown) => e);
+          await settle();
+          if (abortAt.kind === 'while-held') controller.abort();
+          // The hold has said to go ahead, as it does when Sync settles at
+          // the moment of the unload
+          release('waited');
+          if (abortAt.kind === 'after-hold') {
+            for (let i = 0; i < abortAt.hops; i++) await Promise.resolve();
+            controller.abort();
+          }
+          const outcome = await starting;
+
+          const dbWrites = adapter.writeBinary.mock.calls.filter(
+            ([path]) => path === DATABASE_FILE_PATH
+          );
+          if (outcome instanceof SQLJSRepository) {
+            // Done before the unload, and the plugin's to dispose of from then
+            // on: the abort leaves it open
+            expect(abortAt.kind).toBe('after-hold');
+            expect(articleIds(outcome).sort()).toEqual(
+              hasFile ? [...ids].sort() : []
+            );
+            outcome.dispose();
+          } else {
+            expect(outcome).toBeInstanceOf(StartupCancelledError);
+            expect(dbWrites).toHaveLength(0);
+            expect(files.get(DATABASE_FILE_PATH)).toBe(
+              hasFile ? stale : undefined
+            );
+          }
+        }
+      )
+    );
+  });
+
+  it('does not hold a reload after startup, even one that migrates', async () => {
+    const { repo, files, hold } = await (async () => {
+      const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+      const vault = makeVault(INDEXED, files);
+      const hold = vi.fn(async () => 'at-once' as const);
+      const repo = await startRepo(vault.app, { holdForSync: hold });
+      return { repo, files, hold };
+    })();
+    files.set(DATABASE_FILE_PATH, await staleFileWith(['b']));
+
+    await repo.handleFileChange(dbFileChange);
+
+    expect(hold).not.toHaveBeenCalled();
+    expect(articleIds(repo)).toEqual(['b']);
+    expect(await readVersion(files)).toBe(10);
+    repo.db?.close();
   });
 });
 
