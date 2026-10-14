@@ -1527,11 +1527,14 @@ describe('update() — undo and redo put highlights back', () => {
   });
 
   describe('saving', () => {
-    // Timeouts only: undo scrolls, and a faked animation frame makes jsdom
-    // measure what it can't
-    beforeEach(() =>
-      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    );
+    // Timeouts only, and no animation frame at all: undo scrolls, which
+    // schedules a measure jsdom can't make (no Range.getClientRects). A faked
+    // frame would run it when time advances, and a real one fires on its own
+    // ~16ms later, before the view is destroyed on a slow machine (seen in CI)
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(1);
+    });
     afterEach(() => {
       vi.useRealTimers();
       vi.restoreAllMocks();
