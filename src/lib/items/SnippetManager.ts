@@ -1,6 +1,5 @@
 import {
   DEFAULT_PRIORITY,
-  MAX_SQL_QUERY_PARAMS,
   REVIEW_COUNT_FOR_PRIORITY_SCALING,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
@@ -43,6 +42,7 @@ import {
 } from 'obsidian';
 import { refreshHighlightsEffect } from '../extensions';
 import { ArticleManager } from './ArticleManager';
+import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
 
 export class SnippetManager extends ItemManager {
@@ -566,14 +566,7 @@ export class SnippetManager extends ItemManager {
     }
 
     if (opts?.excludeIds && opts.excludeIds.length) {
-      const currentParamCount = params.length;
-      let condition = `id NOT IN (`;
-      condition +=
-        opts.excludeIds
-          .map((_, i) => `$${currentParamCount + i + 1}`)
-          .join(', ') + ')';
-      conditions.push(condition);
-      params.push(...opts.excludeIds);
+      conditions.push(idNotIn(opts.excludeIds, params));
     }
 
     if (conditions.length) {
@@ -588,11 +581,6 @@ export class SnippetManager extends ItemManager {
       query += ` LIMIT $${params.length}`;
     }
 
-    if (params.length > MAX_SQL_QUERY_PARAMS) {
-      throw new Error(
-        `Param count ${params.length} exceeded the limit for query "${query}"`
-      );
-    }
     const rows = opts?.throwOnError
       ? await this.repo.query(query, params, { throwOnError: true })
       : await this.repo.query(query, params);

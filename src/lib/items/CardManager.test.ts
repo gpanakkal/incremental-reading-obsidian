@@ -3,6 +3,7 @@ import {
   CARD_TAG,
   CLOZE_DELIMITERS,
   DAY_ROLLOVER_OFFSET_HOURS,
+  MAX_SQL_QUERY_PARAMS,
   MS_PER_DAY,
   MS_PER_YEAR,
   SOURCE_INDEX_TIMEOUT_MS,
@@ -22,6 +23,7 @@ import type {
   SQLiteRepository,
   SRSCardRow,
 } from '#/lib/types';
+import { excludedIdsOf, seenElsewhereArb } from '#/test/due-query';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
@@ -1254,9 +1256,7 @@ describe('fetchMany', () => {
           await manager.fetchMany({ excludeIds });
           const [sql, params] = lastQueryCall(repo);
           expect(sql).toMatch(/id NOT IN/i);
-          for (const id of excludeIds) {
-            expect(params).toContain(id);
-          }
+          expect(excludedIdsOf(params)).toEqual(excludeIds);
         }
       )
     );
@@ -1291,14 +1291,11 @@ describe('fetchMany', () => {
     const limit = 5;
     await manager.fetchMany({ dueBy, excludeIds, limit });
     const [sql, params] = lastQueryCall(repo);
-    expect(sql).toContain('$1');
-    expect(sql).toContain('$2');
-    expect(sql).toContain('$3');
-    expect(sql).toContain('$4');
-    expect(params[0]).toBe(dueBy);
-    expect(params[1]).toBe('id-1');
-    expect(params[2]).toBe('id-2');
-    expect(params[3]).toBe(limit);
+    // dueBy is $1, the excluded ids $2 as one list, limit $3
+    expect(sql).toContain('due <= $1');
+    expect(sql).toContain('json_each($2)');
+    expect(sql).toContain('LIMIT $3');
+    expect(params).toEqual([dueBy, JSON.stringify(excludeIds), limit]);
   });
 
   it('omits the dismissed filter when includeDismissed=true, but keeps the default deleted filter', async () => {
@@ -1310,21 +1307,25 @@ describe('fetchMany', () => {
     expect(sql).toMatch(/deleted = FALSE/i);
   });
 
-  it('throws when param count exceeds MAX_SQL_QUERY_PARAMS', async () => {
-    const repo = makeRepo();
-    const manager = new CardManager(makePlugin(), repo);
-    const excludeIds = Array.from({ length: 1000 }, (_, i) => `id-${i}`);
-    await expect(manager.fetchMany({ excludeIds })).rejects.toThrow();
-  });
-
-  it('does not throw when param count equals MAX_SQL_QUERY_PARAMS exactly', async () => {
-    const repo = makeRepo();
-    const manager = new CardManager(makePlugin(), repo);
-    // dueBy=$1 + 998 excludeIds = 999 total, which equals the limit
-    const excludeIds = Array.from({ length: 998 }, (_, i) => `id-${i}`);
-    await expect(
-      manager.fetchMany({ dueBy: 1000, excludeIds })
-    ).resolves.not.toThrow();
+  it('binds the excluded ids as one parameter, however many there are', async () => {
+    await fc.assert(
+      fc.asyncProperty(seenElsewhereArb, async (excludeIds) => {
+        const repo = makeRepo();
+        const manager = new CardManager(makePlugin(), repo);
+        await manager.fetchMany({
+          dueBy: 1000,
+          learningDueBy: 500,
+          excludeIds,
+        });
+        const [, params] = lastQueryCall(repo);
+        expect(params).toEqual(
+          excludeIds.length
+            ? [1000, 500, JSON.stringify(excludeIds)]
+            : [1000, 500]
+        );
+      }),
+      { numRuns: 20 }
+    );
   });
 
   describe('against the production schema', () => {
@@ -1367,15 +1368,6 @@ describe('fetchMany', () => {
         await fetchedIds({ includeDismissed: true, includeDeleted: true })
       ).toEqual(['live', 'dismissed', 'deleted']);
     });
-  });
-
-  it('names the param count in the error when it exceeds the limit', async () => {
-    const repo = makeRepo();
-    const manager = new CardManager(makePlugin(), repo);
-    const excludeIds = Array.from({ length: 1000 }, (_, i) => `id-${i}`);
-    await expect(manager.fetchMany({ excludeIds })).rejects.toThrow(
-      /^Param count 1000 exceeded the limit for query "SELECT \* FROM srs_card WHERE/
-    );
   });
 
   it('uses AND to join multiple WHERE conditions', async () => {
@@ -1505,7 +1497,7 @@ describe('getDue', () => {
     const repo = {
       query: vi.fn().mockImplementation((_sql: string, params: unknown[]) => {
         callCount++;
-        const excluded = params.filter((p) => typeof p === 'string');
+        const excluded = excludedIdsOf(params);
         return [rowA, rowB].filter((r) => !excluded.includes(r.id));
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
@@ -1600,7 +1592,16 @@ describe('getDue', () => {
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     await manager.getDue(undefined, undefined, ['excluded-id']);
-    expect(queryCalls[0]).toContain('excluded-id');
+    expect(excludedIdsOf(queryCalls[0])).toContain('excluded-id');
+  });
+
+  it('excludes nothing on the first fetch when no excludeIds are given', async () => {
+    const repo = makeRepoWithCards([]);
+    await new CardManager(makePlugin(), repo).getDue();
+    const [[sql]] = (repo.query as ReturnType<typeof vi.fn>).mock.calls as [
+      string,
+    ][];
+    expect(sql).not.toMatch(/NOT IN/i);
   });
 
   it('does not include rows whose note is refused in results', async () => {
@@ -1624,7 +1625,9 @@ describe('getDue', () => {
         call++;
         if (call === 1) return [rowA, rowB];
         // Exclude rowA on retry
-        return [rowA, rowB].filter((r) => !params.includes(r.id));
+        return [rowA, rowB].filter(
+          (r) => !excludedIdsOf(params).includes(r.id)
+        );
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
@@ -1675,7 +1678,7 @@ describe('getDue', () => {
     await manager.getDue();
     // Should have retried — the refused row's id must appear in the second call's params
     expect(queryCalls.length).toBeGreaterThanOrEqual(2);
-    expect(queryCalls[1]).toContain('missing');
+    expect(excludedIdsOf(queryCalls[1])).toContain('missing');
   });
 
   describe('against the production schema', () => {
@@ -1836,7 +1839,7 @@ describe('getDue', () => {
       expect(ids).toEqual(['at-zero']);
     });
 
-    it('returns exactly the live cards due by their own state’s cutoff, soonest first', async () => {
+    it('returns exactly the live cards due by their own state’s cutoff and not seen, soonest first, however many were seen', async () => {
       await fc.assert(
         fc.asyncProperty(
           // A review day, by its calendar date, and an instant inside it
@@ -1857,7 +1860,16 @@ describe('getDue', () => {
             selector: ({ id }) => id,
             maxLength: 12,
           }),
-          async (day, fraction, offset, dueByOffset, limit, specs) => {
+          seenElsewhereArb,
+          async (
+            day,
+            fraction,
+            offset,
+            dueByOffset,
+            limit,
+            specs,
+            otherSeen
+          ) => {
             const start = new Date(
               day.getFullYear(),
               day.getMonth(),
@@ -1881,9 +1893,10 @@ describe('getDue', () => {
                 deleted: spec.deleted,
               })
             );
-            const excludeIds = specs
-              .filter(({ excluded }) => excluded)
-              .map(({ id }) => id);
+            const excludeIds = [
+              ...otherSeen,
+              ...specs.filter(({ excluded }) => excluded).map(({ id }) => id),
+            ];
 
             const ids = await dueIds(rows, now, {
               dueBy,
@@ -1921,6 +1934,31 @@ describe('getDue', () => {
             ).toEqual(expectedDues);
           }
         )
+      );
+    });
+
+    it('leaves out a row whose note is another item’s and fetches on, however many were seen', async () => {
+      replaceCards(db, [
+        makeCardRow({ id: 'claimed', state: State.Review, due: NOON - 2 }),
+        makeCardRow({ id: 'own', state: State.Review, due: NOON - 1 }),
+      ]);
+      vi.spyOn(Obsidian, 'getNote').mockImplementation(noteAt);
+      const repo = makeRealRepo(db);
+      const manager = new CardManager(
+        makePlugin(claiming('cards/claimed.md')),
+        repo
+      );
+      const seen = Array.from(
+        { length: MAX_SQL_QUERY_PARAMS + 1 },
+        (_, i) => `seen-${i}`
+      );
+
+      const due = await manager.getDue(undefined, 1, seen, NOON);
+
+      expect(due.map(({ data }) => data.id)).toEqual(['own']);
+      // The claimed row was left out of the second query, not just dropped
+      expect((repo.query as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+        2
       );
     });
 

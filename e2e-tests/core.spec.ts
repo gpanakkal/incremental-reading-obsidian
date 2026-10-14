@@ -1,4 +1,4 @@
-import { ARTICLE_TAG } from '#/lib/constants';
+import { ARTICLE_TAG, MAX_SQL_QUERY_PARAMS } from '#/lib/constants';
 import test, {
   expect,
   type ElectronApplication,
@@ -949,6 +949,86 @@ test.describe('Review session', () => {
 
     await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
     await expect(window.locator('css=#begin-review-button')).toHaveCount(0);
+  });
+
+  /**
+   * Unofficial: `window.app`, `app.plugins.plugins`, `reviewManager.repo`,
+   * and the plugin's `store`.
+   */
+  type PluginWindow = {
+    app: {
+      plugins: {
+        plugins: Record<
+          string,
+          {
+            reviewManager: {
+              repo: { mutate(sql: string, params: unknown[]): unknown };
+            };
+            store: { dispatch(action: unknown): void };
+          }
+        >;
+      };
+    };
+  };
+
+  /**
+   * Add `count` due articles whose notes are gone, all due before anything
+   * imported, and mark every one seen this session, as skipping each would.
+   */
+  async function seedSeenArticles(count: number) {
+    await window.evaluate(async (count) => {
+      const plugin = (window as unknown as PluginWindow).app.plugins.plugins[
+        'incremental-reading'
+      ];
+      // One statement, so the seed costs one save rather than one per row
+      await plugin.reviewManager.repo.mutate(
+        `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < $1)
+         INSERT INTO article (id, reference, due, interval, priority)
+         SELECT 'seen-' || i, 'gone/seen-' || i || '.md', i, 1, 30 FROM n`,
+        [count - 1]
+      );
+      const resetTime = Date.now() + 24 * 60 * 60 * 1000;
+      for (let i = 0; i < count; i++) {
+        // The action `addSeenId` in lib/store.ts creates, as skipping dispatches
+        plugin.store.dispatch({
+          type: 'seenIds/addSeenId',
+          payload: { id: `seen-${i}`, resetTime },
+        });
+      }
+    }, count);
+  }
+
+  test('keeps finding due items after more were seen than one query can bind', async () => {
+    // Every id seen this session is left out of the next due query. Each used
+    // to be its own bound parameter, so a long enough session ran into
+    // SQLite's limit and every due query from then on failed.
+    await importArticle(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+    await importArticle(window, 'sources/Security Principles');
+    await executeCommandById(window, 'incremental-reading:learn');
+    const beginReview = window.locator('css=#begin-review-button');
+    await expect(beginReview).toBeEnabled();
+    await seedSeenArticles(MAX_SQL_QUERY_PARAMS + 101);
+
+    await beginReview.click();
+    const first = await waitForReviewItem(window);
+    expect(first.id).not.toMatch(/^seen-/);
+    const other =
+      first.title === ARTICLE_TITLE ? 'Security Principles' : ARTICLE_TITLE;
+
+    // Skipping adds one more seen id. Bounded well inside
+    // `CURRENT_ITEM_REFETCH_TIME`: a skip that failed to move review on must
+    // not pass by the five-second poll moving it instead.
+    const skipButton = window.getByRole('button', {
+      name: 'Skip for current review session',
+    });
+    await expect(skipButton).toBeInViewport();
+    await skipButton.click();
+    await expect(reviewTitle(window, other)).toBeVisible({ timeout: 1_500 });
+    await expect(window.locator('.ir-review-error')).toHaveCount(0);
+    await expect(window.locator('.ir-review-summary')).toHaveCount(0);
   });
 });
 

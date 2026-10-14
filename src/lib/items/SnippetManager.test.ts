@@ -25,6 +25,13 @@ import type {
   SQLiteRepository,
 } from '#/lib/types';
 import { getEndOfDay } from '#/lib/utils';
+import {
+  excludedIdsOf,
+  expectDueInOrder,
+  insertTextItemRow,
+  seenElsewhereArb,
+  textItemSpecArb,
+} from '#/test/due-query';
 import { EditorSelection, EditorState } from '@codemirror/state';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
@@ -1051,9 +1058,7 @@ describe('fetchMany', () => {
           await manager.fetchMany({ excludeIds });
           const [sql, params] = lastQueryCall(repo);
           expect(sql).toMatch(/id NOT IN/i);
-          for (const id of excludeIds) {
-            expect(params).toContain(id);
-          }
+          expect(excludedIdsOf(params)).toEqual(excludeIds);
         }
       )
     );
@@ -1080,39 +1085,26 @@ describe('fetchMany', () => {
     const limit = 5;
     await manager.fetchMany({ dueBy, excludeIds, limit });
     const [sql, params] = lastQueryCall(repo);
-    expect(sql).toContain('$1');
-    expect(sql).toContain('$2');
-    expect(sql).toContain('$3');
-    expect(sql).toContain('$4');
-    expect(params[0]).toBe(dueBy);
-    expect(params[1]).toBe('id-1');
-    expect(params[2]).toBe('id-2');
-    expect(params[3]).toBe(limit);
+    // dueBy is $1, the excluded ids $2 as one list, limit $3
+    expect(sql).toContain('due <= $1');
+    expect(sql).toContain('json_each($2)');
+    expect(sql).toContain('LIMIT $3');
+    expect(params).toEqual([dueBy, JSON.stringify(excludeIds), limit]);
   });
 
-  it('throws when param count exceeds MAX_SQL_QUERY_PARAMS', async () => {
-    const repo = makeSimpleRepo();
-    const manager = new SnippetManager({} as never, repo);
-    const excludeIds = Array.from({ length: 1000 }, (_, i) => `id-${i}`);
-    await expect(manager.fetchMany({ excludeIds })).rejects.toThrow();
-  });
-
-  it('does not throw when param count equals MAX_SQL_QUERY_PARAMS exactly', async () => {
-    const repo = makeSimpleRepo();
-    const manager = new SnippetManager({} as never, repo);
-    // dueBy=$1 + 998 excludeIds = 999 params total
-    const excludeIds = Array.from({ length: 998 }, (_, i) => `id-${i}`);
-    await expect(
-      manager.fetchMany({ dueBy: 1000, excludeIds })
-    ).resolves.not.toThrow();
-  });
-
-  it('uses commas between NOT IN placeholders', async () => {
-    const repo = makeSimpleRepo();
-    const manager = new SnippetManager({} as never, repo);
-    await manager.fetchMany({ excludeIds: ['a', 'b', 'c'] });
-    const [sql] = lastQueryCall(repo);
-    expect(sql).toMatch(/NOT IN \(\$\d+, \$\d+, \$\d+\)/i);
+  it('binds the excluded ids as one parameter, however many there are', async () => {
+    await fc.assert(
+      fc.asyncProperty(seenElsewhereArb, async (excludeIds) => {
+        const repo = makeSimpleRepo();
+        const manager = new SnippetManager({} as never, repo);
+        await manager.fetchMany({ dueBy: 1000, excludeIds });
+        const [, params] = lastQueryCall(repo);
+        expect(params).toEqual(
+          excludeIds.length ? [1000, JSON.stringify(excludeIds)] : [1000]
+        );
+      }),
+      { numRuns: 20 }
+    );
   });
 
   it('uses AND to join multiple WHERE conditions', async () => {
@@ -1182,6 +1174,43 @@ describe('fetchMany', () => {
           }
         )
       );
+    });
+
+    it('keeps dismissed and deleted snippets only when asked to', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      const manager = new SnippetManager({} as never, repo);
+      await fc.assert(
+        fc.asyncProperty(
+          fc.uniqueArray(textItemSpecArb, {
+            selector: ({ id }) => id,
+            maxLength: 8,
+          }),
+          fc.boolean(),
+          fc.boolean(),
+          async (specs, includeDismissed, includeDeleted) => {
+            db.exec('DELETE FROM snippet');
+            for (const spec of specs) insertTextItemRow(db, 'snippet', spec);
+
+            const rows = await manager.fetchMany({
+              includeDismissed,
+              includeDeleted,
+            });
+
+            expect(new Set(rows.map(({ id }) => id))).toEqual(
+              new Set(
+                specs
+                  .filter(
+                    (spec) =>
+                      (includeDismissed || !spec.dismissed) &&
+                      (includeDeleted || !spec.deleted)
+                  )
+                  .map(({ id }) => id)
+              )
+            );
+          }
+        )
+      );
+      db.close();
     });
   });
 });
@@ -1332,6 +1361,82 @@ describe('getDue', () => {
 
       expect(results.map((r) => r.data.id)).toEqual(['at-zero']);
     });
+
+    it('returns exactly the live due snippets not seen, soonest first, however many were seen', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      await fc.assert(
+        fc.asyncProperty(
+          fc.uniqueArray(textItemSpecArb, {
+            selector: ({ id }) => id,
+            maxLength: 12,
+          }),
+          seenElsewhereArb,
+          fc.integer({ min: -MS_PER_DAY, max: 2 * MS_PER_DAY }),
+          // Review asks for one at a time, the queue for all; never for none
+          fc.option(fc.integer({ min: 1, max: 14 }), { nil: undefined }),
+          fc.boolean(),
+          async (specs, otherSeen, dueBy, limit, fuzzTextReviews) => {
+            db.exec('DELETE FROM snippet');
+            for (const spec of specs) insertTextItemRow(db, 'snippet', spec);
+            const excludeIds = [
+              ...otherSeen,
+              ...specs.filter(({ seen }) => seen).map(({ id }) => id),
+            ];
+            const plugin = {
+              app: makeApp(),
+              settings: { dayRolloverOffset: 0, fuzzTextReviews },
+            } as never;
+            const manager = new SnippetManager(plugin, repo);
+
+            const due = await manager.getDue(dueBy, limit, excludeIds);
+
+            expectDueInOrder(
+              due.map(({ data }) => data.id),
+              specs,
+              dueBy,
+              limit
+            );
+          }
+        ),
+        { numRuns: 40 }
+      );
+      db.close();
+    });
+
+    it('leaves out a row whose note is another item’s and fetches on, however many were seen', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      insertSnippetRow(db, {
+        id: 'claimed',
+        due: 1,
+        due_fuzz: null,
+        priority: DEFAULT_PRIORITY,
+      });
+      insertSnippetRow(db, {
+        id: 'own',
+        due: 2,
+        due_fuzz: null,
+        priority: DEFAULT_PRIORITY,
+      });
+      vi.spyOn(Obsidian, 'getNote').mockImplementation(noteAt);
+      const plugin = {
+        app: makeAppClaiming('snippets/claimed.md'),
+        settings: { dayRolloverOffset: 0 },
+      } as never;
+      const manager = new SnippetManager(plugin, repo);
+      const seen = Array.from(
+        { length: MAX_SQL_QUERY_PARAMS + 1 },
+        (_, i) => `seen-${i}`
+      );
+
+      const due = await manager.getDue(10, 1, seen);
+
+      expect(due.map(({ data }) => data.id)).toEqual(['own']);
+      // The claimed row was left out of the second query, not just dropped
+      expect((repo.query as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+        2
+      );
+      db.close();
+    });
   });
 
   it('returns snippets due at or before the offset-adjusted end of day, but not after', async () => {
@@ -1386,7 +1491,7 @@ describe('getDue', () => {
     const repo = {
       query: vi.fn().mockImplementation((_sql: string, params: unknown[]) => {
         callCount++;
-        const excluded = params.slice(1) as string[];
+        const excluded = excludedIdsOf(params);
         const rows = [rowA, rowB].filter((r) => !excluded.includes(r.id));
         return rows;
       }),
@@ -1439,7 +1544,7 @@ describe('getDue', () => {
     await manager.getDue(undefined, undefined, [rowA.id]);
 
     const firstCallParams = queryCalls[0];
-    expect(firstCallParams).toContain(rowA.id);
+    expect(excludedIdsOf(firstCallParams)).toContain(rowA.id);
   });
 
   it('starts with an empty exclude list when no excludeIds are given', async () => {
@@ -1488,7 +1593,9 @@ describe('getDue', () => {
       query: vi.fn().mockImplementation((_sql: string, params: unknown[]) => {
         queryCalls.push(params);
         // A limit of one, as review asks: the first fetch is the refused row
-        return [refused, own].filter((r) => !params.includes(r.id)).slice(0, 1);
+        return [refused, own]
+          .filter((r) => !excludedIdsOf(params).includes(r.id))
+          .slice(0, 1);
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
       _execSql: vi.fn(),
@@ -1504,7 +1611,7 @@ describe('getDue', () => {
     const results = await new SnippetManager(plugin, repo).getDue(1, 1);
 
     expect(results.map((r) => r.data.id)).toEqual(['own']);
-    expect(queryCalls[1]).toContain('refused');
+    expect(excludedIdsOf(queryCalls[1])).toContain('refused');
   });
 
   it('filters out items where rowToReviewSnippet refuses a note that is not the row’s', async () => {
@@ -1525,7 +1632,9 @@ describe('getDue', () => {
       query: vi.fn().mockImplementation((_sql: string, params: unknown[]) => {
         call++;
         if (call === 1) return [rowWithFile, rowNoFile];
-        return [rowWithFile, rowNoFile].filter((r) => !params.includes(r.id));
+        return [rowWithFile, rowNoFile].filter(
+          (r) => !excludedIdsOf(params).includes(r.id)
+        );
       }),
       mutate: vi.fn(),
       _execSql: vi.fn(),

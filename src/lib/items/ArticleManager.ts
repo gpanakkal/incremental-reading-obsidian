@@ -4,7 +4,6 @@ import {
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
   INVALID_TITLE_MESSAGE,
-  MAX_SQL_QUERY_PARAMS,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
   TEXT_BASE_REVIEW_INTERVAL,
@@ -48,6 +47,7 @@ import {
   getEndOfDay,
 } from '#/lib/utils';
 import { type TFile } from 'obsidian';
+import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
 
 const IMPORT_BLOCKED_TAGS = new Set([SNIPPET_TAG, CARD_TAG]);
@@ -922,14 +922,7 @@ export class ArticleManager extends ItemManager {
     }
 
     if (opts?.excludeIds && opts.excludeIds.length) {
-      const currentParamCount = params.length;
-      let condition = `id NOT IN (`;
-      condition +=
-        opts.excludeIds
-          .map((_, i) => `$${currentParamCount + i + 1}`)
-          .join(', ') + ')';
-      conditions.push(condition);
-      params.push(...opts.excludeIds);
+      conditions.push(idNotIn(opts.excludeIds, params));
     }
 
     if (conditions.length) {
@@ -944,11 +937,6 @@ export class ArticleManager extends ItemManager {
       query += ` LIMIT $${params.length}`;
     }
 
-    if (params.length > MAX_SQL_QUERY_PARAMS) {
-      throw new Error(
-        `Param count ${params.length} exceeded the limit for query "${query}"`
-      );
-    }
     const rows = opts?.throwOnError
       ? await this.repo.query(query, params, { throwOnError: true })
       : await this.repo.query(query, params);

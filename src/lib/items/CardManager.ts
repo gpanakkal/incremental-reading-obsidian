@@ -44,13 +44,13 @@ import {
   CLOZE_DELIMITERS,
   CLOZE_GROUPS_PATTERN,
   literal,
-  MAX_SQL_QUERY_PARAMS,
   MS_PER_DAY,
   SOURCE_PROPERTY_NAME,
   TRANSCLUSION_HIDE_TITLE_ALIAS,
   VALID_DELIMITER_PATTERN,
 } from '../constants';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
 import SRSCard from './SRSCard';
 import SRSCardReview from './SRSCardReview';
@@ -803,14 +803,7 @@ export class CardManager extends ItemManager {
     }
 
     if (opts?.excludeIds && opts.excludeIds.length) {
-      const currentParamCount = params.length;
-      let condition = `id NOT IN (`;
-      condition +=
-        opts.excludeIds
-          .map((_, i) => `$${currentParamCount + i + 1}`)
-          .join(', ') + ')';
-      conditions.push(condition);
-      params.push(...opts.excludeIds);
+      conditions.push(idNotIn(opts.excludeIds, params));
     }
 
     if (conditions.length) {
@@ -824,11 +817,6 @@ export class CardManager extends ItemManager {
       query += ` LIMIT $${params.length}`;
     }
 
-    if (params.length > MAX_SQL_QUERY_PARAMS) {
-      throw new Error(
-        `Param count ${params.length} exceeded the limit for query "${query}"`
-      );
-    }
     const rows = opts?.throwOnError
       ? await this.repo.query(query, params, { throwOnError: true })
       : await this.repo.query(query, params);

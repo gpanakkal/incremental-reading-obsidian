@@ -7,6 +7,7 @@ import {
   DAY_ROLLOVER_OFFSET_HOURS,
   DEFAULT_PRIORITY,
   INVALID_TITLE_MESSAGE,
+  MAX_SQL_QUERY_PARAMS,
   MAXIMUM_FIXED_REVIEW_INTERVAL,
   MAXIMUM_PRIORITY,
   MINIMUM_FIXED_REVIEW_INTERVAL,
@@ -36,6 +37,13 @@ import { getEndOfDay } from '#/lib/utils';
 // The mock the vitest config aliases `obsidian` to — imported by path so its
 // recorded notices are visible to the type checker as well as at runtime.
 import { Notice } from '#/test/__mocks__/obsidian';
+import {
+  excludedIdsOf,
+  expectDueInOrder,
+  insertTextItemRow,
+  seenElsewhereArb,
+  textItemSpecArb,
+} from '#/test/due-query';
 import { cachePosition, makeLinkVault, sectionsOf } from '#/test/link-vault';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
@@ -940,6 +948,83 @@ describe('getDue', () => {
         'third',
       ]);
     });
+
+    it('returns exactly the live due articles not seen, soonest first, however many were seen', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      await fc.assert(
+        fc.asyncProperty(
+          fc.uniqueArray(textItemSpecArb, {
+            selector: ({ id }) => id,
+            maxLength: 12,
+          }),
+          // Seen this session but not in this table: other types, or gone
+          seenElsewhereArb,
+          fc.integer({ min: -MS_PER_DAY, max: 2 * MS_PER_DAY }),
+          // Review asks for one at a time, the queue for all; never for none
+          fc.option(fc.integer({ min: 1, max: 14 }), { nil: undefined }),
+          fc.boolean(),
+          async (specs, otherSeen, dueBy, limit, fuzzTextReviews) => {
+            db.exec('DELETE FROM article');
+            for (const spec of specs) insertTextItemRow(db, 'article', spec);
+            const excludeIds = [
+              ...otherSeen,
+              ...specs.filter(({ seen }) => seen).map(({ id }) => id),
+            ];
+            const plugin = {
+              app: makeApp(),
+              settings: { dayRolloverOffset: 0, fuzzTextReviews },
+            } as never;
+            const manager = new ArticleManager(plugin, repo);
+
+            const due = await manager.getDue(dueBy, limit, excludeIds);
+
+            expectDueInOrder(
+              due.map(({ data }) => data.id),
+              specs,
+              dueBy,
+              limit
+            );
+          }
+        ),
+        { numRuns: 40 }
+      );
+      db.close();
+    });
+
+    it('leaves out a row whose note is another item’s and fetches on, however many were seen', async () => {
+      const { repo, db } = await makeSqlJsRepo();
+      insertArticleRow(db, {
+        id: 'claimed',
+        due: 1,
+        due_fuzz: null,
+        priority: DEFAULT_PRIORITY,
+      });
+      insertArticleRow(db, {
+        id: 'own',
+        due: 2,
+        due_fuzz: null,
+        priority: DEFAULT_PRIORITY,
+      });
+      vi.spyOn(Obsidian, 'getNote').mockImplementation(noteAt);
+      const plugin = {
+        app: makeAppClaiming('articles/claimed.md'),
+        settings: { dayRolloverOffset: 0 },
+      } as never;
+      const manager = new ArticleManager(plugin, repo);
+      const seen = Array.from(
+        { length: MAX_SQL_QUERY_PARAMS + 1 },
+        (_, i) => `seen-${i}`
+      );
+
+      const due = await manager.getDue(10, 1, seen);
+
+      expect(due.map(({ data }) => data.id)).toEqual(['own']);
+      // The claimed row was left out of the second query, not just dropped
+      expect((repo.query as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+        2
+      );
+      db.close();
+    });
   });
 
   it('returns a row whose note file is missing as a missing item, without retrying', async () => {
@@ -960,7 +1045,7 @@ describe('getDue', () => {
     const repo = {
       query: vi.fn().mockImplementation((_sql: string, params: unknown[]) => {
         callCount++;
-        const excluded = params.slice(1) as string[];
+        const excluded = excludedIdsOf(params);
         const rows = [rowA, rowB].filter((r) => !excluded.includes(r.id));
         return rows;
       }),
@@ -1043,7 +1128,7 @@ describe('getDue', () => {
 
     // The first query call's params should contain the pre-excluded ID
     const firstCallParams = queryCalls[0];
-    expect(firstCallParams).toContain(rowA.id);
+    expect(excludedIdsOf(firstCallParams)).toContain(rowA.id);
   });
 
   it('filters out items where rowToReviewArticle refuses a note that is not the row’s', async () => {
@@ -1068,7 +1153,9 @@ describe('getDue', () => {
         call++;
         if (call === 1) return [rowWithFile, rowNoFile];
         // Simulate SQL exclusion: omit rows whose id is in params
-        return [rowWithFile, rowNoFile].filter((r) => !params.includes(r.id));
+        return [rowWithFile, rowNoFile].filter(
+          (r) => !excludedIdsOf(params).includes(r.id)
+        );
       }),
       mutate: vi.fn(),
       _execSql: vi.fn(),
@@ -1651,9 +1738,7 @@ describe('fetchMany', () => {
           await manager.fetchMany({ excludeIds });
           const [sql, params] = lastQueryCall(repo);
           expect(sql).toMatch(/id NOT IN/i);
-          for (const id of excludeIds) {
-            expect(params).toContain(id);
-          }
+          expect(excludedIdsOf(params)).toEqual(excludeIds);
         }
       )
     );
@@ -1680,41 +1765,26 @@ describe('fetchMany', () => {
     const limit = 5;
     await manager.fetchMany({ dueBy, excludeIds, limit });
     const [sql, params] = lastQueryCall(repo);
-    // dueBy is $1, excludeIds are $2 and $3, limit is $4
-    expect(sql).toContain('$1');
-    expect(sql).toContain('$2');
-    expect(sql).toContain('$3');
-    expect(sql).toContain('$4');
-    expect(params[0]).toBe(dueBy);
-    expect(params[1]).toBe('id-1');
-    expect(params[2]).toBe('id-2');
-    expect(params[3]).toBe(limit);
+    // dueBy is $1, the excluded ids $2 as one list, limit $3
+    expect(sql).toContain('due <= $1');
+    expect(sql).toContain('json_each($2)');
+    expect(sql).toContain('LIMIT $3');
+    expect(params).toEqual([dueBy, JSON.stringify(excludeIds), limit]);
   });
 
-  it('throws when param count exceeds MAX_SQL_QUERY_PARAMS', async () => {
-    const repo = makeSimpleRepo();
-    const manager = new ArticleManager({} as never, repo);
-    // 1000 IDs exceeds the limit of 999
-    const excludeIds = Array.from({ length: 1000 }, (_, i) => `id-${i}`);
-    await expect(manager.fetchMany({ excludeIds })).rejects.toThrow();
-  });
-
-  it('does not throw when param count equals MAX_SQL_QUERY_PARAMS exactly', async () => {
-    const repo = makeSimpleRepo();
-    const manager = new ArticleManager({} as never, repo);
-    // dueBy=$1 + 998 excludeIds = 999 params total, which equals the limit (not over)
-    const excludeIds = Array.from({ length: 998 }, (_, i) => `id-${i}`);
-    await expect(
-      manager.fetchMany({ dueBy: 1000, excludeIds })
-    ).resolves.not.toThrow();
-  });
-
-  it('uses commas between NOT IN placeholders', async () => {
-    const repo = makeSimpleRepo();
-    const manager = new ArticleManager({} as never, repo);
-    await manager.fetchMany({ excludeIds: ['a', 'b', 'c'] });
-    const [sql] = lastQueryCall(repo);
-    expect(sql).toMatch(/NOT IN \(\$\d+, \$\d+, \$\d+\)/i);
+  it('binds the excluded ids as one parameter, however many there are', async () => {
+    await fc.assert(
+      fc.asyncProperty(seenElsewhereArb, async (excludeIds) => {
+        const repo = makeSimpleRepo();
+        const manager = new ArticleManager({} as never, repo);
+        await manager.fetchMany({ dueBy: 1000, excludeIds });
+        const [, params] = lastQueryCall(repo);
+        expect(params).toEqual(
+          excludeIds.length ? [1000, JSON.stringify(excludeIds)] : [1000]
+        );
+      }),
+      { numRuns: 20 }
+    );
   });
 
   it('uses AND to join multiple WHERE conditions', async () => {
@@ -2425,15 +2495,6 @@ describe('fetchMany (includeDeleted option)', () => {
     const [sql] = lastQueryCall(repo);
     expect(sql).not.toContain(' WHERE ');
   });
-
-  it('throws with a non-empty message when param count exceeds MAX_SQL_QUERY_PARAMS', async () => {
-    const repo = makeSimpleRepo();
-    const manager = new ArticleManager({} as never, repo);
-    const excludeIds = Array.from({ length: 1000 }, (_, i) => `id-${i}`);
-    await expect(manager.fetchMany({ excludeIds })).rejects.toThrow(
-      /exceeded/i
-    );
-  });
 });
 
 describe('rename, when the database write fails', () => {
@@ -2564,7 +2625,7 @@ describe('getDue (filter correctness)', () => {
     const repo = {
       query: vi.fn().mockImplementation((_sql: string, params: unknown[]) => {
         callCount++;
-        const excluded = params.slice(1) as string[];
+        const excluded = excludedIdsOf(params);
         return [rowNoFile, rowWithFile].filter((r) => !excluded.includes(r.id));
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
@@ -2606,11 +2667,7 @@ describe('getDue (filter correctness)', () => {
     const repo = {
       query: vi.fn().mockImplementation((sql: string, params: unknown[]) => {
         queryCalls.push({ sql, params });
-        // Extract excludeIds from the params: they follow the optional dueBy param.
-        // Use the SQL to count how many leading params exist before the NOT IN list.
-        const excluded = params.filter(
-          (p): p is string => typeof p === 'string'
-        );
+        const excluded = excludedIdsOf(params);
         return [missingRow, presentRow].filter((r) => !excluded.includes(r.id));
       }),
       mutate: vi.fn().mockResolvedValue([[]]),
@@ -2631,7 +2688,7 @@ describe('getDue (filter correctness)', () => {
     // At least 2 queries should have run — the retry must have happened
     expect(queryCalls.length).toBeGreaterThanOrEqual(2);
     // The second call must include the missing row's id as an excluded param
-    expect(queryCalls[1].params).toContain(missingRow.id);
+    expect(excludedIdsOf(queryCalls[1].params)).toContain(missingRow.id);
   });
 });
 
