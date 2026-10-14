@@ -25,6 +25,7 @@
 		"format": "prettier --write \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\" && eslint --fix \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\"",
 		"lint": "eslint \"./src/**/*.{ts,tsx}\" \"./e2e-tests/**/*.{ts,tsx}\" \"./styles.css\"",
 		"version": "node version-bump.mjs && git add manifest.json versions.json package.json",
+		"release": "node scripts/release.mjs",
 		"preinstall": "npx only-allow pnpm"
 	},
 	"keywords": [],
