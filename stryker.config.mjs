@@ -30,5 +30,11 @@ const config = {
   checkers: ['typescript'],
   tsconfigFile: 'tsconfig.stryker.json',
   coverageAnalysis: 'perTest',
+  // Reruns only re-test mutants whose code or covering tests changed since the
+  // last run (reports/stryker-incremental.json, per worktree). --force ignores it
+  incremental: true,
+  concurrency: 4,
+  // Static mutants (module-level code) rerun the whole suite per mutant
+  ignoreStatic: true,
 };
 export default config;
