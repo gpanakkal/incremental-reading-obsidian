@@ -159,6 +159,25 @@ test.describe('Article Importing', () => {
     ).toBeVisible();
     await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
   });
+
+  test('a second import confirmation replaces the first on a phone rather than stacking over the text', async () => {
+    await emulateMobile(window, true);
+    // Phone width, where Obsidian stretches its notices across the screen
+    await window.setViewportSize({ width: 400, height: 850 });
+    const imported = (title: string) =>
+      window.locator('.notice').filter({ hasText: `Imported "${title}"` });
+
+    await importArticle(window, 'sources/Security Principles');
+    await expect(imported('Security Principles')).toBeVisible();
+    await importArticle(window, 'sources/Curse of dimensionality - Wikipedia');
+
+    await expect(imported('Curse of dimensionality - Wikipedia')).toBeVisible();
+    // Well inside the first notice's own time on screen (5 s at the least), so
+    // it is the second notice that hid it, not its timer
+    await expect(imported('Security Principles')).toHaveCount(0, {
+      timeout: 1_000,
+    });
+  });
 });
 
 test.describe('Action Bar', () => {

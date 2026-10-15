@@ -11,6 +11,7 @@
 
 import type { App } from 'obsidian';
 import type { NoticeFactory, NoticeTarget } from './ir-id-warning-notice';
+import type { NotifyOptions } from './notices';
 
 /**
  * The parts of Sync's plugin instance read here (undocumented).
@@ -289,7 +290,7 @@ export async function holdForSync(params: {
   path: string;
   reason: SyncHoldReason;
   createNotice: NoticeFactory;
-  notify: (message: string, persist?: boolean) => void;
+  notify: (message: string, options?: NotifyOptions) => void;
   signal?: AbortSignal;
   timeoutMs?: number;
   isOffline?: () => boolean;
@@ -328,7 +329,7 @@ export async function holdForSync(params: {
       console.warn(
         `Incremental Reading - Sync had not delivered ${params.path} (${outcome}); going ahead`
       );
-      notify(SYNC_HOLD_MESSAGES.timeout[reason], true);
+      notify(SYNC_HOLD_MESSAGES.timeout[reason], { persist: true });
       break;
   }
   return waits ? 'waited' : 'at-once';

@@ -2,6 +2,7 @@ import { type App, type TAbstractFile, TFile, TFolder } from 'obsidian';
 import { FORBIDDEN_TITLE_CHARS } from './constants';
 import type { Timer } from './ir-id-warning-notice';
 import { afterLinkUpdates } from './link-update-queue';
+import type { NotifyOptions } from './notices';
 
 /**
  * The characters an item file's path may not gain, nor that of a folder
@@ -235,7 +236,7 @@ export interface ItemPathGuardOptions {
   referencesUnder(folder: string): ReadonlySet<string>;
   /** Follow `file`'s move from `oldPath`, as the rename handler does. */
   follow(file: TFile, oldPath: string): void;
-  notify(message: string): void;
+  notify(message: string, options?: NotifyOptions): void;
 }
 
 /**
@@ -592,7 +593,8 @@ export class ItemPathGuard {
       ]);
       this.#options.notify(
         `Incremental reading: couldn't move "${entry.path}" back. Rename it ` +
-          `without ${chars}`
+          `without ${chars}`,
+        { kind: 'error' }
       );
       return;
     }

@@ -14,6 +14,7 @@ import {
 } from '#/lib/constants';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import type { NoteType } from '#/lib/types';
+import { Notice } from '#/test/__mocks__/obsidian';
 import { makeItemVault } from '#/test/item-vault';
 import { noteText } from '#/test/note-text';
 import type { EditorState } from '@codemirror/state';
@@ -5565,5 +5566,23 @@ describe('updateFrontMatterUndoably', () => {
     await undo();
 
     expect(vault.processFrontMatter).not.toHaveBeenCalled();
+  });
+});
+
+describe('notify', () => {
+  it('shows the message as a notice, kept up when asked to persist', () => {
+    fc.assert(
+      fc.property(fc.string(), fc.boolean(), (message, persist) => {
+        Notice.reset();
+
+        ObsidianHelpers.notify(message, { persist });
+        ObsidianHelpers.notify('later');
+
+        expect(Notice.messages).toEqual([message, 'later']);
+        const [notice] = Notice.instances;
+        expect(notice.duration === 0).toBe(persist);
+        expect(notice.hides).toBe(persist ? 0 : 1);
+      })
+    );
   });
 });

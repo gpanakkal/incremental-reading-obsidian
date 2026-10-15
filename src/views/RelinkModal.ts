@@ -75,7 +75,9 @@ export async function openRelinkPicker(
         if (result.ok) await invalidateItemQuery(row.id);
       } catch (error) {
         console.error(error);
-        Obsidian.notify(`Failed to relink to "${file.path}"`);
+        Obsidian.notify(`Failed to relink to "${file.path}"`, {
+          kind: 'error',
+        });
       }
     }
   );

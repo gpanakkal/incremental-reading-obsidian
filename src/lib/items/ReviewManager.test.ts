@@ -5088,7 +5088,7 @@ describe('ReviewManager.deleteRow', () => {
     expect(wired.dump().snippet).toStrictEqual([]);
     // Lost if Obsidian closes before anything else saves, so the user hears
     expect(notify.mock.calls).toStrictEqual([
-      ["Deleted, but the database couldn't be saved yet"],
+      ["Deleted, but the database couldn't be saved yet", { kind: 'error' }],
     ]);
     expect(wired.forgetIf).toHaveBeenCalledExactlyOnceWith('target');
     expect(

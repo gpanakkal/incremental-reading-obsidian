@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { queryClient } from '#/lib/query-client';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import { Notice } from '#/test/__mocks__/obsidian';
@@ -205,11 +206,15 @@ describe('openRelinkPicker', () => {
       reference: 'gone.pdf',
     });
     vi.spyOn(repo, 'transaction').mockRejectedValue(new Error('disk full'));
+    const notify = vi.spyOn(Obsidian, 'notify');
     modal?.onChooseItem(target);
 
     await vi.waitFor(() =>
       expect(Notice.messages).toEqual(['Failed to relink to "found.pdf"'])
     );
+    expect(notify).toHaveBeenCalledWith('Failed to relink to "found.pdf"', {
+      kind: 'error',
+    });
     expect(error).toHaveBeenCalled();
     expect(invalidate).not.toHaveBeenCalled();
   });

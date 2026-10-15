@@ -353,6 +353,7 @@ describe('renderStandaloneActionBarDOM', () => {
     const file = makeFile();
     const harness = makeHarness({ item: makeItem({ file }) });
     const container = makeContainer();
+    const notify = vi.spyOn(Obsidian, 'notify');
 
     renderStandaloneActionBarDOM(file, harness.plugin, container);
     await tick();
@@ -361,6 +362,9 @@ describe('renderStandaloneActionBarDOM', () => {
     await tick();
 
     expect(Notice.messages).toEqual(['Item not found in database']);
+    expect(notify).toHaveBeenCalledWith('Item not found in database', {
+      kind: 'error',
+    });
     expect(harness.reviewManager.dismissItem).not.toHaveBeenCalled();
     expect(harness.reviewManager.unDismissItem).not.toHaveBeenCalled();
   });
@@ -373,6 +377,7 @@ describe('renderStandaloneActionBarDOM', () => {
       new Error('write failed')
     );
     const container = makeContainer();
+    const notify = vi.spyOn(Obsidian, 'notify');
 
     renderStandaloneActionBarDOM(file, harness.plugin, container);
     await tick();
@@ -380,6 +385,9 @@ describe('renderStandaloneActionBarDOM', () => {
     await tick();
 
     expect(Notice.messages).toEqual(['Failed to update item']);
+    expect(notify).toHaveBeenCalledWith('Failed to update item', {
+      kind: 'error',
+    });
     expect(buttonName(dismissButton(container))).toBe('Dismiss');
     expect(logged).toHaveBeenCalledWith(
       'Failed to toggle dismiss status:',

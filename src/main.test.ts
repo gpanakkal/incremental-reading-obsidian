@@ -2011,7 +2011,7 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
       );
       expect(notify).toHaveBeenCalledExactlyOnceWith(
         refusedPathsWarning(paths),
-        true
+        { persist: true }
       );
       expect(follow.itemPathsWithRefusedChars).toHaveBeenCalledOnce();
       if (moved) {
@@ -2064,7 +2064,7 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
     );
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       refusedPathsWarning(['a|b.md', 'c>.md']),
-      true
+      { persist: true }
     );
   });
 
@@ -2106,7 +2106,7 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
     await vi.waitFor(() =>
       expect(notify).toHaveBeenCalledExactlyOnceWith(
         refusedPathsWarning(['a|b.md']),
-        true
+        { persist: true }
       )
     );
   });
@@ -2216,7 +2216,8 @@ describe('IncrementalReadingPlugin renames', () => {
       )
     );
     expect(renames.notify).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining(`couldn't move "no|tes" back`)
+      expect.stringContaining(`couldn't move "no|tes" back`),
+      { kind: 'error' }
     );
   });
 
@@ -2310,7 +2311,6 @@ describe('IncrementalReadingPlugin database reload', () => {
 
   it('tells the user why changes are no longer saved, until they are again', async () => {
     Notice.reset();
-    const hide = vi.spyOn(Notice.prototype, 'hide');
     const { blockWrites, resumeWrites } = await startDatabase(undefined);
 
     blockWrites(new Error('The file could not be loaded.'));
@@ -2318,12 +2318,12 @@ describe('IncrementalReadingPlugin database reload', () => {
     expect(Notice.messages).toEqual([
       'Incremental reading: The file could not be loaded.',
     ]);
-    expect(hide).not.toHaveBeenCalled();
+    const [blocked] = Notice.instances;
+    expect(blocked.hides).toBe(0);
 
     resumeWrites();
 
-    expect(hide).toHaveBeenCalledOnce();
-    expect(hide.mock.contexts[0]).toBeInstanceOf(Notice);
+    expect(blocked.hides).toBe(1);
   });
 
   it('saves the highlight offsets held back while saving was paused, once it resumes', async () => {
@@ -2577,7 +2577,7 @@ describe('IncrementalReadingPlugin.verifySyncSettings', () => {
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       'Incremental reading: please enable "sync all other types" before ' +
         'using the plugin',
-      true
+      { persist: true }
     );
   });
 

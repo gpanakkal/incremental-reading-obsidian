@@ -1,6 +1,11 @@
 import type { EditorState } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import {
+  editorEditorField,
+  editorInfoField,
+  getFrontMatterInfo,
+  normalizePath,
+  parseYaml,
   type App,
   type DataWriteOptions,
   type Editor,
@@ -8,12 +13,6 @@ import {
   type FrontMatterCache,
   type MarkdownFileInfo,
   type TFile,
-  editorEditorField,
-  editorInfoField,
-  getFrontMatterInfo,
-  normalizePath,
-  Notice,
-  parseYaml,
 } from 'obsidian';
 import {
   ARTICLE_DIRECTORY,
@@ -28,8 +27,6 @@ import {
   FORBIDDEN_TITLE_CHARS,
   FRONTMATTER_PATTERN,
   INVALID_TITLE_MESSAGE,
-  NOTICE_MIN_DURATION_MS,
-  NOTICE_SCALED_DURATION_PER_WORD_MS,
   SNIPPET_DIRECTORY,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
@@ -37,6 +34,7 @@ import {
 } from './constants';
 import { Markdown } from './Markdown';
 import { isEditableText, supportsFrontmatter } from './mime';
+import { notify, type NotifyOptions } from './notices';
 import { parseSourceLink } from './source-link';
 import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
 import { binarySearch, generateId } from './utils';
@@ -784,16 +782,11 @@ export class ObsidianHelpers {
   }
 
   /**
-   * Create an Obsidian Notice, scaling the visibility duration to the number
-   * of words in the message.
+   * Show a notice, up longer the more words it has. A new notice hides the
+   * last one that was neither an error nor persistent; see {@link notify}.
    */
-  static notify(message: string, persist?: boolean) {
-    const wordCount = message.split(' ').length;
-    const duration = Math.max(
-      NOTICE_MIN_DURATION_MS,
-      wordCount * NOTICE_SCALED_DURATION_PER_WORD_MS
-    );
-    new Notice(message, persist ? 0 : duration);
+  static notify(message: string, options?: NotifyOptions): void {
+    notify(message, options);
   }
 }
 

@@ -442,7 +442,8 @@ describe('resolveLeftover', () => {
     expect(repo.rows('snippet')).toEqual([]);
     expect(vault.paths()).toHaveLength(1);
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      `Couldn't keep "a" as an item: saving to the database is paused. Saving is paused.`
+      `Couldn't keep "a" as an item: saving to the database is paused. Saving is paused.`,
+      { kind: 'error' }
     );
   });
 
@@ -456,7 +457,8 @@ describe('resolveLeftover', () => {
     expect(await resolveLeftover(deps, leftover, 'trash')).toBe(false);
 
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      `Couldn't move "a" to the trash`
+      `Couldn't move "a" to the trash`,
+      { kind: 'error' }
     );
   });
 });

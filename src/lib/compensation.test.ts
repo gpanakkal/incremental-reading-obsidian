@@ -195,7 +195,8 @@ describe('refusedWrite', () => {
           true
         );
         expect(notify).toHaveBeenCalledExactlyOnceWith(
-          `Couldn't ${action}: saving to the database is paused. ${reason}`
+          `Couldn't ${action}: saving to the database is paused. ${reason}`,
+          { kind: 'error' }
         );
       })
     );

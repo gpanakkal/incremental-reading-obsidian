@@ -1,5 +1,5 @@
-import { Notice } from 'obsidian';
 import { NOTICE_MIN_DURATION_MS } from './constants';
+import { notify } from './notices';
 
 /**
  * The part of Obsidian's `Notice` this module drives. Declared structurally
@@ -25,7 +25,7 @@ export type NoticeFactory = (message: string) => NoticeTarget;
 
 /** Opens the kind of notice {@link createIrIdWarning} needs. */
 export const persistentNotice: NoticeFactory = (message) =>
-  new Notice(message, 0);
+  notify(message, { persist: true });
 
 /** Runs `run` after `ms`, and hands back the function that cancels it. */
 export type Timer = (run: () => void, ms: number) => () => void;

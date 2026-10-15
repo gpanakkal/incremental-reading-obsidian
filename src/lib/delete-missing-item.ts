@@ -46,7 +46,7 @@ export async function deleteMissingItem(
     await plugin.reviewManager.deleteRow(tableOf(row.type), row.id);
   } catch (error) {
     console.error(error);
-    Obsidian.notify(`Failed to delete "${row.reference}"`);
+    Obsidian.notify(`Failed to delete "${row.reference}"`, { kind: 'error' });
     return false;
   }
 

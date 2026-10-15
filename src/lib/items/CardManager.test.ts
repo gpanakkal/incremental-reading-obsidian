@@ -3590,6 +3590,43 @@ describe('create', () => {
     // A tag after whitespace was one there too
     expect(await card('see #tag', 4)).toBe(`see ${LEFT} #tag ${RIGHT}`);
   });
+
+  it('reports a card it could not make as an error, leaving the note alone', async () => {
+    const manager = new CardManager(makePlugin(), makeRepo());
+    vi.spyOn(
+      manager as unknown as {
+        createFileAndEntry: (text: string) => Promise<unknown>;
+      },
+      'createFileAndEntry'
+    ).mockResolvedValue(null);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
+      line: 'some text',
+      lineNumber: 0,
+      start: 0,
+      end: 9,
+    });
+    vi.spyOn(Obsidian, 'getSelectionWithBounds').mockReturnValue({
+      selection: 'some',
+      start: { line: 0, ch: 0 },
+      end: { line: 0, ch: 4 },
+      startOffset: 0,
+      endOffset: 4,
+    });
+    const setSelection = vi.fn();
+
+    const result = await manager.create(
+      { setSelection } as never,
+      { file: sourceFile } as never
+    );
+
+    expect(result).toBeNull();
+    expect(setSelection).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledExactlyOnceWith('Failed to create card', {
+      kind: 'error',
+    });
+  });
 });
 
 describe('createFromSelection', () => {
@@ -3961,7 +3998,9 @@ describe('createFromSelection', () => {
 
     expect(result).toBeNull();
     expect(editor.text).toBe('some text');
-    expect(notify).toHaveBeenCalledWith('Failed to create card');
+    expect(notify).toHaveBeenCalledWith('Failed to create card', {
+      kind: 'error',
+    });
   });
 });
 
@@ -4281,7 +4320,8 @@ describe('createFromPdf', () => {
             })
           ).toBeNull();
           expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
-            'Failed to create card'
+            'Failed to create card',
+            { kind: 'error' }
           );
           expect(error).toHaveBeenCalledExactlyOnceWith(failure);
           // A note with no row would be a card review never shows; once the
@@ -5157,7 +5197,7 @@ describe('making and deleting a card, with its note and its row as one unit', ()
       "Couldn't create the card: saving to the database is paused. Saving is paused.";
 
     expect(await wired.fromPdf()).toBeNull();
-    expect(wired.notify).toHaveBeenLastCalledWith(refused);
+    expect(wired.notify).toHaveBeenLastCalledWith(refused, { kind: 'error' });
 
     const doc = 'a line of text';
     const editor = makeEditor(doc);
@@ -5169,7 +5209,7 @@ describe('making and deleting a card, with its note and its row as one unit', ()
         [2, 6]
       )
     ).toBeNull();
-    expect(wired.notify).toHaveBeenLastCalledWith(refused);
+    expect(wired.notify).toHaveBeenLastCalledWith(refused, { kind: 'error' });
 
     vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
       line: doc,
@@ -5190,7 +5230,7 @@ describe('making and deleting a card, with its note and its row as one unit', ()
         { file: wired.vault.files.get(NOTE) } as never
       )
     ).toBeNull();
-    expect(wired.notify).toHaveBeenLastCalledWith(refused);
+    expect(wired.notify).toHaveBeenLastCalledWith(refused, { kind: 'error' });
 
     expect(wired.vault.paths()).toEqual([NOTE, PDF]);
     expect(wired.vault.processFrontMatter).not.toHaveBeenCalled();
@@ -5225,7 +5265,8 @@ describe('making and deleting a card, with its note and its row as one unit', ()
       expect(wired.vault.paths()).toEqual(paths);
       if (why === 'refused') {
         expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
-          "Couldn't delete the card: saving to the database is paused. Paused."
+          "Couldn't delete the card: saving to the database is paused. Paused.",
+          { kind: 'error' }
         );
       }
     }

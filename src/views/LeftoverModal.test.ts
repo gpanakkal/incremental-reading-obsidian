@@ -2,6 +2,7 @@
 import { ARTICLE_TAG, DATA_DIRECTORY, SNIPPET_TAG } from '#/lib/constants';
 import type { Leftover } from '#/lib/crash-leftovers';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { Notice } from '#/test/__mocks__/obsidian';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
 import type { App, TFile } from 'obsidian';
@@ -254,6 +255,28 @@ describe('flagLeftovers', () => {
     containerEl.click();
 
     expect(open).toHaveBeenCalledOnce();
+  });
+
+  it('by default lists the leftovers in a notice that stays until clicked', async () => {
+    const vault = makeItemVault({
+      'notes/a.md': { 'ir-id': 'x', tags: [ARTICLE_TAG] },
+    });
+    const repo = await TestRepository.create();
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority) VALUES ('other', 'other.md', 0, 1, 30)`
+    );
+    Notice.reset();
+
+    await flagLeftovers({
+      app: vault.app as never,
+      repo,
+      managers: vi.fn(),
+      onResolved: vi.fn(),
+    });
+
+    expect(Notice.instances).toHaveLength(1);
+    expect(Notice.instances[0].message).toMatch(/1 note has/);
+    expect(Notice.instances[0].duration).toBe(0);
   });
 
   it('resolves what is chosen in the modal, and says so once done', async () => {

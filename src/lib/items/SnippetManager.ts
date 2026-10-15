@@ -459,7 +459,7 @@ export class SnippetManager extends ItemManager {
         ] as const;
       });
     } catch (error) {
-      Obsidian.notify(`Failed to create the snippet`);
+      Obsidian.notify(`Failed to create the snippet`, { kind: 'error' });
       console.error(error);
       return null;
     }
@@ -581,7 +581,7 @@ export class SnippetManager extends ItemManager {
         );
       });
     } catch (error) {
-      Obsidian.notify(`Failed to create the snippet`);
+      Obsidian.notify(`Failed to create the snippet`, { kind: 'error' });
       console.error(error);
       return null;
     }

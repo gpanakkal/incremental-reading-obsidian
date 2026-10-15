@@ -8,8 +8,9 @@ import {
   leftoversMessage,
   resolveLeftover,
 } from '#/lib/crash-leftovers';
+import { notify } from '#/lib/notices';
 import type { SQLiteRepository } from '#/lib/types';
-import { type App, ButtonComponent, Modal, Notice } from 'obsidian';
+import { type App, ButtonComponent, Modal } from 'obsidian';
 
 /** What each action's button says. */
 export const ACTION_LABELS: Readonly<Record<LeftoverAction, string>> = {
@@ -109,7 +110,7 @@ export async function flagLeftovers({
   repo,
   managers,
   onResolved,
-  createNotice = (message) => new Notice(message, 0),
+  createNotice = (message) => notify(message, { persist: true }),
 }: {
   app: App;
   repo: SQLiteRepository;

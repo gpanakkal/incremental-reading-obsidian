@@ -285,7 +285,7 @@ export class CardManager extends ItemManager {
       if (error instanceof Error) {
         console.error(error);
       }
-      Obsidian.notify(`Failed to create card`);
+      Obsidian.notify(`Failed to create card`, { kind: 'error' });
       return null;
     }
   }
@@ -381,7 +381,7 @@ export class CardManager extends ItemManager {
       if (error instanceof Error) {
         console.error(error);
       }
-      Obsidian.notify(`Failed to create card`);
+      Obsidian.notify(`Failed to create card`, { kind: 'error' });
       return null;
     }
   }
@@ -426,7 +426,7 @@ export class CardManager extends ItemManager {
       );
     } catch (_error) {
       // `createFileAndEntry` has logged it
-      Obsidian.notify(`Failed to create card`);
+      Obsidian.notify(`Failed to create card`, { kind: 'error' });
       return null;
     }
   }

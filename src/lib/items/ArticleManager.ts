@@ -225,7 +225,9 @@ export class ArticleManager extends ItemManager {
       }
       return await this.importInPlace(file, priority, fixedIntervalDays);
     } catch (error) {
-      Obsidian.notify(`Failed to import article "${file.name}"`);
+      Obsidian.notify(`Failed to import article "${file.name}"`, {
+        kind: 'error',
+      });
       console.error(error);
       return null;
     } finally {
@@ -436,7 +438,7 @@ export class ArticleManager extends ItemManager {
         kind === 'in place'
           ? `"${name}" is an article, but the snippets and cards taken from it couldn't be adopted`
           : `Imported "${name}", but the snippets and cards taken from its original couldn't be handed to it`,
-        true
+        { kind: 'error', persist: true }
       );
       return fallback;
     }
@@ -565,10 +567,9 @@ export class ArticleManager extends ItemManager {
       Obsidian.sanitizeForTitle(file.basename, true) || Obsidian.createTitle();
     let name = `${basename}.${file.extension}`;
     if (!(await isFree(name))) {
-      Obsidian.notify(
-        `Warning: article with name already exists "${name}"`,
-        true
-      );
+      Obsidian.notify(`Warning: article with name already exists "${name}"`, {
+        persist: true,
+      });
       do {
         name = `${basename} - ${generateId()}.${file.extension}`;
       } while (!(await isFree(name)));
@@ -577,7 +578,7 @@ export class ArticleManager extends ItemManager {
     if (basename !== file.basename.normalize('NFC')) {
       Obsidian.notify(
         `Warning: removed characters a note name can't hold; the copy is named "${name}"`,
-        true
+        { persist: true }
       );
     }
     return name;
@@ -719,7 +720,7 @@ export class ArticleManager extends ItemManager {
   private warnLinksKept(file: TFile) {
     Obsidian.notify(
       `Warning: couldn't update the links in the copy of "${file.basename}"; some may not lead where they did`,
-      true
+      { kind: 'error', persist: true }
     );
   }
 
@@ -778,7 +779,7 @@ export class ArticleManager extends ItemManager {
       Obsidian.notify(
         `Warning: source note has article metadata but no ` +
           `matching record; creating copy`,
-        true
+        { persist: true }
       );
     }
 
@@ -938,7 +939,7 @@ export class ArticleManager extends ItemManager {
       const result = await this.fetch(id);
       return result;
     } catch (error) {
-      Obsidian.notify(`Failed to create empty article`);
+      Obsidian.notify(`Failed to create empty article`, { kind: 'error' });
       console.error(error);
       return null;
     }
@@ -1204,7 +1205,9 @@ export class ArticleManager extends ItemManager {
     } catch (e) {
       if (e instanceof Error) {
         Obsidian.notify(
-          `Failed to set fixed interval for "${article.reference}":` + e.message
+          `Failed to set fixed interval for "${article.reference}":` +
+            e.message,
+          { kind: 'error' }
         );
       }
       console.error(e);
@@ -1233,7 +1236,8 @@ export class ArticleManager extends ItemManager {
       );
     } catch (_e) {
       Obsidian.notify(
-        `Failed to disable fixed interval for article ${article.reference}`
+        `Failed to disable fixed interval for article ${article.reference}`,
+        { kind: 'error' }
       );
     }
   }

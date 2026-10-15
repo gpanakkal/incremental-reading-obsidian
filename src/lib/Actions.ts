@@ -251,7 +251,10 @@ export class Actions {
       await invalidateItemQuery(item.data.id);
       Obsidian.notify(`Priority set to ${priority / 10}`);
     } catch (_error) {
-      Obsidian.notify(`Failed to update priority for "${item.data.reference}"`);
+      Obsidian.notify(
+        `Failed to update priority for "${item.data.reference}"`,
+        { kind: 'error' }
+      );
     }
   };
 
@@ -600,7 +603,9 @@ export class Actions {
         : null;
     } catch (error) {
       console.error(error);
-      Obsidian.notify("Couldn't read the text selected in the PDF");
+      Obsidian.notify("Couldn't read the text selected in the PDF", {
+        kind: 'error',
+      });
       return null;
     }
     if (!selection) {
@@ -1069,7 +1074,9 @@ export class Actions {
     try {
       miss = await actionEntry.undo();
     } catch (error) {
-      Obsidian.notify(`Couldn't undo ${actionEntry.description}`);
+      Obsidian.notify(`Couldn't undo ${actionEntry.description}`, {
+        kind: 'error',
+      });
       throw error;
     }
     if (miss === 'retry') {
@@ -1079,7 +1086,9 @@ export class Actions {
       return;
     }
     if (miss === 'failed') {
-      Obsidian.notify(`Couldn't undo ${actionEntry.description}`);
+      Obsidian.notify(`Couldn't undo ${actionEntry.description}`, {
+        kind: 'error',
+      });
       return;
     }
     Obsidian.notify(`Undid ${actionEntry.description}`);

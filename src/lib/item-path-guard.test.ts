@@ -1130,7 +1130,8 @@ describe('ItemPathGuard.handleRename', () => {
     ]);
     // Naming what its file still holds too
     expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
-      said.failed('A^', '^ or #')
+      said.failed('A^', '^ or #'),
+      { kind: 'error' }
     );
   });
 
@@ -1220,7 +1221,9 @@ describe('ItemPathGuard.handleRename', () => {
     expect(x.path).toBe('A/x#.md');
     expect(wired.follow).toHaveBeenCalledExactlyOnceWith(x, 'A/x.md');
     expect(wired.notify).toHaveBeenCalledTimes(2);
-    expect(wired.notify).toHaveBeenCalledWith(said.failed('A/x#.md', '#'));
+    expect(wired.notify).toHaveBeenCalledWith(said.failed('A/x#.md', '#'), {
+      kind: 'error',
+    });
     expect(wired.notify).toHaveBeenCalledWith(said.folder('^'));
   });
 
@@ -1265,7 +1268,8 @@ describe('ItemPathGuard.handleRename', () => {
       ['A^/y.md', 'A/y.md'],
     ]);
     expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
-      said.failed('A^', '^ or #')
+      said.failed('A^', '^ or #'),
+      { kind: 'error' }
     );
   });
 
@@ -1306,7 +1310,7 @@ describe('ItemPathGuard.handleRename', () => {
     expect(x.path).toBe('A/x#.md');
     expect(wired.follow).toHaveBeenCalledExactlyOnceWith(x, 'A/x.md');
     expect(wired.notify.mock.calls).toStrictEqual([
-      [said.failed('A/x#.md', '#')],
+      [said.failed('A/x#.md', '#'), { kind: 'error' }],
       [said.folder('^')],
     ]);
   });
@@ -1541,7 +1545,8 @@ describe('ItemPathGuard.handleRename', () => {
     expect(wired.follow).toHaveBeenCalledExactlyOnceWith(file, 'cards/a.md');
     expect(wired.references).toStrictEqual(new Set(['cards/a:b.md']));
     expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
-      said.failed('cards/a:b.md', ':')
+      said.failed('cards/a:b.md', ':'),
+      { kind: 'error' }
     );
   });
 
@@ -1568,7 +1573,8 @@ describe('ItemPathGuard.handleRename', () => {
       ['no*tes/sub/plain.md', 'notes/sub/plain.md'],
     ]);
     expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
-      said.failed('no*tes', '*')
+      said.failed('no*tes', '*'),
+      { kind: 'error' }
     );
   });
 

@@ -238,7 +238,7 @@ function renderReviewModeActions(
               }
               Obsidian.notify(`Priority set to ${newPriority / 10}`);
             } catch (error) {
-              Obsidian.notify(`Failed to update priority`);
+              Obsidian.notify(`Failed to update priority`, { kind: 'error' });
               console.error(error);
             }
           },
@@ -370,7 +370,7 @@ export function renderStandaloneActionBarDOM(
             await reviewManager.getReviewItemFromFile(file);
 
           if (!item) {
-            Obsidian.notify('Item not found in database');
+            Obsidian.notify('Item not found in database', { kind: 'error' });
             return;
           }
 
@@ -388,7 +388,7 @@ export function renderStandaloneActionBarDOM(
           await invalidateCacheOnMatch(item.file, reviewManager);
         } catch (error) {
           console.error('Failed to toggle dismiss status:', error);
-          Obsidian.notify('Failed to update item');
+          Obsidian.notify('Failed to update item', { kind: 'error' });
         }
       };
     } catch (error) {

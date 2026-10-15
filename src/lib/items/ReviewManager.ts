@@ -748,7 +748,9 @@ export default class ReviewManager {
       );
       if (left) throw error;
       // Lost if Obsidian closes before anything else saves
-      Obsidian.notify("Deleted, but the database couldn't be saved yet");
+      Obsidian.notify("Deleted, but the database couldn't be saved yet", {
+        kind: 'error',
+      });
     }
 
     // Here, as in `dismissItem`, so a session left on the row cannot resume

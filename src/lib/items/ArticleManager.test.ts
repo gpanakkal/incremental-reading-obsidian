@@ -2634,12 +2634,21 @@ describe('setFixedInterval (error handling)', () => {
     vi.restoreAllMocks();
   });
 
-  it('does not throw when the validation fails (error is caught)', async () => {
+  it('reports an invalid interval as an error notice instead of throwing', async () => {
     const repo = makeSimpleRepo();
     const manager = new ArticleManager({} as never, repo);
+    const article = makeArticle();
+    const notify = vi.spyOn(Obsidian, 'notify');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
     await expect(
-      manager.setFixedInterval(makeArticle(), MINIMUM_FIXED_REVIEW_INTERVAL - 1)
+      manager.setFixedInterval(article, MINIMUM_FIXED_REVIEW_INTERVAL - 1)
     ).resolves.toBeUndefined();
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining(
+        `Failed to set fixed interval for "${article.reference}":`
+      ),
+      { kind: 'error' }
+    );
     expect((repo.mutate as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
       0
     );
@@ -2651,12 +2660,18 @@ describe('disableFixedInterval (error handling)', () => {
     vi.restoreAllMocks();
   });
 
-  it('does not throw when the validation fails (error is caught internally)', async () => {
+  it('reports an invalid priority as an error notice instead of throwing', async () => {
     const repo = makeSimpleRepo();
     const manager = new ArticleManager({} as never, repo);
+    const article = makeArticle();
+    const notify = vi.spyOn(Obsidian, 'notify');
     await expect(
-      manager.disableFixedInterval(makeArticle(), MINIMUM_PRIORITY - 1)
+      manager.disableFixedInterval(article, MINIMUM_PRIORITY - 1)
     ).resolves.toBeUndefined();
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      `Failed to disable fixed interval for article ${article.reference}`,
+      { kind: 'error' }
+    );
     expect((repo.mutate as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
       0
     );
@@ -3221,6 +3236,7 @@ describe('import', () => {
       const plugin = makeImportPlugin(false);
       importVaultOf(plugin).readBinary.mockRejectedValue(new Error('EBUSY'));
       const manager = new ArticleManager(plugin, repo);
+      const notify = vi.spyOn(Obsidian, 'notify');
 
       await expect(
         manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false)
@@ -3229,6 +3245,10 @@ describe('import', () => {
       expect(Notice.messages).toEqual([
         `Failed to import article "${IMPORT_FILE.name}"`,
       ]);
+      expect(notify).toHaveBeenCalledWith(
+        `Failed to import article "${IMPORT_FILE.name}"`,
+        { kind: 'error' }
+      );
       expect(query).not.toHaveBeenCalled();
       expect(mutate).not.toHaveBeenCalled();
       expect(updateFrontMatter).not.toHaveBeenCalled();
@@ -4071,7 +4091,7 @@ describe('import', () => {
               );
               // The warning stays up until dismissed
               if (ownHolder !== null) {
-                expect(notify).toHaveBeenCalledWith(warning, true);
+                expect(notify).toHaveBeenCalledWith(warning, { persist: true });
               }
             }
           ),
@@ -4563,7 +4583,9 @@ describe('import', () => {
         const name = `invoicefdp.exe ${BLACK_FLAG}.md`;
         expect(result?.file.path).toBe(`${ARTICLES}/${name}`);
         // Persists, as the name-taken warning does
-        expect(notify).toHaveBeenCalledWith(warningFor(name), true);
+        expect(notify).toHaveBeenCalledWith(warningFor(name), {
+          persist: true,
+        });
       });
 
       it('gives a copy of a note with a decomposed name the composed name, unwarned', async () => {
@@ -4867,7 +4889,10 @@ describe('import', () => {
           expect(plugin.app.vault.append.mock.calls).toEqual([
             [result?.file, text],
           ]);
-          expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, true);
+          expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, {
+            kind: 'error',
+            persist: true,
+          });
         })
       );
     });
@@ -4893,7 +4918,10 @@ describe('import', () => {
       expect(plugin.app.vault.append.mock.calls).toEqual([
         [result?.file, text],
       ]);
-      expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, true);
+      expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, {
+        kind: 'error',
+        persist: true,
+      });
     });
 
     it('copies the text as it is, warning lastingly and logging why, when re-basing fails', async () => {
@@ -4928,7 +4956,10 @@ describe('import', () => {
         [result?.file, text],
       ]);
       expect(logged).toHaveBeenCalledWith(failure);
-      expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, true);
+      expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, {
+        kind: 'error',
+        persist: true,
+      });
     });
 
     it('reads the note only once Obsidian has finished reading the vault', async () => {
@@ -5812,7 +5843,7 @@ describe('making an article, with its note and its row as one unit', () => {
   it('makes an empty article as a note and a row together, or neither', async () => {
     for (const failure of ['create', 'frontmatter', 'row', null] as const) {
       vi.restoreAllMocks();
-      const { vault, repo, manager } = await wireArticles({}, failure);
+      const { vault, repo, notify, manager } = await wireArticles({}, failure);
 
       const article = await manager.create(DEFAULT_PRIORITY);
 
@@ -5821,6 +5852,9 @@ describe('making an article, with its note and its row as one unit', () => {
         expect(article).toBeNull();
         expect(rows).toEqual([]);
         expect(vault.paths()).toEqual([]);
+        expect(notify).toHaveBeenCalledWith('Failed to create empty article', {
+          kind: 'error',
+        });
       } else {
         expect(rows).toHaveLength(1);
         expect(vault.paths()).toEqual([rows[0].reference]);
@@ -5985,7 +6019,7 @@ describe('making an article, with its note and its row as one unit', () => {
         makeCopy
           ? `Imported "${article?.file.basename}", but the snippets and cards taken from its original couldn't be handed to it`
           : `"${vault.files.get(path)!.basename}" is an article, but the snippets and cards taken from it couldn't be adopted`,
-        true
+        { kind: 'error', persist: true }
       );
       expect(console.error).toHaveBeenCalledWith(failure);
     }
@@ -6010,7 +6044,8 @@ describe('making an article, with its note and its row as one unit', () => {
         expect(vault.frontmatterOf(path)).toEqual(before[path]);
         expect(repo.rows('article')).toEqual([]);
         expect(notify).toHaveBeenCalledExactlyOnceWith(
-          refusal(`import "${file.name}"`)
+          refusal(`import "${file.name}"`),
+          { kind: 'error' }
         );
       }
     }
@@ -6020,7 +6055,8 @@ describe('making an article, with its note and its row as one unit', () => {
     expect(await manager.create(DEFAULT_PRIORITY)).toBeNull();
     expect(vault.paths()).toEqual([]);
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      refusal('create the article')
+      refusal('create the article'),
+      { kind: 'error' }
     );
   });
 });
@@ -6076,7 +6112,7 @@ describe('adoptLeftover', () => {
     expect(repo.rows('article')).toHaveLength(1);
     expect(notify).toHaveBeenCalledWith(
       `"left" is an article, but the snippets and cards taken from it couldn't be adopted`,
-      true
+      { kind: 'error', persist: true }
     );
   });
 });

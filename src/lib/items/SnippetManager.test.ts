@@ -4190,7 +4190,8 @@ describe('create, with its note and its row as one unit', () => {
       const { notify } = await snipInVault(null, failure);
 
       expect(notify).toHaveBeenCalledExactlyOnceWith(
-        expect.stringMatching(/^Failed to create the snippet/)
+        expect.stringMatching(/^Failed to create the snippet/),
+        { kind: 'error' }
       );
     }
   });
@@ -4207,7 +4208,8 @@ describe('create, with its note and its row as one unit', () => {
     expect(vault.paths()).toEqual([PARENT]);
     expect(vault.processFrontMatter).not.toHaveBeenCalled();
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      "Couldn't create the snippet: saving to the database is paused. Saving is paused."
+      "Couldn't create the snippet: saving to the database is paused. Saving is paused.",
+      { kind: 'error' }
     );
   });
 
@@ -4236,7 +4238,8 @@ describe('createFromPdf, with its note and its row as one unit', () => {
       expect(vault.paths()).toEqual([PDF]);
       expect(repo.rows('snippet')).toEqual([]);
       expect(notify).toHaveBeenCalledExactlyOnceWith(
-        expect.stringMatching(/^Failed to create the snippet/)
+        expect.stringMatching(/^Failed to create the snippet/),
+        { kind: 'error' }
       );
     }
   });
@@ -4272,7 +4275,8 @@ describe('createFromPdf, with its note and its row as one unit', () => {
     expect(result).toBeNull();
     expect(vault.paths()).toEqual([PDF]);
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      "Couldn't create the snippet: saving to the database is paused. Saving is paused."
+      "Couldn't create the snippet: saving to the database is paused. Saving is paused.",
+      { kind: 'error' }
     );
   });
 });
@@ -4288,7 +4292,8 @@ describe('delete while writes are refused', () => {
     expect(await manager.delete('snippet-1')).toBe('refused');
 
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      "Couldn't delete the snippet: saving to the database is paused. Saving is paused."
+      "Couldn't delete the snippet: saving to the database is paused. Saving is paused.",
+      { kind: 'error' }
     );
   });
 });

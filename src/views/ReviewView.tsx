@@ -1253,7 +1253,9 @@ export default class ReviewView extends FileView {
     } catch (error) {
       console.error(error);
       const reason = error instanceof Error ? error.message : String(error);
-      Obsidian.notify(`Could not rename "${file.basename}": ${reason}`);
+      Obsidian.notify(`Could not rename "${file.basename}": ${reason}`, {
+        kind: 'error',
+      });
       this.titleEl.textContent = this.getDisplayText();
     }
   }

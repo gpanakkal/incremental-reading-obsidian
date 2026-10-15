@@ -997,7 +997,8 @@ describe('deleteWithNote', () => {
         expect(wired.promptForFileDeletion).not.toHaveBeenCalled();
         expect(wired.vault.paths()).toEqual([ITEM_NOTE]);
         expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
-          "Couldn't delete the item: saving to the database is paused. Saving is paused."
+          "Couldn't delete the item: saving to the database is paused. Saving is paused.",
+          { kind: 'error' }
         );
       }),
       { numRuns: 10 }

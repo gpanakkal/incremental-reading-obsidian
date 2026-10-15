@@ -761,7 +761,7 @@ describe('holdForSync', () => {
         expect(settled).toHaveBeenCalledWith('waited');
         expect(notify).toHaveBeenCalledWith(
           SYNC_HOLD_MESSAGES.timeout[reason],
-          true
+          { persist: true }
         );
         expect(shown[0].hide).toHaveBeenCalled();
         expect(console.warn).toHaveBeenLastCalledWith(
@@ -789,10 +789,9 @@ describe('holdForSync', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(settled).toHaveBeenCalledWith('waited');
-    expect(notify).toHaveBeenCalledWith(
-      SYNC_HOLD_MESSAGES.timeout.migrate,
-      true
-    );
+    expect(notify).toHaveBeenCalledWith(SYNC_HOLD_MESSAGES.timeout.migrate, {
+      persist: true,
+    });
   });
 
   it('property: reads the device as offline by navigator.onLine when not told otherwise', async () => {
@@ -819,7 +818,7 @@ describe('holdForSync', () => {
           expect(settled).toHaveBeenCalledWith('waited');
           expect(notify).toHaveBeenCalledWith(
             SYNC_HOLD_MESSAGES.timeout.migrate,
-            true
+            { persist: true }
           );
         }
       })

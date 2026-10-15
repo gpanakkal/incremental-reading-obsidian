@@ -125,7 +125,9 @@ describe('deleteMissingItem', () => {
           );
           expect(store.getState().showAnswer).toBe(!leftItem);
           expect(wired.notify.mock.calls).toStrictEqual(
-            confirmed && fails ? [[`Failed to delete "${row.reference}"`]] : []
+            confirmed && fails
+              ? [[`Failed to delete "${row.reference}"`, { kind: 'error' }]]
+              : []
           );
           expect(wired.logged.mock.calls).toStrictEqual(
             confirmed && fails ? [[FAILURE]] : []

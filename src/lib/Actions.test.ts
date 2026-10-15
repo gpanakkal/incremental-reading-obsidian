@@ -797,6 +797,28 @@ describe('Actions on a missing item', () => {
   });
 });
 
+describe('Actions.reprioritize', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports a priority it could not save as an error naming the item', async () => {
+    const plugin = makePlugin();
+    Object.assign(plugin.reviewManager, {
+      reprioritize: vi.fn().mockRejectedValue(new Error('disk full')),
+    });
+    const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    const item = makeReviewItem('my-article') as ReviewText;
+
+    await new Actions(plugin).reprioritize(item, 30);
+
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      `Failed to update priority for "${item.data.reference}"`,
+      { kind: 'error' }
+    );
+  });
+});
+
 describe('Actions.skipItem — Notice message', () => {
   beforeEach(() => {
     Notice.reset();
@@ -2842,12 +2864,17 @@ describe('Actions.createPdfSnippet', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const failure = new Error('worker gone');
     const wired = wirePdfSnippet({ read: failure });
+    const notify = vi.spyOn(Obsidian, 'notify');
 
     expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
 
     expect(Notice.messages).toEqual([
       "Couldn't read the text selected in the PDF",
     ]);
+    expect(notify).toHaveBeenCalledWith(
+      "Couldn't read the text selected in the PDF",
+      { kind: 'error' }
+    );
     expect(error).toHaveBeenCalledExactlyOnceWith(failure);
     expect(wired.createFromPdf).not.toHaveBeenCalled();
   });
@@ -3841,7 +3868,8 @@ describe('Actions.undo while writes are refused', () => {
           expect(undo).not.toHaveBeenCalled();
           expect(actions.undoStack).toEqual([entry]);
           expect(notify).toHaveBeenCalledExactlyOnceWith(
-            `Couldn't undo ${description}: saving to the database is paused. ${reason}`
+            `Couldn't undo ${description}: saving to the database is paused. ${reason}`,
+            { kind: 'error' }
           );
         }
       )
@@ -3927,7 +3955,8 @@ describe('Actions.deleteItem', () => {
 
     expect(promptForFileDeletion).not.toHaveBeenCalled();
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      `Couldn't delete "my-article": saving to the database is paused. Saving is paused.`
+      `Couldn't delete "my-article": saving to the database is paused. Saving is paused.`,
+      { kind: 'error' }
     );
   });
 
@@ -4065,7 +4094,8 @@ describe('Actions.undo of something it could not take back', () => {
 
           expect(actions.undoStack).toEqual([]);
           expect(notify).toHaveBeenCalledExactlyOnceWith(
-            `Couldn't undo ${description}`
+            `Couldn't undo ${description}`,
+            { kind: 'error' }
           );
         }
       )
@@ -4102,9 +4132,9 @@ describe('Actions — undo of a snippet made from a note', () => {
       expect(deleteSnippet).toHaveBeenCalledExactlyOnceWith('snippet-1');
       expect(actions.undoStack).toHaveLength(outcome === 'failed' ? 0 : 1);
       expect(notify).toHaveBeenCalledExactlyOnceWith(
-        outcome === 'failed'
-          ? `Couldn't undo creating snippet "snippet"`
-          : `Didn't undo creating snippet "snippet"`
+        ...(outcome === 'failed'
+          ? [`Couldn't undo creating snippet "snippet"`, { kind: 'error' }]
+          : [`Didn't undo creating snippet "snippet"`])
       );
     }
   });

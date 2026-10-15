@@ -221,6 +221,21 @@ describe('persistentNotice', () => {
       })
     );
   });
+  it('raises a notice that later notices leave up', () => {
+    fc.assert(
+      fc.property(fc.string(), (message) => {
+        Notice.reset();
+
+        persistentNotice(message);
+        persistentNotice('later');
+
+        expect(Notice.instances.map((notice) => notice.duration)).toEqual([
+          0, 0,
+        ]);
+        expect(Notice.instances[0].hides).toBe(0);
+      })
+    );
+  });
 });
 
 describe('createIrIdWarning', () => {

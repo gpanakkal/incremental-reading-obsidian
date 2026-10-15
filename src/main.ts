@@ -374,7 +374,10 @@ export default class IncrementalReadingPlugin extends Plugin {
         // Unloaded while startup waited on Sync, so there is nothing to undo
         if (error instanceof StartupCancelledError) return;
         console.error(error);
-        Obsidian.notify(startupFailureMessage(error), true);
+        Obsidian.notify(startupFailureMessage(error), {
+          kind: 'error',
+          persist: true,
+        });
         this.unload();
       }
     });
@@ -529,7 +532,7 @@ export default class IncrementalReadingPlugin extends Plugin {
           signal: unloaded.signal,
           timeoutMs: syncWaitTimeoutForTests(),
           createNotice: persistentNotice,
-          notify: (message, persist) => Obsidian.notify(message, persist),
+          notify: (message, options) => Obsidian.notify(message, options),
         }),
       onMigrationFailure: (error) => {
         console.error(
@@ -539,7 +542,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         Obsidian.notify(
           `Incremental reading: database migration failed. ` +
             `Check the console for details.`,
-          true
+          { kind: 'error', persist: true }
         );
         this.unload();
       },
@@ -598,7 +601,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       isItemFile: (file, path) => this.reviewManager.isItemFileAt(file, path),
       referencesUnder: (folder) => this.reviewManager.referencesUnder(folder),
       follow: (file, oldPath) => this.followRename(file, oldPath),
-      notify: (message) => Obsidian.notify(message),
+      notify: (...args) => Obsidian.notify(...args),
     });
     this.followMovedNotes(repo);
 
@@ -802,7 +805,8 @@ export default class IncrementalReadingPlugin extends Plugin {
             paths,
             this.data.warnedRefusedPaths
           );
-          if (warn) Obsidian.notify(refusedPathsWarning(paths)!, true);
+          if (warn)
+            Obsidian.notify(refusedPathsWarning(paths)!, { persist: true });
           if (remember) await this.rememberWarnedPaths(remember);
         })
         .catch((error: unknown) => {
@@ -1239,7 +1243,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     Obsidian.notify(
       `Incremental reading: please enable "sync all other types"` +
         ` before using the plugin`,
-      true
+      { persist: true }
     );
   }
 }

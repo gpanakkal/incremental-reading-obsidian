@@ -72,8 +72,12 @@ export class Notice {
    */
   static readonly messages: string[] = [];
 
+  /** Every notice constructed since the last {@link Notice.reset}, in order. */
+  static readonly instances: Notice[] = [];
+
   static reset() {
     Notice.messages.length = 0;
+    Notice.instances.length = 0;
   }
 
   /** The notice's own element: a detached one, outside jsdom a bare stub. */
@@ -82,11 +86,22 @@ export class Notice {
       ? ({ addEventListener() {} } as unknown as HTMLElement)
       : document.createElement('div');
 
-  constructor(message: string, _duration?: number) {
+  readonly message: string;
+  /** Obsidian's auto-hide delay: `0` keeps the notice up until it's hidden. */
+  readonly duration: number | undefined;
+  /** How many times {@link hide} has been called on this notice. */
+  hides = 0;
+
+  constructor(message: string, duration?: number) {
+    this.message = message;
+    this.duration = duration;
     Notice.messages.push(message);
+    Notice.instances.push(this);
   }
 
-  hide() {}
+  hide() {
+    this.hides++;
+  }
 }
 
 type Pos = { line: number; col: number; offset: number };

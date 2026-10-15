@@ -208,7 +208,7 @@ export async function resolveLeftover(
     return true;
   } catch (error) {
     console.error(error);
-    Obsidian.notify(`Couldn't ${what}`);
+    Obsidian.notify(`Couldn't ${what}`, { kind: 'error' });
     return false;
   }
 }

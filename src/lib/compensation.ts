@@ -68,7 +68,8 @@ export function refusedWrite(repo: SQLiteRepository, action: string): boolean {
   const refusal = repo.writeRefusal();
   if (!refusal) return false;
   Obsidian.notify(
-    `Couldn't ${action}: saving to the database is paused. ${refusal.message}`
+    `Couldn't ${action}: saving to the database is paused. ${refusal.message}`,
+    { kind: 'error' }
   );
   return true;
 }
