@@ -185,7 +185,7 @@
       "modifiers": [
         "Alt"
       ],
-      "key": "O"
+      "key": "Q"
     }
   ],
   "incremental-reading:import-article": [
@@ -202,6 +202,14 @@
         "Alt"
       ],
       "key": "P"
+    }
+  ],
+  "webviewer:open": [
+    {
+      "modifiers": [
+        "Alt"
+      ],
+      "key": "W"
     }
   ]
 }
