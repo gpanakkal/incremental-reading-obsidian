@@ -23,6 +23,7 @@ export const scrollPositionExtension = ViewPlugin.define(
   (view) => {
     let isRestoring = false;
     let scrollTimeout: number | undefined;
+    let fallbackTimeout: number | undefined;
     let abortController: AbortController | null = null;
     let mutationObserver: MutationObserver | null = null;
     const propertiesLoadTimeoutMs = 300;
@@ -135,7 +136,13 @@ export const scrollPositionExtension = ViewPlugin.define(
       // restoring before it lays out would leave the target position off the top
       // of the viewport. The IREditor hides frontmatter, so no widget appears and
       // the fallback timeout drives the restore.
-      const waitForPropertiesAndRestore = async () => {
+      //
+      // Settles only once the restore has run, whichever path ran it. Saving
+      // waits on this: a scroll saved while the restore is still pending is
+      // what the restore then loads and jumps back to, and its isRestoring
+      // window swallows the saves for whatever the reader scrolls next — the
+      // place they leave the item at is never stored.
+      const waitForPropertiesAndRestore = (): Promise<void> => {
         const contentDOM = view.contentDOM;
 
         // Check if properties widget already exists
@@ -144,35 +151,40 @@ export const scrollPositionExtension = ViewPlugin.define(
         );
         if (propertiesWidget) {
           // Already rendered, restore immediately
-          await restoreScrollPosition();
-          return;
+          return restoreScrollPosition();
         }
 
-        // Use MutationObserver to detect when the properties widget appears
-        let timeoutId: number;
-        mutationObserver = new MutationObserver((_mutations, observer) => {
-          const widget = contentDOM.querySelector('.metadata-container');
-          if (widget) {
-            observer.disconnect();
-            window.clearTimeout(timeoutId);
-            // Give the widget a moment to finish layout
-            window.requestAnimationFrame(() => {
-              void restoreScrollPosition();
-            });
-          }
-        });
+        return new Promise<void>((resolve, reject) => {
+          const restore = () => {
+            if (destroyed) return;
+            restoreScrollPosition().then(resolve, reject);
+          };
 
-        mutationObserver.observe(contentDOM, {
-          childList: true,
-          subtree: true,
-        });
+          // Use MutationObserver to detect when the properties widget appears
+          mutationObserver = new MutationObserver((_mutations, observer) => {
+            const widget = contentDOM.querySelector('.metadata-container');
+            if (widget) {
+              observer.disconnect();
+              window.clearTimeout(fallbackTimeout);
+              fallbackTimeout = undefined;
+              // Give the widget a moment to finish layout
+              window.requestAnimationFrame(restore);
+            }
+          });
 
-        // Fallback: if no properties widget appears before timeout, restore anyway
-        // (file might not have frontmatter, or we're in IREditor)
-        timeoutId = window.setTimeout(() => {
-          mutationObserver?.disconnect();
-          void restoreScrollPosition();
-        }, propertiesLoadTimeoutMs);
+          mutationObserver.observe(contentDOM, {
+            childList: true,
+            subtree: true,
+          });
+
+          // Fallback: if no properties widget appears before timeout, restore anyway
+          // (file might not have frontmatter, or we're in IREditor)
+          fallbackTimeout = window.setTimeout(() => {
+            fallbackTimeout = undefined;
+            mutationObserver?.disconnect();
+            restore();
+          }, propertiesLoadTimeoutMs);
+        });
       };
 
       // Start the scroll restoration process
@@ -180,6 +192,7 @@ export const scrollPositionExtension = ViewPlugin.define(
         window.requestAnimationFrame(() => {
           waitForPropertiesAndRestore()
             .then(() => {
+              if (destroyed) return;
               // Add scroll listener with AbortController for clean lifecycle
               abortController = new AbortController();
               view.scrollDOM.addEventListener('scrollend', handleScroll, {
@@ -196,6 +209,9 @@ export const scrollPositionExtension = ViewPlugin.define(
         destroyed = true;
         abortController?.abort();
         mutationObserver?.disconnect();
+        if (fallbackTimeout !== undefined) {
+          window.clearTimeout(fallbackTimeout);
+        }
         if (scrollTimeout !== undefined) {
           window.clearTimeout(scrollTimeout);
         }
