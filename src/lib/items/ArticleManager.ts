@@ -105,6 +105,14 @@ function describeSchedule(
 }
 
 /**
+ * Confirm an import, or what an import did instead (link or restore an article
+ * already in the database). The `minimal` success notice level keeps these.
+ */
+function confirmImport(message: string) {
+  Obsidian.notify(message, { kind: 'success', category: 'import' });
+}
+
+/**
  * What a copy import's notice adds about the snippets and cards it took over
  * from the original (see `handToCopy`): nothing when it took none.
  */
@@ -379,7 +387,7 @@ export class ArticleManager extends ItemManager {
           () => this.claimInPlace(file, existingId),
           undefined
         );
-        Obsidian.notify(
+        confirmImport(
           `Linked "${file.basename}" to existing article with the same ID`
         );
         warnIfRefused(file.path);
@@ -421,7 +429,7 @@ export class ArticleManager extends ItemManager {
     );
     const schedulingString = describeSchedule(priority, fixedIntervalDays);
 
-    Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
+    confirmImport(`Imported "${titleSlice}" with ${schedulingString}`);
     return this.fetch(id);
   }
 
@@ -536,7 +544,7 @@ export class ArticleManager extends ItemManager {
         () => this.claimInPlace(file, existing.id),
         undefined
       );
-      Obsidian.notify(
+      confirmImport(
         `Restored the article "${titleSlice}" to the queue with its earlier schedule`
       );
       warnIfRefused(file.path);
@@ -556,7 +564,7 @@ export class ArticleManager extends ItemManager {
     );
 
     const schedulingString = describeSchedule(priority, fixedIntervalDays);
-    Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
+    confirmImport(`Imported "${titleSlice}" with ${schedulingString}`);
     return this.fetch(id);
   }
 
@@ -691,7 +699,7 @@ export class ArticleManager extends ItemManager {
         true
       );
       const schedulingString = describeSchedule(priority, fixedIntervalDays);
-      Obsidian.notify(
+      confirmImport(
         `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`
       );
       return this.fetch(id);
@@ -788,7 +796,7 @@ export class ArticleManager extends ItemManager {
           () => this.claimInPlace(file, existingId),
           undefined
         );
-        Obsidian.notify(
+        confirmImport(
           `Linked "${file.basename}" to existing article with the same ID`
         );
         warnIfRefused(file.path);
@@ -885,7 +893,7 @@ export class ArticleManager extends ItemManager {
         true
       );
       const schedulingString = describeSchedule(priority, fixedIntervalDays);
-      Obsidian.notify(
+      confirmImport(
         `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`
       );
       return this.fetch(id);

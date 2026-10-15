@@ -28,6 +28,7 @@ import {
   parseSteps,
   REVIEW_TITLE_BAR_OPTIONS,
   SETTINGS_TAB_CLASS,
+  SUCCESS_NOTICE_LEVEL_OPTIONS,
   type IRPluginSettings,
 } from './settings';
 
@@ -37,6 +38,9 @@ const STEP_PATTERN = /^[1-9]\d*[mhd]$/;
 
 /** Each review title bar choice, as stored. */
 const REVIEW_TITLE_BARS = ['obsidian', 'show', 'hide'] as const;
+
+/** Each success notice level, as stored. */
+const SUCCESS_NOTICE_LEVELS = ['all', 'minimal', 'none'] as const;
 
 /** Any text at all, not just the printable ASCII `fc.string()` defaults to. */
 const textArb = (constraints: fc.StringConstraints = {}) =>
@@ -98,6 +102,8 @@ const settingsArb = fc.record({
     skipHomeScreen: fc.boolean(),
     reviewTitleBar: fc.constantFrom(...REVIEW_TITLE_BARS),
     showGradeIntervals: fc.boolean(),
+    successNoticesInReview: fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
+    successNoticesOutsideReview: fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
     fsrsParams: fc.record({
       request_retention: fc.double(),
       maximum_interval: fc.integer(),
@@ -435,6 +441,10 @@ describe('IRSettingTab.getControlValue', () => {
           retention: tab.getControlValue('fsrsParams.request_retention'),
           fuzz: tab.getControlValue('fsrsParams.enable_fuzz'),
           showGradeIntervals: tab.getControlValue('showGradeIntervals'),
+          successNoticesInReview: tab.getControlValue('successNoticesInReview'),
+          successNoticesOutsideReview: tab.getControlValue(
+            'successNoticesOutsideReview'
+          ),
           maximumInterval: tab.getControlValue('fsrsParams.maximum_interval'),
           shortTerm: tab.getControlValue('fsrsParams.enable_short_term'),
           learningSteps: tab.getControlValue('fsrsParams.learning_steps'),
@@ -453,6 +463,8 @@ describe('IRSettingTab.getControlValue', () => {
           retention: fsrsParams.request_retention,
           fuzz: fsrsParams.enable_fuzz,
           showGradeIntervals: settings.showGradeIntervals,
+          successNoticesInReview: settings.successNoticesInReview,
+          successNoticesOutsideReview: settings.successNoticesOutsideReview,
           maximumInterval: fsrsParams.maximum_interval,
           shortTerm: fsrsParams.enable_short_term,
           learningSteps: fsrsParams.learning_steps.join(', '),
@@ -508,6 +520,11 @@ describe('IRSettingTab.setControlValue', () => {
       ['showAdvancedImportCommands', fc.boolean()],
       ['showAdvancedImportMenuItems', fc.boolean()],
       ['showGradeIntervals', fc.boolean()],
+      ['successNoticesInReview', fc.constantFrom(...SUCCESS_NOTICE_LEVELS)],
+      [
+        'successNoticesOutsideReview',
+        fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
+      ],
     ] as const;
     const fsrsKeys = [
       ['request_retention', fc.double()],
@@ -656,6 +673,26 @@ describe('IRSettingTab.setControlValue', () => {
     expect(Object.keys(REVIEW_TITLE_BAR_OPTIONS)).toEqual(REVIEW_TITLE_BARS);
   });
 
+  it('names every success notice level in both of its dropdowns', () => {
+    const controls = declaredControls()
+      .map((row) => row.control)
+      .filter((row) => row.key.startsWith('successNotices'));
+
+    expect(controls.map((control) => control.key)).toEqual([
+      'successNoticesInReview',
+      'successNoticesOutsideReview',
+    ]);
+    for (const control of controls) {
+      expect(control).toMatchObject({ type: 'dropdown' });
+      expect(control.type === 'dropdown' && control.options).toEqual(
+        SUCCESS_NOTICE_LEVEL_OPTIONS
+      );
+    }
+    expect(Object.keys(SUCCESS_NOTICE_LEVEL_OPTIONS)).toEqual(
+      SUCCESS_NOTICE_LEVELS
+    );
+  });
+
   it('leaves the extra import hotkeys alone when another setting changes', async () => {
     await fc.assert(
       fc.asyncProperty(settingsArb, editsArb(), async (generated, edits) => {
@@ -774,6 +811,34 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         name: 'Create empty articles in the current folder',
         desc: `If disabled, empty articles will be created in "${DATA_DIRECTORY}/"`,
         control: toggle('createEmptyInCurrentFolder'),
+      },
+      {
+        heading: 'Notifications and reminders',
+        name: 'Success notices inside review',
+        desc: 'Which confirmations to show for actions taken in the review tab. Minimal shows only undos and imports. Errors always show.',
+        control: {
+          type: 'dropdown',
+          key: 'successNoticesInReview',
+          options: {
+            all: 'All',
+            minimal: 'Minimal',
+            none: 'None',
+          },
+        },
+      },
+      {
+        heading: 'Notifications and reminders',
+        name: 'Success notices outside review',
+        desc: 'Which confirmations to show for actions taken anywhere else. Minimal shows only undos and imports. Errors always show.',
+        control: {
+          type: 'dropdown',
+          key: 'successNoticesOutsideReview',
+          options: {
+            all: 'All',
+            minimal: 'Minimal',
+            none: 'None',
+          },
+        },
       },
       {
         heading: 'Reviews',

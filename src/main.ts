@@ -56,6 +56,7 @@ import {
 } from './lib/ir-id-warning-notice';
 import ReviewManager from './lib/items/ReviewManager';
 import { scanForMovedNotes } from './lib/moved-note-scan';
+import { configureSuccessNotices } from './lib/notices';
 import {
   type ExtractedMarkdownEditor,
   getEditorClass,
@@ -178,6 +179,8 @@ export default class IncrementalReadingPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    // Success notices follow this plugin's levels, inside review or not
+    configureSuccessNotices(this);
     this.MarkdownEditor = getEditorClass(this.app);
 
     const ribbonIconEl = this.addRibbonIcon(
@@ -418,6 +421,7 @@ export default class IncrementalReadingPlugin extends Plugin {
    */
   onunload() {
     this.reviewManager?.repo.dispose();
+    configureSuccessNotices(null);
   }
 
   async loadSettings() {

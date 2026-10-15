@@ -1,7 +1,8 @@
 import { Actions, itemName } from '#/lib/Actions';
-import { CONTENT_TITLE_SLICE_LENGTH } from '#/lib/constants';
+import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from '#/lib/constants';
 import * as contextFlash from '#/lib/context-flash';
 import * as itemContext from '#/lib/item-context';
+import { configureSuccessNotices } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as obsidianPdf from '#/lib/pdf/obsidian-pdf';
 import * as pdfSelection from '#/lib/pdf/pdf-selection';
@@ -27,6 +28,7 @@ import {
   type ReviewArticle,
   type ReviewCard,
   type ReviewItem,
+  type ReviewSnippet,
   type ReviewText,
 } from '#/lib/types';
 import { getContentSlice, getEndOfDay } from '#/lib/utils';
@@ -36,6 +38,10 @@ import fc from 'fast-check';
 // here is the one `ObsidianHelpers.notify` constructs — importing it by path is
 // what gives TS the mock's `messages`/`reset`, which the real class lacks.
 import { Notice } from '#/test/__mocks__/obsidian';
+import {
+  showSuccessNotices,
+  SUCCESS_NOTICE_LEVELS,
+} from '#/test/success-notices';
 import * as CardAnswerModal from '#/views/CardAnswerModal';
 import type ReviewView from '#/views/ReviewView';
 import { EditorState } from '@codemirror/state';
@@ -815,6 +821,74 @@ describe('Actions.reprioritize', () => {
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       `Failed to update priority for "${item.data.reference}"`,
       { kind: 'error' }
+    );
+  });
+});
+
+describe('Actions — success notice levels', () => {
+  beforeEach(() => {
+    vi.spyOn(store, 'getState').mockReturnValue({
+      currentItemId: null,
+    } as never);
+  });
+
+  afterEach(() => {
+    configureSuccessNotices(null);
+    vi.restoreAllMocks();
+  });
+
+  it('confirms each action only at the all level, and an undo at minimal too', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
+        async (level) => {
+          Notice.reset();
+          showSuccessNotices(level);
+          const plugin = makeReviewingPlugin({
+            reviewId: 'review-1',
+            dayRolloverOffset: 4,
+          });
+          Object.assign(plugin.reviewManager, {
+            reprioritize: vi.fn().mockResolvedValue(undefined),
+          });
+          const actions = new Actions(plugin);
+          const item = (type: NoteType) =>
+            makeTypedItem(type, { id: type, dismissed: false });
+
+          await actions.reviewArticle(
+            item('article') as ReviewArticle,
+            MS_PER_DAY
+          );
+          await actions.reviewSnippet(
+            item('snippet') as ReviewSnippet,
+            MS_PER_DAY
+          );
+          await actions.gradeCard(item('card') as ReviewCard, 3);
+          await actions.reprioritize(item('article') as ReviewText, 40);
+          actions.skipItem(item('article'));
+          await actions.dismissItem(item('snippet'));
+          await actions.unDismissItem(item('snippet'));
+          await actions.undo();
+
+          const undid = 'Undid dismissing "snippet"';
+          expect(Notice.messages).toEqual(
+            {
+              all: [
+                'Next article review manually scheduled for 1 days from now',
+                'Next snippet review manually scheduled for 1 days from now',
+                'Graded as: Good',
+                'Priority set to 4',
+                'Skipping article',
+                'Dismissed "snippet"',
+                'Restored "snippet" to queue',
+                undid,
+              ],
+              minimal: [undid],
+              none: [],
+            }[level]
+          );
+        }
+      )
     );
   });
 });

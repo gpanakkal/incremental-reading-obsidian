@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { DISMISS_ICON_STROKE, PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
+import { configureSuccessNotices } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   DataChangeEvent,
@@ -9,6 +10,10 @@ import type {
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import { Notice } from '#/test/__mocks__/obsidian';
+import {
+  showSuccessNotices,
+  SUCCESS_NOTICE_LEVELS,
+} from '#/test/success-notices';
 import { EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import fc from 'fast-check';
@@ -647,6 +652,35 @@ describe('renderStandaloneActionBarDOM', () => {
         );
         container.remove();
       })
+    );
+  });
+
+  it('confirms a dismissal or restore only while every success notice shows', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
+        async (dismissed, level) => {
+          const file = makeFile();
+          const harness = makeHarness({ item: makeItem({ dismissed, file }) });
+          const container = makeContainer();
+          showSuccessNotices(level);
+          Notice.reset();
+
+          renderStandaloneActionBarDOM(file, harness.plugin, container);
+          await tick();
+          dismissButton(container).click();
+          await tick();
+          configureSuccessNotices(null);
+          container.remove();
+
+          expect(Notice.messages).toEqual(
+            level === 'all'
+              ? [dismissed ? 'Item restored to queue' : 'Item dismissed']
+              : []
+          );
+        }
+      )
     );
   });
 

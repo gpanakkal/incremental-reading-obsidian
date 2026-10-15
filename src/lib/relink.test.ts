@@ -1,5 +1,9 @@
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import { Notice } from '#/test/__mocks__/obsidian';
+import {
+  SUCCESS_NOTICE_LEVELS,
+  showSuccessNotices,
+} from '#/test/success-notices';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { App, TFile } from 'obsidian';
@@ -17,6 +21,7 @@ import {
 import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
 import { refusedPathsWarning } from './item-path-guard';
 import { ITEM_TABLES, type ItemTable, evictedSpot } from './moved-note-scan';
+import { configureSuccessNotices } from './notices';
 import {
   type RelinkFile,
   type RelinkVault,
@@ -989,6 +994,55 @@ describe('relinkItem', () => {
       'Relinked to "new.md", but its frontmatter could not be updated',
     ]);
   });
+
+  it('confirms a clean relink only while every success notice shows, and always says when the frontmatter failed', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
+        async (frontmatterFails, level) => {
+          vi.restoreAllMocks();
+          Notice.reset();
+          const repo = TestRepository.create();
+          insertItem(repo, {
+            table: 'article',
+            id: 'i',
+            reference: 'gone.md',
+            deleted: false,
+          });
+          const { plugin } = makePlugin(repo);
+          if (frontmatterFails) {
+            plugin.app.fileManager.processFrontMatter.mockRejectedValue(
+              new Error('bad YAML')
+            );
+          }
+          vi.spyOn(console, 'error').mockImplementation(() => {});
+          showSuccessNotices(level);
+
+          try {
+            await relinkItem(
+              plugin as never,
+              { table: 'article', id: 'i' },
+              makeFile('new.md') as TFile
+            );
+          } finally {
+            configureSuccessNotices(null);
+          }
+
+          expect(Notice.messages).toEqual(
+            frontmatterFails
+              ? [
+                  'Relinked to "new.md", but its frontmatter could not be updated',
+                ]
+              : level === 'all'
+                ? ['Relinked to "new.md"']
+                : []
+          );
+        }
+      )
+    );
+  });
+
   describe('a snippet’s highlight in its parent', () => {
     /** A parent article at `parent.md` and its missing snippet `i`. */
     function wireSnippet(parentFileThere = true) {

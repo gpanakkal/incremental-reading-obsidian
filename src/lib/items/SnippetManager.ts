@@ -607,7 +607,9 @@ export class SnippetManager extends ItemManager {
   ) {
     await this.insertRow(snippetFile, id, dueTime, priority, parentId, offsets);
 
-    Obsidian.notify(`snippet created: ${snippetFile.basename}`);
+    Obsidian.notify(`snippet created: ${snippetFile.basename}`, {
+      kind: 'success',
+    });
 
     // Past the commit: a failed read is no reason to take the snippet back
     return this.fetch(id).catch((error: unknown) => {

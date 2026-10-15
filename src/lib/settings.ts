@@ -32,6 +32,8 @@ export interface IRPluginSettings {
   reviewTitleBar: ReviewTitleBar;
   /** Whether each grade button shows the interval it would schedule. */
   showGradeIntervals: boolean;
+  successNoticesInReview: SuccessNoticeLevel;
+  successNoticesOutsideReview: SuccessNoticeLevel;
   fsrsParams: FSRSParameters;
 }
 
@@ -58,6 +60,28 @@ export const REVIEW_TITLE_BAR_OPTIONS: Readonly<
 export const isReviewTitleBar = (value: unknown): value is ReviewTitleBar =>
   typeof value === 'string' && Object.hasOwn(REVIEW_TITLE_BAR_OPTIONS, value);
 
+/**
+ * Which success notices show: every one, only those for an undo or an import,
+ * or none. Errors and other notices always show.
+ */
+export type SuccessNoticeLevel = 'all' | 'minimal' | 'none';
+
+/** Each {@link SuccessNoticeLevel}, as the settings dropdowns name it. */
+export const SUCCESS_NOTICE_LEVEL_OPTIONS: Readonly<
+  Record<SuccessNoticeLevel, string>
+> = Object.freeze({
+  all: 'All',
+  minimal: 'Minimal',
+  none: 'None',
+});
+
+/** Whether `value` is a {@link SuccessNoticeLevel}; see {@link isReviewTitleBar}. */
+export const isSuccessNoticeLevel = (
+  value: unknown
+): value is SuccessNoticeLevel =>
+  typeof value === 'string' &&
+  Object.hasOwn(SUCCESS_NOTICE_LEVEL_OPTIONS, value);
+
 const FSRS_PARAMETER_DEFAULTS = Object.freeze(generatorParameters());
 
 export const DEFAULT_SETTINGS: IRPluginSettings = {
@@ -72,6 +96,8 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   skipHomeScreen: false,
   reviewTitleBar: 'obsidian',
   showGradeIntervals: false,
+  successNoticesInReview: 'all',
+  successNoticesOutsideReview: 'all',
   fsrsParams: FSRS_PARAMETER_DEFAULTS,
 };
 
@@ -181,6 +207,8 @@ const CONTROL_BINDINGS = {
   showAdvancedImportCommands: topLevel('showAdvancedImportCommands'),
   showAdvancedImportMenuItems: topLevel('showAdvancedImportMenuItems'),
   showGradeIntervals: topLevel('showGradeIntervals'),
+  successNoticesInReview: topLevel('successNoticesInReview'),
+  successNoticesOutsideReview: topLevel('successNoticesOutsideReview'),
   'fsrsParams.request_retention': fsrsParam('request_retention'),
   'fsrsParams.enable_fuzz': fsrsParam('enable_fuzz'),
   'fsrsParams.maximum_interval': fsrsParam('maximum_interval'),
@@ -257,6 +285,34 @@ export class IRSettingTab extends PluginSettingTab {
             name: 'Create empty articles in the current folder',
             desc: `If disabled, empty articles will be created in "${DATA_DIRECTORY}/"`,
             control: { type: 'toggle', key: 'createEmptyInCurrentFolder' },
+          },
+        ],
+      },
+      {
+        type: 'group',
+        heading: 'Notifications and reminders',
+        items: [
+          {
+            name: 'Success notices inside review',
+            desc:
+              'Which confirmations to show for actions taken in the review tab.' +
+              ' Minimal shows only undos and imports. Errors always show.',
+            control: {
+              type: 'dropdown',
+              key: 'successNoticesInReview',
+              options: SUCCESS_NOTICE_LEVEL_OPTIONS,
+            },
+          },
+          {
+            name: 'Success notices outside review',
+            desc:
+              'Which confirmations to show for actions taken anywhere else.' +
+              ' Minimal shows only undos and imports. Errors always show.',
+            control: {
+              type: 'dropdown',
+              key: 'successNoticesOutsideReview',
+              options: SUCCESS_NOTICE_LEVEL_OPTIONS,
+            },
           },
         ],
       },

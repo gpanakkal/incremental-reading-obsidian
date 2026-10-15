@@ -181,7 +181,8 @@ export class Actions {
       if (nextInterval) {
         Obsidian.notify(
           `Next article review manually scheduled for ` +
-            `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`
+            `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`,
+          { kind: 'success' }
         );
       }
       this._getNext();
@@ -218,7 +219,8 @@ export class Actions {
       if (nextInterval) {
         Obsidian.notify(
           `Next snippet review manually scheduled for ` +
-            `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`
+            `${Math.round((10 * nextInterval) / MS_PER_DAY) / 10} days from now`,
+          { kind: 'success' }
         );
       }
       this._getNext();
@@ -249,7 +251,7 @@ export class Actions {
     try {
       await this.plugin.reviewManager.reprioritize(item.data, priority);
       await invalidateItemQuery(item.data.id);
-      Obsidian.notify(`Priority set to ${priority / 10}`);
+      Obsidian.notify(`Priority set to ${priority / 10}`, { kind: 'success' });
     } catch (_error) {
       Obsidian.notify(
         `Failed to update priority for "${item.data.reference}"`,
@@ -294,7 +296,7 @@ export class Actions {
       },
     });
 
-    Obsidian.notify(`Graded as: ${Rating[grade]}`);
+    Obsidian.notify(`Graded as: ${Rating[grade]}`, { kind: 'success' });
     this._getNext();
   };
 
@@ -320,7 +322,7 @@ export class Actions {
       CONTENT_TITLE_SLICE_LENGTH,
       true
     );
-    Obsidian.notify(`Dismissed "${itemTitle}"`);
+    Obsidian.notify(`Dismissed "${itemTitle}"`, { kind: 'success' });
     if (wasBeingReviewed) {
       this._getNext();
     }
@@ -340,7 +342,7 @@ export class Actions {
       CONTENT_TITLE_SLICE_LENGTH,
       true
     );
-    Obsidian.notify(`Restored "${itemTitle}" to queue`);
+    Obsidian.notify(`Restored "${itemTitle}" to queue`, { kind: 'success' });
   };
 
   /**
@@ -413,7 +415,7 @@ export class Actions {
       CONTENT_TITLE_SLICE_LENGTH + 5,
       true
     );
-    Obsidian.notify(`Skipping ${itemTitle}`);
+    Obsidian.notify(`Skipping ${itemTitle}`, { kind: 'success' });
     this._getNext();
   };
 
@@ -1091,7 +1093,10 @@ export class Actions {
       });
       return;
     }
-    Obsidian.notify(`Undid ${actionEntry.description}`);
+    Obsidian.notify(`Undid ${actionEntry.description}`, {
+      kind: 'success',
+      category: 'undo',
+    });
   };
 
   // #region HELPERS

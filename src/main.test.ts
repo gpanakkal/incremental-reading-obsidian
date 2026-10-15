@@ -1,6 +1,7 @@
 import { refusedPathsWarning } from '#/lib/item-path-guard';
 import ReviewManager from '#/lib/items/ReviewManager';
 import { SnippetManager } from '#/lib/items/SnippetManager';
+import { configureSuccessNotices, notify } from '#/lib/notices';
 import { SYNC_HOLD_MESSAGES, SYNC_WAIT_TIMEOUT_MS } from '#/lib/obsidian-sync';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
@@ -3029,6 +3030,26 @@ describe('IncrementalReadingPlugin unload', () => {
     expect(dispose).toHaveBeenCalledOnce();
   });
 
+  it('shows every success again once unloaded, whatever its levels said', () => {
+    const receiver = {
+      reviewManager: undefined,
+      settings: {
+        successNoticesInReview: 'none' as const,
+        successNoticesOutsideReview: 'none' as const,
+      },
+      getActiveReviewView: () => null,
+    };
+    configureSuccessNotices(receiver);
+    Notice.reset();
+
+    IncrementalReadingPlugin.prototype.onunload.call(
+      receiver as unknown as IncrementalReadingPlugin
+    );
+    notify('done', { kind: 'success' });
+
+    expect(Notice.messages).toEqual(['done']);
+  });
+
   it('unloads when the database never started', () => {
     const receiver = { reviewManager: undefined };
 
@@ -3037,5 +3058,52 @@ describe('IncrementalReadingPlugin unload', () => {
         receiver as unknown as IncrementalReadingPlugin
       );
     }).not.toThrow();
+  });
+});
+
+describe('IncrementalReadingPlugin as the success notice source', () => {
+  afterEach(() => {
+    configureSuccessNotices(null);
+    vi.restoreAllMocks();
+  });
+
+  it('counts a success as raised inside review only while the review tab is the active view', () => {
+    const views = {
+      review: Object.create(ReviewView.prototype) as object,
+      note: Object.create(MarkdownView.prototype) as object,
+      none: null,
+    };
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...(Object.keys(views) as (keyof typeof views)[])),
+        (where) => {
+          Notice.reset();
+          const active = views[where];
+          const receiver = {
+            settings: {
+              successNoticesInReview: 'none' as const,
+              successNoticesOutsideReview: 'all' as const,
+            },
+            app: {
+              workspace: {
+                // Obsidian's lookup: the active view, if it is one of `type`
+                getActiveViewOfType: (type: abstract new () => unknown) =>
+                  active instanceof type ? active : null,
+              },
+            },
+            getActiveReviewView(): object | null {
+              return IncrementalReadingPlugin.prototype.getActiveReviewView.call(
+                this as unknown as IncrementalReadingPlugin
+              );
+            },
+          };
+          configureSuccessNotices(receiver);
+
+          notify('done', { kind: 'success' });
+
+          expect(Notice.messages).toEqual(where === 'review' ? [] : ['done']);
+        }
+      )
+    );
   });
 });

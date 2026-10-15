@@ -142,6 +142,47 @@ describe('parsePluginData', () => {
     );
   });
 
+  it('shows every success notice inside and outside review unless told otherwise', () => {
+    expect(DEFAULT_SETTINGS.successNoticesInReview).toBe('all');
+    expect(DEFAULT_SETTINGS.successNoticesOutsideReview).toBe('all');
+    expect(parsePluginData({ settings: {} }).settings).toMatchObject({
+      successNoticesInReview: 'all',
+      successNoticesOutsideReview: 'all',
+    });
+  });
+
+  it('keeps a known success notice level and replaces anything else with all', () => {
+    const LEVELS: unknown[] = ['all', 'minimal', 'none'];
+    const storedArb = fc.oneof(
+      fc.constantFrom(...LEVELS),
+      fc.constantFrom('All', 'NONE', ' minimal', '', 'toString', '__proto__'),
+      // not strings, though each reads as a level once made one
+      fc.constantFrom(['none'], { toString: () => 'minimal' }),
+      fc.anything()
+    );
+    fc.assert(
+      fc.property(
+        storedArb,
+        storedArb,
+        fc.boolean(),
+        (inside, outside, legacy) => {
+          const saved = {
+            successNoticesInReview: inside,
+            successNoticesOutsideReview: outside,
+          };
+          const data = parsePluginData(legacy ? saved : { settings: saved });
+
+          expect(data.settings.successNoticesInReview).toBe(
+            LEVELS.includes(inside) ? inside : 'all'
+          );
+          expect(data.settings.successNoticesOutsideReview).toBe(
+            LEVELS.includes(outside) ? outside : 'all'
+          );
+        }
+      )
+    );
+  });
+
   it('keeps saved settings and drops nothing, whatever else the file holds', () => {
     fc.assert(
       fc.property(

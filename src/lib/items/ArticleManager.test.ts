@@ -25,6 +25,7 @@ import {
   REFUSED_PATH_CHARS,
   refusedPathsWarning,
 } from '#/lib/item-path-guard';
+import { configureSuccessNotices } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   ArticleRow,
@@ -47,6 +48,10 @@ import {
 } from '#/test/due-query';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
 import { cachePosition, makeLinkVault, sectionsOf } from '#/test/link-vault';
+import {
+  showSuccessNotices,
+  SUCCESS_NOTICE_LEVELS,
+} from '#/test/success-notices';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
@@ -3400,6 +3405,36 @@ describe('import', () => {
       );
 
       expect(result?.file).toBe(replacement);
+    });
+
+    it('confirms the import at every success notice level but none', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
+          async (level) => {
+            Notice.reset();
+            showSuccessNotices(level);
+            const { repo } = await makeSqlJsRepo();
+
+            try {
+              await new ArticleManager(
+                makePdfImportPlugin(PDF_FILE) as never,
+                repo
+              ).import(PDF_FILE, DEFAULT_PRIORITY, null, false);
+            } finally {
+              configureSuccessNotices(null);
+            }
+
+            expect(Notice.messages).toEqual(
+              level === 'none'
+                ? []
+                : [
+                    `Imported "Paper" with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`,
+                  ]
+            );
+          }
+        )
+      );
     });
 
     it('names a long PDF by the start of its name in the notice', async () => {

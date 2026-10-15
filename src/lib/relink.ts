@@ -9,6 +9,7 @@ import {
   type RowId,
   evictedSpot,
 } from './moved-note-scan';
+import type { NoticeKind } from './notices';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import type { NoteType, SQLiteRepository } from './types';
 
@@ -302,6 +303,8 @@ export async function relinkItem(
   }
 
   let notice = `Relinked to "${target.path}"`;
+  // Only a clean relink is a success the levels may hide
+  let kind: NoticeKind = 'success';
   try {
     await Obsidian.updateFrontMatter(
       target,
@@ -311,6 +314,7 @@ export async function relinkItem(
   } catch (error) {
     console.error(error);
     notice += `, but its frontmatter could not be updated`;
+    kind = 'info';
   }
   reviewManager.snippets.offsetTracker.renameFile(result.from, target.path);
   app.workspace.trigger('ir-highlights-changed', target.path);
@@ -326,7 +330,7 @@ export async function relinkItem(
   } catch (error) {
     console.error(error);
   }
-  Obsidian.notify(notice);
+  Obsidian.notify(notice, { kind });
   // Relinked where the user found it, but its path breaks links to it
   const warning = refusedPathWarning(target.path);
   if (warning) Obsidian.notify(warning);

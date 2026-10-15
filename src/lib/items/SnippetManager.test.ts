@@ -4224,6 +4224,28 @@ describe('create, with its note and its row as one unit', () => {
   });
 });
 
+describe('create, confirmed', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('confirms a new snippet by name as a success, which only the all level shows', async () => {
+    const { repo, notify } = await snipInVault(null, null, null);
+
+    const [row] = repo
+      .rows('snippet')
+      .filter(({ reference }) => reference !== PARENT);
+    const basename = (row.reference as string)
+      .split('/')
+      .at(-1)!
+      .replace(/\.md$/, '');
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      `snippet created: ${basename}`,
+      { kind: 'success' }
+    );
+  });
+});
+
 describe('createFromPdf, with its note and its row as one unit', () => {
   afterEach(() => {
     vi.restoreAllMocks();

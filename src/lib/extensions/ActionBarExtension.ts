@@ -236,7 +236,9 @@ function renderReviewModeActions(
               } else if (noteType === 'snippet') {
                 await reviewManager.reprioritize(item.data, newPriority);
               }
-              Obsidian.notify(`Priority set to ${newPriority / 10}`);
+              Obsidian.notify(`Priority set to ${newPriority / 10}`, {
+                kind: 'success',
+              });
             } catch (error) {
               Obsidian.notify(`Failed to update priority`, { kind: 'error' });
               console.error(error);
@@ -377,11 +379,11 @@ export function renderStandaloneActionBarDOM(
           const isDismissed = item.data.dismissed;
           if (isDismissed) {
             await reviewManager.unDismissItem(item);
-            Obsidian.notify('Item restored to queue');
+            Obsidian.notify('Item restored to queue', { kind: 'success' });
             updateButtonLabel(false);
           } else {
             await reviewManager.dismissItem(item);
-            Obsidian.notify('Item dismissed');
+            Obsidian.notify('Item dismissed', { kind: 'success' });
             updateButtonLabel(true);
           }
 

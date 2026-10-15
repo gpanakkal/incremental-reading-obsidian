@@ -5,7 +5,14 @@ import {
   NOTICE_MIN_DURATION_MS,
   NOTICE_SCALED_DURATION_PER_WORD_MS,
 } from './constants';
-import { notify, type NoticeKind } from './notices';
+import {
+  configureSuccessNotices,
+  notify,
+  type NoticeKind,
+  type SuccessCategory,
+  type SuccessNoticeSource,
+} from './notices';
+import type { SuccessNoticeLevel } from './settings';
 
 // #region HELPERS
 
@@ -39,11 +46,39 @@ function isEvictable(options: { kind?: NoticeKind; persist?: boolean } = {}) {
   return options.kind !== 'error' && !options.persist;
 }
 
+const levels: SuccessNoticeLevel[] = ['all', 'minimal', 'none'];
+const categories: SuccessCategory[] = ['undo', 'import'];
+
+/** Any category, or none for an ordinary confirmation. */
+const categoryArb = fc.option(fc.constantFrom(...categories), {
+  nil: undefined,
+});
+
+/**
+ * The plugin as the notices read it: its two levels, and whether the review
+ * tab is the active view. `view` stands for whatever the review tab returns.
+ */
+function makeSource({
+  inside = 'all' as SuccessNoticeLevel,
+  outside = 'all' as SuccessNoticeLevel,
+  inReview = false,
+} = {}): SuccessNoticeSource {
+  const view = {};
+  return {
+    settings: {
+      successNoticesInReview: inside,
+      successNoticesOutsideReview: outside,
+    },
+    getActiveReviewView: () => (inReview ? view : null),
+  };
+}
+
 // #endregion
 
 describe('notify', () => {
   beforeEach(() => {
     Notice.reset();
+    configureSuccessNotices(null);
   });
 
   afterEach(() => {
@@ -133,6 +168,75 @@ describe('notify', () => {
 
         expect(notice).toBe(Notice.instances[0]);
         expect(Notice.messages).toEqual([message]);
+      })
+    );
+  });
+});
+
+describe('notify with success notice levels', () => {
+  beforeEach(() => {
+    Notice.reset();
+  });
+
+  afterEach(() => {
+    configureSuccessNotices(null);
+    vi.restoreAllMocks();
+  });
+
+  it('shows a success only as the level where it was raised allows, and every other notice always', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...levels),
+        fc.constantFrom(...levels),
+        fc.boolean(),
+        kindArb,
+        categoryArb,
+        fc.option(fc.boolean(), { nil: undefined }),
+        (inside, outside, inReview, kind, category, persist) => {
+          Notice.reset();
+          configureSuccessNotices(makeSource({ inside, outside, inReview }));
+          notify('earlier');
+
+          const notice = notify('now', { kind, category, persist });
+
+          const level = inReview ? inside : outside;
+          const shown =
+            kind !== 'success' ||
+            persist === true ||
+            level === 'all' ||
+            (level === 'minimal' && category !== undefined);
+          expect(Notice.messages).toEqual(
+            shown ? ['earlier', 'now'] : ['earlier']
+          );
+          expect(notice).toBe(shown ? Notice.instances[1] : null);
+          // One that is not shown leaves the notice before it up
+          expect(Notice.instances[0].hides).toBe(shown ? 1 : 0);
+        }
+      )
+    );
+  });
+
+  it('reads the levels and the review tab afresh for each notice', () => {
+    const source = makeSource({ inside: 'none', outside: 'all' });
+    configureSuccessNotices(source);
+
+    notify('outside', { kind: 'success' });
+    source.getActiveReviewView = () => ({});
+    notify('inside', { kind: 'success' });
+    source.settings.successNoticesInReview = 'all';
+    notify('inside again', { kind: 'success' });
+
+    expect(Notice.messages).toEqual(['outside', 'inside again']);
+  });
+
+  it('shows every success while nothing has set the levels', () => {
+    fc.assert(
+      fc.property(categoryArb, (category) => {
+        Notice.reset();
+
+        notify('done', { kind: 'success', category });
+
+        expect(Notice.messages).toEqual(['done']);
       })
     );
   });

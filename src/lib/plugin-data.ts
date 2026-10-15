@@ -2,6 +2,7 @@ import type { App } from 'obsidian';
 import {
   DEFAULT_SETTINGS,
   isReviewTitleBar,
+  isSuccessNoticeLevel,
   type IRPluginSettings,
 } from './settings';
 
@@ -61,6 +62,14 @@ export function parsePluginData(raw: unknown): IRPluginData {
   // doesn't know would leave it matching none of its three choices.
   if (!isReviewTitleBar(settings.reviewTitleBar)) {
     settings.reviewTitleBar = DEFAULT_SETTINGS.reviewTitleBar;
+  }
+  for (const key of [
+    'successNoticesInReview',
+    'successNoticesOutsideReview',
+  ] as const) {
+    if (!isSuccessNoticeLevel(settings[key])) {
+      settings[key] = DEFAULT_SETTINGS[key];
+    }
   }
 
   return {
