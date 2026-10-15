@@ -968,6 +968,143 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Saving waits for the mount-time restore
+// ---------------------------------------------------------------------------
+describe('saving waits for the mount-time restore', () => {
+  // A scroll saved before the restore runs is what the restore then loads and
+  // jumps back to, and its 200ms guard swallows the saves for the reader's
+  // scrolling that follows: the place the reader left is lost.
+  it('does not listen for scrolls while waiting out the fallback for a properties widget', async () => {
+    const view = makeView({
+      plugin: makePlugin(makeReviewManager(100)),
+      propertiesWidget: null,
+    });
+    factory(view as never);
+
+    await vi.advanceTimersByTimeAsync(299);
+    expect(view.scrollDOM.addEventListener).not.toHaveBeenCalled();
+
+    await vi.runAllTimersAsync();
+    expect(view.scrollDOM.addEventListener).toHaveBeenCalledWith(
+      'scrollend',
+      expect.any(Function),
+      expect.anything()
+    );
+  });
+
+  it('does not listen for scrolls until the restore the widget triggers has run', async () => {
+    const { MockMO, triggerMutation } = makeFakeMutationObserver();
+    vi.stubGlobal('MutationObserver', MockMO);
+    const reviewManager = makeReviewManager(100);
+    const view = makeView({
+      plugin: makePlugin(reviewManager),
+      propertiesWidget: null,
+    });
+    factory(view as never);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(view.scrollDOM.addEventListener).not.toHaveBeenCalled();
+
+    view.contentDOM.querySelector.mockReturnValue(makeWidgetElement());
+    triggerMutation();
+    await vi.runAllTimersAsync();
+
+    const [load] = reviewManager.loadScrollPosition.mock.invocationCallOrder;
+    const [listen] = view.scrollDOM.addEventListener.mock.invocationCallOrder;
+    expect(listen).toBeGreaterThan(load);
+  });
+
+  it('neither restores nor listens when destroyed while waiting for a properties widget', async () => {
+    spyScrollIntoView();
+    const reviewManager = makeReviewManager(100);
+    const view = makeView({
+      plugin: makePlugin(reviewManager),
+      propertiesWidget: null,
+    });
+    const instance = factory(view as never);
+    await vi.advanceTimersByTimeAsync(10);
+
+    instance.destroy();
+    await vi.runAllTimersAsync();
+
+    expect(reviewManager.loadScrollPosition).not.toHaveBeenCalled();
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(view.scrollDOM.addEventListener).not.toHaveBeenCalled();
+  });
+
+  it('leaves no fallback timer running once destroyed', async () => {
+    const view = makeView({ propertiesWidget: null });
+    const instance = factory(view as never);
+    await vi.advanceTimersByTimeAsync(10);
+
+    instance.destroy();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('restores as soon as the widget lays out, without waiting out the fallback', async () => {
+    const { MockMO, triggerMutation } = makeFakeMutationObserver();
+    vi.stubGlobal('MutationObserver', MockMO);
+    const reviewManager = makeReviewManager(100);
+    const view = makeView({
+      plugin: makePlugin(reviewManager),
+      propertiesWidget: null,
+    });
+    factory(view as never);
+    await vi.advanceTimersByTimeAsync(10);
+
+    view.contentDOM.querySelector.mockReturnValue(makeWidgetElement());
+    triggerMutation();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(reviewManager.loadScrollPosition).toHaveBeenCalledTimes(1);
+    expect(view.scrollDOM.addEventListener).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not restore when destroyed between the widget appearing and its layout frame', async () => {
+    const { MockMO, triggerMutation } = makeFakeMutationObserver();
+    vi.stubGlobal('MutationObserver', MockMO);
+    const reviewManager = makeReviewManager(100);
+    const view = makeView({
+      plugin: makePlugin(reviewManager),
+      propertiesWidget: null,
+    });
+    const instance = factory(view as never);
+    await vi.advanceTimersByTimeAsync(10);
+
+    view.contentDOM.querySelector.mockReturnValue(makeWidgetElement());
+    triggerMutation();
+    instance.destroy();
+    await vi.runAllTimersAsync();
+
+    expect(reviewManager.loadScrollPosition).not.toHaveBeenCalled();
+    expect(view.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('does not listen for scrolls when destroyed while the saved position loads', async () => {
+    const reviewManager = makeReviewManager(null);
+    let finishLoading: (offset: number | null) => void = () => {};
+    reviewManager.loadScrollPosition.mockReturnValue(
+      new Promise((resolve) => {
+        finishLoading = resolve;
+      })
+    );
+    const view = makeView({
+      plugin: makePlugin(reviewManager),
+      propertiesWidget: makeWidgetElement(),
+    });
+    const instance = factory(view as never);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(reviewManager.loadScrollPosition).toHaveBeenCalled();
+
+    instance.destroy();
+    finishLoading(null);
+    await vi.runAllTimersAsync();
+
+    expect(view.scrollDOM.addEventListener).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // destroy() — cleans up resources
 // ---------------------------------------------------------------------------
 describe('destroy()', () => {

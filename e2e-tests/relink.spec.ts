@@ -101,9 +101,12 @@ async function seedLostItem(
   fileAt: string,
   lostAt: string
 ) {
+  // A fuzz already rolled, as any reviewed item has: left null, one is rolled
+  // the first time the item's file resolves, which moves its shown due date by
+  // up to six hours, and across midnight in the evening.
   await mutate(
-    `INSERT INTO ${table} (id, reference, due, interval, priority)
-     VALUES ($1, $2, $3, 86400000, 25)`,
+    `INSERT INTO ${table} (id, reference, due, due_fuzz, interval, priority)
+     VALUES ($1, $2, $3, 0, 86400000, 25)`,
     [id, fileAt, Date.now() - 60_000]
   );
   await mutate(

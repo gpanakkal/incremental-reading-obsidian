@@ -273,14 +273,17 @@ test.describe('Review history navigation', () => {
     await scroller.hover();
     // The save listener goes on only after the mount-time restore has run, two
     // frames plus a 300ms wait for a properties widget in, and a scroll before
-    // that saves nothing: scroll on until one is saved.
+    // that saves nothing: try again until one is saved.
+    //
+    // Each try starts back at the top, so it lands where the first one meant
+    // to. Scrolling on from where the last try stopped runs into the end of the
+    // item, where no line of text sits at the top edge to come back to.
+    const scrollTop = async () => (await topVisibleLine())?.scrollTop ?? 0;
     await expect(async () => {
+      await window.mouse.wheel(0, -100000);
+      await expect.poll(scrollTop, { timeout: 2000 }).toBe(0);
       for (let i = 0; i < 6; i++) await window.mouse.wheel(0, 600);
-      await expect
-        .poll(async () => (await topVisibleLine())?.scrollTop ?? 0, {
-          timeout: 2000,
-        })
-        .toBeGreaterThan(1000);
+      await expect.poll(scrollTop, { timeout: 2000 }).toBeGreaterThan(1000);
       await expect.poll(savedScroll, { timeout: 2000 }).toBeGreaterThan(0);
     }).toPass();
     // Then for the scroll to come to rest, and what is saved with it: a wheel
@@ -288,10 +291,7 @@ test.describe('Review history navigation', () => {
     let last = '';
     await expect
       .poll(async () => {
-        const now = JSON.stringify([
-          await savedScroll(),
-          (await topVisibleLine())?.scrollTop,
-        ]);
+        const now = JSON.stringify([await savedScroll(), await scrollTop()]);
         const settled = now === last;
         last = now;
         return settled;
