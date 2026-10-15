@@ -1,6 +1,7 @@
 import { refusedWrite, withCompensation } from '#/lib/compensation';
 import {
   DEFAULT_PRIORITY,
+  MAX_SQL_QUERY_PARAMS,
   REVIEW_COUNT_FOR_PRIORITY_SCALING,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
