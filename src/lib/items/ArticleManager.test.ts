@@ -6255,7 +6255,7 @@ describe('importWebPage', () => {
     expect(vault.frontmatterOf(taken)).toEqual(before[taken]);
     expect(notify).toHaveBeenCalledWith(
       'Warning: article with name already exists "Page.md"',
-      true
+      { persist: true }
     );
   });
 
@@ -6343,7 +6343,9 @@ describe('importWebPage', () => {
     expect(article).toBeNull();
     expect(vault.paths()).toEqual([]);
     expect(repo.rows('article')).toEqual([]);
-    expect(notify).toHaveBeenCalledExactlyOnceWith(refusal('import "Page"'));
+    expect(notify).toHaveBeenCalledExactlyOnceWith(refusal('import "Page"'), {
+      kind: 'error',
+    });
   });
 });
 
