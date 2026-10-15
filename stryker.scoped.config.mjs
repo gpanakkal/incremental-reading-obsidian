@@ -2,8 +2,10 @@
 // Per-module mutation score: same as stryker.config.mjs, but only the tests
 // colocated with the files given to --mutate run (src/lib/foo.ts ->
 // src/lib/foo.test.ts), via Stryker's `testFiles` option. Comma-separated
-// lists, mutation ranges (`:1-10`) and globs all map over; `!` patterns are dropped.
+// lists, mutation ranges (`:12`, `:1-10`) and globs all map over; a `.tsx` whose test is
+// `.test.ts` is found too; `!` patterns are dropped.
 //   pnpm exec stryker run stryker.scoped.config.mjs --mutate src/lib/foo.ts
+import { existsSync } from 'node:fs';
 import base from './stryker.config.mjs';
 
 /** @param {string[]} argv */
@@ -20,9 +22,16 @@ function mutateArgs(argv) {
 /** @param {string} pattern */
 function colocatedTest(pattern) {
   if (pattern.startsWith('!')) return undefined;
-  const file = pattern.replace(/(:\d+(:\d+)?-\d+(:\d+)?)$/, '');
+  // Ranges: `:12`, `:1-10`, `:1:1-10:5`
+  const file = pattern.replace(/(:\d+(:\d+)?(-\d+(:\d+)?)?)$/, '');
   const test = file.replace(/(\.\{[^}/]+\}|\.[^./]+)$/, '.test$1');
-  return test === file ? undefined : test;
+  if (test === file) return undefined;
+  // Component tests are often `.test.ts` next to a `.tsx`; take whichever exists
+  if (/\.test\.tsx$/.test(test) && !existsSync(test)) {
+    const ts = test.replace(/\.tsx$/, '.ts');
+    if (existsSync(ts)) return ts;
+  }
+  return test;
 }
 
 const testFiles = [
