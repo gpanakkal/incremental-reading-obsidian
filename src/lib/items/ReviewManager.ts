@@ -698,12 +698,12 @@ export default class ReviewManager {
    * Remove the `table` row `id` for good, leaving its note, if any, alone.
    *
    * Its review history and any startup rebind of it go with it. Deleted by
-   * hand rather than left to their `ON DELETE CASCADE`: sql.js's `export`,
-   * which every save runs, reopens the database with foreign keys off. The
-   * snippets and cards taken from it stay, with no parent, as if taken from
-   * nothing: `parent` has no foreign key to clear it, and one left naming a
-   * row that no longer exists would be a parent no lookup can find. All in one
-   * transaction, so a failed delete leaves everything as it was.
+   * hand as well as by their `ON DELETE CASCADE`, so they go even on a
+   * connection that has foreign keys off. The snippets and cards taken from
+   * it stay, with no parent, as if taken from nothing: `parent` has no foreign
+   * key to clear it, and one left naming a row that no longer exists would be
+   * a parent no lookup can find. All in one transaction, so a failed delete
+   * leaves everything as it was.
    *
    * A hard `DELETE` reports no data change (see
    * `SQLJSRepository.registerUpdateHook`), so whatever shows the row must be

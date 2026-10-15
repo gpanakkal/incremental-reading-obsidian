@@ -4880,9 +4880,9 @@ describe('ReviewManager.deleteRow', () => {
 
   /**
    * A manager over a real database, enforcing foreign keys only when
-   * `foreignKeys`. `SQLJSRepository` turns them on as it opens a database, but
-   * sql.js's `export`, which every save runs, reopens it with them off again,
-   * so after the first save their `ON DELETE CASCADE` does nothing.
+   * `foreignKeys`. `SQLJSRepository` keeps them on, but the deletes are
+   * written by hand so they do not depend on that, and with them off their
+   * `ON DELETE CASCADE` does nothing.
    */
   function wireDeletion({ foreignKeys = false } = {}) {
     const repo = TestRepository.create();

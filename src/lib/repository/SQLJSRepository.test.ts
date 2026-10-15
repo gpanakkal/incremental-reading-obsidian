@@ -9,11 +9,19 @@ import type { SyncHoldReason } from '#/lib/obsidian-sync';
 import type { DataChangeEvent, MutationStatement, NoteType } from '#/lib/types';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
-import type { App, Plugin, TAbstractFile } from 'obsidian';
+import type { App, DataAdapter, Plugin, TAbstractFile } from 'obsidian';
 import { resolve } from 'path';
 import type { Database, SqlValue } from 'sql.js';
 import initSqlJs from 'sql.js';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from 'vitest';
 import {
   DatabaseLoadError,
   SQLJSRepository,
@@ -89,20 +97,44 @@ async function makeRepo(): Promise<{ repo: TestRepository; db: Database }> {
 async function makeSavingRepo(): Promise<{
   repo: SavingTestRepository;
   db: Database;
+  /** The stubbed vault write every save ends in */
+  writeBinary: MockInstance<DataAdapter['writeBinary']>;
 }> {
   const SQL = await makeSql();
   const schema = loadSchema();
   const db = new SQL.Database();
   db.exec(schema);
+  // Production turns foreign keys on when it opens a database (`initDb`)
+  db.exec('PRAGMA foreign_keys = ON');
   const repo = SavingTestRepository.createReal(schema, db);
-  return { repo, db };
+  const writeBinary = vi.spyOn(repo.app.vault.adapter, 'writeBinary');
+  return { repo, db, writeBinary };
 }
 
-function insertArticle(repo: TestRepository, id: string, priority = 30) {
+/** `PRAGMA foreign_keys` as the connection reports it: 1 = enforced */
+function foreignKeysPragma(repo: SQLJSRepository): number {
+  const [row] = repo.query('PRAGMA foreign_keys') as unknown as {
+    foreign_keys: number;
+  }[];
+  return row.foreign_keys;
+}
+
+function insertArticle(repo: SQLJSRepository, id: string, priority = 30) {
   repo.mutate(
     `INSERT INTO article (id, reference, due, interval, priority)
      VALUES ($1, $2, $3, $4, $5)`,
     [id, `articles/${id}.md`, Date.now(), 86_400_000, priority]
+  );
+}
+
+function insertArticleReview(
+  repo: SQLJSRepository,
+  id: string,
+  articleId: string
+) {
+  repo.mutate(
+    `INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)`,
+    [id, articleId, Date.now()]
   );
 }
 
@@ -950,6 +982,73 @@ describe('onDataChange', () => {
       { table: 'article', op: 'update', ids: ['a1'] },
       { table: 'article', op: 'insert', ids: ['a2'] },
     ]);
+  });
+});
+
+// sql.js `export()` (run by the real `save()`) closes the connection and
+// reopens the file, so every connection-level pragma is back at its default
+// afterwards. Foreign keys must survive that, or `ON DELETE CASCADE` and every
+// FK constraint go unenforced after the first save of a session.
+describe('foreign keys after save', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('keeps PRAGMA foreign_keys on after a mutate has saved', async () => {
+    const { repo } = await makeSavingRepo();
+    expect(foreignKeysPragma(repo)).toBe(1);
+
+    insertArticle(repo, 'a1');
+
+    expect(foreignKeysPragma(repo)).toBe(1);
+  });
+
+  it('cascades a parent delete to its children after a save', async () => {
+    const { repo } = await makeSavingRepo();
+    insertArticle(repo, 'a1');
+    insertArticleReview(repo, 'r1', 'a1');
+
+    repo.mutate(`DELETE FROM article WHERE id = $1`, ['a1']);
+
+    expect(repo.query(`SELECT id FROM article_review`)).toEqual([]);
+  });
+
+  // Every save reopens the connection, whether the write that follows it
+  // succeeds or not, and a transaction saves once where a mutate saves per
+  // statement.
+  it('enforces foreign keys after any run of saves, failed writes included', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const step = fc.record({
+      viaTransaction: fc.boolean(),
+      writeFails: fc.boolean(),
+    });
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(step, { minLength: 1, maxLength: 6 }),
+        async (steps) => {
+          const { repo, writeBinary } = await makeSavingRepo();
+
+          for (const [i, { viaTransaction, writeFails }] of steps.entries()) {
+            if (writeFails)
+              writeBinary.mockRejectedValueOnce(new Error('disk full'));
+            const write = () => {
+              insertArticle(repo, `a${i}`);
+              insertArticleReview(repo, `r${i}`, `a${i}`);
+            };
+            if (viaTransaction) {
+              await repo.transaction(async () => write()).catch(() => {});
+            } else {
+              write();
+            }
+            expect(foreignKeysPragma(repo)).toBe(1);
+          }
+
+          repo.mutate(`DELETE FROM article`);
+          expect(repo.query(`SELECT id FROM article_review`)).toEqual([]);
+        }
+      ),
+      { numRuns: 25 }
+    );
   });
 });
 

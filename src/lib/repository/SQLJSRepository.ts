@@ -750,7 +750,13 @@ export class SQLJSRepository implements SQLiteRepository {
     try {
       const source = this.db;
       const data = source.export().buffer;
-      // sql.js `export()` tears down the update hook
+      // sql.js `export()` frees every statement, closes the connection, reads
+      // the file out of its FS and opens it again, so `source` is a new
+      // connection from here on: the update hook is gone and every
+      // connection-level pragma is back at its default (`foreign_keys` OFF,
+      // which would leave `ON DELETE CASCADE` unenforced for the rest of the
+      // session). The transaction has committed by now, so the pragma takes.
+      source.exec('PRAGMA foreign_keys = ON');
       this.registerUpdateHook();
       if (this.#fresh) {
         // Shared, so saves started together all wait on one check rather
