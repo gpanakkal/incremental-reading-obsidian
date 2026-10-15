@@ -2,6 +2,7 @@ import { refusedWrite, withCompensation } from '#/lib/compensation';
 import {
   ARTICLE_TAG,
   CARD_TAG,
+  CONTENT_TITLE_MAX_BYTES,
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
   DEFAULT_PRIORITY,
@@ -37,6 +38,7 @@ import type {
   IArticleBase,
   IArticleReview,
   MissingItem,
+  PluginFrontMatter,
   ReviewArticle,
   SnippetRow,
   SRSCardRow,
@@ -48,6 +50,7 @@ import {
   getDateString,
   getEndOfDay,
 } from '#/lib/utils';
+import type { WebPage } from '#/lib/web-viewer';
 import { type TFile } from 'obsidian';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
@@ -123,6 +126,12 @@ function movedToCopy({
   if (counted.length === 0) return '';
   const verb = snippets + cards === 1 ? 'refers' : 'refer';
   return `; ${counted.join(' and ')} now ${verb} to the copy`;
+}
+
+/** How `nameForCopy` names a copy. */
+interface CopyNameOptions {
+  warnCleaned: boolean;
+  maxBytes?: number;
 }
 
 /** The parentless snippets and cards taken from a file. */
@@ -558,13 +567,20 @@ export class ArticleManager extends ItemManager {
    * generated id when nothing is left of it; warning when that changed it.
    * When `isFree` refuses the name, it gets a random suffix until `isFree`
    * accepts one, with a warning that it couldn't keep its own.
+   * @param file the file copied, or what the new note is named for
+   * @param options.warnCleaned whether to warn when reading it as a title
+   *   changed it
+   * @param options.maxBytes the most UTF-8 bytes of its basename to keep (see
+   *   `sanitizeForTitle`), for a name that isn't yet one on disk
    */
   private async nameForCopy(
-    file: TFile,
-    isFree: (name: string) => boolean | Promise<boolean>
+    file: Pick<TFile, 'basename' | 'extension'>,
+    isFree: (name: string) => boolean | Promise<boolean>,
+    { warnCleaned, maxBytes }: CopyNameOptions
   ): Promise<string> {
     const basename =
-      Obsidian.sanitizeForTitle(file.basename, true) || Obsidian.createTitle();
+      Obsidian.sanitizeForTitle(file.basename, true, undefined, maxBytes) ||
+      Obsidian.createTitle();
     let name = `${basename}.${file.extension}`;
     if (!(await isFree(name))) {
       Obsidian.notify(`Warning: article with name already exists "${name}"`, {
@@ -575,7 +591,7 @@ export class ArticleManager extends ItemManager {
       } while (!(await isFree(name)));
     }
     // Obsidian keeps paths as NFC, so a name only NFC changes is its own
-    if (basename !== file.basename.normalize('NFC')) {
+    if (warnCleaned && basename !== file.basename.normalize('NFC')) {
       Obsidian.notify(
         `Warning: removed characters a note name can't hold; the copy is named "${name}"`,
         { persist: true }
@@ -619,11 +635,14 @@ export class ArticleManager extends ItemManager {
    * copy under it, releasing it once `work` settles either way.
    */
   private async withCopyTarget<T>(
-    file: TFile,
-    work: (name: string) => Promise<T>
+    file: Pick<TFile, 'basename' | 'extension'>,
+    work: (name: string) => Promise<T>,
+    options: CopyNameOptions = { warnCleaned: true }
   ): Promise<T> {
-    const name = await this.nameForCopy(file, (candidate) =>
-      this.claimCopyTarget(candidate)
+    const name = await this.nameForCopy(
+      file,
+      (candidate) => this.claimCopyTarget(candidate),
+      options
     );
     try {
       return await work(name);
@@ -871,6 +890,88 @@ export class ArticleManager extends ItemManager {
       );
       return this.fetch(id);
     });
+  }
+
+  /**
+   * Import `page`, read from Obsidian's web viewer, as a note made for it in
+   * the articles folder: named for its title (see `nameForCopy`), holding its
+   * Markdown, with its address as its source. The note and its row are made
+   * together or not at all, as a copy's are. Its title was made safe for a
+   * file name by Obsidian, so what reading it as a title drops goes unsaid,
+   * as does a cut to the length a file name can hold.
+   * @returns the imported article, or null when nothing was imported
+   */
+  async importWebPage(
+    page: WebPage,
+    priority: number,
+    fixedIntervalDays: number | null
+  ) {
+    if (refusedWrite(this.repo, `import "${page.title}"`)) return null;
+    try {
+      return await this.withCopyTarget(
+        { basename: page.title, extension: 'md' },
+        async (fileName) => {
+          const id = crypto.randomUUID();
+          const note = await withCompensation(async (step) => {
+            // Marked as the article from the start, in one write: a note
+            // holding an ir-id no row has is how a cut-short import is found
+            // and adopted (see `crash-leftovers`)
+            const frontmatter: PluginFrontMatter = {
+              created: new Date().toISOString(),
+              'ir-id': id,
+              tags: [ARTICLE_TAG],
+            };
+            if (page.url !== null) {
+              frontmatter[SOURCE_PROPERTY_NAME] = page.url;
+            }
+            const made = await step(
+              async () => {
+                const created = await Obsidian.createNote({
+                  content: page.markdown,
+                  frontmatter,
+                  fileName,
+                  directory: Obsidian.getDirectory('article'),
+                  app: this.app,
+                });
+                if (!created) {
+                  throw new Error(
+                    `Failed to create note ${Obsidian.getTargetPath(fileName, 'article')}`
+                  );
+                }
+                return created;
+              },
+              (created) => this.app.fileManager.trashFile(created)
+            );
+
+            await this.insertImported(
+              id,
+              made.path,
+              priority,
+              fixedIntervalDays
+            );
+            return made;
+          });
+
+          const titleSlice = getContentSlice(
+            note.basename,
+            CONTENT_TITLE_SLICE_LENGTH,
+            true
+          );
+          const schedulingString = describeSchedule(
+            priority,
+            fixedIntervalDays
+          );
+          Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
+          return this.fetch(id);
+        },
+        // A page title is no name on disk yet: past ~255 bytes, none can be
+        { warnCleaned: false, maxBytes: CONTENT_TITLE_MAX_BYTES }
+      );
+    } catch (error) {
+      Obsidian.notify(`Failed to import "${page.title}"`);
+      console.error(error);
+      return null;
+    }
   }
 
   /**

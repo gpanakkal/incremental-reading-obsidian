@@ -33,16 +33,14 @@ Go to **Settings → Sync** → enable **Sync all other types**. Repeat this on 
 
 ## Use the plugin
 
-1. Import learning material into an Obsidian note. See [Third-party tools](#third-party-tools) for HTML/PDF conversion.
-2. Run **Import article** from the command palette to add the entire note to your study queue. Set a lower priority (for example, 1.5) if you want to review it frequently. See [Priority scheduling](#priority-scheduling) for more details.
+1. In the vault, open a note, a PDF, or a webpage in the web viewer that you want to learn from.
+
+2. Run **Import article** from the command palette to save it to your study queue. Set a lower priority (for example, 1.5) if you want to review it frequently. See [Priority scheduling](#priority-scheduling) for more details.
 
 > [!tip]
-> You can also import notes from the editor context menu (three dots in the upper-right corner), or by right-clicking on the note in the Files tab and selecting **Import article**.
+> You can also import from the **More options** menu (three dots in the upper-right corner of a tab), or by right-clicking on a file in the Files sidebar view and selecting **Import article**.
 
 3. Set aside some time for a [study session](#study-sessions) each day, depending on how much you want to learn. Even 10 minutes is fine!
-
-> [!tip]
-> Set up keyboard shortcuts for the **Extract selection** and **Create spaced repetition card** commands, as these are frequently used in incremental reading.
 
 ### Study sessions
 
@@ -58,9 +56,6 @@ Once you've imported some material, begin a study session by selecting the **Inc
 
 > [!warning]
 > For spaced repetition to work properly, make sure you're actually attempting to recall the answer before revealing it.
-
-> [!tip]
-> In review, clicking a link to another article, snippet or card shows that item in review. **Go to context** does the same, except for a note that isn't an item, such as an article's source, which opens in a new tab. Ctrl-click (Cmd-click on macOS) or middle-click a link to open its note in a new tab instead.
 
 #### Revise snippets
 

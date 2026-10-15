@@ -236,6 +236,8 @@ export class FuzzySuggestModal<T> extends Modal {
     return [];
   }
 }
+/** Base of Obsidian's non-file views; the web viewer's among them. */
+export class ItemView {}
 export class FileView {
   /**
    * Stands in for the tab's `.workspace-leaf-content`. A real element under

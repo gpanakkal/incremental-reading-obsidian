@@ -2,6 +2,7 @@ import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
   CARD_TAG,
+  CONTENT_TITLE_MAX_BYTES,
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
   DAY_ROLLOVER_OFFSET_HOURS,
@@ -6058,6 +6059,256 @@ describe('making an article, with its note and its row as one unit', () => {
       refusal('create the article'),
       { kind: 'error' }
     );
+  });
+});
+
+describe('importWebPage', () => {
+  const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('property: makes the page a note in the articles folder, named for its title and holding its Markdown, with its address as its source', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.string(),
+        fc.option(fc.webUrl(), { nil: null }),
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        fc.option(
+          fc.integer({
+            min: MINIMUM_FIXED_REVIEW_INTERVAL,
+            max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+          }),
+          { nil: null }
+        ),
+        async (title, markdown, url, priority, fixedIntervalDays) => {
+          vi.restoreAllMocks();
+          const { vault, repo, manager, notify } = await wireArticles({}, null);
+
+          const article = await manager.importWebPage(
+            { title, markdown, url },
+            priority,
+            fixedIntervalDays
+          );
+
+          const rows = repo.rows('article');
+          expect(rows).toHaveLength(1);
+          expect(rows[0]).toMatchObject({
+            priority,
+            fixed_interval_days: fixedIntervalDays,
+          });
+          const path = rows[0].reference as string;
+          expect(article?.data.id).toBe(rows[0].id);
+          expect(vault.paths()).toEqual([path]);
+          const name = Obsidian.sanitizeForTitle(
+            title,
+            true,
+            undefined,
+            CONTENT_TITLE_MAX_BYTES
+          );
+          if (name) {
+            expect(path).toBe(`${ARTICLES}/${name}.md`);
+          } else {
+            expect(path.slice(0, path.lastIndexOf('/'))).toBe(ARTICLES);
+            expect(path.endsWith('.md')).toBe(true);
+          }
+          expect(vault.bodyOf(path)).toBe(markdown);
+          const { created, ...frontmatter } = vault.frontmatterOf(path) ?? {};
+          expect(typeof created).toBe('string');
+          expect(frontmatter).toStrictEqual({
+            'ir-id': rows[0].id,
+            tags: [ARTICLE_TAG],
+            ...(url === null ? {} : { [SOURCE_PROPERTY_NAME]: url }),
+          });
+          expect(notify).toHaveBeenCalledOnce();
+          expect(notify.mock.calls[0][0]).toMatch(/^Imported "/);
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('property: names the note for as much of a long title as a file name holds, beside a note already named so too', async () => {
+    // A name past 255 bytes (ext4, APFS) or UTF-16 units (NTFS) can't be made
+    const codePoints = (min: number, max: number) =>
+      fc.integer({ min, max }).map((code) => String.fromCodePoint(code));
+    const longTitleArb = fc.string({
+      unit: fc.oneof(
+        fc.constantFrom('a', ' ', '.'),
+        codePoints(0x4e00, 0x9fff),
+        codePoints(0x1f600, 0x1f64f),
+        fc.string({ unit: 'binary', minLength: 1, maxLength: 1 })
+      ),
+      minLength: 40,
+      maxLength: 400,
+    });
+    await fc.assert(
+      fc.asyncProperty(longTitleArb, fc.boolean(), async (title, taken) => {
+        vi.restoreAllMocks();
+        const name = Obsidian.sanitizeForTitle(
+          title,
+          true,
+          undefined,
+          CONTENT_TITLE_MAX_BYTES
+        );
+        const takenPath = `${ARTICLES}/${name}.md`;
+        const { vault, repo, manager } = await wireArticles(
+          taken && name ? { [takenPath]: { title: 'x' } } : {},
+          null
+        );
+
+        try {
+          await manager.importWebPage(
+            { title, markdown: 'Text', url: null },
+            DEFAULT_PRIORITY,
+            null
+          );
+
+          const path = repo.rows('article')[0].reference as string;
+          const fileName = path.slice(ARTICLES.length + 1);
+          expect(new TextEncoder().encode(fileName).length).toBeLessThanOrEqual(
+            255
+          );
+          if (!name) return;
+          expect(fileName.startsWith(taken ? `${name} - ` : `${name}.md`)).toBe(
+            true
+          );
+          expect(vault.paths()).toHaveLength(taken ? 2 : 1);
+        } finally {
+          // Shrinking runs many cases: each database holds wasm memory
+          repo.dispose();
+        }
+      }),
+      { numRuns: 50 }
+    );
+  });
+
+  it('names the note without a word on what a title drops', async () => {
+    const { repo, manager, notify } = await wireArticles({}, null);
+
+    await manager.importWebPage(
+      { title: 'A #tag [and] a|pipe', markdown: 'Text', url: null },
+      DEFAULT_PRIORITY,
+      null
+    );
+
+    expect(repo.rows('article')[0].reference).toBe(
+      `${ARTICLES}/${Obsidian.sanitizeForTitle('A #tag [and] a|pipe', true)}.md`
+    );
+    expect(notify).toHaveBeenCalledOnce();
+  });
+
+  it('names the note apart from one already in the articles folder, saying so', async () => {
+    const taken = `${ARTICLES}/Page.md`;
+    const { vault, repo, manager, notify, before } = await wireArticles(
+      { [taken]: { title: 'x' } },
+      null
+    );
+
+    await manager.importWebPage(
+      { title: 'Page', markdown: 'Text', url: null },
+      DEFAULT_PRIORITY,
+      null
+    );
+
+    const path = repo.rows('article')[0].reference as string;
+    expect(path.startsWith(`${ARTICLES}/Page - `)).toBe(true);
+    expect(path.slice(ARTICLES.length + 1)).not.toContain('/');
+    expect(vault.paths()).toEqual([path, taken].sort());
+    expect(vault.frontmatterOf(taken)).toEqual(before[taken]);
+    expect(notify).toHaveBeenCalledWith(
+      'Warning: article with name already exists "Page.md"',
+      true
+    );
+  });
+
+  it('names the article in its notice, cut short when its title is long', async () => {
+    const { manager, notify } = await wireArticles({}, null);
+    const title = 'A'.repeat(CONTENT_TITLE_SLICE_LENGTH + 10);
+
+    await manager.importWebPage(
+      { title, markdown: 'Text', url: null },
+      DEFAULT_PRIORITY,
+      null
+    );
+
+    expect(notify).toHaveBeenCalledOnce();
+    expect(
+      notify.mock.calls[0][0].startsWith(
+        `Imported "${'A'.repeat(CONTENT_TITLE_SLICE_LENGTH - 3)}..." with `
+      )
+    ).toBe(true);
+  });
+
+  it("writes the note's properties in one write", async () => {
+    const { vault, manager } = await wireArticles({}, null);
+
+    await manager.importWebPage(
+      { title: 'Page', markdown: 'Text', url: 'https://example.com/' },
+      DEFAULT_PRIORITY,
+      null
+    );
+
+    expect(vault.processFrontMatter).toHaveBeenCalledOnce();
+  });
+
+  it('marks the note as the article before its row is written', async () => {
+    // A note holding an ir-id no row has is how a cut-short import is found
+    // and adopted (see `crash-leftovers`)
+    const { vault, repo, manager } = await wireArticles({}, null);
+    let atInsert: unknown;
+    repo.failWrite((query) => {
+      if (query.startsWith('INSERT INTO article')) {
+        atInsert = vault.frontmatterOf(vault.paths()[0]);
+      }
+      return false;
+    });
+
+    await manager.importWebPage(
+      { title: 'Page', markdown: 'Text', url: null },
+      DEFAULT_PRIORITY,
+      null
+    );
+
+    expect(atInsert).toMatchObject({
+      'ir-id': repo.rows('article')[0].id,
+      tags: [ARTICLE_TAG],
+    });
+  });
+
+  it('makes the note and its row together, or neither, saying so', async () => {
+    for (const failure of ['create', 'frontmatter', 'row'] as const) {
+      vi.restoreAllMocks();
+      const { vault, repo, manager, notify } = await wireArticles({}, failure);
+
+      const article = await manager.importWebPage(
+        { title: 'Page', markdown: 'Text', url: 'https://example.com/' },
+        DEFAULT_PRIORITY,
+        null
+      );
+
+      expect(article).toBeNull();
+      expect(repo.rows('article')).toEqual([]);
+      expect(vault.paths()).toEqual([]);
+      expect(notify).toHaveBeenCalledExactlyOnceWith('Failed to import "Page"');
+    }
+  });
+
+  it('makes nothing while writes are refused, saying so', async () => {
+    const { vault, repo, manager, notify } = await wireArticles({}, null, true);
+
+    const article = await manager.importWebPage(
+      { title: 'Page', markdown: 'Text', url: null },
+      DEFAULT_PRIORITY,
+      null
+    );
+
+    expect(article).toBeNull();
+    expect(vault.paths()).toEqual([]);
+    expect(repo.rows('article')).toEqual([]);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(refusal('import "Page"'));
   });
 });
 

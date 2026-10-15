@@ -438,6 +438,9 @@ export class ObsidianHelpers {
    * @param content the note's text, or what gives it from the note once it
    *   exists, still empty, and before the text is written to it: its text can
    *   then depend on where the note is, and on its being there
+   * @param frontmatter written before the text, so text that opens with a
+   *   `---` block of its own (a web page's rule, say) stays text, never read
+   *   as the note's properties
    * @param directory path relative to the vault root
    * @returns the note, or nothing when it couldn't be made: a note made but
    *   not filled in is trashed again, so no empty or half-written one is left
@@ -459,13 +462,13 @@ export class ObsidianHelpers {
     try {
       const fullPath = normalizePath(`${directory}/${fileName}`);
       file = await ObsidianHelpers.createFile(app, fullPath);
-      await app.vault.append(
-        file,
-        typeof content === 'string' ? content : content(file)
-      );
+      const text = typeof content === 'string' ? content : content(file);
+      // Properties first: once there is text, `processFrontMatter` would take
+      // a block the text opens with for the note's own and merge into it
       if (frontmatter) {
         await this.updateFrontMatter(file, frontmatter, app);
       }
+      await app.vault.append(file, text);
       return file;
     } catch (error) {
       console.error(error);

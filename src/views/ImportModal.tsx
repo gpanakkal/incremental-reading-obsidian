@@ -1,24 +1,39 @@
 import { ImportModalContent } from '#/components/ImportModalContent';
 import { isCopyImportable } from '#/lib/mime';
 import type { SchedulingStrategy } from '#/lib/types';
+import type { WebPage } from '#/lib/web-viewer';
 import type IncrementalReadingPlugin from '#/main';
 import { type TFile, Modal } from 'obsidian';
 import { render } from 'preact';
 
+/**
+ * What the dialog imports: a file in the vault (offered as a copy when it can
+ * be copied, the toggle starting at `defaultCopyOnImport` or the setting), or
+ * a page read from the web viewer, which always becomes a new note.
+ */
+export type ImportSubject =
+  | { kind: 'file'; file: TFile; defaultCopyOnImport?: boolean }
+  | { kind: 'web'; page: WebPage };
+
 export class ImportModal extends Modal {
   plugin: IncrementalReadingPlugin;
-  file: TFile;
-  defaultCopyOnImport: boolean | undefined;
+  subject: ImportSubject;
+  /**
+   * Settles once the dialog has closed, however it was closed, and the import
+   * it started (if any) has finished.
+   */
+  readonly closed: Promise<void>;
+  private settleClosed!: () => void;
+  /** The import started by confirming, if any. There is one per dialog. */
+  private importing: Promise<unknown> | null = null;
 
-  constructor(
-    plugin: IncrementalReadingPlugin,
-    file: TFile,
-    defaultCopyOnImport?: boolean
-  ) {
+  constructor(plugin: IncrementalReadingPlugin, subject: ImportSubject) {
     super(plugin.app);
     this.plugin = plugin;
-    this.file = file;
-    this.defaultCopyOnImport = defaultCopyOnImport;
+    this.subject = subject;
+    this.closed = new Promise((resolve) => {
+      this.settleClosed = resolve;
+    });
   }
 
   async handleClose(
@@ -26,17 +41,27 @@ export class ImportModal extends Modal {
     value: number,
     makeCopy: boolean
   ) {
-    const { plugin, file } = this;
+    const { plugin, subject } = this;
     const props: [priority: number, intervalDays: number | null] =
       strategy === 'priority'
         ? [value, null]
         : [plugin.settings.defaultPriority, value];
-    await plugin.reviewManager.importArticle(file, ...props, makeCopy);
+    if (subject.kind === 'web') {
+      await plugin.reviewManager.importWebPage(subject.page, ...props);
+    } else {
+      await plugin.reviewManager.importArticle(
+        subject.file,
+        ...props,
+        makeCopy
+      );
+    }
   }
 
   onOpen() {
-    const { plugin, file, contentEl } = this;
-    this.setTitle(`Importing "${file.basename}"`);
+    const { plugin, subject, contentEl } = this;
+    this.setTitle(
+      `Importing "${subject.kind === 'web' ? subject.page.title : subject.file.basename}"`
+    );
     const schedule = {
       intervalDays: null as number | null,
       priority: plugin.settings.defaultPriority,
@@ -46,18 +71,22 @@ export class ImportModal extends Modal {
         plugin={plugin}
         schedule={schedule}
         defaultCopyOnImport={
-          this.defaultCopyOnImport ?? plugin.settings.copyOnImport
+          subject.kind === 'file' &&
+          (subject.defaultCopyOnImport ?? plugin.settings.copyOnImport)
         }
-        canCopy={isCopyImportable(file)}
+        canCopy={subject.kind === 'file' && isCopyImportable(subject.file)}
         onClose={(args) => {
-          if (args !== 'cancel') {
-            void this.handleClose(
+          if (args === 'cancel') {
+            this.close();
+          } else if (!this.importing) {
+            // Not again on a second confirm (Enter held, a double-click) while
+            // the import runs: a web page would get a second note
+            this.importing = this.handleClose(
               args.strategy,
               args.value,
               args.makeCopy
-            ).finally(() => this.close());
-          } else {
-            this.close();
+            );
+            void this.importing.finally(() => this.close());
           }
         }}
       />,
@@ -67,5 +96,10 @@ export class ImportModal extends Modal {
 
   onClose() {
     render(null, this.contentEl);
+    // Closed with Esc while the import runs: done once that has finished
+    void (this.importing ?? Promise.resolve()).then(
+      this.settleClosed,
+      this.settleClosed
+    );
   }
 }

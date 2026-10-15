@@ -35,6 +35,7 @@ import {
   type SRSCardRow,
   isArticle,
 } from '#/lib/types';
+import type { WebPage } from '#/lib/web-viewer';
 import type IncrementalReadingPlugin from '#/main';
 import type ReviewView from '#/views/ReviewView';
 import {
@@ -224,6 +225,17 @@ export default class ReviewManager {
     makeCopy?: boolean
   ) {
     return this.articles.import(file, priority, fixedIntervalDays, makeCopy);
+  }
+
+  /**
+   * Import a page read from Obsidian's web viewer as a new article
+   */
+  async importWebPage(
+    page: WebPage,
+    priority: number,
+    fixedIntervalDays: number | null
+  ) {
+    return this.articles.importWebPage(page, priority, fixedIntervalDays);
   }
 
   async createEmptyArticle(priority: number, directory?: string) {

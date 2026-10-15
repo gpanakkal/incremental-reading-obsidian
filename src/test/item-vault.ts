@@ -162,6 +162,8 @@ export function makeItemVault(
         ? (app.metadataCache.getFileCache(file)?.frontmatter ?? null)
         : null;
     },
+    /** The body written to the note at `path`, or null when none was. */
+    bodyOf: (path: string) => bodies.get(path) ?? null,
     /** Paths of every file in the vault. */
     paths: () => [...files.keys()].sort(),
     /** Make `op` fail on every path `matches` accepts. */

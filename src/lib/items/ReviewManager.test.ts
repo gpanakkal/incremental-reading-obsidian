@@ -1914,6 +1914,17 @@ describe('ReviewManager delegation', () => {
     expect(spy).toHaveBeenCalledWith(FAKE_FILE, 30, null, true);
   });
 
+  it('importWebPage delegates to articles.importWebPage', async () => {
+    const repo = makeRepo();
+    const manager = new ReviewManager(makePlugin(), repo);
+    const spy = vi
+      .spyOn(manager.articles, 'importWebPage')
+      .mockResolvedValue(undefined as never);
+    const page = { title: 'Page', markdown: 'Text', url: null };
+    await manager.importWebPage(page, 30, 4);
+    expect(spy).toHaveBeenCalledExactlyOnceWith(page, 30, 4);
+  });
+
   it('createEmptyArticle delegates to articles.create', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);

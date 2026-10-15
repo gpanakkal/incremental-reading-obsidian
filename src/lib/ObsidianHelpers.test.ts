@@ -10,6 +10,7 @@ import {
   INVALID_TITLE_MESSAGE,
   SNIPPET_DIRECTORY,
   SNIPPET_TAG,
+  SOURCE_PROPERTY_NAME,
   SOURCE_TAG,
 } from '#/lib/constants';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
@@ -921,6 +922,58 @@ const itemFrontmatterArb = fc.option(
   ),
   { nil: null }
 );
+
+/**
+ * A vault that keeps each note as its text, as a disk does: the frontmatter is
+ * whatever block the text opens with. `processFrontMatter` rewrites it the
+ * way Obsidian's does (read from obsidian.asar: parse the block the text
+ * opens with, or `{}`, edit it, then put it back in place of that block, or
+ * as a new one before the text; with no keys left, the block is dropped).
+ * Written as JSON, which is YAML.
+ */
+function makeTextVault() {
+  const texts = new Map<string, string>();
+  const app = {
+    vault: {
+      getAbstractFileByPath: (path: string) =>
+        texts.has(path) ? makeTFile({ path }) : null,
+      createFolder: vi.fn(async () => undefined),
+      create: vi.fn(async (path: string, data: string) => {
+        texts.set(path, data);
+        return makeTFile({ path });
+      }),
+      append: vi.fn(async (file: TFile, data: string) => {
+        texts.set(file.path, (texts.get(file.path) ?? '') + data);
+      }),
+    },
+    fileManager: {
+      processFrontMatter: vi.fn(
+        async (file: TFile, edit: (fm: Record<string, unknown>) => void) => {
+          const text = texts.get(file.path) ?? '';
+          const info = getFrontMatterInfo(text);
+          const parsed = info.exists ? parseYaml(info.frontmatter) : {};
+          const frontmatter = (
+            parsed !== null && typeof parsed === 'object' ? parsed : {}
+          ) as Record<string, unknown>;
+          edit(frontmatter);
+          const block = `${JSON.stringify(frontmatter)}\n`;
+          texts.set(
+            file.path,
+            Object.keys(frontmatter).length === 0
+              ? text.slice(info.exists ? info.contentStart : 0)
+              : info.exists
+                ? text.slice(0, info.from) + block + text.slice(info.to)
+                : `---\n${block}---\n${text}`
+          );
+        }
+      ),
+      trashFile: vi.fn(async (file: TFile) => {
+        texts.delete(file.path);
+      }),
+    },
+  } as unknown as App;
+  return { app, texts };
+}
 
 // #endregion
 
@@ -4779,6 +4832,91 @@ describe('createNote', () => {
           for (const tag of userTags.filter((t) => !isEmptyTag(t))) {
             expect(result).toContain(tag);
           }
+        }
+      )
+    );
+  });
+
+  /** The note text at `path`, split as Obsidian reads it. */
+  function readNote(texts: Map<string, string>, path: string) {
+    const text = texts.get(path) ?? '';
+    const info = getFrontMatterInfo(text);
+    return {
+      frontmatter: info.exists ? parseYaml(info.frontmatter) : null,
+      body: text.slice(info.exists ? info.contentStart : 0),
+    };
+  }
+
+  it("never reads a body that opens with a frontmatter block as the note's properties", async () => {
+    const { app, texts } = makeTextVault();
+    const body = '---\npublish: true\ntags: [ir-card]\n---\ntext';
+    const frontmatter = {
+      created: '2026-10-15T00:00:00.000Z',
+      'ir-id': 'id',
+      tags: [ARTICLE_TAG],
+    };
+
+    const note = await ObsidianHelpers.createNote({
+      content: body,
+      frontmatter,
+      fileName: 'Page.md',
+      directory: 'articles',
+      app,
+    });
+
+    expect(note?.path).toBe('articles/Page.md');
+    expect(readNote(texts, 'articles/Page.md')).toStrictEqual({
+      frontmatter,
+      body,
+    });
+  });
+
+  it('property: the note holds exactly the frontmatter given, and the body as given after it', async () => {
+    const bodyArb = fc.oneof(
+      fc.string(),
+      // Text that opens with a block of its own, or something like one
+      fc
+        .tuple(fc.dictionary(fc.string(), fc.jsonValue()), fc.string())
+        .map(([block, rest]) => noteText(block, rest)),
+      fc
+        .tuple(
+          fc.constantFrom('---', '---\n', '\n---\n', '---\n---\n'),
+          fc.string()
+        )
+        .map(([start, rest]) => start + rest)
+    );
+    const frontmatterArb = fc
+      .record(
+        {
+          created: fc.string(),
+          'ir-id': fc.string(),
+          tags: fc.constant<string[]>([ARTICLE_TAG]),
+          [SOURCE_PROPERTY_NAME]: fc.string(),
+        },
+        { requiredKeys: ['created'] }
+        // As parsed YAML is: a plain object
+      )
+      .map((frontmatter) => ({ ...frontmatter }));
+    await fc.assert(
+      fc.asyncProperty(
+        bodyArb,
+        frontmatterArb,
+        fc.boolean(),
+        async (body, frontmatter, asFunction) => {
+          const { app, texts } = makeTextVault();
+
+          await ObsidianHelpers.createNote({
+            content: asFunction ? () => body : body,
+            frontmatter,
+            fileName: 'Page.md',
+            directory: 'articles',
+            app,
+          });
+
+          expect(readNote(texts, 'articles/Page.md')).toStrictEqual({
+            frontmatter,
+            body,
+          });
         }
       )
     );

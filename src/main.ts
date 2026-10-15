@@ -20,6 +20,7 @@ import {
   type TAbstractFile,
   type TFile,
   type WorkspaceLeaf,
+  ItemView,
   Keymap,
   MarkdownView,
   Plugin,
@@ -90,6 +91,12 @@ import { SessionTracker } from './lib/SessionTracker';
 import { type IRPluginSettings, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, setPage, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
+import {
+  type WebPage,
+  type WebViewerView,
+  asWebViewer,
+  readWebPage,
+} from './lib/web-viewer';
 import { ImportModal } from './views/ImportModal';
 import { flagLeftovers } from './views/LeftoverModal';
 import ReviewView from './views/ReviewView';
@@ -125,6 +132,12 @@ function syncWaitTimeoutForTests(): number | undefined {
     .__irSyncWaitTimeoutMs;
   return typeof value === 'number' ? value : undefined;
 }
+
+/**
+ * Web viewers whose page is being imported. A second import asked for while
+ * one runs would make a second note, named apart from the first.
+ */
+const importingWebViewers = new WeakSet<WebViewerView>();
 
 export default class IncrementalReadingPlugin extends Plugin {
   /** Everything persisted to `data.json`; `settings` is this object's own half. */
@@ -242,6 +255,14 @@ export default class IncrementalReadingPlugin extends Plugin {
           this.addIRMenuItems(menu, abstractFile, leaf);
         }
       )
+    );
+    // Undocumented: `leaf-menu`, raised for a tab's more-options and tab
+    // header menus after its view has filled them. A web viewer holds no
+    // file, so `file-menu` never reaches its menu.
+    this.registerEvent(
+      this.app.workspace.on('leaf-menu', (menu, leaf) => {
+        this.addWebViewerMenuItems(menu, leaf);
+      })
     );
 
     // Invalidate review item cache when the current item's file is modified externally
@@ -1031,6 +1052,27 @@ export default class IncrementalReadingPlugin extends Plugin {
     });
   }
 
+  /**
+   * Add the import to the menu of `leaf` when it holds a web viewer this
+   * plugin can read pages from (see {@link asWebViewer}).
+   */
+  addWebViewerMenuItems(menu: Menu, leaf: WorkspaceLeaf): void {
+    if (!this.reviewManager) return;
+    const viewer = asWebViewer(leaf.view);
+    if (!viewer) return;
+
+    menu.addSections(['incremental-reading']);
+    menu.addItem((item) => {
+      item
+        .setTitle('Import article')
+        .setIcon(PLACEHOLDER_PLUGIN_ICON)
+        .setSection('incremental-reading')
+        .onClick(async () => {
+          await this.importWebPage(viewer);
+        });
+    });
+  }
+
   async importArticle(
     file: TFile,
     opts?: {
@@ -1042,7 +1084,11 @@ export default class IncrementalReadingPlugin extends Plugin {
 
     const merged = { ...this.settings, ...(opts ?? {}) };
     if (merged.showImportDialog) {
-      new ImportModal(this, file, merged.copyOnImport).open();
+      new ImportModal(this, {
+        kind: 'file',
+        file,
+        defaultCopyOnImport: merged.copyOnImport,
+      }).open();
     } else {
       await this.reviewManager.importArticle(
         file,
@@ -1164,6 +1210,15 @@ export default class IncrementalReadingPlugin extends Plugin {
         if (!this.reviewManager) return false;
         if (this.getActiveReviewView()) return false;
 
+        // The basic import also takes the page open in the web viewer
+        if (!opts) {
+          const viewer = this.getActiveWebViewer();
+          if (viewer) {
+            if (!checking) void this.importWebPage(viewer);
+            return true;
+          }
+        }
+
         const file = this.app.workspace.getActiveFileView()?.file;
         if (!file || !isImportable(file)) return false;
         if (opts?.copyOnImport && !isCopyImportable(file)) return false;
@@ -1172,6 +1227,53 @@ export default class IncrementalReadingPlugin extends Plugin {
         void this.importArticle(file, opts);
       },
     });
+  }
+
+  /**
+   * The web viewer in the active tab, when it is one this plugin can read
+   * pages from (see {@link asWebViewer}), or null.
+   */
+  private getActiveWebViewer(): WebViewerView | null {
+    // The web viewer's view is an ItemView (undocumented core plugin)
+    return asWebViewer(this.app.workspace.getActiveViewOfType(ItemView));
+  }
+
+  /**
+   * Import the page `viewer` shows as an article, in a note made for it in
+   * the articles folder (see `ArticleManager.importWebPage`): through the
+   * import dialog when the "Show import dialog" setting is on, else at the
+   * default priority. The page is read first, so a page that can't be read
+   * opens no dialog. Nothing more is said when Obsidian reads nothing from
+   * the page: it has said why itself. Asked again while the page in `viewer`
+   * is being imported, or while its dialog is open, it does nothing.
+   */
+  async importWebPage(viewer: WebViewerView) {
+    if (importingWebViewers.has(viewer)) return;
+    importingWebViewers.add(viewer);
+    try {
+      let page: WebPage | null;
+      try {
+        page = await readWebPage(viewer);
+      } catch (error) {
+        console.error(error);
+        Obsidian.notify("Couldn't read the page in the web viewer");
+        return;
+      }
+      if (!page) return;
+      if (this.settings.showImportDialog) {
+        const dialog = new ImportModal(this, { kind: 'web', page });
+        dialog.open();
+        await dialog.closed;
+      } else {
+        await this.reviewManager.importWebPage(
+          page,
+          this.settings.defaultPriority,
+          null
+        );
+      }
+    } finally {
+      importingWebViewers.delete(viewer);
+    }
   }
 
   /**

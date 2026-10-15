@@ -536,9 +536,12 @@ function makeImportCommandReceiver({
   extension = 'md',
   where = 'file' as 'file' | 'review' | 'none',
   loaded = true,
+  view = null as unknown,
+  showImportDialog = false,
 } = {}) {
   const file = fileWithExtension(extension);
   const importArticle = vi.fn(() => Promise.resolve());
+  const importWebPage = vi.fn(() => Promise.resolve(null));
   /** The palette: registered commands by id, dropped again on removal. */
   const commands = new Map<
     string,
@@ -547,7 +550,8 @@ function makeImportCommandReceiver({
   const receiver = Object.assign(
     Object.create(IncrementalReadingPlugin.prototype) as object,
     {
-      reviewManager: loaded ? {} : undefined,
+      reviewManager: loaded ? { importWebPage } : undefined,
+      settings: { defaultPriority: 30, showImportDialog },
       importArticle,
       addCommand: vi.fn(
         (command: {
@@ -569,6 +573,7 @@ function makeImportCommandReceiver({
       app: {
         workspace: {
           getActiveFileView: vi.fn(() => (where === 'none' ? null : { file })),
+          getActiveViewOfType: vi.fn(() => view),
         },
       },
     }
@@ -585,7 +590,47 @@ function makeImportCommandReceiver({
     if (!command) throw new Error(`no command ${id}`);
     return command.checkCallback(checking);
   };
-  return { receiver, commands, file, importArticle, run };
+  return { receiver, commands, file, importArticle, importWebPage, run };
+}
+
+/**
+ * A view shaped as Obsidian's web viewer is, showing a page at
+ * `https://example.com/page` that reads as `content` (a page, if not given;
+ * `undefined` given is answered as is).
+ */
+function makeWebViewer(...args: [content?: unknown]) {
+  const content = args.length > 0 ? args[0] : { title: 'Page', md: 'Text' };
+  return {
+    getViewType: () => 'webviewer',
+    getReaderModeContent: vi.fn(() => Promise.resolve(content)),
+    url: 'https://example.com/page',
+  };
+}
+
+/** Views a page can't be imported from: not web viewers it can read. */
+const notWebViewerArb = fc.oneof(
+  fc.constant(null),
+  fc.constant({ getViewType: () => 'webviewer' }),
+  fc.constant({
+    getViewType: () => 'markdown',
+    getReaderModeContent: () => Promise.resolve({ title: 'x', md: 'y' }),
+  }),
+  fc.anything()
+);
+
+/**
+ * Stand in for the import dialog in a test without a DOM: `open` opens
+ * nothing, and each dialog opened is handed back to read or close.
+ */
+function stubImportDialog() {
+  // The mock modal builds its content element in its constructor; any
+  // element will do for a dialog never shown.
+  vi.stubGlobal('document', { createElement: () => ({}) });
+  const open = vi
+    .spyOn(ImportModal.prototype, 'open')
+    .mockImplementation(() => {});
+  const dialogs = () => open.mock.contexts as ImportModal[];
+  return { open, dialogs };
 }
 
 /**
@@ -1155,6 +1200,322 @@ describe('IncrementalReadingPlugin import commands', () => {
   });
 });
 
+describe('IncrementalReadingPlugin import from the web viewer', () => {
+  beforeEach(() => {
+    Notice.reset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('offers the import on a page open in the web viewer, importing it at the default priority', async () => {
+    const view = makeWebViewer({ title: 'Page', md: 'Text' });
+    const { importArticle, importWebPage, run } = makeImportCommandReceiver({
+      where: 'none',
+      view,
+    });
+
+    expect(run('import-article', true)).toBe(true);
+    expect(view.getReaderModeContent).not.toHaveBeenCalled();
+    run('import-article');
+
+    await vi.waitFor(() =>
+      expect(importWebPage).toHaveBeenCalledExactlyOnceWith(
+        { title: 'Page', markdown: 'Text', url: 'https://example.com/page' },
+        30,
+        null
+      )
+    );
+    expect(importArticle).not.toHaveBeenCalled();
+    expect(Notice.messages).toEqual([]);
+  });
+
+  it('still imports the note when the active view is a file view, as before', () => {
+    // `getActiveViewOfType(ItemView)` answers a Markdown or PDF view too
+    fc.assert(
+      fc.property(
+        importCommandIds,
+        fc.constantFrom('markdown', 'pdf'),
+        (id, type) => {
+          const { file, importArticle, importWebPage, run } =
+            makeImportCommandReceiver({ view: { getViewType: () => type } });
+
+          expect(run(id, true)).toBe(true);
+          run(id);
+
+          expect(importArticle).toHaveBeenCalledExactlyOnceWith(
+            file,
+            IMPORT_COMMANDS[id].opts
+          );
+          expect(importWebPage).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('offers none of the advanced imports on a page in the web viewer', () => {
+    fc.assert(
+      fc.property(
+        importCommandIds.filter((id) => id !== 'import-article'),
+        (id) => {
+          const { importWebPage, run } = makeImportCommandReceiver({
+            where: 'none',
+            view: makeWebViewer(),
+          });
+
+          expect(run(id, true)).toBe(false);
+          run(id);
+
+          expect(importWebPage).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('offers no import on a view that is no web viewer it can read', () => {
+    fc.assert(
+      fc.property(importCommandIds, notWebViewerArb, (id, view) => {
+        const { importArticle, importWebPage, run } = makeImportCommandReceiver(
+          { where: 'none', view }
+        );
+
+        expect(run(id, true)).toBe(false);
+        run(id);
+
+        expect(importArticle).not.toHaveBeenCalled();
+        expect(importWebPage).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('offers no import of a web page from the review tab or before loading', () => {
+    for (const setup of [{ where: 'review' as const }, { loaded: false }]) {
+      const view = makeWebViewer();
+      const { importWebPage, run } = makeImportCommandReceiver({
+        ...setup,
+        view,
+      });
+
+      expect(run('import-article', true)).toBe(false);
+      run('import-article');
+
+      expect(view.getReaderModeContent).not.toHaveBeenCalled();
+      expect(importWebPage).not.toHaveBeenCalled();
+    }
+  });
+
+  it('imports nothing, saying nothing more, when Obsidian reads nothing from the page', async () => {
+    // Obsidian shows a notice of its own when Readability finds nothing
+    const view = makeWebViewer(undefined);
+    const { importWebPage, run } = makeImportCommandReceiver({
+      where: 'none',
+      view,
+    });
+
+    run('import-article');
+
+    await vi.waitFor(() =>
+      expect(view.getReaderModeContent).toHaveBeenCalled()
+    );
+    // A macrotask: every promise the import chains has settled by then
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(importWebPage).not.toHaveBeenCalled();
+    expect(Notice.messages).toEqual([]);
+  });
+
+  it('imports a page once, however often asked while it is being imported', async () => {
+    vi.spyOn(console, 'error').mockReturnValue(undefined);
+    for (const outcome of ['read', 'unread', 'thrown'] as const) {
+      Notice.reset();
+      const view = makeWebViewer();
+      let finishRead = (): void => undefined;
+      view.getReaderModeContent.mockImplementation(
+        () =>
+          new Promise((resolve, reject) => {
+            finishRead = () => {
+              if (outcome === 'thrown') reject(new Error('gone'));
+              else
+                resolve(
+                  outcome === 'read' ? { title: 'Page', md: 'Text' } : undefined
+                );
+            };
+          })
+      );
+      let finishImport = (): void => undefined;
+      const { importWebPage, run } = makeImportCommandReceiver({
+        where: 'none',
+        view,
+      });
+      importWebPage.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishImport = () => resolve(null);
+          })
+      );
+
+      // Asked again while the page is read, and while it is imported
+      run('import-article');
+      run('import-article');
+      finishRead();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (outcome === 'read') run('import-article');
+      finishImport();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(view.getReaderModeContent).toHaveBeenCalledOnce();
+      expect(importWebPage).toHaveBeenCalledTimes(outcome === 'read' ? 1 : 0);
+
+      // Once it is done, the page can be imported again
+      run('import-article');
+      finishRead();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(view.getReaderModeContent).toHaveBeenCalledTimes(2);
+      expect(importWebPage).toHaveBeenCalledTimes(outcome === 'read' ? 2 : 0);
+      finishImport();
+    }
+  });
+
+  it('opens the import dialog on the page when the dialog is on, importing nothing yet', async () => {
+    try {
+      const { open, dialogs } = stubImportDialog();
+      const view = makeWebViewer({ title: 'Page', md: 'Text' });
+      const { importWebPage, run } = makeImportCommandReceiver({
+        where: 'none',
+        view,
+        showImportDialog: true,
+      });
+
+      run('import-article');
+
+      await vi.waitFor(() => expect(open).toHaveBeenCalledOnce());
+      expect(dialogs()[0].subject).toEqual({
+        kind: 'web',
+        page: {
+          title: 'Page',
+          markdown: 'Text',
+          url: 'https://example.com/page',
+        },
+      });
+      expect(importWebPage).not.toHaveBeenCalled();
+      expect(Notice.messages).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does nothing while the dialog on the page is open, and imports nothing when it is cancelled', async () => {
+    try {
+      const { open, dialogs } = stubImportDialog();
+      const view = makeWebViewer();
+      const { importWebPage, run } = makeImportCommandReceiver({
+        where: 'none',
+        view,
+        showImportDialog: true,
+      });
+
+      run('import-article');
+      await vi.waitFor(() => expect(open).toHaveBeenCalledOnce());
+      run('import-article');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(view.getReaderModeContent).toHaveBeenCalledOnce();
+      expect(open).toHaveBeenCalledOnce();
+
+      // Cancelled: Obsidian's `close` calls `onClose`
+      dialogs()[0].onClose();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      run('import-article');
+
+      await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(2));
+      expect(view.getReaderModeContent).toHaveBeenCalledTimes(2);
+      expect(importWebPage).not.toHaveBeenCalled();
+      expect(Notice.messages).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("says so when the page can't be read", async () => {
+    vi.spyOn(console, 'error').mockReturnValue(undefined);
+    for (const view of [
+      {
+        ...makeWebViewer(),
+        getReaderModeContent: () => Promise.reject(new Error('gone')),
+      },
+      makeWebViewer({ title: 1, markdown: 'Text' }),
+    ]) {
+      Notice.reset();
+      const { importWebPage, run } = makeImportCommandReceiver({
+        where: 'none',
+        view,
+      });
+
+      run('import-article');
+
+      await vi.waitFor(() =>
+        expect(Notice.messages).toEqual([
+          "Couldn't read the page in the web viewer",
+        ])
+      );
+      expect(importWebPage).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe('IncrementalReadingPlugin.addWebViewerMenuItems', () => {
+  /**
+   * Raise a leaf menu for a leaf holding `view` on a plugin loaded or not,
+   * as Obsidian's `leaf-menu` event hands it over.
+   */
+  function raiseLeafMenu(view: unknown, loaded = true) {
+    const importWebPage = vi.fn(() => Promise.resolve(null));
+    const receiver = Object.assign(
+      Object.create(IncrementalReadingPlugin.prototype) as object,
+      {
+        reviewManager: loaded ? { importWebPage } : undefined,
+        settings: { defaultPriority: 30, showImportDialog: false },
+      }
+    ) as unknown as IncrementalReadingPlugin;
+    const menu = new Menu();
+    receiver.addWebViewerMenuItems(
+      menu as never,
+      { view } as unknown as WorkspaceLeaf
+    );
+    return { menu, importWebPage };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("offers the import in a web viewer's menu, importing its page", async () => {
+    const { menu, importWebPage } = raiseLeafMenu(makeWebViewer());
+
+    expect(titles(menu)).toEqual(['Import article']);
+    expect(menu.items[0].section).toBe('incremental-reading');
+    expect(menu.sections).toEqual(['incremental-reading']);
+    expect(importWebPage).not.toHaveBeenCalled();
+
+    await menu.items[0].callback?.({});
+
+    expect(importWebPage).toHaveBeenCalledExactlyOnceWith(
+      { title: 'Page', markdown: 'Text', url: 'https://example.com/page' },
+      30,
+      null
+    );
+  });
+
+  it('adds nothing to the menu of any other view, or before loading', () => {
+    fc.assert(
+      fc.property(notWebViewerArb, (view) => {
+        expect(raiseLeafMenu(view).menu.items).toEqual([]);
+      })
+    );
+    expect(raiseLeafMenu(makeWebViewer(), false).menu.items).toEqual([]);
+  });
+});
+
 describe('IncrementalReadingPlugin.importArticle', () => {
   it('refuses a file it cannot import, dialog or not, and says so', async () => {
     // With the dialog on, constructing the modal would throw here (no DOM), so
@@ -1206,8 +1567,11 @@ describe('IncrementalReadingPlugin.importArticle', () => {
 
       expect(open).toHaveBeenCalledOnce();
       const modal = open.mock.contexts[0] as ImportModal;
-      expect(modal.file).toBe(file);
-      expect(modal.defaultCopyOnImport).toBe(true);
+      expect(modal.subject).toEqual({
+        kind: 'file',
+        file,
+        defaultCopyOnImport: true,
+      });
       expect(importArticle).not.toHaveBeenCalled();
       expect(Notice.messages).toEqual([]);
     } finally {
