@@ -1,5 +1,6 @@
 import { refusedPathsWarning } from '#/lib/item-path-guard';
 import ReviewManager from '#/lib/items/ReviewManager';
+import { SnippetManager } from '#/lib/items/SnippetManager';
 import { SYNC_HOLD_MESSAGES, SYNC_WAIT_TIMEOUT_MS } from '#/lib/obsidian-sync';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
@@ -24,6 +25,7 @@ import IncrementalReadingPlugin, {
   startupFailureMessage,
   STILL_STARTING_NOTICE,
 } from '#/main';
+import * as LeftoverModal from '#/views/LeftoverModal';
 // The Vitest alias points `obsidian` at this same file, so the `Menu` built
 // here is the one the plugin fills — importing it by path is what gives TS the
 // stub's recorded `items`, which the real class does not expose.
@@ -1877,6 +1879,43 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
     );
   });
 
+  it('looks for notes left without review data once the scan is done, and not before', async () => {
+    const flag = vi
+      .spyOn(LeftoverModal, 'flagLeftovers')
+      .mockResolvedValue(undefined);
+    const follow = makeFollowReceiver();
+
+    followMovedNotes(follow);
+    await settle();
+    expect(flag).not.toHaveBeenCalled();
+
+    follow.finishIndexing();
+    await vi.waitFor(() => expect(flag).toHaveBeenCalledOnce());
+    expect(follow.itemPathsWithRefusedChars).toHaveBeenCalled();
+    const [args] = flag.mock.calls[0];
+    expect(args).toMatchObject({ app: follow.receiver.app, repo: follow.repo });
+    expect(args.managers()).toBe(follow.receiver.reviewManager);
+    const invalidate = vi
+      .spyOn(queryClient, 'invalidateQueries')
+      .mockResolvedValue(undefined);
+    await args.onResolved();
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ['queue'] });
+  });
+
+  it('looks for no leftovers once unloaded', async () => {
+    const flag = vi
+      .spyOn(LeftoverModal, 'flagLeftovers')
+      .mockResolvedValue(undefined);
+    const follow = makeFollowReceiver();
+
+    followMovedNotes(follow);
+    follow.unload();
+    follow.finishIndexing();
+    await settle();
+
+    expect(flag).not.toHaveBeenCalled();
+  });
+
   it('waits for the resolved event where Obsidian has no onCleanCache', async () => {
     const follow = makeFollowReceiver({ indexingSignal: false });
 
@@ -2285,6 +2324,19 @@ describe('IncrementalReadingPlugin database reload', () => {
 
     expect(hide).toHaveBeenCalledOnce();
     expect(hide.mock.contexts[0]).toBeInstanceOf(Notice);
+  });
+
+  it('saves the highlight offsets held back while saving was paused, once it resumes', async () => {
+    const persist = vi
+      .spyOn(SnippetManager.prototype, 'persistPendingOffsets')
+      .mockResolvedValue(undefined);
+    const { blockWrites, resumeWrites } = await startDatabase(undefined);
+    blockWrites(new Error('The file could not be loaded.'));
+    expect(persist).not.toHaveBeenCalled();
+
+    resumeWrites();
+
+    expect(persist).toHaveBeenCalledOnce();
   });
 
   it('resumes quietly when no notice is up', async () => {

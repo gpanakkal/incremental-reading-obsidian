@@ -24,14 +24,16 @@ import type {
   SRSCardRow,
 } from '#/lib/types';
 import { excludedIdsOf, seenElsewhereArb } from '#/test/due-query';
+import { makeItemVault, TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
 import { resolve } from 'path';
-import type { Database, SqlJsStatic } from 'sql.js';
-import initSqlJs from 'sql.js';
-import type { FSRSParameters, Grade, StepUnit } from 'ts-fsrs';
+import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 import {
+  type FSRSParameters,
+  type Grade,
+  type StepUnit,
   createEmptyCard,
   fsrs,
   generatorParameters,
@@ -74,6 +76,7 @@ function makeRepo(): SQLiteRepository {
     transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
+    writeRefusal: vi.fn(() => null),
   } as unknown as SQLiteRepository;
 }
 
@@ -457,6 +460,7 @@ function makeRealRepo(db: Database): SQLiteRepository {
     transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
+    writeRefusal: vi.fn(() => null),
   } as unknown as SQLiteRepository;
 }
 
@@ -512,6 +516,63 @@ const gradeArb = fc.constantFrom<Grade>(
   Rating.Good,
   Rating.Easy
 );
+
+const PDF = 'papers/paper.pdf';
+const NOTE = 'notes/source.md';
+
+/** A manager over a real database and a vault holding a PDF and a note. */
+async function wire() {
+  const vault = makeItemVault({ [PDF]: null, [NOTE]: null });
+  const repo = await TestRepository.create();
+  repo.mutate(
+    `INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)`,
+    ['article-1', PDF, 0, MS_PER_DAY, 30]
+  );
+  const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  vi.spyOn(console, 'error').mockReturnValue(undefined);
+  const manager = new CardManager(
+    {
+      app: vault.app,
+      settings: { dayRolloverOffset: 4, fsrsParams: generatorParameters() },
+    } as never,
+    repo
+  );
+  const fromPdf = () =>
+    manager.createFromPdf({
+      article: {
+        data: { id: 'article-1', type: 'article', reference: PDF },
+        file: vault.files.get(PDF)!,
+      } as never,
+      text: 'some text',
+      start: 1e10,
+      end: 1e10 + 9,
+      subpath: '#page=1&selection=0,0,0,9',
+      answer: [5, 9],
+    });
+  return { vault, repo, notify, manager, fromPdf };
+}
+/**
+ * A card graded `grade` once on a real database, dismissed beforehand or
+ * not, and the card as it was before the grade.
+ */
+async function gradedCard(dismissed: boolean, grade: Grade) {
+  const repo = await TestRepository.create();
+  const manager = new CardManager(makePlugin(), repo);
+  const row = makeCardRow({ id: 'card-1', reference: 'cards/c.md' });
+  const stored = { ...row, dismissed: Number(dismissed) };
+  const columns = Object.keys(stored);
+  repo.mutate(
+    `INSERT INTO srs_card (${columns.join(', ')}) VALUES (${columns.map((_, i) => `$${i + 1}`).join(', ')})`,
+    Object.values(stored).map((v) =>
+      typeof v === 'boolean' ? Number(v) : v
+    ) as never
+  );
+  const before = CardManager.rowToDisplay(
+    repo.rows('srs_card')[0] as unknown as SRSCardRow
+  );
+  const reviewId = await manager.review(before, grade, new Date(0));
+  return { repo, manager, before, reviewId, row: repo.rows('srs_card') };
+}
 
 // #endregion
 
@@ -1212,6 +1273,7 @@ describe('fetchMany', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     const result = await manager.fetchMany();
@@ -1416,6 +1478,7 @@ describe('fetch', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     const result = await manager.fetch(row.id);
@@ -1453,6 +1516,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
   }
 
@@ -1505,6 +1569,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const manager = new CardManager(makePlugin(), repo);
@@ -1538,6 +1603,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     // Whatever it is asked for, under whatever settings
     await fc.assert(
@@ -1589,6 +1655,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     await manager.getDue(undefined, undefined, ['excluded-id']);
@@ -1634,6 +1701,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const manager = new CardManager(makePlugin(claiming(rowA.reference)), repo);
@@ -1669,6 +1737,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const manager = new CardManager(
@@ -2073,6 +2142,7 @@ describe('review', () => {
             transaction: vi.fn(async (work: () => unknown) => work()),
             handleFileChange: vi.fn(),
             onDataChange: vi.fn(() => vi.fn()),
+            writeRefusal: vi.fn(() => null),
           } as unknown as SQLiteRepository;
           const manager = new CardManager(makePlugin(), repo);
           await manager.review(card, grade, new Date());
@@ -2122,6 +2192,7 @@ describe('review', () => {
             transaction: vi.fn(async (work: () => unknown) => work()),
             handleFileChange: vi.fn(),
             onDataChange: vi.fn(() => vi.fn()),
+            writeRefusal: vi.fn(() => null),
           } as unknown as SQLiteRepository;
           const manager = new CardManager(makePlugin(), repo);
           await manager.review(card, grade, new Date());
@@ -2176,6 +2247,7 @@ describe('review', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     await manager.review(card, Rating.Again, new Date());
@@ -2198,6 +2270,7 @@ describe('review', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     // The caller records an undo entry only if this resolves, so a missing
@@ -2220,6 +2293,7 @@ describe('review', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     await manager.review(card, Rating.Good, new Date());
@@ -2259,6 +2333,7 @@ describe('review — FSRS settings', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
   }
 
@@ -4906,7 +4981,7 @@ describe('delete', () => {
         vi.restoreAllMocks();
         const { manager, mutate, fileManager } = wireDelete(id, NOTE);
 
-        expect(await manager.delete(id, { prompt: false })).toBe(true);
+        expect(await manager.delete(id, { prompt: false })).toBe('deleted');
 
         // Obsidian's prompt would also offer to delete what the note alone
         // linked to: a PDF its source links to among them
@@ -4924,7 +4999,7 @@ describe('delete', () => {
     for (const options of [undefined, {}, { prompt: true }]) {
       const { manager, mutate, fileManager } = wireDelete('id-1', NOTE);
 
-      expect(await manager.delete('id-1', options)).toBe(true);
+      expect(await manager.delete('id-1', options)).toBe('deleted');
 
       expect(fileManager.promptForFileDeletion).toHaveBeenCalledExactlyOnceWith(
         NOTE
@@ -4945,7 +5020,7 @@ describe('delete', () => {
       };
       const manager = new CardManager({ app: { fileManager } } as never, repo);
 
-      expect(await manager.delete('id-1', { prompt })).toBe(false);
+      expect(await manager.delete('id-1', { prompt })).toBe('failed');
 
       expect(fileManager.trashFile).not.toHaveBeenCalled();
       expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
@@ -4957,7 +5032,7 @@ describe('delete', () => {
     for (const prompt of [true, false]) {
       const { manager, mutate, fileManager } = wireDelete('id-1', null);
 
-      expect(await manager.delete('id-1', { prompt })).toBe(true);
+      expect(await manager.delete('id-1', { prompt })).toBe('deleted');
 
       expect(fileManager.trashFile).not.toHaveBeenCalled();
       expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
@@ -5039,5 +5114,241 @@ describe('createFromSelection — its parent', () => {
         }
       )
     );
+  });
+});
+
+describe('making and deleting a card, with its note and its row as one unit', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('leaves no card note and no row when a step before the row is saved fails, and keeps both when none does', async () => {
+    for (const failure of ['note', 'frontmatter', 'row', null] as const) {
+      vi.restoreAllMocks();
+      const wired = await wire();
+      if (failure === 'note') wired.vault.fail('create');
+      if (failure === 'frontmatter') wired.vault.fail('frontmatter');
+      if (failure === 'row') {
+        wired.repo.failWrite((query) =>
+          query.startsWith('INSERT INTO srs_card')
+        );
+      }
+
+      const card = await wired.fromPdf();
+
+      const rows = wired.repo.rows('srs_card');
+      if (failure) {
+        expect(card).toBeNull();
+        expect(rows).toEqual([]);
+        expect(wired.vault.paths()).toEqual([NOTE, PDF]);
+      } else {
+        expect(rows).toHaveLength(1);
+        expect(wired.vault.paths()).toEqual(
+          [NOTE, rows[0].reference as string, PDF].sort()
+        );
+      }
+    }
+  });
+
+  it('makes no note, and says why, while writes are refused', async () => {
+    const wired = await wire();
+    wired.repo.refuseWrites(new Error('Saving is paused.'));
+    const refused =
+      "Couldn't create the card: saving to the database is paused. Saving is paused.";
+
+    expect(await wired.fromPdf()).toBeNull();
+    expect(wired.notify).toHaveBeenLastCalledWith(refused);
+
+    const doc = 'a line of text';
+    const editor = makeEditor(doc);
+    expect(
+      await wired.manager.createFromSelection(
+        editor as never,
+        { file: wired.vault.files.get(NOTE) } as never,
+        { from: 0, to: doc.length, text: doc },
+        [2, 6]
+      )
+    ).toBeNull();
+    expect(wired.notify).toHaveBeenLastCalledWith(refused);
+
+    vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
+      line: doc,
+      lineNumber: 0,
+      start: 0,
+      end: doc.length,
+    });
+    vi.spyOn(Obsidian, 'getSelectionWithBounds').mockReturnValue({
+      selection: 'line',
+      start: { line: 0, ch: 2 },
+      end: { line: 0, ch: 6 },
+      startOffset: 2,
+      endOffset: 6,
+    });
+    expect(
+      await wired.manager.create(
+        editor as never,
+        { file: wired.vault.files.get(NOTE) } as never
+      )
+    ).toBeNull();
+    expect(wired.notify).toHaveBeenLastCalledWith(refused);
+
+    expect(wired.vault.paths()).toEqual([NOTE, PDF]);
+    expect(wired.vault.processFrontMatter).not.toHaveBeenCalled();
+    expect(editor.text).toBe(doc);
+  });
+
+  it('keeps the row as it was, and the note, when the note is not deleted, and deletes nothing while writes are refused', async () => {
+    for (const why of ['cancelled', 'trash fails', 'refused'] as const) {
+      vi.restoreAllMocks();
+      const wired = await wire();
+      const card = (await wired.fromPdf())!;
+      const before = wired.repo.rows('srs_card');
+      const paths = wired.vault.paths();
+      Object.assign(wired.vault.app.fileManager, {
+        promptForFileDeletion: vi.fn().mockResolvedValue(false),
+      });
+      if (why === 'trash fails') wired.vault.fail('trash');
+      if (why === 'refused') wired.repo.refuseWrites(new Error('Paused.'));
+      wired.notify.mockClear();
+
+      expect(
+        await wired.manager.delete(card.data.id, {
+          prompt: why === 'cancelled',
+        })
+      ).toBe(
+        { cancelled: 'declined', 'trash fails': 'failed', refused: 'refused' }[
+          why
+        ]
+      );
+
+      expect(wired.repo.rows('srs_card')).toEqual(before);
+      expect(wired.vault.paths()).toEqual(paths);
+      if (why === 'refused') {
+        expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
+          "Couldn't delete the card: saving to the database is paused. Paused."
+        );
+      }
+    }
+  });
+});
+
+describe('rollbackBeforeReview', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('puts the card back dismissed or not as it was before the grade, and drops the review', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), gradeArb, async (dismissed, grade) => {
+        const { repo, manager, before, reviewId } = await gradedCard(
+          dismissed,
+          grade
+        );
+
+        await manager.rollbackBeforeReview(before, reviewId);
+
+        const [card] = repo.rows('srs_card');
+        expect(card.dismissed).toBe(Number(dismissed));
+        expect(repo.rows('srs_card_review')).toEqual([]);
+      }),
+      { numRuns: 16 }
+    );
+  });
+
+  it('changes nothing when any of its writes fails, the dismissal included', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        gradeArb,
+        fc.constantFrom('UPDATE srs_card', 'DELETE FROM srs_card_review'),
+        async (dismissed, grade, failing) => {
+          const graded = await gradedCard(dismissed, grade);
+          const reviews = graded.repo.rows('srs_card_review');
+          graded.repo.failWrite((query) => query.startsWith(failing));
+
+          await expect(
+            graded.manager.rollbackBeforeReview(graded.before, graded.reviewId)
+          ).rejects.toThrow();
+
+          expect(graded.repo.rows('srs_card')).toEqual(graded.row);
+          expect(graded.repo.rows('srs_card_review')).toEqual(reviews);
+        }
+      ),
+      { numRuns: 16 }
+    );
+  });
+});
+
+describe('adoptLeftover', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("gives a leftover card a new card's row, due the next day, the child of what its source links to", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.integer({ min: 0, max: 2 ** 40 }),
+        async (hasParent, now) => {
+          vi.restoreAllMocks();
+          vi.useFakeTimers({ toFake: ['Date'] });
+          vi.setSystemTime(now);
+          const vault = makeItemVault({
+            'cards/left.md': { 'ir-id': 'left-1', tags: [CARD_TAG] },
+            'notes/parent.md': hasParent
+              ? { 'ir-id': 'parent-1', tags: ['ir-article'] }
+              : null,
+          });
+          const repo = await TestRepository.create();
+          if (hasParent) {
+            repo.mutate(
+              `INSERT INTO article (id, reference, due, interval, priority) VALUES ('parent-1', 'notes/parent.md', 0, 1, 30)`
+            );
+          }
+          vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(
+            vault.files.get('notes/parent.md')!
+          );
+          const manager = new CardManager(
+            { app: vault.app, settings: {} } as never,
+            repo
+          );
+
+          await manager.adoptLeftover(
+            vault.files.get('cards/left.md')!,
+            'left-1'
+          );
+
+          expect(repo.rows('srs_card')).toEqual([
+            expect.objectContaining({
+              id: 'left-1',
+              reference: 'cards/left.md',
+              parent: hasParent ? 'parent-1' : null,
+              created_at: now,
+              due: now + MS_PER_DAY,
+              reps: 0,
+              state: State.New,
+            }),
+          ]);
+        }
+      ),
+      { numRuns: 12 }
+    );
+  });
+
+  it('gives one whose source links nowhere a row of no parent', async () => {
+    const vault = makeItemVault({
+      'cards/left.md': { 'ir-id': 'left-1', tags: [CARD_TAG] },
+    });
+    const repo = await TestRepository.create();
+    vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(null);
+    const manager = new CardManager(
+      { app: vault.app, settings: {} } as never,
+      repo
+    );
+
+    await manager.adoptLeftover(vault.files.get('cards/left.md')!, 'left-1');
+
+    expect(repo.rows('srs_card')[0]).toMatchObject({ parent: null });
   });
 });

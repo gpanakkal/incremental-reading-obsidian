@@ -91,6 +91,7 @@ import { type IRPluginSettings, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, setPage, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
 import { ImportModal } from './views/ImportModal';
+import { flagLeftovers } from './views/LeftoverModal';
 import ReviewView from './views/ReviewView';
 
 /**
@@ -552,6 +553,8 @@ export default class IncrementalReadingPlugin extends Plugin {
       onWritesResumed: () => {
         writesBlockedNotice?.hide();
         writesBlockedNotice = null;
+        // Highlight offsets the review editor couldn't save meanwhile
+        void this.reviewManager?.snippets.persistPendingOffsets();
       },
       onReloadFromDisk: async () => {
         await invalidateCurrentItemQuery();
@@ -766,7 +769,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     const { vault, metadataCache } = this.app;
 
     const scan = () => {
-      scanForMovedNotes({
+      void scanForMovedNotes({
         repo,
         vault,
         metadataCache,
@@ -805,6 +808,29 @@ export default class IncrementalReadingPlugin extends Plugin {
         .catch((error: unknown) => {
           console.error(
             'Incremental Reading - failed to look for item paths that break links:',
+            error
+          );
+        })
+        // Last, once every row is where its note is: a note the scan just
+        // pointed a row at is no leftover. Notes only, by the cache, read
+        // once it is clean.
+        // TODO(0081): once the startup hold for Obsidian Sync lands, wait for
+        // its settled signal here too. Until then, a note Sync brings down
+        // before the database reads as a leftover; the notice only asks, and
+        // `resolveLeftover` looks again before it acts.
+        .then(async () => {
+          if (controller.signal.aborted) return;
+          await flagLeftovers({
+            app: this.app,
+            repo,
+            managers: () => this.reviewManager,
+            onResolved: () =>
+              queryClient.invalidateQueries({ queryKey: ['queue'] }),
+          });
+        })
+        .catch((error: unknown) => {
+          console.error(
+            'Incremental Reading - failed to flag notes left without review data:',
             error
           );
         });

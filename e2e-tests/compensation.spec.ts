@@ -1,0 +1,295 @@
+import { ARTICLE_TAG, DATA_DIRECTORY, SNIPPET_TAG } from '#/lib/constants';
+import test, {
+  expect,
+  type ElectronApplication,
+  type Page,
+} from '@playwright/test';
+import * as fs from 'node:fs/promises';
+import {
+  executeCommandById,
+  finalizeArticleImport,
+  openNote,
+  pendingSaves,
+  selectParagraph,
+  watchNotices,
+} from './helpers';
+import {
+  closeElectron,
+  createVaultCopy,
+  launchElectron,
+  openVault,
+  shouldCleanup,
+} from './setup/helpers';
+
+let app: ElectronApplication;
+let window: Page;
+let vaultPath: string;
+
+test.beforeEach(async () => {
+  vaultPath = await createVaultCopy('compensation');
+});
+
+/** Start Obsidian on the vault copy, as it is by then. */
+async function start() {
+  app = await launchElectron(vaultPath);
+  window = await openVault(app, vaultPath);
+  // CI runs headed in a small window; pin it so layout matches everywhere
+  await window.setViewportSize({ width: 1280, height: 800 });
+}
+
+test.afterEach(async () => {
+  if (app) await closeElectron(app);
+  if (shouldCleanup) {
+    await fs
+      .rm(vaultPath, { recursive: true, force: true, maxRetries: 3 })
+      .catch(() => {});
+  }
+});
+
+// #region HELPERS
+
+const SOURCE = 'sources/Security Principles';
+const PARAGRAPH =
+  'Before we start discussing the different security principles';
+
+/**
+ * What the page-side calls below reach. `window.app`, `app.plugins` and the
+ * repository's protected `blockWrites` are unofficial: stable in practice,
+ * but undocumented.
+ */
+type PageWindow = {
+  app: {
+    vault: {
+      getFiles(): { path: string }[];
+      setConfig(key: string, value: unknown): void;
+    };
+    metadataCache: {
+      getCache(path: string): { frontmatter?: Record<string, unknown> } | null;
+    };
+    plugins: {
+      plugins: Record<
+        string,
+        {
+          reviewManager: {
+            repo: {
+              blockWrites(error: Error): Error;
+              mutate: (query: string, params?: unknown[]) => unknown;
+              query(query: string, params?: unknown[]): unknown[];
+            };
+          };
+        }
+      >;
+    };
+  };
+};
+
+/** Paths of every file in the plugin's data folder but its database's. */
+async function itemFiles(window: Page): Promise<string[]> {
+  return window.evaluate((dataDirectory) => {
+    const { app } = window as unknown as PageWindow;
+    return app.vault
+      .getFiles()
+      .map((file) => file.path)
+      .filter(
+        (path) => path.startsWith(`${dataDirectory}/`) && path.endsWith('.md')
+      )
+      .sort();
+  }, DATA_DIRECTORY);
+}
+
+/** How many rows `table` holds. */
+async function rowCount(window: Page, table: string): Promise<number> {
+  return window.evaluate((table) => {
+    const { app } = window as unknown as PageWindow;
+    const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+    return repo.query(`SELECT id FROM ${table}`).length;
+  }, table);
+}
+
+/** Refuse writes, as a changed database file that won't load does. */
+async function pauseSaving(window: Page) {
+  await window.evaluate(() => {
+    const { app } = window as unknown as PageWindow;
+    const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+    repo.blockWrites(new Error('Paused for the test.'));
+  });
+}
+
+/** Write the note at vault path `path`, holding `frontmatter`. */
+async function writeNote(path: string, frontmatter: Record<string, unknown>) {
+  const file = `${vaultPath}/${path}`;
+  await fs.mkdir(file.slice(0, file.lastIndexOf('/')), { recursive: true });
+  await fs.writeFile(
+    file,
+    `---
+${JSON.stringify(frontmatter)}
+---
+left behind
+`
+  );
+}
+
+/** The notice listing leftovers, once it is up. */
+const leftoverNotice = () =>
+  window.locator('.notice', { hasText: 'an item id but no review data' });
+
+/**
+ * Start Obsidian once to give the database an item of its own, then close it:
+ * leftovers are asked about only once the database holds items, as an empty
+ * one may be one Sync has yet to bring down.
+ */
+async function seedItem() {
+  await start();
+  await window.evaluate(() => {
+    const { app } = window as unknown as PageWindow;
+    const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority)
+       VALUES ('seeded', 'seeded.md', 0, 1, 30)`
+    );
+  });
+  await expect.poll(() => pendingSaves(window)).toBe(0);
+  await expect.poll(() => rowCount(window, 'article')).toBe(1);
+  await closeElectron(app);
+}
+
+// #endregion
+
+test.describe('Making items while saving is paused', () => {
+  test.beforeEach(start);
+
+  test('makes no snippet note, and says so', async () => {
+    const notices = await watchNotices(window);
+    await openNote(window, SOURCE);
+    await pauseSaving(window);
+
+    await selectParagraph(window, PARAGRAPH);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+
+    await expect
+      .poll(notices)
+      .toContainEqual(
+        expect.stringContaining(
+          "Couldn't create the snippet: saving to the database is paused."
+        )
+      );
+    expect(await itemFiles(window)).toEqual([]);
+    expect(await rowCount(window, 'snippet')).toBe(0);
+  });
+
+  test("imports nothing, leaving the note's frontmatter as it was", async () => {
+    const notices = await watchNotices(window);
+    await openNote(window, SOURCE);
+    const before = await window.evaluate(
+      (path) =>
+        (window as unknown as PageWindow).app.metadataCache.getCache(path)
+          ?.frontmatter ?? null,
+      `${SOURCE}.md`
+    );
+    await pauseSaving(window);
+
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+
+    await expect
+      .poll(notices)
+      .toContainEqual(
+        expect.stringContaining(
+          `Couldn't import "Security Principles.md": saving to the database is paused.`
+        )
+      );
+    expect(await itemFiles(window)).toEqual([]);
+    expect(await rowCount(window, 'article')).toBe(0);
+    expect(
+      await window.evaluate(
+        (path) =>
+          (window as unknown as PageWindow).app.metadataCache.getCache(path)
+            ?.frontmatter ?? null,
+        `${SOURCE}.md`
+      )
+    ).toEqual(before);
+  });
+});
+
+test.describe('Making an item whose row cannot be saved', () => {
+  test.beforeEach(start);
+
+  test('trashes the snippet note it made', async () => {
+    const notices = await watchNotices(window);
+    await openNote(window, SOURCE);
+    // Throws as a statement SQLite rejects does, past the check made before
+    // anything is touched. Trashed into the vault, not the system's trash
+    // (`vault.setConfig` is unofficial Obsidian API).
+    await window.evaluate(() => {
+      const { app } = window as unknown as PageWindow;
+      app.vault.setConfig('trashOption', 'local');
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      const { mutate } = repo;
+      repo.mutate = (query, params) => {
+        if (query.startsWith('INSERT INTO snippet')) {
+          throw new Error('Rejected for the test');
+        }
+        return Reflect.apply(mutate, repo, [query, params]);
+      };
+    });
+
+    await selectParagraph(window, PARAGRAPH);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+
+    await expect
+      .poll(notices)
+      .toContainEqual(expect.stringContaining('Failed to create the snippet'));
+    await expect.poll(() => itemFiles(window)).toEqual([]);
+    expect(await rowCount(window, 'snippet')).toBe(0);
+  });
+});
+
+test.describe('Notes left without review data by a crash', () => {
+  test('lists them at startup, and keeps one the plugin made as an item when asked', async () => {
+    const path = `${DATA_DIRECTORY}/snippets/Left behind.md`;
+    await seedItem();
+    await writeNote(path, { 'ir-id': 'left-1', tags: [SNIPPET_TAG] });
+    await start();
+
+    await expect(leftoverNotice()).toContainText('"Left behind"');
+    expect(await rowCount(window, 'snippet')).toBe(0);
+    await leftoverNotice().click();
+    await window.getByRole('button', { name: 'Keep as item' }).click();
+
+    await expect.poll(() => rowCount(window, 'snippet')).toBe(1);
+    await expect(window.locator('.modal')).toBeHidden();
+  });
+
+  test("takes the plugin's id and tag off a note being imported in place when asked, leaving the rest", async () => {
+    const path = 'sources/Imported.md';
+    await seedItem();
+    await writeNote(path, {
+      'ir-id': 'left-2',
+      tags: ['mine', ARTICLE_TAG],
+      title: 'kept',
+    });
+    await start();
+
+    await leftoverNotice().click();
+    await expect(
+      window.getByRole('button', { name: 'Move to trash' })
+    ).toHaveCount(0);
+    await window
+      .getByRole('button', { name: 'Remove item properties' })
+      .click();
+
+    await expect
+      .poll(() =>
+        window.evaluate(
+          (path) =>
+            (window as unknown as PageWindow).app.metadataCache.getCache(path)
+              ?.frontmatter ?? null,
+          path
+        )
+      )
+      .toEqual({ tags: ['mine'], title: 'kept' });
+    // The seeded one alone
+    expect(await rowCount(window, 'article')).toBe(1);
+    expect(await itemFiles(window)).toEqual([]);
+  });
+});

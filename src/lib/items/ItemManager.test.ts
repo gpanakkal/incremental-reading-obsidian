@@ -1,5 +1,6 @@
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type { NoteType, SQLiteRepository } from '#/lib/types';
+import { makeItemVault, TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
 import type { CachedMetadata, TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -129,6 +130,89 @@ const tableArb = fc.option(
   fc.constantFrom<keyof typeof TABLE_TYPE>('article', 'snippet', 'srs_card'),
   { nil: null }
 );
+/** Opens the protected `deleteWithNote` to the tests. */
+class DeletingManager extends ItemManager {
+  delete(
+    table: 'snippet' | 'srs_card',
+    id: string,
+    options: { prompt?: boolean }
+  ) {
+    return this.deleteWithNote(table, id, options, 'delete the item');
+  }
+}
+
+/** Where the note of each item that {@link wireDelete} makes is. */
+const ITEM_NOTE = 'items/note.md';
+
+/** An item's row, of either table with a note, as the schema accepts it. */
+const itemRowArb = fc.record({
+  table: fc.constantFrom('snippet' as const, 'srs_card' as const),
+  id: fc.uuid(),
+  due: fc.integer({ min: 0, max: 2 ** 42 }),
+  dismissed: fc.boolean(),
+  reviews: fc.uniqueArray(fc.uuid(), { maxLength: 3 }),
+});
+type ItemRowCase = typeof itemRowArb extends fc.Arbitrary<infer T> ? T : never;
+
+/**
+ * The item `row` with its note at {@link ITEM_NOTE} and its reviews, a
+ * manager over them, and Obsidian's prompt answering `confirm`.
+ */
+async function wireDelete(row: ItemRowCase, confirm = true) {
+  const vault = makeItemVault({
+    [ITEM_NOTE]: { 'ir-id': row.id, tags: ['ir-snippet'] },
+  });
+  const promptForFileDeletion = vi.fn(async (file: TFile) => {
+    if (!confirm) return false;
+    await vault.app.fileManager.trashFile(file);
+    return true;
+  });
+  Object.assign(vault.app.fileManager, { promptForFileDeletion });
+  const repo = await TestRepository.create();
+  const dismissed = Number(row.dismissed);
+  if (row.table === 'snippet') {
+    repo.mutate(
+      `INSERT INTO snippet (id, reference, due, interval, priority, dismissed) VALUES ($1, $2, $3, 1, 30, $4)`,
+      [row.id, ITEM_NOTE, row.due, dismissed]
+    );
+    for (const review of row.reviews) {
+      repo.mutate(
+        `INSERT INTO snippet_review (id, snippet_id, review_time) VALUES ($1, $2, $3)`,
+        [review, row.id, row.due]
+      );
+    }
+  } else {
+    repo.mutate(
+      `INSERT INTO srs_card (id, reference, created_at, due, stability, difficulty, elapsed_days, scheduled_days, learning_steps, reps, lapses, state, dismissed) VALUES ($1, $2, 0, $3, 0, 0, 0, 0, 0, 0, 0, 0, $4)`,
+      [row.id, ITEM_NOTE, row.due, dismissed]
+    );
+    for (const review of row.reviews) {
+      repo.mutate(
+        `INSERT INTO srs_card_review (id, card_id, due, review, stability, difficulty, elapsed_days, last_elapsed_days, scheduled_days, learning_steps, rating, state) VALUES ($1, $2, 0, $3, 0, 0, 0, 0, 0, 0, 1, 0)`,
+        [review, row.id, row.due]
+      );
+    }
+  }
+  const log = row.table === 'snippet' ? 'snippet_review' : 'srs_card_review';
+  const stored = () => ({
+    rows: repo.rows(row.table),
+    reviews: repo.rows(log),
+  });
+  const before = stored();
+  vi.spyOn(console, 'error').mockReturnValue(undefined);
+  const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  const manager = new DeletingManager({ app: vault.app } as never, repo);
+  return {
+    vault,
+    repo,
+    manager,
+    before,
+    stored,
+    notify,
+    promptForFileDeletion,
+  };
+}
+
 // #endregion
 
 describe('reconcileNote', () => {
@@ -751,6 +835,195 @@ describe('retargetChildSources', () => {
     );
     expect(wired.sourceOf('IR/cards/c.md')).toBe(
       `[[${TO.path}#page=2|Paper copy, page 2]]`
+    );
+  });
+});
+
+describe('deleteWithNote', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('keeps the row and its reviews exactly as they were, and the note, when the note is not deleted', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        itemRowArb,
+        fc.constantFrom('cancelled', 'trash fails'),
+        fc.boolean(),
+        fc.boolean(),
+        async (row, why, prompt, foreignKeys) => {
+          vi.restoreAllMocks();
+          fc.pre(prompt || why !== 'cancelled');
+          const wired = await wireDelete(row, why !== 'cancelled');
+          // Off after sql.js's first save: the reviews outlive the row's
+          // delete then, rather than going with it
+          if (!foreignKeys) wired.repo.db!.exec('PRAGMA foreign_keys = OFF');
+          if (why === 'trash fails') wired.vault.fail('trash');
+
+          expect(
+            await wired.manager.delete(row.table, row.id, { prompt })
+          ).toBe(why === 'cancelled' ? 'declined' : 'failed');
+
+          expect(wired.stored()).toEqual(wired.before);
+          expect(wired.vault.paths()).toEqual([ITEM_NOTE]);
+        }
+      ),
+      { numRuns: 40 }
+    );
+  });
+
+  it('deletes nothing when the reviews it would put back cannot be read', async () => {
+    await fc.assert(
+      fc.asyncProperty(itemRowArb, async (row) => {
+        vi.restoreAllMocks();
+        const wired = await wireDelete(row);
+        const query = wired.repo.query.bind(
+          wired.repo
+        ) as TestRepository['query'];
+        const failing = vi
+          .spyOn(wired.repo, 'query')
+          .mockImplementation((sql, params, options) => {
+            if (!sql.includes('_review')) return query(sql, params, options);
+            if (options?.throwOnError) throw new Error('read failed');
+            return [];
+          });
+
+        expect(
+          await wired.manager.delete(row.table, row.id, { prompt: false })
+        ).toBe('failed');
+
+        failing.mockRestore();
+        expect(wired.stored()).toEqual(wired.before);
+        expect(wired.vault.paths()).toEqual([ITEM_NOTE]);
+      }),
+      { numRuns: 10 }
+    );
+  });
+
+  it('keeps the note when the row cannot be deleted', async () => {
+    await fc.assert(
+      fc.asyncProperty(itemRowArb, fc.boolean(), async (row, prompt) => {
+        vi.restoreAllMocks();
+        const wired = await wireDelete(row);
+        wired.repo.failWrite((query) => query.startsWith('DELETE FROM'));
+
+        expect(await wired.manager.delete(row.table, row.id, { prompt })).toBe(
+          'failed'
+        );
+
+        expect(wired.stored()).toEqual(wired.before);
+        expect(wired.vault.paths()).toEqual([ITEM_NOTE]);
+        expect(wired.promptForFileDeletion).not.toHaveBeenCalled();
+      }),
+      { numRuns: 20 }
+    );
+  });
+
+  it('deletes the note and the row when nothing fails, prompting as asked', async () => {
+    await fc.assert(
+      fc.asyncProperty(itemRowArb, fc.boolean(), async (row, prompt) => {
+        vi.restoreAllMocks();
+        const wired = await wireDelete(row);
+
+        expect(await wired.manager.delete(row.table, row.id, { prompt })).toBe(
+          'deleted'
+        );
+
+        expect(wired.stored().rows).toEqual([]);
+        expect(wired.vault.trashed).toEqual([ITEM_NOTE]);
+        expect(wired.promptForFileDeletion).toHaveBeenCalledTimes(
+          prompt ? 1 : 0
+        );
+      }),
+      { numRuns: 20 }
+    );
+  });
+
+  it('keeps the row deleted when the prompt fails after trashing the note', async () => {
+    await fc.assert(
+      fc.asyncProperty(itemRowArb, async (row) => {
+        vi.restoreAllMocks();
+        const wired = await wireDelete(row);
+        const failure = new Error('attachment busy');
+        wired.promptForFileDeletion.mockImplementationOnce(
+          async (file: TFile) => {
+            await wired.vault.app.fileManager.trashFile(file);
+            throw failure;
+          }
+        );
+
+        expect(
+          await wired.manager.delete(row.table, row.id, { prompt: true })
+        ).toBe('deleted');
+
+        expect(wired.stored().rows).toEqual([]);
+        expect(console.error).toHaveBeenCalledWith(failure);
+      }),
+      { numRuns: 10 }
+    );
+  });
+
+  it('says in the console why nothing was deleted', async () => {
+    await fc.assert(
+      fc.asyncProperty(itemRowArb, async (row) => {
+        vi.restoreAllMocks();
+        const wired = await wireDelete(row, false);
+
+        await wired.manager.delete(row.table, row.id, { prompt: true });
+        await wired.manager.delete(row.table, 'no-such-id', { prompt: true });
+
+        expect(
+          vi.mocked(console.error).mock.calls.map(([e]) => String(e))
+        ).toEqual([
+          `Error: Kept ${ITEM_NOTE}`,
+          `Error: No ${row.table} row was found with ID "no-such-id"`,
+        ]);
+      }),
+      { numRuns: 10 }
+    );
+  });
+
+  it('deletes nothing, and says why, while writes are refused', async () => {
+    await fc.assert(
+      fc.asyncProperty(itemRowArb, async (row) => {
+        vi.restoreAllMocks();
+        const wired = await wireDelete(row);
+        wired.repo.refuseWrites(new Error('Saving is paused.'));
+
+        expect(await wired.manager.delete(row.table, row.id, {})).toBe(
+          'refused'
+        );
+
+        expect(wired.promptForFileDeletion).not.toHaveBeenCalled();
+        expect(wired.vault.paths()).toEqual([ITEM_NOTE]);
+        expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
+          "Couldn't delete the item: saving to the database is paused. Saving is paused."
+        );
+      }),
+      { numRuns: 10 }
+    );
+  });
+
+  it('says writes were refused when they are refused partway', async () => {
+    await fc.assert(
+      fc.asyncProperty(itemRowArb, async (row) => {
+        vi.restoreAllMocks();
+        const wired = await wireDelete(row);
+        // Refused only once the row is read, as when Sync pauses saving then
+        const query = wired.repo.query.bind(
+          wired.repo
+        ) as TestRepository['query'];
+        vi.spyOn(wired.repo, 'query').mockImplementation((...args) => {
+          wired.repo.refuseWrites();
+          return query(...args);
+        });
+
+        expect(
+          await wired.manager.delete(row.table, row.id, { prompt: false })
+        ).toBe('refused');
+        expect(wired.vault.paths()).toEqual([ITEM_NOTE]);
+      }),
+      { numRuns: 10 }
     );
   });
 });

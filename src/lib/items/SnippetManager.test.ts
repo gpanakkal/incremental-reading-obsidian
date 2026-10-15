@@ -1,4 +1,5 @@
 import {
+  ARTICLE_TAG,
   DAY_ROLLOVER_OFFSET_HOURS,
   DEFAULT_PRIORITY,
   MAX_SQL_QUERY_PARAMS,
@@ -17,6 +18,7 @@ import IRScheduler from '#/lib/IRScheduler';
 import { Markdown } from '#/lib/Markdown';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { encodeAnchor, MAX_ANCHOR_PAGE } from '#/lib/pdf/pdf-anchor';
+import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
 import type {
   ISnippetBase,
   ISnippetReview,
@@ -32,6 +34,7 @@ import {
   seenElsewhereArb,
   textItemSpecArb,
 } from '#/test/due-query';
+import { makeItemVault, TestRepository } from '#/test/item-vault';
 import { EditorSelection, EditorState } from '@codemirror/state';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
@@ -83,6 +86,7 @@ function makeSimpleRepo(): SQLiteRepository {
     transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
+    writeRefusal: vi.fn(() => null),
   } as unknown as SQLiteRepository;
 }
 
@@ -101,6 +105,7 @@ function makeRepoWithLastReview(
     transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
+    writeRefusal: vi.fn(() => null),
   } as unknown as SQLiteRepository;
 }
 
@@ -208,6 +213,7 @@ async function makeSqlJsRepo(): Promise<{
     transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
+    writeRefusal: vi.fn(() => null),
   } as unknown as SQLiteRepository;
   return { repo, db };
 }
@@ -460,6 +466,221 @@ const renderedTextArb = fc.string({
   minLength: 1,
   maxLength: 30,
 });
+const PARENT = 'notes/parent.md';
+
+/** Frontmatter of a note that is no item: tags or not, other keys or not. */
+const plainFrontmatterArb = fc
+  .option(
+    fc.record(
+      {
+        tags: fc.oneof(
+          fc.oneof(fc.string(), fc.constant(SOURCE_TAG)),
+          fc.array(
+            fc.oneof(fc.string(), fc.constant(SOURCE_TAG), fc.constant(null)),
+            { maxLength: 3 }
+          )
+        ),
+        title: fc.string(),
+      },
+      { requiredKeys: [] }
+    ),
+    { nil: null }
+  )
+  // A note tagged as an item is one; one with no row behind it has its own
+  // test, below
+  .filter((fm) => Obsidian.typeOfTags(fm?.tags) === null);
+
+/** Where a snippet's making can fail, if anywhere. */
+type Failure = 'note' | 'frontmatter' | 'source tag' | 'row' | null;
+const failureArb = fc.constantFrom<Failure>(
+  'note',
+  'frontmatter',
+  'source tag',
+  'row',
+  null
+);
+
+/**
+ * Snip "selected" from the note at {@link PARENT} holding `frontmatter`, an
+ * article whose row is `article` when given, in a vault and database that
+ * fail at `failure`.
+ */
+async function snipInVault(
+  frontmatter: Record<string, unknown> | null,
+  failure: Failure,
+  article: {
+    id: string;
+    priority: number;
+    type?: 'article' | 'snippet';
+  } | null = null
+) {
+  const parentType = article?.type ?? 'article';
+  const vault = makeItemVault({
+    [PARENT]: article
+      ? {
+          'ir-id': article.id,
+          tags: [parentType === 'article' ? ARTICLE_TAG : SNIPPET_TAG],
+        }
+      : frontmatter,
+  });
+  const repo = await TestRepository.create();
+  if (article) {
+    repo.mutate(
+      `INSERT INTO ${parentType} (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)`,
+      [article.id, PARENT, 0, TEXT_BASE_REVIEW_INTERVAL, article.priority]
+    );
+  }
+  const snippetDir = Obsidian.getDirectory('snippet');
+  if (failure === 'note') vault.fail('create');
+  if (failure === 'frontmatter') {
+    vault.fail('frontmatter', (path) => path.startsWith(snippetDir));
+  }
+  if (failure === 'source tag') vault.fail('frontmatter', (p) => p === PARENT);
+  if (failure === 'row') {
+    repo.failWrite((query) => query.startsWith('INSERT INTO snippet'));
+  }
+  const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  vi.spyOn(console, 'warn').mockReturnValue(undefined);
+  vi.spyOn(console, 'error').mockReturnValue(undefined);
+  const manager = new SnippetManager(
+    { app: vault.app, settings: {} } as never,
+    repo
+  );
+  const before = structuredClone(vault.frontmatterOf(PARENT));
+
+  const result = await manager.create(
+    { getSelection: () => 'selected' } as never,
+    {
+      file: vault.files.get(PARENT),
+      getViewType: () => 'markdown',
+      getSelection: () => '',
+    } as never
+  );
+
+  return { vault, repo, notify, result, before };
+}
+const PDF = 'papers/paper.pdf';
+
+/** Snip from the PDF article at {@link PDF}, failing at `failure`. */
+async function snipPdf(failure: 'note' | 'frontmatter' | 'row' | null) {
+  const vault = makeItemVault({ [PDF]: null });
+  const repo = await TestRepository.create();
+  repo.mutate(
+    `INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)`,
+    ['article-1', PDF, 0, TEXT_BASE_REVIEW_INTERVAL, DEFAULT_PRIORITY]
+  );
+  if (failure === 'note') vault.fail('create');
+  if (failure === 'frontmatter') vault.fail('frontmatter');
+  if (failure === 'row') {
+    repo.failWrite((query) => query.startsWith('INSERT INTO snippet'));
+  }
+  const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  vi.spyOn(console, 'error').mockReturnValue(undefined);
+  const manager = new SnippetManager(
+    { app: vault.app, settings: {} } as never,
+    repo
+  );
+  const file = vault.files.get(PDF)!;
+  const result = await manager.createFromPdf({
+    article: {
+      data: makeSnippet({ id: 'article-1', reference: PDF }) as never,
+      file,
+    },
+    text: 'text',
+    start: 1e10,
+    end: 1e10 + 4,
+    subpath: '#page=1&selection=0,0,0,4',
+  });
+  return { vault, repo, notify, result };
+}
+
+/**
+ * A manager over a real database and a vault holding `notes`, writes refused
+ * when `refused`, with notices and console warnings caught.
+ */
+async function wireSnippets(
+  notes: Record<string, Record<string, unknown> | null>,
+  refused = false
+) {
+  const vault = makeItemVault(notes);
+  const repo = await TestRepository.create();
+  if (refused) repo.refuseWrites(new Error('Saving is paused.'));
+  const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  vi.spyOn(console, 'warn').mockReturnValue(undefined);
+  const manager = new SnippetManager(
+    { app: vault.app, settings: {} } as never,
+    repo
+  );
+  /** Snip "selected" from the note at `path`, as from its editor. */
+  const snip = (path: string) =>
+    manager.create(
+      { getSelection: () => 'selected' } as never,
+      {
+        file: vault.files.get(path),
+        getViewType: () => 'markdown',
+        getSelection: () => '',
+      } as never
+    );
+  return { vault, repo, notify, manager, snip };
+}
+
+/** The article {@link wirePending} holds snippets of. */
+const PENDING_ARTICLE = 'articles/a.md';
+
+/**
+ * An article with snippets `ids`, stored at `stored` offsets, and the
+ * tracker holding `tracked` for them, every one held back.
+ */
+async function wirePending(
+  ids: string[],
+  stored: [number, number][],
+  tracked: [number, number][]
+) {
+  const { vault, repo, manager } = await wireSnippets({
+    [PENDING_ARTICLE]: { 'ir-id': 'article-1', tags: [ARTICLE_TAG] },
+  });
+  repo.mutate(
+    `INSERT INTO article (id, reference, due, interval, priority) VALUES ('article-1', $1, 0, 1, 30)`,
+    [PENDING_ARTICLE]
+  );
+  for (const [i, id] of ids.entries()) {
+    repo.mutate(
+      `INSERT INTO snippet (id, reference, due, interval, priority, parent, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, 'article-1', $3, $4)`,
+      [id, `s/${i}.md`, ...stored[i]]
+    );
+  }
+  const highlights = ids.map((id, i) => ({
+    ...(SnippetManager.rowToHighlight(
+      repo.rows('snippet')[i] as unknown as SnippetRow
+    ) as SnippetHighlight),
+    start_offset: tracked[i][0],
+    end_offset: tracked[i][1],
+  }));
+  manager.offsetTracker.loadHighlights(PENDING_ARTICLE, highlights);
+  manager.offsetsPending(PENDING_ARTICLE);
+  const offsets = () =>
+    repo
+      .rows('snippet')
+      .map((r) => [r.start_offset, r.end_offset] as [number, number]);
+  return { vault, repo, manager, offsets };
+}
+
+const pendingCaseArb = fc
+  .uniqueArray(fc.uuid(), { minLength: 1, maxLength: 4 })
+  .chain((ids) =>
+    fc.record({
+      ids: fc.constant(ids),
+      stored: fc.array(fc.tuple(fc.nat(500), fc.nat(500)), {
+        minLength: ids.length,
+        maxLength: ids.length,
+      }),
+      tracked: fc.array(fc.tuple(fc.nat(500), fc.nat(500)), {
+        minLength: ids.length,
+        maxLength: ids.length,
+      }),
+    })
+  );
+
 // #endregion
 
 describe('rowToBase', () => {
@@ -2351,6 +2572,7 @@ function makeOrphanRepoStub(rows: SnippetRow[]): SQLiteRepository {
     transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
+    writeRefusal: vi.fn(() => null),
   } as unknown as SQLiteRepository;
 }
 
@@ -3834,7 +4056,7 @@ describe('delete', () => {
         vi.restoreAllMocks();
         const { manager, mutate, fileManager } = wireDelete(id, NOTE);
 
-        expect(await manager.delete(id, { prompt: false })).toBe(true);
+        expect(await manager.delete(id, { prompt: false })).toBe('deleted');
 
         // Obsidian's prompt would also offer to delete what the note alone
         // linked to: a PDF its source links to among them
@@ -3852,7 +4074,7 @@ describe('delete', () => {
     for (const options of [undefined, {}, { prompt: true }]) {
       const { manager, mutate, fileManager } = wireDelete('id-1', NOTE);
 
-      expect(await manager.delete('id-1', options)).toBe(true);
+      expect(await manager.delete('id-1', options)).toBe('deleted');
 
       expect(fileManager.promptForFileDeletion).toHaveBeenCalledExactlyOnceWith(
         NOTE
@@ -3876,7 +4098,7 @@ describe('delete', () => {
         repo
       );
 
-      expect(await manager.delete('id-1', { prompt })).toBe(false);
+      expect(await manager.delete('id-1', { prompt })).toBe('failed');
 
       expect(fileManager.trashFile).not.toHaveBeenCalled();
       expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
@@ -3888,12 +4110,458 @@ describe('delete', () => {
     for (const prompt of [true, false]) {
       const { manager, mutate, fileManager } = wireDelete('id-1', null);
 
-      expect(await manager.delete('id-1', { prompt })).toBe(true);
+      expect(await manager.delete('id-1', { prompt })).toBe('deleted');
 
       expect(fileManager.trashFile).not.toHaveBeenCalled();
       expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
       expect(mutate).toHaveBeenCalledOnce();
       vi.restoreAllMocks();
     }
+  });
+});
+
+describe('create, with its note and its row as one unit', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('leaves no note, no row and the parent as it was when any step fails, and keeps all of them when none does', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        plainFrontmatterArb,
+        failureArb,
+        fc.option(
+          fc.record({
+            id: fc.uuid(),
+            priority: fc.integer({
+              min: MINIMUM_PRIORITY,
+              max: MAXIMUM_PRIORITY,
+            }),
+            type: fc.constantFrom('article' as const, 'snippet' as const),
+          }),
+          { nil: null }
+        ),
+        async (frontmatter, failure, article) => {
+          vi.restoreAllMocks();
+          // An article parent takes no source tag
+          fc.pre(!(article && failure === 'source tag'));
+
+          const { vault, repo, result, before } = await snipInVault(
+            frontmatter,
+            failure,
+            article
+          );
+
+          const snippets = repo
+            .rows('snippet')
+            .filter(({ reference }) => reference !== PARENT);
+          if (failure !== null) {
+            expect(result).toBeNull();
+            expect(vault.paths()).toEqual([PARENT]);
+            expect(snippets).toEqual([]);
+            expect(vault.frontmatterOf(PARENT) ?? {}).toEqual(before ?? {});
+            return;
+          }
+          expect(snippets).toHaveLength(1);
+          const [row] = snippets;
+          expect(vault.paths()).toEqual([PARENT, row.reference].sort());
+          expect(vault.frontmatterOf(row.reference as string)?.['ir-id']).toBe(
+            row.id
+          );
+          expect(row.parent).toBe(article?.id ?? null);
+          expect(vault.trashed).toEqual([]);
+          if (!article) {
+            expect(vault.frontmatterOf(PARENT)?.tags).toContain(SOURCE_TAG);
+          }
+        }
+      ),
+      { numRuns: 60 }
+    );
+  });
+
+  it('says it failed when a step does', async () => {
+    for (const failure of [
+      'note',
+      'frontmatter',
+      'source tag',
+      'row',
+    ] as const) {
+      vi.restoreAllMocks();
+      const { notify } = await snipInVault(null, failure);
+
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        expect.stringMatching(/^Failed to create the snippet/)
+      );
+    }
+  });
+
+  it('makes nothing, and says why, while writes are refused', async () => {
+    const { vault, notify, snip } = await wireSnippets(
+      { [PARENT]: null },
+      true
+    );
+
+    const result = await snip(PARENT);
+
+    expect(result).toBeNull();
+    expect(vault.paths()).toEqual([PARENT]);
+    expect(vault.processFrontMatter).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      "Couldn't create the snippet: saving to the database is paused. Saving is paused."
+    );
+  });
+
+  it('makes no note when the parent is an item with no row behind it', async () => {
+    const { vault, snip } = await wireSnippets({
+      [PARENT]: { 'ir-id': 'gone', tags: [ARTICLE_TAG] },
+    });
+
+    await expect(snip(PARENT)).rejects.toThrow(/Couldn't find entry/);
+
+    expect(vault.paths()).toEqual([PARENT]);
+  });
+});
+
+describe('createFromPdf, with its note and its row as one unit', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('leaves no note and no row when any step fails, and says so', async () => {
+    for (const failure of ['note', 'frontmatter', 'row'] as const) {
+      vi.restoreAllMocks();
+      const { vault, repo, notify, result } = await snipPdf(failure);
+
+      expect(result).toBeNull();
+      expect(vault.paths()).toEqual([PDF]);
+      expect(repo.rows('snippet')).toEqual([]);
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        expect.stringMatching(/^Failed to create the snippet/)
+      );
+    }
+  });
+
+  it('keeps the note and its row when nothing fails', async () => {
+    const { vault, repo } = await snipPdf(null);
+
+    const [row] = repo.rows('snippet');
+    expect(row.parent).toBe('article-1');
+    expect([row.start_offset, row.end_offset]).toEqual([1e10, 1e10 + 4]);
+    expect(vault.paths()).toEqual([PDF, row.reference].sort());
+    expect(vault.frontmatterOf(row.reference as string)).toMatchObject({
+      'ir-id': row.id,
+      tags: [SNIPPET_TAG],
+    });
+    expect(vault.trashed).toEqual([]);
+  });
+
+  it('makes nothing, and says why, while writes are refused', async () => {
+    const { vault, notify, manager } = await wireSnippets(
+      { [PDF]: null },
+      true
+    );
+
+    const result = await manager.createFromPdf({
+      pdf: vault.files.get(PDF)!,
+      text: 'text',
+      start: 1e10,
+      end: 1e10 + 4,
+      subpath: '#page=1',
+    });
+
+    expect(result).toBeNull();
+    expect(vault.paths()).toEqual([PDF]);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      "Couldn't create the snippet: saving to the database is paused. Saving is paused."
+    );
+  });
+});
+
+describe('delete while writes are refused', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('deletes nothing, and says it was a snippet it could not delete', async () => {
+    const { notify, manager } = await wireSnippets({}, true);
+
+    expect(await manager.delete('snippet-1')).toBe('refused');
+
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      "Couldn't delete the snippet: saving to the database is paused. Saving is paused."
+    );
+  });
+});
+
+describe('offsetsOf', () => {
+  it('reads more snippets than one query can ask for', async () => {
+    const repo = await TestRepository.create();
+    const ids = Array.from(
+      { length: MAX_SQL_QUERY_PARAMS + 2 },
+      (_, i) => `id-${i}`
+    );
+    for (const [i, id] of ids.entries()) {
+      repo.mutate(
+        `INSERT INTO snippet (id, reference, due, interval, priority, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, $3, $3)`,
+        [id, `s/${i}.md`, i]
+      );
+    }
+    const manager = new SnippetManager(
+      { app: {}, settings: {} } as never,
+      repo
+    );
+
+    const found = await manager.offsetsOf(ids);
+
+    expect(found.map(({ id }) => id).sort()).toEqual([...ids].sort());
+  });
+
+  it('answers the stored offsets of each asked-for snippet, null where it has none, and nothing for ids no row holds', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uniqueArray(
+          fc.record({
+            id: fc.uuid(),
+            offsets: fc.option(fc.record({ start: fc.nat(), end: fc.nat() }), {
+              nil: null,
+            }),
+            asked: fc.boolean(),
+          }),
+          { selector: (s) => s.id, maxLength: MAX_SQL_QUERY_PARAMS + 5 }
+        ),
+        fc.array(fc.uuid(), { maxLength: 3 }),
+        async (snippets, unknownIds) => {
+          const repo = await TestRepository.create();
+          for (const [i, { id, offsets }] of snippets.entries()) {
+            repo.mutate(
+              `INSERT INTO snippet (id, reference, due, interval, priority, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, $3, $4)`,
+              [id, `s/${i}.md`, offsets?.start ?? null, offsets?.end ?? null]
+            );
+          }
+          const manager = new SnippetManager(
+            { app: {}, settings: {} } as never,
+            repo
+          );
+          const known = new Set(snippets.map((s) => s.id));
+          const asked = [
+            ...snippets.filter((s) => s.asked).map((s) => s.id),
+            ...unknownIds.filter((id) => !known.has(id)),
+          ];
+
+          const found = await manager.offsetsOf(asked);
+
+          const byId = (a: { id: string }, b: { id: string }) =>
+            a.id.localeCompare(b.id);
+          expect([...found].sort(byId)).toEqual(
+            snippets
+              .filter((s) => s.asked)
+              .map((s) => ({
+                id: s.id,
+                start_offset: s.offsets?.start ?? null,
+                end_offset: s.offsets?.end ?? null,
+              }))
+              .sort(byId)
+          );
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+});
+
+describe('offsets held back while saving is paused', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("saves the tracker's offsets for them once saving resumes, and only once", async () => {
+    await fc.assert(
+      fc.asyncProperty(pendingCaseArb, async ({ ids, stored, tracked }) => {
+        vi.restoreAllMocks();
+        const { repo, manager, offsets } = await wirePending(
+          ids,
+          stored,
+          tracked
+        );
+
+        await manager.persistPendingOffsets();
+        expect(offsets()).toEqual(tracked);
+
+        const update = vi.spyOn(repo, 'transaction');
+        await manager.persistPendingOffsets();
+        expect(update).not.toHaveBeenCalled();
+      }),
+      { numRuns: 20 }
+    );
+  });
+
+  it('keeps them held back when saving them fails, to try again', async () => {
+    const { repo, manager, offsets } = await wirePending(
+      ['a'],
+      [[1, 2]],
+      [[3, 4]]
+    );
+    vi.spyOn(console, 'error').mockReturnValue(undefined);
+    repo.refuseWrites();
+
+    await manager.persistPendingOffsets();
+    expect(offsets()).toEqual([[1, 2]]);
+  });
+
+  it('keeps held back the offsets held back while it was writing others', async () => {
+    const { repo, manager, offsets } = await wirePending(
+      ['a', 'b'],
+      [
+        [1, 2],
+        [5, 6],
+      ],
+      [
+        [3, 4],
+        [7, 8],
+      ]
+    );
+    await manager.persistPendingOffsets();
+    // Moved on since, each now on a note of its own
+    const [a, b] = manager.offsetTracker.getHighlights(PENDING_ARTICLE);
+    manager.offsetTracker.loadHighlights(PENDING_ARTICLE, [
+      { ...a, start_offset: 9, end_offset: 10 },
+    ]);
+    manager.offsetTracker.loadHighlights('other.md', [
+      { ...b, start_offset: 11, end_offset: 12 },
+    ]);
+    manager.offsetsPending(PENDING_ARTICLE);
+    // The other's held back while the first is being written
+    const transaction = repo.transaction.bind(
+      repo
+    ) as TestRepository['transaction'];
+    vi.spyOn(repo, 'transaction').mockImplementationOnce(async (work) => {
+      manager.offsetsPending('other.md');
+      return transaction(work);
+    });
+
+    await manager.persistPendingOffsets();
+    expect(offsets()).toEqual([
+      [9, 10],
+      [7, 8],
+    ]);
+
+    await manager.persistPendingOffsets();
+    expect(offsets()).toEqual([
+      [9, 10],
+      [11, 12],
+    ]);
+  });
+
+  it('writes them once a later try can, from wherever their note has moved to', async () => {
+    const { repo, manager, offsets } = await wirePending(
+      ['a', 'b'],
+      [
+        [1, 2],
+        [5, 6],
+      ],
+      [
+        [3, 4],
+        [7, 8],
+      ]
+    );
+    vi.spyOn(console, 'error').mockReturnValue(undefined);
+    const failing = repo.failWrite(() => true);
+    await manager.persistPendingOffsets();
+    failing.mockRestore();
+    manager.offsetTracker.renameFile(PENDING_ARTICLE, 'moved/a.md');
+
+    await manager.persistPendingOffsets();
+
+    expect(offsets()).toEqual([
+      [3, 4],
+      [7, 8],
+    ]);
+  });
+
+  it("keeps the tracker's offsets when the note's highlights are read again meanwhile, rather than the stored ones", async () => {
+    await fc.assert(
+      fc.asyncProperty(pendingCaseArb, async ({ ids, stored, tracked }) => {
+        vi.restoreAllMocks();
+        const { vault, manager } = await wirePending(ids, stored, tracked);
+
+        await manager.getHighlights(vault.files.get(PENDING_ARTICLE)!);
+
+        expect(
+          manager.offsetTracker
+            .getHighlights(PENDING_ARTICLE)
+            .map((h) => [h.start_offset, h.end_offset])
+        ).toEqual(tracked);
+      }),
+      { numRuns: 20 }
+    );
+  });
+});
+
+describe('adoptLeftover', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('gives a leftover snippet a row due tomorrow, the child of the item its source links to at its priority, or of none at the default', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<'article' | 'snippet' | null>(
+          'article',
+          'snippet',
+          null
+        ),
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        fc.integer({ min: 0, max: 2 ** 40 }),
+        async (parentType, priority, now) => {
+          vi.restoreAllMocks();
+          vi.useFakeTimers({ toFake: ['Date'] });
+          vi.setSystemTime(now);
+          const { vault, repo, manager } = await wireSnippets({
+            'snippets/left.md': { 'ir-id': 'left-1', tags: [SNIPPET_TAG] },
+            'notes/parent.md': null,
+          });
+          if (parentType) {
+            repo.mutate(
+              `INSERT INTO ${parentType} (id, reference, due, interval, priority) VALUES ('parent-1', 'notes/parent.md', 0, 1, $1)`,
+              [priority]
+            );
+          }
+          vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(
+            vault.files.get('notes/parent.md')!
+          );
+
+          await manager.adoptLeftover(
+            vault.files.get('snippets/left.md')!,
+            'left-1'
+          );
+
+          const row = repo.rows('snippet').find(({ id }) => id === 'left-1');
+          expect(row).toMatchObject({
+            reference: 'snippets/left.md',
+            due: now + MS_PER_DAY,
+            parent: parentType ? 'parent-1' : null,
+            priority: parentType ? priority : DEFAULT_PRIORITY,
+            start_offset: null,
+            end_offset: null,
+          });
+        }
+      ),
+      { numRuns: 20 }
+    );
+  });
+
+  it('gives one whose source links nowhere a row of no parent', async () => {
+    const { vault, repo, manager } = await wireSnippets({
+      'snippets/left.md': { 'ir-id': 'left-1', tags: [SNIPPET_TAG] },
+    });
+    vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(null);
+
+    await manager.adoptLeftover(vault.files.get('snippets/left.md')!, 'left-1');
+
+    expect(repo.rows('snippet')[0]).toMatchObject({
+      parent: null,
+      priority: DEFAULT_PRIORITY,
+    });
   });
 });

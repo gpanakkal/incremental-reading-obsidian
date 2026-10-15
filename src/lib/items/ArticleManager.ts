@@ -1,8 +1,10 @@
+import { refusedWrite, withCompensation } from '#/lib/compensation';
 import {
   ARTICLE_TAG,
   CARD_TAG,
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
+  DEFAULT_PRIORITY,
   INVALID_TITLE_MESSAGE,
   SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
@@ -202,6 +204,7 @@ export class ArticleManager extends ItemManager {
     makeCopy?: boolean
   ) {
     if (!checkImportable(file)) return null;
+    if (refusedWrite(this.repo, `import "${file.name}"`)) return null;
     // Read once: a rename during the import changes `file.path` in place
     const { path } = file;
     if (this.importing.has(path)) return null;
@@ -359,7 +362,12 @@ export class ArticleManager extends ItemManager {
           'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
           [file.path, existingId]
         );
-        await this.claimInPlace(file, existingId);
+        await this.afterImport(
+          file.basename,
+          'in place',
+          () => this.claimInPlace(file, existingId),
+          undefined
+        );
         Obsidian.notify(
           `Linked "${file.basename}" to existing article with the same ID`
         );
@@ -373,15 +381,27 @@ export class ArticleManager extends ItemManager {
     // already was, above, keeps its path, as existing paths do
     if (refusedInPlace(file)) return null;
     const id = crypto.randomUUID();
-    await Obsidian.updateFrontMatter(
-      file,
-      { 'ir-id': id, tags: ARTICLE_TAG } satisfies FrontMatterUpdates,
-      this.app
+    // The note is the user's own, so a row that can't be saved puts its
+    // `ir-id` and tags back as they were
+    await withCompensation(async (step) => {
+      await step(
+        () =>
+          Obsidian.updateFrontMatterUndoably(
+            file,
+            { 'ir-id': id, tags: ARTICLE_TAG } satisfies FrontMatterUpdates,
+            this.app
+          ),
+        (undo) => undo()
+      );
+      await this.insertImported(id, file.path, priority, fixedIntervalDays);
+    });
+
+    await this.afterImport(
+      file.basename,
+      'in place',
+      () => this.claimInPlace(file, id),
+      undefined
     );
-
-    await this.insertImported(id, file.path, priority, fixedIntervalDays);
-
-    await this.claimInPlace(file, id);
 
     const titleSlice = getContentSlice(
       file.basename,
@@ -392,6 +412,50 @@ export class ArticleManager extends ItemManager {
 
     Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
     return this.fetch(id);
+  }
+
+  /**
+   * Run `work`, which follows the commit of an import of `name`: its note and
+   * row are kept, so what fails there is no reason to report the import as
+   * failed. Says what was left undone instead: adopting the snippets and cards
+   * taken from a file imported where it is, or handing a copy those taken
+   * from its original.
+   * @returns what `work` answers, or `fallback` when it fails
+   */
+  private async afterImport<T>(
+    name: string,
+    kind: 'in place' | 'copy',
+    work: () => Promise<T>,
+    fallback: T
+  ): Promise<T> {
+    try {
+      return await work();
+    } catch (error) {
+      console.error(error);
+      Obsidian.notify(
+        kind === 'in place'
+          ? `"${name}" is an article, but the snippets and cards taken from it couldn't be adopted`
+          : `Imported "${name}", but the snippets and cards taken from its original couldn't be handed to it`,
+        true
+      );
+      return fallback;
+    }
+  }
+
+  /**
+   * Give the note `file`, which holds the `ir-id` `id` no row does, a row of
+   * its own: an article whose making or import was cut short before its row
+   * was saved (see `crash-leftovers`). Due now at the default priority, as an
+   * import is by default, adopting what was taken from it as an import does.
+   */
+  async adoptLeftover(file: TFile, id: string): Promise<void> {
+    await this.insertImported(id, file.path, DEFAULT_PRIORITY, null);
+    await this.afterImport(
+      file.basename,
+      'in place',
+      () => this.claimInPlace(file, id),
+      undefined
+    );
   }
 
   /** Add the row of a newly imported article at `reference`, due now. */
@@ -455,7 +519,12 @@ export class ArticleManager extends ItemManager {
         [Date.now(), existing.id]
       );
       // Taken from the file while its row was deleted, they had no parent
-      await this.claimInPlace(file, existing.id);
+      await this.afterImport(
+        file.basename,
+        'in place',
+        () => this.claimInPlace(file, existing.id),
+        undefined
+      );
       Obsidian.notify(
         `Restored the article "${titleSlice}" to the queue with its earlier schedule`
       );
@@ -468,7 +537,12 @@ export class ArticleManager extends ItemManager {
     if (refusedInPlace(file)) return null;
     const id = crypto.randomUUID();
     await this.insertImported(id, file.path, priority, fixedIntervalDays);
-    await this.claimInPlace(file, id);
+    await this.afterImport(
+      file.basename,
+      'in place',
+      () => this.claimInPlace(file, id),
+      undefined
+    );
 
     const schedulingString = describeSchedule(priority, fixedIntervalDays);
     Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
@@ -573,19 +647,23 @@ export class ArticleManager extends ItemManager {
       const copyPath = Obsidian.getTargetPath(name, 'article');
       const taken = await this.takenFrom(file);
       await Obsidian.ensureParentFolder(this.app, copyPath);
-      const copy = await this.app.vault.copy(file, copyPath);
-
       const id = crypto.randomUUID();
-      try {
-        await this.insertImported(id, copy.path, priority, fixedIntervalDays);
-      } catch (error) {
-        // Left behind, a copy no row refers to would only hold its name
-        // against the next import. Failing to remove it is logged, so the
-        // error the import fails with is still the one that stopped it.
-        await this.app.fileManager.trashFile(copy).catch(console.error);
-        throw error;
-      }
-      const moved = await this.handToCopy(file, taken, id, copy);
+      // Left behind, a copy no row refers to would only hold its name against
+      // the next import
+      const copy = await withCompensation(async (step) => {
+        const made = await step(
+          () => this.app.vault.copy(file, copyPath),
+          (copied) => this.app.fileManager.trashFile(copied)
+        );
+        await this.insertImported(id, made.path, priority, fixedIntervalDays);
+        return made;
+      });
+      const moved = await this.afterImport(
+        copy.basename,
+        'copy',
+        () => this.handToCopy(file, taken, id, copy),
+        { snippets: 0, cards: 0 }
+      );
 
       const titleSlice = getContentSlice(
         copy.basename,
@@ -684,7 +762,12 @@ export class ArticleManager extends ItemManager {
         );
         // No copy was made — the record now points at this note, so its
         // snippets and cards are adopted in place rather than handed to a copy.
-        await this.claimInPlace(file, existingId);
+        await this.afterImport(
+          file.basename,
+          'in place',
+          () => this.claimInPlace(file, existingId),
+          undefined
+        );
         Obsidian.notify(
           `Linked "${file.basename}" to existing article with the same ID`
         );
@@ -713,58 +796,68 @@ export class ArticleManager extends ItemManager {
     return this.withCopyTarget(file, async (importFileName) => {
       const taken = await this.takenFrom(file);
       let frontmatterLinks: FrontmatterLinkEdit[] = [];
-      // Create a copy in the articles directory
-      const articleFile = await Obsidian.createNote({
-        content: (copy) => {
-          const rebased = this.rebaseCopy(file, copy, content, links);
-          frontmatterLinks = rebased.frontmatter;
-          return rebased.text;
-        },
-        frontmatter: {
-          created: new Date().toISOString(),
-        },
-        fileName: importFileName,
-        directory: Obsidian.getDirectory('article'),
-        app: this.app,
+      const id = crypto.randomUUID();
+      // Left behind, a copy no row refers to would read as an article review
+      // never shows, and hold its name against the next import
+      const articleFile = await withCompensation(async (step) => {
+        // Create a copy in the articles directory
+        const copy = await step(
+          async () => {
+            const made = await Obsidian.createNote({
+              content: (note) => {
+                const rebased = this.rebaseCopy(file, note, content, links);
+                frontmatterLinks = rebased.frontmatter;
+                return rebased.text;
+              },
+              frontmatter: {
+                created: new Date().toISOString(),
+              },
+              fileName: importFileName,
+              directory: Obsidian.getDirectory('article'),
+              app: this.app,
+            });
+            if (!made) {
+              throw new Error(
+                `Failed to create note ${Obsidian.getTargetPath(importFileName, 'article')}`
+              );
+            }
+            return made;
+          },
+          (made) => this.app.fileManager.trashFile(made)
+        );
+
+        // Tag it and create a link to the source if it doesn't exist
+        const frontmatterUpdates: FrontMatterUpdates = {
+          'ir-id': id,
+          tags: ARTICLE_TAG,
+        };
+        if (!frontmatter?.source) {
+          const sourceLink = Obsidian.generateMarkdownLink(
+            file,
+            copy,
+            this.app
+          );
+          frontmatterUpdates[`${SOURCE_PROPERTY_NAME}`] = sourceLink;
+        }
+        // With its frontmatter links re-based, in the same write
+        await Obsidian.updateFrontMatter(
+          copy,
+          frontmatterUpdates,
+          this.app,
+          (properties) =>
+            applyFrontmatterLinkEdits(properties, frontmatterLinks)
+        );
+
+        await this.insertImported(id, copy.path, priority, fixedIntervalDays);
+        return copy;
       });
 
-      if (!articleFile) {
-        throw new Error(
-          `Failed to create note ${Obsidian.getTargetPath(importFileName, 'article')}`
-        );
-      }
-
-      const id = crypto.randomUUID();
-
-      // Tag it and create a link to the source if it doesn't exist
-      const frontmatterUpdates: FrontMatterUpdates = {
-        'ir-id': id,
-        tags: ARTICLE_TAG,
-      };
-      if (!frontmatter?.source) {
-        const sourceLink = Obsidian.generateMarkdownLink(
-          file,
-          articleFile,
-          this.app
-        );
-        frontmatterUpdates[`${SOURCE_PROPERTY_NAME}`] = sourceLink;
-      }
-      // With its frontmatter links re-based, in the same write
-      await Obsidian.updateFrontMatter(
-        articleFile,
-        frontmatterUpdates,
-        this.app,
-        (properties) => applyFrontmatterLinkEdits(properties, frontmatterLinks)
+      const moved = await this.afterImport(
+        articleFile.basename,
+        'copy',
+        () => this.handToCopy(file, taken, id, articleFile),
+        { snippets: 0, cards: 0 }
       );
-
-      await this.insertImported(
-        id,
-        articleFile.path,
-        priority,
-        fixedIntervalDays
-      );
-
-      const moved = await this.handToCopy(file, taken, id, articleFile);
 
       const titleSlice = getContentSlice(
         articleFile.basename,
@@ -783,6 +876,7 @@ export class ArticleManager extends ItemManager {
    * Create a new empty article
    */
   async create(priority: number, directory?: string) {
+    if (refusedWrite(this.repo, 'create the article')) return null;
     try {
       const newNoteName = Obsidian.createTitle(
         `New article ${getDateString()}`
@@ -804,37 +898,42 @@ export class ArticleManager extends ItemManager {
         }
       }
 
-      const articleFile = await Obsidian.createNote({
-        content: '',
-        frontmatter: {
-          'ir-id': id,
-          created: new Date().toISOString(),
-        },
-        fileName: `${newNoteName}.md`,
-        directory: targetDirectory,
-        app: this.app,
+      await withCompensation(async (step) => {
+        const articleFile = await step(
+          async () => {
+            const made = await Obsidian.createNote({
+              content: '',
+              frontmatter: {
+                'ir-id': id,
+                created: new Date().toISOString(),
+              },
+              fileName: `${newNoteName}.md`,
+              directory: targetDirectory,
+              app: this.app,
+            });
+            if (!made) throw new Error(`Failed to create empty article`);
+            return made;
+          },
+          (made) => this.app.fileManager.trashFile(made)
+        );
+
+        const frontmatterUpdates: FrontMatterUpdates = {
+          tags: ARTICLE_TAG,
+        };
+
+        await Obsidian.updateFrontMatter(
+          articleFile,
+          frontmatterUpdates,
+          this.app
+        );
+
+        // Insert into database with immediate due time
+        const dueTime = Date.now();
+        await this.repo.mutate(
+          'INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)',
+          [id, articleFile.path, dueTime, TEXT_BASE_REVIEW_INTERVAL, priority]
+        );
       });
-
-      if (!articleFile) {
-        throw new Error(`Failed to create empty article`);
-      }
-
-      const frontmatterUpdates: FrontMatterUpdates = {
-        tags: ARTICLE_TAG,
-      };
-
-      await Obsidian.updateFrontMatter(
-        articleFile,
-        frontmatterUpdates,
-        this.app
-      );
-
-      // Insert into database with immediate due time
-      const dueTime = Date.now();
-      await this.repo.mutate(
-        'INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)',
-        [id, articleFile.path, dueTime, TEXT_BASE_REVIEW_INTERVAL, priority]
-      );
 
       const result = await this.fetch(id);
       return result;

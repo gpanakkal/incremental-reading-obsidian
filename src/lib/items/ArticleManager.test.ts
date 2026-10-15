@@ -44,6 +44,7 @@ import {
   seenElsewhereArb,
   textItemSpecArb,
 } from '#/test/due-query';
+import { makeItemVault, TestRepository } from '#/test/item-vault';
 import { cachePosition, makeLinkVault, sectionsOf } from '#/test/link-vault';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
@@ -114,6 +115,7 @@ function makeRepo(
     transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
+    writeRefusal: vi.fn(() => null),
   } as unknown as SQLiteRepository;
 }
 
@@ -424,6 +426,7 @@ function makeSimpleRepo(): SQLiteRepository {
     transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
+    writeRefusal: vi.fn(() => null),
   } as unknown as SQLiteRepository;
 }
 
@@ -496,6 +499,7 @@ async function makeSqlJsRepo(): Promise<{
     transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
+    writeRefusal: vi.fn(() => null),
   } as unknown as SQLiteRepository;
   return { repo, db };
 }
@@ -675,6 +679,57 @@ async function createIn(directory: string | undefined, inCurrent: boolean) {
   return createNote.mock.lastCall?.[0].directory;
 }
 
+const SOURCE = 'notes/source.md';
+const PDF = 'papers/paper.pdf';
+
+/** Where making an article can fail, if anywhere. */
+type Failure = 'create' | 'frontmatter' | 'copy' | 'row' | null;
+
+/**
+ * A manager over a real database and a vault holding `notes`, with the
+ * vault or the database failing at `failure`, and writes refused when
+ * `refused`.
+ */
+async function wireArticles(
+  notes: Record<string, Record<string, unknown> | null>,
+  failure: Failure,
+  refused = false
+) {
+  const vault = makeItemVault(notes);
+  const repo = await TestRepository.create();
+  if (failure === 'create' || failure === 'copy') vault.fail(failure);
+  if (failure === 'frontmatter') vault.fail('frontmatter');
+  if (failure === 'row') {
+    repo.failWrite((query) => query.startsWith('INSERT INTO article'));
+  }
+  if (refused) repo.refuseWrites(new Error('Saving is paused.'));
+  const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  vi.spyOn(console, 'error').mockReturnValue(undefined);
+  const manager = new ArticleManager(
+    {
+      app: vault.app,
+      settings: { copyOnImport: false, createEmptyInCurrentFolder: false },
+    } as never,
+    repo
+  );
+  const before = Object.fromEntries(
+    Object.keys(notes).map((path) => [
+      path,
+      structuredClone(vault.frontmatterOf(path)),
+    ])
+  );
+  return { vault, repo, notify, manager, before };
+}
+
+/** A tag a note can hold: any text, the plugin's own among them. */
+const tagArb = fc.oneof(
+  fc.string(),
+  fc.constantFrom(ARTICLE_TAG, SNIPPET_TAG, CARD_TAG, 'ir-source')
+);
+
+const refusal = (action: string) =>
+  `Couldn't ${action}: saving to the database is paused. Saving is paused.`;
+
 // #endregion
 
 describe('disableFixedInterval', () => {
@@ -845,6 +900,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
   }
 
@@ -1054,6 +1110,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1087,6 +1144,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1117,6 +1175,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1162,6 +1221,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1193,6 +1253,7 @@ describe('getDue', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     // Whatever it is asked for, under whatever settings
     await fc.assert(
@@ -1682,6 +1743,7 @@ describe('fetchMany', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     const manager = new ArticleManager({} as never, repo);
     const result = await manager.fetchMany();
@@ -1828,6 +1890,7 @@ describe('fetch', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     const manager = new ArticleManager({} as never, repo);
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(null);
@@ -1845,6 +1908,7 @@ describe('fetch', () => {
           transaction: vi.fn(async (work: () => unknown) => work()),
           handleFileChange: vi.fn(),
           onDataChange: vi.fn(() => vi.fn()),
+          writeRefusal: vi.fn(() => null),
         } as unknown as SQLiteRepository;
         const manager = new ArticleManager({} as never, repo);
         await manager.fetch(id);
@@ -1866,6 +1930,7 @@ describe('fetch', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     const manager = new ArticleManager(
       { app: makeApp(), settings: { fuzzReviewTimes: false } } as never,
@@ -2235,6 +2300,7 @@ describe('rename', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
     const manager = new ArticleManager(
       { app: { fileManager: { renameFile } } } as never,
@@ -2633,6 +2699,7 @@ describe('getDue (filter correctness)', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -2675,6 +2742,7 @@ describe('getDue (filter correctness)', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -2794,6 +2862,7 @@ describe('fuzzing (getDue sort)', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -2818,6 +2887,7 @@ describe('fuzzing (getDue sort)', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -2846,6 +2916,7 @@ describe('fuzzing (getDue sort)', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -2872,6 +2943,7 @@ describe('fuzzing (getDue sort)', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -2897,6 +2969,7 @@ describe('fuzzing (getDue sort)', () => {
       transaction: vi.fn(async (work: () => unknown) => work()),
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
+      writeRefusal: vi.fn(() => null),
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -4912,7 +4985,9 @@ describe('import', () => {
       expect(Obsidian.updateFrontMatter).toHaveBeenCalledWith(
         IMPORT_FILE,
         expect.objectContaining({ tags: ARTICLE_TAG }),
-        expect.anything()
+        expect.anything(),
+        // What reads the note's properties as they were, to put back
+        expect.any(Function)
       );
     });
 
@@ -5725,6 +5800,283 @@ describe('create', () => {
             `article in "${ARTICLES}" instead`,
         ]);
       })
+    );
+  });
+});
+
+describe('making an article, with its note and its row as one unit', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('makes an empty article as a note and a row together, or neither', async () => {
+    for (const failure of ['create', 'frontmatter', 'row', null] as const) {
+      vi.restoreAllMocks();
+      const { vault, repo, manager } = await wireArticles({}, failure);
+
+      const article = await manager.create(DEFAULT_PRIORITY);
+
+      const rows = repo.rows('article');
+      if (failure) {
+        expect(article).toBeNull();
+        expect(rows).toEqual([]);
+        expect(vault.paths()).toEqual([]);
+      } else {
+        expect(rows).toHaveLength(1);
+        expect(vault.paths()).toEqual([rows[0].reference]);
+        expect(vault.frontmatterOf(rows[0].reference as string)).toMatchObject({
+          'ir-id': rows[0].id,
+          tags: [ARTICLE_TAG],
+        });
+      }
+    }
+  });
+
+  it('imports a copy of a note as a copy and a row together, or neither, leaving the note as it was', async () => {
+    for (const failure of ['create', 'frontmatter', 'row', null] as const) {
+      vi.restoreAllMocks();
+      const { vault, repo, manager, before } = await wireArticles(
+        { [SOURCE]: { title: 'x' } },
+        failure
+      );
+
+      const article = await manager.import(
+        vault.files.get(SOURCE)!,
+        DEFAULT_PRIORITY,
+        null,
+        true
+      );
+
+      const rows = repo.rows('article');
+      expect(vault.frontmatterOf(SOURCE)).toEqual(before[SOURCE]);
+      if (failure) {
+        expect(article).toBeNull();
+        expect(rows).toEqual([]);
+        expect(vault.paths()).toEqual([SOURCE]);
+      } else {
+        expect(rows).toHaveLength(1);
+        expect(vault.paths()).toEqual(
+          [rows[0].reference as string, SOURCE].sort()
+        );
+      }
+    }
+  });
+
+  it("imports a note in place as a row and its ir-id and tag together, or puts the note's frontmatter back as it was", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.option(
+          fc.record(
+            {
+              'ir-id': fc.oneof(
+                fc.uuid(),
+                fc.string(),
+                fc.integer(),
+                fc.constant(null)
+              ),
+              tags: fc.oneof(
+                tagArb,
+                fc.array(fc.oneof(tagArb, fc.constant(null)), { maxLength: 3 })
+              ),
+              title: fc.string(),
+            },
+            { requiredKeys: [] }
+          ),
+          { nil: null }
+        ),
+        fc.constantFrom<Failure>('row', null),
+        async (frontmatter, failure) => {
+          vi.restoreAllMocks();
+          const { vault, repo, manager, before } = await wireArticles(
+            { [SOURCE]: frontmatter },
+            failure
+          );
+
+          const article = await manager.import(
+            vault.files.get(SOURCE)!,
+            DEFAULT_PRIORITY,
+            null,
+            false
+          );
+
+          const rows = repo.rows('article');
+          // A note tagged as a snippet or card is refused before anything
+          const tags = frontmatter?.tags;
+          const blocked = [tags]
+            .flat()
+            .some((tag) => tag === SNIPPET_TAG || tag === CARD_TAG);
+          if (failure || blocked) {
+            expect(article).toBeNull();
+            expect(rows).toEqual([]);
+            expect(vault.frontmatterOf(SOURCE) ?? {}).toEqual(
+              before[SOURCE] ?? {}
+            );
+          } else {
+            expect(rows).toHaveLength(1);
+            expect(vault.frontmatterOf(SOURCE)?.['ir-id']).toBe(rows[0].id);
+            expect(vault.frontmatterOf(SOURCE)?.tags).toContain(ARTICLE_TAG);
+          }
+          expect(vault.paths()).toEqual([SOURCE]);
+        }
+      ),
+      { numRuns: 50 }
+    );
+  });
+
+  it('imports a copy of a PDF as a copy and a row together, or neither', async () => {
+    for (const failure of ['copy', 'row', null] as const) {
+      vi.restoreAllMocks();
+      const { vault, repo, manager } = await wireArticles(
+        { [PDF]: null },
+        failure
+      );
+
+      await manager.import(vault.files.get(PDF)!, DEFAULT_PRIORITY, null, true);
+
+      const rows = repo.rows('article');
+      if (failure) {
+        expect(rows).toEqual([]);
+        expect(vault.paths()).toEqual([PDF]);
+      } else {
+        expect(vault.paths()).toEqual(
+          [PDF, rows[0].reference as string].sort()
+        );
+      }
+    }
+  });
+
+  it('keeps an import whose row is saved when handing over what was taken from the file then fails, and says so', async () => {
+    for (const [path, makeCopy] of [
+      [SOURCE, false],
+      [SOURCE, true],
+      [PDF, false],
+      [PDF, true],
+    ] as const) {
+      vi.restoreAllMocks();
+      const { vault, repo, manager, notify } = await wireArticles(
+        { [path]: path === PDF ? null : { title: 'x' } },
+        null
+      );
+      const failure = new Error('adopt failed');
+      // What follows the commit: handing over to a copy, or claiming in place
+      vi.spyOn(
+        manager as unknown as { handToCopy: () => unknown },
+        'handToCopy'
+      ).mockRejectedValue(failure);
+      vi.spyOn(
+        manager as unknown as { claimInPlace: () => unknown },
+        'claimInPlace'
+      ).mockRejectedValue(failure);
+
+      const article = await manager.import(
+        vault.files.get(path)!,
+        DEFAULT_PRIORITY,
+        null,
+        makeCopy
+      );
+
+      const rows = repo.rows('article');
+      expect(rows).toHaveLength(1);
+      expect(article?.data.id).toBe(rows[0].id);
+      expect(notify).not.toHaveBeenCalledWith(
+        expect.stringMatching(/^Failed to import/)
+      );
+      expect(notify).toHaveBeenCalledWith(
+        makeCopy
+          ? `Imported "${article?.file.basename}", but the snippets and cards taken from its original couldn't be handed to it`
+          : `"${vault.files.get(path)!.basename}" is an article, but the snippets and cards taken from it couldn't be adopted`,
+        true
+      );
+      expect(console.error).toHaveBeenCalledWith(failure);
+    }
+  });
+
+  it('makes and imports nothing, and says why, while writes are refused', async () => {
+    for (const makeCopy of [true, false]) {
+      for (const path of [SOURCE, PDF]) {
+        vi.restoreAllMocks();
+        const { vault, repo, manager, notify, before } = await wireArticles(
+          { [path]: path === PDF ? null : { title: 'x' } },
+          null,
+          true
+        );
+        const file = vault.files.get(path)!;
+
+        expect(
+          await manager.import(file, DEFAULT_PRIORITY, null, makeCopy)
+        ).toBeNull();
+
+        expect(vault.paths()).toEqual([path]);
+        expect(vault.frontmatterOf(path)).toEqual(before[path]);
+        expect(repo.rows('article')).toEqual([]);
+        expect(notify).toHaveBeenCalledExactlyOnceWith(
+          refusal(`import "${file.name}"`)
+        );
+      }
+    }
+
+    vi.restoreAllMocks();
+    const { vault, manager, notify } = await wireArticles({}, null, true);
+    expect(await manager.create(DEFAULT_PRIORITY)).toBeNull();
+    expect(vault.paths()).toEqual([]);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      refusal('create the article')
+    );
+  });
+});
+
+describe('adoptLeftover', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('gives a leftover article a row due now at the default priority, at its path', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.integer({ min: 0, max: 2 ** 40 }), async (now) => {
+        vi.restoreAllMocks();
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(now);
+        const { vault, repo, manager } = await wireArticles(
+          { 'notes/left.md': { 'ir-id': 'left-1', tags: [ARTICLE_TAG] } },
+          null
+        );
+
+        await manager.adoptLeftover(
+          vault.files.get('notes/left.md')!,
+          'left-1'
+        );
+
+        expect(repo.rows('article')).toEqual([
+          expect.objectContaining({
+            id: 'left-1',
+            reference: 'notes/left.md',
+            due: now,
+            priority: DEFAULT_PRIORITY,
+            fixed_interval_days: null,
+          }),
+        ]);
+      }),
+      { numRuns: 10 }
+    );
+  });
+
+  it('keeps the row, and says so, when adopting what was taken from it fails', async () => {
+    const { vault, repo, manager, notify } = await wireArticles(
+      { 'notes/left.md': { 'ir-id': 'left-1', tags: [ARTICLE_TAG] } },
+      null
+    );
+    vi.spyOn(
+      manager as unknown as { claimInPlace: () => unknown },
+      'claimInPlace'
+    ).mockRejectedValue(new Error('adopt failed'));
+
+    await manager.adoptLeftover(vault.files.get('notes/left.md')!, 'left-1');
+
+    expect(repo.rows('article')).toHaveLength(1);
+    expect(notify).toHaveBeenCalledWith(
+      `"left" is an article, but the snippets and cards taken from it couldn't be adopted`,
+      true
     );
   });
 });

@@ -1,3 +1,4 @@
+import { refusedWrite, withCompensation } from '#/lib/compensation';
 import {
   DEFAULT_PRIORITY,
   REVIEW_COUNT_FOR_PRIORITY_SCALING,
@@ -45,12 +46,84 @@ import { ArticleManager } from './ArticleManager';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
 
+/** A snippet's offsets as its row holds them: none, for one without. */
+type StoredOffsets = Pick<SnippetRow, 'id' | 'start_offset' | 'end_offset'>;
+
 export class SnippetManager extends ItemManager {
   offsetTracker: SnippetOffsetTracker;
+
+  /**
+   * The snippets whose offsets the tracker holds newer than the database
+   * does: the review editor saved its note while writing them was refused.
+   * See {@link offsetsPending}.
+   */
+  #pendingOffsets = new Set<string>();
 
   constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
     super(plugin, repo);
     this.offsetTracker = new SnippetOffsetTracker();
+  }
+
+  /**
+   * Hold back the offsets the tracker has for the highlights of `path`,
+   * whose note was saved without them, to be written by
+   * {@link persistPendingOffsets} once the database takes writes again.
+   * Until then, they are what the note's highlights read from, as the
+   * database's are older than its text.
+   */
+  offsetsPending(path: string) {
+    for (const { id } of this.offsetTracker.getHighlights(path)) {
+      this.#pendingOffsets.add(id);
+    }
+  }
+
+  /**
+   * Write the offsets held back by {@link offsetsPending}, as the tracker has
+   * them now, wherever their notes have moved to since. Kept held back when
+   * that fails, for the next time.
+   */
+  async persistPendingOffsets(): Promise<void> {
+    if (this.#pendingOffsets.size === 0) return;
+    const pending = this.offsetTracker
+      .getTrackedPaths()
+      .flatMap((path) => this.offsetTracker.getHighlights(path))
+      .filter(({ id }) => this.#pendingOffsets.has(id));
+    try {
+      await this.updateManyOffsets(pending);
+      // Only those written: more can be held back while this writes
+      for (const { id } of pending) this.#pendingOffsets.delete(id);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  /**
+   * Give the tracker `highlights` read from the database for `path`, but for
+   * those held back (see {@link offsetsPending}), whose offsets it keeps.
+   * @returns the highlights as the tracker has them now
+   */
+  #loadHighlights(
+    path: string,
+    highlights: SnippetHighlight[]
+  ): SnippetHighlight[] {
+    const held = new Map(
+      this.offsetTracker
+        .getHighlights(path)
+        .filter(({ id }) => this.#pendingOffsets.has(id))
+        .map((h) => [h.id, h])
+    );
+    const loaded = highlights.map((h) => {
+      const kept = held.get(h.id);
+      return kept
+        ? {
+            ...h,
+            start_offset: kept.start_offset,
+            end_offset: kept.end_offset,
+          }
+        : h;
+    });
+    this.offsetTracker.loadHighlights(path, loaded);
+    return loaded;
   }
 
   static rowToBase(snippetRow: SnippetRow): ISnippetBase {
@@ -148,12 +221,7 @@ export class SnippetManager extends ItemManager {
    * highlight — on every save of a note being typed into. One transaction
    * saves it once for the lot. Nothing is written for an empty list.
    */
-  async updateManyOffsets(
-    highlights: readonly Pick<
-      SnippetHighlight,
-      'id' | 'start_offset' | 'end_offset'
-    >[]
-  ): Promise<void> {
+  async updateManyOffsets(highlights: readonly StoredOffsets[]): Promise<void> {
     if (highlights.length === 0) return;
     await this.repo.transaction(async () => {
       for (const { id, start_offset, end_offset } of highlights) {
@@ -163,6 +231,27 @@ export class SnippetManager extends ItemManager {
         );
       }
     });
+  }
+
+  /**
+   * The offsets the database holds for the snippets `ids`, as
+   * {@link updateManyOffsets} writes them, null where a row has none: to put
+   * back offsets written ahead of a change that then failed. An id no row
+   * holds has none.
+   */
+  async offsetsOf(ids: readonly string[]): Promise<StoredOffsets[]> {
+    const offsets: StoredOffsets[] = [];
+    for (let i = 0; i < ids.length; i += MAX_SQL_QUERY_PARAMS) {
+      const batch = ids.slice(i, i + MAX_SQL_QUERY_PARAMS);
+      const rows = (await this.repo.query(
+        `SELECT id, start_offset, end_offset FROM snippet
+         WHERE id IN (${batch.map((_, j) => `$${j + 1}`).join(', ')})`,
+        [...batch],
+        { throwOnError: true }
+      )) as StoredOffsets[];
+      offsets.push(...rows);
+    }
+    return offsets;
   }
 
   /**
@@ -271,49 +360,12 @@ export class SnippetManager extends ItemManager {
     } else {
       console.warn(`[createSnippet] Could not access the CodeMirror view`);
     }
-    // With the editor's selection empty, the text is reading view's: rendered,
-    // every escape in the note already read. Escaped again, it reads in the
-    // snippet as the selection did, rather than coming back as a link, tag or
-    // Templater command, and names the note as it reads.
-    const snippetFile = await Obsidian.createFromText(
-      editorSelection
-        ? (source?.text ?? editorSelection)
-        : Markdown.escape(selection),
-      Obsidian.getDirectory('snippet'),
-      this.app,
-      editorSelection ? undefined : selection
-    );
 
-    // Tag it and link to the source file
-    const sourceLink = Obsidian.generateMarkdownLink(
-      currentFile,
-      snippetFile,
-      this.app
-    );
+    if (refusedWrite(this.repo, 'create the snippet')) return null;
 
-    const id = crypto.randomUUID();
-    await Obsidian.updateFrontMatter(
-      snippetFile,
-      {
-        'ir-id': id,
-        tags: SNIPPET_TAG,
-        [`${SOURCE_PROPERTY_NAME}`]: sourceLink,
-      },
-      this.app
-    );
-
-    // Tag the source note as ir-source if it doesn't have any IR tag yet (a
-    // PDF, which has no tags, is left untagged by `updateFrontMatter`)
+    // Its parent's row is found before anything is made: a parent that is an
+    // item with no row behind it would otherwise leave a note made for nothing
     const parentType = await this.getItemType(currentFile);
-    if (!parentType) {
-      await Obsidian.updateFrontMatter(
-        currentFile,
-        { tags: SOURCE_TAG },
-        this.app
-      );
-    }
-
-    // inherit priority from the source file if it has one, or assign default priority
     let currentFileEntry: IArticleBase | ISnippetBase | null = null;
     if (parentType === 'article') {
       const articleRow = await this.findArticle(currentFile);
@@ -333,20 +385,83 @@ export class SnippetManager extends ItemManager {
       );
     }
 
+    // inherit priority from the source file if it has one, or assign default priority
     const priority = currentFileEntry
       ? SnippetManager.childPriority(currentFileEntry, snippetDueTime)
       : DEFAULT_PRIORITY;
 
-    // Create the snippet entry. Reading view's selection has no offsets in
-    // the note: the editor's cursor behind it marks nothing that was selected.
-    const result = await this.createEntry(
-      snippetFile,
-      id,
-      snippetDueTime,
-      priority,
-      currentFileEntry?.id,
-      editorSelection ? source?.offsets : undefined
-    );
+    let result: ReviewSnippet | null;
+    let snippetFile: TFile;
+    try {
+      [snippetFile, result] = await withCompensation(async (step) => {
+        // With the editor's selection empty, the text is reading view's:
+        // rendered, every escape in the note already read. Escaped again, it
+        // reads in the snippet as the selection did, rather than coming back
+        // as a link, tag or Templater command, and names the note as it reads.
+        const file = await step(
+          () =>
+            Obsidian.createFromText(
+              editorSelection
+                ? (source?.text ?? editorSelection)
+                : Markdown.escape(selection),
+              Obsidian.getDirectory('snippet'),
+              this.app,
+              editorSelection ? undefined : selection
+            ),
+          (made) => this.app.fileManager.trashFile(made)
+        );
+
+        // Tag it and link to the source file
+        const sourceLink = Obsidian.generateMarkdownLink(
+          currentFile,
+          file,
+          this.app
+        );
+        const id = crypto.randomUUID();
+        await Obsidian.updateFrontMatter(
+          file,
+          {
+            'ir-id': id,
+            tags: SNIPPET_TAG,
+            [`${SOURCE_PROPERTY_NAME}`]: sourceLink,
+          },
+          this.app
+        );
+
+        // Tag the source note as ir-source if it doesn't have any IR tag yet
+        // (a PDF, which has no tags, is left untagged by `updateFrontMatter`)
+        if (!parentType) {
+          await step(
+            () =>
+              Obsidian.updateFrontMatterUndoably(
+                currentFile,
+                { tags: SOURCE_TAG },
+                this.app
+              ),
+            (undo) => undo()
+          );
+        }
+
+        // Create the snippet entry. Reading view's selection has no offsets
+        // in the note: the editor's cursor behind it marks nothing that was
+        // selected.
+        return [
+          file,
+          await this.createEntry(
+            file,
+            id,
+            snippetDueTime,
+            priority,
+            currentFileEntry?.id,
+            editorSelection ? source?.offsets : undefined
+          ),
+        ] as const;
+      });
+    } catch (error) {
+      Obsidian.notify(`Failed to create the snippet`);
+      console.error(error);
+      return null;
+    }
 
     // Refresh highlights immediately after snippet creation.
     if (cm) {
@@ -411,57 +526,75 @@ export class SnippetManager extends ItemManager {
     end: number;
     subpath: string;
   }): Promise<ReviewSnippet | null> {
+    if (refusedWrite(this.repo, 'create the snippet')) return null;
     const dueTime = Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
     const pdf = originFile(origin);
-    // Whatever the PDF holds reads as plain text, and names the note as it
-    // reads
-    const snippetFile = await Obsidian.createFromText(
-      Markdown.escape(text),
-      Obsidian.getDirectory('snippet'),
-      this.app,
-      text
-    );
-    const sourceLink = Obsidian.generateMarkdownLink(
-      pdf,
-      snippetFile,
-      this.app,
-      pageLinkAlias(pdf.basename, decodeAnchor(start).page),
-      subpath
-    );
-    const id = crypto.randomUUID();
-    await Obsidian.updateFrontMatter(
-      snippetFile,
-      {
-        'ir-id': id,
-        tags: SNIPPET_TAG,
-        [SOURCE_PROPERTY_NAME]: sourceLink,
-      },
-      this.app
-    );
     const { article } = origin;
-    if (!article) {
-      // Its row's change tells the PDF's tab to read its highlights again,
-      // which finds a parentless snippet by its source link: in the cache by
-      // then, or the snippet's highlight waits for the next change
-      await this.sourceIndexed(snippetFile, pdf);
+    try {
+      return await withCompensation(async (step) => {
+        // Whatever the PDF holds reads as plain text, and names the note as
+        // it reads
+        const snippetFile = await step(
+          () =>
+            Obsidian.createFromText(
+              Markdown.escape(text),
+              Obsidian.getDirectory('snippet'),
+              this.app,
+              text
+            ),
+          (made) => this.app.fileManager.trashFile(made)
+        );
+        const sourceLink = Obsidian.generateMarkdownLink(
+          pdf,
+          snippetFile,
+          this.app,
+          pageLinkAlias(pdf.basename, decodeAnchor(start).page),
+          subpath
+        );
+        const id = crypto.randomUUID();
+        await Obsidian.updateFrontMatter(
+          snippetFile,
+          {
+            'ir-id': id,
+            tags: SNIPPET_TAG,
+            [SOURCE_PROPERTY_NAME]: sourceLink,
+          },
+          this.app
+        );
+        if (!article) {
+          // Its row's change tells the PDF's tab to read its highlights
+          // again, which finds a parentless snippet by its source link: in
+          // the cache by then, or the snippet's highlight waits for the next
+          // change
+          await this.sourceIndexed(snippetFile, pdf);
+        }
+        return this.createEntry(
+          snippetFile,
+          id,
+          dueTime,
+          article
+            ? SnippetManager.childPriority(article.data, dueTime)
+            : DEFAULT_PRIORITY,
+          article?.data.id,
+          { start, end }
+        );
+      });
+    } catch (error) {
+      Obsidian.notify(`Failed to create the snippet`);
+      console.error(error);
+      return null;
     }
-    return this.createEntry(
-      snippetFile,
-      id,
-      dueTime,
-      article
-        ? SnippetManager.childPriority(article.data, dueTime)
-        : DEFAULT_PRIORITY,
-      article?.data.id,
-      { start, end }
-    );
   }
 
   /**
-   * Given a preexisting snippet file, insert into database
+   * Given a preexisting snippet file, insert into database: the commit point
+   * of making a snippet (see `withCompensation`), so a row that can't be
+   * saved throws, for the note made for it to be taken back.
    * @param dueTime when the snippet should first be due. Intervals between
    * subsequent reviews always scale from the base review interval regardless
    * of how far `dueTime` is in the future.
+   * @returns the new snippet, or null when its row reads as no snippet
+   * @throws if the row can't be saved
    */
   protected async createEntry(
     snippetFile: TFile,
@@ -471,67 +604,75 @@ export class SnippetManager extends ItemManager {
     parentId?: string,
     offsets?: { start: number; end: number }
   ) {
-    try {
-      const query =
-        `INSERT INTO snippet ` +
-        `(id, reference, due, interval, priority, parent, start_offset, end_offset) ` +
-        `VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
-      // save the snippet to the database
-      await this.repo.mutate(query, [
-        id,
-        snippetFile.path,
-        dueTime,
-        TEXT_BASE_REVIEW_INTERVAL,
-        priority,
-        parentId,
-        offsets?.start ?? null,
-        offsets?.end ?? null,
-      ]);
+    await this.insertRow(snippetFile, id, dueTime, priority, parentId, offsets);
 
-      Obsidian.notify(`snippet created: ${snippetFile.basename}`);
+    Obsidian.notify(`snippet created: ${snippetFile.basename}`);
 
-      const result = await this.fetch(id);
-      return result;
-    } catch (error) {
-      Obsidian.notify(`Failed to save snippet to db: ${snippetFile.basename}`);
+    // Past the commit: a failed read is no reason to take the snippet back
+    return this.fetch(id).catch((error: unknown) => {
       console.error(error);
       return null;
-    }
+    });
+  }
+
+  /** Add the row of the snippet `id` whose note is `snippetFile`. */
+  private async insertRow(
+    snippetFile: TFile,
+    id: string,
+    dueTime: number,
+    priority: number,
+    parentId?: string,
+    offsets?: { start: number; end: number }
+  ) {
+    const query =
+      `INSERT INTO snippet ` +
+      `(id, reference, due, interval, priority, parent, start_offset, end_offset) ` +
+      `VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
+    await this.repo.mutate(query, [
+      id,
+      snippetFile.path,
+      dueTime,
+      TEXT_BASE_REVIEW_INTERVAL,
+      priority,
+      parentId,
+      offsets?.start ?? null,
+      offsets?.end ?? null,
+    ]);
   }
 
   /**
-   * Delete snippet file and drop its row.
-   *
-   * @param options.prompt whether to delete the note as Obsidian does from
-   *   its own menus (the default): asking first, if the user has it ask, and
-   *   then offering to delete whatever only the note linked to. That includes
-   *   the PDF a note made from one links to as its source, so an undo, which
-   *   only takes back what it made, says `false` and trashes just the note.
+   * Give the note `file`, which holds the `ir-id` `id` no row does, a row of
+   * its own: a snippet whose making was cut short before its row was saved
+   * (see `crash-leftovers`). Due tomorrow, as a new one is, the child of the
+   * item its `source` links to, if any, at that item's priority. Its
+   * selection's offsets are not known, so it has no highlight.
    */
-  async delete(id: string, { prompt = true }: { prompt?: boolean } = {}) {
-    try {
-      const row = (
-        await this.repo.query(`SELECT * FROM snippet WHERE id = $1`, [id])
-      )[0] as SnippetRow | null;
-      if (!row) throw new Error(`No snippet was found with ID "${id}"`);
+  async adoptLeftover(file: TFile, id: string): Promise<void> {
+    const dueTime = Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
+    const source = Obsidian.getSourceFile(file, this.app);
+    const articleRow = source ? await this.findArticle(source) : null;
+    const snippetRow =
+      source && !articleRow ? await this.findSnippet(source) : null;
+    const parent = articleRow
+      ? ArticleManager.rowToBase(articleRow)
+      : snippetRow
+        ? SnippetManager.rowToBase(snippetRow)
+        : null;
+    await this.insertRow(
+      file,
+      id,
+      dueTime,
+      parent ? SnippetManager.childPriority(parent, dueTime) : DEFAULT_PRIORITY,
+      parent?.id
+    );
+  }
 
-      const file = Obsidian.getNote(row.reference, this.app);
-      if (file) {
-        // delete the snippet file. `promptForFileDeletion` is undocumented
-        // Obsidian API (`trashFile` is the public one); its offer to delete
-        // unlinked attachments was read from the app bundle.
-        await (prompt
-          ? this.plugin.app.fileManager.promptForFileDeletion(file)
-          : this.plugin.app.fileManager.trashFile(file));
-      }
-
-      // remove the row entirely
-      await this.repo.mutate(`DELETE FROM snippet WHERE id = $1`, [id]);
-
-      return true;
-    } catch (_e) {
-      return false;
-    }
+  /**
+   * Delete snippet file and drop its row, as one (see `deleteWithNote`).
+   * @returns how it went: `deleted` once both are gone
+   */
+  async delete(id: string, options: { prompt?: boolean } = {}) {
+    return this.deleteWithNote('snippet', id, options, 'delete the snippet');
   }
 
   async fetch(id: string): Promise<ReviewSnippet | null> {
@@ -616,8 +757,7 @@ export class SnippetManager extends ItemManager {
         .map((r) => SnippetManager.rowToHighlight(r))
         .filter((h): h is SnippetHighlight => h !== null);
 
-      this.offsetTracker.loadHighlights(parentFile.path, highlights);
-      return highlights;
+      return this.#loadHighlights(parentFile.path, highlights);
     }
 
     // A PDF that is no article has its snippets by their source links too,
@@ -629,16 +769,14 @@ export class SnippetManager extends ItemManager {
         parentFile,
         MIN_ANCHOR
       );
-      this.offsetTracker.loadHighlights(parentFile.path, highlights);
-      return highlights;
+      return this.#loadHighlights(parentFile.path, highlights);
     }
 
     // For source notes (or any note without a DB entry), find snippets by the
     // source property that names this note
     if (Obsidian.isSourceNote(parentFile, this.app)) {
       const highlights = await this.getOrphanSnippetHighlights(parentFile);
-      this.offsetTracker.loadHighlights(parentFile.path, highlights);
-      return highlights;
+      return this.#loadHighlights(parentFile.path, highlights);
     }
 
     return [];
@@ -672,7 +810,7 @@ export class SnippetManager extends ItemManager {
       // article row was deleted, its source tag removed). Writing the result
       // back covers that case, so a stale entry can never survive the refresh.
       const highlights = await this.getHighlights(file);
-      this.offsetTracker.loadHighlights(path, highlights);
+      this.#loadHighlights(path, highlights);
 
       this.plugin.app.workspace.trigger('ir-highlights-changed', path);
     }

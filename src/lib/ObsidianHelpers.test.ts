@@ -14,6 +14,7 @@ import {
 } from '#/lib/constants';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import type { NoteType } from '#/lib/types';
+import { makeItemVault } from '#/test/item-vault';
 import { noteText } from '#/test/note-text';
 import type { EditorState } from '@codemirror/state';
 import fc from 'fast-check';
@@ -903,6 +904,22 @@ function parseErrorOf(block: string): unknown {
   }
   throw new Error(`Parses: ${block}`);
 }
+
+/** Properties a note may hold, `tags` and `ir-id` among them or not. */
+const itemFrontmatterArb = fc.option(
+  fc.record(
+    {
+      'ir-id': fc.oneof(fc.uuid(), fc.integer(), fc.constant(null)),
+      tags: fc.oneof(
+        fc.string(),
+        fc.array(fc.oneof(fc.string(), fc.constant(null)), { maxLength: 4 })
+      ),
+      title: fc.string(),
+    },
+    { requiredKeys: [] }
+  ),
+  { nil: null }
+);
 
 // #endregion
 
@@ -5432,5 +5449,121 @@ describe('names made from text, and renames, keep out `>` and `|`', () => {
     expect(ObsidianHelpers.isValidRename('a|b', 'ab')).toBe(false);
     expect(ObsidianHelpers.isValidRename('a>b', 'a>b')).toBe(false);
     expect(ObsidianHelpers.isValidRename('a|b', 'a|b')).toBe(false);
+  });
+});
+
+describe('createNote, when the note cannot be filled in', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('trashes the note it made, and answers nothing, when its text or its frontmatter cannot be written', async () => {
+    for (const failing of ['append', 'frontmatter'] as const) {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const vault = makeItemVault();
+      vault.fail(failing);
+
+      const result = await ObsidianHelpers.createNote({
+        content: 'body',
+        frontmatter: { created: 'now' },
+        fileName: 'note.md',
+        directory: 'notes',
+        app: vault.app as never,
+      });
+
+      expect(result).toBeUndefined();
+      expect(vault.paths()).toEqual([]);
+      expect(vault.trashed).toEqual(['notes/note.md']);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('makes nothing to trash when the note cannot be made at all', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const vault = makeItemVault();
+    vault.fail('create');
+
+    await ObsidianHelpers.createNote({
+      content: 'body',
+      fileName: 'note.md',
+      directory: 'notes',
+      app: vault.app as never,
+    });
+
+    expect(vault.app.fileManager.trashFile).not.toHaveBeenCalled();
+  });
+
+  it('answers nothing, and fails no further, when the note it made cannot be trashed either', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const vault = makeItemVault();
+    vault.fail('append');
+    vault.fail('trash');
+
+    const result = await ObsidianHelpers.createNote({
+      content: 'body',
+      fileName: 'note.md',
+      directory: 'notes',
+      app: vault.app as never,
+    });
+
+    expect(result).toBeUndefined();
+    expect(error).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('updateFrontMatterUndoably', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('writes the update as updateFrontMatter does, and its undo puts every key it wrote back as it was', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        itemFrontmatterArb,
+        fc.record(
+          {
+            'ir-id': fc.uuid(),
+            tags: fc.oneof(
+              fc.string(),
+              fc.array(fc.string(), { maxLength: 2 })
+            ),
+          },
+          { requiredKeys: [] }
+        ),
+        async (frontmatter, updates) => {
+          const path = 'notes/a.md';
+          const plain = makeItemVault({ [path]: structuredClone(frontmatter) });
+          const vault = makeItemVault({ [path]: structuredClone(frontmatter) });
+          const file = vault.files.get(path)!;
+          await ObsidianHelpers.updateFrontMatter(
+            plain.files.get(path)!,
+            updates,
+            plain.app as never
+          );
+
+          const undo = await ObsidianHelpers.updateFrontMatterUndoably(
+            file,
+            updates,
+            vault.app as never
+          );
+
+          expect(vault.frontmatterOf(path)).toEqual(plain.frontmatterOf(path));
+          await undo();
+          expect(vault.frontmatterOf(path) ?? {}).toEqual(frontmatter ?? {});
+        }
+      )
+    );
+  });
+
+  it('undoes nothing when the update never ran', async () => {
+    const path = 'notes/a.md';
+    const vault = makeItemVault({ [path]: { title: 'x' } });
+    const file = vault.files.get(path)!;
+    vi.spyOn(ObsidianHelpers, 'updateFrontMatter').mockResolvedValueOnce();
+
+    const undo = await ObsidianHelpers.updateFrontMatterUndoably(
+      file,
+      { tags: 'ir-source' },
+      vault.app as never
+    );
+    await undo();
+
+    expect(vault.processFrontMatter).not.toHaveBeenCalled();
   });
 });

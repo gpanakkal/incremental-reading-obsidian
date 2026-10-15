@@ -76,6 +76,12 @@ export class Notice {
     Notice.messages.length = 0;
   }
 
+  /** The notice's own element: a detached one, outside jsdom a bare stub. */
+  containerEl: HTMLElement =
+    typeof document === 'undefined'
+      ? ({ addEventListener() {} } as unknown as HTMLElement)
+      : document.createElement('div');
+
   constructor(message: string, _duration?: number) {
     Notice.messages.push(message);
   }

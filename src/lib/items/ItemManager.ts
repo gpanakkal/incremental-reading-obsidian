@@ -1,3 +1,4 @@
+import { refusedWrite, withCompensation } from '#/lib/compensation';
 import {
   MAX_SQL_QUERY_PARAMS,
   SOURCE_INDEX_TIMEOUT_MS,
@@ -20,6 +21,7 @@ import type {
   SnippetRow,
   TableName,
 } from '#/lib/types';
+import type { Primitive } from '#/lib/utility-types';
 import type IncrementalReadingPlugin from '#/main';
 import {
   type App,
@@ -29,6 +31,15 @@ import {
 } from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
+
+/** How deleting an item with its note went: see `deleteWithNote`. */
+export type DeleteOutcome = 'deleted' | 'declined' | 'refused' | 'failed';
+
+/** The review log of each table whose items have notes to delete. */
+const REVIEW_LOG_OF = {
+  snippet: ['snippet_review', 'snippet_id'],
+  srs_card: ['srs_card_review', 'card_id'],
+} as const;
 
 export class ItemManager {
   plugin: IncrementalReadingPlugin;
@@ -409,6 +420,113 @@ export class ItemManager {
       void this.markUndeleted(row.id, type);
     }
     return true;
+  }
+
+  /**
+   * Drop the `table` row `id` and delete its note, as one: a note left with
+   * no row, or a row whose note is gone, is half a deletion.
+   *
+   * The row goes first, and is put back as it was when the note is not
+   * deleted after all — the user turns down Obsidian's prompt, or the trash
+   * fails. A note can't be fetched back from the trash, so its deletion is
+   * the last step, after which nothing is undone.
+   *
+   * @param options.prompt whether to delete the note as Obsidian does from
+   *   its own menus (the default): asking first, if the user has it ask, and
+   *   then offering to delete whatever only the note linked to. That includes
+   *   the PDF a note made from one links to as its source, so an undo, which
+   *   only takes back what it made, says `false` and trashes just the note.
+   * @param action what is refused, as in "Couldn't {action}", while writes
+   *   are (see `refusedWrite`)
+   * @returns `deleted` once both are gone; `declined` when the user turned
+   *   down deleting the note, `refused` when writes were, and `failed` when
+   *   anything else kept them, each leaving both as they were
+   */
+  protected async deleteWithNote(
+    table: 'snippet' | 'srs_card',
+    id: string,
+    { prompt = true }: { prompt?: boolean },
+    action: string
+  ): Promise<DeleteOutcome> {
+    if (refusedWrite(this.repo, action)) return 'refused';
+    let declined = false;
+    try {
+      const row = (
+        await this.repo.query(`SELECT * FROM ${table} WHERE id = $1`, [id])
+      )[0] as SnippetRow | SRSCardRow | undefined;
+      if (!row) throw new Error(`No ${table} row was found with ID "${id}"`);
+
+      // Read too, as the row's delete can take them with it: its foreign
+      // key cascades while sql.js still has foreign keys on
+      const [log, column] = REVIEW_LOG_OF[table];
+      const reviews = await this.repo.query(
+        `SELECT * FROM ${log} WHERE ${column} = $1`,
+        [id],
+        { throwOnError: true }
+      );
+
+      const file = Obsidian.getNote(row.reference, this.app);
+      await withCompensation(async (step) => {
+        await step(
+          () => this.repo.mutate(`DELETE FROM ${table} WHERE id = $1`, [id]),
+          () =>
+            this.repo.transaction(async () => {
+              await this.restoreRow(table, row);
+              // Those the cascade left are still there
+              for (const review of reviews) {
+                await this.restoreRow(log, review, { orIgnore: true });
+              }
+            })
+        );
+        if (!file) return;
+        if (!prompt) {
+          await this.app.fileManager.trashFile(file);
+          return;
+        }
+        // `promptForFileDeletion` is undocumented Obsidian API (`trashFile`
+        // is the public one). Its offer to delete unlinked attachments, and
+        // its answering false when turned down, were read from the app
+        // bundle; its declared type answers nothing.
+        let deleted: unknown;
+        try {
+          deleted = await this.app.fileManager.promptForFileDeletion(file);
+        } catch (error) {
+          // Thrown by what it does past trashing the note, such as offering
+          // to delete the attachments only the note linked to: the note is
+          // gone, so the row must go with it
+          if (this.app.vault.getFileByPath(file.path) === file) throw error;
+          console.error(error);
+          return;
+        }
+        if (deleted === false) {
+          declined = true;
+          throw new Error(`Kept ${row.reference}`);
+        }
+      });
+      return 'deleted';
+    } catch (error) {
+      console.error(error);
+      if (declined) return 'declined';
+      return this.repo.writeRefusal() ? 'refused' : 'failed';
+    }
+  }
+
+  /**
+   * Put `row`, read whole from `table`, back as it was.
+   * @param options.orIgnore leave a row already there as it is
+   */
+  private async restoreRow(
+    table: string,
+    row: object,
+    { orIgnore = false }: { orIgnore?: boolean } = {}
+  ) {
+    const columns = Object.keys(row);
+    await this.repo.mutate(
+      `INSERT ${orIgnore ? 'OR IGNORE ' : ''}INTO ${table} (${columns.join(', ')}) VALUES (${columns
+        .map((_, i) => `$${i + 1}`)
+        .join(', ')})`,
+      Object.values(row) as Primitive[]
+    );
   }
 
   async markDeleted(id: string, type: NoteType): Promise<void> {

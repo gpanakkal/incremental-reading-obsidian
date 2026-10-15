@@ -441,6 +441,8 @@ export class ObsidianHelpers {
    *   exists, still empty, and before the text is written to it: its text can
    *   then depend on where the note is, and on its being there
    * @param directory path relative to the vault root
+   * @returns the note, or nothing when it couldn't be made: a note made but
+   *   not filled in is trashed again, so no empty or half-written one is left
    */
   static async createNote({
     content,
@@ -455,9 +457,10 @@ export class ObsidianHelpers {
     directory: string;
     app: App;
   }) {
+    let file: TFile | null = null;
     try {
       const fullPath = normalizePath(`${directory}/${fileName}`);
-      const file = await ObsidianHelpers.createFile(app, fullPath);
+      file = await ObsidianHelpers.createFile(app, fullPath);
       await app.vault.append(
         file,
         typeof content === 'string' ? content : content(file)
@@ -468,6 +471,7 @@ export class ObsidianHelpers {
       return file;
     } catch (error) {
       console.error(error);
+      if (file) await app.fileManager.trashFile(file).catch(console.error);
     }
   }
 
@@ -671,6 +675,42 @@ export class ObsidianHelpers {
         }
       );
     }
+  }
+
+  /**
+   * {@link updateFrontMatter} with `updates`, answering how to take it back:
+   * each key it wrote put back as it was then, or removed when it wasn't
+   * there. The undo does nothing when the update never ran.
+   */
+  static async updateFrontMatterUndoably(
+    file: TFile,
+    updates: FrontMatterUpdates,
+    app: App
+  ): Promise<() => Promise<void>> {
+    // What each key held, once the update has read the note
+    const before: { keys?: [string, { value: unknown } | null][] } = {};
+    await this.updateFrontMatter(file, updates, app, (frontmatter) => {
+      before.keys = Object.keys(updates).map((key) => [
+        key,
+        Object.hasOwn(frontmatter, key)
+          ? { value: structuredClone(frontmatter[key]) }
+          : null,
+      ]);
+    });
+    return async () => {
+      const written = before.keys;
+      if (!written) return;
+      await this.updateFrontMatter(
+        file,
+        (frontmatter) => {
+          for (const [key, was] of written) {
+            if (was) frontmatter[key] = was.value;
+            else delete frontmatter[key];
+          }
+        },
+        app
+      );
+    };
   }
 
   /**

@@ -1,3 +1,4 @@
+import type { DeleteOutcome } from '#/lib/items/ItemManager';
 import {
   type PdfSelectionSource,
   pdfTabSelection,
@@ -20,6 +21,7 @@ import {
   type WorkspaceLeaf,
 } from 'obsidian';
 import { type Grade, Rating } from 'ts-fsrs';
+import { refusedWrite, withCompensation } from './compensation';
 import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from './constants';
 import { flashSnippetContext } from './context-flash';
 import { createEmitter } from './emitter';
@@ -113,10 +115,29 @@ function selectFirst(kind: SelectionKind): string {
     : 'Select the text to make a card of first';
 }
 
+/** Why an undo took nothing back: see `ActionStackEntry.undo`. */
+type UndoMiss = 'retry' | 'failed';
+
+/** What a delete an undo makes means for the undo: see `UndoMiss`. */
+function undoMiss(outcome: DeleteOutcome): UndoMiss {
+  return outcome === 'declined' || outcome === 'refused' ? 'retry' : 'failed';
+}
+
 export type ActionStackEntry = {
   item: MaybeMissingItem;
   description: string;
-  undo: () => void | Promise<void>;
+  /**
+   * Take the action back. Answers how it went when it took nothing back,
+   * leaving things as they were: `retry` when the user turned down a prompt
+   * on the way or writes were refused, which can go otherwise next time, so
+   * the entry stays to try again; `failed` for anything else, which drops it.
+   */
+  undo: () => void | UndoMiss | Promise<void | UndoMiss>;
+  /**
+   * False for an undo that writes nothing to the database, which can run
+   * while writes are refused; any other is held until they aren't.
+   */
+  writes?: boolean;
 };
 
 /**
@@ -258,15 +279,13 @@ export class Actions {
       item: card,
       description: `grading "${card.file.basename}" ${Rating[grade]}`,
       undo: async () => {
+        // Dismissed again by the rollback itself, when it was: see
+        // `rollbackBeforeReview`
         await this.plugin.reviewManager.cards.rollbackBeforeReview(
           card.data,
           reviewRowId
         );
         this._unrecordReview(reviewRowId);
-        if (wasDismissed) {
-          await this.dismissItem(card);
-        }
-
         await invalidateItemQuery(card.data.id);
         this._returnToItem(card);
       },
@@ -325,7 +344,48 @@ export class Actions {
    * Asks for confirmation if enabled in settings; moves file to trash
    */
   deleteItem = async (item: ReviewItem) => {
-    await this.plugin.app.fileManager.promptForFileDeletion(item.file);
+    const name = `delete "${itemName(item)}"`;
+    if (refusedWrite(this.plugin.reviewManager.repo, name)) return;
+    // The row is marked deleted first, and back when the note isn't deleted
+    // after all: marked by the vault's `delete` event alone, a write failing
+    // there would leave the row behind for a note that is gone. A note can't
+    // be fetched back from the trash, so its deletion is the last step.
+    const { articles } = this.plugin.reviewManager;
+    const { id, type } = item.data;
+    try {
+      await withCompensation(async (step) => {
+        await step(
+          () => articles.markDeleted(id, type),
+          () => articles.markUndeleted(id, type)
+        );
+        // `promptForFileDeletion` is undocumented Obsidian API (`trashFile`
+        // is the public one). It answers false when turned down, read from
+        // the app bundle; its declared type answers nothing.
+        let deleted: unknown;
+        try {
+          deleted = await this.plugin.app.fileManager.promptForFileDeletion(
+            item.file
+          );
+        } catch (error) {
+          // Thrown past trashing the note, by its offer to delete the
+          // attachments only the note linked to, say: the note is gone, and
+          // the row goes with it
+          if (
+            this.plugin.app.vault.getFileByPath(item.file.path) === item.file
+          ) {
+            throw error;
+          }
+          console.error(error);
+        }
+        if (deleted === false) throw new Error(`Kept ${item.file.path}`);
+      });
+    } catch (error) {
+      console.error(error);
+      return;
+    }
+    // Again, past the note's deletion: review's own fetch can have taken the
+    // mark off while the prompt was open, seeing the note still there
+    await articles.markDeleted(id, type).catch(console.error);
     const { currentItemId } = store.getState();
     if (item.data.id === currentItemId) {
       this._getNext();
@@ -339,6 +399,7 @@ export class Actions {
     this._pushUndo({
       item,
       description: `skipping "${itemName(item)}"`,
+      writes: false,
       undo: () => {
         this.plugin.store.dispatch(removeSeenId({ id: item.data.id }));
         this._returnToItem(item);
@@ -376,10 +437,10 @@ export class Actions {
         item: snippet,
         description: `creating snippet "${snippet.file.basename}"`,
         undo: async () => {
-          const success = await this.plugin.reviewManager.snippets.delete(
+          const outcome = await this.plugin.reviewManager.snippets.delete(
             snippet.data.id
           );
-          if (!success) return;
+          if (outcome !== 'deleted') return undoMiss(outcome);
 
           this.plugin.reviewManager.snippets.offsetTracker.removeHighlight(
             parentFile.path,
@@ -425,8 +486,8 @@ export class Actions {
             await snippets.fetch(id)
           );
           // Without a prompt, which would offer to delete the PDF too
-          const deleted = await snippets.delete(id, { prompt: false });
-          if (!deleted) return;
+          const outcome = await snippets.delete(id, { prompt: false });
+          if (outcome !== 'deleted') return undoMiss(outcome);
           // The row is deleted outright, which the repository reports no
           // change for: take the highlight off by hand
           for (const path of paths) {
@@ -495,8 +556,8 @@ export class Actions {
             await cards.fetch(id)
           );
           // Without a prompt, which would offer to delete the PDF too
-          const deleted = await cards.delete(id, { prompt: false });
-          if (!deleted) return;
+          const outcome = await cards.delete(id, { prompt: false });
+          if (outcome !== 'deleted') return undoMiss(outcome);
           for (const path of paths) {
             this.plugin.app.workspace.trigger('ir-highlights-changed', path);
           }
@@ -593,28 +654,65 @@ export class Actions {
         item: result.reviewCard,
         description: `creating card "${result.reviewCard.file.basename}"`,
         undo: async () => {
-          // restore the original text
-          await this.plugin.app.vault.read(sourceFile);
-          await Obsidian.editNote(this.plugin.app, sourceFile, (data) => {
-            const cardEmbed = Obsidian.findEmbeds(
-              this.plugin.app,
-              sourceFile,
-              reviewCard.file
-            );
+          const { app } = this.plugin;
+          // Where the embed was, and what it said, once the line is back in
+          // its place: to put it back if the card can't be deleted after all
+          let restored: { at: number; embed: string } | null = null;
+          // How deleting the card went, once it was tried
+          let outcome: DeleteOutcome = 'failed';
+          try {
+            await withCompensation(async (step) => {
+              // restore the original text
+              await app.vault.read(sourceFile);
+              await step(
+                () =>
+                  Obsidian.editNote(app, sourceFile, (data) => {
+                    const cardEmbed = Obsidian.findEmbeds(
+                      app,
+                      sourceFile,
+                      reviewCard.file
+                    );
+                    if (!cardEmbed) return data;
 
-            if (!cardEmbed) return data;
+                    const startOffset = cardEmbed.position.start.offset;
+                    const endOffset = cardEmbed.position.end.offset;
+                    restored = {
+                      at: startOffset,
+                      embed: data.slice(startOffset, endOffset),
+                    };
+                    return (
+                      data.slice(0, startOffset) + line + data.slice(endOffset)
+                    );
+                  }),
+                () =>
+                  Obsidian.editNote(app, sourceFile, (data) => {
+                    const put = restored;
+                    if (
+                      !put ||
+                      data.slice(put.at, put.at + line.length) !== line
+                    ) {
+                      return data;
+                    }
+                    return (
+                      data.slice(0, put.at) +
+                      put.embed +
+                      data.slice(put.at + line.length)
+                    );
+                  })
+              );
 
-            const startOffset = cardEmbed.position.start.offset;
-            const endOffset = cardEmbed.position.end.offset;
-
-            const prefix = data.slice(0, startOffset);
-            data.slice(startOffset, endOffset);
-            const suffix = data.slice(endOffset);
-            return prefix + line + suffix;
-          });
-
-          // remove the card file and row
-          await this.plugin.reviewManager.cards.delete(reviewCard.data.id);
+              // remove the card file and row
+              outcome = await this.plugin.reviewManager.cards.delete(
+                reviewCard.data.id
+              );
+              if (outcome !== 'deleted') {
+                throw new Error(`Kept the card "${reviewCard.file.basename}"`);
+              }
+            });
+          } catch (error) {
+            console.error(error);
+            return undoMiss(outcome);
+          }
 
           const { parent } = reviewCard.data;
           if (parent) {
@@ -947,16 +1045,43 @@ export class Actions {
   };
 
   undo = async () => {
-    const actionEntry = this.undoStack.pop();
+    const actionEntry = this.undoStack.at(-1);
     if (actionEntry === undefined) {
       Obsidian.notify(`Nothing to undo!`);
       return;
     }
+    // Refused before anything is reversed, and kept for once saving resumes
+    if (
+      actionEntry.writes !== false &&
+      refusedWrite(
+        this.plugin.reviewManager.repo,
+        `undo ${actionEntry.description}`
+      )
+    ) {
+      return;
+    }
+    this.undoStack.pop();
     // Emitted before the reversal runs, not after: the entry is already off the
     // stack, and an undo that throws partway would otherwise leave subscribers
     // reading an entry that is no longer there.
     this.emitter.emit();
-    await actionEntry.undo();
+    let miss: void | UndoMiss;
+    try {
+      miss = await actionEntry.undo();
+    } catch (error) {
+      Obsidian.notify(`Couldn't undo ${actionEntry.description}`);
+      throw error;
+    }
+    if (miss === 'retry') {
+      this.undoStack.push(actionEntry);
+      this.emitter.emit();
+      Obsidian.notify(`Didn't undo ${actionEntry.description}`);
+      return;
+    }
+    if (miss === 'failed') {
+      Obsidian.notify(`Couldn't undo ${actionEntry.description}`);
+      return;
+    }
     Obsidian.notify(`Undid ${actionEntry.description}`);
   };
 

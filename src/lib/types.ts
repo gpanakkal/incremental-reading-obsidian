@@ -287,6 +287,11 @@ export interface SQLiteRepository {
    */
   dispose(): void;
   /**
+   * Why a write would be refused now — saving paused, or the repository
+   * disposed — or null when it would not be.
+   */
+  writeRefusal(): Error | null;
+  /**
    * Subscribe to row-level changes on item tables. Returns an unsubscribe fn.
    */
   onDataChange(listener: DataChangeListener): () => void;

@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
-import { ReviewContextProvider, useReviewContext } from '#/components/ReviewContext';
+import {
+  ReviewContextProvider,
+  useReviewContext,
+} from '#/components/ReviewContext';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import { queryClient } from '#/lib/query-client';
 import type { ReviewItem } from '#/lib/types';
 import fc from 'fast-check';
 import { render } from 'preact';
+import { act } from 'preact/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #region HELPERS
@@ -38,8 +42,14 @@ function makeReviewManager(highlights: Highlight[] = []) {
   return {
     snippets: {
       offsetTracker: { getHighlights: vi.fn(() => highlights) },
+      offsetsOf: vi.fn(async (_ids: string[]): Promise<Highlight[]> => []),
+      offsetsPending: vi.fn((_path: string) => undefined),
+      persistPendingOffsets: vi.fn(async () => undefined),
     },
-    updateManySnippetOffsets: vi.fn(async () => undefined),
+    updateManySnippetOffsets: vi.fn(
+      async (_written: Highlight[]): Promise<void> => undefined
+    ),
+    repo: { writeRefusal: vi.fn((): Error | null => null) },
   };
 }
 
@@ -58,18 +68,21 @@ function captureSaveNote(reviewManager: ReturnType<typeof makeReviewManager>) {
 
   const container = document.createElement('div');
   document.body.appendChild(container);
-  render(
-    (
-      <ReviewContextProvider
-        plugin={{} as never}
-        reviewView={{ app: {} } as never}
-        reviewManager={reviewManager as never}
-      >
-        <Capture />
-      </ReviewContextProvider>
-    ) as never,
-    container
-  );
+  // In `act`, so the provider's effects have run too
+  void act(() => {
+    render(
+      (
+        <ReviewContextProvider
+          plugin={{} as never}
+          reviewView={{ app: {} } as never}
+          reviewManager={reviewManager as never}
+        >
+          <Capture />
+        </ReviewContextProvider>
+      ) as never,
+      container
+    );
+  });
 
   if (!ref.current) throw new Error('saveNote was not provided by the context');
   return ref.current;
@@ -84,6 +97,38 @@ const binaryExtensionArb = fc.oneof(
   fc.string().filter((ext) => ext.toLowerCase() !== 'md')
 );
 
+const highlightsArb = fc.uniqueArray(
+  fc.record({
+    id: fc.uuid(),
+    start_offset: fc.nat(10_000),
+    end_offset: fc.nat(10_000),
+  }),
+  { minLength: 1, maxLength: 6, selector: (h) => h.id }
+);
+
+/**
+ * A review manager whose highlights are `highlights` in memory and
+ * `stored` in the database, recording every write to either in `log`.
+ */
+function wireSave(highlights: Highlight[], stored: Highlight[]) {
+  const log: string[] = [];
+  const db = new Map(stored.map((h) => [h.id, h]));
+  const reviewManager = makeReviewManager(highlights);
+  reviewManager.updateManySnippetOffsets.mockImplementation(async (written) => {
+    log.push('offsets');
+    for (const h of written) db.set(h.id, h);
+  });
+  reviewManager.snippets.offsetsOf.mockImplementation(async (ids) =>
+    ids.flatMap((id) => db.get(id) ?? [])
+  );
+  const editNote = vi
+    .spyOn(ObsidianHelpers, 'editNote')
+    .mockImplementation(async () => {
+      log.push('note');
+      return '';
+    });
+  return { reviewManager, log, db, editNote };
+}
 // #endregion
 
 // react-redux is mocked rather than spied on because its exports are
@@ -183,7 +228,9 @@ describe('saveNote publishes its write to the file-text cache', () => {
 
           // Cross-item bleed would put one note's text in front of another
           // note's file, and the review editor writes back what it displays.
-          expect(queryClient.getQueryData(fileTextKey(otherId))).toBe(otherText);
+          expect(queryClient.getQueryData(fileTextKey(otherId))).toBe(
+            otherText
+          );
         }
       )
     );
@@ -378,6 +425,134 @@ describe('saveNote on an item that is not text', () => {
           expect(reviewManager.updateManySnippetOffsets).not.toHaveBeenCalled();
           expect(dispatch).not.toHaveBeenCalled();
           expect(queryClient.getQueryData(fileTextKey(itemId))).toBeUndefined();
+        }
+      )
+    );
+  });
+});
+
+describe('saveNote keeps a note and its highlight offsets in step', () => {
+  beforeEach(() => {
+    queryClient.clear();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    dispatch.mockClear();
+    queryClient.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('saves the offsets before the note, so a note is never saved with offsets older than its text', async () => {
+    await fc.assert(
+      fc.asyncProperty(highlightsArb, async (highlights) => {
+        const { reviewManager, log } = wireSave(highlights, highlights);
+
+        await captureSaveNote(reviewManager)(makeItem('article-1'), 'body');
+
+        expect(log).toEqual(['offsets', 'note']);
+      })
+    );
+  });
+
+  it('saves the note, holding its offsets back, while writes are refused', async () => {
+    await fc.assert(
+      fc.asyncProperty(highlightsArb, fc.string(), async (highlights, text) => {
+        vi.restoreAllMocks();
+        queryClient.clear();
+        const { reviewManager, editNote, log } = wireSave(highlights, []);
+        reviewManager.repo.writeRefusal.mockReturnValue(new Error('paused'));
+        const item = makeItem('article-1');
+
+        await captureSaveNote(reviewManager)(item, text);
+
+        expect(log).toEqual(['note']);
+        const [, file, transform] = editNote.mock.calls[0];
+        expect(file).toBe(item.file);
+        expect((transform as (data: string) => string)('')).toBe(text);
+        expect(queryClient.getQueryData(fileTextKey('article-1'))).toBe(text);
+        expect(
+          reviewManager.snippets.offsetsPending
+        ).toHaveBeenCalledExactlyOnceWith(item.file.path);
+      })
+    );
+  });
+
+  it('saves the note, holding its offsets back, when writing them fails', async () => {
+    await fc.assert(
+      fc.asyncProperty(highlightsArb, async (highlights) => {
+        vi.restoreAllMocks();
+        const { reviewManager, editNote } = wireSave(highlights, []);
+        const failure = new Error('save failed');
+        reviewManager.updateManySnippetOffsets.mockRejectedValueOnce(failure);
+        const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
+        const item = makeItem('article-1');
+
+        await captureSaveNote(reviewManager)(item, 'new');
+
+        expect(editNote).toHaveBeenCalledOnce();
+        expect(error).toHaveBeenCalledWith(failure);
+        expect(
+          reviewManager.snippets.offsetsPending
+        ).toHaveBeenCalledExactlyOnceWith(item.file.path);
+      })
+    );
+  });
+
+  it('holds no offsets back when they are written, and writes those held back before', async () => {
+    await fc.assert(
+      fc.asyncProperty(highlightsArb, async (highlights) => {
+        vi.restoreAllMocks();
+        const { reviewManager } = wireSave(highlights, []);
+
+        await captureSaveNote(reviewManager)(makeItem('article-1'), 'new');
+
+        expect(reviewManager.snippets.offsetsPending).not.toHaveBeenCalled();
+        expect(
+          reviewManager.snippets.persistPendingOffsets
+        ).toHaveBeenCalledOnce();
+      })
+    );
+  });
+
+  it('saves the note, holding its offsets back, when the offsets it would put back cannot be read', async () => {
+    const { reviewManager, editNote, log } = wireSave(
+      [{ id: 'a', start_offset: 1, end_offset: 2 }],
+      []
+    );
+    reviewManager.snippets.offsetsOf.mockRejectedValueOnce(
+      new Error('read failed')
+    );
+    vi.spyOn(console, 'error').mockReturnValue(undefined);
+
+    await captureSaveNote(reviewManager)(makeItem('article-1'), 'new');
+
+    expect(log).toEqual(['note']);
+    expect(editNote).toHaveBeenCalledOnce();
+    expect(reviewManager.snippets.offsetsPending).toHaveBeenCalledOnce();
+    expect(reviewManager.snippets.persistPendingOffsets).not.toHaveBeenCalled();
+  });
+
+  it('puts the offsets back as they were when the note cannot be saved', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        highlightsArb,
+        fc.array(fc.nat(10_000), { minLength: 12, maxLength: 12 }),
+        async (stored, moved) => {
+          vi.restoreAllMocks();
+          const highlights = stored.map((h, i) => ({
+            ...h,
+            start_offset: moved[i],
+          }));
+          const { reviewManager, db, editNote } = wireSave(highlights, stored);
+          const failure = new Error('write failed');
+          editNote.mockRejectedValue(failure);
+
+          await expect(
+            captureSaveNote(reviewManager)(makeItem('article-1'), 'new')
+          ).rejects.toBe(failure);
+
+          expect([...db.values()]).toEqual(stored);
         }
       )
     );

@@ -74,6 +74,7 @@ function makePlugin() {
     reviewManager: {
       dismissItem: vi.fn().mockResolvedValue(undefined),
       unDismissItem: vi.fn().mockResolvedValue(undefined),
+      repo: { writeRefusal: () => null },
     },
     app: {
       workspace: {
@@ -124,6 +125,7 @@ function makeReviewingPlugin({
       articles: { undoReview: reverse },
       snippets: { undoReview: reverse },
       cards: { rollbackBeforeReview: reverse },
+      repo: { writeRefusal: () => null },
     },
     app: {
       workspace: {
@@ -573,6 +575,129 @@ const contextEStateArb = fc.option(
   }),
   { nil: null }
 );
+
+/** Actions over a plugin whose database refuses writes with `reason`. */
+function refusing(reason: string) {
+  const plugin = makePlugin();
+  Object.assign(plugin.reviewManager, {
+    repo: { writeRefusal: () => new Error(reason) },
+  });
+  return new Actions(plugin);
+}
+/**
+ * A note holding a card's embed between `before` and `after`, and the line the
+ * card was made of: any text, shorter or longer than the embed. The text
+ * around the embed never holds it, as the cache finds the embed by itself.
+ */
+const cardNoteArb = fc
+  .record({
+    before: fc.string(),
+    after: fc.string(),
+    line: fc.string(),
+    embed: fc.constantFrom('![[card|ir-hide-title]]', '![[c]]'),
+  })
+  .filter(({ before, after, embed }) => {
+    const text = before + embed + after;
+    return (
+      text.indexOf(embed) === before.length &&
+      text.lastIndexOf(embed) === before.length
+    );
+  });
+type CardNote = typeof cardNoteArb extends fc.Arbitrary<infer T> ? T : never;
+
+/**
+ * A card made of `note`'s line, whose embed now stands in its place, undone
+ * with a card manager whose delete answers `deleted`, after `meanwhile` has
+ * edited the note.
+ */
+async function makeCardThenUndo(
+  { before, after, line, embed }: CardNote,
+  deleted: boolean,
+  meanwhile: (text: string) => string = (text) => text
+) {
+  const plugin = makePlugin();
+  const sourceFile = makeTFile('source');
+  const cardFile = makeTFile('card');
+  let text = before + embed + after;
+  const process = vi.fn(async (_file: TFile, fn: (data: string) => string) => {
+    text = fn(text);
+    return text;
+  });
+  Object.assign(plugin.app, {
+    vault: { read: vi.fn(async () => text), process },
+  });
+  vi.spyOn(Obsidian, 'findEmbeds').mockImplementation(() => {
+    const start = text.indexOf(embed);
+    return start < 0
+      ? null
+      : ({
+          position: {
+            start: { offset: start },
+            end: { offset: start + embed.length },
+          },
+        } as never);
+  });
+  vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  const reviewCard = { data: { id: 'card-1', parent: null }, file: cardFile };
+  const deleteCard = vi.fn(async () => {
+    text = meanwhile(text);
+    return deleted ? ('deleted' as const) : ('declined' as const);
+  });
+  const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
+  Object.assign(plugin.reviewManager, {
+    createCard: vi.fn().mockResolvedValue({ reviewCard, line }),
+    cards: { delete: deleteCard },
+  });
+  Object.assign(plugin.app.workspace, {
+    activeEditor: { editor: {} },
+    getActiveViewOfType: () => ({ file: sourceFile }),
+  });
+  Object.assign(plugin, { getActiveReviewView: () => null });
+  const actions = new Actions(plugin);
+  await actions.createCard();
+
+  await actions.undo();
+
+  return { text: () => text, deleteCard, error, actions };
+}
+
+/**
+ * Actions over a plugin whose item rows are marked deleted and back through
+ * `log`, and whose prompt to delete a note does `prompt`, leaving the
+ * note there or not as `deletes` says.
+ */
+function wireDeleteItem(prompt: () => Promise<unknown>, deletes = false) {
+  const plugin = makePlugin();
+  const log: string[] = [];
+  let note: unknown = null;
+  const promptForFileDeletion = vi.fn(async (file: unknown) => {
+    log.push('prompt');
+    note = deletes ? null : file;
+    return prompt();
+  });
+  Object.assign(plugin.app, {
+    fileManager: { promptForFileDeletion },
+    vault: { getFileByPath: () => note },
+  });
+  const markDeleted = vi.fn(async (id: string, type: string) => {
+    log.push(`deleted ${type} ${id}`);
+  });
+  Object.assign(plugin.reviewManager, {
+    articles: {
+      markDeleted,
+      markUndeleted: vi.fn(async (id: string, type: string) => {
+        log.push(`undeleted ${type} ${id}`);
+      }),
+    },
+  });
+  vi.spyOn(store, 'getState').mockReturnValue({
+    currentItemId: 'item-1',
+  } as never);
+  vi.spyOn(console, 'error').mockReturnValue(undefined);
+  const actions = new Actions(plugin);
+  const getNext = vi.spyOn(actions, '_getNext').mockImplementation(() => {});
+  return { actions, log, promptForFileDeletion, getNext, markDeleted };
+}
 
 // #endregion
 
@@ -2532,7 +2657,9 @@ describe('Actions.createPdfSnippet', () => {
         : item;
     const plugin = makePlugin();
     const createFromPdf = vi.fn().mockResolvedValue(snippet);
-    const deleteSnippet = vi.fn().mockResolvedValue(deleted);
+    const deleteSnippet = vi
+      .fn()
+      .mockResolvedValue(deleted ? 'deleted' : 'declined');
     const removeHighlight = vi.fn();
     const trigger = vi.fn();
     const getReviewItemFromFile = vi.fn().mockResolvedValue(article);
@@ -2647,6 +2774,8 @@ describe('Actions.createPdfSnippet', () => {
     });
     expect(wired.removeHighlight).not.toHaveBeenCalled();
     expect(wired.trigger).not.toHaveBeenCalled();
+    // Still there to undo once it can be
+    expect(wired.actions.undoStack).toHaveLength(1);
   });
 
   it('records nothing to undo when the snippet could not be saved', async () => {
@@ -2916,7 +3045,9 @@ describe('Actions.createPdfCard', () => {
         : item;
     const plugin = makePlugin();
     const createFromPdf = vi.fn().mockResolvedValue(card);
-    const deleteCard = vi.fn().mockResolvedValue(deleted);
+    const deleteCard = vi
+      .fn()
+      .mockResolvedValue(deleted ? 'deleted' : 'declined');
     const trigger = vi.fn();
     const getReviewItemFromFile = vi.fn().mockResolvedValue(article);
     const fetchCard = vi.fn((id: string) =>
@@ -3118,6 +3249,7 @@ describe('Actions.createPdfCard', () => {
       prompt: false,
     });
     expect(wired.trigger).not.toHaveBeenCalled();
+    expect(wired.actions.undoStack).toHaveLength(1);
   });
 
   it('makes nothing when the answer is not chosen', async () => {
@@ -3642,5 +3774,338 @@ describe('Actions.cancelSelection', () => {
         }
       )
     );
+  });
+});
+
+describe('Actions — undo of a card grade', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('puts the card back as it was, dismissal and all, in its one rollback, leaving nothing else to undo', async () => {
+    await fc.assert(
+      fc.asyncProperty(reviewCaseArb, async (c) => {
+        const { plugin, item, actions } = wireCase({ ...c, type: 'card' });
+        await actions.gradeCard(item as ReviewCard, c.grade);
+
+        await actions.undo();
+
+        const { reviewManager } = plugin;
+        expect(
+          (reviewManager.cards.rollbackBeforeReview as ReturnType<typeof vi.fn>)
+            .mock.calls
+        ).toEqual([
+          [
+            expect.objectContaining({ id: c.itemId, dismissed: c.dismissed }),
+            c.reviewId,
+          ],
+        ]);
+        // A dismissal written apart from the rollback could be lost apart
+        // from it, and would be an undo of its own
+        expect(
+          (reviewManager.dismissItem as ReturnType<typeof vi.fn>).mock.calls
+        ).toEqual([]);
+        expect(actions.undoStack).toEqual([]);
+      })
+    );
+  });
+});
+
+describe('Actions.undo while writes are refused', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('leaves an undo that writes on the stack, unrun, and says why', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.string(),
+        async (description, reason) => {
+          vi.restoreAllMocks();
+          const notify = vi
+            .spyOn(Obsidian, 'notify')
+            .mockReturnValue(undefined);
+          const actions = refusing(reason);
+          const undo = vi.fn();
+          const entry = { item: makeReviewItem('a'), description, undo };
+          actions._pushUndo(entry);
+
+          await actions.undo();
+
+          expect(undo).not.toHaveBeenCalled();
+          expect(actions.undoStack).toEqual([entry]);
+          expect(notify).toHaveBeenCalledExactlyOnceWith(
+            `Couldn't undo ${description}: saving to the database is paused. ${reason}`
+          );
+        }
+      )
+    );
+  });
+
+  it('still undoes a skip, which writes nothing', async () => {
+    const actions = refusing('paused');
+    vi.spyOn(actions, '_returnToItem').mockImplementation(() => {});
+    vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    actions.skipItem(makeReviewItem('a'));
+
+    await actions.undo();
+
+    expect(actions.undoStack).toEqual([]);
+    expect(actions._returnToItem).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Actions — undo of a card made from a note', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('puts the line back in place of the embed once the card is deleted', async () => {
+    await fc.assert(
+      fc.asyncProperty(cardNoteArb, async (note) => {
+        vi.restoreAllMocks();
+        const { text, deleteCard } = await makeCardThenUndo(note, true);
+
+        expect(deleteCard).toHaveBeenCalledOnce();
+        expect(text()).toBe(note.before + note.line + note.after);
+      })
+    );
+  });
+
+  it('leaves the embed where it was when the card is not deleted, keeping the undo, and says why in the console', async () => {
+    await fc.assert(
+      fc.asyncProperty(cardNoteArb, async (note) => {
+        vi.restoreAllMocks();
+        const { text, error, actions } = await makeCardThenUndo(note, false);
+
+        expect(text()).toBe(note.before + note.embed + note.after);
+        expect(actions.undoStack).toHaveLength(1);
+        expect(String(error.mock.calls[0]?.[0])).toBe(
+          'Error: Kept the card "card"'
+        );
+      })
+    );
+  });
+
+  it('puts no embed over a line edited meanwhile', async () => {
+    await fc.assert(
+      fc.asyncProperty(cardNoteArb, fc.string(), async (note, edited) => {
+        fc.pre(!(edited + note.after).startsWith(note.line));
+        vi.restoreAllMocks();
+        const changed = note.before + edited + note.after;
+
+        const { text } = await makeCardThenUndo(note, false, () => changed);
+
+        expect(text()).toBe(changed);
+      })
+    );
+  });
+});
+
+describe('Actions.deleteItem', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('deletes no note, and says why, while writes are refused: its row would be left behind', async () => {
+    const plugin = makePlugin();
+    Object.assign(plugin.reviewManager, {
+      repo: { writeRefusal: () => new Error('Saving is paused.') },
+    });
+    const promptForFileDeletion = vi.fn().mockResolvedValue(true);
+    Object.assign(plugin.app, { fileManager: { promptForFileDeletion } });
+    const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    const item = makeReviewItem('my-article');
+
+    await new Actions(plugin).deleteItem(item);
+
+    expect(promptForFileDeletion).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      `Couldn't delete "my-article": saving to the database is paused. Saving is paused.`
+    );
+  });
+
+  it('marks the row deleted before deleting the note as Obsidian does, then moves on', async () => {
+    const wired = wireDeleteItem(async () => true);
+    const item = makeReviewItem('my-article');
+
+    await wired.actions.deleteItem(item);
+
+    expect(wired.promptForFileDeletion).toHaveBeenCalledExactlyOnceWith(
+      item.file
+    );
+    // Marked again once the note is gone, as review may have unmarked it
+    expect(wired.log).toEqual([
+      'deleted article item-1',
+      'prompt',
+      'deleted article item-1',
+    ]);
+    expect(wired.getNext).toHaveBeenCalledOnce();
+  });
+
+  it('puts the row back, and stays on the item, when the note is not deleted', async () => {
+    const declined = async () => false;
+    for (const prompt of [
+      declined,
+      async () => {
+        throw new Error('trash failed');
+      },
+    ]) {
+      vi.restoreAllMocks();
+      const wired = wireDeleteItem(prompt);
+
+      await wired.actions.deleteItem(makeReviewItem('my-article'));
+
+      expect(wired.log).toEqual([
+        'deleted article item-1',
+        'prompt',
+        'undeleted article item-1',
+      ]);
+      expect(wired.getNext).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(console.error).mock.calls.map(([e]) => String(e))
+      ).toEqual([
+        prompt === declined
+          ? `Error: Kept ${makeReviewItem('my-article').file.path}`
+          : 'Error: trash failed',
+      ]);
+    }
+  });
+
+  it('keeps the row deleted when the prompt fails past trashing the note', async () => {
+    const failure = new Error('attachment busy');
+    const wired = wireDeleteItem(async () => {
+      throw failure;
+    }, true);
+
+    await wired.actions.deleteItem(makeReviewItem('my-article'));
+
+    expect(wired.log).toEqual([
+      'deleted article item-1',
+      'prompt',
+      'deleted article item-1',
+    ]);
+    expect(console.error).toHaveBeenCalledWith(failure);
+    expect(wired.getNext).toHaveBeenCalledOnce();
+  });
+
+  it('asks nothing when the row cannot be marked deleted', async () => {
+    const wired = wireDeleteItem(async () => true);
+    wired.markDeleted.mockRejectedValueOnce(new Error('write failed'));
+
+    await wired.actions.deleteItem(makeReviewItem('my-article'));
+
+    expect(wired.promptForFileDeletion).not.toHaveBeenCalled();
+    expect(wired.getNext).not.toHaveBeenCalled();
+  });
+});
+
+describe('Actions.undo of something it could not take back', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('keeps the entry to try again, and says it was not undone rather than undone', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.string(), async (description) => {
+        vi.restoreAllMocks();
+        const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+        const actions = new Actions(makePlugin());
+        const entry = {
+          item: makeReviewItem('a'),
+          description,
+          undo: vi.fn(async () => 'retry' as const),
+        };
+        actions._pushUndo(entry);
+        const listener = vi.fn();
+        actions.subscribe(listener);
+
+        await actions.undo();
+
+        expect(actions.undoStack).toEqual([entry]);
+        expect(notify).toHaveBeenCalledExactlyOnceWith(
+          `Didn't undo ${description}`
+        );
+        // Told it is back as well as that it came off
+        expect(listener).toHaveBeenCalledTimes(2);
+      })
+    );
+  });
+
+  it('drops the entry, and says it could not undo it, when it failed for any other reason', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.boolean(),
+        async (description, throws) => {
+          vi.restoreAllMocks();
+          const notify = vi
+            .spyOn(Obsidian, 'notify')
+            .mockReturnValue(undefined);
+          const actions = new Actions(makePlugin());
+          const failure = new Error('undo failed');
+          actions._pushUndo({
+            item: makeReviewItem('a'),
+            description,
+            undo: async () => {
+              if (throws) throw failure;
+              return 'failed' as const;
+            },
+          });
+
+          const undone = actions.undo();
+          if (throws) await expect(undone).rejects.toBe(failure);
+          else await undone;
+
+          expect(actions.undoStack).toEqual([]);
+          expect(notify).toHaveBeenCalledExactlyOnceWith(
+            `Couldn't undo ${description}`
+          );
+        }
+      )
+    );
+  });
+});
+
+describe('Actions — undo of a snippet made from a note', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('keeps the undo when deleting the snippet is turned down or refused, and drops it when that fails otherwise', async () => {
+    for (const outcome of ['declined', 'refused', 'failed'] as const) {
+      vi.restoreAllMocks();
+      const plugin = makePlugin();
+      const snippet = { data: { id: 'snippet-1' }, file: makeTFile('snippet') };
+      const deleteSnippet = vi.fn().mockResolvedValue(outcome);
+      Object.assign(plugin.reviewManager, {
+        createSnippet: vi.fn().mockResolvedValue(snippet),
+        snippets: { delete: deleteSnippet },
+      });
+      Object.assign(plugin.app.workspace, {
+        activeEditor: { editor: {} },
+        getActiveViewOfType: () => ({ file: makeTFile('source') }),
+      });
+      Object.assign(plugin, { getActiveReviewView: () => null });
+      const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+      const actions = new Actions(plugin);
+      await actions.createSnippet();
+
+      await actions.undo();
+
+      expect(deleteSnippet).toHaveBeenCalledExactlyOnceWith('snippet-1');
+      expect(actions.undoStack).toHaveLength(outcome === 'failed' ? 0 : 1);
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        outcome === 'failed'
+          ? `Couldn't undo creating snippet "snippet"`
+          : `Didn't undo creating snippet "snippet"`
+      );
+    }
   });
 });

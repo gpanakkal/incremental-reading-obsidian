@@ -2986,3 +2986,45 @@ describe('dispose', () => {
     expect(adapter.writeBinary).not.toHaveBeenCalled();
   });
 });
+
+describe('writeRefusal', () => {
+  beforeEach(() => {
+    stubWasm();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('is null while writes are allowed', async () => {
+    const { repo } = await startOver(['a']);
+
+    expect(repo.writeRefusal()).toBeNull();
+  });
+
+  it('is the error writes are refused with while the changed file on disk cannot be loaded, and null once it loads', async () => {
+    const { repo, files } = await startOver(['a']);
+    files.set(DATABASE_FILE_PATH, await unloadableBytes({ ahead: 1 }));
+    await repo.handleFileChange(dbFileChange);
+
+    const refusal = repo.writeRefusal();
+    expect(refusal).toBeInstanceOf(Error);
+    expect(() => insertArticleRow(repo, 'b')).toThrow(refusal!);
+
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['a']));
+    await repo.handleFileChange(dbFileChange);
+    expect(repo.writeRefusal()).toBeNull();
+  });
+
+  it('says the repository was disposed once it is, writes being refused with the same message', async () => {
+    const { repo } = await startOver(['a']);
+
+    repo.dispose();
+
+    expect(repo.writeRefusal()?.message).toMatch(/disposed/);
+    expect(() => insertArticleRow(repo, 'b')).toThrow(
+      repo.writeRefusal()!.message
+    );
+  });
+});

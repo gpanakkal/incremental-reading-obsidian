@@ -1,3 +1,4 @@
+import { refusedWrite, withCompensation } from '#/lib/compensation';
 import { Markdown } from '#/lib/Markdown';
 import { decodeAnchor } from '#/lib/pdf/pdf-anchor';
 import type { PdfHighlight } from '#/lib/pdf/pdf-highlights';
@@ -257,6 +258,7 @@ export class CardManager extends ItemManager {
     // the answer's start can form syntax there that the note didn't
     const [a, b] = bounds;
     const answer = Markdown.escapeCutStart(line, bounds, 'answer');
+    if (refusedWrite(this.repo, 'create the card')) return null;
 
     try {
       const withDelimiters = this.delimitText(
@@ -342,6 +344,7 @@ export class CardManager extends ItemManager {
     // Each start escaped where it forms syntax the note didn't there
     const pre = Markdown.escapeCutStart(doc, [from, from + a], 'note');
     const hidden = Markdown.escapeCutStart(doc, [from + a, from + b], 'answer');
+    if (refusedWrite(this.repo, 'create the card')) return null;
 
     try {
       // Its second line kept from underlining its first, as delimited
@@ -406,6 +409,7 @@ export class CardManager extends ItemManager {
     PdfOrigin & {
       answer: readonly [number, number];
     }): Promise<ReviewCard | null> {
+    if (refusedWrite(this.repo, 'create the card')) return null;
     const pdf = originFile(origin);
     try {
       const escaped = Markdown.escapeAround(text, answer);
@@ -452,90 +456,111 @@ export class CardManager extends ItemManager {
    * Make the card's note and row. Its parent is found by `sourceFile`'s note
    * type, unless `origin` gives it, along with how to link to `sourceFile`.
    *
-   * A note made for a row that then can't be saved is trashed again: with no
-   * row, review would never show it. Once the row is saved, the note is the
-   * card's whatever fails after.
+   * The note and row are made as one (see `withCompensation`): a note made
+   * for a row that then can't be saved is trashed again, since with no row,
+   * review would never show it. Once the row is saved, the note is the card's
+   * whatever fails after.
    */
   protected async createFileAndEntry(
     delimitedText: string,
     sourceFile: TFile,
     origin?: CardOrigin
   ) {
-    let cardFile: TFile | null = null;
-    let saved = false;
     try {
-      // Create the card from the content
-      cardFile = await Obsidian.createFromText(
-        delimitedText,
-        Obsidian.getDirectory('card'),
-        this.app,
-        origin?.title
-      );
+      const card = await withCompensation(async (step) => {
+        // Create the card from the content
+        const cardFile = await step(
+          () =>
+            Obsidian.createFromText(
+              delimitedText,
+              Obsidian.getDirectory('card'),
+              this.app,
+              origin?.title
+            ),
+          (made) => this.app.fileManager.trashFile(made)
+        );
 
-      const card = new SRSCard(cardFile.path);
+        const card = new SRSCard(cardFile.path);
 
-      const linkToSource = Obsidian.generateMarkdownLink(
-        sourceFile,
-        cardFile,
-        this.app,
-        origin?.alias,
-        origin?.subpath
-      );
-      await Obsidian.updateFrontMatter(
-        cardFile,
-        {
-          'ir-id': card.id,
-          tags: CARD_TAG,
-          [`${SOURCE_PROPERTY_NAME}`]: linkToSource,
-          delimiters: CLOZE_DELIMITERS,
-        },
-        this.app
-      );
+        const linkToSource = Obsidian.generateMarkdownLink(
+          sourceFile,
+          cardFile,
+          this.app,
+          origin?.alias,
+          origin?.subpath
+        );
+        await Obsidian.updateFrontMatter(
+          cardFile,
+          {
+            'ir-id': card.id,
+            tags: CARD_TAG,
+            [`${SOURCE_PROPERTY_NAME}`]: linkToSource,
+            delimiters: CLOZE_DELIMITERS,
+          },
+          this.app
+        );
 
-      const parent = origin
-        ? origin.parent
-        : await this.findParentId(sourceFile);
-      if (origin) {
-        // Its row's change tells the PDF's tabs to read their card highlights
-        // again, which come from this link's subpath, article or not: in the
-        // cache by then, or the card's highlight waits for the next change
-        await this.sourceIndexed(cardFile, sourceFile);
-      }
-      // create the database entry
+        const parent = origin
+          ? origin.parent
+          : await this.findParentId(sourceFile);
+        if (origin) {
+          // Its row's change tells the PDF's tabs to read their card
+          // highlights again, which come from this link's subpath, article or
+          // not: in the cache by then, or the card's highlight waits for the
+          // next change
+          await this.sourceIndexed(cardFile, sourceFile);
+        }
 
-      const params = [
-        card.id,
-        card.reference,
-        parent,
-        card.created_at.getTime(),
-        card.due.getTime() + MS_PER_DAY, // new cards due the next day
-        card.last_review?.getTime() ?? null,
-        card.stability,
-        card.difficulty,
-        card.elapsed_days,
-        card.scheduled_days,
-        card.learning_steps,
-        card.reps,
-        card.lapses,
-        card.state,
-      ];
-      await this.repo.mutate(
-        `INSERT INTO srs_card (id, reference, parent, created_at, due, last_review, ` +
-          `stability, difficulty, elapsed_days, scheduled_days, learning_steps, reps, lapses, state) ` +
-          `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-        params
-      );
-      saved = true;
+        // create the database entry: the commit point
+        await this.insertRow(card, parent);
+        return card;
+      });
 
       const reviewCard = await this.fetch(card.id);
       return reviewCard;
     } catch (error) {
       console.error(error);
-      if (cardFile && !saved) {
-        await this.app.fileManager.trashFile(cardFile).catch(console.error);
-      }
       throw error;
     }
+  }
+
+  /** Add the row of the new card `card`, the child of `parent`. */
+  private async insertRow(card: SRSCard, parent: string | null) {
+    const params = [
+      card.id,
+      card.reference,
+      parent,
+      card.created_at.getTime(),
+      card.due.getTime() + MS_PER_DAY, // new cards due the next day
+      card.last_review?.getTime() ?? null,
+      card.stability,
+      card.difficulty,
+      card.elapsed_days,
+      card.scheduled_days,
+      card.learning_steps,
+      card.reps,
+      card.lapses,
+      card.state,
+    ];
+    await this.repo.mutate(
+      `INSERT INTO srs_card (id, reference, parent, created_at, due, last_review, ` +
+        `stability, difficulty, elapsed_days, scheduled_days, learning_steps, reps, lapses, state) ` +
+        `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+      params
+    );
+  }
+
+  /**
+   * Give the note `file`, which holds the `ir-id` `id` no row does, a row of
+   * its own: a card whose making was cut short before its row was saved (see
+   * `crash-leftovers`). New, as a card just made is, and the child of the
+   * item its `source` links to, if any.
+   */
+  async adoptLeftover(file: TFile, id: string): Promise<void> {
+    const card = new SRSCard(file.path);
+    card.id = id;
+    const source = Obsidian.getSourceFile(file, this.app);
+    await this.insertRow(card, source ? await this.findParentId(source) : null);
   }
 
   /**
@@ -611,38 +636,13 @@ export class CardManager extends ItemManager {
   }
 
   /**
-   * Drop a card's row and delete its note
-   *
-   * @param options.prompt whether to delete the note as Obsidian does from
-   *   its own menus (the default): asking first, if the user has it ask, and
-   *   then offering to delete whatever only the note linked to. That includes
-   *   the PDF a note made from one links to as its source, so an undo, which
-   *   only takes back what it made, says `false` and trashes just the note.
+   * Drop a card's row and delete its note, as one (see `deleteWithNote`).
+   * @returns how it went: `deleted` once both are gone
    */
-  async delete(id: string, { prompt = true }: { prompt?: boolean } = {}) {
-    try {
-      const row = (
-        await this.repo.query(`SELECT * FROM srs_card WHERE id = $1`, [id])
-      )[0] as SRSCardRow | null;
-      if (!row) throw new Error(`No card was found with ID "${id}"`);
-
-      const file = Obsidian.getNote(row.reference, this.app);
-      if (file) {
-        // delete the card file. `promptForFileDeletion` is undocumented
-        // Obsidian API (`trashFile` is the public one); its offer to delete
-        // unlinked attachments was read from the app bundle.
-        await (prompt
-          ? this.plugin.app.fileManager.promptForFileDeletion(file)
-          : this.plugin.app.fileManager.trashFile(file));
-      }
-
-      // remove the row entirely
-      await this.repo.mutate(`DELETE FROM srs_card WHERE id = $1`, [id]);
-      return true;
-    } catch (e) {
-      return false;
-    }
+  async delete(id: string, options: { prompt?: boolean } = {}) {
+    return this.deleteWithNote('srs_card', id, options, 'delete the card');
   }
+
   /**
    * If text is selected, adds cloze deletion delimiters around the selection
    * and removes them elsewhere.
@@ -1065,6 +1065,13 @@ export class CardManager extends ItemManager {
     return reviewRow.id;
   }
 
+  /**
+   * Undo the review `reviewRowId` of `card`, and every later one: the card as
+   * it was before it, dismissed or not, all in one transaction. A dismissal
+   * put back by a write of its own could be lost on its own, leaving a card
+   * that was dismissed back in the queue.
+   * @param card the card as it was before the review
+   */
   async rollbackBeforeReview(card: ISRSCardDisplay, reviewRowId: string) {
     const reviewRow = (
       await this.repo.query(
@@ -1090,10 +1097,10 @@ export class CardManager extends ItemManager {
         `scheduled_days = $6`,
         `learning_steps = $7`,
         `reps = $8, lapses = $9`,
-        `state = $10, dismissed = 0`,
+        `state = $10, dismissed = $11`,
       ];
       updateQuery += columnUpdateSegments.join(', ');
-      updateQuery += ` WHERE id = $11`;
+      updateQuery += ` WHERE id = $12`;
       const updateParams = [
         updatedCard.due,
         updatedCard.last_review,
@@ -1105,6 +1112,7 @@ export class CardManager extends ItemManager {
         updatedCard.reps,
         updatedCard.lapses,
         updatedCard.state,
+        Number(card.dismissed),
         card.id,
       ];
       await this.repo.mutate(updateQuery, updateParams);

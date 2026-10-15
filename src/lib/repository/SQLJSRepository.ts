@@ -298,12 +298,20 @@ export class SQLJSRepository implements SQLiteRepository {
     return error;
   }
 
-  /** @throws if writes are refused (see {@link blockWrites}, {@link dispose}) */
+  /**
+   * Why a write would be refused now (see {@link blockWrites},
+   * {@link dispose}), or null when it would not be: for an operation that
+   * also writes files to check before touching any.
+   */
+  writeRefusal(): Error | null {
+    if (this.#disposed) return new Error('Database repository was disposed');
+    return this.#writeBlock;
+  }
+
+  /** @throws if writes are refused (see {@link writeRefusal}) */
   #assertWritable() {
-    if (this.#disposed) {
-      throw new Error('Database repository was disposed');
-    }
-    if (this.#writeBlock) throw this.#writeBlock;
+    const refusal = this.writeRefusal();
+    if (refusal) throw refusal;
   }
 
   get dbFilePath() {
