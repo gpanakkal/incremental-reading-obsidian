@@ -1,4 +1,4 @@
-import { DISMISS_ICON_STROKE, PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
+import { DISMISS_ICON_STROKE, PLUGIN_ICON } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { fetchByFile, invalidateCacheOnMatch } from '#/lib/query-client';
@@ -495,7 +495,7 @@ const FACES = {
     label: 'Un-dismiss',
     stroke: DISMISS_ICON_STROKE,
   },
-  review: { icon: PLACEHOLDER_PLUGIN_ICON, label: 'Review' },
+  review: { icon: PLUGIN_ICON, label: 'Review' },
 } satisfies Record<string, ButtonFace>;
 
 /**

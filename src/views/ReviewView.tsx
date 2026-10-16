@@ -1,8 +1,5 @@
 import { createReviewInterface } from '#/components/ReviewInterface';
-import {
-  MORE_OPTIONS_SECTIONS,
-  PLACEHOLDER_PLUGIN_ICON,
-} from '#/lib/constants';
+import { MORE_OPTIONS_SECTIONS, PLUGIN_ICON } from '#/lib/constants';
 import { isPositionalEState } from '#/lib/ephemeral-position';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { isEditableText } from '#/lib/mime';
@@ -348,7 +345,7 @@ export default class ReviewView extends FileView {
   }
 
   getIcon(): IconName {
-    return PLACEHOLDER_PLUGIN_ICON;
+    return PLUGIN_ICON;
   }
 
   /**

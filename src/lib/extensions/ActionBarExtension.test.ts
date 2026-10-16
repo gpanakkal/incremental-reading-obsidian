@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { DISMISS_ICON_STROKE, PLACEHOLDER_PLUGIN_ICON } from '#/lib/constants';
+import { DISMISS_ICON_STROKE, PLUGIN_ICON } from '#/lib/constants';
 import { configureSuccessNotices } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { registerPluginIcon } from '#/lib/plugin-icon';
 import type {
   DataChangeEvent,
   DataChangeListener,
@@ -9,7 +10,7 @@ import type {
   ReviewItem,
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
-import { Notice } from '#/test/__mocks__/obsidian';
+import { Notice, removeIcon } from '#/test/__mocks__/obsidian';
 import {
   showSuccessNotices,
   SUCCESS_NOTICE_LEVELS,
@@ -275,6 +276,7 @@ beforeEach(() => {
 afterEach(() => {
   while (mountedViews.length) mountedViews.pop()?.destroy();
   document.body.replaceChildren();
+  removeIcon(PLUGIN_ICON);
   vi.restoreAllMocks();
 });
 
@@ -598,6 +600,7 @@ describe('renderStandaloneActionBarDOM', () => {
   });
 
   it('shows Review as the plugin icon, named by its tooltip and not by text', async () => {
+    registerPluginIcon();
     const { plugin } = makeHarness();
     const container = makeContainer();
 
@@ -605,8 +608,7 @@ describe('renderStandaloneActionBarDOM', () => {
     await tick();
 
     const btn = reviewButton(container);
-    expect(iconOf(btn)).toBe(`lucide-${PLACEHOLDER_PLUGIN_ICON}`);
-    expect(iconSvg(btn)?.getAttribute('stroke')).toBe('currentColor');
+    expect(iconSvg(btn)?.classList.contains(PLUGIN_ICON)).toBe(true);
     expect(btn.classList.contains('ir-review-button')).toBe(true);
     expect(btn.getAttribute('aria-label')).toBe('Review');
     expect(btn.classList.contains('clickable-icon')).toBe(true);

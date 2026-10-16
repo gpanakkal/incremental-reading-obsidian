@@ -4,7 +4,7 @@ import * as ReviewInterface from '#/components/ReviewInterface';
 import {
   CONTROL_TITLE_CHARS,
   FORBIDDEN_TITLE_CHARS,
-  PLACEHOLDER_PLUGIN_ICON,
+  PLUGIN_ICON,
 } from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
@@ -486,7 +486,7 @@ function makeHistoryLeaf() {
     getViewState: vi.fn(() => ({
       type: ReviewView.viewType,
       state: { file: 'Articles/Chapter 1.md' },
-      icon: PLACEHOLDER_PLUGIN_ICON,
+      icon: PLUGIN_ICON,
       title: 'Title for the place already arrived at',
     })),
     on: (name: string, callback: () => void) => {
@@ -2445,7 +2445,7 @@ describe('ReviewView history recording', () => {
           try {
             const older = earlier.map((place) => ({
               title: 'older',
-              icon: PLACEHOLDER_PLUGIN_ICON,
+              icon: PLUGIN_ICON,
               state: {},
               eState: placeToEphemeralState(place),
             }));
@@ -2508,7 +2508,7 @@ describe('ReviewView history recording', () => {
     try {
       const existing = {
         title: 'a',
-        icon: PLACEHOLDER_PLUGIN_ICON,
+        icon: PLUGIN_ICON,
         state: {},
         eState: placeToEphemeralState({ page: 'review', itemId: 'a' }),
       };
@@ -2604,7 +2604,7 @@ describe('ReviewView.historyEntryFor', () => {
               : REVIEW_VIEW_DEFAULT_TITLE;
           expect(entry).toEqual({
             title,
-            icon: PLACEHOLDER_PLUGIN_ICON,
+            icon: PLUGIN_ICON,
             state: { ...leaf.getViewState(), title },
             eState: { [REVIEW_PLACE_KEY]: place },
           });

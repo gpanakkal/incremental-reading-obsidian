@@ -1,4 +1,9 @@
-export const PLACEHOLDER_PLUGIN_ICON = 'book-open-text';
+/**
+ * Id of the plugin's own icon (an open book with a gear), registered with
+ * Obsidian by `registerPluginIcon` at load. Every surface that stands for the
+ * plugin as a whole (ribbon, review tab, menu entries) shows it.
+ */
+export const PLUGIN_ICON = 'incremental-reading';
 
 /** Stroke for the dismiss and restore icons, on every bar that shows them. */
 export const DISMISS_ICON_STROKE = '#f7b500';

@@ -1,8 +1,9 @@
-import { DATA_DIRECTORY } from '#/lib/constants';
+import { DATA_DIRECTORY, PLUGIN_ICON } from '#/lib/constants';
 import { refusedPathsWarning } from '#/lib/item-path-guard';
 import ReviewManager from '#/lib/items/ReviewManager';
 import { SnippetManager } from '#/lib/items/SnippetManager';
 import { configureSuccessNotices, notify } from '#/lib/notices';
+import * as ObsidianEditor from '#/lib/obsidian-editor';
 import {
   SYNC_HOLD_MESSAGES,
   SYNC_WAIT_TIMEOUT_MS,
@@ -35,7 +36,13 @@ import * as LeftoverModal from '#/views/LeftoverModal';
 // The Vitest alias points `obsidian` at this same file, so the `Menu` built
 // here is the one the plugin fills — importing it by path is what gives TS the
 // stub's recorded `items`, which the real class does not expose.
-import { Menu, Notice, type MenuItem } from '#/test/__mocks__/obsidian';
+import {
+  getIconIds,
+  Menu,
+  Notice,
+  removeIcon,
+  type MenuItem,
+} from '#/test/__mocks__/obsidian';
 import { ImportModal } from '#/views/ImportModal';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
@@ -908,6 +915,35 @@ const appWithSync = (sync: unknown) => ({
   internalPlugins: { getEnabledPluginById: vi.fn(() => sync) },
 });
 
+/**
+ * Bare receiver for `onload`, carrying the slots it touches before handing
+ * off to `onLayoutReady`, which it never calls. `iconsAtRibbon` records which
+ * icons Obsidian knew of when the ribbon button was drawn.
+ */
+function makeLoadReceiver() {
+  const ribbonIcons: string[] = [];
+  const iconsAtRibbon: string[][] = [];
+  const receiver = {
+    settings: { showAdvancedImportCommands: false },
+    app: {
+      workspace: { on: vi.fn(), onLayoutReady: vi.fn() },
+      vault: { on: vi.fn() },
+    },
+    loadSettings: vi.fn().mockResolvedValue(undefined),
+    addRibbonIcon: vi.fn((icon: string) => {
+      ribbonIcons.push(icon);
+      iconsAtRibbon.push(getIconIds());
+      return { addClass: vi.fn() };
+    }),
+    addExtractCommands: vi.fn(),
+    addImportCommands: vi.fn(),
+    addCommand: vi.fn(),
+    registerEvent: vi.fn(),
+    addSettingTab: vi.fn(),
+  };
+  return { receiver, ribbonIcons, iconsAtRibbon };
+}
+
 // #endregion
 
 afterEach(() => {
@@ -934,6 +970,17 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
     const menu = raiseMenu(receiver, otherLeaf());
 
     expect(titles(menu)).toContain('Import article');
+  });
+
+  it('marks every import entry with the plugin icon', () => {
+    const { receiver } = makeReceiver({ advanced: true });
+
+    const imports = raiseMenu(receiver).items.filter((item) =>
+      IMPORT_MENU_TITLES.includes(item.title as string)
+    );
+
+    expect(imports.map((item) => item.title)).toEqual(IMPORT_MENU_TITLES);
+    for (const item of imports) expect(item.icon).toBe(PLUGIN_ICON);
   });
 
   it('stays out of the review tab, where the note is already an item', () => {
@@ -1106,6 +1153,36 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
         );
       })
     );
+  });
+});
+
+describe('IncrementalReadingPlugin onload', () => {
+  beforeEach(() => {
+    removeIcon(PLUGIN_ICON);
+    vi.spyOn(ObsidianEditor, 'getEditorClass').mockReturnValue(
+      class {} as never
+    );
+    // The settings tab classes its container, which this node environment
+    // has no document to build.
+    vi.stubGlobal('document', {
+      createElement: () => ({ classList: { add: vi.fn() } }),
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    removeIcon(PLUGIN_ICON);
+  });
+
+  it('puts the plugin icon on the ribbon, registered before it is drawn', async () => {
+    const { receiver, ribbonIcons, iconsAtRibbon } = makeLoadReceiver();
+
+    await IncrementalReadingPlugin.prototype.onload.call(
+      receiver as unknown as IncrementalReadingPlugin
+    );
+
+    expect(ribbonIcons).toEqual([PLUGIN_ICON]);
+    expect(iconsAtRibbon[0]).toContain(PLUGIN_ICON);
   });
 });
 

@@ -12,6 +12,7 @@ import { appendLog } from '#/lib/log-file';
 import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
 import { trackNavbarFootprint } from '#/lib/navbar-footprint';
 import { isPdfView, stopPdfTabSelections } from '#/lib/pdf/obsidian-pdf';
+import { registerPluginIcon } from '#/lib/plugin-icon';
 import { REBIND_LOG_TOPIC } from '#/lib/rebind-records';
 import { goToReviewPlace } from '#/lib/review-history';
 import {
@@ -29,7 +30,7 @@ import {
 // @ts-ignore - SQL schema imported via custom esbuild plugin
 import databaseSchema from './db/schema.sql';
 import { Actions } from './lib/Actions';
-import { DATABASE_FILE_PATH, PLACEHOLDER_PLUGIN_ICON } from './lib/constants';
+import { DATABASE_FILE_PATH, PLUGIN_ICON } from './lib/constants';
 import { recordEphemeralState } from './lib/ephemeral-position';
 import { createIRExtensions, IR_ID_LOCKED_NOTICE } from './lib/extensions';
 import { registerFileExplorerActiveFileClick } from './lib/extensions/FileExplorerActiveFileClick';
@@ -184,8 +185,10 @@ export default class IncrementalReadingPlugin extends Plugin {
     configureSuccessNotices(this);
     this.MarkdownEditor = getEditorClass(this.app);
 
+    // Before anything draws it: `setIcon` draws nothing for an unknown id
+    registerPluginIcon();
     const ribbonIconEl = this.addRibbonIcon(
-      PLACEHOLDER_PLUGIN_ICON,
+      PLUGIN_ICON,
       'Incremental reading',
       async (_evt: MouseEvent) => {
         // The database can take a while to start, as when it waits on Sync
@@ -980,7 +983,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       menu.addItem((item) => {
         item
           .setTitle('Import article')
-          .setIcon(PLACEHOLDER_PLUGIN_ICON)
+          .setIcon(PLUGIN_ICON)
           .setSection('incremental-reading')
           .onClick(async () => {
             await this.importArticle(file);
@@ -1012,7 +1015,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       menu.addItem((item) => {
         item
           .setTitle('Import a copy')
-          .setIcon(PLACEHOLDER_PLUGIN_ICON)
+          .setIcon(PLUGIN_ICON)
           .setSection('incremental-reading')
           .onClick(async () => {
             await this.importArticle(file, {
@@ -1026,7 +1029,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     menu.addItem((item) => {
       item
         .setTitle('Import in place')
-        .setIcon(PLACEHOLDER_PLUGIN_ICON)
+        .setIcon(PLUGIN_ICON)
         .setSection('incremental-reading')
         .onClick(async () => {
           await this.importArticle(file, {
@@ -1039,7 +1042,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     menu.addItem((item) => {
       item
         .setTitle('Open import dialog...')
-        .setIcon(PLACEHOLDER_PLUGIN_ICON)
+        .setIcon(PLUGIN_ICON)
         .setSection('incremental-reading')
         .onClick(async () => {
           await this.importArticle(file, { showImportDialog: true });
@@ -1049,7 +1052,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     menu.addItem((item) => {
       item
         .setTitle('Quick import')
-        .setIcon(PLACEHOLDER_PLUGIN_ICON)
+        .setIcon(PLUGIN_ICON)
         .setSection('incremental-reading')
         .onClick(async () => {
           await this.importArticle(file, { showImportDialog: false });
@@ -1070,7 +1073,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     menu.addItem((item) => {
       item
         .setTitle('Import article')
-        .setIcon(PLACEHOLDER_PLUGIN_ICON)
+        .setIcon(PLUGIN_ICON)
         .setSection('incremental-reading')
         .onClick(async () => {
           await this.importWebPage(viewer);

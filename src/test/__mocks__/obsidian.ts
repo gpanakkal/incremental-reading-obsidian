@@ -414,24 +414,60 @@ export class WorkspaceWindow {
   updateTitle() {}
 }
 /**
+ * Icons registered through `addIcon`, by id. Obsidian keeps the same map
+ * (deminified from obsidian.asar: `addIcon` stores the markup, `getIcon`
+ * wraps it in a fresh `<svg viewBox="0 0 100 100">`).
+ */
+const customIcons = new Map<string, string>();
+
+/** Registers `svgContent` as the inner markup of icon `iconId`, replacing any earlier one. */
+export function addIcon(iconId: string, svgContent: string): void {
+  customIcons.set(iconId, svgContent);
+}
+
+export function removeIcon(iconId: string): void {
+  customIcons.delete(iconId);
+}
+
+/**
+ * The ids `addIcon` registered. The real one lists every Lucide id as well,
+ * which no test needs.
+ */
+export function getIconIds(): string[] {
+  return [...customIcons.keys()];
+}
+
+/**
  * Partial port of Obsidian's `setIcon`, deminified from obsidian.asar: it swaps
  * out the element's first child only (whatever it is) for a fresh `<svg>`
- * classed `svg-icon lucide-<name>`, stroked in `currentColor`, unless that
- * child is already an `<svg>` carrying the id as given. Every name is treated as a
- * Lucide icon, where the real one appends nothing for a name it doesn't know,
- * so this can't catch a wrong icon id; paths are left out too, since tests
- * only read the shell.
+ * classed `svg-icon` plus the icon's class, unless that child is already an
+ * `<svg>` carrying the id as given.
+ *
+ * An id registered with `addIcon` is drawn as Obsidian draws it: classed with
+ * the id itself, in a `0 0 100 100` viewBox holding the registered markup, and
+ * with no stroke of its own (the markup has to bring that). Any other name is
+ * treated as a Lucide icon, classed `lucide-<name>` and stroked in
+ * `currentColor`, where the real one appends nothing for a name it doesn't
+ * know, so this can't catch a wrong Lucide id; Lucide paths are left out too,
+ * since tests only read the shell.
  */
 export function setIcon(parent: HTMLElement, iconId: string): void {
   const first = parent.firstChild;
   if (first instanceof SVGSVGElement && first.classList.contains(iconId)) {
     return;
   }
-  const name = iconId.startsWith('lucide-') ? iconId : `lucide-${iconId}`;
   if (first) parent.removeChild(first);
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.classList.add('svg-icon', name);
-  svg.setAttribute('stroke', 'currentColor');
+  const custom = customIcons.get(iconId);
+  if (custom !== undefined) {
+    svg.classList.add('svg-icon', iconId);
+    svg.setAttribute('viewBox', '0 0 100 100');
+    svg.innerHTML = custom;
+  } else {
+    const name = iconId.startsWith('lucide-') ? iconId : `lucide-${iconId}`;
+    svg.classList.add('svg-icon', name);
+    svg.setAttribute('stroke', 'currentColor');
+  }
   parent.appendChild(svg);
 }
 
