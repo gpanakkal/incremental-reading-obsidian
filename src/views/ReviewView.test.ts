@@ -518,7 +518,10 @@ async function openHistoryView({
   mobileNavbar = { onLeafChange: vi.fn() },
   itemExists = true,
   items = new Map(),
+  leftovers,
 }: {
+  /** The plugin's watch over notes left without review data, if it has one. */
+  leftovers?: { reviewOpened: () => void };
   file?: TFile | null;
   /** The item the tab was asked to open on, as `learn` hands it one. */
   initialItem?: ReviewItem | null;
@@ -564,6 +567,7 @@ async function openHistoryView({
       sessionTracker,
       settings: makePluginSettings(),
       app: makePluginApp(),
+      leftovers,
     } as unknown as IncrementalReadingPlugin,
     reviewManager as unknown as ReviewManager
   );
@@ -4073,5 +4077,24 @@ describe('ReviewView.showMissingInReview', () => {
 
     expect(await view.showMissingInReview('Snippets/gone.md')).toBe(false);
     expect(store.getState().currentItemId).toBeNull();
+  });
+});
+
+describe('ReviewView.onOpen', () => {
+  afterEach(() => {
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  it('tells the plugin that a review tab opened, once its interface is up', async () => {
+    const reviewOpened = vi.fn(() => {
+      // The interface is rendered before the notice can show over it
+      expect(ReviewInterface.createReviewInterface).toHaveBeenCalledOnce();
+    });
+
+    const { view } = await openHistoryView({ leftovers: { reviewOpened } });
+
+    expect(reviewOpened).toHaveBeenCalledOnce();
+    unload(view);
   });
 });

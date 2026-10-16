@@ -77,6 +77,7 @@ type PageWindow = {
               query(query: string, params?: unknown[]): unknown[];
             };
           };
+          leftovers?: { current: readonly unknown[] };
         }
       >;
     };
@@ -129,9 +130,38 @@ left behind
   );
 }
 
-/** The notice listing leftovers, once it is up. */
+/** The notice counting leftovers, once it is up. */
 const leftoverNotice = () =>
-  window.locator('.notice', { hasText: 'an item id but no review data' });
+  window.locator('.notice', { hasText: 'not found in the database' });
+
+/** The review home screen's button for the leftovers. */
+const leftoverButton = () =>
+  window.getByRole('button', {
+    name: /^Manage \d+ notes? not found in the database$/,
+  });
+
+/**
+ * Wait for the startup scan to have found `count` leftovers, which is when
+ * the notice would show were it shown on load.
+ */
+async function leftoversFound(count: number) {
+  await expect
+    .poll(() =>
+      window.evaluate(
+        () =>
+          (window as unknown as PageWindow).app.plugins.plugins[
+            'incremental-reading'
+          ].leftovers?.current.length ?? -1
+      )
+    )
+    .toBe(count);
+}
+
+/** Open review, on its home screen. */
+async function openReview() {
+  await executeCommandById(window, 'incremental-reading:learn');
+  await expect(window.locator('#begin-review-button')).toBeVisible();
+}
 
 /**
  * Start Obsidian once to give the database an item of its own, then close it:
@@ -245,19 +275,68 @@ test.describe('Making an item whose row cannot be saved', () => {
 });
 
 test.describe('Notes left without review data by a crash', () => {
-  test('lists them at startup, and keeps one the plugin made as an item when asked', async () => {
+  test('counts them once review opens, not before, and saves one the plugin made as the type its tag names on a plain Confirm, nothing on Cancel', async () => {
     const path = `${DATA_DIRECTORY}/snippets/Left behind.md`;
     await seedItem();
     await writeNote(path, { 'ir-id': 'left-1', tags: [SNIPPET_TAG] });
     await start();
 
-    await expect(leftoverNotice()).toContainText('"Left behind"');
+    await leftoversFound(1);
+    await expect(leftoverNotice()).toHaveCount(0);
+    await openReview();
+    await expect(leftoverNotice()).toHaveText(
+      /^Incremental reading: 1 note was not found in the database\.\s*Manage$/
+    );
     expect(await rowCount(window, 'snippet')).toBe(0);
-    await leftoverNotice().click();
-    await window.getByRole('button', { name: 'Keep as item' }).click();
+    await leftoverNotice().getByText('Manage', { exact: true }).click();
+    const modal = window.locator('.modal');
+    await modal.getByRole('button', { name: 'Move to trash' }).click();
+    await modal.getByRole('button', { name: 'Cancel' }).click();
 
+    await expect(modal).toBeHidden();
+    await expect(leftoverButton()).toBeVisible();
+    await expect.poll(() => itemFiles(window)).toEqual([path]);
+
+    await leftoverButton().click();
+    // Its tag's type shown, and chosen already
+    await expect(modal.getByRole('combobox')).toHaveValue('snippet');
+    await expect(modal.getByRole('button', { name: 'Confirm' })).toBeEnabled();
+    await modal.getByRole('button', { name: 'Confirm' }).click();
+
+    await expect(modal).toBeHidden();
     await expect.poll(() => rowCount(window, 'snippet')).toBe(1);
-    await expect(window.locator('.modal')).toBeHidden();
+    // The seeded one alone
+    expect(await rowCount(window, 'article')).toBe(1);
+    // None left, so the home screen has nothing to offer for them
+    await expect(leftoverButton()).toHaveCount(0);
+  });
+
+  test('lists a note holding only an id, from the notice and from the review home screen, only hides the notice when its body is clicked, and trashes the note on Confirm', async () => {
+    const path = `${DATA_DIRECTORY}/Untagged.md`;
+    await seedItem();
+    await writeNote(path, { 'ir-id': 'left-3' });
+    await start();
+    await leftoversFound(1);
+
+    await openReview();
+    await expect(leftoverNotice()).toBeVisible();
+    await leftoverNotice().locator('.notice-message').click();
+
+    await expect(leftoverNotice()).toHaveCount(0);
+    await expect(window.locator('.modal')).toHaveCount(0);
+
+    await leftoverButton().click();
+    const modal = window.locator('.modal');
+    await expect(modal).toContainText('Untagged');
+    // No type of its own to show: the placeholder, nothing chosen
+    await expect(modal.getByRole('combobox')).toHaveValue('');
+    await expect(modal.getByRole('button', { name: 'Confirm' })).toBeDisabled();
+    await modal.getByRole('button', { name: 'Move to trash' }).click();
+    await modal.getByRole('button', { name: 'Confirm' }).click();
+
+    await expect(modal).toBeHidden();
+    await expect(leftoverButton()).toHaveCount(0);
+    expect(await itemFiles(window)).toEqual([]);
   });
 
   test("takes the plugin's id and tag off a note being imported in place when asked, leaving the rest", async () => {
@@ -269,14 +348,15 @@ test.describe('Notes left without review data by a crash', () => {
       title: 'kept',
     });
     await start();
+    await leftoversFound(1);
 
-    await leftoverNotice().click();
+    await openReview();
+    await leftoverNotice().getByText('Manage', { exact: true }).click();
     await expect(
       window.getByRole('button', { name: 'Move to trash' })
     ).toHaveCount(0);
-    await window
-      .getByRole('button', { name: 'Remove item properties' })
-      .click();
+    await window.getByRole('button', { name: 'Remove IR properties' }).click();
+    await window.getByRole('button', { name: 'Confirm' }).click();
 
     await expect
       .poll(() =>

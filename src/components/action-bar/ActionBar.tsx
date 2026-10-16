@@ -40,6 +40,7 @@ import {
   Check,
   EllipsisVertical,
   Eye,
+  FileQuestionMark,
   House,
   SkipForward,
   Undo2,
@@ -61,8 +62,9 @@ import { TextScheduler } from './TextScheduler';
  * it would take that guarantee with it.
  *
  * Leading zone: the actions that act on the review session rather than on the
- * item in it — the tab's history, home, the type filter, undo. Middle: the
- * item's own actions. Trailing: the ⋮, which belongs to the view.
+ * item in it — the tab's history, home, the type filter, undo — and, on the
+ * home screen, the notes not found in the database. Middle: the item's own
+ * actions. Trailing: the ⋮, which belongs to the view.
  *
  * A card's grades lead the middle zone while they fit there, and take a row of
  * their own after the bar where they don't (see {@link useGradePlacement}),
@@ -101,6 +103,7 @@ export function ActionBar() {
         {/* setting a tabIndex makes the action bar focusable */}
         <div ref={leadRef} className="ir-bar-lead">
           <GlobalActions />
+          {page === 'home' && <LeftoverAction />}
           {page !== 'home' && (
             <>
               <ButtonWithIcon
@@ -220,6 +223,47 @@ function HomeActions() {
     >
       Begin Review
     </TextButton>
+  );
+}
+
+/** What the bar reads before the plugin has a leftover watch: none. */
+const NO_LEFTOVERS: readonly unknown[] = [];
+const subscribeToNothing = () => () => {};
+
+/** The most leftovers the leftover button's count shows as a number. */
+const MAX_SHOWN_LEFTOVERS = 99;
+
+/**
+ * Opens the notes left without review data by a crash to choose what to do
+ * with (see `LeftoverWatch`), there only while there are some. It looks for
+ * them again first, so a note dealt with by hand since is not listed. Their
+ * count sits on its bottom-right corner, capped at "99+", and is read out
+ * through its label instead.
+ *
+ * In the leading zone, which grows as wide as the trailing one whatever it
+ * holds, so the begin-review button stays on the bar's midpoint.
+ */
+function LeftoverAction() {
+  const { leftovers } = useReviewContext().plugin;
+  const current = useSyncExternalStore(
+    leftovers?.subscribe ?? subscribeToNothing,
+    () => leftovers?.current ?? NO_LEFTOVERS
+  );
+  const count = current.length;
+  if (count === 0) return null;
+
+  return (
+    <ButtonWithIcon
+      tooltip={`Manage ${count} ${count === 1 ? 'note' : 'notes'} not found in the database`}
+      id="manage-leftovers-button"
+      className="ir-has-count"
+      handleClick={() => leftovers?.manage()}
+    >
+      <FileQuestionMark />
+      <span className="ir-leftover-count" aria-hidden="true">
+        {count > MAX_SHOWN_LEFTOVERS ? `${MAX_SHOWN_LEFTOVERS}+` : count}
+      </span>
+    </ButtonWithIcon>
   );
 }
 

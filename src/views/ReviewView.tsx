@@ -710,6 +710,9 @@ export default class ReviewView extends FileView {
     );
     this.interceptOpenFile();
     this.#open = true;
+    // The first review tab of a load is where notes left without review data
+    // are asked about, once the startup scan has found them
+    this.plugin.leftovers?.reviewOpened();
   }
 
   /**

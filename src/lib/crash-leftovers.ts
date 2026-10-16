@@ -10,13 +10,13 @@ import {
   MAX_SQL_QUERY_PARAMS,
   SNIPPET_TAG,
 } from './constants';
-import { tagEntries } from './item-tags';
+import { hasTag, tagEntries, withTag } from './item-tags';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import type { NoteType, SQLiteRepository } from './types';
 
 /**
- * Crash leftovers: notes holding an `ir-id`, and the tag of an item type, that
- * no row holds. Making an item writes its note before its row, the row being
+ * Crash leftovers: notes holding an `ir-id` that no row holds, tagged with an
+ * item type or not. Making an item writes its note before its row, the row being
  * the commit point (see `withCompensation`), and a failure between the two is
  * undone; but a crash or a kill between them skips the undo, and leaves the
  * note. Nothing else reads such a note as an item — the moved-note scan looks
@@ -39,7 +39,14 @@ export type LeftoverKind = 'made' | 'in-place';
 export interface Leftover {
   file: TFile;
   id: string;
-  type: NoteType;
+  /**
+   * The item type the note was made as: the one its tag names; else, for a
+   * note the plugin made (`kind: 'made'`), the one whose folder in the data
+   * folder it is in (see `Obsidian.getDirectory`); else unknown (`null`), and
+   * the note can be kept as an item only as a type the user chooses (see
+   * `resolveLeftover`'s `as`).
+   */
+  type: NoteType | null;
   kind: LeftoverKind;
 }
 
@@ -62,22 +69,50 @@ const TAG_OF: Readonly<Record<NoteType, string>> = {
   card: CARD_TAG,
 };
 
-/** The `ir-id` and item type the cache has for `file`, if it has both. */
+/**
+ * The `ir-id` the cache has for `file`, if any, and the item type its tags
+ * name, if they name one.
+ */
 function claimOf(
   app: Pick<App, 'metadataCache'>,
   file: TFile
-): { id: string; type: NoteType } | null {
+): { id: string; type: NoteType | null } | null {
   const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
   const id: unknown = frontmatter?.['ir-id'];
   const type = Obsidian.typeOfTags(frontmatter?.tags);
-  return typeof id === 'string' && type ? { id, type } : null;
+  return typeof id === 'string' ? { id, type } : null;
+}
+
+const NOTE_TYPES: readonly NoteType[] = ['article', 'snippet', 'card'];
+
+/** The type of item the plugin makes in the folder `path` is in, if any. */
+function typeOfFolder(path: string): NoteType | null {
+  return (
+    NOTE_TYPES.find((type) =>
+      path.startsWith(`${Obsidian.getDirectory(type)}/`)
+    ) ?? null
+  );
+}
+
+/** Who made the note at `path` claiming to be of `type`, and what it is. */
+function placeOf(
+  path: string,
+  type: NoteType | null
+): Pick<Leftover, 'type' | 'kind'> {
+  const made = path.startsWith(`${DATA_DIRECTORY}/`);
+  if (type) {
+    return { type, kind: type === 'article' && !made ? 'in-place' : 'made' };
+  }
+  return made
+    ? { type: typeOfFolder(path), kind: 'made' }
+    : { type: null, kind: 'in-place' };
 }
 
 /** What each action does to the note `name`, as the user is told of it. */
 const DOING: Readonly<Record<LeftoverAction, (name: string) => string>> = {
   adopt: (name) => `keep ${name} as an item`,
   trash: (name) => `move ${name} to the trash`,
-  strip: (name) => `remove the item properties from ${name}`,
+  strip: (name) => `remove the IR properties from ${name}`,
 };
 
 /** Whether the database holds any item at all. */
@@ -133,13 +168,10 @@ export async function findLeftovers(
   return claims
     .filter(({ id }) => !held.has(id))
     .map(
-      (claim): Leftover => ({
-        ...claim,
-        kind:
-          claim.type === 'article' &&
-          !claim.file.path.startsWith(`${DATA_DIRECTORY}/`)
-            ? 'in-place'
-            : 'made',
+      ({ file, id, type }): Leftover => ({
+        file,
+        id,
+        ...placeOf(file.path, type),
       })
     );
 }
@@ -147,36 +179,81 @@ export async function findLeftovers(
 /**
  * What the user may do with `leftover`: give it a row (`adopt`), and, for a
  * note the plugin made, move it to the trash, or, for the user's own note,
- * take the plugin's `ir-id` and type tag off it (`strip`).
+ * take the plugin's `ir-id` and type tag off it (`strip`). Whatever its type,
+ * known or not: one of no known type is adopted as the type the user chooses.
+ * One of no known type the plugin made may also be stripped, to keep it as a
+ * plain note.
  */
 export function actionsFor(leftover: Leftover): LeftoverAction[] {
-  return leftover.kind === 'made' ? ['adopt', 'trash'] : ['adopt', 'strip'];
+  if (leftover.kind !== 'made') return ['adopt', 'strip'];
+  return leftover.type ? ['adopt', 'trash'] : ['adopt', 'strip', 'trash'];
 }
 
 /** What the user is told of `leftovers`, in one notice. */
 export function leftoversMessage(leftovers: readonly Leftover[]): string {
-  const one = leftovers.length === 1;
-  const names = leftovers.map(({ file }) => `"${file.basename}"`).join(', ');
-  return (
-    `Incremental reading: ${leftovers.length} ${one ? 'note has' : 'notes have'} ` +
-    `an item id but no review data, likely left by an action that was cut ` +
-    `short: ${names}. Click to choose what to do with ${one ? 'it' : 'them'}.`
-  );
+  const count = leftovers.length;
+  return count === 1
+    ? 'Incremental reading: 1 note was not found in the database.'
+    : `Incremental reading: ${count} notes were not found in the database.`;
+}
+
+/**
+ * Give the note `file` a row as an item of `type` with `id`. The note gets the
+ * type's tag first, in place of any other item type's: one typed by its folder
+ * alone, or of no type, has none, and without it doesn't read as an item
+ * (`ObsidianHelpers.getNoteType`), and one the user chose to keep as another
+ * type than its tag names (a card kept as a snippet, say) would read as the old
+ * type. The row comes last, as it commits the adoption, and a note left tagged
+ * by a failed one is still a leftover.
+ */
+async function adopt(
+  deps: LeftoverDeps,
+  file: TFile,
+  id: string,
+  type: NoteType
+): Promise<void> {
+  const tag = TAG_OF[type];
+  const others: unknown[] = Object.values(TAG_OF).filter((t) => t !== tag);
+  const isOther = (entry: unknown) => others.includes(entry);
+  const tags: unknown =
+    deps.app.metadataCache.getFileCache(file)?.frontmatter?.tags;
+  if (!hasTag(tags, tag) || tagEntries(tags).some(isOther)) {
+    await Obsidian.updateFrontMatter(
+      file,
+      (frontmatter) => {
+        const entries = tagEntries(frontmatter.tags);
+        const kept = entries.filter((entry) => !isOther(entry));
+        frontmatter.tags = withTag(
+          kept.length < entries.length ? kept : frontmatter.tags,
+          tag
+        );
+      },
+      deps.app as App
+    );
+  }
+  if (type === 'article') await deps.articles.adoptLeftover(file, id);
+  else if (type === 'snippet') await deps.snippets.adoptLeftover(file, id);
+  else await deps.cards.adoptLeftover(file, id);
 }
 
 /**
  * Do `action` to `leftover`, unless it is no leftover any more: its note gone,
  * changed to hold another id, or given a row meanwhile, by Sync bringing the
  * database, say. Says so when it fails, or when writes are refused.
+ * @param as for `adopt`, the type to keep it as, the user's choice: by
+ *   default the one it was made as; with neither, it isn't adopted
  * @returns whether it was done
  */
 export async function resolveLeftover(
   deps: LeftoverDeps,
   leftover: Leftover,
-  action: LeftoverAction
+  action: LeftoverAction,
+  as: NoteType | null = leftover.type
 ): Promise<boolean> {
   const { app, repo } = deps;
   const { file, id, type } = leftover;
+  // A note of no known type is adopted only as a type the user chose
+  if (action === 'adopt' && !as) return false;
   const what = DOING[action](`"${file.basename}"`);
   if (refusedWrite(repo, what)) return false;
   try {
@@ -190,20 +267,19 @@ export async function resolveLeftover(
         file,
         (frontmatter) => {
           delete frontmatter['ir-id'];
-          const kept = tagEntries(frontmatter.tags).filter(
-            (tag) => tag !== TAG_OF[type]
-          );
+          // A note typed by its folder alone has no type tag to take off,
+          // and its tags are left as they are
+          const typeTag = type && TAG_OF[type];
+          const tags = tagEntries(frontmatter.tags);
+          if (!typeTag || !tags.includes(typeTag)) return;
+          const kept = tags.filter((tag) => tag !== typeTag);
           if (kept.length > 0) frontmatter.tags = kept;
           else delete frontmatter.tags;
         },
         app as App
       );
-    } else if (type === 'article') {
-      await deps.articles.adoptLeftover(file, id);
-    } else if (type === 'snippet') {
-      await deps.snippets.adoptLeftover(file, id);
-    } else {
-      await deps.cards.adoptLeftover(file, id);
+    } else if (as) {
+      await adopt(deps, file, id, as);
     }
     return true;
   } catch (error) {

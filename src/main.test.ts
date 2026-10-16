@@ -40,7 +40,7 @@ import IncrementalReadingPlugin, {
   startupFailureMessage,
   STILL_STARTING_NOTICE,
 } from '#/main';
-import * as LeftoverModal from '#/views/LeftoverModal';
+import { LeftoverWatch } from '#/views/LeftoverModal';
 // The Vitest alias points `obsidian` at this same file, so the `Menu` built
 // here is the one the plugin fills — importing it by path is what gives TS the
 // stub's recorded `items`, which the real class does not expose.
@@ -373,7 +373,9 @@ function makeFollowReceiver({
     offref: vi.fn(),
   };
   const saveData = vi.fn(() => Promise.resolve());
+  const startupScan = vi.fn(() => Promise.resolve());
   const receiver = {
+    leftovers: { startupScan },
     data: { warnedRefusedPaths: [...warned] },
     saveData,
     rememberWarnedPaths: (
@@ -409,6 +411,7 @@ function makeFollowReceiver({
     claimMovedFiles,
     itemPathsWithRefusedChars,
     saveData,
+    startupScan,
     finishIndexing: () => whenIndexed?.(),
     unload: () => unloaders.forEach((unloader) => unloader()),
   };
@@ -720,6 +723,7 @@ async function startDatabase(
     register: vi.fn(),
     registerEvent: vi.fn(),
     followMovedNotes: vi.fn(),
+    createLeftoverWatch: vi.fn(),
     resyncLeafActionBars: resync,
     ...extra,
   };
@@ -795,6 +799,7 @@ async function startRenames(items: readonly string[] = []) {
     register: vi.fn(),
     registerEvent: vi.fn(),
     followMovedNotes: vi.fn(),
+    createLeftoverWatch: vi.fn(),
     onVaultRename: plugin.onVaultRename,
     onVaultDelete: plugin.onVaultDelete,
     followRename: plugin.followRename,
@@ -2548,32 +2553,18 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
   });
 
   it('looks for notes left without review data once the scan is done, and not before', async () => {
-    const flag = vi
-      .spyOn(LeftoverModal, 'flagLeftovers')
-      .mockResolvedValue(undefined);
     const follow = makeFollowReceiver();
 
     followMovedNotes(follow);
     await settle();
-    expect(flag).not.toHaveBeenCalled();
+    expect(follow.startupScan).not.toHaveBeenCalled();
 
     follow.finishIndexing();
-    await vi.waitFor(() => expect(flag).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(follow.startupScan).toHaveBeenCalledOnce());
     expect(follow.itemPathsWithRefusedChars).toHaveBeenCalled();
-    const [args] = flag.mock.calls[0];
-    expect(args).toMatchObject({ app: follow.receiver.app, repo: follow.repo });
-    expect(args.managers()).toBe(follow.receiver.reviewManager);
-    const invalidate = vi
-      .spyOn(queryClient, 'invalidateQueries')
-      .mockResolvedValue(undefined);
-    await args.onResolved();
-    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ['queue'] });
   });
 
   it('looks for no leftovers once unloaded', async () => {
-    const flag = vi
-      .spyOn(LeftoverModal, 'flagLeftovers')
-      .mockResolvedValue(undefined);
     const follow = makeFollowReceiver();
 
     followMovedNotes(follow);
@@ -2581,7 +2572,7 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
     follow.finishIndexing();
     await settle();
 
-    expect(flag).not.toHaveBeenCalled();
+    expect(follow.startupScan).not.toHaveBeenCalled();
   });
 
   it('waits for the resolved event where Obsidian has no onCleanCache', async () => {
@@ -3270,6 +3261,7 @@ describe('IncrementalReadingPlugin database startup and Sync', () => {
       register: vi.fn((run: () => void) => unloaders.push(run)),
       registerEvent: vi.fn(),
       followMovedNotes: vi.fn(),
+      createLeftoverWatch: vi.fn(),
     };
     const started = (
       IncrementalReadingPlugin.prototype as unknown as {
@@ -3639,4 +3631,84 @@ describe('IncrementalReadingPlugin as the success notice source', () => {
       )
     );
   });
+});
+
+describe('IncrementalReadingPlugin.createLeftoverWatch', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Build the watch on a bare receiver whose workspace holds `leaves`. */
+  function createWatch(leaves: { view: unknown }[] = []) {
+    const getLeavesOfType = vi.fn(() => leaves);
+    const receiver = {
+      app: { workspace: { getLeavesOfType } },
+      reviewManager: { articles: {}, snippets: {}, cards: {} },
+    };
+    const repo = { query: vi.fn() };
+    const watch = (
+      IncrementalReadingPlugin.prototype as unknown as {
+        createLeftoverWatch(repo: unknown): LeftoverWatch;
+      }
+    ).createLeftoverWatch.call(receiver, repo) as LeftoverWatch;
+    return { watch, receiver, repo, getLeavesOfType };
+  }
+
+  it('is built over the database once it is up, before startup looks for moved notes', async () => {
+    const watch = { startupScan: vi.fn() };
+    const createLeftoverWatch = vi.fn(() => watch);
+    let watchAtScan: unknown;
+    const followMovedNotes = vi.fn(function (
+      this: { leftovers?: unknown },
+      _repo: unknown
+    ) {
+      watchAtScan = this.leftovers;
+    });
+
+    const { handleFileChange } = await startDatabase(undefined, {
+      createLeftoverWatch,
+      followMovedNotes,
+    });
+
+    // The database started, known by the stub's own file handler
+    const [repo] = followMovedNotes.mock.calls[0];
+    expect(repo).toHaveProperty('handleFileChange', handleFileChange);
+    expect(createLeftoverWatch).toHaveBeenCalledExactlyOnceWith(repo);
+    expect(watchAtScan).toBe(watch);
+  });
+
+  it('watches the vault and database it is given, with the review manager, and refreshes the queue once a leftover is resolved', async () => {
+    const { watch, receiver, repo } = createWatch();
+    const invalidate = vi
+      .spyOn(queryClient, 'invalidateQueries')
+      .mockResolvedValue(undefined);
+
+    expect(watch).toBeInstanceOf(LeftoverWatch);
+    expect(watch.deps).toMatchObject({ app: receiver.app, repo });
+    expect(watch.deps.managers()).toBe(receiver.reviewManager);
+    await watch.deps.onResolved();
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ['queue'] });
+  });
+
+  it.each([
+    { tabs: [], open: false },
+    // A tab restored in the background, not yet shown: Obsidian defers its view
+    { tabs: ['deferred'], open: false },
+    { tabs: ['loaded'], open: true },
+    { tabs: ['deferred', 'loaded'], open: true },
+  ] as const)(
+    'counts review as open with review tabs $tabs: $open',
+    ({ tabs, open }) => {
+      const leaves = tabs.map((tab) => ({
+        view:
+          tab === 'loaded'
+            ? (Object.create(ReviewView.prototype) as ReviewView)
+            : {},
+      }));
+      const { watch, getLeavesOfType } = createWatch(leaves);
+
+      expect(watch.deps.isReviewOpen()).toBe(open);
+      expect(getLeavesOfType).toHaveBeenCalledWith(ReviewView.viewType);
+    }
+  );
 });

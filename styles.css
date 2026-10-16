@@ -914,6 +914,29 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
   color: var(--text-on-accent);
 }
 
+/* A count on an icon button's bottom-right corner (the leftover button's,
+   ActionBar.tsx). Inside the button's own box, so it neither grows the bar
+   (0139's compact desktop bar) nor meets the bar's scroll clip (mobile). A
+   halo in the bar's colour instead of a box keeps it legible over the icon's
+   strokes. */
+.ir-review-button.ir-has-count {
+  position: relative;
+}
+
+.ir-leftover-count {
+  position: absolute;
+  right: 1px;
+  bottom: 0;
+  color: var(--text-error);
+  font-size: var(--font-smallest);
+  font-weight: var(--font-semibold);
+  line-height: 1;
+  pointer-events: none;
+  text-shadow:
+    0 0 2px var(--background-secondary),
+    0 0 2px var(--background-secondary);
+}
+
 /* A card's grades (`.ir-grade-group`, GradeGroup.tsx): one segmented control
    dressed as a single Obsidian button — its fill and shadow — so it follows
    the theme and stands apart from the bar's bare icons. Thin dividers between
@@ -2750,6 +2773,31 @@ input.ir-queue-page-input {
 .is-mobile .notice-cta.ir-notice-action {
   min-height: var(--touch-size-m);
   padding-inline: var(--size-4-4);
+}
+
+/* #endregion */
+
+/* #region Leftover notes modal (LeftoverModal.ts) */
+
+/* Obsidian's buttons and dropdowns take `--cursor`, `default` unless the user
+   changes it */
+.ir-leftover-modal .setting-item-control button,
+.ir-leftover-modal .setting-item-control select.dropdown,
+.ir-leftover-modal .modal-button-container button {
+  cursor: pointer;
+}
+
+.ir-leftover-modal .setting-item-control button:disabled,
+.ir-leftover-modal .setting-item-control select.dropdown:disabled,
+.ir-leftover-modal .modal-button-container button:disabled {
+  cursor: not-allowed;
+}
+
+/* Why what was chosen for a note wasn't done, under its name */
+.ir-leftover-modal .ir-leftover-error {
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+  padding-top: var(--size-2-1);
 }
 
 /* #endregion */

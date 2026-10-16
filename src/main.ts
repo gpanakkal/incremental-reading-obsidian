@@ -112,7 +112,7 @@ import {
 } from './lib/web-viewer';
 import { BulkImportModal } from './views/BulkImportModal';
 import { ImportModal } from './views/ImportModal';
-import { flagLeftovers } from './views/LeftoverModal';
+import { LeftoverWatch } from './views/LeftoverModal';
 import ReviewView from './views/ReviewView';
 
 /**
@@ -194,6 +194,11 @@ export default class IncrementalReadingPlugin extends Plugin {
   private reviewReminder?: ReviewReminder;
   /** Imports notes that gain a trigger tag. Unset until the database is up. */
   private autoImportWatcher?: AutoImportWatcher;
+  /**
+   * The notes left without review data by a crash, which review asks about.
+   * Unset until the database it reads is up.
+   */
+  leftovers?: LeftoverWatch;
 
   MarkdownEditor!: typeof ExtractedMarkdownEditor;
 
@@ -672,6 +677,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       follow: (file, oldPath) => this.followRename(file, oldPath),
       notify: (...args) => Obsidian.notify(...args),
     });
+    this.leftovers = this.createLeftoverWatch(repo);
     this.followMovedNotes(repo);
 
     // Keep the review-queue table live: when a row on a cached page changes,
@@ -826,6 +832,22 @@ export default class IncrementalReadingPlugin extends Plugin {
     );
   }
 
+  /** Watch for notes left without review data in `repo` (see `LeftoverWatch`). */
+  private createLeftoverWatch(repo: SQLiteRepository): LeftoverWatch {
+    return new LeftoverWatch({
+      app: this.app,
+      repo,
+      managers: () => this.reviewManager,
+      onResolved: () => queryClient.invalidateQueries({ queryKey: ['queue'] }),
+      // A review tab restored in the background has no view until it is
+      // shown, and has told the watch nothing yet
+      isReviewOpen: () =>
+        this.app.workspace
+          .getLeavesOfType(ReviewView.viewType)
+          .some((leaf) => leaf.view instanceof ReviewView),
+    });
+  }
+
   /**
    * Import notes as their frontmatter gains a trigger tag. See
    * {@link AutoImportWatcher}.
@@ -931,13 +953,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         // `resolveLeftover` looks again before it acts.
         .then(async () => {
           if (controller.signal.aborted) return;
-          await flagLeftovers({
-            app: this.app,
-            repo,
-            managers: () => this.reviewManager,
-            onResolved: () =>
-              queryClient.invalidateQueries({ queryKey: ['queue'] }),
-          });
+          await this.leftovers?.startupScan();
         })
         .catch((error: unknown) => {
           console.error(

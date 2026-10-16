@@ -3,7 +3,7 @@ import { CardManager } from '#/lib/items/CardManager';
 import { SnippetManager } from '#/lib/items/SnippetManager';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   ARTICLE_TAG,
   CARD_TAG,
@@ -34,6 +34,39 @@ const TABLE_OF: Record<NoteType, string> = {
   card: 'srs_card',
 };
 
+/**
+ * Where a note may be: the data folder, each type's folder in it, a folder
+ * nested in one of those, a folder named like either but beside it or outside
+ * the data folder, and the vault's root.
+ */
+const FOLDERS = [
+  `${DATA_DIRECTORY}/`,
+  ...(['article', 'snippet', 'card'] as const).map(
+    (type) => `${Obsidian.getDirectory(type)}/`
+  ),
+  `${Obsidian.getDirectory('article')}/nested/`,
+  `${Obsidian.getDirectory('snippet')}-old/`,
+  `${DATA_DIRECTORY}-old/`,
+  `${DATA_DIRECTORY}-old/cards/`,
+  'cards/',
+  '',
+];
+
+/**
+ * The type a note in each of {@link FOLDERS} was made as, by the folder it is
+ * in, spelled out; any other folder names none.
+ */
+const FOLDER_TYPES: ReadonlyMap<string, NoteType> = new Map<string, NoteType>([
+  [`${Obsidian.getDirectory('article')}/`, 'article'],
+  [`${Obsidian.getDirectory('snippet')}/`, 'snippet'],
+  [`${Obsidian.getDirectory('card')}/`, 'card'],
+  [`${Obsidian.getDirectory('article')}/nested/`, 'article'],
+]);
+
+/** The type a note in `folder` was made as, by the folder it is in. */
+const typeOfFolder = (folder: string): NoteType | null =>
+  FOLDER_TYPES.get(folder) ?? null;
+
 /** A note in the vault, an item's or not, with a row behind it or not. */
 const noteArb = fc.record({
   type: fc.constantFrom<NoteType | null>('article', 'snippet', 'card', null),
@@ -49,8 +82,10 @@ const noteArb = fc.record({
     { nil: undefined }
   ),
   hasRow: fc.boolean(),
+  /** The table holding the row: any, as an id is held wherever it is. */
+  rowType: fc.constantFrom<NoteType>('article', 'snippet', 'card'),
   deletedRow: fc.boolean(),
-  folder: fc.constantFrom(`${DATA_DIRECTORY}/`, `${DATA_DIRECTORY}-old/`, ''),
+  folder: fc.constantFrom(...FOLDERS),
   tagsAsString: fc.boolean(),
   /** Another item type's tag too, which `typeOfTags` ranks against it. */
   secondTag: fc.option(
@@ -99,6 +134,20 @@ function insertRow(
   }
 }
 
+/**
+ * One database for every case of a property, emptied by {@link wireNotes}:
+ * starting sql.js afresh for each case would take most of the test's time.
+ */
+let sharedRepo: TestRepository;
+
+/** Empty every item table of {@link sharedRepo}. */
+function resetSharedRepo(): TestRepository {
+  for (const table of Object.values(TABLE_OF)) {
+    sharedRepo.mutate(`DELETE FROM ${table}`);
+  }
+  return sharedRepo;
+}
+
 /** A vault and database holding `notes`, and managers over them. */
 async function wireNotes(notes: NoteCase[]) {
   const vault = makeItemVault(
@@ -112,13 +161,20 @@ async function wireNotes(notes: NoteCase[]) {
       ])
     )
   );
-  const repo = await TestRepository.create();
+  const repo = resetSharedRepo();
+  const inserted = new Set<string>();
   for (const [i, note] of notes.entries()) {
-    const type = typeOf(note);
-    if (note.hasRow && typeof note.id === 'string' && type) {
+    if (note.hasRow && typeof note.id === 'string' && !inserted.has(note.id)) {
       // Under another path, and maybe another table: the row holds the id
       // wherever its note is
-      insertRow(repo, type, note.id, `elsewhere/${i}.md`, note.deletedRow);
+      insertRow(
+        repo,
+        note.rowType,
+        note.id,
+        `elsewhere/${i}.md`,
+        note.deletedRow
+      );
+      inserted.add(note.id);
     }
   }
   const plugin = { app: vault.app, settings: {} } as never;
@@ -133,10 +189,18 @@ async function wireNotes(notes: NoteCase[]) {
   return { vault, repo, managers, deps };
 }
 
-/** One leftover note of `type` at `path`, holding `id`. */
-async function wireLeftover(type: NoteType, path: string, id = 'left-1') {
+/**
+ * One leftover note at `path`, holding `id`, and tagged as `type`, or, with
+ * `null`, tagged with no item type at all; or with `tags` as given.
+ */
+async function wireLeftover(
+  type: NoteType | null,
+  path: string,
+  id = 'left-1',
+  { tags = type ? ['other', TAG_OF[type]] : ['other'] }: { tags?: unknown } = {}
+) {
   const vault = makeItemVault({
-    [path]: { 'ir-id': id, tags: ['other', TAG_OF[type]], title: 'kept' },
+    [path]: { 'ir-id': id, tags, title: 'kept' },
   });
   const repo = await TestRepository.create();
   const plugin = { app: vault.app, settings: {} } as never;
@@ -157,12 +221,16 @@ const typeArb = fc.constantFrom<NoteType>('article', 'snippet', 'card');
 
 // #endregion
 
+beforeAll(async () => {
+  sharedRepo = await TestRepository.create();
+});
+
 describe('findLeftovers', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('finds every note typed as an item whose ir-id no row holds, deleted or not, and no other', async () => {
+  it('finds every note whose ir-id no row holds, deleted or not, tagged as an item or not, and no other', async () => {
     await fc.assert(
       fc.asyncProperty(fc.array(noteArb, { maxLength: 8 }), async (notes) => {
         vi.restoreAllMocks();
@@ -170,23 +238,39 @@ describe('findLeftovers', () => {
 
         const found = await findLeftovers(deps);
 
-        // A row's id is unique across what is inserted here only once
         const held = new Set(
           notes.flatMap((note) =>
-            note.hasRow && typeof note.id === 'string' && typeOf(note)
-              ? [note.id]
-              : []
+            note.hasRow && typeof note.id === 'string' ? [note.id] : []
           )
         );
-        const expected = notes.flatMap((note, i) => {
-          const type = typeOf(note);
-          return type && typeof note.id === 'string' && !held.has(note.id)
-            ? [{ path: pathOf(note, i), id: note.id, type }]
-            : [];
-        });
-        expect(
-          found.map(({ file, id, type }) => ({ path: file.path, id, type }))
-        ).toEqual(expected);
+        const expected = notes.flatMap((note, i) =>
+          typeof note.id === 'string' && !held.has(note.id)
+            ? [{ path: pathOf(note, i), id: note.id }]
+            : []
+        );
+        expect(found.map(({ file, id }) => ({ path: file.path, id }))).toEqual(
+          expected
+        );
+      }),
+      { numRuns: 60 }
+    );
+  });
+
+  it("types a leftover by its tag, else by the data folder's subfolder it was made in, else not at all", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.array(noteArb, { maxLength: 8 }), async (notes) => {
+        vi.restoreAllMocks();
+        const rowless = notes.map((note) => ({ ...note, hasRow: false }));
+        const { deps } = await wireNotes(rowless);
+
+        const found = await findLeftovers(deps);
+
+        const expected = rowless.flatMap((note) =>
+          typeof note.id === 'string'
+            ? [typeOf(note) ?? typeOfFolder(note.folder)]
+            : []
+        );
+        expect(found.map(({ type }) => type)).toEqual(expected);
       }),
       { numRuns: 60 }
     );
@@ -203,6 +287,7 @@ describe('findLeftovers', () => {
         folder: `${DATA_DIRECTORY}/`,
         tagsAsString: false,
         secondTag: null,
+        rowType: 'snippet',
       })
     ).map((note, i) => ({ ...note, id: `id-${i}`, hasRow: i % 2 === 0 }));
     const { deps } = await wireNotes(notes);
@@ -212,73 +297,83 @@ describe('findLeftovers', () => {
     expect(found).toHaveLength(Math.floor(notes.length / 2));
   });
 
-  it("calls a leftover article outside the plugin's data folder an import in place, and every other one the plugin's own", async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        typeArb,
-        fc.constantFrom(`${DATA_DIRECTORY}/`, `${DATA_DIRECTORY}-old/`, ''),
-        async (type, folder) => {
-          vi.restoreAllMocks();
-          const { deps } = await wireNotes([
-            {
-              type,
-              id: 'left-1',
-              hasRow: false,
-              deletedRow: false,
-              folder,
-              tagsAsString: false,
-              secondTag: null,
-            },
-          ]);
+  // Every type, or none, in every folder: few enough to try them all
+  it.each(
+    (['article', 'snippet', 'card', null] as const).flatMap((type) =>
+      FOLDERS.map((folder) => ({ type, folder }))
+    )
+  )(
+    "calls a $type leftover in '$folder' the plugin's own only if it is in the data folder, or is a tagged snippet or card, and types it by its tag, else by its folder there",
+    async ({ type, folder }) => {
+      const { deps } = await wireNotes([
+        {
+          type,
+          id: 'left-1',
+          hasRow: false,
+          rowType: 'article',
+          deletedRow: false,
+          folder,
+          tagsAsString: false,
+          secondTag: null,
+        },
+      ]);
 
-          const [leftover] = await findLeftovers(deps);
+      const [leftover] = await findLeftovers(deps);
 
-          expect(leftover.kind).toBe(
-            type === 'article' && folder !== `${DATA_DIRECTORY}/`
-              ? 'in-place'
-              : 'made'
-          );
-          expect(actionsFor(leftover)).toEqual(
-            leftover.kind === 'in-place'
-              ? ['adopt', 'strip']
-              : ['adopt', 'trash']
-          );
-        }
-      ),
-      { numRuns: 18 }
-    );
-  });
+      const inDataFolder = folder.startsWith(`${DATA_DIRECTORY}/`);
+      expect(leftover.kind).toBe(
+        inDataFolder || type === 'snippet' || type === 'card'
+          ? 'made'
+          : 'in-place'
+      );
+      expect(leftover.type).toBe(type ?? typeOfFolder(folder));
+    }
+  );
+});
+
+describe('actionsFor', () => {
+  it.each([
+    { type: 'article', kind: 'made', actions: ['adopt', 'trash'] },
+    { type: 'article', kind: 'in-place', actions: ['adopt', 'strip'] },
+    { type: 'snippet', kind: 'made', actions: ['adopt', 'trash'] },
+    { type: 'card', kind: 'in-place', actions: ['adopt', 'strip'] },
+    // No type of its own, but the user picks one to save it as; one the
+    // plugin made can still be kept as a plain note too
+    { type: null, kind: 'made', actions: ['adopt', 'strip', 'trash'] },
+    { type: null, kind: 'in-place', actions: ['adopt', 'strip'] },
+  ] as const)(
+    'offers $actions for a $kind leftover of type $type',
+    ({ type, kind, actions }) => {
+      const leftover = { file: {}, id: 'x', type, kind } as Leftover;
+
+      expect(actionsFor(leftover)).toEqual(actions);
+    }
+  );
 });
 
 describe('leftoversMessage', () => {
-  it('names every leftover note, and says what to do', () => {
+  it('counts the leftover notes, without naming any', () => {
     fc.assert(
       fc.property(
-        fc.uniqueArray(fc.string({ minLength: 1 }), {
-          minLength: 1,
-          maxLength: 5,
-        }),
+        fc.array(fc.string({ minLength: 1 }), { minLength: 2, maxLength: 50 }),
         (names) => {
           const leftovers = names.map(
             (basename) => ({ file: { basename } }) as unknown as Leftover
           );
 
-          const message = leftoversMessage(leftovers);
-
-          const one = names.length === 1;
-          expect(message).toMatch(
-            new RegExp(
-              `^Incremental reading: ${names.length} ${one ? 'note has' : 'notes have'} `
-            )
-          );
-          for (const name of names) expect(message).toContain(`"${name}"`);
-          expect(message).toMatch(
-            new RegExp(
-              `Click to choose what to do with ${one ? 'it' : 'them'}\\.$`
-            )
+          expect(leftoversMessage(leftovers)).toBe(
+            `Incremental reading: ${names.length} notes were not found in the database.`
           );
         }
       )
+    );
+  });
+
+  it('speaks of a lone leftover in the singular', () => {
+    const leftovers = [{ file: { basename: 'a' } }] as unknown as Leftover[];
+
+    expect(leftoversMessage(leftovers)).toBe(
+      'Incremental reading: 1 note was not found in the database.'
     );
   });
 });
@@ -293,7 +388,7 @@ describe('resolveLeftover', () => {
       fc.asyncProperty(typeArb, async (type) => {
         vi.restoreAllMocks();
         const path = `${DATA_DIRECTORY}/x/a.md`;
-        const { repo, deps, leftover } = await wireLeftover(type, path);
+        const { vault, repo, deps, leftover } = await wireLeftover(type, path);
 
         expect(await resolveLeftover(deps, leftover, 'adopt')).toBe(true);
 
@@ -301,6 +396,11 @@ describe('resolveLeftover', () => {
         expect(rows).toHaveLength(1);
         expect(rows[0]).toMatchObject({ id: 'left-1', reference: path });
         expect(await findLeftovers(deps)).toEqual([]);
+        expect(vault.frontmatterOf(path)).toEqual({
+          'ir-id': 'left-1',
+          tags: ['other', TAG_OF[type]],
+          title: 'kept',
+        });
       }),
       { numRuns: 6 }
     );
@@ -382,6 +482,177 @@ describe('resolveLeftover', () => {
     );
   });
 
+  // Without its tag the note wouldn't read as an item (`getNoteType`)
+  it('adopts a leftover with no type tag as the type of the folder it was made in, tagging it so', async () => {
+    for (const type of ['article', 'snippet', 'card'] as const) {
+      vi.restoreAllMocks();
+      const path = `${Obsidian.getDirectory(type)}/a.md`;
+      const { vault, repo, deps, leftover } = await wireLeftover(null, path);
+
+      expect(await resolveLeftover(deps, leftover, 'adopt')).toBe(true);
+
+      expect(repo.rows(TABLE_OF[type])).toMatchObject([
+        { id: 'left-1', reference: path },
+      ]);
+      expect(vault.frontmatterOf(path)).toEqual({
+        'ir-id': 'left-1',
+        tags: ['other', TAG_OF[type]],
+        title: 'kept',
+      });
+    }
+  });
+
+  // A card needs more than a note to be one, so the modal offers only these
+  it.each(
+    (['article', 'snippet', 'card', 'cards folder'] as const).flatMap((from) =>
+      (['article', 'snippet'] as const).map((as) => [from, as] as const)
+    )
+  )(
+    'adopts a leftover typed as %s as the %s the user chose, its item tag replaced',
+    async (from, as) => {
+      const path =
+        from === 'cards folder'
+          ? `${Obsidian.getDirectory('card')}/a.md`
+          : `${DATA_DIRECTORY}/x/a.md`;
+      const { vault, repo, deps, leftover } = await wireLeftover(
+        from === 'cards folder' ? null : from,
+        path
+      );
+
+      expect(await resolveLeftover(deps, leftover, 'adopt', as)).toBe(true);
+
+      for (const type of Object.keys(TABLE_OF) as NoteType[]) {
+        expect(repo.rows(TABLE_OF[type])).toMatchObject(
+          type === as ? [{ id: 'left-1', reference: path }] : []
+        );
+      }
+      expect(vault.frontmatterOf(path)).toEqual({
+        'ir-id': 'left-1',
+        tags: ['other', TAG_OF[as]],
+        title: 'kept',
+      });
+    }
+  );
+
+  it.each<[string, unknown, NoteType, unknown]>([
+    // Only the order would tell a rewrite apart
+    ['already has', [ARTICLE_TAG, 'other'], 'article', null],
+    [
+      'has with another type',
+      ['other', ARTICLE_TAG, SNIPPET_TAG],
+      'snippet',
+      ['other', SNIPPET_TAG],
+    ],
+    ["can't read as tags", 7, 'snippet', [7, SNIPPET_TAG]],
+    [
+      'has with another type, in a lone string,',
+      `other ${CARD_TAG}`,
+      'snippet',
+      ['other', SNIPPET_TAG],
+    ],
+    ['has no tags, so lacks,', null, 'article', [ARTICLE_TAG]],
+  ])(
+    'tags a note adopted as a type whose tag it %s just as needed',
+    async (_, tags, as, written) => {
+      const path = `${Obsidian.getDirectory('snippet')}/a.md`;
+      const { vault, deps, leftover } = await wireLeftover(
+        null,
+        path,
+        'left-1',
+        { tags }
+      );
+      const update = vi.spyOn(Obsidian, 'updateFrontMatter');
+
+      expect(await resolveLeftover(deps, leftover, 'adopt', as)).toBe(true);
+
+      expect(update).toHaveBeenCalledTimes(written === null ? 0 : 1);
+      expect(vault.frontmatterOf(path)?.tags).toEqual(written ?? tags);
+    }
+  );
+
+  it.each(['article', 'snippet'] as const)(
+    'adopts a leftover of no known type as the %s the user chose, tagging it so',
+    async (as) => {
+      const path = 'notes/a.md';
+      const { vault, repo, deps, leftover } = await wireLeftover(null, path);
+
+      expect(await resolveLeftover(deps, leftover, 'adopt', as)).toBe(true);
+
+      for (const type of Object.keys(TABLE_OF) as NoteType[]) {
+        expect(repo.rows(TABLE_OF[type])).toMatchObject(
+          type === as ? [{ id: 'left-1', reference: path }] : []
+        );
+      }
+      expect(vault.frontmatterOf(path)).toEqual({
+        'ir-id': 'left-1',
+        tags: ['other', TAG_OF[as]],
+        title: 'kept',
+      });
+    }
+  );
+
+  it('adopts nothing, and does nothing to the note, when its type is unknown and none is chosen', async () => {
+    const path = 'notes/a.md';
+    const { vault, repo, deps, leftover, notify } = await wireLeftover(
+      null,
+      path
+    );
+
+    expect(await resolveLeftover(deps, leftover, 'adopt')).toBe(false);
+
+    for (const table of Object.values(TABLE_OF)) {
+      expect(repo.rows(table)).toEqual([]);
+    }
+    expect(vault.frontmatterOf(path)?.['ir-id']).toBe('left-1');
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('strips only the ir-id from a note with no type tag, leaving its tags as they were', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.option(
+          fc.oneof(fc.string(), fc.array(fc.string(), { maxLength: 3 })),
+          { nil: undefined }
+        ),
+        fc.constantFrom(...FOLDERS),
+        async (tags, folder) => {
+          // Tags naming no item type, or the note would be typed by them
+          fc.pre(Obsidian.typeOfTags(tags) === null);
+          vi.restoreAllMocks();
+          const path = `${folder}a.md`;
+          const vault = makeItemVault({
+            [path]: {
+              'ir-id': 'left-1',
+              ...(tags === undefined ? {} : { tags }),
+            },
+          });
+          vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+          const deps = {
+            app: vault.app as never,
+            repo: resetSharedRepo(),
+          } as never;
+          const [leftover] = await findLeftovers(deps);
+
+          expect(await resolveLeftover(deps, leftover, 'strip')).toBe(true);
+
+          expect(vault.frontmatterOf(path)).toEqual(
+            tags === undefined ? {} : { tags }
+          );
+        }
+      ),
+      { numRuns: 40 }
+    );
+  });
+
+  it('trashes a leftover with no type tag that the plugin made', async () => {
+    const path = `${DATA_DIRECTORY}/a.md`;
+    const { vault, deps, leftover } = await wireLeftover(null, path);
+
+    expect(await resolveLeftover(deps, leftover, 'trash')).toBe(true);
+
+    expect(vault.trashed).toEqual([path]);
+  });
+
   it('does nothing to a note that is no longer a leftover by the time it is resolved', async () => {
     for (const action of ['adopt', 'trash', 'strip'] as const) {
       vi.restoreAllMocks();
@@ -446,6 +717,28 @@ describe('resolveLeftover', () => {
       { kind: 'error' }
     );
   });
+
+  it.each([
+    { action: 'trash', doing: 'move "a" to the trash' },
+    { action: 'strip', doing: 'remove the IR properties from "a"' },
+  ] as const)(
+    'names what it could not do, $action, while writes are refused',
+    async ({ action, doing }) => {
+      const { vault, deps, leftover, notify } = await wireLeftover(
+        'article',
+        'notes/a.md'
+      );
+      deps.repo.refuseWrites(new Error('Saving is paused.'));
+
+      expect(await resolveLeftover(deps, leftover, action)).toBe(false);
+
+      expect(vault.trashed).toEqual([]);
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        `Couldn't ${doing}: saving to the database is paused. Saving is paused.`,
+        { kind: 'error' }
+      );
+    }
+  );
 
   it('says so when it fails', async () => {
     const { vault, deps, leftover, notify } = await wireLeftover(

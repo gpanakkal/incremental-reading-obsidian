@@ -244,12 +244,82 @@ export class ButtonComponent {
     this.buttonEl.classList.add('mod-destructive', 'mod-cta');
     return this;
   }
+  setDestructive() {
+    this.buttonEl.classList.add('mod-destructive');
+    return this;
+  }
+  removeCta() {
+    this.buttonEl.classList.remove('mod-cta');
+    return this;
+  }
   setClass(cls: string) {
     this.buttonEl.classList.add(cls);
     return this;
   }
+  setDisabled(disabled: boolean) {
+    this.buttonEl.disabled = disabled;
+    return this;
+  }
+  /** `setIcon` on the button, as Obsidian's does. */
+  setIcon(icon: string) {
+    setIcon(this.buttonEl, icon);
+    return this;
+  }
+  /** Obsidian's sets `aria-label`, which its themed tooltip reads. */
+  setTooltip(tooltip: string) {
+    this.buttonEl.setAttribute('aria-label', tooltip);
+    return this;
+  }
   onClick(callback: (evt: MouseEvent) => unknown) {
     this.buttonEl.addEventListener('click', callback);
+    return this;
+  }
+}
+/**
+ * A `select.dropdown` appended to its container, with the hidden
+ * `select.dropdown.is-measuring` Obsidian appends after it to fit its width
+ * (read from obsidian.asar). `setValue` fires no `change`, as there.
+ */
+export class DropdownComponent {
+  readonly selectEl: HTMLSelectElement;
+  readonly measureEl: HTMLSelectElement;
+
+  constructor(containerEl: HTMLElement) {
+    this.selectEl = document.createElement('select');
+    this.selectEl.classList.add('dropdown');
+    this.measureEl = document.createElement('select');
+    this.measureEl.classList.add('dropdown', 'is-measuring');
+    this.measureEl.setAttribute('aria-hidden', 'true');
+    this.measureEl.tabIndex = -1;
+    containerEl.append(this.selectEl, this.measureEl);
+  }
+
+  addOption(value: string, display: string) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.text = display;
+    this.selectEl.appendChild(option);
+    return this;
+  }
+  addOptions(options: Record<string, string>) {
+    for (const [value, display] of Object.entries(options)) {
+      this.addOption(value, display);
+    }
+    return this;
+  }
+  getValue() {
+    return this.selectEl.value;
+  }
+  setValue(value: string) {
+    this.selectEl.value = value;
+    return this;
+  }
+  setDisabled(disabled: boolean) {
+    this.selectEl.disabled = disabled;
+    return this;
+  }
+  onChange(callback: (value: string) => unknown) {
+    this.selectEl.addEventListener('change', () => callback(this.getValue()));
     return this;
   }
 }

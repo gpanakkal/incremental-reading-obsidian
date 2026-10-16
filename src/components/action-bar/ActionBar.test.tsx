@@ -92,15 +92,18 @@ function mountBar({
   actions = makeActions(),
   leaf = makeLeaf(),
   reviewView = { showMoreOptionsMenu, leaf },
+  leftovers,
 }: {
   showMoreOptionsMenu?: () => void;
   actions?: ReturnType<typeof makeActions>;
   leaf?: ReturnType<typeof makeLeaf>;
   reviewView?: object;
+  /** The plugin's watch over notes left without review data, once it has one. */
+  leftovers?: ReturnType<typeof makeLeftoverWatch>;
 } = {}): HTMLElement {
   return mount(
     <ReviewContextProvider
-      plugin={{ actions, app: {}, ...GRADE_INTERVALS_ON } as never}
+      plugin={{ actions, app: {}, leftovers, ...GRADE_INTERVALS_ON } as never}
       reviewView={reviewView as never}
       reviewManager={REVIEW_MANAGER as never}
     >
@@ -290,6 +293,42 @@ function mountReviewBar(actions: ReturnType<typeof makeActions>): HTMLElement {
 /** The two pages the bar renders, which it lays out differently. */
 const PAGES = ['home', 'review'] as const;
 
+/**
+ * Stand-in for the plugin's `LeftoverWatch`, holding `count` leftovers;
+ * `set` changes how many, telling its subscribers as the real one does.
+ */
+function makeLeftoverWatch(count: number) {
+  const listeners = new Set<() => void>();
+  const leftoversOf = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ id: `left-${i}` }));
+  let current = leftoversOf(count);
+  return {
+    get current() {
+      return current;
+    },
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    manage: vi.fn(async () => {}),
+    set(n: number) {
+      current = leftoversOf(n);
+      listeners.forEach((listener) => listener());
+    },
+  };
+}
+
+function queryLeftoverButton(container: HTMLElement): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>('#manage-leftovers-button');
+}
+
+/** The leftover count shown on the leftover button, if any. */
+function queryLeftoverCount(container: HTMLElement): HTMLElement | null {
+  return container.querySelector<HTMLElement>(
+    '#manage-leftovers-button .ir-leftover-count'
+  );
+}
+
 const ITEM_TYPES: NoteType[] = ['article', 'snippet', 'card'];
 const TEXT_TYPES: NoteType[] = ['article', 'snippet'];
 const GRADES = [
@@ -468,6 +507,7 @@ vi.mock('lucide-react', () => ({
   ArrowLeft: () => null,
   ArrowRight: () => null,
   Ban: () => null,
+  FileQuestionMark: () => null,
   CalendarSync: () => null,
   Check: () => null,
   EllipsisVertical: () => null,
@@ -663,6 +703,108 @@ describe('ActionBar', () => {
       getButton(container, 'Go to home screen').click();
 
       expect(dispatch).toHaveBeenCalledWith(setPage('home'));
+    });
+  });
+
+  describe('button for notes not found in the database', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      wireQueue();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it.each(
+      PAGES.flatMap((page) => [null, 0, 1, 3].map((count) => ({ page, count })))
+    )(
+      'shows on the $page page with $count leftovers only on the home page while there are some',
+      async ({ page, count }) => {
+        reduxState.page = page;
+        if (page === 'review') wireCurrentItem();
+        const container = mountBar({
+          leftovers: count === null ? undefined : makeLeftoverWatch(count),
+        });
+        await settle();
+
+        expect(queryLeftoverButton(container) !== null).toBe(
+          page === 'home' && count !== null && count > 0
+        );
+      }
+    );
+
+    it('leads the start edge, after the arrows, leaving the middle zone to the begin-review button', async () => {
+      const container = mountBar({ leftovers: makeLeftoverWatch(1) });
+      await settle();
+
+      expect(zoneChildren(container, 'lead')).toEqual([
+        navigateButton(container, 'back'),
+        navigateButton(container, 'forward'),
+        queryLeftoverButton(container),
+      ]);
+      expect(zoneChildren(container, 'center')).toEqual([
+        beginReviewButton(container),
+      ]);
+      expect(barChildren(container).map((el) => el.className)).toEqual([
+        'ir-bar-lead',
+        'ir-bar-center',
+        'ir-bar-trail',
+      ]);
+    });
+
+    it.each([
+      [1, '1', 'Manage 1 note not found in the database'],
+      [7, '7', 'Manage 7 notes not found in the database'],
+      [150, '99+', 'Manage 150 notes not found in the database'],
+    ])(
+      'shows %i leftovers as "%s" on the button, its label counting them for its tooltip',
+      async (count, shown, label) => {
+        const container = mountBar({ leftovers: makeLeftoverWatch(count) });
+        await settle();
+
+        const badge = queryLeftoverCount(container)!;
+        expect(badge.textContent).toBe(shown);
+        // Read out through the button's label, not twice
+        expect(badge.getAttribute('aria-hidden')).toBe('true');
+        expect(queryLeftoverButton(container)!.getAttribute('aria-label')).toBe(
+          label
+        );
+      }
+    );
+
+    it('asks the plugin to look again and manage them when clicked', async () => {
+      const leftovers = makeLeftoverWatch(2);
+      const container = mountBar({ leftovers });
+      await settle();
+
+      queryLeftoverButton(container)!.click();
+
+      expect(leftovers.manage).toHaveBeenCalledOnce();
+    });
+
+    it('comes and goes as leftovers are found and resolved, with no other re-render', async () => {
+      const leftovers = makeLeftoverWatch(0);
+      const container = mountBar({ leftovers });
+      await settle();
+      expect(queryLeftoverButton(container)).toBeNull();
+
+      leftovers.set(1);
+      await settle();
+      expect(queryLeftoverButton(container)).not.toBeNull();
+      expect(queryLeftoverCount(container)!.textContent).toBe('1');
+
+      leftovers.set(4);
+      await settle();
+      expect(queryLeftoverCount(container)!.textContent).toBe('4');
+      expect(queryLeftoverButton(container)!.getAttribute('aria-label')).toBe(
+        'Manage 4 notes not found in the database'
+      );
+
+      leftovers.set(0);
+      await settle();
+      expect(queryLeftoverButton(container)).toBeNull();
+      expect(container.querySelector('.ir-leftover-count')).toBeNull();
     });
   });
 
