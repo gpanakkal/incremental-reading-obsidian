@@ -1364,6 +1364,49 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
   line-height: var(--line-height-tight);
 }
 
+/* The bulk import dialog: the import dialog's options, laid out as there,
+   over a checklist that scrolls on its own, so the buttons stay in reach
+   however many files it lists. */
+.ir-scheduling-modal > .ir-bulk-import-options {
+  display: contents;
+}
+
+.ir-bulk-import-options > * {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.ir-scheduling-modal > .ir-bulk-import-list {
+  display: block;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: min(40vh, 320px);
+  overflow-y: auto;
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+
+.ir-bulk-import-row label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--size-4-2);
+  padding: var(--size-4-1) var(--size-4-2);
+}
+
+.ir-bulk-import-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ir-bulk-import-path,
+.ir-bulk-import-count,
+.ir-bulk-import-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
 /* The highlight behind the blanked answer comes from Obsidian, not from here:
    `.markdown-rendered mark` sets `background-color: var(--text-highlight-bg)`,
    and a descendant selector outranks a lone class whatever the source order, so

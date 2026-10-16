@@ -1,3 +1,4 @@
+import { folderSource } from '#/lib/bulk-import/candidates';
 import { createEmitter } from '#/lib/emitter';
 import { registerPdfLeafHighlights } from '#/lib/extensions/PdfItemHighlights';
 import {
@@ -100,6 +101,7 @@ import {
   asWebViewer,
   readWebPage,
 } from './lib/web-viewer';
+import { BulkImportModal } from './views/BulkImportModal';
 import { ImportModal } from './views/ImportModal';
 import { flagLeftovers } from './views/LeftoverModal';
 import ReviewView from './views/ReviewView';
@@ -968,12 +970,23 @@ export default class IncrementalReadingPlugin extends Plugin {
   ): void {
     if (leaf?.view instanceof ReviewView) return;
 
-    const file = this.app.vault.getFileByPath(abstractFile.path);
-    if (!file || !this.reviewManager) {
-      // TODO: entire folder imports
-      // const folder = this.app.vault.getFolderByPath(abstractFile.path);
+    if (abstractFile instanceof TFolder) {
+      if (!this.reviewManager) return;
+      menu.addSections(['incremental-reading']);
+      menu.addItem((item) => {
+        item
+          .setTitle('Import from folder…')
+          .setIcon(PLUGIN_ICON)
+          .setSection('incremental-reading')
+          .onClick(() => {
+            this.importFromFolder(abstractFile);
+          });
+      });
       return;
     }
+
+    const file = this.app.vault.getFileByPath(abstractFile.path);
+    if (!file || !this.reviewManager) return;
 
     menu.addSections(['incremental-reading']);
     // Checked by type alone: a file the plugin can't turn into an article
@@ -1079,6 +1092,24 @@ export default class IncrementalReadingPlugin extends Plugin {
           await this.importWebPage(viewer);
         });
     });
+  }
+
+  /**
+   * Offer the files directly in `folder` for import, in the bulk import
+   * dialog. It always opens, whatever `showImportDialog` says: the user picks
+   * the files there.
+   */
+  importFromFolder(folder: TFolder): BulkImportModal {
+    const { reviewManager } = this;
+    const modal = new BulkImportModal(this, {
+      source: folderSource(folder, {
+        app: this.app,
+        isItemAtPath: (file) => reviewManager.isItemFileAt(file, file.path),
+      }),
+      mode: 'import',
+    });
+    modal.open();
+    return modal;
   }
 
   async importArticle(

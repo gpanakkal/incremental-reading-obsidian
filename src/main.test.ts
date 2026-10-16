@@ -36,6 +36,7 @@ import * as LeftoverModal from '#/views/LeftoverModal';
 // The Vitest alias points `obsidian` at this same file, so the `Menu` built
 // here is the one the plugin fills — importing it by path is what gives TS the
 // stub's recorded `items`, which the real class does not expose.
+import type { ScanEvent } from '#/lib/bulk-import/types';
 import {
   getIconIds,
   Menu,
@@ -43,6 +44,7 @@ import {
   removeIcon,
   type MenuItem,
 } from '#/test/__mocks__/obsidian';
+import { BulkImportModal } from '#/views/BulkImportModal';
 import { ImportModal } from '#/views/ImportModal';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
@@ -66,6 +68,14 @@ function makeFile(path = 'notes/Chapter 1.md'): TFile {
   const dot = name.lastIndexOf('.');
   const extension = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
   return { path, name, extension } as TFile;
+}
+
+/** A folder at `path`, as the file explorer raises its menu on one. */
+function makeFolder(path: string): TFolder {
+  return Object.assign(new TFolder(), {
+    path,
+    name: path.slice(path.lastIndexOf('/') + 1),
+  });
 }
 
 /**
@@ -122,6 +132,7 @@ function makeReceiver({
       },
     },
     importArticle,
+    importFromFolder: vi.fn(),
     actions: { goToContext },
   };
   return { receiver, importArticle, goToContext, file };
@@ -147,7 +158,7 @@ function otherLeaf(): WorkspaceLeaf {
 function raiseMenu(
   receiver: ReturnType<typeof makeReceiver>['receiver'],
   leaf?: WorkspaceLeaf,
-  file: TFile = makeFile()
+  file: TFile | TFolder = makeFile()
 ): Menu {
   const menu = new Menu();
   IncrementalReadingPlugin.prototype.addIRMenuItems.call(
@@ -1026,8 +1037,37 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
     });
   });
 
+  it('offers to import from a folder, and nothing else there', () => {
+    fc.assert(
+      fc.property(fc.boolean(), (advanced) => {
+        const { receiver } = makeReceiver({ advanced, file: null });
+        const folder = makeFolder('notes/reading');
+
+        const menu = raiseMenu(receiver, undefined, folder);
+
+        expect(titles(menu)).toEqual(['Import from folder…']);
+        expect(menu.items[0]?.section).toBe('incremental-reading');
+        click(menu.items[0]);
+        expect(receiver.importFromFolder).toHaveBeenCalledExactlyOnceWith(
+          folder
+        );
+      })
+    );
+  });
+
+  it('offers no folder import before the review manager is up, or in the review tab', () => {
+    const waiting = makeReceiver({ imported: false });
+    const ready = makeReceiver();
+
+    expect(
+      raiseMenu(waiting.receiver, undefined, makeFolder('notes')).items
+    ).toHaveLength(0);
+    expect(
+      raiseMenu(ready.receiver, reviewLeaf(), makeFolder('notes')).items
+    ).toHaveLength(0);
+  });
+
   it('says nothing about a path that resolves to no file', () => {
-    // Folders reach the same event, and folder imports are not built yet.
     const { receiver } = makeReceiver({ file: null });
 
     const menu = raiseMenu(receiver);
@@ -1661,6 +1701,56 @@ describe('IncrementalReadingPlugin.importArticle', () => {
       });
       expect(importArticle).not.toHaveBeenCalled();
       expect(Notice.messages).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('IncrementalReadingPlugin.importFromFolder', () => {
+  it("opens the bulk import dialog on the folder's files, whatever showImportDialog says", async () => {
+    // The mock modal builds its content element in its constructor, and this
+    // file runs without a DOM; any element will do for a dialog never shown.
+    vi.stubGlobal('document', { createElement: () => ({}) });
+    try {
+      for (const showImportDialog of [false, true]) {
+        const open = vi
+          .spyOn(BulkImportModal.prototype, 'open')
+          .mockImplementation(() => {});
+        open.mockClear();
+        const isItemFileAt = vi.fn(() => true);
+        const receiver = {
+          app: {},
+          settings: { showImportDialog },
+          reviewManager: { isItemFileAt },
+        };
+        const folder = makeFolder('notes/reading');
+        const pdf = Object.assign(new TFile(), {
+          path: 'notes/reading/paper.pdf',
+          name: 'paper.pdf',
+          extension: 'pdf',
+        });
+        folder.children = [pdf];
+
+        const modal = IncrementalReadingPlugin.prototype.importFromFolder.call(
+          receiver as unknown as IncrementalReadingPlugin,
+          folder
+        ) as BulkImportModal;
+
+        expect(open).toHaveBeenCalledOnce();
+        expect(open.mock.contexts[0]).toBe(modal);
+        expect(modal.request.mode).toBe('import');
+        expect(modal.request.source.title).toBe('reading');
+        // A PDF is an item by the row at its path, which the item layer knows
+        const events: ScanEvent[] = [];
+        for await (const event of modal.request.source.scan(
+          new AbortController().signal
+        )) {
+          events.push(event);
+        }
+        expect(events).toEqual([]);
+        expect(isItemFileAt).toHaveBeenCalledExactlyOnceWith(pdf, pdf.path);
+      }
     } finally {
       vi.unstubAllGlobals();
     }

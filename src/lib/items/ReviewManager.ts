@@ -5,6 +5,11 @@ import type {
   QueueScheduling,
   QueueSubset,
 } from '#/components/types';
+import type {
+  BulkImportEntry,
+  BulkImportOptions,
+  BulkOutcome,
+} from '#/lib/bulk-import/types';
 import { refusedCharsIn } from '#/lib/item-path-guard';
 import { batchAfterLinkUpdates } from '#/lib/link-update-queue';
 import { appendLog } from '#/lib/log-file';
@@ -225,6 +230,17 @@ export default class ReviewManager {
     makeCopy?: boolean
   ) {
     return this.articles.import(file, priority, fixedIntervalDays, makeCopy);
+  }
+
+  /**
+   * Import many files as articles at once, quietly: what came of each is
+   * returned for the caller to say (see `ArticleManager.importMany`)
+   */
+  async importArticles(
+    entries: readonly BulkImportEntry[],
+    options: BulkImportOptions
+  ): Promise<BulkOutcome[]> {
+    return this.articles.importMany(entries, options);
   }
 
   /**

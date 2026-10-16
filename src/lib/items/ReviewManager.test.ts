@@ -1919,6 +1919,22 @@ describe('ReviewManager delegation', () => {
     expect(spy).toHaveBeenCalledWith(FAKE_FILE, 30, null, true);
   });
 
+  it('importArticles delegates to articles.importMany', async () => {
+    const repo = makeRepo();
+    const manager = new ReviewManager(makePlugin(), repo);
+    const outcomes = [{ file: FAKE_FILE, status: 'imported' as const }];
+    const spy = vi
+      .spyOn(manager.articles, 'importMany')
+      .mockResolvedValue(outcomes);
+    const entries = [{ file: FAKE_FILE }];
+    const options = { priority: 30, fixedIntervalDays: 4, makeCopy: true };
+
+    await expect(manager.importArticles(entries, options)).resolves.toBe(
+      outcomes
+    );
+    expect(spy).toHaveBeenCalledExactlyOnceWith(entries, options);
+  });
+
   it('importWebPage delegates to articles.importWebPage', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);

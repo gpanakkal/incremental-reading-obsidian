@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import IRScheduler from '#/lib/IRScheduler';
 import { DEFAULT_SETTINGS } from '#/lib/settings';
 import type { WebPage } from '#/lib/web-viewer';
 import type IncrementalReadingPlugin from '#/main';
@@ -282,6 +283,66 @@ describe('ImportModal', () => {
           }
         }
       )
+    );
+  });
+
+  it('imports at the priority or on the fixed interval typed in, when Enter confirms it from the field', async () => {
+    // Enter blurs the field, which updates the options, and confirms in the
+    // same event, before they render anew
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.integer({ min: 1, max: 99 }).map(String),
+        async (fixedInterval, typed) => {
+          const { plugin, importArticle } = makePlugin();
+          const file = makeFile('note');
+          const modal = new ImportModal(plugin, fileSubject(file, false));
+          modal.onOpen();
+          document.body.append(modal.contentEl);
+          try {
+            if (fixedInterval) {
+              const strategy = [...modal.contentEl.querySelectorAll('label')]
+                .find((el) => el.textContent?.includes('Priority scheduling'))!
+                .querySelector('input')!;
+              await act(() => strategy.click());
+            }
+            const input = modal.contentEl.querySelector<HTMLInputElement>(
+              fixedInterval ? '#ir-fixed-interval-input' : '#ir-priority-input'
+            )!;
+            await act(() => {
+              input.focus();
+              input.value = typed;
+              // preact/compat listens for `input` where React says onChange
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+            await act(() => {
+              input.dispatchEvent(
+                new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })
+              );
+            });
+
+            expect(importArticle).toHaveBeenCalledExactlyOnceWith(
+              file,
+              ...(fixedInterval
+                ? [
+                    plugin.settings.defaultPriority,
+                    IRScheduler.adjustFixedIntervalOnChange(typed),
+                  ]
+                : [
+                    IRScheduler.transformPriority(
+                      IRScheduler.adjustDisplayPriorityOnChange(typed)
+                    ),
+                    null,
+                  ]),
+              false
+            );
+          } finally {
+            modal.onClose();
+            modal.contentEl.remove();
+          }
+        }
+      ),
+      { numRuns: 20 }
     );
   });
 

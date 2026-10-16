@@ -39,6 +39,8 @@ Go to **Settings → Sync** → enable **Sync all other types**. Repeat this on 
 
 > [!tip]
 > You can also import from the **More options** menu (three dots in the upper-right corner of a tab), or by right-clicking on a file in the Files sidebar view and selecting **Import article**.
+>
+> To import several files at once, right-click a folder and select **Import from folder…**. It lists only the notes and PDFs directly in that folder (not in its subfolders) that aren't articles, snippets or cards already.
 
 3. Set aside some time for a [study session](#study-sessions) each day, depending on how much you want to learn. Even 10 minutes is fine!
 

@@ -6405,3 +6405,426 @@ describe('adoptLeftover', () => {
     );
   });
 });
+
+describe('import of a snippet or card note', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('refuses it in place or as a copy, saying why', async () => {
+    for (const tag of [SNIPPET_TAG, CARD_TAG]) {
+      for (const makeCopy of [false, true]) {
+        vi.restoreAllMocks();
+        const { vault, repo, notify, manager } = await wireArticles(
+          { [SOURCE]: { tags: [tag] } },
+          null
+        );
+
+        const article = await manager.import(
+          vault.files.get(SOURCE)!,
+          DEFAULT_PRIORITY,
+          null,
+          makeCopy
+        );
+
+        expect(article).toBeNull();
+        expect(repo.rows('article')).toEqual([]);
+        expect(notify).toHaveBeenCalledExactlyOnceWith(
+          'Note contains a snippet or card tag; canceling import'
+        );
+      }
+    }
+  });
+});
+
+describe('importMany', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** A note or a PDF, by name, in a folder of its own kind. */
+  const fileSpecsArb = fc.uniqueArray(
+    fc.record({
+      name: fc.stringMatching(/^[a-z]{1,6}$/),
+      pdf: fc.boolean(),
+      /** Whether the vault refuses to write it, or its copy. */
+      faulty: fc.boolean(),
+    }),
+    { selector: (spec) => spec.name, minLength: 1, maxLength: 5 }
+  );
+
+  const optionsArb = fc.record({
+    priority: fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+    fixedIntervalDays: fc.option(
+      fc.integer({
+        min: MINIMUM_FIXED_REVIEW_INTERVAL,
+        max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+      }),
+      { nil: null }
+    ),
+    makeCopy: fc.boolean(),
+  });
+
+  const pathOf = ({ name, pdf }: { name: string; pdf: boolean }) =>
+    pdf ? `papers/${name}.pdf` : `notes/${name}.md`;
+
+  it('imports every file with the options given, isolating the ones that throw, and tells the user nothing', async () => {
+    await fc.assert(
+      fc.asyncProperty(fileSpecsArb, optionsArb, async (specs, options) => {
+        vi.restoreAllMocks();
+        const { vault, repo, notify, manager } = await wireArticles(
+          Object.fromEntries(
+            specs.map((spec) => [pathOf(spec), spec.pdf ? null : {}])
+          ),
+          null
+        );
+        const copyPathOf = (spec: { name: string; pdf: boolean }) =>
+          `${ARTICLES_FOLDER}/${spec.name}.${spec.pdf ? 'pdf' : 'md'}`;
+        // Where each file's import writes: a PDF imported in place writes
+        // nothing but its row, so the vault has nothing to refuse there
+        const fails = (spec: (typeof specs)[number]) =>
+          spec.faulty && (options.makeCopy || !spec.pdf);
+        const faulty = new Set(
+          specs
+            .filter(fails)
+            .map((spec) => (options.makeCopy ? copyPathOf(spec) : pathOf(spec)))
+        );
+        vault.fail(options.makeCopy ? 'create' : 'frontmatter', (path) =>
+          faulty.has(path)
+        );
+        vault.fail('copy', (path) => faulty.has(path));
+        const files = specs.map((spec) => vault.files.get(pathOf(spec))!);
+
+        const outcomes = await manager.importMany(
+          files.map((file) => ({ file })),
+          options
+        );
+
+        expect(notify).not.toHaveBeenCalled();
+        expect(outcomes.map((outcome) => outcome.file)).toEqual(files);
+        const rows = repo.rows('article');
+        specs.forEach((spec, i) => {
+          const where = options.makeCopy ? copyPathOf(spec) : pathOf(spec);
+          const row = rows.find((r) => r.reference === where);
+          if (fails(spec)) {
+            // A note's copy is made through `createNote`, which says only
+            // that it failed
+            const reason = !options.makeCopy
+              ? `frontmatter failed at ${where}`
+              : spec.pdf
+                ? `copy failed at ${where}`
+                : `Failed to create note ${where}`;
+            expect(outcomes[i]).toEqual({
+              file: files[i],
+              status: 'failed',
+              reason,
+            });
+            expect(row).toBeUndefined();
+          } else {
+            expect(outcomes[i]).toEqual({ file: files[i], status: 'imported' });
+            expect(row).toMatchObject({
+              priority: options.priority,
+              fixed_interval_days: options.fixedIntervalDays,
+            });
+          }
+        });
+        expect(rows).toHaveLength(specs.filter((spec) => !fails(spec)).length);
+        // Every copy that failed was taken back
+        expect(vault.paths()).toEqual(
+          [
+            ...specs.map(pathOf),
+            ...(options.makeCopy
+              ? specs.filter((spec) => !fails(spec)).map(copyPathOf)
+              : []),
+          ].sort()
+        );
+      }),
+      { numRuns: 40 }
+    );
+  });
+
+  it('imports files one after another', async () => {
+    const { vault, manager } = await wireArticles(
+      { 'notes/a.md': {}, 'notes/b.md': {}, 'notes/c.md': {} },
+      null
+    );
+    const files = ['notes/a.md', 'notes/b.md', 'notes/c.md'].map(
+      (path) => vault.files.get(path)!
+    );
+    let reading = 0;
+    let overlapped = false;
+    const readBinary = vault.app.vault.readBinary;
+    const read = readBinary.getMockImplementation()!;
+    readBinary.mockImplementation(async (file: TFile) => {
+      reading += 1;
+      overlapped ||= reading > 1;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      reading -= 1;
+      return read(file);
+    });
+
+    await manager.importMany(
+      files.map((file) => ({ file })),
+      { priority: DEFAULT_PRIORITY, fixedIntervalDays: null, makeCopy: false }
+    );
+
+    expect(overlapped).toBe(false);
+    expect(readBinary.mock.calls.map(([file]) => file.path)).toEqual(
+      files.map((file) => file.path)
+    );
+  });
+
+  it('says why it imported nothing, quietly, keeping on with the rest', async () => {
+    const refusedChar = [...REFUSED_PATH_CHARS][0];
+    const insertArticle =
+      (id: string, reference: string) => (repo: TestRepository) =>
+        repo.db!.exec(
+          `INSERT INTO article (id, reference, due, interval, priority)
+         VALUES ($1, $2, 0, 1, 20)`,
+          [id, reference]
+        );
+    const cases: {
+      path: string;
+      frontmatter: Record<string, unknown> | null;
+      makeCopy: boolean;
+      status: 'skipped' | 'failed';
+      reason: string;
+      setUp?: (repo: TestRepository) => void;
+    }[] = [
+      {
+        path: 'notes/image.png',
+        frontmatter: null,
+        makeCopy: false,
+        status: 'failed',
+        reason: "can't be imported as an article",
+      },
+      {
+        path: 'notes/snippet.md',
+        frontmatter: { tags: [SNIPPET_TAG] },
+        makeCopy: false,
+        status: 'failed',
+        reason: 'has a snippet or card tag',
+      },
+      {
+        path: 'notes/card.md',
+        frontmatter: { tags: [CARD_TAG] },
+        makeCopy: true,
+        status: 'failed',
+        reason: 'has a snippet or card tag',
+      },
+      {
+        path: `notes/a${refusedChar}b.md`,
+        frontmatter: {},
+        makeCopy: false,
+        status: 'failed',
+        reason: `its name or folder contains ${listChars([refusedChar])}`,
+      },
+      {
+        path: `${DATA_DIRECTORY}/notes/kept.md`,
+        frontmatter: {},
+        makeCopy: true,
+        status: 'failed',
+        reason: 'already in the plugin data folder',
+      },
+      {
+        path: 'notes/taken.md',
+        frontmatter: {},
+        makeCopy: false,
+        status: 'failed',
+        reason: 'another article is at its path',
+        setUp: insertArticle('other', 'notes/taken.md'),
+      },
+      {
+        path: 'notes/article.md',
+        frontmatter: { 'ir-id': 'mine' },
+        makeCopy: false,
+        status: 'skipped',
+        reason: 'already an article',
+        setUp: insertArticle('mine', 'notes/article.md'),
+      },
+      {
+        path: 'papers/article.pdf',
+        frontmatter: null,
+        makeCopy: false,
+        status: 'skipped',
+        reason: 'already an article',
+        setUp: insertArticle('pdf', 'papers/article.pdf'),
+      },
+    ];
+    for (const {
+      path,
+      frontmatter,
+      makeCopy,
+      status,
+      reason,
+      setUp,
+    } of cases) {
+      vi.restoreAllMocks();
+      const { vault, repo, notify, manager } = await wireArticles(
+        { [path]: frontmatter, 'notes/fine.md': {} },
+        null
+      );
+      setUp?.(repo);
+      const fine = vault.files.get('notes/fine.md')!;
+      const file = vault.files.get(path)!;
+
+      const outcomes = await manager.importMany([{ file }, { file: fine }], {
+        priority: DEFAULT_PRIORITY,
+        fixedIntervalDays: null,
+        makeCopy,
+      });
+
+      expect(outcomes, path).toEqual([
+        { file, status, reason },
+        { file: fine, status: 'imported' },
+      ]);
+      expect(notify, path).not.toHaveBeenCalled();
+    }
+  });
+
+  it("fails a file whose content isn't what its extension says, quietly", async () => {
+    const { vault, notify, manager } = await wireArticles(
+      { 'notes/fake.md': {} },
+      null
+    );
+    const file = vault.files.get('notes/fake.md')!;
+    vault.app.vault.readBinary.mockResolvedValue(
+      new TextEncoder().encode('%PDF-1.7').buffer
+    );
+
+    const outcomes = await manager.importMany([{ file }], {
+      priority: DEFAULT_PRIORITY,
+      fixedIntervalDays: null,
+      makeCopy: false,
+    });
+
+    expect(outcomes).toEqual([
+      {
+        file,
+        status: 'failed',
+        reason: "its content isn't what its extension says",
+      },
+    ]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('fails every file while writes are refused, writing nothing', async () => {
+    const { vault, repo, notify, manager } = await wireArticles(
+      { 'notes/a.md': {}, 'papers/b.pdf': null },
+      null,
+      true
+    );
+    const files = ['notes/a.md', 'papers/b.pdf'].map(
+      (path) => vault.files.get(path)!
+    );
+
+    const outcomes = await manager.importMany(
+      files.map((file) => ({ file })),
+      { priority: DEFAULT_PRIORITY, fixedIntervalDays: null, makeCopy: true }
+    );
+
+    expect(outcomes).toEqual(
+      files.map((file) => ({
+        file,
+        status: 'failed',
+        reason: 'saving to the database is paused',
+      }))
+    );
+    expect(repo.rows('article')).toEqual([]);
+    expect(vault.paths()).toEqual(['notes/a.md', 'papers/b.pdf']);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('skips a file being imported already, importing it once', async () => {
+    const { vault, repo, manager } = await wireArticles(
+      { 'notes/a.md': {} },
+      null
+    );
+    const file = vault.files.get('notes/a.md')!;
+    const readBinary = vault.app.vault.readBinary;
+    const read = readBinary.getMockImplementation()!;
+    let release = (): void => undefined;
+    readBinary.mockImplementationOnce(
+      (f: TFile) =>
+        new Promise((resolve) => {
+          release = () => resolve(read(f));
+        })
+    );
+
+    const first = manager.import(file, DEFAULT_PRIORITY, null, false);
+    const outcomes = await manager.importMany([{ file }], {
+      priority: DEFAULT_PRIORITY,
+      fixedIntervalDays: null,
+      makeCopy: false,
+    });
+    release();
+    await first;
+
+    expect(outcomes).toEqual([
+      { file, status: 'skipped', reason: 'already being imported' },
+    ]);
+    expect(repo.rows('article')).toHaveLength(1);
+  });
+
+  it('keeps what it would have warned about out of sight', async () => {
+    const { vault, notify, manager } = await wireArticles(
+      { 'notes/a.md': {}, [`${ARTICLES_FOLDER}/a.md`]: { title: 'x' } },
+      null
+    );
+    const warn = vi.spyOn(console, 'warn').mockReturnValue(undefined);
+    const file = vault.files.get('notes/a.md')!;
+
+    const outcomes = await manager.importMany([{ file }], {
+      priority: DEFAULT_PRIORITY,
+      fixedIntervalDays: null,
+      makeCopy: true,
+    });
+
+    expect(outcomes).toEqual([{ file, status: 'imported' }]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      'Warning: article with name already exists "a.md"'
+    );
+  });
+
+  it('fails a file with what anything else thrown says', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(
+          fc.string().map((message) => new Error(message)),
+          fc.string(),
+          fc.integer()
+        ),
+        async (thrown) => {
+          vi.restoreAllMocks();
+          const { vault, notify, manager } = await wireArticles(
+            { 'notes/a.md': {} },
+            null
+          );
+          vi.spyOn(Obsidian, 'getFrontMatter').mockImplementation(() => {
+            // Anything can be thrown, an Error or not
+            // eslint-disable-next-line @typescript-eslint/only-throw-error
+            throw thrown;
+          });
+          const file = vault.files.get('notes/a.md')!;
+
+          const outcomes = await manager.importMany([{ file }], {
+            priority: DEFAULT_PRIORITY,
+            fixedIntervalDays: null,
+            makeCopy: false,
+          });
+
+          expect(outcomes).toEqual([
+            {
+              file,
+              status: 'failed',
+              reason: thrown instanceof Error ? thrown.message : String(thrown),
+            },
+          ]);
+          expect(notify).not.toHaveBeenCalled();
+        }
+      ),
+      { numRuns: 20 }
+    );
+  });
+});

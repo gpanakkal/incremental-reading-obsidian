@@ -1,3 +1,8 @@
+import type {
+  BulkImportEntry,
+  BulkImportOptions,
+  BulkOutcome,
+} from '#/lib/bulk-import/types';
 import { refusedWrite, withCompensation } from '#/lib/compensation';
 import {
   ARTICLE_TAG,
@@ -70,18 +75,65 @@ export function checkImportable(file: TFile): boolean {
 }
 
 /**
+ * Why an import of a file did nothing: `notice` is what an import of that file
+ * alone tells the user, `reason` the short form a batch's outcome keeps.
+ */
+interface Refusal {
+  notice: string;
+  reason: string;
+  /** Nothing was left to do: the file is an article already. */
+  skipped?: boolean;
+}
+
+/**
+ * Where an import says what came of it. An import of one file tells the user
+ * (see {@link toUser}); one of a batch is quiet, and keeps only why it did
+ * nothing, for its outcome (see `importMany`).
+ */
+interface ImportReport {
+  /** Nothing was imported, for the reason given. */
+  refuse(refusal: Refusal): void;
+  /** What was imported, or done instead (see {@link confirmImport}). */
+  confirm(message: string): void;
+  /** Something about an import that goes ahead. */
+  warn(...args: Parameters<typeof Obsidian.notify>): void;
+}
+
+/** The report of an import of one file: every word of it a notice. */
+const toUser: ImportReport = {
+  refuse: ({ notice }) => Obsidian.notify(notice),
+  confirm: confirmImport,
+  warn: (...args) => Obsidian.notify(...args),
+};
+
+/** The short form of what an import threw, for a batch's outcome. */
+function errorReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** A snippet's or card's note is no article to be. */
+function blockedTag(): Refusal {
+  return {
+    notice: `Note contains a snippet or card tag; canceling import`,
+    reason: 'has a snippet or card tag',
+  };
+}
+
+/**
  * Whether `file` must not become an article where it is, saying why: its path
  * holds a character that breaks links to it (see `REFUSED_PATH_CHARS`). A copy
  * is named from text, which drops them; every type that can be imported in
  * place can be copied today.
  */
-function refusedInPlace(file: TFile): boolean {
+function refusedInPlace(file: TFile, report: ImportReport): boolean {
   const chars = refusedCharsIn(file.path);
   if (chars.length === 0) return false;
-  Obsidian.notify(
-    `Can't import "${file.name}" in place: its name or folder contains ` +
-      `${listChars(chars)}. Rename it or import a copy`
-  );
+  report.refuse({
+    notice:
+      `Can't import "${file.name}" in place: its name or folder contains ` +
+      `${listChars(chars)}. Rename it or import a copy`,
+    reason: `its name or folder contains ${listChars(chars)}`,
+  });
   return true;
 }
 
@@ -89,9 +141,9 @@ function refusedInPlace(file: TFile): boolean {
  * Tell the user when an existing article, relinked or restored, is now at a
  * path that breaks links to it: it stays there, as existing paths do.
  */
-function warnIfRefused(path: string) {
+function warnIfRefused(path: string, report: ImportReport) {
   const warning = refusedPathWarning(path);
-  if (warning) Obsidian.notify(warning);
+  if (warning) report.warn(warning);
 }
 
 /** How an import says it scheduled the article, for its notice. */
@@ -140,6 +192,8 @@ function movedToCopy({
 interface CopyNameOptions {
   warnCleaned: boolean;
   maxBytes?: number;
+  /** Where its warnings go. */
+  report: ImportReport;
 }
 
 /** The parentless snippets and cards taken from a file. */
@@ -222,31 +276,139 @@ export class ArticleManager extends ItemManager {
   ) {
     if (!checkImportable(file)) return null;
     if (refusedWrite(this.repo, `import "${file.name}"`)) return null;
-    // Read once: a rename during the import changes `file.path` in place
-    const { path } = file;
-    if (this.importing.has(path)) return null;
+    if (this.importing.has(file.path)) return null;
 
     const willCopy =
       isCopyImportable(file) && (makeCopy ?? this.plugin.settings.copyOnImport);
-    this.importing.add(path);
     try {
-      if ((await sniffMimeType(this.app, file)) === null) {
-        Obsidian.notify(
-          `"${file.name}" doesn't hold what its extension says; canceling import`
-        );
-        return null;
-      }
-
-      if (willCopy) {
-        return await this.importCopy(file, priority, fixedIntervalDays);
-      }
-      return await this.importInPlace(file, priority, fixedIntervalDays);
+      return await this.importFile(
+        file,
+        priority,
+        fixedIntervalDays,
+        willCopy,
+        toUser
+      );
     } catch (error) {
       Obsidian.notify(`Failed to import article "${file.name}"`, {
         kind: 'error',
       });
       console.error(error);
       return null;
+    }
+  }
+
+  /**
+   * Import each of `entries` as {@link import} does, one after another, with
+   * the same schedule and the same copy choice (a file that can only be
+   * imported in place is, whatever was chosen). Quiet: nothing here tells the
+   * user anything, so the caller can say it once for the whole batch. One file
+   * that fails never stops the rest.
+   * @returns what came of each file, in the order given: `skipped` for one
+   * already an article or being imported already, `failed` with a short
+   * reason for one that could not be imported
+   */
+  async importMany(
+    entries: readonly BulkImportEntry[],
+    { priority, fixedIntervalDays, makeCopy }: BulkImportOptions
+  ): Promise<BulkOutcome[]> {
+    const outcomes: BulkOutcome[] = [];
+    for (const { file } of entries) {
+      outcomes.push(
+        await this.importQuietly(file, priority, fixedIntervalDays, makeCopy)
+      );
+    }
+    return outcomes;
+  }
+
+  /** One file of {@link importMany}. */
+  private async importQuietly(
+    file: TFile,
+    priority: number,
+    fixedIntervalDays: number | null,
+    makeCopy: boolean
+  ): Promise<BulkOutcome> {
+    if (!isImportable(file)) {
+      return {
+        file,
+        status: 'failed',
+        reason: "can't be imported as an article",
+      };
+    }
+    if (this.repo.writeRefusal()) {
+      return {
+        file,
+        status: 'failed',
+        reason: 'saving to the database is paused',
+      };
+    }
+    if (this.importing.has(file.path)) {
+      return { file, status: 'skipped', reason: 'already being imported' };
+    }
+
+    let refusal: Refusal | null = null;
+    const quiet: ImportReport = {
+      refuse: (given) => {
+        refusal = given;
+      },
+      confirm: () => undefined,
+      // Kept where a developer can find them, not shown
+      warn: (message) => console.warn(message),
+    };
+    try {
+      await this.importFile(
+        file,
+        priority,
+        fixedIntervalDays,
+        isCopyImportable(file) && makeCopy,
+        quiet
+      );
+    } catch (error) {
+      console.error(error);
+      return { file, status: 'failed', reason: errorReason(error) };
+    }
+    const refused = refusal as Refusal | null;
+    if (refused === null) return { file, status: 'imported' };
+    return {
+      file,
+      status: refused.skipped ? 'skipped' : 'failed',
+      reason: refused.reason,
+    };
+  }
+
+  /**
+   * Import `file`, which is importable and not being imported already, where
+   * it is or as a copy. Holds its path in `importing` until done, from the
+   * caller's own synchronous step, so no second import of it can start.
+   * @throws whatever the import throws, its report having said nothing of it
+   */
+  private async importFile(
+    file: TFile,
+    priority: number,
+    fixedIntervalDays: number | null,
+    willCopy: boolean,
+    report: ImportReport
+  ) {
+    // Read once: a rename during the import changes `file.path` in place
+    const { path } = file;
+    this.importing.add(path);
+    try {
+      if ((await sniffMimeType(this.app, file)) === null) {
+        report.refuse({
+          notice: `"${file.name}" doesn't hold what its extension says; canceling import`,
+          reason: "its content isn't what its extension says",
+        });
+        return null;
+      }
+
+      if (willCopy) {
+        return await this.importCopy(file, priority, fixedIntervalDays, report);
+      }
+      return await this.importInPlace(
+        file,
+        priority,
+        fixedIntervalDays,
+        report
+      );
     } finally {
       this.importing.delete(path);
     }
@@ -336,15 +498,21 @@ export class ArticleManager extends ItemManager {
   private async importInPlace(
     file: TFile,
     priority: number,
-    fixedIntervalDays: number | null
+    fixedIntervalDays: number | null,
+    report: ImportReport
   ) {
     if (!supportsFrontmatter(file)) {
-      return this.importBinaryInPlace(file, priority, fixedIntervalDays);
+      return this.importBinaryInPlace(
+        file,
+        priority,
+        fixedIntervalDays,
+        report
+      );
     }
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
     if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
-      Obsidian.notify(`Note contains a snippet or card tag; canceling import`);
+      report.refuse(blockedTag());
       return null;
     }
 
@@ -361,14 +529,19 @@ export class ArticleManager extends ItemManager {
       // Nothing left to import, but re-running it on an article is the only
       // way a user can repair snippets and cards stranded by an earlier import.
       await this.claimInPlace(file, refMatch.id);
-      Obsidian.notify(`Note is already an article; canceling import`);
+      report.refuse({
+        notice: `Note is already an article; canceling import`,
+        reason: 'already an article',
+        skipped: true,
+      });
       return null;
     } else if (refMatch) {
       // reference matches, but no ID or ID doesn't match
       // TODO: option to choose any one of the rows matching the id/reference
-      Obsidian.notify(
-        `Another article is already at this file path; canceling import`
-      );
+      report.refuse({
+        notice: `Another article is already at this file path; canceling import`,
+        reason: 'another article is at its path',
+      });
       return null;
     }
     if (existingId) {
@@ -385,12 +558,13 @@ export class ArticleManager extends ItemManager {
           file.basename,
           'in place',
           () => this.claimInPlace(file, existingId),
-          undefined
+          undefined,
+          report
         );
-        confirmImport(
+        report.confirm(
           `Linked "${file.basename}" to existing article with the same ID`
         );
-        warnIfRefused(file.path);
+        warnIfRefused(file.path, report);
         return this.fetch(existingId);
       }
       // Orphaned id + no reference match: fall through to fresh import
@@ -398,7 +572,7 @@ export class ArticleManager extends ItemManager {
 
     // Past here a new article is made where the note is. An article it
     // already was, above, keeps its path, as existing paths do
-    if (refusedInPlace(file)) return null;
+    if (refusedInPlace(file, report)) return null;
     const id = crypto.randomUUID();
     // The note is the user's own, so a row that can't be saved puts its
     // `ir-id` and tags back as they were
@@ -419,7 +593,8 @@ export class ArticleManager extends ItemManager {
       file.basename,
       'in place',
       () => this.claimInPlace(file, id),
-      undefined
+      undefined,
+      report
     );
 
     const titleSlice = getContentSlice(
@@ -429,7 +604,7 @@ export class ArticleManager extends ItemManager {
     );
     const schedulingString = describeSchedule(priority, fixedIntervalDays);
 
-    confirmImport(`Imported "${titleSlice}" with ${schedulingString}`);
+    report.confirm(`Imported "${titleSlice}" with ${schedulingString}`);
     return this.fetch(id);
   }
 
@@ -445,13 +620,14 @@ export class ArticleManager extends ItemManager {
     name: string,
     kind: 'in place' | 'copy',
     work: () => Promise<T>,
-    fallback: T
+    fallback: T,
+    report: ImportReport
   ): Promise<T> {
     try {
       return await work();
     } catch (error) {
       console.error(error);
-      Obsidian.notify(
+      report.warn(
         kind === 'in place'
           ? `"${name}" is an article, but the snippets and cards taken from it couldn't be adopted`
           : `Imported "${name}", but the snippets and cards taken from its original couldn't be handed to it`,
@@ -473,7 +649,8 @@ export class ArticleManager extends ItemManager {
       file.basename,
       'in place',
       () => this.claimInPlace(file, id),
-      undefined
+      undefined,
+      toUser
     );
   }
 
@@ -505,7 +682,8 @@ export class ArticleManager extends ItemManager {
   private async importBinaryInPlace(
     file: TFile,
     priority: number,
-    fixedIntervalDays: number | null
+    fixedIntervalDays: number | null,
+    report: ImportReport
   ) {
     const existing = (
       (await this.repo.query(
@@ -518,7 +696,11 @@ export class ArticleManager extends ItemManager {
       // Nothing left to import, but re-running it is how a user repairs
       // snippets and cards stranded without a parent
       await this.claimInPlace(file, existing.id);
-      Obsidian.notify(`"${file.name}" is already an article; canceling import`);
+      report.refuse({
+        notice: `"${file.name}" is already an article; canceling import`,
+        reason: 'already an article',
+        skipped: true,
+      });
       return this.fetch(existing.id);
     }
     const titleSlice = getContentSlice(
@@ -542,29 +724,31 @@ export class ArticleManager extends ItemManager {
         file.basename,
         'in place',
         () => this.claimInPlace(file, existing.id),
-        undefined
+        undefined,
+        report
       );
-      confirmImport(
+      report.confirm(
         `Restored the article "${titleSlice}" to the queue with its earlier schedule`
       );
-      warnIfRefused(file.path);
+      warnIfRefused(file.path, report);
       return this.fetch(existing.id);
     }
 
     // Past here a new article is made where the file is. One it was before,
     // above, comes back at its path, as existing paths do
-    if (refusedInPlace(file)) return null;
+    if (refusedInPlace(file, report)) return null;
     const id = crypto.randomUUID();
     await this.insertImported(id, file.path, priority, fixedIntervalDays);
     await this.afterImport(
       file.basename,
       'in place',
       () => this.claimInPlace(file, id),
-      undefined
+      undefined,
+      report
     );
 
     const schedulingString = describeSchedule(priority, fixedIntervalDays);
-    confirmImport(`Imported "${titleSlice}" with ${schedulingString}`);
+    report.confirm(`Imported "${titleSlice}" with ${schedulingString}`);
     return this.fetch(id);
   }
 
@@ -584,14 +768,14 @@ export class ArticleManager extends ItemManager {
   private async nameForCopy(
     file: Pick<TFile, 'basename' | 'extension'>,
     isFree: (name: string) => boolean | Promise<boolean>,
-    { warnCleaned, maxBytes }: CopyNameOptions
+    { warnCleaned, maxBytes, report }: CopyNameOptions
   ): Promise<string> {
     const basename =
       Obsidian.sanitizeForTitle(file.basename, true, undefined, maxBytes) ||
       Obsidian.createTitle();
     let name = `${basename}.${file.extension}`;
     if (!(await isFree(name))) {
-      Obsidian.notify(`Warning: article with name already exists "${name}"`, {
+      report.warn(`Warning: article with name already exists "${name}"`, {
         persist: true,
       });
       do {
@@ -600,7 +784,7 @@ export class ArticleManager extends ItemManager {
     }
     // Obsidian keeps paths as NFC, so a name only NFC changes is its own
     if (warnCleaned && basename !== file.basename.normalize('NFC')) {
-      Obsidian.notify(
+      report.warn(
         `Warning: removed characters a note name can't hold; the copy is named "${name}"`,
         { persist: true }
       );
@@ -644,8 +828,8 @@ export class ArticleManager extends ItemManager {
    */
   private async withCopyTarget<T>(
     file: Pick<TFile, 'basename' | 'extension'>,
-    work: (name: string) => Promise<T>,
-    options: CopyNameOptions = { warnCleaned: true }
+    options: CopyNameOptions,
+    work: (name: string) => Promise<T>
   ): Promise<T> {
     const name = await this.nameForCopy(
       file,
@@ -669,9 +853,11 @@ export class ArticleManager extends ItemManager {
   private async importBinaryCopy(
     file: TFile,
     priority: number,
-    fixedIntervalDays: number | null
+    fixedIntervalDays: number | null,
+    report: ImportReport
   ) {
-    return this.withCopyTarget(file, async (name) => {
+    const naming: CopyNameOptions = { warnCleaned: true, report };
+    return this.withCopyTarget(file, naming, async (name) => {
       const copyPath = Obsidian.getTargetPath(name, 'article');
       const taken = await this.takenFrom(file);
       await Obsidian.ensureParentFolder(this.app, copyPath);
@@ -690,7 +876,8 @@ export class ArticleManager extends ItemManager {
         copy.basename,
         'copy',
         () => this.handToCopy(file, taken, id, copy),
-        { snippets: 0, cards: 0 }
+        { snippets: 0, cards: 0 },
+        report
       );
 
       const titleSlice = getContentSlice(
@@ -699,7 +886,7 @@ export class ArticleManager extends ItemManager {
         true
       );
       const schedulingString = describeSchedule(priority, fixedIntervalDays);
-      confirmImport(
+      report.confirm(
         `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`
       );
       return this.fetch(id);
@@ -720,7 +907,8 @@ export class ArticleManager extends ItemManager {
     file: TFile,
     copy: TFile,
     content: string,
-    links: ResolvedLink[] | null
+    links: ResolvedLink[] | null,
+    report: ImportReport
   ): { text: string; frontmatter: FrontmatterLinkEdit[] } {
     const { metadataCache } = this.app;
     try {
@@ -733,19 +921,19 @@ export class ArticleManager extends ItemManager {
           linktext: (target, omitMd) =>
             metadataCache.fileToLinktext(target, copy.path, omitMd),
         });
-        if (missed > 0) this.warnLinksKept(file);
+        if (missed > 0) this.warnLinksKept(file, report);
         return rebased;
       }
     } catch (error) {
       console.error(error);
     }
-    this.warnLinksKept(file);
+    this.warnLinksKept(file, report);
     return { text: content, frontmatter: [] };
   }
 
   /** Say that links in the copy of `file` may not lead where they did. */
-  private warnLinksKept(file: TFile) {
-    Obsidian.notify(
+  private warnLinksKept(file: TFile, report: ImportReport) {
+    report.warn(
       `Warning: couldn't update the links in the copy of "${file.basename}"; some may not lead where they did`,
       { kind: 'error', persist: true }
     );
@@ -757,22 +945,24 @@ export class ArticleManager extends ItemManager {
   private async importCopy(
     file: TFile,
     priority: number,
-    fixedIntervalDays: number | null
+    fixedIntervalDays: number | null,
+    report: ImportReport
   ) {
     // check if the file is inside the plugin's data directory
     if (file.path.startsWith(DATA_DIRECTORY)) {
-      Obsidian.notify(
-        `"${file.name}" is already in the plugin data folder; canceling import`
-      );
+      report.refuse({
+        notice: `"${file.name}" is already in the plugin data folder; canceling import`,
+        reason: 'already in the plugin data folder',
+      });
       return null;
     }
     if (!supportsFrontmatter(file)) {
-      return this.importBinaryCopy(file, priority, fixedIntervalDays);
+      return this.importBinaryCopy(file, priority, fixedIntervalDays, report);
     }
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
     if (frontmatter?.tags?.some((tag) => IMPORT_BLOCKED_TAGS.has(tag))) {
-      Obsidian.notify(`Note contains a snippet or card tag; canceling import`);
+      report.refuse(blockedTag());
       return null;
     }
 
@@ -794,16 +984,17 @@ export class ArticleManager extends ItemManager {
           file.basename,
           'in place',
           () => this.claimInPlace(file, existingId),
-          undefined
+          undefined,
+          report
         );
-        confirmImport(
+        report.confirm(
           `Linked "${file.basename}" to existing article with the same ID`
         );
-        warnIfRefused(file.path);
+        warnIfRefused(file.path, report);
         return this.fetch(existingId);
       }
       // Orphaned ir-id: warn but proceed with creating the copy
-      Obsidian.notify(
+      report.warn(
         `Warning: source note has article metadata but no ` +
           `matching record; creating copy`,
         { persist: true }
@@ -821,7 +1012,8 @@ export class ArticleManager extends ItemManager {
         this.app.metadataCache.getFirstLinkpathDest(linkpath, file.path)
     );
 
-    return this.withCopyTarget(file, async (importFileName) => {
+    const naming: CopyNameOptions = { warnCleaned: true, report };
+    return this.withCopyTarget(file, naming, async (importFileName) => {
       const taken = await this.takenFrom(file);
       let frontmatterLinks: FrontmatterLinkEdit[] = [];
       const id = crypto.randomUUID();
@@ -833,7 +1025,13 @@ export class ArticleManager extends ItemManager {
           async () => {
             const made = await Obsidian.createNote({
               content: (note) => {
-                const rebased = this.rebaseCopy(file, note, content, links);
+                const rebased = this.rebaseCopy(
+                  file,
+                  note,
+                  content,
+                  links,
+                  report
+                );
                 frontmatterLinks = rebased.frontmatter;
                 return rebased.text;
               },
@@ -884,7 +1082,8 @@ export class ArticleManager extends ItemManager {
         articleFile.basename,
         'copy',
         () => this.handToCopy(file, taken, id, articleFile),
-        { snippets: 0, cards: 0 }
+        { snippets: 0, cards: 0 },
+        report
       );
 
       const titleSlice = getContentSlice(
@@ -893,7 +1092,7 @@ export class ArticleManager extends ItemManager {
         true
       );
       const schedulingString = describeSchedule(priority, fixedIntervalDays);
-      confirmImport(
+      report.confirm(
         `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`
       );
       return this.fetch(id);
@@ -918,6 +1117,12 @@ export class ArticleManager extends ItemManager {
     try {
       return await this.withCopyTarget(
         { basename: page.title, extension: 'md' },
+        // A page title is no name on disk yet: past ~255 bytes, none can be
+        {
+          warnCleaned: false,
+          maxBytes: CONTENT_TITLE_MAX_BYTES,
+          report: toUser,
+        },
         async (fileName) => {
           const id = crypto.randomUUID();
           const note = await withCompensation(async (step) => {
@@ -971,9 +1176,7 @@ export class ArticleManager extends ItemManager {
           );
           Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
           return this.fetch(id);
-        },
-        // A page title is no name on disk yet: past ~255 bytes, none can be
-        { warnCleaned: false, maxBytes: CONTENT_TITLE_MAX_BYTES }
+        }
       );
     } catch (error) {
       Obsidian.notify(`Failed to import "${page.title}"`);
