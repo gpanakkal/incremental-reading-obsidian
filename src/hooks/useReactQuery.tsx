@@ -56,6 +56,26 @@ export function useReviewItems(ids: string[]) {
 }
 
 /**
+ * How many cards come due later in the review day: see
+ * `CardManager.countDueLaterToday`.
+ *
+ * Counted afresh each time a caller mounts, rather than kept for the default
+ * stale time: review's summary mounts again each time the queue empties, and
+ * the card just graded may be the one that changed the count. Nor is the last
+ * count kept once no caller is mounted, since react-query would hand it to
+ * the next one as settled until the recount lands.
+ */
+export function useCardsDueLaterToday() {
+  const { reviewManager } = useReviewContext();
+  return useQuery({
+    queryKey: ['cards-due-later-today'],
+    queryFn: async () => reviewManager.cards.countDueLaterToday(),
+    staleTime: 0,
+    gcTime: 0,
+  });
+}
+
+/**
  * The item review is showing, or nothing while it is still being resolved or
  * after it failed to resolve.
  *

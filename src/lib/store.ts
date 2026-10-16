@@ -81,11 +81,13 @@ export const typesToReviewSlice = createSlice({
     // Whether cards are the only item type selected for review.
     cardsOnly: (state): boolean =>
       Object.keys(state).length === 1 && 'card' in state,
+    // Whether cards are among the item types selected for review.
+    reviewsCards: (state): boolean => 'card' in state,
   },
 });
 
 export const { setTypesToReview } = typesToReviewSlice.actions;
-export const { cardsOnly } = typesToReviewSlice.selectors;
+export const { cardsOnly, reviewsCards } = typesToReviewSlice.selectors;
 
 /**
  * What an expired day-scoped record reads as. One shared object rather than a

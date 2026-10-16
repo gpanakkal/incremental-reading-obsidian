@@ -12,15 +12,17 @@ import {
   resetCurrentItem,
   resetSeenIds,
   resetSession,
+  reviewsCards,
   selectionModeSlice,
   setHasSelection,
   setPage,
   setSelectionMode,
   setShowAnswer,
+  setTypesToReview,
   store,
   type SelectionKind,
 } from './store';
-import type { NoteType } from './types';
+import { NOTE_TYPES, type NoteType } from './types';
 
 // #region HELPERS
 
@@ -527,6 +529,29 @@ describe('hasSelection', () => {
         store.dispatch(action());
 
         expect(store.getState().hasSelection).toBe(has);
+      })
+    );
+  });
+});
+
+describe('reviewsCards', () => {
+  afterEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  it('holds while every item type is up for review, as a session starts', () => {
+    store.dispatch(setTypesToReview(['article']));
+    store.dispatch(resetSession());
+
+    expect(reviewsCards(store.getState())).toBe(true);
+  });
+
+  it('holds exactly while cards are among the types chosen for review', () => {
+    fc.assert(
+      fc.property(fc.subarray([...NOTE_TYPES]), (types) => {
+        store.dispatch(setTypesToReview(types));
+
+        expect(reviewsCards(store.getState())).toBe(types.includes('card'));
       })
     );
   });

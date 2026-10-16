@@ -36,15 +36,27 @@ const skippedItemArb = fc.record({
 });
 
 /**
- * One case: the reviews the store counted, the ids it holds as skipped, and
- * what looking those ids up has produced so far — nothing while it is still
+ * One case: the reviews the store counted, the ids it holds as skipped, what
+ * looking those ids up has produced so far — nothing while it is still
  * running, and otherwise any list at all, since the lookup drops ids whose
- * items are gone.
+ * items are gone — how many cards the database says come due later today,
+ * or nothing while it is still counting, and whether cards are among the
+ * types this session reviews.
  */
 const summaryArb = fc.record({
-  completed: fc.dictionary(fc.string(), noteTypeArb),
-  skippedIds: fc.uniqueArray(fc.string()),
+  // Empty often enough that a run reliably meets a tab opened onto an empty
+  // queue, which needs both empty at once
+  completed: fc.oneof(
+    fc.constant<Record<string, NoteType>>({}),
+    fc.dictionary(fc.string(), noteTypeArb)
+  ),
+  skippedIds: fc.oneof(fc.constant<string[]>([]), fc.uniqueArray(fc.string())),
   skippedItems: fc.option(fc.array(skippedItemArb), { nil: undefined }),
+  // One, the singular, made as likely as none
+  dueLaterToday: fc.option(fc.oneof(fc.constantFrom(0, 1), fc.nat()), {
+    nil: undefined,
+  }),
+  reviewsCards: fc.boolean(),
 });
 
 type ValueOf<A> = A extends fc.Arbitrary<infer T> ? T : never;
@@ -60,7 +72,13 @@ function makeItem({
 }
 
 /** Stub everything the summary reads, render it, and hand back the probes. */
-function renderSummary({ completed, skippedIds, skippedItems }: SummaryCase) {
+function renderSummary({
+  completed,
+  skippedIds,
+  skippedItems,
+  dueLaterToday,
+  reviewsCards,
+}: SummaryCase) {
   // Per property case, not per `it`: see the matching note in
   // ReviewItem.test.tsx.
   vi.restoreAllMocks();
@@ -72,9 +90,13 @@ function renderSummary({ completed, skippedIds, skippedItems }: SummaryCase) {
   );
   vi.spyOn(Store, 'getCompletedReviews').mockReturnValue(completed);
   vi.spyOn(Store, 'getSeenIds').mockReturnValue(seenIds);
+  vi.spyOn(Store, 'reviewsCards').mockReturnValue(reviewsCards);
   const useReviewItems = vi
     .spyOn(ReactQuery, 'useReviewItems')
     .mockReturnValue({ data: skippedItems?.map(makeItem) } as never);
+  vi.spyOn(ReactQuery, 'useCardsDueLaterToday').mockReturnValue({
+    data: dueLaterToday,
+  } as never);
   const detach = vi.fn();
   vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
     reviewView: { leaf: { detach } },
@@ -198,6 +220,28 @@ describe('ReviewSummary', () => {
         for (const [ids] of useReviewItems.mock.calls) {
           expect(ids).toEqual(Object.keys(seenIds));
         }
+      })
+    );
+  });
+
+  it('says how many cards come due later today once there are any, whether or not anything was reviewed', () => {
+    fc.assert(
+      fc.property(summaryArb, (c) => {
+        const { container } = renderSummary(c);
+
+        const line = container.querySelector('.ir-review-summary-due-later');
+        const count = c.dueLaterToday ?? 0;
+        // None, still counting, or a session that leaves cards out, where
+        // they would never come back
+        if (count === 0 || !c.reviewsCards) {
+          expect(line).toBeNull();
+          return;
+        }
+        expect(text(line)).toBe(
+          count === 1
+            ? '1 more card comes due later today.'
+            : `${count} more cards come due later today.`
+        );
       })
     );
   });

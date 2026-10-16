@@ -227,6 +227,31 @@ export class CardManager extends ItemManager {
     return due;
   }
 
+  /**
+   * How many cards {@link getDue} leaves out at `now` but will hand review
+   * before the review day `now` falls in is over: the Learning and Relearning
+   * cards due after `now` and before the day's end. New and Review cards due
+   * that day are due already, and an instant at the end itself belongs to the
+   * next day.
+   *
+   * Only cards review could show are counted: not dismissed or deleted, and at
+   * a note of their own.
+   *
+   * @param now The current time, as a Unix timestamp.
+   */
+  async countDueLaterToday(now = Date.now()): Promise<number> {
+    const offset = this.plugin.settings.dayRolloverOffset;
+    const endOfDay = getEndOfDay(offset, reviewDayOf(new Date(now), offset));
+    const rows = (await this.repo.query(
+      `SELECT * FROM srs_card
+       WHERE state IN (${State.Learning}, ${State.Relearning})
+         AND due > $1 AND due < $2
+         AND dismissed = 0 AND deleted = FALSE`,
+      [now, endOfDay]
+    )) as SRSCardRow[];
+    return rows.filter((row) => this.rowToReviewCard(row) !== null).length;
+  }
+
   async create(editor: Editor, view: MarkdownView | ReviewView) {
     const currentFile = view.file;
     if (!currentFile) {

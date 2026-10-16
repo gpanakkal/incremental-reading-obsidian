@@ -474,3 +474,20 @@ test.describe('Grade buttons, intervals off', () => {
     });
   }
 });
+
+test.describe('Review summary', () => {
+  test('says a card graded into a learning step comes due later today', async () => {
+    await reviewNewCard(window);
+    await window.getByRole('button', { name: 'Show answer' }).click();
+
+    // Forgot puts a new card on its first learning step, a minute out: back
+    // later today unless graded in the last minute before the day rolls over
+    await gradeAsWordOnly(window, 'Forgot');
+
+    await expect(
+      window
+        .locator('.ir-review-summary')
+        .getByText('1 more card comes due later today.')
+    ).toBeVisible();
+  });
+});

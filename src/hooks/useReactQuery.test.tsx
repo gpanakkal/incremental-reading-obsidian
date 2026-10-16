@@ -16,6 +16,7 @@ import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  useCardsDueLaterToday,
   useCurrentItem,
   useCurrentItemFileText,
   useQueue,
@@ -908,5 +909,68 @@ describe('useReviewItems', () => {
         expect(getReviewItemFromId.mock.calls).toEqual(ids.map((id) => [id]));
       })
     );
+  });
+});
+
+describe('useCardsDueLaterToday', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    optionsSeen = [];
+    vi.restoreAllMocks();
+  });
+
+  /** Render the hook against a database counting `count`; hand back its query. */
+  function buildQuery(count: number) {
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+    optionsSeen = [];
+    cache = new Map();
+
+    const countDueLaterToday = vi.fn(async () => count);
+    vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
+      reviewManager: { cards: { countDueLaterToday } },
+    } as never);
+
+    function Probe() {
+      useCardsDueLaterToday();
+      return null;
+    }
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(<Probe />, container);
+
+    const options = queryOptions('cards-due-later-today');
+    const run = options.queryFn as () => Promise<number>;
+    return { options, run, countDueLaterToday };
+  }
+
+  it('resolves to the count the card table gives for now', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.nat(), async (count) => {
+        const { options, run, countDueLaterToday } = buildQuery(count);
+
+        expect(options.queryKey).toEqual(['cards-due-later-today']);
+        expect(await run()).toBe(count);
+        // Left to default to the current time
+        expect(countDueLaterToday.mock.calls).toEqual([[]]);
+      })
+    );
+  });
+
+  // The option is the behavior here: react-query is mocked out in this file,
+  // and what a zero stale time does is react-query's own
+  it('asks react-query to count again each time the summary mounts', () => {
+    const { options } = buildQuery(0);
+
+    // The card just graded may be the one that changed the count
+    expect(options.staleTime).toBe(0);
+  });
+
+  it('keeps no count once the summary unmounts, so the next one never shows the last', () => {
+    const { options } = buildQuery(0);
+
+    // A kept count is served the instant the next summary mounts, before the
+    // recount settles: a card graduated since would still show as coming due
+    expect(options.gcTime).toBe(0);
   });
 });

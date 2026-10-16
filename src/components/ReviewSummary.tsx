@@ -1,6 +1,6 @@
 import { useAppSelector } from '#/hooks/useAppSelector';
-import { useReviewItems } from '#/hooks/useReactQuery';
-import { getCompletedReviews, getSeenIds } from '#/lib/store';
+import { useCardsDueLaterToday, useReviewItems } from '#/hooks/useReactQuery';
+import { getCompletedReviews, getSeenIds, reviewsCards } from '#/lib/store';
 import type { NoteType } from '#/lib/types';
 import { useReviewContext } from './ReviewContext';
 
@@ -23,12 +23,18 @@ const REVIEW_TYPES: ReadonlyArray<{ type: NoteType; label: string }> = [
  * Skipped items are listed by name, read back from the database: the store only
  * holds their ids. One deleted since it was skipped has nothing to name and is
  * left off.
+ *
+ * Cards in a learning step can come back before the review day is out, and the
+ * screen says how many will, whether or not this session reviewed any. Not in a
+ * session that leaves cards out, though: none would come back to it.
  */
 export function ReviewSummary() {
   const { reviewView } = useReviewContext();
   const completedReviews = useAppSelector(getCompletedReviews);
   const skippedIds = Object.keys(useAppSelector(getSeenIds));
   const { data: skippedItems = [] } = useReviewItems(skippedIds);
+  const { data: dueLaterToday = 0 } = useCardsDueLaterToday();
+  const showDueLater = useAppSelector(reviewsCards) && dueLaterToday > 0;
 
   const reviewTypes = Object.values(completedReviews);
   const hasActivity = reviewTypes.length > 0 || skippedIds.length > 0;
@@ -57,6 +63,13 @@ export function ReviewSummary() {
             })}
           </dl>
         </>
+      )}
+      {showDueLater && (
+        <p className="ir-review-summary-due-later">
+          {dueLaterToday === 1
+            ? '1 more card comes due later today.'
+            : `${dueLaterToday} more cards come due later today.`}
+        </p>
       )}
       {skippedItems.length > 0 && (
         <section className="ir-review-summary-skipped">

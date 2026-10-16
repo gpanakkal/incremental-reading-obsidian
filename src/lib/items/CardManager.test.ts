@@ -2047,6 +2047,206 @@ describe('getDue', () => {
   });
 });
 
+describe('countDueLaterToday', () => {
+  /** One database for every case: {@link countAt} empties it for each. */
+  let db: Database;
+
+  beforeAll(async () => {
+    db = await makeSchemaDb();
+  });
+
+  afterAll(() => {
+    db.close();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  // #region COUNT-DUE-LATER HELPERS
+
+  const MINUTE = 60 * 1000;
+  /** Noon, well inside its review day under a 4-hour rollover. */
+  const NOON = new Date(2026, 0, 15, 12).getTime();
+  /** The end of {@link NOON}'s review day under a 4-hour rollover. */
+  const END_OF_DAY = new Date(2026, 0, 16, 4).getTime();
+
+  /** What is at a card's reference: its own note, none, or another item's. */
+  type NoteAtReference = 'own' | 'missing' | 'claimed';
+
+  /**
+   * `countDueLaterToday` at `now`, with `rows` as the only cards in the
+   * database, the day rolling over at `offset` hours, and each card's note
+   * as `notes` has it (its own by default).
+   */
+  async function countAt(
+    rows: SRSCardRow[],
+    now: number | undefined,
+    {
+      offset = 4,
+      notes = {},
+    }: { offset?: number; notes?: Record<string, NoteAtReference> } = {}
+  ): Promise<number> {
+    // Per property case, not per `it`
+    vi.restoreAllMocks();
+    replaceCards(db, rows);
+    const noteOf = (path: string) =>
+      notes[/^cards\/(.*)\.md$/.exec(path)![1]] ?? 'own';
+    vi.spyOn(Obsidian, 'getNote').mockImplementation((reference) =>
+      noteOf(reference) === 'missing' ? null : noteAt(reference)
+    );
+    const plugin = makePlugin({
+      metadataCache: {
+        getFileCache: (file: TFile) =>
+          noteOf(file.path) === 'claimed'
+            ? { frontmatter: { 'ir-id': 'another-item', tags: [CARD_TAG] } }
+            : {},
+      },
+    }) as unknown as { settings: { dayRolloverOffset: number } };
+    plugin.settings.dayRolloverOffset = offset;
+    const manager = new CardManager(plugin as never, makeRealRepo(db));
+    return now === undefined
+      ? manager.countDueLaterToday()
+      : manager.countDueLaterToday(now);
+  }
+
+  /** A card in the property below, its due time relative to a cutoff. */
+  const cardSpecArb = fc.record({
+    id: fc.uuid(),
+    state: stateArb,
+    // Spread over the day either side, with the cutoffs themselves likely
+    due: fc.oneof(
+      fc.integer({ min: -MS_PER_DAY, max: 2 * MS_PER_DAY }),
+      fc.constantFrom(-1, 0, 1)
+    ),
+    dueFromEndOfDay: fc.boolean(),
+    dismissed: fc.boolean(),
+    deleted: fc.boolean(),
+    note: fc.constantFrom<NoteAtReference>('own', 'missing', 'claimed'),
+  });
+
+  // #endregion
+
+  it('counts exactly the live Learning and Relearning cards with a note of their own due after now and before the review day ends', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        // A review day, by its calendar date, and an instant inside it
+        fc.date({
+          min: new Date(2000, 0, 1),
+          max: new Date(2100, 0, 1),
+          noInvalidDate: true,
+        }),
+        fc.double({ min: 0, max: 1, maxExcluded: true, noNaN: true }),
+        fc.integer({
+          min: DAY_ROLLOVER_OFFSET_HOURS.MIN,
+          max: DAY_ROLLOVER_OFFSET_HOURS.MAX,
+        }),
+        fc.uniqueArray(cardSpecArb, {
+          selector: ({ id }) => id,
+          maxLength: 12,
+        }),
+        async (day, fraction, offset, specs) => {
+          const start = new Date(
+            day.getFullYear(),
+            day.getMonth(),
+            day.getDate(),
+            offset
+          ).getTime();
+          const end = new Date(
+            day.getFullYear(),
+            day.getMonth(),
+            day.getDate() + 1,
+            offset
+          ).getTime();
+          const now = start + Math.floor(fraction * (end - start));
+          const rows = specs.map((spec) =>
+            makeCardRow({
+              id: spec.id,
+              state: spec.state,
+              due: spec.dueFromEndOfDay ? end + spec.due : now + spec.due,
+              dismissed: spec.dismissed ? 1 : 0,
+              deleted: spec.deleted,
+            })
+          );
+          const notes = Object.fromEntries(
+            specs.map(({ id, note }) => [id, note])
+          );
+
+          const count = await countAt(rows, now, { offset, notes });
+
+          const learning = new Set<number>([State.Learning, State.Relearning]);
+          const expected = rows.filter(
+            (row) =>
+              learning.has(row.state) &&
+              now < row.due &&
+              row.due < end &&
+              !row.dismissed &&
+              !row.deleted &&
+              notes[row.id] === 'own'
+          ).length;
+          expect(count).toBe(expected);
+        }
+      )
+    );
+  });
+
+  it('counts a Learning card due a minute from now', async () => {
+    const count = await countAt(
+      [
+        makeCardRow({
+          id: 'learning',
+          state: State.Learning,
+          due: NOON + MINUTE,
+        }),
+      ],
+      NOON
+    );
+    expect(count).toBe(1);
+  });
+
+  it('leaves out a Learning card due as the review day ends, which is the next day’s', async () => {
+    const count = await countAt(
+      [makeCardRow({ id: 'next-day', state: State.Learning, due: END_OF_DAY })],
+      NOON
+    );
+    expect(count).toBe(0);
+  });
+
+  it('counts a Learning card due before the rollover in the small hours as today’s', async () => {
+    const twoAm = new Date(2026, 0, 16, 2).getTime();
+    const count = await countAt(
+      [
+        makeCardRow({
+          id: 'before-rollover',
+          state: State.Learning,
+          due: twoAm + MINUTE,
+        }),
+        makeCardRow({
+          id: 'after-rollover',
+          state: State.Learning,
+          due: END_OF_DAY + MINUTE,
+        }),
+      ],
+      twoAm
+    );
+    expect(count).toBe(1);
+  });
+
+  it('counts from the current time when no time is given', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOON);
+    const count = await countAt(
+      [
+        makeCardRow({ id: 'past', state: State.Learning, due: NOON - MINUTE }),
+        makeCardRow({ id: 'later', state: State.Learning, due: NOON + MINUTE }),
+      ],
+      undefined
+    );
+    expect(count).toBe(1);
+  });
+});
+
 describe('getFsrs — what getDue relies on', () => {
   // #region SCHEDULING HELPERS
 
