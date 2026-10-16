@@ -634,7 +634,8 @@ body.show-view-header
    more room than Obsidian's own button bars: the find panel
    (`.document-search-container`) pads `var(--size-4-2)` above and below its
    buttons and sits `var(--size-4-4)` in from the sides. The review bar keeps
-   the roomier box above. */
+   the roomier box above. Both of these heights hold on mobile only: on desktop
+   the rule below sizes every bar to the view header. */
 .ir-action-bar.ir-action-bar-panel {
   align-items: center;
   min-height: 0;
@@ -646,6 +647,44 @@ body.show-view-header
    and below is left out, to keep the bar compact. */
 .is-mobile .ir-action-bar.ir-action-bar-panel {
   padding-inline: var(--size-4-3);
+}
+
+/* On desktop every bar stands as tall as Obsidian's own view header, its
+   controls centred in it.
+
+   The header asks for `var(--header-height)` (40px in 1.13.7) but never gets
+   it: `.workspace-tabs .workspace-leaf .view-content { height: 100% }` leaves
+   the view content claiming the whole leaf, so the two overflow the leaf by the
+   header's height and flex shrinks the header by its share of that, about
+   2px in any ordinary window (37.6px in a 700px window, 38.5px in a 1080px
+   one). The bar takes the 38px it is drawn at there; a short leaf in a split
+   shrinks the header a little further (about 35px at 300px), and the bar stays.
+
+   Each control is at most `--input-height` tall (30px), so that holds them
+   with room to spare, and the bar still grows should a theme make them taller.
+
+   Mobile is left as it was: Obsidian sizes its own mobile header from the
+   touch tokens instead, and the bars there are sized for touch to match. */
+body:not(.is-mobile) .ir-action-bar {
+  align-items: center;
+  min-height: calc(var(--header-height) - var(--size-2-1));
+  padding-block: 0;
+}
+
+/* The review bar comes in from the sides as far as the header does, which
+   puts its stand-ins for the header's buttons where the header would. */
+body:not(.is-mobile) .ir-review-interface > .ir-action-bar {
+  padding-inline: var(--size-4-3);
+}
+
+/* Centred zones, too, so each icon takes its natural height (26px), as on the
+   note bars and near the view header's own, rather than stretching to the
+   tallest control in its zone: 30px beside the priority field, and whatever
+   the zone happens to hold elsewhere. */
+body:not(.is-mobile) .ir-bar-lead,
+body:not(.is-mobile) .ir-bar-center,
+body:not(.is-mobile) .ir-bar-trail {
+  align-items: center;
 }
 
 /* A disabled icon in a note's bar — the loader, while the item's lookup runs —
@@ -1019,6 +1058,15 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
   background: var(--background-secondary);
 }
 
+/* In line with the review bar above it on desktop, which comes in as far as
+   the view header does. The 38px bar leaves only 4px under its 30px controls
+   there, so the row adds the rest above the grades, to match the 10px below
+   them. */
+body:not(.is-mobile) .ir-grade-row {
+  padding-top: var(--size-2-3);
+  padding-inline: var(--size-4-3);
+}
+
 .ir-grade-row > .ir-grade-group {
   flex: 1 1 0;
   min-width: 0;
@@ -1089,9 +1137,10 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
   --icon-stroke: var(--icon-s-stroke-width);
   display: flex;
   align-items: center;
-  /* The bar sets no `align-items`, so a bare flex item stretches to its full
-     height; the priority box handles this on its own wrapper. Centering keeps
-     the filter level with the taller icon buttons on mobile. */
+  /* On mobile its zone (`.ir-bar-lead`) sets no `align-items`, so a bare flex
+     item stretches to its full height; the priority box handles this on its
+     own wrapper. Centering keeps the filter level with the taller icon buttons
+     there. */
   align-self: center;
   flex-shrink: 0;
   gap: var(--size-2-1);
@@ -1186,11 +1235,11 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
   text-align: center;
 }
 
-/* Bare divs wrapping the label. They are flex items of the bar, which sets no
-   `align-items` and so stretches them to its full height, while the label
-   inside is only as tall as its content and parks at the top of that stretched
-   box. Desktop hides this, the bar being about as tall as the label; mobile's
-   taller icon buttons open a visible gap. */
+/* Bare divs wrapping the label. They are flex items of the bar's middle zone
+   (`.ir-bar-center`), which on mobile sets no `align-items` and so stretches
+   them to its full height, while the label inside is only as tall as its
+   content and parks at the top of that stretched box, below mobile's taller
+   icon buttons. Desktop centres its zones, which hides this. */
 .ir-priority-container,
 .ir-fixed-interval-container {
   display: flex;

@@ -310,8 +310,8 @@ export function reviewTitle(window: Page, title: string) {
  * Assert that a note's action bar — the editing panel, reading mode's or a PDF
  * tab's — is the compact icon row: every button an Obsidian icon the size of
  * Obsidian's own, named by the `aria-label` its tooltip reads (on the button,
- * never the icon) with no `title`, and the bar padded like Obsidian's find
- * panel, `var(--size-4-2)` above and below, with no height beyond that.
+ * never the icon) with no `title`, and the bar on desktop as tall as its
+ * tab's view header, as the header is drawn, every button level in it.
  *
  * Waits for the dismiss toggle to settle first, since it shows a loader until
  * the item's lookup lands.
@@ -340,15 +340,18 @@ export async function expectCompactIconBar(bar: Locator) {
       probe.remove();
       return width;
     };
-    const step = resolve(el.ownerDocument.body, '--size-4-2');
-    const style = getComputedStyle(el);
+    const header =
+      el
+        .closest('.workspace-leaf-content')
+        ?.querySelector(':scope > .view-header')
+        ?.getBoundingClientRect().height ?? 0;
+    const bar = el.getBoundingClientRect();
     return {
-      step,
-      paddingTop: px(style.paddingTop),
-      paddingBottom: px(style.paddingBottom),
-      height: el.getBoundingClientRect().height,
+      header,
+      height: bar.height,
       buttons: [...el.querySelectorAll('button')].map((button) => {
         const svg = button.querySelector(':scope > svg.svg-icon');
+        const box = button.getBoundingClientRect();
         return {
           label: button.getAttribute('aria-label'),
           hasTitle: button.hasAttribute('title'),
@@ -356,7 +359,8 @@ export async function expectCompactIconBar(bar: Locator) {
           iconLabelled: svg?.hasAttribute('aria-label') ?? null,
           iconWidth: svg?.getBoundingClientRect().width ?? null,
           iconSize: svg ? resolve(button, '--icon-size') : null,
-          height: button.getBoundingClientRect().height,
+          // How much more room the bar leaves above it than below
+          offCentre: box.top - bar.top - (bar.bottom - box.bottom),
         };
       }),
     };
@@ -375,13 +379,11 @@ export async function expectCompactIconBar(bar: Locator) {
     expect(button.iconSize).toBeGreaterThan(0);
     expect(button.iconWidth).toBeCloseTo(button.iconSize!, 0);
   }
-  expect(measured.step).toBeGreaterThan(0);
-  expect(measured.paddingTop).toBe(measured.step);
-  expect(measured.paddingBottom).toBe(measured.step);
-  const tallest = Math.max(...measured.buttons.map((b) => b.height));
-  expect(measured.height).toBeLessThanOrEqual(tallest + 2 * measured.step + 1);
-  // The bar this replaced was at least 50px tall
-  expect(measured.height).toBeLessThan(50);
+  expect(measured.header).toBeGreaterThan(0);
+  expect(Math.abs(measured.height - measured.header)).toBeLessThanOrEqual(2);
+  for (const button of measured.buttons) {
+    expect(Math.abs(button.offCentre)).toBeLessThanOrEqual(1);
+  }
 }
 
 /**
