@@ -84,8 +84,8 @@ test('success notice levels hide confirmations inside review and keep undo and i
           .getByText(name, { exact: true }),
       })
       .getByRole('combobox');
-  const inside = dropdown('Success notices inside review');
-  const outside = dropdown('Success notices outside review');
+  const inside = dropdown('Inside review');
+  const outside = dropdown('Outside review');
   await expect(inside).toHaveValue('all');
   await expect(outside).toHaveValue('all');
 

@@ -3,7 +3,10 @@ import {
   Platform,
   PluginSettingTab,
   type App,
+  type SettingDefinitionControl,
+  type SettingDefinitionGroup,
   type SettingDefinitionItem,
+  type SettingGroupItem,
 } from 'obsidian';
 import {
   generatorParameters,
@@ -242,6 +245,83 @@ const validateSteps = (value: string) =>
 /** Marks this plugin's settings tab for the rules in styles.css. */
 export const SETTINGS_TAB_CLASS = 'ir-settings-tab';
 
+/** Marks a group drawn as a box: its first row heads the indented rest. */
+export const SETTING_BOX_CLASS = 'ir-setting-box';
+
+/** Marks a group that continues the section of the one before it. */
+export const CONTINUED_GROUP_CLASS = 'ir-setting-group-continued';
+
+/**
+ * One setting whose controls sit on their own rows beneath its name and
+ * description, drawn as one box. For a setting with several scopes, like
+ * inside and outside review: the description is said once, and each row is
+ * named for its scope alone.
+ */
+export interface SettingBox<K extends string = string> {
+  type: 'box';
+  name: string;
+  desc: string;
+  items: SettingDefinitionControl<K>[];
+}
+
+/** A group of settings as this tab declares it: Obsidian's, plus boxes. */
+export interface SettingGroupLayout<K extends string = string> {
+  type: 'group';
+  heading?: string;
+  items: (SettingGroupItem<K> | SettingBox<K>)[];
+}
+
+const isSettingBox = <K extends string>(
+  item: SettingGroupItem<K> | SettingBox<K>
+): item is SettingBox<K> => 'type' in item && item.type === 'box';
+
+/**
+ * Obsidian's groups for each declared group, with every box in a group of its
+ * own.
+ *
+ * Obsidian (1.13) has no setting with sub-rows: a group's items render as flat
+ * rows, it drops a group nested among them, and a row can't carry a class. Only
+ * a group can (`cls`), so a box becomes its own group, whose rows stay
+ * declarative controls Obsidian binds itself; styles.css draws it as one block.
+ * The rows either side of a box form groups of their own, marked as continuing
+ * the section so they sit with it, and the heading goes over the first. A run
+ * with no rows makes no group.
+ */
+export function layOutGroups<K extends string>(
+  layouts: SettingGroupLayout<K>[]
+): SettingDefinitionGroup<K>[] {
+  return layouts.flatMap(({ heading, items }) => {
+    const groups: SettingDefinitionGroup<K>[] = [];
+    let rows: SettingGroupItem<K>[] = [];
+    const endRun = () => {
+      if (rows.length > 0) groups.push({ type: 'group', items: rows });
+      rows = [];
+    };
+    for (const item of items) {
+      if (!isSettingBox(item)) {
+        rows.push(item);
+        continue;
+      }
+      endRun();
+      groups.push({
+        type: 'group',
+        cls: SETTING_BOX_CLASS,
+        items: [{ name: item.name, desc: item.desc }, ...item.items],
+      });
+    }
+    endRun();
+
+    return groups.map((group, index) =>
+      index === 0
+        ? { ...group, heading }
+        : {
+            ...group,
+            cls: [group.cls, CONTINUED_GROUP_CLASS].filter(Boolean).join(' '),
+          }
+    );
+  });
+}
+
 /**
  * The plugin's settings tab, described declaratively by
  * {@link getSettingDefinitions}. Obsidian (1.13.1+, which `minAppVersion` covers) renders
@@ -268,7 +348,7 @@ export class IRSettingTab extends PluginSettingTab {
     // says to call `update()`; read from `getControlBinding` in obsidian.asar
     // (1.13.7).
     const remindersOff = () => !this.plugin.settings.reviewReminders;
-    return [
+    return layOutGroups<ControlKey>([
       {
         type: 'group',
         heading: 'Imports',
@@ -311,26 +391,30 @@ export class IRSettingTab extends PluginSettingTab {
         heading: 'Notifications and reminders',
         items: [
           {
-            name: 'Success notices inside review',
+            type: 'box',
+            name: 'Success notices',
             desc:
-              'Which confirmations to show for actions taken in the review tab.' +
-              ' Minimal shows only undos and imports. Errors always show.',
-            control: {
-              type: 'dropdown',
-              key: 'successNoticesInReview',
-              options: SUCCESS_NOTICE_LEVEL_OPTIONS,
-            },
-          },
-          {
-            name: 'Success notices outside review',
-            desc:
-              'Which confirmations to show for actions taken anywhere else.' +
-              ' Minimal shows only undos and imports. Errors always show.',
-            control: {
-              type: 'dropdown',
-              key: 'successNoticesOutsideReview',
-              options: SUCCESS_NOTICE_LEVEL_OPTIONS,
-            },
+              'Which confirmations to show for successful actions.' +
+              ' Minimal shows only undos and imports' +
+              ' Error notices are always shown.',
+            items: [
+              {
+                name: 'Inside review',
+                control: {
+                  type: 'dropdown',
+                  key: 'successNoticesInReview',
+                  options: SUCCESS_NOTICE_LEVEL_OPTIONS,
+                },
+              },
+              {
+                name: 'Outside review',
+                control: {
+                  type: 'dropdown',
+                  key: 'successNoticesOutsideReview',
+                  options: SUCCESS_NOTICE_LEVEL_OPTIONS,
+                },
+              },
+            ],
           },
           {
             name: 'Show review reminders in status bar',
@@ -484,7 +568,7 @@ export class IRSettingTab extends PluginSettingTab {
           },
         ],
       },
-    ];
+    ]);
   }
 
   getControlValue(key: string): unknown {

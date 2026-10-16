@@ -2692,6 +2692,31 @@ input.ir-queue-page-input {
   white-space: nowrap;
 }
 
+/* A box (`SettingBox` in settings.ts): one setting's name and description
+   over rows that each hold one of its controls. Obsidian draws the group as a
+   bordered block already; indent the rows under the first, start their
+   dividers at the indent, and drop the divider under the name, so the rows read
+   as parts of that one setting. Obsidian's padding tokens keep this right for
+   the wider mobile padding and the stacked phone rows. */
+.ir-settings-tab .ir-setting-box .setting-item:not(:first-child) {
+  padding-inline-start: calc(var(--setting-items-padding-x) + var(--size-4-6));
+}
+
+.ir-settings-tab .ir-setting-box .setting-item:not(:first-child)::before {
+  inset-inline-start: calc(var(--setting-items-padding-x) + var(--size-4-6));
+}
+
+.ir-settings-tab .ir-setting-box .setting-item:nth-child(2)::before {
+  content: none;
+}
+
+/* A group that continues the section above it, either side of a box
+   (`layOutGroups` in settings.ts). Obsidian spaces each group from the last
+   as a new section; halve that so the section still reads as one. */
+.ir-settings-tab .setting-group.ir-setting-group-continued {
+  margin-top: var(--size-4-3);
+}
+
 /* #endregion */
 
 /* #region Notice actions */

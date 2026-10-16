@@ -20,16 +20,21 @@ import {
 } from './constants';
 import type { IRPluginData } from './plugin-data';
 import {
+  CONTINUED_GROUP_CLASS,
   DEFAULT_SETTINGS,
   formatPriority,
   formatRetention,
   formatRolloverHour,
   IRSettingTab,
+  layOutGroups,
   parseSteps,
   REVIEW_TITLE_BAR_OPTIONS,
+  SETTING_BOX_CLASS,
   SETTINGS_TAB_CLASS,
   SUCCESS_NOTICE_LEVEL_OPTIONS,
   type IRPluginSettings,
+  type SettingBox,
+  type SettingGroupLayout,
 } from './settings';
 
 // #region HELPERS
@@ -41,6 +46,12 @@ const REVIEW_TITLE_BARS = ['obsidian', 'show', 'hide'] as const;
 
 /** Each success notice level, as stored. */
 const SUCCESS_NOTICE_LEVELS = ['all', 'minimal', 'none'] as const;
+
+/** What the success notices box says, once, above its two dropdowns. */
+const SUCCESS_NOTICES_DESC =
+  'Which confirmations to show for actions taken in the review tab and anywhere else.' +
+  ' All shows every one, Minimal shows only undos and imports, and None shows none.' +
+  ' Errors always show.';
 
 /** Any text at all, not just the printable ASCII `fc.string()` defaults to. */
 const textArb = (constraints: fc.StringConstraints = {}) =>
@@ -167,27 +178,35 @@ function makeTab(settings: IRPluginSettings) {
   return { tab, plugin, saved, events };
 }
 
-type ControlDefinition = {
+type RowDefinition = {
   heading: string;
   name: string;
   desc?: string | DocumentFragment;
-  control: DeclaredControl;
+  control?: DeclaredControl;
 };
 
-/** Each control definition, under its group's heading. Fails on anything else. */
-function declaredRows(items: SettingDefinitionItem[]): ControlDefinition[] {
+type ControlDefinition = RowDefinition & { control: DeclaredControl };
+
+/**
+ * Each row, under the heading it shows beneath: a group with no heading of its
+ * own continues the section above it. A row is a control or a bare name and
+ * description; fails on anything else.
+ */
+function declaredSettingRows(items: SettingDefinitionItem[]): RowDefinition[] {
+  let heading = '';
   return items.flatMap((item) => {
     if (!('type' in item) || item.type !== 'group') {
       throw new Error(`Expected a group, got ${JSON.stringify(item)}`);
     }
+    heading = item.heading ?? heading;
     return (item.items ?? []).map((definition) => {
-      if (!('control' in definition) || !definition.control) {
+      if ('type' in definition || definition.render || definition.action) {
         throw new Error(
-          `Expected a control, got ${JSON.stringify(definition)}`
+          `Expected a control or a bare row, got ${JSON.stringify(definition)}`
         );
       }
       return {
-        heading: item.heading ?? '',
+        heading,
         name: definition.name,
         desc: definition.desc,
         control: definition.control,
@@ -195,6 +214,12 @@ function declaredRows(items: SettingDefinitionItem[]): ControlDefinition[] {
     });
   });
 }
+
+/** Each control definition, under the heading it shows beneath. */
+const declaredRows = (items: SettingDefinitionItem[]): ControlDefinition[] =>
+  declaredSettingRows(items).filter(
+    (row): row is ControlDefinition => row.control !== undefined
+  );
 
 /**
  * The declarative tab's controls, which don't depend on the settings' values.
@@ -263,6 +288,56 @@ const unboundKeyArb = fc
   .filter(
     (key) => !declaredControls().some(({ control }) => control.key === key)
   );
+
+/** Any row a group can hold that isn't a box: a control, a bare row, a page. */
+const groupRowArb = fc.oneof(
+  fc.record({
+    name: textArb(),
+    control: fc.record({
+      type: fc.constant('toggle' as const),
+      key: textArb(),
+    }),
+  }),
+  fc.record({ name: textArb(), desc: textArb() }),
+  fc.record({ type: fc.constant('page' as const), name: textArb() })
+);
+
+/** Any box, including one with no rows of its own. */
+const boxArb: fc.Arbitrary<SettingBox> = fc.record({
+  type: fc.constant('box' as const),
+  name: textArb(),
+  desc: textArb(),
+  items: fc.array(
+    fc.record({
+      name: textArb(),
+      control: fc.record({
+        type: fc.constant('toggle' as const),
+        key: textArb(),
+      }),
+    }),
+    { maxLength: 3 }
+  ),
+});
+
+/** Any group as the tab declares it: rows and boxes in any order, any heading. */
+const groupLayoutArb: fc.Arbitrary<SettingGroupLayout> = fc.record({
+  type: fc.constant('group' as const),
+  heading: fc.option(textArb(), { nil: undefined }),
+  items: fc.array(fc.oneof(groupRowArb, boxArb), { maxLength: 8 }),
+});
+
+const isBox = (item: SettingGroupLayout['items'][number]): item is SettingBox =>
+  'type' in item && item.type === 'box';
+
+/** The rows a box shows: its name and description, then its own rows. */
+const boxRows = (box: SettingBox) => [
+  { name: box.name, desc: box.desc },
+  ...box.items,
+];
+
+/** The classes Obsidian adds to a group's element, from its `cls`. */
+const classesOf = (group: SettingDefinitionItem) =>
+  ('cls' in group ? (group.cls ?? '') : '').split(' ').filter(Boolean);
 
 // #endregion
 
@@ -792,7 +867,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     const disabled = expect.any(Function) as unknown;
     const toggle = (key: string) => ({ type: 'toggle', key });
 
-    expect(declaredRows(tab.getSettingDefinitions())).toEqual([
+    expect(declaredSettingRows(tab.getSettingDefinitions())).toEqual([
       {
         heading: 'Imports',
         name: 'Default article priority',
@@ -827,8 +902,12 @@ describe('IRSettingTab.getSettingDefinitions', () => {
       },
       {
         heading: 'Notifications and reminders',
-        name: 'Success notices inside review',
-        desc: 'Which confirmations to show for actions taken in the review tab. Minimal shows only undos and imports. Errors always show.',
+        name: 'Success notices',
+        desc: SUCCESS_NOTICES_DESC,
+      },
+      {
+        heading: 'Notifications and reminders',
+        name: 'Inside review',
         control: {
           type: 'dropdown',
           key: 'successNoticesInReview',
@@ -841,8 +920,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
       },
       {
         heading: 'Notifications and reminders',
-        name: 'Success notices outside review',
-        desc: 'Which confirmations to show for actions taken anywhere else. Minimal shows only undos and imports. Errors always show.',
+        name: 'Outside review',
         control: {
           type: 'dropdown',
           key: 'successNoticesOutsideReview',
@@ -855,20 +933,18 @@ describe('IRSettingTab.getSettingDefinitions', () => {
       },
       {
         heading: 'Notifications and reminders',
-        name: 'Show review reminders',
-        desc: 'Show "Ready for review" in the status bar while anything is due. Desktop only.',
+        name: 'Show review reminders in status bar',
+        desc: 'Desktop only.',
         control: toggle('reviewReminders'),
       },
       {
         heading: 'Notifications and reminders',
         name: 'Remind for due articles',
-        desc: 'Count due articles toward review reminders. Due cards always count.',
         control: { ...toggle('remindDueArticles'), disabled },
       },
       {
         heading: 'Notifications and reminders',
         name: 'Remind for due snippets',
-        desc: 'Count due snippets toward review reminders. Due cards always count.',
         control: { ...toggle('remindDueSnippets'), disabled },
       },
       {
@@ -1020,6 +1096,69 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     );
   });
 
+  it('draws the success notices as one box: their description once, then a dropdown for each place', () => {
+    const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
+    const boxes = tab
+      .getSettingDefinitions()
+      .filter((item) => classesOf(item).includes(SETTING_BOX_CLASS));
+
+    expect(boxes).toEqual([
+      {
+        type: 'group',
+        heading: 'Notifications and reminders',
+        cls: SETTING_BOX_CLASS,
+        items: [
+          { name: 'Success notices', desc: SUCCESS_NOTICES_DESC },
+          {
+            name: 'Inside review',
+            control: {
+              type: 'dropdown',
+              key: 'successNoticesInReview',
+              options: SUCCESS_NOTICE_LEVEL_OPTIONS,
+            },
+          },
+          {
+            name: 'Outside review',
+            control: {
+              type: 'dropdown',
+              key: 'successNoticesOutsideReview',
+              options: SUCCESS_NOTICE_LEVEL_OPTIONS,
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("saves the level picked on each line of the success notices box under that line's own key", async () => {
+    const lines = declaredControls().filter(({ name }) =>
+      ['Inside review', 'Outside review'].includes(name)
+    );
+
+    expect(lines.map(({ name, control }) => [name, control.key])).toEqual([
+      ['Inside review', 'successNoticesInReview'],
+      ['Outside review', 'successNoticesOutsideReview'],
+    ]);
+    await fc.assert(
+      fc.asyncProperty(
+        settingsArb,
+        fc.constantFrom(...lines),
+        fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
+        async (generated, { control }, level) => {
+          const settings = buildSettings(generated);
+          const after = { ...structuredClone(settings), [control.key]: level };
+          const { tab, saved } = makeTab(settings);
+
+          await tab.setControlValue(control.key, level);
+
+          expect(tab.getControlValue(control.key)).toBe(level);
+          expect(settings).toEqual(after);
+          expect(saved.map((data) => data.settings)).toEqual([after]);
+        }
+      )
+    );
+  });
+
   it('shows each slider value in the units its description uses', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
     const sliders = declaredRows(tab.getSettingDefinitions())
@@ -1116,9 +1255,87 @@ describe('IRSettingTab.getSettingDefinitions', () => {
   });
 });
 
+describe('layOutGroups', () => {
+  it("keeps every row in order, with each box's name and description heading its own rows", () => {
+    fc.assert(
+      fc.property(groupLayoutArb, (layout) => {
+        const groups = layOutGroups([layout]);
+
+        expect(groups.flatMap((group) => group.items ?? [])).toEqual(
+          layout.items.flatMap((item) => (isBox(item) ? boxRows(item) : [item]))
+        );
+      })
+    );
+  });
+
+  it('puts each box in a group of its own, and each run of rows between boxes in one group', () => {
+    fc.assert(
+      fc.property(groupLayoutArb, (layout) => {
+        const groups = layOutGroups([layout]);
+        const boxed = groups.filter((group) =>
+          classesOf(group).includes(SETTING_BOX_CLASS)
+        );
+        const plain = groups.filter(
+          (group) => !classesOf(group).includes(SETTING_BOX_CLASS)
+        );
+        const runs = layout.items.filter(
+          (item, index) =>
+            !isBox(item) && (index === 0 || isBox(layout.items[index - 1]))
+        );
+
+        expect(groups.every((group) => group.type === 'group')).toBe(true);
+        expect(boxed.map((group) => group.items)).toEqual(
+          layout.items.filter(isBox).map(boxRows)
+        );
+        expect(plain).toHaveLength(runs.length);
+        expect(plain.every((group) => (group.items ?? []).length > 0)).toBe(
+          true
+        );
+      })
+    );
+  });
+
+  it('shows the heading once, over the first group, and marks each later group as continuing its section', () => {
+    fc.assert(
+      fc.property(groupLayoutArb, (layout) => {
+        const [first, ...rest] = layOutGroups([layout]);
+
+        if (first) {
+          expect(first.heading).toBe(layout.heading);
+          expect(classesOf(first)).not.toContain(CONTINUED_GROUP_CLASS);
+        }
+        for (const group of rest) {
+          expect(group.heading).toBeUndefined();
+          expect(classesOf(group)).toContain(CONTINUED_GROUP_CLASS);
+        }
+        for (const group of [first, ...rest].filter(Boolean)) {
+          expect(
+            classesOf(group).every((cls) =>
+              [SETTING_BOX_CLASS, CONTINUED_GROUP_CLASS].includes(cls)
+            )
+          ).toBe(true);
+          if (group.cls !== undefined) {
+            expect(group.cls).toBe(classesOf(group).join(' '));
+          }
+        }
+      })
+    );
+  });
+
+  it('lays out each group on its own, in order', () => {
+    fc.assert(
+      fc.property(fc.array(groupLayoutArb, { maxLength: 4 }), (layouts) => {
+        expect(layOutGroups(layouts)).toEqual(
+          layouts.flatMap((layout) => layOutGroups([layout]))
+        );
+      })
+    );
+  });
+});
+
 describe('IRSettingTab container', () => {
   /** Selectors of the styles.css rules that react to Obsidian's `is-invalid`. */
-  const invalidRowSelectors = () =>
+  const selectorsWith = (needle: string) =>
     [
       ...readFileSync(resolve(process.cwd(), 'styles.css'), 'utf8')
         .replace(/\/\*[\s\S]*?\*\//g, '')
@@ -1126,12 +1343,24 @@ describe('IRSettingTab container', () => {
     ]
       .flatMap(([, selectors]) => selectors.split(/,(?![^(]*\))/))
       .map((selector) => selector.replace(/\s+/g, ' ').trim())
-      .filter((selector) => selector.includes('.is-invalid'));
+      .filter((selector) => selector.includes(needle));
+  const invalidRowSelectors = () => selectorsWith('.is-invalid');
 
   it('carries the class that scopes styles.css to this tab', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
 
     expect(tab.containerEl.classList.contains(SETTINGS_TAB_CLASS)).toBe(true);
+  });
+
+  it('is what the styles.css rules for boxes and continued groups are scoped to', () => {
+    for (const cls of [SETTING_BOX_CLASS, CONTINUED_GROUP_CLASS]) {
+      const selectors = selectorsWith(`.${cls}`);
+
+      expect(selectors.length).toBeGreaterThan(0);
+      for (const selector of selectors) {
+        expect(selector.startsWith(`.${SETTINGS_TAB_CLASS} `)).toBe(true);
+      }
+    }
   });
 
   it('is what every styles.css rule for invalid rows is scoped to', () => {

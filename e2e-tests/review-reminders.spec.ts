@@ -102,7 +102,7 @@ test('reminder settings hide it for due articles, and lock the type toggles whil
         .getByText(name, { exact: true }),
     });
   const toggle = (name: string) => row(name).locator('.checkbox-container');
-  const reminders = toggle('Show review reminders');
+  const reminders = toggle('Show review reminders in status bar');
   const articles = toggle('Remind for due articles');
   const snippets = toggle('Remind for due snippets');
   for (const each of [reminders, articles, snippets]) {
