@@ -31,7 +31,7 @@ import {
   type ReviewPage,
   type SelectionKind,
 } from '#/lib/store';
-import type { ReviewItem } from '#/lib/types';
+import { NOTE_TYPES, type NoteType, type ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 // The mock is what `obsidian` resolves to at runtime (see vitest.config.ts), so
 // importing it by path is the same module — but with the stub's own surface
@@ -273,11 +273,14 @@ function makeMountedEditor(sourceMode = false) {
 function makeMenuReceiver({
   page = 'review',
   file = makeFile('Chapter 1'),
+  type = 'article',
   editor = null,
   sourceMode = false,
 }: {
   page?: ReviewPage;
   file?: TFile | null;
+  /** The type of the item `file` belongs to. */
+  type?: NoteType;
   /** The mounted review editor, or `null` for a page that has none. */
   editor?: ReturnType<typeof makeMountedEditor> | null;
   /** The mode the tab is already in, as the constructor would have left it. */
@@ -288,6 +291,7 @@ function makeMenuReceiver({
   const leaf = { id: 'review-leaf' };
   const receiver = {
     file,
+    fileType: type,
     leaf,
     activeEditor: editor,
     sourceMode,
@@ -509,12 +513,15 @@ function makeHistoryLeaf() {
  */
 async function openHistoryView({
   file = null,
+  initialItem = null,
   resume = async () => {},
   mobileNavbar = { onLeafChange: vi.fn() },
   itemExists = true,
   items = new Map(),
 }: {
   file?: TFile | null;
+  /** The item the tab was asked to open on, as `learn` hands it one. */
+  initialItem?: ReviewItem | null;
   /** Stands in for the page and item a mounting tab settles on. */
   resume?: () => Promise<void>;
   mobileNavbar?: { onLeafChange: () => void } | null;
@@ -563,6 +570,7 @@ async function openHistoryView({
   Object.assign(view, {
     leaf,
     file,
+    initialItem,
     contentEl: document.createElement('div'),
     titleEl: document.createElement('div'),
     app: {
@@ -626,11 +634,14 @@ function renamedPath(file: TFile, name: string): string {
 function makeRenameView({
   page = 'review',
   file = makeItemFile('Chapter 1', 'Articles'),
+  type = 'article',
   isMobileApp = false,
   renameFile = vi.fn(async (_file: TFile, _path: string) => {}),
 }: {
   page?: ReviewPage;
   file?: TFile | null;
+  /** The type of the item `file` belongs to. */
+  type?: NoteType;
   isMobileApp?: boolean;
   renameFile?: (file: TFile, path: string) => Promise<void>;
 } = {}) {
@@ -642,7 +653,6 @@ function makeRenameView({
   };
   document.body.appendChild(titleEl);
   Object.assign(view, {
-    file,
     titleEl,
     titleParentEl: { empty: vi.fn() },
     renderBreadcrumbs: vi.fn(),
@@ -655,12 +665,47 @@ function makeRenameView({
   const previous = Platform.isMobileApp;
   Platform.isMobileApp = isMobileApp;
   try {
-    view.setTitle();
+    view.setFile(file, file && type);
     view.wireTitleRename();
   } finally {
     Platform.isMobileApp = previous;
   }
   return { view, store, titleEl, renameFile };
+}
+
+/**
+ * Give a {@link makeRenameView} view a real breadcrumb element, drawn the way
+ * Obsidian's `FileView.renderBreadcrumbs` draws it: one segment per folder of
+ * `file.parent.path`, each followed by a `/`, nothing for the vault root.
+ * `empty` is Obsidian's DOM extension, which jsdom lacks.
+ *
+ * @returns the breadcrumb element, whose text is what the header shows
+ */
+function drawBreadcrumbs(view: ReviewView): HTMLElement {
+  const titleParentEl = document.createElement('div');
+  titleParentEl.empty = () => titleParentEl.replaceChildren();
+  Object.assign(view, {
+    titleParentEl,
+    renderBreadcrumbs(this: ReviewView) {
+      this.titleParentEl.empty();
+      const folder = this.file?.parent?.path;
+      if (!folder || folder === '/') return;
+      for (const segment of folder.split('/')) {
+        titleParentEl.append(segment, '/');
+      }
+    },
+  });
+  return titleParentEl;
+}
+
+/**
+ * The breadcrumb {@link drawBreadcrumbs} shows over `file` as review's article
+ * or snippet: none for a file with an empty basename, which counts as no item.
+ */
+function breadcrumbsOf(file: TFile): string {
+  const folder = file.parent?.path;
+  if (file.basename === '' || !folder || folder === '/') return '';
+  return `${folder}/`;
 }
 
 /**
@@ -1244,6 +1289,36 @@ describe('ReviewView.getDisplayText', () => {
     );
   });
 
+  it('hides a card behind the plugin name, on every page', () => {
+    // A card note's basename is the start of its text, so naming the tab after
+    // it shows the question, or the answer, before the card is read.
+    fc.assert(
+      fc.property(pageArb, fc.string(), (page, basename) => {
+        const view = asView(makeTitleReceiver(page, null));
+
+        view.setFile(makeFile(basename), 'card');
+
+        expect(view.getDisplayText()).toBe(REVIEW_VIEW_DEFAULT_TITLE);
+      })
+    );
+  });
+
+  it('titles the tab after an article or a snippet as before', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom<NoteType[]>('article', 'snippet'),
+        fc.string({ minLength: 1 }),
+        (type, basename) => {
+          const view = asView(makeTitleReceiver('review', null));
+
+          view.setFile(makeFile(basename), type);
+
+          expect(view.getDisplayText()).toBe(basename);
+        }
+      )
+    );
+  });
+
   it('names the plugin the way the rest of the UI does', () => {
     // Pinned to the literal, not the constant: the user-visible defect is a tab
     // and a taskbar entry reading anything other than this.
@@ -1420,10 +1495,10 @@ describe('ReviewView.setTitle', () => {
     asView(receiver).setTitle();
     expect(receiver.containerEl.classList).toContain(NON_TEXT_ITEM_CLASS);
 
-    asView(receiver).setFile(makeFile('Notes'));
+    asView(receiver).setFile(makeFile('Notes'), 'snippet');
     expect(receiver.containerEl.classList).not.toContain(NON_TEXT_ITEM_CLASS);
 
-    asView(receiver).setFile(makeFile('Paper', 'pdf'));
+    asView(receiver).setFile(makeFile('Paper', 'pdf'), 'article');
     expect(receiver.containerEl.classList).toContain(NON_TEXT_ITEM_CLASS);
     receiver.setPage('home');
     asView(receiver).setTitle();
@@ -1459,7 +1534,7 @@ describe('ReviewView.setFile', () => {
         const receiver = makeTitleReceiver('review', null);
         const file = makeFile(basename);
 
-        asView(receiver).setFile(file);
+        asView(receiver).setFile(file, 'article');
 
         expect(receiver.file).toBe(file);
         expect(receiver.titleEl.setText).toHaveBeenCalledWith(basename);
@@ -1477,15 +1552,43 @@ describe('ReviewView.setFile', () => {
       makeFile('Security Principles')
     );
 
-    asView(receiver).setFile(makeFile('Chunking'));
+    asView(receiver).setFile(makeFile('Chunking'), 'snippet');
 
     expect(receiver.renderBreadcrumbs).toHaveBeenCalledTimes(1);
+  });
+
+  it('retitles the tab and the window as review moves between cards and other items', () => {
+    // Each move has to reach every surface: the header, and the taskbar and tab
+    // switcher, which Obsidian only re-reads when told to.
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.tuple(fc.constantFrom(...NOTE_TYPES), fc.string({ minLength: 1 })),
+          { minLength: 1, maxLength: 6 }
+        ),
+        (items) => {
+          const receiver = makeTitleReceiver('review', null);
+
+          items.forEach(([type, basename], i) => {
+            asView(receiver).setFile(makeFile(basename), type);
+
+            const title =
+              type === 'card' ? REVIEW_VIEW_DEFAULT_TITLE : basename;
+            expect(receiver.titleEl.setText).toHaveBeenLastCalledWith(title);
+            expect(receiver.leaf.updateHeader).toHaveBeenCalledTimes(i + 1);
+            expect(receiver.app.workspace.updateTitle).toHaveBeenCalledTimes(
+              i + 1
+            );
+          });
+        }
+      )
+    );
   });
 
   it('drops back to the plugin name when the queue hands over no file', () => {
     const receiver = makeTitleReceiver('review', makeFile('Chunking'));
 
-    asView(receiver).setFile(null);
+    asView(receiver).setFile(null, null);
 
     expect(receiver.file).toBeNull();
     expect(receiver.titleEl.setText).toHaveBeenLastCalledWith(
@@ -1849,7 +1952,7 @@ describe('ReviewView header title rename', () => {
     titleEl.focus();
     titleEl.textContent = 'Chapter 2';
 
-    view.setFile(makeItemFile('Chapter 3', 'Articles'));
+    view.setFile(makeItemFile('Chapter 3', 'Articles'), 'article');
     titleEl.blur();
     await flushLookups();
 
@@ -1930,6 +2033,43 @@ describe('ReviewView header title rename', () => {
     );
   });
 
+  it("never lets a card's title be edited, on desktop or from a touch", () => {
+    // The title shows the plugin's name over a card, not the card's note name,
+    // so there is nothing there to rename.
+    for (const isMobileApp of [false, true]) {
+      const { titleEl } = makeRenameView({ type: 'card', isMobileApp });
+
+      titleEl.dispatchEvent(new Event('touchstart'));
+
+      expect(titleEl.getAttribute('contenteditable'), `${isMobileApp}`).toBe(
+        'false'
+      );
+      document.body.innerHTML = '';
+    }
+  });
+
+  it('never renames a card to whatever its title is made to say', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        itemFileArb,
+        validNameArb,
+        commitArb,
+        async (file, name, end) => {
+          const { titleEl, renameFile } = makeRenameView({
+            file,
+            type: 'card',
+          });
+
+          await editTitle(titleEl, name, end);
+
+          expect(renameFile).not.toHaveBeenCalled();
+          expect(titleEl.textContent).toBe(REVIEW_VIEW_DEFAULT_TITLE);
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
   it('never listens for touch on desktop', () => {
     const { titleEl } = makeRenameView();
     titleEl.setAttribute('contenteditable', 'false');
@@ -1937,6 +2077,83 @@ describe('ReviewView header title rename', () => {
     titleEl.dispatchEvent(new Event('touchstart'));
 
     expect(titleEl.getAttribute('contenteditable')).toBe('false');
+  });
+});
+
+describe('ReviewView header breadcrumb', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  const textTypeArb = fc.constantFrom<NoteType[]>('article', 'snippet');
+
+  it('shows no folder over a card, as over the home screen', () => {
+    // The card's folder in front of the plugin's name read as a note called
+    // "Incremental reading" in the cards folder.
+    fc.assert(
+      fc.property(itemFileArb, (file) => {
+        const { view, titleEl } = makeRenameView({ file });
+        const breadcrumb = drawBreadcrumbs(view);
+
+        view.setFile(file, 'card');
+        expect(breadcrumb.textContent).toBe('');
+        expect(titleEl.textContent).toBe(REVIEW_VIEW_DEFAULT_TITLE);
+
+        view.setTitle();
+        expect(breadcrumb.textContent).toBe('');
+        document.body.innerHTML = '';
+      })
+    );
+  });
+
+  it("shows an article's or a snippet's folder, also after a card", () => {
+    fc.assert(
+      fc.property(itemFileArb, itemFileArb, textTypeArb, (card, file, type) => {
+        const { view } = makeRenameView({ file: card, type: 'card' });
+        const breadcrumb = drawBreadcrumbs(view);
+
+        view.setFile(file, type);
+        expect(breadcrumb.textContent).toBe(breadcrumbsOf(file));
+
+        view.setTitle();
+        expect(breadcrumb.textContent).toBe(breadcrumbsOf(file));
+        document.body.innerHTML = '';
+      })
+    );
+  });
+
+  it("keeps a card's folder out of the header when its note is renamed", async () => {
+    // Obsidian's own rename handler redraws the breadcrumb and writes the new
+    // name into the header before handing over.
+    vi.spyOn(FileView.prototype, 'onRename').mockImplementation(async function (
+      this: ReviewView,
+      renamed: TFile
+    ) {
+      this.renderBreadcrumbs();
+      this.titleEl.setText(renamed.basename);
+    });
+    await fc.assert(
+      fc.asyncProperty(
+        itemFileArb,
+        fc.constantFrom<NoteType[]>(...NOTE_TYPES),
+        async (file, type) => {
+          const { view, titleEl } = makeRenameView({ file, type });
+          const breadcrumb = drawBreadcrumbs(view);
+
+          await view.onRename(file);
+
+          const card = type === 'card';
+          expect(breadcrumb.textContent).toBe(card ? '' : breadcrumbsOf(file));
+          expect(titleEl.textContent).toBe(
+            card
+              ? REVIEW_VIEW_DEFAULT_TITLE
+              : file.basename || REVIEW_VIEW_DEFAULT_TITLE
+          );
+          document.body.innerHTML = '';
+        }
+      )
+    );
   });
 });
 
@@ -1960,6 +2177,21 @@ describe('ReviewView.onRename', () => {
     );
   });
 
+  it("keeps a card's name out of the header when its note is renamed", async () => {
+    // FileView's own handler writes the new name into the header first.
+    await fc.assert(
+      fc.asyncProperty(pageArb, itemFileArb, async (page, file) => {
+        const { view, titleEl } = makeRenameView({ page, file, type: 'card' });
+        titleEl.textContent = file.basename;
+
+        await view.onRename(file);
+
+        expect(titleEl.textContent).toBe(REVIEW_VIEW_DEFAULT_TITLE);
+        document.body.innerHTML = '';
+      })
+    );
+  });
+
   it('leaves the header alone when some other file is renamed', async () => {
     const { view, titleEl } = makeRenameView();
     titleEl.textContent = 'untouched';
@@ -1968,6 +2200,32 @@ describe('ReviewView.onRename', () => {
 
     expect(titleEl.textContent).toBe('untouched');
   });
+});
+
+describe('ReviewView.onOpen with an item to open on', () => {
+  afterEach(() => {
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  it.each(NOTE_TYPES)(
+    'titles the tab for the %s it opens on the way it would for one the queue reached',
+    async (type) => {
+      store.dispatch(setPage('review'));
+      const file = makeFile('Opening item');
+      const { view } = await openHistoryView({
+        initialItem: { data: { type, id: 'item-1' }, file } as ReviewItem,
+      });
+      try {
+        expect(view.file).toBe(file);
+        expect(view.getDisplayText()).toBe(
+          type === 'card' ? REVIEW_VIEW_DEFAULT_TITLE : 'Opening item'
+        );
+      } finally {
+        unload(view);
+      }
+    }
+  );
 });
 
 describe('ReviewView.onPaneMenu', () => {
@@ -2013,6 +2271,29 @@ describe('ReviewView.onPaneMenu', () => {
 
     expect(app.fileManager.promptForFileRename).toHaveBeenCalledWith(file);
     expect(app.fileManager.promptForDeletion).toHaveBeenCalledWith(file);
+  });
+
+  it("leaves rename out for a card, whose prompt would show the card's text", () => {
+    // A card note is named after the start of its text, and the rename prompt
+    // opens with that name filled in.
+    fc.assert(
+      fc.property(menuSourceArb, (source) => {
+        const { view, app, leaf, file } = makeMenuReceiver({ type: 'card' });
+
+        const menu = paneMenu(view, source);
+
+        expect(itemTitled(menu, 'Rename...')).toBeUndefined();
+        // The rest of the file's menu is still the card's to use.
+        expect(itemTitled(menu, 'Delete')).toBeDefined();
+        expect(triggered(app, 'file-menu')).toEqual([
+          'file-menu',
+          menu,
+          file,
+          source,
+          leaf,
+        ]);
+      })
+    );
   });
 
   it('fires file-menu, which is where the rest of the menu comes from', () => {
@@ -2607,6 +2888,28 @@ describe('ReviewView.historyEntryFor', () => {
             icon: PLUGIN_ICON,
             state: { ...leaf.getViewState(), title },
             eState: { [REVIEW_PLACE_KEY]: place },
+          });
+        } finally {
+          unload(view);
+        }
+      })
+    );
+  });
+
+  it("keeps a card's name out of the history menu", async () => {
+    await fc.assert(
+      fc.asyncProperty(placeArb, fc.string(), async (place, basename) => {
+        store.dispatch(resetSession());
+        const { view, leaf } = await openHistoryView();
+        try {
+          view.setFile(makeFile(basename), 'card');
+
+          const entry = view.historyEntryFor(place);
+
+          expect(entry.title).toBe(REVIEW_VIEW_DEFAULT_TITLE);
+          expect(entry.state).toEqual({
+            ...leaf.getViewState(),
+            title: REVIEW_VIEW_DEFAULT_TITLE,
           });
         } finally {
           unload(view);

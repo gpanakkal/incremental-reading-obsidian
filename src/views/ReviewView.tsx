@@ -23,7 +23,7 @@ import {
   setSelectionMode,
   type ReviewPage,
 } from '#/lib/store';
-import type { MaybeMissingItem, ReviewItem } from '#/lib/types';
+import type { MaybeMissingItem, NoteType, ReviewItem } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import {
   FileView,
@@ -96,6 +96,12 @@ export default class ReviewView extends FileView {
    * Set this before opening the view to jump to a specific item.
    */
   initialItem: ReviewItem | null = null;
+  /**
+   * The type of the item `file` belongs to, set with it by {@link setFile}. A
+   * card's note is named after the start of its text, so its name stays out of
+   * every title — see {@link titleOn}.
+   */
+  fileType: NoteType | null = null;
   /**
    * The page as of the last store notification, kept only to spot page
    * *changes*. Read the store for the current page — see {@link getDisplayText}.
@@ -205,9 +211,12 @@ export default class ReviewView extends FileView {
   /**
    * Synchronously set file and title.
    * Use when fetching a new item
+   *
+   * @param type the type of the item `file` belongs to
    */
-  setFile(file: TFile | null) {
+  setFile(file: TFile | null, type: NoteType | null) {
     this.file = file;
+    this.fileType = type;
     this.setTitle();
   }
 
@@ -317,7 +326,19 @@ export default class ReviewView extends FileView {
    * home screen was showing.
    */
   getDisplayText(): string {
-    return this.currentItemName() ?? REVIEW_VIEW_DEFAULT_TITLE;
+    return this.titleOn(this.plugin.store.getState().page);
+  }
+
+  /**
+   * What the tab is titled with review on `page`: the item's name, or the
+   * plugin's name when no item shows or the item is a card. A card's note is
+   * named after the start of its text, so its name in the tab header, the OS
+   * taskbar or the tab switcher would give the card away before it is read.
+   */
+  titleOn(page: ReviewPage): string {
+    const file = this.itemFileOn(page);
+    if (!file || this.fileType === 'card') return REVIEW_VIEW_DEFAULT_TITLE;
+    return file.basename;
   }
 
   /**
@@ -334,10 +355,14 @@ export default class ReviewView extends FileView {
    * explorer click opens that wrong folder.
    *
    * Emptied rather than rendered when no item is showing, to match
-   * {@link getDisplayText} falling back to the plugin name on the home screen.
+   * {@link getDisplayText} falling back to the plugin name on the home screen,
+   * and over a card, whose title is the plugin name too (see {@link titleOn}):
+   * its folder in front read as a note called that in the cards folder.
+   * `FileView.onRename` redraws the breadcrumb itself, so {@link onRename} comes
+   * back through here after it.
    */
   renderTitleParent(): void {
-    if (this.currentItemName()) {
+    if (this.currentItemName() && this.fileType !== 'card') {
       this.renderBreadcrumbs();
     } else {
       this.titleParentEl.empty();
@@ -402,14 +427,13 @@ export default class ReviewView extends FileView {
    * The history entry for `place`, in the shape `WorkspaceLeaf.getHistoryState`
    * gives Obsidian's own entries.
    *
-   * The title is what the tab showed there, worked out from `place` rather than
-   * {@link getDisplayText}, which reads the store; it goes in the view state too,
-   * since that copy is what Obsidian compares to drop an entry repeating the one
-   * before it.
+   * The title is what the tab showed there, worked out from `place` by
+   * {@link titleOn} rather than {@link getDisplayText}, which reads the store;
+   * it goes in the view state too, since that copy is what Obsidian compares to
+   * drop an entry repeating the one before it.
    */
   historyEntryFor(place: ReviewPlace): WorkspaceLeafHistoryState {
-    const title =
-      this.itemFileOn(place.page)?.basename ?? REVIEW_VIEW_DEFAULT_TITLE;
+    const title = this.titleOn(place.page);
     return {
       title,
       icon: this.getIcon(),
@@ -652,7 +676,7 @@ export default class ReviewView extends FileView {
     // the queue against the empty session and dispatch that as the current item.
     await this.resumeUnclaimedSession();
     if (this.initialItem) {
-      this.setFile(this.initialItem.file);
+      this.setFile(this.initialItem.file, this.initialItem.data.type);
     }
     this.wireTitleRename();
     render(
@@ -1079,20 +1103,26 @@ export default class ReviewView extends FileView {
    * Guarded on {@link currentItemFile} rather than `file`, which stays pointed
    * at the last item while the home screen is up: a menu offering to rename or
    * delete a note the tab is not showing would act on the wrong file.
+   *
+   * Rename is left out for a card, as the header title's rename is — see
+   * {@link renamableItemFile}: its prompt opens on the note's name, which is the
+   * start of the card's text.
    */
   addFileMenuItems(menu: Menu, source: string): void {
     const file = this.currentItemFile();
     if (!file) return;
 
-    menu.addItem((item) =>
-      item
-        .setTitle('Rename...')
-        .setIcon('lucide-edit-3')
-        .setSection('action')
-        .onClick(() => {
-          void this.app.fileManager.promptForFileRename(file);
-        })
-    );
+    if (this.renamableItemFile()) {
+      menu.addItem((item) =>
+        item
+          .setTitle('Rename...')
+          .setIcon('lucide-edit-3')
+          .setSection('action')
+          .onClick(() => {
+            void this.app.fileManager.promptForFileRename(file);
+          })
+      );
+    }
     menu.addItem((item) =>
       item
         .setTitle('Delete')
@@ -1170,7 +1200,7 @@ export default class ReviewView extends FileView {
     titleEl.tabIndex = -1;
     this.updateTitleEditable();
     this.registerDomEvent(titleEl, 'focus', () => {
-      this.#renaming = this.currentItemFile();
+      this.#renaming = this.renamableItemFile();
     });
     this.registerDomEvent(titleEl, 'blur', () => {
       void this.commitTitleRename();
@@ -1186,9 +1216,18 @@ export default class ReviewView extends FileView {
   }
 
   /**
+   * The item the header title can rename: the one on screen, unless it is a
+   * card, whose title is the plugin's name rather than its note's — see
+   * {@link titleOn}.
+   */
+  renamableItemFile(): TFile | null {
+    return this.fileType === 'card' ? null : this.currentItemFile();
+  }
+
+  /**
    * Make the header title editable exactly while it names an item: the home
-   * screen's title is the plugin's name, not a note's, and there is nothing to
-   * rename.
+   * screen's title and a card's are the plugin's name, not a note's, and there
+   * is nothing to rename.
    *
    * `plaintext-only` keeps a paste from dragging markup into the name.
    *
@@ -1197,7 +1236,7 @@ export default class ReviewView extends FileView {
    * ends.
    */
   updateTitleEditable(armed = !Platform.isMobileApp): void {
-    const editable = armed && this.currentItemFile() !== null;
+    const editable = armed && this.renamableItemFile() !== null;
     this.titleEl.setAttribute(
       'contenteditable',
       editable ? 'plaintext-only' : 'false'

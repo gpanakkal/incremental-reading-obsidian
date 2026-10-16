@@ -4,7 +4,12 @@ import { CURRENT_ITEM_REFETCH_TIME } from '#/lib/constants';
 import type ReviewManager from '#/lib/items/ReviewManager';
 import { queryClient } from '#/lib/query-client';
 import { resetSession, store } from '#/lib/store';
-import type { MaybeMissingItem, NoteType, ReviewItem } from '#/lib/types';
+import {
+  NOTE_TYPES,
+  type MaybeMissingItem,
+  type NoteType,
+  type ReviewItem,
+} from '#/lib/types';
 import type * as ReactQueryModule from '@tanstack/react-query';
 import {
   QueryClientProvider,
@@ -217,21 +222,27 @@ const poll = async () => {
   await settle();
 };
 
+/** The review tab the hook pushes the current item's file into. */
+function makeReviewViewStub() {
+  return {
+    file: null,
+    setFile: vi.fn(),
+    onLoadFile: vi.fn(),
+    onUnloadFile: vi.fn(),
+  };
+}
+
 /** Mount the hook for `currentItemId` and record what every render returned. */
 async function mountLive(
   currentItemId: string | null,
-  reviewManager: Partial<ReviewManager>
+  reviewManager: Partial<ReviewManager>,
+  reviewView = makeReviewViewStub()
 ) {
   reduxState = { currentItemId };
   vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
     plugin: { app: { vault: { read: vi.fn() } } },
     reviewManager,
-    reviewView: {
-      file: null,
-      setFile: vi.fn(),
-      onLoadFile: vi.fn(),
-      onUnloadFile: vi.fn(),
-    },
+    reviewView,
   } as never);
   const renders: ReturnType<typeof useCurrentItem>[] = [];
   function Probe() {
@@ -805,6 +816,39 @@ describe('useCurrentItem on a live query client', () => {
       reads.release('succeed');
       await settle();
       expect(renders.at(-1)?.isError).toBe(false);
+    }
+  );
+});
+
+describe('useCurrentItem handing the item to the review tab', () => {
+  afterEach(() => {
+    queryClient.clear();
+    store.dispatch(resetSession());
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  it.each(NOTE_TYPES)(
+    "gives the tab the %s's type along with its file, so a card's name stays out of its title",
+    async (type) => {
+      liveQueries = true;
+      try {
+        const item = {
+          data: { type, id: 'item-1' },
+          file: { path: 'notes/item-1.md', extension: 'md' } as TFile,
+        } as ReviewItem;
+        const reviewView = makeReviewViewStub();
+
+        await mountLive(
+          'item-1',
+          readingManager('item-1', async () => {}, item),
+          reviewView
+        );
+
+        expect(reviewView.setFile).toHaveBeenLastCalledWith(item.file, type);
+      } finally {
+        liveQueries = false;
+      }
     }
   );
 });

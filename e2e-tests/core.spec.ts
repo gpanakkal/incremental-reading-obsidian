@@ -22,7 +22,10 @@ import {
   openPluginSettings,
   pendingSaves,
   readSnippetState,
+  REVIEW_VIEW_DEFAULT_TITLE,
+  REVIEW_VIEW_TYPE,
   reviewHeader,
+  reviewNewCard,
   reviewTitle,
   scrollToText,
   selectParagraph,
@@ -32,6 +35,7 @@ import {
   toggleReviewSourceMode,
   waitForReviewItem,
   watchNotices,
+  type RepoWindow,
 } from './helpers';
 import {
   closeElectron,
@@ -1048,6 +1052,91 @@ test.describe('Review session', () => {
     await expect(reviewTitle(window, other)).toBeVisible({ timeout: 1_500 });
     await expect(window.locator('.ir-review-error')).toHaveCount(0);
     await expect(window.locator('.ir-review-summary')).toHaveCount(0);
+  });
+});
+
+test.describe('Review tab title', () => {
+  /** Set every article's due date, through the plugin's own database. */
+  async function setArticlesDue(page: Page, due: number) {
+    await page.evaluate(async (at) => {
+      // Unofficial: `window.app`, `app.plugins.plugins`
+      await (window as unknown as RepoWindow).app.plugins.plugins[
+        'incremental-reading'
+      ].reviewManager.repo.mutate('UPDATE article SET due = $1, due_fuzz = 0', [
+        at,
+      ]);
+    }, due);
+  }
+
+  /** The active review tab's header, and the name its tooltip reads. */
+  const tabHeader = (page: Page) =>
+    page.locator(
+      `.workspace-tabs.mod-active .workspace-tab-header.is-active[data-type="${REVIEW_VIEW_TYPE}"]`
+    );
+
+  /** No card text in the tab header, the view header or the window title. */
+  async function expectCardHidden(page: Page) {
+    await expect(
+      tabHeader(page).locator('.workspace-tab-header-inner-title')
+    ).toHaveText(REVIEW_VIEW_DEFAULT_TITLE);
+    await expect(tabHeader(page)).toHaveAttribute(
+      'aria-label',
+      REVIEW_VIEW_DEFAULT_TITLE
+    );
+    // The whole view header title, breadcrumb included: no cards folder in
+    // front, exactly as on the home screen
+    await expect(
+      reviewHeader(page).locator('.view-header-title-container')
+    ).toHaveText(REVIEW_VIEW_DEFAULT_TITLE);
+    // The window title, which the OS taskbar shows
+    await expect(page).toHaveTitle(new RegExp(`^${REVIEW_VIEW_DEFAULT_TITLE}`));
+    await expect(page).not.toHaveTitle(/Explain the security/);
+  }
+
+  test("shows the plugin's name over a card, and an article's name over the article after it", async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    // Held back until the card is up, so the card comes first
+    await setArticlesDue(window, Date.now() + 86_400_000);
+
+    await reviewNewCard(window);
+    await expectCardHidden(window);
+    await window.getByRole('button', { name: 'Show answer' }).click();
+    await expectCardHidden(window);
+
+    await setArticlesDue(window, Date.now() - 1);
+    await window.getByRole('button', { name: 'Good', exact: true }).click();
+
+    expect((await waitForReviewItem(window)).title).toBe(ARTICLE_TITLE);
+    await expect(tabHeader(window)).toHaveAttribute(
+      'aria-label',
+      ARTICLE_TITLE
+    );
+    // The article's folder is back in front of its name
+    const folder = await window.evaluate(
+      () =>
+        // Unofficial: `window.app`
+        (
+          window as unknown as {
+            app: {
+              workspace: {
+                getMostRecentLeaf(): {
+                  view: { file?: { parent?: { path: string } | null } };
+                } | null;
+              };
+            };
+          }
+        ).app.workspace.getMostRecentLeaf()?.view.file?.parent?.path ?? ''
+    );
+    expect(folder).not.toBe('');
+    await expect(
+      reviewHeader(window).locator('.view-header-title-container')
+    ).toHaveText(`${folder}/${ARTICLE_TITLE}`);
+    await expect(window).toHaveTitle(new RegExp(`^${ARTICLE_TITLE}`));
   });
 });
 

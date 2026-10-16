@@ -159,13 +159,13 @@ export function useCurrentItem(): {
       if (reviewView.file) {
         await reviewView.onUnloadFile(reviewView.file);
       }
-      reviewView.setFile(data?.file ?? null);
+      reviewView.setFile(data?.file ?? null, data?.data.type ?? null);
       if (data?.file) {
         await reviewView.onLoadFile(data.file);
       }
     }
     void viewHandleFileChange();
-  }, [data?.file, reviewView]);
+  }, [data?.file, data?.data.type, reviewView]);
 
   return { data, isLoading, isError };
 }
