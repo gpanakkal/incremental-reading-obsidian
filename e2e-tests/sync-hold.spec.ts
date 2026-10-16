@@ -1,9 +1,10 @@
 import {
   ARTICLE_TAG,
   BACKUP_DIRECTORY,
+  DATA_DIRECTORY,
   DATABASE_FILE_PATH,
 } from '#/lib/constants';
-import { SYNC_HOLD_MESSAGES } from '#/lib/obsidian-sync';
+import { SYNC_HOLD_MESSAGES, syncExclusionMessage } from '#/lib/obsidian-sync';
 import test, {
   expect,
   type ElectronApplication,
@@ -135,6 +136,9 @@ type FakeSync = {
   ready: boolean;
   newServerFiles: { path: string; folder: boolean }[];
   allowTypes: string[];
+  /** Sync's "Excluded folders"; nothing under one syncs. */
+  ignoreFolders: string[];
+  /** What `allowSyncFile` answers for a file under no excluded folder. */
   allowed: boolean;
   trigger(): void;
 };
@@ -156,13 +160,21 @@ async function fakeSync(fields: Partial<Omit<FakeSync, 'trigger'>>) {
       ready: false,
       newServerFiles: [],
       allowTypes: ['image', 'audio', 'pdf', 'video', 'unsupported'],
+      ignoreFolders: [],
       allowed: true,
       ...fields,
       getStatus: () => fake.status,
       filter: {
-        allowSyncFile: () => fake.allowed,
+        // Sync's own folder rule: a file is under an excluded folder when its
+        // path starts with the folder plus `/`
+        allowSyncFile: (path: string) =>
+          fake.allowed &&
+          !fake.ignoreFolders.some((folder) => path.startsWith(`${folder}/`)),
         get allowTypes() {
           return new Set(fake.allowTypes);
+        },
+        get ignoreFolders() {
+          return fake.ignoreFolders;
         },
       },
       on: (_name: string, callback: () => void) => {
@@ -445,7 +457,42 @@ test('with Sync leaving the database out, a startup migrates at once and asks fo
   await enablePlugin();
 
   await expect.poll(pluginArticles).toEqual(expectedArticles());
-  await expect(notice('please enable "sync all other types"')).toBeVisible();
+  await expect(notice(syncExclusionMessage({ cause: 'type' }))).toBeVisible();
   await expect(notice(SYNC_HOLD_MESSAGES.waiting)).toHaveCount(0);
   expect(await version9Backups()).toHaveLength(1);
+});
+
+test("with the data folder among Sync's excluded folders, a startup asks to remove it", async () => {
+  await writeDatabaseFile(databaseBytes({ version: 9 }));
+  await fakeSync({
+    status: 'synced',
+    ready: true,
+    ignoreFolders: ['notes', DATA_DIRECTORY],
+  });
+
+  await enablePlugin();
+
+  await expect.poll(pluginArticles).toEqual(expectedArticles());
+  await expect(
+    notice(syncExclusionMessage({ cause: 'folder', folder: DATA_DIRECTORY }))
+  ).toBeVisible();
+  // Every type syncs, so that is not the cause
+  await expect(notice(syncExclusionMessage({ cause: 'type' }))).toHaveCount(0);
+  await expect(notice(SYNC_HOLD_MESSAGES.waiting)).toHaveCount(0);
+});
+
+test('with only unrelated folders excluded from Sync, a startup says nothing about Sync', async () => {
+  await writeDatabaseFile(databaseBytes({ version: 9 }));
+  await fakeSync({
+    status: 'synced',
+    ready: true,
+    ignoreFolders: ['notes', `${DATA_DIRECTORY}-archive`],
+  });
+
+  await enablePlugin();
+
+  await expect.poll(pluginArticles).toEqual(expectedArticles());
+  await expect(
+    notice('Incremental reading: Sync leaves the review database out')
+  ).toHaveCount(0);
 });

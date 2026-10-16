@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { DATABASE_FILE_PATH } from '#/lib/constants';
+import { DATA_DIRECTORY, DATABASE_FILE_PATH } from '#/lib/constants';
 import fc from 'fast-check';
 import type { App } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  findSyncExclusions,
   getSyncPlugin,
   holdForSync,
   readSyncState,
@@ -11,7 +12,7 @@ import {
   SYNC_POLL_MS,
   SYNC_WAIT_NOTICE_DELAY_MS,
   SYNC_WAIT_TIMEOUT_MS,
-  syncSkipsOtherTypes,
+  syncExclusionMessage,
   waitForSyncedFile,
   type SyncHoldReason,
 } from './obsidian-sync';
@@ -42,6 +43,8 @@ interface FakeSyncFields {
   allowed: boolean;
   /** Entries as Sync queues them, plus anything a change could put there. */
   newServerFiles: unknown[];
+  /** `filter.allowTypes`, the file types Sync syncs. */
+  allowTypes: string[];
 }
 
 /**
@@ -51,19 +54,22 @@ interface FakeSyncFields {
  */
 function makeSync(fields: Partial<FakeSyncFields> = {}) {
   const listeners = new Map<object, () => void>();
+  const { allowTypes = ['image', 'audio', 'pdf', 'video'], ...rest } = fields;
   const sync = {
     status: 'synced' as Status,
     pause: false,
     ready: true,
     allowed: true,
     newServerFiles: [] as unknown[],
-    ...fields,
+    ...rest,
     getStatus() {
       return sync.status;
     },
     filter: {
       allowSyncFile: vi.fn((_path: string, _isFolder: boolean) => sync.allowed),
-      allowTypes: new Set(['image', 'audio', 'pdf', 'video']),
+      allowTypes: new Set(allowTypes),
+      // Sync's "Excluded folders", as vault paths
+      ignoreFolders: [] as unknown,
     },
     on: vi.fn((name: string, callback: () => void) => {
       const ref = { name };
@@ -103,6 +109,12 @@ const fieldsArb: fc.Arbitrary<FakeSyncFields> = fc.record({
   ready: fc.boolean(),
   allowed: fc.boolean(),
   newServerFiles: fc.array(queueEntryArb, { maxLength: 6 }),
+  allowTypes: fc.uniqueArray(
+    fc.oneof(
+      fc.constantFrom('image', 'audio', 'pdf', 'video', 'unsupported'),
+      fc.string()
+    )
+  ),
 });
 
 /** Members of the instance the plugin relies on, each of one type. */
@@ -166,6 +178,57 @@ function makeNotices() {
   });
   return { shown, createNotice };
 }
+
+/** A vault path segment: anything but a separator. */
+const segmentArb = fc
+  .string({ minLength: 1, maxLength: 12 })
+  .filter((segment) => !segment.includes('/'));
+
+/** A data folder of one or more segments, and a database file in it. */
+const dataPathArb = fc
+  .array(segmentArb, { minLength: 1, maxLength: 4 })
+  .chain((segments) =>
+    fc.record({
+      segments: fc.constant(segments),
+      path: segmentArb.map((file) => `${segments.join('/')}/${file}.sqlite`),
+    })
+  );
+
+/**
+ * Sync's "Excluded folders" for a data folder: the folder itself, folders
+ * over it, and look-alikes that leave it in (a partial name, another case,
+ * a trailing slash, the file itself) among unrelated ones.
+ */
+const ignoreFoldersArb = (segments: string[], path: string) => {
+  const folder = segments.join('/');
+  const ancestors = segments.map((_, i) => segments.slice(0, i + 1).join('/'));
+  return fc.array(
+    fc.oneof(
+      fc.constantFrom(...ancestors),
+      fc.constant(`${folder}/`),
+      fc.constant(path),
+      fc
+        .integer({ min: 0, max: folder.length - 1 })
+        .map((end) => folder.slice(0, end)),
+      fc.constant(folder.toUpperCase()),
+      fc.constant(folder.toLowerCase()),
+      fc.string()
+    ),
+    { maxLength: 5 }
+  );
+};
+
+/**
+ * Sync's own answer for a file at `path` that is neither a note, media nor
+ * under the config folder (`_allowSyncFile` in Obsidian's bundle).
+ */
+const syncAllows = (
+  path: string,
+  ignoreFolders: string[],
+  allowTypes: string[]
+) =>
+  !ignoreFolders.some((folder) => path.startsWith(`${folder}/`)) &&
+  allowTypes.includes('unsupported');
 
 // #endregion
 
@@ -843,7 +906,7 @@ describe('holdForSync', () => {
   });
 });
 
-describe('syncSkipsOtherTypes', () => {
+describe('findSyncExclusions', () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -853,101 +916,267 @@ describe('syncSkipsOtherTypes', () => {
     vi.restoreAllMocks();
   });
 
-  function ask(getSync: () => unknown, signal?: AbortSignal) {
+  function ask(
+    getSync: () => unknown,
+    path = DATABASE_FILE_PATH,
+    signal?: AbortSignal
+  ) {
     const settled = vi.fn();
-    void syncSkipsOtherTypes({
-      getSync,
-      path: DATABASE_FILE_PATH,
-      signal,
-    }).then(settled);
+    void findSyncExclusions({ getSync, path, signal }).then(settled);
     return settled;
   }
 
-  /** `filter.allowTypes` as Sync keeps it: a set of type names. */
-  const allowTypesArb = fc.uniqueArray(
-    fc.oneof(
-      fc.constantFrom('image', 'audio', 'pdf', 'video', 'unsupported'),
-      fc.string()
-    )
-  );
+  it('names the excluded folder that keeps the database file out', async () => {
+    const sync = makeSync({ allowed: false, allowTypes: ['unsupported'] });
+    sync.filter.ignoreFolders = [DATA_DIRECTORY];
 
-  it('property: says so exactly when Sync is set up and "Sync all other types" is off', async () => {
+    const settled = ask(() => sync);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(settled).toHaveBeenCalledWith([
+      { cause: 'folder', folder: DATA_DIRECTORY },
+    ]);
+  });
+
+  it('property: names each setting that keeps the database file out, exactly when Sync is set up and would skip it', async () => {
     await fc.assert(
-      fc.asyncProperty(fieldsArb, allowTypesArb, async (fields, types) => {
-        fc.pre(fields.status !== 'uninitialized');
-        const sync = makeSync(fields);
-        sync.filter.allowTypes = new Set(types);
+      fc.asyncProperty(
+        fieldsArb.filter(({ status }) => status !== 'uninitialized'),
+        dataPathArb.chain(({ segments, path }) =>
+          fc.record({
+            path: fc.constant(path),
+            ignoreFolders: ignoreFoldersArb(segments, path),
+          })
+        ),
+        async (fields, { path, ignoreFolders }) => {
+          const sync = makeSync(fields);
+          sync.filter.ignoreFolders = ignoreFolders;
+          sync.filter.allowSyncFile.mockImplementation((file) =>
+            syncAllows(file, ignoreFolders, fields.allowTypes)
+          );
 
-        const settled = ask(() => sync);
-        await vi.advanceTimersByTimeAsync(0);
+          const settled = ask(() => sync, path);
+          await vi.advanceTimersByTimeAsync(0);
 
-        expect(settled).toHaveBeenCalledWith(
-          fields.status !== 'disconnected' && !types.includes('unsupported')
-        );
-      })
+          const folder = ignoreFolders.find((f) => path.startsWith(`${f}/`));
+          const expected =
+            fields.status === 'disconnected' ||
+            syncAllows(path, ignoreFolders, fields.allowTypes)
+              ? []
+              : [
+                  ...(folder === undefined
+                    ? []
+                    : [{ cause: 'folder', folder }]),
+                  ...(fields.allowTypes.includes('unsupported')
+                    ? []
+                    : [{ cause: 'type' }]),
+                ];
+          expect(settled).toHaveBeenCalledWith(expected);
+          if (fields.status !== 'disconnected') {
+            expect(sync.filter.allowSyncFile).toHaveBeenCalledWith(path, false);
+          }
+        }
+      )
     );
   });
 
+  it('property: takes Sync at its word when it would sync the file, whatever its settings look like', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fieldsArb.filter(({ status }) => status !== 'uninitialized'),
+        dataPathArb.chain(({ segments, path }) =>
+          fc.record({
+            path: fc.constant(path),
+            ignoreFolders: ignoreFoldersArb(segments, path),
+          })
+        ),
+        async (fields, { path, ignoreFolders }) => {
+          const sync = makeSync({ ...fields, allowed: true });
+          sync.filter.ignoreFolders = ignoreFolders;
+
+          const settled = ask(() => sync, path);
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(settled).toHaveBeenCalledWith([]);
+        }
+      )
+    );
+  });
+
+  it('property: names only the settings it can read when Sync skips the file', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fieldsArb.filter(
+          ({ status }) =>
+            status !== 'uninitialized' && status !== 'disconnected'
+        ),
+        fc.oneof(
+          fc.anything().filter((value) => !Array.isArray(value)),
+          fc.array(fc.anything().filter((value) => typeof value !== 'string'))
+        ),
+        fc.anything().filter((value) => !(value instanceof Set)),
+        fc.boolean(),
+        async (fields, ignoreFolders, allowTypes, typesReadable) => {
+          const sync = makeSync({ ...fields, allowed: false });
+          sync.filter.ignoreFolders = ignoreFolders;
+          if (!typesReadable) {
+            (sync.filter as Record<string, unknown>).allowTypes = allowTypes;
+          }
+
+          const settled = ask(() => sync);
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(settled).toHaveBeenCalledWith(
+            typesReadable && !fields.allowTypes.includes('unsupported')
+              ? [{ cause: 'type' }]
+              : []
+          );
+        }
+      )
+    );
+  });
+
+  it('property: names the setting it can still read when reading the other throws', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fieldsArb.filter(
+          ({ status }) =>
+            status !== 'uninitialized' && status !== 'disconnected'
+        ),
+        fc.constantFrom('ignoreFolders', 'allowTypes'),
+        async (fields, unreadable) => {
+          const sync = makeSync({ ...fields, allowed: false });
+          sync.filter.ignoreFolders = [DATA_DIRECTORY];
+          Object.defineProperty(sync.filter, unreadable, {
+            get() {
+              throw new Error('Sync settings not loaded');
+            },
+          });
+
+          const settled = ask(() => sync);
+          await vi.advanceTimersByTimeAsync(0);
+
+          const typeOff = !fields.allowTypes.includes('unsupported');
+          expect(settled).toHaveBeenCalledWith(
+            unreadable === 'allowTypes'
+              ? [{ cause: 'folder', folder: DATA_DIRECTORY }]
+              : typeOff
+                ? [{ cause: 'type' }]
+                : []
+          );
+        }
+      )
+    );
+  });
+
+  it('names no excluded folder that is not a path, even one that reads as the data folder', async () => {
+    const sync = makeSync({ allowed: false, allowTypes: ['unsupported'] });
+    sync.filter.ignoreFolders = [{ toString: () => DATA_DIRECTORY }];
+
+    const settled = ask(() => sync);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(settled).toHaveBeenCalledWith([]);
+  });
+
+  it('names no excluded folder from a list that is not an array, even one that finds the data folder', async () => {
+    const sync = makeSync({ allowed: false, allowTypes: ['unsupported'] });
+    sync.filter.ignoreFolders = { find: () => DATA_DIRECTORY };
+
+    const settled = ask(() => sync);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(settled).toHaveBeenCalledWith([]);
+  });
+
   it('waits for Sync to read its settings before reading them', async () => {
-    const sync = makeSync({ status: 'uninitialized' });
+    const sync = makeSync({ status: 'uninitialized', allowed: false });
     const settled = ask(() => sync);
     await vi.advanceTimersByTimeAsync(SYNC_POLL_MS * 4);
     expect(settled).not.toHaveBeenCalled();
 
     // What Sync's saved state holds replaces the defaults
     sync.filter.allowTypes = new Set(['image', 'unsupported']);
+    sync.filter.ignoreFolders = [DATA_DIRECTORY];
     sync.status = 'synced';
     sync.trigger();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(settled).toHaveBeenCalledWith(false);
+    expect(settled).toHaveBeenCalledWith([
+      { cause: 'folder', folder: DATA_DIRECTORY },
+    ]);
   });
 
-  it('says nothing when Sync never finishes starting', async () => {
-    const sync = makeSync({ status: 'uninitialized' });
+  it('names nothing when Sync never finishes starting', async () => {
+    const sync = makeSync({ status: 'uninitialized', allowed: false });
     const settled = ask(() => sync);
 
     await vi.advanceTimersByTimeAsync(SYNC_WAIT_TIMEOUT_MS);
 
-    expect(settled).toHaveBeenCalledWith(false);
+    expect(settled).toHaveBeenCalledWith([]);
   });
 
-  it('says nothing when cancelled', async () => {
+  it('names nothing when cancelled', async () => {
     const controller = new AbortController();
-    const sync = makeSync({ status: 'uninitialized' });
-    const settled = ask(() => sync, controller.signal);
+    const sync = makeSync({ status: 'uninitialized', allowed: false });
+    const settled = ask(() => sync, DATABASE_FILE_PATH, controller.signal);
 
     controller.abort();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(settled).toHaveBeenCalledWith(false);
+    expect(settled).toHaveBeenCalledWith([]);
   });
 
-  it('property: says nothing without Sync, or with Sync in a shape it does not know', async () => {
+  it('property: names nothing without Sync, or with Sync in a shape it does not know', async () => {
     await fc.assert(
       fc.asyncProperty(
         fieldsArb.filter(({ status }) => status !== 'uninitialized'),
         fc.oneof(
           fc.constant('none'),
           fc.constant('no-filter'),
-          fc.anything().map((allowTypes) => ({ allowTypes }))
+          fc.constant('status'),
+          fc.constant('answer')
         ),
         async (fields, variant) => {
-          const sync = makeSync(fields) as unknown as Record<string, unknown>;
-          if (variant === 'no-filter') delete sync.filter;
-          else if (typeof variant === 'object')
-            (sync.filter as Record<string, unknown>).allowTypes =
-              variant.allowTypes;
-          fc.pre(
-            typeof variant !== 'object' || !(variant.allowTypes instanceof Set)
-          );
+          const sync = makeSync({ ...fields, allowed: false });
+          sync.filter.ignoreFolders = [DATA_DIRECTORY];
+          const broken = sync as unknown as Record<string, unknown>;
+          if (variant === 'no-filter') delete broken.filter;
+          if (variant === 'status') sync.status = 'resting' as Status;
+          if (variant === 'answer') {
+            sync.filter.allowSyncFile.mockReturnValue(
+              'no' as unknown as boolean
+            );
+          }
 
           const settled = ask(() => (variant === 'none' ? null : sync));
           await vi.advanceTimersByTimeAsync(0);
 
-          expect(settled).toHaveBeenCalledWith(false);
+          expect(settled).toHaveBeenCalledWith([]);
         }
       )
+    );
+  });
+});
+
+describe('syncExclusionMessage', () => {
+  it('property: names the excluded folder and where to remove it', () => {
+    fc.assert(
+      fc.property(fc.string(), (folder) => {
+        expect(syncExclusionMessage({ cause: 'folder', folder })).toBe(
+          'Incremental reading: Sync leaves the review database out because ' +
+            `"${folder}" is one of its excluded folders. Remove it under ` +
+            'Settings → Sync → Excluded folders before using the plugin.'
+        );
+      })
+    );
+  });
+
+  it('names the "Sync all other types" setting and where to turn it on', () => {
+    expect(syncExclusionMessage({ cause: 'type' })).toBe(
+      'Incremental reading: Sync leaves the review database out because ' +
+        '"Sync all other types" is off. Turn it on under Settings → Sync ' +
+        'before using the plugin.'
     );
   });
 });

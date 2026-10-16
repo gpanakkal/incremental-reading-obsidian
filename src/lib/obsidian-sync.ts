@@ -25,9 +25,12 @@ import type { NotifyOptions } from './notices';
  *   session, and cleared before each reconnect.
  * - `newServerFiles`: remote changes not yet applied. An entry leaves only
  *   after its file has been written to disk.
- * - `filter.allowSyncFile(path, isFolder)`: selective sync. Anything not a
- *   note, image, audio, video or PDF syncs only with "Sync all other types"
- *   (`filter.allowTypes` holding `'unsupported'`), which is off by default.
+ * - `filter.allowSyncFile(path, isFolder)`: selective sync. Nothing under
+ *   one of the "Excluded folders" (`filter.ignoreFolders`, vault paths; a
+ *   file is under one when its path starts with the folder plus `/`) syncs.
+ *   Anything else not a note, image, audio, video or PDF syncs only with
+ *   "Sync all other types" (`filter.allowTypes` holding `'unsupported'`),
+ *   which is off by default.
  * - `on`/`offref`: Obsidian's `Events`; Sync raises `'status-change'`.
  */
 interface SyncInstance {
@@ -38,6 +41,7 @@ interface SyncInstance {
   filter: {
     allowSyncFile(path: string, isFolder: boolean): unknown;
     allowTypes?: unknown;
+    ignoreFolders?: unknown;
   };
   on(name: string, callback: () => void): unknown;
   offref(ref: unknown): void;
@@ -336,38 +340,100 @@ export async function holdForSync(params: {
 }
 
 /**
- * Whether Sync, set up for this vault, leaves out every file that is not a
- * note or media — the database file among them — because "Sync all other
- * types" is off, as it is by default. Waits for Sync to read its settings,
- * which until then hold the defaults; answers false if it never does.
- * @param params.path any path; it only decides when the settings are read
+ * A Sync setting that leaves a file out of selective sync.
+ *
+ * - `folder`: the file is under `folder`, one of Sync's "Excluded folders".
+ * - `type`: the file is of no type Sync syncs, and "Sync all other types" is
+ *   off, as it is by default.
  */
-export async function syncSkipsOtherTypes(params: {
+export type SyncExclusion =
+  | { cause: 'folder'; folder: string }
+  | { cause: 'type' };
+
+/**
+ * The first of Sync's "Excluded folders" that `path`, a file, is under.
+ * Sync's own rule (`_allowSyncFile`): the path starts with the folder plus
+ * `/`, compared as written.
+ */
+function excludingFolder(
+  ignoreFolders: unknown,
+  path: string
+): string | undefined {
+  if (!Array.isArray(ignoreFolders)) return undefined;
+  return (ignoreFolders as unknown[]).find(
+    (folder): folder is string =>
+      typeof folder === 'string' && path.startsWith(`${folder}/`)
+  );
+}
+
+/**
+ * Why Sync, set up for this vault, leaves the file at `path` out, as far as
+ * its settings say: an excluded folder over it, "Sync all other types" off,
+ * or both. Empty when Sync would sync the file, when it is off, not set up,
+ * or in an unknown shape, and when it leaves the file out for a reason this
+ * plugin does not know. Waits for Sync to read its settings, which until then
+ * hold the defaults; answers empty if it never does.
+ */
+export async function findSyncExclusions(params: {
   getSync: () => unknown;
   path: string;
   signal?: AbortSignal;
   timeoutMs?: number;
-}): Promise<boolean> {
+}): Promise<SyncExclusion[]> {
   const verdict = await watchSync({
     getSync: params.getSync,
     signal: params.signal,
     timeoutMs: params.timeoutMs ?? SYNC_WAIT_TIMEOUT_MS,
     pollMs: SYNC_POLL_MS,
-    decide: (sync) => {
+    decide: (sync): SyncExclusion[] | undefined => {
       const state = readSyncState(sync, params.path);
       if (state === 'starting') return undefined;
-      if (
-        state === 'no-sync' ||
-        state === 'unavailable' ||
-        state === 'disconnected'
-      ) {
-        return false;
+      if (state !== 'excluded') return [];
+      const { filter } = sync as SyncInstance;
+      const exclusions: SyncExclusion[] = [];
+      // Each setting is read on its own, so one that throws on reading
+      // leaves the other to be named
+      try {
+        const folder = excludingFolder(filter.ignoreFolders, params.path);
+        if (folder !== undefined) exclusions.push({ cause: 'folder', folder });
+      } catch {
+        // Unreadable: no folder is named
       }
-      const types = (sync as SyncInstance).filter.allowTypes;
-      return types instanceof Set && !types.has('unsupported');
+      try {
+        const types = filter.allowTypes;
+        if (types instanceof Set && !types.has('unsupported')) {
+          exclusions.push({ cause: 'type' });
+        }
+      } catch {
+        // Unreadable: the type setting is not named
+      }
+      return exclusions;
     },
   });
-  return verdict === true;
+  return Array.isArray(verdict) ? verdict : [];
+}
+
+/**
+ * A warning that `exclusion` keeps the database out of Sync, naming the
+ * setting to change and where to find it.
+ */
+export function syncExclusionMessage(exclusion: SyncExclusion): string {
+  const because =
+    'Incremental reading: Sync leaves the review database out because ';
+  switch (exclusion.cause) {
+    case 'folder':
+      return (
+        because +
+        `"${exclusion.folder}" is one of its excluded folders. Remove it ` +
+        'under Settings → Sync → Excluded folders before using the plugin.'
+      );
+    case 'type':
+      return (
+        because +
+        '"Sync all other types" is off. Turn it on under Settings → Sync ' +
+        'before using the plugin.'
+      );
+  }
 }
 
 /**

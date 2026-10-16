@@ -1,8 +1,13 @@
+import { DATA_DIRECTORY } from '#/lib/constants';
 import { refusedPathsWarning } from '#/lib/item-path-guard';
 import ReviewManager from '#/lib/items/ReviewManager';
 import { SnippetManager } from '#/lib/items/SnippetManager';
 import { configureSuccessNotices, notify } from '#/lib/notices';
-import { SYNC_HOLD_MESSAGES, SYNC_WAIT_TIMEOUT_MS } from '#/lib/obsidian-sync';
+import {
+  SYNC_HOLD_MESSAGES,
+  SYNC_WAIT_TIMEOUT_MS,
+  syncExclusionMessage,
+} from '#/lib/obsidian-sync';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import type { ReviewSession } from '#/lib/plugin-data';
@@ -877,7 +882,10 @@ function fakeSync(fields: {
   status?: string;
   pause?: boolean;
   ready?: boolean;
+  /** What `filter.allowSyncFile` answers for the database file. */
+  allowed?: boolean;
   allowTypes?: string[];
+  ignoreFolders?: string[];
 }) {
   return {
     getStatus: () => fields.status ?? 'synced',
@@ -885,8 +893,9 @@ function fakeSync(fields: {
     ready: fields.ready ?? true,
     newServerFiles: [],
     filter: {
-      allowSyncFile: () => true,
+      allowSyncFile: () => fields.allowed ?? true,
       allowTypes: new Set(fields.allowTypes ?? ['image', 'unsupported']),
+      ignoreFolders: fields.ignoreFolders ?? [],
     },
     on: vi.fn(() => ({})),
     offref: vi.fn(),
@@ -2934,23 +2943,68 @@ describe('IncrementalReadingPlugin.verifySyncSettings', () => {
     }) as Promise<void>;
   }
 
-  it('asks for "Sync all other types" when Sync leaves the database out', async () => {
+  it('asks to remove the excluded folder when one keeps the database out', async () => {
     const notify = vi.spyOn(Obsidian, 'notify');
 
-    await verify(appWithSync(fakeSync({ allowTypes: ['image', 'pdf'] })));
+    await verify(
+      appWithSync(
+        fakeSync({
+          allowed: false,
+          ignoreFolders: ['notes', DATA_DIRECTORY],
+          allowTypes: ['unsupported'],
+        })
+      )
+    );
 
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      'Incremental reading: please enable "sync all other types" before ' +
-        'using the plugin',
+      syncExclusionMessage({ cause: 'folder', folder: DATA_DIRECTORY }),
       { persist: true }
     );
   });
 
+  it('asks for "Sync all other types" when that keeps the database out', async () => {
+    const notify = vi.spyOn(Obsidian, 'notify');
+
+    await verify(
+      appWithSync(fakeSync({ allowed: false, allowTypes: ['image', 'pdf'] }))
+    );
+
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      syncExclusionMessage({ cause: 'type' }),
+      { persist: true }
+    );
+  });
+
+  it('asks for both when both keep the database out', async () => {
+    const notify = vi.spyOn(Obsidian, 'notify');
+
+    await verify(
+      appWithSync(
+        fakeSync({
+          allowed: false,
+          ignoreFolders: [DATA_DIRECTORY],
+          allowTypes: ['image', 'pdf'],
+        })
+      )
+    );
+
+    expect(notify.mock.calls).toEqual([
+      [
+        syncExclusionMessage({ cause: 'folder', folder: DATA_DIRECTORY }),
+        { persist: true },
+      ],
+      [syncExclusionMessage({ cause: 'type' }), { persist: true }],
+    ]);
+  });
+
   it.each([
-    ['Sync syncs every type', fakeSync({ allowTypes: ['unsupported'] })],
+    [
+      'Sync syncs the database',
+      fakeSync({ ignoreFolders: ['notes'], allowTypes: ['unsupported'] }),
+    ],
     [
       'Sync is not set up',
-      fakeSync({ status: 'disconnected', allowTypes: [] }),
+      fakeSync({ status: 'disconnected', allowed: false, allowTypes: [] }),
     ],
     ['Sync is off', null],
   ])('says nothing when %s', async (_case, sync) => {

@@ -62,9 +62,10 @@ import {
   getEditorClass,
 } from './lib/obsidian-editor';
 import {
+  findSyncExclusions,
   getSyncPlugin,
   holdForSync,
-  syncSkipsOtherTypes,
+  syncExclusionMessage,
 } from './lib/obsidian-sync';
 import { ObsidianHelpers as Obsidian } from './lib/ObsidianHelpers';
 import {
@@ -1333,23 +1334,21 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   /**
-   * Ask for "Sync all other types" when Obsidian Sync, set up for this vault,
-   * leaves the database file out, as it does by default. Sync reads its
-   * settings after the layout is ready, so this waits for them.
+   * Warn, once per cause, when Obsidian Sync, set up for this vault, leaves
+   * the database file out: "Sync all other types" off, as it is by default,
+   * or an excluded folder over the data folder. Sync reads its settings after
+   * the layout is ready, so this waits for them.
    */
   private async verifySyncSettings(): Promise<void> {
     const unloaded = new AbortController();
     this.register(() => unloaded.abort());
-    const skipsDatabase = await syncSkipsOtherTypes({
+    const exclusions = await findSyncExclusions({
       getSync: () => getSyncPlugin(this.app),
       path: DATABASE_FILE_PATH,
       signal: unloaded.signal,
     });
-    if (!skipsDatabase) return;
-    Obsidian.notify(
-      `Incremental reading: please enable "sync all other types"` +
-        ` before using the plugin`,
-      { persist: true }
-    );
+    for (const exclusion of exclusions) {
+      Obsidian.notify(syncExclusionMessage(exclusion), { persist: true });
+    }
   }
 }
