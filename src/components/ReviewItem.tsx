@@ -122,7 +122,11 @@ export default function ReviewItem() {
         <IREditor
           key={item.data.id}
           value={fileText}
-          className="ir-editor"
+          // A card's answer side: styles.css places its text as it does the
+          // question's (see `.ir-card-editor`)
+          className={
+            isReviewCard(item) ? 'ir-editor ir-card-editor' : 'ir-editor'
+          }
           onEnter={(_cm: EditorView, _mod: boolean, _shift: boolean) => false}
           onEscape={() => {}}
           item={item}

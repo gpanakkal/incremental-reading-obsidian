@@ -25,6 +25,8 @@ export function CardViewer({
     'allow-fold-headings',
     'allow-fold-lists',
     'show-indentation-guide',
+    // The hook styles.css centers the card's text on (see `.ir-card-preview`)
+    'ir-card-preview',
   ];
 
   useEffect(() => {

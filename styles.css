@@ -1327,6 +1327,69 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
   min-height: 0;
 }
 
+/* Where a card's text sits in the space the bar leaves, on both sides of the
+   card: `.ir-card-preview` is CardViewer's preview of the question, and
+   `.ir-card-editor` the editor ReviewItem swaps in once the answer is shown.
+   Articles and snippets get neither, so their layout is untouched.
+
+   Wherever the bar is at the bottom, and only there, the text is centered in
+   that space: the bar's own placement and this one are both keyed on
+   `.is-mobile` (Obsidian's body class for `app.isMobile`; see
+   `.is-mobile .ir-review-interface > .ir-action-bar` and the panel's
+   `top: !app.isMobile` in ActionBarExtension), so the two never disagree.
+   Obsidian pins notices across the top of a phone screen, so a short card
+   starting at the top is the one thing a notice reliably covers; centered, it
+   clears both the notices above and the bar below.
+
+   Auto margins, not `justify-content: center`: once a long card overflows,
+   they resolve to 0 and the card starts at the top and scrolls, where
+   centering would push its first lines above the scroll origin, out of reach.
+
+   Question: `width: 100%` keeps the sizer at the readable line width (as a
+   flex item with auto inline margins it would otherwise shrink to fit its
+   text); `flex-shrink: 0` lets a long card overflow instead of being squeezed.
+
+   Answer: Obsidian already makes `.cm-sizer` a flex column at least as tall as
+   the scroller, but grows `.cm-contentContainer` to fill it, leaving no free
+   space to center in; it stops growing here. CodeMirror's `scrollPastEnd`
+   (IREditor) pads the content's bottom by nearly a screen, as an inline style,
+   which would overflow every card and pin it to the top: it is dropped, and
+   with it only the room to scroll a card's last line up to the top. The blank
+   space left around the text is outside CodeMirror's content, which takes no
+   clicks there; IREditor's `caretOnBlankPress` places the caret instead. */
+.ir-review-interface .ir-card-preview {
+  display: flex;
+  flex-direction: column;
+}
+
+.ir-card-preview > .ir-card-viewer {
+  width: 100%;
+  flex-shrink: 0;
+}
+
+.is-mobile .ir-card-preview > .ir-card-viewer,
+.is-mobile .ir-card-editor.mod-cm6 .cm-sizer > .cm-contentContainer {
+  margin-block: auto;
+}
+
+.is-mobile .ir-card-editor.mod-cm6 .cm-sizer > .cm-contentContainer {
+  flex-grow: 0;
+}
+
+.is-mobile .ir-card-editor.mod-cm6 .cm-content {
+  padding-bottom: 0 !important;
+}
+
+/* With the bar on top (desktop, any width), the text is not centered: it
+   starts at the top, 100px below the bar instead of hugging it, leaving the
+   room a card's hints would take. The answer's scroller sits in a
+   `.markdown-source-view` Obsidian nests inside `.ir-card-editor`, padded by
+   `.ir-review-scroller`. */
+body:not(.is-mobile) .ir-review-interface .ir-card-preview,
+body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
+  padding-top: 100px;
+}
+
 /* Account for the static tab header on mobile in CardViewer */
 .is-phone
   .mod-root

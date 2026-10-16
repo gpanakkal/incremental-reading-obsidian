@@ -20,7 +20,9 @@ import {
   type ReviewArticle,
   type ReviewCard,
   type ReviewItem,
-  type ReviewSnippet, isReviewArticle 
+  type ReviewSnippet,
+  isReviewArticle,
+  isReviewCard,
 } from '#/lib/types';
 import { insertBlankLine } from '@codemirror/commands';
 import {
@@ -140,6 +142,36 @@ export function selectionPresenceListener(
     const has = !update.state.selection.main.empty;
     if (had !== has) onChange(has);
   });
+}
+
+/**
+ * A mousedown handler for a card's editor. Its text is centered in the pane
+ * (`.ir-card-editor` in styles.css), so `.cm-content` no longer fills it, and
+ * the blank space above and below a short card is `.cm-sizer` or
+ * `.cm-contentContainer`: outside contentDOM, where CodeMirror takes no input.
+ * (Both are wrappers Obsidian's undocumented editor class builds around
+ * CodeMirror's content, not CodeMirror's own; unofficial, so they may move.)
+ * A press there puts the caret at the nearest text instead, as it did when the
+ * content filled the pane, or with Shift extends the selection to it. Anything
+ * else (the text, a scrollbar, a button other than the main one) is left
+ * alone. A drag started there selects nothing.
+ */
+export function caretOnBlankPress(view: EditorView) {
+  return (evt: MouseEvent) => {
+    // Duck-typed: `instanceof Element` fails for a review tab in a popout
+    const target = evt.target as Partial<Element> | null;
+    if (evt.button !== 0) return;
+    if (!target?.matches?.('.cm-sizer, .cm-contentContainer')) return;
+    if (!target.contains?.(view.contentDOM)) return;
+    const pos = view.posAtCoords({ x: evt.clientX, y: evt.clientY }, false);
+    evt.preventDefault();
+    view.focus();
+    const { anchor } = view.state.selection.main;
+    view.dispatch({
+      selection: EditorSelection.range(evt.shiftKey ? anchor : pos, pos),
+      userEvent: 'select.pointer',
+    });
+  };
 }
 
 /**
@@ -455,6 +487,9 @@ export function IREditor({
         ],
       });
 
+      const onBlankPress = isReviewCard(item) ? caretOnBlankPress(cm) : null;
+      if (onBlankPress) cm.dom.addEventListener('mousedown', onBlankPress);
+
       // Render TitleEditor via React portal into a container prepended to
       // .cm-sizer, so it appears above the note body. .cm-sizer is created
       // synchronously by CodeMirror's constructor, so it's always present here.
@@ -513,6 +548,7 @@ export function IREditor({
 
       const cleanupEffect = () => {
         stopArrivals();
+        if (onBlankPress) cm.dom.removeEventListener('mousedown', onBlankPress);
         titleContainer?.remove();
         setTitlePortalEl(null);
 

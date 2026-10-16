@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import {
+  caretOnBlankPress,
   isPersistableChange,
   reconcileIncomingValue,
   selectionModeExtension,
@@ -11,7 +12,7 @@ import { computeMinimalChange } from '#/lib/minimal-change';
 import { EditorSelection, EditorState } from '@codemirror/state';
 import { EditorView, type ViewUpdate } from '@codemirror/view';
 import fc from 'fast-check';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #region HELPERS
 
@@ -824,6 +825,145 @@ describe('selectionPresenceListener', () => {
             reports.forEach((has, i) => {
               expect(has).toBe(i % 2 === 0);
             });
+          } finally {
+            view.destroy();
+          }
+        }
+      )
+    );
+  });
+});
+
+describe('caretOnBlankPress', () => {
+  // Obsidian's editor nests the content as .cm-sizer > .cm-contentContainer >
+  // .cm-content; a centered card leaves the first two showing around its text.
+  // jsdom has no layout, so where a press lands is stubbed through posAtCoords.
+  function makeCardEditor(doc: string) {
+    // No animation frame: the press scrolls the caret into view, a measure
+    // jsdom can't make (no Range.getClientRects)
+    vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(1);
+    // Whether each transaction says it came from a pointer, as CodeMirror's
+    // own click does: what other extensions read to tell a click from a key
+    const fromPointer: boolean[] = [];
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        extensions: EditorView.updateListener.of((update) => {
+          for (const tr of update.transactions) {
+            fromPointer.push(tr.isUserEvent('select.pointer'));
+          }
+        }),
+      }),
+      parent: document.body,
+    });
+    const sizer = document.createElement('div');
+    sizer.className = 'cm-sizer';
+    const container = document.createElement('div');
+    container.className = 'cm-contentContainer';
+    view.scrollDOM.insertBefore(sizer, view.contentDOM);
+    sizer.appendChild(container);
+    container.appendChild(view.contentDOM);
+    const focus = vi.spyOn(view, 'focus').mockImplementation(() => {});
+    const onPress = caretOnBlankPress(view);
+    // Handed straight to the handler, as if the press bubbled up to it: a real
+    // press on the text would also reach CodeMirror's own mouse handling,
+    // which measures text jsdom can't lay out
+    const press = (target: Element, button = 0, shiftKey = false) => {
+      const evt = new MouseEvent('mousedown', {
+        cancelable: true,
+        button,
+        shiftKey,
+      });
+      Object.defineProperty(evt, 'target', { value: target });
+      onPress(evt);
+      return evt;
+    };
+    return { view, sizer, container, focus, press, fromPointer };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+  });
+
+  it('puts the caret at the nearest text when the blank space around it is pressed', () => {
+    fc.assert(
+      fc.property(
+        fc.string({ minLength: 1 }),
+        fc.nat(),
+        fc.boolean(),
+        (doc, at, onSizer) => {
+          const { view, sizer, container, focus, press, fromPointer } =
+            makeCardEditor(doc);
+          try {
+            const pos = at % (doc.length + 1);
+            vi.spyOn(view, 'posAtCoords').mockReturnValue(pos);
+
+            const evt = press(onSizer ? sizer : container);
+
+            expect(view.state.selection.main.empty).toBe(true);
+            expect(view.state.selection.main.head).toBe(pos);
+            expect(fromPointer).toEqual([true]);
+            expect(focus).toHaveBeenCalledTimes(1);
+            // Or the browser moves focus to the blank element after us
+            expect(evt.defaultPrevented).toBe(true);
+          } finally {
+            view.destroy();
+          }
+        }
+      )
+    );
+  });
+
+  it('leaves a press on the text, elsewhere, or with another button to the editor', () => {
+    const { view, container, focus, press } = makeCardEditor('alpha\nbeta');
+    view.dispatch({ selection: { anchor: 3 } });
+    vi.spyOn(view, 'posAtCoords').mockReturnValue(8);
+    const line = view.contentDOM.querySelector('.cm-line')!;
+    // A sizer of an editor nested in the text, such as a table cell's
+    const nested = document.createElement('div');
+    nested.className = 'cm-sizer';
+    line.appendChild(nested);
+
+    const presses = [
+      press(view.contentDOM),
+      press(line),
+      press(nested),
+      // The scroller holds the scrollbar
+      press(view.scrollDOM),
+      press(container, 2),
+    ];
+
+    expect(presses.map((evt) => evt.defaultPrevented)).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+    ]);
+    expect(view.state.selection.main.head).toBe(3);
+    expect(focus).not.toHaveBeenCalled();
+    view.destroy();
+  });
+
+  it('extends the selection to the nearest text on a Shift-press there', () => {
+    fc.assert(
+      fc.property(
+        fc.string({ minLength: 1 }),
+        fc.nat(),
+        fc.nat(),
+        (doc, from, at) => {
+          const { view, sizer, press } = makeCardEditor(doc);
+          try {
+            const anchor = from % (doc.length + 1);
+            const pos = at % (doc.length + 1);
+            view.dispatch({ selection: { anchor } });
+            vi.spyOn(view, 'posAtCoords').mockReturnValue(pos);
+
+            press(sizer, 0, true);
+
+            expect(view.state.selection.main.anchor).toBe(anchor);
+            expect(view.state.selection.main.head).toBe(pos);
           } finally {
             view.destroy();
           }

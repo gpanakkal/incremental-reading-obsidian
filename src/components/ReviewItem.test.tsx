@@ -394,11 +394,11 @@ describe('ReviewItem', () => {
 
           expect(cardViewer).not.toHaveBeenCalled();
           expect(editor).toHaveBeenCalledTimes(1);
-          expect(editor.mock.calls[0][0]).toMatchObject({
-            value: text,
-            className: 'ir-editor',
-            item,
-          });
+          expect(editor.mock.calls[0][0]).toMatchObject({ value: text, item });
+          // A card's answer is placed like its question; nothing else is
+          const classes = editor.mock.calls[0][0].className.split(' ');
+          expect(classes).toContain('ir-editor');
+          expect(classes.includes('ir-card-editor')).toBe(type === 'card');
         }
       )
     );

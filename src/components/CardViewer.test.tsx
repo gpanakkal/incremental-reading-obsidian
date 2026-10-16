@@ -185,3 +185,16 @@ describe('CardViewer links', () => {
     expect(press.defaultPrevented).toBe(false);
   });
 });
+
+describe('CardViewer layout', () => {
+  it('marks its preview as a card, the hook the centered layout keys on', () => {
+    // styles.css centers the card's text (or drops it below a top bar) only
+    // inside `.ir-card-preview`; articles and snippets never render here, so
+    // they keep the plain preview layout.
+    const { container, plain } = mountCard();
+
+    const preview = container.firstElementChild!;
+    expect(preview.classList).toContain('ir-card-preview');
+    expect(plain.closest('.ir-card-preview')).toBe(preview);
+  });
+});
