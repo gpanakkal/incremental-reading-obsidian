@@ -1458,7 +1458,7 @@ test.describe('Snippets and cards from a PDF article', () => {
     const snippetBox = snippetBoxes(article(window), 1, 9);
     await expect(snippetBox).toBeVisible();
 
-    const card = await cardInReview(
+    await cardInReview(
       window,
       [1, 2, 0],
       [1, 2, FIRST_LINE.length],
@@ -1477,7 +1477,15 @@ test.describe('Snippets and cards from a PDF article', () => {
     );
 
     await clickOn(window, cardBox);
-    await expect(activeTabTitle(window)).toHaveText(noteTitle(card.reference));
+    // The card in review, its answer hidden. Read off the pane, as the tab's
+    // title names the plugin over every card
+    const cardViewer = window.locator(
+      `.workspace-leaf.mod-active [data-type="${REVIEW_VIEW_TYPE}"] .ir-card-viewer`
+    );
+    await expect(cardViewer).toContainText('Incremental reading turns a');
+    await expect(cardViewer).toContainText('into a series of short reviews.');
+    await expect(cardViewer.locator('.ir-hidden-answer')).toBeVisible();
+    await expect(cardViewer).not.toContainText('long text');
   });
 
   test("takes a card's highlight off when it is undone, and when its note is deleted", async () => {

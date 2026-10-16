@@ -4,8 +4,9 @@ import test, {
   type Page,
 } from '@playwright/test';
 import * as fs from 'node:fs/promises';
+import * as http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import {
   executeCommandById,
   finalizeArticleImport,
@@ -24,10 +25,8 @@ let app: ElectronApplication;
 let window: Page;
 let vaultPath: string;
 
-/** The page imported, as a local file the web viewer can open. */
-const PAGE_URL = pathToFileURL(
-  path.resolve('e2e-tests/fixtures/web-article.html')
-).href;
+/** The page imported, served by {@link server}. */
+const PAGE_FILE = path.resolve('e2e-tests/fixtures/web-article.html');
 /** Its title, which the article is named for. */
 const PAGE_TITLE = 'Gardens of the Northern Coast';
 
@@ -46,6 +45,37 @@ type PageApp = {
   };
 };
 
+/**
+ * Serves {@link PAGE_FILE} over http, at {@link pageUrl}. Not a `file:` URL:
+ * since Obsidian 1.14 the web viewer loads only http(s) addresses, and leaves
+ * the tab blank, titled with the address, for anything else.
+ */
+let server: http.Server;
+let pageUrl: string;
+
+test.beforeAll(async () => {
+  const html = await fs.readFile(PAGE_FILE);
+  server = http.createServer((request, response) => {
+    if (request.url !== '/web-article.html') {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    response.end(html);
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const { port } = server.address() as AddressInfo;
+  pageUrl = `http://127.0.0.1:${port}/web-article.html`;
+});
+
+test.afterAll(async () => {
+  // A connection the web viewer kept alive would hold `close` open
+  server.closeAllConnections();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
+
 /** The title in the header of the active tab. */
 const activeTabTitle = (page: Page) =>
   page.locator(
@@ -53,7 +83,7 @@ const activeTabTitle = (page: Page) =>
   );
 
 /**
- * Open {@link PAGE_URL} in a web viewer tab of its own, turning the core Web
+ * Open {@link pageUrl} in a web viewer tab of its own, turning the core Web
  * viewer plugin on first if it is off, and wait until the page has loaded:
  * the tab takes its title from the page.
  */
@@ -70,7 +100,7 @@ async function openPage(page: Page) {
       active: true,
       state: { url, title: url, navigate: true },
     });
-  }, PAGE_URL);
+  }, pageUrl);
   await expect(activeTabTitle(page)).toHaveText(PAGE_TITLE);
 }
 

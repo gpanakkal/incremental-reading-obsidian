@@ -14,6 +14,7 @@ import {
   recordedFlash,
   recordFlash,
   setNativeMenus,
+  setPluginSetting,
 } from './helpers';
 import {
   closeElectron,
@@ -56,6 +57,10 @@ test.beforeEach(async () => {
   window = await openVault(app, vaultPath);
   // Pinned: CI's window is much narrower than a local headless run's
   await window.setViewportSize({ width: 1000, height: 900 });
+  // No success notices: one still up over the view header's ⋮ takes the click
+  // meant for it, and Obsidian keeps a notice up while the pointer is on it
+  await setPluginSetting(window, 'successNoticesOutsideReview', 'none');
+  await setPluginSetting(window, 'successNoticesInReview', 'none');
 });
 
 test.afterEach(async () => {

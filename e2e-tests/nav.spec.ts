@@ -882,6 +882,9 @@ test.describe('Review history navigation', () => {
     test("has the ⋮ as its one action, opening the item's file menu", async () => {
       // macOS defaults to native menus, which Electron draws outside the page.
       await setNativeMenus(window, false);
+      // No import notices: one sliding in over the ⋮ takes the click meant
+      // for it
+      await setPluginSetting(window, 'successNoticesOutsideReview', 'none');
       await importTwoArticles();
       await beginReview();
       // A markdown tab has a reading-view toggle beside its ⋮; review does not
@@ -1238,14 +1241,13 @@ test.describe('Links followed in review', () => {
 
     await link.click();
 
-    // A card has no title line in review; its tab is named after it
-    await expect(reviewTabTitle()).toHaveText(titleOf(card), LANDS_WITHIN);
-    // The card, as review shows one: its question, the answer hidden
-    await expect(
-      window.locator(
-        `.workspace-leaf.mod-active [data-type="${REVIEW_VIEW_TYPE}"] .ir-card-viewer`
-      )
-    ).toBeVisible();
+    // The card, as review shows one: its question, the answer hidden. Read
+    // off the pane, as the tab's title names the plugin over every card
+    const cardViewer = window.locator(
+      `.workspace-leaf.mod-active [data-type="${REVIEW_VIEW_TYPE}"] .ir-card-viewer`
+    );
+    await expect(cardViewer).toContainText(BULLET, LANDS_WITHIN);
+    await expect(cardViewer.locator('.ir-hidden-answer')).toBeVisible();
   });
 
   test('Go to context from a snippet in review shows its article in review, with the passage centered', async () => {

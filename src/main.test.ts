@@ -3411,9 +3411,10 @@ describe('IncrementalReadingPlugin as the success notice source', () => {
               },
             },
             getActiveReviewView(): object | null {
+              // `.call` answers `any` without `strictBindCallApply`
               return IncrementalReadingPlugin.prototype.getActiveReviewView.call(
                 this as unknown as IncrementalReadingPlugin
-              );
+              ) as ReviewView | null;
             },
           };
           configureSuccessNotices(receiver);

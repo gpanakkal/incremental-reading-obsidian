@@ -49,9 +49,9 @@ const SUCCESS_NOTICE_LEVELS = ['all', 'minimal', 'none'] as const;
 
 /** What the success notices box says, once, above its two dropdowns. */
 const SUCCESS_NOTICES_DESC =
-  'Which confirmations to show for actions taken in the review tab and anywhere else.' +
-  ' All shows every one, Minimal shows only undos and imports, and None shows none.' +
-  ' Errors always show.';
+  'Which confirmations to show for successful actions.' +
+  ' Minimal shows only undos and imports.' +
+  ' Error notices are always shown.';
 
 /** Any text at all, not just the printable ASCII `fc.string()` defaults to. */
 const textArb = (constraints: fc.StringConstraints = {}) =>

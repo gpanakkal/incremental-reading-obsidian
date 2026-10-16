@@ -395,7 +395,7 @@ export class IRSettingTab extends PluginSettingTab {
             name: 'Success notices',
             desc:
               'Which confirmations to show for successful actions.' +
-              ' Minimal shows only undos and imports' +
+              ' Minimal shows only undos and imports.' +
               ' Error notices are always shown.',
             items: [
               {
