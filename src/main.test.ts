@@ -1,4 +1,10 @@
-import { DATA_DIRECTORY, PLUGIN_ICON } from '#/lib/constants';
+import {
+  AUTO_IMPORT_DEBOUNCE_MS,
+  AUTO_IMPORT_MAX_WAIT_MS,
+  AUTO_IMPORT_TAG,
+  DATA_DIRECTORY,
+  PLUGIN_ICON,
+} from '#/lib/constants';
 import { refusedPathsWarning } from '#/lib/item-path-guard';
 import ReviewManager from '#/lib/items/ReviewManager';
 import { SnippetManager } from '#/lib/items/SnippetManager';
@@ -20,6 +26,7 @@ import {
   type SyncHold,
 } from '#/lib/repository/SQLJSRepository';
 import * as ReviewReminder from '#/lib/review-reminder';
+import { DEFAULT_SETTINGS } from '#/lib/settings';
 import {
   resetSession,
   setCurrentItemId,
@@ -874,6 +881,65 @@ function makeCreationReceiver(refused: (string | null)[]) {
 }
 
 /**
+ * A plugin watching for notes that gain a trigger tag, its settings at their
+ * defaults but with importing by tag on, and no review manager yet.
+ */
+function makeAutoImportReceiver() {
+  type Changed = (file: TFile, data: string, cache: unknown) => void;
+  let changed: Changed | undefined;
+  const changedRef = { event: 'changed' };
+  const unloaders: (() => void)[] = [];
+  const files = new Map<string, TFile>();
+  const caches = new Map<TFile, unknown>();
+  const importArticles = vi.fn(() => Promise.resolve([]));
+  const hasItemRow = vi.fn((_id: string) => Promise.resolve(false));
+  const receiver = {
+    settings: { ...structuredClone(DEFAULT_SETTINGS), autoImportOnTag: true },
+    reviewManager: undefined as unknown,
+    app: {
+      vault: { getFileByPath: (path: string) => files.get(path) ?? null },
+      metadataCache: {
+        on: vi.fn((name: string, callback: Changed) => {
+          if (name === 'changed') changed = callback;
+          return changedRef;
+        }),
+        getFileCache: (file: TFile) => caches.get(file) ?? null,
+      },
+    },
+    register: vi.fn((unloader: () => void) => unloaders.push(unloader)),
+    registerEvent: vi.fn(),
+  };
+  (
+    IncrementalReadingPlugin.prototype as unknown as {
+      watchAutoImports(): void;
+    }
+  ).watchAutoImports.call(receiver);
+  return {
+    receiver,
+    importArticles,
+    hasItemRow,
+    changedRef,
+    /**
+     * Have the review manager up, importing through `importArticles` and
+     * looking ids up through `hasItemRow`.
+     */
+    startReviewManager() {
+      receiver.reviewManager = { importArticles, hasItemRow };
+    },
+    /** A note at `path` re-indexed with `frontmatter`, as Obsidian tells of it. */
+    change(path: string, frontmatter: Record<string, unknown>) {
+      const file = files.get(path) ?? tFileAt(path);
+      files.set(path, file);
+      const cache = { frontmatter };
+      caches.set(file, cache);
+      changed!(file, '', cache);
+      return file;
+    },
+    unload: () => unloaders.forEach((unloader) => unloader()),
+  };
+}
+
+/**
  * A workspace holding `views` in leaves of the review type: each a review
  * tab, or a leaf Obsidian has not built its view for yet (a deferred view).
  */
@@ -1207,10 +1273,13 @@ describe('IncrementalReadingPlugin onload', () => {
     vi.spyOn(ObsidianEditor, 'getEditorClass').mockReturnValue(
       class {} as never
     );
-    // The settings tab classes its container, which this node environment
-    // has no document to build.
+    // The settings tab classes its container and listens on it, which this
+    // node environment has no document to build.
     vi.stubGlobal('document', {
-      createElement: () => ({ classList: { add: vi.fn() } }),
+      createElement: () => ({
+        classList: { add: vi.fn() },
+        addEventListener: vi.fn(),
+      }),
     });
   });
 
@@ -2884,6 +2953,97 @@ describe('IncrementalReadingPlugin.watchCreations', () => {
     watch.fire();
 
     expect(notify).not.toHaveBeenCalled();
+  });
+});
+
+describe('IncrementalReadingPlugin.watchAutoImports', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // The watcher waits through `window`
+    vi.stubGlobal('window', globalThis);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('imports a note whose frontmatter gains a trigger tag where it is, at the default priority, once it settles', async () => {
+    const watch = makeAutoImportReceiver();
+    watch.startReviewManager();
+    watch.receiver.settings.defaultPriority = 17;
+
+    const file = watch.change('inbox/clip.md', { tags: [AUTO_IMPORT_TAG] });
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+    expect(watch.importArticles).toHaveBeenCalledExactlyOnceWith(
+      [{ file, matchedTags: [AUTO_IMPORT_TAG] }],
+      { priority: 17, fixedIntervalDays: null, makeCopy: false }
+    );
+  });
+
+  it('imports a note whose ir-id the review manager finds no row for, and not one whose ir-id it does', async () => {
+    const watch = makeAutoImportReceiver();
+    watch.startReviewManager();
+    watch.hasItemRow.mockImplementation((id) => Promise.resolve(id === 'kept'));
+
+    const orphan = watch.change('orphan.md', {
+      'ir-id': 'gone',
+      tags: [AUTO_IMPORT_TAG],
+    });
+    watch.change('known.md', { 'ir-id': 'kept', tags: [AUTO_IMPORT_TAG] });
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+    expect(watch.hasItemRow.mock.calls).toEqual([['gone'], ['kept']]);
+    expect(watch.importArticles).toHaveBeenCalledExactlyOnceWith(
+      [{ file: orphan, matchedTags: [AUTO_IMPORT_TAG] }],
+      expect.anything()
+    );
+  });
+
+  it('ignores changes until the review manager is up', async () => {
+    const watch = makeAutoImportReceiver();
+
+    watch.change('a.md', { tags: [AUTO_IMPORT_TAG] });
+    watch.startReviewManager();
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
+
+    expect(watch.importArticles).not.toHaveBeenCalled();
+  });
+
+  it('follows the settings as they are at each change, with no reload', async () => {
+    const watch = makeAutoImportReceiver();
+    watch.startReviewManager();
+    const { settings } = watch.receiver;
+
+    settings.autoImportOnTag = false;
+    watch.change('off.md', { tags: [AUTO_IMPORT_TAG] });
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
+    expect(watch.importArticles).not.toHaveBeenCalled();
+
+    settings.autoImportOnTag = true;
+    settings.autoImportTags = ['to-read'];
+    watch.change('old-tag.md', { tags: [AUTO_IMPORT_TAG] });
+    const file = watch.change('new-tag.md', { tags: ['to-read'] });
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
+
+    expect(watch.importArticles).toHaveBeenCalledExactlyOnceWith(
+      [{ file, matchedTags: ['to-read'] }],
+      expect.anything()
+    );
+  });
+
+  it('listens for as long as the plugin is loaded, and drops what is waiting when it unloads', async () => {
+    const watch = makeAutoImportReceiver();
+    watch.startReviewManager();
+
+    expect(watch.receiver.registerEvent).toHaveBeenCalledWith(watch.changedRef);
+    watch.change('a.md', { tags: [AUTO_IMPORT_TAG] });
+    watch.unload();
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
+
+    expect(watch.importArticles).not.toHaveBeenCalled();
   });
 });
 

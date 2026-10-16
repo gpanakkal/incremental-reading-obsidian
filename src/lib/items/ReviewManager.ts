@@ -244,6 +244,14 @@ export default class ReviewManager {
   }
 
   /**
+   * Whether any item table holds a row with id `id`, deleted or not: an
+   * `ir-id` none holds is an orphan, which `AutoImportWatcher` may import
+   */
+  async hasItemRow(id: string): Promise<boolean> {
+    return (await this.articles.findById(id)) !== null;
+  }
+
+  /**
    * Import a page read from Obsidian's web viewer as a new article
    */
   async importWebPage(

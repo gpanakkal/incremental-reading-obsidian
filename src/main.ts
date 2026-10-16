@@ -1,3 +1,4 @@
+import { AutoImportWatcher } from '#/lib/AutoImportWatcher';
 import { folderSource } from '#/lib/bulk-import/candidates';
 import { createEmitter } from '#/lib/emitter';
 import {
@@ -191,6 +192,8 @@ export default class IncrementalReadingPlugin extends Plugin {
    * bar, and until the review manager it asks is up.
    */
   private reviewReminder?: ReviewReminder;
+  /** Imports notes that gain a trigger tag. Unset until the database is up. */
+  private autoImportWatcher?: AutoImportWatcher;
 
   MarkdownEditor!: typeof ExtractedMarkdownEditor;
 
@@ -381,6 +384,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         this.watchCreations(hostTimer);
 
         this.watchIrIdFrontmatter();
+
+        this.watchAutoImports();
 
         // Delegated handlers for highlights in reading mode.
         // The CM extension's eventHandlers cover edit mode;
@@ -817,6 +822,44 @@ export default class IncrementalReadingPlugin extends Plugin {
       this.app.metadataCache.on('changed', (file) => {
         if (!this.reviewManager) return;
         repairer.handleChange(file);
+      })
+    );
+  }
+
+  /**
+   * Import notes as their frontmatter gains a trigger tag. See
+   * {@link AutoImportWatcher}.
+   *
+   * `changed` is the one event every writer reaches: the editor, reading
+   * mode's properties widget (which writes straight to the file), Sync, and
+   * scripts and other plugins. `vault.on('create')` is no use here, since it
+   * comes before the new note's frontmatter is read. Listened to whether the
+   * setting is on or not: the watcher reads it on each change, so turning it
+   * on needs no reload.
+   */
+  private watchAutoImports() {
+    const watcher = new AutoImportWatcher({
+      app: this.app,
+      getConfig: () => ({
+        enabled: this.settings.autoImportOnTag,
+        triggerTags: this.settings.autoImportTags,
+        priority: this.settings.defaultPriority,
+      }),
+      importMany: (entries, { priority }) =>
+        this.reviewManager.importArticles(entries, {
+          priority,
+          fixedIntervalDays: null,
+          makeCopy: false,
+        }),
+      hasRow: (id) => this.reviewManager.hasItemRow(id),
+    });
+    this.autoImportWatcher = watcher;
+    this.register(watcher.start());
+
+    this.registerEvent(
+      this.app.metadataCache.on('changed', (file, _data, cache) => {
+        if (!this.reviewManager) return;
+        this.autoImportWatcher?.consider(file, cache);
       })
     );
   }

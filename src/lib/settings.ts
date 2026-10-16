@@ -14,13 +14,16 @@ import {
   type StepUnit,
 } from 'ts-fsrs';
 import {
+  AUTO_IMPORT_TAG,
   DATA_DIRECTORY,
   DAY_ROLLOVER_OFFSET_HOURS,
   DEFAULT_PRIORITY,
+  IMPORT_BLOCKED_TAGS,
   MAXIMUM_PRIORITY,
   MINIMUM_PRIORITY,
 } from './constants';
 import IRScheduler from './IRScheduler';
+import { formatTagList, parseTagList } from './tags';
 
 export interface IRPluginSettings {
   defaultPriority: number;
@@ -43,6 +46,10 @@ export interface IRPluginSettings {
   remindDueArticles: boolean;
   /** Whether due snippets light that reminder. */
   remindDueSnippets: boolean;
+  /** Whether a note whose frontmatter gains a trigger tag is imported by itself. */
+  autoImportOnTag: boolean;
+  /** The trigger tags, as {@link parseTagList} reads them. */
+  autoImportTags: string[];
   fsrsParams: FSRSParameters;
 }
 
@@ -110,6 +117,9 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   reviewReminders: true,
   remindDueArticles: true,
   remindDueSnippets: true,
+  // Off: it changes notes in the vault without being asked each time
+  autoImportOnTag: false,
+  autoImportTags: [AUTO_IMPORT_TAG],
   fsrsParams: FSRS_PARAMETER_DEFAULTS,
 };
 
@@ -224,6 +234,14 @@ const CONTROL_BINDINGS = {
   reviewReminders: topLevel('reviewReminders'),
   remindDueArticles: topLevel('remindDueArticles'),
   remindDueSnippets: topLevel('remindDueSnippets'),
+  autoImportOnTag: topLevel('autoImportOnTag'),
+  // Shown as `#`-prefixed tags separated by spaces; read however they are typed
+  autoImportTags: {
+    read: (settings) => formatTagList(settings.autoImportTags),
+    write: (settings, value: string) => {
+      settings.autoImportTags = parseTagList(value);
+    },
+  },
   'fsrsParams.request_retention': fsrsParam('request_retention'),
   'fsrsParams.enable_fuzz': fsrsParam('enable_fuzz'),
   'fsrsParams.maximum_interval': fsrsParam('maximum_interval'),
@@ -242,6 +260,60 @@ const validateSteps = (value: string) =>
     ? undefined
     : 'Write each step like "3m", "2h" or "1d", separated by commas.';
 
+/**
+ * Why `typed` can't be the trigger tags, if it can't. Snippet and card tags
+ * are refused because notes carrying them are never imported, so they could
+ * only ever fail. An empty list is refused only while importing by tag is on,
+ * where it would quietly import nothing.
+ */
+function triggerTagsProblem(
+  typed: string,
+  importingByTag: boolean
+): string | undefined {
+  const tags = parseTagList(typed);
+  const blocked = tags.filter((tag) => IMPORT_BLOCKED_TAGS.has(tag));
+  if (blocked.length > 0) {
+    return `Snippet and card tags can't be trigger tags: ${formatTagList(blocked)}`;
+  }
+  if (importingByTag && tags.length === 0) {
+    return 'Enter at least one tag, or turn off importing notes by tag.';
+  }
+  return undefined;
+}
+
+/** The trigger tags row's name, by which its field is also found in the tab. */
+const TRIGGER_TAGS_NAME = 'Trigger tags';
+
+/**
+ * `target` if it is the trigger tags field: an input in the row named
+ * {@link TRIGGER_TAGS_NAME}. Found through Obsidian's `setting-item` classes,
+ * since the declarative tab hands out no element for a control.
+ */
+function triggerTagsInput(target: Element): HTMLInputElement | undefined {
+  // Not `instanceof HTMLInputElement`: settings open in a window of their
+  // own, whose element classes are not this one's.
+  if (!target.matches('input')) return undefined;
+  const name = target
+    .closest('.setting-item')
+    ?.querySelector('.setting-item-name')?.textContent;
+  return name === TRIGGER_TAGS_NAME ? (target as HTMLInputElement) : undefined;
+}
+
+/**
+ * Rewrites the trigger tags field, if `event` is on it, as its tags read: each
+ * after a `#`, separated by single spaces.
+ *
+ * Only once the user is done with it. Obsidian's text control saves on every
+ * keystroke, and rewriting then would eat the space typed before a new tag.
+ * Assigning `value` fires no `input` event, so nothing is saved or checked
+ * again; nothing needs to be, since the text reads as the same tags.
+ */
+function tidyTriggerTags(event: Event) {
+  // An element: the listeners are on one, so only elements reach them
+  const input = triggerTagsInput(event.target as Element);
+  if (input) input.value = formatTagList(parseTagList(input.value));
+}
+
 /** Marks this plugin's settings tab for the rules in styles.css. */
 export const SETTINGS_TAB_CLASS = 'ir-settings-tab';
 
@@ -255,12 +327,14 @@ export const CONTINUED_GROUP_CLASS = 'ir-setting-group-continued';
  * One setting whose controls sit on their own rows beneath its name and
  * description, drawn as one box. For a setting with several scopes, like
  * inside and outside review: the description is said once, and each row is
- * named for its scope alone.
+ * named for its scope alone. With a `control` of its own, the head row holds
+ * it, and the rows beneath are the setting's details.
  */
 export interface SettingBox<K extends string = string> {
   type: 'box';
   name: string;
   desc: string;
+  control?: SettingDefinitionControl<K>['control'];
   items: SettingDefinitionControl<K>[];
 }
 
@@ -303,10 +377,14 @@ export function layOutGroups<K extends string>(
         continue;
       }
       endRun();
+      const { name, desc, control } = item;
       groups.push({
         type: 'group',
         cls: SETTING_BOX_CLASS,
-        items: [{ name: item.name, desc: item.desc }, ...item.items],
+        items: [
+          control ? { name, desc, control } : { name, desc },
+          ...item.items,
+        ],
       });
     }
     endRun();
@@ -339,6 +417,12 @@ export class IRSettingTab extends PluginSettingTab {
     // element shown in the settings window, so this scopes styles.css's
     // settings rules to this tab alone.
     this.containerEl.classList.add(SETTINGS_TAB_CLASS);
+    // On the container, which outlives each render of the rows. `focusout`
+    // bubbles where `blur` doesn't.
+    this.containerEl.addEventListener('focusout', tidyTriggerTags);
+    this.containerEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.isComposing) tidyTriggerTags(event);
+    });
   }
 
   getSettingDefinitions(): SettingDefinitionItem<ControlKey>[] {
@@ -383,6 +467,29 @@ export class IRSettingTab extends PluginSettingTab {
             name: 'Create empty articles in the current folder',
             desc: `If disabled, empty articles will be created in "${DATA_DIRECTORY}/"`,
             control: { type: 'toggle', key: 'createEmptyInCurrentFolder' },
+          },
+          {
+            type: 'box',
+            name: 'Auto-import notes by tag',
+            desc:
+              'Automatically import any note in-place when one of the trigger ' +
+              'tags is added to frontmatter. Tags in the note body are ignored. Does not affect notes that already have a matching tag.',
+            control: { type: 'toggle', key: 'autoImportOnTag' },
+            items: [
+              {
+                name: TRIGGER_TAGS_NAME,
+                control: {
+                  type: 'text',
+                  key: 'autoImportTags',
+                  // Read when checked, so the toggle as it is now decides
+                  validate: (typed) =>
+                    triggerTagsProblem(
+                      typed,
+                      this.plugin.settings.autoImportOnTag
+                    ),
+                },
+              },
+            ],
           },
         ],
       },

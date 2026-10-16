@@ -500,7 +500,8 @@ export function setIcon(parent: HTMLElement, iconId: string): void {
   parent.appendChild(svg);
 }
 
-export class MarkdownView {}
+/** A `FileView`, as Obsidian's is (through `TextFileView`). */
+export class MarkdownView extends FileView {}
 export class Component {
   load(): void {}
   unload(): void {}

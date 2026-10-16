@@ -117,6 +117,12 @@ class LeafActionBarController {
     return isPdfFileView(this.leaf.view);
   }
 
+  /** Whether the leaf shows `file`, as a note or a PDF. */
+  shows(file: TFile): boolean {
+    const { view } = this.leaf;
+    return view instanceof FileView && view.file === file;
+  }
+
   private mount({ file, container, className }: BarTarget): void {
     if (
       this.barEl &&
@@ -212,9 +218,20 @@ export function registerReadingModeActionBar(
   plugin.registerEvent(workspace.on('active-leaf-change', queueSyncAll));
   // A PDF is an article only by its row, which a rename or an import settles
   // after the workspace events for it have fired. A note's type is in its
-  // frontmatter, which no database write changes.
+  // frontmatter, which no database write changes: the cache hook below
+  // covers notes.
   const unsubscribe = plugin.reviewManager.repo.onDataChange(() =>
     syncLeaves((ctrl) => ctrl.showsPdf())
+  );
+  // A note's type is in its frontmatter, and importing a note in place gives
+  // it an `ir-id` through the cache with no workspace event, so the bar of a
+  // note open in reading mode would otherwise wait for an unrelated one. It
+  // costs one type lookup per save for the leaves showing that file, and
+  // `mount` is a no-op for the file already mounted.
+  plugin.registerEvent(
+    plugin.app.metadataCache.on('changed', (file) =>
+      syncLeaves((ctrl) => ctrl.shows(file))
+    )
   );
   plugin.register(() => {
     unloaded = true;

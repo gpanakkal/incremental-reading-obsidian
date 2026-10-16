@@ -9,14 +9,17 @@ import type {
   SettingDefinitionItem,
 } from 'obsidian';
 import type { StepUnit } from 'ts-fsrs';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 // The mock is what `obsidian` resolves to at runtime (see vitest.config.ts);
 // imported by path for its writable `Platform`.
 import { Platform } from '#/test/__mocks__/obsidian';
 import {
+  AUTO_IMPORT_TAG,
+  CARD_TAG,
   DATA_DIRECTORY,
   MAXIMUM_PRIORITY,
   MINIMUM_PRIORITY,
+  SNIPPET_TAG,
 } from './constants';
 import type { IRPluginData } from './plugin-data';
 import {
@@ -36,6 +39,7 @@ import {
   type SettingBox,
   type SettingGroupLayout,
 } from './settings';
+import { parseTagList } from './tags';
 
 // #region HELPERS
 
@@ -52,6 +56,12 @@ const SUCCESS_NOTICES_DESC =
   'Which confirmations to show for successful actions.' +
   ' Minimal shows only undos and imports.' +
   ' Error notices are always shown.';
+
+/** What the auto-import box says beside its toggle, above the trigger tags. */
+const AUTO_IMPORT_DESC =
+  'Automatically import any note in-place when one of the trigger tags is' +
+  ' added to frontmatter. Tags in the note body are ignored. Does not affect' +
+  ' notes that already have a matching tag.';
 
 /** Any text at all, not just the printable ASCII `fc.string()` defaults to. */
 const textArb = (constraints: fc.StringConstraints = {}) =>
@@ -118,6 +128,8 @@ const settingsArb = fc.record({
     reviewReminders: fc.boolean(),
     remindDueArticles: fc.boolean(),
     remindDueSnippets: fc.boolean(),
+    autoImportOnTag: fc.boolean(),
+    autoImportTags: fc.array(textArb()),
     fsrsParams: fc.record({
       request_retention: fc.double(),
       maximum_interval: fc.integer(),
@@ -231,6 +243,103 @@ const declaredControls = () =>
     makeTab(structuredClone(DEFAULT_SETTINGS)).tab.getSettingDefinitions()
   );
 
+/** A tag the trigger tags field can't take, written any way it reads as. */
+const blockedTagArb = fc
+  .tuple(
+    fc.constantFrom(SNIPPET_TAG, CARD_TAG),
+    fc.constantFrom('', '#'),
+    fc.boolean()
+  )
+  .map(([tag, hash, upper]) => hash + (upper ? tag.toUpperCase() : tag));
+
+/**
+ * Any typed trigger tags field: tags, blocked ones among them or not, between
+ * any separators; nothing but separators; or anything.
+ */
+const typedTriggerTagsArb = fc.oneof(
+  fc
+    .array(
+      fc.oneof(
+        fc.constantFrom(AUTO_IMPORT_TAG, '#to-read', 'Clipped'),
+        blockedTagArb,
+        fc.stringMatching(/^[\s,#]*$/),
+        textArb()
+      ),
+      { maxLength: 5 }
+    )
+    .chain((tags) =>
+      fc
+        .array(fc.constantFrom(',', ', ', ' ', '\n', ' , ', ''), {
+          minLength: tags.length,
+          maxLength: tags.length,
+        })
+        .map((seps) => tags.map((tag, i) => tag + seps[i]).join(''))
+    ),
+  fc.stringMatching(/^[\s,#]*$/),
+  textArb()
+);
+
+/** Keys pressed while typing: anything but Enter, separators and `#` among them. */
+const typingKeyArb = fc
+  .oneof(
+    fc.constantFrom(' ', ',', '#', 'a', 'Backspace', 'Tab', 'Shift', 'Escape'),
+    fc.string({ minLength: 1, maxLength: 3 })
+  )
+  .filter((key) => key !== 'Enter');
+
+/** The trigger tags row's name, as the tab declares it. */
+const TRIGGER_TAGS = 'Trigger tags';
+
+/**
+ * A row as Obsidian's `Setting` draws a text control, named `name` (none if
+ * undefined), holding `typed`, in `tab`'s container. Returns its field, whose
+ * value is `typed` as the field holds it: an input drops line breaks.
+ */
+function addTextRow(
+  tab: IRSettingTab,
+  name: string | undefined,
+  typed: string,
+  tagName: 'input' | 'textarea' = 'input'
+) {
+  const row = tab.containerEl.appendChild(document.createElement('div'));
+  row.className = 'setting-item';
+  const info = row.appendChild(document.createElement('div'));
+  info.className = 'setting-item-info';
+  if (name !== undefined) {
+    const nameEl = info.appendChild(document.createElement('div'));
+    nameEl.className = 'setting-item-name';
+    nameEl.textContent = name;
+  }
+  const control = row.appendChild(document.createElement('div'));
+  control.className = 'setting-item-control';
+  const field = control.appendChild(document.createElement(tagName));
+  field.value = typed;
+  return field;
+}
+
+/** Ways to be done with a field: leave it, or press Enter in it. */
+type Commit = 'leave' | 'enter';
+const commitArb = fc.constantFrom<Commit>('leave', 'enter');
+
+/** Be done with `field` the way `commit` says, as the user would. */
+function commitField(field: HTMLElement, commit: Commit) {
+  field.focus();
+  if (commit === 'leave') {
+    field.blur();
+  } else {
+    field.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })
+    );
+  }
+}
+
+/** A tab whose container is in the document, so its fields can take focus. */
+function makeAttachedTab() {
+  const made = makeTab(structuredClone(DEFAULT_SETTINGS));
+  document.body.replaceChildren(made.tab.containerEl);
+  return made;
+}
+
 /** Any typed steps field: well-formed, with a malformed step, or anything. */
 const typedFieldArb = fc.oneof(
   typedStepsArb(fc.array(stepArb)),
@@ -302,22 +411,25 @@ const groupRowArb = fc.oneof(
   fc.record({ type: fc.constant('page' as const), name: textArb() })
 );
 
-/** Any box, including one with no rows of its own. */
-const boxArb: fc.Arbitrary<SettingBox> = fc.record({
-  type: fc.constant('box' as const),
-  name: textArb(),
-  desc: textArb(),
-  items: fc.array(
-    fc.record({
-      name: textArb(),
-      control: fc.record({
-        type: fc.constant('toggle' as const),
-        key: textArb(),
-      }),
-    }),
-    { maxLength: 3 }
-  ),
+/** Any toggle a row can hold. */
+const toggleControlArb = fc.record({
+  type: fc.constant('toggle' as const),
+  key: textArb(),
 });
+
+/** Any box, with a control of its own or not, including one with no rows. */
+const boxArb: fc.Arbitrary<SettingBox> = fc.record(
+  {
+    type: fc.constant('box' as const),
+    name: textArb(),
+    desc: textArb(),
+    control: toggleControlArb,
+    items: fc.array(fc.record({ name: textArb(), control: toggleControlArb }), {
+      maxLength: 3,
+    }),
+  },
+  { requiredKeys: ['type', 'name', 'desc', 'items'] }
+);
 
 /** Any group as the tab declares it: rows and boxes in any order, any heading. */
 const groupLayoutArb: fc.Arbitrary<SettingGroupLayout> = fc.record({
@@ -329,9 +441,14 @@ const groupLayoutArb: fc.Arbitrary<SettingGroupLayout> = fc.record({
 const isBox = (item: SettingGroupLayout['items'][number]): item is SettingBox =>
   'type' in item && item.type === 'box';
 
-/** The rows a box shows: its name and description, then its own rows. */
+/**
+ * The rows a box shows: its name and description, with its control if it has
+ * one, then its own rows.
+ */
 const boxRows = (box: SettingBox) => [
-  { name: box.name, desc: box.desc },
+  box.control
+    ? { name: box.name, desc: box.desc, control: box.control }
+    : { name: box.name, desc: box.desc },
   ...box.items,
 ];
 
@@ -526,6 +643,8 @@ describe('IRSettingTab.getControlValue', () => {
           reviewReminders: tab.getControlValue('reviewReminders'),
           remindDueArticles: tab.getControlValue('remindDueArticles'),
           remindDueSnippets: tab.getControlValue('remindDueSnippets'),
+          autoImportOnTag: tab.getControlValue('autoImportOnTag'),
+          autoImportTags: tab.getControlValue('autoImportTags'),
           maximumInterval: tab.getControlValue('fsrsParams.maximum_interval'),
           shortTerm: tab.getControlValue('fsrsParams.enable_short_term'),
           learningSteps: tab.getControlValue('fsrsParams.learning_steps'),
@@ -549,6 +668,10 @@ describe('IRSettingTab.getControlValue', () => {
           reviewReminders: settings.reviewReminders,
           remindDueArticles: settings.remindDueArticles,
           remindDueSnippets: settings.remindDueSnippets,
+          autoImportOnTag: settings.autoImportOnTag,
+          autoImportTags: settings.autoImportTags
+            .map((tag) => `#${tag}`)
+            .join(' '),
           maximumInterval: fsrsParams.maximum_interval,
           shortTerm: fsrsParams.enable_short_term,
           learningSteps: fsrsParams.learning_steps.join(', '),
@@ -612,6 +735,7 @@ describe('IRSettingTab.setControlValue', () => {
       ['reviewReminders', fc.boolean()],
       ['remindDueArticles', fc.boolean()],
       ['remindDueSnippets', fc.boolean()],
+      ['autoImportOnTag', fc.boolean()],
     ] as const;
     const fsrsKeys = [
       ['request_retention', fc.double()],
@@ -681,6 +805,27 @@ describe('IRSettingTab.setControlValue', () => {
                 }
               : before
           );
+        }
+      )
+    );
+  });
+
+  it('stores trigger tags typed as a list as the tags in it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        settingsArb,
+        typedTriggerTagsArb,
+        async (generated, typed) => {
+          const settings = buildSettings(generated);
+          const before = structuredClone(settings);
+          const { tab, plugin } = makeTab(settings);
+
+          await tab.setControlValue('autoImportTags', typed);
+
+          expect(plugin.settings).toEqual({
+            ...before,
+            autoImportTags: parseTagList(typed),
+          });
         }
       )
     );
@@ -901,6 +1046,18 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         control: toggle('createEmptyInCurrentFolder'),
       },
       {
+        heading: 'Imports',
+        name: 'Auto-import notes by tag',
+        desc: AUTO_IMPORT_DESC,
+        control: toggle('autoImportOnTag'),
+      },
+      {
+        heading: 'Imports',
+        name: 'Trigger tags',
+        desc: undefined,
+        control: { type: 'text', key: 'autoImportTags', validate },
+      },
+      {
         heading: 'Notifications and reminders',
         name: 'Success notices',
         desc: SUCCESS_NOTICES_DESC,
@@ -1096,13 +1253,40 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     );
   });
 
+  it('draws importing by tag as one box: its toggle beside its description, then the trigger tags', () => {
+    const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
+    const boxes = tab
+      .getSettingDefinitions()
+      .filter((item) => classesOf(item).includes(SETTING_BOX_CLASS));
+
+    expect(boxes[0]).toStrictEqual({
+      type: 'group',
+      cls: `${SETTING_BOX_CLASS} ${CONTINUED_GROUP_CLASS}`,
+      items: [
+        {
+          name: 'Auto-import notes by tag',
+          desc: AUTO_IMPORT_DESC,
+          control: { type: 'toggle', key: 'autoImportOnTag' },
+        },
+        {
+          name: 'Trigger tags',
+          control: {
+            type: 'text',
+            key: 'autoImportTags',
+            validate: expect.any(Function) as unknown,
+          },
+        },
+      ],
+    });
+  });
+
   it('draws the success notices as one box: their description once, then a dropdown for each place', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
     const boxes = tab
       .getSettingDefinitions()
       .filter((item) => classesOf(item).includes(SETTING_BOX_CLASS));
 
-    expect(boxes).toEqual([
+    expect(boxes.slice(1)).toEqual([
       {
         type: 'group',
         heading: 'Notifications and reminders',
@@ -1207,7 +1391,8 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
     const stepControls = declaredRows(tab.getSettingDefinitions())
       .map(({ control }) => control)
-      .filter((control) => control.type === 'text');
+      .filter((control) => control.type === 'text')
+      .filter((control) => control.key.startsWith('fsrsParams.'));
 
     expect(stepControls.map((control) => control.key)).toEqual([
       'fsrsParams.learning_steps',
@@ -1228,6 +1413,52 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         }
       )
     );
+  });
+
+  it('accepts trigger tags unless one marks snippets or cards, or none are left while importing by tag is on', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        settingsArb,
+        typedTriggerTagsArb,
+        async (generated, typed) => {
+          const settings = buildSettings(generated);
+          const { tab } = makeTab(settings);
+          const [control] = declaredRows(tab.getSettingDefinitions())
+            .map((row) => row.control)
+            .filter((row) => row.key === 'autoImportTags');
+
+          const message = await control.validate?.(typed as never);
+
+          const tags = parseTagList(typed);
+          const blocked = tags.filter(
+            (tag) => tag === SNIPPET_TAG || tag === CARD_TAG
+          );
+          if (blocked.length > 0) {
+            for (const tag of blocked) expect(message).toContain(`#${tag}`);
+          } else if (tags.length === 0 && settings.autoImportOnTag) {
+            expect(message).toEqual(expect.stringMatching(/\S/));
+          } else {
+            expect(message).toBeFalsy();
+          }
+        }
+      )
+    );
+  });
+
+  it('checks for an empty list of trigger tags against the toggle as it is when the field is checked', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    const { tab } = makeTab(settings);
+    const [control] = declaredRows(tab.getSettingDefinitions())
+      .map((row) => row.control)
+      .filter((row) => row.key === 'autoImportTags');
+
+    settings.autoImportOnTag = false;
+    expect(await control.validate?.(' , ' as never)).toBeFalsy();
+    settings.autoImportOnTag = true;
+    expect(await control.validate?.(' , ' as never)).toEqual(
+      expect.stringMatching(/\S/)
+    );
+    expect(await control.validate?.(AUTO_IMPORT_TAG as never)).toBeFalsy();
   });
 
   it('accepts only a whole number of days, at least one, as the maximum interval', async () => {
@@ -1255,13 +1486,184 @@ describe('IRSettingTab.getSettingDefinitions', () => {
   });
 });
 
+describe('IRSettingTab trigger tags field', () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  it('shows what was typed as the tags it reads as, each after a #, one space apart, once left or entered', () => {
+    fc.assert(
+      fc.property(typedTriggerTagsArb, commitArb, (typed, commit) => {
+        const { tab } = makeAttachedTab();
+        const field = addTextRow(tab, TRIGGER_TAGS, typed);
+        const shown = field.value;
+
+        commitField(field, commit);
+
+        expect(field.value).toBe(
+          parseTagList(shown)
+            .map((tag) => `#${tag}`)
+            .join(' ')
+        );
+      })
+    );
+  });
+
+  it('puts one space between tags typed with none between them, once left or entered, in the box it sits in', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.tuple(
+            fc.stringMatching(/^[a-zA-Z0-9_\-/]{1,10}$/),
+            fc.integer({ min: 1, max: 2 }),
+            fc.constantFrom('', '', ' ', ',')
+          ),
+          { minLength: 1, maxLength: 5 }
+        ),
+        commitArb,
+        (entries, commit) => {
+          const typed = entries
+            .map(([tag, hashes, sep]) => '#'.repeat(hashes) + tag + sep)
+            .join('');
+          const { tab } = makeAttachedTab();
+          const field = addTextRow(tab, TRIGGER_TAGS, typed);
+          // Inside a box, as Obsidian draws the trigger tags
+          const box = tab.containerEl.appendChild(
+            document.createElement('div')
+          );
+          box.className = `setting-group ${SETTING_BOX_CLASS}`;
+          box.appendChild(field.closest('.setting-item')!);
+
+          commitField(field, commit);
+
+          expect(field.value).toBe(
+            [...new Set(entries.map(([tag]) => tag.toLowerCase()))]
+              .map((tag) => `#${tag}`)
+              .join(' ')
+          );
+        }
+      )
+    );
+    const { tab } = makeAttachedTab();
+    const field = addTextRow(tab, TRIGGER_TAGS, '#ir-import#clippings');
+    commitField(field, 'leave');
+    expect(field.value).toBe('#ir-import #clippings');
+  });
+
+  it('shows the same tags it saved', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        typedTriggerTagsArb,
+        commitArb,
+        async (typed, commit) => {
+          const { tab } = makeAttachedTab();
+          const field = addTextRow(tab, TRIGGER_TAGS, typed);
+
+          await tab.setControlValue('autoImportTags', field.value);
+          commitField(field, commit);
+
+          expect(field.value).toBe(tab.getControlValue('autoImportTags'));
+        }
+      )
+    );
+  });
+
+  it('leaves the field as typed while typing', () => {
+    fc.assert(
+      fc.property(
+        typedTriggerTagsArb,
+        fc.array(typingKeyArb, { maxLength: 5 }),
+        (typed, keys) => {
+          const { tab } = makeAttachedTab();
+          const field = addTextRow(tab, TRIGGER_TAGS, typed);
+          const shown = field.value;
+          field.focus();
+
+          for (const key of keys) {
+            field.dispatchEvent(
+              new KeyboardEvent('keydown', { key, bubbles: true })
+            );
+            field.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          // Enter that ends composing a character, not the field
+          field.dispatchEvent(
+            new KeyboardEvent('keydown', {
+              key: 'Enter',
+              isComposing: true,
+              bubbles: true,
+            })
+          );
+
+          expect(field.value).toBe(shown);
+        }
+      )
+    );
+  });
+
+  it('leaves every other field as typed, however it is done with', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.record({
+            name: fc.option(
+              fc.oneof(
+                textArb(),
+                fc.constantFrom(
+                  'Learning steps',
+                  'trigger tags',
+                  ' Trigger tags'
+                )
+              ),
+              { nil: undefined }
+            ),
+            tagName: fc.constant<'input' | 'textarea'>('input'),
+          }),
+          fc.record({
+            name: fc.constant<string | undefined>(TRIGGER_TAGS),
+            tagName: fc.constant<'input' | 'textarea'>('textarea'),
+          })
+        ),
+        typedTriggerTagsArb,
+        commitArb,
+        ({ name, tagName }, typed, commit) => {
+          fc.pre(name !== TRIGGER_TAGS || tagName !== 'input');
+          const { tab } = makeAttachedTab();
+          const field = addTextRow(tab, name, typed, tagName);
+          const shown = field.value;
+
+          commitField(field, commit);
+
+          expect(field.value).toBe(shown);
+        }
+      )
+    );
+  });
+
+  it('leaves a field outside any setting row as typed', () => {
+    fc.assert(
+      fc.property(typedTriggerTagsArb, commitArb, (typed, commit) => {
+        const { tab } = makeAttachedTab();
+        const field = tab.containerEl.appendChild(
+          document.createElement('input')
+        );
+        field.value = typed;
+        const shown = field.value;
+
+        commitField(field, commit);
+
+        expect(field.value).toBe(shown);
+      })
+    );
+  });
+});
+
 describe('layOutGroups', () => {
   it("keeps every row in order, with each box's name and description heading its own rows", () => {
     fc.assert(
       fc.property(groupLayoutArb, (layout) => {
         const groups = layOutGroups([layout]);
 
-        expect(groups.flatMap((group) => group.items ?? [])).toEqual(
+        expect(groups.flatMap((group) => group.items ?? [])).toStrictEqual(
           layout.items.flatMap((item) => (isBox(item) ? boxRows(item) : [item]))
         );
       })
@@ -1284,7 +1686,7 @@ describe('layOutGroups', () => {
         );
 
         expect(groups.every((group) => group.type === 'group')).toBe(true);
-        expect(boxed.map((group) => group.items)).toEqual(
+        expect(boxed.map((group) => group.items)).toStrictEqual(
           layout.items.filter(isBox).map(boxRows)
         );
         expect(plain).toHaveLength(runs.length);

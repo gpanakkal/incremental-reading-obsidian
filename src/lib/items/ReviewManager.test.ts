@@ -2643,6 +2643,37 @@ describe('ReviewManager.getItemOrMissingFromId', () => {
   });
 });
 
+describe('ReviewManager.hasItemRow', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  it.each(
+    ITEM_ROW_KINDS.flatMap((kind) =>
+      [false, true].map((deleted) => ({ ...kind, deleted }))
+    )
+  )(
+    'answers yes for the id of a $table row (deleted: $deleted), and no for any other',
+    async ({ deleted, ...kind }) => {
+      const wired = wirePaths([]);
+      insertItemRow(wired.repo, kind, deleted);
+
+      expect(await wired.manager.hasItemRow('x')).toBe(true);
+      await fc.assert(
+        fc.asyncProperty(
+          fc.string().filter((id) => id !== 'x'),
+          async (id) => {
+            expect(await wired.manager.hasItemRow(id)).toBe(false);
+          }
+        )
+      );
+    }
+  );
+});
+
 // ---------------------------------------------------------------------------
 // dismissItem / unDismissItem — table routing and SQL args
 // ---------------------------------------------------------------------------

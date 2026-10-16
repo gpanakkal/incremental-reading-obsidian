@@ -6,13 +6,12 @@ import type {
 import { refusedWrite, withCompensation } from '#/lib/compensation';
 import {
   ARTICLE_TAG,
-  CARD_TAG,
   CONTENT_TITLE_MAX_BYTES,
   CONTENT_TITLE_SLICE_LENGTH,
   DATA_DIRECTORY,
   DEFAULT_PRIORITY,
+  IMPORT_BLOCKED_TAGS,
   INVALID_TITLE_MESSAGE,
-  SNIPPET_TAG,
   SOURCE_PROPERTY_NAME,
   TEXT_BASE_REVIEW_INTERVAL,
 } from '#/lib/constants';
@@ -60,8 +59,6 @@ import type { WebPage } from '#/lib/web-viewer';
 import { Keymap, type TFile } from 'obsidian';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
-
-const IMPORT_BLOCKED_TAGS = new Set([SNIPPET_TAG, CARD_TAG]);
 
 /**
  * Whether `file` can be imported as an article, telling the user why not when

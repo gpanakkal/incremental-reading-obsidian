@@ -21,6 +21,13 @@ export const ARTICLE_DIRECTORY = `articles`;
 export const SNIPPET_TAG = 'ir-text-snippet';
 export const CARD_TAG = 'ir-card';
 export const ARTICLE_TAG = 'ir-article';
+/** Frontmatter tag that, with automatic imports on, makes a note an article. */
+export const AUTO_IMPORT_TAG = 'ir-import';
+/** Notes carrying one of these are snippets or cards, never imported as articles. */
+export const IMPORT_BLOCKED_TAGS: ReadonlySet<string> = new Set([
+  SNIPPET_TAG,
+  CARD_TAG,
+]);
 export const SOURCE_TAG = 'ir-source';
 export const SOURCE_PROPERTY_NAME = 'source';
 
@@ -160,6 +167,22 @@ export const CURRENT_ITEM_REFETCH_TIME = 1000 * 5;
  * `SnippetManager.createFromPdf`.
  */
 export const SOURCE_INDEX_TIMEOUT_MS = 2000;
+/**
+ * How long `AutoImportWatcher` waits for more notes after the last one queued.
+ * It batches the notes that arrive together, from a Sync burst or a script,
+ * into one import and one notice. It does not wait for typing to settle: the
+ * metadata cache already sits behind Obsidian's own 2 s editor save debounce,
+ * so this adds nothing for a typed tag, and it has to stay short for a tag set
+ * in the properties widget, which writes the file at once.
+ */
+export const AUTO_IMPORT_DEBOUNCE_MS = 500;
+/**
+ * The longest a note waits for `AutoImportWatcher`, however often it or the
+ * notes queued with it change. A stream with no pause in it, such as Sync
+ * pulling down a folder over half a minute, would otherwise put the import
+ * off until it ended.
+ */
+export const AUTO_IMPORT_MAX_WAIT_MS = 5000;
 
 export const MAX_SQL_QUERY_PARAMS = 999;
 /**

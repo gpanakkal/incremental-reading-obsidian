@@ -39,8 +39,6 @@ Go to **Settings → Sync** → enable **Sync all other types**. Repeat this on 
 
 > [!tip]
 > You can also import from the **More options** menu (three dots in the upper-right corner of a tab), or by right-clicking on a file in the Files sidebar view and selecting **Import article**.
->
-> To import several files at once, right-click a folder and select **Import from folder…**. It lists only the notes and PDFs directly in that folder (not in its subfolders) that aren't articles, snippets or cards already.
 
 3. Set aside some time for a [study session](#study-sessions) each day, depending on how much you want to learn. Even 10 minutes is fine!
 
@@ -107,7 +105,19 @@ This is especially handy for:
 - Notes that only have one passage you want to learn from, which you can extract into a snippet directly instead of importing the whole note.
 - Notes that are well-structured for direct conversion into cards, such as lists of atomic, self-contained information.
 
-If you import a note as an article later, the snippets and cards you already made from it become the article's. Import it as a copy and they move to the copy, their links pointing at it. The original note is left as it was, card embeds and all, but **Go to context** will now go the copy, so the original can be safely deleted.
+#### Bulk imports
+
+To import several files at once, right-click a folder and select **Import from folder…**. It lists only the notes and PDFs directly in that folder (not in its subfolders) that aren't articles, snippets or cards already.
+
+#### Automatic imports
+
+Enable **Auto-import notes by tag** in the plugin's settings and add tags to the list as desired. 
+
+For example, adding "#clippings" auto-imports pages saved by Obsidian Web Clipper. 
+
+> [!NOTE]
+> This only checks for frontmatter tags, and does not affect notes that had those tags beforehand.
+
 
 ### More guides
 

@@ -1,5 +1,6 @@
 import * as fc from 'fast-check';
 import { describe, expect, it, vi } from 'vitest';
+import { AUTO_IMPORT_TAG } from './constants';
 import {
   DEVICE_ID_KEY,
   getDeviceId,
@@ -8,6 +9,7 @@ import {
   sessionItemId,
 } from './plugin-data';
 import { DEFAULT_SETTINGS } from './settings';
+import { parseTagList } from './tags';
 
 // #region HELPERS
 
@@ -199,6 +201,61 @@ describe('parsePluginData', () => {
         }
       )
     );
+  });
+
+  it('leaves importing by tag off, triggered by the import tag, unless told otherwise', () => {
+    expect(DEFAULT_SETTINGS.autoImportOnTag).toBe(false);
+    expect(DEFAULT_SETTINGS.autoImportTags).toEqual([AUTO_IMPORT_TAG]);
+    expect(parsePluginData({ settings: {} }).settings).toMatchObject({
+      autoImportOnTag: false,
+      autoImportTags: [AUTO_IMPORT_TAG],
+    });
+  });
+
+  it('keeps a saved on or off for importing by tag and turns anything else off', () => {
+    fc.assert(
+      fc.property(fc.anything(), fc.boolean(), (stored, legacy) => {
+        const saved = { autoImportOnTag: stored };
+        const data = parsePluginData(legacy ? saved : { settings: saved });
+
+        expect(data.settings.autoImportOnTag).toBe(stored === true);
+      })
+    );
+  });
+
+  it('reads saved trigger tags as a typed list of them would be, and anything but a list as the default', () => {
+    const storedArb = fc.oneof(
+      fc.array(fc.string()),
+      fc.array(fc.oneof(fc.string(), fc.anything())),
+      fc.constantFrom('ir-import', 'a, b', null),
+      fc.anything()
+    );
+    fc.assert(
+      fc.property(storedArb, fc.boolean(), (stored, legacy) => {
+        const saved = { autoImportTags: stored };
+        const data = parsePluginData(legacy ? saved : { settings: saved });
+
+        expect(data.settings.autoImportTags).toEqual(
+          Array.isArray(stored)
+            ? parseTagList(
+                stored
+                  .filter((tag): tag is string => typeof tag === 'string')
+                  .join(',')
+              )
+            : [AUTO_IMPORT_TAG]
+        );
+      })
+    );
+  });
+
+  it('gives each read its own list of trigger tags, apart from the defaults', () => {
+    const first = parsePluginData({ settings: {} }).settings;
+    const second = parsePluginData({}).settings;
+
+    first.autoImportTags.push('changed');
+
+    expect(second.autoImportTags).toEqual([AUTO_IMPORT_TAG]);
+    expect(DEFAULT_SETTINGS.autoImportTags).toEqual([AUTO_IMPORT_TAG]);
   });
 
   it('keeps saved settings and drops nothing, whatever else the file holds', () => {

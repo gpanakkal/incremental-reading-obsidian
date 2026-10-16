@@ -5,6 +5,7 @@ import {
   isSuccessNoticeLevel,
   type IRPluginSettings,
 } from './settings';
+import { parseTagList } from './tags';
 
 /**
  * localStorage key holding this device's id. Obsidian namespaces
@@ -71,6 +72,18 @@ export function parsePluginData(raw: unknown): IRPluginData {
       settings[key] = DEFAULT_SETTINGS[key];
     }
   }
+  // Both are read on every change to a note, so neither may be left as
+  // anything a hand edit put there. The tags are always a list of their own:
+  // never the defaults' list, which another read would share.
+  settings.autoImportOnTag = settings.autoImportOnTag === true;
+  const storedTags: unknown = settings.autoImportTags;
+  settings.autoImportTags = Array.isArray(storedTags)
+    ? parseTagList(
+        storedTags
+          .filter((tag): tag is string => typeof tag === 'string')
+          .join(',')
+      )
+    : [...DEFAULT_SETTINGS.autoImportTags];
 
   return {
     settings,

@@ -104,6 +104,14 @@ function makePlugin(leaves: Array<FakeLeaf | FakePdfLeaf> = []) {
     triggerLayoutChange: () => handlers.get('layout-change')?.(),
   };
 
+  const cacheHandlers = new Map<string, (file: TFile) => void>();
+  const metadataCache = {
+    on: vi.fn((event: string, handler: (file: TFile) => void) => {
+      cacheHandlers.set(event, handler);
+      return Symbol('cache-event-ref');
+    }),
+  };
+
   const reviewManager = {
     articles: {
       getItemType: vi.fn(
@@ -119,7 +127,7 @@ function makePlugin(leaves: Array<FakeLeaf | FakePdfLeaf> = []) {
   };
 
   return {
-    app: { workspace },
+    app: { workspace, metadataCache },
     reviewManager,
     registerEvent: vi.fn(),
     register: vi.fn((fn: () => void) => {
@@ -127,6 +135,8 @@ function makePlugin(leaves: Array<FakeLeaf | FakePdfLeaf> = []) {
     }),
     runCleanup: () => registeredCleanups.forEach((fn) => fn()),
     emitDataChange: () => dataChangeListeners.forEach((fn) => fn()),
+    /** What the cache fires once it has re-indexed `file`. */
+    emitMetadataChanged: (file: TFile) => cacheHandlers.get('changed')?.(file),
     dataChangeListenerCount: () => dataChangeListeners.size,
     _leaves: leaves,
   };
@@ -173,16 +183,20 @@ describe('registerReadingModeActionBar', () => {
       expect(plugin.app.workspace.iterateAllLeaves).toHaveBeenCalledTimes(1);
     });
 
-    it('hands every workspace listener to the plugin to release on unload', () => {
+    it('hands every workspace and metadata cache listener to the plugin to release on unload', () => {
       const plugin = makePlugin([]);
       registerReadingModeActionBar(plugin as never);
-      const refs = plugin.app.workspace.on.mock.results.map(
-        (r): unknown => r.value
+      const refs = [
+        ...plugin.app.workspace.on.mock.results,
+        ...plugin.app.metadataCache.on.mock.results,
+      ].map((r): unknown => r.value);
+      expect(plugin.app.workspace.on).toHaveBeenCalled();
+      expect(plugin.app.metadataCache.on).toHaveBeenCalled();
+      const registered = plugin.registerEvent.mock.calls.map(
+        ([ref]): unknown => ref
       );
-      expect(refs.length).toBeGreaterThan(0);
-      expect(
-        plugin.registerEvent.mock.calls.map(([ref]): unknown => ref)
-      ).toEqual(refs);
+      expect(registered).toHaveLength(refs.length);
+      expect(new Set(registered)).toEqual(new Set(refs));
     });
 
     it('stops listening for database changes when the plugin cleanup runs', () => {
@@ -911,6 +925,136 @@ describe('registerReadingModeActionBar', () => {
 
       expect(getNoteType).toHaveBeenCalledOnce();
       expect(plugin.reviewManager.articles.getItemType).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('notes whose metadata changes', () => {
+    const noteTypes = ['article', 'snippet', 'card', null] as const;
+
+    it('re-checks a reading-mode note each time the cache re-indexes it, mounting or dropping its bar by the type it has now', async () => {
+      // An in-place import gives the note its `ir-id` through the cache alone,
+      // with no workspace event to re-check the leaf
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom(...noteTypes),
+          fc.array(fc.constantFrom(...noteTypes), {
+            minLength: 1,
+            maxLength: 4,
+          }),
+          async (initial, changes) => {
+            const render = vi
+              .spyOn(ActionBarExtension, 'renderStandaloneActionBarDOM')
+              .mockImplementation(() => () => {});
+            render.mockClear();
+            const getNoteType = vi
+              .spyOn(ObsidianHelpers, 'getNoteType')
+              .mockResolvedValue(initial);
+            const containerEl = makeContainerEl();
+            const file = { path: 'note.md' } as TFile;
+            const plugin = makePlugin([
+              makeMarkdownLeaf({ containerEl, file }),
+            ]);
+            registerReadingModeActionBar(plugin as never);
+            await flush();
+
+            let renders = initial === null ? 0 : 1;
+            let previous: (typeof noteTypes)[number] = initial;
+            for (const type of changes) {
+              getNoteType.mockResolvedValue(type);
+              plugin.emitMetadataChanged(file);
+              await flush();
+
+              expect(containerEl.children).toHaveLength(type === null ? 0 : 1);
+              // A note that stays an item keeps the bar it has
+              if (previous === null && type !== null) renders++;
+              previous = type;
+            }
+            expect(render).toHaveBeenCalledTimes(renders);
+            plugin.runCleanup();
+          }
+        ),
+        // Each change waits out a macrotask; few types, so few runs cover them
+        { numRuns: 40 }
+      );
+    });
+
+    it('re-checks only the leaves showing the re-indexed file, notes and PDFs alike', async () => {
+      type Kind = 'markdown-preview' | 'markdown-source' | 'pdf' | 'non-file';
+      const files = ['a.md', 'b.md', 'c.pdf'].map(
+        (path) => ({ path }) as TFile
+      );
+      await fc.assert(
+        fc.asyncProperty(
+          fc.array(
+            fc.record({
+              kind: fc.constantFrom<Kind>(
+                'markdown-preview',
+                'markdown-source',
+                'pdf',
+                'non-file'
+              ),
+              shown: fc.constantFrom(...files),
+            }),
+            { maxLength: 6 }
+          ),
+          fc.constantFrom(...files),
+          async (specs, changed) => {
+            const getNoteType = vi
+              .spyOn(ObsidianHelpers, 'getNoteType')
+              .mockResolvedValue('article');
+            const leaves = specs.map(({ kind, shown }) => {
+              if (kind === 'pdf') return makePdfLeaf({ file: shown });
+              if (kind === 'non-file') {
+                // Holds a file without being a file view, so never shows it
+                return {
+                  view: { getViewType: () => 'other', file: shown },
+                } as unknown as FakeLeaf;
+              }
+              return makeMarkdownLeaf({
+                mode: kind.slice('markdown-'.length),
+                file: shown,
+              });
+            });
+            const plugin = makePlugin(leaves);
+            registerReadingModeActionBar(plugin as never);
+            await flush();
+            getNoteType.mockClear();
+            plugin.reviewManager.articles.getItemType.mockClear();
+
+            plugin.emitMetadataChanged(changed);
+            await flush();
+
+            const showing = (kind: Kind) =>
+              specs.filter((s) => s.kind === kind && s.shown === changed)
+                .length;
+            expect(getNoteType).toHaveBeenCalledTimes(
+              showing('markdown-preview')
+            );
+            expect(
+              plugin.reviewManager.articles.getItemType
+            ).toHaveBeenCalledTimes(showing('pdf'));
+            plugin.runCleanup();
+          }
+        )
+      );
+    });
+
+    it('mounts nothing when the cache re-indexes a note after the cleanup ran', async () => {
+      const getNoteType = vi
+        .spyOn(ObsidianHelpers, 'getNoteType')
+        .mockResolvedValue(null);
+      const containerEl = makeContainerEl();
+      const file = { path: 'note.md' } as TFile;
+      const plugin = makePlugin([makeMarkdownLeaf({ containerEl, file })]);
+      registerReadingModeActionBar(plugin as never);
+      await flush();
+      plugin.runCleanup();
+
+      getNoteType.mockResolvedValue('article');
+      plugin.emitMetadataChanged(file);
+      await flush();
+
+      expect(containerEl.children).toHaveLength(0);
     });
   });
 
