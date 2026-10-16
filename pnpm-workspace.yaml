@@ -1,7 +1,6 @@
 allowBuilds:
   electron: true
   esbuild: true
-  obsidian-typings: true
   unrs-resolver: true
 saveExact: true
 minimumReleaseAge: 20000
@@ -14,7 +13,13 @@ packageExtensions:
     peerDependenciesMeta:
       typescript:
         optional: true
+  # imports obsidian + @codemirror/* in its augmentations without declaring them; under the
+  # global virtual store (no hoisting) they resolve to nothing and every augmentation is dropped.
+  # Rename this key along with the alias in package.json.
+  '@obsidian-typings/obsidian-public-1.13.4':
+    peerDependencies:
+      obsidian: '*'
+      '@codemirror/state': '*'
+      '@codemirror/view': '*'
 trustPolicyExclude:
   - 'react-redux' # required due to a change in their publishing process https://github.com/reduxjs/reselect/issues/752
-overrides:
-  'obsidian-typings>obsidian': '$obsidian'

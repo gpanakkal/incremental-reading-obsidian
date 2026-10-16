@@ -4,7 +4,11 @@ import type ReviewView from '#/views/ReviewView';
 import type { Extension } from '@codemirror/state';
 import type { EditorView, ViewUpdate } from '@codemirror/view';
 import type { App, Editor, MarkdownView } from 'obsidian';
-import type { EmbedMarkdownComponent, MobileToolbar } from 'obsidian-typings';
+import type {
+  CodeMirrorEditor,
+  EmbedMarkdownComponent,
+  MobileToolbar,
+} from 'obsidian-typings';
 import type { ReviewItem } from './types';
 
 export interface ExtractedEditMode {
@@ -184,10 +188,12 @@ export function setInsertMode(cm: EditorView) {
   }
 }
 
-export function getVimPlugin(cm: EditorView): unknown {
+export function getVimPlugin(cm: EditorView): CodeMirrorEditor | null {
   return (
     (
-      cm as unknown as { plugins: Array<{ value?: { cm: unknown } }> }
+      cm as unknown as {
+        plugins: Array<{ value?: { cm: CodeMirrorEditor } }>;
+      }
     ).plugins.find((p) => {
       if (!p?.value) return false;
       return 'useNextTextInput' in p.value && 'waitForCopy' in p.value;

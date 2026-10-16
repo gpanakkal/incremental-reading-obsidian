@@ -232,7 +232,7 @@ export const SETTINGS_TAB_CLASS = 'ir-settings-tab';
 
 /**
  * The plugin's settings tab, described declaratively by
- * {@link getSettingDefinitions}. Obsidian (1.13.1+, the `minAppVersion`) renders
+ * {@link getSettingDefinitions}. Obsidian (1.13.1+, which `minAppVersion` covers) renders
  * the rows, runs each control's `validate` and shows its message inline, and
  * reads and writes values through {@link getControlValue} and
  * {@link setControlValue}.

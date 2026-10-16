@@ -13,7 +13,7 @@
     "isolatedModules": true,
     "strictNullChecks": true,
     "skipLibCheck": true,
-    "types": ["obsidian-typings"],
+    "types": ["obsidian-typings", "electron"],
     "jsx": "react-jsx",
     "jsxImportSource": "preact",
     "paths": {
@@ -23,7 +23,7 @@
       "react-types": ["./node_modules/@types/react/"],
       "#/*": ["./src/*"]
     },
-    "lib": ["DOM", "ES2022"]
+    "lib": ["DOM", "DOM.Iterable", "ES2022"]
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "e2e-tests/**/*.ts", "vitest.config.ts", "playwright.config.ts"]
 }
