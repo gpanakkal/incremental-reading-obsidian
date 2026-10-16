@@ -3407,35 +3407,33 @@ describe('import', () => {
       expect(result?.file).toBe(replacement);
     });
 
-    it('confirms the import at every success notice level but none', async () => {
-      await fc.assert(
-        fc.asyncProperty(
-          fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
-          async (level) => {
-            Notice.reset();
-            showSuccessNotices(level);
-            const { repo } = await makeSqlJsRepo();
+    // Three levels only: each runs once, rather than a sample of a hundred
+    // that each build their own database
+    it.each(SUCCESS_NOTICE_LEVELS)(
+      'confirms the import at every success notice level but none (%s)',
+      async (level) => {
+        Notice.reset();
+        showSuccessNotices(level);
+        const { repo } = await makeSqlJsRepo();
 
-            try {
-              await new ArticleManager(
-                makePdfImportPlugin(PDF_FILE) as never,
-                repo
-              ).import(PDF_FILE, DEFAULT_PRIORITY, null, false);
-            } finally {
-              configureSuccessNotices(null);
-            }
+        try {
+          await new ArticleManager(
+            makePdfImportPlugin(PDF_FILE) as never,
+            repo
+          ).import(PDF_FILE, DEFAULT_PRIORITY, null, false);
+        } finally {
+          configureSuccessNotices(null);
+        }
 
-            expect(Notice.messages).toEqual(
-              level === 'none'
-                ? []
-                : [
-                    `Imported "Paper" with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`,
-                  ]
-            );
-          }
-        )
-      );
-    });
+        expect(Notice.messages).toEqual(
+          level === 'none'
+            ? []
+            : [
+                `Imported "Paper" with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`,
+              ]
+        );
+      }
+    );
 
     it('names a long PDF by the start of its name in the notice', async () => {
       const file = {
