@@ -1,4 +1,5 @@
 import { DATA_DIRECTORY } from '#/lib/constants';
+import type { ExplorerComparator } from '#/lib/explorer-order';
 import { isImportable, sniffMimeType, supportsFrontmatter } from '#/lib/mime';
 import { TFile, type MetadataCache, type TFolder, type Vault } from 'obsidian';
 import type { CandidateSource, ScanEvent } from './types';
@@ -37,18 +38,18 @@ export async function isImportCandidate(
   return (await sniffMimeType(app, file)) !== null;
 }
 
-/** Compares names as people count: `Part 2` before `Part 10`. */
-const naturalOrder = new Intl.Collator(undefined, { numeric: true });
-
 /**
  * The files directly in `folder` that can be imported (see
- * {@link isImportCandidate}), in natural name order, each checked only once
- * the one before it has been, so its row shows as soon as it passes. A file
- * whose check fails is left out; the rest are still checked.
+ * {@link isImportCandidate}), in the order `compare` puts them in (the file
+ * explorer's, see `explorerComparator`), each checked only once the one
+ * before it has been, so its row shows as soon as it passes. A file whose
+ * check fails is left out; the rest are still checked. Files `compare` ties
+ * stay in the order the folder holds them.
  */
 export function folderSource(
   folder: TFolder,
-  checks: CandidateChecks
+  checks: CandidateChecks,
+  compare: ExplorerComparator
 ): CandidateSource {
   return {
     // The vault root has no name of its own
@@ -56,7 +57,7 @@ export function folderSource(
     async *scan(signal: AbortSignal): AsyncGenerator<ScanEvent> {
       const files = folder.children
         .filter((child): child is TFile => child instanceof TFile)
-        .sort((a, b) => naturalOrder.compare(a.name, b.name));
+        .sort(compare);
       for (const file of files) {
         if (signal.aborted) return;
         const passes = await isImportCandidate(file, checks).catch(

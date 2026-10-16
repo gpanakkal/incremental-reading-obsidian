@@ -1725,7 +1725,7 @@ describe('IncrementalReadingPlugin.importFromFolder', () => {
         open.mockClear();
         const isItemFileAt = vi.fn(() => true);
         const receiver = {
-          app: {},
+          app: { workspace: { getLeavesOfType: () => [] } },
           settings: { showImportDialog },
           reviewManager: { isItemFileAt },
         };
@@ -1756,6 +1756,59 @@ describe('IncrementalReadingPlugin.importFromFolder', () => {
         expect(events).toEqual([]);
         expect(isItemFileAt).toHaveBeenCalledExactlyOnceWith(pdf, pdf.path);
       }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("lists the folder's files in the explorer's order as the dialog opened, whatever the explorer changes to after", async () => {
+    vi.stubGlobal('document', { createElement: () => ({}) });
+    try {
+      vi.spyOn(BulkImportModal.prototype, 'open').mockImplementation(() => {});
+      // Where the explorer keeps its order (see `readExplorerSortOrder`)
+      const explorerState = { sortOrder: 'byModifiedTime' };
+      const receiver = {
+        app: {
+          workspace: {
+            getLeavesOfType: (type: string) =>
+              type === 'file-explorer'
+                ? [{ view: { getState: () => explorerState } }]
+                : [],
+          },
+        },
+        settings: { showImportDialog: false },
+        // Asked about each PDF in turn, in the order the dialog lists them
+        reviewManager: { isItemFileAt: vi.fn((_file: TFile) => true) },
+      };
+      const folder = makeFolder('papers');
+      const pdf = (basename: string, mtime: number) =>
+        Object.assign(new TFile(), {
+          path: `papers/${basename}.pdf`,
+          name: `${basename}.pdf`,
+          basename,
+          extension: 'pdf',
+          stat: { mtime, ctime: 0, size: 0 },
+        });
+      // Newest first, `b` `c` `a`; by name, as the folder holds them, `a` `b` `c`
+      folder.children = [pdf('a', 1), pdf('b', 3), pdf('c', 2)];
+
+      const modal = IncrementalReadingPlugin.prototype.importFromFolder.call(
+        receiver as unknown as IncrementalReadingPlugin,
+        folder
+      ) as BulkImportModal;
+      explorerState.sortOrder = 'alphabetical';
+      const events: ScanEvent[] = [];
+      for await (const event of modal.request.source.scan(
+        new AbortController().signal
+      )) {
+        events.push(event);
+      }
+
+      expect(
+        receiver.reviewManager.isItemFileAt.mock.calls.map(
+          ([file]) => file.basename
+        )
+      ).toEqual(['b', 'c', 'a']);
     } finally {
       vi.unstubAllGlobals();
     }

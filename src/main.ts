@@ -1,5 +1,9 @@
 import { folderSource } from '#/lib/bulk-import/candidates';
 import { createEmitter } from '#/lib/emitter';
+import {
+  explorerComparator,
+  readExplorerSortOrder,
+} from '#/lib/explorer-order';
 import { registerPdfLeafHighlights } from '#/lib/extensions/PdfItemHighlights';
 import {
   createArrivalWarning,
@@ -1126,15 +1130,20 @@ export default class IncrementalReadingPlugin extends Plugin {
   /**
    * Offer the files directly in `folder` for import, in the bulk import
    * dialog. It always opens, whatever `showImportDialog` says: the user picks
-   * the files there.
+   * the files there. They are listed in the file explorer's order as the
+   * dialog opens; changing the explorer's order afterwards leaves the list be.
    */
   importFromFolder(folder: TFolder): BulkImportModal {
     const { reviewManager } = this;
     const modal = new BulkImportModal(this, {
-      source: folderSource(folder, {
-        app: this.app,
-        isItemAtPath: (file) => reviewManager.isItemFileAt(file, file.path),
-      }),
+      source: folderSource(
+        folder,
+        {
+          app: this.app,
+          isItemAtPath: (file) => reviewManager.isItemFileAt(file, file.path),
+        },
+        explorerComparator(readExplorerSortOrder(this.app.workspace))
+      ),
       mode: 'import',
     });
     modal.open();

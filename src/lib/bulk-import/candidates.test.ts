@@ -1,6 +1,7 @@
 import { DATA_DIRECTORY } from '#/lib/constants';
+import type { ExplorerComparator } from '#/lib/explorer-order';
 import fc from 'fast-check';
-import { TFile, TFolder } from 'obsidian';
+import { TFile, TFolder, type TAbstractFile } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   folderSource,
@@ -116,14 +117,9 @@ function inDataDirectory(path: string) {
   return path === DATA_DIRECTORY || path.startsWith(`${DATA_DIRECTORY}/`);
 }
 
-/** Natural name order: digits compare as numbers. */
-function inNameOrder(names: string[]) {
-  return names.every(
-    (name, i) =>
-      i === 0 ||
-      names[i - 1].localeCompare(name, undefined, { numeric: true }) <= 0
-  );
-}
+/** An order to list a folder's entries in: by name, digits as numbers. */
+const byName: ExplorerComparator = (a, b) =>
+  a.name.localeCompare(b.name, undefined, { numeric: true });
 // #endregion
 
 beforeEach(() => {
@@ -212,7 +208,8 @@ describe('folderSource', () => {
         (name, parent) => {
           const source = folderSource(
             makeFolder(`${parent}${name}`),
-            makeChecks(new Map()).checks
+            makeChecks(new Map()).checks,
+            byName
           );
           expect(source.title).toBe(name);
         }
@@ -222,19 +219,24 @@ describe('folderSource', () => {
 
   it('is titled "/" for the vault root, which has no name', () => {
     const root = Object.assign(new TFolder(), { path: '/', name: '' });
-    expect(folderSource(root, makeChecks(new Map()).checks).title).toBe('/');
+    expect(folderSource(root, makeChecks(new Map()).checks, byName).title).toBe(
+      '/'
+    );
   });
 
-  it('yields every eligible direct file once, in name order, and nothing else', async () => {
+  it('yields every eligible direct file once, in the order given, and nothing else', async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.uniqueArray(fileSpecArb, {
-          selector: (spec) => `${spec.name}.${spec.extension}`,
+        fc.uniqueArray(fc.tuple(fileSpecArb, fc.nat({ max: 3 })), {
+          // One file per name a folder can hold
+          selector: ([spec]) =>
+            spec.extension ? `${spec.name}.${spec.extension}` : spec.name,
           maxLength: 8,
         }),
         folderPathArb,
         fc.nat({ max: 3 }),
-        async (specs, path, subfolderCount) => {
+        async (ranked, path, subfolderCount) => {
+          const specs = ranked.map(([spec]) => spec);
           const folder = makeFolder(path);
           const files = specs.map((spec) => makeFile(folder, spec));
           const subfolders = Array.from({ length: subfolderCount }, (_, i) => {
@@ -248,22 +250,30 @@ describe('folderSource', () => {
           // Children come in whatever order the vault holds them in
           folder.children = [...subfolders, ...files].reverse();
           const bySpec = new Map(files.map((f, i) => [f.path, specs[i]]));
+          // An order with ties in it: files of the same rank are left as the
+          // folder holds them
+          const rank = new Map<TAbstractFile, number>(
+            files.map((file, i) => [file, ranked[i][1]])
+          );
+          const rankOf = (entry: TAbstractFile) => rank.get(entry) ?? -1;
+          const order: ExplorerComparator = (a, b) => rankOf(a) - rankOf(b);
           const { checks } = makeChecks(bySpec);
 
           const events = await collect(
-            folderSource(folder, checks).scan(new AbortController().signal)
+            folderSource(folder, checks, order).scan(
+              new AbortController().signal
+            )
           );
 
-          const expected = files.filter((file) =>
-            eligible(bySpec.get(file.path)!, inDataDirectory(path))
-          );
+          const held = (file: TFile) => folder.children.indexOf(file);
+          const expected = files
+            .filter((file) =>
+              eligible(bySpec.get(file.path)!, inDataDirectory(path))
+            )
+            .sort((a, b) => rankOf(a) - rankOf(b) || held(a) - held(b));
           expect(events.every((e) => e.type === 'file')).toBe(true);
           const yielded = events.flatMap((e) => (e.type === 'file' ? [e] : []));
-          expect(new Set(yielded.map((e) => e.file))).toEqual(
-            new Set(expected)
-          );
-          expect(yielded).toHaveLength(expected.length);
-          expect(inNameOrder(yielded.map((e) => e.file.name))).toBe(true);
+          expect(yielded.map((e) => e.file)).toEqual(expected);
           for (const event of yielded) {
             expect(event.parent).toBe(path);
             expect(event.relativePath).toBe(event.file.name);
@@ -271,31 +281,6 @@ describe('folderSource', () => {
         }
       )
     );
-  });
-
-  it('puts numbered names in counting order', async () => {
-    const folder = makeFolder('notes');
-    const spec = (name: string): FileSpec => ({
-      name,
-      extension: 'md',
-      pdfBytes: false,
-      irId: undefined,
-      hasRow: false,
-    });
-    const names = ['Part 10', 'part 2', 'Part 1'];
-    const files = names.map((name) => makeFile(folder, spec(name)));
-    folder.children = files;
-    const { checks } = makeChecks(
-      new Map(files.map((f, i) => [f.path, spec(names[i])]))
-    );
-
-    const events = await collect(
-      folderSource(folder, checks).scan(new AbortController().signal)
-    );
-
-    expect(
-      events.map((e) => (e.type === 'file' ? e.file.basename : e.type))
-    ).toEqual(['Part 1', 'part 2', 'Part 10']);
   });
 
   it('checks one file at a time, in the order it lists them', async () => {
@@ -325,7 +310,7 @@ describe('folderSource', () => {
     });
 
     await collect(
-      folderSource(folder, checks).scan(new AbortController().signal)
+      folderSource(folder, checks, byName).scan(new AbortController().signal)
     );
 
     expect(overlapped).toBe(false);
@@ -367,7 +352,9 @@ describe('folderSource', () => {
           });
 
           const events = await collect(
-            folderSource(folder, checks).scan(new AbortController().signal)
+            folderSource(folder, checks, byName).scan(
+              new AbortController().signal
+            )
           );
 
           expect(
@@ -413,7 +400,7 @@ describe('folderSource', () => {
 
           const yielded: ScanEvent[] = [];
           if (!duringCheck && stopAt === 0) controller.abort();
-          for await (const event of folderSource(folder, checks).scan(
+          for await (const event of folderSource(folder, checks, byName).scan(
             controller.signal
           )) {
             yielded.push(event);
