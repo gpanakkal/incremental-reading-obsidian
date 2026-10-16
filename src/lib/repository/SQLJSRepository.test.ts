@@ -2059,7 +2059,24 @@ describe('start', () => {
           expect((await idsInFile(files)).sort()).toEqual([...ids].sort());
           repo.db?.close();
         }
-      )
+      ),
+      {
+        // Each run builds a database from the full schema and exports it once
+        // per write, ~6ms of CPU: 100 runs took ~0.5s alone and passed the
+        // 5s timeout on a loaded machine. Every index view and `exists` speed
+        // runs first, with writes enough to queue behind the first save, so
+        // the random runs only need to vary the ids and how many there are.
+        numRuns: 32,
+        examples: [true, false].flatMap((folder) =>
+          [true, false].flatMap((file) =>
+            [true, false].map((slowExists): [IndexView, string[], boolean] => [
+              { folder, file },
+              ['a', 'b', 'c'],
+              slowExists,
+            ])
+          )
+        ),
+      }
     );
   });
 
