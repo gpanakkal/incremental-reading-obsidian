@@ -4890,48 +4890,49 @@ describe('import', () => {
       ).toEqual({ related: '[[notes/x]]' });
     });
 
-    it("copies the text as it is, with a lasting warning, when the note's cache is missing or was read from other text", async () => {
-      await fc.assert(
-        fc.asyncProperty(fc.constantFrom('missing', 'stale'), async (state) => {
-          const text = 'See [[x]].\n';
-          const { plugin, note } = makeLinkedCopyPlugin(
-            text,
-            state === 'missing'
-              ? null
-              : {
-                  // Read before "See " was written
-                  links: [
-                    {
-                      link: 'x',
-                      original: '[[x]]',
-                      position: cachePosition(0, 5),
-                    },
-                  ],
-                  sections: sectionsOf('[[x]].'),
-                }
-          );
-          const { repo } = await makeSqlJsRepo();
-          const notify = vi.spyOn(Obsidian, 'notify');
-          notify.mockClear();
+    // Two cases only: each runs once, rather than a sample of a hundred. A
+    // stale cache is one read from other text than the note now holds
+    it.each(['missing', 'stale'] as const)(
+      "copies the text as it is, with a lasting warning, when the note's cache is %s",
+      async (state) => {
+        const text = 'See [[x]].\n';
+        const { plugin, note } = makeLinkedCopyPlugin(
+          text,
+          state === 'missing'
+            ? null
+            : {
+                // Read before "See " was written
+                links: [
+                  {
+                    link: 'x',
+                    original: '[[x]]',
+                    position: cachePosition(0, 5),
+                  },
+                ],
+                sections: sectionsOf('[[x]].'),
+              }
+        );
+        const { repo } = await makeSqlJsRepo();
+        const notify = vi.spyOn(Obsidian, 'notify');
+        notify.mockClear();
 
-          const result = await new ArticleManager(plugin as never, repo).import(
-            note,
-            DEFAULT_PRIORITY,
-            null,
-            true
-          );
+        const result = await new ArticleManager(plugin as never, repo).import(
+          note,
+          DEFAULT_PRIORITY,
+          null,
+          true
+        );
 
-          expect(result?.file.path).toBe(LINKING_COPY);
-          expect(plugin.app.vault.append.mock.calls).toEqual([
-            [result?.file, text],
-          ]);
-          expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, {
-            kind: 'error',
-            persist: true,
-          });
-        })
-      );
-    });
+        expect(result?.file.path).toBe(LINKING_COPY);
+        expect(plugin.app.vault.append.mock.calls).toEqual([
+          [result?.file, text],
+        ]);
+        expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, {
+          kind: 'error',
+          persist: true,
+        });
+      }
+    );
 
     it('warns, lastingly, when a link that needed re-basing is left as written', async () => {
       // The cache reads `x` where the note holds `y`: no path this can trust

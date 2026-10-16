@@ -541,13 +541,18 @@ function wireRenames(notes: Record<string, Record<string, unknown> | null>) {
     void updateQueue.queue(() => new Promise<void>((done) => (release = done)));
     return () => release();
   };
-  /** Settles once every job queued so far has, the ones they queue too. */
+  /**
+   * Settles once every job queued so far has, the ones they queue too. Each
+   * pass yields a macrotask by `setImmediate`, not `setTimeout(0)`, which
+   * takes ~15ms on Windows: a test draining once per case for a hundred
+   * cases would outlast its timeout.
+   */
   const drained = async () => {
     let seen: Promise<unknown>;
     do {
       seen = tail;
       await seen;
-      await new Promise((done) => setTimeout(done, 0));
+      await new Promise((done) => setImmediate(done));
     } while (seen !== tail);
   };
   const rename = (from: string, to: string) =>

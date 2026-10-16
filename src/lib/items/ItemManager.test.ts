@@ -667,7 +667,8 @@ describe('retargetSources', () => {
             c.fromPath,
             c.to
           )
-        ).resolves.toBe(1);
+          // A link that already reads as it would become costs no write
+        ).resolves.toBe(c.expected === c.link ? 0 : 1);
 
         expect(wired.sourceOf(c.nowAt)).toBe(c.expected);
         // Linked to from where the note is now; a note named without its .md

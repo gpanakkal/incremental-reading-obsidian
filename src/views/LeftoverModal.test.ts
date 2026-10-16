@@ -61,6 +61,13 @@ function openModal(
   return { modal, close, rows, buttonsOf };
 }
 
+/**
+ * Let a click's handler finish, its resolver settling at once. Not
+ * `vi.waitFor`: its first retry waits a timer tick, which takes ~15ms on
+ * Windows, so a property clicking dozens of times outlasts the test timeout.
+ */
+const settle = () => new Promise<void>((done) => setImmediate(done));
+
 // #endregion
 
 describe('LeftoverModal', () => {
@@ -107,9 +114,8 @@ describe('LeftoverModal', () => {
           for (const [i, leftover] of leftovers.entries()) {
             const choice = choices[i] ?? 0;
             buttonsOf(rows()[0])[choice].click();
-            await vi.waitFor(() =>
-              expect(rows()).toHaveLength(leftovers.length - i - 1)
-            );
+            await settle();
+            expect(rows()).toHaveLength(leftovers.length - i - 1);
             expect(resolve).toHaveBeenLastCalledWith(
               leftover,
               choice === 0

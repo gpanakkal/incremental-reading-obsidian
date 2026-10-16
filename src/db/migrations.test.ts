@@ -1125,15 +1125,23 @@ describe('migration v6 — vault-relative references', () => {
  * A database at exactly schema v7, produced by replaying migrations 1-7 rather
  * than hardcoding a seventh literal schema. Rows are inserted by the caller
  * afterwards, so migration v6's reference rewrite never touches them.
+ *
+ * Replayed once, then opened from its bytes: replaying per property case put
+ * those tests near the timeout under load.
  */
 function makeDbAtV7(): Database {
-  const db = makeDb(SCHEMA_V0);
-  applyMigrations(
-    db,
-    migrations.filter((m) => m.version < 8)
-  );
-  return db;
+  if (!v7Bytes) {
+    const db = makeDb(SCHEMA_V0);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version < 8)
+    );
+    v7Bytes = db.export();
+    db.close();
+  }
+  return new SQL.Database(v7Bytes);
 }
+let v7Bytes: Uint8Array | undefined;
 
 /** Column values a v7 srs_card row can hold, respecting its CHECK constraints. */
 const v7CardArb = fc.record({

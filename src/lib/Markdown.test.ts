@@ -1246,15 +1246,30 @@ function pastBlankLines(text: string) {
  * first line after them stands on and after, read whole.
  */
 function reading(source: string, range: readonly [number, number]) {
-  const whole = Markdown.escapeCutStart(source, range, 'note');
-  const started = pastBlankLines(whole);
+  const { started, child } = cutPastBlankLines(source, range);
   const p1 = lineIndexOf(source, range[0]) + started.lines;
   return {
     started: started.text,
-    // Past the lines the cut was read past, which the child starts with too
-    child: noteOf(source, range).slice(whole.length - started.text.length),
+    child,
     sourceKinds: readLines(source).slice(p1),
     sourceLines: linesOf(source).slice(p1),
+  };
+}
+
+/**
+ * The `started` and `child` of {@link reading}, without the source's lines,
+ * which a filter of a property over thousands of cuts does without.
+ */
+function cutPastBlankLines(source: string, range: readonly [number, number]) {
+  const whole = Markdown.escapeCutStart(source, range, 'note');
+  const started = pastBlankLines(whole);
+  return {
+    started,
+    // As `noteOf` makes it, past the lines the cut was read past, which the
+    // child starts with too
+    child: Markdown.escapeCutUnderline(source, range[0], whole).slice(
+      whole.length - started.text.length
+    ),
   };
 }
 
@@ -2867,10 +2882,16 @@ describe('escapeCutUnderline', () => {
     });
 
     it('changes only lines that could underline it, keeping what each was: a rule a rule, and text text', () => {
+      // Nine cuts in ten change nothing. A filter skips them as `fc.pre`
+      // would, without the exception `fc.pre` throws per skip or reading
+      // the source's lines, which near the test timeout under load
+      const changedArb = noteCutArb.filter(({ source, range }) => {
+        const { started, child } = cutPastBlankLines(source, range);
+        return child !== started.text;
+      });
       fc.assert(
-        fc.property(noteCutArb, ({ source, range }) => {
+        fc.property(changedArb, ({ source, range }) => {
           const { started, child, sourceKinds } = reading(source, range);
-          fc.pre(child !== started);
 
           const startedLines = linesOf(started);
           const childLines = linesOf(child);
