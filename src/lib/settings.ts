@@ -34,6 +34,12 @@ export interface IRPluginSettings {
   showGradeIntervals: boolean;
   successNoticesInReview: SuccessNoticeLevel;
   successNoticesOutsideReview: SuccessNoticeLevel;
+  /** Whether the status bar says when items are ready for review. */
+  reviewReminders: boolean;
+  /** Whether due articles light that reminder. Due cards always do. */
+  remindDueArticles: boolean;
+  /** Whether due snippets light that reminder. */
+  remindDueSnippets: boolean;
   fsrsParams: FSRSParameters;
 }
 
@@ -98,6 +104,9 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   showGradeIntervals: false,
   successNoticesInReview: 'all',
   successNoticesOutsideReview: 'all',
+  reviewReminders: true,
+  remindDueArticles: true,
+  remindDueSnippets: true,
   fsrsParams: FSRS_PARAMETER_DEFAULTS,
 };
 
@@ -209,6 +218,9 @@ const CONTROL_BINDINGS = {
   showGradeIntervals: topLevel('showGradeIntervals'),
   successNoticesInReview: topLevel('successNoticesInReview'),
   successNoticesOutsideReview: topLevel('successNoticesOutsideReview'),
+  reviewReminders: topLevel('reviewReminders'),
+  remindDueArticles: topLevel('remindDueArticles'),
+  remindDueSnippets: topLevel('remindDueSnippets'),
   'fsrsParams.request_retention': fsrsParam('request_retention'),
   'fsrsParams.enable_fuzz': fsrsParam('enable_fuzz'),
   'fsrsParams.maximum_interval': fsrsParam('maximum_interval'),
@@ -250,6 +262,12 @@ export class IRSettingTab extends PluginSettingTab {
   }
 
   getSettingDefinitions(): SettingDefinitionItem<ControlKey>[] {
+    // Obsidian re-evaluates this after every control change (it calls
+    // `refreshDomState`, which runs `Setting.setDisabled`), so the lock follows
+    // the reminders toggle without a re-render. Undocumented: obsidian.d.ts
+    // says to call `update()`; read from `getControlBinding` in obsidian.asar
+    // (1.13.7).
+    const remindersOff = () => !this.plugin.settings.reviewReminders;
     return [
       {
         type: 'group',
@@ -312,6 +330,27 @@ export class IRSettingTab extends PluginSettingTab {
               type: 'dropdown',
               key: 'successNoticesOutsideReview',
               options: SUCCESS_NOTICE_LEVEL_OPTIONS,
+            },
+          },
+          {
+            name: 'Show review reminders in status bar',
+            desc: 'Desktop only.',
+            control: { type: 'toggle', key: 'reviewReminders' },
+          },
+          {
+            name: 'Remind for due articles',
+            control: {
+              type: 'toggle',
+              key: 'remindDueArticles',
+              disabled: remindersOff,
+            },
+          },
+          {
+            name: 'Remind for due snippets',
+            control: {
+              type: 'toggle',
+              key: 'remindDueSnippets',
+              disabled: remindersOff,
             },
           },
         ],

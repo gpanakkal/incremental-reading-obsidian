@@ -151,6 +151,24 @@ describe('parsePluginData', () => {
     });
   });
 
+  it('turns review reminders on for every item type unless told otherwise', () => {
+    expect(DEFAULT_SETTINGS).toMatchObject({
+      reviewReminders: true,
+      remindDueArticles: true,
+      remindDueSnippets: true,
+    });
+    for (const legacy of [false, true]) {
+      const saved = {};
+      expect(
+        parsePluginData(legacy ? saved : { settings: saved }).settings
+      ).toMatchObject({
+        reviewReminders: true,
+        remindDueArticles: true,
+        remindDueSnippets: true,
+      });
+    }
+  });
+
   it('keeps a known success notice level and replaces anything else with all', () => {
     const LEVELS: unknown[] = ['all', 'minimal', 'none'];
     const storedArb = fc.oneof(

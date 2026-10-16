@@ -104,6 +104,9 @@ const settingsArb = fc.record({
     showGradeIntervals: fc.boolean(),
     successNoticesInReview: fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
     successNoticesOutsideReview: fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
+    reviewReminders: fc.boolean(),
+    remindDueArticles: fc.boolean(),
+    remindDueSnippets: fc.boolean(),
     fsrsParams: fc.record({
       request_retention: fc.double(),
       maximum_interval: fc.integer(),
@@ -445,6 +448,9 @@ describe('IRSettingTab.getControlValue', () => {
           successNoticesOutsideReview: tab.getControlValue(
             'successNoticesOutsideReview'
           ),
+          reviewReminders: tab.getControlValue('reviewReminders'),
+          remindDueArticles: tab.getControlValue('remindDueArticles'),
+          remindDueSnippets: tab.getControlValue('remindDueSnippets'),
           maximumInterval: tab.getControlValue('fsrsParams.maximum_interval'),
           shortTerm: tab.getControlValue('fsrsParams.enable_short_term'),
           learningSteps: tab.getControlValue('fsrsParams.learning_steps'),
@@ -465,6 +471,9 @@ describe('IRSettingTab.getControlValue', () => {
           showGradeIntervals: settings.showGradeIntervals,
           successNoticesInReview: settings.successNoticesInReview,
           successNoticesOutsideReview: settings.successNoticesOutsideReview,
+          reviewReminders: settings.reviewReminders,
+          remindDueArticles: settings.remindDueArticles,
+          remindDueSnippets: settings.remindDueSnippets,
           maximumInterval: fsrsParams.maximum_interval,
           shortTerm: fsrsParams.enable_short_term,
           learningSteps: fsrsParams.learning_steps.join(', '),
@@ -525,6 +534,9 @@ describe('IRSettingTab.setControlValue', () => {
         'successNoticesOutsideReview',
         fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
       ],
+      ['reviewReminders', fc.boolean()],
+      ['remindDueArticles', fc.boolean()],
+      ['remindDueSnippets', fc.boolean()],
     ] as const;
     const fsrsKeys = [
       ['request_retention', fc.double()],
@@ -777,6 +789,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
   it('lists every setting under its heading, with its description and control', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
     const validate = expect.any(Function) as unknown;
+    const disabled = expect.any(Function) as unknown;
     const toggle = (key: string) => ({ type: 'toggle', key });
 
     expect(declaredRows(tab.getSettingDefinitions())).toEqual([
@@ -839,6 +852,24 @@ describe('IRSettingTab.getSettingDefinitions', () => {
             none: 'None',
           },
         },
+      },
+      {
+        heading: 'Notifications and reminders',
+        name: 'Show review reminders',
+        desc: 'Show "Ready for review" in the status bar while anything is due. Desktop only.',
+        control: toggle('reviewReminders'),
+      },
+      {
+        heading: 'Notifications and reminders',
+        name: 'Remind for due articles',
+        desc: 'Count due articles toward review reminders. Due cards always count.',
+        control: { ...toggle('remindDueArticles'), disabled },
+      },
+      {
+        heading: 'Notifications and reminders',
+        name: 'Remind for due snippets',
+        desc: 'Count due snippets toward review reminders. Due cards always count.',
+        control: { ...toggle('remindDueSnippets'), disabled },
       },
       {
         heading: 'Reviews',
@@ -954,6 +985,39 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         },
       },
     ]);
+  });
+
+  it('locks the reminder type toggles exactly while review reminders are off, following each change', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        settingsArb,
+        fc.array(fc.boolean(), { maxLength: 4 }),
+        async (generated, flips) => {
+          const { tab } = makeTab(buildSettings(generated));
+          const locks = declaredRows(tab.getSettingDefinitions()).filter(
+            ({ control }) => control.disabled !== undefined
+          );
+          const lockedNow = () =>
+            locks.map(({ control }) =>
+              typeof control.disabled === 'function'
+                ? control.disabled()
+                : control.disabled
+            );
+
+          expect(locks.map(({ control }) => control.key)).toEqual([
+            'remindDueArticles',
+            'remindDueSnippets',
+          ]);
+          expect(lockedNow()).toEqual(
+            Array(2).fill(!generated.settings.reviewReminders)
+          );
+          for (const on of flips) {
+            await tab.setControlValue('reviewReminders', on);
+            expect(lockedNow()).toEqual([!on, !on]);
+          }
+        }
+      )
+    );
   });
 
   it('shows each slider value in the units its description uses', () => {

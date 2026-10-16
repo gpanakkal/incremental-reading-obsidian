@@ -91,6 +91,10 @@ import {
   StartupCancelledError,
 } from './lib/repository/SQLJSRepository';
 import { initReviewCommands } from './lib/review-commands';
+import {
+  type ReviewReminder,
+  startReviewReminder,
+} from './lib/review-reminder';
 import { SessionTracker } from './lib/SessionTracker';
 import { type IRPluginSettings, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, setPage, store } from './lib/store';
@@ -178,6 +182,11 @@ export default class IncrementalReadingPlugin extends Plugin {
    * review manager it asks is up.
    */
   private itemPathGuard?: ItemPathGuard;
+  /**
+   * The status bar's "Ready for review". Unset on mobile, which has no status
+   * bar, and until the review manager it asks is up.
+   */
+  private reviewReminder?: ReviewReminder;
 
   MarkdownEditor!: typeof ExtractedMarkdownEditor;
 
@@ -203,11 +212,6 @@ export default class IncrementalReadingPlugin extends Plugin {
     );
 
     ribbonIconEl.addClass('incremental-reading-ribbon');
-
-    // TODO: show counts of items in queue?
-    // // This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-    // const statusBarItemEl = this.addStatusBarItem();
-    // statusBarItemEl.setText('Status Bar Text');
 
     this.addExtractCommands();
 
@@ -333,6 +337,7 @@ export default class IncrementalReadingPlugin extends Plugin {
           ReviewView.viewType,
           (leaf) => new ReviewView(leaf, this, this.reviewManager)
         );
+        this.showReviewReminders();
 
         // One notice for a held key's worth of refused edits, like the repair
         // path's warning below but with its own message: nothing was changed
@@ -435,6 +440,28 @@ export default class IncrementalReadingPlugin extends Plugin {
     // The same object, not a copy: every `plugin.settings.x = y; saveSettings()`
     // call site keeps working, and its edit is already in what gets written.
     this.settings = this.data.settings;
+  }
+
+  /**
+   * Say in the status bar when items are ready for review, and open review
+   * from there. Desktop only: mobile has no status bar.
+   */
+  private showReviewReminders() {
+    // `app.isMobile` is undocumented (obsidian-typings); true under
+    // `emulateMobile` too, which hides the status bar as well
+    if (this.app.isMobile) return;
+    const reminder = startReviewReminder({
+      el: this.addStatusBarItem(),
+      icon: PLUGIN_ICON,
+      reviewManager: this.reviewManager,
+      getSettings: () => this.settings,
+      onDataChange: (listener) =>
+        this.reviewManager.repo.onDataChange(listener),
+      onSettingsChange: this.onSettingsChange,
+      open: () => void this.learn(),
+    });
+    this.reviewReminder = reminder;
+    this.register(() => reminder.dispose());
   }
 
   getActiveReviewView(): ReviewView | null {
@@ -598,6 +625,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         // A PDF is an article only by its row, and a swapped-in database
         // reports no change to any row
         this.resyncLeafActionBars?.();
+        // Nor does what is due
+        this.reviewReminder?.refresh();
         // Item text is re-fetched above, but snippet highlights are cached
         // separately in the offset tracker and are just as stale: the rows they
         // came from went out with the replaced database. The event that

@@ -171,6 +171,33 @@ export class CardManager extends ItemManager {
   }
 
   /**
+   * Whether any card is due, as {@link getDue} would find, read straight off
+   * the table: no note is squared with its row, so it writes nothing.
+   * @param now The current time, as a Unix timestamp.
+   * @throws if the card table cannot be read
+   */
+  async anyDue(now = Date.now()): Promise<boolean> {
+    const filter = this.dueFilter(undefined, now);
+    return (await this.fetchMany({ ...filter, limit: 1 })).length > 0;
+  }
+
+  /**
+   * The `fetchMany` options of cards due by `dueBy`, or by the end of the
+   * review day `now` falls in; a learning card, by `now` at the latest.
+   */
+  private dueFilter(dueBy: number | undefined, now: number) {
+    const offset = this.plugin.settings.dayRolloverOffset;
+    const dueTime =
+      dueBy ?? getEndOfDay(offset, reviewDayOf(new Date(now), offset));
+    return {
+      dueBy: dueTime,
+      learningDueBy: Math.min(now, dueTime),
+      // A failed read is not an empty queue
+      throwOnError: true,
+    };
+  }
+
+  /**
    * Cards ready for review, soonest due first.
    *
    * New and Review cards are due once their due time falls on or before
@@ -192,10 +219,7 @@ export class CardManager extends ItemManager {
     excludeIds?: string[],
     now = Date.now()
   ): Promise<(ReviewCard | MissingItem<ISRSCardDisplay>)[]> {
-    const offset = this.plugin.settings.dayRolloverOffset;
-    const dueTime =
-      dueBy ?? getEndOfDay(offset, reviewDayOf(new Date(now), offset));
-    const learningDueTime = Math.min(now, dueTime);
+    const filter = this.dueFilter(dueBy, now);
     let allExcluded = [...(excludeIds ?? [])];
     let due: (ReviewCard | MissingItem<ISRSCardDisplay>)[];
     // keep fetching until all fetched rows have a note
@@ -203,14 +227,7 @@ export class CardManager extends ItemManager {
     do {
       lastMissingNotes = 0;
       due = (
-        await this.fetchMany({
-          dueBy: dueTime,
-          learningDueBy: learningDueTime,
-          limit,
-          excludeIds: allExcluded,
-          // A failed read is not an empty queue
-          throwOnError: true,
-        })
+        await this.fetchMany({ ...filter, limit, excludeIds: allExcluded })
       )
         .map((row) => {
           const item =
@@ -240,8 +257,8 @@ export class CardManager extends ItemManager {
    * @param now The current time, as a Unix timestamp.
    */
   async countDueLaterToday(now = Date.now()): Promise<number> {
-    const offset = this.plugin.settings.dayRolloverOffset;
-    const endOfDay = getEndOfDay(offset, reviewDayOf(new Date(now), offset));
+    // The end of the review day, as `getDue` cuts off at
+    const { dueBy: endOfDay } = this.dueFilter(undefined, now);
     const rows = (await this.repo.query(
       `SELECT * FROM srs_card
        WHERE state IN (${State.Learning}, ${State.Relearning})

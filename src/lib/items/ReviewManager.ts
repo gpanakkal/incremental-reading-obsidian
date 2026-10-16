@@ -351,6 +351,36 @@ export default class ReviewManager {
       throw error;
     }
   }
+
+  /**
+   * Whether anything of `typesToInclude` is due, by the cutoffs
+   * {@link getDue} uses, without its writes: no note is squared with its row,
+   * no tombstone set or lifted, no fuzz filled in, and no notice shown. For
+   * asking often with no review open.
+   *
+   * It reads only the rows, so a due row whose note claims another item's id
+   * counts here though {@link getDue} drops it (marking it deleted, after
+   * which neither counts it).
+   * @throws if a table of an included type cannot be read
+   */
+  async anyDue(
+    typesToInclude: Partial<Record<NoteType, true>>
+  ): Promise<boolean> {
+    try {
+      return (
+        ('card' in typesToInclude && (await this.cards.anyDue())) ||
+        ('snippet' in typesToInclude && (await this.snippets.anyDue())) ||
+        ('article' in typesToInclude && (await this.articles.anyDue()))
+      );
+    } catch (error) {
+      console.error(
+        'Incremental Reading - Failed to check for due items:',
+        error
+      );
+      throw error;
+    }
+  }
+
   /**
    * The scheduling summary shown for an article: its fixed interval when one is
    * set, otherwise its priority. An article never has both at once.

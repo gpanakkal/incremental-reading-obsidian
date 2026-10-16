@@ -19,6 +19,7 @@ import {
   StartupCancelledError,
   type SyncHold,
 } from '#/lib/repository/SQLJSRepository';
+import * as ReviewReminder from '#/lib/review-reminder';
 import {
   resetSession,
   setCurrentItemId,
@@ -686,7 +687,10 @@ function makeImportReceiver() {
  * the reload hook it gave the repository. `resync` stands for the action
  * bars, registered once the database is up.
  */
-async function startDatabase(resync: (() => void) | undefined) {
+async function startDatabase(
+  resync: (() => void) | undefined,
+  extra: Record<string, unknown> = {}
+) {
   let onReloadFromDisk: (() => void | Promise<void>) | undefined;
   let onWriteBlocked: ((error: Error) => void) | undefined;
   let onWritesResumed: (() => void) | undefined;
@@ -710,6 +714,7 @@ async function startDatabase(resync: (() => void) | undefined) {
     registerEvent: vi.fn(),
     followMovedNotes: vi.fn(),
     resyncLeafActionBars: resync,
+    ...extra,
   };
   await (
     IncrementalReadingPlugin.prototype as unknown as {
@@ -2897,6 +2902,99 @@ describe('IncrementalReadingPlugin database reload', () => {
     await reload();
 
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['queue'] });
+  });
+});
+
+describe('IncrementalReadingPlugin review reminders', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** A desktop or mobile plugin with its database up, and the reminder it starts. */
+  function startReminder(isMobile: boolean) {
+    const reminder = { refresh: vi.fn(), dispose: vi.fn() };
+    const start = vi
+      .spyOn(ReviewReminder, 'startReviewReminder')
+      .mockReturnValue(reminder);
+    const statusBarItem = { statusBarItem: true };
+    const unsubscribe = vi.fn();
+    const receiver = {
+      app: { isMobile },
+      addStatusBarItem: vi.fn(() => statusBarItem),
+      reviewManager: { repo: { onDataChange: vi.fn(() => unsubscribe) } },
+      settings: { reviewReminders: true },
+      onSettingsChange: vi.fn(),
+      learn: vi.fn(() => Promise.resolve()),
+      register: vi.fn(),
+      reviewReminder: undefined as unknown,
+    };
+    (
+      IncrementalReadingPlugin.prototype as unknown as {
+        showReviewReminders(): void;
+      }
+    ).showReviewReminders.call(receiver);
+    return { start, reminder, receiver, statusBarItem, unsubscribe };
+  }
+
+  it('puts a reminder in the status bar on desktop, over the plugin settings and database', () => {
+    const { start, receiver, statusBarItem, unsubscribe } =
+      startReminder(false);
+
+    expect(start).toHaveBeenCalledOnce();
+    const [options] = start.mock.calls[0];
+    expect(options.el).toBe(statusBarItem);
+    expect(options.icon).toBe(PLUGIN_ICON);
+    expect(options.reviewManager).toBe(receiver.reviewManager);
+    expect(options.getSettings()).toBe(receiver.settings);
+    expect(options.onSettingsChange).toBe(receiver.onSettingsChange);
+
+    const listener = vi.fn();
+    expect(options.onDataChange(listener)).toBe(unsubscribe);
+    const [[heard]] = receiver.reviewManager.repo.onDataChange.mock
+      .calls as unknown as [[() => void]];
+    heard();
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it('opens review from the reminder as the ribbon does', () => {
+    const { start, receiver } = startReminder(false);
+
+    start.mock.calls[0][0].open();
+
+    expect(receiver.learn).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it('takes the reminder down when the plugin unloads', () => {
+    const { reminder, receiver } = startReminder(false);
+    expect(receiver.reviewReminder).toBe(reminder);
+    expect(reminder.dispose).not.toHaveBeenCalled();
+
+    for (const [cleanup] of receiver.register.mock.calls as unknown as [
+      () => void,
+    ][]) {
+      cleanup();
+    }
+
+    expect(reminder.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('shows no reminder on mobile, which has no status bar', () => {
+    const { start, receiver } = startReminder(true);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(receiver.addStatusBarItem).not.toHaveBeenCalled();
+  });
+
+  it('checks the reminder again when the database is swapped in from disk', async () => {
+    const refresh = vi.fn();
+    const { reload } = await startDatabase(undefined, {
+      reviewReminder: { refresh },
+    });
+    expect(refresh).not.toHaveBeenCalled();
+
+    await reload();
+
+    expect(refresh).toHaveBeenCalledOnce();
   });
 });
 

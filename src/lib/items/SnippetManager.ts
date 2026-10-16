@@ -256,6 +256,25 @@ export class SnippetManager extends ItemManager {
   }
 
   /**
+   * Whether any snippet is due, as {@link getDue} would find, read straight
+   * off the table: no note is squared with its row and no fuzz filled in, so
+   * it writes nothing.
+   * @throws if the snippet table cannot be read
+   */
+  async anyDue(): Promise<boolean> {
+    return (await this.fetchMany({ ...this.dueFilter(), limit: 1 })).length > 0;
+  }
+
+  /** The `fetchMany` options of snippets due by `dueBy`, or by the end of today. */
+  private dueFilter(dueBy?: number) {
+    return {
+      dueBy: dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset),
+      // A failed read is not an empty queue
+      throwOnError: true,
+    };
+  }
+
+  /**
    * Snippets ready for review.
    * @throws if the snippet table cannot be read
    */
@@ -264,8 +283,7 @@ export class SnippetManager extends ItemManager {
     limit?: number,
     excludeIds?: string[]
   ): Promise<(ReviewSnippet | MissingItem<ISnippetBase>)[]> {
-    const dueTime =
-      dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
+    const filter = this.dueFilter(dueBy);
     let allExcluded = [...(excludeIds ?? [])];
     let due: (ReviewSnippet | MissingItem<ISnippetBase>)[];
     // keep fetching until all fetched rows have a note
@@ -273,13 +291,7 @@ export class SnippetManager extends ItemManager {
     do {
       lastMissingNotes = 0;
       due = (
-        await this.fetchMany({
-          dueBy: dueTime,
-          limit,
-          excludeIds: allExcluded,
-          // A failed read is not an empty queue
-          throwOnError: true,
-        })
+        await this.fetchMany({ ...filter, limit, excludeIds: allExcluded })
       )
         .map((row) => {
           const item =

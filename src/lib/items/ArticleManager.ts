@@ -1302,6 +1302,25 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
+   * Whether any article is due, as {@link getDue} would find, read straight
+   * off the table: no note is squared with its row and no fuzz filled in, so
+   * it writes nothing.
+   * @throws if the article table cannot be read
+   */
+  async anyDue(): Promise<boolean> {
+    return (await this.fetchMany({ ...this.dueFilter(), limit: 1 })).length > 0;
+  }
+
+  /** The `fetchMany` options of articles due by `dueBy`, or by the end of today. */
+  private dueFilter(dueBy?: number) {
+    return {
+      dueBy: dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset),
+      // A failed read is not an empty queue
+      throwOnError: true,
+    };
+  }
+
+  /**
    * Articles ready for review.
    * @throws if the article table cannot be read
    */
@@ -1310,8 +1329,7 @@ export class ArticleManager extends ItemManager {
     limit?: number,
     excludeIds?: string[]
   ): Promise<(ReviewArticle | MissingItem<IArticleBase>)[]> {
-    const dueTime =
-      dueBy ?? getEndOfDay(this.plugin.settings.dayRolloverOffset);
+    const filter = this.dueFilter(dueBy);
     let allExcluded = [...(excludeIds ?? [])];
     let due: (ReviewArticle | MissingItem<IArticleBase>)[];
     // keep fetching until all fetched rows have a note
@@ -1319,13 +1337,7 @@ export class ArticleManager extends ItemManager {
     do {
       lastMissingNotes = 0;
       due = (
-        await this.fetchMany({
-          dueBy: dueTime,
-          limit,
-          excludeIds: allExcluded,
-          // A failed read is not an empty queue
-          throwOnError: true,
-        })
+        await this.fetchMany({ ...filter, limit, excludeIds: allExcluded })
       )
         .map((row) => {
           const item =

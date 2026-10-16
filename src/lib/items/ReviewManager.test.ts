@@ -680,6 +680,120 @@ const pathArb = fc
   })
   .map((segments) => segments.join('/'));
 
+/** A moment in a review day, any minute of any day from 2000 to 2100. */
+const reviewTimeArb = fc
+  .tuple(
+    fc.integer({
+      min: 0,
+      max: Math.floor((YEAR_2100_MS - YEAR_2000_MS) / MS_PER_DAY),
+    }),
+    fc.integer({ min: 0, max: MS_PER_DAY / 60_000 - 1 })
+  )
+  .map(
+    ([days, minutes]) => YEAR_2000_MS + days * MS_PER_DAY + minutes * 60_000
+  );
+
+/** An item row as {@link wireDueRows} lays it out. */
+type DueRow = {
+  table: ItemTable;
+  due: number;
+  /** A card's FSRS state: 1 and 3 are learning; text items ignore it. */
+  state: 0 | 1 | 2 | 3;
+  /** No note at its reference, one lacking its id, or one that is its own. */
+  note: 'none' | 'bare' | 'own';
+  dismissed?: boolean;
+  deleted?: boolean;
+  /** A text item's `due_fuzz`; null as a fresh import has it. */
+  fuzz?: number | null;
+};
+
+/**
+ * A row due near one of the cutoffs review uses (now, for a learning card;
+ * the end of the review day, for the rest), placed once the clock is set.
+ */
+const dueRowArb = fc
+  .record({
+    table: fc.constantFrom<ItemTable>('article', 'snippet', 'srs_card'),
+    anchor: fc.constantFrom('now', 'endOfDay'),
+    delta: fc.integer({ min: -2 * MS_PER_DAY, max: 2 * MS_PER_DAY }),
+    state: fc.constantFrom<DueRow['state']>(0, 1, 2, 3),
+    note: fc.constantFrom<DueRow['note']>('none', 'bare', 'own'),
+    dismissed: fc.boolean(),
+    deleted: fc.boolean(),
+    fuzz: fc.option(fc.integer({ min: -3_600_000, max: 3_600_000 })),
+  })
+  .map(({ anchor, delta, ...row }): (() => DueRow) =>
+    // `makePlugin`'s rollover offset; read once the clock is set
+    () => ({
+      ...row,
+      due: (anchor === 'now' ? Date.now() : getEndOfDay(4)) + delta,
+    })
+  );
+
+const TYPE_BY_TABLE: Record<ItemTable, NoteType> = {
+  article: 'article',
+  snippet: 'snippet',
+  srs_card: 'card',
+};
+
+const TAG_BY_TABLE: Record<ItemTable, string> = {
+  article: ARTICLE_TAG,
+  snippet: SNIPPET_TAG,
+  srs_card: CARD_TAG,
+};
+
+/**
+ * A manager over a real database holding `rows` and a vault holding their
+ * notes, fuzzing text reviews so that a due row missing its fuzz gets one on
+ * fetch.
+ */
+function wireDueRows(rows: readonly DueRow[]) {
+  const repo = TestRepository.create();
+  const notes: Record<string, Record<string, unknown>> = {};
+  rows.forEach((row, i) => {
+    const id = `${row.table}-${i}`;
+    const reference = `${row.table}/${id}.md`;
+    if (row.note !== 'none') {
+      notes[reference] =
+        row.note === 'own'
+          ? { 'ir-id': id, tags: TAG_BY_TABLE[row.table] }
+          : {};
+    }
+    const flags = [
+      Number(row.dismissed ?? false),
+      Number(row.deleted ?? false),
+    ];
+    if (row.table === 'srs_card') {
+      repo.mutate(
+        `INSERT INTO srs_card (id, reference, dismissed, deleted, created_at,
+           due, stability, difficulty, elapsed_days, scheduled_days, state)
+         VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0, 0, $7)`,
+        [id, reference, ...flags, YEAR_2000_MS, row.due, row.state]
+      );
+    } else {
+      repo.mutate(
+        `INSERT INTO ${row.table} (id, reference, dismissed, deleted, due,
+           due_fuzz, interval, priority)
+         VALUES ($1, $2, $3, $4, $5, $6, 86400000, 30)`,
+        [id, reference, ...flags, row.due, row.fuzz ?? null]
+      );
+    }
+  });
+  const vault = makeLinkVault(notes);
+  const plugin = makePlugin(vault.app) as unknown as {
+    settings: Record<string, unknown>;
+  };
+  plugin.settings.fuzzTextReviews = true;
+  const manager = new ReviewManager(plugin as never, repo);
+  return { repo, manager, processFrontMatter: vault.processFrontMatter };
+}
+
+/** Every row of every item table, every column. */
+const dumpItemTables = (repo: SQLiteRepository) =>
+  (['article', 'snippet', 'srs_card'] as const).map((table) =>
+    repo.query(`SELECT * FROM ${table} ORDER BY id`)
+  );
+
 // #endregion
 
 describe('ReviewManager.getDue', () => {
@@ -821,6 +935,146 @@ describe('ReviewManager.getDue', () => {
           }
         }
       )
+    );
+  });
+});
+
+describe('ReviewManager.anyDue', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('finds something due exactly when getDue does, by its cutoffs, writing nothing and saying nothing', async () => {
+    const notify = vi.spyOn(Obsidian, 'notify');
+    await fc.assert(
+      fc.asyncProperty(
+        reviewTimeArb,
+        fc.array(dueRowArb, { maxLength: 8 }),
+        fc.subarray(['article', 'snippet', 'card'] as const),
+        async (now, rows, included) => {
+          vi.setSystemTime(now);
+          const typesToInclude = Object.fromEntries(
+            included.map((type) => [type, true as const])
+          );
+          const placed = rows.map((place) => place());
+          const { repo, manager, processFrontMatter } = wireDueRows(placed);
+          const before = dumpItemTables(repo);
+          const mutate = vi.spyOn(repo, 'mutate');
+          const transaction = vi.spyOn(repo, 'transaction');
+          notify.mockClear();
+
+          const anyDue = await manager.anyDue(typesToInclude);
+
+          expect(dumpItemTables(repo)).toEqual(before);
+          expect(mutate).not.toHaveBeenCalled();
+          expect(transaction).not.toHaveBeenCalled();
+          expect(processFrontMatter).not.toHaveBeenCalled();
+          expect(notify).not.toHaveBeenCalled();
+          const { all } = await manager.getDue({ limit: 1, typesToInclude });
+          expect(anyDue).toBe(all.length > 0);
+          // Review's cutoffs: the end of the review day, but now for a
+          // learning card
+          const endOfDay = getEndOfDay(4);
+          const learning = (row: DueRow) =>
+            row.table === 'srs_card' && (row.state === 1 || row.state === 3);
+          expect(anyDue).toBe(
+            placed.some(
+              (row) =>
+                TYPE_BY_TABLE[row.table] in typesToInclude &&
+                !row.dismissed &&
+                !row.deleted &&
+                row.due <= (learning(row) ? Math.min(now, endOfDay) : endOfDay)
+            )
+          );
+        }
+      ),
+      { numRuns: 200 }
+    );
+  });
+
+  it('writes nothing over rows that getDue writes to', async () => {
+    vi.setSystemTime(YEAR_2000_MS);
+    // A note without its id and a row without its fuzz: getDue squares the
+    // one and fills in the other
+    const rows: DueRow[] = [
+      { table: 'article', due: YEAR_2000_MS, state: 0, note: 'bare' },
+    ];
+    const read = wireDueRows(rows);
+    const before = dumpItemTables(read.repo);
+    expect(await read.manager.anyDue({ article: true })).toBe(true);
+    expect(dumpItemTables(read.repo)).toEqual(before);
+    expect(read.processFrontMatter).not.toHaveBeenCalled();
+
+    const fetched = wireDueRows(rows);
+    const fetchedBefore = dumpItemTables(fetched.repo);
+    await fetched.manager.getDue({
+      limit: 1,
+      typesToInclude: { article: true },
+    });
+    await vi.waitFor(() =>
+      expect(dumpItemTables(fetched.repo)).not.toEqual(fetchedBefore)
+    );
+    expect(fetched.processFrontMatter).toHaveBeenCalled();
+  });
+
+  it('counts a learning card only once it is due now, and any other card due by the end of the day', async () => {
+    const now = YEAR_2000_MS;
+    vi.setSystemTime(now);
+    const later = now + 60_000;
+    // Learning (1) and Relearning (3) wait for their minute; New and Review don't
+    for (const [state, due] of [
+      [1, false],
+      [3, false],
+      [0, true],
+      [2, true],
+    ] as const) {
+      const { manager } = wireDueRows([
+        { table: 'srs_card', due: later, state, note: 'own' },
+      ]);
+      expect(await manager.anyDue({ card: true }), `state ${state}`).toBe(due);
+    }
+  });
+
+  it('asks only the tables of the types included', async () => {
+    vi.setSystemTime(YEAR_2000_MS);
+    for (const table of ['article', 'snippet', 'srs_card'] as const) {
+      const type = table === 'srs_card' ? 'card' : table;
+      const { manager } = wireDueRows([
+        { table, due: YEAR_2000_MS, state: 0, note: 'own' },
+      ]);
+      const others = (['article', 'snippet', 'card'] as const).filter(
+        (each) => each !== type
+      );
+      expect(
+        await manager.anyDue(
+          Object.fromEntries(others.map((each) => [each, true as const]))
+        )
+      ).toBe(false);
+      expect(await manager.anyDue({ [type]: true })).toBe(true);
+    }
+  });
+
+  it('rejects, and logs, when a table it asks cannot be read', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { repo, manager } = wireDueRows([]);
+    repo.mutate('DROP TABLE snippet');
+
+    await expect(manager.anyDue({ snippet: true })).rejects.toThrow();
+    expect(error).toHaveBeenCalledWith(
+      'Incremental Reading - Failed to check for due items:',
+      expect.anything()
     );
   });
 });
