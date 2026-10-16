@@ -1,3 +1,4 @@
+import type { Actions } from '#/lib/Actions';
 import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
@@ -25,7 +26,7 @@ import {
   REFUSED_PATH_CHARS,
   refusedPathsWarning,
 } from '#/lib/item-path-guard';
-import { configureSuccessNotices } from '#/lib/notices';
+import { configureSuccessNotices, type NotifyOptions } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import type {
   ArticleRow,
@@ -38,7 +39,7 @@ import type {
 import { getEndOfDay } from '#/lib/utils';
 // The mock the vitest config aliases `obsidian` to — imported by path so its
 // recorded notices are visible to the type checker as well as at runtime.
-import { Notice } from '#/test/__mocks__/obsidian';
+import { Keymap, Notice } from '#/test/__mocks__/obsidian';
 import {
   excludedIdsOf,
   expectDueInOrder,
@@ -6345,6 +6346,160 @@ describe('importWebPage', () => {
     expect(notify).toHaveBeenCalledExactlyOnceWith(refusal('import "Page"'), {
       kind: 'error',
     });
+  });
+});
+
+describe("an import notice's Open button", () => {
+  const NOTE = 'notes/Paper.md';
+  const PAPER = 'papers/Paper.pdf';
+
+  /** Every way an article can be imported. */
+  type ImportWay =
+    | 'note copy'
+    | 'PDF copy'
+    | 'web page'
+    | 'note in place'
+    | 'PDF in place';
+
+  /** The ways that make a note of their own, which the button opens. */
+  const NEW_NOTE_WAYS: ImportWay[] = ['note copy', 'PDF copy', 'web page'];
+
+  /**
+   * A manager over a vault holding a note and a PDF, with the plugin's opener
+   * as a spy, importing them `way`.
+   * @returns the wiring, the opener, the imported article's row id, and the
+   *   options its "Imported" notice was raised with
+   */
+  async function importBy(way: ImportWay) {
+    const wired = await wireArticles({ [NOTE]: null, [PAPER]: null }, null);
+    const openFile = vi.fn<Actions['_openFile']>(async () => null);
+    Object.assign(wired.manager.plugin, { actions: { _openFile: openFile } });
+    const { manager, vault } = wired;
+    if (way === 'web page') {
+      await manager.importWebPage(
+        { title: 'Paper', markdown: '# Paper', url: null },
+        DEFAULT_PRIORITY,
+        null
+      );
+    } else {
+      const file = vault.files.get(way.startsWith('PDF') ? PAPER : NOTE)!;
+      await manager.import(file, DEFAULT_PRIORITY, null, way.endsWith('copy'));
+    }
+    const [row] = wired.repo.rows('article');
+    const imported = wired.notify.mock.calls.filter(([message]) =>
+      message.startsWith('Imported "')
+    );
+    expect(imported).toHaveLength(1);
+    const options = imported[0][1] as NotifyOptions;
+    return { ...wired, openFile, id: row.id as string, options };
+  }
+
+  /** A click as `Keymap.isModEvent` reads one: its button and keys. */
+  const clickArb = fc.record({
+    button: fc.constantFrom(0, 1),
+    ctrlKey: fc.boolean(),
+    metaKey: fc.boolean(),
+    altKey: fc.boolean(),
+    shiftKey: fc.boolean(),
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('is on the notice of every import that makes a note, and on none made in place', async () => {
+    const ways: ImportWay[] = [
+      ...NEW_NOTE_WAYS,
+      'note in place',
+      'PDF in place',
+    ];
+    for (const way of ways) {
+      vi.restoreAllMocks();
+
+      const { options } = await importBy(way);
+
+      // Still an import's confirmation, which the `minimal` level keeps
+      expect(options).toMatchObject({ kind: 'success', category: 'import' });
+      if (NEW_NOTE_WAYS.includes(way)) {
+        expect(options.action?.label).toBe('Open');
+      } else {
+        expect(options.action).toBeUndefined();
+      }
+    }
+  });
+
+  it('property: opens the imported note where it is now, where the click says, as Go to context does', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...NEW_NOTE_WAYS),
+        clickArb,
+        fc.boolean(),
+        async (way, click, renamed) => {
+          vi.restoreAllMocks();
+          const { options, openFile, vault, repo, id } = await importBy(way);
+          let path = repo.rows('article')[0].reference as string;
+          if (renamed) {
+            // As a rename does: the note moves and its row follows it
+            const to = `elsewhere/${path.slice(path.lastIndexOf('/') + 1)}`;
+            vault.move(path, to);
+            repo.mutate('UPDATE article SET reference = $1 WHERE id = $2', [
+              to,
+              id,
+            ]);
+            path = to;
+          }
+          const evt = click as unknown as MouseEvent;
+
+          options.action!.onClick(evt);
+
+          await vi.waitFor(() => expect(openFile).toHaveBeenCalled());
+          expect(openFile).toHaveBeenCalledExactlyOnceWith(
+            vault.files.get(path),
+            null,
+            Keymap.isModEvent(evt)
+          );
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('opens in the tab the user is in on a plain click', async () => {
+    const { options, openFile } = await importBy('note copy');
+
+    options.action!.onClick({ button: 0 } as MouseEvent);
+
+    await vi.waitFor(() => expect(openFile).toHaveBeenCalled());
+    expect(openFile.mock.calls[0][2]).toBe(false);
+  });
+
+  it('says the article is gone, opening nothing, once its note or its row is', async () => {
+    const losses = ['note trashed', 'row deleted', 'row removed'] as const;
+    for (const way of NEW_NOTE_WAYS) {
+      for (const loss of losses) {
+        vi.restoreAllMocks();
+        const { options, openFile, vault, repo, id, notify } =
+          await importBy(way);
+        const path = repo.rows('article')[0].reference as string;
+        if (loss === 'note trashed') vault.files.delete(path);
+        if (loss === 'row deleted') {
+          repo.mutate('UPDATE article SET deleted = 1 WHERE id = $1', [id]);
+        }
+        if (loss === 'row removed') {
+          repo.mutate('DELETE FROM article WHERE id = $1', [id]);
+        }
+        notify.mockClear();
+
+        options.action!.onClick({ button: 0 } as MouseEvent);
+
+        await vi.waitFor(() => expect(notify).toHaveBeenCalled());
+        expect(notify).toHaveBeenCalledExactlyOnceWith(
+          `Couldn't open "Paper": the article is gone`,
+          { kind: 'error' }
+        );
+        expect(openFile).not.toHaveBeenCalled();
+      }
+    }
   });
 });
 

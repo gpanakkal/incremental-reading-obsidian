@@ -2693,3 +2693,38 @@ input.ir-queue-page-input {
 }
 
 /* #endregion */
+
+/* #region Notice actions */
+/* A button on a notice (see `notices.ts`). Obsidian's `notice-cta` lays it out
+   but paints it as accent-coloured text, easy to miss on the notice's dark
+   background; boxed and filled like a mod-cta button instead. Two classes, to
+   outrank `.notice-cta`'s own colour rules. */
+.notice-cta.ir-notice-action {
+  justify-content: center;
+  padding: var(--size-4-1) var(--size-4-3);
+  border-radius: var(--button-radius);
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-weight: var(--font-semibold);
+}
+
+.notice-cta.ir-notice-action.mobile-tap {
+  background-color: var(--interactive-accent-hover);
+  color: var(--text-on-accent);
+}
+
+@media (hover: hover) {
+  .notice-cta.ir-notice-action:hover {
+    background-color: var(--interactive-accent-hover);
+    color: var(--text-on-accent);
+    cursor: pointer;
+  }
+}
+
+/* A finger needs a taller target than a pointer */
+.is-mobile .notice-cta.ir-notice-action {
+  min-height: var(--touch-size-m);
+  padding-inline: var(--size-4-4);
+}
+
+/* #endregion */

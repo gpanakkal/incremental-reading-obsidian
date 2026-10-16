@@ -63,6 +63,20 @@ export function parseYaml(text: string): unknown {
   return parse(text);
 }
 
+/**
+ * Outside jsdom, an element that takes children and listeners and keeps none:
+ * each child it makes is itself.
+ */
+function inertElement(): HTMLElement {
+  const el = {
+    addEventListener() {},
+    createDiv: () => el,
+    createEl: () => el,
+    createSpan: () => el,
+  };
+  return el as unknown as HTMLElement;
+}
+
 export class Notice {
   /**
    * Every notice raised since the last {@link Notice.reset}, so tests can
@@ -80,11 +94,15 @@ export class Notice {
     Notice.instances.length = 0;
   }
 
-  /** The notice's own element: a detached one, outside jsdom a bare stub. */
-  containerEl: HTMLElement =
-    typeof document === 'undefined'
-      ? ({ addEventListener() {} } as unknown as HTMLElement)
-      : document.createElement('div');
+  /**
+   * The notice's own element, which hides the notice when clicked anywhere, as
+   * Obsidian's does: a detached one, outside jsdom an inert stub.
+   */
+  readonly containerEl: HTMLElement;
+  /** The message's element, inside {@link containerEl}, as in Obsidian. */
+  readonly messageEl: HTMLElement;
+  /** Obsidian's deprecated name for {@link messageEl}. */
+  readonly noticeEl: HTMLElement;
 
   readonly message: string;
   /** Obsidian's auto-hide delay: `0` keeps the notice up until it's hidden. */
@@ -95,6 +113,17 @@ export class Notice {
   constructor(message: string, duration?: number) {
     this.message = message;
     this.duration = duration;
+    if (typeof document === 'undefined') {
+      this.containerEl = this.messageEl = this.noticeEl = inertElement();
+    } else {
+      this.containerEl = document.createElement('div');
+      this.containerEl.className = 'notice';
+      this.messageEl = this.noticeEl = document.createElement('div');
+      this.messageEl.className = 'notice-message';
+      this.messageEl.textContent = message;
+      this.containerEl.appendChild(this.messageEl);
+      this.containerEl.addEventListener('click', () => this.hide());
+    }
     Notice.messages.push(message);
     Notice.instances.push(this);
   }

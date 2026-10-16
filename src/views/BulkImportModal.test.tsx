@@ -296,7 +296,8 @@ describe('BulkImportModal', () => {
       ),
       { numRuns: 25 }
     );
-  });
+    // 2-5 s alone; past the 5 s default under a full parallel run
+  }, 20_000);
 
   it('closes on confirm, then says how many it imported from where', async () => {
     const { plugin, importArticles } = makePlugin();

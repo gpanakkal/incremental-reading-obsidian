@@ -26,6 +26,12 @@ export const SOURCE_PROPERTY_NAME = 'source';
 
 export const NOTICE_SCALED_DURATION_PER_WORD_MS = 750;
 export const NOTICE_MIN_DURATION_MS = 5000;
+/**
+ * How much longer than {@link NOTICE_MIN_DURATION_MS} an import's notice stays
+ * up at the least. A short page title made the notice vanish before its Open
+ * button could be used.
+ */
+export const IMPORT_NOTICE_EXTRA_MS = 2000;
 
 /** characters that should never be permitted in note titles */
 export const FORBIDDEN_TITLE_CHARS = new Set(`#^[]*"\\/<>:|?\n`.split(''));

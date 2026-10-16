@@ -28,6 +28,7 @@ import {
   sniffMimeType,
   supportsFrontmatter,
 } from '#/lib/mime';
+import type { NoticeAction } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import {
   applyFrontmatterLinkEdits,
@@ -56,7 +57,7 @@ import {
   getEndOfDay,
 } from '#/lib/utils';
 import type { WebPage } from '#/lib/web-viewer';
-import { type TFile } from 'obsidian';
+import { Keymap, type TFile } from 'obsidian';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
 
@@ -93,8 +94,11 @@ interface Refusal {
 interface ImportReport {
   /** Nothing was imported, for the reason given. */
   refuse(refusal: Refusal): void;
-  /** What was imported, or done instead (see {@link confirmImport}). */
-  confirm(message: string): void;
+  /**
+   * What was imported, or done instead (see {@link confirmImport}), with a
+   * button for the notice to carry, if any.
+   */
+  confirm(message: string, action?: NoticeAction): void;
   /** Something about an import that goes ahead. */
   warn(...args: Parameters<typeof Obsidian.notify>): void;
 }
@@ -159,9 +163,11 @@ function describeSchedule(
 /**
  * Confirm an import, or what an import did instead (link or restore an article
  * already in the database). The `minimal` success notice level keeps these.
+ * @param action a button on the notice: one that opens the note an import
+ *   made, which one made in place has no need of
  */
-function confirmImport(message: string) {
-  Obsidian.notify(message, { kind: 'success', category: 'import' });
+function confirmImport(message: string, action?: NoticeAction) {
+  Obsidian.notify(message, { kind: 'success', category: 'import', action });
 }
 
 /**
@@ -638,6 +644,39 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
+   * The button an import's notice opens the note it made with, `title` being
+   * how the notice names it.
+   */
+  private openAction(id: string, title: string): NoticeAction {
+    return {
+      label: 'Open',
+      onClick: (evt) => void this.openImported(id, title, evt),
+    };
+  }
+
+  /**
+   * Open the note of the article `id`, imported as `title`, where it is now:
+   * found by its row, which follows a rename, not by the path it was made at.
+   * Opened as Go to context opens a note, in the tab the user is in unless
+   * `evt` was a modified or middle click (see `Keymap.isModEvent`). Says the
+   * article is gone instead when its row or its note is.
+   */
+  private async openImported(id: string, title: string, evt: MouseEvent) {
+    const rows = (await this.repo.query(
+      'SELECT reference FROM article WHERE id = $1 AND deleted = 0',
+      [id]
+    )) as Pick<ArticleRow, 'reference'>[];
+    const file = rows[0] ? Obsidian.getNote(rows[0].reference, this.app) : null;
+    if (!file) {
+      Obsidian.notify(`Couldn't open "${title}": the article is gone`, {
+        kind: 'error',
+      });
+      return;
+    }
+    await this.plugin.actions._openFile(file, null, Keymap.isModEvent(evt));
+  }
+
+  /**
    * Give the note `file`, which holds the `ir-id` `id` no row does, a row of
    * its own: an article whose making or import was cut short before its row
    * was saved (see `crash-leftovers`). Due now at the default priority, as an
@@ -887,7 +926,8 @@ export class ArticleManager extends ItemManager {
       );
       const schedulingString = describeSchedule(priority, fixedIntervalDays);
       report.confirm(
-        `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`
+        `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`,
+        this.openAction(id, titleSlice)
       );
       return this.fetch(id);
     });
@@ -1093,7 +1133,8 @@ export class ArticleManager extends ItemManager {
       );
       const schedulingString = describeSchedule(priority, fixedIntervalDays);
       report.confirm(
-        `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`
+        `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`,
+        this.openAction(id, titleSlice)
       );
       return this.fetch(id);
     });
@@ -1174,7 +1215,10 @@ export class ArticleManager extends ItemManager {
             priority,
             fixedIntervalDays
           );
-          Obsidian.notify(`Imported "${titleSlice}" with ${schedulingString}`);
+          confirmImport(
+            `Imported "${titleSlice}" with ${schedulingString}`,
+            this.openAction(id, titleSlice)
+          );
           return this.fetch(id);
         }
       );

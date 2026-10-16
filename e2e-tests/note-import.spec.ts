@@ -236,3 +236,34 @@ test.describe('Importing a note as a copy re-bases its links', () => {
     ).toContainText('The target.');
   });
 });
+
+test.describe("The import notice's Open button", () => {
+  test('opens the copy an import made, in the tab the original was in', async () => {
+    await openNote(window, 'sources/Security Principles');
+    const tabs = window.locator(
+      '.workspace-tabs.mod-active .workspace-tab-header'
+    );
+    const tabCount = await tabs.count();
+    const breadcrumb = window.locator(
+      '.workspace-leaf.mod-active .view-header-title-parent'
+    );
+    await expect(breadcrumb).toContainText('sources');
+    await window.evaluate(() => {
+      const { app } = window as unknown as { app: PageApp };
+      app.plugins.plugins['incremental-reading'].toggleAdvancedCommands(true);
+    });
+
+    await executeCommandById(window, 'incremental-reading:import-article-copy');
+    const notice = window
+      .locator('.notice')
+      .filter({ hasText: 'Imported "Security Principles"' });
+    await notice.getByRole('button', { name: 'Open' }).click();
+
+    await expect(notice).toHaveCount(0);
+    // The copy, which has the original's name, in the data folder
+    await expect(activeTabTitle(window)).toHaveText('Security Principles');
+    await expect(breadcrumb).toContainText(DATA_DIRECTORY);
+    await expect(breadcrumb).toContainText(ARTICLE_DIRECTORY);
+    await expect(tabs).toHaveCount(tabCount);
+  });
+});
