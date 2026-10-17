@@ -268,8 +268,10 @@ export interface SQLiteRepository {
    * Run `statements` in order, a slice of work at a time, each chunk in its own
    * transaction, handing the thread back between them. A failing statement
    * rolls back its chunk and stops the run; earlier chunks stay committed.
-   * @throws {RangeError} if `sliceMs` is not a positive, finite number
-   * @throws whatever the failing statement throws
+   * @throws {RangeError} if `sliceMs` is not a positive, finite number, before
+   * anything is written
+   * @throws {BulkMutateError} when the run stops short, saying how many
+   * statements committed before it did
    */
   bulkMutate(
     statements: readonly MutationStatement[],

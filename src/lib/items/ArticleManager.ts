@@ -36,6 +36,7 @@ import {
   type FrontmatterLinkEdit,
   type ResolvedLink,
 } from '#/lib/rebase-links';
+import { BulkMutateError } from '#/lib/repository/BulkMutateError';
 import type {
   ArticleDisplay,
   ArticleRow,
@@ -43,6 +44,7 @@ import type {
   IArticleBase,
   IArticleReview,
   MissingItem,
+  MutationStatement,
   PluginFrontMatter,
   ReviewArticle,
   SnippetRow,
@@ -59,6 +61,7 @@ import type { WebPage } from '#/lib/web-viewer';
 import { Keymap, type TFile } from 'obsidian';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
+import type { SnippetManager } from './SnippetManager';
 
 /**
  * Whether `file` can be imported as an article, telling the user why not when
@@ -191,6 +194,136 @@ function movedToCopy({
   return `; ${counted.join(' and ')} now ${verb} to the copy`;
 }
 
+/**
+ * What an article takes over from the file it was imported from: the snippets
+ * and cards taken from that file while it was no article.
+ */
+interface Claim<T> {
+  /** Take them, writing as it goes, once the article's row is written. */
+  now(): Promise<T>;
+  /**
+   * Find them, for a writer that writes the rows that take them along with
+   * the article's own.
+   */
+  rows(): Promise<ClaimRows<T>>;
+}
+
+/** What {@link Claim.rows} found. */
+interface ClaimRows<T> {
+  /** The writes that take them. */
+  statements: MutationStatement[];
+  /** What follows once `statements` are written. */
+  after: () => Promise<T>;
+}
+
+/**
+ * Where an import's row writes go. An import of one file writes each as it
+ * reaches it (see `ArticleManager.import`); one of a batch holds them for one
+ * write of the whole batch (see {@link HeldWriter}).
+ */
+interface RowWriter {
+  /**
+   * An import's commit point, reached once per import: write `row`, the
+   * article's own row write if it has one, and with it, for a writer that
+   * holds rows for a batch, those that take over what `claim` finds.
+   * @returns the rest of `claim`, to run once the import is committed (see
+   *   `afterImport`); it rejects when what it follows was not written
+   * @throws when `row` was not written, so the import is taken back
+   */
+  commit<T>(
+    row: MutationStatement | null,
+    claim: Claim<T>
+  ): Promise<() => Promise<T>>;
+  /** What an import answers its caller, having imported the article `id`. */
+  result(id: string): Promise<ReviewArticle | null>;
+}
+
+/**
+ * A step that fails with `error` once run: thrown as it is called, which a
+ * caller awaiting it takes as its rejection.
+ */
+function failing(error: unknown): () => never {
+  return () => {
+    throw error;
+  };
+}
+
+/**
+ * The {@link RowWriter} of one file of a batch (see
+ * `ArticleManager.importMany`): holds its import at its commit point, until
+ * the batch has written every file's rows in one run, then lets it go on as
+ * its own rows fared.
+ */
+class HeldWriter implements RowWriter {
+  /** The rows held, from when the import reaches its commit point. */
+  held: readonly MutationStatement[] = [];
+  /** Settles once the import reaches its commit point. */
+  readonly reached: Promise<void>;
+  #reach!: () => void;
+  #release: (written: number) => void = () => undefined;
+  #stopped: unknown = null;
+
+  constructor() {
+    this.reached = new Promise((resolve) => {
+      this.#reach = resolve;
+    });
+  }
+
+  async commit<T>(row: MutationStatement | null, claim: Claim<T>) {
+    const own = row ? [row] : [];
+    let claimed: ClaimRows<T> | null = null;
+    let notFound: unknown = null;
+    try {
+      claimed = await claim.rows();
+    } catch (error) {
+      // Not this import's to fail, as an import of one file takes them only
+      // once committed (see `afterImport`)
+      notFound = error;
+    }
+    const statements = [...own, ...(claimed?.statements ?? [])];
+    const written = statements.length === 0 ? 0 : await this.#hold(statements);
+    if (written < own.length) throw this.#stopped;
+    if (!claimed) return failing(notFound);
+    if (written < statements.length) return failing(this.#stopped);
+    return claimed.after;
+  }
+
+  /** Hold `statements` for the batch's run: see {@link release}. */
+  #hold(statements: readonly MutationStatement[]): Promise<number> {
+    this.held = statements;
+    return new Promise((resolve) => {
+      this.#release = resolve;
+      this.#reach();
+    });
+  }
+
+  /**
+   * Let the import go on, the batch's run having written `written` of its
+   * held rows, from the first (all of them, when at least their number), and
+   * stopped for `stopped` if not all. A no-op for an import that held none.
+   */
+  release(written: number, stopped: unknown) {
+    this.#stopped = stopped;
+    this.#release(written);
+  }
+
+  /** Nothing: a batch's caller reads its outcomes instead. */
+  result(): Promise<ReviewArticle | null> {
+    return Promise.resolve(null);
+  }
+}
+
+/**
+ * The write that makes the article `id`, deleted or not, the live article at
+ * `path`.
+ */
+function relinkRow(path: string, id: string): MutationStatement {
+  return {
+    query: 'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
+    params: [path, id],
+  };
+}
+
 /** How `nameForCopy` names a copy. */
 interface CopyNameOptions {
   warnCleaned: boolean;
@@ -215,6 +348,14 @@ export class ArticleManager extends ItemManager {
    * to land at.
    */
   private readonly copyTargets = new Set<string>();
+  /** The {@link RowWriter} of an import of one file: writes as it goes. */
+  private readonly writeNow: RowWriter = {
+    commit: async <T>(row: MutationStatement | null, claim: Claim<T>) => {
+      if (row) await this.repo.mutate(row.query, row.params);
+      return () => claim.now();
+    },
+    result: (id) => this.fetch(id),
+  };
 
   static rowToBase(articleRow: ArticleRow): IArticleBase {
     return {
@@ -289,7 +430,8 @@ export class ArticleManager extends ItemManager {
         priority,
         fixedIntervalDays,
         willCopy,
-        toUser
+        toUser,
+        this.writeNow
       );
     } catch (error) {
       Obsidian.notify(`Failed to import article "${file.name}"`, {
@@ -301,11 +443,25 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * Import each of `entries` as {@link import} does, one after another, with
-   * the same schedule and the same copy choice (a file that can only be
-   * imported in place is, whatever was chosen). Quiet: nothing here tells the
-   * user anything, so the caller can say it once for the whole batch. One file
-   * that fails never stops the rest.
+   * Import each of `entries` as {@link import} does, with the same schedule
+   * and the same copy choice (a file that can only be imported in place is,
+   * whatever was chosen). Quiet: nothing here tells the user anything, so the
+   * caller can say it once for the whole batch. One file that fails short of
+   * its rows never stops the rest; one whose rows fail to be written does (see
+   * below).
+   *
+   * In two phases, as every `mutate` saves the whole database file: first each
+   * file in turn, up to its import's commit point, with its note's
+   * frontmatter or its copy written then (see {@link HeldWriter}); then every
+   * file's rows in one paced run (see `SQLiteRepository.bulkMutate`), saving
+   * once a chunk. A file whose rows that run didn't write is failed, and its
+   * frontmatter or copy taken back; once the run stops, no file after it is
+   * written. No transaction is held open across the first phase: the run's
+   * chunks would join it, and its writes to files would hold it open.
+   *
+   * The frontmatter goes first on purpose: a crash between the phases leaves
+   * a note with an `ir-id` no row holds, which no later import takes for an
+   * article, and which `crash-leftovers` offers to repair.
    * @returns what came of each file, in the order given: `skipped` for one
    * already an article or being imported already, `failed` with a short
    * reason for one that could not be imported
@@ -314,21 +470,52 @@ export class ArticleManager extends ItemManager {
     entries: readonly BulkImportEntry[],
     { priority, fixedIntervalDays, makeCopy }: BulkImportOptions
   ): Promise<BulkOutcome[]> {
-    const outcomes: BulkOutcome[] = [];
+    const started: { writer: HeldWriter; run: Promise<BulkOutcome> }[] = [];
     for (const { file } of entries) {
-      outcomes.push(
-        await this.importQuietly(file, priority, fixedIntervalDays, makeCopy)
+      const writer = new HeldWriter();
+      const run = this.importQuietly(
+        file,
+        priority,
+        fixedIntervalDays,
+        makeCopy,
+        writer
       );
+      started.push({ writer, run });
+      // On to the next once this one has reached its commit point, or ended
+      // short of it
+      await Promise.race([run, writer.reached]);
+    }
+
+    const statements = started.flatMap(({ writer }) => writer.held);
+    let written = statements.length;
+    let stopped: unknown = null;
+    try {
+      await this.repo.bulkMutate(statements);
+    } catch (error) {
+      const short = error instanceof BulkMutateError;
+      written = short ? error.committed : 0;
+      stopped = short ? error.cause : error;
+    }
+
+    // One at a time, as an import of each would: what follows a commit writes
+    // to files as well
+    const outcomes: BulkOutcome[] = [];
+    let start = 0;
+    for (const { writer, run } of started) {
+      writer.release(written - start, stopped);
+      start += writer.held.length;
+      outcomes.push(await run);
     }
     return outcomes;
   }
 
-  /** One file of {@link importMany}. */
+  /** One file of {@link importMany}, writing its rows through `writer`. */
   private async importQuietly(
     file: TFile,
     priority: number,
     fixedIntervalDays: number | null,
-    makeCopy: boolean
+    makeCopy: boolean,
+    writer: RowWriter
   ): Promise<BulkOutcome> {
     if (!isImportable(file)) {
       return {
@@ -363,7 +550,8 @@ export class ArticleManager extends ItemManager {
         priority,
         fixedIntervalDays,
         isCopyImportable(file) && makeCopy,
-        quiet
+        quiet,
+        writer
       );
     } catch (error) {
       console.error(error);
@@ -380,8 +568,9 @@ export class ArticleManager extends ItemManager {
 
   /**
    * Import `file`, which is importable and not being imported already, where
-   * it is or as a copy. Holds its path in `importing` until done, from the
-   * caller's own synchronous step, so no second import of it can start.
+   * it is or as a copy, its rows written through `writer`. Holds its path in
+   * `importing` until done, from the caller's own synchronous step, so no
+   * second import of it can start.
    * @throws whatever the import throws, its report having said nothing of it
    */
   private async importFile(
@@ -389,7 +578,8 @@ export class ArticleManager extends ItemManager {
     priority: number,
     fixedIntervalDays: number | null,
     willCopy: boolean,
-    report: ImportReport
+    report: ImportReport,
+    writer: RowWriter
   ) {
     // Read once: a rename during the import changes `file.path` in place
     const { path } = file;
@@ -404,13 +594,20 @@ export class ArticleManager extends ItemManager {
       }
 
       if (willCopy) {
-        return await this.importCopy(file, priority, fixedIntervalDays, report);
+        return await this.importCopy(
+          file,
+          priority,
+          fixedIntervalDays,
+          report,
+          writer
+        );
       }
       return await this.importInPlace(
         file,
         priority,
         fixedIntervalDays,
-        report
+        report,
+        writer
       );
     } finally {
       this.importing.delete(path);
@@ -434,8 +631,48 @@ export class ArticleManager extends ItemManager {
       ...(await cards.adoptOrphans(file, articleId)),
     ];
     if (adopted.length === 0) return;
+    await this.repaint(snippets, file);
+  }
+
+  /** Reload the highlights of `file`, whose snippets and cards changed hands. */
+  private async repaint(snippets: SnippetManager, file: TFile) {
     await snippets.getHighlights(file);
     this.app.workspace.trigger('ir-highlights-changed', file.path);
+  }
+
+  /** {@link claimInPlace}, as a {@link Claim}. */
+  private inPlaceClaim(file: TFile, articleId: string): Claim<void> {
+    return {
+      now: () => this.claimInPlace(file, articleId),
+      rows: async () => {
+        const reviewManager = this.plugin.reviewManager;
+        // Nothing is taken without it, as `claimInPlace` takes nothing
+        if (!reviewManager) {
+          return { statements: [], after: () => Promise.resolve() };
+        }
+        // The rows `adoptOrphans` finds, as both managers share this database
+        const statements = this.handoverRows(
+          await this.takenFrom(file),
+          articleId
+        );
+        return {
+          statements,
+          after: async () => {
+            if (statements.length > 0) {
+              await this.repaint(reviewManager.snippets, file);
+            }
+          },
+        };
+      },
+    };
+  }
+
+  /** The writes that give `taken` to the article `articleId`. */
+  private handoverRows(taken: Taken, articleId: string): MutationStatement[] {
+    return [
+      ...this.adoptStatements('snippet', taken.snippets, articleId),
+      ...this.adoptStatements('srs_card', taken.cards, articleId),
+    ];
   }
 
   /**
@@ -475,13 +712,26 @@ export class ArticleManager extends ItemManager {
     articleId: string,
     copy: TFile
   ): Promise<{ snippets: number; cards: number }> {
+    await this.adoptRows('snippet', taken.snippets, articleId);
+    await this.adoptRows('srs_card', taken.cards, articleId);
+    return this.followCopy(file, taken, copy);
+  }
+
+  /**
+   * What follows the rows of `taken` from `file` naming the article of its
+   * copy `copy`: see {@link handToCopy}.
+   * @returns how many snippets and cards changed hands
+   */
+  private async followCopy(
+    file: TFile,
+    taken: Taken,
+    copy: TFile
+  ): Promise<{ snippets: number; cards: number }> {
     const counts = {
       snippets: taken.snippets.length,
       cards: taken.cards.length,
     };
     if (counts.snippets + counts.cards === 0) return counts;
-    await this.adoptRows('snippet', taken.snippets, articleId);
-    await this.adoptRows('srs_card', taken.cards, articleId);
     await this.retargetSources(
       [...taken.snippets, ...taken.cards],
       taken.from,
@@ -495,6 +745,23 @@ export class ArticleManager extends ItemManager {
     return counts;
   }
 
+  /** {@link handToCopy}, as a {@link Claim}. */
+  private copyClaim(
+    file: TFile,
+    taken: Taken,
+    articleId: string,
+    copy: TFile
+  ): Claim<{ snippets: number; cards: number }> {
+    return {
+      now: () => this.handToCopy(file, taken, articleId, copy),
+      rows: () =>
+        Promise.resolve({
+          statements: this.handoverRows(taken, articleId),
+          after: () => this.followCopy(file, taken, copy),
+        }),
+    };
+  }
+
   /**
    * Import a note directly
    */
@@ -502,14 +769,16 @@ export class ArticleManager extends ItemManager {
     file: TFile,
     priority: number,
     fixedIntervalDays: number | null,
-    report: ImportReport
+    report: ImportReport,
+    writer: RowWriter
   ) {
     if (!supportsFrontmatter(file)) {
       return this.importBinaryInPlace(
         file,
         priority,
         fixedIntervalDays,
-        report
+        report,
+        writer
       );
     }
 
@@ -531,7 +800,11 @@ export class ArticleManager extends ItemManager {
     if (refMatch && refMatch.id === existingId) {
       // Nothing left to import, but re-running it on an article is the only
       // way a user can repair snippets and cards stranded by an earlier import.
-      await this.claimInPlace(file, refMatch.id);
+      const claimed = await writer.commit(
+        null,
+        this.inPlaceClaim(file, refMatch.id)
+      );
+      await claimed();
       report.refuse({
         notice: `Note is already an article; canceling import`,
         reason: 'already an article',
@@ -553,14 +826,14 @@ export class ArticleManager extends ItemManager {
         [existingId]
       );
       if (rows[0]) {
-        await this.repo.mutate(
-          'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
-          [file.path, existingId]
+        const claimed = await writer.commit(
+          relinkRow(file.path, existingId),
+          this.inPlaceClaim(file, existingId)
         );
         await this.afterImport(
           file.basename,
           'in place',
-          () => this.claimInPlace(file, existingId),
+          claimed,
           undefined,
           report
         );
@@ -568,7 +841,7 @@ export class ArticleManager extends ItemManager {
           `Linked "${file.basename}" to existing article with the same ID`
         );
         warnIfRefused(file.path, report);
-        return this.fetch(existingId);
+        return writer.result(existingId);
       }
       // Orphaned id + no reference match: fall through to fresh import
     }
@@ -579,7 +852,7 @@ export class ArticleManager extends ItemManager {
     const id = crypto.randomUUID();
     // The note is the user's own, so a row that can't be saved puts its
     // `ir-id` and tags back as they were
-    await withCompensation(async (step) => {
+    const claimed = await withCompensation(async (step) => {
       await step(
         () =>
           Obsidian.updateFrontMatterUndoably(
@@ -589,13 +862,16 @@ export class ArticleManager extends ItemManager {
           ),
         (undo) => undo()
       );
-      await this.insertImported(id, file.path, priority, fixedIntervalDays);
+      return writer.commit(
+        this.importRow(id, file.path, priority, fixedIntervalDays),
+        this.inPlaceClaim(file, id)
+      );
     });
 
     await this.afterImport(
       file.basename,
       'in place',
-      () => this.claimInPlace(file, id),
+      claimed,
       undefined,
       report
     );
@@ -608,7 +884,7 @@ export class ArticleManager extends ItemManager {
     const schedulingString = describeSchedule(priority, fixedIntervalDays);
 
     report.confirm(`Imported "${titleSlice}" with ${schedulingString}`);
-    return this.fetch(id);
+    return writer.result(id);
   }
 
   /**
@@ -697,17 +973,40 @@ export class ArticleManager extends ItemManager {
     priority: number,
     fixedIntervalDays: number | null
   ) {
-    await this.repo.mutate(
-      'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days) VALUES ($1, $2, $3, $4, $5, $6)',
-      [
+    const { query, params } = this.importRow(
+      id,
+      reference,
+      priority,
+      fixedIntervalDays
+    );
+    await this.repo.mutate(query, params);
+  }
+
+  /**
+   * The write that adds a newly imported article at `reference`, due now,
+   * fuzzed if text reviews are. Drawn here, not on its first fetch as for a row
+   * that predates fuzzing (see `rowToReviewArticle`): a batch fetches none of
+   * its rows, which unfuzzed would come up in the order they were imported.
+   */
+  private importRow(
+    id: string,
+    reference: string,
+    priority: number,
+    fixedIntervalDays: number | null
+  ): MutationStatement {
+    return {
+      query:
+        'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days, due_fuzz) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      params: [
         id,
         reference,
         Date.now(),
         TEXT_BASE_REVIEW_INTERVAL,
         priority,
         fixedIntervalDays,
-      ]
-    );
+        this.plugin.settings.fuzzTextReviews ? IRScheduler.getDueFuzz() : null,
+      ],
+    };
   }
 
   /**
@@ -719,7 +1018,8 @@ export class ArticleManager extends ItemManager {
     file: TFile,
     priority: number,
     fixedIntervalDays: number | null,
-    report: ImportReport
+    report: ImportReport,
+    writer: RowWriter
   ) {
     const existing = (
       (await this.repo.query(
@@ -731,13 +1031,17 @@ export class ArticleManager extends ItemManager {
     if (existing && !existing.deleted) {
       // Nothing left to import, but re-running it is how a user repairs
       // snippets and cards stranded without a parent
-      await this.claimInPlace(file, existing.id);
+      const claimed = await writer.commit(
+        null,
+        this.inPlaceClaim(file, existing.id)
+      );
+      await claimed();
       report.refuse({
         notice: `"${file.name}" is already an article; canceling import`,
         reason: 'already an article',
         skipped: true,
       });
-      return this.fetch(existing.id);
+      return writer.result(existing.id);
     }
     const titleSlice = getContentSlice(
       file.basename,
@@ -751,15 +1055,19 @@ export class ArticleManager extends ItemManager {
       // and history; importing it again asks for it in the queue, so a
       // dismissal is lifted. Only a dismissed row may lack a due date, so one
       // that does is due now.
-      await this.repo.mutate(
-        'UPDATE article SET deleted = 0, dismissed = 0, due = COALESCE(due, $1) WHERE id = $2',
-        [Date.now(), existing.id]
+      const claimed = await writer.commit(
+        {
+          query:
+            'UPDATE article SET deleted = 0, dismissed = 0, due = COALESCE(due, $1) WHERE id = $2',
+          params: [Date.now(), existing.id],
+        },
+        this.inPlaceClaim(file, existing.id)
       );
       // Taken from the file while its row was deleted, they had no parent
       await this.afterImport(
         file.basename,
         'in place',
-        () => this.claimInPlace(file, existing.id),
+        claimed,
         undefined,
         report
       );
@@ -767,25 +1075,28 @@ export class ArticleManager extends ItemManager {
         `Restored the article "${titleSlice}" to the queue with its earlier schedule`
       );
       warnIfRefused(file.path, report);
-      return this.fetch(existing.id);
+      return writer.result(existing.id);
     }
 
     // Past here a new article is made where the file is. One it was before,
     // above, comes back at its path, as existing paths do
     if (refusedInPlace(file, report)) return null;
     const id = crypto.randomUUID();
-    await this.insertImported(id, file.path, priority, fixedIntervalDays);
+    const claimed = await writer.commit(
+      this.importRow(id, file.path, priority, fixedIntervalDays),
+      this.inPlaceClaim(file, id)
+    );
     await this.afterImport(
       file.basename,
       'in place',
-      () => this.claimInPlace(file, id),
+      claimed,
       undefined,
       report
     );
 
     const schedulingString = describeSchedule(priority, fixedIntervalDays);
     report.confirm(`Imported "${titleSlice}" with ${schedulingString}`);
-    return this.fetch(id);
+    return writer.result(id);
   }
 
   /**
@@ -890,7 +1201,8 @@ export class ArticleManager extends ItemManager {
     file: TFile,
     priority: number,
     fixedIntervalDays: number | null,
-    report: ImportReport
+    report: ImportReport,
+    writer: RowWriter
   ) {
     const naming: CopyNameOptions = { warnCleaned: true, report };
     return this.withCopyTarget(file, naming, async (name) => {
@@ -900,18 +1212,23 @@ export class ArticleManager extends ItemManager {
       const id = crypto.randomUUID();
       // Left behind, a copy no row refers to would only hold its name against
       // the next import
-      const copy = await withCompensation(async (step) => {
+      const { copy, claimed } = await withCompensation(async (step) => {
         const made = await step(
           () => this.app.vault.copy(file, copyPath),
           (copied) => this.app.fileManager.trashFile(copied)
         );
-        await this.insertImported(id, made.path, priority, fixedIntervalDays);
-        return made;
+        return {
+          copy: made,
+          claimed: await writer.commit(
+            this.importRow(id, made.path, priority, fixedIntervalDays),
+            this.copyClaim(file, taken, id, made)
+          ),
+        };
       });
       const moved = await this.afterImport(
         copy.basename,
         'copy',
-        () => this.handToCopy(file, taken, id, copy),
+        claimed,
         { snippets: 0, cards: 0 },
         report
       );
@@ -926,7 +1243,7 @@ export class ArticleManager extends ItemManager {
         `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`,
         this.openAction(id, titleSlice)
       );
-      return this.fetch(id);
+      return writer.result(id);
     });
   }
 
@@ -983,7 +1300,8 @@ export class ArticleManager extends ItemManager {
     file: TFile,
     priority: number,
     fixedIntervalDays: number | null,
-    report: ImportReport
+    report: ImportReport,
+    writer: RowWriter
   ) {
     // check if the file is inside the plugin's data directory
     if (file.path.startsWith(DATA_DIRECTORY)) {
@@ -994,7 +1312,13 @@ export class ArticleManager extends ItemManager {
       return null;
     }
     if (!supportsFrontmatter(file)) {
-      return this.importBinaryCopy(file, priority, fixedIntervalDays, report);
+      return this.importBinaryCopy(
+        file,
+        priority,
+        fixedIntervalDays,
+        report,
+        writer
+      );
     }
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
@@ -1011,16 +1335,16 @@ export class ArticleManager extends ItemManager {
         [existingId]
       );
       if (rows[0]) {
-        await this.repo.mutate(
-          'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
-          [file.path, existingId]
+        const claimed = await writer.commit(
+          relinkRow(file.path, existingId),
+          this.inPlaceClaim(file, existingId)
         );
         // No copy was made — the record now points at this note, so its
         // snippets and cards are adopted in place rather than handed to a copy.
         await this.afterImport(
           file.basename,
           'in place',
-          () => this.claimInPlace(file, existingId),
+          claimed,
           undefined,
           report
         );
@@ -1028,7 +1352,7 @@ export class ArticleManager extends ItemManager {
           `Linked "${file.basename}" to existing article with the same ID`
         );
         warnIfRefused(file.path, report);
-        return this.fetch(existingId);
+        return writer.result(existingId);
       }
       // Orphaned ir-id: warn but proceed with creating the copy
       report.warn(
@@ -1056,7 +1380,7 @@ export class ArticleManager extends ItemManager {
       const id = crypto.randomUUID();
       // Left behind, a copy no row refers to would read as an article review
       // never shows, and hold its name against the next import
-      const articleFile = await withCompensation(async (step) => {
+      const committed = await withCompensation(async (step) => {
         // Create a copy in the articles directory
         const copy = await step(
           async () => {
@@ -1111,14 +1435,20 @@ export class ArticleManager extends ItemManager {
             applyFrontmatterLinkEdits(properties, frontmatterLinks)
         );
 
-        await this.insertImported(id, copy.path, priority, fixedIntervalDays);
-        return copy;
+        return {
+          copy,
+          claimed: await writer.commit(
+            this.importRow(id, copy.path, priority, fixedIntervalDays),
+            this.copyClaim(file, taken, id, copy)
+          ),
+        };
       });
+      const { copy: articleFile, claimed } = committed;
 
       const moved = await this.afterImport(
         articleFile.basename,
         'copy',
-        () => this.handToCopy(file, taken, id, articleFile),
+        claimed,
         { snippets: 0, cards: 0 },
         report
       );
@@ -1133,7 +1463,7 @@ export class ArticleManager extends ItemManager {
         `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`,
         this.openAction(id, titleSlice)
       );
-      return this.fetch(id);
+      return writer.result(id);
     });
   }
 

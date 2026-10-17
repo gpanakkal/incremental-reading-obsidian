@@ -22,6 +22,7 @@ import {
   vi,
   type MockInstance,
 } from 'vitest';
+import { BulkMutateError } from './BulkMutateError';
 import {
   DatabaseLoadError,
   SQLJSRepository,
@@ -73,6 +74,11 @@ class SavingTestRepository extends SQLJSRepository {
     repo.db = db;
     repo.registerUpdateHook();
     return repo;
+  }
+
+  /** Refuse writes from here on, as saving paused does. */
+  refuseWrites(error: Error) {
+    this.blockWrites(error);
   }
 }
 
@@ -470,6 +476,19 @@ async function makeBulkRepo() {
   );
   const writeBinary = vi.spyOn(repo.app.vault.adapter, 'writeBinary');
   return { repo, writeBinary };
+}
+
+/** What `run` rejects with, or null when it resolves. */
+function failureOf(run: Promise<unknown>): Promise<unknown> {
+  return run.then(
+    () => null,
+    (error: unknown) => error
+  );
+}
+
+/** How many rows the item tables hold between them. */
+function rowCount(repo: SQLJSRepository): number {
+  return Object.values(idsByTable(repo)).flat().length;
 }
 
 /** `items` split into consecutive runs of `size`. */
@@ -1458,6 +1477,171 @@ describe('bulkMutate', () => {
               chunksOf(committed, size).flatMap(insertEventsFor)
             );
           } finally {
+            repo.db?.close();
+          }
+        }
+      )
+    );
+  });
+
+  // A caller that did work per statement before the run, writing a note say,
+  // must know which statements landed to take back the work of those that
+  // didn't
+  it('reports how many statements committed before a failing one, and why it stopped', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await fc.assert(
+      fc.asyncProperty(
+        rowWritesArb().chain((writes) =>
+          fc.tuple(fc.constant(writes), fc.nat({ max: writes.length }))
+        ),
+        failingStatementArb,
+        sliceMsArb,
+        async ([writes, failAt], failing, sliceMs) => {
+          const { repo } = await makeBulkRepo();
+          try {
+            const statements = writes.map(insertStatement);
+            statements.splice(failAt, 0, failing);
+            const size = sliceMs ?? BATCHED_MUTATION_SLICE_MS;
+            // every chunk that ends before the failing statement
+            const committed = Math.floor(failAt / size) * size;
+            // what the failing statement throws, run on its own
+            const alone = await failureOf(
+              Promise.resolve().then(() =>
+                repo.mutate(failing.query, failing.params)
+              )
+            );
+
+            const error = await failureOf(
+              repo.bulkMutate(statements, pace(sliceMs))
+            );
+
+            expect(error).toBeInstanceOf(BulkMutateError);
+            const {
+              committed: reported,
+              cause,
+              message,
+            } = error as BulkMutateError;
+            expect(reported).toBe(committed);
+            expect(rowCount(repo)).toBe(reported);
+            expect(cause).toEqual(alone);
+            expect(message).toBe(
+              `Stopped after committing ${committed} of ${statements.length} statements`
+            );
+          } finally {
+            repo.db?.close();
+          }
+        }
+      )
+    );
+  });
+
+  // Committed rows are in the database whether or not this save reached the
+  // disk, and the next save writes them out
+  it('counts a chunk whose save failed as committed, and stops there', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await fc.assert(
+      fc.asyncProperty(
+        rowWritesArb({ minLength: 1 }),
+        sliceMsArb,
+        fc.nat(),
+        async (writes, sliceMs, failingSave) => {
+          const { repo, writeBinary } = await makeBulkRepo();
+          try {
+            const size = sliceMs ?? BATCHED_MUTATION_SLICE_MS;
+            const chunks = chunksOf(writes, size);
+            const failing = failingSave % chunks.length;
+            const diskFull = new Error('disk full');
+            writeBinary.mockImplementation(async () => {
+              if (writeBinary.mock.calls.length === failing + 1) throw diskFull;
+            });
+            const committed = chunks
+              .slice(0, failing + 1)
+              .reduce((sum, chunk) => sum + chunk.length, 0);
+
+            const error = await failureOf(
+              repo.bulkMutate(writes.map(insertStatement), pace(sliceMs))
+            );
+
+            expect(error).toBeInstanceOf(BulkMutateError);
+            expect((error as BulkMutateError).committed).toBe(committed);
+            expect((error as BulkMutateError).cause).toBe(diskFull);
+            expect(rowCount(repo)).toBe(committed);
+            expect(writeBinary).toHaveBeenCalledTimes(failing + 1);
+          } finally {
+            repo.db?.close();
+          }
+        }
+      )
+    );
+  });
+
+  // Saving pauses when Sync starts rewriting the file, which can happen
+  // between any two chunks
+  it('reports the chunks committed before writes were refused, and the refusal', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        rowWritesArb(),
+        sliceMsArb,
+        fc.nat(),
+        async (writes, sliceMs, refuseAfter) => {
+          const { repo, writeBinary } = await makeBulkRepo();
+          try {
+            const size = sliceMs ?? BATCHED_MUTATION_SLICE_MS;
+            const chunks = chunksOf(writes, size);
+            // after how many saves, from none to every one
+            const saves = refuseAfter % (chunks.length + 1);
+            const paused = new Error('Saving is paused.');
+            if (saves === 0) repo.refuseWrites(paused);
+            writeBinary.mockImplementation(async () => {
+              if (writeBinary.mock.calls.length === saves) {
+                repo.refuseWrites(paused);
+              }
+            });
+            const committed = Math.min(saves * size, writes.length);
+
+            const error = await failureOf(
+              repo.bulkMutate(writes.map(insertStatement), pace(sliceMs))
+            );
+
+            expect(rowCount(repo)).toBe(committed);
+            if (committed === writes.length) {
+              expect(error).toBeNull();
+              return;
+            }
+            expect(error).toBeInstanceOf(BulkMutateError);
+            expect((error as BulkMutateError).committed).toBe(committed);
+            expect((error as BulkMutateError).cause).toBe(paused);
+          } finally {
+            repo.db?.close();
+          }
+        }
+      )
+    );
+  });
+
+  it('keeps what stopped it, however that was thrown', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.anything({ withNullPrototype: true }),
+        async (thrown) => {
+          const { repo } = await makeBulkRepo();
+          try {
+            vi.spyOn(repo, 'mutate').mockImplementation(() => {
+              // Anything can be thrown, an Error or not
+              throw thrown;
+            });
+
+            const error = await failureOf(
+              repo.bulkMutate([insertStatement({ table: 'article', id: 'a' })])
+            );
+
+            expect(error).toBeInstanceOf(BulkMutateError);
+            expect((error as BulkMutateError).cause).toBe(thrown);
+            expect((error as BulkMutateError).committed).toBe(0);
+          } finally {
+            vi.restoreAllMocks();
             repo.db?.close();
           }
         }

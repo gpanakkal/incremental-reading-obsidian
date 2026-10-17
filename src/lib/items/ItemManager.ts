@@ -15,6 +15,7 @@ import {
 import type {
   ArticleRow,
   MissingItem,
+  MutationStatement,
   NoteType,
   RowTypes,
   SRSCardRow,
@@ -231,19 +232,39 @@ export class ItemManager {
     orphans: readonly R[],
     parentId: string
   ): Promise<R[]> {
-    // Chunked so a file with a very large number of them cannot blow the
-    // statement's parameter limit; the parent id takes one slot per chunk.
-    const chunkSize = MAX_SQL_QUERY_PARAMS - 1;
-    for (let i = 0; i < orphans.length; i += chunkSize) {
-      const chunk = orphans.slice(i, i + chunkSize);
-      const placeholders = chunk.map((_, j) => `$${j + 2}`).join(', ');
-      await this.repo.mutate(
-        `UPDATE ${table} SET parent = $1 WHERE id IN (${placeholders})`,
-        [parentId, ...chunk.map((row) => row.id)]
-      );
+    for (const { query, params } of this.adoptStatements(
+      table,
+      orphans,
+      parentId
+    )) {
+      await this.repo.mutate(query, params);
     }
 
     return orphans.map((row) => ({ ...row, parent: parentId }));
+  }
+
+  /**
+   * The writes that give the rows `orphans` of `table` the parent `parentId`
+   * (see {@link adoptRows}), for a caller that runs them along with others.
+   */
+  protected adoptStatements(
+    table: 'snippet' | 'srs_card',
+    orphans: readonly { id: string }[],
+    parentId: string
+  ): MutationStatement[] {
+    // Chunked so a file with a very large number of them cannot blow the
+    // statement's parameter limit; the parent id takes one slot per chunk.
+    const chunkSize = MAX_SQL_QUERY_PARAMS - 1;
+    const statements: MutationStatement[] = [];
+    for (let i = 0; i < orphans.length; i += chunkSize) {
+      const chunk = orphans.slice(i, i + chunkSize);
+      const placeholders = chunk.map((_, j) => `$${j + 2}`).join(', ');
+      statements.push({
+        query: `UPDATE ${table} SET parent = $1 WHERE id IN (${placeholders})`,
+        params: [parentId, ...chunk.map((row) => row.id)],
+      });
+    }
+    return statements;
   }
 
   /**

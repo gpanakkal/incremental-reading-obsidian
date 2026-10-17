@@ -28,10 +28,12 @@ import {
 } from '#/lib/item-path-guard';
 import { configureSuccessNotices, type NotifyOptions } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { BulkMutateError } from '#/lib/repository/BulkMutateError';
 import type {
   ArticleRow,
   IArticleBase,
   IArticleReview,
+  MutationStatement,
   ReviewArticle,
   SnippetRow,
   SQLiteRepository,
@@ -61,6 +63,9 @@ import initSqlJs, { type Database } from 'sql.js';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ArticleManager } from './ArticleManager';
+import { CardManager } from './CardManager';
+import { ItemManager } from './ItemManager';
+import { SnippetManager } from './SnippetManager';
 
 // #region HELPERS
 /**
@@ -736,6 +741,252 @@ const tagArb = fc.oneof(
 
 const refusal = (action: string) =>
   `Couldn't ${action}: saving to the database is paused. Saving is paused.`;
+
+/**
+ * A file of a batch import: a note or a PDF, by name, with the snippets and
+ * cards taken from it while it was no article, and what the database holds
+ * of it beforehand. `fresh`: nothing. `article`: its live row at its path.
+ * `moved`: a note's row, named by its `ir-id`, live at another path; for a
+ * PDF, which holds no id, an unrelated row there. `deleted`: a note's row,
+ * named by its `ir-id`, deleted at another path; a PDF's deleted at its own.
+ * `orphan`: a note's `ir-id`, which no row holds; nothing, for a PDF.
+ */
+interface BatchSpec {
+  name: string;
+  pdf: boolean;
+  state: 'fresh' | 'article' | 'moved' | 'deleted' | 'orphan';
+  snippets: number;
+  cards: number;
+}
+
+const batchSpecsArb = fc.uniqueArray(
+  fc.record<BatchSpec>({
+    name: fc.stringMatching(/^[a-z]{1,6}$/),
+    pdf: fc.boolean(),
+    state: fc.constantFrom('fresh', 'article', 'moved', 'deleted', 'orphan'),
+    snippets: fc.nat({ max: 2 }),
+    cards: fc.nat({ max: 2 }),
+  }),
+  { selector: (spec) => spec.name, minLength: 1, maxLength: 6 }
+);
+
+/** Fresh files of a batch, with nothing taken from them. */
+const freshBatchArb = fc.uniqueArray(
+  fc.record<BatchSpec>({
+    name: fc.stringMatching(/^[a-z]{1,6}$/),
+    pdf: fc.boolean(),
+    state: fc.constant('fresh'),
+    snippets: fc.constant(0),
+    cards: fc.constant(0),
+  }),
+  { selector: (spec) => spec.name, minLength: 1, maxLength: 6 }
+);
+
+const batchOptionsArb = fc.record({
+  priority: fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+  fixedIntervalDays: fc.option(
+    fc.integer({
+      min: MINIMUM_FIXED_REVIEW_INTERVAL,
+      max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+    }),
+    { nil: null }
+  ),
+  makeCopy: fc.boolean(),
+});
+
+const batchPathOf = ({ name, pdf }: BatchSpec) =>
+  pdf ? `papers/${name}.pdf` : `notes/${name}.md`;
+
+/** Where a file of a batch lands once imported, as `makeCopy` asks. */
+const batchTargetOf = (spec: BatchSpec, makeCopy: boolean) =>
+  makeCopy
+    ? `${ARTICLES_FOLDER}/${spec.name}.${spec.pdf ? 'pdf' : 'md'}`
+    : batchPathOf(spec);
+
+/**
+ * A manager over a real database and a vault holding each of `specs`, with
+ * the review manager's snippets and cards over the same database unless
+ * `withReviewManager` is false, and text reviews fuzzed when `fuzz` is.
+ */
+async function batchWorld(
+  specs: readonly BatchSpec[],
+  { fuzz = false, withReviewManager = true } = {}
+) {
+  const notes: Record<string, Record<string, unknown> | null> = {};
+  const children: {
+    table: 'snippet' | 'srs_card';
+    id: string;
+    path: string;
+  }[] = [];
+  for (const spec of specs) {
+    const path = batchPathOf(spec);
+    notes[path] = spec.pdf
+      ? null
+      : spec.state === 'fresh'
+        ? {}
+        : { 'ir-id': `${spec.name}-id`, tags: [ARTICLE_TAG] };
+    const taken = [
+      ...Array.from({ length: spec.snippets }, (_, i) => ({
+        table: 'snippet' as const,
+        id: `${spec.name}-s${i}`,
+        path: `snippets/${spec.name}-s${i}.md`,
+      })),
+      ...Array.from({ length: spec.cards }, (_, i) => ({
+        table: 'srs_card' as const,
+        id: `${spec.name}-c${i}`,
+        path: `cards/${spec.name}-c${i}.md`,
+      })),
+    ];
+    for (const child of taken) {
+      notes[child.path] = { 'ir-id': child.id, source: `[[${path}]]` };
+    }
+    children.push(...taken);
+  }
+  const vault = makeItemVault(notes);
+  const repo = await TestRepository.create();
+  for (const spec of specs) {
+    if (spec.state === 'fresh' || spec.state === 'orphan') continue;
+    const atOwnPath =
+      spec.state === 'article' || (spec.pdf && spec.state === 'deleted');
+    repo.db!.run(
+      `INSERT INTO article (id, reference, due, interval, priority, deleted)
+       VALUES ($1, $2, 0, 1, 20, $3)`,
+      [
+        `${spec.name}-id`,
+        atOwnPath
+          ? batchPathOf(spec)
+          : `old/${spec.name}.${spec.pdf ? 'pdf' : 'md'}`,
+        spec.state === 'deleted' ? 1 : 0,
+      ]
+    );
+  }
+  for (const { table, id, path } of children) {
+    repo.db!.run(
+      table === 'snippet'
+        ? `INSERT INTO snippet (id, reference, due, interval, priority, start_offset, end_offset)
+           VALUES ($1, $2, 0, 1, 20, 0, 5)`
+        : `INSERT INTO srs_card (id, reference, created_at, due, stability,
+             difficulty, elapsed_days, scheduled_days, reps, lapses, state)
+           VALUES ($1, $2, 0, 0, 0, 0, 0, 0, 0, 0, 0)`,
+      [id, path]
+    );
+  }
+  vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  vi.spyOn(console, 'error').mockReturnValue(undefined);
+  vi.spyOn(console, 'warn').mockReturnValue(undefined);
+  const trigger = vi.fn();
+  const plugin = {
+    app: { ...vault.app, workspace: { trigger } },
+    settings: {
+      copyOnImport: false,
+      createEmptyInCurrentFolder: false,
+      fuzzTextReviews: fuzz,
+    },
+    reviewManager: undefined as
+      | { snippets: SnippetManager; cards: CardManager }
+      | undefined,
+  };
+  const snippets = new SnippetManager(plugin as never, repo);
+  const getHighlights = vi
+    .spyOn(snippets, 'getHighlights')
+    .mockResolvedValue([]);
+  if (withReviewManager) {
+    plugin.reviewManager = {
+      snippets,
+      cards: new CardManager(plugin as never, repo),
+    };
+  }
+  const manager = new ArticleManager(plugin as never, repo);
+  const files = specs.map((spec) => vault.files.get(batchPathOf(spec))!);
+  return { vault, repo, manager, files, getHighlights, trigger };
+}
+
+/**
+ * What a {@link batchWorld} holds, with every article id named by its row's
+ * path, as two imports of the same files make different ids.
+ */
+function batchSnapshot({
+  repo,
+  vault,
+}: Awaited<ReturnType<typeof batchWorld>>) {
+  const articles = repo.rows('article');
+  const pathOf = new Map(articles.map((row) => [row.id, row.reference]));
+  const named = (id: unknown) => pathOf.get(id as string) ?? id;
+  return {
+    articles: articles
+      .map(({ id: _, ...row }) => row)
+      .sort((a, b) => String(a.reference).localeCompare(String(b.reference))),
+    children: [...repo.rows('snippet'), ...repo.rows('srs_card')].map(
+      (row) => ({ id: row.id, parent: named(row.parent) })
+    ),
+    notes: Object.fromEntries(
+      vault.paths().map((path) => {
+        const frontmatter = vault.frontmatterOf(path);
+        return [
+          path,
+          frontmatter && {
+            ...frontmatter,
+            'ir-id': named(frontmatter['ir-id']),
+          },
+        ];
+      })
+    ),
+  };
+}
+
+/**
+ * `bulkMutate` options that make a chunk exactly `sliceMs` statements: the
+ * clock advances a tick a reading.
+ */
+function chunkedBy(sliceMs: number) {
+  let tick = 0;
+  return { sliceMs, now: () => tick++ };
+}
+
+/**
+ * Run `repo`'s bulk writes `sliceMs` statements a chunk, with `rewrite`
+ * changing what a run is given, counting the writes made outside of one and
+ * keeping what stopped one.
+ */
+function watchWrites(
+  repo: TestRepository,
+  sliceMs: number,
+  rewrite: (statements: readonly MutationStatement[]) => MutationStatement[] = (
+    statements
+  ) => [...statements]
+) {
+  let inBulk = 0;
+  let outside = 0;
+  let stopped: unknown = null;
+  // `bind` is untyped here, without `strictBindCallApply`
+  const mutate = repo.mutate.bind(repo) as TestRepository['mutate'];
+  vi.spyOn(repo, 'mutate').mockImplementation((query, params) => {
+    if (inBulk === 0) outside += 1;
+    return mutate(query, params);
+  });
+  const run = repo.bulkMutate.bind(repo) as TestRepository['bulkMutate'];
+  const bulkMutate = vi
+    .spyOn(repo, 'bulkMutate')
+    .mockImplementation(async (statements) => {
+      inBulk += 1;
+      try {
+        await run(rewrite(statements), chunkedBy(sliceMs));
+      } catch (error) {
+        stopped = error;
+        throw error;
+      } finally {
+        inBulk -= 1;
+      }
+    });
+  // Undocumented to callers: `save` is the repository's own
+  const save = vi.spyOn(repo as unknown as { save(): Promise<void> }, 'save');
+  return {
+    bulkMutate,
+    save,
+    outside: () => outside,
+    stopped: () => stopped,
+  };
+}
 
 // #endregion
 
@@ -6591,7 +6842,15 @@ describe('import of a snippet or card note', () => {
 });
 
 describe('importMany', () => {
+  beforeEach(() => {
+    // A write of many rows yields through `window`, which this node
+    // environment lacks
+    vi.stubGlobal('window', globalThis);
+  });
+
   afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -6978,6 +7237,351 @@ describe('importMany', () => {
         }
       ),
       { numRuns: 20 }
+    );
+  });
+
+  // Each save exports the whole database and rewrites its file: a folder of
+  // hundreds of notes saved it hundreds of times
+  it('writes every row of the batch in one paced run, saving once a chunk rather than once a file', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        batchSpecsArb,
+        batchOptionsArb,
+        fc.integer({ min: 1, max: 8 }),
+        async (specs, options, sliceMs) => {
+          vi.restoreAllMocks();
+          // Fuzzed, a fetched article gets its fuzz written on the spot
+          const { repo, manager, files } = await batchWorld(specs, {
+            fuzz: true,
+          });
+          const writes = watchWrites(repo, sliceMs);
+
+          await manager.importMany(
+            files.map((file) => ({ file })),
+            options
+          );
+
+          expect(writes.bulkMutate).toHaveBeenCalledOnce();
+          expect(writes.outside()).toBe(0);
+          const [statements] = writes.bulkMutate.mock.calls[0];
+          expect(writes.save).toHaveBeenCalledTimes(
+            Math.ceil(statements.length / sliceMs)
+          );
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('leaves the same rows, notes and adoptions as importing each file on its own', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-15T12:00:00Z'));
+    await fc.assert(
+      fc.asyncProperty(
+        batchSpecsArb,
+        batchOptionsArb,
+        fc.boolean(),
+        async (specs, options, withReviewManager) => {
+          vi.restoreAllMocks();
+          const batch = await batchWorld(specs, { withReviewManager });
+          const alone = await batchWorld(specs, { withReviewManager });
+
+          await batch.manager.importMany(
+            batch.files.map((file) => ({ file })),
+            options
+          );
+          for (const file of alone.files) {
+            await alone.manager.import(
+              file,
+              options.priority,
+              options.fixedIntervalDays,
+              options.makeCopy
+            );
+          }
+
+          expect(batchSnapshot(batch)).toEqual(batchSnapshot(alone));
+          // Their notes repainted alike: once a file that adopted something
+          expect(batch.getHighlights.mock.calls).toEqual(
+            alone.getHighlights.mock.calls
+          );
+          expect(batch.trigger.mock.calls).toEqual(alone.trigger.mock.calls);
+        }
+      ),
+      { numRuns: 60 }
+    );
+  });
+
+  // Unfuzzed, the rows of a batch would come up for review in the order the
+  // files were imported, one after another: a batch fetches none of them,
+  // which is where an article missing its fuzz is given one
+  it('gives each article it makes the fuzz an import of that file alone does', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-15T12:00:00Z'));
+    await fc.assert(
+      fc.asyncProperty(
+        freshBatchArb,
+        batchOptionsArb,
+        fc.boolean(),
+        fc.integer(),
+        async (specs, options, fuzz, drawn) => {
+          vi.restoreAllMocks();
+          const batch = await batchWorld(specs, { fuzz });
+          const alone = await batchWorld(specs, { fuzz });
+          vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(drawn);
+
+          await batch.manager.importMany(
+            batch.files.map((file) => ({ file })),
+            options
+          );
+          for (const file of alone.files) {
+            await alone.manager.import(
+              file,
+              options.priority,
+              options.fixedIntervalDays,
+              options.makeCopy
+            );
+          }
+
+          expect(batchSnapshot(batch)).toEqual(batchSnapshot(alone));
+          expect(batch.repo.rows('article').map((row) => row.due_fuzz)).toEqual(
+            specs.map(() => (fuzz ? drawn : null))
+          );
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('keeps the files whose rows were written when the run stops, and takes back every other', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        freshBatchArb,
+        fc.boolean(),
+        fc.integer({ min: 1, max: 4 }),
+        fc.oneof(
+          fc.record({ kind: fc.constant('statement' as const), at: fc.nat() }),
+          fc.record({ kind: fc.constant('refused' as const) })
+        ),
+        async (specs, makeCopy, sliceMs, stop) => {
+          vi.restoreAllMocks();
+          const { vault, repo, manager, files } = await batchWorld(specs);
+          const before = files.map((file) =>
+            structuredClone(vault.frontmatterOf(file.path))
+          );
+          // One statement a file: its row
+          const failAt = stop.kind === 'statement' ? stop.at % files.length : 0;
+          const writes = watchWrites(repo, sliceMs, (statements) => {
+            if (stop.kind === 'refused') {
+              repo.refuseWrites();
+              return [...statements];
+            }
+            return statements.map((statement, i) =>
+              i === failAt ? { query: 'not a statement' } : statement
+            );
+          });
+          const written =
+            stop.kind === 'refused'
+              ? 0
+              : Math.floor(failAt / sliceMs) * sliceMs;
+
+          const outcomes = await manager.importMany(
+            files.map((file) => ({ file })),
+            {
+              priority: DEFAULT_PRIORITY,
+              fixedIntervalDays: null,
+              makeCopy,
+            }
+          );
+
+          const stopped = writes.stopped();
+          expect(stopped).toBeInstanceOf(BulkMutateError);
+          const reason = ((stopped as BulkMutateError).cause as Error).message;
+          expect(outcomes).toEqual(
+            files.map((file, i) =>
+              i < written
+                ? { file, status: 'imported' }
+                : { file, status: 'failed', reason }
+            )
+          );
+          const kept = specs.slice(0, written);
+          expect(
+            repo
+              .rows('article')
+              .map((row) => row.reference)
+              .sort()
+          ).toEqual(kept.map((spec) => batchTargetOf(spec, makeCopy)).sort());
+          // Copies of the rest trashed, their notes as they were
+          expect(vault.paths()).toEqual(
+            [
+              ...specs.map(batchPathOf),
+              ...(makeCopy
+                ? kept.map((spec) => batchTargetOf(spec, true))
+                : []),
+            ].sort()
+          );
+          files.forEach((file, i) => {
+            if (i >= written) {
+              expect(vault.frontmatterOf(file.path)).toEqual(before[i]);
+            }
+          });
+        }
+      ),
+      { numRuns: 60 }
+    );
+  });
+
+  it('keeps a file imported whose row was written but not all of its adoptions, saying so out of sight', async () => {
+    const spec: BatchSpec = {
+      name: 'a',
+      pdf: false,
+      state: 'fresh',
+      snippets: 1,
+      cards: 1,
+    };
+    const { repo, manager, files, getHighlights } = await batchWorld([spec]);
+    const [file] = files;
+    // Its row, its snippet's adoption, then its card's, which fails
+    watchWrites(repo, 1, (statements) =>
+      statements.map((statement, i) =>
+        i === 2 ? { query: 'not a statement' } : statement
+      )
+    );
+
+    const outcomes = await manager.importMany([{ file }], {
+      priority: DEFAULT_PRIORITY,
+      fixedIntervalDays: null,
+      makeCopy: false,
+    });
+
+    expect(outcomes).toEqual([{ file, status: 'imported' }]);
+    const [article] = repo.rows('article');
+    expect(article.reference).toBe(file.path);
+    expect(repo.rows('snippet')).toMatchObject([
+      { id: 'a-s0', parent: article.id },
+    ]);
+    expect(repo.rows('srs_card')).toMatchObject([{ id: 'a-c0', parent: null }]);
+    expect(console.warn).toHaveBeenCalledWith(
+      `"a" is an article, but the snippets and cards taken from it couldn't be adopted`
+    );
+    expect(getHighlights).not.toHaveBeenCalled();
+  });
+
+  it('fails and takes back every file it held when the run fails outright', async () => {
+    await fc.assert(
+      fc.asyncProperty(freshBatchArb, fc.boolean(), async (specs, makeCopy) => {
+        vi.restoreAllMocks();
+        const { vault, repo, manager, files } = await batchWorld(specs);
+        const before = vault
+          .paths()
+          .map((path) => [path, structuredClone(vault.frontmatterOf(path))]);
+        vi.spyOn(repo, 'bulkMutate').mockRejectedValue(new Error('gone'));
+
+        const outcomes = await manager.importMany(
+          files.map((file) => ({ file })),
+          { priority: DEFAULT_PRIORITY, fixedIntervalDays: null, makeCopy }
+        );
+
+        expect(outcomes).toEqual(
+          files.map((file) => ({ file, status: 'failed', reason: 'gone' }))
+        );
+        expect(repo.rows('article')).toEqual([]);
+        expect(
+          vault.paths().map((path) => [path, vault.frontmatterOf(path)])
+        ).toEqual(before);
+      }),
+      { numRuns: 30 }
+    );
+  });
+
+  // Nothing of it was held back for the run, so nothing of it was lost there
+  it('skips an article with nothing to adopt, whatever became of the run', async () => {
+    const specs: BatchSpec[] = [
+      { name: 'a', pdf: false, state: 'fresh', snippets: 0, cards: 0 },
+      { name: 'b', pdf: false, state: 'article', snippets: 0, cards: 0 },
+    ];
+    const { repo, manager, files } = await batchWorld(specs);
+    watchWrites(repo, 1, () => [{ query: 'not a statement' }]);
+
+    const outcomes = await manager.importMany(
+      files.map((file) => ({ file })),
+      { priority: DEFAULT_PRIORITY, fixedIntervalDays: null, makeCopy: false }
+    );
+
+    expect(outcomes[0]).toMatchObject({ file: files[0], status: 'failed' });
+    expect(outcomes[1]).toEqual({
+      file: files[1],
+      status: 'skipped',
+      reason: 'already an article',
+    });
+  });
+
+  it('fails an article whose stranded snippets and cards could not be adopted', async () => {
+    const spec: BatchSpec = {
+      name: 'a',
+      pdf: false,
+      state: 'article',
+      snippets: 1,
+      cards: 0,
+    };
+    const { repo, manager, files } = await batchWorld([spec]);
+    const [file] = files;
+    const writes = watchWrites(repo, 1, () => [{ query: 'not a statement' }]);
+
+    const outcomes = await manager.importMany([{ file }], {
+      priority: DEFAULT_PRIORITY,
+      fixedIntervalDays: null,
+      makeCopy: false,
+    });
+
+    const stopped = writes.stopped() as BulkMutateError;
+    expect(outcomes).toEqual([
+      { file, status: 'failed', reason: (stopped.cause as Error).message },
+    ]);
+    expect(repo.rows('snippet')).toMatchObject([{ id: 'a-s0', parent: null }]);
+  });
+
+  it('imports the file as an import of it alone would when its snippets and cards cannot be found, saying so out of sight', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), async (makeCopy) => {
+        vi.restoreAllMocks();
+        const spec: BatchSpec = {
+          name: 'a',
+          pdf: false,
+          state: 'fresh',
+          snippets: 1,
+          cards: 1,
+        };
+        const { repo, manager, files } = await batchWorld([spec]);
+        const [file] = files;
+        const unreadable = new Error('unreadable');
+        vi.spyOn(
+          ItemManager.prototype as unknown as {
+            findParentlessFrom(): Promise<unknown>;
+          },
+          'findParentlessFrom'
+        ).mockRejectedValue(unreadable);
+
+        const outcomes = await manager.importMany([{ file }], {
+          priority: DEFAULT_PRIORITY,
+          fixedIntervalDays: null,
+          makeCopy,
+        });
+
+        // Found before the copy is made, it fails the import of a copy
+        if (makeCopy) {
+          expect(outcomes).toEqual([
+            { file, status: 'failed', reason: 'unreadable' },
+          ]);
+          return;
+        }
+        expect(outcomes).toEqual([{ file, status: 'imported' }]);
+        expect(repo.rows('article')).toMatchObject([{ reference: file.path }]);
+        expect(console.warn).toHaveBeenCalledWith(
+          `"a" is an article, but the snippets and cards taken from it couldn't be adopted`
+        );
+        // Logged as what it was
+        expect(console.error).toHaveBeenCalledWith(unreadable);
+      })
     );
   });
 });

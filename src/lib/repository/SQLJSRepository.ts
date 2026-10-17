@@ -38,6 +38,7 @@ import initSqlJs, {
   type Database,
   type QueryExecResult,
 } from 'sql.js';
+import { BulkMutateError } from './BulkMutateError';
 // @ts-ignore - WASM imported as base64 string via custom esbuild plugin.
 // Points at the binary shipped with the installed sql.js package so the bundled
 // WASM stays in lockstep with the sql.js version in node_modules.
@@ -554,15 +555,21 @@ export class SQLJSRepository implements SQLiteRepository {
    * of a fixed few statements would spend the run waiting rather than writing.
    *
    * Called inside an open {@link transaction}, the chunks join it instead, so
-   * nothing commits until it does and the yields hold it open.
+   * nothing commits until it does and the yields hold it open; a failure then
+   * rolls nothing back here, leaving that to the open transaction, and the
+   * count a {@link BulkMutateError} gives is of the chunks that ran in full.
    * @param statements run in order; do any async work before calling, since
    * none can happen inside the transactions
    * @param options `sliceMs` is how long to keep writing before committing a
    * chunk and yielding; `now` is the clock it is measured on
    * @throws {RangeError} if `sliceMs` is not a positive, finite number, before
    * anything is written
-   * @throws whatever the first failing statement throws, after rolling back
-   * its chunk. Earlier chunks stay committed; later ones never run.
+   * @throws {BulkMutateError} when the run stops short: at a failing
+   * statement, whose chunk is rolled back; at writes being refused; or at a
+   * save that failed, whose chunk had committed and counts as such. Its
+   * `committed` says how many statements, from the first, are in the database;
+   * the rest never ran, or were rolled back. A caller that did work for each
+   * statement beforehand takes back the work of the rest.
    */
   async bulkMutate(
     statements: readonly MutationStatement[],
@@ -577,19 +584,27 @@ export class SQLJSRepository implements SQLiteRepository {
       );
     }
 
-    let next = 0;
-    while (next < statements.length) {
-      const started = now();
-      await this.transaction(() => {
-        while (next < statements.length) {
-          const { query, params } = statements[next++];
-          this.mutate(query, params);
-          if (now() - started >= sliceMs) break;
-        }
-      });
-      // Nothing after the last chunk is waiting on the thread being free, so
-      // only the gaps between chunks are paid for
-      if (next < statements.length) await yieldToHost();
+    let committed = 0;
+    try {
+      while (committed < statements.length) {
+        const started = now();
+        let next = committed;
+        await this.transaction(() => {
+          while (next < statements.length) {
+            const { query, params } = statements[next++];
+            this.mutate(query, params);
+            if (now() - started >= sliceMs) break;
+          }
+          // The chunk commits once this returns, so a save that fails after
+          // it leaves these in the database all the same
+          committed = next;
+        });
+        // Nothing after the last chunk is waiting on the thread being free, so
+        // only the gaps between chunks are paid for
+        if (committed < statements.length) await yieldToHost();
+      }
+    } catch (cause) {
+      throw new BulkMutateError(committed, statements.length, cause);
     }
   }
 
