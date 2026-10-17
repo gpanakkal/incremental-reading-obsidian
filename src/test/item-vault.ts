@@ -9,7 +9,23 @@ import { makeLinkVault } from './link-vault';
 
 const SCHEMA = readFileSync(resolve(__dirname, '../db/schema.sql'), 'utf-8');
 
-let sql: Promise<SqlJsStatic> | null = null;
+let emptyDb: Promise<{ SQL: SqlJsStatic; bytes: Uint8Array }> | null = null;
+
+/**
+ * The sql.js module and an empty database at {@link SCHEMA}, built once.
+ * Executing the schema costs far more than deserializing its result, and
+ * properties make a fresh repository per case.
+ */
+function getEmptyDb(): Promise<{ SQL: SqlJsStatic; bytes: Uint8Array }> {
+  return (emptyDb ??= (async () => {
+    const SQL = await initSqlJs();
+    const db = new SQL.Database();
+    db.exec(SCHEMA);
+    const bytes = db.export();
+    db.close();
+    return { SQL, bytes };
+  })());
+}
 
 /**
  * A repository over a real in-memory sql.js database, as the plugin runs it,
@@ -18,15 +34,13 @@ let sql: Promise<SqlJsStatic> | null = null;
  */
 export class TestRepository extends SQLJSRepository {
   static async create(): Promise<TestRepository> {
-    sql ??= initSqlJs();
-    const SQL = await sql;
+    const { SQL, bytes } = await getEmptyDb();
     const repo = new TestRepository({
       app: { vault: { adapter: {} } } as unknown as App,
       dbFilePath: 'ir-test.sqlite',
       schema: SCHEMA,
     });
-    repo.db = new SQL.Database();
-    repo.db.exec(SCHEMA);
+    repo.db = new SQL.Database(bytes);
     // As `initDb` turns them on, until the first `export` turns them off
     repo.db.exec('PRAGMA foreign_keys = ON');
     repo.registerUpdateHook();

@@ -165,7 +165,7 @@ test('imports a note written into the vault with a trigger tag, once, however of
     .filter({
       has: settings
         .locator('.setting-item-name')
-        .getByText('Import notes by tag', { exact: true }),
+        .getByText('Auto-import notes by tag', { exact: true }),
     })
     .locator('.checkbox-container');
   await toggle.click();

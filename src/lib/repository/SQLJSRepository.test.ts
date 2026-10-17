@@ -86,11 +86,9 @@ async function makeSql(): Promise<initSqlJs.SqlJsStatic> {
 }
 
 async function makeRepo(): Promise<{ repo: TestRepository; db: Database }> {
-  const SQL = await makeSql();
-  const schema = loadSchema();
-  const db = new SQL.Database();
-  db.exec(schema);
-  const repo = TestRepository.createReal(schema, db);
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(await getEmptyDbBytes());
+  const repo = TestRepository.createReal(getSharedSchema(), db);
   return { repo, db };
 }
 
@@ -100,13 +98,11 @@ async function makeSavingRepo(): Promise<{
   /** The stubbed vault write every save ends in */
   writeBinary: MockInstance<DataAdapter['writeBinary']>;
 }> {
-  const SQL = await makeSql();
-  const schema = loadSchema();
-  const db = new SQL.Database();
-  db.exec(schema);
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(await getEmptyDbBytes());
   // Production turns foreign keys on when it opens a database (`initDb`)
   db.exec('PRAGMA foreign_keys = ON');
-  const repo = SavingTestRepository.createReal(schema, db);
+  const repo = SavingTestRepository.createReal(getSharedSchema(), db);
   const writeBinary = vi.spyOn(repo.app.vault.adapter, 'writeBinary');
   return { repo, db, writeBinary };
 }
@@ -213,6 +209,18 @@ async function getEmptyDbBytes(): Promise<Uint8Array> {
   return emptyDbBytes;
 }
 
+/**
+ * Insert an article row per id into `db` in one transaction: committed one
+ * at a time, the inserts cost several times as much as the rest of building
+ * a file, and properties build a few files per case.
+ */
+function insertArticleRows(db: Database, ids: readonly string[]) {
+  db.exec('BEGIN');
+  for (const id of ids)
+    db.exec(INSERT_ARTICLE_SQL, articleRow(id) as SqlValue[]);
+  db.exec('COMMIT');
+}
+
 const remoteDbCache = new Map<string, Uint8Array>();
 
 /**
@@ -226,8 +234,7 @@ async function remoteDbBytes(ids: readonly string[]): Promise<Uint8Array> {
 
   const SQL = await getSharedSql();
   const db = new SQL.Database(await getEmptyDbBytes());
-  for (const id of ids)
-    db.exec(INSERT_ARTICLE_SQL, articleRow(id) as SqlValue[]);
+  insertArticleRows(db, ids);
   const bytes = db.export();
   db.close();
   remoteDbCache.set(key, bytes);
@@ -601,8 +608,7 @@ function startRepo(
 async function dbFileWith(ids: readonly string[]): Promise<Uint8Array> {
   const SQL = await getSharedSql();
   const db = new SQL.Database(await getEmptyDbBytes());
-  for (const id of ids)
-    db.exec(INSERT_ARTICLE_SQL, articleRow(id) as SqlValue[]);
+  insertArticleRows(db, ids);
   const bytes = db.export();
   db.close();
   return bytes;

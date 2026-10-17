@@ -40,7 +40,7 @@ import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
 import { resolve } from 'path';
-import initSqlJs, { type Database } from 'sql.js';
+import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SnippetManager } from './SnippetManager';
 
@@ -179,21 +179,40 @@ function noteAt(reference: string): TFile {
   return { path: reference, extension: 'md' } as TFile;
 }
 
+let emptyDb: Promise<{ SQL: SqlJsStatic; bytes: Uint8Array }> | null = null;
+
+/**
+ * The sql.js module and an empty database at the production schema, built
+ * once. Executing the schema costs far more than deserializing its result, and
+ * properties build a fresh database per case.
+ */
+function getEmptyDb(): Promise<{ SQL: SqlJsStatic; bytes: Uint8Array }> {
+  return (emptyDb ??= (async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    const SQL = await initSqlJs({
+      wasmBinary: wasmBinary as unknown as ArrayBuffer,
+    });
+    const db = new SQL.Database();
+    db.exec(readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8'));
+    const bytes = db.export();
+    db.close();
+    return { SQL, bytes };
+  })());
+}
+
 /**
  * A repo backed by a real in-memory sql.js database, so ORDER BY / LIMIT
- * clauses are actually executed (mock repos ignore them).
+ * clauses are actually executed (mock repos ignore them). Each call gets its
+ * own fresh database.
  */
 async function makeSqlJsRepo(): Promise<{
   repo: SQLiteRepository;
   db: Database;
 }> {
-  const dbDir = resolve(__dirname, '../../db');
-  const wasmBinary = readFileSync(require.resolve('sql.js/dist/sql-wasm.wasm'));
-  const SQL = await initSqlJs({
-    wasmBinary: wasmBinary as unknown as ArrayBuffer,
-  });
-  const db = new SQL.Database();
-  db.exec(readFileSync(resolve(dbDir, 'schema.sql'), 'utf-8'));
+  const { SQL, bytes } = await getEmptyDb();
+  const db = new SQL.Database(bytes);
 
   const query = (sql: string, params: unknown[] = []) => {
     const results = db.exec(sql, params as never);
@@ -2744,33 +2763,31 @@ describe('adoptOrphans', () => {
     // One update can carry the parent id plus MAX_SQL_QUERY_PARAMS - 1 ids.
     // The counts straddle an exact chunk boundary, where an off-by-one would
     // emit a trailing `IN ()` — a syntax error in SQLite.
+    // Two counts only: each runs once, rather than a sample of a hundred
     const chunkSize = MAX_SQL_QUERY_PARAMS - 1;
-    await fc.assert(
-      fc.asyncProperty(
-        fc.constantFrom(chunkSize, chunkSize + 1),
-        async (orphanCount) => {
-          const specs = Array.from({ length: orphanCount }, () => QUALIFYING);
-          const rows = toOrphanRows(specs);
-          wireOrphanNotes(rows, specs, TARGET.path);
-          const repo = makeOrphanRepoStub(rows);
-          const manager = new SnippetManager({ app: makeApp() } as never, repo);
+    for (const orphanCount of [chunkSize, chunkSize + 1]) {
+      const specs = Array.from({ length: orphanCount }, () => QUALIFYING);
+      const rows = toOrphanRows(specs);
+      wireOrphanNotes(rows, specs, TARGET.path);
+      const repo = makeOrphanRepoStub(rows);
+      const manager = new SnippetManager({ app: makeApp() } as never, repo);
 
-          const adopted = await manager.adoptOrphans(TARGET, 'article-1');
+      const adopted = await manager.adoptOrphans(TARGET, 'article-1');
 
-          const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-            .calls as [string, unknown[]][];
-          expect(calls).toHaveLength(Math.ceil(orphanCount / chunkSize));
-          for (const [, params] of calls) {
-            expect(params.length).toBeGreaterThan(1);
-            expect(params.length).toBeLessThanOrEqual(MAX_SQL_QUERY_PARAMS);
-          }
-          // every orphan is claimed exactly once
-          expect(new Set(adoptedIdsFromMutates(repo)).size).toBe(orphanCount);
-          expect(adopted).toHaveLength(orphanCount);
-          vi.restoreAllMocks();
-        }
-      )
-    );
+      const calls = (repo.mutate as ReturnType<typeof vi.fn>).mock.calls as [
+        string,
+        unknown[],
+      ][];
+      expect(calls).toHaveLength(Math.ceil(orphanCount / chunkSize));
+      for (const [, params] of calls) {
+        expect(params.length).toBeGreaterThan(1);
+        expect(params.length).toBeLessThanOrEqual(MAX_SQL_QUERY_PARAMS);
+      }
+      // every orphan is claimed exactly once
+      expect(new Set(adoptedIdsFromMutates(repo)).size).toBe(orphanCount);
+      expect(adopted).toHaveLength(orphanCount);
+      vi.restoreAllMocks();
+    }
   });
 
   it('reads the source property rather than Obsidian’s link index', async () => {
@@ -4327,12 +4344,12 @@ describe('offsetsOf', () => {
       { length: MAX_SQL_QUERY_PARAMS + 2 },
       (_, i) => `id-${i}`
     );
-    for (const [i, id] of ids.entries()) {
-      repo.mutate(
-        `INSERT INTO snippet (id, reference, due, interval, priority, start_offset, end_offset) VALUES ($1, $2, 0, 1, 30, $3, $3)`,
-        [id, `s/${i}.md`, i]
-      );
-    }
+    // One statement: a thousand separate writes cost more than the read
+    repo.mutate(
+      `INSERT INTO snippet (id, reference, due, interval, priority, start_offset, end_offset) VALUES ${ids
+        .map((id, i) => `('${id}', 's/${i}.md', 0, 1, 30, ${i}, ${i})`)
+        .join(', ')}`
+    );
     const manager = new SnippetManager(
       { app: {}, settings: {} } as never,
       repo

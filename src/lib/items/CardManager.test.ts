@@ -464,18 +464,33 @@ function makeRealRepo(db: Database): SQLiteRepository {
   } as unknown as SQLiteRepository;
 }
 
-let sqlJs: SqlJsStatic | undefined;
+let emptySchemaDb: Promise<{ SQL: SqlJsStatic; bytes: Uint8Array }> | null =
+  null;
+
+/**
+ * The sql.js module and an empty database at the current production schema,
+ * built once. Executing the schema costs far more than deserializing its
+ * result, and properties build a fresh database per case.
+ */
+function getEmptySchemaDb(): Promise<{ SQL: SqlJsStatic; bytes: Uint8Array }> {
+  return (emptySchemaDb ??= (async () => {
+    const SQL = await initSqlJs({
+      wasmBinary: readFileSync(
+        require.resolve('sql.js/dist/sql-wasm.wasm')
+      ) as unknown as ArrayBuffer,
+    });
+    const db = new SQL.Database();
+    db.exec(readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8'));
+    const bytes = db.export();
+    db.close();
+    return { SQL, bytes };
+  })());
+}
 
 /** A fresh in-memory database at the current production schema. */
 async function makeSchemaDb(): Promise<Database> {
-  sqlJs ??= await initSqlJs({
-    wasmBinary: readFileSync(
-      require.resolve('sql.js/dist/sql-wasm.wasm')
-    ) as unknown as ArrayBuffer,
-  });
-  const db = new sqlJs.Database();
-  db.exec(readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8'));
-  return db;
+  const { SQL, bytes } = await getEmptySchemaDb();
+  return new SQL.Database(bytes);
 }
 
 /** Make `rows` the only cards in `db`, each at a note of its own. */
@@ -3453,12 +3468,11 @@ describe('review — against the production schema', () => {
    * the production schema.sql, so malformed SQL surfaces as a thrown error.
    */
   let SQL: SqlJsStatic;
+  /** An empty database at the production schema, reopened per case. */
+  let schemaBytes: Uint8Array;
 
   beforeAll(async () => {
-    const wasmBinary = readFileSync(
-      require.resolve('sql.js/dist/sql-wasm.wasm')
-    );
-    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+    ({ SQL, bytes: schemaBytes } = await getEmptySchemaDb());
   });
 
   /** Fixed instant so FSRS scheduling is reproducible run to run. */
@@ -3470,8 +3484,7 @@ describe('review — against the production schema', () => {
     db: Database;
     row: SRSCardRow;
   } {
-    const db = new SQL.Database();
-    db.exec(readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8'));
+    const db = new SQL.Database(schemaBytes);
     const row = makeCardRow({
       created_at: REVIEW_AT.getTime(),
       due: REVIEW_AT.getTime(),
@@ -4782,12 +4795,11 @@ describe('createFromPdf without an article', () => {
 
 describe('adoptOrphans', () => {
   let SQL: SqlJsStatic;
+  /** An empty database at the production schema, reopened per case. */
+  let schemaBytes: Uint8Array;
 
   beforeAll(async () => {
-    const wasmBinary = readFileSync(
-      require.resolve('sql.js/dist/sql-wasm.wasm')
-    );
-    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+    ({ SQL, bytes: schemaBytes } = await getEmptySchemaDb());
   });
 
   afterEach(() => {
@@ -4815,10 +4827,7 @@ describe('adoptOrphans', () => {
         fc.uuid(),
         async (specs, parentId) => {
           vi.restoreAllMocks();
-          const db = new SQL.Database();
-          db.exec(
-            readFileSync(resolve(__dirname, '../../db/schema.sql'), 'utf-8')
-          );
+          const db = new SQL.Database(schemaBytes);
           const query = (
             sql: string,
             params: unknown[] = []
