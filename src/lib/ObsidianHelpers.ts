@@ -36,6 +36,7 @@ import { Markdown } from './Markdown';
 import { isEditableText, supportsFrontmatter } from './mime';
 import { notify, type NotifyOptions } from './notices';
 import { parseSourceLink } from './source-link';
+import { stripFrontmatterTags } from './tags';
 import type { FrontMatterUpdates, NoteType, PluginFrontMatter } from './types';
 import { binarySearch, generateId } from './utils';
 
@@ -709,6 +710,35 @@ export class ObsidianHelpers {
             else delete frontmatter[key];
           }
         },
+        app
+      );
+    };
+  }
+
+  /**
+   * Take `tags` off `file`'s frontmatter, leaving its other tags (see
+   * `stripFrontmatterTags`), and dropping `tags` once nothing is left in it.
+   * A file with no frontmatter is left alone.
+   * @returns how to take it back: each tag key it changed put back as it was
+   */
+  static async removeFrontMatterTags(
+    file: TFile,
+    tags: readonly string[],
+    app: App
+  ): Promise<() => Promise<void>> {
+    let before: Record<string, unknown> = {};
+    await this.updateFrontMatter(
+      file,
+      (frontmatter) => {
+        before = stripFrontmatterTags(frontmatter, tags);
+      },
+      app
+    );
+    return async () => {
+      if (Object.keys(before).length === 0) return;
+      await this.updateFrontMatter(
+        file,
+        (frontmatter) => Object.assign(frontmatter, before),
         app
       );
     };

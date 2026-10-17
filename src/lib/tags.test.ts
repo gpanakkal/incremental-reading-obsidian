@@ -1,6 +1,11 @@
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { formatTagList, matchFrontmatterTags, parseTagList } from './tags';
+import {
+  formatTagList,
+  matchFrontmatterTags,
+  parseTagList,
+  stripFrontmatterTags,
+} from './tags';
 
 // #region HELPERS
 
@@ -401,5 +406,156 @@ describe('matchFrontmatterTags', () => {
         }
       )
     );
+  });
+});
+
+describe('stripFrontmatterTags', () => {
+  /**
+   * Tags to take off: some the frontmatter carries, written any way that
+   * matches them, and others, a blank and a lone `#` among them.
+   */
+  const strippedArb = (carried: ReadonlySet<string>) =>
+    fc
+      .tuple(
+        fc.subarray([...carried]),
+        fc.array(
+          fc.oneof(
+            writtenTagArb.map(({ written }) => written),
+            fc.constantFrom('', '#', '##')
+          ),
+          { maxLength: 4 }
+        ),
+        fc.nat()
+      )
+      .map(([some, others, spelling]) => [
+        ...some.map(
+          (tag, i) => [tag, `#${tag}`, tag.toUpperCase()][(spelling + i) % 3]
+        ),
+        ...others,
+      ]);
+  const casesArb = frontmatterArb.chain(({ frontmatter, carried }) =>
+    strippedArb(carried).map((stripped) => ({
+      frontmatter,
+      carried,
+      stripped,
+    }))
+  );
+  const asCompared = (tag: string) => tag.replace(/^#+/, '').toLowerCase();
+
+  it('takes every tag asked for off every tag key, leaving every other tag carried', () => {
+    fc.assert(
+      fc.property(casesArb, ({ frontmatter, carried, stripped }) => {
+        const gone = new Set(stripped.map(asCompared));
+
+        stripFrontmatterTags(frontmatter, stripped);
+
+        expect(matchFrontmatterTags(frontmatter, stripped)).toEqual([]);
+        expect(matchFrontmatterTags(frontmatter, carried)).toEqual(
+          [...carried].filter((tag) => !gone.has(tag))
+        );
+      })
+    );
+  });
+
+  it('leaves each key that held none of them as it was, and returns what each other key held, to put back', () => {
+    fc.assert(
+      fc.property(casesArb, ({ frontmatter, stripped }) => {
+        const before = { ...frontmatter };
+        const snapshot = structuredClone(frontmatter);
+
+        const changed = stripFrontmatterTags(frontmatter, stripped);
+
+        for (const [key, value] of Object.entries(before)) {
+          if (Object.hasOwn(changed, key)) {
+            expect(changed[key]).toBe(value);
+            expect(
+              matchFrontmatterTags({ [key]: value }, stripped)
+            ).not.toEqual([]);
+          } else {
+            expect(frontmatter[key]).toBe(value);
+          }
+        }
+        expect(Object.keys(changed).every((key) => key in before)).toBe(true);
+        expect(Object.assign(frontmatter, changed)).toEqual(snapshot);
+      })
+    );
+  });
+
+  it('leaves a key it changed as a list of what is left in it, with no blanks, or drops it when nothing is', () => {
+    fc.assert(
+      fc.property(casesArb, ({ frontmatter, stripped }) => {
+        const changed = stripFrontmatterTags(frontmatter, stripped);
+
+        for (const key of Object.keys(changed)) {
+          if (!(key in frontmatter)) continue;
+          const left = frontmatter[key] as unknown[];
+          expect(Array.isArray(left)).toBe(true);
+          expect(left.length).toBeGreaterThan(0);
+          for (const entry of left) {
+            expect(entry === null || entry === undefined).toBe(false);
+            if (typeof entry === 'string') {
+              expect(entry.trim()).not.toBe('');
+            }
+          }
+        }
+      })
+    );
+  });
+
+  it('keeps each other tag of a key it changed as it was spelled, less its #, and every entry that held none as it was', () => {
+    const frontmatter: Record<string, unknown> = {
+      tags: [
+        '#Keep this',
+        'IR-Import, #Clip#Other',
+        3,
+        null,
+        '',
+        ' 	',
+        undefined,
+        false,
+      ],
+      tag: '#ir-import',
+      Tags: 'one two',
+      aliases: ['ir-import'],
+    };
+
+    const changed = stripFrontmatterTags(frontmatter, ['ir-import', 'clip']);
+
+    expect(frontmatter).toEqual({
+      tags: ['#Keep this', 'Other', 3, false],
+      Tags: 'one two',
+      aliases: ['ir-import'],
+    });
+    expect(changed).toEqual({
+      tags: [
+        '#Keep this',
+        'IR-Import, #Clip#Other',
+        3,
+        null,
+        '',
+        ' 	',
+        undefined,
+        false,
+      ],
+      tag: '#ir-import',
+    });
+  });
+
+  it('turns a lone string it changed into the list of the tags left in it', () => {
+    const frontmatter: Record<string, unknown> = {
+      tags: 'ir-import Read, #Later',
+    };
+
+    stripFrontmatterTags(frontmatter, ['#IR-IMPORT']);
+
+    expect(frontmatter).toEqual({ tags: ['Read', 'Later'] });
+  });
+
+  it('takes the tags to take off from any iterable, a set included', () => {
+    const frontmatter: Record<string, unknown> = { tags: ['a', 'b', 'c'] };
+
+    stripFrontmatterTags(frontmatter, new Set(['a', 'c']));
+
+    expect(frontmatter).toEqual({ tags: ['b'] });
   });
 });

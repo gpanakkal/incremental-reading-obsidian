@@ -1,4 +1,9 @@
-import { ARTICLE_TAG, AUTO_IMPORT_TAG } from '#/lib/constants';
+import {
+  ARTICLE_DIRECTORY,
+  ARTICLE_TAG,
+  AUTO_IMPORT_TAG,
+  DATA_DIRECTORY,
+} from '#/lib/constants';
 import test, {
   expect,
   type ElectronApplication,
@@ -32,7 +37,10 @@ let vaultPath: string;
  * plugin's `autoImportWatcher` is private to it.
  */
 type PageApp = {
-  vault: { getFileByPath(path: string): unknown };
+  vault: {
+    getFileByPath(path: string): unknown;
+    getFiles(): { path: string }[];
+  };
   fileManager: {
     processFrontMatter(
       file: unknown,
@@ -71,6 +79,8 @@ type PageApp = {
         autoImportWatcher: { flushNow(): Promise<void> };
       }
     >;
+    disablePlugin(id: string): Promise<void>;
+    enablePlugin(id: string): Promise<boolean>;
   };
 };
 
@@ -141,6 +151,17 @@ const flushAutoImports = () =>
       'incremental-reading'
     ].autoImportWatcher.flushNow();
   });
+
+/** The paths of the files in the articles folder, sorted. */
+const articleFiles = () =>
+  window.evaluate((folder) => {
+    const { app } = window as unknown as { app: PageApp };
+    return app.vault
+      .getFiles()
+      .map((file) => file.path)
+      .filter((at) => at.startsWith(`${folder}/`))
+      .sort();
+  }, `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`);
 
 /** Wait for the note at `notePath` to be an article, and return its id. */
 async function expectImported(notePath: string): Promise<string> {
@@ -288,4 +309,114 @@ A page read before the reset.
 
   await expectImported(notePath);
   expect(await articleCount()).toBe(before);
+});
+
+test('imports a copy of a note tagged in copy mode, moving the tag to it, and never imports the note again', async () => {
+  const settings = await openPluginSettings(app, window);
+  const settingRow = (name: string) =>
+    settings.locator('.vertical-tab-content .setting-item').filter({
+      has: settings
+        .locator('.setting-item-name')
+        .getByText(name, { exact: true }),
+    });
+  const toggle = settingRow('Auto-import notes by tag').locator(
+    '.checkbox-container'
+  );
+  await toggle.click();
+  await expect(toggle).toHaveClass(/is-enabled/);
+  // By role: Obsidian sizes the dropdown off a hidden copy of the select
+  await settingRow('Where to import tagged notes')
+    .getByRole('combobox')
+    .selectOption({ label: 'Make a copy' });
+  // Saved, so the plugin loaded again below reads it
+  await expect
+    .poll(async () => {
+      try {
+        const data = await fs.readFile(
+          path.join(
+            vaultPath,
+            '.obsidian/plugins/incremental-reading/data.json'
+          ),
+          'utf8'
+        );
+        return (JSON.parse(data) as { settings?: unknown }).settings;
+      } catch {
+        // Not written yet, or caught halfway through a write
+        return null;
+      }
+    })
+    .toMatchObject({ autoImportOnTag: true, autoImportMode: 'copy' });
+  await window.evaluate(() =>
+    (window as unknown as { app: PageApp }).app.setting.close()
+  );
+  const before = await articleCount();
+  const articlesBefore = await articleFiles();
+  const notePath = 'inbox/Clipped page.md';
+  const copyPath = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/Clipped page.md`;
+
+  await writeVaultFile(
+    notePath,
+    `---\ntags: [${AUTO_IMPORT_TAG}, keep-me]\n---\nA clipped page.\n`
+  );
+
+  const id = await expectImported(copyPath);
+  expect((await noteState(copyPath)).tags).toEqual(
+    expect.arrayContaining([AUTO_IMPORT_TAG, 'keep-me'])
+  );
+  await expect
+    .poll(async () => (await noteState(notePath)).tags)
+    .toEqual(['keep-me']);
+  expect(await noteState(notePath)).toMatchObject({ irId: null, rowIds: [] });
+  expect(await articleCount()).toBe(before + 1);
+
+  // Loaded again, as at the next start, then both notes changed after
+  await window.evaluate(async () => {
+    const { app } = window as unknown as { app: PageApp };
+    await app.plugins.disablePlugin('incremental-reading');
+    await app.plugins.enablePlugin('incremental-reading');
+  });
+  await expect
+    .poll(() =>
+      window.evaluate(() => {
+        const { plugins } = (window as unknown as { app: PageApp }).app.plugins;
+        return 'incremental-reading' in plugins;
+      })
+    )
+    .toBe(true);
+  for (const at of [notePath, copyPath]) {
+    await window.evaluate(async (at) => {
+      const { app } = window as unknown as { app: PageApp };
+      await app.fileManager.processFrontMatter(
+        app.vault.getFileByPath(at),
+        (frontmatter) => {
+          frontmatter.read = true;
+        }
+      );
+    }, at);
+  }
+  await expect
+    .poll(() =>
+      window.evaluate(
+        (paths) => {
+          const { app } = window as unknown as { app: PageApp };
+          return paths.map(
+            (at) =>
+              app.metadataCache.getFileCache(app.vault.getFileByPath(at))
+                ?.frontmatter?.read
+          );
+        },
+        [notePath, copyPath]
+      )
+    )
+    .toEqual([true, true]);
+  await flushAutoImports();
+
+  expect(await articleCount()).toBe(before + 1);
+  expect(await noteState(notePath)).toMatchObject({
+    irId: null,
+    tags: ['keep-me'],
+    rowIds: [],
+  });
+  expect(await noteState(copyPath)).toMatchObject({ irId: id, rowIds: [id] });
+  expect(await articleFiles()).toEqual([...articlesBefore, copyPath].sort());
 });

@@ -14,6 +14,7 @@ import {
   SOURCE_TAG,
 } from '#/lib/constants';
 import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
+import { stripFrontmatterTags } from '#/lib/tags';
 import type { NoteType } from '#/lib/types';
 import { Notice } from '#/test/__mocks__/obsidian';
 import { makeItemVault } from '#/test/item-vault';
@@ -5699,6 +5700,89 @@ describe('updateFrontMatterUndoably', () => {
     const undo = await ObsidianHelpers.updateFrontMatterUndoably(
       file,
       { tags: 'ir-source' },
+      vault.app as never
+    );
+    await undo();
+
+    expect(vault.processFrontMatter).not.toHaveBeenCalled();
+  });
+});
+
+describe('removeFrontMatterTags', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  /** Tags a note can carry, and be asked to lose, in any spelling. */
+  const tagArb = fc.constantFrom('ir-import', '#IR-Import', 'clip', 'Other');
+  const frontmatterArb = fc.option(
+    fc.record(
+      {
+        'ir-id': fc.uuid(),
+        tags: fc.oneof(
+          tagArb,
+          fc.array(fc.oneof(tagArb, fc.string(), fc.constant(null)), {
+            maxLength: 4,
+          })
+        ),
+        tag: tagArb,
+        title: fc.string(),
+      },
+      { requiredKeys: [] }
+    ),
+    { nil: null }
+  );
+
+  it('takes the tags off the note as stripFrontmatterTags does, and its undo puts them back as they were', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        frontmatterArb,
+        fc.array(tagArb, { maxLength: 3 }),
+        async (frontmatter, tags) => {
+          const path = 'notes/a.md';
+          const vault = makeItemVault({ [path]: structuredClone(frontmatter) });
+          const file = vault.files.get(path)!;
+          const expected: Record<string, unknown> = structuredClone(
+            frontmatter ?? {}
+          );
+          stripFrontmatterTags(expected, tags);
+
+          const undo = await ObsidianHelpers.removeFrontMatterTags(
+            file,
+            tags,
+            vault.app as never
+          );
+
+          expect(vault.frontmatterOf(path) ?? {}).toEqual(expected);
+          await undo();
+          expect(vault.frontmatterOf(path) ?? {}).toEqual(frontmatter ?? {});
+        }
+      )
+    );
+  });
+
+  it('writes nothing more to undo when it took nothing off', async () => {
+    const path = 'notes/a.md';
+    const vault = makeItemVault({ [path]: { tags: ['keep'] } });
+    const file = vault.files.get(path)!;
+
+    const undo = await ObsidianHelpers.removeFrontMatterTags(
+      file,
+      ['ir-import'],
+      vault.app as never
+    );
+    await undo();
+
+    expect(vault.processFrontMatter).toHaveBeenCalledOnce();
+    expect(vault.frontmatterOf(path)).toEqual({ tags: ['keep'] });
+  });
+
+  it('leaves a file with no frontmatter alone', async () => {
+    const path = 'papers/a.pdf';
+    const vault = makeItemVault({ [path]: null });
+    const file = vault.files.get(path)!;
+
+    const undo = await ObsidianHelpers.removeFrontMatterTags(
+      file,
+      ['ir-import'],
       vault.app as never
     );
     await undo();

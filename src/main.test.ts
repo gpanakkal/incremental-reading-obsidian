@@ -896,7 +896,7 @@ function makeAutoImportReceiver() {
   const unloaders: (() => void)[] = [];
   const files = new Map<string, TFile>();
   const caches = new Map<TFile, unknown>();
-  const importArticles = vi.fn(() => Promise.resolve([]));
+  const importTaggedNotes = vi.fn(() => Promise.resolve([]));
   const hasItemRow = vi.fn((_id: string) => Promise.resolve(false));
   const receiver = {
     settings: { ...structuredClone(DEFAULT_SETTINGS), autoImportOnTag: true },
@@ -921,15 +921,15 @@ function makeAutoImportReceiver() {
   ).watchAutoImports.call(receiver);
   return {
     receiver,
-    importArticles,
+    importTaggedNotes,
     hasItemRow,
     changedRef,
     /**
-     * Have the review manager up, importing through `importArticles` and
+     * Have the review manager up, importing through `importTaggedNotes` and
      * looking ids up through `hasItemRow`.
      */
     startReviewManager() {
-      receiver.reviewManager = { importArticles, hasItemRow };
+      receiver.reviewManager = { importTaggedNotes, hasItemRow };
     },
     /** A note at `path` re-indexed with `frontmatter`, as Obsidian tells of it. */
     change(path: string, frontmatter: Record<string, unknown>) {
@@ -2968,10 +2968,27 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
     const file = watch.change('inbox/clip.md', { tags: [AUTO_IMPORT_TAG] });
     await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
 
-    expect(watch.importArticles).toHaveBeenCalledExactlyOnceWith(
+    expect(watch.importTaggedNotes).toHaveBeenCalledExactlyOnceWith(
       [{ file, matchedTags: [AUTO_IMPORT_TAG] }],
-      { priority: 17, fixedIntervalDays: null, makeCopy: false }
+      { priority: 17, mode: 'inPlace' }
     );
+  });
+
+  it('imports in the way of importing tagged notes set when the batch is imported', async () => {
+    for (const mode of ['inPlace', 'copy', 'inherit'] as const) {
+      const watch = makeAutoImportReceiver();
+      watch.startReviewManager();
+      const { settings } = watch.receiver;
+
+      watch.change('inbox/clip.md', { tags: [AUTO_IMPORT_TAG] });
+      settings.autoImportMode = mode;
+      await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+      expect(watch.importTaggedNotes).toHaveBeenCalledExactlyOnceWith(
+        expect.anything(),
+        { priority: settings.defaultPriority, mode }
+      );
+    }
   });
 
   it('imports a note whose ir-id the review manager finds no row for, and not one whose ir-id it does', async () => {
@@ -2987,7 +3004,7 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
     await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
 
     expect(watch.hasItemRow.mock.calls).toEqual([['gone'], ['kept']]);
-    expect(watch.importArticles).toHaveBeenCalledExactlyOnceWith(
+    expect(watch.importTaggedNotes).toHaveBeenCalledExactlyOnceWith(
       [{ file: orphan, matchedTags: [AUTO_IMPORT_TAG] }],
       expect.anything()
     );
@@ -3000,7 +3017,7 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
     watch.startReviewManager();
     await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
 
-    expect(watch.importArticles).not.toHaveBeenCalled();
+    expect(watch.importTaggedNotes).not.toHaveBeenCalled();
   });
 
   it('follows the settings as they are at each change, with no reload', async () => {
@@ -3011,7 +3028,7 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
     settings.autoImportOnTag = false;
     watch.change('off.md', { tags: [AUTO_IMPORT_TAG] });
     await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
-    expect(watch.importArticles).not.toHaveBeenCalled();
+    expect(watch.importTaggedNotes).not.toHaveBeenCalled();
 
     settings.autoImportOnTag = true;
     settings.autoImportTags = ['to-read'];
@@ -3019,7 +3036,7 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
     const file = watch.change('new-tag.md', { tags: ['to-read'] });
     await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
 
-    expect(watch.importArticles).toHaveBeenCalledExactlyOnceWith(
+    expect(watch.importTaggedNotes).toHaveBeenCalledExactlyOnceWith(
       [{ file, matchedTags: ['to-read'] }],
       expect.anything()
     );
@@ -3034,7 +3051,7 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
     watch.unload();
     await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
 
-    expect(watch.importArticles).not.toHaveBeenCalled();
+    expect(watch.importTaggedNotes).not.toHaveBeenCalled();
   });
 });
 

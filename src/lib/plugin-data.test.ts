@@ -248,6 +248,42 @@ describe('parsePluginData', () => {
     );
   });
 
+  it('imports tagged notes in place unless told otherwise, whatever copying on import says', () => {
+    fc.assert(
+      fc.property(fc.anything(), fc.boolean(), (copyOnImport, legacy) => {
+        const saved = { copyOnImport };
+        const data = parsePluginData(legacy ? saved : { settings: saved });
+
+        expect(DEFAULT_SETTINGS.autoImportMode).toBe('inPlace');
+        expect(data.settings.autoImportMode).toBe('inPlace');
+      })
+    );
+  });
+
+  it('keeps a known way of importing tagged notes and replaces anything else with in place', () => {
+    const MODES: unknown[] = ['inPlace', 'copy', 'inherit'];
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.constantFrom(...MODES),
+          fc.constantFrom('Copy', 'inplace', ' copy', '', 'toString'),
+          // not strings, though each reads as a mode once made one
+          fc.constantFrom(['copy'], { toString: () => 'copy' }),
+          fc.anything()
+        ),
+        fc.boolean(),
+        (stored, legacy) => {
+          const saved = { autoImportMode: stored };
+          const data = parsePluginData(legacy ? saved : { settings: saved });
+
+          expect(data.settings.autoImportMode).toBe(
+            MODES.includes(stored) ? stored : 'inPlace'
+          );
+        }
+      )
+    );
+  });
+
   it('gives each read its own list of trigger tags, apart from the defaults', () => {
     const first = parsePluginData({ settings: {} }).settings;
     const second = parsePluginData({}).settings;

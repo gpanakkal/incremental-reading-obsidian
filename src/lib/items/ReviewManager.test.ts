@@ -2189,6 +2189,75 @@ describe('ReviewManager delegation', () => {
     expect(spy).toHaveBeenCalledExactlyOnceWith(entries, options);
   });
 
+  it('importTaggedNotes copies exactly when told to, or when told to follow copying on import and that is on, taking the tags that triggered each off the original', async () => {
+    const entryArb = fc.record({
+      path: fc.string(),
+      matchedTags: fc.array(fc.string()),
+    });
+    const outcomeArb = fc.constantFrom('imported', 'skipped', 'failed');
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(entryArb, { maxLength: 4 }),
+        fc.constantFrom('inPlace', 'copy', 'inherit'),
+        fc.boolean(),
+        fc.integer(),
+        outcomeArb,
+        async (generated, mode, copyOnImport, priority, status) => {
+          vi.restoreAllMocks();
+          const plugin = makePlugin() as unknown as {
+            settings: Record<string, unknown>;
+          };
+          plugin.settings.copyOnImport = copyOnImport;
+          const manager = new ReviewManager(plugin as never, makeRepo());
+          const entries = generated.map(({ path, matchedTags }) => ({
+            file: { path } as TFile,
+            matchedTags,
+          }));
+          const outcomes = entries.map(({ file }) => ({ file, status }));
+          const importMany = vi
+            .spyOn(manager.articles, 'importMany')
+            .mockResolvedValue(outcomes);
+
+          await expect(
+            manager.importTaggedNotes(entries, { priority, mode })
+          ).resolves.toBe(outcomes);
+
+          expect(importMany).toHaveBeenCalledExactlyOnceWith(
+            entries.map(({ file, matchedTags }) => ({
+              file,
+              stripFromSource: matchedTags,
+            })),
+            {
+              priority,
+              fixedIntervalDays: null,
+              makeCopy: mode === 'copy' || (mode === 'inherit' && copyOnImport),
+            }
+          );
+        }
+      )
+    );
+  });
+
+  it('importTaggedNotes reads copying on import as it is at each import', async () => {
+    const plugin = makePlugin() as unknown as {
+      settings: Record<string, unknown>;
+    };
+    const manager = new ReviewManager(plugin as never, makeRepo());
+    const importMany = vi
+      .spyOn(manager.articles, 'importMany')
+      .mockResolvedValue([]);
+    const entries = [{ file: FAKE_FILE, matchedTags: ['a'] }];
+
+    plugin.settings.copyOnImport = false;
+    await manager.importTaggedNotes(entries, { priority: 1, mode: 'inherit' });
+    plugin.settings.copyOnImport = true;
+    await manager.importTaggedNotes(entries, { priority: 1, mode: 'inherit' });
+
+    expect(
+      importMany.mock.calls.map(([, options]) => options.makeCopy)
+    ).toEqual([false, true]);
+  });
+
   it('importWebPage delegates to articles.importWebPage', async () => {
     const repo = makeRepo();
     const manager = new ReviewManager(makePlugin(), repo);

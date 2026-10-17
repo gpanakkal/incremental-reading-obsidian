@@ -5,6 +5,7 @@ import type {
   QueueScheduling,
   QueueSubset,
 } from '#/components/types';
+import type { AutoImportEntry } from '#/lib/AutoImportWatcher';
 import type {
   BulkImportEntry,
   BulkImportOptions,
@@ -25,6 +26,7 @@ import {
   REBIND_LOG_TOPIC,
   reclaimAtPath,
 } from '#/lib/rebind-records';
+import type { AutoImportMode } from '#/lib/settings';
 import {
   type ArticleRow,
   type IArticleBase,
@@ -241,6 +243,28 @@ export default class ReviewManager {
     options: BulkImportOptions
   ): Promise<BulkOutcome[]> {
     return this.articles.importMany(entries, options);
+  }
+
+  /**
+   * Import notes for their trigger tags (see `AutoImportWatcher`), as
+   * {@link importArticles} does, copied or not as `mode` says, with
+   * `inherit` read as `copyOnImport` is now. A note copied loses the tags
+   * that triggered it, which its copy keeps, so it isn't imported again.
+   */
+  async importTaggedNotes(
+    entries: readonly AutoImportEntry[],
+    { priority, mode }: { priority: number; mode: AutoImportMode }
+  ): Promise<BulkOutcome[]> {
+    const makeCopy =
+      mode === 'copy' ||
+      (mode === 'inherit' && this.plugin.settings.copyOnImport);
+    return this.articles.importMany(
+      entries.map(({ file, matchedTags }) => ({
+        file,
+        stripFromSource: matchedTags,
+      })),
+      { priority, fixedIntervalDays: null, makeCopy }
+    );
   }
 
   /**

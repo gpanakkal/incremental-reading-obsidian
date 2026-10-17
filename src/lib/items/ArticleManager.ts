@@ -115,6 +115,14 @@ function errorReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Whether `file` is in the plugin's data folder, where a copy of it would be
+ * one of the plugin's own: `importCopy` refuses it. Not a note whose own name
+ * or folder only starts as the folder's does.
+ */
+const inDataDirectory = (file: TFile) =>
+  file.path.startsWith(`${DATA_DIRECTORY}/`);
+
 /** A snippet's or card's note is no article to be. */
 function blockedTag(): Refusal {
   return {
@@ -445,19 +453,22 @@ export class ArticleManager extends ItemManager {
   /**
    * Import each of `entries` as {@link import} does, with the same schedule
    * and the same copy choice (a file that can only be imported in place is,
-   * whatever was chosen). Quiet: nothing here tells the user anything, so the
-   * caller can say it once for the whole batch. One file that fails short of
-   * its rows never stops the rest; one whose rows fail to be written does (see
-   * below).
+   * whatever was chosen, as is one in the plugin's data folder, which a copy
+   * would be refused for every time). Quiet: nothing here tells the user
+   * anything, so the caller can say it once for the whole batch. One file
+   * that fails short of its rows never stops the rest; one whose rows fail to
+   * be written does (see below). A file copied has its entry's
+   * `stripFromSource` tags taken off it.
    *
    * In two phases, as every `mutate` saves the whole database file: first each
    * file in turn, up to its import's commit point, with its note's
-   * frontmatter or its copy written then (see {@link HeldWriter}); then every
-   * file's rows in one paced run (see `SQLiteRepository.bulkMutate`), saving
-   * once a chunk. A file whose rows that run didn't write is failed, and its
-   * frontmatter or copy taken back; once the run stops, no file after it is
-   * written. No transaction is held open across the first phase: the run's
-   * chunks would join it, and its writes to files would hold it open.
+   * frontmatter or its copy written then (see {@link HeldWriter}), and a
+   * copied file's tags stripped; then every file's rows in one paced run (see
+   * `SQLiteRepository.bulkMutate`), saving once a chunk. A file whose rows
+   * that run didn't write is failed, and its frontmatter or copy taken back,
+   * with its stripped tags put back on it; once the run stops, no file after
+   * it is written. No transaction is held open across the first phase: the
+   * run's chunks would join it, and its writes to files would hold it open.
    *
    * The frontmatter goes first on purpose: a crash between the phases leaves
    * a note with an `ir-id` no row holds, which no later import takes for an
@@ -471,14 +482,15 @@ export class ArticleManager extends ItemManager {
     { priority, fixedIntervalDays, makeCopy }: BulkImportOptions
   ): Promise<BulkOutcome[]> {
     const started: { writer: HeldWriter; run: Promise<BulkOutcome> }[] = [];
-    for (const { file } of entries) {
+    for (const { file, stripFromSource } of entries) {
       const writer = new HeldWriter();
       const run = this.importQuietly(
         file,
         priority,
         fixedIntervalDays,
         makeCopy,
-        writer
+        writer,
+        stripFromSource
       );
       started.push({ writer, run });
       // On to the next once this one has reached its commit point, or ended
@@ -515,7 +527,8 @@ export class ArticleManager extends ItemManager {
     priority: number,
     fixedIntervalDays: number | null,
     makeCopy: boolean,
-    writer: RowWriter
+    writer: RowWriter,
+    stripFromSource: readonly string[] = []
   ): Promise<BulkOutcome> {
     if (!isImportable(file)) {
       return {
@@ -549,9 +562,10 @@ export class ArticleManager extends ItemManager {
         file,
         priority,
         fixedIntervalDays,
-        isCopyImportable(file) && makeCopy,
+        isCopyImportable(file) && makeCopy && !inDataDirectory(file),
         quiet,
-        writer
+        writer,
+        stripFromSource
       );
     } catch (error) {
       console.error(error);
@@ -571,6 +585,7 @@ export class ArticleManager extends ItemManager {
    * it is or as a copy, its rows written through `writer`. Holds its path in
    * `importing` until done, from the caller's own synchronous step, so no
    * second import of it can start.
+   * @param stripFromSource tags to take off `file` once it is copied
    * @throws whatever the import throws, its report having said nothing of it
    */
   private async importFile(
@@ -579,7 +594,8 @@ export class ArticleManager extends ItemManager {
     fixedIntervalDays: number | null,
     willCopy: boolean,
     report: ImportReport,
-    writer: RowWriter
+    writer: RowWriter,
+    stripFromSource: readonly string[] = []
   ) {
     // Read once: a rename during the import changes `file.path` in place
     const { path } = file;
@@ -599,7 +615,8 @@ export class ArticleManager extends ItemManager {
           priority,
           fixedIntervalDays,
           report,
-          writer
+          writer,
+          stripFromSource
         );
       }
       return await this.importInPlace(
@@ -1295,16 +1312,20 @@ export class ArticleManager extends ItemManager {
 
   /**
    * Copy a file to the data directory, then import the copy
+   * @param stripFromSource tags to take off `file` once the copy is the
+   *   article, so the tags that asked for the import end on the note carrying
+   *   the `ir-id` and `file` no longer asks. Only when a copy is made: a
+   *   note linked back to its own row keeps them.
    */
   private async importCopy(
     file: TFile,
     priority: number,
     fixedIntervalDays: number | null,
     report: ImportReport,
-    writer: RowWriter
+    writer: RowWriter,
+    stripFromSource: readonly string[]
   ) {
-    // check if the file is inside the plugin's data directory
-    if (file.path.startsWith(DATA_DIRECTORY)) {
+    if (inDataDirectory(file)) {
       report.refuse({
         notice: `"${file.name}" is already in the plugin data folder; canceling import`,
         reason: 'already in the plugin data folder',
@@ -1396,9 +1417,8 @@ export class ArticleManager extends ItemManager {
                 frontmatterLinks = rebased.frontmatter;
                 return rebased.text;
               },
-              frontmatter: {
-                created: new Date().toISOString(),
-              },
+              // No properties until the text is there: it opens with the
+              // note's own, which the write below then adds to
               fileName: importFileName,
               directory: Obsidian.getDirectory('article'),
               app: this.app,
@@ -1415,6 +1435,7 @@ export class ArticleManager extends ItemManager {
 
         // Tag it and create a link to the source if it doesn't exist
         const frontmatterUpdates: FrontMatterUpdates = {
+          created: new Date().toISOString(),
           'ir-id': id,
           tags: ARTICLE_TAG,
         };
@@ -1434,6 +1455,17 @@ export class ArticleManager extends ItemManager {
           (properties) =>
             applyFrontmatterLinkEdits(properties, frontmatterLinks)
         );
+
+        // The trigger tags went to the copy with the rest of the note's
+        // properties; off the note, they no longer ask for an import. Before
+        // the commit point, so rows a batch fails to write put them back
+        if (stripFromSource.length > 0) {
+          await step(
+            () =>
+              Obsidian.removeFrontMatterTags(file, stripFromSource, this.app),
+            (undo) => undo()
+          );
+        }
 
         return {
           copy,

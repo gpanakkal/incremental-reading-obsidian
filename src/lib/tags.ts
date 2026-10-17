@@ -66,3 +66,57 @@ export function matchFrontmatterTags(
   }
   return [...tags].filter((tag) => carried.has(normalizeTag(tag)));
 }
+
+/** An entry YAML leaves behind for an empty `tags:` or `- ` line. */
+const isBlank = (entry: unknown) =>
+  entry === null ||
+  entry === undefined ||
+  (typeof entry === 'string' && entry.trim() === '');
+
+// TODO: task 0146 adds `withoutTags`/`removeTags` in `item-tags.ts` for
+// un-import; whichever of the two lands second folds them into one helper
+/**
+ * Take `tags` off `frontmatter`, compared as {@link matchFrontmatterTags}
+ * compares them, from every key Obsidian reads tags from, leaving every other
+ * tag where it was.
+ *
+ * A key holding none of them is left exactly as it is. One that held any
+ * becomes the list of what is left of it, each tag as it was spelled, less
+ * its `#`, and the blank entries YAML reads as null, since a write would
+ * otherwise spell them out; a key with nothing left is dropped.
+ *
+ * Writes to `frontmatter`, so it must be one `processFrontMatter` hands out,
+ * never the metadata cache's own.
+ * @returns what each key it changed held before, to put back
+ */
+export function stripFrontmatterTags(
+  frontmatter: Record<string, unknown>,
+  tags: Iterable<string>
+): Record<string, unknown> {
+  const unwanted = new Set([...tags].map(normalizeTag));
+  const before: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(frontmatter)) {
+    if (!TAG_KEY.test(key)) continue;
+    let changed = false;
+    const kept: unknown[] = [];
+    for (const entry of Array.isArray(value) ? value : [value]) {
+      if (typeof entry !== 'string') {
+        kept.push(entry);
+        continue;
+      }
+      const written = entry.split(TAG_SEPARATORS).filter((tag) => tag !== '');
+      const left = written.filter((tag) => !unwanted.has(tag.toLowerCase()));
+      if (left.length === written.length) kept.push(entry);
+      else {
+        changed = true;
+        kept.push(...left);
+      }
+    }
+    if (!changed) continue;
+    before[key] = value;
+    const rest = kept.filter((entry) => !isBlank(entry));
+    if (rest.length === 0) delete frontmatter[key];
+    else frontmatter[key] = rest;
+  }
+  return before;
+}

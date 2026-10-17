@@ -23,6 +23,7 @@ import {
 } from './constants';
 import type { IRPluginData } from './plugin-data';
 import {
+  AUTO_IMPORT_MODE_OPTIONS,
   CONTINUED_GROUP_CLASS,
   DEFAULT_SETTINGS,
   formatPriority,
@@ -51,6 +52,9 @@ const REVIEW_TITLE_BARS = ['obsidian', 'show', 'hide'] as const;
 /** Each success notice level, as stored. */
 const SUCCESS_NOTICE_LEVELS = ['all', 'minimal', 'none'] as const;
 
+/** Each way of importing a note by its trigger tag, as stored. */
+const AUTO_IMPORT_MODES = ['inPlace', 'copy', 'inherit'] as const;
+
 /** What the success notices box says, once, above its two dropdowns. */
 const SUCCESS_NOTICES_DESC =
   'Which confirmations to show for successful actions.' +
@@ -59,7 +63,7 @@ const SUCCESS_NOTICES_DESC =
 
 /** What the auto-import box says beside its toggle, above the trigger tags. */
 const AUTO_IMPORT_DESC =
-  'Automatically import any note in-place when one of the trigger tags is' +
+  'Automatically import any note when one of the trigger tags is' +
   ' added to frontmatter. Tags in the note body are ignored. Does not affect' +
   ' notes that already have a matching tag.';
 
@@ -130,6 +134,7 @@ const settingsArb = fc.record({
     remindDueSnippets: fc.boolean(),
     autoImportOnTag: fc.boolean(),
     autoImportTags: fc.array(textArb()),
+    autoImportMode: fc.constantFrom(...AUTO_IMPORT_MODES),
     fsrsParams: fc.record({
       request_retention: fc.double(),
       maximum_interval: fc.integer(),
@@ -645,6 +650,7 @@ describe('IRSettingTab.getControlValue', () => {
           remindDueSnippets: tab.getControlValue('remindDueSnippets'),
           autoImportOnTag: tab.getControlValue('autoImportOnTag'),
           autoImportTags: tab.getControlValue('autoImportTags'),
+          autoImportMode: tab.getControlValue('autoImportMode'),
           maximumInterval: tab.getControlValue('fsrsParams.maximum_interval'),
           shortTerm: tab.getControlValue('fsrsParams.enable_short_term'),
           learningSteps: tab.getControlValue('fsrsParams.learning_steps'),
@@ -672,6 +678,7 @@ describe('IRSettingTab.getControlValue', () => {
           autoImportTags: settings.autoImportTags
             .map((tag) => `#${tag}`)
             .join(' '),
+          autoImportMode: settings.autoImportMode,
           maximumInterval: fsrsParams.maximum_interval,
           shortTerm: fsrsParams.enable_short_term,
           learningSteps: fsrsParams.learning_steps.join(', '),
@@ -736,6 +743,7 @@ describe('IRSettingTab.setControlValue', () => {
       ['remindDueArticles', fc.boolean()],
       ['remindDueSnippets', fc.boolean()],
       ['autoImportOnTag', fc.boolean()],
+      ['autoImportMode', fc.constantFrom(...AUTO_IMPORT_MODES)],
     ] as const;
     const fsrsKeys = [
       ['request_retention', fc.double()],
@@ -905,6 +913,20 @@ describe('IRSettingTab.setControlValue', () => {
     expect(Object.keys(REVIEW_TITLE_BAR_OPTIONS)).toEqual(REVIEW_TITLE_BARS);
   });
 
+  it('names every way of importing a note by tag in its dropdown', () => {
+    const [control] = declaredControls()
+      .map((row) => row.control)
+      .filter((row) => row.key === 'autoImportMode');
+
+    expect(control).toMatchObject({ type: 'dropdown' });
+    expect(control.type === 'dropdown' && control.options).toEqual({
+      inPlace: 'In place',
+      copy: 'Make a copy',
+      inherit: 'Same as manual imports',
+    });
+    expect(Object.keys(AUTO_IMPORT_MODE_OPTIONS)).toEqual(AUTO_IMPORT_MODES);
+  });
+
   it('names every success notice level in both of its dropdowns', () => {
     const controls = declaredControls()
       .map((row) => row.control)
@@ -1056,6 +1078,15 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         name: 'Trigger tags',
         desc: undefined,
         control: { type: 'text', key: 'autoImportTags', validate },
+      },
+      {
+        heading: 'Imports',
+        name: 'Where to import tagged notes',
+        control: {
+          type: 'dropdown',
+          key: 'autoImportMode',
+          options: AUTO_IMPORT_MODE_OPTIONS,
+        },
       },
       {
         heading: 'Notifications and reminders',
@@ -1253,13 +1284,21 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     );
   });
 
-  it('draws importing by tag as one box: its toggle beside its description, then the trigger tags', () => {
+  it('draws importing by tag as one box: its toggle beside its description, then the trigger tags and where to import', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
     const boxes = tab
       .getSettingDefinitions()
       .filter((item) => classesOf(item).includes(SETTING_BOX_CLASS));
+    // Found by its head, not its place: other boxes may come before it
+    const box = boxes.find(
+      (item) =>
+        'items' in item &&
+        item.items?.some(
+          (row) => 'name' in row && row.name === 'Auto-import notes by tag'
+        )
+    );
 
-    expect(boxes[0]).toStrictEqual({
+    expect(box).toStrictEqual({
       type: 'group',
       cls: `${SETTING_BOX_CLASS} ${CONTINUED_GROUP_CLASS}`,
       items: [
@@ -1274,6 +1313,14 @@ describe('IRSettingTab.getSettingDefinitions', () => {
             type: 'text',
             key: 'autoImportTags',
             validate: expect.any(Function) as unknown,
+          },
+        },
+        {
+          name: 'Where to import tagged notes',
+          control: {
+            type: 'dropdown',
+            key: 'autoImportMode',
+            options: AUTO_IMPORT_MODE_OPTIONS,
           },
         },
       ],

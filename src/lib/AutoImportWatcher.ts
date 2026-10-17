@@ -7,6 +7,7 @@ import {
   IMPORT_BLOCKED_TAGS,
 } from './constants';
 import { notify } from './notices';
+import type { AutoImportMode } from './settings';
 import { matchFrontmatterTags } from './tags';
 
 /** What decides whether, and how, notes are imported. Read afresh each time. */
@@ -17,6 +18,8 @@ export interface AutoImportConfig {
   triggerTags: readonly string[];
   /** The priority an imported note starts with. */
   priority: number;
+  /** Whether a note is imported where it is or as a copy, for `importMany`. */
+  mode: AutoImportMode;
 }
 
 /** A note to import, with the trigger tags it carried when it was checked. */

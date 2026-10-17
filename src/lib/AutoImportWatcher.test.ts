@@ -25,6 +25,7 @@ import {
   CARD_TAG,
   SNIPPET_TAG,
 } from './constants';
+import { matchFrontmatterTags, stripFrontmatterTags } from './tags';
 
 // #region HELPERS
 
@@ -105,20 +106,53 @@ function makeImporter(
   );
 }
 
+/**
+ * Imports as the plugin does in copy mode: a copy of each note is made under
+ * `copies/`, carrying its frontmatter, with an `ir-id` a row holds and the
+ * article tag, and the note loses the trigger tags it was imported by.
+ */
+function makeCopyImporter(vault: Vault) {
+  return vi.fn(
+    (entries: readonly AutoImportEntry[], _config: AutoImportConfig) =>
+      Promise.resolve(
+        entries.map(({ file, matchedTags }): BulkOutcome => {
+          const frontmatter: Record<string, unknown> =
+            vault.cacheOf(file)?.frontmatter ?? {};
+          const path = `copies/${file.path}`;
+          const id = `id-${path}`;
+          vault.rows.add(id);
+          vault.add(path, {
+            ...frontmatter,
+            'ir-id': id,
+            tags: [...[frontmatter.tags].flat(), 'ir-article'],
+          });
+          const left = structuredClone(frontmatter);
+          stripFrontmatterTags(left, matchedTags);
+          vault.edit(file, left);
+          return { file, status: 'imported' };
+        })
+      )
+  );
+}
+
 /** Answers whether `vault`'s database holds a row with the id asked of it. */
 const makeRowLookup = (vault: Vault) =>
   vi.fn((id: string) => Promise.resolve(vault.rows.has(id)));
 
 /** A started watcher over a fresh vault, with the config it reads changeable. */
-function makeWatcher(config: Partial<AutoImportConfig> = {}) {
+function makeWatcher(
+  config: Partial<AutoImportConfig> = {},
+  makeImport: typeof makeImporter = makeImporter
+) {
   const vault = makeVault();
   let current: AutoImportConfig = {
     enabled: true,
     triggerTags: [TRIGGER],
     priority: 30,
+    mode: 'inPlace',
     ...config,
   };
-  const importMany = makeImporter(vault);
+  const importMany = makeImport(vault);
   const hasRow = makeRowLookup(vault);
   const watcher = new AutoImportWatcher({
     app: vault.app,
@@ -426,7 +460,12 @@ describe('AutoImportWatcher.consider', () => {
     const importMany = makeImporter(vault);
     const watcher = new AutoImportWatcher({
       app: vault.app,
-      getConfig: () => ({ enabled: true, triggerTags: [TRIGGER], priority: 1 }),
+      getConfig: () => ({
+        enabled: true,
+        triggerTags: [TRIGGER],
+        priority: 1,
+        mode: 'inPlace',
+      }),
       importMany,
       hasRow: makeRowLookup(vault),
     });
@@ -551,11 +590,14 @@ describe('AutoImportWatcher batching', () => {
       priority: 10,
     });
     change(vault.add('a.md', { tags: TRIGGER }));
-    configure({ priority: 42 });
+    configure({ priority: 42, mode: 'copy' });
 
     await settle();
 
-    expect(importMany.mock.calls[0][1]).toMatchObject({ priority: 42 });
+    expect(importMany.mock.calls[0][1]).toMatchObject({
+      priority: 42,
+      mode: 'copy',
+    });
   });
 });
 
@@ -746,7 +788,12 @@ describe('AutoImportWatcher failures', () => {
     });
     const watcher = new AutoImportWatcher({
       app: vault.app,
-      getConfig: () => ({ enabled: true, triggerTags: [TRIGGER], priority: 1 }),
+      getConfig: () => ({
+        enabled: true,
+        triggerTags: [TRIGGER],
+        priority: 1,
+        mode: 'inPlace',
+      }),
       importMany,
       hasRow: makeRowLookup(vault),
     });
@@ -796,6 +843,7 @@ describe('AutoImportWatcher notices', () => {
               enabled: true,
               triggerTags: [TRIGGER],
               priority: 1,
+              mode: 'inPlace',
             }),
             importMany,
             hasRow: makeRowLookup(vault),
@@ -837,6 +885,7 @@ describe('AutoImportWatcher notices', () => {
           enabled: true,
           triggerTags: [TRIGGER],
           priority: 1,
+          mode: 'inPlace',
         }),
         importMany,
         hasRow: makeRowLookup(vault),
@@ -866,7 +915,12 @@ describe('AutoImportWatcher notices', () => {
     );
     const watcher = new AutoImportWatcher({
       app: vault.app,
-      getConfig: () => ({ enabled: true, triggerTags: [TRIGGER], priority: 1 }),
+      getConfig: () => ({
+        enabled: true,
+        triggerTags: [TRIGGER],
+        priority: 1,
+        mode: 'inPlace',
+      }),
       importMany,
       hasRow: makeRowLookup(vault),
     });
@@ -884,5 +938,85 @@ describe('AutoImportWatcher notices', () => {
 
     expect(summary.hides).toBe(1);
     expect(failures.hides).toBe(0);
+  });
+});
+
+describe('AutoImportWatcher in copy mode', () => {
+  it('hands on only the trigger tags a note carries, for a copy import to take off it', async () => {
+    const { vault, change, importMany } = makeWatcher(
+      { triggerTags: [TRIGGER, 'clipped'], mode: 'copy' },
+      makeCopyImporter
+    );
+    const file = vault.add('clip.md', { tags: ['#Clipped', 'other'] });
+    change(file);
+
+    await settle();
+
+    expect(importMany.mock.calls).toEqual([
+      [
+        [{ file, matchedTags: ['clipped'] }],
+        expect.objectContaining({ mode: 'copy' }),
+      ],
+    ]);
+    expect(vault.cacheOf(file)).toEqual({ frontmatter: { tags: ['other'] } });
+  });
+
+  it('never imports again after a copy import, however often the note or its copy changes', async () => {
+    const triggersArb = fc.subarray([TRIGGER, 'clipped', 'to-read'], {
+      minLength: 1,
+    });
+    const tagsArb = fc.subarray([TRIGGER, '#Clipped', 'TO-READ', 'Other'], {
+      minLength: 1,
+    });
+    await fc.assert(
+      fc.asyncProperty(
+        triggersArb,
+        tagsArb,
+        fc.array(fc.boolean(), { maxLength: 6 }),
+        async (triggerTags, tags, changes) => {
+          vi.clearAllTimers();
+          const { vault, change, importMany, hasRow } = makeWatcher(
+            { triggerTags, mode: 'copy' },
+            makeCopyImporter
+          );
+          const original = vault.add('clip.md', { tags, title: 'Clip' });
+          const matched = matchFrontmatterTags({ tags }, triggerTags);
+          change(original);
+          await settle();
+          const copy = vault.app.vault.getFileByPath('copies/clip.md');
+
+          // Each change the import made, and any more, as Obsidian tells of
+          for (const ofCopy of [false, true, ...changes]) {
+            const target = ofCopy ? copy : original;
+            if (target) change(target);
+            await settle();
+          }
+
+          expect(importMany).toHaveBeenCalledTimes(matched.length > 0 ? 1 : 0);
+          if (matched.length === 0) return;
+          expect(importMany.mock.calls[0][0]).toEqual([
+            { file: original, matchedTags: matched },
+          ]);
+          // The note keeps every tag but those, the copy carries them
+          const kept = tags.filter(
+            (tag) => matchFrontmatterTags({ tags: [tag] }, matched).length === 0
+          );
+          expect(vault.cacheOf(original)).toEqual({
+            frontmatter: {
+              title: 'Clip',
+              ...(kept.length > 0 && { tags: kept }),
+            },
+          });
+          expect(
+            matchFrontmatterTags(vault.cacheOf(copy!)?.frontmatter, triggerTags)
+          ).toEqual(matched);
+          // Only the copy's ir-id is ever looked up
+          expect(new Set(hasRow.mock.calls.map(([id]) => id))).toEqual(
+            new Set(['id-copies/clip.md'])
+          );
+        }
+      ),
+      { numRuns: 60 }
+    );
   });
 });

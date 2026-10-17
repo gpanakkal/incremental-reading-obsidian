@@ -866,13 +866,10 @@ export default class IncrementalReadingPlugin extends Plugin {
         enabled: this.settings.autoImportOnTag,
         triggerTags: this.settings.autoImportTags,
         priority: this.settings.defaultPriority,
+        mode: this.settings.autoImportMode,
       }),
-      importMany: (entries, { priority }) =>
-        this.reviewManager.importArticles(entries, {
-          priority,
-          fixedIntervalDays: null,
-          makeCopy: false,
-        }),
+      importMany: (entries, { priority, mode }) =>
+        this.reviewManager.importTaggedNotes(entries, { priority, mode }),
       hasRow: (id) => this.reviewManager.hasItemRow(id),
     });
     this.autoImportWatcher = watcher;

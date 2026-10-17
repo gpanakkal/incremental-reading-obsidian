@@ -1,6 +1,7 @@
 import type { App } from 'obsidian';
 import {
   DEFAULT_SETTINGS,
+  isAutoImportMode,
   isReviewTitleBar,
   isSuccessNoticeLevel,
   type IRPluginSettings,
@@ -84,6 +85,10 @@ export function parsePluginData(raw: unknown): IRPluginData {
           .join(',')
       )
     : [...DEFAULT_SETTINGS.autoImportTags];
+  // One the dropdown doesn't offer would show as none of its choices
+  if (!isAutoImportMode(settings.autoImportMode)) {
+    settings.autoImportMode = DEFAULT_SETTINGS.autoImportMode;
+  }
 
   return {
     settings,
