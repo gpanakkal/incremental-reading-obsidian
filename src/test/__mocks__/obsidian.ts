@@ -189,8 +189,171 @@ export class PluginSettingTab {
    */
   containerEl: HTMLElement | undefined =
     typeof document === 'undefined' ? undefined : document.createElement('div');
+
+  /** Re-applies `visible`/`disabled` predicates in Obsidian; nothing here. */
+  refreshDomState() {}
 }
-export class Setting {}
+/**
+ * A row as Obsidian 1.13's `Setting` builds one (read from obsidian.asar):
+ * `.setting-item` holding `.setting-item-info` (name, description) and
+ * `.setting-item-control`, which each `add*` appends its component to in call
+ * order. Leaves out the Enter-blurs listener `addText` adds without a physical
+ * keyboard.
+ */
+export class Setting {
+  readonly settingEl: HTMLElement;
+  readonly infoEl: HTMLElement;
+  readonly nameEl: HTMLElement;
+  readonly descEl: HTMLElement;
+  readonly controlEl: HTMLElement;
+  errorEl: HTMLElement | null = null;
+
+  constructor(containerEl: HTMLElement) {
+    const div = (parent: HTMLElement, cls: string) => {
+      const el = parent.appendChild(document.createElement('div'));
+      el.className = cls;
+      return el;
+    };
+    this.settingEl = div(containerEl, 'setting-item');
+    this.settingEl.tabIndex = -1;
+    this.infoEl = div(this.settingEl, 'setting-item-info');
+    this.nameEl = div(this.infoEl, 'setting-item-name');
+    this.descEl = div(this.infoEl, 'setting-item-description');
+    this.controlEl = div(this.settingEl, 'setting-item-control');
+  }
+
+  setName(name: string) {
+    this.nameEl.textContent = name;
+    return this;
+  }
+  setDesc(desc: string) {
+    this.descEl.textContent = desc;
+    return this;
+  }
+  /**
+   * As Obsidian's: shows the message in a `.setting-item-error` appended to
+   * the control on first use and marks the row `is-invalid`; `null` hides it.
+   */
+  setErrorMessage(message: string | null) {
+    if (message) {
+      if (!this.errorEl) {
+        this.errorEl = this.controlEl.appendChild(
+          document.createElement('div')
+        );
+        this.errorEl.className = 'setting-item-error';
+      }
+      this.errorEl.textContent = message;
+      this.errorEl.style.display = '';
+      this.settingEl.classList.add('is-invalid');
+    } else {
+      if (this.errorEl) this.errorEl.style.display = 'none';
+      this.settingEl.classList.remove('is-invalid');
+    }
+    return this;
+  }
+  addExtraButton(cb: (component: ExtraButtonComponent) => unknown) {
+    cb(new ExtraButtonComponent(this.controlEl));
+    return this;
+  }
+  addText(cb: (component: TextComponent) => unknown) {
+    cb(new TextComponent(this.controlEl));
+    return this;
+  }
+  addComponent(cb: (el: HTMLElement) => unknown) {
+    cb(this.controlEl);
+    return this;
+  }
+}
+/**
+ * `div.clickable-icon.extra-setting-button`, focusable, drawn with a gear until
+ * `setIcon`, as Obsidian's is. A click, Enter or Space runs the `onClick`
+ * callback unless `setDisabled(true)`; an `aria-disabled` attribute doesn't
+ * stop it.
+ */
+export class ExtraButtonComponent {
+  readonly extraSettingsEl: HTMLElement;
+  disabled = false;
+  private callback: (() => unknown) | undefined;
+
+  constructor(containerEl: HTMLElement) {
+    const el = (this.extraSettingsEl = containerEl.appendChild(
+      document.createElement('div')
+    ));
+    el.className = 'clickable-icon extra-setting-button';
+    el.tabIndex = 0;
+    setIcon(el, 'lucide-settings');
+    const run = () => {
+      if (!this.disabled) this.callback?.();
+    };
+    el.addEventListener('click', (event) => {
+      event.preventDefault();
+      run();
+    });
+    el.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        run();
+      }
+    });
+  }
+
+  setDisabled(disabled: boolean) {
+    this.disabled = disabled;
+    this.extraSettingsEl.classList.toggle('is-disabled', disabled);
+    return this;
+  }
+  setIcon(icon: string) {
+    setIcon(this.extraSettingsEl, icon);
+    return this;
+  }
+  /** Obsidian's sets `aria-label`, which its themed tooltip reads. */
+  setTooltip(tooltip: string) {
+    this.extraSettingsEl.setAttribute('aria-label', tooltip);
+    return this;
+  }
+  onClick(callback: () => unknown) {
+    this.callback = callback;
+    return this;
+  }
+}
+/**
+ * An `input[type=text]` appended to its container, `spellcheck="false"`,
+ * calling `onChange` with its value on each `input` event, as Obsidian's does.
+ * `setValue` fires nothing.
+ */
+export class TextComponent {
+  readonly inputEl: HTMLInputElement;
+  private callback: ((value: string) => unknown) | undefined;
+
+  constructor(containerEl: HTMLElement) {
+    this.inputEl = containerEl.appendChild(document.createElement('input'));
+    this.inputEl.type = 'text';
+    this.inputEl.setAttribute('spellcheck', 'false');
+    this.inputEl.addEventListener('input', () =>
+      this.callback?.(this.inputEl.value)
+    );
+  }
+
+  getValue() {
+    return this.inputEl.value;
+  }
+  setValue(value: string) {
+    this.inputEl.value = value;
+    return this;
+  }
+  setPlaceholder(placeholder: string) {
+    this.inputEl.setAttribute('placeholder', placeholder);
+    return this;
+  }
+  setDisabled(disabled: boolean) {
+    this.inputEl.disabled = disabled;
+    return this;
+  }
+  onChange(callback: (value: string) => unknown) {
+    this.callback = callback;
+    return this;
+  }
+}
 export class Modal {
   app: unknown;
   /**

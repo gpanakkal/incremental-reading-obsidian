@@ -6,13 +6,15 @@ import { resolve } from 'node:path';
 import type {
   App,
   SettingControl as DeclaredControl,
+  SettingDefinitionGroup,
   SettingDefinitionItem,
+  SettingNumberControl,
 } from 'obsidian';
 import type { StepUnit } from 'ts-fsrs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // The mock is what `obsidian` resolves to at runtime (see vitest.config.ts);
 // imported by path for its writable `Platform`.
-import { Platform } from '#/test/__mocks__/obsidian';
+import { Platform, Setting } from '#/test/__mocks__/obsidian';
 import {
   AUTO_IMPORT_TAG,
   CARD_TAG,
@@ -26,6 +28,7 @@ import {
   AUTO_IMPORT_MODE_OPTIONS,
   CONTINUED_GROUP_CLASS,
   DEFAULT_SETTINGS,
+  drawResettableRows,
   formatPriority,
   formatRetention,
   formatRolloverHour,
@@ -245,7 +248,7 @@ const declaredRows = (items: SettingDefinitionItem[]): ControlDefinition[] =>
  */
 const declaredControls = () =>
   declaredRows(
-    makeTab(structuredClone(DEFAULT_SETTINGS)).tab.getSettingDefinitions()
+    makeTab(structuredClone(DEFAULT_SETTINGS)).tab.declareSettings()
   );
 
 /** A tag the trigger tags field can't take, written any way it reads as. */
@@ -461,6 +464,112 @@ const boxRows = (box: SettingBox) => [
 const classesOf = (group: SettingDefinitionItem) =>
   ('cls' in group ? (group.cls ?? '') : '').split(' ').filter(Boolean);
 
+/**
+ * The declared rows the tab draws itself, to give them a reset button: number
+ * and text controls with a default.
+ */
+const resettableRows = () =>
+  declaredControls().filter(
+    ({ control }) =>
+      (control.type === 'number' || control.type === 'text') &&
+      control.defaultValue !== undefined
+  );
+
+/** The control types Obsidian (1.13) draws a reset button for itself. */
+const OBSIDIAN_RESET_TYPES: ReadonlySet<string> = new Set(['slider', 'color']);
+
+/** The default a row's field shows, as its control declares it. */
+const defaultText = ({ control }: ControlDefinition) =>
+  String(control.defaultValue);
+
+/**
+ * Lets every pending check and save run: each is a short chain of promises
+ * that settle at once, so microtasks are enough, and far quicker than a timer.
+ */
+async function settle() {
+  for (let tick = 0; tick < 20; tick++) await Promise.resolve();
+}
+
+/**
+ * The row named `name` as `tab` hands it to Obsidian, drawn as Obsidian draws a
+ * `render` row: into a new `Setting` in the tab's container, already named.
+ * Fails if the tab doesn't draw that row itself.
+ */
+function drawRow(tab: IRSettingTab, name: string) {
+  const row = tab
+    .getSettingDefinitions()
+    .flatMap((item) => ('items' in item ? (item.items ?? []) : []))
+    .find((item) => 'name' in item && item.name === name);
+  if (!row || 'type' in row || !row.render) {
+    throw new Error(`The tab doesn't draw ${name} itself`);
+  }
+  const setting = new Setting(tab.containerEl).setName(name);
+  row.render(setting as never, {} as never);
+  const field = setting.controlEl.querySelector('input');
+  const reset = setting.controlEl.querySelector('.extra-setting-button');
+  if (!field || !(reset instanceof HTMLElement)) {
+    throw new Error(`${name} has no field or reset button`);
+  }
+  return { setting, field, reset };
+}
+
+/** Type `typed` into a drawn text field, as the user would. */
+function typeInto(field: HTMLInputElement, typed: string) {
+  field.value = typed;
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/** Anything typed into a number field: numbers of every shape, or not. */
+const typedNumberArb = fc.oneof(
+  fc.integer().map(String),
+  fc.double({ noNaN: true, noDefaultInfinity: true }).map(String),
+  fc.constantFrom('', '0', '1', '2', '-3', '1.5', '36500', '1e3'),
+  textArb()
+);
+
+/** What the user might type into a drawn row's field. */
+const userEditArb = (control: DeclaredControl) =>
+  control.type === 'number' ? typedNumberArb : typedFieldArb;
+
+/**
+ * Change a drawn row's field as the user would: type into a text field, or
+ * type into a number field and leave it.
+ */
+function editField(
+  control: DeclaredControl,
+  field: HTMLInputElement,
+  typed: string
+) {
+  if (control.type === 'number') {
+    field.value = typed;
+    field.dispatchEvent(new FocusEvent('blur'));
+  } else {
+    typeInto(field, typed);
+  }
+}
+
+/**
+ * `control` drawn as `drawResettableRows` hands it to Obsidian, in a row named
+ * `name` in the document, bound through `host`.
+ */
+function drawControl(
+  control: DeclaredControl,
+  host: Parameters<typeof drawResettableRows>[1]
+) {
+  const [group] = drawResettableRows(
+    [{ type: 'group', items: [{ name: 'Drawn', control }] }],
+    host
+  );
+  const [row] = group.items ?? [];
+  if ('type' in row || !row.render) throw new Error('Not drawn');
+  const setting = new Setting(
+    document.body.appendChild(document.createElement('div'))
+  );
+  row.render(setting as never, {} as never);
+  const field = setting.controlEl.querySelector('input');
+  if (!field) throw new Error('No field');
+  return { row, setting, field };
+}
 // #endregion
 
 describe('parseSteps', () => {
@@ -843,7 +952,7 @@ describe('IRSettingTab.setControlValue', () => {
     await fc.assert(
       fc.asyncProperty(settingsArb, editsArb(), async (generated, edits) => {
         const { tab, plugin, saved } = makeTab(buildSettings(generated));
-        const rows = declaredRows(tab.getSettingDefinitions());
+        const rows = declaredRows(tab.declareSettings());
 
         for (const [i, edit] of edits.entries()) {
           await tab.setControlValue(rows[edit.row].control.key, edit.value);
@@ -887,7 +996,7 @@ describe('IRSettingTab.setControlValue', () => {
     await fc.assert(
       fc.asyncProperty(settingsArb, editsArb(), async (generated, edits) => {
         const { tab, plugin } = makeTab(buildSettings(generated));
-        const rows = declaredRows(tab.getSettingDefinitions());
+        const rows = declaredRows(tab.declareSettings());
         const others = edits.filter(
           (edit) => rows[edit.row].control.key !== 'reviewTitleBar'
         );
@@ -951,7 +1060,7 @@ describe('IRSettingTab.setControlValue', () => {
     await fc.assert(
       fc.asyncProperty(settingsArb, editsArb(), async (generated, edits) => {
         const { tab, plugin } = makeTab(buildSettings(generated));
-        const rows = declaredRows(tab.getSettingDefinitions());
+        const rows = declaredRows(tab.declareSettings());
         const others = edits.filter(
           (edit) => rows[edit.row].control.key !== 'showAdvancedImportCommands'
         );
@@ -1000,7 +1109,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     ];
     try {
       const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
-      const definitions = tab.getSettingDefinitions();
+      const definitions = tab.declareSettings();
       for (const platform of platforms) {
         Object.assign(Platform, platform, { isDesktop: !platform.isMobile });
         const visible = definitions.flatMap((group) =>
@@ -1034,7 +1143,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     const disabled = expect.any(Function) as unknown;
     const toggle = (key: string) => ({ type: 'toggle', key });
 
-    expect(declaredSettingRows(tab.getSettingDefinitions())).toEqual([
+    expect(declaredSettingRows(tab.declareSettings())).toEqual([
       {
         heading: 'Imports',
         name: 'Default article priority',
@@ -1077,7 +1186,12 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         heading: 'Imports',
         name: 'Trigger tags',
         desc: undefined,
-        control: { type: 'text', key: 'autoImportTags', validate },
+        control: {
+          type: 'text',
+          key: 'autoImportTags',
+          defaultValue: '#ir-import',
+          validate,
+        },
       },
       {
         heading: 'Imports',
@@ -1138,7 +1252,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
       {
         heading: 'Reviews',
         name: 'End-of-day shift',
-        desc: 'Adjust the end time of the review day, in hours from midnight. Set this to the time you are most likely to be asleep. Default: 4 AM.',
+        desc: 'Adjust the end time of the review day. Set this to the time you are most likely to be asleep.',
         control: {
           type: 'slider',
           key: 'dayRolloverOffset',
@@ -1216,7 +1330,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
       {
         heading: 'Spaced repetition',
         name: 'Maximum review interval',
-        desc: 'Soft ceiling on the time between card reviews. Fuzzing can exceed this limit slightly. Default: 36,500 days.',
+        desc: 'Ceiling on the number of days between card reviews.',
         control: {
           type: 'number',
           key: 'fsrsParams.maximum_interval',
@@ -1235,16 +1349,22 @@ describe('IRSettingTab.getSettingDefinitions', () => {
       {
         heading: 'Spaced repetition',
         name: 'Learning steps',
-        desc: 'FSRS learning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas. Default: 1m, 10m',
-        control: { type: 'text', key: 'fsrsParams.learning_steps', validate },
+        desc: 'FSRS learning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas.',
+        control: {
+          type: 'text',
+          key: 'fsrsParams.learning_steps',
+          defaultValue: '1m, 10m',
+          validate,
+        },
       },
       {
         heading: 'Spaced repetition',
         name: 'Relearning steps',
-        desc: 'FSRS relearning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas. Default: 10m',
+        desc: 'FSRS relearning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas.',
         control: {
           type: 'text',
           key: 'fsrsParams.relearning_steps',
+          defaultValue: '10m',
           validate,
         },
       },
@@ -1258,7 +1378,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         fc.array(fc.boolean(), { maxLength: 4 }),
         async (generated, flips) => {
           const { tab } = makeTab(buildSettings(generated));
-          const locks = declaredRows(tab.getSettingDefinitions()).filter(
+          const locks = declaredRows(tab.declareSettings()).filter(
             ({ control }) => control.disabled !== undefined
           );
           const lockedNow = () =>
@@ -1287,7 +1407,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
   it('draws importing by tag as one box: its toggle beside its description, then the trigger tags and where to import', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
     const boxes = tab
-      .getSettingDefinitions()
+      .declareSettings()
       .filter((item) => classesOf(item).includes(SETTING_BOX_CLASS));
     // Found by its head, not its place: other boxes may come before it
     const box = boxes.find(
@@ -1312,6 +1432,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
           control: {
             type: 'text',
             key: 'autoImportTags',
+            defaultValue: '#ir-import',
             validate: expect.any(Function) as unknown,
           },
         },
@@ -1330,7 +1451,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
   it('draws the success notices as one box: their description once, then a dropdown for each place', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
     const boxes = tab
-      .getSettingDefinitions()
+      .declareSettings()
       .filter((item) => classesOf(item).includes(SETTING_BOX_CLASS));
 
     expect(boxes.slice(1)).toEqual([
@@ -1392,7 +1513,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
 
   it('shows each slider value in the units its description uses', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
-    const sliders = declaredRows(tab.getSettingDefinitions())
+    const sliders = declaredRows(tab.declareSettings())
       .map(({ control }) => control)
       .filter((control) => control.type === 'slider');
 
@@ -1407,7 +1528,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
 
   it('gives each setting its own control', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
-    const keys = declaredRows(tab.getSettingDefinitions()).map(
+    const keys = declaredRows(tab.declareSettings()).map(
       ({ control }) => control.key
     );
 
@@ -1419,15 +1540,18 @@ describe('IRSettingTab.getSettingDefinitions', () => {
 
   it('resets each control to the value default settings show', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
-    const withDefaults = declaredRows(tab.getSettingDefinitions()).filter(
+    const withDefaults = declaredRows(tab.declareSettings()).filter(
       ({ control }) => control.defaultValue !== undefined
     );
 
     expect(withDefaults.map(({ control }) => control.key)).toEqual([
       'defaultPriority',
+      'autoImportTags',
       'dayRolloverOffset',
       'fsrsParams.request_retention',
       'fsrsParams.maximum_interval',
+      'fsrsParams.learning_steps',
+      'fsrsParams.relearning_steps',
     ]);
     for (const { control } of withDefaults) {
       expect(control.defaultValue).toBe(tab.getControlValue(control.key));
@@ -1436,7 +1560,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
 
   it('accepts only well-formed steps', async () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
-    const stepControls = declaredRows(tab.getSettingDefinitions())
+    const stepControls = declaredRows(tab.declareSettings())
       .map(({ control }) => control)
       .filter((control) => control.type === 'text')
       .filter((control) => control.key.startsWith('fsrsParams.'));
@@ -1470,7 +1594,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         async (generated, typed) => {
           const settings = buildSettings(generated);
           const { tab } = makeTab(settings);
-          const [control] = declaredRows(tab.getSettingDefinitions())
+          const [control] = declaredRows(tab.declareSettings())
             .map((row) => row.control)
             .filter((row) => row.key === 'autoImportTags');
 
@@ -1495,7 +1619,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
   it('checks for an empty list of trigger tags against the toggle as it is when the field is checked', async () => {
     const settings = structuredClone(DEFAULT_SETTINGS);
     const { tab } = makeTab(settings);
-    const [control] = declaredRows(tab.getSettingDefinitions())
+    const [control] = declaredRows(tab.declareSettings())
       .map((row) => row.control)
       .filter((row) => row.key === 'autoImportTags');
 
@@ -1510,7 +1634,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
 
   it('accepts only a whole number of days, at least one, as the maximum interval', async () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
-    const [control] = declaredRows(tab.getSettingDefinitions())
+    const [control] = declaredRows(tab.declareSettings())
       .map((row) => row.control)
       .filter((row) => row.type === 'number');
 
@@ -1530,6 +1654,543 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         }
       })
     );
+  });
+});
+
+describe('IRSettingTab reset buttons', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.replaceChildren();
+  });
+
+  it('draws each number and text setting with a default itself, and hands every other row to Obsidian as declared', () => {
+    const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
+    const drawn = new Set(resettableRows().map(({ name }) => name));
+
+    expect([...drawn]).toEqual([
+      'Trigger tags',
+      'Maximum review interval',
+      'Learning steps',
+      'Relearning steps',
+    ]);
+    // the same rows both times, so their functions compare equal
+    const declared = tab.declareSettings();
+    vi.spyOn(tab, 'declareSettings').mockReturnValue(declared);
+    expect(tab.getSettingDefinitions()).toEqual(
+      declared.map((group) => ({
+        ...group,
+        items: group.items?.map((row) => {
+          if (!drawn.has(row.name) || !('control' in row)) return row;
+          const { control: _control, ...rest } = row;
+          return { ...rest, render: expect.any(Function) as unknown };
+        }),
+      }))
+    );
+  });
+
+  it("puts a reset button before each drawn field, as Obsidian puts a slider's", () => {
+    for (const row of resettableRows()) {
+      const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
+      const { setting, field, reset } = drawRow(tab, row.name);
+
+      expect([...setting.controlEl.children]).toEqual([reset, field]);
+      expect(reset.className).toBe('clickable-icon extra-setting-button');
+      expect(reset.querySelector('svg')?.classList).toContain(
+        'lucide-rotate-ccw'
+      );
+      expect(reset.getAttribute('aria-label')).toBe('Restore default');
+      expect(field.type).toBe(row.control.type);
+    }
+  });
+
+  it('restores a changed setting to its default, saving it once and clearing any error', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        settingsArb,
+        fc.constantFrom(...resettableRows()).chain((row) =>
+          fc.record({
+            row: fc.constant(row),
+            typed: fc.option(userEditArb(row.control)),
+          })
+        ),
+        async (generated, { row, typed }) => {
+          const { tab, plugin } = makeTab(buildSettings(generated));
+          const { setting, field, reset } = drawRow(tab, row.name);
+          // as the field holds it: an input drops line breaks
+          expect(field.value).toBe(
+            String(tab.getControlValue(row.control.key)).replace(/[\r\n]/g, '')
+          );
+          if (typed !== null) editField(row.control, field, typed);
+          await settle();
+          fc.pre(field.value !== defaultText(row));
+          plugin.saveSettings.mockClear();
+
+          expect(reset.getAttribute('aria-disabled')).toBe('false');
+          reset.click();
+          await settle();
+
+          expect(field.value).toBe(defaultText(row));
+          expect(tab.getControlValue(row.control.key)).toBe(
+            row.control.defaultValue
+          );
+          expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
+          expect(setting.settingEl.classList).not.toContain('is-invalid');
+          expect(reset.getAttribute('aria-disabled')).toBe('true');
+        }
+      )
+    );
+  });
+
+  it("does nothing at the default, where its button is marked disabled as a slider's is", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc
+          .constantFrom(...resettableRows())
+          .chain((row) =>
+            fc.record({ row: fc.constant(row), typed: typedFieldArb })
+          ),
+        async ({ row, typed }) => {
+          const { tab, plugin } = makeTab(structuredClone(DEFAULT_SETTINGS));
+          const { field, reset } = drawRow(tab, row.name);
+
+          expect(reset.getAttribute('aria-disabled')).toBe('true');
+          reset.click();
+          await settle();
+          expect(plugin.saveSettings).not.toHaveBeenCalled();
+          expect(field.value).toBe(defaultText(row));
+
+          // follows the field as it is typed in, before anything is saved
+          field.value = typed;
+          field.dispatchEvent(new Event('input'));
+          expect(reset.getAttribute('aria-disabled')).toBe(
+            String(field.value === defaultText(row))
+          );
+          field.value = defaultText(row);
+          field.dispatchEvent(new Event('input'));
+          expect(reset.getAttribute('aria-disabled')).toBe('true');
+        }
+      )
+    );
+  });
+
+  it('saves a drawn text field on each keystroke, as Obsidian saves its own, unless its check fails', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        settingsArb,
+        fc.constantFrom(
+          ...resettableRows().filter(({ control }) => control.type === 'text')
+        ),
+        typedFieldArb,
+        async (generated, row, typed) => {
+          const settings = buildSettings(generated);
+          const { tab, plugin } = makeTab(settings);
+          const { setting, field } = drawRow(tab, row.name);
+          await settle();
+          const before = structuredClone(settings);
+          plugin.saveSettings.mockClear();
+
+          typeInto(field, typed);
+          // as the field holds it: an input drops line breaks
+          const held = field.value;
+          await settle();
+
+          // this tab's, which reads this tab's settings
+          const [{ control }] = declaredRows(tab.declareSettings()).filter(
+            ({ name }) => name === row.name
+          );
+          const problem = await control.validate?.(held as never);
+          const errorEl = setting.controlEl.querySelector(
+            '.setting-item-error'
+          );
+          if (problem) {
+            expect(setting.settingEl.classList).toContain('is-invalid');
+            expect(errorEl?.textContent).toBe(problem);
+            expect(plugin.saveSettings).not.toHaveBeenCalled();
+            expect(settings).toEqual(before);
+          } else {
+            const expected = makeTab(before);
+            await expected.tab.setControlValue(row.control.key, held);
+            expect(setting.settingEl.classList).not.toContain('is-invalid');
+            expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
+            expect(settings).toEqual(expected.plugin.settings);
+          }
+        }
+      )
+    );
+  });
+
+  it('saves a drawn number field once it is entered or left, as Obsidian saves its own: blank as the default, never below the minimum', async () => {
+    const [row] = resettableRows().filter(
+      ({ control }) => control.type === 'number'
+    );
+    await fc.assert(
+      fc.asyncProperty(typedNumberArb, commitArb, async (typed, commit) => {
+        const { tab } = makeAttachedTab();
+        const { setting, field } = drawRow(tab, row.name);
+        const before = tab.getControlValue(row.control.key);
+
+        // what the field holds of it: a number input drops what isn't a number
+        field.value = typed;
+        const shown = field.value;
+        commitField(field, commit);
+        await settle();
+
+        const days = parseFloat(shown);
+        const errorEl = setting.controlEl.querySelector('.setting-item-error');
+        const problem =
+          shown === ''
+            ? undefined
+            : days < 1
+              ? 'Value must be at least 1'
+              : await row.control.validate?.(days as never);
+        // Enter leaves the field once it is saved; Obsidian's check is no
+        // part of that
+        if (commit === 'enter') {
+          expect(document.activeElement === field).toBe(
+            shown !== '' && days < 1
+          );
+        }
+        if (problem) {
+          expect(errorEl?.textContent).toBe(problem);
+          expect(setting.settingEl.classList).toContain('is-invalid');
+          expect(tab.getControlValue(row.control.key)).toBe(before);
+        } else {
+          expect(setting.settingEl.classList).not.toContain('is-invalid');
+          expect(tab.getControlValue(row.control.key)).toBe(
+            shown === '' ? row.control.defaultValue : days
+          );
+        }
+      })
+    );
+  });
+
+  it('puts a drawn number field back as last saved on Escape, clearing its error', async () => {
+    const [row] = resettableRows().filter(
+      ({ control }) => control.type === 'number'
+    );
+    const { tab, plugin } = makeAttachedTab();
+    const { setting, field, reset } = drawRow(tab, row.name);
+    field.focus();
+    field.value = '0.5';
+    field.dispatchEvent(new Event('input'));
+    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    await settle();
+    expect(setting.settingEl.classList).toContain('is-invalid');
+    expect(reset.getAttribute('aria-disabled')).toBe('false');
+
+    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await settle();
+
+    expect(field.value).toBe(defaultText(row));
+    expect(document.activeElement).not.toBe(field);
+    expect(setting.settingEl.classList).not.toContain('is-invalid');
+    expect(reset.getAttribute('aria-disabled')).toBe('true');
+    expect(tab.getControlValue(row.control.key)).toBe(row.control.defaultValue);
+    expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a drawn number field alone on any other key, and on Enter or Escape while composing', async () => {
+    const [row] = resettableRows().filter(
+      ({ control }) => control.type === 'number'
+    );
+    const { tab, plugin } = makeAttachedTab();
+    const { setting, field } = drawRow(tab, row.name);
+    field.focus();
+    field.value = '0.5';
+    field.dispatchEvent(new FocusEvent('blur'));
+    await settle();
+    field.focus();
+
+    for (const init of [
+      { key: 'x' },
+      { key: 'Tab' },
+      { key: 'Enter', isComposing: true },
+      { key: 'Escape', isComposing: true },
+    ]) {
+      field.dispatchEvent(new KeyboardEvent('keydown', init));
+    }
+    await settle();
+
+    expect(field.value).toBe('0.5');
+    expect(document.activeElement).toBe(field);
+    expect(setting.settingEl.classList).toContain('is-invalid');
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('flags a stored value its check rejects as soon as the row is drawn', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    settings.autoImportOnTag = true;
+    settings.autoImportTags = [];
+    const { tab } = makeTab(settings);
+
+    const { setting } = drawRow(tab, TRIGGER_TAGS);
+    await settle();
+
+    expect(setting.settingEl.classList).toContain('is-invalid');
+  });
+
+  it('draws any number control it is given as Obsidian draws one: placeholder, limits, a value outside them refused', async () => {
+    const limitsArb = fc
+      .tuple(fc.option(fc.integer()), fc.option(fc.integer()))
+      .map(([a, b]) =>
+        a !== null && b !== null && a > b
+          ? ([b, a] as const)
+          : ([a, b] as const)
+      );
+    await fc.assert(
+      fc.asyncProperty(
+        limitsArb,
+        fc.oneof(fc.integer(), fc.constant(Number.NaN), textArb()),
+        fc.integer(),
+        fc.option(textArb({ minLength: 1 })),
+        async ([min, max], stored, typed, placeholder) => {
+          const host = {
+            getControlValue: () => stored,
+            setControlValue: vi.fn(),
+            refreshDomState: vi.fn(),
+          };
+          const control: SettingNumberControl = {
+            type: 'number',
+            key: 'limited',
+            defaultValue: 7,
+          };
+          if (min !== null) control.min = min;
+          if (max !== null) control.max = max;
+          if (placeholder !== null) control.placeholder = placeholder;
+          const [group] = drawResettableRows(
+            [{ type: 'group', items: [{ name: 'Limited', control }] }],
+            host
+          );
+          const [row] = group.items ?? [];
+          if ('type' in row || !row.render) throw new Error('Not drawn');
+          // in the document, so its field can take focus
+          const setting = new Setting(
+            document.body.appendChild(document.createElement('div'))
+          );
+          row.render(setting as never, {} as never);
+          const field = setting.controlEl.querySelector('input');
+          if (!field) throw new Error('No field');
+
+          expect(field).toMatchObject({
+            type: 'number',
+            inputMode: 'decimal',
+            step: 'any',
+            value:
+              typeof stored === 'number' && !Number.isNaN(stored)
+                ? String(stored)
+                : '',
+          });
+          expect(field.getAttribute('min')).toBe(
+            min === null ? null : `${min}`
+          );
+          expect(field.getAttribute('max')).toBe(
+            max === null ? null : `${max}`
+          );
+          expect(field.getAttribute('placeholder')).toBe(placeholder);
+          field.value = String(typed);
+          field.focus();
+          field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+          await settle();
+
+          const error = setting.controlEl.querySelector('.setting-item-error');
+          const belowMin = min !== null && typed < min;
+          const aboveMax = max !== null && typed > max;
+          // Enter leaves the field only once it is saved
+          expect(document.activeElement === field).toBe(belowMin || aboveMax);
+          if (belowMin) {
+            expect(error?.textContent).toBe(`Value must be at least ${min}`);
+          } else if (aboveMax) {
+            expect(error?.textContent).toBe(`Value must be at most ${max}`);
+          }
+          if (belowMin || aboveMax) {
+            expect(host.setControlValue).not.toHaveBeenCalled();
+          } else {
+            // twice, as Obsidian's does: on Enter, then on leaving the field
+            expect(host.setControlValue.mock.calls).toEqual([
+              ['limited', typed],
+              ['limited', typed],
+            ]);
+            expect(host.refreshDomState).toHaveBeenCalledTimes(2);
+          }
+        }
+      )
+    );
+  });
+
+  it('refuses a number at either limit only past it', async () => {
+    const host = {
+      getControlValue: () => 5,
+      setControlValue: vi.fn(),
+      refreshDomState: vi.fn(),
+    };
+    const [group] = drawResettableRows(
+      [
+        {
+          type: 'group',
+          items: [
+            {
+              name: 'Limited',
+              control: {
+                type: 'number',
+                key: 'limited',
+                min: 2,
+                max: 9,
+                defaultValue: 5,
+              },
+            },
+          ],
+        },
+      ],
+      host
+    );
+    const [row] = group.items ?? [];
+    if ('type' in row || !row.render) throw new Error('Not drawn');
+    const setting = new Setting(document.createElement('div'));
+    row.render(setting as never, {} as never);
+    const field = setting.controlEl.querySelector('input');
+    if (!field) throw new Error('No field');
+
+    for (const typed of ['2', '9']) {
+      field.value = typed;
+      field.dispatchEvent(new FocusEvent('blur'));
+    }
+    await settle();
+
+    expect(host.setControlValue.mock.calls).toEqual([
+      ['limited', 2],
+      ['limited', 9],
+    ]);
+    expect(setting.settingEl.classList).not.toContain('is-invalid');
+  });
+
+  it('leaves a number or text control with no default, and every other control, to Obsidian', () => {
+    const host = {
+      getControlValue: () => undefined,
+      setControlValue: vi.fn(),
+      refreshDomState: vi.fn(),
+    };
+    const groups: SettingDefinitionGroup[] = [
+      {
+        type: 'group',
+        items: [
+          { name: 'Number', control: { type: 'number', key: 'n' } },
+          { name: 'Text', control: { type: 'text', key: 't' } },
+          {
+            name: 'Slider',
+            control: {
+              type: 'slider',
+              key: 's',
+              min: 0,
+              max: 1,
+              step: 1,
+              defaultValue: 0,
+            },
+          },
+          {
+            name: 'Dropdown',
+            control: {
+              type: 'dropdown',
+              key: 'd',
+              options: {},
+              defaultValue: 'a',
+            },
+          },
+          { name: 'Bare' },
+        ],
+      },
+    ];
+
+    expect(drawResettableRows(groups, host)).toEqual(groups);
+  });
+
+  it('marks the trigger tags reset button by what the field shows once tidied', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.constantFrom(AUTO_IMPORT_TAG, ` #${AUTO_IMPORT_TAG} , `),
+          typedTriggerTagsArb
+        ),
+        commitArb,
+        (typed, commit) => {
+          const { tab } = makeAttachedTab();
+          const { field, reset } = drawRow(tab, TRIGGER_TAGS);
+
+          typeInto(field, typed);
+          commitField(field, commit);
+
+          expect(reset.getAttribute('aria-disabled')).toBe(
+            String(field.value === `#${AUTO_IMPORT_TAG}`)
+          );
+        }
+      )
+    );
+  });
+
+  it('refreshes the other rows only once a drawn field is saved, as Obsidian does', async () => {
+    let finishSave = () => {};
+    const host = {
+      getControlValue: () => 'a',
+      setControlValue: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishSave = resolve;
+          })
+      ),
+      refreshDomState: vi.fn(),
+    };
+    const { field } = drawControl(
+      { type: 'text', key: 't', defaultValue: 'a' },
+      host
+    );
+
+    typeInto(field, 'b');
+    await settle();
+    expect(host.setControlValue).toHaveBeenCalledWith('t', 'b');
+    expect(host.refreshDomState).not.toHaveBeenCalled();
+
+    finishSave();
+    await settle();
+    expect(host.refreshDomState).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a drawn control's lock on its row, where Obsidian reads it", () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.boolean(),
+          fc.boolean().map((locked) => () => locked)
+        ),
+        fc.constantFrom<'number' | 'text'>('number', 'text'),
+        (disabled, type) => {
+          const host = {
+            getControlValue: () => undefined,
+            setControlValue: vi.fn(),
+            refreshDomState: vi.fn(),
+          };
+          const control: DeclaredControl =
+            type === 'number'
+              ? { type, key: 'k', defaultValue: 1, disabled }
+              : { type, key: 'k', defaultValue: 'a', disabled };
+
+          expect(drawControl(control, host).row).toMatchObject({ disabled });
+        }
+      )
+    );
+  });
+
+  it('never spells out the default of a setting with a reset button', () => {
+    const drawn = resettableRows().map(({ control }) => control.key);
+    const withReset = declaredControls().filter(
+      ({ control }) =>
+        control.defaultValue !== undefined &&
+        (OBSIDIAN_RESET_TYPES.has(control.type) || drawn.includes(control.key))
+    );
+
+    expect(withReset.length).toBeGreaterThan(drawn.length);
+    for (const { desc } of withReset) {
+      const text = typeof desc === 'string' ? desc : (desc?.textContent ?? '');
+      expect(text).not.toMatch(/\bdefault\b/i);
+    }
   });
 });
 

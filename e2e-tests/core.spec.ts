@@ -2205,6 +2205,34 @@ test.describe('Settings tab', () => {
       .toBe(await resolveColor('--background-modifier-border'));
   });
 
+  test('puts a changed field back to its default with its reset button', async () => {
+    const steps = settingRow('Learning steps');
+    const stepsReset = steps.locator('.extra-setting-button');
+    await expect(stepsReset).toHaveAttribute('aria-disabled', 'true');
+
+    await steps.locator('input').fill('2m, soon');
+    await expect(steps).toHaveClass(/is-invalid/);
+    await stepsReset.click();
+    await expect(steps.locator('input')).toHaveValue('1m, 10m');
+    await expect(steps).not.toHaveClass(/is-invalid/);
+    await expect(stepsReset).toHaveAttribute('aria-disabled', 'true');
+
+    const interval = settingRow('Maximum review interval');
+    const intervalField = interval.locator('input');
+    await intervalField.fill('100');
+    await intervalField.press('Enter');
+    await expect.poll(readPluginData).toMatchObject({
+      settings: { fsrsParams: { maximum_interval: 100 } },
+    });
+    await interval.locator('.extra-setting-button').click();
+    await expect(intervalField).toHaveValue('36500');
+    await expect.poll(readPluginData).toMatchObject({
+      settings: {
+        fsrsParams: { maximum_interval: 36500, learning_steps: ['1m', '10m'] },
+      },
+    });
+  });
+
   test('shows or hides the open review tab’s title bar as its dropdown says', async () => {
     await executeCommandById(window, 'incremental-reading:learn');
     const header = reviewHeader(window);

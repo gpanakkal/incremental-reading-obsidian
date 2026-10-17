@@ -2,11 +2,17 @@ import type IncrementalReadingPlugin from '#/main';
 import {
   Platform,
   PluginSettingTab,
+  TextComponent,
   type App,
+  type ExtraButtonComponent,
+  type Setting,
+  type SettingControl,
   type SettingDefinitionControl,
   type SettingDefinitionGroup,
   type SettingDefinitionItem,
   type SettingGroupItem,
+  type SettingNumberControl,
+  type SettingTextControl,
 } from 'obsidian';
 import {
   generatorParameters,
@@ -425,12 +431,232 @@ export function layOutGroups<K extends string>(
   });
 }
 
+/** A control's default: the default setting, as the control shows it. */
+const shownDefault = <K extends ControlKey>(
+  key: K
+): ReturnType<(typeof CONTROL_BINDINGS)[K]['read']> =>
+  CONTROL_BINDINGS[key].read(DEFAULT_SETTINGS) as ReturnType<
+    (typeof CONTROL_BINDINGS)[K]['read']
+  >;
+
+/**
+ * A number or text control with a default. Obsidian (1.13.7) draws a reset
+ * button for a slider or colour control with a `defaultValue`, but never for
+ * these, so the tab draws them itself: see {@link drawResettableRows}.
+ */
+type ResettableControl<K extends string> =
+  | (SettingNumberControl<K> & { defaultValue: number })
+  | (SettingTextControl<K> & { defaultValue: string });
+
+const isResettable = <K extends string>(
+  control: SettingControl<K>
+): control is ResettableControl<K> =>
+  (control.type === 'number' || control.type === 'text') &&
+  control.defaultValue !== undefined;
+
+/** What a row the tab draws itself needs of the tab: Obsidian's binding. */
+interface ControlHost {
+  getControlValue(key: string): unknown;
+  setControlValue(key: string, value: unknown): void | Promise<void>;
+  refreshDomState(): void;
+}
+
+/**
+ * `groups` with each number and text control that has a default turned into a
+ * row the tab draws itself ({@link drawResettable}), so it can carry the reset
+ * button Obsidian gives a slider. Every other row is left to Obsidian.
+ */
+export function drawResettableRows<K extends string>(
+  groups: SettingDefinitionGroup<K>[],
+  host: ControlHost
+): SettingDefinitionGroup<K>[] {
+  return groups.map((group) => ({
+    ...group,
+    items: group.items?.map((item): SettingGroupItem<K> => {
+      if ('type' in item || !item.control || !isResettable(item.control)) {
+        return item;
+      }
+      const { control, ...row } = item;
+      return {
+        ...row,
+        // Undocumented: a `render` row has no `disabled` in obsidian.d.ts, but
+        // `refreshDomState` reads one off any row (obsidian.asar 1.13.7)
+        ...(control.disabled !== undefined && { disabled: control.disabled }),
+        render: (setting) => drawResettable(setting, control, host),
+      };
+    }),
+  }));
+}
+
+/**
+ * Draws `control` into `setting` as Obsidian (1.13.7) draws its declarative
+ * control, behind a reset button drawn as Obsidian draws a slider's: the same
+ * icon and tooltip, added before the control, and `aria-disabled` while the
+ * field shows the default. A click while it does is a no-op, as the slider's
+ * `setValue` is; otherwise it puts the default in the field and saves it as an
+ * edit would, which clears any error. Undocumented: ported from the
+ * declarative renderer in obsidian.asar.
+ */
+function drawResettable<K extends string>(
+  setting: Setting,
+  control: ResettableControl<K>,
+  host: ControlHost
+) {
+  const { key, validate } = control;
+  // Only ever handed the type of value its own control holds
+  const check = (value: unknown) => validate?.(value as never);
+  /** Shows the problem with `value`, or saves it, as Obsidian's control does. */
+  const apply = async (value: string | number) => {
+    const problem = await check(value);
+    if (problem) {
+      setting.setErrorMessage(problem);
+      return;
+    }
+    setting.setErrorMessage(null);
+    await host.setControlValue(key, value);
+    host.refreshDomState();
+  };
+  const value = host.getControlValue(key) ?? control.defaultValue;
+  void (async () => {
+    const problem = await check(value);
+    if (problem) setting.setErrorMessage(problem);
+  })();
+
+  const defaultText = String(control.defaultValue);
+  let reset!: ExtraButtonComponent;
+  setting.addExtraButton((button) => {
+    reset = button
+      .setIcon('lucide-rotate-ccw')
+      .setTooltip('Restore default')
+      .onClick(() => {
+        if (field.inputEl.value === defaultText) return;
+        field.inputEl.value = defaultText;
+        markDefault();
+        field.commit();
+      });
+  });
+  // Once the field exists, as this follows it
+  const shown = () => markDefault();
+  const field =
+    control.type === 'number'
+      ? drawNumberField(setting, control, value, apply, shown)
+      : drawTextField(setting, control, value, apply);
+  const markDefault = () =>
+    reset.extraSettingsEl.setAttribute(
+      'aria-disabled',
+      String(field.inputEl.value === defaultText)
+    );
+  // On leaving and keys too: the tab may tidy the field then, firing no
+  // `input` (`tidyTriggerTags`)
+  for (const type of ['input', 'focusout', 'keydown']) {
+    field.inputEl.addEventListener(type, markDefault);
+  }
+  markDefault();
+}
+
+/** A field drawn by {@link drawResettable}, and how it saves what it shows. */
+interface DrawnField {
+  inputEl: HTMLInputElement;
+  /** Saves what the field shows, as finishing an edit in it would. */
+  commit: () => void;
+}
+
+/** Obsidian's text control: saves on each keystroke. */
+function drawTextField(
+  setting: Setting,
+  control: SettingTextControl,
+  value: unknown,
+  apply: (value: string) => Promise<void>
+): DrawnField {
+  let inputEl!: HTMLInputElement;
+  setting.addText((text) => {
+    if (control.placeholder) text.setPlaceholder(control.placeholder);
+    text.setValue(String(value)).onChange((typed) => {
+      void apply(typed);
+    });
+    inputEl = text.inputEl;
+  });
+  return { inputEl, commit: () => void apply(inputEl.value) };
+}
+
+/**
+ * Obsidian's number control: saves once entered or left, a blank field as the
+ * default, and puts back what was last saved on Escape. Its own messages, in
+ * English, as this plugin is.
+ */
+function drawNumberField(
+  setting: Setting,
+  control: SettingNumberControl & { defaultValue: number },
+  value: unknown,
+  apply: (value: number) => Promise<void>,
+  /** Called after the field changes what it shows by itself. */
+  shown: () => void
+): DrawnField {
+  // Obsidian's number input is a text component typed `number`; `addText`
+  // would also blur it on Enter without a physical keyboard, as on a phone.
+  let input!: TextComponent;
+  setting.addComponent((el) => (input = new TextComponent(el)));
+  const { inputEl } = input;
+  inputEl.type = 'number';
+  inputEl.inputMode = 'decimal';
+  if (control.placeholder) input.setPlaceholder(control.placeholder);
+  if (control.min !== undefined) inputEl.min = String(control.min);
+  if (control.max !== undefined) inputEl.max = String(control.max);
+  inputEl.step = String(control.step ?? 'any');
+
+  let saved = typeof value === 'number' && !Number.isNaN(value) ? value : null;
+  const show = (number: number | null) => {
+    inputEl.value = number === null ? '' : String(number);
+  };
+  show(saved);
+
+  /** Saves what the field shows, if it can be; says whether it was. */
+  const commit = () => {
+    if (inputEl.value === '') {
+      saved = control.defaultValue;
+      show(saved);
+      shown();
+    } else {
+      // Never NaN, where Obsidian checks: a number input holds '' for
+      // anything typed that isn't a number.
+      const typed = parseFloat(inputEl.value);
+      if (control.min !== undefined && typed < control.min) {
+        setting.setErrorMessage(`Value must be at least ${control.min}`);
+        return false;
+      }
+      if (control.max !== undefined && typed > control.max) {
+        setting.setErrorMessage(`Value must be at most ${control.max}`);
+        return false;
+      }
+      saved = typed;
+    }
+    void apply(saved);
+    return true;
+  };
+  inputEl.addEventListener('blur', commit);
+  inputEl.addEventListener('keydown', (event) => {
+    if (event.isComposing) return;
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      if (commit()) inputEl.blur();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      show(saved);
+      shown();
+      setting.setErrorMessage(null);
+      inputEl.blur();
+    }
+  });
+  return { inputEl, commit };
+}
+
 /**
  * The plugin's settings tab, described declaratively by
  * {@link getSettingDefinitions}. Obsidian (1.13.1+, which `minAppVersion` covers) renders
  * the rows, runs each control's `validate` and shows its message inline, and
  * reads and writes values through {@link getControlValue} and
- * {@link setControlValue}.
+ * {@link setControlValue}. The rows that carry a reset button Obsidian doesn't
+ * draw are drawn by the tab instead, the same way: see {@link drawResettableRows}.
  */
 export class IRSettingTab extends PluginSettingTab {
   plugin: IncrementalReadingPlugin;
@@ -443,14 +669,27 @@ export class IRSettingTab extends PluginSettingTab {
     // settings rules to this tab alone.
     this.containerEl.classList.add(SETTINGS_TAB_CLASS);
     // On the container, which outlives each render of the rows. `focusout`
-    // bubbles where `blur` doesn't.
-    this.containerEl.addEventListener('focusout', tidyTriggerTags);
-    this.containerEl.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && !event.isComposing) tidyTriggerTags(event);
-    });
+    // bubbles where `blur` doesn't. Capturing, so the field's own listeners,
+    // its reset button's mark among them, see the tidied text.
+    this.containerEl.addEventListener('focusout', tidyTriggerTags, true);
+    this.containerEl.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.key === 'Enter' && !event.isComposing) tidyTriggerTags(event);
+      },
+      true
+    );
   }
 
   getSettingDefinitions(): SettingDefinitionItem<ControlKey>[] {
+    return drawResettableRows(this.declareSettings(), this);
+  }
+
+  /**
+   * The tab as declared, every row a declarative control. Obsidian draws them,
+   * but for those {@link drawResettableRows} draws instead.
+   */
+  declareSettings(): SettingDefinitionGroup<ControlKey>[] {
     // Obsidian re-evaluates this after every control change (it calls
     // `refreshDomState`, which runs `Setting.setDisabled`), so the lock follows
     // the reminders toggle without a re-render. Undocumented: obsidian.d.ts
@@ -506,6 +745,7 @@ export class IRSettingTab extends PluginSettingTab {
                 control: {
                   type: 'text',
                   key: 'autoImportTags',
+                  defaultValue: shownDefault('autoImportTags'),
                   // Read when checked, so the toggle as it is now decides
                   validate: (typed) =>
                     triggerTagsProblem(
@@ -586,9 +826,8 @@ export class IRSettingTab extends PluginSettingTab {
           {
             name: 'End-of-day shift',
             desc:
-              'Adjust the end time of the review day, in hours from midnight.' +
-              ' Set this to the time you are most likely to be asleep.' +
-              ' Default: 4 AM.',
+              'Adjust the end time of the review day.' +
+              ' Set this to the time you are most likely to be asleep.',
             control: {
               type: 'slider',
               key: 'dayRolloverOffset',
@@ -670,7 +909,7 @@ export class IRSettingTab extends PluginSettingTab {
           },
           {
             name: 'Maximum review interval',
-            desc: `Soft ceiling on the time between card reviews. Fuzzing can exceed this limit slightly. Default: 36,500 days.`,
+            desc: `Ceiling on the number of days between card reviews.`,
             control: {
               type: 'number',
               key: 'fsrsParams.maximum_interval',
@@ -690,19 +929,21 @@ export class IRSettingTab extends PluginSettingTab {
           },
           {
             name: 'Learning steps',
-            desc: `FSRS learning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas. Default: 1m, 10m`,
+            desc: `FSRS learning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas.`,
             control: {
               type: 'text',
               key: 'fsrsParams.learning_steps',
+              defaultValue: shownDefault('fsrsParams.learning_steps'),
               validate: validateSteps,
             },
           },
           {
             name: 'Relearning steps',
-            desc: `FSRS relearning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas. Default: 10m`,
+            desc: `FSRS relearning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas.`,
             control: {
               type: 'text',
               key: 'fsrsParams.relearning_steps',
+              defaultValue: shownDefault('fsrsParams.relearning_steps'),
               validate: validateSteps,
             },
           },
