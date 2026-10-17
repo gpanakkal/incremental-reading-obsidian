@@ -116,8 +116,12 @@ async function pauseSaving(window: Page) {
   });
 }
 
-/** Write the note at vault path `path`, holding `frontmatter`. */
-async function writeNote(path: string, frontmatter: Record<string, unknown>) {
+/** Write the note at vault path `path`, holding `frontmatter`, then `body`. */
+async function writeNote(
+  path: string,
+  frontmatter: Record<string, unknown>,
+  body = 'left behind'
+) {
   const file = `${vaultPath}/${path}`;
   await fs.mkdir(file.slice(0, file.lastIndexOf('/')), { recursive: true });
   await fs.writeFile(
@@ -125,7 +129,7 @@ async function writeNote(path: string, frontmatter: Record<string, unknown>) {
     `---
 ${JSON.stringify(frontmatter)}
 ---
-left behind
+${body}
 `
   );
 }
@@ -337,6 +341,44 @@ test.describe('Notes left without review data by a crash', () => {
     await expect(modal).toBeHidden();
     await expect(leftoverButton()).toHaveCount(0);
     expect(await itemFiles(window)).toEqual([]);
+  });
+
+  test('previews a note in the modal when its name is clicked, one at a time, changing nothing', async () => {
+    const first = `${DATA_DIRECTORY}/First.md`;
+    const second = `${DATA_DIRECTORY}/Second.md`;
+    await seedItem();
+    await writeNote(
+      first,
+      { 'ir-id': 'left-4' },
+      '# Greeting\n\nThe first note says **hello**.'
+    );
+    await writeNote(second, { 'ir-id': 'left-5' }, 'The second says goodbye.');
+    await start();
+    await leftoversFound(2);
+
+    await openReview();
+    await leftoverButton().click();
+    const modal = window.locator('.modal');
+    // Rendered, not shown as written: a heading, and no `#` or `**` left
+    const firstBody = modal.getByRole('heading', { name: 'Greeting' });
+    const secondBody = modal.getByText('The second says goodbye.');
+    await expect(firstBody).toHaveCount(0);
+    await modal.getByRole('button', { name: 'Preview First' }).click();
+
+    await expect(firstBody).toBeVisible();
+    await expect(modal.locator('strong', { hasText: 'hello' })).toBeVisible();
+    await expect(modal.getByText('**hello**')).toHaveCount(0);
+    // Its frontmatter left out
+    await expect(modal.getByText('left-4')).toHaveCount(0);
+    await modal.getByRole('button', { name: 'Preview Second' }).click();
+
+    await expect(secondBody).toBeVisible();
+    await expect(firstBody).toHaveCount(0);
+    await modal.getByRole('button', { name: 'Cancel' }).click();
+
+    await expect(modal).toBeHidden();
+    await expect(leftoverButton()).toBeVisible();
+    expect(await itemFiles(window)).toEqual([first, second]);
   });
 
   test("takes the plugin's id and tag off a note being imported in place when asked, leaving the rest", async () => {

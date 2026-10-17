@@ -2800,4 +2800,66 @@ input.ir-queue-page-input {
   padding-top: var(--size-2-1);
 }
 
+/* The list scrolls, not the whole modal, so Confirm and Cancel stay in view
+   however long it gets, previews and all */
+.ir-leftover-modal .modal-content {
+  min-height: 0;
+  overflow: auto;
+}
+
+.ir-leftover-modal .modal-button-container {
+  flex-shrink: 0;
+}
+
+/* A note's name, which opens its preview, behind a chevron that turns down
+   while it's open */
+.ir-leftover-modal .setting-item-name[role='button'] {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-2-2);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.ir-leftover-modal .setting-item-name[role='button']:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
+}
+
+.ir-leftover-modal .ir-leftover-chevron {
+  --icon-size: var(--icon-xs);
+  display: flex;
+  color: var(--text-muted);
+  transition: transform 100ms ease-in-out;
+}
+
+.ir-leftover-modal
+  .setting-item-name[aria-expanded='true']
+  .ir-leftover-chevron {
+  transform: rotate(90deg);
+}
+
+/* A note's preview, under its line: capped, scrolling inside both ways, so a
+   long note or a wide table never pushes the buttons off a phone's screen.
+   Selectable, which Obsidian turns off outside what it edits. */
+.ir-leftover-modal .ir-leftover-preview {
+  max-height: 40vh;
+  overflow: auto;
+  margin-bottom: var(--size-4-2);
+  padding: 0 var(--size-4-3);
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background-color: var(--background-primary);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.ir-leftover-modal .ir-leftover-preview[hidden] {
+  display: none;
+}
+
+.ir-leftover-modal .ir-leftover-preview-error {
+  padding: var(--size-4-2) 0;
+  color: var(--text-error);
+}
+
 /* #endregion */

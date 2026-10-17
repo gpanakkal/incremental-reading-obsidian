@@ -6,7 +6,7 @@ import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { Notice } from '#/test/__mocks__/obsidian';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
-import type { App, TFile } from 'obsidian';
+import { type App, Component, MarkdownRenderer, type TFile } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   type LeftoverChoice,
@@ -93,12 +93,18 @@ function choicesFor(leftover: Leftover): LeftoverChoice[] {
   );
 }
 
-/** Open `leftovers` in a modal as Obsidian would, resolving with `resolve`. */
+/**
+ * Open `leftovers` in a modal as Obsidian would, resolving with `resolve`,
+ * its vault reading each note with `read`.
+ */
 function openModal(
   leftovers: readonly Leftover[],
-  resolve: (leftover: Leftover, choice: LeftoverChoice) => Promise<boolean>
+  resolve: (leftover: Leftover, choice: LeftoverChoice) => Promise<boolean>,
+  read: (file: TFile) => Promise<string> = async () => ''
 ) {
-  const modal = new LeftoverModal({} as App, leftovers, resolve);
+  const cachedRead = vi.fn(read);
+  const app = { vault: { cachedRead } } as unknown as App;
+  const modal = new LeftoverModal(app, leftovers, resolve);
   const close = vi.spyOn(modal, 'close').mockImplementation(() => {});
   document.body.append(modal.modalEl, modal.contentEl);
   modal.onOpen();
@@ -115,6 +121,8 @@ function openModal(
     )!;
   return {
     modal,
+    app,
+    cachedRead,
     close,
     rows,
     rowOf,
@@ -282,6 +290,44 @@ function listed(modal: LeftoverModal): string[] {
     (el) => el.textContent ?? ''
   );
 }
+
+/** The toggle on `row` that shows its note's preview: the note's name. */
+const nameOf = (row: Element) =>
+  row.querySelector<HTMLElement>('.setting-item-info .setting-item-name')!;
+
+/** Where `row`'s note is previewed: just under the row. */
+function previewOf(row: Element): HTMLElement | null {
+  const next = row.nextElementSibling;
+  return next instanceof HTMLElement && next.matches('.ir-leftover-preview')
+    ? next
+    : null;
+}
+
+/** Whether `row`'s preview is open: shown, and holding something. */
+function previewShown(row: Element): boolean {
+  const preview = previewOf(row);
+  return !!preview && !preview.hidden && preview.childElementCount > 0;
+}
+
+/** Press `key` on `el`, answering whether its default was prevented. */
+function press(el: HTMLElement, key: string): boolean {
+  const event = new KeyboardEvent('keydown', {
+    key,
+    bubbles: true,
+    cancelable: true,
+  });
+  el.dispatchEvent(event);
+  return event.defaultPrevented;
+}
+
+/** The body of each note read in the preview tests, by its path. */
+const bodyOf = (path: string) => `# ${path}\nbody of ${path}`;
+
+/** A note at `path` as read from the vault: some frontmatter, then its body. */
+const noteText = (path: string) => `---\nir-id: x\n---\n${bodyOf(path)}`;
+
+/** Read a note as {@link noteText} has it. */
+const readNote = async (file: TFile) => noteText(file.path);
 
 // #endregion
 
@@ -681,6 +727,356 @@ describe('LeftoverModal', () => {
 
     expect(modal.contentEl.childElementCount).toBe(0);
     expect(footer()).toBeNull();
+  });
+});
+
+describe('LeftoverModal previews', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  it("names each note on a closed toggle for its preview, labelled on the name, never on the chevron's icon", () => {
+    const leftovers = [MADE, IN_PLACE];
+    const { rows } = openModal(leftovers, async () => true);
+
+    for (const [i, row] of rows().entries()) {
+      const name = nameOf(row);
+      expect(name.getAttribute('role')).toBe('button');
+      expect(name.tabIndex).toBe(0);
+      expect(name.getAttribute('aria-expanded')).toBe('false');
+      expect(name.getAttribute('aria-label')).toBe(
+        `Preview ${leftovers[i].file.basename}`
+      );
+      const icon = name.querySelector('svg')!;
+      expect(icon.classList).toContain('lucide-chevron-right');
+      // What turns while open
+      expect(icon.parentElement!.classList).toContain('ir-leftover-chevron');
+      expect(icon.parentElement!.closest('[aria-label]')).toBe(name);
+      expect(icon.hasAttribute('aria-label')).toBe(false);
+    }
+  });
+
+  it('reads and renders nothing until a name is clicked', async () => {
+    const render = vi.spyOn(MarkdownRenderer, 'render');
+    const { rows, cachedRead } = openModal(
+      [MADE, IN_PLACE],
+      async () => true,
+      readNote
+    );
+    await settle();
+
+    expect(cachedRead).not.toHaveBeenCalled();
+    expect(render).not.toHaveBeenCalled();
+    for (const row of rows()) {
+      expect(previewOf(row)!.hidden).toBe(true);
+      expect(previewOf(row)!.childElementCount).toBe(0);
+    }
+  });
+
+  it("opens a note's preview under its line, rendering its body as the note would, with what it renders loaded", async () => {
+    const render = vi.spyOn(MarkdownRenderer, 'render');
+    const load = vi.spyOn(Component.prototype, 'load');
+    const { app, rowOf, cachedRead } = openModal(
+      [MADE, IN_PLACE],
+      async () => true,
+      readNote
+    );
+
+    nameOf(rowOf(IN_PLACE)).click();
+    await settle();
+
+    const { path } = IN_PLACE.file;
+    expect(cachedRead.mock.calls).toEqual([[IN_PLACE.file]]);
+    expect(render.mock.calls).toEqual([
+      [
+        app,
+        bodyOf(path),
+        previewOf(rowOf(IN_PLACE)),
+        path,
+        expect.any(Component),
+      ],
+    ]);
+    expect(load.mock.contexts).toEqual([render.mock.calls[0][4]]);
+    expect(nameOf(rowOf(IN_PLACE)).getAttribute('aria-expanded')).toBe('true');
+    expect(previewShown(rowOf(IN_PLACE))).toBe(true);
+    expect(previewOf(rowOf(IN_PLACE))!.textContent).toBe(bodyOf(path));
+    // Styled as Obsidian styles a note's reading view
+    expect(previewOf(rowOf(IN_PLACE))!.classList).toContain(
+      'markdown-rendered'
+    );
+    expect(previewShown(rowOf(MADE))).toBe(false);
+  });
+
+  it.each<[string, boolean]>([
+    ['Enter', true],
+    [' ', true],
+    ['a', false],
+    ['Tab', false],
+  ])('opens a preview on %j from the keyboard: %s', async (key, opens) => {
+    const { rowOf } = openModal([MADE], async () => true, readNote);
+    const name = nameOf(rowOf(MADE));
+
+    // Taken, so Space doesn't scroll the modal too
+    expect(press(name, key)).toBe(opens);
+    await settle();
+
+    expect(name.getAttribute('aria-expanded')).toBe(String(opens));
+    expect(previewShown(rowOf(MADE))).toBe(opens);
+  });
+
+  it.each<[string, string, string]>([
+    ['LF line breaks', '---\na: 1\n---\nbody\n', 'body\n'],
+    ['CRLF line breaks', '---\r\na: 1\r\n---\r\nbody\r\n', 'body\r\n'],
+    [
+      'a horizontal rule in its body',
+      '---\na: 1\n---\nabove\n\n---\nbelow',
+      'above\n\n---\nbelow',
+    ],
+    ['no frontmatter', 'above\n---\nbelow', 'above\n---\nbelow'],
+    ['a block that never closes', '---\na: 1\nbody', '---\na: 1\nbody'],
+  ])(
+    'renders a note with %s without its frontmatter',
+    async (_, text, body) => {
+      const render = vi.spyOn(MarkdownRenderer, 'render');
+      const { rowOf } = openModal(
+        [MADE],
+        async () => true,
+        async () => text
+      );
+
+      nameOf(rowOf(MADE)).click();
+      await settle();
+
+      expect(render.mock.calls.map((call) => call[1])).toEqual([body]);
+    }
+  );
+
+  it('closes on a second click, emptying the preview and unloading what it rendered, and reads the note afresh when opened again', async () => {
+    let text = '---\na: 1\n---\nfirst';
+    const render = vi.spyOn(MarkdownRenderer, 'render');
+    const unload = vi.spyOn(Component.prototype, 'unload');
+    const { rowOf, cachedRead } = openModal(
+      [MADE],
+      async () => true,
+      async () => text
+    );
+    const name = nameOf(rowOf(MADE));
+    const preview = previewOf(rowOf(MADE))!;
+    name.click();
+    await settle();
+
+    name.click();
+    await settle();
+
+    expect(name.getAttribute('aria-expanded')).toBe('false');
+    expect(preview.hidden).toBe(true);
+    expect(preview.childElementCount).toBe(0);
+    expect(unload.mock.contexts).toEqual([render.mock.calls[0][4]]);
+
+    text = '---\na: 1\n---\nsecond';
+    name.click();
+    await settle();
+
+    expect(cachedRead).toHaveBeenCalledTimes(2);
+    expect(preview.textContent).toBe('second');
+    expect(render.mock.calls[1][4]).not.toBe(render.mock.calls[0][4]);
+  });
+
+  it('shows one preview at a time, of the note last opened, until its name is clicked again, leaving what is chosen be', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        leftoversArb,
+        fc.array(
+          fc.record({
+            pick: fc.nat(),
+            how: fc.constantFrom('click', 'Enter', ' '),
+          }),
+          { maxLength: 8 }
+        ),
+        async (leftovers, steps) => {
+          document.body.innerHTML = '';
+          // Per case, as `afterEach` runs once per `it`
+          vi.restoreAllMocks();
+          const render = vi.spyOn(MarkdownRenderer, 'render');
+          const unload = vi.spyOn(Component.prototype, 'unload');
+          const resolve = vi.fn(async () => true);
+          const { rows, cachedRead, confirmButton } = openModal(
+            leftovers,
+            resolve,
+            readNote
+          );
+          const confirmable = !confirmButton().disabled;
+          let open: number | null = null;
+          let opened = 0;
+
+          for (const { pick, how } of steps) {
+            const i = pick % leftovers.length;
+            const name = nameOf(rows()[i]);
+            if (how === 'click') name.click();
+            else press(name, how);
+            open = open === i ? null : i;
+            if (open !== null) opened += 1;
+            await settle();
+          }
+
+          for (const [i, row] of rows().entries()) {
+            expect(nameOf(row).getAttribute('aria-expanded')).toBe(
+              String(i === open)
+            );
+            expect(previewShown(row)).toBe(i === open);
+            expect(previewOf(row)!.textContent).toBe(
+              i === open ? bodyOf(leftovers[i].file.path) : ''
+            );
+          }
+          expect(cachedRead).toHaveBeenCalledTimes(opened);
+          expect(render).toHaveBeenCalledTimes(opened);
+          // Every one rendered is unloaded, but the one still open
+          const components = render.mock.calls.map((call) => call[4]);
+          const stillOpen = open === null ? null : components.at(-1);
+          for (const component of components) {
+            expect(unload.mock.contexts.includes(component)).toBe(
+              component !== stillOpen
+            );
+          }
+          expect(!confirmButton().disabled).toBe(confirmable);
+          expect(resolve).not.toHaveBeenCalled();
+        }
+      ),
+      { numRuns: 50 }
+    );
+  });
+
+  it("says it couldn't read a note it can't, in its preview, throwing nothing", async () => {
+    const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
+    const render = vi.spyOn(MarkdownRenderer, 'render');
+    const failure = new Error('gone');
+    const { rowOf } = openModal(
+      [MADE],
+      async () => true,
+      async () => {
+        throw failure;
+      }
+    );
+
+    nameOf(rowOf(MADE)).click();
+    await settle();
+
+    expect(
+      previewOf(rowOf(MADE))!.querySelector('.ir-leftover-preview-error')
+        ?.textContent
+    ).toBe("Couldn't read this note");
+    expect(previewOf(rowOf(MADE))!.childElementCount).toBe(1);
+    expect(previewShown(rowOf(MADE))).toBe(true);
+    expect(render).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(expect.any(String), failure);
+  });
+
+  it('logs a note that fails to render, throwing nothing', async () => {
+    const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
+    const failure = new Error('embed failed');
+    vi.spyOn(MarkdownRenderer, 'render').mockRejectedValue(failure);
+    const { rowOf } = openModal([MADE], async () => true, readNote);
+
+    nameOf(rowOf(MADE)).click();
+    await settle();
+
+    expect(error).toHaveBeenCalledWith(expect.any(String), failure);
+    expect(nameOf(rowOf(MADE)).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it.each<[string, string, boolean]>([
+    ['closed', 'read', true],
+    ['closed', 'failed to be read', false],
+    ['left for another', 'read', true],
+    ['left for another', 'failed to be read', false],
+  ])(
+    'shows nothing in a preview %s before its note was %s',
+    async (how, _, read) => {
+      vi.spyOn(console, 'error').mockReturnValue(undefined);
+      const render = vi.spyOn(MarkdownRenderer, 'render');
+      const reading = deferred<boolean>();
+      const { rowOf } = openModal(
+        [MADE, IN_PLACE],
+        async () => true,
+        (file) =>
+          file === MADE.file
+            ? reading.promise.then((ok) => {
+                if (!ok) throw new Error('gone');
+                return noteText(file.path);
+              })
+            : readNote(file)
+      );
+      nameOf(rowOf(MADE)).click();
+
+      nameOf(rowOf(how === 'closed' ? MADE : IN_PLACE)).click();
+      reading.settle(read);
+      await settle();
+
+      expect(previewOf(rowOf(MADE))!.childElementCount).toBe(0);
+      expect(render.mock.calls.map((call) => call[3])).not.toContain(
+        MADE.file.path
+      );
+    }
+  );
+
+  it("takes a note's preview with its line once what was chosen for it is done", async () => {
+    const render = vi.spyOn(MarkdownRenderer, 'render');
+    const unload = vi.spyOn(Component.prototype, 'unload');
+    const { modal, rows, rowOf, confirmButton } = openModal(
+      [MADE, IN_PLACE],
+      async (leftover) => leftover === MADE,
+      readNote
+    );
+    nameOf(rowOf(MADE)).click();
+    await settle();
+    const preview = previewOf(rowOf(MADE))!;
+    choose(rowOf(MADE), { action: 'trash' });
+
+    confirmButton().click();
+    await settle();
+    await settle();
+
+    expect(preview.isConnected).toBe(false);
+    expect(unload.mock.contexts).toEqual([render.mock.calls[0][4]]);
+    // The line left keeps its own
+    expect(rows()).toHaveLength(1);
+    expect(
+      modal.contentEl.querySelectorAll('.ir-leftover-preview')
+    ).toHaveLength(1);
+    expect(previewOf(rows()[0])).not.toBeNull();
+  });
+
+  it("keeps a note's preview open while another note's line is taken away", async () => {
+    const unload = vi.spyOn(Component.prototype, 'unload');
+    const { rows, rowOf, confirmButton } = openModal(
+      [MADE, IN_PLACE],
+      async (leftover) => leftover === MADE,
+      readNote
+    );
+    nameOf(rowOf(IN_PLACE)).click();
+    await settle();
+    choose(rowOf(MADE), { action: 'trash' });
+
+    confirmButton().click();
+    await settle();
+    await settle();
+
+    expect(rows()).toHaveLength(1);
+    expect(previewShown(rows()[0])).toBe(true);
+    expect(unload).not.toHaveBeenCalled();
+  });
+
+  it('unloads what the open preview rendered once closed', async () => {
+    const render = vi.spyOn(MarkdownRenderer, 'render');
+    const unload = vi.spyOn(Component.prototype, 'unload');
+    const { modal, rowOf } = openModal([MADE], async () => true, readNote);
+    nameOf(rowOf(MADE)).click();
+    await settle();
+
+    modal.onClose();
+
+    expect(unload.mock.contexts).toEqual([render.mock.calls[0][4]]);
   });
 });
 

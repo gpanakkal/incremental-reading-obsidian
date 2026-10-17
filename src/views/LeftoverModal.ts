@@ -9,7 +9,16 @@ import {
 } from '#/lib/crash-leftovers';
 import { notify } from '#/lib/notices';
 import type { NoteType, SQLiteRepository } from '#/lib/types';
-import { type App, ButtonComponent, DropdownComponent, Modal } from 'obsidian';
+import {
+  type App,
+  ButtonComponent,
+  Component,
+  DropdownComponent,
+  getFrontMatterInfo,
+  MarkdownRenderer,
+  Modal,
+  setIcon,
+} from 'obsidian';
 
 /** A type a leftover can be saved as from the modal. */
 export type SaveType = Extract<NoteType, 'article' | 'snippet'>;
@@ -55,12 +64,23 @@ interface Row {
   leftover: Leftover;
   el: HTMLElement;
   info: HTMLElement;
+  /** The note's name, which opens and closes its preview. */
+  name: HTMLElement;
+  /** Where the note is previewed, just under the line; empty while closed. */
+  preview: HTMLElement;
   /** What is chosen for the line, `null` for leaving it be. */
   choice: LeftoverChoice | null;
   /** Show what is chosen on the line's controls. */
   show: () => void;
   /** Turn every control on the line off, or back on. */
   setDisabled: (disabled: boolean) => void;
+}
+
+/** A preview open in a {@link LeftoverModal}. */
+interface OpenPreview {
+  row: Row;
+  /** Holds what the preview rendered, unloaded once it closes. */
+  component: Component;
 }
 
 /**
@@ -71,6 +91,9 @@ interface Row {
  * one done, and closes once none are left; a line whose choice failed stays,
  * saying so. Cancel, or closing it, leaves every note as it is, to be found
  * again from the review home screen (see {@link LeftoverWatch}).
+ *
+ * A note's name opens a read-only preview of it under its line, one at a
+ * time, read afresh each time it opens.
  */
 export class LeftoverModal extends Modal {
   readonly #leftovers: readonly Leftover[];
@@ -84,6 +107,8 @@ export class LeftoverModal extends Modal {
   /** Whether Confirm is under way. */
   #running = false;
   #closed = false;
+  /** The preview open, if one is. */
+  #open: OpenPreview | null = null;
 
   /**
    * @param resolve does what was chosen for a leftover, answering whether it
@@ -123,6 +148,7 @@ export class LeftoverModal extends Modal {
 
   onClose() {
     this.#closed = true;
+    this.#closePreview();
     this.contentEl.replaceChildren();
     this.#buttonsEl?.remove();
     this.#buttonsEl = null;
@@ -142,7 +168,28 @@ export class LeftoverModal extends Modal {
         parent: info,
       });
     }
-    createDiv({ cls: 'setting-item-name', text: file.basename, parent: info });
+    // Labelled on the name, never the icon: an aria-label on an SVG crashes
+    // Obsidian's tooltip handler
+    const name = createDiv({
+      cls: 'setting-item-name',
+      attr: {
+        role: 'button',
+        tabindex: 0,
+        'aria-expanded': 'false',
+        'aria-label': `Preview ${file.basename}`,
+      },
+      parent: info,
+    });
+    setIcon(
+      createSpan({ cls: 'ir-leftover-chevron', parent: name }),
+      'chevron-right'
+    );
+    name.append(file.basename);
+    const preview = createDiv({
+      cls: ['ir-leftover-preview', 'markdown-rendered'],
+      parent: this.contentEl,
+    });
+    preview.hidden = true;
     const controls = createDiv({ cls: 'setting-item-control', parent: el });
 
     // What the line starts with (see `Row`)
@@ -157,6 +204,8 @@ export class LeftoverModal extends Modal {
       leftover,
       el,
       info,
+      name,
+      preview,
       choice: initial,
       show: () => {},
       setDisabled: () => {},
@@ -220,8 +269,84 @@ export class LeftoverModal extends Modal {
       strip?.setDisabled(disabled);
       trash?.setDisabled(disabled);
     };
+    name.addEventListener('click', () => this.#togglePreview(row));
+    name.addEventListener('keydown', (evt) => {
+      if (evt.key !== 'Enter' && evt.key !== ' ') return;
+      // Or Space scrolls the modal too
+      evt.preventDefault();
+      this.#togglePreview(row);
+    });
     row.show();
     return row;
+  }
+
+  /** Open `row`'s preview, closing the one open; or close it, if it's that. */
+  #togglePreview(row: Row) {
+    const wasOpen = this.#open?.row === row;
+    this.#closePreview();
+    if (!wasOpen) void this.#openPreview(row);
+  }
+
+  /** Close the open preview, if there is one, unloading what it rendered. */
+  #closePreview() {
+    const open = this.#open;
+    if (!open) return;
+    this.#open = null;
+    open.component.unload();
+    open.row.preview.replaceChildren();
+    open.row.preview.hidden = true;
+    open.row.name.setAttribute('aria-expanded', 'false');
+  }
+
+  /**
+   * Read `row`'s note, and render it, less its frontmatter, as the note
+   * would: links and embeds resolve from the note's own path. A read that
+   * ends once the preview has closed shows nothing.
+   */
+  async #openPreview(row: Row) {
+    // Its own Component, not the modal: `Modal` isn't one, and
+    // `MarkdownRenderer.render` logs a leak warning for anything that isn't
+    // `instanceof Component` (undocumented, read from obsidian.asar)
+    const component = new Component();
+    component.load();
+    const open: OpenPreview = { row, component };
+    this.#open = open;
+    row.preview.hidden = false;
+    row.name.setAttribute('aria-expanded', 'true');
+    const { file } = row.leftover;
+    let text: string;
+    try {
+      text = await this.app.vault.cachedRead(file);
+    } catch (error) {
+      console.error(
+        'Incremental Reading - failed to read a leftover note to preview:',
+        error
+      );
+      if (this.#open === open) {
+        createDiv({
+          cls: 'ir-leftover-preview-error',
+          text: "Couldn't read this note",
+          parent: row.preview,
+        });
+      }
+      return;
+    }
+    if (this.#open !== open) return;
+    try {
+      await MarkdownRenderer.render(
+        this.app,
+        text.slice(getFrontMatterInfo(text).contentStart),
+        row.preview,
+        file.path,
+        component
+      );
+    } catch (error) {
+      // What did render stays, short of what failed, an embed say
+      console.error(
+        'Incremental Reading - failed to render a leftover note to preview:',
+        error
+      );
+    }
   }
 
   /** Confirm is on while something is chosen and nothing is under way. */
@@ -257,7 +382,9 @@ export class LeftoverModal extends Modal {
         );
       }
       if (done) {
+        if (this.#open?.row === row) this.#closePreview();
         row.el.remove();
+        row.preview.remove();
         this.#rows = this.#rows.filter((r) => r !== row);
       } else {
         createDiv({

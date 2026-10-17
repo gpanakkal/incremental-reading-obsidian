@@ -576,17 +576,24 @@ export class Component {
   load(): void {}
   unload(): void {}
 }
-/** Renders the markdown as plain text; tests spy on `render` to put markup in its place. */
+/**
+ * Renders the markdown as plain text in a `div.mock-rendered`, appended to
+ * `el` as Obsidian's appends its output (read from obsidian.asar: it never
+ * empties `el`). Tests spy on `render` to read its arguments, or to put markup
+ * in its place.
+ */
 export class MarkdownRenderer {
   static async render(
     _app: unknown,
-    _markdown: string,
-    _el: HTMLElement,
+    markdown: string,
+    el: HTMLElement,
     _sourcePath: string,
     _component: Component
   ): Promise<void> {
-    // Minimal stub: write textContent = markdown so tests can control rendered output
-    _el.textContent = _markdown;
+    const rendered = document.createElement('div');
+    rendered.className = 'mock-rendered';
+    rendered.textContent = markdown;
+    el.appendChild(rendered);
   }
 }
 export const Platform = {
