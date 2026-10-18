@@ -1,3 +1,4 @@
+import * as notices from '#/lib/notices';
 import { configureSuccessNotices, notify } from '#/lib/notices';
 // The mock the vitest config aliases `obsidian` to, imported by path so its
 // recorded notices are visible to the type checker
@@ -82,6 +83,47 @@ describe('importChosen', () => {
             files.map((file) => ({ file })),
             options
           );
+        }
+      )
+    );
+  });
+
+  it('hands over what came of it before saying anything, and puts the button it answers on the count alone', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        resultsArb,
+        optionsArb,
+        fc.boolean(),
+        async (outcomes, options, withAction) => {
+          vi.restoreAllMocks();
+          const said = vi.spyOn(notices, 'notify');
+          const action = withAction
+            ? { label: 'Undo', onClick: vi.fn() }
+            : undefined;
+          const onImported = vi.fn(() => {
+            expect(said).not.toHaveBeenCalled();
+            return action;
+          });
+          const files = outcomes.map(({ file }) => file);
+
+          await importChosen(
+            makeImporter(outcomes),
+            files,
+            options,
+            'notes',
+            onImported
+          );
+
+          expect(onImported).toHaveBeenCalledExactlyOnceWith(outcomes);
+          const [summary, ...rest] = said.mock.calls;
+          expect(summary[1]).toEqual({
+            kind: 'success',
+            category: 'import',
+            action,
+          });
+          for (const [, options] of rest) {
+            expect(options?.action).toBeUndefined();
+          }
         }
       )
     );

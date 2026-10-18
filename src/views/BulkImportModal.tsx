@@ -48,11 +48,17 @@ export class BulkImportModal extends Modal {
     // Not again on a second confirm while the import runs
     if (this.importing) return;
     const { plugin, request } = this;
+    const { title } = request.source;
     this.importing = importChosen(
       plugin.reviewManager,
       files,
       options,
-      request.source.title
+      title,
+      (outcomes) => {
+        // One entry for the whole of it, which the summary's button undoes
+        const entry = plugin.actions.recordImport({ from: title, outcomes });
+        return entry ? plugin.actions.undoAction(entry) : undefined;
+      }
     );
     this.close();
   }

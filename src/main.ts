@@ -1369,12 +1369,13 @@ export default class IncrementalReadingPlugin extends Plugin {
         defaultCopyOnImport: merged.copyOnImport,
       }).open();
     } else {
-      await this.reviewManager.importArticle(
+      const result = await this.reviewManager.importArticle(
         file,
         this.settings.defaultPriority,
         null,
         merged.copyOnImport
       );
+      this.actions.recordImport({ name: file.basename, result });
     }
   }
 
@@ -1544,11 +1545,12 @@ export default class IncrementalReadingPlugin extends Plugin {
         dialog.open();
         await dialog.closed;
       } else {
-        await this.reviewManager.importWebPage(
+        const result = await this.reviewManager.importWebPage(
           page,
           this.settings.defaultPriority,
           null
         );
+        this.actions.recordImport({ name: page.title, result });
       }
     } finally {
       importingWebViewers.delete(viewer);

@@ -11,14 +11,18 @@ import { ImportModal, type ImportSubject } from './ImportModal';
 
 // #region HELPERS
 function makePlugin(copyOnImport = DEFAULT_SETTINGS.copyOnImport) {
-  const importArticle = vi.fn(() => Promise.resolve(null));
-  const importWebPage = vi.fn(() => Promise.resolve(null));
+  /** What either import answers, which the undo entry is recorded for. */
+  const result = { articleId: 'imported', effect: 'created', article: null };
+  const importArticle = vi.fn((): Promise<unknown> => Promise.resolve(result));
+  const importWebPage = vi.fn((): Promise<unknown> => Promise.resolve(result));
+  const recordImport = vi.fn();
   const plugin = {
     app: {},
     settings: { ...DEFAULT_SETTINGS, copyOnImport },
     reviewManager: { importArticle, importWebPage },
+    actions: { recordImport },
   } as unknown as IncrementalReadingPlugin;
-  return { plugin, importArticle, importWebPage };
+  return { plugin, importArticle, importWebPage, recordImport, result };
 }
 
 /** The dialog for importing `file`, its copy toggle starting at `defaultCopy`. */
@@ -258,7 +262,8 @@ describe('ImportModal', () => {
         fc.integer(),
         fc.boolean(),
         async (subject, strategy, value, makeCopy) => {
-          const { plugin, importArticle, importWebPage } = makePlugin();
+          const { plugin, importArticle, importWebPage, recordImport, result } =
+            makePlugin();
           const modal = new ImportModal(plugin, subject);
 
           await modal.handleClose(strategy, value, makeCopy);
@@ -281,6 +286,14 @@ describe('ImportModal', () => {
             );
             expect(importWebPage).not.toHaveBeenCalled();
           }
+          // One undo entry, named for what was imported
+          expect(recordImport).toHaveBeenCalledExactlyOnceWith({
+            name:
+              subject.kind === 'web'
+                ? subject.page.title
+                : subject.file.basename,
+            result,
+          });
         }
       )
     );

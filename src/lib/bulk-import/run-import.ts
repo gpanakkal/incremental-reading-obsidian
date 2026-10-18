@@ -1,4 +1,4 @@
-import { notify } from '#/lib/notices';
+import { notify, type NoticeAction } from '#/lib/notices';
 import type { TFile } from 'obsidian';
 import type { BulkImportEntry, BulkImportOptions, BulkOutcome } from './types';
 
@@ -24,21 +24,27 @@ export function describeFailures(failed: readonly BulkOutcome[]): string {
  * same `options`, then say how it went: one notice counting what was
  * imported, a success the notice levels may hide, and when any failed a
  * second one listing them, which always shows.
+ * @param onImported told what came of the import before anything is said,
+ *   for an undo to take it back; answers the button for the first notice to
+ *   carry, if any
  */
 export async function importChosen(
   importer: BulkImporter,
   files: readonly TFile[],
   options: BulkImportOptions,
-  title: string
+  title: string,
+  onImported?: (outcomes: readonly BulkOutcome[]) => NoticeAction | undefined
 ): Promise<BulkOutcome[]> {
   const outcomes = await importer.importArticles(
     files.map((file) => ({ file })),
     options
   );
+  const action = onImported?.(outcomes);
   const imported = outcomes.filter(({ status }) => status === 'imported');
   notify(`${imported.length} of ${outcomes.length} imported from ${title}`, {
     kind: 'success',
     category: 'import',
+    action,
   });
   const failed = outcomes.filter(({ status }) => status === 'failed');
   if (failed.length > 0) notify(describeFailures(failed), { kind: 'error' });

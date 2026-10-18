@@ -1,3 +1,4 @@
+import type { BulkOutcome, ImportedArticle } from '#/lib/bulk-import/types';
 import type { DeleteOutcome } from '#/lib/items/ItemManager';
 import {
   type PdfSelectionSource,
@@ -34,6 +35,7 @@ import {
 } from './item-context';
 import type { CardSelection } from './items/CardManager';
 import { getMimeType } from './mime';
+import type { NoticeAction } from './notices';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import {
   fetchCurrentItem,
@@ -67,6 +69,7 @@ import {
   isReviewArticle,
   isReviewSnippet,
 } from './types';
+import { refreshAfterImportUndo } from './unimport-article';
 import { getContentSlice, getEndOfDay } from './utils';
 
 /**
@@ -124,7 +127,8 @@ function undoMiss(outcome: DeleteOutcome): UndoMiss {
 }
 
 export type ActionStackEntry = {
-  item: MaybeMissingItem;
+  /** The item acted on, if the action had one. */
+  item?: MaybeMissingItem;
   description: string;
   /**
    * Take the action back. Answers how it went when it took nothing back,
@@ -141,6 +145,30 @@ export type ActionStackEntry = {
 };
 
 /**
+ * A manual import, for {@link Actions.recordImport}: of one file or web page,
+ * named `name`, which did what `result` says (nothing, when null); or of many
+ * files at once, chosen from what `from` names.
+ */
+export type ImportSummary =
+  | { name: string; result: ImportedArticle | null }
+  | { from: string; outcomes: readonly BulkOutcome[] };
+
+/** What of `summary` an undo takes back: what was made or brought back. */
+function undoableImports(summary: ImportSummary): ImportedArticle[] {
+  const done =
+    'result' in summary
+      ? summary.result
+        ? [summary.result]
+        : []
+      : summary.outcomes.flatMap(({ articleId, effect, madeFile }) =>
+          articleId !== undefined && effect !== undefined
+            ? [{ articleId, effect, madeFile }]
+            : []
+        );
+  return done.filter(({ effect }) => effect !== 'linked');
+}
+
+/**
  * Coordinates review operations with store and query cache updates
  */
 export class Actions {
@@ -151,6 +179,11 @@ export class Actions {
    * {@link _makeFromPdf}.
    */
   private _makingFromPdf = false;
+  /**
+   * The entry recorded for each import of one file (see `recordImport`), by
+   * its result, which the import's notice holds to undo it.
+   */
+  private readonly _importEntries = new WeakMap<object, ActionStackEntry>();
   emitter;
   subscribe;
 
@@ -1057,6 +1090,23 @@ export class Actions {
       Obsidian.notify(`Nothing to undo!`);
       return;
     }
+    await this.undoEntry(actionEntry);
+  };
+
+  /**
+   * Undo `target` wherever it is on the stack, as {@link undo} undoes the
+   * top one; taken off the stack, it goes from where it was, and comes back
+   * there for a `retry`. Says it was undone already when it is not on the
+   * stack (anymore).
+   */
+  undoEntry = async (target: ActionStackEntry | undefined) => {
+    // The stack holds no `undefined`, so none is found for it either
+    const index = this.undoStack.findIndex((entry) => entry === target);
+    const actionEntry = this.undoStack[index];
+    if (actionEntry === undefined) {
+      Obsidian.notify('Already undone');
+      return;
+    }
     // Refused before anything is reversed, and kept for once saving resumes
     if (
       actionEntry.writes !== false &&
@@ -1067,7 +1117,7 @@ export class Actions {
     ) {
       return;
     }
-    this.undoStack.pop();
+    this.undoStack.splice(index, 1);
     // Emitted before the reversal runs, not after: the entry is already off the
     // stack, and an undo that throws partway would otherwise leave subscribers
     // reading an entry that is no longer there.
@@ -1082,7 +1132,8 @@ export class Actions {
       throw error;
     }
     if (miss === 'retry') {
-      this.undoStack.push(actionEntry);
+      // Where it was: on top, when what was above it has gone meanwhile
+      this.undoStack.splice(index, 0, actionEntry);
       this.emitter.emit();
       Obsidian.notify(`Didn't undo ${actionEntry.description}`);
       return;
@@ -1098,6 +1149,54 @@ export class Actions {
       category: 'undo',
     });
   };
+
+  /**
+   * Record a manual import, as `summary` tells it, for an undo to take back
+   * (see `ArticleManager.undoImports`): one entry for the whole of it. An
+   * import that made or brought back nothing, having only linked a file to
+   * the article its `ir-id` names, leaves none. Automatic imports never come
+   * here (see `AutoImportWatcher`): nothing there was the user's to undo.
+   * @returns the entry, for a notice's button to undo (see {@link undoAction}),
+   *   or null when none was recorded
+   */
+  recordImport = (summary: ImportSummary): ActionStackEntry | null => {
+    const imports = undoableImports(summary);
+    if (imports.length === 0) return null;
+    const description =
+      'result' in summary
+        ? `importing "${getContentSlice(summary.name, CONTENT_TITLE_SLICE_LENGTH, true)}"`
+        : `importing ${imports.length} article${imports.length === 1 ? '' : 's'} from ${summary.from}`;
+    const entry: ActionStackEntry = {
+      description,
+      writes: true,
+      undo: async () => {
+        const undone = await this.plugin.reviewManager.undoImports(imports);
+        await refreshAfterImportUndo(undone);
+        // Those it couldn't take back were logged as it went
+        if (undone.length === 0) return 'failed';
+      },
+    };
+    if ('result' in summary && summary.result) {
+      this._importEntries.set(summary.result, entry);
+    }
+    this._pushUndo(entry);
+    return entry;
+  };
+
+  /**
+   * Undo the import of one file that answered `result`, by the entry
+   * {@link recordImport} recorded for it: what its notice's Undo button does
+   * (see `ArticleManager.import`).
+   */
+  undoImport = async (result: ImportedArticle | null) => {
+    await this.undoEntry(result ? this._importEntries.get(result) : undefined);
+  };
+
+  /** A notice's button that undoes `entry` (see {@link undoEntry}). */
+  undoAction = (entry: ActionStackEntry): NoticeAction => ({
+    label: 'Undo',
+    onClick: () => void this.undoEntry(entry),
+  });
 
   // #region HELPERS
   /** Call this after reviewing, skipping, dismissing, or deleting an open item */

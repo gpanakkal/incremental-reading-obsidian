@@ -2,6 +2,7 @@ import type {
   BulkImportEntry,
   BulkImportOptions,
   BulkOutcome,
+  ImportedArticle,
 } from '#/lib/bulk-import/types';
 import { refusedWrite, withCompensation } from '#/lib/compensation';
 import {
@@ -102,6 +103,17 @@ interface ImportReport {
   confirm(message: string, action?: NoticeAction): void;
   /** Something about an import that goes ahead. */
   warn(...args: Parameters<typeof Obsidian.notify>): void;
+  /**
+   * The button that undoes the import, for a notice of one made where its
+   * file is: a copy's notice opens the copy instead (see `openAction`).
+   */
+  undo?: NoticeAction;
+}
+
+/** What an import of one file did, and the article it made or brought back. */
+export interface ImportResult extends ImportedArticle {
+  /** Null when the article can't be shown: see `ArticleManager.fetch`. */
+  article: ReviewArticle | null;
 }
 
 /** The report of an import of one file: every word of it a notice. */
@@ -243,8 +255,6 @@ interface RowWriter {
     row: MutationStatement | null,
     claim: Claim<T>
   ): Promise<() => Promise<T>>;
-  /** What an import answers its caller, having imported the article `id`. */
-  result(id: string): Promise<ReviewArticle | null>;
 }
 
 /**
@@ -315,11 +325,17 @@ class HeldWriter implements RowWriter {
     this.#stopped = stopped;
     this.#release(written);
   }
+}
 
-  /** Nothing: a batch's caller reads its outcomes instead. */
-  result(): Promise<ReviewArticle | null> {
-    return Promise.resolve(null);
-  }
+/**
+ * What an import that made the article `articleId` did: see `ImportEffect`.
+ */
+function imported(
+  articleId: string,
+  effect: ImportedArticle['effect'],
+  madeFile?: TFile
+): ImportedArticle {
+  return madeFile ? { articleId, effect, madeFile } : { articleId, effect };
 }
 
 /**
@@ -363,7 +379,6 @@ export class ArticleManager extends ItemManager {
       if (row) await this.repo.mutate(row.query, row.params);
       return () => claim.now();
     },
-    result: (id) => this.fetch(id),
   };
 
   static rowToBase(articleRow: ArticleRow): IArticleBase {
@@ -418,30 +433,45 @@ export class ArticleManager extends ItemManager {
    * A file that can only be imported in place is, whatever copy was asked for.
    * A second import of a file while one is still running is dropped: both
    * would find no row at its path, and the second would fail on inserting it.
-   * @returns the imported or restored article; for a PDF already imported,
-   * that article; or null when nothing was imported
+   *
+   * The notice of an article made or brought back where its file is carries
+   * an Undo button, which undoes the entry the caller records for the import
+   * (see `Actions.recordImport`).
+   * @returns what the import did, or null when nothing was imported (a file
+   * already an article among them)
    */
   async import(
     file: TFile,
     priority: number,
     fixedIntervalDays: number | null,
     makeCopy?: boolean
-  ) {
+  ): Promise<ImportResult | null> {
     if (!checkImportable(file)) return null;
     if (refusedWrite(this.repo, `import "${file.name}"`)) return null;
     if (this.importing.has(file.path)) return null;
 
     const willCopy =
       isCopyImportable(file) && (makeCopy ?? this.plugin.settings.copyOnImport);
+    // Filled in once the import returns, before its notice can be clicked
+    let result: ImportResult | null = null;
+    const report: ImportReport = {
+      ...toUser,
+      undo: {
+        label: 'Undo',
+        onClick: () => void this.plugin.actions.undoImport(result),
+      },
+    };
     try {
-      return await this.importFile(
+      const made = await this.importFile(
         file,
         priority,
         fixedIntervalDays,
         willCopy,
-        toUser,
+        report,
         this.writeNow
       );
+      if (made) result = { ...made, article: await this.fetch(made.articleId) };
+      return result;
     } catch (error) {
       Obsidian.notify(`Failed to import article "${file.name}"`, {
         kind: 'error',
@@ -558,8 +588,9 @@ export class ArticleManager extends ItemManager {
       // Kept where a developer can find them, not shown
       warn: (message) => console.warn(message),
     };
+    let made: ImportedArticle | null;
     try {
-      await this.importFile(
+      made = await this.importFile(
         file,
         priority,
         fixedIntervalDays,
@@ -573,7 +604,7 @@ export class ArticleManager extends ItemManager {
       return { file, status: 'failed', reason: errorReason(error) };
     }
     const refused = refusal as Refusal | null;
-    if (refused === null) return { file, status: 'imported' };
+    if (refused === null) return { file, status: 'imported', ...made };
     return {
       file,
       status: refused.skipped ? 'skipped' : 'failed',
@@ -587,6 +618,8 @@ export class ArticleManager extends ItemManager {
    * `importing` until done, from the caller's own synchronous step, so no
    * second import of it can start.
    * @param stripFromSource tags to take off `file` once it is copied
+   * @returns what the import did, or null when it did nothing, its report
+   *   having said why
    * @throws whatever the import throws, its report having said nothing of it
    */
   private async importFile(
@@ -597,7 +630,7 @@ export class ArticleManager extends ItemManager {
     report: ImportReport,
     writer: RowWriter,
     stripFromSource: readonly string[] = []
-  ) {
+  ): Promise<ImportedArticle | null> {
     // Read once: a rename during the import changes `file.path` in place
     const { path } = file;
     this.importing.add(path);
@@ -839,10 +872,10 @@ export class ArticleManager extends ItemManager {
       return null;
     }
     if (existingId) {
-      const rows = await this.repo.query(
-        'SELECT id FROM article WHERE id = $1',
+      const rows = (await this.repo.query(
+        'SELECT id, deleted FROM article WHERE id = $1',
         [existingId]
-      );
+      )) as Pick<ArticleRow, 'id' | 'deleted'>[];
       if (rows[0]) {
         const claimed = await writer.commit(
           relinkRow(file.path, existingId),
@@ -855,11 +888,14 @@ export class ArticleManager extends ItemManager {
           undefined,
           report
         );
+        // A deleted row is brought back, which an undo deletes again
+        const effect = rows[0].deleted ? 'restored' : 'linked';
         report.confirm(
-          `Linked "${file.basename}" to existing article with the same ID`
+          `Linked "${file.basename}" to existing article with the same ID`,
+          effect === 'restored' ? report.undo : undefined
         );
         warnIfRefused(file.path, report);
-        return writer.result(existingId);
+        return imported(existingId, effect);
       }
       // Orphaned id + no reference match: fall through to fresh import
     }
@@ -901,8 +937,11 @@ export class ArticleManager extends ItemManager {
     );
     const schedulingString = describeSchedule(priority, fixedIntervalDays);
 
-    report.confirm(`Imported "${titleSlice}" with ${schedulingString}`);
-    return writer.result(id);
+    report.confirm(
+      `Imported "${titleSlice}" with ${schedulingString}`,
+      report.undo
+    );
+    return imported(id, 'created');
   }
 
   /**
@@ -1059,7 +1098,7 @@ export class ArticleManager extends ItemManager {
         reason: 'already an article',
         skipped: true,
       });
-      return writer.result(existing.id);
+      return null;
     }
     const titleSlice = getContentSlice(
       file.basename,
@@ -1090,10 +1129,11 @@ export class ArticleManager extends ItemManager {
         report
       );
       report.confirm(
-        `Restored the article "${titleSlice}" to the queue with its earlier schedule`
+        `Restored the article "${titleSlice}" to the queue with its earlier schedule`,
+        report.undo
       );
       warnIfRefused(file.path, report);
-      return writer.result(existing.id);
+      return imported(existing.id, 'restored');
     }
 
     // Past here a new article is made where the file is. One it was before,
@@ -1113,8 +1153,11 @@ export class ArticleManager extends ItemManager {
     );
 
     const schedulingString = describeSchedule(priority, fixedIntervalDays);
-    report.confirm(`Imported "${titleSlice}" with ${schedulingString}`);
-    return writer.result(id);
+    report.confirm(
+      `Imported "${titleSlice}" with ${schedulingString}`,
+      report.undo
+    );
+    return imported(id, 'created');
   }
 
   /**
@@ -1261,7 +1304,7 @@ export class ArticleManager extends ItemManager {
         `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`,
         this.openAction(id, titleSlice)
       );
-      return writer.result(id);
+      return imported(id, 'created', copy);
     });
   }
 
@@ -1352,10 +1395,10 @@ export class ArticleManager extends ItemManager {
     // Re-associate if the source already carries an ir-id with a matching DB row
     const existingId = frontmatter?.['ir-id'];
     if (existingId) {
-      const rows = await this.repo.query(
-        'SELECT id FROM article WHERE id = $1',
+      const rows = (await this.repo.query(
+        'SELECT id, deleted FROM article WHERE id = $1',
         [existingId]
-      );
+      )) as Pick<ArticleRow, 'id' | 'deleted'>[];
       if (rows[0]) {
         const claimed = await writer.commit(
           relinkRow(file.path, existingId),
@@ -1370,11 +1413,14 @@ export class ArticleManager extends ItemManager {
           undefined,
           report
         );
+        // A deleted row is brought back, which an undo deletes again
+        const effect = rows[0].deleted ? 'restored' : 'linked';
         report.confirm(
-          `Linked "${file.basename}" to existing article with the same ID`
+          `Linked "${file.basename}" to existing article with the same ID`,
+          effect === 'restored' ? report.undo : undefined
         );
         warnIfRefused(file.path, report);
-        return writer.result(existingId);
+        return imported(existingId, effect);
       }
       // Orphaned ir-id: warn but proceed with creating the copy
       report.warn(
@@ -1496,7 +1542,7 @@ export class ArticleManager extends ItemManager {
         `Imported "${titleSlice}" with ${schedulingString}${movedToCopy(moved)}`,
         this.openAction(id, titleSlice)
       );
-      return writer.result(id);
+      return imported(id, 'created', articleFile);
     });
   }
 
@@ -1507,13 +1553,14 @@ export class ArticleManager extends ItemManager {
    * together or not at all, as a copy's are. Its title was made safe for a
    * file name by Obsidian, so what reading it as a title drops goes unsaid,
    * as does a cut to the length a file name can hold.
-   * @returns the imported article, or null when nothing was imported
+   * @returns what the import did, the note it made among it, or null when
+   *   nothing was imported
    */
   async importWebPage(
     page: WebPage,
     priority: number,
     fixedIntervalDays: number | null
-  ) {
+  ): Promise<ImportResult | null> {
     if (refusedWrite(this.repo, `import "${page.title}"`)) return null;
     try {
       return await this.withCopyTarget(
@@ -1579,7 +1626,10 @@ export class ArticleManager extends ItemManager {
             `Imported "${titleSlice}" with ${schedulingString}`,
             this.openAction(id, titleSlice)
           );
-          return this.fetch(id);
+          return {
+            ...imported(id, 'created', note),
+            article: await this.fetch(id),
+          };
         }
       );
     } catch (error) {
@@ -2059,6 +2109,85 @@ export class ArticleManager extends ItemManager {
       console.error(error);
     }
     this.app.workspace.trigger('ir-highlights-changed', file.path);
+  }
+
+  /**
+   * Take back what `imports` did, the last first (see `Actions.recordImport`):
+   * - an article made where its file is is un-imported (see
+   *   {@link unimportMany}), trigger tags and all, or the auto-import watcher
+   *   would import it again at once;
+   * - one made as a note of its own, a copy or a web page's, loses its row for
+   *   good, its snippets and cards kept with no parent, and its note goes to
+   *   the trash; the file copied is left as it is;
+   * - one brought back is deleted again, keeping its history.
+   *
+   * Only a live article is taken back: one gone since, un-imported or deleted
+   * by hand, is passed over, as is one only linked, which had nothing made to
+   * take back. What fails is logged, and never stops the rest.
+   * @returns the ids of the articles taken back, which are live no longer
+   */
+  async undoImports(imports: readonly ImportedArticle[]): Promise<string[]> {
+    const undone: string[] = [];
+    for (const one of [...imports].reverse()) {
+      try {
+        if (await this.undoImport(one)) undone.push(one.articleId);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+    return undone;
+  }
+
+  /**
+   * One of {@link undoImports}.
+   * @returns whether its article was taken back
+   */
+  private async undoImport({
+    articleId,
+    effect,
+    madeFile,
+  }: ImportedArticle): Promise<boolean> {
+    if (effect === 'linked') return false;
+    const reference = await this.liveReference(articleId);
+    if (reference === null) {
+      console.warn(`Not undoing the import of ${articleId}: it is gone`);
+      return false;
+    }
+    // Where its row says, which follows its file on a rename
+    const file = this.app.vault.getFileByPath(reference);
+    if (effect === 'restored') {
+      await this.markDeleted(articleId, 'article');
+      if (file) await this.refreshHighlights(file);
+      return true;
+    }
+    if (madeFile || !file) {
+      // Held back from automatic import before its row goes, as an un-import
+      if (file) this.plugin.autoImportWatcher?.unimporting(file);
+      await this.plugin.reviewManager.deleteRow('article', articleId);
+      if (!madeFile || !file) return true;
+      try {
+        await this.app.fileManager.trashFile(file);
+      } catch (error) {
+        // Its row gone, it is a plain note: taken back all the same
+        console.error(error);
+      }
+      return true;
+    }
+    const [outcome] = await this.unimportMany([file]);
+    if (outcome.status !== 'unimported') {
+      console.warn(`Undoing the import of "${file.path}": ${outcome.reason}`);
+    }
+    // Its properties failing to clear leaves it taken back all the same
+    return (await this.liveReference(articleId)) === null;
+  }
+
+  /** Where the live article `id` is, or null when it is none. */
+  private async liveReference(id: string): Promise<string | null> {
+    const rows = (await this.repo.query(
+      'SELECT reference FROM article WHERE id = $1 AND deleted = FALSE',
+      [id]
+    )) as Pick<ArticleRow, 'reference'>[];
+    return rows[0]?.reference ?? null;
   }
   // #endregion
 }

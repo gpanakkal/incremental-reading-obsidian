@@ -1,4 +1,9 @@
-import { Actions, itemName } from '#/lib/Actions';
+import { Actions, itemName, type ActionStackEntry } from '#/lib/Actions';
+import type {
+  BulkOutcome,
+  ImportEffect,
+  ImportedArticle,
+} from '#/lib/bulk-import/types';
 import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from '#/lib/constants';
 import * as contextFlash from '#/lib/context-flash';
 import * as itemContext from '#/lib/item-context';
@@ -32,6 +37,7 @@ import {
   type ReviewSnippet,
   type ReviewText,
 } from '#/lib/types';
+import * as unimportArticle from '#/lib/unimport-article';
 import { getContentSlice, getEndOfDay } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import fc from 'fast-check';
@@ -714,6 +720,73 @@ const namingKind = (kind: SelectionKind) =>
       's'
     )
   ) as unknown;
+
+/** What an import may report it did, by any article. */
+const importedArb: fc.Arbitrary<ImportedArticle> = fc.record(
+  {
+    articleId: fc.uuid(),
+    effect: fc.constantFrom<ImportEffect>('created', 'restored', 'linked'),
+    madeFile: fc.string().map((name) => makeTFile(name)),
+  },
+  { requiredKeys: ['articleId', 'effect'] }
+);
+
+/**
+ * What a bulk import may report of one file: imported, saying what it did, or
+ * not, saying nothing of it.
+ */
+const bulkOutcomeArb: fc.Arbitrary<BulkOutcome> = fc.oneof(
+  importedArb.map((imported) => ({
+    file: makeTFile('f'),
+    status: 'imported' as const,
+    ...imported,
+  })),
+  fc
+    .constantFrom<
+      BulkOutcome['status']
+    >('imported', 'unimported', 'skipped', 'failed')
+    .map((status) => ({ file: makeTFile('f'), status }))
+);
+
+/** What of `imports` an undo takes back: all but what only linked. */
+const undoable = (imports: readonly Partial<ImportedArticle>[]) =>
+  imports.flatMap(({ articleId, effect, madeFile }) =>
+    articleId !== undefined && effect !== undefined && effect !== 'linked'
+      ? [{ articleId, effect, madeFile }]
+      : []
+  );
+
+/**
+ * Actions whose review manager takes back what `undone` picks of the imports
+ * it is handed (all of them by default), the refresh after it and the
+ * notices spied on.
+ */
+function wireImports(
+  undone: (imports: readonly ImportedArticle[]) => string[] = (imports) =>
+    imports.map(({ articleId }) => articleId)
+) {
+  const plugin = makePlugin();
+  const undoImports = vi.fn(async (imports: readonly ImportedArticle[]) =>
+    undone(imports)
+  );
+  Object.assign(plugin.reviewManager, { undoImports });
+  const refresh = vi
+    .spyOn(unimportArticle, 'refreshAfterImportUndo')
+    .mockResolvedValue(undefined);
+  const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+  const actions = new Actions(plugin);
+  const listener = vi.fn();
+  actions.subscribe(listener);
+  return { actions, undoImports, refresh, notify, listener };
+}
+
+/** A plain entry for the stack, which undoes as `undo` says. */
+function plainEntry(
+  description: string,
+  undo: ActionStackEntry['undo'] = () => undefined
+): ActionStackEntry {
+  return { description, undo: vi.fn(undo), writes: false };
+}
 
 // #endregion
 
@@ -4207,5 +4280,301 @@ describe('Actions — undo of a snippet made from a note', () => {
         );
       }
     }
+  });
+});
+
+describe('Actions.recordImport', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('property: records one entry for an import of one file, unless it made or brought back nothing', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        // Long ones too, which the description cuts short
+        fc.oneof(fc.string(), fc.string({ minLength: 40, maxLength: 120 })),
+        fc.option(importedArb, { nil: null }),
+        async (name, result) => {
+          vi.restoreAllMocks();
+          const { actions, undoImports, refresh, listener } = wireImports();
+
+          const entry = actions.recordImport({ name, result });
+
+          if (result === null || result.effect === 'linked') {
+            expect(entry).toBeNull();
+            expect(actions.undoStack).toEqual([]);
+            expect(listener).not.toHaveBeenCalled();
+            return;
+          }
+          expect(actions.undoStack).toEqual([entry]);
+          expect(listener).toHaveBeenCalledOnce();
+          expect(entry!.writes).toBe(true);
+          expect(entry!.description).toContain(
+            `"${getContentSlice(name, CONTENT_TITLE_SLICE_LENGTH, true)}"`
+          );
+
+          await actions.undo();
+
+          expect(undoImports).toHaveBeenCalledExactlyOnceWith([result]);
+          expect(refresh).toHaveBeenCalledExactlyOnceWith([result.articleId]);
+          expect(actions.undoStack).toEqual([]);
+        }
+      )
+    );
+  });
+
+  it('property: records one entry for a bulk import that made or brought back anything, counting those', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.array(bulkOutcomeArb, { maxLength: 6 }),
+        async (from, outcomes) => {
+          vi.restoreAllMocks();
+          const { actions, undoImports, listener } = wireImports();
+          const expected = undoable(outcomes);
+
+          const entry = actions.recordImport({ from, outcomes });
+
+          if (expected.length === 0) {
+            expect(entry).toBeNull();
+            expect(actions.undoStack).toEqual([]);
+            expect(listener).not.toHaveBeenCalled();
+            return;
+          }
+          expect(actions.undoStack).toEqual([entry]);
+          expect(listener).toHaveBeenCalledOnce();
+          expect(entry!.writes).toBe(true);
+          const count = expected.length;
+          expect(entry!.description).toContain(
+            ` ${count} article${count === 1 ? '' : 's'} `
+          );
+          expect(entry!.description.endsWith(` ${from}`)).toBe(true);
+
+          await actions.undo();
+
+          // In the order imported: the manager takes them back last first
+          expect(undoImports).toHaveBeenCalledExactlyOnceWith(expected);
+        }
+      )
+    );
+  });
+
+  it('property: says it could not undo an import when nothing was taken back, and that it did when anything was', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          importedArb.filter(({ effect }) => effect !== 'linked'),
+          { minLength: 1, maxLength: 4 }
+        ),
+        fc.nat(),
+        async (imports, kept) => {
+          vi.restoreAllMocks();
+          const keep = kept % (imports.length + 1);
+          const undone = imports.slice(keep).map(({ articleId }) => articleId);
+          const { actions, refresh, notify } = wireImports(() => undone);
+          const outcomes = imports.map((imported) => ({
+            file: makeTFile('f'),
+            status: 'imported' as const,
+            ...imported,
+          }));
+          const entry = actions.recordImport({ from: 'x', outcomes })!;
+
+          await actions.undo();
+
+          expect(refresh).toHaveBeenCalledExactlyOnceWith(undone);
+          expect(actions.undoStack).toEqual([]);
+          expect(notify).toHaveBeenCalledExactlyOnceWith(
+            expect.stringContaining(entry.description),
+            undone.length === 0
+              ? { kind: 'error' }
+              : { kind: 'success', category: 'undo' }
+          );
+        }
+      )
+    );
+  });
+
+  it('is held while writes are refused, as every undo that writes is', async () => {
+    const { actions, undoImports } = wireImports();
+    Object.assign(actions.plugin.reviewManager, {
+      repo: { writeRefusal: () => new Error('Saving is paused.') },
+    });
+    const entry = actions.recordImport({
+      name: 'a',
+      result: { articleId: 'a', effect: 'created' },
+    });
+
+    await actions.undo();
+
+    expect(undoImports).not.toHaveBeenCalled();
+    expect(actions.undoStack).toEqual([entry]);
+  });
+});
+
+describe('Actions.undoEntry', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('property: undoes the entry given wherever it is, leaving the rest in order', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 5 }),
+        fc.nat(),
+        async (count, at) => {
+          vi.restoreAllMocks();
+          const { actions, notify, listener } = wireImports();
+          const entries = Array.from({ length: count }, (_, i) =>
+            plainEntry(`doing ${i}`)
+          );
+          entries.forEach((entry) => actions._pushUndo(entry));
+          listener.mockClear();
+          const target = entries[at % count];
+
+          await actions.undoEntry(target);
+
+          expect(target.undo).toHaveBeenCalledOnce();
+          for (const other of entries.filter((entry) => entry !== target)) {
+            expect(other.undo).not.toHaveBeenCalled();
+          }
+          expect(actions.undoStack).toEqual(
+            entries.filter((entry) => entry !== target)
+          );
+          expect(listener).toHaveBeenCalledOnce();
+          expect(notify).toHaveBeenCalledExactlyOnceWith(
+            expect.stringContaining(target.description),
+            { kind: 'success', category: 'undo' }
+          );
+        }
+      )
+    );
+  });
+
+  it('property: puts an entry to try again back where it was, or on top once what was above it is gone', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 5 }),
+        fc.nat(),
+        fc.nat(),
+        async (count, at, dropped) => {
+          vi.restoreAllMocks();
+          const { actions } = wireImports();
+          const index = at % count;
+          // What its undo takes off the top meanwhile, of what was above it
+          const drop = dropped % (count - index);
+          const entries = Array.from({ length: count }, (_, i) =>
+            plainEntry(`doing ${i}`, () => {
+              if (i !== index) return;
+              for (let n = 0; n < drop; n++) actions.undoStack.pop();
+              return 'retry';
+            })
+          );
+          entries.forEach((entry) => actions._pushUndo(entry));
+
+          await actions.undoEntry(entries[index]);
+
+          expect(actions.undoStack).toEqual([
+            ...entries.slice(0, index),
+            entries[index],
+            ...entries.slice(index + 1, count - drop),
+          ]);
+        }
+      )
+    );
+  });
+
+  it('says the entry was undone already, doing nothing, once it is off the stack', async () => {
+    const { actions, notify, listener } = wireImports();
+    const kept = [plainEntry('kept'), plainEntry('kept too')];
+    const gone = plainEntry('gone');
+    kept.forEach((entry) => actions._pushUndo(entry));
+    listener.mockClear();
+
+    for (const entry of [gone, undefined]) {
+      notify.mockClear();
+
+      await actions.undoEntry(entry);
+
+      expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String));
+      expect(gone.undo).not.toHaveBeenCalled();
+      for (const { undo } of kept) expect(undo).not.toHaveBeenCalled();
+      expect(actions.undoStack).toEqual(kept);
+      expect(listener).not.toHaveBeenCalled();
+    }
+  });
+
+  it('undoes the top entry through undo, and says so when there is none', async () => {
+    const { actions, notify } = wireImports();
+    const [below, top] = [plainEntry('below'), plainEntry('top')];
+    actions._pushUndo(below);
+    actions._pushUndo(top);
+
+    await actions.undo();
+
+    expect(top.undo).toHaveBeenCalledOnce();
+    expect(below.undo).not.toHaveBeenCalled();
+    expect(actions.undoStack).toEqual([below]);
+    const undoEntry = vi.spyOn(actions, 'undoEntry');
+    actions.undoStack.pop();
+    notify.mockClear();
+
+    await actions.undo();
+
+    expect(undoEntry).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Actions.undoImport and undoAction', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('undo the entry recorded for an import, wherever it is, and only once', async () => {
+    for (const how of ['undoImport', 'undoAction'] as const) {
+      vi.restoreAllMocks();
+      const { actions, undoImports, notify } = wireImports();
+      const result = { articleId: 'a', effect: 'created' as const };
+      const entry = actions.recordImport({ name: 'a', result })!;
+      const above = plainEntry('above');
+      actions._pushUndo(above);
+      const run = () =>
+        how === 'undoImport'
+          ? actions.undoImport(result)
+          : actions.undoAction(entry).onClick({ button: 0 } as MouseEvent);
+
+      await run();
+      // Its success said once it is done
+      await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
+
+      expect(undoImports).toHaveBeenCalledExactlyOnceWith([result]);
+      expect(actions.undoStack).toEqual([above]);
+      notify.mockClear();
+
+      await run();
+      await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
+
+      expect(undoImports).toHaveBeenCalledOnce();
+      expect(above.undo).not.toHaveBeenCalled();
+    }
+  });
+
+  it('says an import none was recorded for is undone already', async () => {
+    const { actions, undoImports, notify } = wireImports();
+    const recorded = { articleId: 'a', effect: 'created' as const };
+    actions.recordImport({ name: 'a', result: recorded });
+
+    for (const result of [
+      null,
+      { articleId: 'a', effect: 'created' as const },
+    ]) {
+      notify.mockClear();
+
+      await actions.undoImport(result);
+
+      expect(notify).toHaveBeenCalledOnce();
+    }
+    expect(undoImports).not.toHaveBeenCalled();
+    expect(actions.undoStack).toHaveLength(1);
   });
 });

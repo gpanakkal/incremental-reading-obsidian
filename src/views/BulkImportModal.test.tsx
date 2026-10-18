@@ -43,14 +43,22 @@ function makePlugin(
     Object.assign(ui, change);
     return Promise.resolve();
   });
+  // The entry an import records for an undo, and its notice button
+  const entry = { description: 'importing', undo: vi.fn() };
+  const undo = { label: 'Undo', onClick: vi.fn() };
+  const actions = {
+    recordImport: vi.fn<(summary: unknown) => typeof entry | null>(() => entry),
+    undoAction: vi.fn(() => undo),
+  };
   const plugin = {
     app: {},
     settings: { ...DEFAULT_SETTINGS, copyOnImport },
     data: { ui },
     saveUiState,
     reviewManager: { importArticles },
+    actions,
   } as unknown as IncrementalReadingPlugin;
-  return { plugin, importArticles, saveUiState };
+  return { plugin, importArticles, saveUiState, actions, entry, undo };
 }
 
 function makeFile(name: string, folder = 'notes'): TFile {
@@ -453,6 +461,42 @@ describe('BulkImportModal', () => {
       expect.stringMatching(/\b1\b.*\b2\b.*Reading/),
       expect.stringMatching(/\b1\b[\s\S]*notes\/b\.md[\s\S]*broken/),
     ]);
+  });
+
+  it('records the import for an undo, which a button on its count undoes', async () => {
+    for (const recorded of [true, false]) {
+      Notice.reset();
+      const { plugin, importArticles, actions, entry, undo } = makePlugin();
+      if (!recorded) actions.recordImport.mockReturnValue(null);
+      const scan = makeSource('Reading');
+      const modal = openModal(plugin, scan.source);
+      const file = makeFile('a.md');
+      await scan.add(file);
+      const outcomes = [{ file, status: 'imported' as const }];
+      importArticles.mockResolvedValue(outcomes);
+
+      await click(confirmButton(modal));
+      await modal.closed;
+
+      expect(actions.recordImport).toHaveBeenCalledExactlyOnceWith({
+        from: 'Reading',
+        outcomes,
+      });
+      const buttons = [
+        ...Notice.instances[0].containerEl.querySelectorAll<HTMLElement>(
+          '.notice-cta'
+        ),
+      ];
+      if (!recorded) {
+        expect(actions.undoAction).not.toHaveBeenCalled();
+        expect(buttons).toEqual([]);
+        continue;
+      }
+      expect(actions.undoAction).toHaveBeenCalledExactlyOnceWith(entry);
+      expect(buttons).toHaveLength(1);
+      buttons[0].click();
+      expect(undo.onClick).toHaveBeenCalledOnce();
+    }
   });
 
   it('imports once, however often it is confirmed', async () => {

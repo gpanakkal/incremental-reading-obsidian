@@ -74,11 +74,28 @@ export interface BulkImportEntry {
 }
 
 /**
+ * What an import did to make its file an article:
+ * - `created`: a new row, for the file where it is or for a copy of it;
+ * - `restored`: a deleted row brought back, with its schedule and history;
+ * - `linked`: a row the file's `ir-id` names, live or deleted, moved to the
+ *   file's path. A deleted one is `restored` instead.
+ */
+export type ImportEffect = 'created' | 'restored' | 'linked';
+
+/** What an import of one file did, which an undo takes back. */
+export interface ImportedArticle {
+  articleId: string;
+  effect: ImportEffect;
+  /** The note or file the import made: a copy, or a web page's note. */
+  madeFile?: TFile;
+}
+
+/**
  * What a bulk operation did with one file: `skipped` when there was nothing to
  * do (already an article, or being imported already), `failed` with why not
- * when it couldn't be done.
+ * when it couldn't be done. One `imported` says what the import did.
  */
-export interface BulkOutcome {
+export interface BulkOutcome extends Partial<ImportedArticle> {
   file: TFile;
   status: 'imported' | 'unimported' | 'skipped' | 'failed';
   reason?: string;

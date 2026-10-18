@@ -72,3 +72,23 @@ export async function refreshAfterUnimport(
     refetchType: 'all',
   });
 }
+
+/**
+ * Bring what shows items up to date after an undo of imports took back the
+ * articles `undone` (see `ArticleManager.undoImports`), as a hard delete
+ * reports no change: refetch every cached queue page, and move review off
+ * one of them, onto whatever is due next.
+ */
+export async function refreshAfterImportUndo(
+  undone: readonly string[]
+): Promise<void> {
+  if (undone.length === 0) return;
+  const { currentItemId } = store.getState();
+  if (currentItemId !== null && undone.includes(currentItemId)) {
+    store.dispatch(resetCurrentItem());
+  }
+  await queryClient.invalidateQueries({
+    queryKey: ['queue'],
+    refetchType: 'all',
+  });
+}

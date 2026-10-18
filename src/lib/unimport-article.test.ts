@@ -6,7 +6,11 @@ import * as ConfirmModalModule from '#/views/ConfirmModal';
 import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { refreshAfterUnimport, unimportArticle } from './unimport-article';
+import {
+  refreshAfterImportUndo,
+  refreshAfterUnimport,
+  unimportArticle,
+} from './unimport-article';
 
 // #region HELPERS
 
@@ -240,6 +244,46 @@ describe('refreshAfterUnimport', () => {
               ? null
               : currentItemId
           );
+        }
+      )
+    );
+  });
+});
+
+describe('refreshAfterImportUndo', () => {
+  afterEach(() => {
+    store.dispatch(setCurrentItemId(null));
+    vi.restoreAllMocks();
+  });
+
+  it('refreshes once when any article was taken back, moving review off one that was', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uniqueArray(fc.constantFrom<string>('a', 'b', 'c'), {
+          maxLength: 3,
+        }),
+        fc.option(fc.constantFrom('a', 'b', 'other'), { nil: null }),
+        async (undone, currentItemId) => {
+          vi.restoreAllMocks();
+          const invalidate = vi
+            .spyOn(queryClient, 'invalidateQueries')
+            .mockResolvedValue(undefined);
+          store.dispatch(setCurrentItemId(currentItemId));
+          store.dispatch(setShowAnswer(true));
+
+          await refreshAfterImportUndo(undone);
+
+          expect(invalidate.mock.calls).toStrictEqual(
+            undone.length > 0
+              ? [[{ queryKey: ['queue'], refetchType: 'all' }]]
+              : []
+          );
+          const left = currentItemId !== null && undone.includes(currentItemId);
+          expect(store.getState().currentItemId).toBe(
+            left ? null : currentItemId
+          );
+          // Reset as review resets on leaving an item, answer and all
+          expect(store.getState().showAnswer).toBe(!left);
         }
       )
     );

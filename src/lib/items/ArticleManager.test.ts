@@ -1,4 +1,5 @@
 import type { Actions } from '#/lib/Actions';
+import type { ImportEffect } from '#/lib/bulk-import/types';
 import {
   ARTICLE_DIRECTORY,
   ARTICLE_TAG,
@@ -64,7 +65,7 @@ import { resolve } from 'path';
 import initSqlJs, { type Database } from 'sql.js';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ArticleManager } from './ArticleManager';
+import { ArticleManager, type ImportResult } from './ArticleManager';
 import { CardManager } from './CardManager';
 import { ItemManager } from './ItemManager';
 import ReviewManager from './ReviewManager';
@@ -821,6 +822,34 @@ const batchOptionsArb = fc.record({
 
 const batchPathOf = ({ name, pdf }: BatchSpec) =>
   pdf ? `papers/${name}.pdf` : `notes/${name}.md`;
+
+/**
+ * The outcome of `file` imported as the article `row` holds: made, unless
+ * `effect` says otherwise, and as a copy, the file at the row's path, when
+ * `copied`.
+ */
+function importedOutcome(
+  file: TFile,
+  row: Record<string, unknown> | undefined,
+  {
+    copied = false,
+    effect = 'created',
+  }: { copied?: boolean; effect?: ImportEffect } = {}
+) {
+  return {
+    file,
+    status: 'imported',
+    articleId: row?.id,
+    effect,
+    ...(copied
+      ? {
+          madeFile: expect.objectContaining({
+            path: row?.reference,
+          }) as unknown,
+        }
+      : {}),
+  };
+}
 
 /** Where a file of a batch lands once imported, as `makeCopy` asks. */
 const batchTargetOf = (spec: BatchSpec, makeCopy: boolean) =>
@@ -3744,8 +3773,8 @@ describe('import', () => {
             });
             expect(rows[0].due).toBeGreaterThanOrEqual(before);
             expect(rows[0].due).toBeLessThanOrEqual(Date.now());
-            expect(result?.data.id).toBe(rows[0].id);
-            expect(result?.file).toBe(file);
+            expect(result?.article?.data.id).toBe(rows[0].id);
+            expect(result?.article?.file).toBe(file);
             expect(Notice.messages).toEqual([
               fixedDays === null
                 ? importedWithPriority('Paper', priority)
@@ -3827,7 +3856,7 @@ describe('import', () => {
         false
       );
 
-      expect(result?.file).toBe(replacement);
+      expect(result?.article?.file).toBe(replacement);
     });
 
     // Three levels only: each runs once, rather than a sample of a hundred
@@ -3878,7 +3907,7 @@ describe('import', () => {
       ]);
     });
 
-    it('gives back the article already at its path, adding nothing', async () => {
+    it('adds nothing for the article already at its path, and answers that nothing was imported', async () => {
       const { repo, db } = await makeSqlJsRepo();
       insertArticleRow(db, {
         id: 'existing',
@@ -3900,8 +3929,8 @@ describe('import', () => {
       );
 
       expect(allRows(repo)).toEqual(before);
-      expect(result?.data.id).toBe('existing');
-      expect(result?.file).toBe(PDF_FILE);
+      // Nothing imported: nothing for an undo to take back
+      expect(result).toBeNull();
       expect(Notice.messages).toEqual([
         expect.stringContaining(`"${PDF_FILE.name}"`),
       ]);
@@ -3945,14 +3974,14 @@ describe('import', () => {
         repo
       ).import(file, MINIMUM_PRIORITY, null, false);
 
-      expect(result?.data.id).toBe('deleted');
+      expect(result?.article?.data.id).toBe('deleted');
       expect(Notice.messages).toStrictEqual([
         expect.stringContaining('"Paper"'),
         refusedPathsWarning([file.path]),
       ]);
     });
 
-    it('gives back the article already at a path that breaks links, made before the rule', async () => {
+    it('imports nothing for the article already at a path that breaks links, made before the rule', async () => {
       const file = fileAt('C# papers/Paper.pdf');
       const { repo, db } = await makeSqlJsRepo();
       insertArticleRow(db, {
@@ -3970,7 +3999,7 @@ describe('import', () => {
         repo
       ).import(file, MINIMUM_PRIORITY, null, false);
 
-      expect(result?.data.id).toBe('existing');
+      expect(result).toBeNull();
       expect(Notice.messages).toEqual([expect.stringContaining('"Paper.pdf"')]);
     });
 
@@ -3999,7 +4028,7 @@ describe('import', () => {
       expect(row).toMatchObject({ deleted: 0, dismissed: 0 });
       expect(row.due).toBeGreaterThanOrEqual(before);
       expect(row.due).toBeLessThanOrEqual(Date.now());
-      expect(result?.data.id).toBe('tombstoned');
+      expect(result?.article?.data.id).toBe('tombstoned');
     });
 
     it('revives a deleted row at its path into the queue, keeping its schedule and history', async () => {
@@ -4046,7 +4075,7 @@ describe('import', () => {
             expect(repo.query('SELECT article_id FROM article_review')).toEqual(
               [{ article_id: 'tombstoned' }]
             );
-            expect(result?.data).toMatchObject({
+            expect(result?.article?.data).toMatchObject({
               id: 'tombstoned',
               deleted: 0,
               dismissed: false,
@@ -4158,10 +4187,10 @@ describe('import', () => {
             copy
           );
 
-          expect(result?.data.id).toBe(allRows(repo)[0].id);
+          expect(result?.article?.data.id).toBe(allRows(repo)[0].id);
           expect(error).not.toHaveBeenCalled();
           expect(repo.query('SELECT parent FROM snippet')).toEqual([
-            { parent: copy ? result?.data.id : null },
+            { parent: copy ? result?.article?.data.id : null },
           ]);
           error.mockRestore();
         }
@@ -4396,8 +4425,8 @@ describe('import', () => {
               });
               expect(rows[0].due).toBeGreaterThanOrEqual(before);
               expect(rows[0].due).toBeLessThanOrEqual(Date.now());
-              expect(result?.data.id).toBe(rows[0].id);
-              expect(result?.file).toBe(plugin.files.get(copyPath));
+              expect(result?.article?.data.id).toBe(rows[0].id);
+              expect(result?.article?.file).toBe(plugin.files.get(copyPath));
               expect(Notice.messages).toEqual([
                 fixedDays === null
                   ? importedWithPriority('Paper', priority)
@@ -4534,12 +4563,12 @@ describe('import', () => {
               expect(plugin.app.vault.copy.mock.calls).toEqual([
                 [plugin.files.get('papers/Paper.pdf'), copyPath],
               ]);
-              expect(result?.file.path).toBe(copyPath);
+              expect(result?.article?.file.path).toBe(copyPath);
               // The rows that held names are as they were; one more is added
               const rows = allRows(repo);
-              expect(rows.filter((row) => row.id !== result?.data.id)).toEqual(
-                rowsBefore
-              );
+              expect(
+                rows.filter((row) => row.id !== result?.article?.data.id)
+              ).toEqual(rowsBefore);
               expect(rows).toHaveLength(rowsBefore.length + 1);
               const warning = expect.stringContaining('"Paper.pdf"') as unknown;
               // Named by the copy, trimmed as every title is
@@ -4574,7 +4603,7 @@ describe('import', () => {
 
         const copyPath = `${ARTICLES}/invoicefdp.exe.pdf`;
         expect(plugin.app.vault.copy.mock.calls).toEqual([[source, copyPath]]);
-        expect(result?.file.path).toBe(copyPath);
+        expect(result?.article?.file.path).toBe(copyPath);
         expect(Notice.messages[0]).toContain('"invoicefdp.exe.pdf"');
       });
 
@@ -4599,7 +4628,9 @@ describe('import', () => {
             .map((row) => row.reference)
             .sort()
         ).toEqual([...copies].sort());
-        expect([first?.file.path, second?.file.path]).toEqual(copies);
+        expect([first?.article?.file.path, second?.article?.file.path]).toEqual(
+          copies
+        );
         expect(plugin.files.has(source.path)).toBe(true);
       });
 
@@ -4666,7 +4697,9 @@ describe('import', () => {
               )
             );
 
-            const copyPaths = results.map((result) => result?.file.path);
+            const copyPaths = results.map(
+              (result) => result?.article?.file.path
+            );
             expect(new Set(copyPaths).size).toBe(count);
             expect(
               allRows(repo)
@@ -4725,7 +4758,7 @@ describe('import', () => {
         // Its name is free again for the next import
         Notice.reset();
         const retry = await manager.import(source, 10, null, true);
-        expect(retry?.file.path).toBe(`${ARTICLES}/Paper.pdf`);
+        expect(retry?.article?.file.path).toBe(`${ARTICLES}/Paper.pdf`);
       });
 
       it('fails with the error that stopped it, when the copy cannot be taken back out either', async () => {
@@ -4889,15 +4922,15 @@ describe('import', () => {
             expect(plugin.app.vault.create.mock.calls).toEqual([
               [copyPath, ''],
             ]);
-            expect(result?.file.path).toBe(copyPath);
+            expect(result?.article?.file.path).toBe(copyPath);
             // The row that held the name is as it was; one more is added
             const rows = allRows(repo);
-            expect(rows.filter((row) => row.id !== result?.data.id)).toEqual(
-              rowsBefore
-            );
+            expect(
+              rows.filter((row) => row.id !== result?.article?.data.id)
+            ).toEqual(rowsBefore);
             expect(rows).toHaveLength(rowsBefore.length + 1);
             expect(
-              rows.find((row) => row.id === result?.data.id)?.reference
+              rows.find((row) => row.id === result?.article?.data.id)?.reference
             ).toBe(copyPath);
             expect(logged).not.toHaveBeenCalled();
             const imported = importedWithPriority(noticeTitle(title), 10);
@@ -5003,7 +5036,7 @@ describe('import', () => {
               expect(plugin.app.vault.create.mock.calls).toEqual([
                 [copyPath, ''],
               ]);
-              expect(result?.file.path).toBe(copyPath);
+              expect(result?.article?.file.path).toBe(copyPath);
               const imported = importedWithPriority(noticeTitle(title), 10);
               // The copy's own name, as it ends up
               expect(Notice.messages).toEqual([
@@ -5038,7 +5071,7 @@ describe('import', () => {
         );
 
         const name = `invoicefdp.exe ${BLACK_FLAG}.md`;
-        expect(result?.file.path).toBe(`${ARTICLES}/${name}`);
+        expect(result?.article?.file.path).toBe(`${ARTICLES}/${name}`);
         // Persists, as the name-taken warning does
         expect(notify).toHaveBeenCalledWith(warningFor(name), {
           persist: true,
@@ -5061,7 +5094,9 @@ describe('import', () => {
           true
         );
 
-        expect(result?.file.path).toBe(`${ARTICLES}/Caf${fromCodes(0xe9)}.md`);
+        expect(result?.article?.file.path).toBe(
+          `${ARTICLES}/Caf${fromCodes(0xe9)}.md`
+        );
         expect(Notice.messages).toEqual([
           importedWithPriority(`Caf${fromCodes(0xe9)}`, 10),
         ]);
@@ -5087,7 +5122,7 @@ describe('import', () => {
         random.mockRestore();
 
         const name = `${suffixOf(0.25)}.md`;
-        expect(result?.file.path).toBe(`${ARTICLES}/${name}`);
+        expect(result?.article?.file.path).toBe(`${ARTICLES}/${name}`);
         expect(Notice.messages[0]).toEqual(warningFor(name));
       });
     });
@@ -5115,7 +5150,7 @@ describe('import', () => {
 
             const after = new Date().toISOString();
             const copy = plugin.files.get(`${ARTICLES}/my-note.md`);
-            expect(result?.file).toBe(copy);
+            expect(result?.article?.file).toBe(copy);
             const calls = updateFrontMatter.mock.calls;
             // One write, once the copy holds the note's text and properties
             expect(calls.map(([file]) => file)).toEqual([copy]);
@@ -5123,7 +5158,7 @@ describe('import', () => {
             expect(created >= before && created <= after).toBe(true);
             expect(calls[0][1]).toEqual({
               created,
-              'ir-id': result?.data.id,
+              'ir-id': result?.article?.data.id,
               tags: ARTICLE_TAG,
               ...(!source && {
                 [SOURCE_PROPERTY_NAME]: '[[notes/my-note.md|my-note]]',
@@ -5168,7 +5203,7 @@ describe('import', () => {
                 true
               );
 
-              expect(result?.file.path).toBe(copyPath);
+              expect(result?.article?.file.path).toBe(copyPath);
               expect(seen.length).toBeGreaterThan(0);
               expect(seen).toEqual(seen.map(() => noteText(frontmatter)));
             } finally {
@@ -5205,7 +5240,7 @@ describe('import', () => {
             )
           );
 
-          const copyPaths = results.map((result) => result?.file.path);
+          const copyPaths = results.map((result) => result?.article?.file.path);
           expect(copyPaths).not.toContain(undefined);
           expect(new Set(copyPaths).size).toBe(count);
           expect(
@@ -5235,7 +5270,7 @@ describe('import', () => {
       expect(logged).toHaveBeenCalledWith(
         new Error(`Failed to create note ${ARTICLES}/my-note.md`)
       );
-      expect(retry?.file.path).toBe(`${ARTICLES}/my-note.md`);
+      expect(retry?.article?.file.path).toBe(`${ARTICLES}/my-note.md`);
     });
   });
 
@@ -5270,7 +5305,7 @@ describe('import', () => {
       );
 
       const copy = plugin.files.get(LINKING_COPY);
-      expect(result?.file).toBe(copy);
+      expect(result?.article?.file).toBe(copy);
       const { vault, fileManager } = plugin.app;
       expect(vault.create.mock.calls).toEqual([[LINKING_COPY, '']]);
       // The namesake beside the copy would take `[[x]]`; the copy has its
@@ -5319,10 +5354,10 @@ describe('import', () => {
       );
 
       expect(plugin.app.vault.append.mock.calls).toEqual([
-        [result?.file, text],
+        [result?.article?.file, text],
       ]);
       expect(
-        editedInImportWrite(updateFrontMatter, result?.file, {
+        editedInImportWrite(updateFrontMatter, result?.article?.file, {
           related: '[[x]]',
           up: '[[../cards/c]]',
           other: 1,
@@ -5358,7 +5393,7 @@ describe('import', () => {
       );
 
       expect(
-        editedInImportWrite(updateFrontMatter, result?.file, {
+        editedInImportWrite(updateFrontMatter, result?.article?.file, {
           related: '[[notes/x]]',
         })
       ).toEqual({ related: '[[notes/x]]' });
@@ -5397,9 +5432,9 @@ describe('import', () => {
           true
         );
 
-        expect(result?.file.path).toBe(LINKING_COPY);
+        expect(result?.article?.file.path).toBe(LINKING_COPY);
         expect(plugin.app.vault.append.mock.calls).toEqual([
-          [result?.file, text],
+          [result?.article?.file, text],
         ]);
         expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, {
           kind: 'error',
@@ -5427,7 +5462,7 @@ describe('import', () => {
       );
 
       expect(plugin.app.vault.append.mock.calls).toEqual([
-        [result?.file, text],
+        [result?.article?.file, text],
       ]);
       expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, {
         kind: 'error',
@@ -5462,9 +5497,9 @@ describe('import', () => {
         true
       );
 
-      expect(result?.file.path).toBe(LINKING_COPY);
+      expect(result?.article?.file.path).toBe(LINKING_COPY);
       expect(plugin.app.vault.append.mock.calls).toEqual([
-        [result?.file, text],
+        [result?.article?.file, text],
       ]);
       expect(logged).toHaveBeenCalledWith(failure);
       expect(notify).toHaveBeenCalledWith(LINKS_KEPT_WARNING, {
@@ -5496,7 +5531,7 @@ describe('import', () => {
       expect(plugin.app.vault.cachedRead).not.toHaveBeenCalled();
       settle();
 
-      expect((await imported)?.file.path).toBe(LINKING_COPY);
+      expect((await imported)?.article?.file.path).toBe(LINKING_COPY);
       expect(plugin.app.vault.cachedRead).toHaveBeenCalledWith(note);
     });
   });
@@ -6238,7 +6273,7 @@ describe('import', () => {
                 repo
               ).import(NOTE, DEFAULT_PRIORITY, null, true);
 
-              const copy = result!.file;
+              const copy = result!.article!.file;
               expect(copy).toBe(plugin.files.get(copy.path));
               expect(copy.path === COPY_PATH).toBe(!occupied);
               const { vault, fileManager } = plugin.app;
@@ -6537,14 +6572,14 @@ describe('making an article, with its note and its row as one unit', () => {
 
       const rows = repo.rows('article');
       expect(rows).toHaveLength(1);
-      expect(article?.data.id).toBe(rows[0].id);
+      expect(article?.article?.data.id).toBe(rows[0].id);
       // Not failed: that is told with the error kind alone
       expect(notify).not.toHaveBeenCalledWith(expect.anything(), {
         kind: 'error',
       });
       expect(notify).toHaveBeenCalledWith(
         expect.stringContaining(
-          `"${makeCopy ? article?.file.basename : vault.files.get(path)!.basename}"`
+          `"${makeCopy ? article?.article?.file.basename : vault.files.get(path)!.basename}"`
         ),
         { kind: 'error', persist: true }
       );
@@ -6625,7 +6660,7 @@ describe('importWebPage', () => {
             fixed_interval_days: fixedIntervalDays,
           });
           const path = rows[0].reference as string;
-          expect(article?.data.id).toBe(rows[0].id);
+          expect(article?.article?.data.id).toBe(rows[0].id);
           expect(vault.paths()).toEqual([path]);
           const name = Obsidian.sanitizeForTitle(
             title,
@@ -6862,23 +6897,33 @@ describe("an import notice's Open button", () => {
   /**
    * A manager over a vault holding a note and a PDF, with the plugin's opener
    * as a spy, importing them `way`.
-   * @returns the wiring, the opener, the imported article's row id, and the
-   *   options its "Imported" notice was raised with
+   * @returns the wiring, the opener and the undoer, the imported article's
+   *   row id, what the import answered, and the options its "Imported"
+   *   notice was raised with
    */
   async function importBy(way: ImportWay) {
     const wired = await wireArticles({ [NOTE]: null, [PAPER]: null }, null);
     const openFile = vi.fn<Actions['_openFile']>(async () => null);
-    Object.assign(wired.manager.plugin, { actions: { _openFile: openFile } });
+    const undoImport = vi.fn<Actions['undoImport']>(async () => undefined);
+    Object.assign(wired.manager.plugin, {
+      actions: { _openFile: openFile, undoImport },
+    });
     const { manager, vault } = wired;
+    let result;
     if (way === 'web page') {
-      await manager.importWebPage(
+      result = await manager.importWebPage(
         { title: 'Paper', markdown: '# Paper', url: null },
         DEFAULT_PRIORITY,
         null
       );
     } else {
       const file = vault.files.get(way.startsWith('PDF') ? PAPER : NOTE)!;
-      await manager.import(file, DEFAULT_PRIORITY, null, way.endsWith('copy'));
+      result = await manager.import(
+        file,
+        DEFAULT_PRIORITY,
+        null,
+        way.endsWith('copy')
+      );
     }
     const [row] = wired.repo.rows('article');
     const imported = wired.notify.mock.calls.filter(
@@ -6886,7 +6931,14 @@ describe("an import notice's Open button", () => {
     );
     expect(imported).toHaveLength(1);
     const options = imported[0][1] as NotifyOptions;
-    return { ...wired, openFile, id: row.id as string, options };
+    return {
+      ...wired,
+      openFile,
+      undoImport,
+      id: row.id as string,
+      result,
+      options,
+    };
   }
 
   /** A click as `Keymap.isModEvent` reads one: its button and keys. */
@@ -6902,7 +6954,7 @@ describe("an import notice's Open button", () => {
     vi.restoreAllMocks();
   });
 
-  it('is on the notice of every import that makes a note, and on none made in place', async () => {
+  it('is on the notice of every import that makes a note; one made in place has the undo instead', async () => {
     const ways: ImportWay[] = [
       ...NEW_NOTE_WAYS,
       'note in place',
@@ -6911,14 +6963,18 @@ describe("an import notice's Open button", () => {
     for (const way of ways) {
       vi.restoreAllMocks();
 
-      const { options } = await importBy(way);
+      const { options, result, undoImport } = await importBy(way);
+      options.action?.onClick({ button: 0 } as MouseEvent);
 
       // Still an import's confirmation, which the `minimal` level keeps
       expect(options).toMatchObject({ kind: 'success', category: 'import' });
+      expect(result).not.toBeNull();
       if (NEW_NOTE_WAYS.includes(way)) {
         expect(options.action?.label).toBe('Open');
+        expect(undoImport).not.toHaveBeenCalled();
       } else {
-        expect(options.action).toBeUndefined();
+        // The entry recorded for this import, found by what it answered
+        expect(undoImport).toHaveBeenCalledExactlyOnceWith(result);
       }
     }
   });
@@ -7175,7 +7231,9 @@ describe('importMany', () => {
             });
             expect(row).toBeUndefined();
           } else {
-            expect(outcomes[i]).toEqual({ file: files[i], status: 'imported' });
+            expect(outcomes[i]).toEqual(
+              importedOutcome(files[i], row, { copied: options.makeCopy })
+            );
             expect(row).toMatchObject({
               priority: options.priority,
               fixed_interval_days: options.fixedIntervalDays,
@@ -7323,7 +7381,13 @@ describe('importMany', () => {
 
       expect(outcomes, path).toEqual([
         { file, status, reason },
-        { file: fine, status: 'imported' },
+        importedOutcome(
+          fine,
+          repo
+            .rows('article')
+            .find(({ id }) => id !== 'other' && id !== 'mine' && id !== 'pdf'),
+          { copied: makeCopy }
+        ),
       ]);
       expect(notify, path).not.toHaveBeenCalled();
     }
@@ -7414,7 +7478,7 @@ describe('importMany', () => {
   });
 
   it('keeps what it would have warned about out of sight', async () => {
-    const { vault, notify, manager } = await wireArticles(
+    const { vault, repo, notify, manager } = await wireArticles(
       { 'notes/a.md': {}, [`${ARTICLES_FOLDER}/a.md`]: { title: 'x' } },
       null
     );
@@ -7427,7 +7491,9 @@ describe('importMany', () => {
       makeCopy: true,
     });
 
-    expect(outcomes).toEqual([{ file, status: 'imported' }]);
+    expect(outcomes).toEqual([
+      importedOutcome(file, repo.rows('article')[0], { copied: true }),
+    ]);
     expect(notify).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"a.md"'));
   });
@@ -7632,7 +7698,16 @@ describe('importMany', () => {
           expect(outcomes).toEqual(
             files.map((file, i) =>
               i < written
-                ? { file, status: 'imported' }
+                ? importedOutcome(
+                    file,
+                    repo
+                      .rows('article')
+                      .find(
+                        ({ reference }) =>
+                          reference === batchTargetOf(specs[i], makeCopy)
+                      ),
+                    { copied: makeCopy }
+                  )
                 : { file, status: 'failed', reason }
             )
           );
@@ -7686,7 +7761,7 @@ describe('importMany', () => {
       makeCopy: false,
     });
 
-    expect(outcomes).toEqual([{ file, status: 'imported' }]);
+    expect(outcomes).toEqual([importedOutcome(file, repo.rows('article')[0])]);
     const [article] = repo.rows('article');
     expect(article.reference).toBe(file.path);
     expect(repo.rows('snippet')).toMatchObject([
@@ -7807,7 +7882,9 @@ describe('importMany', () => {
           ]);
           return;
         }
-        expect(outcomes).toEqual([{ file, status: 'imported' }]);
+        expect(outcomes).toEqual([
+          importedOutcome(file, repo.rows('article')[0]),
+        ]);
         expect(repo.rows('article')).toMatchObject([{ reference: file.path }]);
         expect(console.warn).toHaveBeenCalledWith(
           `"a" is an article, but the snippets and cards taken from it couldn't be adopted`
@@ -7896,7 +7973,9 @@ describe('importMany, copying a note imported for its trigger tags', () => {
             OPTIONS
           );
 
-          expect(outcomes).toEqual([{ file, status: 'imported' }]);
+          expect(outcomes).toEqual([
+            importedOutcome(file, repo.rows('article')[0], { copied: true }),
+          ]);
           const [row] = repo.rows('article');
           expect(row.reference).toBe(COPY);
           // The note keeps all else, its other tags included
@@ -7965,7 +8044,9 @@ describe('importMany, copying a note imported for its trigger tags', () => {
         OPTIONS
       );
 
-      expect(outcomes).toEqual([{ file, status: 'imported' }]);
+      expect(outcomes).toEqual([
+        importedOutcome(file, repo.rows('article')[0], { copied: true }),
+      ]);
       expect(
         vault.processFrontMatter.mock.calls.filter(
           ([target]) => target === file
@@ -7999,7 +8080,12 @@ describe('importMany, copying a note imported for its trigger tags', () => {
         OPTIONS
       );
 
-      expect(outcomes).toEqual([{ file, status: 'imported' }]);
+      // Brought back when deleted, which an undo deletes again
+      expect(outcomes).toEqual([
+        importedOutcome(file, repo.rows('article')[0], {
+          effect: deleted ? 'restored' : 'linked',
+        }),
+      ]);
       expect(repo.rows('article')).toMatchObject([
         { id: 'kept', reference: NOTE, deleted: 0 },
       ]);
@@ -8022,7 +8108,7 @@ describe('importMany, copying a note imported for its trigger tags', () => {
       OPTIONS
     );
 
-    expect(outcomes).toEqual([{ file, status: 'imported' }]);
+    expect(outcomes).toEqual([importedOutcome(file, repo.rows('article')[0])]);
     const [row] = repo.rows('article');
     expect(row.reference).toBe(inData);
     expect(vault.frontmatterOf(inData)).toEqual({
@@ -8051,7 +8137,9 @@ describe('importMany, copying a note imported for its trigger tags', () => {
         OPTIONS
       );
 
-      expect(outcomes).toEqual([{ file, status: 'imported' }]);
+      expect(outcomes).toEqual([
+        importedOutcome(file, repo.rows('article')[0], { copied: true }),
+      ]);
       const [row] = repo.rows('article');
       expect(row.reference).toBe(`${ARTICLES_FOLDER}/${name}`);
       expect(vault.frontmatterOf(path)).toEqual({ tags: ['other'] });
@@ -8566,5 +8654,510 @@ describe('unimportMany', () => {
         }
       )
     );
+  });
+});
+
+describe('what an import reports it did', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const NOTE = 'notes/Note.md';
+  const PAPER = 'papers/Paper.pdf';
+
+  /** Every way a new article can be made. */
+  const WAYS = [
+    'note in place',
+    'PDF in place',
+    'note copy',
+    'PDF copy',
+    'web page',
+  ] as const;
+
+  /** Import by `way` from a vault holding a note and a PDF. */
+  async function importBy(way: (typeof WAYS)[number], priority: number) {
+    const wired = await wireUnimport({ [NOTE]: {}, [PAPER]: null });
+    const { manager, vault } = wired;
+    const result =
+      way === 'web page'
+        ? await manager.importWebPage(
+            { title: 'Page', markdown: '# Page', url: null },
+            priority,
+            null
+          )
+        : await manager.import(
+            vault.files.get(way.startsWith('PDF') ? PAPER : NOTE)!,
+            priority,
+            null,
+            way.endsWith('copy')
+          );
+    return { ...wired, result };
+  }
+
+  it('property: a new article is created, with the note made for it when it has one, and comes with the article', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...WAYS),
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        async (way, priority) => {
+          vi.restoreAllMocks();
+          const { repo, vault, result } = await importBy(way, priority);
+
+          const [row] = repo.rows('article');
+          const file = vault.files.get(row.reference as string);
+          expect(file).toBeDefined();
+          expect(result).toStrictEqual({
+            articleId: row.id,
+            effect: 'created',
+            ...(way.endsWith('in place') ? {} : { madeFile: file }),
+            article: expect.objectContaining({
+              data: expect.objectContaining({
+                id: row.id,
+                priority,
+              }) as unknown,
+              file,
+            }) as unknown,
+          });
+          repo.dispose();
+        }
+      ),
+      { numRuns: 20 }
+    );
+  });
+
+  it('brings back a deleted article where its file is, or links the article its ir-id names, deleted or not', async () => {
+    const cases = [
+      // A PDF is known by its path alone
+      { path: PAPER, at: PAPER, deleted: true, makeCopy: false },
+      ...[false, true].flatMap((deleted) =>
+        [false, true].map((makeCopy) => ({
+          path: NOTE,
+          at: 'notes/old.md',
+          deleted,
+          makeCopy,
+        }))
+      ),
+    ];
+    for (const { path, at, deleted, makeCopy } of cases) {
+      vi.restoreAllMocks();
+      const { repo, vault, manager } = await wireUnimport({
+        [path]: path === PAPER ? null : { 'ir-id': 'known' },
+      });
+      seedArticle(repo, 'known', at, { deleted });
+      const undoImport = vi.fn<Actions['undoImport']>(async () => undefined);
+      Object.assign(manager.plugin, { actions: { undoImport } });
+      const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+
+      const result = await manager.import(
+        vault.files.get(path)!,
+        DEFAULT_PRIORITY,
+        null,
+        makeCopy
+      );
+
+      const label = JSON.stringify({ path, deleted, makeCopy });
+      // Only what was brought back has anything for an undo to take back
+      const [confirmed] = notify.mock.calls.filter(
+        ([, options]) => options?.kind === 'success'
+      );
+      const action = (confirmed[1] as NotifyOptions).action;
+      if (deleted) {
+        action!.onClick({ button: 0 } as MouseEvent);
+        expect(undoImport, label).toHaveBeenCalledExactlyOnceWith(result);
+      } else {
+        expect(action, label).toBeUndefined();
+      }
+      expect(result, label).toStrictEqual({
+        articleId: 'known',
+        effect: deleted ? 'restored' : 'linked',
+        article: expect.objectContaining({
+          data: expect.objectContaining({ id: 'known' }) as unknown,
+        }) as unknown,
+      });
+      expect(repo.rows('article'), label).toMatchObject([
+        { id: 'known', reference: path, deleted: 0 },
+      ]);
+      repo.dispose();
+    }
+  });
+
+  it('makes a copy afresh of a note whose ir-id no row holds', async () => {
+    const { repo, vault, manager } = await wireUnimport({
+      [NOTE]: { 'ir-id': 'orphan' },
+    });
+    vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+
+    const result = await manager.import(
+      vault.files.get(NOTE)!,
+      DEFAULT_PRIORITY,
+      null,
+      true
+    );
+
+    const [row] = repo.rows('article');
+    expect(row.id).not.toBe('orphan');
+    expect(result).toMatchObject({
+      articleId: row.id,
+      effect: 'created',
+      madeFile: vault.files.get(row.reference as string),
+    });
+    expect(row.reference).not.toBe(NOTE);
+    repo.dispose();
+  });
+});
+
+describe('undoImports', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** One import to undo: of a note or a PDF, copied or not, or a web page. */
+  const undoSpecArb = fc.record({
+    kind: fc.constantFrom('note', 'pdf', 'web'),
+    copy: fc.boolean(),
+    tags: fc.option(
+      fc.uniqueArray(
+        keptTagArb.filter((tag) => ![SNIPPET_TAG, CARD_TAG].includes(tag)),
+        { minLength: 1, maxLength: 3 }
+      ),
+      { nil: undefined }
+    ),
+    others: otherPropertiesArb,
+  });
+  type UndoSpec = typeof undoSpecArb extends fc.Arbitrary<infer T> ? T : never;
+
+  /** A note imported as `copy` says, carrying nothing in particular. */
+  const plainNote = (copy: boolean): UndoSpec => ({
+    kind: 'note',
+    copy,
+    tags: undefined,
+    others: {},
+  });
+
+  /** Where the file of the `i`th of a batch is, if it has one before. */
+  const pathOf = ({ kind }: UndoSpec, i: number) =>
+    kind === 'pdf' ? `papers/p${i}.pdf` : `notes/n${i}.md`;
+
+  /** The notes `specs` start as, by path: a web page has none. */
+  function undoNotes(specs: readonly UndoSpec[]) {
+    return Object.fromEntries(
+      specs.flatMap((spec, i): [string, Record<string, unknown> | null][] => {
+        if (spec.kind === 'web') return [];
+        if (spec.kind === 'pdf') return [[pathOf(spec, i), null]];
+        const { tags, others } = spec;
+        return [[pathOf(spec, i), tags ? { ...others, tags } : others]];
+      })
+    ) as Record<string, Record<string, unknown> | null>;
+  }
+
+  /** Import each of `specs` in turn, as an import of its own. */
+  async function importEach(
+    manager: ArticleManager,
+    vault: ReturnType<typeof makeItemVault>,
+    specs: readonly UndoSpec[]
+  ) {
+    const results = [];
+    for (const [i, spec] of specs.entries()) {
+      results.push(
+        spec.kind === 'web'
+          ? await manager.importWebPage(
+              { title: `w${i}`, markdown: '# Page', url: null },
+              DEFAULT_PRIORITY,
+              null
+            )
+          : await manager.import(
+              vault.files.get(pathOf(spec, i))!,
+              DEFAULT_PRIORITY,
+              null,
+              spec.copy
+            )
+      );
+    }
+    return results.map((result) => result!);
+  }
+
+  it('property: takes back every new article, the last first, leaving the vault and its notes as they were', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(undoSpecArb, { minLength: 1, maxLength: 4 }),
+        async (specs) => {
+          vi.restoreAllMocks();
+          const notes = undoNotes(specs);
+          const { repo, vault, manager, reviewManager, getHighlights } =
+            await wireUnimport(notes);
+          const before = Object.fromEntries(
+            Object.keys(notes).map((path) => [
+              path,
+              structuredClone(vault.frontmatterOf(path)),
+            ])
+          );
+          const paths = vault.paths();
+          const results = await importEach(manager, vault, specs);
+          const made = results.flatMap(({ madeFile }) =>
+            madeFile ? [madeFile.path] : []
+          );
+          const deleteRow = vi.spyOn(reviewManager, 'deleteRow');
+          getHighlights.mockClear();
+
+          const undone = await manager.undoImports(results);
+
+          const ids = results.map(({ articleId }) => articleId).reverse();
+          expect(undone).toEqual(ids);
+          expect(deleteRow.mock.calls.map(([, id]) => id)).toEqual(ids);
+          expect(repo.rows('article')).toEqual([]);
+          expect(vault.paths()).toEqual(paths);
+          expect(vault.trashed).toEqual(made.reverse());
+          for (const [path, frontmatter] of Object.entries(before)) {
+            expect(vault.frontmatterOf(path)).toStrictEqual(frontmatter);
+          }
+          // Those made where they are lose their highlights' parent
+          expect(getHighlights).toHaveBeenCalledTimes(
+            specs.filter(({ kind, copy }) => kind !== 'web' && !copy).length
+          );
+          repo.dispose();
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('un-imports a note made an article where it is, trigger tags and all, keeping the rest', async () => {
+    const NOTE = 'notes/n0.md';
+    const { repo, vault, manager } = await wireUnimport({
+      [NOTE]: { tags: ['kept'] },
+    });
+    const [result] = await importEach(manager, vault, [plainNote(false)]);
+    // Tagged since, which would have the watcher import it again
+    await vault.processFrontMatter(
+      vault.files.get(NOTE)!,
+      (frontmatter: Record<string, unknown>) => {
+        (frontmatter.tags as string[]).push(TRIGGER_TAGS[0]);
+      }
+    );
+
+    expect(await manager.undoImports([result])).toEqual([result.articleId]);
+
+    expect(vault.frontmatterOf(NOTE)).toStrictEqual({ tags: ['kept'] });
+    repo.dispose();
+  });
+
+  it('deletes a brought-back article again, keeping its history and what was taken from it', async () => {
+    const PAPER = 'papers/Paper.pdf';
+    const { repo, vault, manager, getHighlights } = await wireUnimport({
+      [PAPER]: null,
+    });
+    seedArticle(repo, 'known', PAPER, { deleted: true, reviews: 2 });
+    seedChild(repo, 'snippet', 's', 'known');
+    const result = await manager.import(
+      vault.files.get(PAPER)!,
+      DEFAULT_PRIORITY,
+      null,
+      false
+    );
+    const before = itemTables(repo);
+    getHighlights.mockClear();
+
+    const undone = await manager.undoImports([result!]);
+
+    expect(undone).toEqual(['known']);
+    const after = itemTables(repo);
+    expect(after.article).toEqual([{ ...before.article[0], deleted: 1 }]);
+    expect({ ...after, article: [] }).toEqual({ ...before, article: [] });
+    expect(vault.paths()).toEqual([PAPER]);
+    expect(getHighlights).toHaveBeenCalledExactlyOnceWith(
+      vault.files.get(PAPER)
+    );
+    repo.dispose();
+  });
+
+  it('deletes a brought-back article whose file is gone again all the same', async () => {
+    const PAPER = 'papers/Paper.pdf';
+    const { repo, vault, manager, getHighlights } = await wireUnimport({
+      [PAPER]: null,
+    });
+    seedArticle(repo, 'known', PAPER, { deleted: true });
+    const result = await manager.import(
+      vault.files.get(PAPER)!,
+      DEFAULT_PRIORITY,
+      null,
+      false
+    );
+    vault.files.delete(PAPER);
+    getHighlights.mockClear();
+
+    expect(await manager.undoImports([result!])).toEqual(['known']);
+
+    expect(repo.rows('article')).toMatchObject([{ id: 'known', deleted: 1 }]);
+    expect(getHighlights).not.toHaveBeenCalled();
+    repo.dispose();
+  });
+
+  it('frees what was taken from a copy, and its history, as its row goes', async () => {
+    const { repo, vault, manager } = await wireUnimport({
+      'notes/n0.md': {},
+    });
+    const [result] = await importEach(manager, vault, [plainNote(true)]);
+    seedChild(repo, 'snippet', 's', result.articleId);
+    seedChild(repo, 'srs_card', 'c', result.articleId);
+    repo.mutate(
+      'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, 0)',
+      ['r', result.articleId]
+    );
+
+    expect(await manager.undoImports([result])).toEqual([result.articleId]);
+
+    expect(repo.rows('article')).toEqual([]);
+    expect(repo.rows('article_review')).toEqual([]);
+    expect(
+      [...repo.rows('snippet'), ...repo.rows('srs_card')].map(
+        ({ parent }) => parent
+      )
+    ).toEqual([null, null]);
+    expect(vault.trashed).toEqual([result.madeFile!.path]);
+    repo.dispose();
+  });
+
+  it('holds a copy back from automatic import before its row goes', async () => {
+    const { repo, vault, manager, unimporting, rowWhenHeld } =
+      await wireUnimport({ 'notes/n0.md': {} });
+    const [result] = await importEach(manager, vault, [plainNote(true)]);
+    const copy = result.madeFile!;
+
+    expect(await manager.undoImports([result])).toEqual([result.articleId]);
+
+    expect(unimporting).toHaveBeenCalledExactlyOnceWith(copy);
+    expect(rowWhenHeld.get(copy.path)).toBe(true);
+    repo.dispose();
+  });
+
+  it('deletes the row of an article whose file is gone, made where it is or as a copy', async () => {
+    for (const copy of [false, true]) {
+      vi.restoreAllMocks();
+      const { repo, vault, manager, reviewManager } = await wireUnimport({
+        'notes/n0.md': {},
+      });
+      const [result] = await importEach(manager, vault, [plainNote(copy)]);
+      vault.files.delete(repo.rows('article')[0].reference as string);
+      const unimport = vi.spyOn(manager, 'unimportMany');
+      const deleteRow = vi.spyOn(reviewManager, 'deleteRow');
+
+      expect(await manager.undoImports([result])).toEqual([result.articleId]);
+
+      expect(repo.rows('article')).toEqual([]);
+      expect(deleteRow).toHaveBeenCalledExactlyOnceWith(
+        'article',
+        result.articleId
+      );
+      expect(unimport).not.toHaveBeenCalled();
+      expect(vault.trashed).toEqual([]);
+      repo.dispose();
+    }
+  });
+
+  it('passes over what it has nothing to take back of, taking back the rest', async () => {
+    const notes = {
+      'notes/linked.md': { 'ir-id': 'live' },
+      'notes/gone.md': {},
+      'notes/deleted.md': {},
+      'notes/renamed.md': {},
+      'notes/copied.md': {},
+      'notes/fine.md': {},
+    };
+    const { repo, vault, manager } = await wireUnimport(notes);
+    seedArticle(repo, 'live', 'notes/old.md');
+    const imports: ImportResult[] = [];
+    for (const path of Object.keys(notes)) {
+      const file = vault.files.get(path)!;
+      const copy = path === 'notes/copied.md';
+      imports.push((await manager.import(file, 20, null, copy))!);
+    }
+    const [linked, gone, deleted, , copied, fine] = imports;
+    expect(linked.effect).toBe('linked');
+    // Un-imported by hand since, or deleted
+    await manager.unimportMany([vault.files.get('notes/gone.md')!]);
+    repo.mutate('UPDATE article SET deleted = 1 WHERE id = $1', [
+      deleted.articleId,
+    ]);
+    // Its note now claims another article, which no un-import takes for it
+    await vault.processFrontMatter(
+      vault.files.get('notes/renamed.md')!,
+      (frontmatter: Record<string, unknown>) => {
+        frontmatter['ir-id'] = 'other';
+      }
+    );
+    // Its copy un-imported, which leaves it a plain note
+    await manager.unimportMany([copied.madeFile!]);
+    const warn = vi.spyOn(console, 'warn').mockReturnValue(undefined);
+    const tables = itemTables(repo);
+    const paths = vault.paths();
+
+    const undone = await manager.undoImports(imports);
+
+    expect(undone).toEqual([fine.articleId]);
+    expect(itemTables(repo)).toEqual({
+      ...tables,
+      article: tables.article.filter(({ id }) => id !== fine.articleId),
+    });
+    expect(vault.paths()).toEqual(paths);
+    expect(vault.trashed).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(4);
+    for (const { articleId } of [gone, deleted, copied]) {
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(articleId));
+    }
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('notes/renamed.md')
+    );
+    repo.dispose();
+  });
+
+  it('logs what fails, and keeps on with the rest', async () => {
+    const { repo, vault, manager, reviewManager, logged } = await wireUnimport({
+      'notes/n0.md': {},
+      'notes/n1.md': {},
+      'notes/n2.md': {},
+    });
+    const [trashless, inPlace, rowless] = await importEach(manager, vault, [
+      plainNote(true),
+      plainNote(false),
+      plainNote(true),
+    ]);
+    const failure = new Error('no delete');
+    // Taken back last first: the first row delete is its
+    const deleteRow = vi
+      .spyOn(reviewManager, 'deleteRow')
+      .mockRejectedValueOnce(failure);
+    vault.fail('trash', (path) => path === trashless.madeFile!.path);
+
+    const undone = await manager.undoImports([trashless, inPlace, rowless]);
+
+    expect(deleteRow.mock.calls[0]).toEqual(['article', rowless.articleId]);
+
+    // A copy whose row is gone is a plain note, taken back all the same
+    expect(undone).toEqual([inPlace.articleId, trashless.articleId]);
+    expect(repo.rows('article').map(({ id }) => id)).toEqual([
+      rowless.articleId,
+    ]);
+    expect(vault.files.has(trashless.madeFile!.path)).toBe(true);
+    expect(vault.files.has(rowless.madeFile!.path)).toBe(true);
+    expect(logged).toHaveBeenCalledWith(failure);
+    expect(logged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining(trashless.madeFile!.path) as unknown,
+      })
+    );
+    repo.dispose();
+  });
+
+  it('counts a note whose properties failed to clear as taken back, its row gone', async () => {
+    const { repo, vault, manager } = await wireUnimport({ 'notes/n0.md': {} });
+    const [result] = await importEach(manager, vault, [plainNote(false)]);
+    vault.fail('frontmatter');
+    const warn = vi.spyOn(console, 'warn').mockReturnValue(undefined);
+
+    expect(await manager.undoImports([result])).toEqual([result.articleId]);
+
+    expect(repo.rows('article')).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('notes/n0.md'));
+    repo.dispose();
   });
 });

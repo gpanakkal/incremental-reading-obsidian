@@ -10,6 +10,7 @@ import type {
   BulkImportEntry,
   BulkImportOptions,
   BulkOutcome,
+  ImportedArticle,
 } from '#/lib/bulk-import/types';
 import { refusedCharsIn } from '#/lib/item-path-guard';
 import { batchAfterLinkUpdates } from '#/lib/link-update-queue';
@@ -273,6 +274,15 @@ export default class ReviewManager {
    */
   async unimportArticles(files: readonly TFile[]): Promise<BulkOutcome[]> {
     return this.articles.unimportMany(files);
+  }
+
+  /**
+   * Take back what imports did, for an undo of them (see
+   * `ArticleManager.undoImports`)
+   * @returns the ids of the articles taken back
+   */
+  async undoImports(imports: readonly ImportedArticle[]): Promise<string[]> {
+    return this.articles.undoImports(imports);
   }
 
   /**

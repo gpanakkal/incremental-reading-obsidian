@@ -46,14 +46,20 @@ export class ImportModal extends Modal {
       strategy === 'priority'
         ? [value, null]
         : [plugin.settings.defaultPriority, value];
+    // One entry on the undo stack for it, as for an import with no dialog
     if (subject.kind === 'web') {
-      await plugin.reviewManager.importWebPage(subject.page, ...props);
+      const result = await plugin.reviewManager.importWebPage(
+        subject.page,
+        ...props
+      );
+      plugin.actions.recordImport({ name: subject.page.title, result });
     } else {
-      await plugin.reviewManager.importArticle(
+      const result = await plugin.reviewManager.importArticle(
         subject.file,
         ...props,
         makeCopy
       );
+      plugin.actions.recordImport({ name: subject.file.basename, result });
     }
   }
 

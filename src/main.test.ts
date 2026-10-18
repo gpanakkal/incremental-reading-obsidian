@@ -591,6 +591,7 @@ function makeImportCommandReceiver({
   const file = fileWithExtension(extension);
   const importArticle = vi.fn(() => Promise.resolve());
   const importWebPage = vi.fn(() => Promise.resolve(null));
+  const recordImport = vi.fn();
   /** The palette: registered commands by id, dropped again on removal. */
   const commands = new Map<
     string,
@@ -600,6 +601,7 @@ function makeImportCommandReceiver({
     Object.create(IncrementalReadingPlugin.prototype) as object,
     {
       reviewManager: loaded ? { importWebPage } : undefined,
+      actions: { recordImport },
       settings: { defaultPriority: 30, showImportDialog },
       importArticle,
       addCommand: vi.fn(
@@ -639,7 +641,15 @@ function makeImportCommandReceiver({
     if (!command) throw new Error(`no command ${id}`);
     return command.checkCallback(checking);
   };
-  return { receiver, commands, file, importArticle, importWebPage, run };
+  return {
+    receiver,
+    commands,
+    file,
+    importArticle,
+    importWebPage,
+    recordImport,
+    run,
+  };
 }
 
 /**
@@ -687,7 +697,10 @@ function stubImportDialog() {
  * unless a call's options say otherwise. `call` runs the method on it.
  */
 function makeImportReceiver() {
-  const importArticle = vi.fn(() => Promise.resolve(null));
+  /** What the import answers, which the undo entry is recorded for. */
+  const result = { articleId: 'imported', effect: 'created', article: null };
+  const importArticle = vi.fn(() => Promise.resolve(result));
+  const recordImport = vi.fn();
   const receiver = {
     settings: {
       showImportDialog: false,
@@ -695,6 +708,7 @@ function makeImportReceiver() {
       defaultPriority: 3,
     },
     reviewManager: { importArticle },
+    actions: { recordImport },
   };
   const call = async (file: TFile, opts?: Record<string, boolean>) => {
     await IncrementalReadingPlugin.prototype.importArticle.call(
@@ -703,7 +717,7 @@ function makeImportReceiver() {
       opts
     );
   };
-  return { importArticle, call };
+  return { importArticle, recordImport, result, call };
 }
 
 /**
@@ -917,13 +931,18 @@ function makeAutoImportReceiver() {
   const unloaders: (() => void)[] = [];
   const files = new Map<string, TFile>();
   const caches = new Map<TFile, unknown>();
-  const importTaggedNotes = vi.fn(() => Promise.resolve([]));
+  const importTaggedNotes = vi.fn(
+    (_entries: { file: TFile }[], _options: unknown): Promise<unknown[]> =>
+      Promise.resolve([])
+  );
   const hasItemRow = vi.fn((_id: string) => Promise.resolve(false));
+  const recordImport = vi.fn();
   const storage = new Map<string, unknown>();
   const settingsListeners = new Set<() => void>();
   const receiver = {
     settings: { ...structuredClone(DEFAULT_SETTINGS), autoImportOnTag: true },
     reviewManager: undefined as unknown,
+    actions: { recordImport },
     autoImportWatcher: undefined as unknown,
     autoImportWatcherMade: { resolve: vi.fn() },
     onSettingsChange: (listener: () => void) => {
@@ -963,6 +982,7 @@ function makeAutoImportReceiver() {
     receiver,
     importTaggedNotes,
     hasItemRow,
+    recordImport,
     changedRef,
     arrivalRefs,
     /**
@@ -1520,10 +1540,8 @@ describe('IncrementalReadingPlugin import from the web viewer', () => {
 
   it('offers the import on a page open in the web viewer, importing it at the default priority', async () => {
     const view = makeWebViewer({ title: 'Page', md: 'Text' });
-    const { importArticle, importWebPage, run } = makeImportCommandReceiver({
-      where: 'none',
-      view,
-    });
+    const { importArticle, importWebPage, recordImport, run } =
+      makeImportCommandReceiver({ where: 'none', view });
 
     expect(run('import-article', true)).toBe(true);
     expect(view.getReaderModeContent).not.toHaveBeenCalled();
@@ -1535,6 +1553,13 @@ describe('IncrementalReadingPlugin import from the web viewer', () => {
         30,
         null
       )
+    );
+    // Recorded for an undo, with what it answered: here, nothing imported
+    await vi.waitFor(() =>
+      expect(recordImport).toHaveBeenCalledExactlyOnceWith({
+        name: 'Page',
+        result: null,
+      })
     );
     expect(importArticle).not.toHaveBeenCalled();
     expect(Notice.messages).toEqual([]);
@@ -1776,11 +1801,14 @@ describe('IncrementalReadingPlugin.addWebViewerMenuItems', () => {
    * as Obsidian's `leaf-menu` event hands it over.
    */
   function raiseLeafMenu(view: unknown, loaded = true) {
-    const importWebPage = vi.fn(() => Promise.resolve(null));
+    const result = { articleId: 'page', effect: 'created', article: null };
+    const importWebPage = vi.fn(() => Promise.resolve(result));
+    const recordImport = vi.fn();
     const receiver = Object.assign(
       Object.create(IncrementalReadingPlugin.prototype) as object,
       {
         reviewManager: loaded ? { importWebPage } : undefined,
+        actions: { recordImport },
         settings: { defaultPriority: 30, showImportDialog: false },
       }
     ) as unknown as IncrementalReadingPlugin;
@@ -1789,7 +1817,7 @@ describe('IncrementalReadingPlugin.addWebViewerMenuItems', () => {
       menu as never,
       { view } as unknown as WorkspaceLeaf
     );
-    return { menu, importWebPage };
+    return { menu, importWebPage, recordImport, result };
   }
 
   afterEach(() => {
@@ -1797,7 +1825,8 @@ describe('IncrementalReadingPlugin.addWebViewerMenuItems', () => {
   });
 
   it("offers the import in a web viewer's menu, importing its page", async () => {
-    const { menu, importWebPage } = raiseLeafMenu(makeWebViewer());
+    const { menu, importWebPage, recordImport, result } =
+      raiseLeafMenu(makeWebViewer());
 
     expect(iconsOf(menu)).toEqual(importsOnly(1));
     expect(menu.items[0].section).toBe('incremental-reading');
@@ -1811,6 +1840,10 @@ describe('IncrementalReadingPlugin.addWebViewerMenuItems', () => {
       30,
       null
     );
+    expect(recordImport).toHaveBeenCalledExactlyOnceWith({
+      name: 'Page',
+      result,
+    });
   });
 
   it('adds nothing to the menu of any other view, or before loading', () => {
@@ -1849,13 +1882,17 @@ describe('IncrementalReadingPlugin.importArticle', () => {
     );
   });
 
-  it('imports a note straight away when the dialog is off', async () => {
-    const { importArticle, call } = makeImportReceiver();
+  it('imports a note straight away when the dialog is off, recording it for an undo', async () => {
+    const { importArticle, recordImport, result, call } = makeImportReceiver();
     const file = makeFile();
 
     await call(file, { showImportDialog: false, copyOnImport: true });
 
     expect(importArticle).toHaveBeenCalledExactlyOnceWith(file, 3, null, true);
+    expect(recordImport).toHaveBeenCalledExactlyOnceWith({
+      name: file.basename,
+      result,
+    });
   });
 
   it('opens the dialog on a note when asked, importing nothing yet', async () => {
@@ -1867,10 +1904,13 @@ describe('IncrementalReadingPlugin.importArticle', () => {
       const open = vi
         .spyOn(ImportModal.prototype, 'open')
         .mockImplementation(() => {});
-      const { importArticle, call } = makeImportReceiver();
+      const { importArticle, recordImport, call } = makeImportReceiver();
       const file = makeFile();
 
       await call(file, { showImportDialog: true, copyOnImport: true });
+
+      // The dialog records it, once it imports
+      expect(recordImport).not.toHaveBeenCalled();
 
       expect(open).toHaveBeenCalledOnce();
       const modal = open.mock.contexts[0] as ImportModal;
@@ -3417,6 +3457,25 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
       [{ file, matchedTags: [AUTO_IMPORT_TAG] }],
       { priority: 17, mode: 'inPlace' }
     );
+  });
+
+  it('leaves nothing on the undo stack for what it imports', async () => {
+    const watch = makeAutoImportReceiver();
+    watch.startReviewManager();
+    watch.importTaggedNotes.mockImplementation(async (entries) =>
+      entries.map(({ file }) => ({
+        file,
+        status: 'imported',
+        articleId: 'made',
+        effect: 'created',
+      }))
+    );
+
+    watch.change('inbox/clip.md', { tags: [AUTO_IMPORT_TAG] });
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+    expect(watch.importTaggedNotes).toHaveBeenCalledOnce();
+    expect(watch.recordImport).not.toHaveBeenCalled();
   });
 
   it('imports in the way of importing tagged notes set when the batch is imported', async () => {
