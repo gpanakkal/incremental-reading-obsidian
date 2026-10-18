@@ -9,7 +9,9 @@ const config = {
   plugins: [
     import.meta.resolve('@stryker-mutator/vitest-runner'),
     import.meta.resolve('@stryker-mutator/typescript-checker'),
+    import.meta.resolve('./stryker-ui-string-ignorer.mjs'),
   ],
+  ignorers: ['ui-strings'],
   reporters: ['html', 'clear-text', 'progress'],
   testRunner: 'vitest',
   testRunner_comment:
