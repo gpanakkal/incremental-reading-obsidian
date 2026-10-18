@@ -13,6 +13,7 @@ import {
 } from './plugin-data';
 import { DEFAULT_SETTINGS } from './settings';
 import { parseTagList } from './tags';
+import { cleanFolderList } from './watched-folders';
 
 // #region HELPERS
 
@@ -263,6 +264,26 @@ describe('parsePluginData', () => {
     );
   });
 
+  it('leaves watching folders off, with none watched, unless told otherwise', () => {
+    expect(DEFAULT_SETTINGS.autoImportOnFolder).toBe(false);
+    expect(DEFAULT_SETTINGS.autoImportFolders).toEqual([]);
+    expect(parsePluginData({ settings: {} }).settings).toMatchObject({
+      autoImportOnFolder: false,
+      autoImportFolders: [],
+    });
+  });
+
+  it('keeps a saved on or off for watching folders and turns anything else off', () => {
+    fc.assert(
+      fc.property(fc.anything(), fc.boolean(), (stored, legacy) => {
+        const saved = { autoImportOnFolder: stored };
+        const data = parsePluginData(legacy ? saved : { settings: saved });
+
+        expect(data.settings.autoImportOnFolder).toBe(stored === true);
+      })
+    );
+  });
+
   it('keeps a known way of importing tagged notes and replaces anything else with in place', () => {
     const MODES: unknown[] = ['inPlace', 'copy', 'inherit'];
     fc.assert(
@@ -285,6 +306,51 @@ describe('parsePluginData', () => {
         }
       )
     );
+  });
+
+  it('reads saved watched folders as the settings tab keeps them, and anything but a list as none', () => {
+    const storedArb = fc.oneof(
+      fc.array(fc.string()),
+      fc.array(fc.oneof(fc.string(), fc.anything())),
+      fc.constantFrom(
+        'Inbox',
+        ['/Inbox/', 'Inbox', ' Clips ', '/', 'a, b', 'c\nd'],
+        null
+      ),
+      fc.anything()
+    );
+    fc.assert(
+      fc.property(storedArb, fc.boolean(), (stored, legacy) => {
+        const saved = { autoImportFolders: stored };
+        const data = parsePluginData(legacy ? saved : { settings: saved });
+
+        expect(data.settings.autoImportFolders).toEqual(
+          Array.isArray(stored)
+            ? cleanFolderList(
+                stored.filter((folder) => typeof folder === 'string')
+              )
+            : []
+        );
+      })
+    );
+  });
+
+  it('keeps a saved watched folder whole, commas and line breaks included', () => {
+    const data = parsePluginData({
+      settings: { autoImportFolders: ['/a, b/', 'c\nd', '/', 'a, b'] },
+    });
+
+    expect(data.settings.autoImportFolders).toEqual(['a, b', 'c\nd']);
+  });
+
+  it('gives each read its own list of watched folders, apart from the defaults', () => {
+    const first = parsePluginData({ settings: {} }).settings;
+    const second = parsePluginData({}).settings;
+
+    first.autoImportFolders.push('changed');
+
+    expect(second.autoImportFolders).toEqual([]);
+    expect(DEFAULT_SETTINGS.autoImportFolders).toEqual([]);
   });
 
   it('gives each read its own list of trigger tags, apart from the defaults', () => {

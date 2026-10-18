@@ -653,7 +653,7 @@ function makeLinkedCopyPlugin(text: string, cache: unknown) {
 }
 
 /** The notice a copy whose links weren't all re-based is made with. */
-const LINKS_KEPT_WARNING = `Warning: couldn't update the links in the copy of "Note"; some may not lead where they did`;
+const LINKS_KEPT_WARNING = expect.stringContaining('"Note"') as unknown;
 
 /**
  * The edit the copy's frontmatter is given in the write that makes it
@@ -745,13 +745,13 @@ const escapeRegExp = (text: string) =>
   text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** A refusal while writes are paused: what it names, then the pause's reason. */
-const refusal = (named = '') =>
+const refusal = (named = ''): unknown =>
   expect.stringMatching(
     new RegExp(`${escapeRegExp(named)}.*Saving is paused\\.$`, 's')
   );
 
 /** An import's confirmation, by the title it names and the priority given. */
-const importedWithPriority = (title: string, priority: number) =>
+const importedWithPriority = (title: string, priority: number): unknown =>
   expect.stringMatching(
     new RegExp(
       `"${escapeRegExp(title)}".*\\b` +
@@ -761,7 +761,7 @@ const importedWithPriority = (title: string, priority: number) =>
   );
 
 /** An import's confirmation, by the title it names and its fixed interval. */
-const importedWithFixedDays = (title: string, days: number) =>
+const importedWithFixedDays = (title: string, days: number): unknown =>
   expect.stringMatching(
     new RegExp(`"${escapeRegExp(title)}".*\\b${days}(?![.\\d])`, 's')
   );
@@ -3823,9 +3823,7 @@ describe('import', () => {
       ).import(file, MINIMUM_PRIORITY, null, false);
 
       expect(result?.data.id).toBe('existing');
-      expect(Notice.messages).toEqual([
-        expect.stringContaining('"Paper.pdf"'),
-      ]);
+      expect(Notice.messages).toEqual([expect.stringContaining('"Paper.pdf"')]);
     });
 
     it('makes a revived dismissed row with no due date due now', async () => {
@@ -4395,7 +4393,7 @@ describe('import', () => {
                 rowsBefore
               );
               expect(rows).toHaveLength(rowsBefore.length + 1);
-              const warning = expect.stringContaining('"Paper.pdf"');
+              const warning = expect.stringContaining('"Paper.pdf"') as unknown;
               // Named by the copy, trimmed as every title is
               const title = expectedName.slice(0, -'.pdf'.length).trim();
               const imported = importedWithPriority(title, 10);
@@ -4824,7 +4822,8 @@ describe('import', () => {
           }
           return chars.join('');
         });
-      const warningFor = (name: string) => expect.stringContaining(`"${name}"`);
+      const warningFor = (name: string): unknown =>
+        expect.stringContaining(`"${name}"`);
 
       it('names the copy as a title would read its name, warning when that changed it', async () => {
         await fc.assert(
@@ -4860,7 +4859,9 @@ describe('import', () => {
               const imported = importedWithPriority(noticeTitle(title), 10);
               // The copy's own name, as it ends up
               expect(Notice.messages).toEqual([
-                ...(taken ? [expect.stringContaining(`"${clean}.md"`)] : []),
+                ...(taken
+                  ? [expect.stringContaining(`"${clean}.md"`) as unknown]
+                  : []),
                 ...(changed ? [warningFor(`${title}.md`)] : []),
                 imported,
               ]);
@@ -5143,7 +5144,10 @@ describe('import', () => {
       ]) {
         expect(write).not.toHaveBeenCalled();
       }
-      expect(Notice.messages).not.toContain(LINKS_KEPT_WARNING);
+      // Only the confirmation: no warning that links were kept
+      expect(Notice.messages).toEqual([
+        importedWithPriority('Note', DEFAULT_PRIORITY),
+      ]);
     });
 
     it('re-bases a frontmatter link in the copy by its key, in the write that makes the copy the article', async () => {
@@ -5180,7 +5184,10 @@ describe('import', () => {
         up: '[[../../cards/c]]',
         other: 1,
       });
-      expect(Notice.messages).not.toContain(LINKS_KEPT_WARNING);
+      // Only the confirmation: no warning that links were kept
+      expect(Notice.messages).toEqual([
+        importedWithPriority('Note', DEFAULT_PRIORITY),
+      ]);
     });
 
     it('edits no frontmatter link that needs no change', async () => {
@@ -5355,7 +5362,7 @@ describe('import', () => {
       await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
 
       expect(Notice.messages).toEqual([
-        `Imported "my-note" with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`,
+        importedWithPriority('my-note', DEFAULT_PRIORITY),
       ]);
       expect(Obsidian.createNote).not.toHaveBeenCalled();
       const [sql, params] = lastMutateCall(repo);
@@ -5517,8 +5524,13 @@ describe('import', () => {
             expect(lastMutateCall(repo)).toBeUndefined();
             expect(updateFrontMatter).not.toHaveBeenCalled();
             expect(Notice.messages).toStrictEqual([
-              `Can't import "${file.name}" in place: its name or folder ` +
-                `contains ${listChars([char])}. Rename it or import a copy`,
+              expect.stringMatching(
+                new RegExp(
+                  `"${escapeRegExp(file.name)}".*` +
+                    escapeRegExp(listChars([char])),
+                  's'
+                )
+              ),
             ]);
           }
         )
@@ -5544,7 +5556,7 @@ describe('import', () => {
         [file.path, 'elsewhere'],
       ]);
       expect(Notice.messages).toStrictEqual([
-        'Linked "my-note" to existing article with the same ID',
+        expect.stringContaining('"my-note"'),
         refusedPathsWarning([file.path]),
       ]);
     });
@@ -5568,9 +5580,7 @@ describe('import', () => {
       await manager.import(file, DEFAULT_PRIORITY, null, false);
 
       expect(snippets.adoptOrphans).toHaveBeenCalledWith(file, 'existing');
-      expect(Notice.messages).toStrictEqual([
-        'Note is already an article; canceling import',
-      ]);
+      expect(Notice.messages).toStrictEqual([expect.any(String)]);
     });
 
     it('imports a copy of a note whose folder breaks links', async () => {
@@ -5582,7 +5592,10 @@ describe('import', () => {
       await manager.import(fileAt('x>y/my-note.md'), DEFAULT_PRIORITY, null);
 
       expect(createNote).toHaveBeenCalled();
-      expect(Notice.messages.join(' ')).not.toContain("Can't import");
+      // Imported, not refused for its folder
+      expect(Notice.messages).toEqual([
+        importedWithPriority('my-note', DEFAULT_PRIORITY),
+      ]);
     });
   });
 
@@ -5756,7 +5769,7 @@ describe('import', () => {
 
         await manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false);
 
-        expect(Notice.messages.at(-1)).not.toContain('the copy');
+        expect(Notice.messages.at(-1)).not.toMatch(/snippet|card/);
       });
 
       it('adopts in place when the ir-id links the note to an existing record instead of copying', async () => {
@@ -5790,7 +5803,6 @@ describe('import', () => {
   describe('cards made from a note before it was imported', () => {
     const EXISTING_ID = 'existing-article-id';
 
-    const PRIORITY = `priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`;
     /**
      * Each way an import of a note meets the database: as no article yet; with
      * its own row at its path (the repair); with its row, named by its
@@ -5799,23 +5811,25 @@ describe('import', () => {
      * cards go to, if any.
      */
     const cases = {
-      new: { row: null, notice: `Imported "my-note" with ${PRIORITY}` },
+      new: {
+        row: null,
+        notice: importedWithPriority('my-note', DEFAULT_PRIORITY),
+      },
       repair: {
         row: { id: EXISTING_ID, reference: 'notes/my-note.md' },
-        notice: 'Note is already an article; canceling import',
+        notice: expect.any(String) as unknown,
       },
       relink: {
         row: { id: EXISTING_ID, reference: 'notes/old.md' },
-        notice: 'Linked "my-note" to existing article with the same ID',
+        notice: expect.stringContaining('"my-note"') as unknown,
       },
       'relink asked to copy': {
         row: { id: EXISTING_ID, reference: 'notes/old.md' },
-        notice: 'Linked "my-note" to existing article with the same ID',
+        notice: expect.stringContaining('"my-note"') as unknown,
       },
       'another article at its path': {
         row: { id: 'another', reference: 'notes/my-note.md' },
-        notice:
-          'Another article is already at this file path; canceling import',
+        notice: expect.any(String) as unknown,
       },
     } as const;
 
@@ -5901,11 +5915,13 @@ describe('import', () => {
       });
 
       it.each([
-        [0, 0, ''],
-        [1, 0, '; 1 snippet now refers to the copy'],
-        [0, 1, '; 1 card now refers to the copy'],
-        [0, 2, '; 2 cards now refer to the copy'],
-        [1, 2, '; 1 snippet and 2 cards now refer to the copy'],
+        // What the notice adds: each count with its noun, and the verb
+        // agreeing with their sum
+        [0, 0, null],
+        [1, 0, /\b1 snippet\b.*\brefers\b/],
+        [0, 1, /\b1 card\b.*\brefers\b/],
+        [0, 2, /\b2 cards\b.*\brefer\b/],
+        [1, 2, /\b1 snippet\b.*\b2 cards\b.*\brefer\b/],
       ] as const)(
         'hands %i snippets and %i cards to the copy, re-pointing their links at it, and counts them in the notice',
         async (snippetCount, cardCount, notice) => {
@@ -5945,8 +5961,10 @@ describe('import', () => {
             gone: null,
           });
           expect(Notice.messages).toEqual([
-            `Imported "Note" with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}${notice}`,
+            importedWithPriority('Note', DEFAULT_PRIORITY),
           ]);
+          if (notice) expect(Notice.messages[0]).toMatch(notice);
+          else expect(Notice.messages[0]).not.toMatch(/snippet|card/);
           if (snippetCount + cardCount === 0) {
             expect(retargetSources).not.toHaveBeenCalled();
           } else {
@@ -6183,8 +6201,12 @@ describe('create', () => {
 
         expect(await createIn(`notes/x${char}y`, true)).toBe(ARTICLES);
         expect(Notice.messages).toStrictEqual([
-          `The current folder contains ${listChars([char])}; created the ` +
-            `article in "${ARTICLES}" instead`,
+          expect.stringMatching(
+            new RegExp(
+              `${escapeRegExp(listChars([char]))}.*"${escapeRegExp(ARTICLES)}"`,
+              's'
+            )
+          ),
         ]);
       })
     );
@@ -6208,7 +6230,7 @@ describe('making an article, with its note and its row as one unit', () => {
         expect(article).toBeNull();
         expect(rows).toEqual([]);
         expect(vault.paths()).toEqual([]);
-        expect(notify).toHaveBeenCalledWith('Failed to create empty article', {
+        expect(notify).toHaveBeenCalledWith(expect.any(String), {
           kind: 'error',
         });
       } else {
@@ -6368,13 +6390,14 @@ describe('making an article, with its note and its row as one unit', () => {
       const rows = repo.rows('article');
       expect(rows).toHaveLength(1);
       expect(article?.data.id).toBe(rows[0].id);
-      expect(notify).not.toHaveBeenCalledWith(
-        expect.stringMatching(/^Failed to import/)
-      );
+      // Not failed: that is told with the error kind alone
+      expect(notify).not.toHaveBeenCalledWith(expect.anything(), {
+        kind: 'error',
+      });
       expect(notify).toHaveBeenCalledWith(
-        makeCopy
-          ? `Imported "${article?.file.basename}", but the snippets and cards taken from its original couldn't be handed to it`
-          : `"${vault.files.get(path)!.basename}" is an article, but the snippets and cards taken from it couldn't be adopted`,
+        expect.stringContaining(
+          `"${makeCopy ? article?.file.basename : vault.files.get(path)!.basename}"`
+        ),
         { kind: 'error', persist: true }
       );
       expect(console.error).toHaveBeenCalledWith(failure);
@@ -6400,7 +6423,7 @@ describe('making an article, with its note and its row as one unit', () => {
         expect(vault.frontmatterOf(path)).toEqual(before[path]);
         expect(repo.rows('article')).toEqual([]);
         expect(notify).toHaveBeenCalledExactlyOnceWith(
-          refusal(`import "${file.name}"`),
+          refusal(`"${file.name}"`),
           { kind: 'error' }
         );
       }
@@ -6410,10 +6433,9 @@ describe('making an article, with its note and its row as one unit', () => {
     const { vault, manager, notify } = await wireArticles({}, null, true);
     expect(await manager.create(DEFAULT_PRIORITY)).toBeNull();
     expect(vault.paths()).toEqual([]);
-    expect(notify).toHaveBeenCalledExactlyOnceWith(
-      refusal('create the article'),
-      { kind: 'error' }
-    );
+    expect(notify).toHaveBeenCalledExactlyOnceWith(refusal(), {
+      kind: 'error',
+    });
   });
 });
 
@@ -6478,7 +6500,10 @@ describe('importWebPage', () => {
             ...(url === null ? {} : { [SOURCE_PROPERTY_NAME]: url }),
           });
           expect(notify).toHaveBeenCalledOnce();
-          expect(notify.mock.calls[0][0]).toMatch(/^Imported "/);
+          expect(notify.mock.calls[0][1]).toMatchObject({
+            kind: 'success',
+            category: 'import',
+          });
         }
       ),
       { numRuns: 30 }
@@ -6573,10 +6598,9 @@ describe('importWebPage', () => {
     expect(path.slice(ARTICLES.length + 1)).not.toContain('/');
     expect(vault.paths()).toEqual([path, taken].sort());
     expect(vault.frontmatterOf(taken)).toEqual(before[taken]);
-    expect(notify).toHaveBeenCalledWith(
-      'Warning: article with name already exists "Page.md"',
-      { persist: true }
-    );
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('"Page.md"'), {
+      persist: true,
+    });
   });
 
   it('names the article in its notice, cut short when its title is long', async () => {
@@ -6590,11 +6614,12 @@ describe('importWebPage', () => {
     );
 
     expect(notify).toHaveBeenCalledOnce();
-    expect(
-      notify.mock.calls[0][0].startsWith(
-        `Imported "${'A'.repeat(CONTENT_TITLE_SLICE_LENGTH - 3)}..." with `
+    expect(notify.mock.calls[0][0]).toEqual(
+      importedWithPriority(
+        `${'A'.repeat(CONTENT_TITLE_SLICE_LENGTH - 3)}...`,
+        DEFAULT_PRIORITY
       )
-    ).toBe(true);
+    );
   });
 
   it("writes the note's properties in one write", async () => {
@@ -6647,7 +6672,9 @@ describe('importWebPage', () => {
       expect(article).toBeNull();
       expect(repo.rows('article')).toEqual([]);
       expect(vault.paths()).toEqual([]);
-      expect(notify).toHaveBeenCalledExactlyOnceWith('Failed to import "Page"');
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining('"Page"')
+      );
     }
   });
 
@@ -6663,7 +6690,7 @@ describe('importWebPage', () => {
     expect(article).toBeNull();
     expect(vault.paths()).toEqual([]);
     expect(repo.rows('article')).toEqual([]);
-    expect(notify).toHaveBeenCalledExactlyOnceWith(refusal('import "Page"'), {
+    expect(notify).toHaveBeenCalledExactlyOnceWith(refusal('"Page"'), {
       kind: 'error',
     });
   });
@@ -6706,8 +6733,8 @@ describe("an import notice's Open button", () => {
       await manager.import(file, DEFAULT_PRIORITY, null, way.endsWith('copy'));
     }
     const [row] = wired.repo.rows('article');
-    const imported = wired.notify.mock.calls.filter(([message]) =>
-      message.startsWith('Imported "')
+    const imported = wired.notify.mock.calls.filter(
+      ([, options]) => options?.kind === 'success'
     );
     expect(imported).toHaveLength(1);
     const options = imported[0][1] as NotifyOptions;
@@ -6814,7 +6841,7 @@ describe("an import notice's Open button", () => {
 
         await vi.waitFor(() => expect(notify).toHaveBeenCalled());
         expect(notify).toHaveBeenCalledExactlyOnceWith(
-          `Couldn't open "Paper": the article is gone`,
+          expect.stringContaining('"Paper"'),
           { kind: 'error' }
         );
         expect(openFile).not.toHaveBeenCalled();
@@ -6872,10 +6899,10 @@ describe('adoptLeftover', () => {
     await manager.adoptLeftover(vault.files.get('notes/left.md')!, 'left-1');
 
     expect(repo.rows('article')).toHaveLength(1);
-    expect(notify).toHaveBeenCalledWith(
-      `"left" is an article, but the snippets and cards taken from it couldn't be adopted`,
-      { kind: 'error', persist: true }
-    );
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('"left"'), {
+      kind: 'error',
+      persist: true,
+    });
   });
 });
 
@@ -6902,9 +6929,7 @@ describe('import of a snippet or card note', () => {
 
         expect(article).toBeNull();
         expect(repo.rows('article')).toEqual([]);
-        expect(notify).toHaveBeenCalledExactlyOnceWith(
-          'Note contains a snippet or card tag; canceling import'
-        );
+        expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String));
       }
     }
   });
@@ -7256,9 +7281,7 @@ describe('importMany', () => {
 
     expect(outcomes).toEqual([{ file, status: 'imported' }]);
     expect(notify).not.toHaveBeenCalled();
-    expect(warn).toHaveBeenCalledWith(
-      'Warning: article with name already exists "a.md"'
-    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"a.md"'));
   });
 
   it('fails a file with what anything else thrown says', async () => {

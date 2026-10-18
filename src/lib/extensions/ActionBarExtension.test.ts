@@ -311,7 +311,9 @@ describe('renderStandaloneActionBarDOM', () => {
           renderStandaloneActionBarDOM(file, plugin, container);
           await tick();
 
-          expect(iconName(dismissButton(container))).toBe(dismissed ? RESTORE : DISMISS);
+          expect(iconName(dismissButton(container))).toBe(
+            dismissed ? RESTORE : DISMISS
+          );
           expect(dismissButton(container).disabled).toBe(false);
           container.remove();
         }
@@ -672,7 +674,9 @@ describe('renderStandaloneActionBarDOM', () => {
           expect(harness.reviewManager.dismissItem).toHaveBeenCalledOnce();
           expect(harness.reviewManager.unDismissItem).not.toHaveBeenCalled();
         }
-        expect(iconName(dismissButton(container))).toBe(dismissed ? DISMISS : RESTORE);
+        expect(iconName(dismissButton(container))).toBe(
+          dismissed ? DISMISS : RESTORE
+        );
         container.remove();
       })
     );
@@ -762,7 +766,9 @@ describe('renderStandaloneActionBarDOM', () => {
               harness.emit({ ids: ['watched'] });
               await tick();
 
-              expect(iconName(dismissButton(container))).toBe(dismissed ? RESTORE : DISMISS);
+              expect(iconName(dismissButton(container))).toBe(
+                dismissed ? RESTORE : DISMISS
+              );
             }
             container.remove();
           }
@@ -813,7 +819,9 @@ describe('renderStandaloneActionBarDOM', () => {
             harness.emit({ ids: ['watched'] });
             await tick();
 
-            expect(iconName(dismissButton(container))).toBe(dismissed ? RESTORE : DISMISS);
+            expect(iconName(dismissButton(container))).toBe(
+              dismissed ? RESTORE : DISMISS
+            );
             expect(logged).toHaveBeenCalledExactlyOnceWith(
               'Failed to refresh item status:',
               reason

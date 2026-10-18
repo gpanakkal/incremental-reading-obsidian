@@ -230,6 +230,11 @@ export class Setting {
     this.descEl.textContent = desc;
     return this;
   }
+  /** As Obsidian's: adds each space-separated class to the row. */
+  setClass(cls: string) {
+    this.settingEl.classList.add(...cls.split(' ').filter(Boolean));
+    return this;
+  }
   /**
    * As Obsidian's: shows the message in a `.setting-item-error` appended to
    * the control on first use and marks the row `is-invalid`; `null` hides it.

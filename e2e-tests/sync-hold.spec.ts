@@ -350,9 +350,13 @@ test('a migrating startup waits for Sync, then loads the copy it delivered inste
     })
   ).toBe(false);
   await window.locator('.incremental-reading-ribbon').click();
-  // Told to try again: a notice besides the wait's own
+  // Told to try again: a notice of the plugin's own (each names the plugin
+  // first; Obsidian's own, such as "Indexing complete.", don't) besides the
+  // wait's
   await expect(
-    window.locator('.notice').filter({ hasNotText: SYNC_HOLD_MESSAGES.waiting })
+    window
+      .locator('.notice', { hasText: /^Incremental reading:/ })
+      .filter({ hasNotText: SYNC_HOLD_MESSAGES.waiting })
   ).toBeVisible();
 
   // Sync writes the other device's migrated copy, then dequeues it, as its

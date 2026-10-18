@@ -7,6 +7,7 @@ import {
   type IRPluginSettings,
 } from './settings';
 import { parseTagList } from './tags';
+import { cleanFolderList } from './watched-folders';
 
 /**
  * localStorage key holding this device's id. Obsidian namespaces
@@ -89,6 +90,17 @@ export function parsePluginData(raw: unknown): IRPluginData {
   if (!isAutoImportMode(settings.autoImportMode)) {
     settings.autoImportMode = DEFAULT_SETTINGS.autoImportMode;
   }
+  // Read on every file created or moved, so held to the same, and kept as the
+  // settings tab keeps them
+  settings.autoImportOnFolder = settings.autoImportOnFolder === true;
+  const storedFolders: unknown = settings.autoImportFolders;
+  settings.autoImportFolders = Array.isArray(storedFolders)
+    ? cleanFolderList(
+        storedFolders.filter(
+          (folder): folder is string => typeof folder === 'string'
+        )
+      )
+    : [];
 
   return {
     settings,

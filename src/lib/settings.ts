@@ -2,6 +2,7 @@ import type IncrementalReadingPlugin from '#/main';
 import {
   Platform,
   PluginSettingTab,
+  setIcon,
   TextComponent,
   type App,
   type ExtraButtonComponent,
@@ -10,6 +11,7 @@ import {
   type SettingDefinitionControl,
   type SettingDefinitionGroup,
   type SettingDefinitionItem,
+  type SettingDefinitionRender,
   type SettingGroupItem,
   type SettingNumberControl,
   type SettingTextControl,
@@ -30,6 +32,12 @@ import {
 } from './constants';
 import IRScheduler from './IRScheduler';
 import { formatTagList, parseTagList } from './tags';
+import {
+  cleanFolderList,
+  folderToWatchProblem,
+  normalizeFolderPath,
+  watchListProblem,
+} from './watched-folders';
 
 export interface IRPluginSettings {
   defaultPriority: number;
@@ -58,6 +66,10 @@ export interface IRPluginSettings {
   autoImportTags: string[];
   /** Whether a note imported by its trigger tag is copied. */
   autoImportMode: AutoImportMode;
+  /** Whether a file that arrives in a watched folder is imported by itself. */
+  autoImportOnFolder: boolean;
+  /** The watched folders' vault paths, as {@link cleanFolderList} keeps them. */
+  autoImportFolders: string[];
   fsrsParams: FSRSParameters;
 }
 
@@ -150,6 +162,9 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   autoImportTags: [AUTO_IMPORT_TAG],
   // Not `inherit`: turning on `copyOnImport` mustn't start copying clippings
   autoImportMode: 'inPlace',
+  // Off, as importing by tag is, and no folder is a given
+  autoImportOnFolder: false,
+  autoImportFolders: [],
   fsrsParams: FSRS_PARAMETER_DEFAULTS,
 };
 
@@ -273,6 +288,15 @@ const CONTROL_BINDINGS = {
     },
   },
   autoImportMode: topLevel('autoImportMode'),
+  autoImportOnFolder: topLevel('autoImportOnFolder'),
+  // The list the watched folders row shows as chips; no declarative control
+  // holds it (`drawWatchedFolders`)
+  autoImportFolders: {
+    read: (settings) => [...settings.autoImportFolders],
+    write: (settings, value: string[]) => {
+      settings.autoImportFolders = cleanFolderList(value);
+    },
+  },
   'fsrsParams.request_retention': fsrsParam('request_retention'),
   'fsrsParams.enable_fuzz': fsrsParam('enable_fuzz'),
   'fsrsParams.maximum_interval': fsrsParam('maximum_interval'),
@@ -345,6 +369,143 @@ function tidyTriggerTags(event: Event) {
   if (input) input.value = formatTagList(parseTagList(input.value));
 }
 
+/** The watched folders row's name. */
+export const WATCHED_FOLDERS_NAME = 'Watched folders';
+
+/**
+ * The watched folders field's example: a folder's path, cased as its names
+ * are, which isn't a sentence for sentence case to apply to.
+ */
+const FOLDER_PLACEHOLDER = 'Reading/Inbox';
+
+/** Marks the watched folders row, whose control holds its chips too. */
+export const FOLDER_LIST_ROW_CLASS = 'ir-folder-list-row';
+
+/** Marks the list of watched folders under the row's field. */
+export const FOLDER_CHIPS_CLASS = 'ir-folder-chips';
+
+/** Marks one watched folder in that list. */
+export const FOLDER_CHIP_CLASS = 'ir-folder-chip';
+
+/** Marks a watched folder's path in its chip. */
+export const FOLDER_CHIP_PATH_CLASS = 'ir-folder-chip-path';
+
+/** Marks the button that stops watching a folder. */
+export const FOLDER_CHIP_REMOVE_CLASS = 'ir-folder-chip-remove';
+
+/** What the watched folders row needs of the tab. */
+interface WatchedFoldersHost {
+  getControlValue(key: string): unknown;
+  setControlValue(key: string, value: unknown): void | Promise<void>;
+  /** Whether importing files added to folders is on now. */
+  watching: () => boolean;
+  /** Whether the vault holds a folder at `path` now. */
+  isFolder: (path: string) => boolean;
+}
+
+/**
+ * Draws the watched folders row into `setting`: a field above the folders
+ * already watched, each a chip with a button that stops watching it. Enter in
+ * the field adds the folder it names, if it can be watched, and clears it;
+ * otherwise the row says why and keeps the text. Each change saves the whole
+ * list through the tab's `autoImportFolders` binding.
+ *
+ * A row the tab draws, since no declarative control holds a list: Obsidian
+ * (1.13.7) calls this each time it draws the row, in the tab or in the
+ * settings search, so the chips go wherever the row does. Returns what puts
+ * the row's message right for the list as it is now, which the tab calls when
+ * watching is turned on or off.
+ */
+function drawWatchedFolders(
+  setting: Setting,
+  host: WatchedFoldersHost
+): () => void {
+  setting.setClass(FOLDER_LIST_ROW_CLASS);
+  const folders = () => host.getControlValue('autoImportFolders') as string[];
+
+  let input!: HTMLInputElement;
+  setting.addText((text) => {
+    text.setPlaceholder(FOLDER_PLACEHOLDER);
+    input = text.inputEl;
+  });
+  // Under the whole row, not in the control: the chips take the row's full
+  // width, below the name and the field (styles.css wraps the row)
+  const list = setting.settingEl.createDiv({ cls: FOLDER_CHIPS_CLASS });
+
+  /** Shows the list's problem, if it has one, in place of any other. */
+  const checkList = () => {
+    setting.setErrorMessage(
+      watchListProblem(folders(), host.watching()) ?? null
+    );
+  };
+
+  /** Saves `next` as the watched folders, and shows them. */
+  const save = async (next: string[]) => {
+    // Written before the save is awaited, so the chips show the new list
+    const saving = host.setControlValue('autoImportFolders', next);
+    drawChips();
+    checkList();
+    await saving;
+  };
+
+  const drawChips = () => {
+    list.replaceChildren();
+    for (const folder of folders()) {
+      const chip = list.createDiv({ cls: FOLDER_CHIP_CLASS });
+      chip.createSpan({ cls: FOLDER_CHIP_PATH_CLASS, text: folder });
+      // `clickable-icon`, Obsidian's icon button, also keeps a narrow row's
+      // rule from stretching every button in the control across it
+      const remove = chip.createEl('button', {
+        cls: ['clickable-icon', FOLDER_CHIP_REMOVE_CLASS],
+        attr: { type: 'button', 'aria-label': `Remove ${folder}` },
+      });
+      setIcon(remove, 'lucide-x');
+      remove.addEventListener('click', () => {
+        const index = folders().indexOf(folder);
+        // Only from a button that had focus, as a key press or a desktop
+        // click gives it: focusing the field after a tap would open a
+        // phone's keyboard
+        const focused = remove.ownerDocument.activeElement === remove;
+        void save(folders().filter((watched) => watched !== folder));
+        if (!focused) return;
+        const buttons = list.querySelectorAll<HTMLElement>(
+          `.${FOLDER_CHIP_REMOVE_CLASS}`
+        );
+        (buttons[Math.min(index, buttons.length - 1)] ?? input).focus();
+      });
+    }
+  };
+
+  /** Adds the folder the field names, or says why it can't. */
+  const add = () => {
+    if (input.value.trim() === '') return;
+    const folder = normalizeFolderPath(input.value);
+    const problem = folderToWatchProblem(folder, host.isFolder);
+    if (problem) {
+      setting.setErrorMessage(problem);
+      return;
+    }
+    input.value = '';
+    if (folders().includes(folder)) {
+      checkList();
+      return;
+    }
+    void save([...folders(), folder]);
+  };
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.isComposing) return;
+    event.preventDefault();
+    add();
+  });
+  // The field's message is about what was typed, so it goes once that changes
+  input.addEventListener('input', checkList);
+
+  drawChips();
+  checkList();
+  return checkList;
+}
+
 /** Marks this plugin's settings tab for the rules in styles.css. */
 export const SETTINGS_TAB_CLASS = 'ir-settings-tab';
 
@@ -366,7 +527,7 @@ export interface SettingBox<K extends string = string> {
   name: string;
   desc: string;
   control?: SettingDefinitionControl<K>['control'];
-  items: SettingDefinitionControl<K>[];
+  items: (SettingDefinitionControl<K> | SettingDefinitionRender)[];
 }
 
 /** A group of settings as this tab declares it: Obsidian's, plus boxes. */
@@ -660,6 +821,12 @@ function drawNumberField(
  */
 export class IRSettingTab extends PluginSettingTab {
   plugin: IncrementalReadingPlugin;
+  /**
+   * Each drawn watched folders row, by its element, and what puts its message
+   * right, for when watching is turned on or off: its toggle is a row of its
+   * own. There may be more than one, as the settings search draws rows too.
+   */
+  readonly #watchListChecks = new Map<HTMLElement, () => void>();
 
   constructor(app: App, plugin: IncrementalReadingPlugin) {
     super(app, plugin);
@@ -760,6 +927,39 @@ export class IRSettingTab extends PluginSettingTab {
                   type: 'dropdown',
                   key: 'autoImportMode',
                   options: AUTO_IMPORT_MODE_OPTIONS,
+                },
+              },
+            ],
+          },
+          {
+            type: 'box',
+            name: 'Auto-import files added to folders',
+            desc:
+              'Automatically import any note or PDF when it is added to a ' +
+              'watched folder or its subfolders: created there, moved in, or ' +
+              'synced from another device. Files already there are not ' +
+              'imported, nor are notes un-imported while there. Use "Import ' +
+              'from folder…" for those. "Where to import tagged notes" ' +
+              'applies here too.',
+            control: { type: 'toggle', key: 'autoImportOnFolder' },
+            items: [
+              {
+                name: WATCHED_FOLDERS_NAME,
+                render: (setting) => {
+                  const checkList = drawWatchedFolders(setting, {
+                    getControlValue: (key) => this.getControlValue(key),
+                    setControlValue: (key, value) =>
+                      this.setControlValue(key, value),
+                    // Read when checked, so the toggle and the vault as they
+                    // are now decide
+                    watching: () => this.plugin.settings.autoImportOnFolder,
+                    isFolder: (path) =>
+                      this.plugin.app.vault.getFolderByPath(path) !== null,
+                  });
+                  this.#watchListChecks.set(setting.settingEl, checkList);
+                  return () => {
+                    this.#watchListChecks.delete(setting.settingEl);
+                  };
                 },
               },
             ],
@@ -970,6 +1170,13 @@ export class IRSettingTab extends PluginSettingTab {
     // from memory, and a failed write must not leave the open ones behind the
     // ones opened after it.
     if (key === 'reviewTitleBar') this.plugin.syncReviewTitleBars();
+    if (key === 'autoImportOnFolder') {
+      for (const [row, checkList] of this.#watchListChecks) {
+        // Obsidian may not clean up a row whose window closed
+        if (row.isConnected) checkList();
+        else this.#watchListChecks.delete(row);
+      }
+    }
     await this.plugin.saveSettings();
 
     if (key === 'showAdvancedImportCommands') {

@@ -110,14 +110,12 @@ This is especially handy for:
 To import several files at once, right-click a folder and select **Import from folder…**. It lists only the notes and PDFs directly in that folder (not in its subfolders) that aren't articles, snippets or cards already.
 
 #### Automatic imports
+To import everything that lands in a folder, such as a Web Clipper inbox, enable **Auto-import files added to folders** and list the folders under **Watched folders**. Notes and PDFs created in those folders or their subfolders, moved in from elsewhere, or synced in from another device become articles while Obsidian is open.
 
-Enable **Auto-import notes by tag** in the plugin's settings and add tags to the list as desired. 
-
-For example, adding "#clippings" auto-imports pages saved by Obsidian Web Clipper. 
+To import notes when certain tags are added to their frontmatter, enable **Auto-import notes by tag** in the plugin's settings and add tags to the list as desired. For example, adding "#clippings" auto-imports pages saved by Obsidian Web Clipper. 
 
 > [!NOTE]
-> This only checks for frontmatter tags, and does not affect notes that had those tags beforehand.
-
+> This only checks for frontmatter tags.
 
 ### More guides
 

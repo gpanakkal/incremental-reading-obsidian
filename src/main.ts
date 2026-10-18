@@ -862,8 +862,8 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   /**
-   * Import notes as their frontmatter gains a trigger tag. See
-   * {@link AutoImportWatcher}.
+   * Import notes as their frontmatter gains a trigger tag, and files as they
+   * arrive in a watched folder. See {@link AutoImportWatcher}.
    *
    * `changed` is the one event every writer reaches: the editor, reading
    * mode's properties widget (which writes straight to the file), Sync, and
@@ -880,6 +880,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         triggerTags: this.settings.autoImportTags,
         priority: this.settings.defaultPriority,
         mode: this.settings.autoImportMode,
+        onFolder: this.settings.autoImportOnFolder,
+        folders: this.settings.autoImportFolders,
       }),
       importMany: (entries, { priority, mode }) =>
         this.reviewManager.importTaggedNotes(entries, { priority, mode }),
@@ -894,6 +896,22 @@ export default class IncrementalReadingPlugin extends Plugin {
       this.app.metadataCache.on('changed', (file, _data, cache) => {
         if (!this.reviewManager) return;
         this.autoImportWatcher?.consider(file, cache);
+      })
+    );
+
+    // Arrivals in watched folders. Registered once the layout is ready, as
+    // this is, so the `create` Obsidian raises for every file as the vault
+    // loads isn't taken for one.
+    this.registerEvent(
+      this.app.vault.on('create', (file) => {
+        if (!this.reviewManager) return;
+        this.autoImportWatcher?.noteArrival(file);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on('rename', (file, oldPath) => {
+        if (!this.reviewManager) return;
+        this.autoImportWatcher?.noteArrival(file, oldPath);
       })
     );
   }

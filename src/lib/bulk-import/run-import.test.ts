@@ -134,7 +134,9 @@ describe('importChosen', () => {
       );
 
       expect(Notice.messages, level).toEqual([
-        ...(level === 'none' ? [] : [expect.stringContaining('notes')]),
+        ...(level === 'none'
+          ? []
+          : [expect.stringContaining('notes') as unknown]),
         describeFailures([failure]),
       ]);
     }

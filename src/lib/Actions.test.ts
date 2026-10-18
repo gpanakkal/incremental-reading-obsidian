@@ -11,6 +11,7 @@ import {
   invalidateCurrentItemQuery,
 } from '#/lib/query-client';
 import * as reviewPosition from '#/lib/review-position';
+import type { SuccessNoticeLevel } from '#/lib/settings';
 import {
   addCompletedReview,
   removeCompletedReview,
@@ -38,10 +39,7 @@ import fc from 'fast-check';
 // here is the one `ObsidianHelpers.notify` constructs — importing it by path is
 // what gives TS the mock's `messages`/`reset`, which the real class lacks.
 import { Notice } from '#/test/__mocks__/obsidian';
-import {
-  showSuccessNotices,
-  SUCCESS_NOTICE_LEVELS,
-} from '#/test/success-notices';
+import { showSuccessNotices } from '#/test/success-notices';
 import * as CardAnswerModal from '#/views/CardAnswerModal';
 import type ReviewView from '#/views/ReviewView';
 import { EditorState } from '@codemirror/state';
@@ -705,6 +703,18 @@ function wireDeleteItem(prompt: () => Promise<unknown>, deletes = false) {
   return { actions, log, promptForFileDeletion, getNext, markDeleted };
 }
 
+/**
+ * A notice that names the selection kind `kind` as a word of its own, and
+ * never the other kind: its wording is free, which kind it is about is not.
+ */
+const namingKind = (kind: SelectionKind) =>
+  expect.stringMatching(
+    new RegExp(
+      `^(?!.*\\b${kind === 'snippet' ? 'card' : 'snippet'}\\b).*\\b${kind}\\b`,
+      's'
+    )
+  ) as unknown;
+
 // #endregion
 
 describe('itemName', () => {
@@ -788,17 +798,15 @@ describe('Actions on a missing item', () => {
     await actions.dismissItem(missing);
     await actions.unDismissItem(missing);
 
-    expect(Notice.messages).toEqual([
-      'Skipping away',
-      'Dismissed "away"',
-      'Restored "away" to queue',
-    ]);
+    const byName = expect.stringContaining('away') as unknown;
+    expect(Notice.messages).toEqual([byName, byName, byName]);
+    expect(Notice.messages.join()).not.toContain('gone');
     expect(
       (plugin.reviewManager.dismissItem as ReturnType<typeof vi.fn>).mock.calls
     ).toEqual([[missing]]);
     expect(actions.undoStack.map((entry) => entry.description)).toEqual([
-      'skipping "away"',
-      'dismissing "away"',
+      byName,
+      byName,
     ]);
   });
 });
@@ -819,7 +827,7 @@ describe('Actions.reprioritize', () => {
     await new Actions(plugin).reprioritize(item, 30);
 
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      `Failed to update priority for "${item.data.reference}"`,
+      expect.stringContaining(item.data.reference),
       { kind: 'error' }
     );
   });
@@ -838,58 +846,52 @@ describe('Actions — success notice levels', () => {
   });
 
   it('confirms each action only at the all level, and an undo at minimal too', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.constantFrom(...SUCCESS_NOTICE_LEVELS),
-        async (level) => {
-          Notice.reset();
-          showSuccessNotices(level);
-          const plugin = makeReviewingPlugin({
-            reviewId: 'review-1',
-            dayRolloverOffset: 4,
-          });
-          Object.assign(plugin.reviewManager, {
-            reprioritize: vi.fn().mockResolvedValue(undefined),
-          });
-          const actions = new Actions(plugin);
-          const item = (type: NoteType) =>
-            makeTypedItem(type, { id: type, dismissed: false });
+    /** Every notice the same run of actions raises at `level`. */
+    const noticesAt = async (level: SuccessNoticeLevel) => {
+      Notice.reset();
+      showSuccessNotices(level);
+      const plugin = makeReviewingPlugin({
+        reviewId: 'review-1',
+        dayRolloverOffset: 4,
+      });
+      Object.assign(plugin.reviewManager, {
+        reprioritize: vi.fn().mockResolvedValue(undefined),
+      });
+      const actions = new Actions(plugin);
+      const item = (type: NoteType) =>
+        makeTypedItem(type, { id: type, dismissed: false });
 
-          await actions.reviewArticle(
-            item('article') as ReviewArticle,
-            MS_PER_DAY
-          );
-          await actions.reviewSnippet(
-            item('snippet') as ReviewSnippet,
-            MS_PER_DAY
-          );
-          await actions.gradeCard(item('card') as ReviewCard, 3);
-          await actions.reprioritize(item('article') as ReviewText, 40);
-          actions.skipItem(item('article'));
-          await actions.dismissItem(item('snippet'));
-          await actions.unDismissItem(item('snippet'));
-          await actions.undo();
+      await actions.reviewArticle(item('article') as ReviewArticle, MS_PER_DAY);
+      await actions.reviewSnippet(item('snippet') as ReviewSnippet, MS_PER_DAY);
+      await actions.gradeCard(item('card') as ReviewCard, 3);
+      await actions.reprioritize(item('article') as ReviewText, 40);
+      actions.skipItem(item('article'));
+      await actions.dismissItem(item('snippet'));
+      await actions.unDismissItem(item('snippet'));
+      await actions.undo();
+      return [...Notice.messages];
+    };
+    /** A notice showing `n` as a number of its own. */
+    const showing = (n: number) =>
+      expect.stringMatching(
+        new RegExp(`(^|[^\\d.])${n}([^\\d.]|$)`)
+      ) as unknown;
 
-          const undid = 'Undid dismissing "snippet"';
-          expect(Notice.messages).toEqual(
-            {
-              all: [
-                'Next article review manually scheduled for 1 days from now',
-                'Next snippet review manually scheduled for 1 days from now',
-                'Graded as: Good',
-                'Priority set to 4',
-                'Skipping article',
-                'Dismissed "snippet"',
-                'Restored "snippet" to queue',
-                undid,
-              ],
-              minimal: [undid],
-              none: [],
-            }[level]
-          );
-        }
-      )
-    );
+    const all = await noticesAt('all');
+
+    // Only the values each notice carries; its wording is free to change
+    expect(all).toEqual([
+      showing(1), // days to the article's next review
+      showing(1), // days to the snippet's next review
+      expect.stringContaining('Good'), // the grade's name
+      showing(4), // the priority, out of 5
+      expect.stringContaining('article'), // the skipped item's name
+      expect.stringContaining('snippet'), // the dismissed item's name
+      expect.stringContaining('snippet'), // the restored item's name
+      expect.stringContaining('snippet'), // what was undone
+    ]);
+    expect(await noticesAt('minimal')).toEqual([all.at(-1)]);
+    expect(await noticesAt('none')).toEqual([]);
   });
 });
 
@@ -908,14 +910,6 @@ describe('Actions.skipItem — Notice message', () => {
     expect(Notice.messages).toHaveLength(1);
     const [message] = Notice.messages;
     expect(message).toContain('my-article');
-  });
-
-  it('Notice names the skipped item and nothing more', () => {
-    // A skip lasts until rollover or a restart, which no short phrase states
-    // accurately, so the notice makes no promise about when the item returns.
-    const actions = new Actions(makePlugin());
-    actions.skipItem(makeReviewItem('my-article'));
-    expect(Notice.messages).toEqual(['Skipping my-article']);
   });
 
   it('does not leak folder name from multi-segment path into Notice', () => {
@@ -970,14 +964,6 @@ describe('Actions.dismissItem — Notice message', () => {
     expect(message).toContain('my-article');
   });
 
-  it('Notice matches Dismissed "..." format', async () => {
-    const actions = new Actions(makePlugin());
-    await actions.dismissItem(makeReviewItem('my-article'));
-    expect(Notice.messages).toHaveLength(1);
-    const [message] = Notice.messages;
-    expect(message).toMatch(/^Dismissed ".*"$/);
-  });
-
   it('does not leak folder name from multi-segment path into Notice', async () => {
     const item = makeReviewItem('note', 'folder-a/subfolder/note.md');
     const actions = new Actions(makePlugin());
@@ -1016,22 +1002,6 @@ describe('Actions.unDismissItem — Notice message', () => {
     expect(Notice.messages).toHaveLength(1);
     const [message] = Notice.messages;
     expect(message).toContain('my-article');
-  });
-
-  it('Notice contains "to queue"', async () => {
-    const actions = new Actions(makePlugin());
-    await actions.unDismissItem(makeReviewItem('my-article'));
-    expect(Notice.messages).toHaveLength(1);
-    const [message] = Notice.messages;
-    expect(message).toContain('to queue');
-  });
-
-  it('Notice matches Restored "..." to queue format', async () => {
-    const actions = new Actions(makePlugin());
-    await actions.unDismissItem(makeReviewItem('my-article'));
-    expect(Notice.messages).toHaveLength(1);
-    const [message] = Notice.messages;
-    expect(message).toMatch(/^Restored ".*" to queue$/);
   });
 
   it('does not leak folder name from multi-segment path into Notice', async () => {
@@ -1781,7 +1751,7 @@ describe('Actions.goToContext', () => {
           );
           if (context === null) {
             expect(Notice.messages).toEqual([
-              `"${titleOf(basename)}" has no parent or local source to open`,
+              expect.stringContaining(titleOf(basename)),
             ]);
             expectNothingOpened(wired);
             return;
@@ -2065,11 +2035,7 @@ describe('Actions.goToContext', () => {
           expect(resolve).not.toHaveBeenCalled();
           if (source.file === null) {
             const title = titleOf(basename);
-            expect(Notice.messages).toEqual([
-              source.reason === 'none'
-                ? `"${title}" has no source`
-                : `The source of "${title}" is outside the vault`,
-            ]);
+            expect(Notice.messages).toEqual([expect.stringContaining(title)]);
             expectNothingOpened(wired);
             return;
           }
@@ -2078,6 +2044,30 @@ describe('Actions.goToContext', () => {
         }
       )
     );
+  });
+
+  it('tells an article with no source apart from one whose source is outside the vault', async () => {
+    const said = [];
+    for (const reason of ['none', 'outside-vault'] as const) {
+      vi.restoreAllMocks();
+      Notice.reset();
+      const itemFile = makeTFile('Paper');
+      const article = {
+        data: { id: 'item-1', type: 'article' },
+        file: itemFile,
+      } as unknown as ReviewArticle;
+      vi.spyOn(itemContext, 'findArticleSource').mockReturnValue({
+        file: null,
+        reason,
+      });
+      const wired = wireGoToContext({ item: article });
+
+      await new Actions(wired.plugin).goToContext(itemFile, false);
+
+      expect(Notice.messages).toHaveLength(1);
+      said.push(Notice.messages[0]);
+    }
+    expect(said[0]).not.toBe(said[1]);
   });
 });
 
@@ -2135,7 +2125,7 @@ describe('Actions.extract', () => {
 
           await actions.extract(kind, reviewView);
 
-          expect(Notice.messages).toEqual(['No selectable text']);
+          expect(Notice.messages).toHaveLength(1);
           expect(dispatched(plugin)).toEqual([]);
           expect(fromPdf.snippet).not.toHaveBeenCalled();
           expect(fromPdf.card).not.toHaveBeenCalled();
@@ -2345,9 +2335,7 @@ describe('Actions.extract', () => {
             expect(Notice.messages).toEqual([]);
           } else {
             expect(confirmSelection).not.toHaveBeenCalled();
-            expect(Notice.messages).toEqual([
-              `Finish or cancel the ${mode} selection first`,
-            ]);
+            expect(Notice.messages).toEqual([namingKind(mode)]);
           }
           expect(dispatched(plugin)).toEqual([]);
           expect(fromPdf.snippet).not.toHaveBeenCalled();
@@ -2487,10 +2475,6 @@ describe('Actions.extract', () => {
   });
 
   it('refuses the other kind while in the mode, says so, and leaves the selection be', async () => {
-    const refusal = {
-      snippet: 'Finish or cancel the snippet selection first',
-      card: 'Finish or cancel the card selection first',
-    };
     await fc.assert(
       fc.asyncProperty(
         selectionKindArb,
@@ -2507,7 +2491,7 @@ describe('Actions.extract', () => {
 
           await actions.extract(kind, reviewView);
 
-          expect(Notice.messages).toEqual([refusal[mode]]);
+          expect(Notice.messages).toEqual([namingKind(mode)]);
           expect(dispatched(plugin)).toEqual([]);
           if (cm) expect(cm.dispatch).not.toHaveBeenCalled();
           expect(domSelection.removeAllRanges).not.toHaveBeenCalled();
@@ -2892,7 +2876,7 @@ describe('Actions.createPdfSnippet', () => {
 
       expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
 
-      expect(Notice.messages).toEqual(['No selectable text']);
+      expect(Notice.messages).toHaveLength(1);
       expect(wired.createFromPdf).not.toHaveBeenCalled();
       expect(wired.readPdfSelection).toHaveBeenCalledTimes(
         'read' in options ? 1 : 0
@@ -2928,7 +2912,7 @@ describe('Actions.createPdfSnippet', () => {
 
     expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
 
-    expect(Notice.messages).toEqual(["The PDF hasn't finished loading"]);
+    expect(Notice.messages).toHaveLength(1);
     expect(wired.readPdfSelection).not.toHaveBeenCalled();
     expect(wired.viewer!.clearSelection).not.toHaveBeenCalled();
     expect(wired.createFromPdf).not.toHaveBeenCalled();
@@ -2942,13 +2926,10 @@ describe('Actions.createPdfSnippet', () => {
 
     expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
 
-    expect(Notice.messages).toEqual([
-      "Couldn't read the text selected in the PDF",
-    ]);
-    expect(notify).toHaveBeenCalledWith(
-      "Couldn't read the text selected in the PDF",
-      { kind: 'error' }
-    );
+    expect(Notice.messages).toHaveLength(1);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+      kind: 'error',
+    });
     expect(error).toHaveBeenCalledExactlyOnceWith(failure);
     expect(wired.createFromPdf).not.toHaveBeenCalled();
   });
@@ -2958,7 +2939,7 @@ describe('Actions.createPdfSnippet', () => {
 
     expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
 
-    expect(Notice.messages).toEqual(["Can't select text in this PDF here"]);
+    expect(Notice.messages).toHaveLength(1);
     expect(wired.readPdfSelection).not.toHaveBeenCalled();
     expect(wired.createFromPdf).not.toHaveBeenCalled();
   });
@@ -2969,7 +2950,7 @@ describe('Actions.createPdfSnippet', () => {
 
     expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
 
-    expect(Notice.messages).toEqual(["Can't select text in this PDF here"]);
+    expect(Notice.messages).toHaveLength(1);
     expect(wired.readPdfSelection).not.toHaveBeenCalled();
     expect(wired.createFromPdf).not.toHaveBeenCalled();
   });
@@ -3083,9 +3064,7 @@ describe('Actions.createPdfSnippet', () => {
 
       expect(await wired.actions.createPdfSnippet(wired.reviewView)).toBeNull();
 
-      expect(Notice.messages).toEqual([
-        '"paper" is not an incremental reading article',
-      ]);
+      expect(Notice.messages).toEqual([expect.stringContaining('paper')]);
       expect(wired.createFromPdf).not.toHaveBeenCalled();
       vi.restoreAllMocks();
     }
@@ -3376,23 +3355,22 @@ describe('Actions.createPdfCard', () => {
 
   it('says why, and asks for no answer, when there is no text to make a card of', async () => {
     const failure = new Error('worker gone');
-    const cases: [Parameters<typeof wirePdfCard>[0], string][] = [
-      [{ read: null }, 'No selectable text'],
-      [{ selection: null }, 'No selectable text'],
-      [{ pdfDocument: null }, "The PDF hasn't finished loading"],
-      [{ read: failure }, "Couldn't read the text selected in the PDF"],
-      [{ noViewer: true }, "Can't select text in this PDF here"],
+    const anyNotice = expect.any(String) as unknown;
+    const namingPaper = expect.stringContaining('paper') as unknown;
+    const cases: [Parameters<typeof wirePdfCard>[0], unknown][] = [
+      [{ read: null }, anyNotice],
+      [{ selection: null }, anyNotice],
+      [{ pdfDocument: null }, anyNotice],
+      [{ read: failure }, anyNotice],
+      [{ noViewer: true }, anyNotice],
       // Review only ever shows articles
-      [
-        { read: READ, item: null },
-        '"paper" is not an incremental reading article',
-      ],
+      [{ read: READ, item: null }, namingPaper],
       [
         {
           read: READ,
           item: { data: { id: 's', type: 'snippet' }, file: pdfFile() },
         },
-        '"paper" is not an incremental reading article',
+        namingPaper,
       ],
     ];
     for (const [options, message] of cases) {
@@ -3424,40 +3402,41 @@ describe('Actions.confirmSelection for a PDF', () => {
   });
 
   it('stays in the mode, and says so, while nothing is selected in the viewer', async () => {
-    const selectFirst = {
-      snippet: 'Select the text to extract first',
-      card: 'Select the text to make a card of first',
+    const said = async (pageHasText: boolean, kind: SelectionKind) => {
+      Notice.reset();
+      const { plugin, actions } = wireSelectionActions();
+      const fromPdf = spyPdfCreators(actions);
+      wireSelectionMode(kind);
+      const { reviewView } = makeSelectingView(null, pdfFile());
+      const { viewer } = withPdfViewer(
+        reviewView,
+        null,
+        pdfDocumentWith([pageHasText ? ['Text'] : []])
+      );
+
+      await actions.confirmSelection(reviewView);
+
+      expect(Notice.messages).toHaveLength(1);
+      expect(dispatched(plugin)).toEqual([]);
+      expect(fromPdf.snippet).not.toHaveBeenCalled();
+      expect(fromPdf.card).not.toHaveBeenCalled();
+      expect(viewer!.clearSelection).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+      return Notice.messages[0];
     };
-    await fc.assert(
-      fc.asyncProperty(
-        fc.boolean(),
-        selectionKindArb,
-        async (pageHasText, kind) => {
-          Notice.reset();
-          const { plugin, actions } = wireSelectionActions();
-          const fromPdf = spyPdfCreators(actions);
-          wireSelectionMode(kind);
-          const { reviewView } = makeSelectingView(null, pdfFile());
-          const { viewer } = withPdfViewer(
-            reviewView,
-            null,
-            pdfDocumentWith([pageHasText ? ['Text'] : []])
-          );
 
-          await actions.confirmSelection(reviewView);
+    const selectFirst = {
+      snippet: await said(true, 'snippet'),
+      card: await said(true, 'card'),
+    };
+    const scanned = await said(false, 'snippet');
 
-          // A scanned page has nothing to select, which is worth saying
-          expect(Notice.messages).toEqual([
-            pageHasText ? selectFirst[kind] : 'No selectable text',
-          ]);
-          expect(dispatched(plugin)).toEqual([]);
-          expect(fromPdf.snippet).not.toHaveBeenCalled();
-          expect(fromPdf.card).not.toHaveBeenCalled();
-          expect(viewer!.clearSelection).not.toHaveBeenCalled();
-          vi.restoreAllMocks();
-        }
-      )
-    );
+    // Asking for a selection names what it is for
+    expect(selectFirst.snippet).not.toBe(selectFirst.card);
+    // A scanned page has nothing to select, which is worth saying, whatever
+    // the selection was for
+    expect(await said(false, 'card')).toBe(scanned);
+    expect(Object.values(selectFirst)).not.toContain(scanned);
   });
 
   it('ends the mode and makes the snippet or card of the selection', async () => {
@@ -3586,28 +3565,27 @@ describe('Actions.extractFromPdfTab', () => {
   });
 
   it('asks for a selection first, and makes nothing, with nothing selected in the tab', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        selectionKindArb,
-        fc.option(selectionKindArb, { nil: null }),
-        async (kind, mode) => {
-          Notice.reset();
-          const wired = wirePdfTab({ selection: null, mode });
+    const said: Record<SelectionKind, string[]> = { snippet: [], card: [] };
+    for (const kind of ['snippet', 'card'] as const) {
+      for (const mode of [null, 'snippet', 'card'] as const) {
+        Notice.reset();
+        const wired = wirePdfTab({ selection: null, mode });
 
-          await wired.actions.extractFromPdfTab(kind, wired.view);
+        await wired.actions.extractFromPdfTab(kind, wired.view);
 
-          expect(Notice.messages).toEqual([
-            kind === 'snippet'
-              ? 'Select the text to extract first'
-              : 'Select the text to make a card of first',
-          ]);
-          expect(wired.fromPdf.snippet).not.toHaveBeenCalled();
-          expect(wired.fromPdf.card).not.toHaveBeenCalled();
-          expect(dispatched(wired.plugin)).toEqual([]);
-          vi.restoreAllMocks();
-        }
-      )
-    );
+        expect(Notice.messages).toHaveLength(1);
+        said[kind].push(Notice.messages[0]);
+        expect(wired.fromPdf.snippet).not.toHaveBeenCalled();
+        expect(wired.fromPdf.card).not.toHaveBeenCalled();
+        expect(dispatched(wired.plugin)).toEqual([]);
+        vi.restoreAllMocks();
+      }
+    }
+
+    // One request per kind, whatever mode review is in
+    expect(new Set(said.snippet).size).toBe(1);
+    expect(new Set(said.card).size).toBe(1);
+    expect(said.snippet[0]).not.toBe(said.card[0]);
   });
 
   it('says there is no selectable text when no page on screen has any', async () => {
@@ -3620,9 +3598,17 @@ describe('Actions.extractFromPdfTab', () => {
         });
 
         await wired.actions.extractFromPdfTab(kind, wired.view);
-
-        expect(Notice.messages).toEqual(['No selectable text']);
+        const [scanned] = Notice.messages;
+        expect(Notice.messages).toHaveLength(1);
         expect(wired.fromPdf[kind]).not.toHaveBeenCalled();
+        vi.restoreAllMocks();
+
+        // Not the request for a selection a page with text gets
+        Notice.reset();
+        const withText = wirePdfTab({ selection: null });
+        await withText.actions.extractFromPdfTab(kind, withText.view);
+        expect(Notice.messages).toHaveLength(1);
+        expect(Notice.messages).not.toContain(scanned);
         vi.restoreAllMocks();
       })
     );
@@ -3804,7 +3790,7 @@ describe('Actions.createPdfSnippet and createPdfCard from a PDF tab', () => {
       file: null,
     } as unknown as FileView);
 
-    expect(Notice.messages).toEqual(["Can't select text in this PDF here"]);
+    expect(Notice.messages).toHaveLength(1);
     expect(readPdfSelection).not.toHaveBeenCalled();
   });
 });
@@ -3941,10 +3927,12 @@ describe('Actions.undo while writes are refused', () => {
 
           expect(undo).not.toHaveBeenCalled();
           expect(actions.undoStack).toEqual([entry]);
-          expect(notify).toHaveBeenCalledExactlyOnceWith(
-            `Couldn't undo ${description}: saving to the database is paused. ${reason}`,
-            { kind: 'error' }
-          );
+          expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+            kind: 'error',
+          });
+          const [message] = notify.mock.calls[0];
+          expect(message).toContain(description);
+          expect(message).toContain(reason);
         }
       )
     );
@@ -4028,10 +4016,12 @@ describe('Actions.deleteItem', () => {
     await new Actions(plugin).deleteItem(item);
 
     expect(promptForFileDeletion).not.toHaveBeenCalled();
-    expect(notify).toHaveBeenCalledExactlyOnceWith(
-      `Couldn't delete "my-article": saving to the database is paused. Saving is paused.`,
-      { kind: 'error' }
-    );
+    expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+      kind: 'error',
+    });
+    const [message] = notify.mock.calls[0];
+    expect(message).toContain('my-article');
+    expect(message).toContain('Saving is paused.');
   });
 
   it('marks the row deleted before deleting the note as Obsidian does, then moves on', async () => {
@@ -4132,8 +4122,9 @@ describe('Actions.undo of something it could not take back', () => {
         await actions.undo();
 
         expect(actions.undoStack).toEqual([entry]);
+        // No success kind: a plain notice, not the one an undo confirms with
         expect(notify).toHaveBeenCalledExactlyOnceWith(
-          `Didn't undo ${description}`
+          expect.stringContaining(description)
         );
         // Told it is back as well as that it came off
         expect(listener).toHaveBeenCalledTimes(2);
@@ -4168,7 +4159,7 @@ describe('Actions.undo of something it could not take back', () => {
 
           expect(actions.undoStack).toEqual([]);
           expect(notify).toHaveBeenCalledExactlyOnceWith(
-            `Couldn't undo ${description}`,
+            expect.stringContaining(description),
             { kind: 'error' }
           );
         }
@@ -4205,11 +4196,16 @@ describe('Actions — undo of a snippet made from a note', () => {
 
       expect(deleteSnippet).toHaveBeenCalledExactlyOnceWith('snippet-1');
       expect(actions.undoStack).toHaveLength(outcome === 'failed' ? 0 : 1);
-      expect(notify).toHaveBeenCalledExactlyOnceWith(
-        ...(outcome === 'failed'
-          ? [`Couldn't undo creating snippet "snippet"`, { kind: 'error' }]
-          : [`Didn't undo creating snippet "snippet"`])
-      );
+      if (outcome === 'failed') {
+        expect(notify).toHaveBeenCalledExactlyOnceWith(
+          expect.stringContaining('snippet'),
+          { kind: 'error' }
+        );
+      } else {
+        expect(notify).toHaveBeenCalledExactlyOnceWith(
+          expect.stringContaining('snippet')
+        );
+      }
     }
   });
 });

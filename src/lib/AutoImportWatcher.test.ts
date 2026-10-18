@@ -11,7 +11,12 @@ import {
   SUCCESS_NOTICE_LEVELS,
 } from '#/test/success-notices';
 import * as fc from 'fast-check';
-import { TFile, type CachedMetadata } from 'obsidian';
+import {
+  TFile,
+  TFolder,
+  type CachedMetadata,
+  type TAbstractFile,
+} from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AutoImportWatcher,
@@ -24,6 +29,7 @@ import {
   AUTO_IMPORT_TAG,
   AUTO_IMPORT_WATERMARK_SLACK_MS,
   CARD_TAG,
+  DATA_DIRECTORY,
   SNIPPET_TAG,
 } from './constants';
 import {
@@ -35,6 +41,12 @@ import { matchFrontmatterTags, stripFrontmatterTags } from './tags';
 // #region HELPERS
 
 const TRIGGER = AUTO_IMPORT_TAG;
+
+/** A watched folder. */
+const INBOX = 'Inbox';
+
+/** Watching no folders, as the tests of trigger tags alone do. */
+const NO_FOLDERS = { onFolder: false, folders: [] };
 
 /**
  * A vault the watcher reads files and their cached metadata from, the ids its
@@ -77,15 +89,37 @@ function makeVault() {
       const file = Object.assign(new TFile(), {
         path,
         extension,
-        stat: { ctime: mtime, mtime, size: 0 },
+        stat: { ctime: mtime, mtime, size: 1 },
       });
       files.set(path, file);
       caches.set(file, frontmatter === undefined ? {} : { frontmatter });
       return file;
     },
-    /** Re-index `file` with `frontmatter`; none when undefined. */
-    edit: (file: TFile, frontmatter?: Record<string, unknown>) => {
+    /**
+     * Re-index `file` with `frontmatter`, none when undefined, its text now
+     * `size` bytes long, written when it last was.
+     */
+    edit: (file: TFile, frontmatter?: Record<string, unknown>, size = 1) => {
+      file.stat = { ...file.stat, size };
       caches.set(file, frontmatter === undefined ? {} : { frontmatter });
+    },
+    /**
+     * A file at `path` the metadata cache hasn't read: a note just created, or
+     * a file of any other kind, which it never reads.
+     */
+    create: (path: string) => {
+      const extension = path.slice(path.lastIndexOf('.') + 1);
+      const file = Object.assign(new TFile(), {
+        path,
+        extension,
+        stat: { ctime: 0, mtime: 0, size: 0 },
+      });
+      files.set(path, file);
+      return file;
+    },
+    /** Forget what the cache read of `file`. */
+    unindex: (file: TFile) => {
+      caches.delete(file);
     },
     cacheOf: (file: TFile) => caches.get(file) ?? null,
     remove: (file: TFile) => {
@@ -181,6 +215,7 @@ function makeWatcher(
     triggerTags: [TRIGGER],
     priority: 30,
     mode: 'inPlace',
+    ...NO_FOLDERS,
     ...config,
   };
   const importMany = makeImport(vault);
@@ -206,6 +241,16 @@ function makeWatcher(
     /** Tell the watcher `file` was re-indexed as its cache now stands. */
     change: (file: TFile) => {
       watcher.consider(file, vault.cacheOf(file));
+    },
+    /** Tell the watcher `file` was created where it is. */
+    arrive: (file: TAbstractFile) => {
+      watcher.noteArrival(file);
+    },
+    /** Move `file` to `path`, and tell the watcher. */
+    move: (file: TFile, path: string) => {
+      const oldPath = file.path;
+      vault.rename(file, path);
+      watcher.noteArrival(file, oldPath);
     },
   };
 }
@@ -278,10 +323,10 @@ const callsForImport = (note: NoteState, heldIds: ReadonlySet<string>) =>
 const seenAt = (vault: Vault) => loadAutoImportWatermark(vault.app);
 
 /** The notice for `count` imports, matched by its count and plural only. */
-const importedNotice = (count: number) =>
+const importedNotice = (count: number): unknown =>
   expect.stringMatching(
     new RegExp(`\\b${count} article${count === 1 ? '' : 's'}\\b`)
-  );
+  ) as unknown;
 
 // #endregion
 
@@ -525,6 +570,7 @@ describe('AutoImportWatcher.consider', () => {
         triggerTags: [TRIGGER],
         priority: 1,
         mode: 'inPlace',
+        ...NO_FOLDERS,
       }),
       importMany,
       hasRow: makeRowLookup(vault),
@@ -853,6 +899,7 @@ describe('AutoImportWatcher failures', () => {
         triggerTags: [TRIGGER],
         priority: 1,
         mode: 'inPlace',
+        ...NO_FOLDERS,
       }),
       importMany,
       hasRow: makeRowLookup(vault),
@@ -904,6 +951,7 @@ describe('AutoImportWatcher notices', () => {
               triggerTags: [TRIGGER],
               priority: 1,
               mode: 'inPlace',
+              ...NO_FOLDERS,
             }),
             importMany,
             hasRow: makeRowLookup(vault),
@@ -918,9 +966,7 @@ describe('AutoImportWatcher notices', () => {
             .filter((_, i) => statuses[i] === 'failed')
             .map((file) => ({ file, ...outcome(file) }) as BulkOutcome);
           expect(Notice.messages).toEqual([
-            ...(imported === 0
-              ? []
-              : [importedNotice(imported)]),
+            ...(imported === 0 ? [] : [importedNotice(imported)]),
             ...(failed.length === 0 ? [] : [describeFailures(failed)]),
           ]);
           stop();
@@ -946,6 +992,7 @@ describe('AutoImportWatcher notices', () => {
           triggerTags: [TRIGGER],
           priority: 1,
           mode: 'inPlace',
+          ...NO_FOLDERS,
         }),
         importMany,
         hasRow: makeRowLookup(vault),
@@ -980,6 +1027,7 @@ describe('AutoImportWatcher notices', () => {
         triggerTags: [TRIGGER],
         priority: 1,
         mode: 'inPlace',
+        ...NO_FOLDERS,
       }),
       importMany,
       hasRow: makeRowLookup(vault),
@@ -1274,6 +1322,7 @@ describe('AutoImportWatcher.runCatchUpScan', () => {
           triggerTags: [TRIGGER],
           priority: 1,
           mode: 'inPlace',
+          ...NO_FOLDERS,
         }),
         importMany,
         hasRow: makeRowLookup(vault),
@@ -1352,6 +1401,24 @@ describe('AutoImportWatcher.runCatchUpScan', () => {
         stop();
       })
     );
+  });
+
+  it('imports a file written in a watched folder after the moment last seen to only for a trigger tag, never as an arrival', async () => {
+    const vault = makeVault();
+    const { watcher, importMany, stop } = makeWatcher(
+      { onFolder: true, folders: [INBOX] },
+      vault
+    );
+    const seen = Date.now() - 1000;
+    vault.add(`${INBOX}/plain.md`, {}, 'md', seen + 1);
+    vault.add(`${INBOX}/paper.pdf`, undefined, 'pdf', seen + 1);
+    vault.add(`${INBOX}/tagged.md`, { tags: [TRIGGER] }, 'md', seen + 1);
+    saveAutoImportWatermark(vault.app, seen);
+
+    await watcher.runCatchUpScan();
+
+    expect(importedPaths(importMany)).toEqual([[`${INBOX}/tagged.md`]]);
+    stop();
   });
 });
 
@@ -1530,6 +1597,7 @@ describe('AutoImportWatcher, the moment last seen to', () => {
           triggerTags: [TRIGGER],
           priority: 1,
           mode: 'inPlace',
+          ...NO_FOLDERS,
         }),
         importMany: makeImporter(vault),
         hasRow: makeRowLookup(vault),
@@ -1583,5 +1651,501 @@ describe('AutoImportWatcher, the moment last seen to', () => {
         }
       )
     );
+  });
+});
+
+describe('AutoImportWatcher.noteArrival', () => {
+  /** A watcher watching {@link INBOX}, with importing by tag off. */
+  const makeFolderWatcher = (config: Partial<AutoImportConfig> = {}) =>
+    makeWatcher({
+      enabled: false,
+      onFolder: true,
+      folders: [INBOX],
+      ...config,
+    });
+
+  /**
+   * A file created or moved to `to`, with `extension`, while watching
+   * `folders`. A note carries `frontmatter` once read, if it has any. The
+   * plugin's data folder can be among `folders` only by a hand-edited
+   * `data.json`, since settings refuse it.
+   */
+  const arrivalArb = fc.record({
+    onFolder: fc.boolean(),
+    enabled: fc.boolean(),
+    folders: fc.subarray([INBOX, 'Clips/Web', DATA_DIRECTORY]),
+    extension: fc.constantFrom('md', 'pdf', 'png'),
+    to: fc.constantFrom(
+      `${INBOX}/a`,
+      `${INBOX}/sub/a`,
+      `${INBOX}2/a`,
+      'Clips/Web/a',
+      'Clips/a',
+      `${DATA_DIRECTORY}/a`,
+      'a'
+    ),
+    /** Where it was moved from; created when null. */
+    from: fc.constantFrom(
+      null,
+      `${INBOX}/b`,
+      `${INBOX}2/b`,
+      'Clips/Web/sub/b',
+      'Clips/b',
+      `${DATA_DIRECTORY}/sub/b`,
+      'b'
+    ),
+    hasFrontmatter: fc.boolean(),
+    /** Whether a note has nothing in it when read. */
+    empty: fc.boolean(),
+    irId: irIdArb,
+    rowHeld: fc.boolean(),
+    tags: fc.subarray([TRIGGER, SNIPPET_TAG, CARD_TAG, 'Other']),
+  });
+
+  it('imports an importable file that lands in a watched folder from outside every one, unless a note is a snippet or card or has an ir-id', async () => {
+    await fc.assert(
+      fc.asyncProperty(arrivalArb, async (arrival) => {
+        const { onFolder, enabled, folders, extension, from } = arrival;
+        const { vault, change, arrive, move, importMany, stop } = makeWatcher({
+          onFolder,
+          enabled,
+          folders,
+        });
+        const { irId, rowHeld, tags, hasFrontmatter, empty } = arrival;
+        const size = empty ? 0 : 1;
+        if (typeof irId === 'string' && rowHeld) vault.rows.add(irId);
+        const frontmatter = hasFrontmatter
+          ? { 'ir-id': irId, tags }
+          : undefined;
+        const isNote = extension === 'md';
+        const to = `${arrival.to}.${extension}`;
+        if (from === null) {
+          const file = vault.create(to);
+          arrive(file);
+          if (isNote) {
+            // Read only some time after it is created
+            await settle();
+            vault.edit(file, frontmatter, size);
+            change(file);
+          }
+        } else {
+          const file = vault.create(`${from}.${extension}`);
+          if (isNote) vault.edit(file, frontmatter, size);
+          move(file, to);
+        }
+        await settle();
+
+        const watched = (path: string) =>
+          !path.startsWith(`${DATA_DIRECTORY}/`) &&
+          folders.some((folder) => path.startsWith(`${folder}/`));
+        const arrived =
+          onFolder &&
+          extension !== 'png' &&
+          watched(to) &&
+          (from === null || !watched(from));
+        const blocked =
+          hasFrontmatter &&
+          tags.some((tag) => tag === SNIPPET_TAG || tag === CARD_TAG);
+        const id: unknown = hasFrontmatter ? irId : undefined;
+        const byArrival =
+          arrived &&
+          (!isNote || (!empty && !blocked && typeof id !== 'string'));
+        // A new note is read after it is created; one moved is looked at
+        // only if it arrived
+        const looked = isNote && (from === null || arrived);
+        const byTag =
+          looked &&
+          enabled &&
+          hasFrontmatter &&
+          tags.includes(TRIGGER) &&
+          !blocked &&
+          !(typeof id === 'string' && rowHeld);
+        expect(importedPaths(importMany)).toEqual(
+          byArrival || byTag ? [[to]] : []
+        );
+        if (byArrival || byTag) {
+          expect(importMany.mock.calls[0][0][0].matchedTags).toEqual(
+            byTag ? [TRIGGER] : []
+          );
+        }
+        stop();
+      })
+    );
+  });
+
+  it('waits for a new note to be read, then imports it once', async () => {
+    const { vault, watcher, change, arrive, importMany } = makeFolderWatcher();
+    const file = vault.create(`${INBOX}/clip.md`);
+    arrive(file);
+    await settle();
+    // Written, but not read yet: its frontmatter, an ir-id among it, is unknown
+    file.stat.size = 40;
+    watcher.consider(file, null);
+    await settle();
+    expect(importMany).not.toHaveBeenCalled();
+
+    vault.edit(file, { source: 'web' });
+    change(file);
+    await settle();
+    // The import's own write-back, then further edits
+    change(file);
+    change(file);
+    await settle();
+
+    expect(importMany.mock.calls).toEqual([
+      [
+        [{ file, matchedTags: [] }],
+        expect.objectContaining({ onFolder: true }),
+      ],
+    ]);
+  });
+
+  it('waits for a note that arrives empty to have something in it', async () => {
+    const { vault, change, arrive, move, importMany } = makeFolderWatcher();
+    const created = vault.create(`${INBOX}/new.md`);
+    arrive(created);
+    const moved = vault.add('blank.md');
+    vault.edit(moved, undefined, 0);
+    move(moved, `${INBOX}/blank.md`);
+    // Read empty, and read again as it is saved still empty
+    for (let i = 0; i < 2; i++) {
+      vault.edit(created, undefined, 0);
+      change(created);
+      change(moved);
+      await settle();
+    }
+    expect(importMany).not.toHaveBeenCalled();
+
+    // Its first words saved
+    vault.edit(created, undefined, 12);
+    change(created);
+    vault.edit(moved, undefined, 3);
+    change(moved);
+    await settle();
+
+    expect(importedPaths(importMany)).toEqual([
+      [`${INBOX}/new.md`, `${INBOX}/blank.md`],
+    ]);
+  });
+
+  it('takes each arrival as one chance to import, not retried once the import passes it by', async () => {
+    const { vault, change, arrive, importMany } = makeFolderWatcher();
+    const file = vault.create(`${INBOX}/clip.md`);
+    importMany.mockResolvedValueOnce([
+      { file, status: 'skipped', reason: 'already being imported' },
+    ]);
+    arrive(file);
+    vault.edit(file);
+    change(file);
+    await settle();
+
+    change(file);
+    await settle();
+
+    expect(importMany).toHaveBeenCalledOnce();
+  });
+
+  it('imports a PDF as soon as the wait for others to arrive ends', async () => {
+    const { vault, arrive, importMany } = makeFolderWatcher();
+    const file = vault.create(`${INBOX}/paper.pdf`);
+    arrive(file);
+
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS - 1);
+    expect(importMany).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(importMany.mock.calls[0][0]).toEqual([{ file, matchedTags: [] }]);
+  });
+
+  it('imports a note moved in at once, and none moved within or out', async () => {
+    const { vault, move, importMany } = makeFolderWatcher();
+    const within = vault.add(`${INBOX}/within.md`);
+    const out = vault.add(`${INBOX}/out.md`);
+    const moved = vault.add('notes/moved.md');
+    move(within, `${INBOX}/sub/within.md`);
+    move(out, 'notes/out.md');
+    move(moved, `${INBOX}/moved.md`);
+
+    await settle();
+
+    expect(importedPaths(importMany)).toEqual([[`${INBOX}/moved.md`]]);
+  });
+
+  it('waits for a note moved in before it was read to be read', async () => {
+    const { vault, change, move, importMany } = makeFolderWatcher();
+    const file = vault.create('new.md');
+    move(file, `${INBOX}/new.md`);
+    await settle();
+    expect(importMany).not.toHaveBeenCalled();
+
+    vault.edit(file);
+    change(file);
+    await settle();
+
+    expect(importedPaths(importMany)).toEqual([[`${INBOX}/new.md`]]);
+  });
+
+  it('imports nothing when a note that did not arrive changes, without a trigger tag', async () => {
+    const { vault, change, importMany } = makeFolderWatcher({ enabled: true });
+    change(vault.add(`${INBOX}/old.md`, { tags: ['Other'] }));
+
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+  });
+
+  it('leaves a note that arrives with an ir-id alone, without looking it up', async () => {
+    const { vault, change, arrive, move, importMany, hasRow } =
+      makeFolderWatcher();
+    // An article Sync delivers before the database row behind its id
+    const synced = vault.create(`${INBOX}/synced.md`);
+    arrive(synced);
+    vault.edit(synced, { 'ir-id': 'from-elsewhere' });
+    change(synced);
+    move(vault.add('article.md', { 'ir-id': '' }), `${INBOX}/article.md`);
+
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+    expect(hasRow).not.toHaveBeenCalled();
+  });
+
+  it('imports nothing while watching is off, even if turned on before a new note is read', async () => {
+    const { vault, change, arrive, move, configure, importMany } =
+      makeFolderWatcher({ onFolder: false });
+    const note = vault.create(`${INBOX}/a.md`);
+    arrive(note);
+    arrive(vault.create(`${INBOX}/a.pdf`));
+    move(vault.add('b.md'), `${INBOX}/b.md`);
+    await settle();
+    configure({ onFolder: true });
+    vault.edit(note);
+    change(note);
+
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+  });
+
+  it('imports nothing when watching is turned off before a new note is read', async () => {
+    const { vault, change, arrive, configure, importMany } =
+      makeFolderWatcher();
+    const note = vault.create(`${INBOX}/a.md`);
+    arrive(note);
+    configure({ onFolder: false });
+    vault.edit(note);
+    change(note);
+
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+  });
+
+  it('imports a note that arrived carrying a trigger tag once, as one with that tag', async () => {
+    const { vault, change, arrive, importMany } = makeFolderWatcher({
+      enabled: true,
+    });
+    const file = vault.create(`${INBOX}/clip.md`);
+    arrive(file);
+    vault.edit(file, { tags: [TRIGGER] });
+    change(file);
+    change(file);
+    await settle();
+    change(file);
+    await settle();
+
+    expect(importMany).toHaveBeenCalledOnce();
+    expect(importMany.mock.calls[0][0]).toEqual([
+      { file, matchedTags: [TRIGGER] },
+    ]);
+  });
+
+  it('ignores folders', async () => {
+    const { arrive, importMany } = makeFolderWatcher();
+    const folder = Object.assign(new TFolder(), { path: `${INBOX}/sub.md` });
+
+    expect(() => arrive(folder)).not.toThrow();
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+  });
+
+  it('imports nothing that arrives before it starts or after it stops', async () => {
+    const { vault, watcher, change, arrive, importMany, stop } =
+      makeFolderWatcher();
+    stop();
+    const note = vault.create(`${INBOX}/a.md`);
+    arrive(note);
+    arrive(vault.create(`${INBOX}/a.pdf`));
+    watcher.start();
+    vault.edit(note);
+    change(note);
+
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+  });
+
+  it('forgets the notes waiting to be read when stopped', async () => {
+    const { vault, watcher, change, arrive, importMany, stop } =
+      makeFolderWatcher();
+    const note = vault.create(`${INBOX}/a.md`);
+    arrive(note);
+    stop();
+    watcher.start();
+    vault.edit(note);
+    change(note);
+
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+  });
+
+  it('forgets which waiting files arrived once they are imported or dropped', async () => {
+    const { vault, watcher, change, move, importMany, stop } =
+      makeFolderWatcher({ enabled: true });
+    const flushed = vault.add('flushed.md');
+    const stopped = vault.add('stopped.md');
+    importMany.mockResolvedValueOnce([
+      { file: flushed, status: 'skipped', reason: 'busy' },
+    ]);
+    move(flushed, `${INBOX}/flushed.md`);
+    await settle();
+    move(stopped, `${INBOX}/stopped.md`);
+    stop();
+    watcher.start();
+    importMany.mockClear();
+
+    // Queued again by a trigger tag, which goes before the flush
+    for (const file of [flushed, stopped]) {
+      vault.edit(file, { tags: [TRIGGER] });
+      change(file);
+      vault.edit(file);
+    }
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+  });
+
+  it('remembers a file whose import failed, and never tries it again', async () => {
+    const { vault, arrive, move, importMany } = makeFolderWatcher();
+    const file = vault.create(`${INBOX}/broken.pdf`);
+    importMany.mockResolvedValueOnce([
+      { file, status: 'failed', reason: 'broken' },
+    ]);
+    arrive(file);
+    await settle();
+    move(file, 'broken.pdf');
+    move(file, `${INBOX}/broken.pdf`);
+
+    await settle();
+
+    expect(importMany).toHaveBeenCalledOnce();
+  });
+
+  it('counts arrivals and tagged notes imported together in one notice', async () => {
+    const { vault, change, arrive, importMany } = makeFolderWatcher({
+      enabled: true,
+    });
+    arrive(vault.create(`${INBOX}/a.pdf`));
+    change(vault.add('tagged.md', { tags: [TRIGGER] }));
+
+    await settle();
+
+    expect(importMany).toHaveBeenCalledOnce();
+    expect(Notice.messages).toEqual([importedNotice(2)]);
+  });
+});
+
+describe('AutoImportWatcher arrivals at flush', () => {
+  /** A file that arrived in the watched folder and waits for the flush. */
+  function makeWaiting(extension: 'md' | 'pdf' = 'md') {
+    const watching = makeWatcher({ onFolder: true, folders: [INBOX] });
+    const file = watching.vault.create(`${INBOX}/a.${extension}`);
+    watching.arrive(file);
+    if (extension === 'md') {
+      watching.vault.edit(file, { tags: ['Other'] });
+      watching.change(file);
+    }
+    return { ...watching, file };
+  }
+
+  it('drops a file moved out of every watched folder, and imports one moved within, where it now is', async () => {
+    for (const extension of ['md', 'pdf'] as const) {
+      const out = makeWaiting(extension);
+      out.vault.rename(out.file, `notes/a.${extension}`);
+      const within = makeWaiting(extension);
+      within.vault.rename(within.file, `${INBOX}/sub/a.${extension}`);
+
+      await settle();
+
+      expect(out.importMany).not.toHaveBeenCalled();
+      expect(importedPaths(within.importMany)).toEqual([
+        [`${INBOX}/sub/a.${extension}`],
+      ]);
+    }
+  });
+
+  it("drops a file moved into the plugin's data folder while it waited, even with that folder listed", async () => {
+    for (const extension of ['md', 'pdf'] as const) {
+      const watching = makeWatcher({
+        onFolder: true,
+        folders: [INBOX, DATA_DIRECTORY],
+      });
+      const file = watching.vault.create(`${INBOX}/a.${extension}`);
+      watching.arrive(file);
+      if (extension === 'md') {
+        watching.vault.edit(file, { tags: ['Other'] });
+        watching.change(file);
+      }
+      watching.vault.rename(file, `${DATA_DIRECTORY}/a.${extension}`);
+
+      await settle();
+
+      expect(watching.importMany).not.toHaveBeenCalled();
+    }
+  });
+
+  it('drops a file deleted while it waited', async () => {
+    const { vault, file, importMany } = makeWaiting('pdf');
+    vault.remove(file);
+
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+  });
+
+  it('drops a note that gained an ir-id, a snippet or card tag, or lost its cache while it waited', async () => {
+    const changes: ((vault: Vault, file: TFile) => void)[] = [
+      (vault, file) => vault.edit(file, { 'ir-id': 'copied-in' }),
+      (vault, file) => vault.edit(file, { tags: [SNIPPET_TAG] }),
+      (vault, file) => vault.edit(file, { tags: CARD_TAG }),
+      (vault, file) => vault.unindex(file),
+    ];
+    for (const makeChange of changes) {
+      const { vault, file, importMany } = makeWaiting();
+      makeChange(vault, file);
+
+      await settle();
+
+      expect(importMany).not.toHaveBeenCalled();
+    }
+  });
+
+  it('drops everything that arrived when watching is turned off, or its folder unwatched, before the flush', async () => {
+    const changes: Partial<AutoImportConfig>[] = [
+      { onFolder: false },
+      { folders: ['Elsewhere'] },
+    ];
+    for (const change of changes) {
+      for (const extension of ['md', 'pdf'] as const) {
+        const { configure, importMany } = makeWaiting(extension);
+        configure(change);
+
+        await settle();
+
+        expect(importMany).not.toHaveBeenCalled();
+      }
+    }
   });
 });

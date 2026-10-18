@@ -4206,10 +4206,9 @@ describe('create, with its note and its row as one unit', () => {
       vi.restoreAllMocks();
       const { notify } = await snipInVault(null, failure);
 
-      expect(notify).toHaveBeenCalledExactlyOnceWith(
-        expect.any(String),
-        { kind: 'error' }
-      );
+      expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+        kind: 'error',
+      });
     }
   });
 
@@ -4276,10 +4275,9 @@ describe('createFromPdf, with its note and its row as one unit', () => {
       expect(result).toBeNull();
       expect(vault.paths()).toEqual([PDF]);
       expect(repo.rows('snippet')).toEqual([]);
-      expect(notify).toHaveBeenCalledExactlyOnceWith(
-        expect.any(String),
-        { kind: 'error' }
-      );
+      expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+        kind: 'error',
+      });
     }
   });
 

@@ -29,6 +29,10 @@ import {
   CONTINUED_GROUP_CLASS,
   DEFAULT_SETTINGS,
   drawResettableRows,
+  FOLDER_CHIP_CLASS,
+  FOLDER_CHIP_PATH_CLASS,
+  FOLDER_CHIPS_CLASS,
+  FOLDER_LIST_ROW_CLASS,
   formatPriority,
   formatRetention,
   formatRolloverHour,
@@ -39,11 +43,18 @@ import {
   SETTING_BOX_CLASS,
   SETTINGS_TAB_CLASS,
   SUCCESS_NOTICE_LEVEL_OPTIONS,
+  WATCHED_FOLDERS_NAME,
   type IRPluginSettings,
   type SettingBox,
   type SettingGroupLayout,
 } from './settings';
 import { parseTagList } from './tags';
+import {
+  cleanFolderList,
+  folderToWatchProblem,
+  normalizeFolderPath,
+  watchListProblem,
+} from './watched-folders';
 
 // #region HELPERS
 
@@ -126,6 +137,8 @@ const settingsArb = fc.record({
     autoImportOnTag: fc.boolean(),
     autoImportTags: fc.array(textArb()),
     autoImportMode: fc.constantFrom(...AUTO_IMPORT_MODES),
+    autoImportOnFolder: fc.boolean(),
+    autoImportFolders: fc.array(textArb()),
     fsrsParams: fc.record({
       request_retention: fc.double(),
       maximum_interval: fc.integer(),
@@ -156,7 +169,8 @@ function buildSettings({
  * A plugin holding `settings` as its half of `data.json`, recording a snapshot
  * of that whole file on each save and each extra-hotkeys toggle it is asked for.
  */
-function makeTab(settings: IRPluginSettings) {
+function makeTab(settings: IRPluginSettings, folders: Iterable<string> = []) {
+  const folderPaths = new Set(folders);
   const data: IRPluginData = {
     settings,
     session: { deviceId: 'device-a', itemId: 'item-1' },
@@ -165,6 +179,12 @@ function makeTab(settings: IRPluginSettings) {
   const saved: IRPluginData[] = [];
   const events: string[] = [];
   const plugin = {
+    app: {
+      vault: {
+        getFolderByPath: (path: string): { path: string } | null =>
+          folderPaths.has(path) ? { path } : null,
+      },
+    },
     data,
     settings,
     saveSettings: vi.fn(() => {
@@ -191,14 +211,16 @@ type RowDefinition = {
   name: string;
   desc?: string | DocumentFragment;
   control?: DeclaredControl;
+  /** How the tab draws the row itself, if it does. */
+  render?: unknown;
 };
 
 type ControlDefinition = RowDefinition & { control: DeclaredControl };
 
 /**
  * Each row, under the heading it shows beneath: a group with no heading of its
- * own continues the section above it. A row is a control or a bare name and
- * description; fails on anything else.
+ * own continues the section above it. A row is a control, a row the tab draws
+ * itself, or a bare name and description; fails on anything else.
  */
 function declaredSettingRows(items: SettingDefinitionItem[]): RowDefinition[] {
   let heading = '';
@@ -208,7 +230,7 @@ function declaredSettingRows(items: SettingDefinitionItem[]): RowDefinition[] {
     }
     heading = item.heading ?? heading;
     return (item.items ?? []).map((definition) => {
-      if ('type' in definition || definition.render || definition.action) {
+      if ('type' in definition || definition.action) {
         throw new Error(
           `Expected a control or a bare row, got ${JSON.stringify(definition)}`
         );
@@ -218,6 +240,7 @@ function declaredSettingRows(items: SettingDefinitionItem[]): RowDefinition[] {
         name: definition.name,
         desc: definition.desc,
         control: definition.control,
+        ...(definition.render && { render: definition.render }),
       };
     });
   });
@@ -247,6 +270,35 @@ const blockedTagArb = fc
     fc.boolean()
   )
   .map(([tag, hash, upper]) => hash + (upper ? tag.toUpperCase() : tag));
+
+/** A folder's vault path, often one of a few, so typed paths name them. */
+const folderArb = fc.oneof(
+  fc.constantFrom(
+    'Inbox',
+    'Reading/Inbox',
+    'a, b',
+    DATA_DIRECTORY,
+    `${DATA_DIRECTORY}/x`
+  ),
+  textArb()
+);
+
+/**
+ * What might be typed into the watched folders field: a folder, padded with
+ * slashes and spaces or not; the root; nothing; or anything.
+ */
+const typedFolderArb = fc.oneof(
+  folderArb,
+  fc
+    .tuple(
+      fc.constantFrom('', ' ', '/', ' /'),
+      folderArb,
+      fc.constantFrom('', '/', ' ', '/ ')
+    )
+    .map((parts) => parts.join('')),
+  fc.constantFrom('/', '//', ' ', '', 'Inbox, Reading/Inbox'),
+  textArb()
+);
 
 /**
  * Any typed trigger tags field: tags, blocked ones among them or not, between
@@ -559,6 +611,93 @@ function drawControl(
   if (!field) throw new Error('No field');
   return { row, setting, field };
 }
+
+/**
+ * The box the tab declares whose head row is named `name`, wherever it puts
+ * it among the others.
+ */
+const boxHeadedBy = (tab: IRSettingTab, name: string) =>
+  tab
+    .declareSettings()
+    .filter((item) => classesOf(item).includes(SETTING_BOX_CLASS))
+    .find((box) => {
+      const head = 'items' in box ? box.items?.[0] : undefined;
+      return head !== undefined && 'name' in head && head.name === name;
+    });
+
+/**
+ * The watched folders row as `tab` hands it to Obsidian, drawn as Obsidian
+ * draws a `render` row: into a new `Setting` in the tab's container, already
+ * named, with the container in the document so the row's buttons take focus.
+ */
+function drawWatchedFolders(tab: IRSettingTab) {
+  const row = tab
+    .getSettingDefinitions()
+    .flatMap((item) => ('items' in item ? (item.items ?? []) : []))
+    .find((item) => 'name' in item && item.name === WATCHED_FOLDERS_NAME);
+  if (!row || 'type' in row || !row.render) {
+    throw new Error("The tab doesn't draw the watched folders itself");
+  }
+  if (!tab.containerEl.isConnected) document.body.append(tab.containerEl);
+  const setting = new Setting(tab.containerEl).setName(WATCHED_FOLDERS_NAME);
+  const cleanup = row.render(setting as never, {} as never);
+  const field = setting.controlEl.querySelector('input');
+  if (!field) throw new Error('The watched folders row has no field');
+  const chipEls = () => [
+    ...setting.settingEl.querySelectorAll<HTMLElement>(
+      `.${FOLDER_CHIPS_CLASS} > .${FOLDER_CHIP_CLASS}`
+    ),
+  ];
+  return {
+    setting,
+    field,
+    cleanup: () => cleanup?.(),
+    /** Each chip's folder, as it reads, in order. */
+    chips: () =>
+      chipEls().map(
+        (chip) => chip.querySelector(`.${FOLDER_CHIP_PATH_CLASS}`)?.textContent
+      ),
+    /** Each chip's button, in order. */
+    buttons: () =>
+      chipEls().map((chip) => {
+        const button = chip.querySelector('button');
+        if (!button) throw new Error('A chip has no button');
+        return button;
+      }),
+    /** The message the row shows, if it shows one. */
+    message: () =>
+      setting.settingEl.classList.contains('is-invalid')
+        ? setting.errorEl?.textContent
+        : undefined,
+  };
+}
+
+/** Press Enter in `field`, as the user would; returns the key's event. */
+function pressEnter(field: HTMLElement, init: KeyboardEventInit = {}) {
+  const event = new KeyboardEvent('keydown', {
+    key: 'Enter',
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  field.dispatchEvent(event);
+  return event;
+}
+
+/** Settings watching `folders`, kept as the tab keeps them, and `watching`. */
+function watchingSettings(folders: string[], watching: boolean) {
+  return {
+    ...structuredClone(DEFAULT_SETTINGS),
+    autoImportOnFolder: watching,
+    autoImportFolders: cleanFolderList(folders),
+  };
+}
+
+/** A watched folders list as stored: any folders, each once. */
+const storedFoldersArb = fc
+  .array(folderArb, { maxLength: 4 })
+  .map(cleanFolderList);
+
 // #endregion
 
 describe('parseSteps', () => {
@@ -749,6 +888,8 @@ describe('IRSettingTab.getControlValue', () => {
           autoImportOnTag: tab.getControlValue('autoImportOnTag'),
           autoImportTags: tab.getControlValue('autoImportTags'),
           autoImportMode: tab.getControlValue('autoImportMode'),
+          autoImportOnFolder: tab.getControlValue('autoImportOnFolder'),
+          autoImportFolders: tab.getControlValue('autoImportFolders'),
           maximumInterval: tab.getControlValue('fsrsParams.maximum_interval'),
           shortTerm: tab.getControlValue('fsrsParams.enable_short_term'),
           learningSteps: tab.getControlValue('fsrsParams.learning_steps'),
@@ -777,6 +918,8 @@ describe('IRSettingTab.getControlValue', () => {
             .map((tag) => `#${tag}`)
             .join(' '),
           autoImportMode: settings.autoImportMode,
+          autoImportOnFolder: settings.autoImportOnFolder,
+          autoImportFolders: settings.autoImportFolders,
           maximumInterval: fsrsParams.maximum_interval,
           shortTerm: fsrsParams.enable_short_term,
           learningSteps: fsrsParams.learning_steps.join(', '),
@@ -842,6 +985,7 @@ describe('IRSettingTab.setControlValue', () => {
       ['remindDueSnippets', fc.boolean()],
       ['autoImportOnTag', fc.boolean()],
       ['autoImportMode', fc.constantFrom(...AUTO_IMPORT_MODES)],
+      ['autoImportOnFolder', fc.boolean()],
     ] as const;
     const fsrsKeys = [
       ['request_retention', fc.double()],
@@ -931,6 +1075,27 @@ describe('IRSettingTab.setControlValue', () => {
           expect(plugin.settings).toEqual({
             ...before,
             autoImportTags: parseTagList(typed),
+          });
+        }
+      )
+    );
+  });
+
+  it('stores a list of watched folders as the folders it names, each once', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        settingsArb,
+        fc.array(typedFolderArb, { maxLength: 5 }),
+        async (generated, folders) => {
+          const settings = buildSettings(generated);
+          const before = structuredClone(settings);
+          const { tab, plugin } = makeTab(settings);
+
+          await tab.setControlValue('autoImportFolders', folders);
+
+          expect(plugin.settings).toEqual({
+            ...before,
+            autoImportFolders: cleanFolderList(folders),
           });
         }
       )
@@ -1131,8 +1296,9 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     const toggle = (key: string) => ({ type: 'toggle', key });
 
     expect(
-      declaredSettingRows(tab.declareSettings()).map(({ control }) => ({
+      declaredSettingRows(tab.declareSettings()).map(({ control, render }) => ({
         control,
+        render,
       }))
     ).toEqual([
       {
@@ -1174,7 +1340,12 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         },
       },
       {
+        control: toggle('autoImportOnFolder'),
       },
+      {
+        render: expect.any(Function) as unknown,
+      },
+      {},
       {
         control: {
           type: 'dropdown',
@@ -1319,19 +1490,8 @@ describe('IRSettingTab.getSettingDefinitions', () => {
 
   it('draws importing by tag as one box: its toggle beside its description, then the trigger tags and where to import', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
-    const boxes = tab
-      .declareSettings()
-      .filter((item) => classesOf(item).includes(SETTING_BOX_CLASS));
-    // Found by its head, not its place: other boxes may come before it
-    const box = boxes.find(
-      (item) =>
-        'items' in item &&
-        item.items?.some(
-          (row) => 'name' in row && row.name === 'Auto-import notes by tag'
-        )
-    );
 
-    expect(box).toStrictEqual({
+    expect(boxHeadedBy(tab, 'Auto-import notes by tag')).toStrictEqual({
       type: 'group',
       cls: `${SETTING_BOX_CLASS} ${CONTINUED_GROUP_CLASS}`,
       items: [
@@ -1361,41 +1521,58 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     });
   });
 
+  it('draws watching folders as one box: its toggle beside its description, then the folders', () => {
+    const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
+
+    expect(
+      boxHeadedBy(tab, 'Auto-import files added to folders')
+    ).toStrictEqual({
+      type: 'group',
+      cls: `${SETTING_BOX_CLASS} ${CONTINUED_GROUP_CLASS}`,
+      items: [
+        {
+          name: expect.any(String) as unknown,
+          desc: expect.any(String) as unknown,
+          control: { type: 'toggle', key: 'autoImportOnFolder' },
+        },
+        {
+          name: expect.any(String) as unknown,
+          render: expect.any(Function) as unknown,
+        },
+      ],
+    });
+  });
+
   it('draws the success notices as one box: their description once, then a dropdown for each place', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
-    const boxes = tab
-      .declareSettings()
-      .filter((item) => classesOf(item).includes(SETTING_BOX_CLASS));
 
-    expect(boxes.slice(1)).toEqual([
-      {
-        type: 'group',
-        heading: expect.any(String) as unknown,
-        cls: SETTING_BOX_CLASS,
-        items: [
-          {
-            name: expect.any(String) as unknown,
-            desc: expect.any(String) as unknown,
+    expect(boxHeadedBy(tab, 'Success notices')).toEqual({
+      type: 'group',
+      heading: expect.any(String) as unknown,
+      cls: SETTING_BOX_CLASS,
+      items: [
+        {
+          name: expect.any(String) as unknown,
+          desc: expect.any(String) as unknown,
+        },
+        {
+          name: expect.any(String) as unknown,
+          control: {
+            type: 'dropdown',
+            key: 'successNoticesInReview',
+            options: SUCCESS_NOTICE_LEVEL_OPTIONS,
           },
-          {
-            name: expect.any(String) as unknown,
-            control: {
-              type: 'dropdown',
-              key: 'successNoticesInReview',
-              options: SUCCESS_NOTICE_LEVEL_OPTIONS,
-            },
+        },
+        {
+          name: expect.any(String) as unknown,
+          control: {
+            type: 'dropdown',
+            key: 'successNoticesOutsideReview',
+            options: SUCCESS_NOTICE_LEVEL_OPTIONS,
           },
-          {
-            name: expect.any(String) as unknown,
-            control: {
-              type: 'dropdown',
-              key: 'successNoticesOutsideReview',
-              options: SUCCESS_NOTICE_LEVEL_OPTIONS,
-            },
-          },
-        ],
-      },
-    ]);
+        },
+      ],
+    });
   });
 
   it("saves the level picked on each line of the success notices box under that line's own key", async () => {
@@ -1767,7 +1944,8 @@ describe('IRSettingTab reset buttons', () => {
         }
         if (belowMin || problem) {
           // Below the minimum, only the minimum it names is logic
-          if (belowMin) expect(showsInteger(errorEl?.textContent, 1)).toBe(true);
+          if (belowMin)
+            expect(showsInteger(errorEl?.textContent, 1)).toBe(true);
           else expect(errorEl?.textContent).toBe(problem);
           expect(setting.settingEl.classList).toContain('is-invalid');
           expect(tab.getControlValue(row.control.key)).toBe(before);
@@ -1844,6 +2022,35 @@ describe('IRSettingTab reset buttons', () => {
     await settle();
 
     expect(setting.settingEl.classList).toContain('is-invalid');
+  });
+
+  it('draws a text control with the placeholder it is given, or none', () => {
+    fc.assert(
+      fc.property(
+        fc.option(textArb({ minLength: 1 })),
+        textArb(),
+        (placeholder, stored) => {
+          document.body.replaceChildren();
+          const control: DeclaredControl = {
+            type: 'text',
+            key: 'typed',
+            defaultValue: 'default',
+            ...(placeholder !== null && { placeholder }),
+          };
+          const host = {
+            getControlValue: () => stored,
+            setControlValue: vi.fn(),
+            refreshDomState: vi.fn(),
+          };
+
+          const { field } = drawControl(control, host);
+
+          expect(field.getAttribute('placeholder')).toBe(placeholder);
+          // As the field holds it: an input drops line breaks
+          expect(field.value).toBe(stored.replace(/[\r\n]/g, ''));
+        }
+      )
+    );
   });
 
   it('draws any number control it is given as Obsidian draws one: placeholder, limits, a value outside them refused', async () => {
@@ -2095,7 +2302,371 @@ describe('IRSettingTab reset buttons', () => {
       )
     );
   });
+});
 
+describe('IRSettingTab watched folders row', () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+    vi.restoreAllMocks();
+  });
+
+  it('reads the watched folders as a list of its own, which edits to it leave alone', () => {
+    const settings = watchingSettings(['Inbox', 'Clips'], true);
+    const { tab } = makeTab(settings);
+
+    const read = tab.getControlValue('autoImportFolders') as string[];
+    read.push('Other');
+
+    expect(settings.autoImportFolders).toEqual(['Inbox', 'Clips']);
+  });
+
+  it('shows each watched folder as a chip under an empty field, and says so if there are none while watching', () => {
+    fc.assert(
+      fc.property(storedFoldersArb, fc.boolean(), (folders, watching) => {
+        document.body.replaceChildren();
+        const { tab, plugin } = makeTab(watchingSettings(folders, watching));
+
+        const row = drawWatchedFolders(tab);
+
+        expect(row.setting.settingEl.classList).toContain(
+          FOLDER_LIST_ROW_CLASS
+        );
+        expect(row.field.value).toBe('');
+        expect(row.field.placeholder).toEqual(expect.stringMatching(/\S/));
+        expect(row.setting.descEl.textContent).toBe('');
+        expect(row.chips()).toEqual(folders);
+        expect(
+          row.buttons().map((button, at) => ({
+            type: button.type,
+            names: button.getAttribute('aria-label')?.includes(folders[at]),
+            icon: button.querySelector('svg.lucide-x') !== null,
+            // Obsidian's icon button, which a narrow row doesn't stretch
+            iconButton: button.classList.contains('clickable-icon'),
+          }))
+        ).toEqual(
+          folders.map(() => ({
+            type: 'button',
+            names: true,
+            icon: true,
+            iconButton: true,
+          }))
+        );
+        expect(row.message()).toBe(watchListProblem(folders, watching));
+        expect(plugin.saveSettings).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('adds the folder typed on Enter if it can be watched, and otherwise says why and keeps the text', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        storedFoldersArb.chain((stored) =>
+          fc.tuple(
+            fc.constant(stored),
+            fc.oneof(
+              typedFolderArb,
+              // Often a folder already watched, padded
+              stored.length > 0
+                ? fc.constantFrom(...stored).map((folder) => ` /${folder}/ `)
+                : typedFolderArb
+            )
+          )
+        ),
+        fc.boolean(),
+        fc.boolean(),
+        fc.array(folderArb, { maxLength: 3 }),
+        async ([stored, entered], watching, exists, others) => {
+          document.body.replaceChildren();
+          // As the field holds it: an input drops line breaks
+          const typed = entered.replace(/[\r\n]/g, '');
+          const folder = normalizeFolderPath(typed);
+          const vault = exists ? [...others, folder] : others;
+          const settings = watchingSettings(stored, watching);
+          const before = structuredClone(settings);
+          const { tab, plugin } = makeTab(settings, vault);
+          const row = drawWatchedFolders(tab);
+          typeInto(row.field, typed);
+
+          const event = pressEnter(row.field);
+          await settle();
+
+          expect(event.defaultPrevented).toBe(true);
+          const problem = folderToWatchProblem(folder, (path) =>
+            vault.includes(path)
+          );
+          if (typed.trim() === '') {
+            expect(row.field.value).toBe(typed);
+            expect(row.message()).toBe(watchListProblem(stored, watching));
+            expect(plugin.settings).toEqual(before);
+            expect(plugin.saveSettings).not.toHaveBeenCalled();
+          } else if (problem) {
+            expect(row.field.value).toBe(typed);
+            expect(row.message()).toBe(problem);
+            expect(row.chips()).toEqual(stored);
+            expect(plugin.settings).toEqual(before);
+            expect(plugin.saveSettings).not.toHaveBeenCalled();
+          } else if (stored.includes(folder)) {
+            expect(row.field.value).toBe('');
+            expect(row.message()).toBeUndefined();
+            expect(row.chips()).toEqual(stored);
+            expect(plugin.settings).toEqual(before);
+            expect(plugin.saveSettings).not.toHaveBeenCalled();
+          } else {
+            expect(row.field.value).toBe('');
+            expect(row.message()).toBeUndefined();
+            expect(row.chips()).toEqual([...stored, folder]);
+            expect(plugin.settings).toEqual({
+              ...before,
+              autoImportFolders: [...stored, folder],
+            });
+            expect(plugin.saveSettings).toHaveBeenCalledOnce();
+          }
+        }
+      )
+    );
+  });
+
+  it('adds a folder named with commas as one folder', async () => {
+    const { tab, plugin } = makeTab(watchingSettings([], true), ['a, b']);
+    const row = drawWatchedFolders(tab);
+
+    typeInto(row.field, 'Inbox, a, b');
+    pressEnter(row.field);
+    await settle();
+
+    expect(row.message()).toBe(
+      folderToWatchProblem('Inbox, a, b', () => false)
+    );
+    expect(plugin.settings.autoImportFolders).toEqual([]);
+
+    typeInto(row.field, '/a, b/');
+    pressEnter(row.field);
+    await settle();
+
+    expect(row.chips()).toEqual(['a, b']);
+    expect(plugin.settings.autoImportFolders).toEqual(['a, b']);
+  });
+
+  it('adds each folder entered after the last, and only once', async () => {
+    const { tab, plugin, saved } = makeTab(watchingSettings([], true), [
+      'Inbox',
+      'Clips',
+    ]);
+    const row = drawWatchedFolders(tab);
+    expect(row.message()).toBe(watchListProblem([], true));
+
+    for (const typed of ['Inbox', 'Clips', 'Inbox/']) {
+      typeInto(row.field, typed);
+      pressEnter(row.field);
+    }
+    await settle();
+
+    expect(row.chips()).toEqual(['Inbox', 'Clips']);
+    expect(row.message()).toBeUndefined();
+    expect(plugin.settings.autoImportFolders).toEqual(['Inbox', 'Clips']);
+    expect(saved.map((data) => data.settings.autoImportFolders)).toEqual([
+      ['Inbox'],
+      ['Inbox', 'Clips'],
+    ]);
+  });
+
+  it('does nothing on any other key, or on Enter that ends a composition', async () => {
+    await fc.assert(
+      fc.asyncProperty(typingKeyArb, async (key) => {
+        document.body.replaceChildren();
+        const { tab, plugin } = makeTab(watchingSettings([], false), ['Inbox']);
+        const row = drawWatchedFolders(tab);
+        typeInto(row.field, 'Inbox');
+
+        const other = new KeyboardEvent('keydown', {
+          key,
+          bubbles: true,
+          cancelable: true,
+        });
+        row.field.dispatchEvent(other);
+        const composing = pressEnter(row.field, { isComposing: true });
+        await settle();
+
+        expect(other.defaultPrevented).toBe(false);
+        expect(composing.defaultPrevented).toBe(false);
+        expect(row.field.value).toBe('Inbox');
+        expect(row.chips()).toEqual([]);
+        expect(plugin.saveSettings).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('saves nothing as the folder is typed, and drops the message about it once the text changes', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        storedFoldersArb,
+        fc.boolean(),
+        fc.array(typedFolderArb, { minLength: 1, maxLength: 3 }),
+        async (stored, watching, edits) => {
+          document.body.replaceChildren();
+          const { tab, plugin } = makeTab(watchingSettings(stored, watching));
+          const row = drawWatchedFolders(tab);
+          typeInto(row.field, 'Missing');
+          pressEnter(row.field);
+          expect(row.message()).toBe(
+            folderToWatchProblem('Missing', () => false)
+          );
+
+          for (const typed of edits) typeInto(row.field, typed);
+          await settle();
+
+          expect(row.message()).toBe(watchListProblem(stored, watching));
+          expect(row.chips()).toEqual(stored);
+          expect(plugin.saveSettings).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('stops watching the folder whose button is clicked, and says so once none are left while watching', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        storedFoldersArb.filter((folders) => folders.length > 0),
+        fc.nat(),
+        fc.boolean(),
+        async (stored, pick, watching) => {
+          document.body.replaceChildren();
+          const index = pick % stored.length;
+          const settings = watchingSettings(stored, watching);
+          const before = structuredClone(settings);
+          const { tab, plugin } = makeTab(settings);
+          const row = drawWatchedFolders(tab);
+
+          row.buttons()[index].click();
+          await settle();
+
+          const left = stored.filter((_, at) => at !== index);
+          expect(row.chips()).toEqual(left);
+          expect(plugin.settings).toEqual({
+            ...before,
+            autoImportFolders: left,
+          });
+          expect(plugin.saveSettings).toHaveBeenCalledOnce();
+          expect(row.message()).toBe(watchListProblem(left, watching));
+        }
+      )
+    );
+  });
+
+  it('moves focus from a removed folder button to the one now in its place, the last one, or the field', () => {
+    fc.assert(
+      fc.property(
+        storedFoldersArb.filter((folders) => folders.length > 0),
+        fc.nat(),
+        (stored, pick) => {
+          document.body.replaceChildren();
+          const index = pick % stored.length;
+          const { tab } = makeTab(watchingSettings(stored, true));
+          const row = drawWatchedFolders(tab);
+          const button = row.buttons()[index];
+
+          button.focus();
+          button.click();
+
+          const left = row.buttons();
+          expect(document.activeElement).toBe(
+            left.length === 0
+              ? row.field
+              : left[Math.min(index, left.length - 1)]
+          );
+        }
+      )
+    );
+  });
+
+  it('leaves focus alone when a removed folder button never had it, as after a tap', () => {
+    const { tab } = makeTab(watchingSettings(['Inbox', 'Clips'], true));
+    const row = drawWatchedFolders(tab);
+    const elsewhere = document.body.appendChild(
+      document.createElement('button')
+    );
+    elsewhere.focus();
+
+    row.buttons()[0].click();
+
+    expect(document.activeElement).toBe(elsewhere);
+    expect(row.chips()).toEqual(['Clips']);
+  });
+
+  it('says there are no folders while watching is on, wherever the row is drawn, as watching is turned on or off', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        storedFoldersArb,
+        fc.array(fc.boolean(), { minLength: 1, maxLength: 4 }),
+        async (stored, toggles) => {
+          document.body.replaceChildren();
+          const { tab } = makeTab(watchingSettings(stored, false));
+          // The tab's row, and one the settings search draws
+          const rows = [drawWatchedFolders(tab), drawWatchedFolders(tab)];
+
+          for (const watching of toggles) {
+            await tab.setControlValue('autoImportOnFolder', watching);
+            for (const row of rows) {
+              expect(row.message()).toBe(watchListProblem(stored, watching));
+            }
+          }
+        }
+      )
+    );
+  });
+
+  it('keeps the message about a folder typed when any other setting changes', async () => {
+    await fc.assert(
+      fc.asyncProperty(editsArb(), async (edits) => {
+        document.body.replaceChildren();
+        const { tab } = makeTab(watchingSettings([], true));
+        const row = drawWatchedFolders(tab);
+        typeInto(row.field, 'Missing');
+        pressEnter(row.field);
+        const typedProblem = folderToWatchProblem('Missing', () => false);
+        const rows = declaredControls();
+
+        for (const { row: at, value } of edits) {
+          const { key } = rows[at].control;
+          if (key === 'autoImportOnFolder') continue;
+          await tab.setControlValue(key, value);
+        }
+
+        expect(row.message()).toBe(typedProblem);
+      })
+    );
+  });
+
+  it('stops updating a row once Obsidian cleans it up, or once it leaves the document', async () => {
+    const { tab } = makeTab(watchingSettings([], false));
+    const cleaned = drawWatchedFolders(tab);
+    const detached = drawWatchedFolders(tab);
+    const kept = drawWatchedFolders(tab);
+
+    cleaned.cleanup();
+    detached.setting.settingEl.remove();
+    await tab.setControlValue('autoImportOnFolder', true);
+    document.body.append(detached.setting.settingEl);
+    await tab.setControlValue('autoImportOnFolder', true);
+
+    expect(cleaned.message()).toBeUndefined();
+    expect(detached.message()).toBeUndefined();
+    expect(kept.message()).toBe(watchListProblem([], true));
+  });
+
+  it('keeps its chips drawn when the tab draws the row again', () => {
+    const { tab } = makeTab(watchingSettings(['Inbox'], true), ['Clips']);
+    const first = drawWatchedFolders(tab);
+    typeInto(first.field, 'Clips');
+    pressEnter(first.field);
+    first.cleanup();
+    first.setting.settingEl.remove();
+
+    const again = drawWatchedFolders(tab);
+
+    expect(again.chips()).toEqual(['Inbox', 'Clips']);
+    expect(again.field.value).toBe('');
+  });
 });
 
 describe('IRSettingTab trigger tags field', () => {

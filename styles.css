@@ -2740,6 +2740,83 @@ input.ir-queue-page-input {
   margin-top: var(--size-4-3);
 }
 
+/* The watched folders row (`drawWatchedFolders` in settings.ts): a field
+   over the folders watched, each a chip whose button stops watching it.
+   Obsidian's control is one flex row; wrap it, as Obsidian does an invalid
+   row's, so the `.setting-item-error` message and then the chips each take
+   the full width under the field. The chips borrow the tokens of Obsidian's
+   own multi-select pills, so they suit every theme. */
+/* The row wraps so the chip list, its last child, drops under the name and
+   the control at the row's full width */
+.ir-settings-tab .ir-folder-list-row {
+  flex-wrap: wrap;
+}
+
+.ir-settings-tab .ir-folder-list-row .setting-item-control {
+  flex-wrap: wrap;
+  max-width: 50%;
+  row-gap: var(--size-4-1);
+}
+
+.ir-settings-tab .ir-folder-chips {
+  display: flex;
+  flex: 0 0 100%;
+  flex-wrap: wrap;
+  gap: var(--size-2-3);
+  min-width: 0;
+  margin-top: var(--size-4-2);
+}
+
+.ir-settings-tab .ir-folder-chips:empty {
+  display: none;
+}
+
+.ir-settings-tab .ir-folder-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-1);
+  min-width: 0;
+  max-width: 100%;
+  padding-block: var(--pill-padding-y);
+  padding-inline-start: var(--pill-padding-x);
+  border: var(--pill-border-width) solid var(--pill-border-color);
+  border-radius: var(--radius-s);
+  background-color: var(--pill-background);
+  color: var(--pill-color);
+  font-size: var(--font-ui-small);
+  line-height: var(--line-height-tight);
+}
+
+.ir-settings-tab .ir-folder-chip-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Obsidian's `clickable-icon`, shrunk to fit in the chip */
+.ir-settings-tab .ir-folder-chip .ir-folder-chip-remove {
+  --icon-size: var(--icon-xs);
+  --icon-stroke: var(--icon-xs-stroke-width);
+  flex-shrink: 0;
+  margin-inline-end: var(--size-2-1);
+  padding: var(--size-2-1);
+  color: var(--pill-color-remove);
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .ir-settings-tab .ir-folder-chip .ir-folder-chip-remove:hover {
+    color: var(--pill-color-remove-hover);
+  }
+}
+
+/* Where Obsidian stacks a row's control under its name, full width and
+   started at the left */
+@container (max-width: 400px) {
+  .ir-settings-tab .ir-folder-list-row .setting-item-control {
+    max-width: unset;
+  }
+}
+
 /* #endregion */
 
 /* #region Notice actions */

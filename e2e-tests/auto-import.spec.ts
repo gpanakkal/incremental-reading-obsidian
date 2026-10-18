@@ -41,8 +41,15 @@ type PageApp = {
   vault: {
     getFileByPath(path: string): unknown;
     getFiles(): { path: string }[];
+    createFolder(path: string): Promise<unknown>;
+    create(path: string, data: string): Promise<unknown>;
+    createBinary(path: string, data: ArrayBuffer): Promise<unknown>;
+    readBinary(file: unknown): Promise<ArrayBuffer>;
+    /** Unofficial: sets one of the vault's own config keys. */
+    setConfig(key: string, value: unknown): void;
   };
   fileManager: {
+    renameFile(file: unknown, newPath: string): Promise<void>;
     processFrontMatter(
       file: unknown,
       fn: (frontmatter: Record<string, unknown>) => void
@@ -164,6 +171,33 @@ const articleFiles = () =>
       .filter((at) => at.startsWith(`${folder}/`))
       .sort();
   }, `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`);
+/** The ids of the articles whose rows point at `reference`. */
+const rowIdsAt = (reference: string) =>
+  window.evaluate(async (at) => {
+    const { repo } = (window as unknown as { app: PageApp }).app.plugins
+      .plugins['incremental-reading'].reviewManager;
+    const rows = await repo.query(
+      'SELECT id FROM article WHERE reference = $1',
+      [at]
+    );
+    return rows.map((row) => row.id as string);
+  }, reference);
+
+/** Set the frontmatter key `key` of the note at `notePath` to `value`. */
+const setFrontmatter = (notePath: string, key: string, value: unknown) =>
+  window.evaluate(
+    async ({ at, name, to }) => {
+      const { app } = window as unknown as { app: PageApp };
+      await app.fileManager.processFrontMatter(
+        app.vault.getFileByPath(at),
+        (frontmatter) => {
+          if (to === undefined) delete frontmatter[name];
+          else frontmatter[name] = to;
+        }
+      );
+    },
+    { at: notePath, name: key, to: value }
+  );
 
 /** Wait for the note at `notePath` to be an article, and return its id. */
 async function expectImported(notePath: string): Promise<string> {
@@ -486,4 +520,127 @@ test('imports the notes tagged while Obsidian was closed when it next starts, on
       rowIds: [],
     });
   }
+});
+
+test('imports what is created in, moved into or copied into a watched folder, and nothing that was there before or was un-imported', async () => {
+  // A folder made while Obsidian runs, holding a note from before it is watched
+  await window.evaluate(async () => {
+    const { app } = window as unknown as { app: PageApp };
+    await app.vault.createFolder('Inbox');
+    await app.vault.create('Inbox/Here before.md', 'Here before watching.\n');
+  });
+  await setPluginSetting(window, 'autoImportOnFolder', true);
+  await setPluginSetting(window, 'autoImportFolders', ['Inbox']);
+  const before = await articleCount();
+
+  // A new note made where new notes go, here the inbox, and typed into
+  await window.evaluate(() => {
+    const { vault } = (window as unknown as { app: PageApp }).app;
+    vault.setConfig('newFileLocation', 'folder');
+    vault.setConfig('newFileFolderPath', 'Inbox');
+  });
+  await executeCommandById(window, 'file-explorer:new-file');
+  const created = 'Inbox/Untitled.md';
+  const body = window.locator('.workspace-leaf.mod-active .cm-content');
+  await body.click();
+  await window.keyboard.type('Typed into a new note.');
+  // Typed before the import lands, so the import is what could lose it: an
+  // empty note open in the editor takes the file's text over unsaved typing
+  expect((await noteState(created)).irId).toBeNull();
+  await expectImported(created);
+  await expect(body).toContainText('Typed into a new note.');
+
+  // Moved in from elsewhere in the vault
+  const moved = 'Inbox/Security Principles.md';
+  await window.evaluate(async (to) => {
+    const { app } = window as unknown as { app: PageApp };
+    await app.fileManager.renameFile(
+      app.vault.getFileByPath('sources/Security Principles.md'),
+      to
+    );
+  }, moved);
+  await expectImported(moved);
+
+  // A PDF copied in
+  const pdf = 'Inbox/Paper.pdf';
+  await window.evaluate(async (to) => {
+    const { vault } = (window as unknown as { app: PageApp }).app;
+    const data = await vault.readBinary(
+      vault.getFileByPath('testing/PDF fixture.pdf')
+    );
+    await vault.createBinary(to, data);
+  }, pdf);
+  await expect.poll(() => rowIdsAt(pdf)).toHaveLength(1);
+
+  // As un-importing does: the row deleted, the plugin's frontmatter stripped
+  const id = (await noteState(moved)).irId!;
+  await window.evaluate(async (articleId) => {
+    const { repo } = (window as unknown as { app: PageApp }).app.plugins
+      .plugins['incremental-reading'].reviewManager;
+    await repo.mutate('DELETE FROM article_review WHERE article_id = $1', [
+      articleId,
+    ]);
+    await repo.mutate('DELETE FROM article WHERE id = $1', [articleId]);
+  }, id);
+  await setFrontmatter(moved, 'ir-id', undefined);
+  await setFrontmatter(moved, 'tags', undefined);
+  // Edited after, as is the note that was there before watching began
+  await setFrontmatter(moved, 'read', true);
+  await setFrontmatter('Inbox/Here before.md', 'read', true);
+  await expect.poll(async () => (await noteState(moved)).irId).toBeNull();
+  await flushAutoImports();
+
+  expect(await noteState(moved)).toMatchObject({ irId: null, rowIds: [] });
+  expect(await noteState('Inbox/Here before.md')).toMatchObject({
+    irId: null,
+    rowIds: [],
+  });
+  expect(await articleCount()).toBe(before + 2);
+});
+
+test('adds a watched folder on Enter as a chip under the field, refuses one that is missing, and removes it by its button', async () => {
+  await window.evaluate(async () => {
+    const { app } = window as unknown as { app: PageApp };
+    await app.vault.createFolder('Inbox');
+  });
+  const settings = await openPluginSettings(app, window);
+  const settingRow = (name: string) =>
+    settings.locator('.vertical-tab-content .setting-item').filter({
+      has: settings
+        .locator('.setting-item-name')
+        .getByText(name, { exact: true }),
+    });
+  const toggle = settingRow('Auto-import files added to folders').locator(
+    '.checkbox-container'
+  );
+  const row = settingRow('Watched folders');
+  const field = row.getByRole('textbox');
+  const message = row.locator('.setting-item-error');
+  const chips = row.locator('.ir-folder-chip');
+
+  // Watching with no folders says so
+  await toggle.click();
+  await expect(toggle).toHaveClass(/is-enabled/);
+  await expect(message).toBeVisible();
+
+  await field.fill('Not here');
+  await field.press('Enter');
+  await expect(field).toHaveValue('Not here');
+  await expect(message).toContainText('Not here');
+  await expect(chips).toHaveCount(0);
+
+  await field.fill('/Inbox/');
+  await field.press('Enter');
+  await expect(field).toHaveValue('');
+  await expect(chips).toHaveText(['Inbox']);
+  await expect(message).toBeHidden();
+
+  await chips.getByRole('button', { name: /Inbox/ }).click();
+  await expect(chips).toHaveCount(0);
+  await expect(message).toBeVisible();
+
+  // Turning watching off leaves an empty list nothing to say
+  await toggle.click();
+  await expect(toggle).not.toHaveClass(/is-enabled/);
+  await expect(message).toBeHidden();
 });

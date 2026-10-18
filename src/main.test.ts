@@ -893,6 +893,12 @@ function makeAutoImportReceiver() {
   type Changed = (file: TFile, data: string, cache: unknown) => void;
   let changed: Changed | undefined;
   const changedRef = { event: 'changed' };
+  type Arrived = (file: TFile, oldPath: string) => void;
+  const arrivals = new Map<string, Arrived>();
+  const arrivalRefs = {
+    create: { event: 'create' },
+    rename: { event: 'rename' },
+  };
   const unloaders: (() => void)[] = [];
   const files = new Map<string, TFile>();
   const caches = new Map<TFile, unknown>();
@@ -914,7 +920,13 @@ function makeAutoImportReceiver() {
       saveLocalStorage: (key: string, data: unknown) => {
         storage.set(key, data);
       },
-      vault: { getFileByPath: (path: string) => files.get(path) ?? null },
+      vault: {
+        getFileByPath: (path: string) => files.get(path) ?? null,
+        on: vi.fn((name: 'create' | 'rename', callback: Arrived) => {
+          arrivals.set(name, callback);
+          return arrivalRefs[name];
+        }),
+      },
       metadataCache: {
         on: vi.fn((name: string, callback: Changed) => {
           if (name === 'changed') changed = callback;
@@ -936,6 +948,7 @@ function makeAutoImportReceiver() {
     importTaggedNotes,
     hasItemRow,
     changedRef,
+    arrivalRefs,
     /**
      * Have the review manager up, importing through `importTaggedNotes` and
      * looking ids up through `hasItemRow`.
@@ -956,6 +969,24 @@ function makeAutoImportReceiver() {
     settingsListeners: () => settingsListeners.size,
     /** Save the settings as they now stand, as the settings tab does. */
     saveSettings: () => settingsListeners.forEach((listener) => listener()),
+    /**
+     * A file Obsidian tells of creating at `path`, or of moving there from
+     * `oldPath`. A note's cache, once read, has no frontmatter.
+     */
+    arrive(path: string, oldPath?: string) {
+      const file = Object.assign(tFileAt(path), {
+        extension: path.slice(path.lastIndexOf('.') + 1),
+        stat: { ctime: 0, mtime: 0, size: 1 },
+      });
+      files.set(path, file);
+      if (oldPath === undefined) {
+        arrivals.get('create')!(file, '');
+      } else {
+        caches.set(file, {});
+        arrivals.get('rename')!(file, oldPath);
+      }
+      return file;
+    },
     unload: () => unloaders.forEach((unloader) => unloader()),
   };
 }
@@ -3193,6 +3224,96 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
 
     expect(watch.receiver.registerEvent).toHaveBeenCalledWith(watch.changedRef);
     watch.change('a.md', { tags: [AUTO_IMPORT_TAG] });
+    watch.unload();
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
+
+    expect(watch.importTaggedNotes).not.toHaveBeenCalled();
+  });
+
+  it('imports a file created in a watched folder or moved into one where it is, at the default priority, once it settles', async () => {
+    const watch = makeAutoImportReceiver();
+    watch.startReviewManager();
+    Object.assign(watch.receiver.settings, {
+      autoImportOnTag: false,
+      autoImportOnFolder: true,
+      autoImportFolders: ['Inbox'],
+      defaultPriority: 23,
+    });
+
+    const pdf = watch.arrive('Inbox/paper.pdf');
+    const note = watch.arrive('Inbox/note.md', 'note.md');
+    watch.arrive('Inbox/sub/within.md', 'Inbox/within.md');
+    watch.arrive('Elsewhere/other.pdf');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+    expect(watch.importTaggedNotes).toHaveBeenCalledExactlyOnceWith(
+      [
+        { file: pdf, matchedTags: [] },
+        { file: note, matchedTags: [] },
+      ],
+      { priority: 23, mode: 'inPlace' }
+    );
+  });
+
+  it('imports a file arriving in a watched folder in the way of importing tagged notes set', async () => {
+    for (const mode of ['inPlace', 'copy', 'inherit'] as const) {
+      const watch = makeAutoImportReceiver();
+      watch.startReviewManager();
+      Object.assign(watch.receiver.settings, {
+        autoImportOnTag: false,
+        autoImportOnFolder: true,
+        autoImportFolders: ['Inbox'],
+        autoImportMode: mode,
+      });
+
+      const file = watch.arrive('Inbox/paper.pdf');
+      await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+      expect(watch.importTaggedNotes).toHaveBeenCalledExactlyOnceWith(
+        [{ file, matchedTags: [] }],
+        { priority: watch.receiver.settings.defaultPriority, mode }
+      );
+    }
+  });
+
+  it('ignores arrivals until the review manager is up, and follows the watched folders as they are at each', async () => {
+    const watch = makeAutoImportReceiver();
+    const { settings } = watch.receiver;
+    settings.autoImportOnFolder = true;
+    settings.autoImportFolders = ['Inbox'];
+
+    watch.arrive('Inbox/early.pdf');
+    watch.arrive('Inbox/early.md', 'early.md');
+    watch.startReviewManager();
+    settings.autoImportOnFolder = false;
+    watch.arrive('Inbox/off.pdf');
+    settings.autoImportOnFolder = true;
+    settings.autoImportFolders = ['Clips'];
+    watch.arrive('Inbox/unwatched.pdf');
+    const file = watch.arrive('Clips/clip.pdf');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
+
+    expect(watch.importTaggedNotes).toHaveBeenCalledExactlyOnceWith(
+      [{ file, matchedTags: [] }],
+      expect.anything()
+    );
+  });
+
+  it('listens for arrivals for as long as the plugin is loaded, and drops those waiting when it unloads', async () => {
+    const watch = makeAutoImportReceiver();
+    watch.startReviewManager();
+    Object.assign(watch.receiver.settings, {
+      autoImportOnFolder: true,
+      autoImportFolders: ['Inbox'],
+    });
+
+    expect(watch.receiver.registerEvent).toHaveBeenCalledWith(
+      watch.arrivalRefs.create
+    );
+    expect(watch.receiver.registerEvent).toHaveBeenCalledWith(
+      watch.arrivalRefs.rename
+    );
+    watch.arrive('Inbox/a.pdf');
     watch.unload();
     await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
 

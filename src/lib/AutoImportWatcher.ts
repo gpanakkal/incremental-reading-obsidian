@@ -1,18 +1,21 @@
 import { describeFailures } from '#/lib/bulk-import/run-import';
 import type { BulkImportEntry, BulkOutcome } from '#/lib/bulk-import/types';
-import type {
-  App,
-  CachedMetadata,
-  MetadataCache,
+import {
   TFile,
-  Vault,
+  type App,
+  type CachedMetadata,
+  type MetadataCache,
+  type TAbstractFile,
+  type Vault,
 } from 'obsidian';
 import {
   AUTO_IMPORT_DEBOUNCE_MS,
   AUTO_IMPORT_MAX_WAIT_MS,
   AUTO_IMPORT_WATERMARK_SLACK_MS,
+  DATA_DIRECTORY,
   IMPORT_BLOCKED_TAGS,
 } from './constants';
+import { isImportable, supportsFrontmatter } from './mime';
 import { notify } from './notices';
 import {
   loadAutoImportWatermark,
@@ -20,6 +23,7 @@ import {
 } from './plugin-data';
 import type { AutoImportMode } from './settings';
 import { matchFrontmatterTags } from './tags';
+import { isUnderAnyFolder, isUnderFolder } from './watched-folders';
 
 /** What decides whether, and how, notes are imported. Read afresh each time. */
 export interface AutoImportConfig {
@@ -31,6 +35,10 @@ export interface AutoImportConfig {
   priority: number;
   /** Whether a note is imported where it is or as a copy, for `importMany`. */
   mode: AutoImportMode;
+  /** Whether a file that arrives in one of {@link folders} is imported. */
+  onFolder: boolean;
+  /** The watched folders' vault paths, as `cleanFolderList` keeps them. */
+  folders: readonly string[];
 }
 
 /** A note to import, with the trigger tags it carried when it was checked. */
@@ -95,6 +103,11 @@ interface AutoImportWatcherOptions {
  * by {@link runCatchUpScan}, by the one thing it keeps: the last moment this
  * device saw every change (see `AUTO_IMPORT_WATERMARK_KEY`).
  *
+ * Files that arrive in a watched folder, through {@link noteArrival}, are
+ * imported too: created there, moved in from outside, or delivered by Sync.
+ * Only arrivals count, so what a folder held when it was first watched stays
+ * as it is, and so does a note un-imported there, until it arrives again.
+ *
  * Two devices can import the same note before either syncs the other's
  * database. One database wins outright when they meet. If the note keeps the
  * losing device's `ir-id`, its next change has it imported, and the import
@@ -112,6 +125,13 @@ export class AutoImportWatcher {
   /** When the oldest note still waiting was queued, for the longest wait. */
   #queuedSince: number | null = null;
   #timer: number | null = null;
+  /**
+   * Notes that arrived in a watched folder and wait for the metadata cache to
+   * read them, since until then nothing is known of their frontmatter.
+   */
+  readonly #arrived = new Set<TFile>();
+  /** The queued files that arrived in a watched folder, which that qualifies. */
+  readonly #queuedArrivals = new Set<TFile>();
   /** Paths whose import failed since the plugin loaded. */
   readonly #failed = new Set<string>();
   /** Notes handed to the import running now. */
@@ -152,12 +172,32 @@ export class AutoImportWatcher {
       this.#cancelTimer();
       this.#queued.clear();
       this.#queuedSince = null;
+      this.#arrived.clear();
+      this.#queuedArrivals.clear();
     };
   }
 
-  /** Queue `file` for import if its frontmatter, as `cache` has it, calls for one. */
+  /**
+   * Queue `file` for import if its frontmatter, as `cache` has it, calls for
+   * one, or if it is a note that arrived in a watched folder and this is the
+   * first look at its frontmatter.
+   */
   consider(file: TFile, cache: CachedMetadata | null): void {
-    if (this.#triggerTagsOf(file, cache, this.#getConfig()) === null) return;
+    const config = this.#getConfig();
+    // An arrival is settled by the first cache that has the note read, once
+    // there is something in it. An empty note open in an editor takes the
+    // file's text over its own unsaved text when the file changes, so
+    // importing a new note while it is typed into would lose the typing; it
+    // has words in it once its first save comes. (`loadFileInternal` merges
+    // only when the text last saved is not empty: obsidian.asar 1.13.7.)
+    const arrived =
+      cache !== null && this.#arrived.has(file) && file.stat.size > 0;
+    if (arrived) this.#arrived.delete(file);
+    const byArrival = arrived && this.#arrivalQualifies(file, cache, config);
+    if (!byArrival && this.#triggerTagsOf(file, cache, config) === null) {
+      return;
+    }
+    if (byArrival) this.#queuedArrivals.add(file);
     this.#queued.add(file);
     this.#schedule();
   }
@@ -187,6 +227,8 @@ export class AutoImportWatcher {
    * the next run looks at more notes than it needs to, at no cost, since one
    * already imported is passed over. What it imports goes in with anything
    * already waiting, under one notice. Resolves once that import is done.
+   * Only trigger tags count here: a file that changed in a watched folder
+   * while Obsidian was closed is no arrival the watcher heard of.
    */
   runCatchUpScan(): Promise<void> {
     if (!this.#running) return Promise.resolve();
@@ -210,17 +252,47 @@ export class AutoImportWatcher {
   }
 
   /**
+   * Tell the watcher `file` was created, or moved from `oldPath`. One that
+   * lands in a watched folder from outside every watched folder is imported:
+   * a PDF as it is, a note once its frontmatter is known. That is when the
+   * metadata cache first reads a new note ({@link consider}), and at once for
+   * a note moved in, which keeps its cache. An empty note waits until it has
+   * something in it. A note is never imported unread:
+   * one with an `ir-id`, such as an article Sync delivers, is left alone.
+   * Folders, and files moved out or within, are ignored.
+   */
+  noteArrival(file: TAbstractFile, oldPath?: string): void {
+    if (!this.#running || !(file instanceof TFile) || !isImportable(file)) {
+      return;
+    }
+    const config = this.#getConfig();
+    if (!this.#watches(file.path, config)) return;
+    if (oldPath !== undefined && this.#watches(oldPath, config)) return;
+    if (!supportsFrontmatter(file)) {
+      this.#queuedArrivals.add(file);
+      this.#queued.add(file);
+      this.#schedule();
+      return;
+    }
+    this.#arrived.add(file);
+    // No `changed` follows a rename: the cache moves with the note
+    this.consider(file, this.#app.metadataCache.getFileCache(file));
+  }
+
+  /**
    * Import whatever is waiting now rather than when it settles. Resolves once
    * every import asked for so far is done.
    */
   flushNow(): Promise<void> {
     this.#cancelTimer();
     const batch = [...this.#queued];
+    const arrivals = new Set(this.#queuedArrivals);
     this.#queued.clear();
+    this.#queuedArrivals.clear();
     this.#queuedSince = null;
     this.#pending = this.#pending
       .then(async () => {
-        await this.#import(batch);
+        await this.#import(batch, arrivals);
         // Seen to here, though a crash could come before another flush
         this.#recordSeen();
       })
@@ -254,6 +326,44 @@ export class AutoImportWatcher {
     return matched;
   }
 
+  /**
+   * Whether `file`, which arrived in a watched folder, is one to import for
+   * that: still in a watched folder with watching on, its import not failed,
+   * and, if a note, read by the metadata cache, with no snippet or card tag
+   * and no `ir-id`. An `ir-id` says the note was imported already, here or on
+   * a device whose database may not have synced yet, so no lookup can tell an
+   * orphan from an article whose row is on its way; a trigger tag or the
+   * import command still imports an orphan.
+   */
+  #arrivalQualifies(
+    file: TFile,
+    cache: CachedMetadata | null,
+    config: AutoImportConfig
+  ): boolean {
+    if (!this.#watches(file.path, config)) return false;
+    if (this.#failed.has(file.path)) return false;
+    if (cache === null && supportsFrontmatter(file)) return false;
+    const frontmatter = cache?.frontmatter;
+    if (matchFrontmatterTags(frontmatter, IMPORT_BLOCKED_TAGS).length > 0) {
+      return false;
+    }
+    return typeof frontmatter?.['ir-id'] !== 'string';
+  }
+
+  /**
+   * Whether an arrival at `path` counts: watching on, in a watched folder,
+   * and outside the plugin's data folder, where its own copies, snippets and
+   * cards are made. Settings refuse that folder, but `data.json` can be
+   * edited by hand.
+   */
+  #watches(path: string, { onFolder, folders }: AutoImportConfig): boolean {
+    return (
+      onFolder &&
+      isUnderAnyFolder(path, folders) &&
+      !isUnderFolder(path, DATA_DIRECTORY)
+    );
+  }
+
   #schedule(): void {
     const now = Date.now();
     this.#queuedSince ??= now;
@@ -274,8 +384,15 @@ export class AutoImportWatcher {
     this.#timer = null;
   }
 
-  /** Import each of `batch` that still calls for it, and say how it went. */
-  async #import(batch: readonly TFile[]): Promise<void> {
+  /**
+   * Import each of `batch` that still calls for it, by a trigger tag or, for
+   * those among `arrivals`, by having arrived in a watched folder. Say how it
+   * went.
+   */
+  async #import(
+    batch: readonly TFile[],
+    arrivals: ReadonlySet<TFile>
+  ): Promise<void> {
     const config = this.#getConfig();
     const entries: AutoImportEntry[] = [];
     for (const file of batch) {
@@ -283,7 +400,11 @@ export class AutoImportWatcher {
       // `file` with it, so a renamed note is still found, where it now is.
       if (this.#app.vault.getFileByPath(file.path) !== file) continue;
       const cache = this.#app.metadataCache.getFileCache(file);
-      const matchedTags = this.#triggerTagsOf(file, cache, config);
+      const matchedTags =
+        this.#triggerTagsOf(file, cache, config) ??
+        (arrivals.has(file) && this.#arrivalQualifies(file, cache, config)
+          ? []
+          : null);
       if (!matchedTags) continue;
       // An id is a string; anything else there matches no row, and the
       // import replaces it. The plugin's own write of an `ir-id` comes back
