@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import type { CandidateChecks } from '#/lib/bulk-import/candidates';
+import { selectionSource } from '#/lib/bulk-import/selection';
 import type {
   BulkImportOptions,
   BulkOutcome,
@@ -6,6 +8,7 @@ import type {
   ScanEvent,
 } from '#/lib/bulk-import/types';
 import { MINIMUM_FIXED_REVIEW_INTERVAL } from '#/lib/constants';
+import { explorerComparator } from '#/lib/explorer-order';
 import IRScheduler from '#/lib/IRScheduler';
 import type { UiState } from '#/lib/plugin-data';
 import { DEFAULT_SETTINGS } from '#/lib/settings';
@@ -14,7 +17,7 @@ import type IncrementalReadingPlugin from '#/main';
 // recorded notices are visible to the type checker
 import { Notice } from '#/test/__mocks__/obsidian';
 import fc from 'fast-check';
-import { TFile } from 'obsidian';
+import { TFile, TFolder } from 'obsidian';
 import { act } from 'preact/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BulkImportModal } from './BulkImportModal';
@@ -1149,5 +1152,142 @@ describe('BulkImportModal: remembering Include subfolders', () => {
       ),
       { numRuns: 20 }
     );
+  });
+});
+
+describe('BulkImportModal on a Files-view selection', () => {
+  /**
+   * A vault of notes: `sources` with two notes and a subfolder, `testing`
+   * and `papers` each with a note and a subfolder, and the source of a dialog
+   * on a selection of the two notes in `sources`, `testing`, a note in
+   * `testing`, and `papers`.
+   */
+  function selectionDialog() {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new TypeError('Failed to fetch')
+    );
+    const folder = (path: string, parent: TFolder | null) =>
+      Object.assign(new TFolder(), {
+        path,
+        name: path.slice(path.lastIndexOf('/') + 1),
+        parent,
+      });
+    const note = (name: string, parent: TFolder) => {
+      const file = Object.assign(makeFile(name, parent.path), { parent });
+      parent.children.push(file);
+      return file;
+    };
+    const root = folder('/', null);
+    const sources = folder('sources', root);
+    const testing = folder('testing', root);
+    const sourcesDeep = folder('sources/deep', sources);
+    const testingDeep = folder('testing/deep', testing);
+    const papers = folder('papers', root);
+    const papersOld = folder('papers/old', papers);
+    sources.children.push(sourcesDeep);
+    testing.children.push(testingDeep);
+    papers.children.push(papersOld);
+    const one = note('one.md', sources);
+    const two = note('two.md', sources);
+    note('hidden.md', sourcesDeep);
+    const kept = note('kept.md', testing);
+    note('below.md', testingDeep);
+    note('p.md', papers);
+    note('older.md', papersOld);
+    const checks: CandidateChecks = {
+      app: {
+        vault: {
+          readBinary: async () => new TextEncoder().encode('# Note').buffer,
+          getResourcePath: (file: TFile) => file.path,
+        },
+        metadataCache: { getFileCache: () => null },
+      } as never,
+      isItemAtPath: () => false,
+    };
+    const source = selectionSource(
+      [two, one, testing, kept, papers],
+      checks,
+      explorerComparator('alphabetical')
+    );
+    return { source };
+  }
+
+  async function openOnSelection(includeSubfolders = false) {
+    const { plugin, importArticles } = makePlugin(
+      DEFAULT_SETTINGS.copyOnImport,
+      { includeSubfolders }
+    );
+    const modal = openModal(plugin, selectionDialog().source);
+    await settle();
+    return { modal, importArticles };
+  }
+
+  it('is titled with how many items were selected, one a selected folder holds not counted', async () => {
+    const { modal } = await openOnSelection();
+
+    expect(modal.titleEl.textContent).toMatch(/\b4\b/);
+    modal.close();
+  });
+
+  it('lists each selected folder as a folder, then the selected files, and imports exactly the ticked rows', async () => {
+    const { modal, importArticles } = await openOnSelection();
+
+    expect(outline(modal)).toEqual([
+      'papers',
+      '  p',
+      'testing',
+      '  kept',
+      'one',
+      'two',
+    ]);
+    // The fourth file row: `two`
+    await click(rowBox(modal, 3));
+    expect(selectedCount(modal)).toBe(3);
+    await click(confirmButton(modal));
+    await settle();
+
+    expect(
+      importArticles.mock.calls[0][0].map(({ file }) => file.path)
+    ).toEqual(['papers/p.md', 'testing/kept.md', 'sources/one.md']);
+  });
+
+  it('takes every selected folder deeper with Include subfolders, and back', async () => {
+    const { modal } = await openOnSelection();
+
+    await click(subfolderToggle(modal)!);
+    await settle();
+    expect(outline(modal)).toEqual([
+      'papers',
+      '  old',
+      '    older',
+      '  p',
+      'testing',
+      '  deep',
+      '    below',
+      '  kept',
+      'one',
+      'two',
+    ]);
+    await click(subfolderToggle(modal)!);
+    await settle();
+    expect(outline(modal)).toEqual([
+      'papers',
+      '  p',
+      'testing',
+      '  kept',
+      'one',
+      'two',
+    ]);
+    modal.close();
+  });
+
+  it('opens deeper when Include subfolders was last left on', async () => {
+    const { modal } = await openOnSelection(true);
+
+    expect(subfolderToggle(modal)?.checked).toBe(true);
+    expect(outline(modal)).toEqual(
+      expect.arrayContaining(['    older', '    below'])
+    );
+    modal.close();
   });
 });

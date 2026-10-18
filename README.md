@@ -107,7 +107,10 @@ This is especially handy for:
 
 #### Bulk imports
 
-To import several files at once, right-click a folder and select **Import from folder…**.
+Import many selected files and folders (or the contents of a folder) by right clicking on them in the Files view and selecting **Import n items…** or **Import from folder…**, respectively.
+
+> [!tip]
+> Select many files in the Files view with Alt-click (Option-click on macOS), or Shift-click to select a range of files.
 
 #### Automatic imports
 To import everything that arrives in a folder (for example, a Web Clipper inbox), enable **Auto-import files added to folders** and list the folders under **Watched folders**. Notes and PDFs created, moved, or synced into those folders or their subfolders will become articles.

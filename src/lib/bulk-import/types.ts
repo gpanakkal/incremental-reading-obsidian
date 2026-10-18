@@ -29,6 +29,8 @@ export type ScanEvent =
 export interface CandidateSource {
   /** What the files come from, for the modal's title and the summary notice. */
   title: string;
+  /** The modal's title, when "Importing from {title}" would not read right. */
+  heading?: string;
   /**
    * Whether `scan` can go into subfolders, which the modal offers as
    * "Include subfolders".

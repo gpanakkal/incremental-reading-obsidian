@@ -62,7 +62,13 @@ import { BulkImportModal } from '#/views/BulkImportModal';
 import { ImportModal } from '#/views/ImportModal';
 import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
-import { MarkdownView, TFile, TFolder, type WorkspaceLeaf } from 'obsidian';
+import {
+  MarkdownView,
+  TFile,
+  TFolder,
+  type TAbstractFile,
+  type WorkspaceLeaf,
+} from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // `main.ts` pulls the schema in as a raw `.sql` import, which Vite cannot parse
@@ -1979,6 +1985,187 @@ describe('IncrementalReadingPlugin.importFromFolder', () => {
           ([file]) => file.basename
         )
       ).toEqual(['b', 'c', 'a']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('IncrementalReadingPlugin.addSelectionMenuItems', () => {
+  /** A file the item layer and the selection code can tell is one. */
+  const fileAt = (path: string) => Object.assign(new TFile(), makeFile(path));
+  /**
+   * What a multi-selection can hold: notes, a PDF and files that can't
+   * import, folders nested in one another, and the data directory.
+   */
+  const pool = [
+    makeFolder('a'),
+    makeFolder('a/b'),
+    fileAt('a/x.md'),
+    fileAt('a/b/y.PDF'),
+    fileAt('a 2.md'),
+    fileAt('c.png'),
+    fileAt('d.md'),
+    fileAt('e.canvas'),
+    makeFolder(DATA_DIRECTORY),
+    fileAt(`${DATA_DIRECTORY}/f.md`),
+  ];
+  const selectionArb = fc.array(fc.constantFrom(...pool), {
+    minLength: 1,
+    maxLength: 6,
+  });
+
+  function raiseSelectionMenu(
+    receiver: ReturnType<typeof makeReceiver>['receiver'],
+    files: TAbstractFile[],
+    leaf: WorkspaceLeaf | null = null
+  ): Menu {
+    const menu = new Menu();
+    IncrementalReadingPlugin.prototype.addSelectionMenuItems.call(
+      receiver as unknown as IncrementalReadingPlugin,
+      menu as never,
+      files,
+      leaf
+    );
+    return menu;
+  }
+
+  it('offers to import the selection, counting each item once and none a selected folder holds, when any of it could import', () => {
+    fc.assert(
+      fc.property(selectionArb, (files) => {
+        const receiver = {
+          ...makeReceiver().receiver,
+          importSelection: vi.fn(),
+        };
+        const paths = [...new Set(files.map((file) => file.path))];
+        const kept = paths.filter(
+          (path) =>
+            path !== DATA_DIRECTORY &&
+            !path.startsWith(`${DATA_DIRECTORY}/`) &&
+            !paths.some((other) => path.startsWith(`${other}/`))
+        );
+        const offered = kept.some((path) =>
+          /^a(\/b)?$|\.(md|pdf)$/i.test(path)
+        );
+
+        const menu = raiseSelectionMenu(receiver, files);
+
+        if (!offered) {
+          expect(menu.items).toHaveLength(0);
+          return;
+        }
+        expect(iconsOf(menu)).toEqual(importsOnly(1));
+        expect(menu.items[0]?.section).toBe('incremental-reading');
+        expect(menu.items[0]?.title).toContain(` ${kept.length} `);
+        click(menu.items[0]);
+        expect(receiver.importSelection).toHaveBeenCalledExactlyOnceWith(files);
+      })
+    );
+  });
+
+  it('offers nothing before the review manager is up, or in the review tab', () => {
+    const files = [fileAt('d.md'), fileAt('a 2.md')];
+
+    expect(
+      raiseSelectionMenu(makeReceiver({ imported: false }).receiver, files)
+        .items
+    ).toHaveLength(0);
+    expect(
+      raiseSelectionMenu(makeReceiver().receiver, files, reviewLeaf()).items
+    ).toHaveLength(0);
+    expect(
+      raiseSelectionMenu(makeReceiver().receiver, files, otherLeaf()).items
+    ).toHaveLength(1);
+  });
+
+  it('is what a menu on a multi-selection gets', async () => {
+    removeIcon(PLUGIN_ICON);
+    vi.spyOn(ObsidianEditor, 'getEditorClass').mockReturnValue(
+      class {} as never
+    );
+    vi.stubGlobal('document', {
+      createElement: () => ({
+        classList: { add: vi.fn() },
+        addEventListener: vi.fn(),
+      }),
+    });
+    try {
+      const { receiver } = makeLoadReceiver();
+      const addSelectionMenuItems = vi.fn();
+      Object.assign(receiver, { addSelectionMenuItems });
+
+      await IncrementalReadingPlugin.prototype.onload.call(
+        receiver as unknown as IncrementalReadingPlugin
+      );
+      const [, handler] = receiver.app.workspace.on.mock.calls.find(
+        ([name]) => name === 'files-menu'
+      ) as [string, (...args: unknown[]) => void];
+      const menu = new Menu();
+      const files = [fileAt('d.md'), makeFolder('a')];
+      handler(menu, files, 'file-explorer-context-menu', null);
+
+      expect(addSelectionMenuItems).toHaveBeenCalledExactlyOnceWith(
+        menu,
+        files,
+        null
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      removeIcon(PLUGIN_ICON);
+    }
+  });
+});
+
+describe('IncrementalReadingPlugin.importSelection', () => {
+  it('opens the bulk import dialog on the selection, in the explorer order as it opened', async () => {
+    vi.stubGlobal('document', { createElement: () => ({}) });
+    try {
+      const open = vi
+        .spyOn(BulkImportModal.prototype, 'open')
+        .mockImplementation(() => {});
+      const explorerState = { sortOrder: 'alphabeticalReverse' };
+      const isItemFileAt = vi.fn((_file: TFile, _path: string) => true);
+      const receiver = {
+        app: {
+          workspace: {
+            getLeavesOfType: (type: string) =>
+              type === 'file-explorer'
+                ? [{ view: { getState: () => explorerState } }]
+                : [],
+          },
+        },
+        reviewManager: { isItemFileAt },
+      };
+      const pdf = (basename: string) =>
+        Object.assign(new TFile(), {
+          path: `papers/${basename}.pdf`,
+          name: `${basename}.pdf`,
+          basename,
+          extension: 'pdf',
+        });
+      const files = [pdf('a'), pdf('c'), pdf('b')];
+
+      const modal = IncrementalReadingPlugin.prototype.importSelection.call(
+        receiver as unknown as IncrementalReadingPlugin,
+        files
+      ) as BulkImportModal;
+      explorerState.sortOrder = 'alphabetical';
+      const events: ScanEvent[] = [];
+      for await (const event of modal.request.source.scan(
+        new AbortController().signal
+      )) {
+        events.push(event);
+      }
+
+      expect(open).toHaveBeenCalledOnce();
+      expect(open.mock.contexts[0]).toBe(modal);
+      expect(modal.request.mode).toBe('import');
+      expect(modal.request.source.title).toMatch(/\b3\b/);
+      // Each PDF is an item by the row at its path; Z to A, as it opened
+      expect(isItemFileAt.mock.calls).toEqual(
+        ['c', 'b', 'a'].map((name) => [pdf(name), `papers/${name}.pdf`])
+      );
+      expect(events).toEqual([{ type: 'folder-done', path: '/' }]);
     } finally {
       vi.unstubAllGlobals();
     }

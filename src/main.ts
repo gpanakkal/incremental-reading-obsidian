@@ -1,5 +1,11 @@
 import { AutoImportWatcher } from '#/lib/AutoImportWatcher';
 import { folderSource } from '#/lib/bulk-import/candidates';
+import {
+  itemCount,
+  selectionMayImport,
+  selectionRoots,
+  selectionSource,
+} from '#/lib/bulk-import/selection';
 import { createEmitter } from '#/lib/emitter';
 import {
   explorerComparator,
@@ -295,6 +301,15 @@ export default class IncrementalReadingPlugin extends Plugin {
           this.addIRMenuItems(menu, abstractFile, leaf);
         }
       )
+    );
+    // `files-menu` fires only when the item right-clicked is part of a
+    // multi-selection in the Files view (Bases and Canvas raise it too); a
+    // single right-click raises `file-menu`. Its `files` may hold folders, and
+    // from the Files view `leaf` is null (observed, not documented).
+    this.registerEvent(
+      this.app.workspace.on('files-menu', (menu, files, _source, leaf) => {
+        this.addSelectionMenuItems(menu, files, leaf);
+      })
     );
     // Undocumented: `leaf-menu`, raised for a tab's more-options and tab
     // header menus after its view has filled them. A web viewer holds no
@@ -1262,6 +1277,55 @@ export default class IncrementalReadingPlugin extends Plugin {
           await this.importWebPage(viewer);
         });
     });
+  }
+
+  /**
+   * The entries for a menu on several files and folders at once: **Import N
+   * items…**, N counting the selection with what a selected folder covers
+   * left out, when anything in it could import. Not in the review tab, and
+   * not before the review manager is up, as {@link addIRMenuItems}.
+   */
+  addSelectionMenuItems(
+    menu: Menu,
+    files: readonly TAbstractFile[],
+    leaf?: WorkspaceLeaf | null
+  ): void {
+    if (leaf?.view instanceof ReviewView || !this.reviewManager) return;
+    const roots = selectionRoots(files);
+    if (!selectionMayImport(roots)) return;
+    menu.addSections(['incremental-reading']);
+    menu.addItem((item) => {
+      item
+        .setTitle(`Import ${itemCount(roots.length)}…`)
+        .setIcon(PLUGIN_ICON)
+        .setSection('incremental-reading')
+        .onClick(() => {
+          this.importSelection(files);
+        });
+    });
+  }
+
+  /**
+   * Offer what `files`, a Files-view selection, holds for import in the bulk
+   * import dialog: each selected file, and the files in each selected folder
+   * (and, with "Include subfolders", under it), in the explorer's order as
+   * the dialog opens. See `selectionSource`.
+   */
+  importSelection(files: readonly TAbstractFile[]): BulkImportModal {
+    const { reviewManager } = this;
+    const modal = new BulkImportModal(this, {
+      source: selectionSource(
+        files,
+        {
+          app: this.app,
+          isItemAtPath: (file) => reviewManager.isItemFileAt(file, file.path),
+        },
+        explorerComparator(readExplorerSortOrder(this.app.workspace))
+      ),
+      mode: 'import',
+    });
+    modal.open();
+    return modal;
   }
 
   /**

@@ -59,7 +59,9 @@ export class BulkImportModal extends Modal {
 
   onOpen() {
     const { plugin, request, contentEl } = this;
-    this.setTitle(`Importing from ${request.source.title}`);
+    this.setTitle(
+      request.source.heading ?? `Importing from ${request.source.title}`
+    );
     render(
       <BulkImportModalContent
         source={request.source}
