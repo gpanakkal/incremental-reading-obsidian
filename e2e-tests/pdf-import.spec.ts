@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
+  chooseFromMenu,
   executeCommandById,
   finalizeArticleImport,
   openFileInActiveLeaf,
@@ -123,29 +124,6 @@ async function expandFolder(page: Page, folder: string, shown: Locator) {
 /** The file explorer's row for the file at `at`. */
 const explorerRow = (page: Page, at: string) =>
   page.locator(`.nav-file-title[data-path="${at}"]`);
-
-/**
- * Right click `target` until its menu shows every one of `titles`, then choose
- * the first, and wait for the menu to go. Obsidian's menus animate in, and on
- * a loaded runner the first right click can land before the row takes it, so
- * it is repeated.
- */
-async function chooseFromMenu(
-  page: Page,
-  target: Locator,
-  titles: [string, ...string[]]
-) {
-  const menu = page.locator('.menu');
-  const item = (title: string) => menu.getByText(title, { exact: true });
-  await expect(async () => {
-    if ((await menu.count()) === 0) await target.click({ button: 'right' });
-    for (const title of titles) {
-      await expect(item(title)).toBeVisible({ timeout: 2_000 });
-    }
-  }).toPass();
-  await item(titles[0]).click();
-  await expect(menu).toHaveCount(0);
-}
 
 /** The import dialog's "Make a copy" toggle. */
 const copyToggle = (page: Page) =>

@@ -208,7 +208,7 @@ export default class IncrementalReadingPlugin extends Plugin {
    */
   private reviewReminder?: ReviewReminder;
   /** Imports notes that gain a trigger tag. Unset until the database is up. */
-  private autoImportWatcher?: AutoImportWatcher;
+  autoImportWatcher?: AutoImportWatcher;
   /**
    * Settles with {@link autoImportWatcher} once {@link watchAutoImports} has
    * made it. The startup scan in {@link followMovedNotes} waits on this, not

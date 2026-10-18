@@ -555,12 +555,95 @@ export async function setReviewTitleBar(
  * Set Settings -> Appearance -> "Native menus", the `nativeMenus` vault
  * config. On macOS it defaults to on, and a native menu is drawn by Electron
  * outside the page, where no locator can see it. Turn it off before asserting
- * on a `.menu`. Takes effect at once, like `setShowViewHeader`.
+ * on a `.menu`. Takes effect at once, like `setShowViewHeader`, and is saved
+ * at once too: the config is written a second after a change, and a reload
+ * of its files before then (Obsidian rereads them when their mtime moves)
+ * drops every key they lack, which on macOS brings native menus back.
+ * Undocumented, read from obsidian.asar 1.14.4: `vault.saveConfig`,
+ * `reloadConfig`, and `nativeMenus` living in `appearance.json`.
  */
 export async function setNativeMenus(window: Page, native: boolean) {
-  await window.evaluate((value) => {
-    (window as unknown as TestWindow).app.vault.setConfig('nativeMenus', value);
-  }, native);
+  await expect
+    .poll(() =>
+      window.evaluate(async (value) => {
+        const { vault } = (
+          window as unknown as {
+            app: {
+              vault: {
+                configDir: string;
+                adapter: { read(path: string): Promise<string> };
+                getConfig(key: string): unknown;
+                setConfig(key: string, value: unknown): void;
+                saveConfig(): Promise<void>;
+              };
+            };
+          }
+        ).app;
+        vault.setConfig('nativeMenus', value);
+        await vault.saveConfig();
+        const saved = JSON.parse(
+          await vault.adapter.read(`${vault.configDir}/appearance.json`)
+        ) as Record<string, unknown>;
+        return (
+          saved['nativeMenus'] === value &&
+          vault.getConfig('nativeMenus') === value
+        );
+      }, native)
+    )
+    .toBe(true);
+}
+
+/**
+ * Close the open menu with Escape, and wait for it to go. Repeated while it
+ * stays: Obsidian shows a menu at once but listens for its keys a task later
+ * (`setTimeout(this.load)` in `Menu.showAtPosition`, obsidian.asar 1.14.4),
+ * and a window in the background, as on CI, can put that off by a second, so
+ * an Escape pressed as it shows reaches the page instead.
+ */
+export async function closeMenu(window: Page) {
+  const menu = window.locator('.menu');
+  await expect(async () => {
+    if ((await menu.count()) > 0) await window.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0, { timeout: 2_000 });
+  }).toPass();
+}
+
+/**
+ * Right click `target` until its menu shows every one of `titles`, and return
+ * that menu. A menu without them, as one opened before the plugin's entries
+ * apply or on a row about to be redrawn, is closed and opened again; a right
+ * click can also land before the row takes it.
+ */
+export async function openMenuWith(
+  window: Page,
+  target: Locator,
+  titles: readonly string[]
+): Promise<Locator> {
+  const menu = window.locator('.menu');
+  await expect(async () => {
+    if ((await menu.count()) > 0) await closeMenu(window);
+    await target.click({ button: 'right' });
+    for (const title of titles) {
+      await expect(menu.getByText(title, { exact: true })).toBeVisible({
+        timeout: 2_000,
+      });
+    }
+  }).toPass({ timeout: 60_000 });
+  return menu;
+}
+
+/**
+ * Right click `target` until its menu shows every one of `titles`, choose the
+ * first, and wait for the menu to go.
+ */
+export async function chooseFromMenu(
+  window: Page,
+  target: Locator,
+  titles: readonly [string, ...string[]]
+) {
+  const menu = await openMenuWith(window, target, titles);
+  await menu.getByText(titles[0], { exact: true }).click();
+  await expect(menu).toHaveCount(0);
 }
 
 /** What the review tab calls itself when it is not showing an item. */

@@ -2014,6 +2014,8 @@ export class ArticleManager extends ItemManager {
           reason: 'saving to the database is paused',
         };
       }
+      // Before the row goes, which would make the note an orphan to import
+      this.plugin.autoImportWatcher?.unimporting(file);
       await this.plugin.reviewManager.deleteRow('article', row.id);
     } catch (error) {
       console.error(error);

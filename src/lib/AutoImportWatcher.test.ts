@@ -917,6 +917,95 @@ describe('AutoImportWatcher at flush', () => {
   });
 });
 
+describe('AutoImportWatcher.unimporting', () => {
+  /**
+   * Un-import `file` as the plugin does: the watcher told first, then the row
+   * deleted. Its cache is left as it was, as the metadata cache reads the
+   * stripped note only a moment later.
+   */
+  const unimport = (
+    { vault, watcher }: ReturnType<typeof makeWatcher>,
+    file: TFile
+  ) => {
+    watcher.unimporting(file);
+    const id: unknown = vault.cacheOf(file)?.frontmatter?.['ir-id'];
+    if (typeof id === 'string') vault.rows.delete(id);
+  };
+
+  it('leaves alone a note un-imported while it waited, its cache still showing its trigger tag and the id whose row went, and imports the rest', async () => {
+    const watching = makeWatcher();
+    const { vault, change, importMany } = watching;
+    const file = vault.add('a.md', { tags: TRIGGER });
+    change(file);
+    await settle();
+    // The import's own write of the id comes back to be looked at
+    change(file);
+    change(vault.add('b.md', { tags: TRIGGER }));
+
+    unimport(watching, file);
+    await settle();
+
+    expect(importedPaths(importMany)).toEqual([['a.md'], ['b.md']]);
+  });
+
+  it('holds a note back for as long as its cache shows the id and a trigger tag it had when un-imported, then imports it when tagged again', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        irIdArb,
+        fc.nat({ max: 3 }),
+        fc.constantFrom('untagged', 'new id'),
+        async (irId, staleChanges, moveOn) => {
+          const watching = makeWatcher();
+          const { vault, change, importMany } = watching;
+          const file = vault.add('a.md', { 'ir-id': irId, tags: TRIGGER });
+          change(file);
+
+          unimport(watching, file);
+          for (let i = 0; i < staleChanges; i++) change(file);
+          await settle();
+          expect(importMany).not.toHaveBeenCalled();
+
+          // The cache reads the note as the un-import left it, or as changed
+          // since: no trigger tag, or another id
+          vault.edit(
+            file,
+            moveOn === 'untagged'
+              ? { tags: ['other'] }
+              : { 'ir-id': `${String(irId)}-new`, tags: TRIGGER }
+          );
+          change(file);
+          await settle();
+          vault.edit(file, { tags: TRIGGER });
+          change(file);
+          await settle();
+
+          expect(importedPaths(importMany)).toEqual(
+            moveOn === 'untagged' ? [['a.md']] : [['a.md'], ['a.md']]
+          );
+        }
+      )
+    );
+  });
+
+  it('leaves alone a note un-imported while its id was looked up', async () => {
+    const watching = makeWatcher();
+    const { vault, change, importMany, hasRow } = watching;
+    vault.rows.add('a');
+    const file = vault.add('a.md', { 'ir-id': 'a', tags: TRIGGER });
+    const lookup = deferred<boolean>();
+    hasRow.mockImplementationOnce(() => lookup.promise);
+    change(file);
+    await settle();
+    expect(hasRow).toHaveBeenCalledOnce();
+
+    unimport(watching, file);
+    lookup.resolve(false);
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+  });
+});
+
 describe('AutoImportWatcher failures', () => {
   it('never tries again to import a note that failed, but does other notes and ones only skipped', async () => {
     const vault = makeVault();

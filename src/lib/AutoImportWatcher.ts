@@ -178,6 +178,13 @@ export class AutoImportWatcher {
   /** Pending store of {@link #ledger}, after a file in it moved or went. */
   #ledgerTimer: number | null = null;
   /**
+   * Notes being or lately un-imported, each with the `ir-id` its cache showed
+   * then (`undefined` for none), held back while the cache still shows that
+   * id and a trigger tag (see {@link unimporting}). Weak, so a deleted note
+   * goes with its hold.
+   */
+  readonly #unimported = new WeakMap<TFile, unknown>();
+  /**
    * Serializes imports: a batch is checked only once the one before it is
    * done, so a note it imported has its `ir-id`, and the row holding it, by
    * then.
@@ -219,6 +226,7 @@ export class AutoImportWatcher {
    */
   consider(file: TFile, cache: CachedMetadata | null): void {
     const config = this.#getConfig();
+    this.#releaseHold(file, cache, config);
     // An arrival is settled by the first cache that has the note read, once
     // there is something in it. An empty note open in an editor takes the
     // file's text over its own unsaved text when the file changes, so
@@ -236,6 +244,40 @@ export class AutoImportWatcher {
     if (byArrival) this.#queuedArrivals.add(file);
     this.#queued.add(file);
     this.#schedule();
+  }
+
+  /**
+   * Hear that `file` is about to be un-imported: its row deleted, then its
+   * `ir-id` and trigger tags stripped. Leave it alone until the cache shows
+   * it changed (see {@link #releaseHold}). The cache reads the stripped note
+   * only a moment after the row goes, and a flush in between, of the change
+   * its import's own write queued, would take it for an orphan and import it
+   * again.
+   */
+  unimporting(file: TFile): void {
+    const cache = this.#app.metadataCache.getFileCache(file);
+    this.#unimported.set(file, cache?.frontmatter?.['ir-id']);
+  }
+
+  /**
+   * End the hold {@link unimporting} put on `file` once `cache` shows it
+   * changed: with another id, or no trigger tag. Looked at on every change,
+   * so the first that shows it ends the hold.
+   */
+  #releaseHold(
+    file: TFile,
+    cache: CachedMetadata | null,
+    config: AutoImportConfig
+  ): void {
+    if (!this.#unimported.has(file)) return;
+    const frontmatter = cache?.frontmatter;
+    if (
+      frontmatter === undefined ||
+      frontmatter['ir-id'] !== this.#unimported.get(file) ||
+      matchFrontmatterTags(frontmatter, config.triggerTags).length === 0
+    ) {
+      this.#unimported.delete(file);
+    }
   }
 
   /**
@@ -645,6 +687,8 @@ export class AutoImportWatcher {
       // here, so each import costs one lookup.
       const id: unknown = cache?.frontmatter?.['ir-id'];
       if (typeof id === 'string' && (await this.#rowHolds(id))) continue;
+      // Un-imported, or while the lookup ran, which may be why no row holds it
+      if (this.#unimported.has(file)) continue;
       entries.push({ file, matchedTags });
     }
     // Stopped while a lookup ran: the plugin is unloading

@@ -976,11 +976,20 @@ async function wireUnimport(
   const repo = await TestRepository.create();
   const trigger = vi.fn();
   const forgetIf = vi.fn();
+  // Whether the row was still there when the watcher heard, by file path
+  const rowWhenHeld = new Map<string, boolean>();
+  const unimporting = vi.fn((file: TFile) => {
+    rowWhenHeld.set(
+      file.path,
+      repo.rows('article').some(({ reference }) => reference === file.path)
+    );
+  });
   const plugin: Record<string, unknown> = {
     app: { ...vault.app, workspace: { trigger } },
     settings: { autoImportTags: [...triggers], dayRolloverOffset: 4 },
     registerEvent: vi.fn(),
     sessionTracker: { forgetIf },
+    autoImportWatcher: { unimporting },
   };
   const reviewManager = new ReviewManager(plugin as never, repo);
   plugin.reviewManager = reviewManager;
@@ -997,6 +1006,8 @@ async function wireUnimport(
     forgetIf,
     getHighlights,
     logged,
+    unimporting,
+    rowWhenHeld,
   };
 }
 
@@ -8162,16 +8173,24 @@ describe('unimportMany', () => {
           cards: fc.nat({ max: 2 }),
         }),
         async (tags, lone, others, seed) => {
-          const { repo, vault, manager, forgetIf, getHighlights, trigger } =
-            await wireUnimport({
-              [NOTE]: {
-                ...others,
-                'ir-id': 'a',
-                tags: lone
-                  ? tags.map(({ tag }) => tag).join(', ')
-                  : tags.map(({ tag }) => tag),
-              },
-            });
+          const {
+            repo,
+            vault,
+            manager,
+            forgetIf,
+            getHighlights,
+            trigger,
+            unimporting,
+            rowWhenHeld,
+          } = await wireUnimport({
+            [NOTE]: {
+              ...others,
+              'ir-id': 'a',
+              tags: lone
+                ? tags.map(({ tag }) => tag).join(', ')
+                : tags.map(({ tag }) => tag),
+            },
+          });
           seedArticle(repo, 'a', NOTE, seed);
           // Another article, with what is its own, which stays as it was
           seedArticle(repo, 'b', 'notes/Other.md', {
@@ -8225,6 +8244,9 @@ describe('unimportMany', () => {
                 : {}),
           });
           expect(forgetIf).toHaveBeenCalledWith('a');
+          // Held back from automatic import before its row went
+          expect(unimporting).toHaveBeenCalledExactlyOnceWith(file);
+          expect(rowWhenHeld.get(NOTE)).toBe(true);
           expect(getHighlights).toHaveBeenCalledExactlyOnceWith(file);
           expect(trigger).toHaveBeenCalledExactlyOnceWith(
             'ir-highlights-changed',
@@ -8376,6 +8398,7 @@ describe('unimportMany', () => {
           expect(vault.frontmatterOf(path)).toStrictEqual(fmBefore);
           expect(vault.processFrontMatter).not.toHaveBeenCalled();
           expect(wired.forgetIf).not.toHaveBeenCalled();
+          expect(wired.unimporting).not.toHaveBeenCalled();
           expect(wired.getHighlights).not.toHaveBeenCalled();
           expect(wired.trigger).not.toHaveBeenCalled();
         }

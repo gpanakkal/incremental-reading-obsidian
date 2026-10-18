@@ -8,9 +8,13 @@ import test, {
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
+  chooseFromMenu as chooseMenuEntry,
+  closeMenu,
   executeCommandById,
   finalizeArticleImport,
+  openMenuWith,
   openNote,
+  pendingSaves,
   setNativeMenus,
   setPluginSetting,
 } from './helpers';
@@ -76,35 +80,16 @@ test.afterEach(async () => {
 /** The note's row in Files. */
 const fileRow = () => window.locator(`.nav-file-title[data-path="${NOTE}"]`);
 
-/**
- * Right click `target` until its menu shows `title`, then choose it, and wait
- * for the menu to go. Obsidian's menus animate in, and on a loaded runner the
- * first right click can land before the row takes it, so it is repeated.
- */
-async function chooseFromMenu(target: Locator, title: string) {
-  const menu = window.locator('.menu');
-  const item = menu.getByText(title, { exact: true });
-  await expect(async () => {
-    if ((await menu.count()) === 0) await target.click({ button: 'right' });
-    await expect(item).toBeVisible({ timeout: 2_000 });
-  }).toPass();
-  await item.click();
-  await expect(menu).toHaveCount(0);
-}
+/** Choose `title` from the menu `target` shows on a right click. */
+const chooseFromMenu = (target: Locator, title: string) =>
+  chooseMenuEntry(window, target, [title]);
 
 /** The titles of the menu `target` shows on a right click, which is closed again. */
 async function menuTitles(target: Locator): Promise<string[]> {
-  const menu = window.locator('.menu');
-  await expect(async () => {
-    if ((await menu.count()) === 0) await target.click({ button: 'right' });
-    // Its own entries come last, once the plugin's handler has run
-    await expect(menu.getByText('Import article', { exact: true })).toBeVisible(
-      { timeout: 2_000 }
-    );
-  }).toPass();
+  // Its own entries come last, once the plugin's handler has run
+  const menu = await openMenuWith(window, target, ['Import article']);
   const titles = await menu.locator('.menu-item-title').allTextContents();
-  await window.keyboard.press('Escape');
-  await expect(menu).toHaveCount(0);
+  await closeMenu(window);
   return titles;
 }
 
@@ -267,6 +252,9 @@ test('leaves the article as it was when the un-import is turned down', async () 
 test('un-imports an article whose note carries no ir-id, as one imported before notes had them', async () => {
   const before = await articleCount();
   await importFromFiles();
+  // A save still under way when the plugin goes is dropped, and the import
+  // with it
+  await expect.poll(() => pendingSaves(window)).toBe(0);
   // Written with the plugin off, which would put the id straight back
   await window.evaluate(async () => {
     const { app } = window as unknown as { app: ReloadableApp };
