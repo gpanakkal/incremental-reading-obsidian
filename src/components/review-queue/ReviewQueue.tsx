@@ -7,6 +7,7 @@ import { deleteMissingItem } from '#/lib/delete-missing-item';
 import { tableOf } from '#/lib/relink';
 import { goToReviewPlace } from '#/lib/review-history';
 import type { IRPluginState } from '#/lib/store';
+import { unimportArticle } from '#/lib/unimport-article';
 import { currentReviewDay, reviewDayOf } from '#/lib/utils';
 import type IncrementalReadingPlugin from '#/main';
 import { openRelinkPicker } from '#/views/RelinkModal';
@@ -33,7 +34,8 @@ const QUEUE_ERROR_MESSAGE =
  * The menu for one queue row. "Relink file…" is offered on every row so the
  * menu reads the same throughout, but only a row missing its file can take it.
  * "Permanently delete" is offered only there: a row with its note is deleted
- * by deleting the note.
+ * by deleting the note. "Un-import article…" is offered on an article row
+ * with its file, and does what the file menu's entry does.
  */
 export function queueRowMenu(
   plugin: IncrementalReadingPlugin,
@@ -60,6 +62,18 @@ export function queueRowMenu(
         .setWarning(true)
         .onClick(() => {
           void deleteMissingItem(plugin, row);
+        })
+    );
+  }
+  const { file } = row;
+  if (row.type === 'article' && file !== null) {
+    menu.addItem((item) =>
+      item
+        .setTitle('Un-import article…')
+        .setIcon('file-x')
+        .setWarning(true)
+        .onClick(() => {
+          void unimportArticle(plugin, file);
         })
     );
   }

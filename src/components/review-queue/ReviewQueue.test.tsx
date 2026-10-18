@@ -11,6 +11,7 @@ import {
   setShowAnswer,
   store,
 } from '#/lib/store';
+import * as UnimportArticleModule from '#/lib/unimport-article';
 import { Menu } from '#/test/__mocks__/obsidian';
 import * as RelinkModalModule from '#/views/RelinkModal';
 import fc from 'fast-check';
@@ -814,11 +815,58 @@ describe('queue row menu', () => {
   });
 
   it('offers relinking only to a row that is missing its file', () => {
-    const menu = queueRowMenu({} as never, makeQueueRow()) as unknown as Menu;
+    const menu = queueRowMenu(
+      {} as never,
+      makeQueueRow({ type: 'snippet' })
+    ) as unknown as Menu;
 
     expect(menu.items.map((item) => [item.icon, item.disabled])).toEqual([
       ['link', true],
     ]);
+  });
+
+  it('offers to un-import only an article row with its file, as a warning', () => {
+    const unimportArticle = vi
+      .spyOn(UnimportArticleModule, 'unimportArticle')
+      .mockResolvedValue(true);
+    fc.assert(
+      fc.property(
+        fc.constantFrom('article', 'snippet', 'card'),
+        fc.boolean(),
+        (type, hasFile) => {
+          const row = makeQueueRow({
+            type,
+            file: hasFile ? ({ path: 'notes/x.md' } as TFile) : null,
+          });
+
+          const menu = queueRowMenu({} as never, row) as unknown as Menu;
+
+          const offered = type === 'article' && hasFile;
+          expect(menu.items.map((item) => [item.icon, item.warning])).toEqual([
+            ['link', false],
+            ...(hasFile ? [] : [['trash-2', true]]),
+            ...(offered ? [['file-x', true]] : []),
+          ]);
+          expect(unimportArticle).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('un-imports the row’s file once its entry is picked', () => {
+    const unimportArticle = vi
+      .spyOn(UnimportArticleModule, 'unimportArticle')
+      .mockResolvedValue(true);
+    const plugin = { name: 'plugin' };
+    const file = { path: 'notes/x.md' } as TFile;
+
+    const menu = queueRowMenu(
+      plugin as never,
+      makeQueueRow({ file })
+    ) as unknown as Menu;
+    menu.items.find(({ icon }) => icon === 'file-x')?.callback?.(undefined);
+
+    expect(unimportArticle).toHaveBeenCalledExactlyOnceWith(plugin, file);
   });
 
   it('opens a clicked row in review, with the item left open reset', () => {

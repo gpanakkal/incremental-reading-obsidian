@@ -8,6 +8,7 @@ import test, {
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
+  executeCommandById,
   finalizeArticleImport,
   openNote,
   setNativeMenus,
@@ -192,6 +193,36 @@ async function importFromFiles() {
   expect(await noteText()).toMatch(/^ir-id: /m);
 }
 
+/** The note's row in the review tab's queue. */
+const queueRow = () =>
+  window.locator('.ir-queue-row').filter({ hasText: 'Unimport me' });
+
+/**
+ * Open the queue row's menu and choose its un-import entry, found by its icon
+ * and warning state. Right clicks are repeated as in `chooseFromMenu`.
+ */
+async function unimportFromQueueRow() {
+  const menu = window.locator('.menu');
+  const item = menu.locator('.menu-item.is-warning:has(.lucide-file-x)');
+  await expect(async () => {
+    if ((await menu.count()) === 0) {
+      await queueRow().locator('.ir-queue-cell').first().click({
+        button: 'right',
+      });
+    }
+    await expect(item).toBeVisible({ timeout: 2_000 });
+  }).toPass();
+  await item.click();
+  await expect(menu).toHaveCount(0);
+}
+
+/** Import the note, then open the review tab's queue, showing its row. */
+async function importAndOpenQueue() {
+  await importFromFiles();
+  await executeCommandById(window, 'incremental-reading:learn');
+  await expect(queueRow()).toHaveCount(1);
+}
+
 // #endregion
 
 test('un-imports an article from its menu in Files, leaving a plain note with its own tags', async () => {
@@ -306,4 +337,29 @@ test('leaves a note imported by its tag a plain note for good, with import by ta
 
   await expect(tagPills()).toHaveText(['keep-me']);
   expect(await articleCount()).toBe(before);
+});
+
+test('un-imports an article from its row menu in the queue, which drops the row', async () => {
+  const before = await articleCount();
+  await importAndOpenQueue();
+
+  await unimportFromQueueRow();
+  await expect(confirmation()).toContainText('"Unimport me"');
+  await answer('Un-import');
+
+  await expect(queueRow()).toHaveCount(0);
+  await expect.poll(noteText).not.toMatch(/ir-id/);
+  expect(await articleCount()).toBe(before);
+});
+
+test('keeps the queue row when the un-import from it is turned down', async () => {
+  const before = await articleCount();
+  await importAndOpenQueue();
+
+  await unimportFromQueueRow();
+  await answer('Cancel');
+
+  await expect(queueRow()).toHaveCount(1);
+  expect(await noteText()).toMatch(/^ir-id: /m);
+  expect(await articleCount()).toBe(before + 1);
 });
