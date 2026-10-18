@@ -558,4 +558,15 @@ describe('stripFrontmatterTags', () => {
 
     expect(frontmatter).toEqual({ tags: ['b'] });
   });
+
+  it('takes off a tag asked for after several #s, in any case, but no tag that only starts with it', () => {
+    const frontmatter: Record<string, unknown> = {
+      tags: ['ÉTÉ', 'été-x', 'été/sub', '#Later'],
+      TAG: 'later',
+    };
+
+    stripFrontmatterTags(frontmatter, ['##été', 'LATER']);
+
+    expect(frontmatter).toEqual({ tags: ['été-x', 'été/sub'] });
+  });
 });

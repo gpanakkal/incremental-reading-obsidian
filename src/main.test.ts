@@ -37,6 +37,7 @@ import {
   type ReviewPage,
 } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
+import * as UnimportModule from '#/lib/unimport-article';
 import IncrementalReadingPlugin, {
   startupFailureMessage,
   STILL_STARTING_NOTICE,
@@ -122,14 +123,17 @@ function makeReceiver({
   file = makeFile() as TFile | null,
   imported = true,
   frontmatter = undefined as Record<string, unknown> | undefined,
+  articleId = null as string | null,
 } = {}) {
   const importArticle = vi.fn();
   const goToContext = vi.fn().mockResolvedValue(undefined);
+  // The id of the live article the file is, if any
+  const articleIdAt = vi.fn((_file: TFile): string | null => articleId);
   const receiver = {
     settings: { showAdvancedImportMenuItems: advanced },
     // Truthy stands for a plugin that finished loading; the menu is suppressed
     // until then, since importing needs the manager.
-    reviewManager: imported ? {} : undefined,
+    reviewManager: imported ? { articleIdAt } : undefined,
     app: {
       vault: { getFileByPath: vi.fn(() => file) },
       // The cached frontmatter of `file`, and of nothing else.
@@ -143,7 +147,7 @@ function makeReceiver({
     importFromFolder: vi.fn(),
     actions: { goToContext },
   };
-  return { receiver, importArticle, goToContext, file };
+  return { receiver, importArticle, goToContext, articleIdAt, file };
 }
 
 /**
@@ -1307,6 +1311,55 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
         );
       })
     );
+  });
+
+  it('offers to un-import a file that is a live article, and no other', () => {
+    fc.assert(
+      fc.property(
+        fc.option(fc.string(), { nil: null }),
+        fc.constantFrom('md', 'pdf', 'png'),
+        fc.boolean(),
+        fc.boolean(),
+        (articleId, extension, advanced, withLeaf) => {
+          const file = fileWithExtension(extension);
+          const { receiver, articleIdAt } = makeReceiver({
+            advanced,
+            file,
+            articleId,
+          });
+
+          const menu = raiseMenu(
+            receiver,
+            withLeaf ? otherLeaf() : undefined,
+            file
+          );
+
+          expect(articleIdAt).toHaveBeenCalledExactlyOnceWith(file);
+          const entries = menu.items.filter(
+            (i) => i.title === 'Un-import article'
+          );
+          if (articleId === null) {
+            expect(entries).toEqual([]);
+            return;
+          }
+          expect(entries).toHaveLength(1);
+          expect(entries[0].section).toBe('incremental-reading');
+          expect(entries[0].icon).toBe('lucide-file-x');
+        }
+      )
+    );
+  });
+
+  it('un-imports the file the menu was raised on', () => {
+    const unimport = vi
+      .spyOn(UnimportModule, 'unimportArticle')
+      .mockResolvedValue(true);
+    const { receiver, file } = makeReceiver({ articleId: 'a' });
+    const menu = raiseMenu(receiver, undefined, file!);
+
+    click(menu.items.find((i) => i.title === 'Un-import article'));
+
+    expect(unimport).toHaveBeenCalledExactlyOnceWith(receiver, file);
   });
 });
 

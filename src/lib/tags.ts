@@ -73,8 +73,6 @@ const isBlank = (entry: unknown) =>
   entry === undefined ||
   (typeof entry === 'string' && entry.trim() === '');
 
-// TODO: task 0146 adds `withoutTags`/`removeTags` in `item-tags.ts` for
-// un-import; whichever of the two lands second folds them into one helper
 /**
  * Take `tags` off `frontmatter`, compared as {@link matchFrontmatterTags}
  * compares them, from every key Obsidian reads tags from, leaving every other

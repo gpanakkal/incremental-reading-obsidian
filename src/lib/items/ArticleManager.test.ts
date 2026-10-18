@@ -67,6 +67,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ArticleManager } from './ArticleManager';
 import { CardManager } from './CardManager';
 import { ItemManager } from './ItemManager';
+import ReviewManager from './ReviewManager';
 import { SnippetManager } from './SnippetManager';
 
 // #region HELPERS
@@ -958,6 +959,47 @@ function batchSnapshot({
   };
 }
 
+/** The auto-import trigger tags an un-import strips, besides the article tag. */
+const TRIGGER_TAGS = ['auto-import', 'later'];
+
+/**
+ * An article manager over a real database, foreign keys on, and a vault
+ * holding `notes`, wired to a real `ReviewManager`: an un-import deletes its
+ * row through that. Auto-import is triggered by `triggers`. Highlights reload
+ * through a stub, and the console and the session tracker are watched.
+ */
+async function wireUnimport(
+  notes: Record<string, Record<string, unknown> | null>,
+  triggers: readonly string[] = TRIGGER_TAGS
+) {
+  const vault = makeItemVault(notes);
+  const repo = await TestRepository.create();
+  const trigger = vi.fn();
+  const forgetIf = vi.fn();
+  const plugin: Record<string, unknown> = {
+    app: { ...vault.app, workspace: { trigger } },
+    settings: { autoImportTags: [...triggers], dayRolloverOffset: 4 },
+    registerEvent: vi.fn(),
+    sessionTracker: { forgetIf },
+  };
+  const reviewManager = new ReviewManager(plugin as never, repo);
+  plugin.reviewManager = reviewManager;
+  const getHighlights = vi
+    .spyOn(reviewManager.snippets, 'getHighlights')
+    .mockResolvedValue(undefined as never);
+  const logged = vi.spyOn(console, 'error').mockReturnValue(undefined);
+  return {
+    vault,
+    repo,
+    reviewManager,
+    manager: reviewManager.articles,
+    trigger,
+    forgetIf,
+    getHighlights,
+    logged,
+  };
+}
+
 /**
  * `bulkMutate` options that make a chunk exactly `sliceMs` statements: the
  * clock advances a tick a reading.
@@ -1011,6 +1053,101 @@ function watchWrites(
     stopped: () => stopped,
   };
 }
+
+/**
+ * An article row `id` at `reference`, with `reviews` reviews in its log and,
+ * when `rebound`, a startup rebind.
+ */
+function seedArticle(
+  repo: TestRepository,
+  id: string,
+  reference: string,
+  { deleted = false, reviews = 0, rebound = false } = {}
+) {
+  repo.mutate(
+    `INSERT INTO article (id, reference, due, interval, priority, deleted)
+     VALUES ($1, $2, 0, 86400000, 30, $3)`,
+    [id, reference, deleted ? 1 : 0]
+  );
+  for (let i = 0; i < reviews; i++) {
+    repo.mutate(
+      'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
+      [`${id}-review-${i}`, id, i]
+    );
+  }
+  if (rebound) {
+    repo.mutate(
+      `INSERT INTO rebind (article_id, old_reference, new_reference, rebound_at)
+       VALUES ($1, 'old.md', $2, 0)`,
+      [id, reference]
+    );
+  }
+}
+
+/** A snippet or card `id` taken from the item `parent`, if any. */
+function seedChild(
+  repo: TestRepository,
+  table: 'snippet' | 'srs_card',
+  id: string,
+  parent: string | null
+) {
+  if (table === 'snippet') {
+    repo.mutate(
+      `INSERT INTO snippet (id, reference, parent, due, interval, priority)
+       VALUES ($1, $2, $3, 0, 86400000, 30)`,
+      [id, `snippets/${id}.md`, parent]
+    );
+    return;
+  }
+  repo.mutate(
+    `INSERT INTO srs_card (id, reference, parent, created_at, due,
+       stability, difficulty, elapsed_days, scheduled_days, state)
+     VALUES ($1, $2, $3, 0, 0, 0, 0, 0, 0, 0)`,
+    [id, `cards/${id}.md`, parent]
+  );
+}
+
+/** Every row of every table an un-import may touch, to compare. */
+function itemTables(repo: TestRepository) {
+  return Object.fromEntries(
+    ['article', 'article_review', 'rebind', 'snippet', 'srs_card'].map(
+      (table) => [table, repo.rows(table)]
+    )
+  );
+}
+
+/**
+ * A tag a note carries that no un-import strips: any, the item types' own and
+ * lookalikes of what is stripped among them.
+ */
+const keptTagArb = fc
+  .oneof(
+    fc
+      .string({ minLength: 1, maxLength: 8 })
+      .map((text) => text.replace(/[\s,#]/g, '')),
+    fc.constantFrom(
+      `${ARTICLE_TAG}-x`,
+      `${ARTICLE_TAG}/sub`,
+      'auto-imported',
+      SNIPPET_TAG,
+      'ir-source'
+    )
+  )
+  .filter(
+    (tag) =>
+      tag !== '' && ![ARTICLE_TAG, ...TRIGGER_TAGS].includes(tag.toLowerCase())
+  );
+
+/** A stripped tag, in any case a note may write it. */
+const strippedTagArb = fc
+  .constantFrom(ARTICLE_TAG, ...TRIGGER_TAGS)
+  .chain((tag) => fc.constantFrom(tag, tag.toUpperCase(), `#${tag}`));
+
+/** Properties a note may carry besides its `ir-id` and tags. */
+const otherPropertiesArb = fc.dictionary(
+  fc.constantFrom('source', 'aliases', 'priority', 'cssclasses', 'Tagline'),
+  fc.oneof(fc.string(), fc.integer(), fc.array(fc.string(), { maxLength: 2 }))
+);
 
 // #endregion
 
@@ -7995,6 +8132,416 @@ describe('importMany, copying a note imported for its trigger tags', () => {
         }
       ),
       { numRuns: 20 }
+    );
+  });
+});
+
+describe('unimportMany', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const NOTE = 'notes/Note.md';
+
+  it('deletes the row and its history, frees its snippets and cards, and strips only the article and trigger tags', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          fc.oneof(
+            keptTagArb.map((tag) => ({ tag, kept: true })),
+            strippedTagArb.map((tag) => ({ tag, kept: false }))
+          ),
+          { maxLength: 5 }
+        ),
+        fc.boolean(),
+        otherPropertiesArb,
+        fc.record({
+          reviews: fc.nat({ max: 3 }),
+          rebound: fc.boolean(),
+          snippets: fc.nat({ max: 2 }),
+          cards: fc.nat({ max: 2 }),
+        }),
+        async (tags, lone, others, seed) => {
+          const { repo, vault, manager, forgetIf, getHighlights, trigger } =
+            await wireUnimport({
+              [NOTE]: {
+                ...others,
+                'ir-id': 'a',
+                tags: lone
+                  ? tags.map(({ tag }) => tag).join(', ')
+                  : tags.map(({ tag }) => tag),
+              },
+            });
+          seedArticle(repo, 'a', NOTE, seed);
+          // Another article, with what is its own, which stays as it was
+          seedArticle(repo, 'b', 'notes/Other.md', {
+            reviews: 1,
+            rebound: true,
+          });
+          for (let i = 0; i < seed.snippets; i++) {
+            seedChild(repo, 'snippet', `s${i}`, 'a');
+          }
+          for (let i = 0; i < seed.cards; i++) {
+            seedChild(repo, 'srs_card', `c${i}`, 'a');
+          }
+          seedChild(repo, 'snippet', 'other-snippet', 'b');
+          seedChild(repo, 'srs_card', 'other-card', 'b');
+          const file = vault.files.get(NOTE)!;
+
+          const outcomes = await manager.unimportMany([file]);
+
+          expect(outcomes).toStrictEqual([{ file, status: 'unimported' }]);
+          expect(repo.rows('article').map(({ id }) => id)).toEqual(['b']);
+          expect(repo.rows('article_review')).toEqual([
+            expect.objectContaining({ article_id: 'b' }),
+          ]);
+          expect(repo.rows('rebind')).toEqual([
+            expect.objectContaining({ article_id: 'b' }),
+          ]);
+          for (const table of ['snippet', 'srs_card']) {
+            expect(
+              Object.fromEntries(
+                repo.rows(table).map(({ id, parent }) => [id, parent])
+              )
+            ).toEqual(
+              Object.fromEntries(
+                repo
+                  .rows(table)
+                  .map(({ id }) => [
+                    id,
+                    String(id).startsWith('other') ? 'b' : null,
+                  ])
+              )
+            );
+          }
+          const left = tags.filter(({ kept }) => kept).map(({ tag }) => tag);
+          const strippedAny = tags.some(({ kept }) => !kept);
+          expect(vault.frontmatterOf(NOTE)).toStrictEqual({
+            ...others,
+            ...(left.length > 0
+              ? { tags: lone && !strippedAny ? left.join(', ') : left }
+              : !strippedAny
+                ? { tags: lone ? '' : [] }
+                : {}),
+          });
+          expect(forgetIf).toHaveBeenCalledWith('a');
+          expect(getHighlights).toHaveBeenCalledExactlyOnceWith(file);
+          expect(trigger).toHaveBeenCalledExactlyOnceWith(
+            'ir-highlights-changed',
+            NOTE
+          );
+        }
+      ),
+      { numRuns: 40 }
+    );
+  });
+
+  it("deletes a PDF's row by its path and leaves the file alone", async () => {
+    const PDF_PATH = 'papers/paper.pdf';
+    const { repo, vault, manager, getHighlights, trigger } = await wireUnimport(
+      { [PDF_PATH]: null }
+    );
+    seedArticle(repo, 'p', PDF_PATH, { reviews: 2 });
+    seedChild(repo, 'snippet', 's', 'p');
+    const file = vault.files.get(PDF_PATH)!;
+
+    const outcomes = await manager.unimportMany([file]);
+
+    expect(outcomes).toStrictEqual([{ file, status: 'unimported' }]);
+    expect(repo.rows('article')).toEqual([]);
+    expect(repo.rows('article_review')).toEqual([]);
+    expect(repo.rows('snippet')).toEqual([
+      expect.objectContaining({ id: 's', parent: null }),
+    ]);
+    expect(vault.processFrontMatter).not.toHaveBeenCalled();
+    expect(vault.paths()).toEqual([PDF_PATH]);
+    expect(getHighlights).toHaveBeenCalledExactlyOnceWith(file);
+    expect(trigger).toHaveBeenCalledExactlyOnceWith(
+      'ir-highlights-changed',
+      PDF_PATH
+    );
+  });
+
+  it("un-imports a note claiming no id at a live article's path, as a review fetch takes it", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        // Imported before notes carried ids, or its properties cleared
+        fc.constantFrom<unknown>(undefined, null, '', 0, false),
+        otherPropertiesArb,
+        async (irId, others) => {
+          const { repo, vault, manager } = await wireUnimport({
+            [NOTE]: {
+              ...others,
+              ...(irId === undefined ? {} : { 'ir-id': irId }),
+              tags: [ARTICLE_TAG],
+            },
+          });
+          seedArticle(repo, 'a', NOTE, { reviews: 1 });
+          seedArticle(repo, 'b', 'notes/Other.md', { reviews: 1 });
+          const file = vault.files.get(NOTE)!;
+
+          const outcomes = await manager.unimportMany([file]);
+
+          expect(outcomes).toStrictEqual([{ file, status: 'unimported' }]);
+          expect(repo.rows('article').map(({ id }) => id)).toEqual(['b']);
+          expect(repo.rows('article_review')).toEqual([
+            expect.objectContaining({ article_id: 'b' }),
+          ]);
+          expect(vault.frontmatterOf(NOTE)).toStrictEqual({ ...others });
+        }
+      ),
+      { numRuns: 20 }
+    );
+  });
+
+  it('skips a file that is no live article, changing nothing', async () => {
+    type Kind =
+      | 'plain'
+      | 'plain at a deleted row'
+      | 'non-string id'
+      | 'non-string id at a live row'
+      | 'snippet'
+      | 'card'
+      | 'deleted'
+      | 'orphan'
+      | 'copy'
+      | 'pdf without row'
+      | 'deleted pdf';
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<Kind>(
+          'plain',
+          'plain at a deleted row',
+          'non-string id',
+          'non-string id at a live row',
+          'snippet',
+          'card',
+          'deleted',
+          'orphan',
+          'copy',
+          'pdf without row',
+          'deleted pdf'
+        ),
+        fc.boolean(),
+        async (kind, withTags) => {
+          const pdf = kind.includes('pdf');
+          const path = pdf ? 'papers/p.pdf' : NOTE;
+          const tags = withTags ? { tags: [ARTICLE_TAG, ...TRIGGER_TAGS] } : {};
+          const frontmatter: Record<Kind, Record<string, unknown> | null> = {
+            plain: tags,
+            'plain at a deleted row': tags,
+            'non-string id': { ...tags, 'ir-id': 7 },
+            'non-string id at a live row': { ...tags, 'ir-id': 7 },
+            snippet: { ...tags, 'ir-id': 's' },
+            card: { ...tags, 'ir-id': 'c' },
+            deleted: { ...tags, 'ir-id': 'a' },
+            orphan: { ...tags, 'ir-id': 'gone' },
+            copy: { ...tags, 'ir-id': 'a' },
+            'pdf without row': null,
+            'deleted pdf': null,
+          };
+          const wired = await wireUnimport({ [path]: frontmatter[kind] });
+          const { repo, vault, manager } = wired;
+          // A live article elsewhere, whose id a snippet's or card's note
+          // can't stand for
+          seedArticle(repo, 's-parent', 'notes/Parent.md');
+          seedChild(repo, 'snippet', 's', 's-parent');
+          seedChild(repo, 'srs_card', 'c', 's-parent');
+          if (
+            kind === 'deleted' ||
+            kind === 'deleted pdf' ||
+            kind === 'plain at a deleted row'
+          ) {
+            seedArticle(repo, 'a', path, { deleted: true, reviews: 1 });
+          }
+          if (kind === 'non-string id at a live row') {
+            // A truthy id is a claim, and one no row's string id answers
+            seedArticle(repo, '7', path, { reviews: 1 });
+          }
+          if (kind === 'copy') {
+            // A copy of the article's note carries its id; the row, its
+            // history and its own note belong to the original alone
+            seedArticle(repo, 'a', 'notes/Original.md', { reviews: 1 });
+          }
+          const before = itemTables(repo);
+          const fmBefore = structuredClone(vault.frontmatterOf(path));
+          const file = vault.files.get(path)!;
+
+          const outcomes = await manager.unimportMany([file]);
+
+          expect(outcomes).toStrictEqual([
+            { file, status: 'skipped', reason: 'not an article' },
+          ]);
+          expect(itemTables(repo)).toStrictEqual(before);
+          expect(vault.frontmatterOf(path)).toStrictEqual(fmBefore);
+          expect(vault.processFrontMatter).not.toHaveBeenCalled();
+          expect(wired.forgetIf).not.toHaveBeenCalled();
+          expect(wired.getHighlights).not.toHaveBeenCalled();
+          expect(wired.trigger).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('carries on past a file that fails, reporting each in the order given', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc
+          .integer({ min: 1, max: 4 })
+          .chain((count) =>
+            fc.tuple(fc.constant(count), fc.nat({ max: count - 1 }))
+          ),
+        async ([count, failing]) => {
+          const paths = Array.from({ length: count }, (_, i) => `n/${i}.md`);
+          const wired = await wireUnimport(
+            Object.fromEntries(
+              paths.map((path, i) => [
+                path,
+                { 'ir-id': `id${i}`, tags: [ARTICLE_TAG] },
+              ])
+            )
+          );
+          const { repo, vault, manager, reviewManager } = wired;
+          paths.forEach((path, i) => seedArticle(repo, `id${i}`, path));
+          // The real delete, which the spy below stands in front of
+          const deleteRow: ReviewManager['deleteRow'] = (table, id) =>
+            ReviewManager.prototype.deleteRow.call(
+              reviewManager,
+              table,
+              id
+            ) as Promise<void>;
+          vi.spyOn(reviewManager, 'deleteRow').mockImplementation(
+            async (table, id) => {
+              if (id === `id${failing}`) throw new Error('disk full');
+              return deleteRow(table, id);
+            }
+          );
+          const files = paths.map((path) => vault.files.get(path)!);
+
+          const outcomes = await manager.unimportMany(files);
+
+          expect(outcomes).toStrictEqual(
+            files.map((file, i) =>
+              i === failing
+                ? { file, status: 'failed', reason: 'disk full' }
+                : { file, status: 'unimported' }
+            )
+          );
+          expect(repo.rows('article').map(({ id }) => id)).toEqual([
+            `id${failing}`,
+          ]);
+          expect(vault.frontmatterOf(paths[failing])).toStrictEqual({
+            'ir-id': `id${failing}`,
+            tags: [ARTICLE_TAG],
+          });
+          expect(wired.getHighlights.mock.calls).toEqual(
+            files.filter((_, i) => i !== failing).map((file) => [file])
+          );
+          expect(wired.logged).toHaveBeenCalledWith(new Error('disk full'));
+        }
+      ),
+      { numRuns: 20 }
+    );
+  });
+
+  it('fails a file whose properties cannot be cleared, its row gone already', async () => {
+    const { repo, vault, manager, getHighlights, trigger, logged } =
+      await wireUnimport({ [NOTE]: { 'ir-id': 'a', tags: [ARTICLE_TAG] } });
+    seedArticle(repo, 'a', NOTE, { reviews: 1 });
+    vault.fail('frontmatter');
+    const file = vault.files.get(NOTE)!;
+
+    const outcomes = await manager.unimportMany([file]);
+
+    expect(outcomes).toStrictEqual([
+      {
+        file,
+        status: 'failed',
+        reason: `its review history is gone, but its properties couldn't be cleared: frontmatter failed at ${NOTE}`,
+      },
+    ]);
+    expect(repo.rows('article')).toEqual([]);
+    expect(repo.rows('article_review')).toEqual([]);
+    // The orphan id the startup leftover notice deals with
+    expect(vault.frontmatterOf(NOTE)).toStrictEqual({
+      'ir-id': 'a',
+      tags: [ARTICLE_TAG],
+    });
+    expect(logged).toHaveBeenCalledWith(
+      new Error(`frontmatter failed at ${NOTE}`)
+    );
+    expect(getHighlights).toHaveBeenCalledExactlyOnceWith(file);
+    expect(trigger).toHaveBeenCalledExactlyOnceWith(
+      'ir-highlights-changed',
+      NOTE
+    );
+  });
+
+  it('fails a file while saving is paused, leaving it an article', async () => {
+    const { repo, vault, manager, getHighlights } = await wireUnimport({
+      [NOTE]: { 'ir-id': 'a', tags: [ARTICLE_TAG] },
+    });
+    seedArticle(repo, 'a', NOTE, { reviews: 1 });
+    repo.refuseWrites();
+    const file = vault.files.get(NOTE)!;
+
+    const outcomes = await manager.unimportMany([file]);
+
+    expect(outcomes).toStrictEqual([
+      { file, status: 'failed', reason: 'saving to the database is paused' },
+    ]);
+    expect(repo.rows('article').map(({ id }) => id)).toEqual(['a']);
+    expect(repo.rows('article_review')).toHaveLength(1);
+    expect(vault.processFrontMatter).not.toHaveBeenCalled();
+    expect(getHighlights).not.toHaveBeenCalled();
+  });
+
+  it("still says the highlights changed when they can't be reloaded", async () => {
+    const { repo, vault, manager, getHighlights, trigger, logged } =
+      await wireUnimport({ [NOTE]: { 'ir-id': 'a' } });
+    seedArticle(repo, 'a', NOTE);
+    const failure = new Error('no highlights');
+    getHighlights.mockRejectedValue(failure);
+    const file = vault.files.get(NOTE)!;
+
+    const outcomes = await manager.unimportMany([file]);
+
+    expect(outcomes).toStrictEqual([{ file, status: 'unimported' }]);
+    expect(logged).toHaveBeenCalledWith(failure);
+    expect(trigger).toHaveBeenCalledExactlyOnceWith(
+      'ir-highlights-changed',
+      NOTE
+    );
+  });
+
+  it('strips whichever trigger tags are configured, and only those', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.subarray(['auto-import', 'later', 'inbox']),
+        async (triggers) => {
+          const { repo, vault, reviewManager } = await wireUnimport(
+            {
+              [NOTE]: {
+                'ir-id': 'a',
+                tags: [ARTICLE_TAG, 'auto-import', 'later', 'inbox'],
+              },
+            },
+            triggers
+          );
+          seedArticle(repo, 'a', NOTE);
+          const file = vault.files.get(NOTE)!;
+
+          // Through the review manager, as every caller reaches it
+          await reviewManager.unimportArticles([file]);
+
+          const left = ['auto-import', 'later', 'inbox'].filter(
+            (tag) => !triggers.includes(tag)
+          );
+          expect(vault.frontmatterOf(NOTE)).toStrictEqual(
+            left.length > 0 ? { tags: left } : {}
+          );
+        }
+      )
     );
   });
 });

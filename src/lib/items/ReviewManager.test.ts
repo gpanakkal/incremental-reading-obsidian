@@ -5577,3 +5577,104 @@ describe('ReviewManager.liveItemIdAt', () => {
     );
   });
 });
+
+describe('ReviewManager.articleIdAt', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("answers at once with the live article a note's ir-id names, only at that article's own path", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('article', 'snippet', 'srs_card' as const),
+        fc.array(segmentArb, { minLength: 1, maxLength: 3 }),
+        fc.option(fc.oneof(fc.constantFrom('x', 'y'), fc.jsonValue()), {
+          nil: undefined,
+        }),
+        fc.boolean(),
+        fc.boolean(),
+        fc.boolean(),
+        (table, segments, irId, deleted, sameNote, occupied) => {
+          const reference = `${segments.join('/')}.md`;
+          const asked = sameNote ? reference : `other/${reference}`;
+          const notes: Record<string, Record<string, unknown> | null> = {
+            [asked]: irId === undefined ? null : { 'ir-id': irId },
+          };
+          // The row's own note still at its path, which the note asked about
+          // is then a copy of
+          if (!sameNote && occupied) notes[reference] = { 'ir-id': 'x' };
+          const { files, manager } = wireItem(table, reference, notes, deleted);
+
+          // A note claiming no id is the row's at its path, as a review
+          // fetch takes it; one claiming an id must claim the row's
+          const claimsRow = !irId || irId === 'x';
+          expect(manager.articleIdAt(files.get(asked)!)).toBe(
+            table === 'article' && !deleted && sameNote && claimsRow
+              ? 'x'
+              : null
+          );
+        }
+      )
+    );
+  });
+
+  it('knows a file with no frontmatter by its path alone', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('article', 'snippet', 'srs_card' as const),
+        fc.array(segmentArb, { minLength: 1, maxLength: 3 }),
+        fc.boolean(),
+        fc.boolean(),
+        (table, segments, deleted, samePath) => {
+          const reference = `${segments.join('/')}.pdf`;
+          const asked = samePath ? reference : `other/${reference}`;
+          const { files, manager } = wireItem(
+            table,
+            reference,
+            { [asked]: null },
+            deleted
+          );
+
+          expect(manager.articleIdAt(files.get(asked)!)).toBe(
+            table === 'article' && !deleted && samePath ? 'x' : null
+          );
+        }
+      )
+    );
+  });
+
+  it("takes no number for an id, even one that reads as a live article's", () => {
+    fc.assert(
+      // 0 claims no id at all, as any falsy `ir-id` does
+      fc.property(fc.integer().filter(Boolean), (id) => {
+        const { files, repo, manager } = wireItem('article', 'a.md', {
+          'b.md': { 'ir-id': id },
+        });
+        // SQLite would compare the number as text against the id column
+        repo.mutate(
+          `INSERT INTO article (id, reference, due, interval, priority)
+           VALUES ($1, 'b.md', 0, 86400000, 30)`,
+          [String(id)]
+        );
+
+        expect(manager.articleIdAt(files.get('b.md')!)).toBeNull();
+      })
+    );
+  });
+
+  it("answers null for a repository that can't answer at once, which a menu can't wait on", () => {
+    const vault = makeLinkVault({ 'articles/x.md': { 'ir-id': 'x' } });
+    const repo = makeRepo();
+    (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: 'x' }]);
+    const manager = new ReviewManager(makePlugin(vault.app), repo);
+
+    expect(manager.articleIdAt(vault.files.get('articles/x.md')!)).toBeNull();
+  });
+});

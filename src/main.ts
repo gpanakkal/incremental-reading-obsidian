@@ -104,6 +104,7 @@ import { SessionTracker } from './lib/SessionTracker';
 import { type IRPluginSettings, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, setPage, store } from './lib/store';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
+import { unimportArticle } from './lib/unimport-article';
 import {
   type WebPage,
   type WebViewerView,
@@ -1091,7 +1092,8 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   /**
-   * Offer to import a note as an article, wherever Obsidian raises a file menu.
+   * Offer to import a note as an article, or to un-import one that is,
+   * wherever Obsidian raises a file menu.
    *
    * Skipped in the review tab, whose menu {@link ReviewView.addFileMenuItems}
    * raises: the note showing there is already an item, so the entries would
@@ -1153,6 +1155,22 @@ export default class IncrementalReadingPlugin extends Plugin {
           .setSection('incremental-reading')
           .onClick(async (evt) => {
             await this.actions.goToContext(file, Keymap.isModEvent(evt));
+          });
+      });
+    }
+    // Asked of the database while the menu is built, which sql.js answers at
+    // once. A note's or PDF's own ⋮ "More options" menu raises this same
+    // `file-menu`, with source `more-options`, so the entry shows there too
+    // (undocumented, read from obsidian.asar 1.13: `EditableFileView`'s
+    // `onPaneMenu` raises it, and the markdown and PDF views extend that).
+    if (this.reviewManager.articleIdAt(file) !== null) {
+      menu.addItem((item) => {
+        item
+          .setTitle('Un-import article')
+          .setIcon('lucide-file-x')
+          .setSection('incremental-reading')
+          .onClick(() => {
+            void unimportArticle(this, file);
           });
       });
     }

@@ -62,7 +62,7 @@ import {
   compareStrings,
   getEndOfDay,
 } from '../utils';
-import { ArticleManager } from './ArticleManager';
+import { ArticleManager, liveArticleLookup } from './ArticleManager';
 import { type CardSelection, CardManager } from './CardManager';
 import { type FileMove, followSourceLinks } from './follow-source-links';
 import { SnippetManager } from './SnippetManager';
@@ -265,6 +265,32 @@ export default class ReviewManager {
       })),
       { priority, fixedIntervalDays: null, makeCopy }
     );
+  }
+
+  /**
+   * Make many articles plain files again, quietly: what came of each is
+   * returned for the caller to say (see `ArticleManager.unimportMany`)
+   */
+  async unimportArticles(files: readonly TFile[]): Promise<BulkOutcome[]> {
+    return this.articles.unimportMany(files);
+  }
+
+  /**
+   * The id of the live article `file` is, or `null` when it is none: a note
+   * by its cached `ir-id` and its path, a copy of an article's note being
+   * none, and a note claiming no id or a file with no frontmatter by its path
+   * (see `liveArticleLookup`).
+   *
+   * Answers at once, for a menu being built: sql.js answers a query at once,
+   * as in {@link isItemFileAt}. A repository that answers later can't be
+   * waited on there, so it gets `null`.
+   */
+  articleIdAt(file: TFile): string | null {
+    const lookup = liveArticleLookup(file, this.app);
+    if (!lookup) return null;
+    const rows = this.#repo.query(lookup.sql, lookup.params);
+    if (!Array.isArray(rows)) return null;
+    return (rows as unknown as { id: string }[])[0]?.id ?? null;
   }
 
   /**

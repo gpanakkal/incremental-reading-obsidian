@@ -37,6 +37,7 @@ import {
   type ResolvedLink,
 } from '#/lib/rebase-links';
 import { BulkMutateError } from '#/lib/repository/BulkMutateError';
+import { stripFrontmatterTags } from '#/lib/tags';
 import type {
   ArticleDisplay,
   ArticleRow,
@@ -58,7 +59,7 @@ import {
   getEndOfDay,
 } from '#/lib/utils';
 import type { WebPage } from '#/lib/web-viewer';
-import { Keymap, type TFile } from 'obsidian';
+import { Keymap, type App, type TFile } from 'obsidian';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
 import type { SnippetManager } from './SnippetManager';
@@ -1968,4 +1969,135 @@ export class ArticleManager extends ItemManager {
       );
     }
   }
+
+  // #region UN-IMPORT
+  /**
+   * Make each of `files` that is a live article a plain file again, one after
+   * another: its row goes for good, with its review history (see
+   * `ReviewManager.deleteRow`), and a note loses its `ir-id`, its article tag
+   * and every auto-import trigger tag, so nothing imports it again. The
+   * snippets and cards taken from it keep reviewing with no parent, until an
+   * import of the note adopts them again. A copy stays where it is, a plain
+   * note now.
+   *
+   * The row goes first: while it is there, the `ir-id` repairer would put
+   * back whatever the note lost. A note whose properties can't be cleared
+   * after is left with an orphan `ir-id`, the leftover the startup notice
+   * offers to deal with.
+   *
+   * Quiet, as {@link importMany} is: the caller says what came of the batch,
+   * and refreshes whatever shows the rows, which a hard delete never reports
+   * as changed. One file that fails never stops the rest.
+   * @returns what came of each file, in the order given: `unimported`,
+   * `skipped` for one that is no live article, or `failed` with a short reason
+   */
+  async unimportMany(files: readonly TFile[]): Promise<BulkOutcome[]> {
+    const outcomes: BulkOutcome[] = [];
+    for (const file of files) outcomes.push(await this.unimportQuietly(file));
+    return outcomes;
+  }
+
+  /** One file of {@link unimportMany}. */
+  private async unimportQuietly(file: TFile): Promise<BulkOutcome> {
+    try {
+      const lookup = liveArticleLookup(file, this.app);
+      const [row] = lookup
+        ? ((await this.repo.query(lookup.sql, lookup.params)) as {
+            id: string;
+          }[])
+        : [];
+      if (!row) return { file, status: 'skipped', reason: 'not an article' };
+      if (this.repo.writeRefusal()) {
+        return {
+          file,
+          status: 'failed',
+          reason: 'saving to the database is paused',
+        };
+      }
+      await this.plugin.reviewManager.deleteRow('article', row.id);
+    } catch (error) {
+      console.error(error);
+      return { file, status: 'failed', reason: errorReason(error) };
+    }
+
+    let outcome: BulkOutcome = { file, status: 'unimported' };
+    try {
+      // Does nothing to a file with no frontmatter, whose row was all of it
+      await Obsidian.updateFrontMatter(
+        file,
+        (frontmatter) => {
+          delete frontmatter['ir-id'];
+          stripFrontmatterTags(frontmatter, [
+            ARTICLE_TAG,
+            ...this.plugin.settings.autoImportTags,
+          ]);
+        },
+        this.app
+      );
+    } catch (error) {
+      console.error(error);
+      outcome = {
+        file,
+        status: 'failed',
+        reason: `its review history is gone, but its properties couldn't be cleared: ${errorReason(error)}`,
+      };
+    }
+    await this.refreshHighlights(file);
+    return outcome;
+  }
+
+  /**
+   * Reload the highlights of `file`, which is no article now: those of its
+   * snippets lose the parent they were found by.
+   */
+  private async refreshHighlights(file: TFile): Promise<void> {
+    try {
+      await this.plugin.reviewManager.snippets.getHighlights(file);
+    } catch (error) {
+      console.error(error);
+    }
+    this.app.workspace.trigger('ir-highlights-changed', file.path);
+  }
+  // #endregion
+}
+
+/**
+ * How to look up the live article row of `file`: for a note, the row its
+ * cached `ir-id` names, and only while that row's `reference` is the note's
+ * own path, as `ReviewManager.isItemFileAt` asks; for a note claiming no id,
+ * or a file with no frontmatter, a PDF say, the row at its path. `null` for a
+ * note whose `ir-id` is no string, which no row can answer to. A snippet's or
+ * card's id names no article row, so their notes have none.
+ *
+ * The path matters for a copy of an article's note, which carries the
+ * original's `ir-id`: un-importing the copy would otherwise delete the
+ * original's row and history, and leave the original an orphan `ir-id`. A
+ * row's `reference` follows its note on every rename, so the one cost is that
+ * the copy, itself no article, is offered no un-import.
+ *
+ * A note with no `ir-id` at a live row's path is that row's note, as a review
+ * fetch takes it (`ItemManager.reconcileNote`, which puts the id back): an
+ * article imported before notes carried ids, or one whose properties were
+ * cleared, or one the cache is still parsing. `reference` is unique, so no
+ * other note can be at that path to be mistaken for it.
+ */
+export function liveArticleLookup(
+  file: TFile,
+  app: App
+): { sql: string; params: string[] } | null {
+  // A file with no frontmatter has no cache entry to carry one. Read as
+  // `reconcileNote` reads it: anything falsy claims no id
+  const id: unknown =
+    app.metadataCache.getFileCache(file)?.frontmatter?.['ir-id'];
+  if (!id) {
+    return {
+      sql: 'SELECT id FROM article WHERE reference = $1 AND deleted = FALSE',
+      params: [file.path],
+    };
+  }
+  if (typeof id !== 'string') return null;
+  return {
+    sql: 'SELECT id FROM article WHERE id = $1 AND reference = $2 AND deleted = FALSE',
+    params: [id, file.path],
+  };
 }
