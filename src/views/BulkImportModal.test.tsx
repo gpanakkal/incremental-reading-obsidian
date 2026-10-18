@@ -352,6 +352,12 @@ describe('BulkImportModal', () => {
 
           const [row] = rows(modal);
           expect(nameOf(row)).toBe(basename);
+          // The full name is the tooltip, for a name cut off by its width
+          expect(
+            row
+              .querySelector('.ir-bulk-import-name')
+              ?.getAttribute('aria-label')
+          ).toBe(basename);
           expect(tagOf(row)).toBe(extension === 'md' ? undefined : extension);
           modal.close();
         }

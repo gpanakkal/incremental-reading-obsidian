@@ -78,7 +78,15 @@ function TreeRows({
                 checked={!unticked.has(entry.file)}
                 onChange={() => toggle(entry.file)}
               />
-              <span className="ir-bulk-import-name">{entry.file.basename}</span>
+              {/* Cut off with an ellipsis (styles.css); the full name is the
+                  tooltip. Obsidian draws its tooltip from `aria-label` on
+                  hover, and on a long press on mobile. */}
+              <span
+                className="ir-bulk-import-name"
+                aria-label={entry.file.basename}
+              >
+                {entry.file.basename}
+              </span>
               {/* Every type but Markdown is tagged, as in the Files view.
                   `nav-file-tag` is Obsidian's own (undocumented) class, and
                   its app.css rule is not scoped to the Files view. */}
@@ -92,7 +100,9 @@ function TreeRows({
         ) : (
           <li key={entry.path} className="ir-bulk-import-folder">
             <div className="ir-bulk-import-folder-title">
-              <span className="ir-bulk-import-name">{entry.name}</span>
+              <span className="ir-bulk-import-name" aria-label={entry.name}>
+                {entry.name}
+              </span>
               {entry.scanning && (
                 <LoadingSpinner label={`Finding files in ${entry.name}`} />
               )}

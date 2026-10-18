@@ -1561,9 +1561,12 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 
 /* A file's type, uppercase and faint at the row's end, comes from Obsidian's
    own `.nav-file-tag`; the name's end margin keeps it clear of a long name. */
+/* One line, cut off with an ellipsis; the full name is the tooltip */
 .ir-bulk-import-name {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .ir-bulk-import-row .ir-bulk-import-name {
