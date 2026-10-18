@@ -120,6 +120,169 @@ function inDataDirectory(path: string) {
 /** An order to list a folder's entries in: by name, digits as numbers. */
 const byName: ExplorerComparator = (a, b) =>
   a.name.localeCompare(b.name, undefined, { numeric: true });
+
+/** A generated folder: its files and its subfolders, each with a rank. */
+interface TreeSpec {
+  files: [FileSpec, number][];
+  folders: [string, number, TreeSpec][];
+}
+
+const fileNameOf = (spec: FileSpec) =>
+  spec.extension ? `${spec.name}.${spec.extension}` : spec.name;
+
+/**
+ * The contents of a folder at most `depth` levels deep, its subfolders now
+ * and then named as the data directory is, each entry ranked for an order
+ * with ties in it.
+ */
+function treeSpecArb(depth: number): fc.Arbitrary<TreeSpec> {
+  return fc
+    .record({
+      files: fc.uniqueArray(fc.tuple(fileSpecArb, fc.nat({ max: 3 })), {
+        selector: ([spec]) => fileNameOf(spec),
+        maxLength: 4,
+      }),
+      folders:
+        depth > 0
+          ? fc.uniqueArray(
+              fc.tuple(
+                fc.oneof(
+                  fc.constant(DATA_DIRECTORY),
+                  fc
+                    .string({ minLength: 1, maxLength: 6 })
+                    .filter((s) => !s.includes('/'))
+                ),
+                fc.nat({ max: 3 })
+              ),
+              { selector: ([name]) => name, maxLength: 3 }
+            )
+          : fc.constant<[string, number][]>([]),
+    })
+    .chain(({ files, folders }) =>
+      fc
+        .tuple<TreeSpec[]>(...folders.map(() => treeSpecArb(depth - 1)))
+        .map((subtrees) => ({
+          // A file and a folder can't share a name
+          files: files.filter(
+            ([spec]) => !folders.some(([name]) => name === fileNameOf(spec))
+          ),
+          folders: folders.map(
+            ([name, rank], i): [string, number, TreeSpec] => [
+              name,
+              rank,
+              subtrees[i],
+            ]
+          ),
+        }))
+    );
+}
+
+/**
+ * A vault folder at `path` filled from `spec`, its children held in an
+ * order of their own, and what the scan needs to know: each file's spec and
+ * each entry's rank.
+ */
+function makeTree(path: string, spec: TreeSpec) {
+  const specs = new Map<string, FileSpec>();
+  const rank = new Map<TAbstractFile, number>();
+  const build = (folder: TFolder, tree: TreeSpec) => {
+    const files = tree.files.map(([fileSpec, r]) => {
+      const file = makeFile(folder, fileSpec);
+      specs.set(file.path, fileSpec);
+      rank.set(file, r);
+      return file;
+    });
+    const folders = tree.folders.map(([name, r, sub]) => {
+      const child = makeFolder(
+        folder.path === '/' ? name : `${folder.path}/${name}`
+      );
+      child.parent = folder;
+      rank.set(child, r);
+      build(child, sub);
+      return child;
+    });
+    // Children come in whatever order the vault holds them in
+    folder.children = [...files, ...folders].reverse();
+  };
+  const root = makeFolder(path);
+  build(root, spec);
+  const rankOf = (entry: TAbstractFile) => rank.get(entry) ?? -1;
+  const order: ExplorerComparator = (a, b) => rankOf(a) - rankOf(b);
+  return { root, specs, order, rankOf };
+}
+
+/** `folder`'s children of one kind, as an explorer ordering by rank lists them. */
+function sorted<T extends TAbstractFile>(
+  folder: TFolder,
+  kind: abstract new () => T,
+  rankOf: (entry: TAbstractFile) => number
+): T[] {
+  const held = (entry: TAbstractFile) => folder.children.indexOf(entry);
+  return folder.children
+    .filter((child): child is T => child instanceof kind)
+    .sort((a, b) => rankOf(a) - rankOf(b) || held(a) - held(b));
+}
+
+/**
+ * What a scan of `root` should report, and every file it should check, in
+ * turn: with `subfolders`, `root`'s subfolders announced; its eligible files;
+ * `root` done; then, with `subfolders`, breadth-first, top to bottom, each
+ * folder's subfolders announced, its eligible files, and the folder done.
+ * The data directory is never entered.
+ */
+function expectedScan(
+  root: TFolder,
+  specs: ReadonlyMap<string, FileSpec>,
+  rankOf: (entry: TAbstractFile) => number,
+  subfolders: boolean
+) {
+  const events: ScanEvent[] = [];
+  const checked: TFile[] = [];
+  const enter = (folder: TFolder) => {
+    const subs = subfolders
+      ? sorted(folder, TFolder, rankOf).filter(
+          (sub) => !inDataDirectory(sub.path)
+        )
+      : [];
+    for (const sub of subs) {
+      events.push({ type: 'folder', path: sub.path, parent: folder.path });
+    }
+    for (const file of sorted(folder, TFile, rankOf)) {
+      const spec = specs.get(file.path)!;
+      if (!ruledOutCheaply(spec, folder.path)) checked.push(file);
+      if (eligible(spec, inDataDirectory(folder.path))) {
+        events.push({
+          type: 'file',
+          file,
+          parent: folder.path,
+          relativePath:
+            root.path === '/'
+              ? file.path
+              : file.path.slice(root.path.length + 1),
+        });
+      }
+    }
+    events.push({ type: 'folder-done', path: folder.path });
+    return subs;
+  };
+  const queue = enter(root);
+  for (const folder of queue) queue.push(...enter(folder));
+  return { events, checked };
+}
+
+/** An event as data to compare, its file by path. */
+const plain = (event: ScanEvent) =>
+  event.type === 'file' ? { ...event, file: event.file.path } : event;
+
+/** Whether `spec`, directly in `folderPath`, is ruled out before its content is read. */
+function ruledOutCheaply(spec: FileSpec, folderPath: string): boolean {
+  const extension = spec.extension.toLowerCase();
+  return (
+    inDataDirectory(folderPath) ||
+    !['md', 'pdf'].includes(extension) ||
+    (extension === 'md' ? typeof spec.irId === 'string' : spec.hasRow)
+  );
+}
 // #endregion
 
 beforeEach(() => {
@@ -224,7 +387,7 @@ describe('folderSource', () => {
     );
   });
 
-  it('yields every eligible direct file once, in the order given, and nothing else', async () => {
+  it('yields every eligible direct file once, in the order given, then the folder done, and nothing else', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.uniqueArray(fc.tuple(fileSpecArb, fc.nat({ max: 3 })), {
@@ -271,10 +434,14 @@ describe('folderSource', () => {
               eligible(bySpec.get(file.path)!, inDataDirectory(path))
             )
             .sort((a, b) => rankOf(a) - rankOf(b) || held(a) - held(b));
-          expect(events.every((e) => e.type === 'file')).toBe(true);
-          const yielded = events.flatMap((e) => (e.type === 'file' ? [e] : []));
-          expect(yielded.map((e) => e.file)).toEqual(expected);
+          // Then the folder is done; its subfolders go unmentioned
+          expect(events.at(-1)).toEqual({ type: 'folder-done', path });
+          const yielded = events.slice(0, -1);
+          expect(yielded.map((e) => (e.type === 'file' ? e.file : e))).toEqual(
+            expected
+          );
           for (const event of yielded) {
+            if (event.type !== 'file') continue;
             expect(event.parent).toBe(path);
             expect(event.relativePath).toBe(event.file.name);
           }
@@ -321,7 +488,7 @@ describe('folderSource', () => {
     ]);
   });
 
-  it('leaves out a file that cannot be read, still checking the rest', async () => {
+  it('leaves out a file that cannot be read, still checking the rest, and says so once', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.integer({ min: 1, max: 6 }),
@@ -351,66 +518,173 @@ describe('folderSource', () => {
             return NOTE_BYTES.slice().buffer;
           });
 
-          const events = await collect(
-            folderSource(folder, checks, byName).scan(
-              new AbortController().signal
-            )
-          );
+          const source = folderSource(folder, checks, byName);
+          // Again, the toggle switched, say: it isn't read nor logged again
+          for (let run = 0; run < 2; run++) {
+            const events = await collect(
+              source.scan(new AbortController().signal)
+            );
 
-          expect(
-            events.map((e) => (e.type === 'file' ? e.file : null))
-          ).toEqual(files.filter((file) => file !== unreadable));
+            expect(
+              events.flatMap((e) => (e.type === 'file' ? [e.file] : []))
+            ).toEqual(files.filter((file) => file !== unreadable));
+          }
+          expect(readBinary).toHaveBeenCalledTimes(count);
           expect(console.error).toHaveBeenCalledExactlyOnceWith(gone);
         }
       )
     );
   });
+});
 
-  it('stops once aborted, checking and yielding nothing more', async () => {
+describe('folderSource scan, subfolders included or not', () => {
+  it("offers subfolders, and reports, breadth-first and top to bottom in the order given, each folder's subfolders, then its eligible files, then it done; the data directory never entered", async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.integer({ min: 1, max: 6 }),
-        fc.nat({ max: 6 }),
+        treeSpecArb(3),
+        folderPathArb,
         fc.boolean(),
-        async (count, abortAfter, duringCheck) => {
-          const folder = makeFolder('notes');
-          const spec: FileSpec = {
-            name: '',
-            extension: 'md',
-            pdfBytes: false,
-            irId: undefined,
-            hasRow: false,
-          };
-          const files = Array.from({ length: count }, (_, i) =>
-            makeFile(folder, { ...spec, name: `n${i}` })
+        async (spec, path, subfolders) => {
+          const { root, specs, order, rankOf } = makeTree(path, spec);
+          const { checks } = makeChecks(specs);
+          const source = folderSource(root, checks, order);
+
+          const events = await collect(
+            source.scan(new AbortController().signal, { subfolders })
           );
-          folder.children = files;
-          const { checks, readBinary } = makeChecks(
-            new Map(files.map((f) => [f.path, spec]))
+
+          expect(source.canIncludeSubfolders).toBe(true);
+          expect(events.map(plain)).toEqual(
+            expectedScan(root, specs, rankOf, subfolders).events.map(plain)
           );
-          const controller = new AbortController();
-          const stopAt = Math.min(abortAfter, count);
-          if (duringCheck) {
-            // Aborted while the file after the last one kept is being read
-            readBinary.mockImplementation(async () => {
-              if (readBinary.mock.calls.length > stopAt) controller.abort();
-              return NOTE_BYTES.slice().buffer;
-            });
+        }
+      )
+    );
+  });
+
+  it("checks one file at a time, each folder's files before the next folder's, and nothing in the data directory", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        treeSpecArb(3),
+        folderPathArb,
+        fc.boolean(),
+        async (spec, path, subfolders) => {
+          const { root, specs, order, rankOf } = makeTree(path, spec);
+          const { checks, readBinary } = makeChecks(specs);
+          const read = readBinary.getMockImplementation()!;
+          let reading = 0;
+          let overlapped = false;
+          readBinary.mockImplementation(async (file: TFile) => {
+            reading += 1;
+            overlapped ||= reading > 1;
+            await Promise.resolve();
+            await Promise.resolve();
+            reading -= 1;
+            return read(file);
+          });
+
+          await collect(
+            folderSource(root, checks, order).scan(
+              new AbortController().signal,
+              { subfolders }
+            )
+          );
+
+          expect(overlapped).toBe(false);
+          expect(readBinary.mock.calls.map(([file]) => file)).toEqual(
+            expectedScan(root, specs, rankOf, subfolders).checked
+          );
+        }
+      )
+    );
+  });
+
+  it('run again, the toggle switched, reports as it would have, checking only files no run before it checked', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        treeSpecArb(3),
+        folderPathArb,
+        fc.array(fc.boolean(), { minLength: 2, maxLength: 3 }),
+        async (spec, path, runs) => {
+          const { root, specs, order, rankOf } = makeTree(path, spec);
+          const { checks, readBinary } = makeChecks(specs);
+          const source = folderSource(root, checks, order);
+          const checkedBefore = new Set<TFile>();
+
+          for (const subfolders of runs) {
+            readBinary.mockClear();
+            const events = await collect(
+              source.scan(new AbortController().signal, { subfolders })
+            );
+
+            const expected = expectedScan(root, specs, rankOf, subfolders);
+            expect(events.map(plain)).toEqual(expected.events.map(plain));
+            expect(readBinary.mock.calls.map(([file]) => file)).toEqual(
+              expected.checked.filter((file) => !checkedBefore.has(file))
+            );
+            for (const file of expected.checked) checkedBefore.add(file);
           }
+        }
+      )
+    );
+  });
+
+  it('stops once aborted, checking and reporting nothing more', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        treeSpecArb(3),
+        folderPathArb,
+        fc.boolean(),
+        fc.nat(),
+        fc.boolean(),
+        async (spec, path, subfolders, cut, duringCheck) => {
+          const { root, specs, order, rankOf } = makeTree(path, spec);
+          const { checks, readBinary } = makeChecks(specs);
+          const { events: expected, checked } = expectedScan(
+            root,
+            specs,
+            rankOf,
+            subfolders
+          );
+          // After that many reports, or while that file is read
+          const stopAt = cut % ((duringCheck ? checked : expected).length + 1);
+          const controller = new AbortController();
+          let readsWhenAborted: number | null = null;
+          const abort = () => {
+            controller.abort();
+            readsWhenAborted = readBinary.mock.calls.length;
+          };
+          const read = readBinary.getMockImplementation()!;
+          readBinary.mockImplementation(async (file: TFile) => {
+            // Aborted while the file after the last one kept is being read
+            if (duringCheck && readBinary.mock.calls.length === stopAt + 1) {
+              abort();
+            }
+            return read(file);
+          });
 
           const yielded: ScanEvent[] = [];
-          if (!duringCheck && stopAt === 0) controller.abort();
-          for await (const event of folderSource(folder, checks, byName).scan(
-            controller.signal
+          let afterAbort = 0;
+          if (!duringCheck && stopAt === 0) abort();
+          for await (const event of folderSource(root, checks, order).scan(
+            controller.signal,
+            { subfolders }
           )) {
+            if (controller.signal.aborted) afterAbort += 1;
             yielded.push(event);
-            if (!duringCheck && yielded.length === stopAt) controller.abort();
+            if (!duringCheck && yielded.length === stopAt) abort();
           }
 
-          expect(yielded).toHaveLength(stopAt);
-          expect(readBinary.mock.calls.length).toBe(
-            duringCheck ? Math.min(stopAt + 1, count) : stopAt
+          expect(afterAbort).toBe(0);
+          expect(yielded.map(plain)).toEqual(
+            expected.slice(0, yielded.length).map(plain)
           );
+          if (!duringCheck) {
+            expect(yielded).toHaveLength(Math.min(stopAt, expected.length));
+          }
+          if (readsWhenAborted !== null) {
+            expect(readBinary.mock.calls).toHaveLength(readsWhenAborted);
+          }
         }
       )
     );

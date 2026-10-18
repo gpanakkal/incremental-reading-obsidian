@@ -7,6 +7,7 @@ import type {
 } from '#/lib/bulk-import/types';
 import { MINIMUM_FIXED_REVIEW_INTERVAL } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
+import type { UiState } from '#/lib/plugin-data';
 import { DEFAULT_SETTINGS } from '#/lib/settings';
 import type IncrementalReadingPlugin from '#/main';
 // The mock the vitest config aliases `obsidian` to, imported by path so its
@@ -19,7 +20,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BulkImportModal } from './BulkImportModal';
 
 // #region HELPERS
-function makePlugin(copyOnImport = DEFAULT_SETTINGS.copyOnImport) {
+/**
+ * A plugin whose "Include subfolders" was last left `includeSubfolders`, and
+ * which remembers each change to it as the real one does.
+ */
+function makePlugin(
+  copyOnImport = DEFAULT_SETTINGS.copyOnImport,
+  { includeSubfolders = false } = {}
+) {
   const importArticles = vi.fn(
     async (
       entries: { file: TFile }[],
@@ -27,12 +35,19 @@ function makePlugin(copyOnImport = DEFAULT_SETTINGS.copyOnImport) {
     ): Promise<BulkOutcome[]> =>
       entries.map(({ file }) => ({ file, status: 'imported' }))
   );
+  const ui: UiState = { folderImportIncludeSubfolders: includeSubfolders };
+  const saveUiState = vi.fn((change: Partial<UiState>) => {
+    Object.assign(ui, change);
+    return Promise.resolve();
+  });
   const plugin = {
     app: {},
     settings: { ...DEFAULT_SETTINGS, copyOnImport },
+    data: { ui },
+    saveUiState,
     reviewManager: { importArticles },
   } as unknown as IncrementalReadingPlugin;
-  return { plugin, importArticles };
+  return { plugin, importArticles, saveUiState };
 }
 
 function makeFile(name: string, folder = 'notes'): TFile {
@@ -54,41 +69,65 @@ async function settle() {
 
 /**
  * A source whose scan yields what the test sends it, when it sends it, and
- * ends when told to.
+ * ends when told to; each run of it, the toggle having changed, takes what is
+ * sent from then on. With `deeper`, it offers to include subfolders.
  */
-function makeSource(title = 'notes') {
-  const pending: (ScanEvent | 'end')[] = [];
-  let wake: (() => void) | null = null;
-  let signal: AbortSignal | null = null;
+function makeSource(title = 'notes', { deeper = false } = {}) {
+  let queue: (ScanEvent | 'end')[] = [];
+  const waiting = new Set<() => void>();
+  /** Each run, oldest first: its signal, and whether it went deeper. */
+  const runs: { signal: AbortSignal; subfolders: boolean | undefined }[] = [];
   const source: CandidateSource = {
     title,
-    async *scan(given) {
-      signal = given;
+    ...(deeper && { canIncludeSubfolders: true }),
+    async *scan(signal, options) {
+      runs.push({ signal, subfolders: options?.subfolders });
+      const mine: (ScanEvent | 'end')[] = (queue = []);
       for (;;) {
-        while (pending.length === 0) {
-          await new Promise<void>((resolve) => (wake = resolve));
+        while (mine.length === 0) {
+          await new Promise<void>((resolve) => waiting.add(resolve));
         }
-        const next = pending.shift()!;
+        const next = mine.shift()!;
         if (next === 'end') return;
         yield next;
       }
     },
   };
   const send = async (next: ScanEvent | 'end') => {
-    pending.push(next);
-    wake?.();
-    wake = null;
+    queue.push(next);
+    for (const wake of waiting) wake();
+    waiting.clear();
     await settle();
   };
+  const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/'));
   return {
     source,
-    /** Yield `file` as a row, `relativePath` from where the source starts. */
+    /** Yield `file` as a top-level row, `relativePath` from where it starts. */
     add: (file: TFile, relativePath = file.name) =>
       send({ type: 'file', file, parent: 'notes', relativePath }),
     end: () => send('end'),
     /** Yield `event` as it is. */
     send,
-    signal: () => signal,
+    signal: () => runs[0]?.signal ?? null,
+    runs,
+    /** Announce the folder at `path`, under the folder its path names. */
+    folder: (path: string) =>
+      send({ type: 'folder', path, parent: parentOf(path) }),
+    /** Yield `file`, or a new file at a path, a row in its path's folder. */
+    file: (file: TFile | string) => {
+      const found =
+        typeof file === 'string'
+          ? makeFile(file.slice(file.lastIndexOf('/') + 1), parentOf(file))
+          : file;
+      return send({
+        type: 'file',
+        file: found,
+        parent: parentOf(found.path),
+        relativePath: found.path.slice('notes/'.length),
+      });
+    },
+    /** Report the folder at `path` done; `notes` is where the source starts. */
+    done: (path: string) => send({ type: 'folder-done', path }),
   };
 }
 
@@ -109,6 +148,15 @@ function openModal(
 
 function rows(modal: BulkImportModal) {
   return [...modal.contentEl.querySelectorAll('.ir-bulk-import-row')];
+}
+
+/** The name a row shows, and the type tag after it, if any. */
+function nameOf(row: Element) {
+  return row.querySelector('.ir-bulk-import-name')?.textContent;
+}
+
+function tagOf(row: Element) {
+  return row.querySelector('.ir-bulk-import-tag')?.textContent;
 }
 
 function rowBox(modal: BulkImportModal, index: number) {
@@ -174,6 +222,49 @@ async function click(el: HTMLElement) {
     el.click();
   });
 }
+function subfolderToggle(modal: BulkImportModal) {
+  const label = [...modal.contentEl.querySelectorAll('label')].find((el) =>
+    el.textContent?.includes('Include subfolders')
+  );
+  return label?.querySelector('input') ?? null;
+}
+
+/**
+ * The list as text, a line a row, indented two spaces a level: a file by
+ * its name and the path it shows, a folder by its name, with `…` after it
+ * while its spinner shows.
+ */
+function outline(modal: BulkImportModal): string[] {
+  const lines: string[] = [];
+  const walk = (list: Element, depth: number) => {
+    for (const item of list.children) {
+      const indent = '  '.repeat(depth);
+      if (item.classList.contains('ir-bulk-import-row')) {
+        const name = item.querySelector('.ir-bulk-import-name')?.textContent;
+        const tag = item.querySelector('.ir-bulk-import-tag')?.textContent;
+        lines.push(`${indent}${name}${tag === undefined ? '' : ` [${tag}]`}`);
+      } else if (item.classList.contains('ir-bulk-import-folder')) {
+        const title = item.querySelector(
+          ':scope > .ir-bulk-import-folder-title'
+        )!;
+        const name = title.firstElementChild!;
+        const spinning = title.querySelector('.ir-loading') !== null;
+        // The spinner comes after the name
+        if (spinning)
+          expect(name.nextElementSibling).toBe(
+            title.querySelector('.ir-loading')
+          );
+        lines.push(`${indent}${name.textContent}${spinning ? ' …' : ''}`);
+        const children = item.querySelector(
+          ':scope > .ir-bulk-import-children'
+        );
+        if (children) walk(children, depth + 1);
+      }
+    }
+  };
+  walk(modal.contentEl.querySelector('.ir-bulk-import-list')!, 0);
+  return lines;
+}
 // #endregion
 
 beforeEach(() => {
@@ -214,8 +305,8 @@ describe('BulkImportModal', () => {
     const names = ['b.md', 'a.pdf', 'c.md'];
     for (const [i, name] of names.entries()) {
       await scan.add(makeFile(name));
-      expect(rows(modal).map((row) => row.textContent)).toEqual(
-        names.slice(0, i + 1)
+      expect(rows(modal).map(nameOf)).toEqual(
+        names.slice(0, i + 1).map((n) => n.slice(0, n.lastIndexOf('.')))
       );
       expect(rowBox(modal, i).checked).toBe(true);
       // The spinner trails the rows
@@ -230,10 +321,11 @@ describe('BulkImportModal', () => {
     await scan.end();
     expect(spinner(modal)).toBeNull();
     expect(rows(modal)).toHaveLength(names.length);
+    expect(emptyState(modal)).toBeNull();
     modal.close();
   });
 
-  it('shows a deeper file by its name and its path from where the source starts', async () => {
+  it('shows a deeper file by its name alone, its folder row saying where it is', async () => {
     const scan = makeSource();
     const modal = openModal(makePlugin().plugin, scan.source);
     const deep = makeFile('a.md', 'notes/sub');
@@ -241,12 +333,32 @@ describe('BulkImportModal', () => {
     await scan.add(deep, 'sub/a.md');
 
     const row = rows(modal)[0];
-    expect(row.querySelector('.ir-bulk-import-name')?.textContent).toBe('a.md');
-    expect(row.querySelector('.ir-bulk-import-path')?.textContent).toBe(
-      'sub/a.md'
-    );
+    expect(nameOf(row)).toBe('a');
+    expect(row.textContent).toBe('a');
     modal.close();
   });
+
+  it('names a file without its extension, tagging every type but Markdown with it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ minLength: 1 }).filter((s) => !s.startsWith('.')),
+        fc.oneof(fc.constant('md'), fc.stringMatching(/^[a-zA-Z0-9]{1,5}$/)),
+        async (basename, extension) => {
+          document.body.replaceChildren();
+          const scan = makeSource();
+          const modal = openModal(makePlugin().plugin, scan.source);
+
+          await scan.add(makeFile(`${basename}.${extension}`));
+
+          const [row] = rows(modal);
+          expect(nameOf(row)).toBe(basename);
+          expect(tagOf(row)).toBe(extension === 'md' ? undefined : extension);
+          modal.close();
+        }
+      ),
+      { numRuns: 25 }
+    );
+  }, 20_000);
 
   it('says so when the scan finds nothing', async () => {
     const scan = makeSource();
@@ -527,20 +639,6 @@ describe('BulkImportModal', () => {
     modal.close();
   });
 
-  it('lists files only, whatever else the scan reports', async () => {
-    // Folders are for the tree the subfolder scan fills in
-    const scan = makeSource();
-    const modal = openModal(makePlugin().plugin, scan.source);
-
-    await scan.send({ type: 'folder', path: 'notes/sub', parent: 'notes' });
-    await scan.send({ type: 'folder-done', path: 'notes/sub' });
-    await scan.add(makeFile('a.md'));
-
-    expect(rows(modal).map((row) => row.textContent)).toEqual(['a.md']);
-    expect(selectedCount(modal)).toBe(1);
-    modal.close();
-  });
-
   it('imports nothing when cancelled, and stops the scan once closed', async () => {
     for (const how of ['cancel', 'escape'] as const) {
       const { plugin, importArticles } = makePlugin();
@@ -576,5 +674,474 @@ describe('BulkImportModal', () => {
     expect(spinner(modal)).toBeNull();
     expect(error).toHaveBeenCalled();
     modal.close();
+  });
+});
+
+describe('BulkImportModal: Include subfolders', () => {
+  /** A modal whose source can go deeper, its own file found and done. */
+  async function openDeeper(plugin = makePlugin().plugin) {
+    const scan = makeSource('notes', { deeper: true });
+    const modal = openModal(plugin, scan.source);
+    const top = makeFile('top.md');
+    await scan.add(top);
+    await scan.done('notes');
+    await scan.end();
+    return { scan, modal, top };
+  }
+
+  async function setToggle(modal: BulkImportModal, on: boolean) {
+    const toggle = subfolderToggle(modal)!;
+    if (toggle.checked !== on) await click(toggle);
+    await settle();
+  }
+
+  const toggleLook = (modal: BulkImportModal) =>
+    subfolderToggle(modal)?.closest('.ir-toggle .checkbox-container')
+      ?.classList;
+
+  /** Whether the list ends in the top level's spinner. */
+  const trailingSpinner = (modal: BulkImportModal) =>
+    modal.contentEl.querySelector(
+      '.ir-bulk-import-list > li:last-child > .ir-loading'
+    ) !== null;
+
+  it('is offered, switched off, only for a source that can go deeper, which then scans no subfolder', async () => {
+    const flat = makeSource();
+    const flatModal = openModal(makePlugin().plugin, flat.source);
+    await flat.end();
+    expect(subfolderToggle(flatModal)).toBeNull();
+    flatModal.close();
+
+    const { scan, modal } = await openDeeper();
+    expect(subfolderToggle(modal)?.checked).toBe(false);
+    expect(toggleLook(modal)).not.toContain('is-enabled');
+    expect(scan.runs.map((run) => run.subfolders)).toEqual([false]);
+    modal.close();
+  });
+
+  it("switched on, scans afresh with subfolders: each folder's subfolders above its files, empty with a spinner after the name until scanned", async () => {
+    const { scan, modal, top } = await openDeeper();
+
+    await setToggle(modal, true);
+    expect(subfolderToggle(modal)?.checked).toBe(true);
+    expect(toggleLook(modal)).toContain('is-enabled');
+    expect(scan.runs.map((run) => run.subfolders)).toEqual([false, true]);
+    expect(scan.runs[0].signal.aborted).toBe(true);
+    await scan.folder('notes/Topic');
+    await scan.folder('notes/Other');
+    expect(outline(modal)).toEqual(['Topic …', 'Other …']);
+    expect(
+      modal.contentEl
+        .querySelector('.ir-bulk-import-folder .ir-loading')
+        ?.getAttribute('aria-label')
+    ).toContain('Topic');
+    await scan.file(top);
+    // The top level's own spinner trails the list until its files are in
+    expect(trailingSpinner(modal)).toBe(true);
+    await scan.done('notes');
+    expect(trailingSpinner(modal)).toBe(false);
+    expect(outline(modal)).toEqual(['Topic …', 'Other …', 'top']);
+
+    await scan.folder('notes/Topic/Sub');
+    await scan.file('notes/Topic/paper.pdf');
+    await scan.done('notes/Topic');
+    expect(outline(modal)).toEqual([
+      'Topic',
+      '  Sub …',
+      '  paper [pdf]',
+      'Other …',
+      'top',
+    ]);
+
+    await scan.file('notes/Other/b.md');
+    await scan.done('notes/Other');
+    await scan.file('notes/Topic/Sub/deep.md');
+    await scan.done('notes/Topic/Sub');
+    await scan.end();
+    expect(outline(modal)).toEqual([
+      'Topic',
+      '  Sub',
+      '    deep',
+      '  paper [pdf]',
+      'Other',
+      '  b',
+      'top',
+    ]);
+    expect(selectedCount(modal)).toBe(4);
+    expect(spinner(modal)).toBeNull();
+    modal.close();
+  });
+
+  it('switched on while the top level is still being scanned, starts over with subfolders, saying nothing more of the run it stopped', async () => {
+    const scan = makeSource('notes', { deeper: true });
+    const modal = openModal(makePlugin().plugin, scan.source);
+    await scan.add(makeFile('top.md'));
+
+    await setToggle(modal, true);
+
+    expect(scan.runs.map((run) => run.subfolders)).toEqual([false, true]);
+    expect(scan.runs[0].signal.aborted).toBe(true);
+    expect(scan.runs[1].signal.aborted).toBe(false);
+    expect(outline(modal)).toEqual([]);
+    expect(trailingSpinner(modal)).toBe(true);
+    await scan.folder('notes/Topic');
+    await scan.add(makeFile('top.md'));
+    await scan.add(makeFile('later.md'));
+    expect(outline(modal)).toEqual(['Topic …', 'top', 'later']);
+    expect(trailingSpinner(modal)).toBe(true);
+    modal.close();
+  });
+
+  it('lists nothing more from a run the toggle stopped, nor takes its end for the end of the scan', async () => {
+    const top = makeFile('top.md');
+    const late = makeFile('late.md');
+    let release = () => {};
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const fresh = makeSource('notes', { deeper: true });
+    let runs = 0;
+    const source: CandidateSource = {
+      title: 'notes',
+      canIncludeSubfolders: true,
+      async *scan(signal, options) {
+        if ((runs += 1) > 1) {
+          yield* fresh.source.scan(signal, options);
+          return;
+        }
+        // Deaf to its signal
+        yield {
+          type: 'file',
+          file: top,
+          parent: 'notes',
+          relativePath: 'top.md',
+        };
+        await released;
+        yield {
+          type: 'file',
+          file: late,
+          parent: 'notes',
+          relativePath: 'late.md',
+        };
+      },
+    };
+    const modal = openModal(makePlugin().plugin, source);
+    await settle();
+    expect(outline(modal)).toEqual(['top']);
+
+    await click(subfolderToggle(modal)!);
+    release();
+    await settle();
+
+    expect(outline(modal)).toEqual([]);
+    expect(trailingSpinner(modal)).toBe(true);
+    expect(emptyState(modal)).toBeNull();
+    await fresh.end();
+    expect(emptyState(modal)).not.toBeNull();
+    modal.close();
+  });
+
+  it('keeps a file unticked across the toggle', async () => {
+    const { scan, modal, top } = await openDeeper();
+    await click(rowBox(modal, 0));
+    expect(selectedCount(modal)).toBe(0);
+
+    await setToggle(modal, true);
+    await scan.folder('notes/Topic');
+    await scan.file(top);
+    await scan.file('notes/Topic/a.md');
+
+    expect(outline(modal)).toEqual(['Topic …', '  a', 'top']);
+    expect(rowBox(modal, 0).checked).toBe(true);
+    expect(rowBox(modal, 1).checked).toBe(false);
+    expect(selectedCount(modal)).toBe(1);
+    modal.close();
+  });
+
+  it('removes a subfolder with nothing to import once it and everything under it is scanned, never while some of it is still to come', async () => {
+    const { scan, modal, top } = await openDeeper();
+    await setToggle(modal, true);
+    await scan.folder('notes/Empty');
+    await scan.folder('notes/Kept');
+    await scan.file(top);
+    await scan.done('notes');
+
+    await scan.folder('notes/Empty/Deeper');
+    await scan.done('notes/Empty');
+    // What is under it could still hold something
+    expect(outline(modal)).toEqual(['Empty', '  Deeper …', 'Kept …', 'top']);
+
+    await scan.file('notes/Kept/a.md');
+    await scan.done('notes/Kept');
+    await scan.done('notes/Empty/Deeper');
+    expect(outline(modal)).toEqual(['Kept', '  a', 'top']);
+    modal.close();
+  });
+
+  it('switched off, scans afresh without subfolders, dropping them from the list, the count and the import', async () => {
+    const { plugin, importArticles } = makePlugin();
+    const { scan, modal, top } = await openDeeper(plugin);
+    await setToggle(modal, true);
+    await scan.folder('notes/Topic');
+    await scan.file(top);
+    await scan.done('notes');
+    await scan.file('notes/Topic/a.md');
+    expect(selectedCount(modal)).toBe(2);
+
+    await setToggle(modal, false);
+
+    expect(scan.runs.map((run) => run.subfolders)).toEqual([
+      false,
+      true,
+      false,
+    ]);
+    expect(scan.runs[1].signal.aborted).toBe(true);
+    expect(outline(modal)).toEqual([]);
+    expect(selectedCount(modal)).toBe(0);
+    await scan.file(top);
+    await scan.done('notes');
+    await scan.end();
+    expect(outline(modal)).toEqual(['top']);
+    expect(selectedCount(modal)).toBe(1);
+
+    await click(confirmButton(modal));
+    await modal.closed;
+    expect(importArticles).toHaveBeenCalledExactlyOnceWith(
+      [{ file: top }],
+      expect.anything()
+    );
+  });
+
+  it('stops the scan once closed', async () => {
+    const { scan, modal } = await openDeeper();
+    await setToggle(modal, true);
+    await scan.folder('notes/Topic');
+
+    modal.close();
+    await modal.closed;
+
+    expect(scan.runs[1].signal.aborted).toBe(true);
+  });
+
+  it('says there is nothing to import only once the scan has ended, subfolders and all', async () => {
+    const scan = makeSource('notes', { deeper: true });
+    const modal = openModal(makePlugin().plugin, scan.source);
+    await setToggle(modal, true);
+    await scan.folder('notes/Empty');
+    await scan.done('notes');
+    expect(emptyState(modal)).toBeNull();
+
+    await scan.done('notes/Empty');
+    expect(outline(modal)).toEqual([]);
+    expect(emptyState(modal)).toBeNull();
+
+    await scan.end();
+    expect(emptyState(modal)).not.toBeNull();
+    modal.close();
+  });
+
+  it('stops every spinner and keeps the rows it has when the scan fails', async () => {
+    const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
+    const file = makeFile('a.md', 'notes/Topic');
+    const failure = new Error('gone');
+    const source: CandidateSource = {
+      title: 'notes',
+      canIncludeSubfolders: true,
+      async *scan(_signal, options) {
+        if (!options?.subfolders) return;
+        yield { type: 'folder', path: 'notes/Topic', parent: 'notes' };
+        yield { type: 'folder', path: 'notes/Empty', parent: 'notes' };
+        yield {
+          type: 'file',
+          file,
+          parent: 'notes/Topic',
+          relativePath: 'Topic/a.md',
+        };
+        throw failure;
+      },
+    };
+    const modal = openModal(makePlugin().plugin, source);
+    await settle();
+    await setToggle(modal, true);
+    await settle();
+
+    expect(outline(modal)).toEqual(['Topic', '  a']);
+    expect(spinner(modal)).toBeNull();
+    expect(selectedCount(modal)).toBe(1);
+    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
+    modal.close();
+  });
+
+  it('counts the ticked files of the whole tree, and imports exactly them, top to bottom', async () => {
+    /** The folder's subfolders: how many files each holds, and its one subfolder. */
+    const foldersArb = fc.array(
+      fc.record({
+        files: fc.integer({ min: 0, max: 2 }),
+        deeper: fc.integer({ min: 0, max: 2 }),
+      }),
+      { maxLength: 3 }
+    );
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 0, max: 2 }),
+        foldersArb,
+        fc.array(fc.nat({ max: 12 }), { maxLength: 6 }),
+        async (topCount, folders, clicks) => {
+          document.body.replaceChildren();
+          const { plugin, importArticles } = makePlugin();
+          const scan = makeSource('notes', { deeper: true });
+          const modal = openModal(plugin, scan.source);
+          await setToggle(modal, true);
+          // As a folder source reports: each folder's subfolders, its files,
+          // it done; breadth-first
+          for (const [i] of folders.entries()) {
+            await scan.folder(`notes/d${i}`);
+          }
+          for (let i = 0; i < topCount; i++) {
+            await scan.add(makeFile(`t${i}.md`));
+          }
+          await scan.done('notes');
+          for (const [i, { files, deeper }] of folders.entries()) {
+            if (deeper > 0) await scan.folder(`notes/d${i}/s`);
+            for (let j = 0; j < files; j++) {
+              await scan.file(`notes/d${i}/f${j}.md`);
+            }
+            await scan.done(`notes/d${i}`);
+          }
+          for (const [i, { deeper }] of folders.entries()) {
+            if (deeper === 0) continue;
+            for (let j = 0; j < deeper; j++) {
+              await scan.file(`notes/d${i}/s/g${j}.md`);
+            }
+            await scan.done(`notes/d${i}/s`);
+          }
+          await scan.end();
+
+          // Top to bottom: each subfolder's subfolder's files, then its own,
+          // then the folder's own files
+          const shown = [
+            ...folders.flatMap(({ files, deeper }, i) => [
+              ...Array.from(
+                { length: deeper },
+                (_, j) => `notes/d${i}/s/g${j}.md`
+              ),
+              ...Array.from(
+                { length: files },
+                (_, j) => `notes/d${i}/f${j}.md`
+              ),
+            ]),
+            ...Array.from({ length: topCount }, (_, i) => `notes/t${i}.md`),
+          ];
+          const ticked = shown.map(() => true);
+          for (const index of clicks.filter((i) => i < shown.length)) {
+            await click(rowBox(modal, index));
+            ticked[index] = !ticked[index];
+          }
+          const chosen = shown.filter((_, i) => ticked[i]);
+          expect(selectedCount(modal)).toBe(chosen.length);
+
+          await click(confirmButton(modal));
+          await settle();
+
+          if (chosen.length === 0) {
+            expect(importArticles).not.toHaveBeenCalled();
+          } else {
+            expect(
+              importArticles.mock.calls[0][0].map(({ file }) => file.path)
+            ).toEqual(chosen);
+          }
+          modal.close();
+        }
+      ),
+      { numRuns: 15 }
+    );
+    // Seconds alone; more under a full parallel run
+  }, 30_000);
+});
+
+describe('BulkImportModal: remembering Include subfolders', () => {
+  it('opens on and already scanning subfolders when last left on', async () => {
+    const { plugin, saveUiState } = makePlugin(undefined, {
+      includeSubfolders: true,
+    });
+    const scan = makeSource('notes', { deeper: true });
+    const modal = openModal(plugin, scan.source);
+
+    expect(subfolderToggle(modal)?.checked).toBe(true);
+    expect(
+      subfolderToggle(modal)?.closest('.checkbox-container')?.classList
+    ).toContain('is-enabled');
+    expect(scan.runs.map((run) => run.subfolders)).toEqual([true]);
+    await scan.folder('notes/Topic');
+    await scan.file('notes/Topic/deep.md');
+    await scan.done('notes/Topic');
+    await scan.done('notes');
+    await scan.end();
+    expect(outline(modal)).toEqual(['Topic', '  deep']);
+    // Opening is no change to remember
+    expect(saveUiState).not.toHaveBeenCalled();
+    modal.close();
+  });
+
+  it('opens off, scanning the top level alone, when last left off', async () => {
+    const { plugin } = makePlugin(undefined, { includeSubfolders: false });
+    const scan = makeSource('notes', { deeper: true });
+    const modal = openModal(plugin, scan.source);
+    await scan.end();
+
+    expect(subfolderToggle(modal)?.checked).toBe(false);
+    expect(scan.runs.map((run) => run.subfolders)).toEqual([false]);
+    modal.close();
+  });
+
+  it('scans no subfolder of a source that cannot go deeper, whatever was last left', () => {
+    fc.assert(
+      fc.property(fc.boolean(), (includeSubfolders) => {
+        const scan = makeSource();
+        const modal = openModal(
+          makePlugin(undefined, { includeSubfolders }).plugin,
+          scan.source
+        );
+
+        expect(subfolderToggle(modal)).toBeNull();
+        expect(scan.runs.map((run) => run.subfolders)).toEqual([false]);
+        modal.close();
+      })
+    );
+  });
+
+  it('remembers each switch as it is made, and the next dialog opens the way the last was left', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.integer({ min: 1, max: 4 }),
+        async (startOn, clicks) => {
+          const { plugin, saveUiState } = makePlugin(undefined, {
+            includeSubfolders: startOn,
+          });
+          const scan = makeSource('notes', { deeper: true });
+          const modal = openModal(plugin, scan.source);
+          let on = startOn;
+          const saved: boolean[] = [];
+          for (let i = 0; i < clicks; i++) {
+            await click(subfolderToggle(modal)!);
+            on = !on;
+            saved.push(on);
+            expect(saveUiState).toHaveBeenLastCalledWith({
+              folderImportIncludeSubfolders: on,
+            });
+          }
+          expect(saveUiState.mock.calls.map(([change]) => change)).toEqual(
+            saved.map((value) => ({ folderImportIncludeSubfolders: value }))
+          );
+          modal.close();
+
+          const next = makeSource('notes', { deeper: true });
+          const reopened = openModal(plugin, next.source);
+          expect(subfolderToggle(reopened)?.checked).toBe(on);
+          expect(next.runs.map((run) => run.subfolders)).toEqual([on]);
+          reopened.close();
+        }
+      ),
+      { numRuns: 20 }
+    );
   });
 });

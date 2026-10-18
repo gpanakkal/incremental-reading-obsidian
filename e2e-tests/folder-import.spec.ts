@@ -33,6 +33,9 @@ const SOURCE_NOTES = [
  */
 const NEWEST_FIRST = [SOURCE_NOTES[1], SOURCE_NOTES[0], SOURCE_NOTES[2]];
 
+/** `name` as the import dialog shows it, without its extension. */
+const withoutExtension = (name: string) => name.replace(/\.[^.]*$/, '');
+
 /**
  * What setting the explorer's order reaches. Unofficial: `window.app`, and
  * the explorer view's `setSortOrder`, which its sort menu calls.
@@ -108,6 +111,53 @@ async function chooseFromMenu(page: Page, target: Locator, title: string) {
   await expect(menu).toHaveCount(0);
 }
 
+/** A folder of nested files, two levels deep, built by `buildNested`. */
+const NESTED = 'nested';
+
+/**
+ * Fill `NESTED` with notes, a PDF and files that can't be imported, some
+ * folders deep, through the vault so Obsidian knows of them at once.
+ * Unofficial: `window.app`.
+ */
+const buildNested = (page: Page) =>
+  page.evaluate(
+    async ({ root, pdf }) => {
+      type Vault = {
+        createFolder(path: string): Promise<unknown>;
+        create(path: string, data: string): Promise<unknown>;
+        copy(file: unknown, path: string): Promise<unknown>;
+        getFileByPath(path: string): unknown;
+      };
+      const { vault } = (window as unknown as { app: { vault: Vault } }).app;
+      for (const folder of ['', '/Alpha', '/Alpha/Deep', '/Beta', '/Empty']) {
+        await vault.createFolder(`${root}${folder}`);
+      }
+      const notes = [
+        'root.md',
+        'Alpha/a1.md',
+        'Alpha/Deep/d1.md',
+        'Beta/b1.md',
+      ];
+      for (const note of notes) {
+        await vault.create(
+          `${root}/${note}`,
+          `# ${note}
+
+Some text.`
+        );
+      }
+      // Not importable: listed nowhere, and a folder of only these neither
+      await vault.create(`${root}/Alpha/data.json`, '{}');
+      await vault.create(`${root}/Empty/readme.txt`, 'Nothing here.');
+      await vault.copy(vault.getFileByPath(pdf), `${root}/Alpha/paper.pdf`);
+    },
+    { root: NESTED, pdf: 'testing/PDF fixture.pdf' }
+  );
+
+/** The bulk import dialog. */
+const bulkModal = (page: Page) =>
+  page.locator('.modal').filter({ has: page.locator('.ir-bulk-import') });
+
 test.beforeEach(async () => {
   vaultPath = await createVaultCopy('folder-import');
   // Hours apart, newest first as `NEWEST_FIRST` lists them, before Obsidian
@@ -148,11 +198,16 @@ test.describe('Importing from a folder', () => {
     await expect(modal.locator('.modal-title')).toContainText(SOURCES);
     const rows = modal.locator('.ir-bulk-import-row');
     await expect(modal.locator('.ir-loading')).toHaveCount(0);
-    await expect(rows).toHaveText(SOURCE_NOTES);
+    await expect(rows.locator('.ir-bulk-import-name')).toHaveText(
+      SOURCE_NOTES.map(withoutExtension)
+    );
     await expect(modal.locator('.ir-bulk-import-count')).toHaveText(/^3\b/);
 
     const [kept1, kept2, unticked] = SOURCE_NOTES;
-    await rows.filter({ hasText: unticked }).getByRole('checkbox').uncheck();
+    await rows
+      .filter({ hasText: withoutExtension(unticked) })
+      .getByRole('checkbox')
+      .uncheck();
     await expect(modal.locator('.ir-bulk-import-count')).toHaveText(/^2\b/);
     await modal.getByRole('button', { name: 'Import 2' }).click();
 
@@ -195,8 +250,167 @@ test.describe('Importing from a folder', () => {
       has: window.locator('.ir-bulk-import'),
     });
     await expect(modal.locator('.ir-loading')).toHaveCount(0);
-    await expect(modal.locator('.ir-bulk-import-row')).toHaveText(
-      await explorerFileNames(window, SOURCES)
+    await expect(
+      modal.locator('.ir-bulk-import-row .ir-bulk-import-name')
+    ).toHaveText(
+      (await explorerFileNames(window, SOURCES)).map(withoutExtension)
     );
+  });
+
+  test('with subfolders included, lists everything under the folder as a tree, and imports it', async () => {
+    await setNativeMenus(window, false);
+    await buildNested(window);
+    const folderRow = window.locator(
+      `.nav-folder-title[data-path="${NESTED}"]`
+    );
+
+    await chooseFromMenu(window, folderRow, 'Import from folder…');
+
+    const modal = bulkModal(window);
+    const rows = modal.locator('.ir-bulk-import-row');
+    const names = rows.locator('.ir-bulk-import-name');
+    const folders = modal.locator('.ir-bulk-import-folder');
+    const include = modal.locator('label', { hasText: 'Include subfolders' });
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await expect(names).toHaveText(['root']);
+    await expect(include.locator('input')).not.toBeChecked();
+
+    await include.click();
+
+    await expect(include.locator('input')).toBeChecked();
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    // Top to bottom as the Files view lists them, each folder's subfolders
+    // then its files; the folder holding nothing to import is gone
+    await expect(
+      modal.locator('.ir-bulk-import-folder-title .ir-bulk-import-name')
+    ).toHaveText(['Alpha', 'Deep', 'Beta']);
+    await expect(names).toHaveText(['d1', 'a1', 'paper', 'b1', 'root']);
+    // Only the PDF is tagged with its type, as in the Files view
+    await expect(modal.locator('.ir-bulk-import-tag')).toHaveCount(1);
+    await expect(
+      rows.filter({ hasText: /^paper/ }).locator('.ir-bulk-import-tag')
+    ).toHaveText(/^pdf$/i);
+    const alpha = folders.filter({ hasText: /^Alpha/ });
+    await expect(
+      alpha.locator('.ir-bulk-import-folder').locator('.ir-bulk-import-name')
+    ).toHaveText(['Deep', 'd1']);
+    await expect(modal.locator('.ir-bulk-import-count')).toHaveText(/^5\b/);
+
+    await include.click();
+
+    await expect(include.locator('input')).not.toBeChecked();
+    await expect(folders).toHaveCount(0);
+    await expect(names).toHaveText(['root']);
+    await expect(modal.locator('.ir-bulk-import-count')).toHaveText(/^1\b/);
+    await modal.getByRole('button', { name: 'Import 1' }).click();
+
+    await expect(modal).toHaveCount(0);
+    await expect
+      .poll(() => articlePaths(window))
+      .toEqual([`${NESTED}/root.md`]);
+
+    // Again, with subfolders: what is under it, and nothing already imported
+    await chooseFromMenu(window, folderRow, 'Import from folder…');
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await include.click();
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await expect(names).toHaveText(['d1', 'a1', 'paper', 'b1']);
+    await modal.getByRole('button', { name: 'Import 4' }).click();
+
+    await expect(modal).toHaveCount(0);
+    await expect
+      .poll(() => articlePaths(window))
+      .toEqual([
+        `${NESTED}/Alpha/Deep/d1.md`,
+        `${NESTED}/Alpha/a1.md`,
+        `${NESTED}/Alpha/paper.pdf`,
+        `${NESTED}/Beta/b1.md`,
+        `${NESTED}/root.md`,
+      ]);
+  });
+
+  test('opens with subfolders included the way it was last left, across a reload of the plugin', async () => {
+    await setNativeMenus(window, false);
+    await buildNested(window);
+    const folderRow = window.locator(
+      `.nav-folder-title[data-path="${NESTED}"]`
+    );
+    const modal = bulkModal(window);
+    const names = modal.locator('.ir-bulk-import-row .ir-bulk-import-name');
+    const include = modal.locator('label', { hasText: 'Include subfolders' });
+    const everything = ['d1', 'a1', 'paper', 'b1', 'root'];
+
+    await chooseFromMenu(window, folderRow, 'Import from folder…');
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await include.click();
+    await expect(names).toHaveText(everything);
+    await modal.getByRole('button', { name: 'Cancel' }).click();
+    await expect(modal).toHaveCount(0);
+
+    // Opened again, it is still on, and goes into subfolders unasked
+    await chooseFromMenu(window, folderRow, 'Import from folder…');
+    await expect(include.locator('input')).toBeChecked();
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await expect(names).toHaveText(everything);
+    await modal.getByRole('button', { name: 'Cancel' }).click();
+    await expect(modal).toHaveCount(0);
+
+    // Saved, so the plugin loaded again below reads it
+    await expect
+      .poll(async () => {
+        try {
+          const data = await fs.readFile(
+            path.join(
+              vaultPath,
+              '.obsidian/plugins/incremental-reading/data.json'
+            ),
+            'utf8'
+          );
+          return (JSON.parse(data) as { ui?: unknown }).ui;
+        } catch {
+          // Not written yet, or caught halfway through a write
+          return null;
+        }
+      })
+      .toEqual({ folderImportIncludeSubfolders: true });
+    // Loaded again, as at the next start. Unofficial: `app.plugins`.
+    await window.evaluate(async () => {
+      type Plugins = {
+        plugins: Record<string, unknown>;
+        disablePlugin(id: string): Promise<void>;
+        enablePlugin(id: string): Promise<boolean>;
+      };
+      const { plugins } = (window as unknown as { app: { plugins: Plugins } })
+        .app;
+      await plugins.disablePlugin('incremental-reading');
+      await plugins.enablePlugin('incremental-reading');
+    });
+    await expect
+      .poll(() =>
+        window.evaluate(
+          () =>
+            'incremental-reading' in
+            (
+              window as unknown as {
+                app: { plugins: { plugins: Record<string, unknown> } };
+              }
+            ).app.plugins.plugins
+        )
+      )
+      .toBe(true);
+
+    await chooseFromMenu(window, folderRow, 'Import from folder…');
+    await expect(include.locator('input')).toBeChecked();
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await expect(names).toHaveText(everything);
+
+    // Switched off, it opens off from then on
+    await include.click();
+    await expect(names).toHaveText(['root']);
+    await modal.getByRole('button', { name: 'Cancel' }).click();
+    await chooseFromMenu(window, folderRow, 'Import from folder…');
+    await expect(include.locator('input')).not.toBeChecked();
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await expect(names).toHaveText(['root']);
   });
 });

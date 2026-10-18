@@ -1,52 +1,126 @@
+import {
+  buildTree,
+  topLevelScanning,
+  treeFiles,
+  type TreeEntry,
+} from '#/lib/bulk-import/tree';
 import type {
   BulkImportOptions,
   CandidateSource,
+  ScanEvent,
 } from '#/lib/bulk-import/types';
 import { isCopyImportable } from '#/lib/mime';
 import type { TFile } from 'obsidian';
-import { useEffect, useState } from 'react';
+import { useLayoutEffect, useMemo, useState } from 'react';
 import { ImportOptionsFields, useImportOptions } from './ImportOptions';
 import { LoadingSpinner } from './LoadingSpinner';
 
-/** A file listed for import, and its path from where its source starts. */
-interface Row {
-  file: TFile;
-  relativePath: string;
+/** What a scan has reported so far, and whether it has finished. */
+interface ScanState {
+  events: readonly ScanEvent[];
+  done: boolean;
 }
 
+const NOT_STARTED: ScanState = { events: [], done: false };
+
 /**
- * The rows `source` finds, each appended as soon as the scan yields it, and
- * whether the scan is still running. Unmounting stops the scan.
+ * What `source`'s scan reports, each event kept as soon as the scan yields
+ * it. A change of `subfolders` or unmounting stops the scan and forgets what
+ * it found; a change starts it over.
  */
-function useScan(source: CandidateSource) {
-  const [rows, setRows] = useState<Row[]>([]);
-  const [scanning, setScanning] = useState(true);
-  useEffect(() => {
+function useScan(source: CandidateSource, subfolders: boolean): ScanState {
+  const [state, setState] = useState<ScanState>(NOT_STARTED);
+  // Run before the screen paints: rows a toggle drops are gone in that frame,
+  // and rows the source answers for at once are back before it shows
+  useLayoutEffect(() => {
     const controller = new AbortController();
+    const { signal } = controller;
     void (async () => {
       try {
-        for await (const event of source.scan(controller.signal)) {
-          if (event.type !== 'file') continue;
-          const { file, relativePath } = event;
-          setRows((prev) => [...prev, { file, relativePath }]);
+        for await (const event of source.scan(signal, { subfolders })) {
+          // Not a row more once stopped
+          if (signal.aborted) return;
+          setState((prev) => ({ ...prev, events: [...prev.events, event] }));
         }
       } catch (error) {
         // The rows found so far can still be imported
         console.error(error);
       } finally {
-        if (!controller.signal.aborted) setScanning(false);
+        if (!signal.aborted) setState((prev) => ({ ...prev, done: true }));
       }
     })();
-    return () => controller.abort();
-  }, [source]);
-  return { rows, scanning };
+    return () => {
+      controller.abort();
+      setState(NOT_STARTED);
+    };
+  }, [source, subfolders]);
+  return state;
+}
+
+/** The rows of `entries`, folders holding theirs below their names. */
+function TreeRows({
+  entries,
+  unticked,
+  toggle,
+}: {
+  entries: readonly TreeEntry[];
+  unticked: ReadonlySet<TFile>;
+  toggle: (file: TFile) => void;
+}) {
+  return (
+    <>
+      {entries.map((entry) =>
+        entry.kind === 'file' ? (
+          <li key={entry.file.path} className="ir-bulk-import-row">
+            <label>
+              <input
+                type="checkbox"
+                checked={!unticked.has(entry.file)}
+                onChange={() => toggle(entry.file)}
+              />
+              <span className="ir-bulk-import-name">{entry.file.basename}</span>
+              {/* Every type but Markdown is tagged, as in the Files view.
+                  `nav-file-tag` is Obsidian's own (undocumented) class, and
+                  its app.css rule is not scoped to the Files view. */}
+              {entry.file.extension !== 'md' && (
+                <span className="ir-bulk-import-tag nav-file-tag">
+                  {entry.file.extension}
+                </span>
+              )}
+            </label>
+          </li>
+        ) : (
+          <li key={entry.path} className="ir-bulk-import-folder">
+            <div className="ir-bulk-import-folder-title">
+              <span className="ir-bulk-import-name">{entry.name}</span>
+              {entry.scanning && (
+                <LoadingSpinner label={`Finding files in ${entry.name}`} />
+              )}
+            </div>
+            <ul className="ir-bulk-import-children">
+              <TreeRows
+                entries={entry.entries}
+                unticked={unticked}
+                toggle={toggle}
+              />
+            </ul>
+          </li>
+        )
+      )}
+    </>
+  );
 }
 
 export interface BulkImportModalContentProps {
   /** Where the files come from. */
   source: CandidateSource;
-  /** What the options start at. */
-  defaults: { priority: number; makeCopy: boolean };
+  /**
+   * What the options start at. `includeSubfolders` counts only for a source
+   * that `canIncludeSubfolders`.
+   */
+  defaults: { priority: number; makeCopy: boolean; includeSubfolders: boolean };
+  /** "Include subfolders" was switched to `on`. */
+  onIncludeSubfoldersChange: (on: boolean) => void;
   /** Import `files`, the ticked rows in the order listed, with `options`. */
   onConfirm: (files: TFile[], options: BulkImportOptions) => void;
   onCancel: () => void;
@@ -55,22 +129,43 @@ export interface BulkImportModalContentProps {
 /**
  * The import options, then a checklist of the files `source` finds, each
  * ticked to start with, the count of those ticked, and the buttons.
+ *
+ * A source that can go deeper also gets an "Include subfolders" toggle,
+ * starting as `defaults` has it: on, the first scan already goes deeper.
+ * Switching it either way scans afresh: on, the list becomes a tree of the
+ * folders below, each folder's subfolders above its files as in
+ * the file explorer, the subfolders' files checked once the top level's are;
+ * off, the subfolders go, their files with them. The count and the import
+ * cover the ticked files the tree shows, top to bottom.
  */
 export function BulkImportModalContent({
   source,
   defaults,
   onConfirm,
   onCancel,
+  onIncludeSubfoldersChange,
 }: BulkImportModalContentProps) {
-  const { rows, scanning } = useScan(source);
+  const [includeSubfolders, setIncludeSubfolders] = useState(
+    () => source.canIncludeSubfolders === true && defaults.includeSubfolders
+  );
+  const scan = useScan(source, includeSubfolders);
+  const tree = useMemo(
+    () => buildTree(scan.events, scan.done),
+    [scan.events, scan.done]
+  );
+  const topScanning = useMemo(
+    () => topLevelScanning(scan.events, scan.done),
+    [scan.events, scan.done]
+  );
+  const files = useMemo(() => treeFiles(tree), [tree]);
   const [unticked, setUnticked] = useState<ReadonlySet<TFile>>(() => new Set());
   const { values, update, current } = useImportOptions({
     priority: defaults.priority,
     intervalDays: null,
     makeCopy: defaults.makeCopy,
   });
-  const canCopy = rows.every(({ file }) => isCopyImportable(file));
-  const ticked = rows.filter(({ file }) => !unticked.has(file));
+  const canCopy = files.every((file) => isCopyImportable(file));
+  const ticked = files.filter((file) => !unticked.has(file));
 
   const toggle = (file: TFile) => {
     setUnticked((prev) => {
@@ -84,15 +179,12 @@ export function BulkImportModalContent({
     if (ticked.length === 0) return;
     const chosen = current();
     const fixed = chosen.strategy === 'fixed-interval';
-    onConfirm(
-      ticked.map(({ file }) => file),
-      {
-        // A fixed interval schedules without priority, so it keeps the default
-        priority: fixed ? defaults.priority : chosen.priority,
-        fixedIntervalDays: fixed ? chosen.fixedIntervalDays : null,
-        makeCopy: canCopy && chosen.makeCopy,
-      }
-    );
+    onConfirm(ticked, {
+      // A fixed interval schedules without priority, so it keeps the default
+      priority: fixed ? defaults.priority : chosen.priority,
+      fixedIntervalDays: fixed ? chosen.fixedIntervalDays : null,
+      makeCopy: canCopy && chosen.makeCopy,
+    });
   };
 
   return (
@@ -113,29 +205,37 @@ export function BulkImportModalContent({
           initialInterval={null}
         />
       </div>
-      <ul className="ir-bulk-import-list">
-        {rows.map(({ file, relativePath }) => (
-          <li key={file.path} className="ir-bulk-import-row">
-            <label>
+      {source.canIncludeSubfolders && (
+        <div className="ir-toggle">
+          <label className="ir-toggle-label">
+            <div
+              className={
+                'checkbox-container' + (includeSubfolders ? ' is-enabled' : '')
+              }
+            >
               <input
                 type="checkbox"
-                checked={!unticked.has(file)}
-                onChange={() => toggle(file)}
+                checked={includeSubfolders}
+                onChange={(e) => {
+                  const on = e.currentTarget.checked;
+                  setIncludeSubfolders(on);
+                  onIncludeSubfoldersChange(on);
+                }}
               />
-              <span className="ir-bulk-import-name">{file.name}</span>
-              {relativePath !== file.name && (
-                <span className="ir-bulk-import-path">{relativePath}</span>
-              )}
-            </label>
-          </li>
-        ))}
-        {scanning && (
+            </div>
+            Include subfolders
+          </label>
+        </div>
+      )}
+      <ul className="ir-bulk-import-list">
+        <TreeRows entries={tree} unticked={unticked} toggle={toggle} />
+        {topScanning && (
           <li>
             <LoadingSpinner label="Finding files to import" />
           </li>
         )}
       </ul>
-      {!scanning && rows.length === 0 && (
+      {scan.done && files.length === 0 && (
         <div className="ir-bulk-import-empty">No files to import here</div>
       )}
       <div className="ir-bulk-import-count">{ticked.length} selected</div>

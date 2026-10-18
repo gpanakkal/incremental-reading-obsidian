@@ -175,6 +175,7 @@ function makeTab(settings: IRPluginSettings, folders: Iterable<string> = []) {
     settings,
     session: { deviceId: 'device-a', itemId: 'item-1' },
     warnedRefusedPaths: ['a|b.md'],
+    ui: { folderImportIncludeSubfolders: true },
   };
   const saved: IRPluginData[] = [];
   const events: string[] = [];

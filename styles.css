@@ -1515,7 +1515,7 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 .ir-scheduling-modal > .ir-bulk-import-list {
   display: block;
   margin: 0;
-  padding: 0;
+  padding: var(--size-4-1);
   list-style: none;
   max-height: min(40vh, 320px);
   overflow-y: auto;
@@ -1523,19 +1523,96 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
   border-radius: var(--radius-s);
 }
 
-.ir-bulk-import-row label {
+/* Rows are padded and hovered like the Files view's (`.tree-item-self` in
+   Obsidian's app.css), from the same `--nav-item-*` tokens, so a theme that
+   restyles one restyles both. Its start padding leaves room for a folder's
+   collapse arrow, which these rows have no use for. A rule in the theme's
+   border colour divides each row from the one above. */
+.ir-bulk-import-list .ir-bulk-import-row > label,
+.ir-bulk-import-list .ir-bulk-import-folder-title {
   display: flex;
-  align-items: baseline;
-  gap: var(--size-4-2);
-  padding: var(--size-4-1) var(--size-4-2);
+  align-items: center;
+  border-top: var(--border-width) solid var(--background-modifier-border);
+  line-height: var(--line-height-tight);
+  padding: var(--nav-item-padding);
+  padding-inline-start: var(--size-4-2);
 }
 
+.ir-bulk-import-list > li:first-child > :first-child {
+  border-top-color: transparent;
+}
+
+@media (hover: hover) {
+  .ir-bulk-import-list .ir-bulk-import-row > label:hover {
+    color: var(--nav-item-color-hover);
+    background-color: var(--nav-item-background-hover);
+  }
+
+  .ir-bulk-import-list .ir-bulk-import-row > label:hover .nav-file-tag {
+    color: var(--nav-tag-color-hover);
+  }
+}
+
+/* The gap a checklist leaves after its box in reading view
+   (`.markdown-preview-view .task-list-item-checkbox`) */
+.ir-bulk-import-row input[type='checkbox'] {
+  margin-inline-end: 0.6em;
+}
+
+/* A file's type, uppercase and faint at the row's end, comes from Obsidian's
+   own `.nav-file-tag`; the name's end margin keeps it clear of a long name. */
 .ir-bulk-import-name {
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.ir-bulk-import-path,
+.ir-bulk-import-row .ir-bulk-import-name {
+  margin-inline-end: var(--size-4-2);
+}
+
+.ir-bulk-import-tag {
+  flex: none;
+}
+
+/* A subfolder: its name, a small spinner after it while it is being scanned,
+   and its rows indented below. */
+.ir-bulk-import-list .ir-bulk-import-folder-title {
+  gap: var(--size-4-2);
+  font-weight: var(--font-semibold);
+}
+
+.ir-bulk-import-folder-title > .ir-loading {
+  flex: none;
+  height: auto;
+}
+
+.ir-bulk-import-folder-title .ir-spinner {
+  width: var(--size-4-3);
+  height: var(--size-4-3);
+}
+
+/* Obsidian gives checkboxes and its toggle `--cursor`, `default` unless the
+   user changes it */
+.ir-bulk-import-row label,
+.ir-bulk-import-row input,
+.ir-bulk-import .ir-toggle-label,
+.ir-bulk-import .checkbox-container,
+.ir-bulk-import .checkbox-container input {
+  cursor: pointer;
+}
+
+/* Each level indents as far as a folder's children do in the Files view, guide
+   line included (`.tree-item-children` in Obsidian's app.css). */
+.ir-bulk-import-list .ir-bulk-import-children {
+  margin: 0;
+  margin-inline-start: var(--nav-item-children-margin-start);
+  padding: 0;
+  padding-inline-start: var(--nav-item-children-padding-start);
+  border-inline-start: var(--nav-indentation-guide-width) solid
+    var(--nav-indentation-guide-color);
+  list-style: none;
+}
+
 .ir-bulk-import-count,
 .ir-bulk-import-empty {
   color: var(--text-muted);

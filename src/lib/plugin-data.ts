@@ -44,7 +44,23 @@ export interface IRPluginData {
    * startup notice comes back only for new ones (see `startupWarning`).
    */
   warnedRefusedPaths: string[];
+  /** How the plugin's dialogs were last left; see {@link UiState}. */
+  ui: UiState;
 }
+
+/**
+ * Choices made in dialogs rather than in the settings tab, remembered so each
+ * dialog opens the way the user left it.
+ */
+export interface UiState {
+  /** Whether the folder import dialog's "Include subfolders" is on. */
+  folderImportIncludeSubfolders: boolean;
+}
+
+/** {@link UiState} for a file that has none: everything as it first opens. */
+export const DEFAULT_UI_STATE: Readonly<UiState> = {
+  folderImportIncludeSubfolders: false,
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -110,6 +126,22 @@ export function parsePluginData(raw: unknown): IRPluginData {
           (path): path is string => typeof path === 'string'
         )
       : [],
+    ui: parseUiState(data.ui),
+  };
+}
+
+/**
+ * Stored {@link UiState}, each field not saved as one of its own values left
+ * at its default. Always a new object, never {@link DEFAULT_UI_STATE} itself,
+ * which a dialog writing to it would change for every later read.
+ */
+export function parseUiState(raw: unknown): UiState {
+  const ui = isRecord(raw) ? raw : {};
+  return {
+    folderImportIncludeSubfolders:
+      typeof ui.folderImportIncludeSubfolders === 'boolean'
+        ? ui.folderImportIncludeSubfolders
+        : DEFAULT_UI_STATE.folderImportIncludeSubfolders,
   };
 }
 

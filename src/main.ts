@@ -78,6 +78,7 @@ import { ObsidianHelpers as Obsidian } from './lib/ObsidianHelpers';
 import {
   type IRPluginData,
   type ReviewSession,
+  type UiState,
   getDeviceId,
   parsePluginData,
   sessionItemId,
@@ -517,6 +518,15 @@ export default class IncrementalReadingPlugin extends Plugin {
    */
   async saveSession(session: ReviewSession | null) {
     this.data.session = session;
+    await this.saveData(this.data);
+  }
+
+  /**
+   * Remember `change` to how a dialog was left, so it opens that way next
+   * time, restarts included. Writes the whole file, as {@link saveSession}.
+   */
+  async saveUiState(change: Partial<UiState>) {
+    Object.assign(this.data.ui, change);
     await this.saveData(this.data);
   }
 
@@ -1250,8 +1260,9 @@ export default class IncrementalReadingPlugin extends Plugin {
 
   /**
    * Offer the files directly in `folder` for import, in the bulk import
-   * dialog. It always opens, whatever `showImportDialog` says: the user picks
-   * the files there. They are listed in the file explorer's order as the
+   * dialog, and with its "Include subfolders" toggle those under it too. It
+   * always opens, whatever `showImportDialog` says: the user picks the files
+   * there. They are listed in the file explorer's order as the
    * dialog opens; changing the explorer's order afterwards leaves the list be.
    */
   importFromFolder(folder: TFolder): BulkImportModal {

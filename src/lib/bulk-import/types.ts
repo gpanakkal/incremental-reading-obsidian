@@ -7,7 +7,15 @@ import type { TFile } from 'obsidian';
  *   is its name), which its row shows;
  * - `folder`: a folder the scan entered, shown empty with a spinner until its
  *   `folder-done`;
- * - `folder-done`: the folder at `path` holds no more rows.
+ * - `folder-done`: the folder at `path` holds no more rows. Its subfolders
+ *   are reported before it, so a folder holding nothing yet is never
+ *   briefly finished and empty while what is under it is still to come.
+ *   For a folder never reported as a `folder`, the one the source starts
+ *   from, it means the top level holds all its rows.
+ *
+ * A folder's subfolders are reported as the scan enters it, before its files,
+ * so its rows read as the file explorer's do, folders first, and every row
+ * still goes at the bottom of its folder: nothing already shown moves.
  */
 export type ScanEvent =
   | { type: 'file'; file: TFile; parent: string; relativePath: string }
@@ -21,7 +29,25 @@ export type ScanEvent =
 export interface CandidateSource {
   /** What the files come from, for the modal's title and the summary notice. */
   title: string;
-  scan(signal: AbortSignal): AsyncIterable<ScanEvent>;
+  /**
+   * Whether `scan` can go into subfolders, which the modal offers as
+   * "Include subfolders".
+   */
+  canIncludeSubfolders?: boolean;
+  /**
+   * The rows, top level first. With `subfolders` (only for a source that
+   * `canIncludeSubfolders`), what is under the top level's folders too,
+   * breadth-first, its files never checked before the top level's. A scan
+   * run again, the toggle having changed, answers at once for every file an
+   * earlier run of it checked.
+   */
+  scan(signal: AbortSignal, options?: ScanOptions): AsyncIterable<ScanEvent>;
+}
+
+/** How far a {@link CandidateSource} scans. */
+export interface ScanOptions {
+  /** Go into subfolders ("Include subfolders"). */
+  subfolders?: boolean;
 }
 
 /** What a bulk modal does with the files it lists; fixed for its life. */

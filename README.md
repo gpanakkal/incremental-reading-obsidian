@@ -107,7 +107,7 @@ This is especially handy for:
 
 #### Bulk imports
 
-To import several files at once, right-click a folder and select **Import from folder…**. It lists only the notes and PDFs directly in that folder (not in its subfolders) that aren't articles, snippets or cards already.
+To import several files at once, right-click a folder and select **Import from folder…**.
 
 #### Automatic imports
 To import everything that lands in a folder, such as a Web Clipper inbox, enable **Auto-import files added to folders** and list the folders under **Watched folders**. Notes and PDFs created in those folders or their subfolders, moved in from elsewhere, or synced in from another device become articles while Obsidian is open.

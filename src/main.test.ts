@@ -1910,7 +1910,8 @@ describe('IncrementalReadingPlugin.importFromFolder', () => {
         )) {
           events.push(event);
         }
-        expect(events).toEqual([]);
+        // No row: the folder is done with nothing in it
+        expect(events).toEqual([{ type: 'folder-done', path: folder.path }]);
         expect(isItemFileAt).toHaveBeenCalledExactlyOnceWith(pdf, pdf.path);
       }
     } finally {
@@ -2175,6 +2176,48 @@ describe('IncrementalReadingPlugin.syncReviewTitleBars', () => {
           expect(synced).toEqual(
             views.flatMap((kind, i) => (kind === 'review' ? [i] : []))
           );
+        }
+      )
+    );
+  });
+});
+
+describe('IncrementalReadingPlugin.saveUiState', () => {
+  it('writes the change into the whole file, the rest of it as it was', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.record(
+          { folderImportIncludeSubfolders: fc.boolean() },
+          { requiredKeys: [] }
+        ),
+        async (before, change) => {
+          const plugin = new IncrementalReadingPlugin({} as never, {} as never);
+          const session = { deviceId: 'device-a', itemId: 'item-1' };
+          plugin.data = {
+            settings: { defaultPriority: 42 },
+            session,
+            warnedRefusedPaths: ['a|b.md'],
+            ui: { folderImportIncludeSubfolders: before },
+          } as never;
+          // The obsidian mock's Plugin has no saveData to spy on
+          const written: unknown[] = [];
+          const saveData = vi.fn((data: unknown) => {
+            written.push(structuredClone(data));
+            return Promise.resolve();
+          });
+          plugin.saveData = saveData;
+
+          await plugin.saveUiState(change);
+
+          const expected = {
+            settings: { defaultPriority: 42 },
+            session,
+            warnedRefusedPaths: ['a|b.md'],
+            ui: { folderImportIncludeSubfolders: before, ...change },
+          };
+          expect(saveData).toHaveBeenCalledExactlyOnceWith(plugin.data);
+          expect(written).toEqual([expected]);
         }
       )
     );

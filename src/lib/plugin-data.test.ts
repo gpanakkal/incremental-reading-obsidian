@@ -3,11 +3,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { AUTO_IMPORT_TAG } from './constants';
 import {
   AUTO_IMPORT_WATERMARK_KEY,
+  DEFAULT_UI_STATE,
   DEVICE_ID_KEY,
   getDeviceId,
   loadAutoImportWatermark,
   parsePluginData,
   parseSession,
+  parseUiState,
   saveAutoImportWatermark,
   sessionItemId,
 } from './plugin-data';
@@ -385,6 +387,97 @@ describe('parsePluginData', () => {
           );
         }
       )
+    );
+  });
+});
+
+describe('how the dialogs were last left', () => {
+  /** A stored `ui`: a valid one, one with a field gone wrong, or anything. */
+  const storedUiArb = fc.oneof(
+    fc.record({ folderImportIncludeSubfolders: fc.boolean() }),
+    fc.record(
+      { folderImportIncludeSubfolders: fc.anything() },
+      { requiredKeys: [] }
+    ),
+    fc.dictionary(fc.string(), fc.anything()),
+    fc.anything()
+  );
+  const expectedUi = (stored: unknown) => {
+    const field: unknown =
+      typeof stored === 'object' && stored !== null && !Array.isArray(stored)
+        ? (stored as Record<string, unknown>).folderImportIncludeSubfolders
+        : undefined;
+    return {
+      folderImportIncludeSubfolders: typeof field === 'boolean' ? field : false,
+    };
+  };
+
+  it('starts with "Include subfolders" off', () => {
+    expect(DEFAULT_UI_STATE).toEqual({ folderImportIncludeSubfolders: false });
+  });
+
+  it('keeps a saved on or off for "Include subfolders" and reads anything else as off, settings and session as they would be without it', () => {
+    fc.assert(
+      fc.property(
+        storedUiArb,
+        // Settings of any shape, a malformed half included
+        fc.oneof(fc.dictionary(fc.string(), fc.anything()), fc.anything()),
+        fc.option(fc.record({ deviceId: fc.string(), itemId: fc.string() })),
+        (stored, settings, session) => {
+          const without = parsePluginData({ settings, session });
+          const data = parsePluginData({ settings, session, ui: stored });
+
+          expect(data.ui).toEqual(expectedUi(stored));
+          expect(data.settings).toEqual(without.settings);
+          expect(data.session).toEqual(without.session);
+          expect(parseUiState(stored)).toEqual(expectedUi(stored));
+        }
+      )
+    );
+  });
+
+  it('starts as it first opens for a file saved before it was kept, or no file at all', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.dictionary(fc.string(), fc.anything()).map((settings) => ({
+            settings,
+          })),
+          fc.dictionary(
+            fc.string().filter((key) => key !== 'ui'),
+            fc.anything()
+          ),
+          fc.anything()
+        ),
+        (raw) => {
+          // A file of any shape without `ui` of its own
+          fc.pre(
+            typeof raw !== 'object' ||
+              raw === null ||
+              Array.isArray(raw) ||
+              !('ui' in raw)
+          );
+          expect(parsePluginData(raw).ui).toEqual(DEFAULT_UI_STATE);
+        }
+      )
+    );
+  });
+
+  it("reads into an object of each file's own, so a change to one is no other's", () => {
+    fc.assert(
+      fc.property(storedUiArb, (stored) => {
+        const first = parsePluginData({ settings: {}, ui: stored }).ui;
+        first.folderImportIncludeSubfolders =
+          !first.folderImportIncludeSubfolders;
+
+        expect(DEFAULT_UI_STATE.folderImportIncludeSubfolders).toBe(false);
+        expect(parsePluginData({ settings: {}, ui: stored }).ui).toEqual(
+          expectedUi(stored)
+        );
+        expect(parsePluginData({ settings: {} }).ui).toEqual({
+          folderImportIncludeSubfolders: false,
+        });
+      })
     );
   });
 });
