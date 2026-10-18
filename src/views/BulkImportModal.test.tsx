@@ -250,7 +250,7 @@ function outline(modal: BulkImportModal): string[] {
         const title = item.querySelector(
           ':scope > .ir-bulk-import-folder-title'
         )!;
-        const name = title.firstElementChild!;
+        const name = title.querySelector('.ir-bulk-import-name')!;
         const spinning = title.querySelector('.ir-loading') !== null;
         // The spinner comes after the name
         if (spinning)
@@ -1064,6 +1064,207 @@ describe('BulkImportModal: Include subfolders', () => {
     );
     // Seconds alone; more under a full parallel run
   }, 30_000);
+
+  /** Each folder row's checkbox, top to bottom. */
+  const folderBoxes = (modal: BulkImportModal) => [
+    ...modal.contentEl.querySelectorAll<HTMLInputElement>(
+      '.ir-bulk-import-folder-title input[type="checkbox"]'
+    ),
+  ];
+
+  /**
+   * What a folder's checkbox shows. Partial is `indeterminate` and unchecked,
+   * with the attribute Obsidian's own partial fill is drawn for.
+   */
+  const boxState = (box: HTMLInputElement) => {
+    expect(box.getAttribute('data-indeterminate') === 'true').toBe(
+      box.indeterminate
+    );
+    if (box.indeterminate) {
+      expect(box.checked).toBe(false);
+      return 'partial';
+    }
+    return box.checked ? 'checked' : 'unchecked';
+  };
+
+  const fileTicks = (modal: BulkImportModal) =>
+    rows(modal).map((row) => row.querySelector('input')!.checked);
+
+  /**
+   * The tree `Topic (Sub (deep, deeper), a), Other (b), top`, all scanned:
+   * file rows 0 to 4 are deep, deeper, a, b, top; folder boxes 0 to 2 are
+   * Topic, Sub, Other.
+   */
+  async function openTree() {
+    const { plugin, importArticles } = makePlugin();
+    const { scan, modal, top } = await openDeeper(plugin);
+    await setToggle(modal, true);
+    await scan.folder('notes/Topic');
+    await scan.folder('notes/Other');
+    await scan.file(top);
+    await scan.done('notes');
+    await scan.folder('notes/Topic/Sub');
+    await scan.file('notes/Topic/a.md');
+    await scan.done('notes/Topic');
+    await scan.file('notes/Other/b.md');
+    await scan.done('notes/Other');
+    await scan.file('notes/Topic/Sub/deep.md');
+    await scan.file('notes/Topic/Sub/deeper.md');
+    await scan.done('notes/Topic/Sub');
+    await scan.end();
+    return { scan, modal, importArticles };
+  }
+
+  it('shows each folder checked when all its files are ticked, unchecked when none are, partly filled otherwise', async () => {
+    /** The file rows under each folder box. */
+    const under = [[0, 1, 2], [0, 1], [3]];
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uniqueArray(fc.nat({ max: 4 }), { maxLength: 5 }),
+        async (unticked) => {
+          document.body.replaceChildren();
+          const { modal } = await openTree();
+          expect(folderBoxes(modal).map(boxState)).toEqual([
+            'checked',
+            'checked',
+            'checked',
+          ]);
+          for (const index of unticked) await click(rowBox(modal, index));
+
+          const ticks = fileTicks(modal);
+          expect(folderBoxes(modal).map(boxState)).toEqual(
+            under.map((files) =>
+              files.every((i) => ticks[i])
+                ? 'checked'
+                : files.some((i) => ticks[i])
+                  ? 'partial'
+                  : 'unchecked'
+            )
+          );
+          expect(selectedCount(modal)).toBe(5 - unticked.length);
+          modal.close();
+        }
+      ),
+      { numRuns: 20 }
+    );
+    // Seconds alone; more under a full parallel run
+  }, 30_000);
+
+  it('unticks everything under a folder when it is unticked, leaving it out of the count and the import, and ticks it all again', async () => {
+    const { modal, importArticles } = await openTree();
+
+    await click(folderBoxes(modal)[0]);
+
+    expect(fileTicks(modal)).toEqual([false, false, false, true, true]);
+    expect(folderBoxes(modal).map(boxState)).toEqual([
+      'unchecked',
+      'unchecked',
+      'checked',
+    ]);
+    expect(selectedCount(modal)).toBe(2);
+
+    // The folder's name ticks it too, as a file's does
+    const subName = modal.contentEl.querySelectorAll<HTMLElement>(
+      '.ir-bulk-import-folder-title .ir-bulk-import-name'
+    )[1];
+    await click(subName);
+    expect(fileTicks(modal)).toEqual([true, true, false, true, true]);
+    expect(folderBoxes(modal).map(boxState)).toEqual([
+      'partial',
+      'checked',
+      'checked',
+    ]);
+
+    await click(folderBoxes(modal)[1]);
+    await click(confirmButton(modal));
+    await settle();
+    expect(
+      importArticles.mock.calls[0][0].map(({ file }) => file.path)
+    ).toEqual(['notes/Other/b.md', 'notes/top.md']);
+  });
+
+  it('ticks everything under a partly ticked folder when it is clicked', async () => {
+    const { modal } = await openTree();
+    await click(rowBox(modal, 0));
+    await click(rowBox(modal, 3));
+    expect(folderBoxes(modal).map(boxState)).toEqual([
+      'partial',
+      'partial',
+      'unchecked',
+    ]);
+
+    await click(folderBoxes(modal)[0]);
+
+    expect(fileTicks(modal)).toEqual([true, true, true, false, true]);
+    expect(folderBoxes(modal).map(boxState)).toEqual([
+      'checked',
+      'checked',
+      'unchecked',
+    ]);
+    expect(selectedCount(modal)).toBe(4);
+    modal.close();
+  });
+
+  it('ticks a file found later as its folder is, judging a folder still being scanned by what it holds so far', async () => {
+    const { scan, modal } = await openDeeper();
+    await setToggle(modal, true);
+    await scan.folder('notes/Topic');
+    await scan.folder('notes/Other');
+    await scan.folder('notes/Third');
+    await scan.file('notes/top.md');
+    await scan.done('notes');
+    await scan.file('notes/Other/b.md');
+    await scan.file('notes/Other/c.md');
+    await scan.file('notes/Third/e.md');
+    // Topic holds nothing yet; Other is partly ticked; Third is unticked
+    await click(folderBoxes(modal)[0]);
+    await click(rowBox(modal, 0));
+    await click(rowBox(modal, 2));
+    expect(folderBoxes(modal).map(boxState)).toEqual([
+      'unchecked',
+      'partial',
+      'unchecked',
+    ]);
+
+    await scan.folder('notes/Topic/Sub');
+    await scan.file('notes/Topic/a.md');
+    await scan.file('notes/Other/d.md');
+    await scan.file('notes/Third/f.md');
+    await scan.file('notes/Topic/Sub/deep.md');
+
+    expect(outline(modal)).toEqual([
+      'Topic …',
+      '  Sub …',
+      '    deep',
+      '  a',
+      'Other …',
+      '  b',
+      '  c',
+      '  d',
+      'Third …',
+      '  e',
+      '  f',
+      'top',
+    ]);
+    expect(fileTicks(modal)).toEqual([
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+    ]);
+    expect(folderBoxes(modal).map(boxState)).toEqual([
+      'unchecked',
+      'unchecked',
+      'partial',
+      'unchecked',
+    ]);
+    expect(selectedCount(modal)).toBe(3);
+    modal.close();
+  });
 });
 
 describe('BulkImportModal: remembering Include subfolders', () => {

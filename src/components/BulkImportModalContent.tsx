@@ -1,8 +1,16 @@
 import {
+  folderStates,
+  NO_TICKS,
+  ticksReducer,
+  untickedFiles,
+  type CheckState,
+} from '#/lib/bulk-import/ticks';
+import {
   buildTree,
   topLevelScanning,
   treeFiles,
   type TreeEntry,
+  type TreeFolder,
 } from '#/lib/bulk-import/tree';
 import type {
   BulkImportOptions,
@@ -11,7 +19,7 @@ import type {
 } from '#/lib/bulk-import/types';
 import { isCopyImportable } from '#/lib/mime';
 import type { TFile } from 'obsidian';
-import { useLayoutEffect, useMemo, useState } from 'react';
+import { useLayoutEffect, useMemo, useReducer, useState } from 'react';
 import { ImportOptionsFields, useImportOptions } from './ImportOptions';
 import { LoadingSpinner } from './LoadingSpinner';
 
@@ -57,15 +65,46 @@ function useScan(source: CandidateSource, subfolders: boolean): ScanState {
   return state;
 }
 
+/**
+ * A folder's checkbox: ticked, unticked, or partly filled. A browser draws
+ * the partial state for `indeterminate`, but Obsidian's checkboxes draw
+ * nothing of the browser's; its app.css draws its own dash for an unchecked
+ * box with `data-indeterminate="true"` (undocumented; set the same way on
+ * the Properties view's checkboxes), so the box carries both.
+ */
+function FolderBox({
+  state,
+  onChange,
+}: {
+  state: CheckState;
+  onChange: () => void;
+}) {
+  const partial = state === 'partial';
+  return (
+    <input
+      type="checkbox"
+      checked={state === 'checked'}
+      indeterminate={partial}
+      data-indeterminate={partial}
+      onChange={onChange}
+    />
+  );
+}
+
 /** The rows of `entries`, folders holding theirs below their names. */
 function TreeRows({
   entries,
   unticked,
   toggle,
+  folderStates,
+  toggleFolder,
 }: {
   entries: readonly TreeEntry[];
   unticked: ReadonlySet<TFile>;
   toggle: (file: TFile) => void;
+  /** What each folder's checkbox shows, by path. */
+  folderStates: ReadonlyMap<string, CheckState>;
+  toggleFolder: (folder: TreeFolder) => void;
 }) {
   return (
     <>
@@ -99,19 +138,25 @@ function TreeRows({
           </li>
         ) : (
           <li key={entry.path} className="ir-bulk-import-folder">
-            <div className="ir-bulk-import-folder-title">
+            <label className="ir-bulk-import-folder-title">
+              <FolderBox
+                state={folderStates.get(entry.path)!}
+                onChange={() => toggleFolder(entry)}
+              />
               <span className="ir-bulk-import-name" aria-label={entry.name}>
                 {entry.name}
               </span>
               {entry.scanning && (
                 <LoadingSpinner label={`Finding files in ${entry.name}`} />
               )}
-            </div>
+            </label>
             <ul className="ir-bulk-import-children">
               <TreeRows
                 entries={entry.entries}
                 unticked={unticked}
                 toggle={toggle}
+                folderStates={folderStates}
+                toggleFolder={toggleFolder}
               />
             </ul>
           </li>
@@ -147,6 +192,11 @@ export interface BulkImportModalContentProps {
  * the file explorer, the subfolders' files checked once the top level's are;
  * off, the subfolders go, their files with them. The count and the import
  * cover the ticked files the tree shows, top to bottom.
+ *
+ * Each folder has a checkbox too: ticked while all the files under it are,
+ * unticked while none are, partly filled otherwise. Clicking it ticks all of
+ * them, or unticks them all once all are ticked, and a file found later is
+ * ticked as its folder is (see `ticksReducer`).
  */
 export function BulkImportModalContent({
   source,
@@ -168,7 +218,14 @@ export function BulkImportModalContent({
     [scan.events, scan.done]
   );
   const files = useMemo(() => treeFiles(tree), [tree]);
-  const [unticked, setUnticked] = useState<ReadonlySet<TFile>>(() => new Set());
+  const [ticks, dispatch] = useReducer(ticksReducer, NO_TICKS);
+  // Before the screen paints, so a file found under an unticked folder never
+  // shows ticked
+  useLayoutEffect(() => {
+    dispatch({ type: 'found', tree });
+  }, [tree]);
+  const unticked = useMemo(() => untickedFiles(ticks), [ticks]);
+  const states = useMemo(() => folderStates(ticks, tree), [ticks, tree]);
   const { values, update, current } = useImportOptions({
     priority: defaults.priority,
     intervalDays: null,
@@ -177,13 +234,9 @@ export function BulkImportModalContent({
   const canCopy = files.every((file) => isCopyImportable(file));
   const ticked = files.filter((file) => !unticked.has(file));
 
-  const toggle = (file: TFile) => {
-    setUnticked((prev) => {
-      const next = new Set(prev);
-      if (!next.delete(file)) next.add(file);
-      return next;
-    });
-  };
+  const toggle = (file: TFile) => dispatch({ type: 'toggle-file', tree, file });
+  const toggleFolder = (folder: TreeFolder) =>
+    dispatch({ type: 'toggle-folder', tree, folder });
 
   const confirm = () => {
     if (ticked.length === 0) return;
@@ -238,7 +291,13 @@ export function BulkImportModalContent({
         </div>
       )}
       <ul className="ir-bulk-import-list">
-        <TreeRows entries={tree} unticked={unticked} toggle={toggle} />
+        <TreeRows
+          entries={tree}
+          unticked={unticked}
+          toggle={toggle}
+          folderStates={states}
+          toggleFolder={toggleFolder}
+        />
         {topScanning && (
           <li>
             <LoadingSpinner label="Finding files to import" />

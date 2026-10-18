@@ -1543,7 +1543,8 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 }
 
 @media (hover: hover) {
-  .ir-bulk-import-list .ir-bulk-import-row > label:hover {
+  .ir-bulk-import-list .ir-bulk-import-row > label:hover,
+  .ir-bulk-import-list .ir-bulk-import-folder-title:hover {
     color: var(--nav-item-color-hover);
     background-color: var(--nav-item-background-hover);
   }
@@ -1554,8 +1555,10 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 }
 
 /* The gap a checklist leaves after its box in reading view
-   (`.markdown-preview-view .task-list-item-checkbox`) */
-.ir-bulk-import-row input[type='checkbox'] {
+   (`.markdown-preview-view .task-list-item-checkbox`). A folder's partial
+   state is Obsidian's own: see `FolderBox`. */
+.ir-bulk-import-row input[type='checkbox'],
+.ir-bulk-import-folder-title input[type='checkbox'] {
   margin-inline-end: 0.6em;
 }
 
@@ -1577,16 +1580,16 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
   flex: none;
 }
 
-/* A subfolder: its name, a small spinner after it while it is being scanned,
-   and its rows indented below. */
+/* A subfolder: its checkbox and name, a small spinner after it while it is
+   being scanned, and its rows indented below. */
 .ir-bulk-import-list .ir-bulk-import-folder-title {
-  gap: var(--size-4-2);
   font-weight: var(--font-semibold);
 }
 
 .ir-bulk-import-folder-title > .ir-loading {
   flex: none;
   height: auto;
+  margin-inline-start: var(--size-4-2);
 }
 
 .ir-bulk-import-folder-title .ir-spinner {
@@ -1598,6 +1601,8 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
    user changes it */
 .ir-bulk-import-row label,
 .ir-bulk-import-row input,
+.ir-bulk-import-folder-title,
+.ir-bulk-import-folder-title input,
 .ir-bulk-import .ir-toggle-label,
 .ir-bulk-import .checkbox-container,
 .ir-bulk-import .checkbox-container input {

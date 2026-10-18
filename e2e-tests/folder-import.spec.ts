@@ -329,6 +329,56 @@ test.describe('Importing from a folder', () => {
       ]);
   });
 
+  test('unticking a folder leaves everything under it out, and a partly ticked folder shows so', async () => {
+    await setNativeMenus(window, false);
+    await buildNested(window);
+    const folderRow = window.locator(
+      `.nav-folder-title[data-path="${NESTED}"]`
+    );
+    const modal = bulkModal(window);
+    const include = modal.locator('label', { hasText: 'Include subfolders' });
+    const folderBox = (name: string) =>
+      modal
+        .locator('.ir-bulk-import-folder-title')
+        .filter({
+          has: window.locator('.ir-bulk-import-name', {
+            hasText: new RegExp(`^${name}$`),
+          }),
+        })
+        .locator('input[type="checkbox"]');
+    const count = modal.locator('.ir-bulk-import-count');
+
+    await chooseFromMenu(window, folderRow, 'Import from folder…');
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await include.click();
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await expect(count).toHaveText(/^5\b/);
+
+    await folderBox('Alpha').click();
+
+    await expect(folderBox('Alpha')).not.toBeChecked();
+    await expect(folderBox('Deep')).not.toBeChecked();
+    await expect(folderBox('Beta')).toBeChecked();
+    await expect(count).toHaveText(/^2\b/);
+
+    // Ticking the folder inside it alone leaves it partly ticked
+    await folderBox('Deep').click();
+
+    await expect(folderBox('Deep')).toBeChecked();
+    await expect(folderBox('Alpha')).toHaveJSProperty('indeterminate', true);
+    await expect(count).toHaveText(/^3\b/);
+    await modal.getByRole('button', { name: 'Import 3' }).click();
+
+    await expect(modal).toHaveCount(0);
+    await expect
+      .poll(() => articlePaths(window))
+      .toEqual([
+        `${NESTED}/Alpha/Deep/d1.md`,
+        `${NESTED}/Beta/b1.md`,
+        `${NESTED}/root.md`,
+      ]);
+  });
+
   test('opens with subfolders included the way it was last left, across a reload of the plugin', async () => {
     await setNativeMenus(window, false);
     await buildNested(window);
