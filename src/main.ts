@@ -925,6 +925,12 @@ export default class IncrementalReadingPlugin extends Plugin {
         this.autoImportWatcher?.noteArrival(file, oldPath);
       })
     );
+    // So the files seen in watched folders are only those still there
+    this.registerEvent(
+      this.app.vault.on('delete', (file) => {
+        this.autoImportWatcher?.noteDeletion(file);
+      })
+    );
   }
 
   /**
@@ -965,9 +971,9 @@ export default class IncrementalReadingPlugin extends Plugin {
             error
           );
         })
-        // Then notes that gained a trigger tag while Obsidian was closed, once
-        // every row is where its note is, so the import's checks by path see
-        // the vault as it is
+        // Then notes that gained a trigger tag, and files that arrived in a
+        // watched folder, while Obsidian was closed, once every row is where
+        // its note is, so the import's checks by path see the vault as it is
         .then(async () => {
           const watcher = await this.autoImportWatcherMade.promise;
           if (controller.signal.aborted) return;
@@ -975,7 +981,7 @@ export default class IncrementalReadingPlugin extends Plugin {
         })
         .catch((error: unknown) => {
           console.error(
-            'Incremental Reading - failed to import notes tagged while Obsidian was closed:',
+            'Incremental Reading - failed to catch up on automatic imports:',
             error
           );
         })

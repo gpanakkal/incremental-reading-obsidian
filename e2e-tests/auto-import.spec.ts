@@ -4,6 +4,7 @@ import {
   AUTO_IMPORT_TAG,
   DATA_DIRECTORY,
 } from '#/lib/constants';
+import { WATCHED_FOLDER_LEDGER_KEY } from '#/lib/watched-folder-ledger';
 import test, {
   expect,
   type ElectronApplication,
@@ -38,6 +39,7 @@ let vaultPath: string;
  * plugin's `autoImportWatcher` is private to it.
  */
 type PageApp = {
+  loadLocalStorage(key: string): unknown;
   vault: {
     getFileByPath(path: string): unknown;
     getFiles(): { path: string }[];
@@ -596,6 +598,121 @@ test('imports what is created in, moved into or copied into a watched folder, an
     rowIds: [],
   });
   expect(await articleCount()).toBe(before + 2);
+});
+
+test('imports what was added to a watched folder while Obsidian was closed when it next starts, once, but not what was there before or was un-imported', async () => {
+  const folder = 'Clippings';
+  const hereBefore = `${folder}/Here before.md`;
+  await writeVaultFile(hereBefore, 'Here before watching.\n');
+  await expect
+    .poll(async () => (await noteState(hereBefore)).rowIds)
+    .toEqual([]);
+  await setPluginSetting(window, 'autoImportOnFolder', true);
+  await setPluginSetting(window, 'autoImportFolders', [folder]);
+  // Saving tells the watcher, as the settings tab does
+  await window.evaluate(() =>
+    (window as unknown as { app: PageApp }).app.plugins.plugins[
+      'incremental-reading'
+    ].saveSettings()
+  );
+  // What the folder holds now is seen, by the startup look or the save
+  await expect
+    .poll(() =>
+      window.evaluate(
+        (key) =>
+          (window as unknown as { app: PageApp }).app.loadLocalStorage(key),
+        WATCHED_FOLDER_LEDGER_KEY
+      )
+    )
+    .toEqual({ folders: [folder], paths: [hereBefore] });
+  const before = await articleCount();
+  /** Close Obsidian, run `whileClosed` from outside it, and start it again. */
+  const restart = async (whileClosed: () => Promise<void>) => {
+    await expect.poll(() => pendingSaves(window)).toBe(0);
+    await closeElectron(app);
+    await whileClosed();
+    app = await launchElectron(vaultPath);
+    window = await openVault(app, vaultPath);
+  };
+  /** Write a note into the watched folder, as Web Clipper or a script would. */
+  const clip = (name: string) =>
+    writeVaultFile(`${folder}/${name}.md`, `Clipped while closed: ${name}.\n`);
+  const importNotices = () =>
+    window.locator('.notice', { hasText: /\b\d+ articles?\b/ });
+
+  const notes = [`${folder}/First.md`, `${folder}/Second.md`];
+  const pdf = `${folder}/Paper.pdf`;
+  await restart(async () => {
+    await clip('First');
+    await clip('Second');
+    await fs.copyFile(
+      path.join(vaultPath, 'testing/PDF fixture.pdf'),
+      path.join(vaultPath, pdf)
+    );
+  });
+
+  await expect(importNotices()).toHaveText([/\b3 articles\b/]);
+  const ids = [];
+  for (const notePath of notes) ids.push(await expectImported(notePath));
+  await expect.poll(() => rowIdsAt(pdf)).toHaveLength(1);
+  expect(await articleCount()).toBe(before + 3);
+  expect(await noteState(hereBefore)).toMatchObject({
+    irId: null,
+    rowIds: [],
+  });
+
+  // Started again with one more note added while closed, so there is a sign
+  // that the look at the folder is over. In copy mode from here on: nothing
+  // marks the note it copies, so only the record of what was seen keeps it
+  // from being imported again at every launch
+  await setPluginSetting(window, 'autoImportMode', 'copy');
+  await window.evaluate(() =>
+    (window as unknown as { app: PageApp }).app.plugins.plugins[
+      'incremental-reading'
+    ].saveSettings()
+  );
+  const copied = `${folder}/Third.md`;
+  const copyOf = (name: string) =>
+    `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/${name}.md`;
+  await restart(() => clip('Third'));
+
+  await expect(importNotices()).toHaveText([/\b1 article\b/]);
+  await expectImported(copyOf('Third'));
+  expect(await articleCount()).toBe(before + 4);
+  expect(await noteState(copied)).toMatchObject({ irId: null, rowIds: [] });
+
+  // As un-importing does: the row deleted, the plugin's frontmatter stripped
+  const [unimported] = notes;
+  await window.evaluate(async (articleId) => {
+    const { repo } = (window as unknown as { app: PageApp }).app.plugins
+      .plugins['incremental-reading'].reviewManager;
+    await repo.mutate('DELETE FROM article_review WHERE article_id = $1', [
+      articleId,
+    ]);
+    await repo.mutate('DELETE FROM article WHERE id = $1', [articleId]);
+  }, ids[0]);
+  await setFrontmatter(unimported, 'ir-id', undefined);
+  await setFrontmatter(unimported, 'tags', undefined);
+  await expect.poll(async () => (await noteState(unimported)).irId).toBeNull();
+  await restart(() => clip('Fourth'));
+
+  await expect(importNotices()).toHaveText([/\b1 article\b/]);
+  await expectImported(copyOf('Fourth'));
+  expect(await articleCount()).toBe(before + 4);
+  expect(await noteState(copied)).toMatchObject({ irId: null, rowIds: [] });
+  expect(await noteState(unimported)).toMatchObject({
+    irId: null,
+    rowIds: [],
+  });
+  expect(await noteState(notes[1])).toMatchObject({
+    irId: ids[1],
+    rowIds: [ids[1]],
+  });
+  expect(await rowIdsAt(pdf)).toHaveLength(1);
+  expect(await noteState(hereBefore)).toMatchObject({
+    irId: null,
+    rowIds: [],
+  });
 });
 
 test('adds a watched folder on Enter as a chip under the field, refuses one that is missing, and removes it by its button', async () => {

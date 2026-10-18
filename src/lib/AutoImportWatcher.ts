@@ -2,6 +2,7 @@ import { describeFailures } from '#/lib/bulk-import/run-import';
 import type { BulkImportEntry, BulkOutcome } from '#/lib/bulk-import/types';
 import {
   TFile,
+  TFolder,
   type App,
   type CachedMetadata,
   type MetadataCache,
@@ -23,7 +24,26 @@ import {
 } from './plugin-data';
 import type { AutoImportMode } from './settings';
 import { matchFrontmatterTags } from './tags';
+import {
+  ledgerArrivals,
+  loadWatchedFolderLedger,
+  reconcileLedger,
+  saveWatchedFolderLedger,
+  type WatchedFolderLedger,
+} from './watched-folder-ledger';
 import { isUnderAnyFolder, isUnderFolder } from './watched-folders';
+
+/** The ledger as the watcher holds it, its paths in a set to look up. */
+interface HeldLedger {
+  folders: readonly string[];
+  paths: Set<string>;
+}
+
+/** `ledger` as it is stored and compared. */
+const plainLedger = ({ folders, paths }: HeldLedger): WatchedFolderLedger => ({
+  folders,
+  paths: [...paths],
+});
 
 /** What decides whether, and how, notes are imported. Read afresh each time. */
 export interface AutoImportConfig {
@@ -48,11 +68,12 @@ export interface AutoImportEntry extends BulkImportEntry {
 
 /**
  * The parts of the app the watcher reads, and the device's own storage, where
- * it keeps the moment it last saw every change.
+ * it keeps the moment it last saw every change and the files it has seen in
+ * the watched folders.
  */
 interface WatchedApp
   extends Pick<App, 'loadLocalStorage' | 'saveLocalStorage'> {
-  vault: Pick<Vault, 'getFileByPath' | 'getMarkdownFiles'>;
+  vault: Pick<Vault, 'getFileByPath' | 'getFiles' | 'getMarkdownFiles'>;
   metadataCache: Pick<MetadataCache, 'getFileCache'>;
 }
 
@@ -107,6 +128,9 @@ interface AutoImportWatcherOptions {
  * imported too: created there, moved in from outside, or delivered by Sync.
  * Only arrivals count, so what a folder held when it was first watched stays
  * as it is, and so does a note un-imported there, until it arrives again.
+ * Files that arrived while Obsidian was closed are found at startup by
+ * {@link runCatchUpScan}, as those missing from the ledger of files this
+ * device has seen in its watched folders (see `WatchedFolderLedger`).
  *
  * Two devices can import the same note before either syncs the other's
  * database. One database wins outright when they meet. If the note keeps the
@@ -134,8 +158,11 @@ export class AutoImportWatcher {
   readonly #queuedArrivals = new Set<TFile>();
   /** Paths whose import failed since the plugin loaded. */
   readonly #failed = new Set<string>();
-  /** Notes handed to the import running now. */
-  readonly #importing = new Set<TFile>();
+  /**
+   * Files a flush has taken, until it is done with them: those being
+   * imported, and those waiting behind the import before.
+   */
+  readonly #flushing = new Set<TFile>();
   /**
    * Whether {@link runCatchUpScan} has run, so the stored moment may move on:
    * until then, what changed while Obsidian was closed is still unseen.
@@ -143,6 +170,13 @@ export class AutoImportWatcher {
   #caughtUp = false;
   /** Whether importing was on when last looked at, to see it turned on. */
   #wasEnabled = false;
+  /**
+   * The files this device has seen in its watched folders, once read from
+   * storage (`undefined` until then), or null when none are stored.
+   */
+  #ledger: HeldLedger | null | undefined;
+  /** Pending store of {@link #ledger}, after a file in it moved or went. */
+  #ledgerTimer: number | null = null;
   /**
    * Serializes imports: a batch is checked only once the one before it is
    * done, so a note it imported has its `ir-id`, and the row holding it, by
@@ -168,6 +202,7 @@ export class AutoImportWatcher {
     this.#wasEnabled = this.#getConfig().enabled;
     return () => {
       this.#recordSeen();
+      if (this.#ledgerTimer !== null) this.#storeLedger();
       this.#running = false;
       this.#cancelTimer();
       this.#queued.clear();
@@ -194,6 +229,7 @@ export class AutoImportWatcher {
       cache !== null && this.#arrived.has(file) && file.stat.size > 0;
     if (arrived) this.#arrived.delete(file);
     const byArrival = arrived && this.#arrivalQualifies(file, cache, config);
+    if (arrived && !byArrival) this.#notePassedOver(file, config);
     if (!byArrival && this.#triggerTagsOf(file, cache, config) === null) {
       return;
     }
@@ -204,14 +240,35 @@ export class AutoImportWatcher {
 
   /**
    * Hear of a change to the settings. Importing by tag turned on applies from
-   * then on: a note tagged before is no change it saw, and is left alone.
+   * then on: a note tagged before is no change it saw, and is left alone. So
+   * does a folder newly watched: what it holds now is taken as seen, so the
+   * next launch doesn't find it all arrived.
    */
   configChanged(): void {
-    const { enabled } = this.#getConfig();
-    if (this.#running && enabled && !this.#wasEnabled) {
+    const config = this.#getConfig();
+    if (this.#running && config.enabled && !this.#wasEnabled) {
       this.#record(Date.now());
     }
-    this.#wasEnabled = enabled;
+    this.#wasEnabled = config.enabled;
+    if (this.#running) this.#followWatchedFolders(config);
+  }
+
+  /**
+   * Tell the watcher `file` was deleted, so the ledger forgets it: a file
+   * written to its path later, with Obsidian closed, is one that arrived.
+   */
+  noteDeletion(file: TAbstractFile): void {
+    const ledger = this.#running ? this.#loadLedger() : null;
+    if (ledger === null) return;
+    let forgot = ledger.paths.delete(file.path);
+    // Whether Obsidian tells of each file in a deleted folder isn't
+    // documented, so they are forgotten with it
+    if (file instanceof TFolder) {
+      for (const path of ledger.paths) {
+        if (isUnderFolder(path, file.path)) forgot = ledger.paths.delete(path);
+      }
+    }
+    if (forgot) this.#storeLedgerSoon();
   }
 
   /**
@@ -232,23 +289,68 @@ export class AutoImportWatcher {
    */
   runCatchUpScan(): Promise<void> {
     if (!this.#running) return Promise.resolve();
-    const seen = loadAutoImportWatermark(this.#app);
     this.#caughtUp = true;
+    this.#catchUpOnTags();
+    this.#catchUpOnArrivals();
+    // The flush moves the stored moment on
+    return this.flushNow();
+  }
+
+  /** The trigger-tag half of {@link runCatchUpScan}. */
+  #catchUpOnTags(): void {
+    const seen = loadAutoImportWatermark(this.#app);
     if (seen === null || !this.#getConfig().enabled) {
       this.#record(Date.now());
-      return Promise.resolve();
+      return;
     }
     const { vault, metadataCache } = this.#app;
     for (const file of vault.getMarkdownFiles()) {
       // Untouched since: before the cache is read, as that is nearly every note
       if (file.stat.mtime <= seen) continue;
-      // Its cache may not show the `ir-id` that import is writing yet, so
-      // checked again it would be imported twice
-      if (this.#importing.has(file)) continue;
+      // Taken by a flush already. Its cache may not show the `ir-id` that
+      // import writes by then, so checked again it would be imported twice
+      if (this.#flushing.has(file)) continue;
       this.consider(file, metadataCache.getFileCache(file));
     }
-    // The flush moves the stored moment on
-    return this.flushNow();
+  }
+
+  /**
+   * The watched-folder half of {@link runCatchUpScan}. Obsidian keeps no
+   * record of which files are new, so each file in a watched folder that the
+   * ledger doesn't hold arrived while Obsidian was closed. A folder the ledger
+   * has no record of, watched for the first time on this device, is taken as
+   * seen. Files are told apart by path alone, so one deleted and written again
+   * at the same path while Obsidian was closed is taken as the one seen, and
+   * left alone. The ledger is then rewritten to what the folders hold, all
+   * but the arrivals still to be imported, which their flush adds: a crash
+   * before it leaves them to be found again.
+   */
+  #catchUpOnArrivals(): void {
+    const config = this.#getConfig();
+    const folders = this.#watchedFolders(config);
+    const files = this.#watchedFiles(config);
+    const ledger = this.#loadLedger();
+    if (ledger !== null) {
+      const byPath = new Map(files.map((file) => [file.path, file]));
+      const arrived = ledgerArrivals(plainLedger(ledger), folders, [
+        ...byPath.keys(),
+      ]);
+      for (const path of arrived) {
+        const file = byPath.get(path)!;
+        // Arrived since the layout was ready, and taken by a flush already
+        if (this.#flushing.has(file)) continue;
+        this.noteArrival(file);
+      }
+    }
+    const seen = files
+      .filter(
+        (file) =>
+          !this.#arrived.has(file) &&
+          !this.#queuedArrivals.has(file) &&
+          !this.#flushing.has(file)
+      )
+      .map(({ path }) => path);
+    this.#keepLedger(reconcileLedger(null, folders, seen));
   }
 
   /**
@@ -259,14 +361,19 @@ export class AutoImportWatcher {
    * a note moved in, which keeps its cache. An empty note waits until it has
    * something in it. A note is never imported unread:
    * one with an `ir-id`, such as an article Sync delivers, is left alone.
-   * Folders, and files moved out or within, are ignored.
+   * Folders, and files moved out or within, are ignored. Whatever arrives is
+   * added to the ledger of files seen: an import once it is done, anything
+   * passed over at once.
    */
   noteArrival(file: TAbstractFile, oldPath?: string): void {
-    if (!this.#running || !(file instanceof TFile) || !isImportable(file)) {
+    if (!this.#running || !(file instanceof TFile)) return;
+    const config = this.#getConfig();
+    if (oldPath !== undefined) this.#followMove(oldPath, file.path, config);
+    if (!this.#watches(file.path, config)) return;
+    if (!isImportable(file)) {
+      this.#notePassedOver(file, config);
       return;
     }
-    const config = this.#getConfig();
-    if (!this.#watches(file.path, config)) return;
     if (oldPath !== undefined && this.#watches(oldPath, config)) return;
     if (!supportsFrontmatter(file)) {
       this.#queuedArrivals.add(file);
@@ -290,9 +397,17 @@ export class AutoImportWatcher {
     this.#queued.clear();
     this.#queuedArrivals.clear();
     this.#queuedSince = null;
+    for (const file of batch) this.#flushing.add(file);
     this.#pending = this.#pending
       .then(async () => {
-        await this.#import(batch, arrivals);
+        let failed: ReadonlySet<TFile>;
+        try {
+          failed = await this.#import(batch, arrivals);
+        } finally {
+          for (const file of batch) this.#flushing.delete(file);
+        }
+        // Seen, so not found arrived at the next launch, unless it failed
+        this.#noteSeen(arrivals, failed);
         // Seen to here, though a crash could come before another flush
         this.#recordSeen();
       })
@@ -364,6 +479,125 @@ export class AutoImportWatcher {
     );
   }
 
+  /** The folders watched under `config`: none while watching is off. */
+  #watchedFolders({ onFolder, folders }: AutoImportConfig): readonly string[] {
+    return onFolder ? folders : [];
+  }
+
+  /** The files whose arrival counts under `config` (see {@link #watches}). */
+  #watchedFiles(config: AutoImportConfig): TFile[] {
+    return this.#app.vault
+      .getFiles()
+      .filter((file) => this.#watches(file.path, config));
+  }
+
+  /** {@link #ledger}, read from storage the first time it is asked for. */
+  #loadLedger(): HeldLedger | null {
+    if (this.#ledger === undefined) {
+      const stored = loadWatchedFolderLedger(this.#app);
+      this.#ledger = stored && {
+        folders: stored.folders,
+        paths: new Set(stored.paths),
+      };
+    }
+    return this.#ledger;
+  }
+
+  /** Hold `ledger`, and store it. */
+  #keepLedger(ledger: WatchedFolderLedger): void {
+    this.#ledger = { folders: ledger.folders, paths: new Set(ledger.paths) };
+    this.#storeLedger();
+  }
+
+  /** Store the ledger held now. */
+  #storeLedger(): void {
+    if (this.#ledgerTimer !== null) window.clearTimeout(this.#ledgerTimer);
+    this.#ledgerTimer = null;
+    saveWatchedFolderLedger(this.#app, plainLedger(this.#ledger!));
+  }
+
+  /**
+   * Store the ledger in a moment, once a burst of moves or deletions, such
+   * as a folder's, is over. A crash before then leaves it as it was, which
+   * costs at most an import the next launch could have done without.
+   */
+  #storeLedgerSoon(): void {
+    this.#ledgerTimer ??= window.setTimeout(
+      () => this.#storeLedger(),
+      AUTO_IMPORT_DEBOUNCE_MS
+    );
+  }
+
+  /**
+   * Keep the ledger's folders the ones watched under `config`: a folder newly
+   * watched is taken as seen as it is now, and one no longer watched is
+   * forgotten, so watching it again later takes it as seen again.
+   */
+  #followWatchedFolders(config: AutoImportConfig): void {
+    const ledger = this.#loadLedger();
+    const folders = this.#watchedFolders(config);
+    if (
+      ledger === null ||
+      (folders.length === ledger.folders.length &&
+        folders.every((folder) => ledger.folders.includes(folder)))
+    ) {
+      return;
+    }
+    const paths = this.#watchedFiles(config).map(({ path }) => path);
+    this.#keepLedger(reconcileLedger(plainLedger(ledger), folders, paths));
+  }
+
+  /**
+   * Move a seen file's path in the ledger: a file moved within the watched
+   * folders is still seen where it is now, and one moved out is forgotten.
+   */
+  #followMove(oldPath: string, path: string, config: AutoImportConfig): void {
+    const ledger = this.#loadLedger();
+    if (!ledger?.paths.delete(oldPath)) return;
+    if (this.#watches(path, config)) ledger.paths.add(path);
+    this.#storeLedgerSoon();
+  }
+
+  /**
+   * Add `file`, an arrival passed over, to the ledger now, if it is in a
+   * watched folder and its import didn't fail: it is seen, so the next launch
+   * doesn't find it arrived once what kept it out is gone, as when an article
+   * Sync delivered is un-imported.
+   */
+  #notePassedOver(file: TFile, config: AutoImportConfig): void {
+    const ledger = this.#loadLedger();
+    if (
+      ledger === null ||
+      ledger.paths.has(file.path) ||
+      this.#failed.has(file.path) ||
+      !this.#watches(file.path, config)
+    ) {
+      return;
+    }
+    ledger.paths.add(file.path);
+    this.#storeLedgerSoon();
+  }
+
+  /**
+   * Add to the ledger the `arrivals` a flush is done with, still where they
+   * were imported or passed over, all but those that `failed`, which the next
+   * launch tries again.
+   */
+  #noteSeen(arrivals: ReadonlySet<TFile>, failed: ReadonlySet<TFile>): void {
+    const ledger = this.#running ? this.#loadLedger() : null;
+    if (ledger === null) return;
+    const config = this.#getConfig();
+    let added = false;
+    for (const file of arrivals) {
+      if (failed.has(file)) continue;
+      if (this.#app.vault.getFileByPath(file.path) !== file) continue;
+      if (!this.#watches(file.path, config)) continue;
+      ledger.paths.add(file.path);
+      added = true;
+    }
+    if (added) this.#storeLedger();
+  }
+
   #schedule(): void {
     const now = Date.now();
     this.#queuedSince ??= now;
@@ -387,12 +621,12 @@ export class AutoImportWatcher {
   /**
    * Import each of `batch` that still calls for it, by a trigger tag or, for
    * those among `arrivals`, by having arrived in a watched folder. Say how it
-   * went.
+   * went, and return the files whose import failed.
    */
   async #import(
     batch: readonly TFile[],
     arrivals: ReadonlySet<TFile>
-  ): Promise<void> {
+  ): Promise<ReadonlySet<TFile>> {
     const config = this.#getConfig();
     const entries: AutoImportEntry[] = [];
     for (const file of batch) {
@@ -414,15 +648,9 @@ export class AutoImportWatcher {
       entries.push({ file, matchedTags });
     }
     // Stopped while a lookup ran: the plugin is unloading
-    if (entries.length === 0 || !this.#running) return;
+    if (entries.length === 0 || !this.#running) return new Set();
 
-    for (const { file } of entries) this.#importing.add(file);
-    let outcomes: BulkOutcome[];
-    try {
-      outcomes = await this.#importMany(entries, config);
-    } finally {
-      this.#importing.clear();
-    }
+    const outcomes = await this.#importMany(entries, config);
     const failed = outcomes.filter(({ status }) => status === 'failed');
     for (const { file } of failed) this.#failed.add(file.path);
     const imported = outcomes.filter(
@@ -435,6 +663,7 @@ export class AutoImportWatcher {
       });
     }
     if (failed.length > 0) notify(describeFailures(failed), { kind: 'error' });
+    return new Set(failed.map(({ file }) => file));
   }
 
   /**

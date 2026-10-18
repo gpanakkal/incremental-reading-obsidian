@@ -38,6 +38,10 @@ import {
 } from '#/lib/store';
 import type { ReviewItem } from '#/lib/types';
 import * as UnimportModule from '#/lib/unimport-article';
+import {
+  loadWatchedFolderLedger,
+  saveWatchedFolderLedger,
+} from '#/lib/watched-folder-ledger';
 import IncrementalReadingPlugin, {
   startupFailureMessage,
   STILL_STARTING_NOTICE,
@@ -902,6 +906,7 @@ function makeAutoImportReceiver() {
   const arrivalRefs = {
     create: { event: 'create' },
     rename: { event: 'rename' },
+    delete: { event: 'delete' },
   };
   const unloaders: (() => void)[] = [];
   const files = new Map<string, TFile>();
@@ -926,7 +931,8 @@ function makeAutoImportReceiver() {
       },
       vault: {
         getFileByPath: (path: string) => files.get(path) ?? null,
-        on: vi.fn((name: 'create' | 'rename', callback: Arrived) => {
+        getFiles: () => [...files.values()],
+        on: vi.fn((name: keyof typeof arrivalRefs, callback: Arrived) => {
           arrivals.set(name, callback);
           return arrivalRefs[name];
         }),
@@ -990,6 +996,12 @@ function makeAutoImportReceiver() {
         arrivals.get('rename')!(file, oldPath);
       }
       return file;
+    },
+    /** Delete the file at `path`, as Obsidian tells of it. */
+    remove(path: string) {
+      const file = files.get(path) ?? tFileAt(path);
+      files.delete(path);
+      arrivals.get('delete')!(file, '');
     },
     unload: () => unloaders.forEach((unloader) => unloader()),
   };
@@ -2779,7 +2791,7 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
 
     await vi.waitFor(() => expect(follow.startupScan).toHaveBeenCalledOnce());
     expect(error).toHaveBeenCalledWith(
-      'Incremental Reading - failed to import notes tagged while Obsidian was closed:',
+      'Incremental Reading - failed to catch up on automatic imports:',
       failure
     );
   });
@@ -3414,6 +3426,30 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
     await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
 
     expect(watch.importTaggedNotes).not.toHaveBeenCalled();
+  });
+
+  it('has the watcher forget each file deleted from a watched folder, the review manager up or not', async () => {
+    const watch = makeAutoImportReceiver();
+    const { app, settings } = watch.receiver;
+    Object.assign(settings, {
+      autoImportOnFolder: true,
+      autoImportFolders: ['Inbox'],
+    });
+    saveWatchedFolderLedger(app, {
+      folders: ['Inbox'],
+      paths: ['Inbox/a.pdf', 'Inbox/b.pdf'],
+    });
+
+    watch.remove('Inbox/a.pdf');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+    expect(watch.receiver.registerEvent).toHaveBeenCalledWith(
+      watch.arrivalRefs.delete
+    );
+    expect(loadWatchedFolderLedger(app)).toEqual({
+      folders: ['Inbox'],
+      paths: ['Inbox/b.pdf'],
+    });
   });
 });
 

@@ -33,10 +33,16 @@ import {
   SNIPPET_TAG,
 } from './constants';
 import {
+  AUTO_IMPORT_WATERMARK_KEY,
   loadAutoImportWatermark,
   saveAutoImportWatermark,
 } from './plugin-data';
 import { matchFrontmatterTags, stripFrontmatterTags } from './tags';
+import {
+  loadWatchedFolderLedger,
+  saveWatchedFolderLedger,
+  WATCHED_FOLDER_LEDGER_KEY,
+} from './watched-folder-ledger';
 
 // #region HELPERS
 
@@ -67,6 +73,8 @@ function makeVault() {
       },
       vault: {
         getFileByPath: (path: string) => files.get(path) ?? null,
+        // As Obsidian's: every file, folders not included, in no set order
+        getFiles: () => [...files.values()],
         // As Obsidian's: the files whose extension is `md`, in no set order
         getMarkdownFiles: () =>
           [...files.values()].filter(({ extension }) => extension === 'md'),
@@ -327,6 +335,35 @@ const importedNotice = (count: number): unknown =>
   expect.stringMatching(
     new RegExp(`\\b${count} article${count === 1 ? '' : 's'}\\b`)
   ) as unknown;
+
+/** The ledger of watched folders `vault` stores, or null. */
+const ledgerOf = (vault: Vault) => loadWatchedFolderLedger(vault.app);
+
+/** The paths the ledger `vault` stores has seen, in no order. */
+const seenPaths = (vault: Vault) => new Set(ledgerOf(vault)?.paths);
+
+/** Store a ledger in `vault`, as an earlier launch left it. */
+const storeLedger = (vault: Vault, folders: string[], paths: string[]) => {
+  saveWatchedFolderLedger(vault.app, { folders, paths });
+};
+
+/** How many times `store`, spying on `saveLocalStorage`, stored the ledger. */
+const ledgerWrites = (store: { mock: { calls: readonly unknown[][] } }) =>
+  store.mock.calls.filter(([key]) => key === WATCHED_FOLDER_LEDGER_KEY).length;
+
+/**
+ * The plugin started over `vault`: a watcher made as {@link makeWatcher} makes
+ * one, caught up as at startup.
+ */
+async function launch(
+  config: Partial<AutoImportConfig>,
+  vault: Vault,
+  makeImport?: typeof makeImporter
+) {
+  const watching = makeWatcher(config, vault, makeImport);
+  await watching.watcher.runCatchUpScan();
+  return watching;
+}
 
 // #endregion
 
@@ -1148,6 +1185,18 @@ describe('AutoImportWatcher.runCatchUpScan', () => {
     ),
   });
 
+  it('takes a note written at the very moment last seen to as seen, and one a moment after as not', async () => {
+    const vault = makeVault();
+    const seen = Date.now() - 10;
+    saveAutoImportWatermark(vault.app, seen);
+    vault.add('at.md', { tags: [TRIGGER] }, 'md', seen);
+    vault.add('after.md', { tags: [TRIGGER] }, 'md', seen + 1);
+
+    const { importMany } = await launch({}, vault);
+
+    expect(importedPaths(importMany)).toEqual([['after.md']]);
+  });
+
   it('imports at once, in one batch under one notice, every note written after the moment last seen to that the guards let through, and no other file', async () => {
     await fc.assert(
       fc.asyncProperty(
@@ -1271,9 +1320,11 @@ describe('AutoImportWatcher.runCatchUpScan', () => {
           expect(Notice.messages).toEqual([]);
           expect(seenAt(vault)).toBe(Math.max(stored ?? now, now));
           // Never moved back: a later moment stored is kept as it is
-          expect(store.mock.calls.length).toBe(
-            stored !== null && stored >= now ? 0 : 1
-          );
+          expect(
+            store.mock.calls.filter(
+              ([key]) => key === AUTO_IMPORT_WATERMARK_KEY
+            ).length
+          ).toBe(stored !== null && stored >= now ? 0 : 1);
           stop();
           vi.restoreAllMocks();
         }
@@ -1377,6 +1428,33 @@ describe('AutoImportWatcher.runCatchUpScan', () => {
     await settle();
 
     expect(importMany).toHaveBeenCalledOnce();
+  });
+
+  it('leaves a note waiting behind another import to its own import, though its cache has yet to show it', async () => {
+    const vault = makeVault();
+    saveAutoImportWatermark(vault.app, Date.now() - 1);
+    const { watcher, change, importMany } = makeWatcher({}, vault);
+    const outcomes = deferred<BulkOutcome[]>();
+    importMany.mockImplementationOnce(() => outcomes.promise);
+    const first = vault.add('a.md', { tags: [TRIGGER] });
+    change(first);
+    await settle();
+    const second = vault.add('b.md', { tags: [TRIGGER] });
+    importMany.mockImplementationOnce(() =>
+      Promise.resolve([{ file: second, status: 'imported' }])
+    );
+    change(second);
+    await settle();
+    expect(importMany).toHaveBeenCalledOnce();
+
+    const scan = watcher.runCatchUpScan();
+    // The rows are made, but the notes' new ir-ids are not indexed yet
+    vault.rows.add('id-a.md').add('id-b.md');
+    outcomes.resolve([{ file: first, status: 'imported' }]);
+    await scan;
+    await settle();
+
+    expect(importedPaths(importMany)).toEqual([['a.md'], ['b.md']]);
   });
 
   it('looks at a note again once an import of it that came to nothing is over', async () => {
@@ -2147,5 +2225,676 @@ describe('AutoImportWatcher arrivals at flush', () => {
         expect(importMany).not.toHaveBeenCalled();
       }
     }
+  });
+});
+
+describe('AutoImportWatcher, the ledger of watched folders, at startup', () => {
+  /**
+   * A file in the vault at startup: where it is, of what kind, whether an
+   * earlier launch saw it, and, for a note, whether it has an `ir-id` or a
+   * snippet's tag.
+   */
+  const startupFileArb = fc.record({
+    place: fc.constantFrom(
+      `${INBOX}/`,
+      `${INBOX}/sub/`,
+      `${INBOX}2/`,
+      'notes/',
+      `${DATA_DIRECTORY}/`
+    ),
+    extension: fc.constantFrom('md', 'pdf', 'canvas', 'png'),
+    seen: fc.boolean(),
+    irId: fc.boolean(),
+    blocked: fc.boolean(),
+  });
+
+  it('imports at once, under one notice, the importable files in a folder the ledger records that it has not seen, and stores every file the folders hold as seen', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(startupFileArb, { maxLength: 8 }),
+        fc.record({
+          stored: fc.boolean(),
+          recorded: fc.boolean(),
+          onFolder: fc.boolean(),
+        }),
+        async (specs, { stored, recorded, onFolder }) => {
+          Notice.reset();
+          const vault = makeVault();
+          const folders = [INBOX, DATA_DIRECTORY];
+          const files = specs.map((spec, i) =>
+            vault.add(
+              `${spec.place}${i}.${spec.extension}`,
+              spec.extension === 'md'
+                ? {
+                    ...(spec.irId ? { 'ir-id': `id-${i}` } : {}),
+                    ...(spec.blocked ? { tags: [SNIPPET_TAG] } : {}),
+                  }
+                : undefined,
+              spec.extension
+            )
+          );
+          if (stored) {
+            storeLedger(
+              vault,
+              recorded ? folders : [],
+              files.filter((_, i) => specs[i].seen).map(({ path }) => path)
+            );
+          }
+          const { watcher, importMany, stop } = makeWatcher(
+            { onFolder, folders },
+            vault
+          );
+
+          await watcher.runCatchUpScan();
+
+          const watched = files.filter((_, i) =>
+            specs[i].place.startsWith(`${INBOX}/`)
+          );
+          const wanted = files
+            .filter((file, i) => {
+              const { extension, seen, irId, blocked } = specs[i];
+              return (
+                stored &&
+                recorded &&
+                onFolder &&
+                watched.includes(file) &&
+                !seen &&
+                (extension === 'pdf' ||
+                  (extension === 'md' && !irId && !blocked))
+              );
+            })
+            .map(({ path }) => path);
+          expect(importedPaths(importMany)).toEqual(
+            wanted.length === 0 ? [] : [wanted]
+          );
+          expect(Notice.messages).toEqual(
+            wanted.length === 0 ? [] : [importedNotice(wanted.length)]
+          );
+          expect(ledgerOf(vault)?.folders).toEqual(onFolder ? folders : []);
+          expect(seenPaths(vault)).toEqual(
+            new Set(onFolder ? watched.map(({ path }) => path) : [])
+          );
+          await settle();
+          expect(importMany.mock.calls.length).toBe(
+            wanted.length === 0 ? 0 : 1
+          );
+          stop();
+        }
+      )
+    );
+  });
+
+  it('reads a stored ledger that is not wholly one as none: imports nothing, and stores the folders as they are', async () => {
+    for (const malformed of [
+      'Inbox/a.pdf',
+      { folders: [INBOX] },
+      { folders: [INBOX], paths: [1] },
+      { folders: INBOX, paths: [] },
+    ]) {
+      const vault = makeVault();
+      vault.storage.set(WATCHED_FOLDER_LEDGER_KEY, malformed);
+      const file = vault.add(`${INBOX}/a.pdf`, undefined, 'pdf');
+      const { importMany } = await launch(
+        { onFolder: true, folders: [INBOX] },
+        vault
+      );
+
+      expect(importMany).not.toHaveBeenCalled();
+      expect(ledgerOf(vault)).toEqual({ folders: [INBOX], paths: [file.path] });
+    }
+  });
+
+  it('imports what arrived while Obsidian was closed once per device: not again at the next launch, nor after it is un-imported', async () => {
+    const vault = makeVault();
+    const config = { onFolder: true, folders: [INBOX] };
+    vault.add(`${INBOX}/old.md`, {});
+    (await launch(config, vault)).stop();
+    const note = vault.add(`${INBOX}/clip.md`, { title: 'Clip' });
+    const pdf = vault.add(`${INBOX}/paper.pdf`, undefined, 'pdf');
+
+    const first = await launch(config, vault);
+    first.stop();
+    const second = await launch(config, vault);
+    second.stop();
+    // Un-imported: its row gone and its `ir-id` stripped
+    vault.rows.delete(`id-${note.path}`);
+    vault.edit(note, { title: 'Clip' });
+    const third = await launch(config, vault);
+
+    expect(importedPaths(first.importMany)).toEqual([[note.path, pdf.path]]);
+    expect(second.importMany).not.toHaveBeenCalled();
+    expect(third.importMany).not.toHaveBeenCalled();
+  });
+
+  it('imports what arrived together with notes tagged while Obsidian was closed, in one batch under one notice, each once', async () => {
+    const vault = makeVault();
+    saveAutoImportWatermark(vault.app, Date.now() - 1);
+    storeLedger(vault, [INBOX], []);
+    vi.advanceTimersByTime(1);
+    const tagged = vault.add('notes/tagged.md', { tags: [TRIGGER] });
+    const both = vault.add(`${INBOX}/both.md`, { tags: [TRIGGER] });
+    const arrived = vault.add(`${INBOX}/arrived.pdf`, undefined, 'pdf');
+
+    const { importMany } = await launch(
+      { onFolder: true, folders: [INBOX] },
+      vault
+    );
+
+    expect(importedPaths(importMany)).toEqual([
+      [tagged.path, both.path, arrived.path],
+    ]);
+    expect(Notice.messages).toEqual([importedNotice(3)]);
+  });
+
+  it('stores an arrival it found as seen only once it is imported, so a crash before then leaves it to be found again', async () => {
+    const vault = makeVault();
+    storeLedger(vault, [INBOX], []);
+    const pdf = vault.add(`${INBOX}/a.pdf`, undefined, 'pdf');
+    const { watcher, importMany } = makeWatcher(
+      { onFolder: true, folders: [INBOX] },
+      vault
+    );
+    const outcomes = deferred<BulkOutcome[]>();
+    importMany.mockImplementationOnce(() => outcomes.promise);
+
+    const scan = watcher.runCatchUpScan();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(importMany).toHaveBeenCalledOnce();
+    expect(ledgerOf(vault)).toEqual({ folders: [INBOX], paths: [] });
+    outcomes.resolve([{ file: pdf, status: 'imported' }]);
+    await scan;
+    expect(ledgerOf(vault)).toEqual({ folders: [INBOX], paths: [pdf.path] });
+  });
+
+  it('tries an arrival whose import failed again at the next launch', async () => {
+    const vault = makeVault();
+    const config = { onFolder: true, folders: [INBOX] };
+    storeLedger(vault, [INBOX], []);
+    const pdf = vault.add(`${INBOX}/a.pdf`, undefined, 'pdf');
+    const failing = makeWatcher(config, vault, (v) =>
+      makeImporter(v, () => ({ status: 'failed', reason: 'broken' }))
+    );
+    await failing.watcher.runCatchUpScan();
+    failing.stop();
+
+    const next = await launch(config, vault);
+
+    expect(importedPaths(failing.importMany)).toEqual([[pdf.path]]);
+    expect(importedPaths(next.importMany)).toEqual([[pdf.path]]);
+    expect(seenPaths(vault)).toEqual(new Set([pdf.path]));
+  });
+
+  it('leaves an arrival being imported as the scan runs to that import, and stores it as seen once done', async () => {
+    const vault = makeVault();
+    storeLedger(vault, [INBOX], []);
+    const { watcher, importMany, arrive } = makeWatcher(
+      { onFolder: true, folders: [INBOX] },
+      vault
+    );
+    const outcomes = deferred<BulkOutcome[]>();
+    importMany.mockImplementationOnce(() => outcomes.promise);
+    const pdf = vault.add(`${INBOX}/a.pdf`, undefined, 'pdf');
+    arrive(pdf);
+    await settle();
+    expect(importMany).toHaveBeenCalledOnce();
+
+    const scan = watcher.runCatchUpScan();
+    expect(seenPaths(vault)).toEqual(new Set());
+    outcomes.resolve([{ file: pdf, status: 'imported' }]);
+    await scan;
+    await settle();
+
+    expect(importMany).toHaveBeenCalledOnce();
+    expect(seenPaths(vault)).toEqual(new Set([pdf.path]));
+  });
+
+  it('leaves an arrival waiting behind another import as the scan runs to its own import, so it is imported once', async () => {
+    const vault = makeVault();
+    storeLedger(vault, [INBOX], []);
+    const { watcher, importMany, arrive } = makeWatcher(
+      { onFolder: true, folders: [INBOX] },
+      vault,
+      makeCopyImporter
+    );
+    const outcomes = deferred<BulkOutcome[]>();
+    const copy = importMany.getMockImplementation()!;
+    importMany.mockImplementationOnce(async (entries, config) => {
+      await outcomes.promise;
+      return copy(entries, config);
+    });
+    const first = vault.add(`${INBOX}/first.pdf`, undefined, 'pdf');
+    arrive(first);
+    await settle();
+    const second = vault.add(`${INBOX}/second.pdf`, undefined, 'pdf');
+    arrive(second);
+    await settle();
+    expect(importMany).toHaveBeenCalledOnce();
+
+    const scan = watcher.runCatchUpScan();
+    expect(seenPaths(vault)).toEqual(new Set());
+    outcomes.resolve([]);
+    await scan;
+    await settle();
+
+    expect(importedPaths(importMany)).toEqual([[first.path], [second.path]]);
+    expect(seenPaths(vault)).toEqual(new Set([first.path, second.path]));
+  });
+
+  it('leaves an empty note it found unseen until it has something in it, and imports it then', async () => {
+    const vault = makeVault();
+    storeLedger(vault, [INBOX], []);
+    const note = vault.create(`${INBOX}/new.md`);
+    const { watcher, importMany, change } = makeWatcher(
+      { onFolder: true, folders: [INBOX] },
+      vault
+    );
+
+    await watcher.runCatchUpScan();
+    expect(importMany).not.toHaveBeenCalled();
+    expect(seenPaths(vault)).toEqual(new Set());
+
+    vault.edit(note, {});
+    change(note);
+    await settle();
+    expect(importedPaths(importMany)).toEqual([[note.path]]);
+    expect(seenPaths(vault)).toEqual(new Set([note.path]));
+  });
+
+  it('stores an arrival imported before the scan as seen, so a copy import leaves no note for the scan to import again', async () => {
+    const vault = makeVault();
+    storeLedger(vault, [INBOX], []);
+    const { watcher, importMany, arrive, change } = makeWatcher(
+      { onFolder: true, folders: [INBOX], mode: 'copy' },
+      vault,
+      makeCopyImporter
+    );
+    const note = vault.create(`${INBOX}/clip.md`);
+    arrive(note);
+    vault.edit(note, { title: 'Clip' });
+    change(note);
+    await settle();
+
+    await watcher.runCatchUpScan();
+    await settle();
+
+    expect(importedPaths(importMany)).toEqual([[note.path]]);
+    expect(seenPaths(vault)).toEqual(new Set([note.path]));
+  });
+
+  it('stores nothing for a flush that imported no arrival', async () => {
+    const vault = makeVault();
+    const { watcher, change } = makeWatcher(
+      { onFolder: true, folders: [INBOX] },
+      vault
+    );
+    await watcher.runCatchUpScan();
+    const store = vi.spyOn(vault.app, 'saveLocalStorage');
+
+    change(vault.add(`${INBOX}/tagged.md`, { tags: [TRIGGER] }));
+    await settle();
+
+    expect(ledgerWrites(store)).toBe(0);
+  });
+
+  it('leaves out of the ledger an arrival deleted, moved out of the watched folders, or failed while it was imported, and stores none once stopped', async () => {
+    const vault = makeVault();
+    storeLedger(vault, [INBOX], []);
+    const { watcher, importMany, arrive } = makeWatcher(
+      { onFolder: true, folders: [INBOX] },
+      vault,
+      (v) =>
+        makeImporter(v, (file) =>
+          file.path.includes('failing')
+            ? { status: 'failed', reason: 'broken' }
+            : { status: 'imported' }
+        )
+    );
+    await watcher.runCatchUpScan();
+    const files = ['kept', 'deleted', 'moved', 'failing'].map((name) =>
+      vault.add(`${INBOX}/${name}.pdf`, undefined, 'pdf')
+    );
+    files.forEach(arrive);
+    const outcomes = deferred<BulkOutcome[]>();
+    const real = importMany.getMockImplementation()!;
+    importMany.mockImplementationOnce(async (entries, config) => {
+      await outcomes.promise;
+      return real(entries, config);
+    });
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
+    vault.remove(files[1]);
+    vault.rename(files[2], 'notes/moved.pdf');
+    outcomes.resolve([]);
+    await settle();
+
+    expect(seenPaths(vault)).toEqual(new Set([files[0].path]));
+  });
+
+  it('stores nothing for a flush that ends after the plugin stopped', async () => {
+    const vault = makeVault();
+    storeLedger(vault, [INBOX], []);
+    const { watcher, importMany, arrive, stop } = makeWatcher(
+      { onFolder: true, folders: [INBOX] },
+      vault
+    );
+    await watcher.runCatchUpScan();
+    const outcomes = deferred<BulkOutcome[]>();
+    importMany.mockImplementationOnce(() => outcomes.promise);
+    const pdf = vault.add(`${INBOX}/a.pdf`, undefined, 'pdf');
+    arrive(pdf);
+    await settle();
+
+    stop();
+    outcomes.resolve([{ file: pdf, status: 'imported' }]);
+    await settle();
+
+    expect(seenPaths(vault)).toEqual(new Set());
+  });
+
+  it('does nothing once stopped', async () => {
+    const vault = makeVault();
+    storeLedger(vault, [INBOX], []);
+    vault.add(`${INBOX}/a.pdf`, undefined, 'pdf');
+    const { watcher, importMany, stop } = makeWatcher(
+      { onFolder: true, folders: [INBOX] },
+      vault
+    );
+    stop();
+
+    await watcher.runCatchUpScan();
+
+    expect(importMany).not.toHaveBeenCalled();
+    expect(ledgerOf(vault)).toEqual({ folders: [INBOX], paths: [] });
+  });
+});
+
+describe('AutoImportWatcher, the ledger of watched folders, as settings change', () => {
+  const CLIPS = 'Clips';
+
+  it('takes a folder newly watched as seen as it is, so only what arrives in it later is imported', async () => {
+    const vault = makeVault();
+    const old = vault.add(`${CLIPS}/old.pdf`, undefined, 'pdf');
+    const first = await launch({ onFolder: true, folders: [INBOX] }, vault);
+
+    first.configure({ folders: [INBOX, CLIPS] });
+    first.stop();
+    const added = vault.add(`${CLIPS}/new.pdf`, undefined, 'pdf');
+    const next = await launch(
+      { onFolder: true, folders: [INBOX, CLIPS] },
+      vault
+    );
+
+    expect(first.importMany).not.toHaveBeenCalled();
+    expect(importedPaths(next.importMany)).toEqual([[added.path]]);
+    expect(seenPaths(vault)).toEqual(new Set([old.path, added.path]));
+  });
+
+  it('forgets a folder no longer watched, so watching it again takes it as seen again', async () => {
+    for (const unwatch of [
+      { folders: [INBOX] },
+      { onFolder: false },
+    ] as const) {
+      const vault = makeVault();
+      const config = { onFolder: true, folders: [INBOX, CLIPS] };
+      const kept = vault.add(`${INBOX}/kept.pdf`, undefined, 'pdf');
+      const watching = await launch(config, vault);
+
+      watching.configure(unwatch);
+      const unwatched = ledgerOf(vault);
+      const meanwhile = vault.add(`${CLIPS}/meanwhile.pdf`, undefined, 'pdf');
+      watching.configure(config);
+      watching.stop();
+      const next = await launch(config, vault);
+
+      expect(unwatched).toEqual(
+        'folders' in unwatch
+          ? { folders: [INBOX], paths: [kept.path] }
+          : { folders: [], paths: [] }
+      );
+      expect(next.importMany).not.toHaveBeenCalled();
+      expect(seenPaths(vault)).toEqual(new Set([kept.path, meanwhile.path]));
+    }
+  });
+
+  it('keeps an unseen file in a folder still watched as one to import when another folder is added', async () => {
+    const vault = makeVault();
+    storeLedger(vault, [INBOX], []);
+    const { configure, stop } = makeWatcher(
+      { onFolder: true, folders: [INBOX] },
+      vault
+    );
+    const unseen = vault.add(`${INBOX}/${CLIPS}/unseen.pdf`, undefined, 'pdf');
+
+    configure({ folders: [INBOX, `${INBOX}/${CLIPS}`] });
+    stop();
+    const next = await launch(
+      { onFolder: true, folders: [INBOX, `${INBOX}/${CLIPS}`] },
+      vault
+    );
+
+    expect(importedPaths(next.importMany)).toEqual([[unseen.path]]);
+  });
+
+  it('stores nothing while the folders watched stay the same, in whatever order', async () => {
+    const vault = makeVault();
+    const watching = await launch(
+      { onFolder: true, folders: [INBOX, CLIPS] },
+      vault
+    );
+    const store = vi.spyOn(vault.app, 'saveLocalStorage');
+
+    watching.configure({ priority: 10 });
+    watching.configure({ folders: [CLIPS, INBOX] });
+    watching.configure({ onFolder: true });
+
+    expect(ledgerWrites(store)).toBe(0);
+  });
+
+  it('stores no ledger before one is stored, nor once stopped', () => {
+    const vault = makeVault();
+    const { configure, stop } = makeWatcher(
+      { onFolder: true, folders: [INBOX] },
+      vault
+    );
+    configure({ folders: [INBOX, CLIPS] });
+    expect(ledgerOf(vault)).toBeNull();
+    stop();
+
+    const stored = makeVault();
+    storeLedger(stored, [INBOX], []);
+    const stopped = makeWatcher({ onFolder: true, folders: [INBOX] }, stored);
+    stopped.configure({ folders: [INBOX, CLIPS] });
+    stopped.stop();
+    stopped.configure({ folders: [CLIPS] });
+    expect(ledgerOf(stored)).toEqual({ folders: [INBOX, CLIPS], paths: [] });
+  });
+
+  it('takes a folder swapped in for another as newly watched, and forgets the other', async () => {
+    const vault = makeVault();
+    const inbox = vault.add(`${INBOX}/a.pdf`, undefined, 'pdf');
+    vault.add(`${CLIPS}/b.pdf`, undefined, 'pdf');
+    const papers = vault.add('Papers/c.pdf', undefined, 'pdf');
+    const watching = await launch(
+      { onFolder: true, folders: [INBOX, CLIPS] },
+      vault
+    );
+
+    watching.configure({ folders: [INBOX, 'Papers'] });
+
+    expect(ledgerOf(vault)).toEqual({
+      folders: [INBOX, 'Papers'],
+      paths: [inbox.path, papers.path],
+    });
+  });
+});
+
+describe('AutoImportWatcher, the ledger of watched folders, as files move and go', () => {
+  /** A watcher caught up over a vault with `paths` in it, all seen. */
+  async function makeCaughtUp(...paths: string[]) {
+    const vault = makeVault();
+    const files = paths.map((path) => vault.add(path, undefined, 'pdf'));
+    const watching = await launch({ onFolder: true, folders: [INBOX] }, vault);
+    return { ...watching, files };
+  }
+
+  /** Tell `watcher` `file` was deleted, as the plugin does. */
+  const deleteFile = (
+    { vault, watcher }: Awaited<ReturnType<typeof makeCaughtUp>>,
+    file: TFile
+  ) => {
+    vault.remove(file);
+    watcher.noteDeletion(file);
+  };
+
+  it('records an arrival it passes over at once, so it is not found arrived at the next launch once it no longer has what kept it out', async () => {
+    const watching = await makeCaughtUp();
+    const { vault } = watching;
+    // Delivered by Sync, or an article moved in: the `ir-id` keeps it out
+    vault.rows.add('id-synced');
+    const synced = vault.add(`${INBOX}/synced.md`, { 'ir-id': 'id-synced' });
+    watching.arrive(synced);
+    const moved = vault.add('notes/moved.md', { 'ir-id': 'id-moved' });
+    vault.rows.add('id-moved');
+    watching.move(moved, `${INBOX}/moved.md`);
+    const snippet = vault.add(`${INBOX}/snippet.md`, { tags: [SNIPPET_TAG] });
+    watching.arrive(snippet);
+    const image = vault.create(`${INBOX}/image.png`);
+    watching.arrive(image);
+    await settle();
+    expect(seenPaths(vault)).toEqual(
+      new Set([synced.path, `${INBOX}/moved.md`, snippet.path, image.path])
+    );
+    // Un-imported, and untagged
+    vault.rows.clear();
+    vault.edit(synced, {});
+    vault.edit(moved, {});
+    vault.edit(snippet, {});
+    watching.stop();
+
+    const next = await launch({ onFolder: true, folders: [INBOX] }, vault);
+
+    expect(watching.importMany).not.toHaveBeenCalled();
+    expect(next.importMany).not.toHaveBeenCalled();
+  });
+
+  it('leaves an arrival it passes over unrecorded when its import failed before, so the next launch tries it again', async () => {
+    const vault = makeVault();
+    const config = { onFolder: true, folders: [INBOX] };
+    const watching = await launch(config, vault, (v) =>
+      makeImporter(v, () => ({ status: 'failed', reason: 'broken' }))
+    );
+    const note = vault.add(`${INBOX}/a.md`, {});
+    watching.arrive(note);
+    await settle();
+    // Back again, moved out and in
+    watching.move(note, 'notes/a.md');
+    watching.move(note, `${INBOX}/a.md`);
+    await settle();
+    watching.stop();
+
+    const next = await launch(config, vault);
+
+    expect(importedPaths(watching.importMany)).toEqual([[note.path]]);
+    expect(importedPaths(next.importMany)).toEqual([[note.path]]);
+  });
+
+  it('moves a file moved within the watched folders to where it now is, in a moment', async () => {
+    const watching = await makeCaughtUp(`${INBOX}/a.pdf`);
+    const store = vi.spyOn(watching.vault.app, 'saveLocalStorage');
+
+    watching.move(watching.files[0], `${INBOX}/sub/a.pdf`);
+    watching.move(watching.files[0], `${INBOX}/b.pdf`);
+    expect(seenPaths(watching.vault)).toEqual(new Set([`${INBOX}/a.pdf`]));
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+    expect(seenPaths(watching.vault)).toEqual(new Set([`${INBOX}/b.pdf`]));
+    expect(ledgerWrites(store)).toBe(1);
+    expect(watching.importMany).not.toHaveBeenCalled();
+    watching.stop();
+    const next = await launch(
+      { onFolder: true, folders: [INBOX] },
+      watching.vault
+    );
+    expect(next.importMany).not.toHaveBeenCalled();
+  });
+
+  it('forgets a file moved out, so one moved back while Obsidian was closed is imported', async () => {
+    const watching = await makeCaughtUp(`${INBOX}/a.pdf`, `${INBOX}/b.pdf`);
+    const [file] = watching.files;
+
+    watching.move(file, 'notes/a.pdf');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+    expect(seenPaths(watching.vault)).toEqual(new Set([`${INBOX}/b.pdf`]));
+    watching.stop();
+    watching.vault.rename(file, `${INBOX}/a.pdf`);
+    const next = await launch(
+      { onFolder: true, folders: [INBOX] },
+      watching.vault
+    );
+
+    expect(importedPaths(next.importMany)).toEqual([[`${INBOX}/a.pdf`]]);
+  });
+
+  it('forgets a deleted file, so a file written to its path while Obsidian was closed is imported', async () => {
+    const watching = await makeCaughtUp(`${INBOX}/a.pdf`, `${INBOX}/b.pdf`);
+
+    deleteFile(watching, watching.files[0]);
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+    expect(seenPaths(watching.vault)).toEqual(new Set([`${INBOX}/b.pdf`]));
+    watching.stop();
+    watching.vault.add(`${INBOX}/a.pdf`, undefined, 'pdf');
+    const next = await launch(
+      { onFolder: true, folders: [INBOX] },
+      watching.vault
+    );
+
+    expect(importedPaths(next.importMany)).toEqual([[`${INBOX}/a.pdf`]]);
+  });
+
+  it('forgets every file in a deleted folder', async () => {
+    const watching = await makeCaughtUp(
+      `${INBOX}/sub/a.pdf`,
+      `${INBOX}/sub/deeper/b.pdf`,
+      `${INBOX}/sub2/c.pdf`,
+      `${INBOX}/d.pdf`
+    );
+    const folder = Object.assign(new TFolder(), { path: `${INBOX}/sub` });
+
+    watching.watcher.noteDeletion(folder);
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+    expect(seenPaths(watching.vault)).toEqual(
+      new Set([`${INBOX}/sub2/c.pdf`, `${INBOX}/d.pdf`])
+    );
+  });
+
+  it('stores at once, as the plugin stops, what a move or deletion changed', async () => {
+    const watching = await makeCaughtUp(`${INBOX}/a.pdf`, `${INBOX}/b.pdf`);
+
+    deleteFile(watching, watching.files[0]);
+    watching.stop();
+
+    expect(seenPaths(watching.vault)).toEqual(new Set([`${INBOX}/b.pdf`]));
+  });
+
+  it('stores nothing for a move or deletion of a file it has not seen, or once stopped, or with no ledger stored', async () => {
+    const watching = await makeCaughtUp(`${INBOX}/a.pdf`);
+    const store = vi.spyOn(watching.vault.app, 'saveLocalStorage');
+    const unseen = watching.vault.add('notes/x.pdf', undefined, 'pdf');
+    const emptyFolder = Object.assign(new TFolder(), { path: 'notes' });
+
+    watching.move(unseen, 'notes/y.pdf');
+    deleteFile(watching, unseen);
+    watching.watcher.noteDeletion(emptyFolder);
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+    watching.stop();
+    deleteFile(watching, watching.files[0]);
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+    const fresh = makeWatcher({ onFolder: true, folders: [INBOX] });
+    fresh.watcher.noteDeletion(fresh.vault.add(`${INBOX}/z.pdf`));
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+    expect(ledgerWrites(store)).toBe(0);
+    expect(ledgerOf(fresh.vault)).toBeNull();
   });
 });
