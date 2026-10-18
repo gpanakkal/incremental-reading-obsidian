@@ -95,7 +95,7 @@ describe('ImportModal', () => {
         );
         modal.onOpen();
         try {
-          expect(modal.titleEl.textContent).toBe(`Importing "${basename}"`);
+          expect(modal.titleEl.textContent).toContain(basename);
         } finally {
           modal.onClose();
         }
@@ -212,7 +212,7 @@ describe('ImportModal', () => {
         });
         modal.onOpen();
         try {
-          expect(modal.titleEl.textContent).toBe(`Importing "${title}"`);
+          expect(modal.titleEl.textContent).toContain(title);
         } finally {
           modal.onClose();
         }

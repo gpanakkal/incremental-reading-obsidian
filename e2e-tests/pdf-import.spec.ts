@@ -283,9 +283,7 @@ test.describe('Importing a PDF', () => {
 
     await expect
       .poll(notices)
-      .toContainEqual(
-        `"Not really.pdf" doesn't hold what its extension says; canceling import`
-      );
+      .toContainEqual(expect.stringContaining('"Not really.pdf"'));
     expect(await rowsAt(window, fakePath)).toEqual([]);
   });
 });

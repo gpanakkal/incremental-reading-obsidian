@@ -145,24 +145,22 @@ test.describe('Importing from a folder', () => {
     const modal = window.locator('.modal').filter({
       has: window.locator('.ir-bulk-import'),
     });
-    await expect(modal.locator('.modal-title')).toHaveText(
-      `Importing from ${SOURCES}`
-    );
+    await expect(modal.locator('.modal-title')).toContainText(SOURCES);
     const rows = modal.locator('.ir-bulk-import-row');
     await expect(modal.locator('.ir-loading')).toHaveCount(0);
     await expect(rows).toHaveText(SOURCE_NOTES);
-    await expect(modal.getByText('3 selected')).toBeVisible();
+    await expect(modal.locator('.ir-bulk-import-count')).toHaveText(/^3\b/);
 
     const [kept1, kept2, unticked] = SOURCE_NOTES;
     await rows.filter({ hasText: unticked }).getByRole('checkbox').uncheck();
-    await expect(modal.getByText('2 selected')).toBeVisible();
+    await expect(modal.locator('.ir-bulk-import-count')).toHaveText(/^2\b/);
     await modal.getByRole('button', { name: 'Import 2' }).click();
 
     await expect(modal).toHaveCount(0);
     await expect(
-      window.locator('.notice', {
-        hasText: `2 of 2 imported from ${SOURCES}`,
-      })
+      window
+        .locator('.notice', { hasText: '2 of 2' })
+        .filter({ hasText: SOURCES })
     ).toBeVisible();
     await expect
       .poll(() => articlePaths(window))

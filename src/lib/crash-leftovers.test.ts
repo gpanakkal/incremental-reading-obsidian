@@ -704,7 +704,7 @@ describe('resolveLeftover', () => {
   it('does nothing, and says why, while writes are refused', async () => {
     const { vault, repo, deps, leftover, notify } = await wireLeftover(
       'snippet',
-      `${DATA_DIRECTORY}/x/a.md`
+      `${DATA_DIRECTORY}/x/Quokka.md`
     );
     repo.refuseWrites(new Error('Saving is paused.'));
 
@@ -712,45 +712,49 @@ describe('resolveLeftover', () => {
 
     expect(repo.rows('snippet')).toEqual([]);
     expect(vault.paths()).toHaveLength(1);
-    expect(notify).toHaveBeenCalledExactlyOnceWith(
-      `Couldn't keep "a" as an item: saving to the database is paused. Saving is paused.`,
-      { kind: 'error' }
-    );
+    expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+      kind: 'error',
+    });
+    const [message] = notify.mock.calls[0];
+    expect(message).toContain('Quokka');
+    expect(message).toContain('Saving is paused.');
   });
 
-  it.each([
-    { action: 'trash', doing: 'move "a" to the trash' },
-    { action: 'strip', doing: 'remove the IR properties from "a"' },
-  ] as const)(
-    'names what it could not do, $action, while writes are refused',
-    async ({ action, doing }) => {
+  it('names the note and why, and tells trashing apart from stripping, while writes are refused', async () => {
+    const said: string[] = [];
+    for (const action of ['trash', 'strip'] as const) {
+      vi.restoreAllMocks();
       const { vault, deps, leftover, notify } = await wireLeftover(
         'article',
-        'notes/a.md'
+        'notes/Quokka.md'
       );
       deps.repo.refuseWrites(new Error('Saving is paused.'));
 
       expect(await resolveLeftover(deps, leftover, action)).toBe(false);
 
       expect(vault.trashed).toEqual([]);
-      expect(notify).toHaveBeenCalledExactlyOnceWith(
-        `Couldn't ${doing}: saving to the database is paused. Saving is paused.`,
-        { kind: 'error' }
-      );
+      expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+        kind: 'error',
+      });
+      const [message] = notify.mock.calls[0];
+      expect(message).toContain('Quokka');
+      expect(message).toContain('Saving is paused.');
+      said.push(message);
     }
-  );
+    expect(new Set(said).size).toBe(2);
+  });
 
   it('says so when it fails', async () => {
     const { vault, deps, leftover, notify } = await wireLeftover(
       'snippet',
-      `${DATA_DIRECTORY}/x/a.md`
+      `${DATA_DIRECTORY}/x/Quokka.md`
     );
     vault.fail('trash');
 
     expect(await resolveLeftover(deps, leftover, 'trash')).toBe(false);
 
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      `Couldn't move "a" to the trash`,
+      expect.stringContaining('Quokka'),
       { kind: 'error' }
     );
   });

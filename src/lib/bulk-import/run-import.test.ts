@@ -92,7 +92,8 @@ describe('importChosen', () => {
       fc.asyncProperty(
         resultsArb,
         optionsArb,
-        fc.string(),
+        // No digits, so the only numbers in the summary are its counts
+        fc.string().filter((title) => !/\d/.test(title)),
         async (outcomes, options, title) => {
           Notice.reset();
           const files = outcomes.map(({ file }) => file);
@@ -101,10 +102,15 @@ describe('importChosen', () => {
 
           const imported = outcomes.filter((o) => o.status === 'imported');
           const failed = outcomes.filter((o) => o.status === 'failed');
-          expect(Notice.messages).toEqual([
-            `${imported.length} of ${outcomes.length} imported from ${title}`,
-            ...(failed.length > 0 ? [describeFailures(failed)] : []),
+          const [summary, ...rest] = Notice.messages;
+          expect(summary).toContain(title);
+          expect(summary.match(/\d+/g)?.map(Number)).toEqual([
+            imported.length,
+            outcomes.length,
           ]);
+          expect(rest).toEqual(
+            failed.length > 0 ? [describeFailures(failed)] : []
+          );
         }
       )
     );
@@ -128,7 +134,7 @@ describe('importChosen', () => {
       );
 
       expect(Notice.messages, level).toEqual([
-        ...(level === 'none' ? [] : ['0 of 1 imported from notes']),
+        ...(level === 'none' ? [] : [expect.stringContaining('notes')]),
         describeFailures([failure]),
       ]);
     }
@@ -163,9 +169,16 @@ describe('describeFailures', () => {
         const failed = outcomes.filter((o) => o.status === 'failed');
         fc.pre(failed.length > 0);
 
-        expect(describeFailures(failed)).toBe(
+        const message = describeFailures(failed);
+        // The header is worded freely; only its count and plural are logic
+        const [header] = message.split('\n');
+        const plural = failed.length === 1 ? '' : 's';
+        expect(header).toMatch(
+          new RegExp(`\\b${failed.length} file${plural}\\b`)
+        );
+        expect(message).toBe(
           [
-            `Couldn't import ${failed.length} ${failed.length === 1 ? 'file' : 'files'}:`,
+            header,
             ...failed.map(({ file, reason }) => `${file.path}: ${reason}`),
           ].join('\n')
         );

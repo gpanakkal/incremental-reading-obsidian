@@ -350,8 +350,9 @@ test('a migrating startup waits for Sync, then loads the copy it delivered inste
     })
   ).toBe(false);
   await window.locator('.incremental-reading-ribbon').click();
+  // Told to try again: a notice besides the wait's own
   await expect(
-    notice('Incremental reading: still starting. Try again in a moment.')
+    window.locator('.notice').filter({ hasNotText: SYNC_HOLD_MESSAGES.waiting })
   ).toBeVisible();
 
   // Sync writes the other device's migrated copy, then dequeues it, as its
@@ -492,7 +493,10 @@ test('with only unrelated folders excluded from Sync, a startup says nothing abo
   await enablePlugin();
 
   await expect.poll(pluginArticles).toEqual(expectedArticles());
-  await expect(
-    notice('Incremental reading: Sync leaves the review database out')
-  ).toHaveCount(0);
+  for (const folder of ['notes', `${DATA_DIRECTORY}-archive`, DATA_DIRECTORY]) {
+    await expect(
+      notice(syncExclusionMessage({ cause: 'folder', folder }))
+    ).toHaveCount(0);
+  }
+  await expect(notice(syncExclusionMessage({ cause: 'type' }))).toHaveCount(0);
 });

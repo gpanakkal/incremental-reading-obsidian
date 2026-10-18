@@ -277,9 +277,11 @@ const callsForImport = (note: NoteState, heldIds: ReadonlySet<string>) =>
 /** The moment the watcher last saw every change, as `vault` stores it. */
 const seenAt = (vault: Vault) => loadAutoImportWatermark(vault.app);
 
-/** The notice for `count` imports. */
+/** The notice for `count` imports, matched by its count and plural only. */
 const importedNotice = (count: number) =>
-  `Imported ${count} article${count === 1 ? '' : 's'}`;
+  expect.stringMatching(
+    new RegExp(`\\b${count} article${count === 1 ? '' : 's'}\\b`)
+  );
 
 // #endregion
 
@@ -804,7 +806,7 @@ describe('AutoImportWatcher at flush', () => {
       'Incremental Reading - couldn\'t look up ir-id "gone" for an automatic import:',
       new Error('database closed')
     );
-    expect(Notice.messages).toEqual(['Imported 2 articles']);
+    expect(Notice.messages).toEqual([importedNotice(2)]);
 
     change(unread);
     await settle();
@@ -918,7 +920,7 @@ describe('AutoImportWatcher notices', () => {
           expect(Notice.messages).toEqual([
             ...(imported === 0
               ? []
-              : [`Imported ${imported} article${imported === 1 ? '' : 's'}`]),
+              : [importedNotice(imported)]),
             ...(failed.length === 0 ? [] : [describeFailures(failed)]),
           ]);
           stop();
@@ -957,7 +959,7 @@ describe('AutoImportWatcher notices', () => {
       await settle();
 
       expect(Notice.messages, level).toEqual([
-        ...(level === 'none' ? [] : ['Imported 1 article']),
+        ...(level === 'none' ? [] : [importedNotice(1)]),
         describeFailures([{ file: bad, status: 'failed', reason: 'broken' }]),
       ]);
       stop();

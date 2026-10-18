@@ -85,15 +85,11 @@ describe('ConfirmModal', () => {
         ).toStrictEqual(
           options.paragraphs.map((text) => [text, 'u-break-word'])
         );
-        expect(
-          buttons.map((button) => [button.textContent, button.className])
-        ).toStrictEqual([
-          ['Cancel', 'mod-cancel'],
-          [
-            options.confirmText,
-            options.destructive ? 'mod-destructive mod-cta' : 'mod-cta',
-          ],
+        expect(buttons.map((button) => button.className)).toStrictEqual([
+          'mod-cancel',
+          options.destructive ? 'mod-destructive mod-cta' : 'mod-cta',
         ]);
+        expect(buttons[1].textContent).toBe(options.confirmText);
         modal.close();
       })
     );

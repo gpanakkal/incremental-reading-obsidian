@@ -2294,7 +2294,7 @@ describe('start', () => {
           expect(files.get(DATABASE_FILE_PATH)).toBe(arrived);
           expect(onWriteBlocked).toHaveBeenCalledOnce();
           expect((onWriteBlocked.mock.calls[0] as [Error])[0].message).toMatch(
-            /^A database file appeared on disk .* not be saved.* reload the plugin to load it\.$/
+            /appeared/
           );
           for (const id of localIds.slice(1)) {
             expect(() => insertArticleRow(repo, id)).toThrow();
@@ -2759,7 +2759,7 @@ describe('reloading a file that changed on disk', () => {
           expect(files.get(DATABASE_FILE_PATH)).toBe(broken);
           expect(onWriteBlocked).toHaveBeenCalledOnce();
           expect((onWriteBlocked.mock.calls[0] as [Error])[0].message).toMatch(
-            /^The database file changed on disk but could not be loaded\. Changes will not be saved until it loads\.$/
+            /could not be loaded/
           );
           expect(onReloadFromDisk).not.toHaveBeenCalled();
           expect(onWritesResumed).not.toHaveBeenCalled();

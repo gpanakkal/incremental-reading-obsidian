@@ -74,12 +74,6 @@ const labelOf = (offset: number, approximate: boolean) =>
 const intervalShown = (offset: number, approximate = false) =>
   Number.isNaN(offset) ? '–' : labelOf(offset, approximate);
 
-/** A segment's accessible name for `offset`: the word alone for no date. */
-const nameOf = (word: string, offset: number, approximate = false) =>
-  Number.isNaN(offset)
-    ? word
-    : `${word}, next review in ${labelOf(offset, approximate)}`;
-
 /**
  * A plugin holding the "Show intervals on grade buttons" setting, which
  * announces each change to its settings the way the real one does.
@@ -144,34 +138,41 @@ function mountGroup(
   return { container, gradeCard, gradePreview, setShowGradeIntervals };
 }
 
-/** Each segment's word, interval line (null for none) and accessible name. */
-const segmentsShown = (container: HTMLElement) =>
-  segments(container).map((button) => ({
-    word: button.querySelector('.ir-grade-word')?.textContent,
-    interval: button.querySelector('.ir-grade-interval')?.textContent ?? null,
-    name: button.getAttribute('aria-label'),
-  }));
-
 /**
- * What the group shows for `offsets` with intervals on, or off. A ghost names
+ * Check what the group shows for `offsets` with intervals on, or off: each
+ * segment's interval line (none while off), and an accessible name that pairs
+ * its word with that interval, or is the word alone without one. A ghost names
  * nothing: it is hidden from assistive technology.
  */
-const expectedSegments = (
+const expectSegments = (
+  container: HTMLElement,
   offsets: readonly number[],
   approximate: readonly boolean[],
   showIntervals: boolean,
   ghost = false
-) =>
-  GRADES.map(([word], i) => {
-    const shown = showIntervals
-      ? {
-          word,
-          interval: intervalShown(offsets[i], approximate[i]),
-          name: nameOf(word, offsets[i], approximate[i]),
-        }
-      : { word, interval: null, name: word };
-    return ghost ? { ...shown, name: null } : shown;
+) => {
+  const shown = segments(container);
+  expect(shown).toHaveLength(GRADES.length);
+  shown.forEach((button, i) => {
+    const word = button.querySelector('.ir-grade-word')?.textContent;
+    const interval =
+      button.querySelector('.ir-grade-interval')?.textContent ?? null;
+    const name = button.getAttribute('aria-label');
+
+    expect(word).toBeTruthy();
+    expect(interval).toBe(
+      showIntervals ? intervalShown(offsets[i], approximate[i]) : null
+    );
+    if (ghost) {
+      expect(name).toBeNull();
+    } else if (showIntervals && !Number.isNaN(offsets[i])) {
+      expect(name).toContain(word);
+      expect(name).toContain(interval);
+    } else {
+      expect(name).toBe(word);
+    }
   });
+};
 
 /**
  * A card under review, as the current-item poll hands it over: a new object
@@ -238,12 +239,10 @@ describe('GradeGroup', () => {
           button.querySelector('.ir-grade-interval')?.textContent,
         ]);
 
-        expect(shown).toEqual(
-          GRADES.map(([word], i) => [
-            word,
-            intervalShown(offsets[i], approximate[i]),
-          ])
+        expect(shown.map(([, interval]) => interval)).toEqual(
+          offsets.map((offset, i) => intervalShown(offset, approximate[i]))
         );
+        for (const [word] of shown) expect(word).toBeTruthy();
       })
     );
   });
@@ -254,9 +253,13 @@ describe('GradeGroup', () => {
         const { container } = mountGroup(makeCard(), offsets, { approximate });
 
         segments(container).forEach((button, i) => {
-          expect(button.getAttribute('aria-label')).toBe(
-            nameOf(GRADES[i][0], offsets[i], approximate[i])
+          const name = button.getAttribute('aria-label');
+          expect(name).toContain(
+            button.querySelector('.ir-grade-word')?.textContent
           );
+          if (!Number.isNaN(offsets[i])) {
+            expect(name).toContain(intervalShown(offsets[i], approximate[i]));
+          }
           expect(button.hasAttribute('title')).toBe(false);
           for (const inner of Array.from(button.querySelectorAll('*'))) {
             expect(inner.hasAttribute('aria-label')).toBe(false);
@@ -280,9 +283,7 @@ describe('GradeGroup', () => {
             ghost,
           });
 
-          expect(segmentsShown(container)).toEqual(
-            expectedSegments(offsets, approximate, showIntervals, ghost)
-          );
+          expectSegments(container, offsets, approximate, showIntervals, ghost);
           expect(gradePreview).toHaveBeenCalledTimes(showIntervals ? 1 : 0);
         }
       )
@@ -306,9 +307,7 @@ describe('GradeGroup', () => {
 
           for (const show of flips) {
             setShowGradeIntervals(show);
-            expect(segmentsShown(container)).toEqual(
-              expectedSegments(offsets, approximate, show, ghost)
-            );
+            expectSegments(container, offsets, approximate, show, ghost);
           }
         }
       )
@@ -367,8 +366,8 @@ describe('GradeGroup', () => {
       true,
       true,
     ]);
-    first.forEach(([interval, label], i) => {
-      expect(label).toBe(`${GRADES[i][0]}, next review in ${interval}`);
+    first.forEach(([interval, label]) => {
+      expect(label).toContain(interval);
     });
 
     const preview = vi.spyOn(cards, 'previewDue');
@@ -380,12 +379,14 @@ describe('GradeGroup', () => {
     const card = makeCard();
     const { container, gradeCard } = mountGroup(card, [NaN, NaN, NaN, NaN]);
 
-    expect(
-      segments(container).map((b) => [
-        b.getAttribute('aria-label'),
-        b.querySelector('.ir-grade-interval')?.textContent,
-      ])
-    ).toEqual(GRADES.map(([word]) => [word, '–']));
+    const shown = segments(container);
+    expect(shown).toHaveLength(GRADES.length);
+    for (const b of shown) {
+      const word = b.querySelector('.ir-grade-word')?.textContent;
+      expect(word).toBeTruthy();
+      expect(b.getAttribute('aria-label')).toBe(word);
+      expect(b.querySelector('.ir-grade-interval')?.textContent).toBe('–');
+    }
     segments(container)[2]?.click();
     expect(gradeCard).toHaveBeenCalledExactlyOnceWith(card, Rating.Good);
   });

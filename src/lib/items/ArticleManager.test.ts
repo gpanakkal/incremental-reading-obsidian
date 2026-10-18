@@ -741,8 +741,30 @@ const tagArb = fc.oneof(
   fc.constantFrom(ARTICLE_TAG, SNIPPET_TAG, CARD_TAG, 'ir-source')
 );
 
-const refusal = (action: string) =>
-  `Couldn't ${action}: saving to the database is paused. Saving is paused.`;
+const escapeRegExp = (text: string) =>
+  text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** A refusal while writes are paused: what it names, then the pause's reason. */
+const refusal = (named = '') =>
+  expect.stringMatching(
+    new RegExp(`${escapeRegExp(named)}.*Saving is paused\\.$`, 's')
+  );
+
+/** An import's confirmation, by the title it names and the priority given. */
+const importedWithPriority = (title: string, priority: number) =>
+  expect.stringMatching(
+    new RegExp(
+      `"${escapeRegExp(title)}".*\\b` +
+        `${escapeRegExp(IRScheduler.toDisplayPriority(priority))}(?![.\\d])`,
+      's'
+    )
+  );
+
+/** An import's confirmation, by the title it names and its fixed interval. */
+const importedWithFixedDays = (title: string, days: number) =>
+  expect.stringMatching(
+    new RegExp(`"${escapeRegExp(title)}".*\\b${days}(?![.\\d])`, 's')
+  );
 
 /**
  * A file of a batch import: a note or a PDF, by name, with the snippets and
@@ -2904,9 +2926,7 @@ describe('setFixedInterval (error handling)', () => {
       manager.setFixedInterval(article, MINIMUM_FIXED_REVIEW_INTERVAL - 1)
     ).resolves.toBeUndefined();
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining(
-        `Failed to set fixed interval for "${article.reference}":`
-      ),
+      expect.stringContaining(article.reference),
       { kind: 'error' }
     );
     expect((repo.mutate as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
@@ -2929,7 +2949,7 @@ describe('disableFixedInterval (error handling)', () => {
       manager.disableFixedInterval(article, MINIMUM_PRIORITY - 1)
     ).resolves.toBeUndefined();
     expect(notify).toHaveBeenCalledExactlyOnceWith(
-      `Failed to disable fixed interval for article ${article.reference}`,
+      expect.stringContaining(article.reference),
       { kind: 'error' }
     );
     expect((repo.mutate as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
@@ -3409,9 +3429,7 @@ describe('import', () => {
             manager.import(file, DEFAULT_PRIORITY, null, makeCopy)
           ).resolves.toBeNull();
 
-          expect(Notice.messages).toEqual([
-            `"${file.name}" can't be imported as an article`,
-          ]);
+          expect(Notice.messages).toEqual([expect.stringContaining(file.name)]);
           expect(query).not.toHaveBeenCalled();
           expect(mutate).not.toHaveBeenCalled();
           expect(createNote).not.toHaveBeenCalled();
@@ -3455,8 +3473,10 @@ describe('import', () => {
             Notice.reset();
             const createNote = vi.spyOn(Obsidian, 'createNote');
             const updateFrontMatter = vi.spyOn(Obsidian, 'updateFrontMatter');
+            const notify = vi.spyOn(Obsidian, 'notify');
             createNote.mockClear();
             updateFrontMatter.mockClear();
+            notify.mockClear();
             const repo = makeSimpleRepo();
             const query = vi.spyOn(repo, 'query');
             const mutate = vi.spyOn(repo, 'mutate');
@@ -3474,8 +3494,10 @@ describe('import', () => {
             ).resolves.toBeNull();
 
             expect(Notice.messages).toHaveLength(1);
-            expect(Notice.messages[0]).toContain(file.name);
-            expect(Notice.messages[0]).not.toContain('Failed');
+            // Refused, not failed: told without the error kind
+            expect(notify).toHaveBeenCalledExactlyOnceWith(
+              expect.stringContaining(file.name)
+            );
             expect(query).not.toHaveBeenCalled();
             expect(mutate).not.toHaveBeenCalled();
             expect(createNote).not.toHaveBeenCalled();
@@ -3502,11 +3524,9 @@ describe('import', () => {
         manager.import(IMPORT_FILE, DEFAULT_PRIORITY, null, false)
       ).resolves.toBeNull();
 
-      expect(Notice.messages).toEqual([
-        `Failed to import article "${IMPORT_FILE.name}"`,
-      ]);
+      expect(Notice.messages).toHaveLength(1);
       expect(notify).toHaveBeenCalledWith(
-        `Failed to import article "${IMPORT_FILE.name}"`,
+        expect.stringContaining(IMPORT_FILE.name),
         { kind: 'error' }
       );
       expect(query).not.toHaveBeenCalled();
@@ -3580,8 +3600,8 @@ describe('import', () => {
             expect(result?.file).toBe(file);
             expect(Notice.messages).toEqual([
               fixedDays === null
-                ? `Imported "Paper" with priority ${IRScheduler.toDisplayPriority(priority)}`
-                : `Imported "Paper" with fixed interval of ${fixedDays} days`,
+                ? importedWithPriority('Paper', priority)
+                : importedWithFixedDays('Paper', fixedDays),
             ]);
             // Nothing about the PDF itself changes, and no copy is made
             expect(createNote).not.toHaveBeenCalled();
@@ -3623,12 +3643,13 @@ describe('import', () => {
           expect(allRows(repo)).toHaveLength(1);
           expect(results.filter((r) => r !== null)).toHaveLength(1);
           expect(Notice.messages).toEqual([
-            expect.stringContaining('Imported "Paper"'),
+            importedWithPriority('Paper', DEFAULT_PRIORITY),
           ]);
 
           // Once it has finished, the file can be asked about again
           await manager.import(PDF_FILE, DEFAULT_PRIORITY, null, false);
-          expect(Notice.messages.at(-1)).toContain('already an article');
+          expect(Notice.messages).toHaveLength(2);
+          expect(Notice.messages.at(-1)).toContain(`"${PDF_FILE.name}"`);
         }),
         { numRuns: 5 }
       );
@@ -3682,9 +3703,7 @@ describe('import', () => {
         expect(Notice.messages).toEqual(
           level === 'none'
             ? []
-            : [
-                `Imported "Paper" with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`,
-              ]
+            : [importedWithPriority('Paper', DEFAULT_PRIORITY)]
         );
       }
     );
@@ -3704,7 +3723,10 @@ describe('import', () => {
       );
 
       expect(Notice.messages).toEqual([
-        `Imported "${'P'.repeat(CONTENT_TITLE_SLICE_LENGTH - 3)}..." with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`,
+        importedWithPriority(
+          `${'P'.repeat(CONTENT_TITLE_SLICE_LENGTH - 3)}...`,
+          DEFAULT_PRIORITY
+        ),
       ]);
     });
 
@@ -3733,7 +3755,7 @@ describe('import', () => {
       expect(result?.data.id).toBe('existing');
       expect(result?.file).toBe(PDF_FILE);
       expect(Notice.messages).toEqual([
-        `"${PDF_FILE.name}" is already an article; canceling import`,
+        expect.stringContaining(`"${PDF_FILE.name}"`),
       ]);
     });
 
@@ -3751,8 +3773,7 @@ describe('import', () => {
       expect(result).toBeNull();
       expect(allRows(repo)).toEqual(before);
       expect(Notice.messages).toStrictEqual([
-        `Can't import "Paper.pdf" in place: its name or folder contains |. ` +
-          `Rename it or import a copy`,
+        expect.stringMatching(/"Paper\.pdf".*\|/),
       ]);
     });
 
@@ -3778,7 +3799,7 @@ describe('import', () => {
 
       expect(result?.data.id).toBe('deleted');
       expect(Notice.messages).toStrictEqual([
-        `Restored the article "Paper" to the queue with its earlier schedule`,
+        expect.stringContaining('"Paper"'),
         refusedPathsWarning([file.path]),
       ]);
     });
@@ -3803,7 +3824,7 @@ describe('import', () => {
 
       expect(result?.data.id).toBe('existing');
       expect(Notice.messages).toEqual([
-        `"Paper.pdf" is already an article; canceling import`,
+        expect.stringContaining('"Paper.pdf"'),
       ]);
     });
 
@@ -3885,7 +3906,7 @@ describe('import', () => {
               dismissed: false,
             });
             expect(Notice.messages).toEqual([
-              `Restored the article "Paper" to the queue with its earlier schedule`,
+              expect.stringContaining('"Paper"'),
             ]);
           }
         ),
@@ -4042,14 +4063,15 @@ describe('import', () => {
         vi.spyOn(Obsidian, 'getTargetPath').mockRestore();
         const ARTICLES = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}`;
         const COPY_PATH = `${ARTICLES}/Paper.pdf`;
-        // Snippets and cards taken from it, and what the notice adds
+        // Snippets and cards taken from it, and what the notice adds: each
+        // count with its noun, and the verb agreeing with their sum
         const cases = [
-          [0, 0, ''],
-          [1, 0, '; 1 snippet now refers to the copy'],
-          [0, 1, '; 1 card now refers to the copy'],
-          [2, 0, '; 2 snippets now refer to the copy'],
-          [1, 1, '; 1 snippet and 1 card now refer to the copy'],
-          [3, 2, '; 3 snippets and 2 cards now refer to the copy'],
+          [0, 0, null],
+          [1, 0, /\b1 snippet\b.*\brefers\b/],
+          [0, 1, /\b1 card\b.*\brefers\b/],
+          [2, 0, /\b2 snippets\b.*\brefer\b/],
+          [1, 1, /\b1 snippet\b.*\b1 card\b.*\brefer\b/],
+          [3, 2, /\b3 snippets\b.*\b2 cards\b.*\brefer\b/],
         ] as const;
         for (const [snippetCount, cardCount, notice] of cases) {
           vi.restoreAllMocks();
@@ -4120,9 +4142,12 @@ describe('import', () => {
             ...Object.fromEntries(cardIds.map((c) => [c, id])),
             elsewhere: null,
           });
-          expect(Notice.messages.at(-1)).toBe(
-            `Imported "Paper" with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}${notice}`
+          const confirmed = Notice.messages.at(-1);
+          expect(confirmed).toEqual(
+            importedWithPriority('Paper', DEFAULT_PRIORITY)
           );
+          if (notice) expect(confirmed).toMatch(notice);
+          else expect(confirmed).not.toMatch(/snippet|card/);
           if (snippetCount + cardCount === 0) {
             expect(retargetSources).not.toHaveBeenCalled();
             expect(
@@ -4229,8 +4254,8 @@ describe('import', () => {
               expect(result?.file).toBe(plugin.files.get(copyPath));
               expect(Notice.messages).toEqual([
                 fixedDays === null
-                  ? `Imported "Paper" with priority ${IRScheduler.toDisplayPriority(priority)}`
-                  : `Imported "Paper" with fixed interval of ${fixedDays} days`,
+                  ? importedWithPriority('Paper', priority)
+                  : importedWithFixedDays('Paper', fixedDays),
               ]);
               // A PDF carries no frontmatter, so no link back to its original
               expect(createNote).not.toHaveBeenCalled();
@@ -4370,10 +4395,10 @@ describe('import', () => {
                 rowsBefore
               );
               expect(rows).toHaveLength(rowsBefore.length + 1);
-              const warning = `Warning: article with name already exists "Paper.pdf"`;
+              const warning = expect.stringContaining('"Paper.pdf"');
               // Named by the copy, trimmed as every title is
               const title = expectedName.slice(0, -'.pdf'.length).trim();
-              const imported = `Imported "${title}" with priority ${IRScheduler.toDisplayPriority(10)}`;
+              const imported = importedWithPriority(title, 10);
               expect(Notice.messages).toEqual(
                 ownHolder === null ? [imported] : [warning, imported]
               );
@@ -4404,9 +4429,7 @@ describe('import', () => {
         const copyPath = `${ARTICLES}/invoicefdp.exe.pdf`;
         expect(plugin.app.vault.copy.mock.calls).toEqual([[source, copyPath]]);
         expect(result?.file.path).toBe(copyPath);
-        expect(Notice.messages[0]).toBe(
-          `Warning: removed characters a note name can't hold; the copy is named "invoicefdp.exe.pdf"`
-        );
+        expect(Notice.messages[0]).toContain('"invoicefdp.exe.pdf"');
       });
 
       it('makes a second, distinctly named copy when imported twice', async () => {
@@ -4465,7 +4488,7 @@ describe('import', () => {
 
           expect(result).toBeNull();
           expect(Notice.messages).toEqual([
-            `"${source.name}" is already in the plugin data folder; canceling import`,
+            expect.stringContaining(`"${source.name}"`),
           ]);
           expect(plugin.app.vault.copy).not.toHaveBeenCalled();
           expect(createNote).not.toHaveBeenCalled();
@@ -4526,7 +4549,10 @@ describe('import', () => {
         ).import(source, DEFAULT_PRIORITY, null, true);
 
         expect(Notice.messages).toEqual([
-          `Imported "${'P'.repeat(CONTENT_TITLE_SLICE_LENGTH - 3)}..." with priority ${IRScheduler.toDisplayPriority(DEFAULT_PRIORITY)}`,
+          importedWithPriority(
+            `${'P'.repeat(CONTENT_TITLE_SLICE_LENGTH - 3)}...`,
+            DEFAULT_PRIORITY
+          ),
         ]);
       });
 
@@ -4547,7 +4573,7 @@ describe('import', () => {
         expect([...plugin.files.keys()]).toEqual([source.path]);
         expect(allRows(repo)).toEqual([]);
         expect(Notice.messages).toEqual([
-          `Failed to import article "Paper.pdf"`,
+          expect.stringContaining('"Paper.pdf"'),
         ]);
 
         // Its name is free again for the next import
@@ -4579,7 +4605,7 @@ describe('import', () => {
         expect(result).toBeNull();
         expect(logged.mock.calls).toEqual([[trashError], [insertError]]);
         expect(Notice.messages).toEqual([
-          `Failed to import article "Paper.pdf"`,
+          expect.stringContaining('"Paper.pdf"'),
         ]);
       });
 
@@ -4601,7 +4627,7 @@ describe('import', () => {
         expect(result).toBeNull();
         expect(allRows(repo)).toEqual([]);
         expect(Notice.messages).toEqual([
-          `Failed to import article "Paper.pdf"`,
+          expect.stringContaining('"Paper.pdf"'),
         ]);
       });
     });
@@ -4728,14 +4754,11 @@ describe('import', () => {
               rows.find((row) => row.id === result?.data.id)?.reference
             ).toBe(copyPath);
             expect(logged).not.toHaveBeenCalled();
-            const imported = `Imported "${noticeTitle(title)}" with priority ${IRScheduler.toDisplayPriority(10)}`;
+            const imported = importedWithPriority(noticeTitle(title), 10);
             expect(Notice.messages).toEqual(
               holder === null
                 ? [imported]
-                : [
-                    `Warning: article with name already exists "${basename}.md"`,
-                    imported,
-                  ]
+                : [expect.stringContaining(`"${basename}.md"`), imported]
             );
             logged.mockRestore();
           }
@@ -4801,8 +4824,7 @@ describe('import', () => {
           }
           return chars.join('');
         });
-      const warningFor = (name: string) =>
-        `Warning: removed characters a note name can't hold; the copy is named "${name}"`;
+      const warningFor = (name: string) => expect.stringContaining(`"${name}"`);
 
       it('names the copy as a title would read its name, warning when that changed it', async () => {
         await fc.assert(
@@ -4835,12 +4857,10 @@ describe('import', () => {
                 [copyPath, ''],
               ]);
               expect(result?.file.path).toBe(copyPath);
-              const imported = `Imported "${noticeTitle(title)}" with priority ${IRScheduler.toDisplayPriority(10)}`;
+              const imported = importedWithPriority(noticeTitle(title), 10);
               // The copy's own name, as it ends up
               expect(Notice.messages).toEqual([
-                ...(taken
-                  ? [`Warning: article with name already exists "${clean}.md"`]
-                  : []),
+                ...(taken ? [expect.stringContaining(`"${clean}.md"`)] : []),
                 ...(changed ? [warningFor(`${title}.md`)] : []),
                 imported,
               ]);
@@ -4893,8 +4913,9 @@ describe('import', () => {
         );
 
         expect(result?.file.path).toBe(`${ARTICLES}/Caf${fromCodes(0xe9)}.md`);
-        expect(Notice.messages).toHaveLength(1);
-        expect(Notice.messages[0]).toMatch(/^Imported /);
+        expect(Notice.messages).toEqual([
+          importedWithPriority(`Caf${fromCodes(0xe9)}`, 10),
+        ]);
       });
 
       it('names a copy whose name a title drops all of by a generated id', async () => {
@@ -4918,7 +4939,7 @@ describe('import', () => {
 
         const name = `${suffixOf(0.25)}.md`;
         expect(result?.file.path).toBe(`${ARTICLES}/${name}`);
-        expect(Notice.messages[0]).toBe(warningFor(name));
+        expect(Notice.messages[0]).toEqual(warningFor(name));
       });
     });
 

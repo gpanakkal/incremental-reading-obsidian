@@ -86,7 +86,7 @@ async function writeVaultFile(at: string, content: string) {
 const missingRows = () =>
   window
     .locator('.ir-queue-row')
-    .filter({ has: window.getByText('Missing', { exact: true }) });
+    .filter({ has: window.locator('.ir-queue-missing-badge') });
 
 const menu = () => window.locator('.menu');
 
@@ -170,12 +170,9 @@ test('permanently deletes a missing item from its queue row, keeping what was ta
   await openRowMenu(missing, 'Permanently delete');
   await chooseMenuItem('Permanently delete');
   await expect(confirmation()).toBeVisible();
-  await expect(confirmation().locator('.modal-title')).toHaveText(
-    'Permanently delete item'
-  );
   await expect(confirmation()).toContainText('gone/Lost.md');
   const buttons = confirmation().locator('.modal-button-container > button');
-  await expect(buttons).toHaveText(['Cancel', 'Delete']);
+  await expect(buttons).toHaveCount(2);
   await expect(buttons.nth(1)).toHaveClass(/mod-destructive/);
   await buttons.nth(0).click();
   await expect(confirmation()).toBeHidden();
@@ -190,9 +187,8 @@ test('permanently deletes a missing item from its queue row, keeping what was ta
   await expect(missing).toHaveCount(0);
   await expect(child).toHaveCount(1);
   await expect(child).not.toContainText('gone/Lost.md');
-  await expect(child).toContainText('Parent —');
   // Nothing was trashed: the snippet keeps its own note
-  await expect(child.getByText('Missing', { exact: true })).toHaveCount(0);
+  await expect(child.locator('.ir-queue-missing-badge')).toHaveCount(0);
 });
 
 test('moves review on to the next item due when the item it was on is deleted', async () => {

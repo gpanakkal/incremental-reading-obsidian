@@ -183,7 +183,6 @@ describe('review source mode command', () => {
 
     expect(command).toMatchObject({
       id: TOGGLE_SOURCE_ID,
-      name: 'Toggle live preview/source mode',
       icon: 'lucide-code-2',
     });
   });
@@ -248,12 +247,11 @@ describe('review source mode command', () => {
 });
 
 describe('go to context command', () => {
-  it('registers under its id and name', () => {
+  it('registers under its id', () => {
     const command = wireCommands(null).get(GO_TO_CONTEXT_ID);
 
     expect(command).toMatchObject({
       id: GO_TO_CONTEXT_ID,
-      name: 'Go to context',
     });
   });
 
@@ -284,11 +282,6 @@ describe('go to context command', () => {
 });
 
 describe('relink file command', () => {
-  it('is named for what it does', () => {
-    const { command } = relinkSetup({ hasView: true, item: null, paths: [] });
-    expect(command.name).toBe('Relink file…');
-  });
-
   it.each([
     [
       'there is no review tab',

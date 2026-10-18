@@ -529,6 +529,20 @@ function playScript(
   }
 }
 
+/**
+ * Assert exactly one notice went up for the missing file at `ref`, naming the
+ * item it points at as `kind` and not as the other kind. The ref is taken out
+ * first, since a path like `cards/c.md` would otherwise name a kind itself.
+ */
+function expectRelinkNotice(ref: string, kind: 'card' | 'snippet') {
+  expect(Notice.messages).toHaveLength(1);
+  const [message] = Notice.messages;
+  expect(message).toContain(ref);
+  const words = message.replace(ref, '').split(/\W+/);
+  expect(words).toContain(kind);
+  expect(words).not.toContain(kind === 'card' ? 'snippet' : 'card');
+}
+
 // #endregion
 
 // ---------------------------------------------------------------------------
@@ -1953,9 +1967,7 @@ describe('click event handler', () => {
 
     expect(openHighlightFromEvent(plugin as never, event)).toBe(true);
     expect(plugin.app.workspace.openLinkText).not.toHaveBeenCalled();
-    expect(Notice.messages).toEqual([
-      'No file at "cards/c.md". Relink the card from the review queue.',
-    ]);
+    expectRelinkNotice('cards/c.md', 'card');
   });
 
   it('opens the card of a card’s highlight in a PDF, as a snippet’s opens the snippet', () => {
@@ -2007,9 +2019,7 @@ describe('click event handler', () => {
 
     expect(openLinkText).not.toHaveBeenCalled();
     expect(event?.defaultPrevented).toBe(true);
-    expect(Notice.messages).toEqual([
-      'No file at "snippets/a.md". Relink the snippet from the review queue.',
-    ]);
+    expectRelinkNotice('snippets/a.md', 'snippet');
   });
 
   it('plain click opens the snippet in the active leaf', () => {
@@ -2699,9 +2709,7 @@ describe('openHighlightFromEvent, for an item missing its file', () => {
             expect(Notice.messages).toEqual([]);
           } else {
             expect(showMissingInReview).not.toHaveBeenCalled();
-            expect(Notice.messages).toEqual([
-              `No file at "snippets/a.md". Relink the ${card ? 'card' : 'snippet'} from the review queue.`,
-            ]);
+            expectRelinkNotice('snippets/a.md', card ? 'card' : 'snippet');
           }
         }
       )
@@ -2714,9 +2722,7 @@ describe('openHighlightFromEvent, for an item missing its file', () => {
     openHighlightFromEvent(plugin as never, clickOn(highlightIn(containerEl)));
     await flush();
 
-    expect(Notice.messages).toEqual([
-      'No file at "snippets/a.md". Relink the snippet from the review queue.',
-    ]);
+    expectRelinkNotice('snippets/a.md', 'snippet');
   });
 
   it('says to relink it when review cannot look the reference up', async () => {
@@ -2728,9 +2734,7 @@ describe('openHighlightFromEvent, for an item missing its file', () => {
     openHighlightFromEvent(plugin as never, clickOn(highlightIn(containerEl)));
     await flush();
 
-    expect(Notice.messages).toEqual([
-      'No file at "snippets/a.md". Relink the snippet from the review queue.',
-    ]);
+    expectRelinkNotice('snippets/a.md', 'snippet');
     expect(logged).toHaveBeenCalledExactlyOnceWith(
       'Incremental Reading: could not look a link up',
       error
@@ -2747,9 +2751,7 @@ describe('openHighlightFromEvent, for an item missing its file', () => {
     );
     await flush();
 
-    expect(Notice.messages).toEqual([
-      'No file at "snippets/a.md". Relink the snippet from the review queue.',
-    ]);
+    expectRelinkNotice('snippets/a.md', 'snippet');
   });
 });
 

@@ -115,8 +115,19 @@ function rowBox(modal: BulkImportModal, index: number) {
   return rows(modal)[index].querySelector('input')!;
 }
 
-function countText(modal: BulkImportModal) {
-  return modal.contentEl.querySelector('.ir-bulk-import-count')?.textContent;
+/** The first number in `text`, or NaN when it has none. */
+function numberIn(text: string | null | undefined) {
+  return Number(/\d+/.exec(text ?? '')?.[0]);
+}
+
+function selectedCount(modal: BulkImportModal) {
+  return numberIn(
+    modal.contentEl.querySelector('.ir-bulk-import-count')?.textContent
+  );
+}
+
+function emptyState(modal: BulkImportModal) {
+  return modal.contentEl.querySelector('.ir-bulk-import-empty');
 }
 
 function button(modal: BulkImportModal, text: RegExp) {
@@ -184,7 +195,7 @@ describe('BulkImportModal', () => {
         });
         modal.onOpen();
         try {
-          expect(modal.titleEl.textContent).toBe(`Importing from ${title}`);
+          expect(modal.titleEl.textContent).toContain(title);
         } finally {
           modal.onClose();
         }
@@ -213,7 +224,7 @@ describe('BulkImportModal', () => {
           .querySelector('.ir-bulk-import-list')
           ?.lastElementChild?.querySelector('.ir-loading')
       ).not.toBeNull();
-      expect(countText(modal)).toBe(`${i + 1} selected`);
+      expect(selectedCount(modal)).toBe(i + 1);
     }
 
     await scan.end();
@@ -241,11 +252,11 @@ describe('BulkImportModal', () => {
     const scan = makeSource();
     const modal = openModal(makePlugin().plugin, scan.source);
     await settle();
-    expect(modal.contentEl.textContent).not.toContain('No files');
+    expect(emptyState(modal)).toBeNull();
 
     await scan.end();
 
-    expect(modal.contentEl.textContent).toContain('No files to import');
+    expect(emptyState(modal)).not.toBeNull();
     expect(confirmButton(modal).disabled).toBe(true);
     modal.close();
   });
@@ -271,8 +282,8 @@ describe('BulkImportModal', () => {
             await click(rowBox(modal, index));
             ticked[index] = !ticked[index];
             const selected = ticked.filter(Boolean).length;
-            expect(countText(modal)).toBe(`${selected} selected`);
-            expect(confirmButton(modal).textContent).toBe(`Import ${selected}`);
+            expect(selectedCount(modal)).toBe(selected);
+            expect(numberIn(confirmButton(modal).textContent)).toBe(selected);
             expect(confirmButton(modal).disabled).toBe(selected === 0);
           }
 
@@ -318,8 +329,8 @@ describe('BulkImportModal', () => {
 
     expect(close).toHaveBeenCalledOnce();
     expect(Notice.messages).toEqual([
-      '1 of 2 imported from Reading',
-      "Couldn't import 1 file:\nnotes/b.md: broken",
+      expect.stringMatching(/\b1\b.*\b2\b.*Reading/),
+      expect.stringMatching(/\b1\b[\s\S]*notes\/b\.md[\s\S]*broken/),
     ]);
   });
 
@@ -526,7 +537,7 @@ describe('BulkImportModal', () => {
     await scan.add(makeFile('a.md'));
 
     expect(rows(modal).map((row) => row.textContent)).toEqual(['a.md']);
-    expect(countText(modal)).toBe('1 selected');
+    expect(selectedCount(modal)).toBe(1);
     modal.close();
   });
 

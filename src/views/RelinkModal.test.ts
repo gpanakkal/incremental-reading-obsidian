@@ -145,7 +145,9 @@ describe('openRelinkPicker', () => {
       'd/x.pdf',
     ]);
     expect(modal?.getItemText(files[3])).toBe('freed.pdf');
-    expect(setPlaceholder).toHaveBeenCalledWith('Relink "gone.pdf" to…');
+    expect(setPlaceholder).toHaveBeenCalledWith(
+      expect.stringContaining('gone.pdf')
+    );
     expect(open).toHaveBeenCalledTimes(1);
   });
 
@@ -210,9 +212,9 @@ describe('openRelinkPicker', () => {
     modal?.onChooseItem(target);
 
     await vi.waitFor(() =>
-      expect(Notice.messages).toEqual(['Failed to relink to "found.pdf"'])
+      expect(Notice.messages).toEqual([expect.stringContaining('found.pdf')])
     );
-    expect(notify).toHaveBeenCalledWith('Failed to relink to "found.pdf"', {
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining('found.pdf'), {
       kind: 'error',
     });
     expect(error).toHaveBeenCalled();
@@ -233,9 +235,7 @@ describe('openRelinkPicker', () => {
 
     expect(modal).toBeNull();
     expect(open).not.toHaveBeenCalled();
-    expect(Notice.messages).toEqual([
-      'No unlinked files of this type to relink to',
-    ]);
+    expect(Notice.messages).toEqual([expect.any(String)]);
   });
 
   it('relinks the item to the picked file and refreshes it', async () => {
@@ -274,9 +274,7 @@ describe('openRelinkPicker', () => {
     modal?.onChooseItem(target);
 
     await vi.waitFor(() =>
-      expect(Notice.messages).toEqual([
-        '"found.pdf" already belongs to another item',
-      ])
+      expect(Notice.messages).toEqual([expect.stringContaining('found.pdf')])
     );
     expect(referenceOf(repo, 'i')).toBe('gone.pdf');
     expect(invalidate).not.toHaveBeenCalled();

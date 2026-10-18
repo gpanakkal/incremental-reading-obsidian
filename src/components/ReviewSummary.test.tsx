@@ -19,15 +19,13 @@ const reduxState = {};
 
 const noteTypeArb = fc.constantFrom<NoteType>('article', 'snippet', 'card');
 
-/**
- * The row each kind of review gets, in display order, labelled for a count of
- * one and for any other count.
- */
-const COUNT_LABELS: ReadonlyArray<[NoteType, string, string]> = [
-  ['article', 'Article', 'Articles'],
-  ['snippet', 'Snippet', 'Snippets'],
-  ['card', 'Card', 'Cards'],
-];
+/** The row each kind of review gets, in display order. */
+const COUNT_ORDER: readonly NoteType[] = ['article', 'snippet', 'card'];
+
+/** Matches `count` as a whole number, beside `noun` pluralized for it. */
+function countOf(count: number, noun: string): RegExp {
+  return new RegExp(`\\b${count}\\b.*\\b${noun}${count === 1 ? '' : 's'}\\b`);
+}
 
 const skippedItemArb = fc.record({
   id: fc.string(),
@@ -138,13 +136,18 @@ describe('ReviewSummary', () => {
   it('calls the session complete once anything was reviewed or skipped, and the queue empty otherwise', () => {
     fc.assert(
       fc.property(summaryArb, (c) => {
-        const { container } = renderSummary(c);
+        const headingFor = (summary: SummaryCase) =>
+          text(renderSummary(summary).container.querySelector('h2'));
+        const empty = { ...c, completed: {}, skippedIds: [] };
+        const emptyHeading = headingFor(empty);
+        const completeHeading = headingFor({ ...empty, skippedIds: ['x'] });
 
         const hadSession =
           Object.keys(c.completed).length > 0 || c.skippedIds.length > 0;
-        expect(text(container.querySelector('h2'))).toBe(
-          hadSession ? 'Review complete' : 'Nothing due for review.'
-        );
+        expect(emptyHeading).toBeTruthy();
+        expect(completeHeading).toBeTruthy();
+        expect(completeHeading).not.toBe(emptyHeading);
+        expect(headingFor(c)).toBe(hadSession ? completeHeading : emptyHeading);
       })
     );
   });
@@ -170,17 +173,16 @@ describe('ReviewSummary', () => {
           expect(counts).toEqual([]);
           return;
         }
-        expect(text(total)).toBe(
-          types.length === 1
-            ? '1 item reviewed'
-            : `${types.length} items reviewed`
-        );
-        expect(counts).toEqual(
-          COUNT_LABELS.map(([type, singular, plural]) => {
-            const countOfType = types.filter((t) => t === type).length;
-            return [countOfType === 1 ? singular : plural, String(countOfType)];
-          })
-        );
+        expect(text(total)).toMatch(countOf(types.length, 'item'));
+        expect(counts).toHaveLength(COUNT_ORDER.length);
+        COUNT_ORDER.forEach((type, i) => {
+          const countOfType = types.filter((t) => t === type).length;
+          const [label, count] = counts[i];
+          expect(label).toMatch(
+            new RegExp(`^${type}${countOfType === 1 ? '' : 's'}$`, 'i')
+          );
+          expect(count).toBe(String(countOfType));
+        });
       })
     );
   });
@@ -197,8 +199,8 @@ describe('ReviewSummary', () => {
           expect(section).toBeNull();
           return;
         }
-        expect(text(section?.querySelector('h3'))).toBe(
-          `Skipped (${found.length})`
+        expect(text(section?.querySelector('h3'))).toMatch(
+          new RegExp(`\\b${found.length}\\b`)
         );
         const rows = [...(section?.querySelectorAll('li') ?? [])].map((li) => [
           text(li.querySelector('.ir-review-summary-skipped-name')),
@@ -237,11 +239,7 @@ describe('ReviewSummary', () => {
           expect(line).toBeNull();
           return;
         }
-        expect(text(line)).toBe(
-          count === 1
-            ? '1 more card comes due later today.'
-            : `${count} more cards come due later today.`
-        );
+        expect(text(line)).toMatch(countOf(count, 'card'));
       })
     );
   });

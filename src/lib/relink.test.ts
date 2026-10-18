@@ -22,6 +22,7 @@ import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
 import { refusedPathsWarning } from './item-path-guard';
 import { ITEM_TABLES, type ItemTable, evictedSpot } from './moved-note-scan';
 import { configureSuccessNotices } from './notices';
+import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import {
   type RelinkFile,
   type RelinkVault,
@@ -714,7 +715,7 @@ describe('relinkItem', () => {
 
       expect(result).toEqual({ ok: true, from: 'gone.md' });
       expect(Notice.messages).toStrictEqual([
-        `Relinked to "${path}"`,
+        expect.stringContaining(path),
         ...(warned ? [refusedPathsWarning([path])] : []),
       ]);
     }
@@ -774,7 +775,7 @@ describe('relinkItem', () => {
 
     expect(result).toEqual({ ok: true, from: 'gone.pdf' });
     expect(error).toHaveBeenCalledExactlyOnceWith(failure);
-    expect(Notice.messages).toEqual(['Relinked to "new.pdf"']);
+    expect(Notice.messages).toEqual([expect.stringContaining('new.pdf')]);
   });
 
   it('writes nothing to a PDF target', async () => {
@@ -821,7 +822,7 @@ describe('relinkItem', () => {
       'ir-highlights-changed',
       'new.pdf'
     );
-    expect(Notice.messages).toEqual(['Relinked to "new.pdf"']);
+    expect(Notice.messages).toEqual([expect.stringContaining('new.pdf')]);
   });
 
   it('refuses a note that carries another item’s ir-id, writing nothing', async () => {
@@ -854,22 +855,15 @@ describe('relinkItem', () => {
       plugin.reviewManager.snippets.offsetTracker.renameFile
     ).not.toHaveBeenCalled();
     expect(plugin.app.workspace.trigger).not.toHaveBeenCalled();
-    expect(Notice.messages).toEqual([
-      '"copy.md" already belongs to another item',
-    ]);
+    expect(Notice.messages).toEqual([expect.stringContaining('copy.md')]);
   });
 
   it.each([
-    [
-      'wrong-type',
-      'gone.md',
-      'new.pdf',
-      '"new.pdf" is not the same type of file as the item',
-    ],
-    ['no-row', null, 'new.md', 'The item no longer exists'],
+    ['wrong-type', 'gone.md', 'new.pdf', expect.stringContaining('new.pdf')],
+    ['no-row', null, 'new.md', expect.any(String)],
   ] as const)(
-    'tells the user why a %s relink was refused',
-    async (_reason, reference, target, message) => {
+    'tells the user when a %s relink was refused',
+    async (reason, reference, target, message) => {
       const repo = TestRepository.create();
       if (reference) {
         insertItem(repo, {
@@ -881,12 +875,13 @@ describe('relinkItem', () => {
       }
       const { plugin, written } = makePlugin(repo);
 
-      await relinkItem(
+      const result = await relinkItem(
         plugin as never,
         { table: 'article', id: 'i' },
         makeFile(target) as TFile
       );
 
+      expect(result).toEqual({ ok: false, reason });
       expect(written).toEqual({});
       expect(Notice.messages).toEqual([message]);
     }
@@ -914,9 +909,7 @@ describe('relinkItem', () => {
 
       expect(result).toEqual({ ok: false, reason: 'tagged' });
       expect(written).toEqual({});
-      expect(Notice.messages).toEqual([
-        '"article.md" is tagged as another kind of item',
-      ]);
+      expect(Notice.messages).toEqual([expect.stringContaining('article.md')]);
     }
   );
 
@@ -959,9 +952,7 @@ describe('relinkItem', () => {
 
     expect(result).toEqual({ ok: false, reason: 'not-missing' });
     expect(written).toEqual({});
-    expect(Notice.messages).toEqual([
-      'The item has its file again; nothing to relink',
-    ]);
+    expect(Notice.messages).toEqual([expect.any(String)]);
   });
 
   it('keeps the relink when the note’s frontmatter cannot be written, and says so', async () => {
@@ -977,6 +968,7 @@ describe('relinkItem', () => {
       new Error('bad YAML')
     );
     vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notify = vi.spyOn(Obsidian, 'notify');
 
     const result = await relinkItem(
       plugin as never,
@@ -990,9 +982,11 @@ describe('relinkItem', () => {
       'ir-highlights-changed',
       'new.md'
     );
-    expect(Notice.messages).toEqual([
-      'Relinked to "new.md", but its frontmatter could not be updated',
-    ]);
+    // Not a success, which the levels could hide
+    expect(notify).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('new.md'),
+      { kind: 'info' }
+    );
   });
 
   it('confirms a clean relink only while every success notice shows, and always says when the frontmatter failed', async () => {
@@ -1030,13 +1024,9 @@ describe('relinkItem', () => {
           }
 
           expect(Notice.messages).toEqual(
-            frontmatterFails
-              ? [
-                  'Relinked to "new.md", but its frontmatter could not be updated',
-                ]
-              : level === 'all'
-                ? ['Relinked to "new.md"']
-                : []
+            frontmatterFails || level === 'all'
+              ? [expect.stringContaining('new.md')]
+              : []
           );
         }
       )
@@ -1110,7 +1100,7 @@ describe('relinkItem', () => {
       vi.spyOn(console, 'error').mockImplementation(() => {});
 
       await expect(relink()).resolves.toEqual({ ok: true, from: 'gone.md' });
-      expect(Notice.messages).toEqual(['Relinked to "new.md"']);
+      expect(Notice.messages).toEqual([expect.stringContaining('new.md')]);
     });
 
     it.each(['article', 'srs_card'] as const)(

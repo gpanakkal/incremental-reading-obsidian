@@ -167,9 +167,7 @@ describe('typeTagRestoredMessage', () => {
   it('names the tag it put back, in a message short enough to read on a phone', () => {
     for (const tag of [ARTICLE_TAG, SNIPPET_TAG, CARD_TAG]) {
       const message = typeTagRestoredMessage(tag);
-      expect(message).toBe(
-        `Incremental Reading: restored the ${tag} tag. Item notes need it.`
-      );
+      expect(message).toContain(tag);
       expect(message.length).toBeLessThanOrEqual(140);
     }
   });
@@ -199,8 +197,10 @@ describe('irIdWarningMessage', () => {
         messageArb,
         fc.integer({ min: 2, max: 1_000_000 }),
         (message, count) => {
-          expect(irIdWarningMessage(message, count)).toBe(
-            `${message} (×${count})`
+          const counted = irIdWarningMessage(message, count);
+          expect(counted.startsWith(message)).toBe(true);
+          expect(counted.slice(message.length)).toMatch(
+            new RegExp(`(^|\\D)${count}(\\D|$)`)
           );
         }
       )

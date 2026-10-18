@@ -60,10 +60,12 @@ function pageInput(container: HTMLElement): HTMLInputElement {
   return input;
 }
 
-/** The indicator read back as a whole, e.g. `2 of 5`. */
-function indicatorText(container: HTMLElement): string {
-  const total = container.querySelector('.ir-queue-page-total')?.textContent;
-  return `${pageInput(container).value} ${total}`;
+/** Check the indicator shows page `page` (1-based) of `count`. */
+function expectIndicator(container: HTMLElement, page: number, count: number) {
+  expect(pageInput(container).value).toBe(String(page));
+  expect(container.querySelector('.ir-queue-page-total')?.textContent).toMatch(
+    new RegExp(`\\b${count}\\b`)
+  );
 }
 
 /** Type into the page box, as a user editing it does. */
@@ -107,9 +109,7 @@ describe('QueuePagination', () => {
             onPageChange={() => {}}
           />
         );
-        expect(indicatorText(container)).toBe(
-          `${pageNumber + 1} of ${pageCount}`
-        );
+        expectIndicator(container, pageNumber + 1, pageCount);
         // Both left-hand arrows have somewhere to go from every page but the
         // first, and both right-hand ones from every page but the last.
         expect(firstButton(container).disabled).toBe(pageNumber === 0);
@@ -132,10 +132,14 @@ describe('QueuePagination', () => {
     // The end jumps sit outside the steps they extend, so how far a control
     // moves grows with its distance from the number it is moving.
     const parts = [...container.querySelectorAll('button, input')];
-    const labels = parts.map(
-      (el) => el.textContent || (el as HTMLInputElement).value
-    );
-    expect(labels).toEqual(['<<', '<', '3', '>', '>>']);
+    expect(parts).toEqual([
+      firstButton(container),
+      prevButton(container),
+      pageInput(container),
+      nextButton(container),
+      lastButton(container),
+    ]);
+    expect(pageInput(container).value).toBe('3');
   });
 
   it('requests the previous page on prev click', () => {
@@ -461,7 +465,7 @@ describe('QueuePagination', () => {
     rerender(3);
     await flush();
 
-    expect(indicatorText(container)).toBe('4 of 5');
+    expectIndicator(container, 4, 5);
   });
 
   it('sizes the box to the widest page number the queue can reach', () => {

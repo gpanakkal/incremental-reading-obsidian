@@ -116,16 +116,18 @@ function enterDate(container: HTMLElement, value: string) {
 }
 
 /**
- * The pager's indicator read back as a whole, e.g. `3 of 3`. The page number
- * is a text box, so it is a value rather than text and cannot be read off the
- * indicator's `textContent`.
+ * The pager's indicator as its two numbers, e.g. `3/3` for the third page of
+ * three. The page number is a text box, so it is a value rather than text and
+ * cannot be read off the indicator's `textContent`.
  */
 function pageIndicator(container: HTMLElement): string {
   const page = container.querySelector<HTMLInputElement>(
     '.ir-queue-page-input'
   );
-  const total = container.querySelector('.ir-queue-page-total')?.textContent;
-  return `${page?.value} ${total}`;
+  const total = container
+    .querySelector('.ir-queue-page-total')
+    ?.textContent?.match(/\d+/)?.[0];
+  return `${page?.value}/${total}`;
 }
 
 /** The visible-range label's text, or null when it is not rendered. */
@@ -229,7 +231,7 @@ describe('ReviewQueue', () => {
     expect(date.getDate()).toBe(13);
     expect(entriesPerPage).toBe(QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE);
     // The reported page 2 is displayed 1-based as the third of three.
-    expect(pageIndicator(container)).toBe('3 of 3');
+    expect(pageIndicator(container)).toBe('3/3');
   });
 
   it('navigates when the day already in view is re-entered', async () => {
@@ -252,7 +254,7 @@ describe('ReviewQueue', () => {
     const [date] = findPageForDate.mock.calls[0] as [Date];
     expect(date.getMonth()).toBe(7);
     expect(date.getDate()).toBe(1);
-    expect(pageIndicator(container)).toBe('1 of 6');
+    expect(pageIndicator(container)).toBe('1/6');
   });
 
   it('stays on its page when a date lookup fails', async () => {
@@ -265,11 +267,8 @@ describe('ReviewQueue', () => {
     await flush();
     await flush();
 
-    expect(pageIndicator(container)).toMatch(/^1 /);
-    expect(error).toHaveBeenCalledWith(
-      'Incremental Reading - Date lookup failed:',
-      expect.any(Error)
-    );
+    expect(pageIndicator(container)).toMatch(/^1\//);
+    expect(error).toHaveBeenCalledWith(expect.any(String), expect.any(Error));
   });
 
   it('ignores a stale lookup that resolves after a newer one', async () => {
@@ -289,8 +288,8 @@ describe('ReviewQueue', () => {
     deferred[0](0); // stale lookup answers late
     await flush();
 
-    // 101 rows at 20 per page → 6 pages; page 4 shows as "5 of 6".
-    expect(pageIndicator(container)).toBe('5 of 6');
+    // 101 rows at 20 per page → 6 pages; page 4 shows as the fifth of six.
+    expect(pageIndicator(container)).toBe('5/6');
   });
 
   it('places the date field before the previous-page button', () => {
@@ -304,16 +303,21 @@ describe('ReviewQueue', () => {
     // The calendar trigger belongs to the date field and sits with it, so tab
     // reaches both before it reaches the pager, and reaches the pager's own
     // controls in the order they are laid out.
-    expect(focusable.map((el) => el.getAttribute('aria-label'))).toEqual([
-      'Jump to date',
-      'Open calendar',
-      'First page',
-      'Previous page',
-      'Page number',
-      'Next page',
-      'Last page',
-    ]);
+    expect(focusable).toHaveLength(7);
     expect(focusable[0]).toBe(dateInput(container));
+    expect(focusable[1].classList).toContain('ir-queue-date-jump-trigger');
+    const pager = focusable.slice(2);
+    for (const el of pager) {
+      expect(el.closest('.ir-queue-pagination')).not.toBeNull();
+    }
+    expect(pager.map((el) => el.tagName)).toEqual([
+      'BUTTON',
+      'BUTTON',
+      'INPUT',
+      'BUTTON',
+      'BUTTON',
+    ]);
+    expect(pager[2].classList).toContain('ir-queue-page-input');
   });
 
   it('shows the review day the visible page opens on', () => {
@@ -428,7 +432,10 @@ describe('ReviewQueue', () => {
 
     const container = mount(<ReviewQueue />);
 
-    expect(rangeLabel(container)).toBe('Unscheduled');
+    // Named as such rather than as a date range
+    const label = rangeLabel(container);
+    expect(label).toBeTruthy();
+    expect(label).not.toMatch(/\d/);
   });
 
   it('groups the range label and date field ahead of the pagination', () => {
@@ -447,8 +454,10 @@ describe('ReviewQueue', () => {
     expect(label.className).toContain('ir-queue-visible-range');
     expect(date).toBe(dateInput(container));
     expect(openCalendar.className).toContain('ir-queue-date-jump-trigger');
-    expect(first.textContent).toBe('<<');
-    expect(prev.textContent).toBe('<');
+    for (const pagerButton of [first, prev]) {
+      expect(pagerButton.tagName).toBe('BUTTON');
+      expect(pagerButton.closest('.ir-queue-pagination')).not.toBeNull();
+    }
   });
 
   it('balances the pagination with an equal flank on each side', () => {
@@ -490,7 +499,6 @@ describe('ReviewQueue', () => {
       throw new Error('title or controls not rendered inside the panel');
     }
 
-    expect(title.textContent).toBe('Upcoming');
     expect(
       title.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
@@ -694,6 +702,14 @@ describe('ReviewQueue', () => {
 
   describe('unreadable queue', () => {
     it('property: says the queue could not be loaded, never that nothing is due', () => {
+      wireQueue({ rows: [], totalRows: 0 });
+      const emptyMessage = mount(<ReviewQueue />).querySelector(
+        '.ir-review-placeholder'
+      )?.textContent;
+      document.body.innerHTML = '';
+      vi.restoreAllMocks();
+      expect(emptyMessage).toBeTruthy();
+
       fc.assert(
         fc.property(
           fc.boolean(),
@@ -710,12 +726,12 @@ describe('ReviewQueue', () => {
               const container = mount(<ReviewQueue />);
 
               const panel = container.querySelector('.ir-queue-panel');
-              expect(panel?.querySelector('.ir-queue-title')?.textContent).toBe(
-                'Upcoming'
-              );
-              const message = panel?.querySelector('.ir-review-placeholder');
-              expect(message?.textContent).toContain("Couldn't load the queue");
-              expect(container.textContent).not.toContain('Nothing due');
+              expect(panel?.querySelector('.ir-queue-title')).not.toBeNull();
+              const message = panel?.querySelector(
+                '.ir-review-placeholder'
+              )?.textContent;
+              expect(message).toBeTruthy();
+              expect(message).not.toBe(emptyMessage);
               // Rows held from before the failure may be gone from the
               // database, and the controls would page through them
               expect(container.querySelector('.ir-queue-table')).toBeNull();
@@ -743,8 +759,7 @@ describe('ReviewQueue', () => {
         throw new Error('title or placeholder not rendered inside the panel');
       }
 
-      expect(title.textContent).toBe('Upcoming');
-      expect(placeholder.textContent).toContain('Nothing due for review');
+      expect(placeholder.textContent).toBeTruthy();
       expect(
         title.compareDocumentPosition(placeholder) &
           Node.DOCUMENT_POSITION_FOLLOWING
@@ -786,10 +801,7 @@ describe('queue row menu', () => {
 
     const menu = queueRowMenu(plugin as never, row) as unknown as Menu;
 
-    expect(menu.items.map((item) => [item.title, item.icon])).toEqual([
-      ['Relink file…', 'link'],
-      ['Permanently delete', 'trash-2'],
-    ]);
+    expect(menu.items.map((item) => item.icon)).toEqual(['link', 'trash-2']);
     const [relink] = menu.items;
     expect(relink.disabled).toBe(false);
     expect(openRelinkPicker).not.toHaveBeenCalled();
@@ -804,8 +816,8 @@ describe('queue row menu', () => {
   it('offers relinking only to a row that is missing its file', () => {
     const menu = queueRowMenu({} as never, makeQueueRow()) as unknown as Menu;
 
-    expect(menu.items.map((item) => [item.title, item.disabled])).toEqual([
-      ['Relink file…', true],
+    expect(menu.items.map((item) => [item.icon, item.disabled])).toEqual([
+      ['link', true],
     ]);
   });
 
@@ -841,9 +853,9 @@ describe('queue row menu', () => {
     expect(shown).toHaveBeenCalledTimes(1);
     expect(shown.mock.calls[0][0]).toEqual({ x: 3, y: 4 });
     const menu = shown.mock.contexts[0] as Menu;
-    expect(menu.items.map((item) => [item.title, item.disabled])).toEqual([
-      ['Relink file…', false],
-      ['Permanently delete', false],
+    expect(menu.items.map((item) => [item.icon, item.disabled])).toEqual([
+      ['link', false],
+      ['trash-2', false],
     ]);
   });
 

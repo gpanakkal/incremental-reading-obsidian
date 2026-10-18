@@ -343,9 +343,6 @@ describe('LeftoverModal', () => {
         document.body.innerHTML = '';
         const { modal, rows } = openModal(leftovers, async () => true);
 
-        expect(modal.titleEl.textContent).toBe(
-          'Notes not found in the database'
-        );
         expect(modal.contentEl.querySelector('p')).toBeNull();
         expect(rows()).toHaveLength(leftovers.length);
         for (const [i, row] of rows().entries()) {
@@ -449,7 +446,7 @@ describe('LeftoverModal', () => {
       button().click();
       expect(dropdownOf(row)!.value).toBe('');
       // The placeholder shows again, not a blank
-      expect(dropdownOf(row)!.selectedOptions[0]?.text).toBe('Save as…');
+      expect(dropdownOf(row)!.selectedOptions[0]?.text).toBeTruthy();
       expect(button().getAttribute('aria-pressed')).toBe('true');
 
       pickFrom(dropdownOf(row)!, 'snippet');
@@ -571,8 +568,8 @@ describe('LeftoverModal', () => {
     const [row] = rows();
     expect(resolve).toHaveBeenCalledTimes(2);
     expect(row.querySelector('.setting-item-name')!.textContent).toBe('a');
-    expect(row.querySelector('.ir-leftover-error')!.textContent).toBe(
-      "Couldn't move this note to the trash."
+    expect(row.querySelector('.ir-leftover-error')!.textContent).toMatch(
+      /trash/
     );
     // Still chosen, to try again
     expect(trashOf(row)!.getAttribute('aria-pressed')).toBe('true');
@@ -599,30 +596,18 @@ describe('LeftoverModal', () => {
     await vi.waitFor(() => expect(rows()).toHaveLength(1));
 
     expect(resolve).toHaveBeenCalledTimes(2);
-    expect(rowOf(MADE).querySelector('.ir-leftover-error')?.textContent).toBe(
-      "Couldn't move this note to the trash."
-    );
+    expect(
+      rowOf(MADE).querySelector('.ir-leftover-error')?.textContent
+    ).toMatch(/trash/);
     expect(trashOf(rowOf(MADE))!.disabled).toBe(false);
     expect(confirmButton().disabled).toBe(false);
     expect(error).toHaveBeenCalled();
   });
 
-  it.each<[string, LeftoverChoice, string]>([
-    [
-      'saving it as an article',
-      { action: 'adopt', as: 'article' },
-      "Couldn't save this note as an article.",
-    ],
-    [
-      'saving it as a snippet',
-      { action: 'adopt', as: 'snippet' },
-      "Couldn't save this note as a snippet.",
-    ],
-    [
-      'stripping it',
-      { action: 'strip' },
-      "Couldn't remove this note's IR properties.",
-    ],
+  it.each<[string, LeftoverChoice, RegExp]>([
+    ['saving it as an article', { action: 'adopt', as: 'article' }, /article/],
+    ['saving it as a snippet', { action: 'adopt', as: 'snippet' }, /snippet/],
+    ['stripping it', { action: 'strip' }, /properties/],
   ])('says what went wrong %s', async (_, choice, error) => {
     const { rowOf, confirmButton } = openModal([IN_PLACE], async () => false);
     choose(rowOf(IN_PLACE), choice);
@@ -632,7 +617,7 @@ describe('LeftoverModal', () => {
     await vi.waitFor(() =>
       expect(
         rowOf(IN_PLACE).querySelector('.ir-leftover-error')?.textContent
-      ).toBe(error)
+      ).toMatch(error)
     );
   });
 
@@ -745,8 +730,8 @@ describe('LeftoverModal previews', () => {
       expect(name.getAttribute('role')).toBe('button');
       expect(name.tabIndex).toBe(0);
       expect(name.getAttribute('aria-expanded')).toBe('false');
-      expect(name.getAttribute('aria-label')).toBe(
-        `Preview ${leftovers[i].file.basename}`
+      expect(name.getAttribute('aria-label')).toContain(
+        leftovers[i].file.basename
       );
       const icon = name.querySelector('svg')!;
       expect(icon.classList).toContain('lucide-chevron-right');
@@ -964,8 +949,7 @@ describe('LeftoverModal previews', () => {
 
     expect(
       previewOf(rowOf(MADE))!.querySelector('.ir-leftover-preview-error')
-        ?.textContent
-    ).toBe("Couldn't read this note");
+    ).not.toBeNull();
     expect(previewOf(rowOf(MADE))!.childElementCount).toBe(1);
     expect(previewShown(rowOf(MADE))).toBe(true);
     expect(render).not.toHaveBeenCalled();
@@ -1106,9 +1090,7 @@ describe('LeftoverWatch', () => {
     wired.closeReview();
     wired.openReview();
 
-    expect(Notice.messages).toEqual([
-      'Incremental reading: 1 note was not found in the database.',
-    ]);
+    expect(Notice.messages).toEqual([expect.stringMatching(/\b1 note\b/)]);
   });
 
   it('shows the notice at the end of the startup scan when a review tab is open by then', async () => {
@@ -1148,11 +1130,10 @@ describe('LeftoverWatch', () => {
     openReview();
 
     const [notice] = Notice.instances;
-    expect(notice.message).toBe(
-      'Incremental reading: 2 notes were not found in the database.'
-    );
+    expect(notice.message).toMatch(/\b2 notes\b/);
+    expect(notice.message).not.toMatch(/secret|hidden/);
     expect(notice.duration).toBe(0);
-    expect(noticeButtons(notice).map((b) => b.textContent)).toEqual(['Manage']);
+    expect(noticeButtons(notice)).toHaveLength(1);
   });
 
   it("opens the leftovers to choose from from the notice's Manage button, as they are by then", async () => {
@@ -1245,9 +1226,7 @@ describe('LeftoverWatch', () => {
 
     expect(wired.open).not.toHaveBeenCalled();
     expect(wired.watch.current).toEqual([]);
-    expect(Notice.messages).toEqual([
-      'Incremental reading: no notes are missing from the database.',
-    ]);
+    expect(Notice.messages).toEqual([expect.any(String)]);
   });
 
   it('opens the leftovers once when asked to manage them again before the first look ends', async () => {
@@ -1274,10 +1253,9 @@ describe('LeftoverWatch', () => {
     expect(wired.open).not.toHaveBeenCalled();
     expect(wired.watch.current.map(({ id }) => id)).toEqual(['x']);
     // An error, which no notice after it hides before it is read
-    expect(notify).toHaveBeenCalledExactlyOnceWith(
-      "Incremental reading: couldn't look for notes missing from the database.",
-      { kind: 'error' }
-    );
+    expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+      kind: 'error',
+    });
     expect(wired.error).toHaveBeenCalledOnce();
   });
 

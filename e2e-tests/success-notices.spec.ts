@@ -62,9 +62,7 @@ async function readPluginData() {
 async function gradeGood(page: Page) {
   await page.getByRole('button', { name: 'Show answer' }).click();
   await page.getByRole('button', { name: /^Good\b/ }).click();
-  await expect(
-    page.getByRole('heading', { name: 'Review complete' })
-  ).toBeVisible();
+  await expect(page.locator('.ir-review-summary-total')).toBeVisible();
 }
 
 /** Undo from the summary, and wait for review to bring the card back. */
@@ -72,6 +70,10 @@ async function undoGrade(page: Page) {
   await page.locator('css=#undo-button').click();
   await expect(page.getByRole('button', { name: 'Show answer' })).toBeVisible();
 }
+
+/** An undo's notice names the card it ungraded, in quotes, then the grade. */
+const UNDO_NOTICE = /"[^"]+" Good\b/;
+const IMPORTED = 'Curse of dimensionality - Wikipedia';
 
 test('success notice levels hide confirmations inside review and keep undo and import ones at minimal', async () => {
   const settings = await openPluginSettings(app, window);
@@ -115,7 +117,7 @@ test('success notice levels hide confirmations inside review and keep undo and i
   await gradeGood(window);
   await undoGrade(window);
   await expect(
-    window.locator('.notice').filter({ hasText: /^Undid grading/ })
+    window.locator('.notice').filter({ hasText: UNDO_NOTICE })
   ).toBeVisible();
 
   // Minimal outside review: an import still confirms, though inside review
@@ -123,17 +125,17 @@ test('success notice levels hide confirmations inside review and keep undo and i
   await setPluginSetting(window, 'successNoticesInReview', 'none');
   await importArticle(window, 'sources/Curse of dimensionality - Wikipedia');
   await expect(
-    window
-      .locator('.notice')
-      .filter({ hasText: 'Imported "Curse of dimensionality - Wikipedia"' })
+    window.locator('.notice').filter({ hasText: `"${IMPORTED}"` })
   ).toBeVisible();
 
   // Every confirmation seen, in order: the first undo said nothing, nor did
-  // either grade
+  // either grade (each names its grade, Good, as the undo does)
   expect(
-    (await notices()).filter((text) => /^(Graded|Undid|Imported)/.test(text))
+    (await notices()).filter(
+      (text) => /\bGood\b/.test(text) || text.includes(IMPORTED)
+    )
   ).toEqual([
-    expect.stringMatching(/^Undid grading/),
-    expect.stringMatching(/^Imported "Curse of dimensionality - Wikipedia"/),
+    expect.stringMatching(UNDO_NOTICE),
+    expect.stringContaining(`"${IMPORTED}"`),
   ]);
 });

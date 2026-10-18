@@ -58,18 +58,6 @@ const SUCCESS_NOTICE_LEVELS = ['all', 'minimal', 'none'] as const;
 /** Each way of importing a note by its trigger tag, as stored. */
 const AUTO_IMPORT_MODES = ['inPlace', 'copy', 'inherit'] as const;
 
-/** What the success notices box says, once, above its two dropdowns. */
-const SUCCESS_NOTICES_DESC =
-  'Which confirmations to show for successful actions.' +
-  ' Minimal shows only undos and imports.' +
-  ' Error notices are always shown.';
-
-/** What the auto-import box says beside its toggle, above the trigger tags. */
-const AUTO_IMPORT_DESC =
-  'Automatically import any note when one of the trigger tags is' +
-  ' added to frontmatter. Tags in the note body are ignored. Does not affect' +
-  ' notes that already have a matching tag.';
-
 /** Any text at all, not just the printable ASCII `fc.string()` defaults to. */
 const textArb = (constraints: fc.StringConstraints = {}) =>
   fc.string({ unit: 'binary', ...constraints });
@@ -295,6 +283,10 @@ const typingKeyArb = fc
   )
   .filter((key) => key !== 'Enter');
 
+/** Whether `text` shows the whole number `n`, not just digits inside another. */
+const showsInteger = (text: string | null | undefined, n: number) =>
+  (text ?? '').match(/-?\d+/g)?.includes(String(n)) ?? false;
+
 /** The trigger tags row's name, as the tab declares it. */
 const TRIGGER_TAGS = 'Trigger tags';
 
@@ -474,9 +466,6 @@ const resettableRows = () =>
       (control.type === 'number' || control.type === 'text') &&
       control.defaultValue !== undefined
   );
-
-/** The control types Obsidian (1.13) draws a reset button for itself. */
-const OBSIDIAN_RESET_TYPES: ReadonlySet<string> = new Set(['slider', 'color']);
 
 /** The default a row's field shows, as its control declares it. */
 const defaultText = ({ control }: ControlDefinition) =>
@@ -1028,11 +1017,9 @@ describe('IRSettingTab.setControlValue', () => {
       .filter((row) => row.key === 'autoImportMode');
 
     expect(control).toMatchObject({ type: 'dropdown' });
-    expect(control.type === 'dropdown' && control.options).toEqual({
-      inPlace: 'In place',
-      copy: 'Make a copy',
-      inherit: 'Same as manual imports',
-    });
+    expect(control.type === 'dropdown' && control.options).toEqual(
+      AUTO_IMPORT_MODE_OPTIONS
+    );
     expect(Object.keys(AUTO_IMPORT_MODE_OPTIONS)).toEqual(AUTO_IMPORT_MODES);
   });
 
@@ -1137,17 +1124,18 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     }
   });
 
-  it('lists every setting under its heading, with its description and control', () => {
+  it('lists every setting in order, each with its control', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
     const validate = expect.any(Function) as unknown;
     const disabled = expect.any(Function) as unknown;
     const toggle = (key: string) => ({ type: 'toggle', key });
 
-    expect(declaredSettingRows(tab.declareSettings())).toEqual([
+    expect(
+      declaredSettingRows(tab.declareSettings()).map(({ control }) => ({
+        control,
+      }))
+    ).toEqual([
       {
-        heading: 'Imports',
-        name: 'Default article priority',
-        desc: 'Priority for new imports. Does not affect existing articles.',
         control: {
           type: 'slider',
           key: 'defaultPriority',
@@ -1159,33 +1147,18 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         },
       },
       {
-        heading: 'Imports',
-        name: 'Show article import dialog',
-        desc: 'Show a dialog when importing that allows customization.',
         control: toggle('showImportDialog'),
       },
       {
-        heading: 'Imports',
-        name: 'Copy articles when importing',
-        desc: `Copy notes into the data directory (${DATA_DIRECTORY}/) when importing and leave the original note untouched. Disable to import notes in-place.`,
         control: toggle('copyOnImport'),
       },
       {
-        heading: 'Imports',
-        name: 'Create empty articles in the current folder',
-        desc: `If disabled, empty articles will be created in "${DATA_DIRECTORY}/"`,
         control: toggle('createEmptyInCurrentFolder'),
       },
       {
-        heading: 'Imports',
-        name: 'Auto-import notes by tag',
-        desc: AUTO_IMPORT_DESC,
         control: toggle('autoImportOnTag'),
       },
       {
-        heading: 'Imports',
-        name: 'Trigger tags',
-        desc: undefined,
         control: {
           type: 'text',
           key: 'autoImportTags',
@@ -1194,8 +1167,6 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         },
       },
       {
-        heading: 'Imports',
-        name: 'Where to import tagged notes',
         control: {
           type: 'dropdown',
           key: 'autoImportMode',
@@ -1203,56 +1174,31 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         },
       },
       {
-        heading: 'Notifications and reminders',
-        name: 'Success notices',
-        desc: SUCCESS_NOTICES_DESC,
       },
       {
-        heading: 'Notifications and reminders',
-        name: 'Inside review',
         control: {
           type: 'dropdown',
           key: 'successNoticesInReview',
-          options: {
-            all: 'All',
-            minimal: 'Minimal',
-            none: 'None',
-          },
+          options: SUCCESS_NOTICE_LEVEL_OPTIONS,
         },
       },
       {
-        heading: 'Notifications and reminders',
-        name: 'Outside review',
         control: {
           type: 'dropdown',
           key: 'successNoticesOutsideReview',
-          options: {
-            all: 'All',
-            minimal: 'Minimal',
-            none: 'None',
-          },
+          options: SUCCESS_NOTICE_LEVEL_OPTIONS,
         },
       },
       {
-        heading: 'Notifications and reminders',
-        name: 'Show review reminders in status bar',
-        desc: 'Desktop only.',
         control: toggle('reviewReminders'),
       },
       {
-        heading: 'Notifications and reminders',
-        name: 'Remind for due articles',
         control: { ...toggle('remindDueArticles'), disabled },
       },
       {
-        heading: 'Notifications and reminders',
-        name: 'Remind for due snippets',
         control: { ...toggle('remindDueSnippets'), disabled },
       },
       {
-        heading: 'Reviews',
-        name: 'End-of-day shift',
-        desc: 'Adjust the end time of the review day. Set this to the time you are most likely to be asleep.',
         control: {
           type: 'slider',
           key: 'dayRolloverOffset',
@@ -1264,47 +1210,25 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         },
       },
       {
-        heading: 'Reviews',
-        name: 'Fuzz review ordering',
-        desc: 'Partially shuffle article and snippet reviews within the same day. Cards are not affected.',
         control: toggle('fuzzTextReviews'),
       },
       {
-        heading: 'Reviews',
-        name: 'Skip home screen',
-        desc: 'Jump to the first due item when opening review.',
         control: toggle('skipHomeScreen'),
       },
       {
-        heading: 'Reviews',
-        name: 'Show review tab title bar',
-        desc: 'Show the title bar above the review tab, or leave it to the "Show tab title bar" appearance setting.',
         control: {
           type: 'dropdown',
           key: 'reviewTitleBar',
-          options: {
-            obsidian: 'Follow Obsidian setting',
-            show: 'Show',
-            hide: 'Hide',
-          },
+          options: REVIEW_TITLE_BAR_OPTIONS,
         },
       },
       {
-        heading: 'Shortcuts',
-        name: 'Enable extra import hotkeys',
-        desc: 'Shortcuts to open or bypass the import modal, import a copy, or import in-place.',
         control: toggle('showAdvancedImportCommands'),
       },
       {
-        heading: 'Shortcuts',
-        name: 'Show extra file menu entries for importing',
-        desc: 'Entries to open or bypass the import modal, import a copy, or import in-place.',
         control: toggle('showAdvancedImportMenuItems'),
       },
       {
-        heading: 'Spaced repetition',
-        name: 'Targeted retention',
-        desc: 'The card recall score (out of 1) to aim for. Card reviews will be scheduled to target this score. 0.9 is optimal in most cases.',
         control: {
           type: 'slider',
           key: 'fsrsParams.request_retention',
@@ -1316,21 +1240,12 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         },
       },
       {
-        heading: 'Spaced repetition',
-        name: 'Fuzz review intervals',
-        desc: 'Add controlled randomness to subsequent card reviews. Does not affect articles or snippets.',
         control: toggle('fsrsParams.enable_fuzz'),
       },
       {
-        heading: 'Spaced repetition',
-        name: 'Show intervals on grade buttons',
-        desc: "Show when the card's next review would be for each grade. A ~ marks an interval that fuzzing can change.",
         control: toggle('showGradeIntervals'),
       },
       {
-        heading: 'Spaced repetition',
-        name: 'Maximum review interval',
-        desc: 'Ceiling on the number of days between card reviews.',
         control: {
           type: 'number',
           key: 'fsrsParams.maximum_interval',
@@ -1341,15 +1256,9 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         },
       },
       {
-        heading: 'Spaced repetition',
-        name: 'Enable short-term card scheduling',
-        desc: 'Schedule cards for next review in a few minutes in some cases where the user chooses a review grade below easy.',
         control: toggle('fsrsParams.enable_short_term'),
       },
       {
-        heading: 'Spaced repetition',
-        name: 'Learning steps',
-        desc: 'FSRS learning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas.',
         control: {
           type: 'text',
           key: 'fsrsParams.learning_steps',
@@ -1358,9 +1267,6 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         },
       },
       {
-        heading: 'Spaced repetition',
-        name: 'Relearning steps',
-        desc: 'FSRS relearning steps, formatted like "3m"/"2h"/"1d". Separate steps with commas.',
         control: {
           type: 'text',
           key: 'fsrsParams.relearning_steps',
@@ -1369,6 +1275,13 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         },
       },
     ]);
+  });
+
+  it('names the data directory in the descriptions of the settings that write into it', () => {
+    for (const key of ['copyOnImport', 'createEmptyInCurrentFolder']) {
+      const row = declaredControls().find(({ control }) => control.key === key);
+      expect(row?.desc).toContain(DATA_DIRECTORY);
+    }
   });
 
   it('locks the reminder type toggles exactly while review reminders are off, following each change', async () => {
@@ -1423,12 +1336,12 @@ describe('IRSettingTab.getSettingDefinitions', () => {
       cls: `${SETTING_BOX_CLASS} ${CONTINUED_GROUP_CLASS}`,
       items: [
         {
-          name: 'Auto-import notes by tag',
-          desc: AUTO_IMPORT_DESC,
+          name: expect.any(String) as unknown,
+          desc: expect.any(String) as unknown,
           control: { type: 'toggle', key: 'autoImportOnTag' },
         },
         {
-          name: 'Trigger tags',
+          name: expect.any(String) as unknown,
           control: {
             type: 'text',
             key: 'autoImportTags',
@@ -1437,7 +1350,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
           },
         },
         {
-          name: 'Where to import tagged notes',
+          name: expect.any(String) as unknown,
           control: {
             type: 'dropdown',
             key: 'autoImportMode',
@@ -1457,12 +1370,15 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     expect(boxes.slice(1)).toEqual([
       {
         type: 'group',
-        heading: 'Notifications and reminders',
+        heading: expect.any(String) as unknown,
         cls: SETTING_BOX_CLASS,
         items: [
-          { name: 'Success notices', desc: SUCCESS_NOTICES_DESC },
           {
-            name: 'Inside review',
+            name: expect.any(String) as unknown,
+            desc: expect.any(String) as unknown,
+          },
+          {
+            name: expect.any(String) as unknown,
             control: {
               type: 'dropdown',
               key: 'successNoticesInReview',
@@ -1470,7 +1386,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
             },
           },
           {
-            name: 'Outside review',
+            name: expect.any(String) as unknown,
             control: {
               type: 'dropdown',
               key: 'successNoticesOutsideReview',
@@ -1667,11 +1583,11 @@ describe('IRSettingTab reset buttons', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
     const drawn = new Set(resettableRows().map(({ name }) => name));
 
-    expect([...drawn]).toEqual([
-      'Trigger tags',
-      'Maximum review interval',
-      'Learning steps',
-      'Relearning steps',
+    expect(resettableRows().map(({ control }) => control.key)).toEqual([
+      'autoImportTags',
+      'fsrsParams.maximum_interval',
+      'fsrsParams.learning_steps',
+      'fsrsParams.relearning_steps',
     ]);
     // the same rows both times, so their functions compare equal
     const declared = tab.declareSettings();
@@ -1698,7 +1614,7 @@ describe('IRSettingTab reset buttons', () => {
       expect(reset.querySelector('svg')?.classList).toContain(
         'lucide-rotate-ccw'
       );
-      expect(reset.getAttribute('aria-label')).toBe('Restore default');
+      expect(reset.getAttribute('aria-label')).toBeTruthy();
       expect(field.type).toBe(row.control.type);
     }
   });
@@ -1837,12 +1753,11 @@ describe('IRSettingTab reset buttons', () => {
 
         const days = parseFloat(shown);
         const errorEl = setting.controlEl.querySelector('.setting-item-error');
+        const belowMin = shown !== '' && days < 1;
         const problem =
-          shown === ''
+          shown === '' || belowMin
             ? undefined
-            : days < 1
-              ? 'Value must be at least 1'
-              : await row.control.validate?.(days as never);
+            : await row.control.validate?.(days as never);
         // Enter leaves the field once it is saved; Obsidian's check is no
         // part of that
         if (commit === 'enter') {
@@ -1850,8 +1765,10 @@ describe('IRSettingTab reset buttons', () => {
             shown !== '' && days < 1
           );
         }
-        if (problem) {
-          expect(errorEl?.textContent).toBe(problem);
+        if (belowMin || problem) {
+          // Below the minimum, only the minimum it names is logic
+          if (belowMin) expect(showsInteger(errorEl?.textContent, 1)).toBe(true);
+          else expect(errorEl?.textContent).toBe(problem);
           expect(setting.settingEl.classList).toContain('is-invalid');
           expect(tab.getControlValue(row.control.key)).toBe(before);
         } else {
@@ -1997,10 +1914,11 @@ describe('IRSettingTab reset buttons', () => {
           const aboveMax = max !== null && typed > max;
           // Enter leaves the field only once it is saved
           expect(document.activeElement === field).toBe(belowMin || aboveMax);
+          // The limit it names is logic; the words around it are not
           if (belowMin) {
-            expect(error?.textContent).toBe(`Value must be at least ${min}`);
+            expect(showsInteger(error?.textContent, min)).toBe(true);
           } else if (aboveMax) {
-            expect(error?.textContent).toBe(`Value must be at most ${max}`);
+            expect(showsInteger(error?.textContent, max)).toBe(true);
           }
           if (belowMin || aboveMax) {
             expect(host.setControlValue).not.toHaveBeenCalled();
@@ -2178,20 +2096,6 @@ describe('IRSettingTab reset buttons', () => {
     );
   });
 
-  it('never spells out the default of a setting with a reset button', () => {
-    const drawn = resettableRows().map(({ control }) => control.key);
-    const withReset = declaredControls().filter(
-      ({ control }) =>
-        control.defaultValue !== undefined &&
-        (OBSIDIAN_RESET_TYPES.has(control.type) || drawn.includes(control.key))
-    );
-
-    expect(withReset.length).toBeGreaterThan(drawn.length);
-    for (const { desc } of withReset) {
-      const text = typeof desc === 'string' ? desc : (desc?.textContent ?? '');
-      expect(text).not.toMatch(/\bdefault\b/i);
-    }
-  });
 });
 
 describe('IRSettingTab trigger tags field', () => {

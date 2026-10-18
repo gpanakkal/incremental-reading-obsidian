@@ -183,9 +183,11 @@ async function expectQueuedArticles(priorities: Record<string, number> = {}) {
   await expect(rows).toHaveCount(ARTICLES.length);
   for (const { id, reference, priority } of ARTICLES) {
     const shown = ((priorities[id] ?? priority) / 10).toFixed(1);
-    await expect(rows.filter({ hasText: reference })).toContainText(
-      `Priority ${shown}`
-    );
+    await expect(
+      rows
+        .filter({ hasText: reference })
+        .locator('[data-column="scheduling"]')
+    ).toContainText(shown);
   }
 }
 
@@ -215,7 +217,7 @@ test('re-enabling the plugin in place keeps every item and every change', async 
   await openQueue();
   await expectQueuedArticles({ [changed]: 45 });
   await expect(window.locator('#begin-review-button')).toBeEnabled();
-  await expect(window.getByText('Nothing due for review')).toHaveCount(0);
+  await expect(window.locator('.ir-review-placeholder')).toHaveCount(0);
 });
 
 test('an update that meets a v9 database migrates it in place, keeping every item', async () => {

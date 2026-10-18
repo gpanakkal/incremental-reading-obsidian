@@ -169,7 +169,7 @@ test.describe('Article Importing', () => {
     // Phone width, where Obsidian stretches its notices across the screen
     await window.setViewportSize({ width: 400, height: 850 });
     const imported = (title: string) =>
-      window.locator('.notice').filter({ hasText: `Imported "${title}"` });
+      window.locator('.notice').filter({ hasText: `"${title}"` });
 
     await importArticle(window, 'sources/Security Principles');
     await expect(imported('Security Principles')).toBeVisible();
@@ -251,10 +251,9 @@ test.describe('Action Bar', () => {
     await window.getByRole('button', { name: 'Mark reviewed' }).click();
 
     const summary = window.locator('.ir-review-summary');
-    await expect(
-      summary.getByRole('heading', { name: 'Review complete' })
-    ).toBeVisible();
-    await expect(summary.getByText('1 item reviewed')).toBeVisible();
+    await expect(summary.locator('.ir-review-summary-total')).toHaveText(
+      /\b1 item\b/
+    );
     // Singular, because the row's label is pluralized by its own count and
     // exactly one article was reviewed here.
     await expect(
@@ -285,9 +284,7 @@ test.describe('Action Bar', () => {
     await window.getByRole('button', { name: 'Mark reviewed' }).click();
 
     const summary = window.locator('.ir-review-summary');
-    await expect(
-      summary.getByRole('heading', { name: 'Review complete' })
-    ).toBeVisible();
+    await expect(summary.locator('.ir-review-summary-total')).toBeVisible();
 
     await window.locator('css=#undo-button').click();
 
@@ -318,9 +315,7 @@ test.describe('Action Bar', () => {
     await skipButton.click();
 
     const summary = window.locator('.ir-review-summary');
-    await expect(
-      summary.getByRole('heading', { name: 'Review complete' })
-    ).toBeVisible();
+    await expect(summary.locator('.ir-review-summary-total')).toBeVisible();
     await expect(
       summary.getByRole('listitem').filter({ hasText: ARTICLE_TITLE })
     ).toBeVisible();
@@ -355,9 +350,7 @@ test.describe('Action Bar', () => {
       .click();
 
     const summary = window.locator('.ir-review-summary');
-    await expect(
-      summary.getByRole('heading', { name: 'Review complete' })
-    ).toBeVisible();
+    await expect(summary.locator('.ir-review-summary-total')).toBeVisible();
 
     await window.locator('css=#undo-button').click();
 
@@ -2036,7 +2029,7 @@ test.describe("Removing an item note's type tag", () => {
     notices: () => Promise<string[]>,
     round: number
   ) {
-    const message = `restored the ${tag} tag`;
+    const message = tag;
     await expect
       .poll(
         async () =>

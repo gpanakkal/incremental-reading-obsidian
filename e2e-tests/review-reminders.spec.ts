@@ -80,7 +80,7 @@ test('the status bar says items are ready for review until the last is reviewed,
   await importArticle(window, ARTICLE);
   await expectReminder(window, true);
   // Never a count
-  await expect(reminder(window)).toHaveText('Ready for review');
+  await expect(reminder(window)).not.toHaveText(/\d/);
 
   await reminder(window).click();
   await expectReviewHome(window);

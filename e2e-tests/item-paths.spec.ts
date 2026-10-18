@@ -229,7 +229,7 @@ test.describe('Item paths that would break links', () => {
     await syncRename(window, SOURCE, bad);
     await expect
       .poll(notices)
-      .toEqual([expect.stringContaining('cannot contain')]);
+      .toEqual([expect.stringContaining(FILE_CHAR)]);
     await expectInExplorer(window, SOURCE);
     await syncRename(window, SOURCE, bad);
 
@@ -237,10 +237,8 @@ test.describe('Item paths that would break links', () => {
     await expect
       .poll(notices)
       .toEqual([
-        expect.stringContaining('cannot contain'),
-        expect.stringContaining(
-          `"${bad}" was already moved back once, so it stays`
-        ),
+        expect.stringContaining(FILE_CHAR),
+        expect.stringContaining(`"${bad}"`),
       ]);
     await expectInExplorer(window, bad);
     await expect(explorerRow(window, SOURCE)).toHaveCount(0);
@@ -258,8 +256,8 @@ test.describe('Item paths that would break links', () => {
     window = await openVault(app, vaultPath);
 
     await expect(
-      window.locator('.notice', { hasText: 'cannot contain any of these' })
-    ).toContainText(`Rename "${bad}"`);
+      window.locator('.notice', { hasText: `"${bad}"` })
+    ).toBeVisible();
     // A path that already breaks links is reported, never moved
     expect(await itemRows(window)).toMatchObject([
       { kind: 'article', reference: bad, exists: true },
@@ -282,8 +280,7 @@ test.describe('Item paths that would break links', () => {
         await expect
           .poll(notices)
           .toContainEqual(
-            `Incremental reading: IR files and their folders cannot contain ` +
-              `${FOLDER_CHAR} or ${FILE_CHAR}`
+            expect.stringContaining(`${FOLDER_CHAR} or ${FILE_CHAR}`)
           );
         for (const path of paths) await expectInExplorer(window, path);
         await expect(
@@ -291,8 +288,9 @@ test.describe('Item paths that would break links', () => {
         ).toHaveCount(0);
         await expect(explorerRow(window, `A/x${FILE_CHAR}.md`)).toHaveCount(0);
         expect(
-          (await notices()).filter((notice) =>
-            notice.includes('cannot contain')
+          (await notices()).filter(
+            (notice) =>
+              notice.includes(FOLDER_CHAR) || notice.includes(FILE_CHAR)
           )
         ).toHaveLength(1);
       });

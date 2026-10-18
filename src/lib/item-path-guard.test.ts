@@ -325,21 +325,38 @@ const plainName = fc
 
 const refusedChar = fc.constantFrom(...REFUSED_PATH_CHARS);
 
-/** What the guard tells, by what happened. */
+const escapeRegExp = (text: string) =>
+  text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Ends in exactly the list `chars` (see `listChars`): after a word of the
+ * sentence, not partway through a longer list.
+ */
+const endsListing = (chars: string) =>
+  `(?<=[a-z])(?<! or) ${escapeRegExp(chars)}$`;
+
+/**
+ * What the guard tells, by what happened: only what it fills in, plus the one
+ * word that tells a file's notice from a folder's. `failed` is told apart
+ * from `stays` by its error kind.
+ */
 const said = {
   /** A file put back */
   file: (chars: string) =>
-    `Incremental reading: IR files and their folders cannot contain ${chars}`,
+    expect.stringMatching(new RegExp(`files.*${endsListing(chars)}`, 's')),
   /** A folder put back */
   folder: (chars: string) =>
-    `Incremental reading: folders with items cannot contain ${chars}`,
+    expect.stringMatching(new RegExp(`items.*${endsListing(chars)}`, 's')),
   /** Not put back: where it is, and what to drop */
   failed: (path: string, chars: string) =>
-    `Incremental reading: couldn't move "${path}" back. Rename it without ${chars}`,
+    expect.stringMatching(
+      new RegExp(`"${escapeRegExp(path)}".*${endsListing(chars)}`, 's')
+    ),
   /** Put back once already, so left */
   stays: (path: string, chars: string) =>
-    `Incremental reading: "${path}" was already moved back once, so it ` +
-    `stays. Rename it without ${chars}`,
+    expect.stringMatching(
+      new RegExp(`"${escapeRegExp(path)}".*${endsListing(chars)}`, 's')
+    ),
 };
 
 /** Text for within one name: refused characters and plain ones, no slash. */
@@ -569,17 +586,14 @@ describe('refusedPathsWarning', () => {
 
   it('names up to three paths, counts the rest, and lists the characters to drop', () => {
     const chars = '# ^ [ ] * " \\ < > : | ? line breaks';
-    expect(refusedPathsWarning(['a|b.md'])).toBe(
-      `Incremental reading: IR files and their folders cannot contain any ` +
-        `of these characters: ${chars}. Rename "a|b.md"`
-    );
-    expect(refusedPathsWarning(['a', 'b', 'c', 'd', 'e'])).toBe(
-      `Incremental reading: IR files and their folders cannot contain any ` +
-        `of these characters: ${chars}. Rename "a", "b", "c" and 2 more`
-    );
-    expect(refusedPathsWarning(['a', 'b', 'c'])).toMatch(
-      /Rename "a", "b", "c"$/
-    );
+    const one = refusedPathsWarning(['a|b.md']);
+    expect(one).toContain(chars);
+    expect(one).toMatch(/ "a\|b\.md"$/);
+    const five = refusedPathsWarning(['a', 'b', 'c', 'd', 'e']);
+    expect(five).toContain(chars);
+    expect(five).toMatch(/ "a", "b", "c"\D+2\D*$/);
+    expect(five).not.toContain('"d"');
+    expect(refusedPathsWarning(['a', 'b', 'c'])).toMatch(/ "a", "b", "c"$/);
   });
 });
 

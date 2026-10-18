@@ -161,14 +161,17 @@ const queueRow = (reference: string) =>
 const missingRows = () =>
   window
     .locator('.ir-queue-row')
-    .filter({ has: window.getByText('Missing', { exact: true }) });
+    .filter({ has: window.locator('.ir-queue-missing-badge') });
 
 /** A queue row's Due cell. */
 const dueCell = (row: Locator) => row.locator('[data-column="due"]');
 
+/** A queue row's Scheduling cell. */
+const schedulingCell = (row: Locator) =>
+  row.locator('[data-column="scheduling"]');
+
 /** A priority as the queue's Scheduling column shows it: 25 reads "2.5". */
-const shownPriority = (priority: number) =>
-  `Priority ${(priority / 10).toFixed(1)}`;
+const shownPriority = (priority: number) => (priority / 10).toFixed(1);
 
 /**
  * Open a menu with `open` until it shows `title`, choose that, and wait for
@@ -226,7 +229,7 @@ test('relinks a missing PDF article from the queue row menu', async () => {
   const row = missingRows();
   await expect(row).toHaveCount(1);
   await expect(row).toContainText('Lost.pdf');
-  await expect(row).toContainText(shownPriority(25));
+  await expect(schedulingCell(row)).toContainText(shownPriority(25));
   const due = (await dueCell(row).textContent()) ?? '';
   expect(due).not.toBe('');
   const child = queueRow('snippets/child.md');
@@ -253,7 +256,7 @@ test('relinks a missing PDF article from the queue row menu', async () => {
   await expect(missingRows()).toHaveCount(0);
   const relinked = queueRow('papers/Found.pdf');
   await expect(relinked).toHaveCount(1);
-  await expect(relinked).toContainText(shownPriority(25));
+  await expect(schedulingCell(relinked)).toContainText(shownPriority(25));
   await expect(dueCell(relinked)).toHaveText(due);
   await expect(child).toContainText('papers/Found.pdf');
   await expect(window.locator('.ir-queue-row')).toHaveCount(3);

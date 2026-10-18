@@ -218,9 +218,9 @@ test('imports a note written into the vault with a trigger tag, once, however of
 
   expect(await noteState(notePath)).toMatchObject({ irId: id, rowIds: [id] });
   expect(await articleCount()).toBe(before + 1);
-  expect((await notices()).filter((text) => text.includes('Imported'))).toEqual(
-    ['Imported 1 article']
-  );
+  expect(
+    (await notices()).filter((text) => /\b\d+ articles?\b/.test(text))
+  ).toEqual([expect.stringMatching(/\b1 article\b/)]);
 });
 
 test('imports a note when its trigger tag is typed into its frontmatter', async () => {
@@ -454,11 +454,11 @@ test('imports the notes tagged while Obsidian was closed when it next starts, on
     window = await openVault(app, vaultPath);
   };
   const importNotices = () =>
-    window.locator('.notice', { hasText: 'Imported' });
+    window.locator('.notice', { hasText: /\b\d+ articles?\b/ });
 
   await tagWhileClosed(tagged);
 
-  await expect(importNotices()).toHaveText(['Imported 3 articles']);
+  await expect(importNotices()).toHaveText([/\b3 articles\b/]);
   const ids = [];
   for (const notePath of tagged) ids.push(await expectImported(notePath));
   expect(await articleCount()).toBe(before + 3);
@@ -472,7 +472,7 @@ test('imports the notes tagged while Obsidian was closed when it next starts, on
   for (const [i, witness] of ['inbox/Fourth.md', 'inbox/Fifth.md'].entries()) {
     await tagWhileClosed([witness]);
 
-    await expect(importNotices()).toHaveText(['Imported 1 article']);
+    await expect(importNotices()).toHaveText([/\b1 article\b/]);
     await expectImported(witness);
     expect(await articleCount()).toBe(before + 4 + i);
     for (const [j, notePath] of tagged.entries()) {

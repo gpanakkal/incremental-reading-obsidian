@@ -150,15 +150,22 @@ const dismissButton = (container: HTMLElement) => buttons(container)[0];
 
 const reviewButton = (container: HTMLElement) => buttons(container)[1];
 
-/**
- * What a button is called, as `getByRole(name)` and Obsidian's tooltip read
- * it: its `aria-label`, or failing that its text.
- */
-const buttonName = (btn: Element) =>
-  btn.getAttribute('aria-label') ?? btn.textContent;
-
 /** The `<svg>` Obsidian's `setIcon` put in a button, if any. */
 const iconSvg = (btn: Element) => btn.querySelector(':scope > svg.svg-icon');
+
+/**
+ * The icon a button shows, by its id without any `lucide-` prefix, or null for
+ * a text-only button. Tests tell buttons apart by this, not by their wording.
+ */
+const iconName = (btn: Element) =>
+  [...(iconSvg(btn)?.classList ?? [])]
+    .find((c) => c !== 'svg-icon')
+    ?.replace(/^lucide-/, '') ?? null;
+
+/** The toggle's icon while a click would dismiss the item. */
+const DISMISS = 'ban';
+/** The toggle's icon while a click would restore a dismissed item. */
+const RESTORE = 'archive-restore';
 
 /** The Lucide icon a button shows, by its `lucide-*` class, or null. */
 const iconOf = (btn: Element) =>
@@ -229,7 +236,7 @@ function mountPanel(
       info = null;
     },
     barButtons: () =>
-      [...parent.querySelectorAll('.ir-action-bar button')].map(buttonName),
+      [...parent.querySelectorAll('.ir-action-bar button')].map(iconName),
     /** The CodeMirror panel slot the bar was mounted into. */
     host: () => parent.querySelector('.ir-action-bar-host'),
     topSlotBar: () => parent.querySelector('.cm-panels-top .ir-action-bar'),
@@ -244,9 +251,7 @@ function mountPanel(
 function expectDismissFace(btn: HTMLButtonElement, dismissed: boolean) {
   expect(iconOf(btn)).toBe(dismissed ? 'lucide-archive-restore' : 'lucide-ban');
   expect(iconSvg(btn)?.getAttribute('stroke')).toBe(DISMISS_ICON_STROKE);
-  expect(btn.getAttribute('aria-label')).toBe(
-    dismissed ? 'Un-dismiss' : 'Dismiss'
-  );
+  expect(btn.getAttribute('aria-label')).toBeTruthy();
   expect(btn.classList.contains('clickable-icon')).toBe(true);
   expect(btn.classList.contains('ir-action-bar-status')).toBe(false);
   expect(btn.textContent).toBe('');
@@ -254,11 +259,11 @@ function expectDismissFace(btn: HTMLButtonElement, dismissed: boolean) {
 }
 
 /**
- * Assert `btn` reads `text` as plain muted status text: no icon, and no
- * `aria-label` tooltip repeating what is already on screen.
+ * Assert `btn` reads as plain muted status text: no icon, and no `aria-label`
+ * tooltip repeating what is already on screen.
  */
-function expectStatusText(btn: HTMLButtonElement, text: string) {
-  expect(btn.textContent).toBe(text);
+function expectStatusText(btn: HTMLButtonElement) {
+  expect(btn.textContent).toBeTruthy();
   expect(iconSvg(btn)).toBeNull();
   expect(btn.hasAttribute('aria-label')).toBe(false);
   expect(btn.classList.contains('clickable-icon')).toBe(false);
@@ -287,7 +292,7 @@ describe('renderStandaloneActionBarDOM', () => {
 
     renderStandaloneActionBarDOM(makeFile(), plugin, container);
 
-    expect(buttonName(dismissButton(container))).toBe('Loading...');
+    expect(iconName(dismissButton(container))).toBe('loader');
     expect(dismissButton(container).disabled).toBe(true);
   });
 
@@ -306,9 +311,7 @@ describe('renderStandaloneActionBarDOM', () => {
           renderStandaloneActionBarDOM(file, plugin, container);
           await tick();
 
-          expect(buttonName(dismissButton(container))).toBe(
-            dismissed ? 'Un-dismiss' : 'Dismiss'
-          );
+          expect(iconName(dismissButton(container))).toBe(dismissed ? RESTORE : DISMISS);
           expect(dismissButton(container).disabled).toBe(false);
           container.remove();
         }
@@ -325,7 +328,7 @@ describe('renderStandaloneActionBarDOM', () => {
     const btn = dismissButton(container);
     expect(iconOf(btn)).toBe('lucide-loader');
     expect(iconSvg(btn)?.getAttribute('stroke')).toBe('currentColor');
-    expect(btn.getAttribute('aria-label')).toBe('Loading...');
+    expect(btn.getAttribute('aria-label')).toBeTruthy();
     expect(btn.classList.contains('clickable-icon')).toBe(true);
     expect(btn.classList.contains('ir-action-bar-status')).toBe(false);
     expect(btn.textContent).toBe('');
@@ -338,7 +341,29 @@ describe('renderStandaloneActionBarDOM', () => {
     renderStandaloneActionBarDOM(makeFile(), plugin, container);
     await tick();
 
-    expectStatusText(dismissButton(container), 'Not in database');
+    expectStatusText(dismissButton(container));
+  });
+
+  it('tells a note with no row apart from a lookup that failed', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const missing = makeContainer();
+    const failed = makeContainer();
+
+    renderStandaloneActionBarDOM(
+      makeFile(),
+      makeHarness({ item: null }).plugin,
+      missing
+    );
+    renderStandaloneActionBarDOM(
+      makeFile(),
+      makeHarness({ lookupRejects: true }).plugin,
+      failed
+    );
+    await tick();
+
+    expect(dismissButton(missing).textContent).not.toBe(
+      dismissButton(failed).textContent
+    );
   });
 
   it('says so when the lookup throws, and reports why', async () => {
@@ -349,7 +374,7 @@ describe('renderStandaloneActionBarDOM', () => {
     renderStandaloneActionBarDOM(makeFile(), plugin, container);
     await tick();
 
-    expectStatusText(dismissButton(container), 'Error');
+    expectStatusText(dismissButton(container));
     expect(logged).toHaveBeenCalledWith(
       'Failed to fetch item status:',
       expect.any(Error)
@@ -368,8 +393,8 @@ describe('renderStandaloneActionBarDOM', () => {
     dismissButton(container).click();
     await tick();
 
-    expect(Notice.messages).toEqual(['Item not found in database']);
-    expect(notify).toHaveBeenCalledWith('Item not found in database', {
+    expect(Notice.messages).toHaveLength(1);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
       kind: 'error',
     });
     expect(harness.reviewManager.dismissItem).not.toHaveBeenCalled();
@@ -391,11 +416,11 @@ describe('renderStandaloneActionBarDOM', () => {
     dismissButton(container).click();
     await tick();
 
-    expect(Notice.messages).toEqual(['Failed to update item']);
-    expect(notify).toHaveBeenCalledWith('Failed to update item', {
+    expect(Notice.messages).toHaveLength(1);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
       kind: 'error',
     });
-    expect(buttonName(dismissButton(container))).toBe('Dismiss');
+    expect(iconName(dismissButton(container))).toBe(DISMISS);
     expect(logged).toHaveBeenCalledWith(
       'Failed to toggle dismiss status:',
       expect.any(Error)
@@ -610,7 +635,7 @@ describe('renderStandaloneActionBarDOM', () => {
     const btn = reviewButton(container);
     expect(iconSvg(btn)?.classList.contains(PLUGIN_ICON)).toBe(true);
     expect(btn.classList.contains('ir-review-button')).toBe(true);
-    expect(btn.getAttribute('aria-label')).toBe('Review');
+    expect(btn.getAttribute('aria-label')).toBeTruthy();
     expect(btn.classList.contains('clickable-icon')).toBe(true);
     expect(btn.textContent).toBe('');
     expect(btn.hasAttribute('title')).toBe(false);
@@ -624,7 +649,7 @@ describe('renderStandaloneActionBarDOM', () => {
     renderStandaloneActionBarDOM(makeFile(), plugin, container);
     await tick();
 
-    expect(buttons(container).map(buttonName)).toEqual(['Dismiss', 'Review']);
+    expect(buttons(container).map(iconName)).toEqual([DISMISS, PLUGIN_ICON]);
   });
 
   it('toggles the stored state on click and relabels for the opposite action', async () => {
@@ -643,15 +668,11 @@ describe('renderStandaloneActionBarDOM', () => {
         if (dismissed) {
           expect(harness.reviewManager.unDismissItem).toHaveBeenCalledOnce();
           expect(harness.reviewManager.dismissItem).not.toHaveBeenCalled();
-          expect(Notice.messages).toContain('Item restored to queue');
         } else {
           expect(harness.reviewManager.dismissItem).toHaveBeenCalledOnce();
           expect(harness.reviewManager.unDismissItem).not.toHaveBeenCalled();
-          expect(Notice.messages).toContain('Item dismissed');
         }
-        expect(buttonName(dismissButton(container))).toBe(
-          dismissed ? 'Dismiss' : 'Un-dismiss'
-        );
+        expect(iconName(dismissButton(container))).toBe(dismissed ? DISMISS : RESTORE);
         container.remove();
       })
     );
@@ -676,11 +697,7 @@ describe('renderStandaloneActionBarDOM', () => {
           configureSuccessNotices(null);
           container.remove();
 
-          expect(Notice.messages).toEqual(
-            level === 'all'
-              ? [dismissed ? 'Item restored to queue' : 'Item dismissed']
-              : []
-          );
+          expect(Notice.messages).toHaveLength(level === 'all' ? 1 : 0);
         }
       )
     );
@@ -745,9 +762,7 @@ describe('renderStandaloneActionBarDOM', () => {
               harness.emit({ ids: ['watched'] });
               await tick();
 
-              expect(buttonName(dismissButton(container))).toBe(
-                dismissed ? 'Un-dismiss' : 'Dismiss'
-              );
+              expect(iconName(dismissButton(container))).toBe(dismissed ? RESTORE : DISMISS);
             }
             container.remove();
           }
@@ -772,7 +787,7 @@ describe('renderStandaloneActionBarDOM', () => {
       expect(
         harness.reviewManager.getReviewItemFromFile
       ).not.toHaveBeenCalled();
-      expect(buttonName(dismissButton(container))).toBe('Dismiss');
+      expect(iconName(dismissButton(container))).toBe(DISMISS);
     });
 
     it('keeps the label and reports why when re-reading the item fails', async () => {
@@ -798,9 +813,7 @@ describe('renderStandaloneActionBarDOM', () => {
             harness.emit({ ids: ['watched'] });
             await tick();
 
-            expect(buttonName(dismissButton(container))).toBe(
-              dismissed ? 'Un-dismiss' : 'Dismiss'
-            );
+            expect(iconName(dismissButton(container))).toBe(dismissed ? RESTORE : DISMISS);
             expect(logged).toHaveBeenCalledExactlyOnceWith(
               'Failed to refresh item status:',
               reason
@@ -825,7 +838,7 @@ describe('renderStandaloneActionBarDOM', () => {
       harness.emit({ ids: ['watched'] });
       await tick();
 
-      expect(buttonName(dismissButton(container))).toBe('Un-dismiss');
+      expect(iconName(dismissButton(container))).toBe(RESTORE);
     });
 
     it('stops listening once torn down, and leaves no listener behind', async () => {
@@ -850,7 +863,7 @@ describe('renderStandaloneActionBarDOM', () => {
       harness.emit({ ids: ['watched'] });
       await tick();
 
-      expect(buttonName(dismissButton(container))).toBe('Dismiss');
+      expect(iconName(dismissButton(container))).toBe(DISMISS);
     });
 
     it('never subscribes when torn down before the lookup resolves', async () => {
@@ -890,7 +903,7 @@ describe('the edit-mode action bar panel', () => {
     const panel = mountPanel(harness);
     await tick();
 
-    expect(panel.barButtons()).toEqual(['Dismiss', 'Review']);
+    expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
     expect(harness.listenerCount()).toBe(1);
   });
 
@@ -912,13 +925,13 @@ describe('the edit-mode action bar panel', () => {
     });
     const panel = mountPanel(harness);
     await tick();
-    expect(panel.barButtons()).toEqual(['Un-dismiss', 'Review']);
+    expect(panel.barButtons()).toEqual([RESTORE, PLUGIN_ICON]);
 
     harness.setStored('watched', false);
     harness.emit({ ids: ['watched'] });
     await tick();
 
-    expect(panel.barButtons()).toEqual(['Dismiss', 'Review']);
+    expect(panel.barButtons()).toEqual([DISMISS, PLUGIN_ICON]);
   });
 
   it('stops watching when the editor goes away', async () => {

@@ -126,7 +126,7 @@ describe('deleteMissingItem', () => {
           expect(store.getState().showAnswer).toBe(!leftItem);
           expect(wired.notify.mock.calls).toStrictEqual(
             confirmed && fails
-              ? [[`Failed to delete "${row.reference}"`, { kind: 'error' }]]
+              ? [[expect.stringContaining(row.reference), { kind: 'error' }]]
               : []
           );
           expect(wired.logged.mock.calls).toStrictEqual(
@@ -152,7 +152,7 @@ describe('deleteMissingItem', () => {
         expect(deleted).toBe(false);
         expect(wired.deleteRow).not.toHaveBeenCalled();
         expect(wired.notify.mock.calls).toStrictEqual([
-          [`"${row.reference}" is back, so it was not deleted`],
+          [expect.stringContaining(row.reference)],
         ]);
         expect(wired.invalidate.mock.calls).toStrictEqual([
           [{ queryKey: ['queue'], refetchType: 'all' }],

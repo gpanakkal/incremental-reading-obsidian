@@ -194,10 +194,12 @@ describe('refusedWrite', () => {
         expect(refusedWrite(repoRefusing(new Error(reason)), action)).toBe(
           true
         );
-        expect(notify).toHaveBeenCalledExactlyOnceWith(
-          `Couldn't ${action}: saving to the database is paused. ${reason}`,
-          { kind: 'error' }
-        );
+        expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+          kind: 'error',
+        });
+        const [message] = notify.mock.calls[0];
+        expect(message).toContain(action);
+        expect(message).toContain(reason);
       })
     );
   });

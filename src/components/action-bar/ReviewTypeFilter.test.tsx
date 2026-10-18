@@ -146,21 +146,24 @@ describe('ReviewTypeFilter', () => {
     // themed tooltip from, so the two cannot disagree.
     fc.assert(
       fc.property(typesArb, (types) => {
-        const { container } = mountFilter(types);
+        const labelsWith = (on: readonly NoteType[]) => {
+          const { container } = mountFilter(on);
+          return NOTE_TYPES.map((type) =>
+            toggle(container, type).getAttribute('aria-label')
+          );
+        };
+        const reviewing = labelsWith(NOTE_TYPES);
+        const notReviewing = labelsWith([]);
+        const shown = labelsWith(types);
 
-        expect(toggle(container, 'article').getAttribute('aria-label')).toBe(
-          types.includes('article')
-            ? 'Reviewing articles'
-            : 'Not reviewing articles'
-        );
-        expect(toggle(container, 'snippet').getAttribute('aria-label')).toBe(
-          types.includes('snippet')
-            ? 'Reviewing snippets'
-            : 'Not reviewing snippets'
-        );
-        expect(toggle(container, 'card').getAttribute('aria-label')).toBe(
-          types.includes('card') ? 'Reviewing cards' : 'Not reviewing cards'
-        );
+        NOTE_TYPES.forEach((type, i) => {
+          expect(reviewing[i]).toMatch(type);
+          expect(notReviewing[i]).toMatch(type);
+          expect(reviewing[i]).not.toBe(notReviewing[i]);
+          expect(shown[i]).toBe(
+            types.includes(type) ? reviewing[i] : notReviewing[i]
+          );
+        });
       })
     );
   });

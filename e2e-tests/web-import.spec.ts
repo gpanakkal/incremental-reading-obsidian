@@ -135,8 +135,8 @@ test.describe('Importing the page open in the web viewer', () => {
 
     await executeCommandById(window, 'incremental-reading:import-article');
 
-    await expect(window.locator('.modal .modal-title')).toHaveText(
-      `Importing "${PAGE_TITLE}"`
+    await expect(window.locator('.modal .modal-title')).toContainText(
+      PAGE_TITLE
     );
     await finalizeArticleImport(window);
     await expectQueued(window);

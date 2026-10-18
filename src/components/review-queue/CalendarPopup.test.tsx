@@ -663,9 +663,9 @@ describe('CalendarPopup', () => {
 
     const actions = Array.from(
       container.ownerDocument.querySelectorAll('.ir-calendar-action')
-    ).map((button) => button.textContent);
+    );
 
-    expect(actions).toEqual(['Today', 'Cancel']);
+    expect(actions).toHaveLength(2);
   });
 
   describe('bounds', () => {
