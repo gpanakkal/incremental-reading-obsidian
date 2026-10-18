@@ -183,6 +183,16 @@ export const AUTO_IMPORT_DEBOUNCE_MS = 500;
  * off until it ended.
  */
 export const AUTO_IMPORT_MAX_WAIT_MS = 5000;
+/**
+ * How far before the moment it is written `AutoImportWatcher` dates the
+ * moment it last saw every change. A note's change reaches the watcher only
+ * once the metadata cache has read it, a moment after the file was written,
+ * and while Obsidian is starting up, many seconds after. A note written just
+ * before the watcher stops may be read too late; dated this far back, the
+ * next startup looks at it again. Looking at a note too many costs nothing:
+ * one already imported is passed over.
+ */
+export const AUTO_IMPORT_WATERMARK_SLACK_MS = 60_000;
 
 export const MAX_SQL_QUERY_PARAMS = 999;
 /**

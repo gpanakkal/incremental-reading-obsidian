@@ -135,3 +135,30 @@ export function getDeviceId(
   app.saveLocalStorage(DEVICE_ID_KEY, deviceId);
   return deviceId;
 }
+
+/**
+ * localStorage key holding the last moment this device's `AutoImportWatcher`
+ * saw every change to the vault. Device-local, as {@link DEVICE_ID_KEY} is:
+ * the moment says what this device's metadata cache saw, which no other
+ * device can speak for.
+ */
+export const AUTO_IMPORT_WATERMARK_KEY = 'incremental-reading-auto-import-seen';
+
+/**
+ * The moment stored under {@link AUTO_IMPORT_WATERMARK_KEY}, in milliseconds
+ * since the epoch, or null when none is stored or what is there is no time.
+ */
+export function loadAutoImportWatermark(
+  app: Pick<App, 'loadLocalStorage'>
+): number | null {
+  const stored: unknown = app.loadLocalStorage(AUTO_IMPORT_WATERMARK_KEY);
+  return typeof stored === 'number' && Number.isFinite(stored) ? stored : null;
+}
+
+/** Store `time` under {@link AUTO_IMPORT_WATERMARK_KEY}. */
+export function saveAutoImportWatermark(
+  app: Pick<App, 'saveLocalStorage'>,
+  time: number
+): void {
+  app.saveLocalStorage(AUTO_IMPORT_WATERMARK_KEY, time);
+}

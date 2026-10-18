@@ -15,6 +15,7 @@ import {
   executeCommandById,
   openNote,
   openPluginSettings,
+  pendingSaves,
   setDefaultEditingMode,
   setPluginSetting,
   watchNotices,
@@ -77,6 +78,7 @@ type PageApp = {
           };
         };
         autoImportWatcher: { flushNow(): Promise<void> };
+        saveSettings(): Promise<void>;
       }
     >;
     disablePlugin(id: string): Promise<void>;
@@ -419,4 +421,69 @@ test('imports a copy of a note tagged in copy mode, moving the tag to it, and ne
   });
   expect(await noteState(copyPath)).toMatchObject({ irId: id, rowIds: [id] });
   expect(await articleFiles()).toEqual([...articlesBefore, copyPath].sort());
+});
+
+test('imports the notes tagged while Obsidian was closed when it next starts, once, but none tagged before importing by tag was on', async () => {
+  const taggedBefore = 'inbox/Tagged before.md';
+  await writeVaultFile(
+    taggedBefore,
+    `---\ntags: [${AUTO_IMPORT_TAG}]\n---\nTagged before importing by tag was on.\n`
+  );
+  await expect
+    .poll(async () => (await noteState(taggedBefore)).tags)
+    .toContain(AUTO_IMPORT_TAG);
+  await setPluginSetting(window, 'autoImportOnTag', true);
+  await window.evaluate(() =>
+    (window as unknown as { app: PageApp }).app.plugins.plugins[
+      'incremental-reading'
+    ].saveSettings()
+  );
+  const before = await articleCount();
+  const tagged = ['inbox/First.md', 'inbox/Second.md', 'notes/Third.md'];
+  /** Close Obsidian, tag `notePaths` from outside it, and start it again. */
+  const tagWhileClosed = async (notePaths: string[]) => {
+    await expect.poll(() => pendingSaves(window)).toBe(0);
+    await closeElectron(app);
+    for (const notePath of notePaths) {
+      await writeVaultFile(
+        notePath,
+        `---\ntags: [${AUTO_IMPORT_TAG}]\n---\nTagged while Obsidian was closed.\n`
+      );
+    }
+    app = await launchElectron(vaultPath);
+    window = await openVault(app, vaultPath);
+  };
+  const importNotices = () =>
+    window.locator('.notice', { hasText: 'Imported' });
+
+  await tagWhileClosed(tagged);
+
+  await expect(importNotices()).toHaveText(['Imported 3 articles']);
+  const ids = [];
+  for (const notePath of tagged) ids.push(await expectImported(notePath));
+  expect(await articleCount()).toBe(before + 3);
+  expect(await noteState(taggedBefore)).toMatchObject({
+    irId: null,
+    rowIds: [],
+  });
+
+  // Started twice more, each time with one more note tagged while closed, so
+  // there is a sign that the look at the vault is over
+  for (const [i, witness] of ['inbox/Fourth.md', 'inbox/Fifth.md'].entries()) {
+    await tagWhileClosed([witness]);
+
+    await expect(importNotices()).toHaveText(['Imported 1 article']);
+    await expectImported(witness);
+    expect(await articleCount()).toBe(before + 4 + i);
+    for (const [j, notePath] of tagged.entries()) {
+      expect(await noteState(notePath)).toMatchObject({
+        irId: ids[j],
+        rowIds: [ids[j]],
+      });
+    }
+    expect(await noteState(taggedBefore)).toMatchObject({
+      irId: null,
+      rowIds: [],
+    });
+  }
 });

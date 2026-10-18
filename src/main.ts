@@ -153,6 +153,13 @@ function syncWaitTimeoutForTests(): number | undefined {
  */
 const importingWebViewers = new WeakSet<WebViewerView>();
 
+/** A promise and the function that settles it, as ES2024's `Promise.withResolvers`. */
+function withResolvers<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => (resolve = settle));
+  return { promise, resolve };
+}
+
 export default class IncrementalReadingPlugin extends Plugin {
   /** Everything persisted to `data.json`; `settings` is this object's own half. */
   data!: IRPluginData;
@@ -194,6 +201,12 @@ export default class IncrementalReadingPlugin extends Plugin {
   private reviewReminder?: ReviewReminder;
   /** Imports notes that gain a trigger tag. Unset until the database is up. */
   private autoImportWatcher?: AutoImportWatcher;
+  /**
+   * Settles with {@link autoImportWatcher} once {@link watchAutoImports} has
+   * made it. The startup scan in {@link followMovedNotes} waits on this, not
+   * on which of the two happens to run first.
+   */
+  private readonly autoImportWatcherMade = withResolvers<AutoImportWatcher>();
   /**
    * The notes left without review data by a crash, which review asks about.
    * Unset until the database it reads is up.
@@ -874,6 +887,8 @@ export default class IncrementalReadingPlugin extends Plugin {
     });
     this.autoImportWatcher = watcher;
     this.register(watcher.start());
+    this.register(this.onSettingsChange(() => watcher.configChanged()));
+    this.autoImportWatcherMade.resolve(watcher);
 
     this.registerEvent(
       this.app.metadataCache.on('changed', (file, _data, cache) => {
@@ -921,6 +936,20 @@ export default class IncrementalReadingPlugin extends Plugin {
             error
           );
         })
+        // Then notes that gained a trigger tag while Obsidian was closed, once
+        // every row is where its note is, so the import's checks by path see
+        // the vault as it is
+        .then(async () => {
+          const watcher = await this.autoImportWatcherMade.promise;
+          if (controller.signal.aborted) return;
+          await watcher.runCatchUpScan();
+        })
+        .catch((error: unknown) => {
+          console.error(
+            'Incremental Reading - failed to import notes tagged while Obsidian was closed:',
+            error
+          );
+        })
         // Once every row is where its file is, whether or not following them
         // went well: paths that break links to their items are left as they
         // are, but the user hears of them
@@ -942,8 +971,8 @@ export default class IncrementalReadingPlugin extends Plugin {
           );
         })
         // Last, once every row is where its note is: a note the scan just
-        // pointed a row at is no leftover. Notes only, by the cache, read
-        // once it is clean.
+        // pointed a row at is no leftover, nor one just imported by its tag.
+        // Notes only, by the cache, read once it is clean.
         // TODO(0081): once the startup hold for Obsidian Sync lands, wait for
         // its settled signal here too. Until then, a note Sync brings down
         // before the database reads as a leftover; the notice only asks, and

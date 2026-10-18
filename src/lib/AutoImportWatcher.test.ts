@@ -22,9 +22,14 @@ import {
   AUTO_IMPORT_DEBOUNCE_MS,
   AUTO_IMPORT_MAX_WAIT_MS,
   AUTO_IMPORT_TAG,
+  AUTO_IMPORT_WATERMARK_SLACK_MS,
   CARD_TAG,
   SNIPPET_TAG,
 } from './constants';
+import {
+  loadAutoImportWatermark,
+  saveAutoImportWatermark,
+} from './plugin-data';
 import { matchFrontmatterTags, stripFrontmatterTags } from './tags';
 
 // #region HELPERS
@@ -32,25 +37,48 @@ import { matchFrontmatterTags, stripFrontmatterTags } from './tags';
 const TRIGGER = AUTO_IMPORT_TAG;
 
 /**
- * A vault the watcher reads files and their cached metadata from, and the ids
- * its database holds rows for, deleted or not.
+ * A vault the watcher reads files and their cached metadata from, the ids its
+ * database holds rows for, deleted or not, and the device's localStorage.
  */
 function makeVault() {
   const files = new Map<string, TFile>();
   const caches = new Map<TFile, CachedMetadata | null>();
+  const storage = new Map<string, unknown>();
   return {
     rows: new Set<string>(),
+    storage,
     app: {
+      // As Obsidian's: null for a key never stored
+      loadLocalStorage: (key: string): unknown => storage.get(key) ?? null,
+      saveLocalStorage: (key: string, data: unknown) => {
+        storage.set(key, data);
+      },
       vault: {
         getFileByPath: (path: string) => files.get(path) ?? null,
+        // As Obsidian's: the files whose extension is `md`, in no set order
+        getMarkdownFiles: () =>
+          [...files.values()].filter(({ extension }) => extension === 'md'),
       },
       metadataCache: {
         getFileCache: (file: TFile) => caches.get(file) ?? null,
       },
     },
-    /** A note at `path`, its frontmatter `frontmatter`; none when undefined. */
-    add: (path: string, frontmatter?: Record<string, unknown>) => {
-      const file = Object.assign(new TFile(), { path, extension: 'md' });
+    /**
+     * A file at `path`, a note unless `extension` says otherwise, its
+     * frontmatter `frontmatter`; none when undefined. Last written `mtime`,
+     * now unless said otherwise.
+     */
+    add: (
+      path: string,
+      frontmatter?: Record<string, unknown>,
+      extension = 'md',
+      mtime = Date.now()
+    ) => {
+      const file = Object.assign(new TFile(), {
+        path,
+        extension,
+        stat: { ctime: mtime, mtime, size: 0 },
+      });
       files.set(path, file);
       caches.set(file, frontmatter === undefined ? {} : { frontmatter });
       return file;
@@ -139,12 +167,15 @@ function makeCopyImporter(vault: Vault) {
 const makeRowLookup = (vault: Vault) =>
   vi.fn((id: string) => Promise.resolve(vault.rows.has(id)));
 
-/** A started watcher over a fresh vault, with the config it reads changeable. */
+/**
+ * A started watcher over `vault`, a fresh one unless given, with the config it
+ * reads changeable, importing through what `makeImport` makes.
+ */
 function makeWatcher(
   config: Partial<AutoImportConfig> = {},
+  vault = makeVault(),
   makeImport: typeof makeImporter = makeImporter
 ) {
-  const vault = makeVault();
   let current: AutoImportConfig = {
     enabled: true,
     triggerTags: [TRIGGER],
@@ -167,8 +198,10 @@ function makeWatcher(
     importMany,
     hasRow,
     stop,
+    /** Change the settings, telling the watcher as the plugin does. */
     configure: (change: Partial<AutoImportConfig>) => {
       current = { ...current, ...change };
+      watcher.configChanged();
     },
     /** Tell the watcher `file` was re-indexed as its cache now stands. */
     change: (file: TFile) => {
@@ -222,6 +255,31 @@ const noteArb = fc.record({
   ]),
   failedBefore: fc.boolean(),
 });
+
+type NoteState = Omit<
+  typeof noteArb extends fc.Arbitrary<infer T> ? T : never,
+  'enabled'
+>;
+
+/**
+ * Whether a note in `note`'s state is one to import, the watcher on and
+ * looking for {@link TRIGGER} and `second-trigger`, where `heldIds` are the
+ * ids rows hold.
+ */
+const callsForImport = (note: NoteState, heldIds: ReadonlySet<string>) =>
+  note.hasFrontmatter &&
+  !(typeof note.irId === 'string' && heldIds.has(note.irId)) &&
+  note.tags.some((tag) => tag === TRIGGER || tag === '#Second-Trigger') &&
+  !note.tags.includes(SNIPPET_TAG) &&
+  !note.tags.includes(CARD_TAG) &&
+  !note.failedBefore;
+
+/** The moment the watcher last saw every change, as `vault` stores it. */
+const seenAt = (vault: Vault) => loadAutoImportWatermark(vault.app);
+
+/** The notice for `count` imports. */
+const importedNotice = (count: number) =>
+  `Imported ${count} article${count === 1 ? '' : 's'}`;
 
 // #endregion
 
@@ -945,6 +1003,7 @@ describe('AutoImportWatcher in copy mode', () => {
   it('hands on only the trigger tags a note carries, for a copy import to take off it', async () => {
     const { vault, change, importMany } = makeWatcher(
       { triggerTags: [TRIGGER, 'clipped'], mode: 'copy' },
+      makeVault(),
       makeCopyImporter
     );
     const file = vault.add('clip.md', { tags: ['#Clipped', 'other'] });
@@ -977,6 +1036,7 @@ describe('AutoImportWatcher in copy mode', () => {
           vi.clearAllTimers();
           const { vault, change, importMany, hasRow } = makeWatcher(
             { triggerTags, mode: 'copy' },
+            makeVault(),
             makeCopyImporter
           );
           const original = vault.add('clip.md', { tags, title: 'Clip' });
@@ -1017,6 +1077,509 @@ describe('AutoImportWatcher in copy mode', () => {
         }
       ),
       { numRuns: 60 }
+    );
+  });
+});
+
+/** The moment last seen to, as stored, if one is: any a clock gives. */
+const seenArb = fc.option(fc.integer({ min: 0, max: 4e12 }), { nil: null });
+
+describe('AutoImportWatcher.runCatchUpScan', () => {
+  /**
+   * A file the scan may find: a note, or a file of another kind, last written
+   * `writtenAfter` ms after the moment last seen to (before it, if negative).
+   */
+  const scannedArb = fc.record({
+    extension: fc.constantFrom('md', 'pdf', 'canvas', 'MD'),
+    note: noteArb.map(({ enabled: _enabled, ...note }): NoteState => note),
+    writtenAfter: fc.oneof(
+      fc.constantFrom(0, 1, -1),
+      fc.integer({ min: -1e12, max: 1e12 })
+    ),
+  });
+
+  it('imports at once, in one batch under one notice, every note written after the moment last seen to that the guards let through, and no other file', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(scannedArb, { maxLength: 8 }),
+        seenArb,
+        async (scanned, seen) => {
+          Notice.reset();
+          const vault = makeVault();
+          const { watcher, importMany, stop } = makeWatcher(
+            { triggerTags: [TRIGGER, 'second-trigger'] },
+            vault
+          );
+          const files = scanned.map(({ extension, writtenAfter }, i) =>
+            vault.add(
+              `notes/${i}.${extension}`,
+              { tags: [TRIGGER] },
+              extension,
+              (seen ?? Date.now()) + writtenAfter
+            )
+          );
+          // Failed since the plugin loaded
+          const failing = files.filter((_, i) => scanned[i].note.failedBefore);
+          if (failing.length > 0) {
+            for (const file of failing) {
+              watcher.consider(file, vault.cacheOf(file));
+            }
+            importMany.mockImplementationOnce((entries) =>
+              Promise.resolve(
+                entries.map(
+                  ({ file }): BulkOutcome => ({
+                    file,
+                    status: 'failed',
+                    reason: 'broken',
+                  })
+                )
+              )
+            );
+            await watcher.flushNow();
+            importMany.mockClear();
+            Notice.reset();
+          }
+          if (seen !== null) saveAutoImportWatermark(vault.app, seen);
+          const heldIds = new Set(
+            scanned.flatMap(({ note }) =>
+              typeof note.irId === 'string' && note.rowHeld ? [note.irId] : []
+            )
+          );
+          heldIds.forEach((id) => vault.rows.add(id));
+          scanned.forEach(({ note }, i) => {
+            vault.edit(
+              files[i],
+              note.hasFrontmatter
+                ? { 'ir-id': note.irId, tags: note.tags }
+                : undefined
+            );
+          });
+
+          await watcher.runCatchUpScan();
+
+          const wanted = files
+            .filter(
+              ({ extension, stat }, i) =>
+                extension === 'md' &&
+                seen !== null &&
+                stat.mtime > seen &&
+                callsForImport(scanned[i].note, heldIds)
+            )
+            .map(({ path }) => path);
+          expect(importedPaths(importMany)).toEqual(
+            wanted.length === 0 ? [] : [wanted]
+          );
+          expect(Notice.messages).toEqual(
+            wanted.length === 0 ? [] : [importedNotice(wanted.length)]
+          );
+          // Nothing was left waiting to be imported later
+          await settle();
+          expect(importMany.mock.calls.length).toBe(
+            wanted.length === 0 ? 0 : 1
+          );
+          stop();
+        }
+      )
+    );
+  });
+
+  it('reads no note, and stores now as the moment last seen to, when none is stored or importing is off', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(
+          fc.record({
+            enabled: fc.boolean(),
+            storedAfterNow: fc.constant(null),
+          }),
+          fc.record({
+            enabled: fc.constant(false),
+            storedAfterNow: fc.oneof(
+              fc.constantFrom(0, 1, -1),
+              fc.integer({ min: -1e12, max: 1e12 })
+            ),
+          })
+        ),
+        fc.array(fc.integer({ min: -1e12, max: 1e12 }), { maxLength: 5 }),
+        async ({ enabled, storedAfterNow }, writtenAfter) => {
+          Notice.reset();
+          const vault = makeVault();
+          const now = Date.now();
+          writtenAfter.forEach((after, i) =>
+            vault.add(`note ${i}.md`, { tags: [TRIGGER] }, 'md', now + after)
+          );
+          const stored = storedAfterNow === null ? null : now + storedAfterNow;
+          if (stored !== null) saveAutoImportWatermark(vault.app, stored);
+          const { watcher, importMany, stop } = makeWatcher({ enabled }, vault);
+          const listFiles = vi.spyOn(vault.app.vault, 'getMarkdownFiles');
+          const store = vi.spyOn(vault.app, 'saveLocalStorage');
+
+          await watcher.runCatchUpScan();
+          await settle();
+
+          expect(listFiles).not.toHaveBeenCalled();
+          expect(importMany).not.toHaveBeenCalled();
+          expect(Notice.messages).toEqual([]);
+          expect(seenAt(vault)).toBe(Math.max(stored ?? now, now));
+          // Never moved back: a later moment stored is kept as it is
+          expect(store.mock.calls.length).toBe(
+            stored !== null && stored >= now ? 0 : 1
+          );
+          stop();
+          vi.restoreAllMocks();
+        }
+      )
+    );
+  });
+
+  it('imports nothing and says nothing when run again after its imports, however often', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 5 }),
+        fc.integer({ min: 1, max: 3 }),
+        async (count, reruns) => {
+          Notice.reset();
+          const vault = makeVault();
+          saveAutoImportWatermark(vault.app, Date.now() - 1);
+          const { watcher, importMany, stop } = makeWatcher({}, vault);
+          for (let i = 0; i < count; i++) {
+            vault.add(`note ${i}.md`, { tags: [TRIGGER] });
+          }
+          await watcher.runCatchUpScan();
+          expect(importMany).toHaveBeenCalledOnce();
+
+          for (let i = 0; i < reruns; i++) await watcher.runCatchUpScan();
+          await settle();
+
+          expect(importMany).toHaveBeenCalledOnce();
+          expect(Notice.messages).toEqual([importedNotice(count)]);
+          stop();
+        }
+      )
+    );
+  });
+
+  it('does no work, and stores nothing, before it starts or once it stops', async () => {
+    for (const state of ['unstarted', 'stopped'] as const) {
+      const vault = makeVault();
+      vault.add('a.md', { tags: [TRIGGER] });
+      const listFiles = vi.spyOn(vault.app.vault, 'getMarkdownFiles');
+      const readCache = vi.spyOn(vault.app.metadataCache, 'getFileCache');
+      const importMany = makeImporter(vault);
+      const watcher = new AutoImportWatcher({
+        app: vault.app,
+        getConfig: () => ({
+          enabled: true,
+          triggerTags: [TRIGGER],
+          priority: 1,
+          mode: 'inPlace',
+        }),
+        importMany,
+        hasRow: makeRowLookup(vault),
+      });
+      if (state === 'stopped') watcher.start()();
+
+      await watcher.runCatchUpScan();
+      await settle();
+
+      expect({ state, listed: listFiles.mock.calls.length }).toEqual({
+        state,
+        listed: 0,
+      });
+      expect(readCache).not.toHaveBeenCalled();
+      expect(importMany).not.toHaveBeenCalled();
+      expect(vault.storage.size).toBe(0);
+    }
+  });
+
+  it('imports the notes already waiting in the same batch, under the same notice', async () => {
+    const vault = makeVault();
+    saveAutoImportWatermark(vault.app, Date.now() - 1);
+    const { watcher, change, importMany } = makeWatcher({}, vault);
+    change(vault.add('waiting.md', { tags: [TRIGGER] }));
+    vault.add('tagged while closed.md', { tags: [TRIGGER] });
+
+    await watcher.runCatchUpScan();
+    await settle();
+
+    expect(importedPaths(importMany)).toEqual([
+      ['waiting.md', 'tagged while closed.md'],
+    ]);
+    expect(Notice.messages).toEqual([importedNotice(2)]);
+  });
+
+  it('leaves a note being imported to that import, though its cache has yet to show it', async () => {
+    const vault = makeVault();
+    saveAutoImportWatermark(vault.app, Date.now() - 1);
+    const { watcher, change, importMany } = makeWatcher({}, vault);
+    const file = vault.add('a.md', { tags: [TRIGGER] });
+    const outcomes = deferred<BulkOutcome[]>();
+    importMany.mockImplementationOnce(() => outcomes.promise);
+    change(file);
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+    expect(importMany).toHaveBeenCalledOnce();
+
+    const scan = watcher.runCatchUpScan();
+    // The row is made, but the note's new ir-id is not indexed yet
+    vault.rows.add('id-a.md');
+    outcomes.resolve([{ file, status: 'imported' }]);
+    await scan;
+    await settle();
+
+    expect(importMany).toHaveBeenCalledOnce();
+  });
+
+  it('looks at a note again once an import of it that came to nothing is over', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.constantFrom('skipped', 'throws'), async (first) => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        const vault = makeVault();
+        saveAutoImportWatermark(vault.app, Date.now() - 1);
+        const { watcher, change, importMany, stop } = makeWatcher({}, vault);
+        const file = vault.add('a.md', { tags: [TRIGGER] });
+        importMany.mockImplementationOnce(() =>
+          first === 'throws'
+            ? Promise.reject(new Error('disk full'))
+            : Promise.resolve([{ file, status: 'skipped', reason: 'not now' }])
+        );
+        change(file);
+        await watcher.flushNow();
+
+        await watcher.runCatchUpScan();
+
+        expect(importedPaths(importMany)).toEqual([['a.md'], ['a.md']]);
+        stop();
+      })
+    );
+  });
+});
+
+describe('AutoImportWatcher, the moment last seen to', () => {
+  /** A watcher over `vault` that has looked for what changed while closed. */
+  async function caughtUp(
+    vault: Vault,
+    config: Partial<AutoImportConfig> = {}
+  ) {
+    const watching = makeWatcher(config, vault);
+    await watching.watcher.runCatchUpScan();
+    return watching;
+  }
+
+  it('moves on after each import, back as far as the note waiting longest less the slack, and never back', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(fc.constant(0), fc.integer({ min: -1e9, max: 1e9 })),
+        fc.boolean(),
+        fc.integer({ min: 1, max: AUTO_IMPORT_DEBOUNCE_MS - 1 }),
+        async (storedAfterNow, queuedMeanwhile, wait) => {
+          Notice.reset();
+          const vault = makeVault();
+          const stored = Date.now() + storedAfterNow;
+          saveAutoImportWatermark(vault.app, stored);
+          const { importMany, change, stop } = await caughtUp(vault);
+          const scanned = Math.max(
+            stored,
+            Date.now() - AUTO_IMPORT_WATERMARK_SLACK_MS
+          );
+          expect(seenAt(vault)).toBe(scanned);
+
+          const first = vault.add('first.md', { tags: [TRIGGER] });
+          const outcomes = deferred<BulkOutcome[]>();
+          importMany.mockImplementationOnce(() => outcomes.promise);
+          change(first);
+          await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+          expect(importMany).toHaveBeenCalledOnce();
+          const queuedAt = Date.now();
+          if (queuedMeanwhile) {
+            change(vault.add('second.md', { tags: [TRIGGER] }));
+          }
+          await vi.advanceTimersByTimeAsync(wait);
+          outcomes.resolve([{ file: first, status: 'imported' }]);
+          // Settled with no time passing, so the note queued meanwhile waits
+          for (let i = 0; i < 20; i++) await Promise.resolve();
+          expect(Notice.messages).toEqual([importedNotice(1)]);
+
+          expect(seenAt(vault)).toBe(
+            Math.max(
+              scanned,
+              (queuedMeanwhile ? queuedAt : queuedAt + wait) -
+                AUTO_IMPORT_WATERMARK_SLACK_MS
+            )
+          );
+          stop();
+        }
+      )
+    );
+  });
+
+  it('is stored as it stops, so a note written too late to import, whether or not its change came, is imported at the next start, as after a crash', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('changed', 'unread', 'crashed'),
+        fc.integer({ min: 1, max: AUTO_IMPORT_DEBOUNCE_MS - 1 }),
+        async (how, wait) => {
+          const vault = makeVault();
+          saveAutoImportWatermark(vault.app, Date.now() - 1);
+          const { importMany, change, stop } = await caughtUp(vault);
+          const before = seenAt(vault)!;
+          await vi.advanceTimersByTimeAsync(AUTO_IMPORT_WATERMARK_SLACK_MS * 2);
+          const file = vault.add('late.md', { tags: [TRIGGER] });
+          const writtenAt = Date.now();
+          if (how === 'changed') change(file);
+          await vi.advanceTimersByTimeAsync(wait);
+
+          if (how !== 'crashed') {
+            stop();
+            expect(seenAt(vault)).toBe(
+              Math.max(
+                before,
+                (how === 'changed' ? writtenAt : writtenAt + wait) -
+                  AUTO_IMPORT_WATERMARK_SLACK_MS
+              )
+            );
+          }
+          expect(importMany).not.toHaveBeenCalled();
+
+          const next = await caughtUp(vault);
+          expect(importedPaths(next.importMany)).toEqual([['late.md']]);
+          next.stop();
+          if (how === 'crashed') stop();
+        }
+      )
+    );
+  });
+
+  it('stays put once stopped, though an import was under way', async () => {
+    const vault = makeVault();
+    saveAutoImportWatermark(vault.app, Date.now() - 1);
+    const { importMany, change, stop } = await caughtUp(vault);
+    const file = vault.add('a.md', { tags: [TRIGGER] });
+    const outcomes = deferred<BulkOutcome[]>();
+    importMany.mockImplementationOnce(() => outcomes.promise);
+    change(file);
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+    stop();
+    const stopped = seenAt(vault);
+
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_WATERMARK_SLACK_MS * 2);
+    outcomes.resolve([{ file, status: 'imported' }]);
+    await settle();
+
+    expect(seenAt(vault)).toBe(stopped);
+  });
+
+  it('is moved by nothing but turning importing on until it has looked for what changed while closed', async () => {
+    await fc.assert(
+      fc.asyncProperty(seenArb, async (stored) => {
+        const vault = makeVault();
+        if (stored !== null) saveAutoImportWatermark(vault.app, stored);
+        const { change, importMany, stop } = makeWatcher({}, vault);
+        change(vault.add('a.md', { tags: [TRIGGER] }));
+        await settle();
+        expect(importMany).toHaveBeenCalledOnce();
+
+        stop();
+
+        expect(seenAt(vault)).toBe(stored);
+      })
+    );
+  });
+
+  it('is now as importing by tag is turned on, and moves at no other change to the settings', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.array(
+          fc.record({
+            enabled: fc.boolean(),
+            triggerTags: fc.constantFrom([TRIGGER], ['other']),
+            after: fc.integer({ min: 0, max: 1e7 }),
+          }),
+          { maxLength: 6 }
+        ),
+        async (enabledAtStart, changes) => {
+          const vault = makeVault();
+          const { configure, stop } = makeWatcher(
+            { enabled: enabledAtStart },
+            vault
+          );
+          let enabled = enabledAtStart;
+          let expected: number | null = null;
+          for (const { after, ...change } of changes) {
+            await vi.advanceTimersByTimeAsync(after);
+            configure(change);
+            if (change.enabled && !enabled) expected = Date.now();
+            enabled = change.enabled;
+            expect(seenAt(vault)).toBe(expected);
+          }
+          stop();
+        }
+      )
+    );
+  });
+
+  it('is not stored as importing is turned on before the watcher starts or once it stops', () => {
+    for (const state of ['unstarted', 'stopped'] as const) {
+      const vault = makeVault();
+      let enabled = false;
+      const watcher = new AutoImportWatcher({
+        app: vault.app,
+        getConfig: () => ({
+          enabled,
+          triggerTags: [TRIGGER],
+          priority: 1,
+          mode: 'inPlace',
+        }),
+        importMany: makeImporter(vault),
+        hasRow: makeRowLookup(vault),
+      });
+      if (state === 'stopped') watcher.start()();
+
+      enabled = true;
+      watcher.configChanged();
+
+      expect({ state, stored: vault.storage.size }).toEqual({
+        state,
+        stored: 0,
+      });
+    }
+  });
+
+  it('leaves alone a note tagged before importing by tag was turned on, however often Obsidian starts, until it changes', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 0, max: 1e7 }),
+        fc.integer({ min: 1, max: 4 }),
+        fc.boolean(),
+        async (gap, starts, scannedWhileOff) => {
+          const vault = makeVault();
+          const off = makeWatcher({ enabled: false }, vault);
+          if (scannedWhileOff) await off.watcher.runCatchUpScan();
+          const tagged = vault.add('tagged before.md', { tags: [TRIGGER] });
+          off.change(tagged);
+          await vi.advanceTimersByTimeAsync(gap);
+          off.configure({ enabled: true });
+          await settle();
+          off.stop();
+
+          for (let i = 0; i < starts; i++) {
+            await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
+            const next = await caughtUp(vault);
+            await settle();
+            expect(next.importMany).not.toHaveBeenCalled();
+            next.stop();
+          }
+
+          // Changed while Obsidian was closed
+          await vi.advanceTimersByTimeAsync(AUTO_IMPORT_MAX_WAIT_MS);
+          tagged.stat.mtime = Date.now();
+          const next = await caughtUp(vault);
+          expect(importedPaths(next.importMany)).toEqual([
+            ['tagged before.md'],
+          ]);
+          expect(off.importMany).not.toHaveBeenCalled();
+          next.stop();
+        }
+      )
     );
   });
 });

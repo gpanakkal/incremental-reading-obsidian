@@ -2,10 +2,13 @@ import * as fc from 'fast-check';
 import { describe, expect, it, vi } from 'vitest';
 import { AUTO_IMPORT_TAG } from './constants';
 import {
+  AUTO_IMPORT_WATERMARK_KEY,
   DEVICE_ID_KEY,
   getDeviceId,
+  loadAutoImportWatermark,
   parsePluginData,
   parseSession,
+  saveAutoImportWatermark,
   sessionItemId,
 } from './plugin-data';
 import { DEFAULT_SETTINGS } from './settings';
@@ -391,5 +394,44 @@ describe('getDeviceId', () => {
       expect(deviceId).not.toBe('');
       expect(save).toHaveBeenCalledWith(DEVICE_ID_KEY, deviceId);
     }
+  });
+});
+
+describe('the moment the automatic import last saw every change', () => {
+  it('is kept under a localStorage key of this plugin, apart from the device id', () => {
+    expect(AUTO_IMPORT_WATERMARK_KEY).toContain('incremental-reading');
+    expect(AUTO_IMPORT_WATERMARK_KEY).not.toBe(DEVICE_ID_KEY);
+  });
+
+  it('reads back as the time saved, whatever time that is', () => {
+    fc.assert(
+      fc.property(
+        fc.double({ noNaN: true, noDefaultInfinity: true }),
+        (time) => {
+          const app = makeLocalStorage();
+
+          saveAutoImportWatermark(app, time);
+
+          expect(app.entries.get(AUTO_IMPORT_WATERMARK_KEY)).toBe(time);
+          expect(loadAutoImportWatermark(app)).toBe(time);
+        }
+      )
+    );
+  });
+
+  it('reads as none where nothing is stored, or what is stored is no time', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.constantFrom(null, undefined, NaN, Infinity, -Infinity, '1', ''),
+          fc.anything().filter((stored) => typeof stored !== 'number')
+        ),
+        (stored) => {
+          const app = makeLocalStorage({ [AUTO_IMPORT_WATERMARK_KEY]: stored });
+
+          expect(loadAutoImportWatermark(app)).toBeNull();
+        }
+      )
+    );
   });
 });

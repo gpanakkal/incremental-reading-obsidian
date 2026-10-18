@@ -1,12 +1,23 @@
 import { describeFailures } from '#/lib/bulk-import/run-import';
 import type { BulkImportEntry, BulkOutcome } from '#/lib/bulk-import/types';
-import type { CachedMetadata, MetadataCache, TFile, Vault } from 'obsidian';
+import type {
+  App,
+  CachedMetadata,
+  MetadataCache,
+  TFile,
+  Vault,
+} from 'obsidian';
 import {
   AUTO_IMPORT_DEBOUNCE_MS,
   AUTO_IMPORT_MAX_WAIT_MS,
+  AUTO_IMPORT_WATERMARK_SLACK_MS,
   IMPORT_BLOCKED_TAGS,
 } from './constants';
 import { notify } from './notices';
+import {
+  loadAutoImportWatermark,
+  saveAutoImportWatermark,
+} from './plugin-data';
 import type { AutoImportMode } from './settings';
 import { matchFrontmatterTags } from './tags';
 
@@ -27,9 +38,13 @@ export interface AutoImportEntry extends BulkImportEntry {
   matchedTags: string[];
 }
 
-/** The parts of the app the watcher reads. */
-interface WatchedApp {
-  vault: Pick<Vault, 'getFileByPath'>;
+/**
+ * The parts of the app the watcher reads, and the device's own storage, where
+ * it keeps the moment it last saw every change.
+ */
+interface WatchedApp
+  extends Pick<App, 'loadLocalStorage' | 'saveLocalStorage'> {
+  vault: Pick<Vault, 'getFileByPath' | 'getMarkdownFiles'>;
   metadataCache: Pick<MetadataCache, 'getFileCache'>;
 }
 
@@ -70,9 +85,15 @@ interface AutoImportWatcherOptions {
  * A note is never imported twice: importing gives it an `ir-id`, and a note
  * whose `ir-id` a row holds, deleted or not, is dropped at the flush, so a
  * deleted article stays deleted. A note whose `ir-id` no row holds is
- * imported, as the import command imports it (see `hasRow`). Nothing is
- * persisted. A note whose import failed is remembered until the plugin next
- * loads, so it isn't tried again on every edit.
+ * imported, as the import command imports it (see `hasRow`). A note whose
+ * import failed is remembered until the plugin next loads, so it isn't tried
+ * again on every edit.
+ *
+ * The watcher acts on changes, so a note that had a trigger tag before
+ * importing by tag was turned on is left alone until it next changes. Changes
+ * made while it wasn't listening, with Obsidian closed, are caught at startup
+ * by {@link runCatchUpScan}, by the one thing it keeps: the last moment this
+ * device saw every change (see `AUTO_IMPORT_WATERMARK_KEY`).
  *
  * Two devices can import the same note before either syncs the other's
  * database. One database wins outright when they meet. If the note keeps the
@@ -93,6 +114,15 @@ export class AutoImportWatcher {
   #timer: number | null = null;
   /** Paths whose import failed since the plugin loaded. */
   readonly #failed = new Set<string>();
+  /** Notes handed to the import running now. */
+  readonly #importing = new Set<TFile>();
+  /**
+   * Whether {@link runCatchUpScan} has run, so the stored moment may move on:
+   * until then, what changed while Obsidian was closed is still unseen.
+   */
+  #caughtUp = false;
+  /** Whether importing was on when last looked at, to see it turned on. */
+  #wasEnabled = false;
   /**
    * Serializes imports: a batch is checked only once the one before it is
    * done, so a note it imported has its `ir-id`, and the row holding it, by
@@ -115,7 +145,9 @@ export class AutoImportWatcher {
   /** Begin importing. Returns the cleanup to hand to `Plugin.register`. */
   start(): () => void {
     this.#running = true;
+    this.#wasEnabled = this.#getConfig().enabled;
     return () => {
+      this.#recordSeen();
       this.#running = false;
       this.#cancelTimer();
       this.#queued.clear();
@@ -131,6 +163,53 @@ export class AutoImportWatcher {
   }
 
   /**
+   * Hear of a change to the settings. Importing by tag turned on applies from
+   * then on: a note tagged before is no change it saw, and is left alone.
+   */
+  configChanged(): void {
+    const { enabled } = this.#getConfig();
+    if (this.#running && enabled && !this.#wasEnabled) {
+      this.#record(Date.now());
+    }
+    this.#wasEnabled = enabled;
+  }
+
+  /**
+   * Import the notes that changed while the watcher wasn't listening, as it
+   * would have had it been: those whose file changed after the last moment it
+   * saw every change. For startup, once the metadata cache has indexed the
+   * vault: a note changed while Obsidian was closed (by a script, or synced
+   * from another device) may have been indexed before the watcher was
+   * listening, so no change of it ever comes.
+   *
+   * With no such moment stored, as on the first run, or with importing off,
+   * nothing is imported: that moment is now. A crash leaves an older one, so
+   * the next run looks at more notes than it needs to, at no cost, since one
+   * already imported is passed over. What it imports goes in with anything
+   * already waiting, under one notice. Resolves once that import is done.
+   */
+  runCatchUpScan(): Promise<void> {
+    if (!this.#running) return Promise.resolve();
+    const seen = loadAutoImportWatermark(this.#app);
+    this.#caughtUp = true;
+    if (seen === null || !this.#getConfig().enabled) {
+      this.#record(Date.now());
+      return Promise.resolve();
+    }
+    const { vault, metadataCache } = this.#app;
+    for (const file of vault.getMarkdownFiles()) {
+      // Untouched since: before the cache is read, as that is nearly every note
+      if (file.stat.mtime <= seen) continue;
+      // Its cache may not show the `ir-id` that import is writing yet, so
+      // checked again it would be imported twice
+      if (this.#importing.has(file)) continue;
+      this.consider(file, metadataCache.getFileCache(file));
+    }
+    // The flush moves the stored moment on
+    return this.flushNow();
+  }
+
+  /**
    * Import whatever is waiting now rather than when it settles. Resolves once
    * every import asked for so far is done.
    */
@@ -140,7 +219,11 @@ export class AutoImportWatcher {
     this.#queued.clear();
     this.#queuedSince = null;
     this.#pending = this.#pending
-      .then(() => this.#import(batch))
+      .then(async () => {
+        await this.#import(batch);
+        // Seen to here, though a crash could come before another flush
+        this.#recordSeen();
+      })
       .catch((error: unknown) => {
         console.error('Incremental Reading - automatic import failed:', error);
       });
@@ -212,7 +295,13 @@ export class AutoImportWatcher {
     // Stopped while a lookup ran: the plugin is unloading
     if (entries.length === 0 || !this.#running) return;
 
-    const outcomes = await this.#importMany(entries, config);
+    for (const { file } of entries) this.#importing.add(file);
+    let outcomes: BulkOutcome[];
+    try {
+      outcomes = await this.#importMany(entries, config);
+    } finally {
+      this.#importing.clear();
+    }
     const failed = outcomes.filter(({ status }) => status === 'failed');
     for (const { file } of failed) this.#failed.add(file.path);
     const imported = outcomes.filter(
@@ -225,6 +314,25 @@ export class AutoImportWatcher {
       });
     }
     if (failed.length > 0) notify(describeFailures(failed), { kind: 'error' });
+  }
+
+  /**
+   * Store the moment up to which every change was seen, if {@link
+   * runCatchUpScan} has run while listening: back as far as the note waiting
+   * longest, as that is not imported yet, and further for the notes still
+   * being read (see `AUTO_IMPORT_WATERMARK_SLACK_MS`).
+   */
+  #recordSeen(): void {
+    if (!this.#running || !this.#caughtUp) return;
+    const since = this.#queuedSince ?? Date.now();
+    this.#record(since - AUTO_IMPORT_WATERMARK_SLACK_MS);
+  }
+
+  /** Store `time` as the moment last seen to, unless one later is stored. */
+  #record(time: number): void {
+    const stored = loadAutoImportWatermark(this.#app);
+    if (stored !== null && stored >= time) return;
+    saveAutoImportWatermark(this.#app, time);
   }
 
   /**

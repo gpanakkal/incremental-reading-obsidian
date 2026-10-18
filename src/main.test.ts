@@ -1,3 +1,4 @@
+import { AutoImportWatcher } from '#/lib/AutoImportWatcher';
 import {
   AUTO_IMPORT_DEBOUNCE_MS,
   AUTO_IMPORT_MAX_WAIT_MS,
@@ -17,7 +18,7 @@ import {
 } from '#/lib/obsidian-sync';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
-import type { ReviewSession } from '#/lib/plugin-data';
+import { loadAutoImportWatermark, type ReviewSession } from '#/lib/plugin-data';
 import { queryClient } from '#/lib/query-client';
 import {
   DatabaseLoadError,
@@ -341,6 +342,7 @@ function makeFollowReceiver({
   indexingSignal = true,
   refusedPaths = [] as string[],
   warned = [] as string[],
+  watcherMade = true,
 } = {}) {
   const unloaders: (() => void)[] = [];
   let whenIndexed: (() => void) | undefined;
@@ -374,8 +376,18 @@ function makeFollowReceiver({
   };
   const saveData = vi.fn(() => Promise.resolve());
   const startupScan = vi.fn(() => Promise.resolve());
+  const runCatchUpScan = vi.fn(() => Promise.resolve());
+  const watcher = { runCatchUpScan };
+  let makeWatcher!: () => void;
   const receiver = {
     leftovers: { startupScan },
+    autoImportWatcherMade: {
+      promise: watcherMade
+        ? Promise.resolve(watcher)
+        : new Promise<typeof watcher>(
+            (resolve) => (makeWatcher = () => resolve(watcher))
+          ),
+    },
     data: { warnedRefusedPaths: [...warned] },
     saveData,
     rememberWarnedPaths: (
@@ -412,6 +424,9 @@ function makeFollowReceiver({
     itemPathsWithRefusedChars,
     saveData,
     startupScan,
+    runCatchUpScan,
+    /** Have `watchAutoImports` make the watcher, when `watcherMade` was false. */
+    makeWatcher: () => makeWatcher(),
     finishIndexing: () => whenIndexed?.(),
     unload: () => unloaders.forEach((unloader) => unloader()),
   };
@@ -898,10 +913,22 @@ function makeAutoImportReceiver() {
   const caches = new Map<TFile, unknown>();
   const importTaggedNotes = vi.fn(() => Promise.resolve([]));
   const hasItemRow = vi.fn((_id: string) => Promise.resolve(false));
+  const storage = new Map<string, unknown>();
+  const settingsListeners = new Set<() => void>();
   const receiver = {
     settings: { ...structuredClone(DEFAULT_SETTINGS), autoImportOnTag: true },
     reviewManager: undefined as unknown,
+    autoImportWatcher: undefined as unknown,
+    autoImportWatcherMade: { resolve: vi.fn() },
+    onSettingsChange: (listener: () => void) => {
+      settingsListeners.add(listener);
+      return () => settingsListeners.delete(listener);
+    },
     app: {
+      loadLocalStorage: (key: string): unknown => storage.get(key) ?? null,
+      saveLocalStorage: (key: string, data: unknown) => {
+        storage.set(key, data);
+      },
       vault: { getFileByPath: (path: string) => files.get(path) ?? null },
       metadataCache: {
         on: vi.fn((name: string, callback: Changed) => {
@@ -940,6 +967,10 @@ function makeAutoImportReceiver() {
       changed!(file, '', cache);
       return file;
     },
+    /** How many listen for changes to the settings. */
+    settingsListeners: () => settingsListeners.size,
+    /** Save the settings as they now stand, as the settings tab does. */
+    saveSettings: () => settingsListeners.forEach((listener) => listener()),
     unload: () => unloaders.forEach((unloader) => unloader()),
   };
 }
@@ -2564,6 +2595,145 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
     expect(follow.itemPathsWithRefusedChars).toHaveBeenCalled();
   });
 
+  it('imports notes tagged while Obsidian was closed once the moved notes are followed, and not before', async () => {
+    const follow = makeFollowReceiver();
+    let followed!: () => void;
+    follow.claimMovedFiles.mockReturnValueOnce(
+      new Promise<void>((resolve) => (followed = resolve))
+    );
+
+    followMovedNotes(follow);
+    await settle();
+    expect(follow.runCatchUpScan).not.toHaveBeenCalled();
+
+    follow.finishIndexing();
+    await vi.waitFor(() => expect(follow.claimMovedFiles).toHaveBeenCalled());
+    await settle();
+    expect(follow.runCatchUpScan).not.toHaveBeenCalled();
+
+    followed();
+    await vi.waitFor(() =>
+      expect(follow.runCatchUpScan).toHaveBeenCalledOnce()
+    );
+  });
+
+  it('imports notes tagged while Obsidian was closed once the resolved event comes, where Obsidian has no onCleanCache', async () => {
+    const follow = makeFollowReceiver({ indexingSignal: false });
+
+    followMovedNotes(follow);
+    await settle();
+    expect(follow.runCatchUpScan).not.toHaveBeenCalled();
+
+    follow.finishIndexing();
+    await vi.waitFor(() =>
+      expect(follow.runCatchUpScan).toHaveBeenCalledOnce()
+    );
+  });
+
+  it('imports notes tagged while Obsidian was closed only once the watcher is made, holding back the look for leftovers till then', async () => {
+    const follow = makeFollowReceiver({ watcherMade: false });
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+    await vi.waitFor(() => expect(follow.claimMovedFiles).toHaveBeenCalled());
+    await settle();
+    expect(follow.runCatchUpScan).not.toHaveBeenCalled();
+    expect(follow.startupScan).not.toHaveBeenCalled();
+
+    follow.makeWatcher();
+
+    await vi.waitFor(() => expect(follow.startupScan).toHaveBeenCalledOnce());
+    expect(follow.runCatchUpScan).toHaveBeenCalledOnce();
+  });
+
+  it('imports no notes tagged while Obsidian was closed when unloaded before the watcher is made', async () => {
+    const follow = makeFollowReceiver({ watcherMade: false });
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+    await vi.waitFor(() => expect(follow.claimMovedFiles).toHaveBeenCalled());
+    follow.unload();
+    follow.makeWatcher();
+    await settle();
+
+    expect(follow.runCatchUpScan).not.toHaveBeenCalled();
+    expect(follow.startupScan).not.toHaveBeenCalled();
+  });
+
+  it('still imports notes tagged while Obsidian was closed when following the moves fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const follow = makeFollowReceiver();
+    follow.claimMovedFiles.mockRejectedValue(new Error('disk full'));
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+
+    await vi.waitFor(() =>
+      expect(follow.runCatchUpScan).toHaveBeenCalledOnce()
+    );
+  });
+
+  it('looks for leftovers only once the notes tagged while Obsidian was closed are imported', async () => {
+    const follow = makeFollowReceiver();
+    let imported!: () => void;
+    follow.runCatchUpScan.mockReturnValueOnce(
+      new Promise<void>((resolve) => (imported = resolve))
+    );
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+    await vi.waitFor(() => expect(follow.runCatchUpScan).toHaveBeenCalled());
+    await settle();
+    expect(follow.startupScan).not.toHaveBeenCalled();
+
+    imported();
+    await vi.waitFor(() => expect(follow.startupScan).toHaveBeenCalledOnce());
+  });
+
+  it('reports a failed import of notes tagged while Obsidian was closed, and still looks for leftovers', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failure = new Error('no vault');
+    const follow = makeFollowReceiver();
+    follow.runCatchUpScan.mockRejectedValueOnce(failure);
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+
+    await vi.waitFor(() => expect(follow.startupScan).toHaveBeenCalledOnce());
+    expect(error).toHaveBeenCalledWith(
+      'Incremental Reading - failed to import notes tagged while Obsidian was closed:',
+      failure
+    );
+  });
+
+  it('imports no notes tagged while Obsidian was closed once unloaded', async () => {
+    const follow = makeFollowReceiver();
+
+    followMovedNotes(follow);
+    follow.unload();
+    follow.finishIndexing();
+    await settle();
+
+    expect(follow.runCatchUpScan).not.toHaveBeenCalled();
+  });
+
+  it('imports no notes tagged while Obsidian was closed when unloaded while following the moves', async () => {
+    const follow = makeFollowReceiver();
+    let followed!: () => void;
+    follow.claimMovedFiles.mockReturnValueOnce(
+      new Promise<void>((resolve) => (followed = resolve))
+    );
+
+    followMovedNotes(follow);
+    follow.finishIndexing();
+    await vi.waitFor(() => expect(follow.claimMovedFiles).toHaveBeenCalled());
+    follow.unload();
+    followed();
+    await settle();
+
+    expect(follow.runCatchUpScan).not.toHaveBeenCalled();
+  });
+
   it('looks for no leftovers once unloaded', async () => {
     const follow = makeFollowReceiver();
 
@@ -3040,6 +3210,32 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
       [{ file, matchedTags: ['to-read'] }],
       expect.anything()
     );
+  });
+
+  it('hands the watcher it makes to the startup scan waiting for it', () => {
+    const watch = makeAutoImportReceiver();
+
+    expect(watch.receiver.autoImportWatcher).toBeInstanceOf(AutoImportWatcher);
+    expect(
+      watch.receiver.autoImportWatcherMade.resolve
+    ).toHaveBeenCalledExactlyOnceWith(watch.receiver.autoImportWatcher);
+  });
+
+  it('watches from the moment importing by tag is turned on in the settings, until the plugin unloads', async () => {
+    const watch = makeAutoImportReceiver();
+    const { settings, app } = watch.receiver;
+    settings.autoImportOnTag = false;
+    watch.saveSettings();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    settings.autoImportOnTag = true;
+    watch.saveSettings();
+    const turnedOn = Date.now();
+    expect(loadAutoImportWatermark(app)).toBe(turnedOn);
+
+    expect(watch.settingsListeners()).toBe(1);
+    watch.unload();
+    expect(watch.settingsListeners()).toBe(0);
   });
 
   it('listens for as long as the plugin is loaded, and drops what is waiting when it unloads', async () => {
