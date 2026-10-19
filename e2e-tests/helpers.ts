@@ -969,6 +969,21 @@ export async function openPluginSettings(
 }
 
 /**
+ * Turn the toggle of a settings row (its `.checkbox-container`) on or off,
+ * clicking it only when it isn't that way already, since a test can't count on
+ * a default staying as it is.
+ */
+export async function setToggle(toggle: Locator, on: boolean) {
+  const enabled = /\bis-enabled\b/;
+  await expect(toggle).toBeVisible();
+  if (enabled.test((await toggle.getAttribute('class')) ?? '') !== on) {
+    await toggle.click();
+  }
+  if (on) await expect(toggle).toHaveClass(enabled);
+  else await expect(toggle).not.toHaveClass(enabled);
+}
+
+/**
  * Flip one of the plugin's settings from inside the running app.
  *
  * In memory only — no `saveSettings` — because that is where everything reads

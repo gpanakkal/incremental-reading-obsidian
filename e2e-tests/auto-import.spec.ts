@@ -19,6 +19,7 @@ import {
   pendingSaves,
   setDefaultEditingMode,
   setPluginSetting,
+  setToggle,
   watchNotices,
 } from './helpers';
 import {
@@ -227,8 +228,7 @@ test('imports a note written into the vault with a trigger tag, once, however of
         .getByText('Auto-import notes by tag', { exact: true }),
     })
     .locator('.checkbox-container');
-  await toggle.click();
-  await expect(toggle).toHaveClass(/is-enabled/);
+  await setToggle(toggle, true);
   await window.evaluate(() =>
     (window as unknown as { app: PageApp }).app.setting.close()
   );
@@ -360,8 +360,7 @@ test('imports a copy of a note tagged in copy mode, moving the tag to it, and ne
   const toggle = settingRow('Auto-import notes by tag').locator(
     '.checkbox-container'
   );
-  await toggle.click();
-  await expect(toggle).toHaveClass(/is-enabled/);
+  await setToggle(toggle, true);
   // By role: Obsidian sizes the dropdown off a hidden copy of the select
   await settingRow('Where to import tagged notes')
     .getByRole('combobox')
@@ -460,6 +459,15 @@ test('imports a copy of a note tagged in copy mode, moving the tag to it, and ne
 });
 
 test('imports the notes tagged while Obsidian was closed when it next starts, once, but none tagged before importing by tag was on', async () => {
+  const saveSettings = () =>
+    window.evaluate(() =>
+      (window as unknown as { app: PageApp }).app.plugins.plugins[
+        'incremental-reading'
+      ].saveSettings()
+    );
+  // On from the first launch, so off while the first note is tagged
+  await setPluginSetting(window, 'autoImportOnTag', false);
+  await saveSettings();
   const taggedBefore = 'inbox/Tagged before.md';
   await writeVaultFile(
     taggedBefore,
@@ -469,11 +477,7 @@ test('imports the notes tagged while Obsidian was closed when it next starts, on
     .poll(async () => (await noteState(taggedBefore)).tags)
     .toContain(AUTO_IMPORT_TAG);
   await setPluginSetting(window, 'autoImportOnTag', true);
-  await window.evaluate(() =>
-    (window as unknown as { app: PageApp }).app.plugins.plugins[
-      'incremental-reading'
-    ].saveSettings()
-  );
+  await saveSettings();
   const before = await articleCount();
   const tagged = ['inbox/First.md', 'inbox/Second.md', 'notes/Third.md'];
   /** Close Obsidian, tag `notePaths` from outside it, and start it again. */
@@ -788,8 +792,7 @@ test("suggests the vault's tags in the trigger tags field, but the plugin's item
   const toggle = settingRow('Auto-import notes by tag').locator(
     '.checkbox-container'
   );
-  await toggle.click();
-  await expect(toggle).toHaveClass(/is-enabled/);
+  await setToggle(toggle, true);
   const field = settingRow('Trigger tags').getByRole('textbox');
 
   await field.click();

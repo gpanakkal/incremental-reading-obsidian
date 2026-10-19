@@ -209,11 +209,11 @@ describe('parsePluginData', () => {
     );
   });
 
-  it('leaves importing by tag off, triggered by the import tag, unless told otherwise', () => {
-    expect(DEFAULT_SETTINGS.autoImportOnTag).toBe(false);
+  it('turns importing by tag on, triggered by the import tag, unless told otherwise', () => {
+    expect(DEFAULT_SETTINGS.autoImportOnTag).toBe(true);
     expect(DEFAULT_SETTINGS.autoImportTags).toEqual([AUTO_IMPORT_TAG]);
     expect(parsePluginData({ settings: {} }).settings).toMatchObject({
-      autoImportOnTag: false,
+      autoImportOnTag: true,
       autoImportTags: [AUTO_IMPORT_TAG],
     });
   });

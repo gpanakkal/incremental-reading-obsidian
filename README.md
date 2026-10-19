@@ -122,7 +122,9 @@ To import everything that arrives in a folder (for example, a Web Clipper inbox)
 > [!NOTE]
 > Files already in a folder before it is watched will not be auto-imported.
 
-To import notes when certain tags are added to frontmatter, enable **Auto-import notes by tag** in the plugin's settings and add tags to the list as desired. For example, adding "#clippings" auto-imports pages saved by Obsidian Web Clipper. 
+Notes are also imported when certain tags are added to their frontmatter (by default, just **#ir-import**). Add more under **Trigger tags** in the plugin's settings as desired, or turn off this behavior.
+
+For example, adding **#clippings** auto-imports pages saved by Obsidian Web Clipper. 
 
 > [!NOTE]
 > This does not check for tags in note bodies.
