@@ -761,3 +761,48 @@ test('adds a watched folder on Enter as a chip under the field, refuses one that
   await expect(toggle).not.toHaveClass(/is-enabled/);
   await expect(message).toBeHidden();
 });
+
+test("suggests the vault's tags in the trigger tags field, but the plugin's item-type tags, and a pick joins the list", async () => {
+  // Body tags: frontmatter ones would make the note an item
+  await writeVaultFile('inbox/Tagged.md', 'Text #e2e-suggest #ir-card/e2e\n');
+  // The metadata cache catches up on its own time (`getTags` is undocumented)
+  await expect
+    .poll(() =>
+      window.evaluate(
+        () =>
+          (
+            window as unknown as {
+              app: { metadataCache: { getTags(): Record<string, number> } };
+            }
+          ).app.metadataCache.getTags()['#e2e-suggest'] ?? 0
+      )
+    )
+    .toBe(1);
+  const settings = await openPluginSettings(app, window);
+  const settingRow = (name: string) =>
+    settings.locator('.vertical-tab-content .setting-item').filter({
+      has: settings
+        .locator('.setting-item-name')
+        .getByText(name, { exact: true }),
+    });
+  const toggle = settingRow('Auto-import notes by tag').locator(
+    '.checkbox-container'
+  );
+  await toggle.click();
+  await expect(toggle).toHaveClass(/is-enabled/);
+  const field = settingRow('Trigger tags').getByRole('textbox');
+
+  await field.click();
+  await field.press('End');
+  await field.pressSequentially(' ');
+
+  const items = settings.locator('.suggestion-container .suggestion-item');
+  await expect(items.filter({ hasText: /^#e2e-suggest$/ })).toHaveCount(1);
+  await expect(
+    items.filter({ hasText: /ir-(article|card|text-snippet)/i })
+  ).toHaveCount(0);
+
+  await items.filter({ hasText: /^#e2e-suggest$/ }).click();
+
+  await expect(field).toHaveValue(/^#ir-import #e2e-suggest\s*$/);
+});

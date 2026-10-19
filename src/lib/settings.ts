@@ -1,3 +1,4 @@
+import { TagSuggest, withSuggestion } from '#/components/TagSuggest';
 import type IncrementalReadingPlugin from '#/main';
 import {
   Platform,
@@ -367,6 +368,32 @@ function tidyTriggerTags(event: Event) {
   // An element: the listeners are on one, so only elements reach them
   const input = triggerTagsInput(event.target as Element);
   if (input) input.value = formatTagList(parseTagList(input.value));
+}
+
+/** The trigger tags fields that suggest tags already. */
+const suggestingTriggerTags = new WeakSet<HTMLInputElement>();
+
+/**
+ * Makes the trigger tags field suggest the vault's tags (see `TagSuggest`) as
+ * `event`, a focus, reaches it, unless it does already. The declarative tab
+ * hands out no element per control to attach to on drawing, and redraws
+ * rows (the settings search too), so each field is taken up as first used.
+ *
+ * The tags come from `metadataCache.getTags()`, undocumented (read from
+ * Obsidian 1.13.7's obsidian.asar). A pick takes the place of the tag being typed, with a space after it for
+ * the next, and is saved: Obsidian's text control saves on `input`. The tidy
+ * is left to leaving the field or Enter, as for typing.
+ */
+function suggestTriggerTags(app: App, event: Event) {
+  const input = triggerTagsInput(event.target as Element);
+  if (!input || suggestingTriggerTags.has(input)) return;
+  suggestingTriggerTags.add(input);
+  const suggest = new TagSuggest(app, input);
+  suggest.onSelect((tag) => {
+    suggest.close();
+    input.value = `${withSuggestion(input.value, tag)} `;
+    input.dispatchEvent(new Event('input'));
+  });
 }
 
 /** The watched folders row's name. */
@@ -839,6 +866,9 @@ export class IRSettingTab extends PluginSettingTab {
     // bubbles where `blur` doesn't. Capturing, so the field's own listeners,
     // its reset button's mark among them, see the tidied text.
     this.containerEl.addEventListener('focusout', tidyTriggerTags, true);
+    this.containerEl.addEventListener('focusin', (event) =>
+      suggestTriggerTags(app, event)
+    );
     this.containerEl.addEventListener(
       'keydown',
       (event) => {

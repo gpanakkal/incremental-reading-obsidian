@@ -169,7 +169,11 @@ function buildSettings({
  * A plugin holding `settings` as its half of `data.json`, recording a snapshot
  * of that whole file on each save and each extra-hotkeys toggle it is asked for.
  */
-function makeTab(settings: IRPluginSettings, folders: Iterable<string> = []) {
+function makeTab(
+  settings: IRPluginSettings,
+  folders: Iterable<string> = [],
+  vaultTags: readonly string[] = []
+) {
   const folderPaths = new Set(folders);
   const data: IRPluginData = {
     settings,
@@ -200,8 +204,14 @@ function makeTab(settings: IRPluginSettings, folders: Iterable<string> = []) {
       events.push(`title-bars:${settings.reviewTitleBar}`);
     }),
   };
+  // Every tag in the vault, as `getTags` keys them, for the tag suggestions
+  const app = {
+    metadataCache: {
+      getTags: () => Object.fromEntries(vaultTags.map((tag) => [tag, 1])),
+    },
+  } as unknown as App;
   const tab = new IRSettingTab(
-    {} as App,
+    app,
     plugin as unknown as IncrementalReadingPlugin
   );
   return { tab, plugin, saved, events };
@@ -387,8 +397,8 @@ function commitField(field: HTMLElement, commit: Commit) {
 }
 
 /** A tab whose container is in the document, so its fields can take focus. */
-function makeAttachedTab() {
-  const made = makeTab(structuredClone(DEFAULT_SETTINGS));
+function makeAttachedTab(vaultTags: readonly string[] = []) {
+  const made = makeTab(structuredClone(DEFAULT_SETTINGS), [], vaultTags);
   document.body.replaceChildren(made.tab.containerEl);
   return made;
 }
@@ -2673,6 +2683,86 @@ describe('IRSettingTab watched folders row', () => {
 describe('IRSettingTab trigger tags field', () => {
   afterEach(() => {
     document.body.replaceChildren();
+  });
+
+  /** The suggestions showing, as their text. */
+  const shownSuggestions = () =>
+    [...document.querySelectorAll('.suggestion-item')].map(
+      (item) => item.textContent
+    );
+
+  /** Focus `field` and type `typed`, letting the suggestions show. */
+  async function typeSuggesting(
+    field: HTMLInputElement | HTMLTextAreaElement,
+    typed: string
+  ) {
+    field.focus();
+    typeInto(field as HTMLInputElement, typed);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  const VAULT_TAGS = [
+    '#read',
+    '#Reading',
+    '#ir-article',
+    '#IR-Card',
+    '#ir-text-snippet/x',
+    '#ir-import',
+    '#later',
+  ];
+
+  it("suggests the vault's tags for the tag being typed, after the last space, but item-type tags and those in the field", async () => {
+    const { tab } = makeAttachedTab(VAULT_TAGS);
+    const field = addTextRow(tab, TRIGGER_TAGS, '');
+
+    await typeSuggesting(field, '#read #');
+
+    expect(shownSuggestions()).toEqual(['#ir-import', '#later', '#Reading']);
+
+    await typeSuggesting(field, '#later RE');
+
+    expect(shownSuggestions()).toEqual(['#read', '#Reading']);
+  });
+
+  it('puts a pick in place of the tag being typed, keeping the rest, and saves it, tidying only once done', async () => {
+    const { tab } = makeAttachedTab(VAULT_TAGS);
+    const field = addTextRow(tab, TRIGGER_TAGS, '');
+    const inputs = vi.fn();
+    await typeSuggesting(field, '#read, lat');
+    field.addEventListener('input', inputs);
+
+    const item = [
+      ...document.querySelectorAll<HTMLElement>('.suggestion-item'),
+    ].find((el) => el.textContent === '#later')!;
+    item.click();
+
+    expect(field.value).toBe('#read, #later ');
+    // Obsidian's text control saves on `input`
+    expect(inputs).toHaveBeenCalledOnce();
+
+    commitField(field, 'leave');
+
+    expect(field.value).toBe('#read #later');
+  });
+
+  it('suggests once per field however often it is focused', async () => {
+    const { tab } = makeAttachedTab(VAULT_TAGS);
+    const field = addTextRow(tab, TRIGGER_TAGS, '');
+    field.focus();
+    field.blur();
+
+    await typeSuggesting(field, 'lat');
+
+    expect(shownSuggestions()).toEqual(['#later']);
+  });
+
+  it('suggests nothing in a field of another row', async () => {
+    const { tab } = makeAttachedTab(VAULT_TAGS);
+    const field = addTextRow(tab, 'Watched folders', '');
+
+    await typeSuggesting(field, 'lat');
+
+    expect(shownSuggestions()).toEqual([]);
   });
 
   it('shows what was typed as the tags it reads as, each after a #, one space apart, once left or entered', () => {

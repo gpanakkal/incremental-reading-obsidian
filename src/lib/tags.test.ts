@@ -1,7 +1,10 @@
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
+import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
 import {
   formatTagList,
+  isItemTypeTag,
+  matchAnyTags,
   matchFrontmatterTags,
   parseTagList,
   stripFrontmatterTags,
@@ -160,6 +163,63 @@ function deepFreeze<T>(value: T): T {
   }
   return value;
 }
+
+/** A casing someone might write a tag in. */
+const casingArb = fc.constantFrom<(text: string) => string>(
+  (text) => text,
+  (text) => text.toUpperCase(),
+  (text) => text.toLowerCase()
+);
+
+/** One level of a nested tag: a tag with no `/` in it. */
+const segmentArb = tagCoreArb.filter((text) => !text.includes('/'));
+
+/** A tag nested any number of levels deep, as its levels. */
+const nestedArb = fc.array(segmentArb, { minLength: 1, maxLength: 4 });
+
+/**
+ * The tags a note's body holds, as Obsidian caches them (`cache.tags`): each
+ * after one `#`, in any case. Returns them with the tags they read as.
+ */
+const inlineTagsArb = fc
+  .array(fc.tuple(tagCoreArb, casingArb), { maxLength: 4 })
+  .map((entries) => ({
+    tags: entries.map(([text, casing]) => ({ tag: `#${casing(text)}` })),
+    carried: entries.map(([text, casing]) => casing(text).toLowerCase()),
+  }));
+
+type TagCache = NonNullable<Parameters<typeof matchAnyTags>[0]>;
+
+/**
+ * A note's metadata, as the metadata cache holds it: frontmatter or none,
+ * body tags or none, and a field that carries no tags. Returns it with the
+ * tags it carries, as compared.
+ */
+const cacheArb = fc
+  .tuple(
+    fc.option(frontmatterArb, { nil: undefined }),
+    fc.option(inlineTagsArb, { nil: undefined })
+  )
+  .map(([fm, inline]) => ({
+    cache: {
+      ...(fm && { frontmatter: fm.frontmatter }),
+      ...(inline && { tags: inline.tags }),
+      links: [{ link: 'tag', original: '[[tag]]', displayText: 'tag' }],
+    } as TagCache,
+    carried: new Set([...(fm?.carried ?? []), ...(inline?.carried ?? [])]),
+  }));
+
+/**
+ * Whether a note carrying `carried` has `asked`, by Obsidian's tag search:
+ * the tag itself, or one nested in it.
+ */
+const carriesTag = (carried: ReadonlySet<string>, asked: string) => {
+  const tag = asked.replace(/^#+/, '').toLowerCase();
+  return (
+    tag !== '' &&
+    [...carried].some((held) => held === tag || held.startsWith(`${tag}/`))
+  );
+};
 
 // #endregion
 
@@ -568,5 +628,204 @@ describe('stripFrontmatterTags', () => {
     stripFrontmatterTags(frontmatter, ['##été', 'LATER']);
 
     expect(frontmatter).toEqual({ tags: ['été-x', 'été/sub'] });
+  });
+});
+
+describe('matchAnyTags', () => {
+  it('matches a tag the note carries, and each tag it is nested in, in its frontmatter or its body, in any case, # optional', () => {
+    fc.assert(
+      fc.property(
+        nestedArb,
+        fc.nat(),
+        casingArb,
+        casingArb,
+        fc.nat({ max: 2 }),
+        fc.constantFrom('string', 'list', 'body'),
+        tagKeyArb,
+        (levels, cut, carriedCase, askedCase, hashes, where, key) => {
+          const depth = (cut % levels.length) + 1;
+          const asked = levels.slice(0, depth).map(askedCase);
+          // Only casings that read alike: `ß` upper-cased is `SS`
+          fc.pre(
+            asked.every(
+              (level, i) =>
+                level.toLowerCase() === carriedCase(levels[i]).toLowerCase()
+            )
+          );
+          const written = levels.map(carriedCase).join('/');
+          const cache: TagCache =
+            where === 'body'
+              ? { tags: [{ tag: `#${written}` }] as TagCache['tags'] }
+              : {
+                  frontmatter: {
+                    [key]: where === 'list' ? [written] : `x, ${written}`,
+                  },
+                };
+          const tag = '#'.repeat(hashes) + asked.join('/');
+
+          expect(matchAnyTags(cache, [tag])).toEqual([tag]);
+        }
+      )
+    );
+  });
+
+  it('never matches a tag nested in one the note carries, nor one the carried tag only starts with', () => {
+    fc.assert(
+      fc.property(
+        nestedArb,
+        segmentArb,
+        fc.boolean(),
+        fc.boolean(),
+        (levels, more, deeper, inBody) => {
+          const carried = levels.join('/');
+          const asked = deeper ? `${carried}/${more}` : `${carried}${more}`;
+          const cache: TagCache = inBody
+            ? { tags: [{ tag: `#${carried}` }] as TagCache['tags'] }
+            : { frontmatter: { tags: carried } };
+
+          expect(matchAnyTags(cache, [asked])).toEqual([]);
+        }
+      )
+    );
+  });
+
+  it('returns which of the tags asked for the note carries, in the order asked', () => {
+    fc.assert(
+      fc.property(
+        cacheArb,
+        fc.array(writtenTagArb, { maxLength: 6 }),
+        fc.array(fc.nat(), { maxLength: 4 }),
+        ({ cache, carried }, asked, picks) => {
+          // Some of what is asked for is carried, or a tag a carried one is
+          // nested in, written its own way
+          const held = [...carried];
+          const fromCarried =
+            held.length === 0
+              ? []
+              : picks.map((pick, i) => {
+                  const tag = held[pick % held.length];
+                  const parent = tag.includes('/')
+                    ? tag.slice(0, tag.indexOf('/'))
+                    : tag;
+                  return [`#${tag}`, parent, `##${parent}`][i % 3];
+                });
+          const tags = [...asked.map(({ written }) => written), ...fromCarried];
+
+          expect(matchAnyTags(cache, tags)).toEqual(
+            tags.filter((tag) => carriesTag(carried, tag))
+          );
+        }
+      )
+    );
+  });
+
+  it('finds every tag the frontmatter matcher finds', () => {
+    fc.assert(
+      fc.property(
+        frontmatterArb,
+        fc.array(writtenTagArb, { maxLength: 6 }),
+        ({ frontmatter, carried }, asked) => {
+          const tags = [
+            ...asked.map(({ written }) => written),
+            ...[...carried].map((tag) => `#${tag}`),
+          ];
+          const matched = matchFrontmatterTags(frontmatter, tags);
+
+          expect(
+            matchAnyTags({ frontmatter }, tags).filter((tag) =>
+              matched.includes(tag)
+            )
+          ).toEqual(matched);
+        }
+      )
+    );
+  });
+
+  it('matches nothing for a note with no metadata, for no tags asked, or for a tag of only #s', () => {
+    fc.assert(
+      fc.property(cacheArb, fc.nat({ max: 3 }), ({ cache }, hashes) => {
+        expect(matchAnyTags(cache, [])).toEqual([]);
+        expect(matchAnyTags(cache, ['#'.repeat(hashes)])).toEqual([]);
+      })
+    );
+    // Tags that start with `/`, which an empty tag nests nothing in
+    expect(matchAnyTags({ frontmatter: { tags: '/x' } }, ['#', ''])).toEqual(
+      []
+    );
+    expect(
+      matchAnyTags({ tags: [{ tag: '#/x' }] as TagCache['tags'] }, ['#'])
+    ).toEqual([]);
+    expect(matchAnyTags(null, ['a'])).toEqual([]);
+    expect(matchAnyTags(undefined, ['a'])).toEqual([]);
+    expect(matchAnyTags({}, ['a'])).toEqual([]);
+  });
+
+  it('takes the tags to look for from any iterable, a set included', () => {
+    expect(
+      matchAnyTags(
+        { tags: [{ tag: '#b' }] as TagCache['tags'] },
+        new Set(['a', 'b'])
+      )
+    ).toEqual(['b']);
+  });
+
+  it('leaves the metadata it reads as it was', () => {
+    fc.assert(
+      fc.property(cacheArb, fc.array(fc.string()), ({ cache }, tags) => {
+        const before = structuredClone(cache);
+
+        matchAnyTags(deepFreeze(cache), tags);
+
+        expect(cache).toEqual(before);
+      })
+    );
+  });
+});
+
+describe('isItemTypeTag', () => {
+  const typeTagArb = fc.constantFrom(ARTICLE_TAG, SNIPPET_TAG, CARD_TAG);
+
+  it('holds for each tag the plugin marks an item type with, and each nested in one, in any case, # optional', () => {
+    fc.assert(
+      fc.property(
+        typeTagArb,
+        fc.array(segmentArb, { maxLength: 2 }),
+        casingArb,
+        fc.nat({ max: 2 }),
+        (typeTag, nested, casing, hashes) => {
+          const name = casing([typeTag, ...nested].join('/'));
+          // Only casings that read alike: `ß` upper-cased is `SS`
+          fc.pre(name.toLowerCase().startsWith(typeTag));
+
+          expect(isItemTypeTag('#'.repeat(hashes) + name)).toBe(true);
+        }
+      )
+    );
+  });
+
+  it('holds for no other tag: not one a type tag only starts with, nor one it is nested in', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          tagCoreArb,
+          fc.tuple(typeTagArb, segmentArb).map(([t, more]) => `${t}${more}`),
+          fc
+            .tuple(segmentArb, typeTagArb)
+            .map(([outer, typeTag]) => `${outer}/${typeTag}`),
+          fc.constantFrom('ir', 'ir-', 'ir-import', 'ir-source', '')
+        ),
+        (tag) => {
+          const name = tag.toLowerCase();
+          fc.pre(
+            ![ARTICLE_TAG, SNIPPET_TAG, CARD_TAG].some(
+              (t) => name === t || name.startsWith(`${t}/`)
+            )
+          );
+
+          expect(isItemTypeTag(tag)).toBe(false);
+          expect(isItemTypeTag(`#${tag}`)).toBe(false);
+        }
+      )
+    );
   });
 });

@@ -1861,12 +1861,13 @@ describe('BulkImportModal: filter bar', () => {
       name: 'notes',
     });
     const folder = vi.fn((_folder: TFolder) => scan.source);
-    const bulkImportSources = vi.fn(() => ({ folder }));
+    const tag = vi.fn((_tags: readonly string[]) => scan.source);
+    const bulkImportSources = vi.fn(() => ({ folder, tag }));
     Object.assign(made.plugin, {
       app: { vault: { getAllFolders: () => [notes] } },
       bulkImportSources,
     });
-    return { ...made, notes, folder, bulkImportSources };
+    return { ...made, notes, folder, tag, bulkImportSources };
   }
 
   function openFiltered(plugin: IncrementalReadingPlugin) {
@@ -1987,5 +1988,76 @@ describe('BulkImportModal: filter bar', () => {
       }),
       { numRuns: 4 }
     );
+  });
+
+  /** Press the filter bar's segment for tags. */
+  async function pressTag(modal: BulkImportModal) {
+    const segment = [
+      ...modal.contentEl.querySelectorAll<HTMLButtonElement>(
+        '.ir-bulk-import-filter-segment'
+      ),
+    ][1];
+    await click(segment);
+    await settle();
+  }
+
+  it('offers the tags filter second, holding the trigger tags when auto-import by tag is on, and listing them at once', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.boolean(),
+        fc.uniqueArray(fc.constantFrom('to-read', 'later', 'a/b'), {
+          minLength: 1,
+          maxLength: 2,
+        }),
+        async (on, triggerTags) => {
+          const scan = makeSource('#tags');
+          const { plugin, tag } = makeFilterPlugin(scan);
+          plugin.settings.autoImportOnTag = on;
+          plugin.settings.autoImportTags = triggerTags;
+          const modal = openFiltered(plugin);
+
+          await pressTag(modal);
+
+          const input = modal.contentEl.querySelector<HTMLInputElement>(
+            '.ir-bulk-import-filter-row input[type="text"]'
+          )!;
+          if (on) {
+            expect(input.value).toBe(
+              triggerTags.map((t) => `#${t}`).join(', ')
+            );
+            expect(tag).toHaveBeenCalledExactlyOnceWith(triggerTags);
+          } else {
+            expect(input.value).toBe('');
+            expect(tag).not.toHaveBeenCalled();
+          }
+          modal.close();
+          document.body.replaceChildren();
+        }
+      ),
+      { numRuns: 6 }
+    );
+  });
+
+  it('imports the ticked notes a tag lists, saying it imported them from the tags', async () => {
+    Notice.reset();
+    const scan = makeSource('#to-read, #later');
+    const { plugin, importArticles } = makeFilterPlugin(scan);
+    plugin.settings.autoImportOnTag = true;
+    plugin.settings.autoImportTags = ['to-read', 'later'];
+    const modal = openFiltered(plugin);
+    await pressTag(modal);
+    const file = makeFile('a.md');
+    await scan.add(file);
+
+    await click(confirmButton(modal));
+    await modal.closed;
+
+    expect(importArticles).toHaveBeenCalledExactlyOnceWith(
+      [{ file }],
+      expect.anything()
+    );
+    expect(Notice.messages).toEqual([
+      expect.stringMatching(/\b1\b.*#to-read, #later/),
+    ]);
   });
 });

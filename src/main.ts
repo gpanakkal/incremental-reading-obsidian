@@ -9,6 +9,7 @@ import {
   selectionRoots,
   selectionSource,
 } from '#/lib/bulk-import/selection';
+import { tagSource } from '#/lib/bulk-import/tag-source';
 import type { FilterSources } from '#/lib/bulk-import/types';
 import { createEmitter } from '#/lib/emitter';
 import {
@@ -1384,7 +1385,10 @@ export default class IncrementalReadingPlugin extends Plugin {
     const compare = explorerComparator(
       readExplorerSortOrder(this.app.workspace)
     );
-    return { folder: (folder) => folderSource(folder, checks, compare) };
+    return {
+      folder: (folder) => folderSource(folder, checks, compare),
+      tag: (tags) => tagSource(tags, this.app.vault, checks, compare),
+    };
   }
 
   async importArticle(

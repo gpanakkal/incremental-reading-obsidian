@@ -3,6 +3,7 @@ import {
   folderFilter,
 } from '#/components/BulkImportFilterBar';
 import { BulkImportModalContent } from '#/components/BulkImportModalContent';
+import { tagFilter } from '#/components/TagFilter';
 import { importChosen } from '#/lib/bulk-import/run-import';
 import type {
   BulkImportOptions,
@@ -106,7 +107,16 @@ export class BulkImportModal extends Modal {
     this.setTitle('Bulk import');
     render(
       <FilteredBulkImport
-        segments={[folderFilter(plugin.app, sources.folder)]}
+        segments={[
+          folderFilter(plugin.app, sources.folder),
+          tagFilter(
+            plugin.app,
+            sources.tag,
+            plugin.settings.autoImportOnTag
+              ? plugin.settings.autoImportTags
+              : []
+          ),
+        ]}
         defaults={{
           priority: plugin.settings.defaultPriority,
           makeCopy: plugin.settings.copyOnImport,

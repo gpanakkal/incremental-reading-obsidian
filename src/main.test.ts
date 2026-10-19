@@ -2346,6 +2346,59 @@ describe('IncrementalReadingPlugin.bulkImportSources', () => {
   });
 });
 
+describe('IncrementalReadingPlugin.bulkImportSources: tags', () => {
+  it("makes a tag's source over the vault's notes carrying it, titled with the tags, in the explorer's order", async () => {
+    const note = (path: string, mtime: number) =>
+      Object.assign(new TFile(), {
+        path,
+        name: path.slice(path.lastIndexOf('/') + 1),
+        basename: path.slice(path.lastIndexOf('/') + 1, -3),
+        extension: 'md',
+        stat: { mtime, ctime: 0, size: 0 },
+        parent: null,
+      });
+    const older = note('older.md', 1);
+    const newer = note('newer.md', 2);
+    const untagged = note('untagged.md', 3);
+    const caches = new Map<TFile, unknown>([
+      [older, { frontmatter: { tags: ['read/later'] } }],
+      [newer, { tags: [{ tag: '#Read' }] }],
+    ]);
+    const explorerState = { sortOrder: 'byModifiedTime' };
+    const receiver = {
+      app: {
+        workspace: {
+          getLeavesOfType: (type: string) =>
+            type === 'file-explorer'
+              ? [{ view: { getState: () => explorerState } }]
+              : [],
+        },
+        vault: {
+          getMarkdownFiles: () => [older, untagged, newer],
+          readBinary: async () => new TextEncoder().encode('# x').buffer,
+          getResourcePath: (file: TFile) => file.path,
+        },
+        metadataCache: { getFileCache: (file: TFile) => caches.get(file) },
+      },
+      reviewManager: { isItemFileAt: vi.fn(() => false) },
+    };
+
+    const sources = IncrementalReadingPlugin.prototype.bulkImportSources.call(
+      receiver as unknown as IncrementalReadingPlugin
+    ) as FilterSources;
+    explorerState.sortOrder = 'alphabetical';
+    const source = sources.tag(['read', 'x']);
+    const files: TFile[] = [];
+    for await (const event of source.scan(new AbortController().signal)) {
+      if (event.type === 'file') files.push(event.file);
+    }
+
+    expect(source.title).toBe('#read, #x');
+    // Newest first, as the explorer was when asked
+    expect(files).toEqual([newer, older]);
+  });
+});
+
 describe('IncrementalReadingPlugin.learn', () => {
   beforeEach(() => {
     store.dispatch(resetSession());
