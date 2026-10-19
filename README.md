@@ -112,7 +112,7 @@ Import many selected files and folders (or the contents of a folder) by right cl
 > [!tip]
 > Select many files in the Files view with Alt-click (Option-click on macOS), or Shift-click to select a range of files.
 
-Alternatively, click **Bulk import…** on the review home screen to select files by folder or frontmatter tags. Subtags of chosen tags count as well.
+Alternatively, click **Bulk import…** on the review home screen to select files by folder, frontmatter tags, or [search](https://help.obsidian.md/Plugins/Search).
 
 #### Automatic imports
 To import everything that arrives in a folder (for example, a Web Clipper inbox), enable **Auto-import files added to folders** and list the folders under **Watched folders**. Notes and PDFs created, moved, or synced into those folders or their subfolders will become articles.

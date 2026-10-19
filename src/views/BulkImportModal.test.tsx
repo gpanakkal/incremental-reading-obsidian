@@ -1853,7 +1853,13 @@ describe('BulkImportModal: filter bar', () => {
    */
   function makeFilterPlugin(
     scan: ReturnType<typeof makeSource>,
-    { includeSubfolders = false, copyOnImport = false } = {}
+    {
+      includeSubfolders = false,
+      copyOnImport = false,
+      cli = undefined as unknown,
+      explorers = [] as unknown[],
+      files = [] as TFile[],
+    } = {}
   ) {
     const made = makePlugin(copyOnImport, { includeSubfolders });
     const notes = Object.assign(new TFolder(), {
@@ -1862,12 +1868,44 @@ describe('BulkImportModal: filter bar', () => {
     });
     const folder = vi.fn((_folder: TFolder) => scan.source);
     const tag = vi.fn((_tags: readonly string[]) => scan.source);
-    const bulkImportSources = vi.fn(() => ({ folder, tag }));
+    const search = vi.fn((_files: readonly TFile[]) => scan.source);
+    const bulkImportSources = vi.fn(() => ({ folder, tag, search }));
     Object.assign(made.plugin, {
-      app: { vault: { getAllFolders: () => [notes] } },
+      app: {
+        vault: {
+          getAllFolders: () => [notes],
+          getFileByPath: (path: string) =>
+            files.find((file) => file.path === path) ?? null,
+        },
+        workspace: {
+          getLeavesOfType: (type: string) =>
+            type === 'file-explorer' ? explorers : [],
+        },
+        cli,
+      },
       bulkImportSources,
     });
-    return { ...made, notes, folder, tag, bulkImportSources };
+    return { ...made, notes, folder, tag, search, bulkImportSources };
+  }
+
+  /** Core's `search` command, answering `paths` for any query. */
+  function makeCli(paths: readonly string[]) {
+    const handler = vi.fn(() => Promise.resolve(JSON.stringify(paths)));
+    return { handlers: new Map([['search', { handler }]]) };
+  }
+
+  function segments(modal: BulkImportModal) {
+    return [
+      ...modal.contentEl.querySelectorAll<HTMLButtonElement>(
+        '.ir-bulk-import-filter-segment'
+      ),
+    ];
+  }
+
+  function searchInput(modal: BulkImportModal) {
+    return modal.contentEl.querySelector<HTMLInputElement>(
+      '.ir-bulk-import-search-input'
+    );
   }
 
   function openFiltered(plugin: IncrementalReadingPlugin) {
@@ -1898,6 +1936,115 @@ describe('BulkImportModal: filter bar', () => {
       '.ir-bulk-import-filter-row .ir-bulk-import-subfolders input'
     );
   }
+
+  it('offers the search filter, after the folder and tag filters, only while the search engine can be reached', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), async (reachable) => {
+        const scan = makeSource('search');
+        const { plugin } = makeFilterPlugin(scan, {
+          cli: reachable ? makeCli([]) : undefined,
+        });
+        const modal = openFiltered(plugin);
+        await settle();
+
+        expect(segments(modal)).toHaveLength(reachable ? 3 : 2);
+        if (reachable) {
+          await click(segments(modal)[2]);
+          expect(searchInput(modal)).not.toBeNull();
+        }
+        expect(searchInput(modal) !== null).toBe(reachable);
+        modal.close();
+        document.body.replaceChildren();
+      }),
+      { numRuns: 4 }
+    );
+  });
+
+  it('lists what a search matched, as the source the plugin makes of it, and says it imported them from search', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      Notice.reset();
+      const file = makeFile('a.md');
+      const scan = makeSource('search');
+      const { plugin, search } = makeFilterPlugin(scan, {
+        cli: makeCli([file.path]),
+        files: [file],
+      });
+      const modal = openFiltered(plugin);
+      await click(segments(modal)[2]);
+      const input = searchInput(modal)!;
+      input.value = 'spaced';
+      await act(() => {
+        input.dispatchEvent(new Event('input'));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300);
+      });
+
+      expect(search).toHaveBeenCalledExactlyOnceWith([file]);
+      vi.useRealTimers();
+      await scan.add(file);
+      await click(confirmButton(modal));
+      await modal.closed;
+
+      expect(Notice.messages).toEqual([expect.stringMatching(/\bsearch\b/)]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('adds the search filter once a file explorer not loaded yet is, and draws nothing once closed', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), async (closeFirst) => {
+        class Query {
+          matcher = {};
+          match() {
+            return null;
+          }
+        }
+        let loaded!: () => void;
+        const leaf = {
+          view: {} as object,
+          isDeferred: true,
+          loadIfDeferred: vi.fn(
+            () =>
+              new Promise<void>((resolve) => {
+                loaded = () => {
+                  leaf.view = {
+                    onSearchChanged(this: { searchQuery: unknown }) {
+                      this.searchQuery = new Query();
+                    },
+                  };
+                  leaf.isDeferred = false;
+                  resolve();
+                };
+              })
+          ),
+        };
+        const scan = makeSource('search');
+        const { plugin } = makeFilterPlugin(scan, { explorers: [leaf] });
+        Object.assign(plugin.app, {
+          metadataCache: {
+            isUserIgnored: () => false,
+            isSupportedFile: () => true,
+          },
+        });
+        const modal = openFiltered(plugin);
+        await settle();
+        expect(segments(modal)).toHaveLength(2);
+        if (closeFirst) modal.close();
+
+        loaded();
+        await settle();
+
+        expect(leaf.loadIfDeferred).toHaveBeenCalledOnce();
+        expect(segments(modal)).toHaveLength(closeFirst ? 0 : 3);
+        modal.close();
+        document.body.replaceChildren();
+      }),
+      { numRuns: 2 }
+    );
+  });
 
   it('lists nothing until a folder is picked, then the files the source made for it finds', async () => {
     const scan = makeSource('notes', { deeper: true });

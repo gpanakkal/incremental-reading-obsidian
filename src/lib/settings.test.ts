@@ -14,7 +14,7 @@ import type { StepUnit } from 'ts-fsrs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // The mock is what `obsidian` resolves to at runtime (see vitest.config.ts);
 // imported by path for its writable `Platform`.
-import { Platform, Setting } from '#/test/__mocks__/obsidian';
+import { Platform, Setting, TFolder } from '#/test/__mocks__/obsidian';
 import {
   AUTO_IMPORT_TAG,
   CARD_TAG,
@@ -188,6 +188,14 @@ function makeTab(
       vault: {
         getFolderByPath: (path: string): { path: string } | null =>
           folderPaths.has(path) ? { path } : null,
+        // As Obsidian's: the root only when asked for
+        getAllFolders: (includeRoot?: boolean) =>
+          [...(includeRoot === true ? ['/'] : []), ...folderPaths].map((path) =>
+            Object.assign(new TFolder(), {
+              path,
+              name: path.slice(path.lastIndexOf('/') + 1),
+            })
+          ),
       },
     },
     data,
@@ -2677,6 +2685,111 @@ describe('IRSettingTab watched folders row', () => {
 
     expect(again.chips()).toEqual(['Inbox', 'Clips']);
     expect(again.field.value).toBe('');
+  });
+});
+
+describe('IRSettingTab watched folders suggestions', () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+    vi.restoreAllMocks();
+  });
+
+  /** What the suggestions popup lists, top to bottom. */
+  const suggested = () =>
+    [
+      ...document.querySelectorAll('.suggestion-container .suggestion-item'),
+    ].map((item) => item.textContent);
+
+  /** Focus `field` and type `typed` into it, as the user would. */
+  async function typeFocused(field: HTMLInputElement, typed: string) {
+    field.focus();
+    typeInto(field, typed);
+    await settle();
+  }
+
+  it('suggests each folder whose path holds all the text typed, any case, but the root, the data folder and those watched', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        storedFoldersArb,
+        fc.array(folderArb, { maxLength: 5 }),
+        fc.oneof(
+          typedFolderArb,
+          fc.mixedCase(fc.constantFrom('inbox', 'a, b', 'reading/'))
+        ),
+        async (stored, others, typed) => {
+          document.body.replaceChildren();
+          const vault = [...new Set([...stored, ...others])];
+          const { tab } = makeTab(watchingSettings(stored, true), vault);
+          const row = drawWatchedFolders(tab);
+
+          await typeFocused(row.field, typed);
+
+          const needle = typed.trim().toLowerCase();
+          const wanted = vault.filter(
+            (path) =>
+              path.toLowerCase().includes(needle) &&
+              path !== DATA_DIRECTORY &&
+              !path.startsWith(`${DATA_DIRECTORY}/`) &&
+              !row.chips().includes(path)
+          );
+          expect([...suggested()].sort()).toEqual([...wanted].sort());
+          expect(suggested()).not.toContain('/');
+        }
+      )
+    );
+  });
+
+  it('fills the field with the folder picked, adding it only on Enter, as typed', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('Inbox', 'Reading/Inbox', 'a, b'),
+        fc.boolean(),
+        async (folder, watching) => {
+          document.body.replaceChildren();
+          const { tab, plugin } = makeTab(watchingSettings([], watching), [
+            'Inbox',
+            'Reading/Inbox',
+            'a, b',
+          ]);
+          const row = drawWatchedFolders(tab);
+          await typeFocused(row.field, folder.slice(0, 3));
+          // What was typed is no folder, which the row says until the pick
+          pressEnter(row.field);
+          expect(row.message()).toEqual(expect.stringMatching(/\S/));
+          const item = [
+            ...document.querySelectorAll<HTMLElement>('.suggestion-item'),
+          ].find((el) => el.textContent === folder)!;
+
+          item.click();
+          await settle();
+
+          expect(row.field.value).toBe(folder);
+          expect(suggested()).toEqual([]);
+          expect(row.chips()).toEqual([]);
+          expect(plugin.saveSettings).not.toHaveBeenCalled();
+          expect(row.message()).toBe(watchListProblem([], watching));
+
+          pressEnter(row.field);
+          await settle();
+
+          expect(row.chips()).toEqual([folder]);
+          expect(row.field.value).toBe('');
+          expect(plugin.saveSettings).toHaveBeenCalledOnce();
+        }
+      )
+    );
+  });
+
+  it('no longer suggests a folder once it is watched', async () => {
+    const { tab } = makeTab(watchingSettings([], true), ['Inbox', 'Inbox/Sub']);
+    const row = drawWatchedFolders(tab);
+    typeInto(row.field, 'Inbox');
+    pressEnter(row.field);
+    await settle();
+
+    await typeFocused(row.field, 'inbox');
+
+    expect(suggested()).toEqual(['Inbox/Sub']);
   });
 });
 

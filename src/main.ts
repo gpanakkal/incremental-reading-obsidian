@@ -3,6 +3,7 @@ import {
   type CandidateChecks,
   folderSource,
 } from '#/lib/bulk-import/candidates';
+import { listSource } from '#/lib/bulk-import/list-source';
 import {
   itemCount,
   selectionMayImport,
@@ -1388,6 +1389,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     return {
       folder: (folder) => folderSource(folder, checks, compare),
       tag: (tags) => tagSource(tags, this.app.vault, checks, compare),
+      search: (files) => listSource(files, checks, compare, 'search'),
     };
   }
 

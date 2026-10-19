@@ -1767,14 +1767,26 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
   gap: var(--size-4-2) var(--size-4-4);
 }
 
-.ir-bulk-import-filter-row .ir-bulk-import-folder-input {
+.ir-bulk-import-filter-row .ir-bulk-import-folder-input,
+.ir-bulk-import-filter-row .ir-bulk-import-tag-input,
+.ir-bulk-import-filter-row .ir-bulk-import-search-input {
   flex: 1 1 12em;
   min-width: 0;
 }
 
-.ir-bulk-import-filter-row .ir-bulk-import-tag-input {
-  flex: 1 1 12em;
-  min-width: 0;
+/* Under the search field: how many have matched while it searches, or why
+   the query can't be searched, in the engine's words. */
+.ir-bulk-import-search-progress,
+.ir-bulk-import-search-error {
+  font-size: var(--font-ui-smaller);
+}
+
+.ir-bulk-import-search-progress {
+  color: var(--text-muted);
+}
+
+.ir-bulk-import-search-error {
+  color: var(--text-error);
 }
 
 /* Before the filter bar has a source, the list holds nothing at all; its

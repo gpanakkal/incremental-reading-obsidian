@@ -806,3 +806,47 @@ test("suggests the vault's tags in the trigger tags field, but the plugin's item
 
   await expect(field).toHaveValue(/^#ir-import #e2e-suggest\s*$/);
 });
+
+test('suggests the folders that could be watched as the field is typed in, a pick filling it for Enter to add', async () => {
+  await window.evaluate(async () => {
+    const { app } = window as unknown as { app: PageApp };
+    await app.vault.createFolder('Inbox');
+    await app.vault.createFolder('Reading');
+    await app.vault.createFolder('Reading/Inbox');
+  });
+  const settings = await openPluginSettings(app, window);
+  const row = settings.locator('.vertical-tab-content .setting-item').filter({
+    has: settings
+      .locator('.setting-item-name')
+      .getByText('Watched folders', { exact: true }),
+  });
+  const field = row.getByRole('textbox');
+  const chips = row.locator('.ir-folder-chip');
+  const suggestions = settings.locator(
+    '.suggestion-container .suggestion-item'
+  );
+
+  await field.fill('INB');
+  await expect(suggestions).toHaveText(['Inbox', 'Reading/Inbox']);
+
+  await suggestions.filter({ hasText: /^Reading\/Inbox$/ }).click();
+  await expect(field).toHaveValue('Reading/Inbox');
+  await expect(suggestions).toHaveCount(0);
+  await expect(chips).toHaveCount(0);
+
+  await field.press('Enter');
+  await expect(chips).toHaveText(['Reading/Inbox']);
+  await expect(field).toHaveValue('');
+
+  // A folder watched is offered no more
+  await field.fill('inbox');
+  await expect(suggestions).toHaveText(['Inbox']);
+
+  // Enter while the list is open picks the highlighted one, adding nothing
+  await field.press('Enter');
+  await expect(field).toHaveValue('Inbox');
+  await expect(suggestions).toHaveCount(0);
+  await expect(chips).toHaveText(['Reading/Inbox']);
+  await field.press('Enter');
+  await expect(chips).toHaveText(['Reading/Inbox', 'Inbox']);
+});

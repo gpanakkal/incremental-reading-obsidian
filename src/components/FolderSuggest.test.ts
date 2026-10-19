@@ -3,7 +3,7 @@ import { DATA_DIRECTORY } from '#/lib/constants';
 import fc from 'fast-check';
 import { TFolder, type App } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FolderSuggest } from './FolderSuggest';
+import { FolderSuggest, type FolderSuggestOptions } from './FolderSuggest';
 
 // #region HELPERS
 function makeFolder(path: string): TFolder {
@@ -17,12 +17,16 @@ function makeFolder(path: string): TFolder {
  * A suggest over a vault holding `paths`, the root among them only when
  * `getAllFolders` is asked to include it, as Obsidian's does.
  */
-function makeSuggest(paths: readonly string[]) {
+function makeSuggest(paths: readonly string[], options?: FolderSuggestOptions) {
   const getAllFolders = vi.fn((includeRoot?: boolean) =>
     paths.filter((path) => includeRoot === true || path !== '/').map(makeFolder)
   );
   const app = { vault: { getAllFolders } } as unknown as App;
-  const suggest = new FolderSuggest(app, document.createElement('input'));
+  const suggest = new FolderSuggest(
+    app,
+    document.createElement('input'),
+    options
+  );
   return { suggest, getAllFolders };
 }
 
@@ -131,6 +135,45 @@ describe('FolderSuggest', () => {
           expect(el.textContent).toBe(folder.path);
         }
       })
+    );
+  });
+
+  it('leaves out the vault root when told to, and every folder `exclude` names, asking it afresh each time', () => {
+    fc.assert(
+      fc.property(
+        pathsArb,
+        fc.option(fc.boolean(), { nil: undefined }),
+        fc.func(fc.boolean()),
+        (paths, includeRoot, excluded) => {
+          let excluding = true;
+          const exclude = vi.fn((path: string) => excluding && excluded(path));
+          const { suggest, getAllFolders } = makeSuggest(paths, {
+            includeRoot,
+            exclude,
+          });
+
+          const suggested = suggest.getSuggestions('').map((f) => f.path);
+
+          expect(getAllFolders).toHaveBeenCalledExactlyOnceWith(
+            includeRoot ?? true
+          );
+          const wanted = paths.filter(
+            (path) =>
+              (includeRoot !== false || path !== '/') &&
+              !inDataDirectory(path) &&
+              !excluded(path)
+          );
+          expect([...suggested].sort()).toEqual([...wanted].sort());
+          excluding = false;
+          expect(suggest.getSuggestions('')).toHaveLength(
+            paths.filter(
+              (path) =>
+                (includeRoot !== false || path !== '/') &&
+                !inDataDirectory(path)
+            ).length
+          );
+        }
+      )
     );
   });
 });

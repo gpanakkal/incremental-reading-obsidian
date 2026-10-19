@@ -1,3 +1,4 @@
+import { FolderSuggest } from '#/components/FolderSuggest';
 import { TagSuggest, withSuggestion } from '#/components/TagSuggest';
 import type IncrementalReadingPlugin from '#/main';
 import {
@@ -422,6 +423,8 @@ export const FOLDER_CHIP_REMOVE_CLASS = 'ir-folder-chip-remove';
 
 /** What the watched folders row needs of the tab. */
 interface WatchedFoldersHost {
+  /** The app whose folders the field suggests. */
+  app: App;
   getControlValue(key: string): unknown;
   setControlValue(key: string, value: unknown): void | Promise<void>;
   /** Whether importing files added to folders is on now. */
@@ -435,7 +438,8 @@ interface WatchedFoldersHost {
  * already watched, each a chip with a button that stops watching it. Enter in
  * the field adds the folder it names, if it can be watched, and clears it;
  * otherwise the row says why and keeps the text. Each change saves the whole
- * list through the tab's `autoImportFolders` binding.
+ * list through the tab's `autoImportFolders` binding. Typing suggests the
+ * folders that could be watched; picking one fills the field, for Enter to add.
  *
  * A row the tab draws, since no declarative control holds a list: Obsidian
  * (1.13.7) calls this each time it draws the row, in the tab or in the
@@ -527,6 +531,20 @@ function drawWatchedFolders(
   });
   // The field's message is about what was typed, so it goes once that changes
   input.addEventListener('input', checkList);
+
+  // The field names one folder, commas and all, so all of it is the query.
+  // Never the root, which can't be watched, nor a folder already watched.
+  // Enter while the list is open picks from it: Obsidian's popup takes the
+  // key before the field sees it
+  const suggest = new FolderSuggest(host.app, input, {
+    includeRoot: false,
+    exclude: (path) => folders().includes(path),
+  });
+  suggest.onSelect((folder) => {
+    suggest.setValue(folder.path);
+    suggest.close();
+    checkList();
+  });
 
   drawChips();
   checkList();
@@ -977,6 +995,7 @@ export class IRSettingTab extends PluginSettingTab {
                 name: WATCHED_FOLDERS_NAME,
                 render: (setting) => {
                   const checkList = drawWatchedFolders(setting, {
+                    app: this.plugin.app,
                     getControlValue: (key) => this.getControlValue(key),
                     setControlValue: (key, value) =>
                       this.setControlValue(key, value),

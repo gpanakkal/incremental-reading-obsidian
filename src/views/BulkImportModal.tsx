@@ -3,12 +3,15 @@ import {
   folderFilter,
 } from '#/components/BulkImportFilterBar';
 import { BulkImportModalContent } from '#/components/BulkImportModalContent';
+import { searchFilter } from '#/components/SearchFilter';
 import { tagFilter } from '#/components/TagFilter';
 import { importChosen } from '#/lib/bulk-import/run-import';
 import type {
   BulkImportOptions,
   CandidateSource,
+  FilterSources,
 } from '#/lib/bulk-import/types';
+import { getVaultSearch, loadSearchEngine } from '#/lib/vault-search';
 import type IncrementalReadingPlugin from '#/main';
 import { Modal, type TFile } from 'obsidian';
 import { render } from 'preact';
@@ -39,6 +42,8 @@ export class BulkImportModal extends Modal {
   private settleClosed!: () => void;
   /** The import started by confirming, if any. There is one per dialog. */
   private importing: Promise<unknown> | null = null;
+  /** Whether the dialog has closed, after which nothing is drawn in it. */
+  private shut = false;
 
   constructor(plugin: IncrementalReadingPlugin, request: BulkImportRequest) {
     super(plugin.app);
@@ -99,12 +104,27 @@ export class BulkImportModal extends Modal {
 
   /**
    * The dialog with the filter bar, listing nothing until a filter makes a
-   * source. The file explorer's order is read once, here.
+   * source. The file explorer's order is read once, here. The search filter
+   * is there only while Obsidian's search engine can be reached, which may
+   * take loading a file explorer not shown yet: drawn again once loaded.
    */
   private openFiltered() {
-    const { plugin, contentEl } = this;
+    const { plugin } = this;
     const sources = plugin.bulkImportSources();
     this.setTitle('Bulk import');
+    this.drawFiltered(sources);
+    loadSearchEngine(plugin.app).then(
+      (loaded) => {
+        if (loaded && !this.shut) this.drawFiltered(sources);
+      },
+      // The dialog stays as drawn, without the search filter
+      (error: unknown) => console.error(error)
+    );
+  }
+
+  private drawFiltered(sources: FilterSources) {
+    const { plugin, contentEl } = this;
+    const search = getVaultSearch(plugin.app);
     render(
       <FilteredBulkImport
         segments={[
@@ -116,6 +136,7 @@ export class BulkImportModal extends Modal {
               ? plugin.settings.autoImportTags
               : []
           ),
+          ...(search ? [searchFilter(search, sources.search)] : []),
         ]}
         defaults={{
           priority: plugin.settings.defaultPriority,
@@ -135,6 +156,7 @@ export class BulkImportModal extends Modal {
   }
 
   onClose() {
+    this.shut = true;
     // Unmounting stops the scan
     render(null, this.contentEl);
     void (this.importing ?? Promise.resolve()).then(

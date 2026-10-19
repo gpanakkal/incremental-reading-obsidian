@@ -161,4 +161,67 @@ test.describe('Bulk import from the review home', () => {
     await expect(queueRow(inBody)).toHaveCount(1);
     await expect(queueRow(untagged)).toHaveCount(0);
   });
+
+  test("lists what a search matches, as core's Search pane does, imports it, and shows a bad query's error, listing nothing", async () => {
+    const query = 'path:sources "spaced repetition"';
+    const match = SOURCE_NOTES[1];
+    // What core's Search pane lists for the query. Unofficial: the search
+    // view's `setQuery` and `dom.resultDomLookup` (a Map keyed by file)
+    const paneLists = () =>
+      window.evaluate(async (text) => {
+        const { app } = window as unknown as {
+          app: {
+            workspace: {
+              getLeavesOfType(type: string): {
+                loadIfDeferred(): Promise<void>;
+                view: unknown;
+              }[];
+            };
+          };
+        };
+        const leaf = app.workspace.getLeavesOfType('search')[0];
+        await leaf.loadIfDeferred();
+        const view = leaf.view as {
+          getQuery(): string;
+          setQuery(query: string): void;
+          dom: { resultDomLookup: Map<{ path: string }, unknown> };
+        };
+        if (view.getQuery() !== text) view.setQuery(text);
+        return [...view.dom.resultDomLookup.keys()].map((file) => file.path);
+      }, query);
+    await expect.poll(paneLists).toEqual([`${SOURCES}/${match}.md`]);
+
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('#bulk-import-button').click();
+    const modal = window
+      .locator('.modal')
+      .filter({ has: window.locator('.ir-bulk-import-filter') });
+    const segments = modal.locator('.ir-bulk-import-filter-segment');
+    // Search is the last filter
+    await segments.last().click();
+    await expect(segments.last()).toHaveAttribute('aria-pressed', 'true');
+    const input = modal.locator('.ir-bulk-import-search-input');
+    await input.fill(query);
+
+    const rows = modal.locator('.ir-bulk-import-row');
+    await expect(rows.locator('.ir-bulk-import-name')).toHaveText([match]);
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await expect(rows).toHaveCount(1);
+
+    // An operator the engine doesn't know: its message, and nothing listed
+    await input.fill('nosuchop:x');
+    await expect(modal.locator('.ir-bulk-import-search-error')).toContainText(
+      'nosuchop'
+    );
+    await expect(rows).toHaveCount(0);
+
+    await input.fill(query);
+    await expect(rows.locator('.ir-bulk-import-name')).toHaveText([match]);
+    await modal.locator('button.mod-cta').click();
+
+    await expect(modal).toHaveCount(0);
+    await expect(
+      window.locator('.ir-queue-row', { hasText: match })
+    ).toHaveCount(1);
+  });
 });

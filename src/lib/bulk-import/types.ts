@@ -104,9 +104,11 @@ export interface BulkOutcome extends Partial<ImportedArticle> {
 /**
  * What the bulk dialog's filter bar makes candidate sources with, one maker
  * per filter: the folder chosen, for the folder filter; the tags typed (in
- * lower case, with no `#`), for the tag filter.
+ * lower case, with no `#`), for the tag filter; the files a query matched,
+ * for the search filter.
  */
 export interface FilterSources {
   folder: (folder: TFolder) => CandidateSource;
   tag: (tags: readonly string[]) => CandidateSource;
+  search: (files: readonly TFile[]) => CandidateSource;
 }
