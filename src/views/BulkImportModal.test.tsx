@@ -18,6 +18,8 @@ import type IncrementalReadingPlugin from '#/main';
 import { Notice } from '#/test/__mocks__/obsidian';
 import fc from 'fast-check';
 import { TFile, TFolder } from 'obsidian';
+import { render } from 'preact';
+import { useId } from 'preact/hooks';
 import { act } from 'preact/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BulkImportModal } from './BulkImportModal';
@@ -1308,6 +1310,313 @@ describe('BulkImportModal: Include subfolders', () => {
     ]);
     expect(selectedCount(modal)).toBe(3);
     modal.close();
+  });
+
+  /**
+   * Each shown folder's arrow, top to bottom: classed as Obsidian's own, which
+   * its app.css draws and turns.
+   */
+  const arrows = (modal: BulkImportModal) => [
+    ...modal.contentEl.querySelectorAll<HTMLButtonElement>(
+      '.ir-bulk-import-folder-title > button.ir-bulk-import-collapse.collapse-icon'
+    ),
+  ];
+
+  /** The arrow named for the folder `name`, as a screen reader names it. */
+  const arrowOf = (modal: BulkImportModal, name: string) => {
+    const found = arrows(modal).find(
+      (arrow) =>
+        document.getElementById(arrow.getAttribute('aria-labelledby')!)
+          ?.textContent === name
+    );
+    if (!found) throw new Error(`no arrow for ${name}`);
+    return found;
+  };
+
+  /** Whether the arrow says its folder is expanded, drawn turned that way. */
+  const isExpanded = (arrow: HTMLButtonElement) => {
+    const expanded = arrow.getAttribute('aria-expanded') === 'true';
+    expect(arrow.getAttribute('aria-expanded')).toBe(String(expanded));
+    expect(arrow.classList.contains('is-collapsed')).toBe(!expanded);
+    return expanded;
+  };
+
+  /** Whether the folder `name` shows its spinner. */
+  const spins = (modal: BulkImportModal, name: string) =>
+    arrowOf(modal, name).parentElement!.querySelector('.ir-loading') !== null;
+
+  const shownNames = (modal: BulkImportModal) => rows(modal).map(nameOf);
+
+  const folderNames = (modal: BulkImportModal) =>
+    [
+      ...modal.contentEl.querySelectorAll(
+        '.ir-bulk-import-folder-title .ir-bulk-import-name'
+      ),
+    ].map((name) => name.textContent);
+
+  it('hides everything under a collapsed folder and shows it again once expanded, the ticks, the count and the import as they were', async () => {
+    const { modal, importArticles } = await openTree();
+    // Every folder starts expanded
+    expect(arrows(modal).map(isExpanded)).toEqual([true, true, true]);
+    await click(rowBox(modal, 0));
+
+    await click(arrowOf(modal, 'Topic'));
+
+    expect(isExpanded(arrowOf(modal, 'Topic'))).toBe(false);
+    expect(shownNames(modal)).toEqual(['b', 'top']);
+    expect(folderNames(modal)).toEqual(['Topic', 'Other']);
+    // Its box still shows what is ticked under it
+    expect(folderBoxes(modal).map(boxState)).toEqual(['partial', 'checked']);
+    expect(selectedCount(modal)).toBe(4);
+
+    await click(arrowOf(modal, 'Other'));
+    await click(arrowOf(modal, 'Topic'));
+
+    expect(shownNames(modal)).toEqual(['deep', 'deeper', 'a', 'top']);
+    expect(fileTicks(modal)).toEqual([false, true, true, true]);
+    expect(arrows(modal).map(isExpanded)).toEqual([true, true, false]);
+    expect(selectedCount(modal)).toBe(4);
+
+    // A folder collapsed inside a collapsed one stays so once that expands
+    await click(arrowOf(modal, 'Sub'));
+    await click(arrowOf(modal, 'Topic'));
+    await click(arrowOf(modal, 'Topic'));
+
+    expect(shownNames(modal)).toEqual(['a', 'top']);
+    expect(arrows(modal).map(isExpanded)).toEqual([true, false, false]);
+
+    await click(confirmButton(modal));
+    await settle();
+    expect(
+      importArticles.mock.calls[0][0].map(({ file }) => file.path)
+    ).toEqual([
+      'notes/Topic/Sub/deeper.md',
+      'notes/Topic/a.md',
+      'notes/Other/b.md',
+      'notes/top.md',
+    ]);
+  });
+
+  it('shows only the rows outside collapsed folders, whatever is collapsed, counting and importing the ticked ones all the same', async () => {
+    /** The folder's subfolders: how many files each holds, and its one subfolder. */
+    const foldersArb = fc.array(
+      fc.record({
+        files: fc.integer({ min: 0, max: 2 }),
+        deeper: fc.integer({ min: 0, max: 2 }),
+      }),
+      { maxLength: 3 }
+    );
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 0, max: 2 }),
+        foldersArb,
+        fc.array(fc.nat({ max: 12 }), { maxLength: 4 }),
+        fc.array(fc.nat({ max: 12 }), { maxLength: 6 }),
+        async (topCount, folders, tickClicks, arrowClicks) => {
+          document.body.replaceChildren();
+          const { plugin, importArticles } = makePlugin();
+          const scan = makeSource('notes', { deeper: true });
+          const modal = openModal(plugin, scan.source);
+          await setToggle(modal, true);
+          for (const [i] of folders.entries()) {
+            await scan.folder(`notes/d${i}`);
+          }
+          for (let i = 0; i < topCount; i++) {
+            await scan.add(makeFile(`t${i}.md`));
+          }
+          await scan.done('notes');
+          for (const [i, { files, deeper }] of folders.entries()) {
+            if (deeper > 0) await scan.folder(`notes/d${i}/s`);
+            for (let j = 0; j < files; j++) {
+              await scan.file(`notes/d${i}/f${i}_${j}.md`);
+            }
+            await scan.done(`notes/d${i}`);
+          }
+          for (const [i, { deeper }] of folders.entries()) {
+            for (let j = 0; j < deeper; j++) {
+              await scan.file(`notes/d${i}/s/g${i}_${j}.md`);
+            }
+            if (deeper > 0) await scan.done(`notes/d${i}/s`);
+          }
+          await scan.end();
+
+          // Each folder's files by name, its subfolder's first; a folder
+          // holding nothing is left out
+          const tree = folders
+            .map(({ files, deeper }, i) => ({
+              path: `d${i}`,
+              sub: Array.from({ length: deeper }, (_, j) => `g${i}_${j}`),
+              own: Array.from({ length: files }, (_, j) => `f${i}_${j}`),
+            }))
+            .filter(({ sub, own }) => sub.length + own.length > 0);
+          const tops = Array.from({ length: topCount }, (_, i) => `t${i}`);
+          const all = [
+            ...tree.flatMap(({ sub, own }) => [...sub, ...own]),
+            ...tops,
+          ];
+          const ticked = new Set(all);
+          for (const index of tickClicks.filter((i) => i < all.length)) {
+            await click(rowBox(modal, index));
+            if (!ticked.delete(all[index])) ticked.add(all[index]);
+          }
+
+          const collapsed = new Set<string>();
+          const shownFolders = () =>
+            tree.flatMap(({ path, sub }) => [
+              path,
+              ...(sub.length > 0 && !collapsed.has(path) ? [`${path}/s`] : []),
+            ]);
+          for (const n of arrowClicks) {
+            const shown = shownFolders();
+            expect(arrows(modal)).toHaveLength(shown.length);
+            if (shown.length === 0) break;
+            await click(arrows(modal)[n % shown.length]);
+            const path = shown[n % shown.length];
+            if (!collapsed.delete(path)) collapsed.add(path);
+          }
+
+          expect(arrows(modal).map(isExpanded)).toEqual(
+            shownFolders().map((path) => !collapsed.has(path))
+          );
+          expect(shownNames(modal)).toEqual([
+            ...tree.flatMap(({ path, sub, own }) =>
+              collapsed.has(path)
+                ? []
+                : [...(collapsed.has(`${path}/s`) ? [] : sub), ...own]
+            ),
+            ...tops,
+          ]);
+          const chosen = all.filter((name) => ticked.has(name));
+          expect(selectedCount(modal)).toBe(chosen.length);
+
+          await click(confirmButton(modal));
+          await settle();
+
+          if (chosen.length === 0) {
+            expect(importArticles).not.toHaveBeenCalled();
+          } else {
+            expect(
+              importArticles.mock.calls[0][0].map(({ file }) => file.basename)
+            ).toEqual(chosen);
+          }
+          modal.close();
+        }
+      ),
+      { numRuns: 15 }
+    );
+  }, 30_000);
+
+  it('keeps the files found under a collapsed folder hidden, yet counts and imports them, its spinner showing while anything under it is being scanned', async () => {
+    const { plugin, importArticles } = makePlugin();
+    const { scan, modal, top } = await openDeeper(plugin);
+    await setToggle(modal, true);
+    await scan.folder('notes/Topic');
+    await scan.file(top);
+    await scan.done('notes');
+
+    await click(arrowOf(modal, 'Topic'));
+    expect(spins(modal, 'Topic')).toBe(true);
+    await scan.folder('notes/Topic/Sub');
+    await scan.file('notes/Topic/a.md');
+    await scan.done('notes/Topic');
+
+    expect(shownNames(modal)).toEqual(['top']);
+    expect(selectedCount(modal)).toBe(2);
+    // Done itself, but not the folder under it
+    expect(spins(modal, 'Topic')).toBe(true);
+
+    // Expanded, the spinner is the subfolder's alone
+    await click(arrowOf(modal, 'Topic'));
+    expect(spins(modal, 'Topic')).toBe(false);
+    expect(spins(modal, 'Sub')).toBe(true);
+
+    await click(arrowOf(modal, 'Topic'));
+    await scan.file('notes/Topic/Sub/deep.md');
+    await scan.done('notes/Topic/Sub');
+    await scan.end();
+
+    expect(spins(modal, 'Topic')).toBe(false);
+    expect(shownNames(modal)).toEqual(['top']);
+    expect(selectedCount(modal)).toBe(3);
+    await click(confirmButton(modal));
+    await settle();
+    expect(
+      importArticles.mock.calls[0][0].map(({ file }) => file.path)
+    ).toEqual(['notes/Topic/Sub/deep.md', 'notes/Topic/a.md', 'notes/top.md']);
+  });
+
+  it('collapses on the arrow alone, a button apart from the checkbox: neither changes the other', async () => {
+    const { modal } = await openTree();
+    const arrow = arrowOf(modal, 'Topic');
+    // Reachable with Tab, and pressed with Enter or Space, as a button is
+    expect(arrow.tagName).toBe('BUTTON');
+    expect(arrow.disabled).toBe(false);
+    expect(arrow.tabIndex).toBe(0);
+    expect(arrow.closest('label')).toBeNull();
+    // Obsidian's own arrow icon, the Files view's
+    const icon = arrow.querySelector('svg.svg-icon');
+    expect([...(icon?.classList ?? [])]).toContainEqual(
+      expect.stringMatching(/right-triangle$/)
+    );
+
+    await click(arrow);
+
+    expect(isExpanded(arrowOf(modal, 'Topic'))).toBe(false);
+    expect(folderBoxes(modal).map(boxState)).toEqual(['checked', 'checked']);
+    expect(selectedCount(modal)).toBe(5);
+
+    await click(folderBoxes(modal)[0]);
+
+    expect(isExpanded(arrowOf(modal, 'Topic'))).toBe(false);
+    expect(folderBoxes(modal).map(boxState)).toEqual(['unchecked', 'checked']);
+    expect(selectedCount(modal)).toBe(2);
+
+    // Nor does its name, which ticks it as its box does
+    const topicName = modal.contentEl.querySelector<HTMLElement>(
+      '.ir-bulk-import-folder-title .ir-bulk-import-name'
+    )!;
+    await click(topicName);
+
+    expect(isExpanded(arrowOf(modal, 'Topic'))).toBe(false);
+    expect(selectedCount(modal)).toBe(5);
+
+    await click(arrowOf(modal, 'Topic'));
+
+    expect(isExpanded(arrowOf(modal, 'Topic'))).toBe(true);
+    expect(folderBoxes(modal).map(boxState)).toEqual([
+      'checked',
+      'checked',
+      'checked',
+    ]);
+    expect(selectedCount(modal)).toBe(5);
+  });
+
+  it('names each arrow for its own folder, whatever ids another Preact root on the page hands out', async () => {
+    // Another root, say another plugin's, naming its own elements by useId
+    function Other() {
+      return <span id={useId()} />;
+    }
+    const other = document.body.createDiv();
+    render(
+      <>
+        <Other />
+        <Other />
+        <Other />
+      </>,
+      other
+    );
+
+    const { modal } = await openTree();
+
+    for (const arrow of arrows(modal)) {
+      const name = document.getElementById(
+        arrow.getAttribute('aria-labelledby')!
+      );
+      expect(name?.closest('.ir-bulk-import-folder-title')).toBe(
+        arrow.parentElement
+      );
+    }
+    render(null, other);
   });
 });
 

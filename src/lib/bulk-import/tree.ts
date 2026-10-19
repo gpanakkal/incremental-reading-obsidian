@@ -101,3 +101,16 @@ export function treeFiles(entries: readonly TreeEntry[]): TFile[] {
     entry.kind === 'file' ? [entry.file] : treeFiles(entry.entries)
   );
 }
+
+/**
+ * Whether `folder` or any folder under it is still being scanned: what a
+ * collapsed folder's spinner shows, its subfolders' own spinners being hidden.
+ */
+export function subtreeScanning(folder: TreeFolder): boolean {
+  return (
+    folder.scanning ||
+    folder.entries.some(
+      (entry) => entry.kind === 'folder' && subtreeScanning(entry)
+    )
+  );
+}

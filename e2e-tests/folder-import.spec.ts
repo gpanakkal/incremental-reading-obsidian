@@ -380,6 +380,47 @@ test.describe('Importing from a folder', () => {
       ]);
   });
 
+  test('collapsing a folder hides its rows but still imports them', async () => {
+    await setNativeMenus(window, false);
+    await buildNested(window);
+    const folderRow = window.locator(
+      `.nav-folder-title[data-path="${NESTED}"]`
+    );
+    const modal = bulkModal(window);
+    const names = modal.locator('.ir-bulk-import-row .ir-bulk-import-name');
+    const include = modal.locator('label', { hasText: 'Include subfolders' });
+    const alpha = modal.locator('.ir-bulk-import-folder-title').filter({
+      has: window.locator('.ir-bulk-import-name', { hasText: /^Alpha$/ }),
+    });
+    const arrow = alpha.getByRole('button', { name: 'Alpha' });
+    const count = modal.locator('.ir-bulk-import-count');
+
+    await chooseFromMenu(window, folderRow, 'Import from folder…');
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await include.click();
+    await expect(modal.locator('.ir-loading')).toHaveCount(0);
+    await expect(names).toHaveText(['d1', 'a1', 'paper', 'b1', 'root']);
+
+    await arrow.click();
+
+    await expect(arrow).toHaveAttribute('aria-expanded', 'false');
+    await expect(names).toHaveText(['b1', 'root']);
+    await expect(alpha.locator('input[type="checkbox"]')).toBeChecked();
+    await expect(count).toHaveText(/^5\b/);
+    await modal.getByRole('button', { name: 'Import 5' }).click();
+
+    await expect(modal).toHaveCount(0);
+    await expect
+      .poll(() => articlePaths(window))
+      .toEqual([
+        `${NESTED}/Alpha/Deep/d1.md`,
+        `${NESTED}/Alpha/a1.md`,
+        `${NESTED}/Alpha/paper.pdf`,
+        `${NESTED}/Beta/b1.md`,
+        `${NESTED}/root.md`,
+      ]);
+  });
+
   test('opens with subfolders included the way it was last left, across a reload of the plugin', async () => {
     await setNativeMenus(window, false);
     await buildNested(window);

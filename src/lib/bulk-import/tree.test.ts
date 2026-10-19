@@ -1,7 +1,14 @@
 import fc from 'fast-check';
 import { TFile } from 'obsidian';
 import { describe, expect, it } from 'vitest';
-import { buildTree, topLevelScanning, treeFiles, type TreeEntry } from './tree';
+import {
+  buildTree,
+  subtreeScanning,
+  topLevelScanning,
+  treeFiles,
+  type TreeEntry,
+  type TreeFolder,
+} from './tree';
 import type { ScanEvent } from './types';
 
 // #region HELPERS
@@ -375,6 +382,86 @@ describe('treeFiles', () => {
         expect(treeFiles(buildTree(seen)).map((file) => file.path)).toEqual(
           topToBottom(expectedShape(root, rootPath, seen))
         );
+      })
+    );
+  });
+});
+
+describe('subtreeScanning', () => {
+  /**
+   * Folder paths over `a` and `b`, each with its parent folder, and the ones
+   * still being scanned.
+   */
+  const foldersArb = fc
+    .uniqueArray(
+      fc
+        .array(fc.constantFrom('a', 'b'), { minLength: 1, maxLength: 3 })
+        .map((parts) => parts.join('/'))
+    )
+    .map((paths) => {
+      const all = new Set<string>();
+      for (const path of paths) {
+        const parts = path.split('/');
+        parts.forEach((_, i) => all.add(parts.slice(0, i + 1).join('/')));
+      }
+      // Parents before their children, as a source reports them
+      return [...all].sort((x, y) => x.length - y.length);
+    })
+    .chain((paths) =>
+      fc.record({
+        paths: fc.constant(paths),
+        scanning: fc.subarray(paths).map((sub) => new Set(sub)),
+      })
+    );
+
+  const findFolder = (
+    entries: readonly TreeEntry[],
+    path: string
+  ): TreeFolder | undefined => {
+    for (const entry of entries) {
+      if (entry.kind !== 'folder') continue;
+      if (entry.path === path) return entry;
+      const found = findFolder(entry.entries, path);
+      if (found) return found;
+    }
+    return undefined;
+  };
+
+  it('is whether the folder or any folder under it is still being scanned', () => {
+    fc.assert(
+      fc.property(foldersArb, ({ paths, scanning }) => {
+        const parentOf = (path: string) =>
+          path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : null;
+        const events: ScanEvent[] = [
+          ...paths.map(
+            (path): ScanEvent => ({
+              type: 'folder',
+              path,
+              parent: parentOf(path),
+            })
+          ),
+          // A file in each, so no finished folder is left out as empty
+          ...paths.map(
+            (path): ScanEvent => ({
+              type: 'file',
+              file: makeFile(`${path}/f`),
+              parent: path,
+              relativePath: `${path}/f`,
+            })
+          ),
+          ...paths
+            .filter((path) => !scanning.has(path))
+            .map((path): ScanEvent => ({ type: 'folder-done', path })),
+        ];
+        const tree = buildTree(events);
+
+        for (const path of paths) {
+          expect(subtreeScanning(findFolder(tree, path)!)).toBe(
+            [...scanning].some(
+              (other) => other === path || other.startsWith(`${path}/`)
+            )
+          );
+        }
       })
     );
   });

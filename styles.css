@@ -1525,9 +1525,9 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 
 /* Rows are padded and hovered like the Files view's (`.tree-item-self` in
    Obsidian's app.css), from the same `--nav-item-*` tokens, so a theme that
-   restyles one restyles both. Its start padding leaves room for a folder's
-   collapse arrow, which these rows have no use for. A rule in the theme's
-   border colour divides each row from the one above. */
+   restyles one restyles both. Its start padding, which leaves room for a
+   folder's collapse arrow, is only kept in a list that has folders. A rule in
+   the theme's border colour divides each row from the one above. */
 .ir-bulk-import-list .ir-bulk-import-row > label,
 .ir-bulk-import-list .ir-bulk-import-folder-title {
   display: flex;
@@ -1536,6 +1536,51 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
   line-height: var(--line-height-tight);
   padding: var(--nav-item-padding);
   padding-inline-start: var(--size-4-2);
+}
+
+/* A folder's label takes the row's padding, all but the start where its arrow
+   sits, so all of the row but the arrow ticks the folder */
+.ir-bulk-import-list .ir-bulk-import-folder-title {
+  align-items: stretch;
+  padding: 0;
+  padding-inline-start: var(--size-4-1);
+}
+
+.ir-bulk-import-folder-label {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+  padding: var(--nav-item-padding);
+  padding-inline-start: var(--size-4-1);
+}
+
+/* In a tree, a file's box lines up with its sibling folders', past their
+   arrows, as names do in the Files view */
+.ir-bulk-import-list:has(.ir-bulk-import-folder) .ir-bulk-import-row > label {
+  padding-inline-start: var(--size-4-6);
+}
+
+/* The arrow, as wide as the Files view's (`.tree-item-self .tree-item-icon`);
+   its look and turn are Obsidian's `.collapse-icon` rules (see
+   `CollapseButton`). These undo Obsidian's button look, which outranks a
+   lone class; the focus ring is kept. */
+.ir-bulk-import-list
+  .ir-bulk-import-folder-title
+  > button.ir-bulk-import-collapse {
+  flex: none;
+  width: var(--size-4-4);
+  height: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.ir-bulk-import-list
+  .ir-bulk-import-folder-title
+  > button.ir-bulk-import-collapse:not(:focus-visible) {
+  box-shadow: none;
 }
 
 .ir-bulk-import-list > li:first-child > :first-child {
@@ -1602,13 +1647,13 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
   flex: none;
 }
 
-/* A subfolder: its checkbox and name, a small spinner after it while it is
+/* A subfolder: its arrow, checkbox and name, a small spinner after it while it is
    being scanned, and its rows indented below. */
 .ir-bulk-import-list .ir-bulk-import-folder-title {
   font-weight: var(--font-semibold);
 }
 
-.ir-bulk-import-folder-title > .ir-loading {
+.ir-bulk-import-folder-label > .ir-loading {
   flex: none;
   height: auto;
   margin-inline-start: var(--size-4-2);

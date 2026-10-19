@@ -9,6 +9,7 @@ import {
 } from '#/lib/bulk-import/ticks';
 import {
   buildTree,
+  subtreeScanning,
   topLevelScanning,
   treeFiles,
   type TreeEntry,
@@ -20,9 +21,16 @@ import type {
   ScanEvent,
 } from '#/lib/bulk-import/types';
 import { isCopyImportable } from '#/lib/mime';
-import type { TFile } from 'obsidian';
+import { setIcon, type TFile } from 'obsidian';
 import type { ComponentChildren } from 'preact';
-import { useLayoutEffect, useMemo, useReducer, useState } from 'react';
+import {
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
 import { ImportOptionsFields, useImportOptions } from './ImportOptions';
 import { LoadingSpinner } from './LoadingSpinner';
 
@@ -40,6 +48,9 @@ interface TicksOn {
   source: CandidateSource | null;
   ticks: Ticks;
 }
+
+/** No folder collapsed. */
+const NO_PATHS: ReadonlySet<string> = new Set();
 
 /**
  * `ticksReducer` on the ticks set on `source`: a new source starts from
@@ -118,21 +129,107 @@ function FolderBox({
   );
 }
 
-/** The rows of `entries`, folders holding theirs below their names. */
-function TreeRows({
-  entries,
-  unticked,
-  toggle,
-  folderStates,
-  toggleFolder,
-}: {
+interface TreeRowsProps {
   entries: readonly TreeEntry[];
   unticked: ReadonlySet<TFile>;
   toggle: (file: TFile) => void;
   /** What each folder's checkbox shows, by path. */
   folderStates: ReadonlyMap<string, CheckState>;
   toggleFolder: (folder: TreeFolder) => void;
+  /** The paths of the folders collapsed. */
+  collapsed: ReadonlySet<string>;
+  toggleCollapsed: (folder: TreeFolder) => void;
+}
+
+/**
+ * The arrow that collapses and expands a folder, as the Files view draws it:
+ * Obsidian's own `right-triangle` icon in a `collapse-icon`, which its app.css
+ * turns to point right once `is-collapsed` (both undocumented). It sits
+ * outside the folder's label, so it never ticks the folder, and is named by
+ * the folder's name: an `aria-label` would put a tooltip on it, which the
+ * Files view's arrow has none of.
+ */
+function CollapseButton({
+  expanded,
+  nameId,
+  onClick,
+}: {
+  expanded: boolean;
+  nameId: string;
+  onClick: () => void;
 }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    setIcon(ref.current!, 'right-triangle');
+  }, []);
+  return (
+    <button
+      ref={ref}
+      type="button"
+      className={
+        'ir-bulk-import-collapse collapse-icon' +
+        (expanded ? '' : ' is-collapsed')
+      }
+      aria-expanded={expanded}
+      aria-labelledby={nameId}
+      onClick={onClick}
+    />
+  );
+}
+
+/**
+ * A folder's row: its arrow, its checkbox and name, and a spinner while it is
+ * being scanned, then its rows below unless it is collapsed. Collapsed, the
+ * spinner shows while anything under it is being scanned too, the spinners
+ * under it being hidden.
+ */
+function FolderRow({
+  folder,
+  ...props
+}: Omit<TreeRowsProps, 'entries'> & { folder: TreeFolder }) {
+  const { folderStates, toggleFolder, collapsed, toggleCollapsed } = props;
+  // Prefixed: Preact's ids restart at P0-0 in each root, so another root on
+  // the page using useId (another plugin's, say) would hand out the same one
+  const nameId = `ir-bulk-import-${useId()}`;
+  const expanded = !collapsed.has(folder.path);
+  const scanning = expanded ? folder.scanning : subtreeScanning(folder);
+  return (
+    <li className="ir-bulk-import-folder">
+      <div className="ir-bulk-import-folder-title">
+        <CollapseButton
+          expanded={expanded}
+          nameId={nameId}
+          onClick={() => toggleCollapsed(folder)}
+        />
+        <label className="ir-bulk-import-folder-label">
+          <FolderBox
+            state={folderStates.get(folder.path)!}
+            onChange={() => toggleFolder(folder)}
+          />
+          <span
+            id={nameId}
+            className="ir-bulk-import-name"
+            aria-label={folder.name}
+          >
+            {folder.name}
+          </span>
+          {scanning && (
+            <LoadingSpinner label={`Finding files in ${folder.name}`} />
+          )}
+        </label>
+      </div>
+      {expanded && (
+        <ul className="ir-bulk-import-children">
+          <TreeRows entries={folder.entries} {...props} />
+        </ul>
+      )}
+    </li>
+  );
+}
+
+/** The rows of `entries`, folders holding theirs below their names. */
+function TreeRows({ entries, ...props }: TreeRowsProps) {
+  const { unticked, toggle } = props;
   return (
     <>
       {entries.map((entry) =>
@@ -164,29 +261,7 @@ function TreeRows({
             </label>
           </li>
         ) : (
-          <li key={entry.path} className="ir-bulk-import-folder">
-            <label className="ir-bulk-import-folder-title">
-              <FolderBox
-                state={folderStates.get(entry.path)!}
-                onChange={() => toggleFolder(entry)}
-              />
-              <span className="ir-bulk-import-name" aria-label={entry.name}>
-                {entry.name}
-              </span>
-              {entry.scanning && (
-                <LoadingSpinner label={`Finding files in ${entry.name}`} />
-              )}
-            </label>
-            <ul className="ir-bulk-import-children">
-              <TreeRows
-                entries={entry.entries}
-                unticked={unticked}
-                toggle={toggle}
-                folderStates={folderStates}
-                toggleFolder={toggleFolder}
-              />
-            </ul>
-          </li>
+          <FolderRow key={entry.path} folder={entry} {...props} />
         )
       )}
     </>
@@ -232,7 +307,10 @@ export interface BulkImportModalContentProps {
  * Each folder has a checkbox too: ticked while all the files under it are,
  * unticked while none are, partly filled otherwise. Clicking it ticks all of
  * them, or unticks them all once all are ticked, and a file found later is
- * ticked as its folder is (see `ticksReducer`).
+ * ticked as its folder is (see `ticksReducer`). Each folder starts expanded,
+ * and its arrow collapses it: that hides its rows and nothing more, so the
+ * ticks, the count and the import still cover them, rows found under it
+ * included.
  */
 export function BulkImportModalContent({
   source,
@@ -272,6 +350,20 @@ export function BulkImportModalContent({
   }, [source, tree]);
   const unticked = useMemo(() => untickedFiles(ticks), [ticks]);
   const states = useMemo(() => folderStates(ticks, tree), [ticks, tree]);
+  // The folders collapsed, for the source they were collapsed on, like the
+  // ticks: a new source starts with every folder expanded
+  const [collapsedOn, setCollapsedOn] = useState<{
+    source: CandidateSource | null;
+    paths: ReadonlySet<string>;
+  }>(() => ({ source, paths: NO_PATHS }));
+  const collapsed =
+    collapsedOn.source === source ? collapsedOn.paths : NO_PATHS;
+  const toggleCollapsed = (folder: TreeFolder) =>
+    setCollapsedOn((prev) => {
+      const next = new Set(prev.source === source ? prev.paths : NO_PATHS);
+      if (!next.delete(folder.path)) next.add(folder.path);
+      return { source, paths: next };
+    });
   const { values, update, current } = useImportOptions({
     priority: defaults.priority,
     intervalDays: null,
@@ -346,6 +438,8 @@ export function BulkImportModalContent({
           toggle={toggle}
           folderStates={states}
           toggleFolder={toggleFolder}
+          collapsed={collapsed}
+          toggleCollapsed={toggleCollapsed}
         />
         {source && topScanning && (
           <li>

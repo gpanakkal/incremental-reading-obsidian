@@ -332,6 +332,39 @@ describe('FilteredBulkImport', () => {
     expect(selectedCount(container)).toBe(1);
   });
 
+  it('expands every folder again on a new source, though its folders have the same paths', async () => {
+    /** A fresh source on each pick, listing `Sub` and a file in it. */
+    const sourceFor = (folder: TFolder): CandidateSource => ({
+      title: folder.path,
+      canIncludeSubfolders: true,
+      async *scan() {
+        const sub = `${folder.path}/Sub`;
+        const file = makeFile(`${sub}/a.md`);
+        yield { type: 'folder', path: sub, parent: folder.path };
+        yield { type: 'folder-done', path: folder.path };
+        yield { type: 'file', file, parent: sub, relativePath: 'Sub/a.md' };
+        yield { type: 'folder-done', path: sub };
+      },
+    });
+    const { segment, made } = folderSegment(['notes', 'other'], sourceFor);
+    const { container } = mount([segment]);
+    const arrow = () =>
+      container.querySelector<HTMLButtonElement>(
+        '.ir-bulk-import-folder-title > button.ir-bulk-import-collapse'
+      )!;
+    await chooseFolder(container, 'notes');
+    await act(() => arrow().click());
+    expect(arrow().getAttribute('aria-expanded')).toBe('false');
+    expect(rows(container)).toHaveLength(0);
+
+    await chooseFolder(container, 'other');
+    await chooseFolder(container, 'notes');
+
+    expect(made).toHaveBeenCalledTimes(3);
+    expect(arrow().getAttribute('aria-expanded')).toBe('true');
+    expect(rows(container)).toHaveLength(1);
+  });
+
   it('confirms the ticked rows with the source they came from', async () => {
     const files = [makeFile('notes/a.md'), makeFile('notes/b.md')];
     const chosen = makeSource('notes', files);
