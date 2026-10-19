@@ -66,11 +66,11 @@ function useScan(source: CandidateSource, subfolders: boolean): ScanState {
 }
 
 /**
- * A folder's checkbox: ticked, unticked, or partly filled. A browser draws
- * the partial state for `indeterminate`, but Obsidian's checkboxes draw
- * nothing of the browser's; its app.css draws its own dash for an unchecked
- * box with `data-indeterminate="true"` (undocumented; set the same way on
- * the Properties view's checkboxes), so the box carries both.
+ * A folder's checkbox: ticked, unticked, or partly filled. `indeterminate`
+ * gives the partial state its meaning, but Obsidian's checkboxes draw
+ * nothing of the browser's; `ir-partial` fills the box's left half instead
+ * (styles.css). Obsidian's own dash for `data-indeterminate="true"` reads as
+ * a collapse arrow next to a folder name, so the box never carries it.
  */
 function FolderBox({
   state,
@@ -85,7 +85,7 @@ function FolderBox({
       type="checkbox"
       checked={state === 'checked'}
       indeterminate={partial}
-      data-indeterminate={partial}
+      className={partial ? 'ir-partial' : undefined}
       onChange={onChange}
     />
   );

@@ -1118,12 +1118,12 @@ describe('BulkImportModal: Include subfolders', () => {
 
   /**
    * What a folder's checkbox shows. Partial is `indeterminate` and unchecked,
-   * with the attribute Obsidian's own partial fill is drawn for.
+   * with the class its half fill is drawn for and never the attribute
+   * Obsidian draws its dash for.
    */
   const boxState = (box: HTMLInputElement) => {
-    expect(box.getAttribute('data-indeterminate') === 'true').toBe(
-      box.indeterminate
-    );
+    expect(box.classList.contains('ir-partial')).toBe(box.indeterminate);
+    expect(box.hasAttribute('data-indeterminate')).toBe(false);
     if (box.indeterminate) {
       expect(box.checked).toBe(false);
       return 'partial';

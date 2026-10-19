@@ -1555,11 +1555,33 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 }
 
 /* The gap a checklist leaves after its box in reading view
-   (`.markdown-preview-view .task-list-item-checkbox`). A folder's partial
-   state is Obsidian's own: see `FolderBox`. */
+   (`.markdown-preview-view .task-list-item-checkbox`). */
 .ir-bulk-import-row input[type='checkbox'],
 .ir-bulk-import-folder-title input[type='checkbox'] {
   margin-inline-end: 0.6em;
+}
+
+/* A partly ticked folder: the left half in the colour a ticked box is
+   filled with, the right half empty, inside the box's own border and radius.
+   `--checkbox-color` and `--checkbox-color-hover` are the undocumented
+   tokens Obsidian's app.css paints `input[type=checkbox]:checked` with; they
+   follow the theme's accent. */
+.ir-bulk-import-folder-title input[type='checkbox'].ir-partial {
+  background-image: linear-gradient(
+    to right,
+    var(--checkbox-color) 50%,
+    transparent 50%
+  );
+}
+
+@media (hover: hover) {
+  .ir-bulk-import-folder-title input[type='checkbox'].ir-partial:hover {
+    background-image: linear-gradient(
+      to right,
+      var(--checkbox-color-hover) 50%,
+      transparent 50%
+    );
+  }
 }
 
 /* A file's type, uppercase and faint at the row's end, comes from Obsidian's

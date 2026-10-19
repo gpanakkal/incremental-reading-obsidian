@@ -366,6 +366,7 @@ test.describe('Importing from a folder', () => {
 
     await expect(folderBox('Deep')).toBeChecked();
     await expect(folderBox('Alpha')).toHaveJSProperty('indeterminate', true);
+    await expect(folderBox('Alpha')).toContainClass('ir-partial');
     await expect(count).toHaveText(/^3\b/);
     await modal.getByRole('button', { name: 'Import 3' }).click();
 
