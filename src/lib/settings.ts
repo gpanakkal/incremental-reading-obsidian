@@ -159,8 +159,7 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   reviewReminders: true,
   remindDueArticles: true,
   remindDueSnippets: true,
-  // Off: it changes notes in the vault without being asked each time
-  autoImportOnTag: false,
+  autoImportOnTag: true,
   autoImportTags: [AUTO_IMPORT_TAG],
   // Not `inherit`: turning on `copyOnImport` mustn't start copying clippings
   autoImportMode: 'inPlace',
