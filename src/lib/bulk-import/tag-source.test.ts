@@ -4,7 +4,7 @@ import { parseTagList } from '#/lib/tags';
 import fc from 'fast-check';
 import { TFile, TFolder, type CachedMetadata } from 'obsidian';
 import { describe, expect, it, vi } from 'vitest';
-import type { CandidateChecks } from './candidates';
+import { unimportChecks, type CandidateChecks } from './candidates';
 import { listSource } from './list-source';
 import { tagListText, tagSource } from './tag-source';
 import type { ScanEvent } from './types';
@@ -182,6 +182,46 @@ describe('tagSource', () => {
     expect(
       events.flatMap((event) => (event.type === 'file' ? [event.file] : []))
     ).toEqual([files[0]]);
+  });
+
+  it('lists, for an un-import, the tagged notes that are live articles alone, reading none', async () => {
+    const { files, vault, checks } = makeVault([
+      {
+        dirs: [],
+        name: 'plain',
+        frontmatter: { tags: 'read' },
+        inline: undefined,
+      },
+      {
+        dirs: [],
+        name: 'article',
+        frontmatter: { tags: 'read', 'ir-id': 'id' },
+        inline: undefined,
+      },
+      {
+        dirs: [],
+        name: 'untagged',
+        frontmatter: { 'ir-id': 'id2' },
+        inline: undefined,
+      },
+    ]);
+    const articles = new Set<TFile>([files[1], files[2]]);
+
+    const events = await scan(
+      tagSource(
+        ['read'],
+        vault,
+        unimportChecks(checks, {
+          articleIdAt: (file) => (articles.has(file) ? 'id' : null),
+        }),
+        explorerComparator('alphabetical')
+      )
+    );
+
+    expect(
+      events.flatMap((event) => (event.type === 'file' ? [event.file] : []))
+    ).toEqual([files[1]]);
+    expect(checks.app.vault.readBinary).not.toHaveBeenCalled();
   });
 
   it('looks only at the vault’s notes, once, when made', () => {

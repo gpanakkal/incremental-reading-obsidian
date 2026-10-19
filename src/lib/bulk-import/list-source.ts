@@ -2,7 +2,7 @@ import type { ExplorerComparator } from '#/lib/explorer-order';
 import type { TFile, TFolder } from 'obsidian';
 import {
   inDataDirectory,
-  isImportCandidate,
+  isCandidate,
   type CandidateChecks,
 } from './candidates';
 import type { CandidateSource, ScanEvent } from './types';
@@ -85,8 +85,9 @@ export function arrangeList(
 
 /**
  * The files of a list known up front, a tag's or a search's matches, laid
- * out as {@link arrangeList} lays them out, with only those that can be
- * imported (`isImportCandidate`) listed: each file checked once the one
+ * out as {@link arrangeList} lays them out, with only those that pass
+ * `checks` (`isCandidate`: those that can be imported, or for an un-import
+ * live articles) listed: each file checked once the one
  * before it has been, so its row shows as soon as it passes. A folder shows
  * whether or not anything in it passes; the dialog leaves out one that ends
  * up empty. As the folder source does, it checks a file once for its life.
@@ -107,7 +108,7 @@ export function listSource(
   const verdict = (file: TFile) => {
     let known = verdicts.get(file);
     if (!known) {
-      known = isImportCandidate(file, checks).catch((error: unknown) => {
+      known = isCandidate(file, checks).catch((error: unknown) => {
         // A file that can't be read hides only itself
         console.error(error);
         return false;

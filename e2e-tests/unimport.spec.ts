@@ -11,6 +11,7 @@ import {
   chooseFromMenu as chooseMenuEntry,
   closeMenu,
   executeCommandById,
+  expectExtractSettled,
   finalizeArticleImport,
   openMenuWith,
   openNote,
@@ -350,4 +351,162 @@ test('keeps the queue row when the un-import from it is turned down', async () =
   await expect(queueRow()).toHaveCount(1);
   expect(await noteText()).toMatch(/^ir-id: /m);
   expect(await articleCount()).toBe(before + 1);
+});
+
+test.describe('Un-importing from a folder', () => {
+  /** The test vault's folder of plain notes, and what it holds. */
+  const SOURCES = 'sources';
+  const SOURCE_NOTES = [
+    'Curse of dimensionality - Wikipedia.md',
+    'Memorizing a programming language using spaced repetition software.md',
+    'Security Principles.md',
+  ];
+  /** The note a snippet is taken from, and the snippet's text. */
+  const PARENT = `${SOURCES}/Security Principles.md`;
+  const SNIPPET = 'Security has become a buzzword';
+
+  /**
+   * What the page-side calls below reach. Unofficial: `window.app`,
+   * `app.plugins.plugins` and the active editor's `editor`.
+   */
+  type SnippetApp = PageApp & {
+    workspace: {
+      activeEditor: {
+        editor: {
+          getValue(): string;
+          offsetToPos(offset: number): unknown;
+          setSelection(from: unknown, to: unknown): void;
+        };
+      };
+    };
+  };
+
+  /** The live articles in `SOURCES`, by path, sorted. */
+  const sourceArticles = () =>
+    window.evaluate(async (folder) => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      const rows = await repo.query(
+        'SELECT reference FROM article WHERE deleted = FALSE ORDER BY reference'
+      );
+      return rows
+        .map((row) => row.reference as string)
+        .filter((reference) => reference.startsWith(`${folder}/`));
+    }, SOURCES);
+
+  /**
+   * The snippet made last, the one taken from `PARENT`: live or not, its
+   * parent's id, and where that parent's note is.
+   */
+  const snippet = () =>
+    window.evaluate(async () => {
+      const { app } = window as unknown as { app: PageApp };
+      const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+      const [row] = await repo.query(
+        `SELECT s.deleted AS deleted, s.parent AS parent, a.reference AS of
+           FROM snippet s LEFT JOIN article a ON a.id = s.parent
+           ORDER BY s.rowid DESC LIMIT 1`
+      );
+      return row
+        ? {
+            live: !row.deleted,
+            parent: (row.parent as string | null) ?? null,
+            of: (row.of as string | null) ?? null,
+          }
+        : null;
+    });
+
+  /** The bulk dialog. */
+  const bulkModal = () =>
+    window.locator('.modal').filter({ has: window.locator('.ir-bulk-import') });
+
+  /** `SOURCES`' row in Files. */
+  const folderRow = () =>
+    window.locator(`.nav-folder-title[data-path="${SOURCES}"]`);
+
+  /** The queue's rows showing `text`. */
+  const queueRows = (text: string) =>
+    window.locator('.ir-queue-row').filter({ hasText: text });
+
+  /** Take `SNIPPET` from `PARENT`, open in the active tab. */
+  async function extractSnippet() {
+    await openNote(window, PARENT);
+    await window.evaluate((text) => {
+      const { editor } = (window as unknown as { app: SnippetApp }).app
+        .workspace.activeEditor;
+      const at = editor.getValue().indexOf(text);
+      editor.setSelection(
+        editor.offsetToPos(at),
+        editor.offsetToPos(at + text.length)
+      );
+    }, SNIPPET);
+    await executeCommandById(window, 'incremental-reading:extract-selection');
+    await expectExtractSettled(window, PARENT, 1);
+  }
+
+  test('un-imports what a folder import made, keeping the snippet taken from it, which importing the note again adopts', async () => {
+    // Import the folder
+    await chooseFromMenu(folderRow(), 'Import from folder…');
+    await expect(bulkModal().locator('.ir-loading')).toHaveCount(0);
+    await expect(bulkModal().locator('.ir-bulk-import-row')).toHaveCount(
+      SOURCE_NOTES.length
+    );
+    await bulkModal().locator('button.mod-cta').click();
+    await expect(bulkModal()).toHaveCount(0);
+    await expect
+      .poll(sourceArticles)
+      .toEqual(SOURCE_NOTES.map((name) => `${SOURCES}/${name}`));
+
+    await extractSnippet();
+    const taken = await snippet();
+    expect(taken).toMatchObject({ live: true, of: PARENT });
+    await executeCommandById(window, 'incremental-reading:learn');
+    await expect(queueRows('Curse of dimensionality')).toHaveCount(1);
+    await expect(queueRows(SNIPPET)).toHaveCount(1);
+
+    // Un-import it again, listing only its articles
+    await chooseFromMenu(folderRow(), 'Un-import from folder…');
+    await expect(bulkModal().locator('.ir-loading')).toHaveCount(0);
+    await expect(
+      bulkModal().locator('.ir-bulk-import-row .ir-bulk-import-name')
+    ).toHaveText(SOURCE_NOTES.map((name) => name.replace(/\.md$/, '')));
+    await bulkModal().locator('button.mod-warning').click();
+    await answer('Un-import');
+
+    await expect(bulkModal()).toHaveCount(0);
+    await expect(
+      window.locator('.notice', { hasText: '3 of 3' }).filter({
+        hasText: SOURCES,
+      })
+    ).toBeVisible();
+    await expect.poll(sourceArticles).toEqual([]);
+    await expect(queueRows('Curse of dimensionality')).toHaveCount(0);
+    await expect(queueRows('Memorizing a programming')).toHaveCount(0);
+    // Still reviewing, taken from nothing now
+    await expect(queueRows(SNIPPET)).toHaveCount(1);
+    expect(await snippet()).toEqual({ live: true, parent: null, of: null });
+    for (const name of SOURCE_NOTES) {
+      const text = await fs.readFile(
+        path.join(vaultPath, SOURCES, name),
+        'utf-8'
+      );
+      expect(text).not.toMatch(/ir-id/);
+      expect(text).not.toContain(ARTICLE_TAG);
+    }
+
+    // Imported again, the note takes its snippet back
+    await openNote(window, PARENT);
+    const noteRow = window.locator(`.nav-file-title[data-path="${PARENT}"]`);
+    const folderItem = folderRow().locator('xpath=..');
+    if (
+      await folderItem.evaluate((el) => el.classList.contains('is-collapsed'))
+    ) {
+      await folderRow().click();
+    }
+    await chooseFromMenu(noteRow, 'Import article');
+    await finalizeArticleImport(window);
+
+    await expect.poll(sourceArticles).toEqual([PARENT]);
+    await expect.poll(snippet).toMatchObject({ live: true, of: PARENT });
+  });
 });

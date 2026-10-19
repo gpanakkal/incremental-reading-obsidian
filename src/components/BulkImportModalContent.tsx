@@ -17,6 +17,7 @@ import {
 } from '#/lib/bulk-import/tree';
 import type {
   BulkImportOptions,
+  BulkMode,
   CandidateSource,
   ScanEvent,
 } from '#/lib/bulk-import/types';
@@ -270,6 +271,12 @@ function TreeRows({ entries, ...props }: TreeRowsProps) {
 
 export interface BulkImportModalContentProps {
   /**
+   * What confirming does with the ticked files, `'import'` unless said: an
+   * un-import has no options, a line saying what it does in their place, and
+   * its button warns.
+   */
+  mode?: BulkMode;
+  /**
    * Where the files come from; `null` lists nothing, until a filter above
    * makes a source. A new source scans afresh, every row ticked again.
    */
@@ -287,7 +294,10 @@ export interface BulkImportModalContentProps {
   defaults: { priority: number; makeCopy: boolean; includeSubfolders: boolean };
   /** "Include subfolders" was switched to `on`. */
   onIncludeSubfoldersChange: (on: boolean) => void;
-  /** Import `files`, the ticked rows in the order listed, with `options`. */
+  /**
+   * Import `files`, the ticked rows in the order listed, with `options`; or
+   * un-import them, `options` being the defaults then, there for no use.
+   */
   onConfirm: (files: TFile[], options: BulkImportOptions) => void;
   onCancel: () => void;
 }
@@ -311,8 +321,12 @@ export interface BulkImportModalContentProps {
  * and its arrow collapses it: that hides its rows and nothing more, so the
  * ticks, the count and the import still cover them, rows found under it
  * included.
+ *
+ * In `'unimport'` mode, a line saying what un-importing does stands where the
+ * options would, and the button reads `Un-import N`, styled as a warning.
  */
 export function BulkImportModalContent({
+  mode = 'import',
   source,
   defaults,
   onConfirm,
@@ -411,25 +425,34 @@ export function BulkImportModalContent({
     </div>
   );
 
+  const unimporting = mode === 'unimport';
+
   return (
     <div className="ir-scheduling-modal ir-bulk-import">
       {renderFilterBar?.(subfoldersToggle)}
-      <div
-        className="ir-bulk-import-options"
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            confirm();
-          }
-        }}
-      >
-        <ImportOptionsFields
-          values={values}
-          update={update}
-          canCopy={canCopy}
-          initialInterval={null}
-        />
-      </div>
+      {unimporting ? (
+        <div className="ir-bulk-import-explanation">
+          Removes these articles and their review history. Notes stay in place;
+          their snippets and cards keep reviewing.
+        </div>
+      ) : (
+        <div
+          className="ir-bulk-import-options"
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              confirm();
+            }
+          }}
+        >
+          <ImportOptionsFields
+            values={values}
+            update={update}
+            canCopy={canCopy}
+            initialInterval={null}
+          />
+        </div>
+      )}
       {!renderFilterBar && canGoDeeper && subfoldersToggle}
       <ul className="ir-bulk-import-list">
         <TreeRows
@@ -443,27 +466,39 @@ export function BulkImportModalContent({
         />
         {source && topScanning && (
           <li>
-            <LoadingSpinner label="Finding files to import" />
+            <LoadingSpinner
+              label={
+                unimporting
+                  ? 'Finding articles to un-import'
+                  : 'Finding files to import'
+              }
+            />
           </li>
         )}
       </ul>
       {!source && (
         <div className="ir-bulk-import-prompt">
-          Choose what to import above to list its files
+          {unimporting
+            ? 'Choose what to un-import above to list its articles'
+            : 'Choose what to import above to list its files'}
         </div>
       )}
       {scan.done && files.length === 0 && (
-        <div className="ir-bulk-import-empty">No files to import here</div>
+        <div className="ir-bulk-import-empty">
+          {unimporting
+            ? 'No articles to un-import here'
+            : 'No files to import here'}
+        </div>
       )}
       <div className="ir-bulk-import-count">{ticked.length} selected</div>
       <div className="modal-button-container">
         <button onClick={onCancel}>Cancel</button>
         <button
-          className="mod-cta"
+          className={unimporting ? 'mod-warning' : 'mod-cta'}
           disabled={ticked.length === 0}
           onClick={confirm}
         >
-          Import {ticked.length}
+          {unimporting ? 'Un-import' : 'Import'} {ticked.length}
         </button>
       </div>
     </div>

@@ -5136,6 +5136,79 @@ describe('ReviewManager.referencesUnder', () => {
   });
 });
 
+describe('ReviewManager.hasArticleUnder', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  it('is true while a live article row names a path at any depth in the folder, the vault holding every one, and no snippet or card counts', () => {
+    const tables = ['article', 'snippet', 'srs_card'] as const;
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(
+          fc.record({
+            path: pathArb,
+            table: fc.constantFrom(...tables),
+            deleted: fc.boolean(),
+          }),
+          { selector: ({ path }) => path, maxLength: 8 }
+        ),
+        fc.oneof(pathArb, fc.constantFrom('a', 'a/b', '/')),
+        (rows, folder) => {
+          const wired = wireRenames({});
+          rows.forEach(({ path, table, deleted }, i) => {
+            wired.insert(table, `row-${i}`, path);
+            if (deleted) {
+              wired.repo.mutate(
+                `UPDATE ${table} SET deleted = TRUE WHERE id = $1`,
+                [`row-${i}`]
+              );
+            }
+          });
+
+          expect(wired.manager.hasArticleUnder(folder)).toBe(
+            rows.some(
+              ({ path, table, deleted }) =>
+                table === 'article' &&
+                !deleted &&
+                (folder === '/' || path.startsWith(`${folder}/`))
+            )
+          );
+        }
+      ),
+      {
+        // Random paths seldom land in the folder asked about; these always
+        // ask about one with an article in it, at depth, and about its
+        // siblings, `a0` sorting just past `a/`
+        examples: [
+          [[{ path: 'a/b/c.md', table: 'article', deleted: false }], 'a'],
+          [[{ path: 'a/b/c.md', table: 'article', deleted: false }], 'a/b'],
+          [
+            [
+              { path: 'a0/c.md', table: 'article', deleted: false },
+              { path: 'a', table: 'article', deleted: false },
+              { path: 'a.md', table: 'article', deleted: false },
+            ],
+            'a',
+          ],
+        ],
+      }
+    );
+  });
+
+  it("answers false for a repository that can't answer at once, which a menu can't wait on", () => {
+    const repo = makeRepo();
+    (repo.query as ReturnType<typeof vi.fn>).mockResolvedValue([{ 1: 1 }]);
+    const manager = new ReviewManager(makePlugin(), repo);
+
+    expect(manager.hasArticleUnder('notes')).toBe(false);
+    expect(manager.hasArticleUnder('/')).toBe(false);
+  });
+});
+
 describe('ReviewManager.handleCreation reports an item arriving where its path breaks links', () => {
   beforeAll(async () => {
     const wasmBinary = readFileSync(

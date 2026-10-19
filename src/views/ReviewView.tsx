@@ -1030,6 +1030,23 @@ export default class ReviewView extends FileView {
    * `.setSection('pane')`, and they join the top group in the order written.
    */
   addViewMenuItems(menu: Menu): void {
+    if (
+      this.plugin.store.getState().page === 'home' &&
+      // Only while there is an article to un-import; sql.js answers at once
+      this.plugin.reviewManager.hasArticleUnder('/')
+    ) {
+      // Beside the home screen's own "Bulk import…" button, the way back out
+      menu.addItem((item) =>
+        item
+          .setTitle('Bulk un-import…')
+          .setIcon('lucide-file-x')
+          .setSection('pane')
+          .onClick(() => {
+            this.plugin.openBulkUnimport();
+          })
+      );
+    }
+
     const file = this.currentItemFile();
     if (!file) return;
 

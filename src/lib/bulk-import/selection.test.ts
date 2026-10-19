@@ -3,10 +3,15 @@ import { explorerComparator } from '#/lib/explorer-order';
 import fc from 'fast-check';
 import { TFile, TFolder, type TAbstractFile } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { folderSource, type CandidateChecks } from './candidates';
+import {
+  folderSource,
+  unimportChecks,
+  type CandidateChecks,
+} from './candidates';
 import {
   itemCount,
   selectionMayImport,
+  selectionMayUnimport,
   selectionRoots,
   selectionSource,
 } from './selection';
@@ -315,6 +320,36 @@ describe('selectionMayImport', () => {
           )
         );
       })
+    );
+  });
+});
+
+describe('selectionMayUnimport', () => {
+  it('is true for a selection holding a live article, or a folder with one under it, asking each item only what fits it', () => {
+    fc.assert(
+      fc.property(
+        selectionCaseArb.chain((vault) =>
+          fc
+            .subarray(vault.selection.map(({ path }) => path))
+            .map((marked) => ({ ...vault, marked: new Set(marked) }))
+        ),
+        ({ selection, marked }) => {
+          const isArticle = vi.fn((file: TFile) => marked.has(file.path));
+          const hasArticleUnder = vi.fn((folder: TFolder) =>
+            marked.has(folder.path)
+          );
+
+          expect(
+            selectionMayUnimport(selection, { isArticle, hasArticleUnder })
+          ).toBe(selection.some(({ path }) => marked.has(path)));
+          for (const [file] of isArticle.mock.calls) {
+            expect(file).toBeInstanceOf(TFile);
+          }
+          for (const [folder] of hasArticleUnder.mock.calls) {
+            expect(folder).toBeInstanceOf(TFolder);
+          }
+        }
+      )
     );
   });
 });
@@ -664,6 +699,45 @@ describe('selectionSource', () => {
           if (readsWhenAborted !== null) {
             expect(readBinary.mock.calls).toHaveLength(readsWhenAborted);
           }
+        }
+      )
+    );
+  });
+});
+
+describe('selectionSource with unimportChecks', () => {
+  it('lists the selected files the item layer names live articles, and no other, in the Files-view order', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        selectionCaseArb.chain((vault) =>
+          fc
+            .subarray(vault.selection.map(({ path }) => path))
+            .map((marked) => ({ ...vault, marked: new Set(marked) }))
+        ),
+        async ({ selection, specs, order, marked }) => {
+          const files = selectionRoots(selection).filter(
+            (entry): entry is TFile => entry instanceof TFile
+          );
+          const { checks, readBinary } = makeChecks(specs);
+          const articleIdAt = (file: TFile) =>
+            marked.has(file.path) ? 'id' : null;
+
+          const events = await collect(
+            selectionSource(
+              files,
+              unimportChecks(checks, { articleIdAt }),
+              explorerComparator(order)
+            ).scan(new AbortController().signal)
+          );
+
+          expect(
+            events.flatMap((e) => (e.type === 'file' ? [e.file] : []))
+          ).toEqual(
+            [...files]
+              .sort(explorerComparator(order))
+              .filter(({ path }) => marked.has(path))
+          );
+          expect(readBinary).not.toHaveBeenCalled();
         }
       )
     );

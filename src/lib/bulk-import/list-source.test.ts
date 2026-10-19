@@ -6,7 +6,7 @@ import {
 import fc from 'fast-check';
 import { TFile, TFolder } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CandidateChecks } from './candidates';
+import { unimportChecks, type CandidateChecks } from './candidates';
 import { arrangeList, listSource } from './list-source';
 import { buildTree, type TreeEntry } from './tree';
 import type { ScanEvent } from './types';
@@ -350,6 +350,41 @@ describe('listSource', () => {
           )
         );
       })
+    );
+  });
+
+  it('lists, for an un-import, the files of the arrangement that are live articles alone, reading none', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        specsArb,
+        compareArb,
+        fc.array(fc.boolean(), { minLength: 1 }),
+        async (specs, compare, picks) => {
+          const { files, specOf } = makeVault(specs);
+          const { checks, readBinary } = makeChecks(specOf);
+          const articles = new Set(
+            files.filter((_, i) => picks[i % picks.length])
+          );
+
+          const events = await collect(
+            listSource(
+              files,
+              unimportChecks(checks, {
+                articleIdAt: (file) => (articles.has(file) ? 'id' : null),
+              }),
+              compare,
+              'title'
+            ).scan(new AbortController().signal)
+          );
+
+          expect(events).toEqual(
+            arrangeList(files, compare).filter(
+              (event) => event.type !== 'file' || articles.has(event.file)
+            )
+          );
+          expect(readBinary).not.toHaveBeenCalled();
+        }
+      )
     );
   });
 

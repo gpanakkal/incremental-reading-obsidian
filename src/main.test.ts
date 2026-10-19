@@ -50,7 +50,11 @@ import { LeftoverWatch } from '#/views/LeftoverModal';
 // The Vitest alias points `obsidian` at this same file, so the `Menu` built
 // here is the one the plugin fills — importing it by path is what gives TS the
 // stub's recorded `items`, which the real class does not expose.
-import type { FilterSources, ScanEvent } from '#/lib/bulk-import/types';
+import type {
+  CandidateSource,
+  FilterSources,
+  ScanEvent,
+} from '#/lib/bulk-import/types';
 import {
   getIconIds,
   Menu,
@@ -134,16 +138,19 @@ function makeReceiver({
   imported = true,
   frontmatter = undefined as Record<string, unknown> | undefined,
   articleId = null as string | null,
+  articlesUnder = false,
 } = {}) {
   const importArticle = vi.fn();
   const goToContext = vi.fn().mockResolvedValue(undefined);
   // The id of the live article the file is, if any
   const articleIdAt = vi.fn((_file: TFile): string | null => articleId);
+  // Whether a live article is in a folder, any folder
+  const hasArticleUnder = vi.fn((_folder: string) => articlesUnder);
   const receiver = {
     settings: { showAdvancedImportMenuItems: advanced },
     // Truthy stands for a plugin that finished loading; the menu is suppressed
     // until then, since importing needs the manager.
-    reviewManager: imported ? { articleIdAt } : undefined,
+    reviewManager: imported ? { articleIdAt, hasArticleUnder } : undefined,
     app: {
       vault: { getFileByPath: vi.fn(() => file) },
       // The cached frontmatter of `file`, and of nothing else.
@@ -155,9 +162,17 @@ function makeReceiver({
     },
     importArticle,
     importFromFolder: vi.fn(),
+    unimportFromFolder: vi.fn(),
     actions: { goToContext },
   };
-  return { receiver, importArticle, goToContext, articleIdAt, file };
+  return {
+    receiver,
+    importArticle,
+    goToContext,
+    articleIdAt,
+    hasArticleUnder,
+    file,
+  };
 }
 
 /**
@@ -1196,20 +1211,37 @@ describe('IncrementalReadingPlugin.addIRMenuItems', () => {
     });
   });
 
-  it('offers to import from a folder, and nothing else there', () => {
+  it('offers to import from a folder, and to un-import from it only while a live article is under it', () => {
     fc.assert(
-      fc.property(fc.boolean(), (advanced) => {
-        const { receiver } = makeReceiver({ advanced, file: null });
+      fc.property(fc.boolean(), fc.boolean(), (advanced, articlesUnder) => {
+        const { receiver, hasArticleUnder } = makeReceiver({
+          advanced,
+          articlesUnder,
+          file: null,
+        });
         const folder = makeFolder('notes/reading');
 
         const menu = raiseMenu(receiver, undefined, folder);
 
-        expect(iconsOf(menu)).toEqual(importsOnly(1));
-        expect(menu.items[0]?.section).toBe('incremental-reading');
+        expect(iconsOf(menu)).toEqual([
+          PLUGIN_ICON,
+          ...(articlesUnder ? ['lucide-folder-x'] : []),
+        ]);
+        expect(hasArticleUnder).toHaveBeenCalledExactlyOnceWith(folder.path);
+        for (const item of menu.items) {
+          expect(item.section).toBe('incremental-reading');
+        }
         click(menu.items[0]);
         expect(receiver.importFromFolder).toHaveBeenCalledExactlyOnceWith(
           folder
         );
+        expect(receiver.unimportFromFolder).not.toHaveBeenCalled();
+        if (!articlesUnder) return;
+        click(menu.items[1]);
+        expect(receiver.unimportFromFolder).toHaveBeenCalledExactlyOnceWith(
+          folder
+        );
+        expect(receiver.importFromFolder).toHaveBeenCalledOnce();
       })
     );
   });
@@ -2114,6 +2146,48 @@ describe('IncrementalReadingPlugin.addSelectionMenuItems', () => {
     );
   });
 
+  it('offers to un-import the selection, counting as the import does, only when it holds a live article or a folder with one under it', () => {
+    fc.assert(
+      fc.property(
+        selectionArb,
+        fc.subarray(pool.map(({ path }) => path)),
+        (files, articles) => {
+          const { receiver, articleIdAt, hasArticleUnder } = makeReceiver();
+          // A file is an article, a folder has one under it, as `articles` says
+          articleIdAt.mockImplementation((file) =>
+            articles.includes(file.path) ? 'x' : null
+          );
+          hasArticleUnder.mockImplementation((path) => articles.includes(path));
+          const wired = { ...receiver, unimportSelection: vi.fn() };
+          const paths = [...new Set(files.map((file) => file.path))];
+          const kept = paths.filter(
+            (path) =>
+              path !== DATA_DIRECTORY &&
+              !path.startsWith(`${DATA_DIRECTORY}/`) &&
+              !paths.some((other) => path.startsWith(`${other}/`))
+          );
+          const offered = kept.some((path) => articles.includes(path));
+
+          const menu = raiseSelectionMenu(wired, files);
+
+          const entry = menu.items.find(({ icon }) => icon === 'lucide-file-x');
+          if (!offered) {
+            expect(entry).toBeUndefined();
+            return;
+          }
+          // After the import, which an article's type always allows
+          expect(menu.items.at(-1)).toBe(entry);
+          expect(entry?.section).toBe('incremental-reading');
+          expect(entry?.title).toContain(` ${kept.length} `);
+          click(entry);
+          expect(wired.unimportSelection).toHaveBeenCalledExactlyOnceWith(
+            files
+          );
+        }
+      )
+    );
+  });
+
   it('offers nothing before the review manager is up, or in the review tab', () => {
     const files = [fileAt('d.md'), fileAt('a 2.md')];
 
@@ -2307,6 +2381,9 @@ describe('IncrementalReadingPlugin.bulkImportSources', () => {
       reviewManager: {
         isItemFileAt: vi.fn((_file: TFile, _path: string) => true),
       },
+      // The plugin's own, run on this receiver as the methods under test are
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      candidateChecks: IncrementalReadingPlugin.prototype.candidateChecks,
     };
     const folder = makeFolder('papers/deep');
     const pdf = (basename: string, mtime: number) =>
@@ -2381,6 +2458,9 @@ describe('IncrementalReadingPlugin.bulkImportSources: tags', () => {
         metadataCache: { getFileCache: (file: TFile) => caches.get(file) },
       },
       reviewManager: { isItemFileAt: vi.fn(() => false) },
+      // The plugin's own, run on this receiver as the method under test is
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      candidateChecks: IncrementalReadingPlugin.prototype.candidateChecks,
     };
 
     const sources = IncrementalReadingPlugin.prototype.bulkImportSources.call(
@@ -2396,6 +2476,173 @@ describe('IncrementalReadingPlugin.bulkImportSources: tags', () => {
     expect(source.title).toBe('#read, #x');
     // Newest first, as the explorer was when asked
     expect(files).toEqual([newer, older]);
+  });
+});
+
+describe('IncrementalReadingPlugin bulk un-import', () => {
+  /** A file of `folder`, last modified at `mtime`. */
+  const fileIn = (folder: TFolder, name: string, mtime: number) =>
+    Object.assign(new TFile(), {
+      path: `${folder.path}/${name}`,
+      name,
+      basename: name.slice(0, name.lastIndexOf('.')),
+      extension: name.slice(name.lastIndexOf('.') + 1),
+      stat: { mtime, ctime: 0, size: 0 },
+      parent: folder,
+    });
+
+  /**
+   * A plugin whose explorer sorts newest first, with `articles` the live
+   * articles by name, and the methods that build the dialogs.
+   */
+  function makeUnimportReceiver(articles: readonly string[]) {
+    const explorerState = { sortOrder: 'byModifiedTime' };
+    const readBinary = vi.fn();
+    const receiver = {
+      app: {
+        vault: { readBinary },
+        workspace: {
+          getLeavesOfType: (type: string) =>
+            type === 'file-explorer'
+              ? [{ view: { getState: () => explorerState } }]
+              : [],
+        },
+      },
+      reviewManager: {
+        isItemFileAt: vi.fn((_file: TFile, _path: string) => false),
+        articleIdAt: vi.fn((file: TFile) =>
+          articles.includes(file.name) ? `id-${file.name}` : null
+        ),
+      },
+      // The plugin's own, run on this receiver as the methods under test are
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      candidateChecks: IncrementalReadingPlugin.prototype.candidateChecks,
+    };
+    return { receiver, readBinary, explorerState };
+  }
+
+  /** Every event `source` scans, top level only. */
+  async function scanned(source: CandidateSource | undefined) {
+    const events: ScanEvent[] = [];
+    for await (const event of source!.scan(new AbortController().signal)) {
+      events.push(event);
+    }
+    return events;
+  }
+
+  /** The names of the files among `events`. */
+  const filesOf = (events: readonly ScanEvent[]) =>
+    events.flatMap((event) => (event.type === 'file' ? [event.file.name] : []));
+
+  beforeEach(() => {
+    vi.stubGlobal('document', { createElement: () => ({}) });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("lists a folder's live articles alone, by the item layer's word, reading no file, in the explorer's order", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.subarray(['a.md', 'b.pdf', 'c.md', 'd.png']),
+        fc.constantFrom('filters', 'folder'),
+        async (articles, through) => {
+          vi.spyOn(BulkImportModal.prototype, 'open').mockImplementation(
+            () => {}
+          );
+          const { receiver, readBinary } = makeUnimportReceiver(articles);
+          const folder = makeFolder('notes');
+          folder.children = [
+            fileIn(folder, 'a.md', 1),
+            fileIn(folder, 'b.pdf', 4),
+            fileIn(folder, 'c.md', 3),
+            fileIn(folder, 'd.png', 2),
+          ];
+          const plugin = receiver as unknown as IncrementalReadingPlugin;
+
+          const source =
+            through === 'filters'
+              ? (
+                  IncrementalReadingPlugin.prototype.bulkImportSources.call(
+                    plugin,
+                    'unimport'
+                  ) as FilterSources
+                ).folder(folder)
+              : (
+                  IncrementalReadingPlugin.prototype.unimportFromFolder.call(
+                    plugin,
+                    folder
+                  ) as BulkImportModal
+                ).request.source;
+          const events = await scanned(source);
+
+          // Newest first
+          expect(filesOf(events)).toEqual(
+            ['b.pdf', 'c.md', 'd.png', 'a.md'].filter((name) =>
+              articles.includes(name)
+            )
+          );
+          expect(readBinary).not.toHaveBeenCalled();
+          expect(receiver.reviewManager.isItemFileAt).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('opens the dialog to un-import from the folder', () => {
+    const open = vi
+      .spyOn(BulkImportModal.prototype, 'open')
+      .mockImplementation(() => {});
+    const { receiver } = makeUnimportReceiver([]);
+
+    const modal = IncrementalReadingPlugin.prototype.unimportFromFolder.call(
+      receiver as unknown as IncrementalReadingPlugin,
+      makeFolder('notes/reading')
+    ) as BulkImportModal;
+
+    expect(open.mock.contexts).toEqual([modal]);
+    expect(modal.request.mode).toBe('unimport');
+    expect(modal.request.source?.title).toBe('reading');
+  });
+
+  it("opens the dialog to un-import the selection's live articles, saying how many items it was on", async () => {
+    const open = vi
+      .spyOn(BulkImportModal.prototype, 'open')
+      .mockImplementation(() => {});
+    const { receiver } = makeUnimportReceiver(['a.md', 'c.md']);
+    const folder = makeFolder('notes');
+    const files = ['a.md', 'b.md', 'c.md'].map((name, i) =>
+      fileIn(folder, name, i)
+    );
+
+    const modal = IncrementalReadingPlugin.prototype.unimportSelection.call(
+      receiver as unknown as IncrementalReadingPlugin,
+      files
+    ) as BulkImportModal;
+
+    expect(open.mock.contexts).toEqual([modal]);
+    expect(modal.request.mode).toBe('unimport');
+    expect(modal.request.source?.heading).toMatch(/\b3\b/);
+    expect(modal.request.source?.heading).not.toMatch(/^Importing/);
+    expect(filesOf(await scanned(modal.request.source))).toEqual([
+      'c.md',
+      'a.md',
+    ]);
+  });
+
+  it('opens the dialog with its filter bar to un-import', () => {
+    const open = vi
+      .spyOn(BulkImportModal.prototype, 'open')
+      .mockImplementation(() => {});
+
+    const modal = IncrementalReadingPlugin.prototype.openBulkUnimport.call({
+      app: {},
+    } as unknown as IncrementalReadingPlugin) as BulkImportModal;
+
+    expect(open.mock.contexts).toEqual([modal]);
+    expect(modal.request).toEqual({ mode: 'unimport', filterBar: true });
   });
 });
 

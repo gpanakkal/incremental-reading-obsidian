@@ -2,11 +2,7 @@ import { DATA_DIRECTORY } from '#/lib/constants';
 import type { ExplorerComparator } from '#/lib/explorer-order';
 import { isImportable } from '#/lib/mime';
 import { TFile, TFolder, type TAbstractFile } from 'obsidian';
-import {
-  folderSource,
-  isImportCandidate,
-  type CandidateChecks,
-} from './candidates';
+import { folderSource, isCandidate, type CandidateChecks } from './candidates';
 import type { CandidateSource } from './types';
 
 /** Whether `path` is the data directory or anything inside it. */
@@ -57,6 +53,25 @@ export function selectionMayImport(roots: readonly TAbstractFile[]): boolean {
   );
 }
 
+/**
+ * Whether a selection's un-import could find anything: it holds a live
+ * article, or a folder with one under it, as `articles` says. Asked at once,
+ * as the menu it decides on is built.
+ */
+export function selectionMayUnimport(
+  roots: readonly TAbstractFile[],
+  articles: {
+    isArticle: (file: TFile) => boolean;
+    hasArticleUnder: (folder: TFolder) => boolean;
+  }
+): boolean {
+  return roots.some((entry) =>
+    entry instanceof TFolder
+      ? articles.hasArticleUnder(entry)
+      : entry instanceof TFile && articles.isArticle(entry)
+  );
+}
+
 /** `N items`, or `1 item`. */
 export const itemCount = (count: number) =>
   `${count} item${count === 1 ? '' : 's'}`;
@@ -66,7 +81,7 @@ export const itemCount = (count: number) =>
  * {@link selectionRoots} for which of its items count): a forest whose roots,
  * folders first, are in the order `compare` puts them in (the file
  * explorer's, see `explorerComparator`). A selected file is a top-level row
- * when it can be imported (`isImportCandidate`). A selected folder is a
+ * when it passes `checks` (`isCandidate`). A selected folder is a
  * top-level folder, walked as {@link folderSource} walks one, its rows' paths
  * from it; with subfolders, every selected folder goes deeper at once.
  *
@@ -104,7 +119,7 @@ export function selectionSource(
   const verdict = (file: TFile) => {
     let known = verdicts.get(file);
     if (!known) {
-      known = isImportCandidate(file, checks).catch((error: unknown) => {
+      known = isCandidate(file, checks).catch((error: unknown) => {
         // A file that can't be read hides only itself
         console.error(error);
         return false;

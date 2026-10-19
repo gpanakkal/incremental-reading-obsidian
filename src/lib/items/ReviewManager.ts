@@ -66,6 +66,7 @@ import {
 import { ArticleManager, liveArticleLookup } from './ArticleManager';
 import { type CardSelection, CardManager } from './CardManager';
 import { type FileMove, followSourceLinks } from './follow-source-links';
+import { deleteRowStatements } from './row-delete';
 import { SnippetManager } from './SnippetManager';
 
 /**
@@ -94,13 +95,6 @@ function irIdOf(frontmatter: Record<string, unknown>): string | undefined {
   const id = frontmatter['ir-id'];
   return typeof id === 'string' ? id : undefined;
 }
-
-/** Each item table's review log, and the column there naming the item. */
-const REVIEW_LOG_OF: Readonly<Record<ItemTable, readonly [string, string]>> = {
-  article: ['article_review', 'article_id'],
-  snippet: ['snippet_review', 'snippet_id'],
-  srs_card: ['srs_card_review', 'card_id'],
-};
 
 export default class ReviewManager {
   plugin: IncrementalReadingPlugin;
@@ -847,23 +841,9 @@ export default class ReviewManager {
 
     try {
       await this.#repo.transaction(async () => {
-        await this.#repo.mutate(
-          'UPDATE snippet SET parent = NULL WHERE parent = $1',
-          [id]
-        );
-        await this.#repo.mutate(
-          'UPDATE srs_card SET parent = NULL WHERE parent = $1',
-          [id]
-        );
-        const [log, column] = REVIEW_LOG_OF[table];
-        await this.#repo.mutate(`DELETE FROM ${log} WHERE ${column} = $1`, [
-          id,
-        ]);
-        // Only an article is ever rebound; for anything else this is a no-op
-        await this.#repo.mutate('DELETE FROM rebind WHERE article_id = $1', [
-          id,
-        ]);
-        await this.#repo.mutate(`DELETE FROM ${table} WHERE id = $1`, [id]);
+        for (const { query, params } of deleteRowStatements(table, id)) {
+          await this.#repo.mutate(query, params);
+        }
       });
     } catch (error) {
       // A save failing after the commit throws as well, with the delete held
@@ -954,6 +934,27 @@ export default class ReviewManager {
         ({ reference }) => reference
       )
     );
+  }
+
+  /**
+   * Whether a live article row names a path in the folder at `folder`, at any
+   * depth, `/` being the vault: what an un-import from the folder may find.
+   * Answers at once, as {@link referencesUnder} does, or `false`.
+   */
+  hasArticleUnder(folder: string): boolean {
+    const rows =
+      folder === '/'
+        ? this.#repo.query(
+            'SELECT 1 FROM article WHERE deleted = FALSE LIMIT 1'
+          )
+        : this.#repo.query(
+            `SELECT 1 FROM article
+               WHERE deleted = FALSE AND reference >= $1 AND reference < $2
+               LIMIT 1`,
+            // `0` sorts right after `/`, as in `referencesUnder`
+            [`${folder}/`, `${folder}0`]
+          );
+    return Array.isArray(rows) && rows.length > 0;
   }
 
   /**

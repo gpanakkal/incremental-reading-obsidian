@@ -11,6 +11,7 @@ import { MINIMUM_FIXED_REVIEW_INTERVAL } from '#/lib/constants';
 import { explorerComparator } from '#/lib/explorer-order';
 import IRScheduler from '#/lib/IRScheduler';
 import type { UiState } from '#/lib/plugin-data';
+import { queryClient } from '#/lib/query-client';
 import { DEFAULT_SETTINGS } from '#/lib/settings';
 import type IncrementalReadingPlugin from '#/main';
 // The mock the vitest config aliases `obsidian` to, imported by path so its
@@ -23,6 +24,7 @@ import { useId } from 'preact/hooks';
 import { act } from 'preact/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BulkImportModal } from './BulkImportModal';
+import * as ConfirmModalModule from './ConfirmModal';
 
 // #region HELPERS
 /**
@@ -277,6 +279,49 @@ function outline(modal: BulkImportModal): string[] {
   };
   walk(modal.contentEl.querySelector('.ir-bulk-import-list')!, 0);
   return lines;
+}
+/**
+ * A plugin whose un-imports all succeed, a modal on `source` open on it to
+ * un-import, and the confirmation it asks, held until the test answers it.
+ */
+function openUnimport(source: CandidateSource) {
+  const made = makePlugin();
+  const unimportArticles = vi.fn(
+    async (files: readonly TFile[]): Promise<BulkOutcome[]> =>
+      files.map((file) => ({ file, status: 'unimported' }))
+  );
+  Object.assign(made.plugin.reviewManager, {
+    unimportArticles,
+    hasItemRow: vi.fn(async () => false),
+  });
+  const refreshed = vi
+    .spyOn(queryClient, 'invalidateQueries')
+    .mockResolvedValue(undefined);
+  // Each question waits for the test to answer it
+  const asked: ((confirmed: boolean) => void)[] = [];
+  const prompt = vi
+    .spyOn(ConfirmModalModule, 'promptForConfirmation')
+    .mockImplementation(
+      () => new Promise<boolean>((resolve) => asked.push(resolve))
+    );
+  const modal = new BulkImportModal(made.plugin, { source, mode: 'unimport' });
+  const close = vi
+    .spyOn(modal, 'close')
+    .mockImplementation(() => modal.onClose());
+  void act(() => modal.onOpen());
+  document.body.append(modal.contentEl);
+  /** Answer the latest question. */
+  const answer = async (confirmed: boolean) => {
+    await act(async () => {
+      asked.at(-1)!(confirmed);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+  return { ...made, modal, unimportArticles, prompt, answer, close, refreshed };
+}
+
+function warningButton(modal: BulkImportModal) {
+  return modal.contentEl.querySelector<HTMLButtonElement>('button.mod-warning');
 }
 // #endregion
 
@@ -2206,5 +2251,228 @@ describe('BulkImportModal: filter bar', () => {
     expect(Notice.messages).toEqual([
       expect.stringMatching(/\b1\b.*#to-read, #later/),
     ]);
+  });
+});
+
+describe('BulkImportModal: un-import', () => {
+  it('shows no options, a line in their place, and a warning button counting the ticked rows', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc
+          .integer({ min: 1, max: 5 })
+          .chain((count) =>
+            fc.tuple(fc.constant(count), fc.subarray([...Array(count).keys()]))
+          ),
+        async ([count, unticked]) => {
+          document.body.replaceChildren();
+          const scan = makeSource();
+          const { modal } = openUnimport(scan.source);
+          for (let i = 0; i < count; i++) await scan.add(makeFile(`${i}.md`));
+          await scan.end();
+          for (const i of unticked) await click(rowBox(modal, i));
+
+          expect(
+            modal.contentEl.querySelector('.ir-bulk-import-options')
+          ).toBeNull();
+          expect(copyToggle(modal)).toBeNull();
+          expect(
+            modal.contentEl.querySelector('.ir-bulk-import-explanation')
+          ).not.toBeNull();
+          expect(modal.contentEl.querySelector('.mod-cta')).toBeNull();
+          const confirm = warningButton(modal)!;
+          expect(numberIn(confirm.textContent)).toBe(count - unticked.length);
+          expect(confirm.disabled).toBe(unticked.length === count);
+          expect(selectedCount(modal)).toBe(count - unticked.length);
+          modal.close();
+        }
+      ),
+      { numRuns: 15 }
+    );
+  });
+
+  it('is titled apart from an import of the same source', () => {
+    const { modal } = openUnimport(makeSource('Reading').source);
+    const imported = openModal(
+      makePlugin().plugin,
+      makeSource('Reading').source
+    );
+
+    expect(modal.titleEl.textContent).toContain('Reading');
+    // Which of the two says it un-imports
+    expect(modal.titleEl.textContent).toMatch(/un-import/i);
+    expect(imported.titleEl.textContent).not.toMatch(/un-import/i);
+    modal.close();
+    imported.close();
+  });
+
+  it('asks before un-importing, counting what it will un-import, as a destructive step, with the dialog still open', async () => {
+    const scan = makeSource();
+    const { modal, prompt, unimportArticles, close } = openUnimport(
+      scan.source
+    );
+    for (const name of ['a.md', 'b.md', 'c.md']) {
+      await scan.add(makeFile(name));
+    }
+    await click(rowBox(modal, 1));
+
+    await click(warningButton(modal)!);
+
+    expect(prompt).toHaveBeenCalledOnce();
+    const [, options] = prompt.mock.calls[0];
+    expect(options.destructive).toBe(true);
+    expect(options.paragraphs.join(' ')).toMatch(/\b2 articles\b/);
+    expect(unimportArticles).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    modal.close();
+  });
+
+  it('counts one article in the singular', async () => {
+    const scan = makeSource();
+    const { modal, prompt } = openUnimport(scan.source);
+    await scan.add(makeFile('a.md'));
+
+    await click(warningButton(modal)!);
+
+    const [, options] = prompt.mock.calls[0];
+    expect(options.paragraphs.join(' ')).toMatch(/\b1 article\b/);
+    modal.close();
+  });
+
+  it('un-imports exactly the ticked rows, in order, once confirmed, closing and saying how it went', async () => {
+    const scan = makeSource('Reading');
+    const { modal, answer, unimportArticles, close, refreshed } = openUnimport(
+      scan.source
+    );
+    const files = ['a.md', 'b.pdf', 'c.md'].map((name) => makeFile(name));
+    for (const file of files) await scan.add(file);
+    await click(rowBox(modal, 0));
+    await click(warningButton(modal)!);
+
+    await answer(true);
+    await modal.closed;
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(scan.signal()?.aborted).toBe(true);
+    expect(unimportArticles).toHaveBeenCalledExactlyOnceWith([
+      files[1],
+      files[2],
+    ]);
+    // A hard delete reports no change: the queue is told by hand
+    expect(refreshed).toHaveBeenCalled();
+    expect(Notice.messages).toEqual([expect.stringMatching(/\b2\b.*Reading/)]);
+  });
+
+  it('un-imports nothing when the question is answered no, leaving the dialog open to ask again', async () => {
+    const scan = makeSource();
+    const { modal, prompt, answer, unimportArticles, close } = openUnimport(
+      scan.source
+    );
+    const file = makeFile('a.md');
+    await scan.add(file);
+    await click(warningButton(modal)!);
+
+    await answer(false);
+
+    expect(unimportArticles).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    expect(scan.signal()?.aborted).toBe(false);
+    expect(Notice.messages).toEqual([]);
+
+    await click(warningButton(modal)!);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    await answer(true);
+    await modal.closed;
+    expect(unimportArticles).toHaveBeenCalledExactlyOnceWith([file]);
+  });
+
+  it('asks once, however often it is confirmed while asking', async () => {
+    const scan = makeSource();
+    const { modal, prompt } = openUnimport(scan.source);
+    await scan.add(makeFile('a.md'));
+
+    await click(warningButton(modal)!);
+    await click(warningButton(modal)!);
+
+    expect(prompt).toHaveBeenCalledOnce();
+    modal.close();
+  });
+
+  it('un-imports nothing when cancelled', async () => {
+    const scan = makeSource();
+    const { modal, prompt, unimportArticles } = openUnimport(scan.source);
+    await scan.add(makeFile('a.md'));
+
+    await click(button(modal, /^Cancel$/));
+    await modal.closed;
+
+    expect(prompt).not.toHaveBeenCalled();
+    expect(unimportArticles).not.toHaveBeenCalled();
+  });
+
+  it('makes its filter bar sources for an un-import, and un-imports from the folder picked', async () => {
+    const scan = makeSource('Reading', { deeper: true });
+    const made = openUnimport(scan.source);
+    made.modal.close();
+    document.body.replaceChildren();
+    const notes = Object.assign(new TFolder(), {
+      path: 'notes',
+      name: 'notes',
+    });
+    const folder = vi.fn((_folder: TFolder) => scan.source);
+    const bulkImportSources = vi.fn(() => ({ folder }));
+    Object.assign(made.plugin, {
+      app: { vault: { getAllFolders: () => [notes] } },
+      bulkImportSources,
+    });
+    const modal = new BulkImportModal(made.plugin, {
+      mode: 'unimport',
+      filterBar: true,
+    });
+    vi.spyOn(modal, 'close').mockImplementation(() => modal.onClose());
+    document.body.append(modal.contentEl);
+    void act(() => modal.onOpen());
+    const input = modal.contentEl.querySelector<HTMLInputElement>(
+      '.ir-bulk-import-filter-row input[type="text"]'
+    )!;
+    input.focus();
+    input.value = 'no';
+    input.dispatchEvent(new Event('input'));
+    await settle();
+    await click(document.querySelector<HTMLElement>('.suggestion-item')!);
+    await settle();
+    const file = makeFile('a.md');
+    await scan.add(file);
+
+    expect(bulkImportSources).toHaveBeenCalledExactlyOnceWith('unimport');
+    expect(modal.titleEl.textContent).toMatch(/un-import/i);
+    expect(folder).toHaveBeenCalledExactlyOnceWith(notes);
+    expect(modal.contentEl.querySelector('.ir-bulk-import-options')).toBeNull();
+    await click(warningButton(modal)!);
+    await made.answer(true);
+    await modal.closed;
+
+    expect(made.unimportArticles).toHaveBeenCalledExactlyOnceWith([file]);
+    expect(Notice.messages).toEqual([expect.stringMatching(/\b1\b.*Reading/)]);
+  });
+
+  it('makes its filter bar sources for an import when opened to import', () => {
+    const { plugin } = makePlugin();
+    const bulkImportSources = vi.fn(() => ({ folder: vi.fn() }));
+    Object.assign(plugin, {
+      app: { vault: { getAllFolders: () => [] } },
+      bulkImportSources,
+    });
+    const modal = new BulkImportModal(plugin, {
+      mode: 'import',
+      filterBar: true,
+    });
+    vi.spyOn(modal, 'close').mockImplementation(() => modal.onClose());
+    void act(() => modal.onOpen());
+
+    expect(bulkImportSources).toHaveBeenCalledExactlyOnceWith('import');
+    expect(modal.titleEl.textContent).not.toMatch(/un-import/i);
+    expect(warningButton(modal)).toBeNull();
+    expect(modal.contentEl.querySelector('button.mod-cta')).not.toBeNull();
+    modal.close();
   });
 });

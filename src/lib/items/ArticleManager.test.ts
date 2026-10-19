@@ -69,6 +69,7 @@ import { ArticleManager, type ImportResult } from './ArticleManager';
 import { CardManager } from './CardManager';
 import { ItemManager } from './ItemManager';
 import ReviewManager from './ReviewManager';
+import { deleteRowStatements } from './row-delete';
 import { SnippetManager } from './SnippetManager';
 
 // #region HELPERS
@@ -8236,7 +8237,14 @@ describe('importMany, copying a note imported for its trigger tags', () => {
 });
 
 describe('unimportMany', () => {
+  beforeEach(() => {
+    // A write of many rows yields through `window`, which this node
+    // environment lacks
+    vi.stubGlobal('window', globalThis);
+  });
+
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -8494,7 +8502,57 @@ describe('unimportMany', () => {
     );
   });
 
-  it('carries on past a file that fails, reporting each in the order given', async () => {
+  // Each save exports the whole database and rewrites its file: un-importing
+  // a folder saved it once a note
+  it('deletes every row in one paced run, saving once a chunk rather than once a file', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 4 }),
+        fc.integer({ min: 1, max: 12 }),
+        async (count, sliceMs) => {
+          vi.restoreAllMocks();
+          const paths = Array.from({ length: count }, (_, i) => `n/${i}.md`);
+          const { repo, vault, manager } = await wireUnimport(
+            Object.fromEntries(
+              paths.map((path, i) => [path, { 'ir-id': `id${i}` }])
+            )
+          );
+          paths.forEach((path, i) => seedArticle(repo, `id${i}`, path));
+          const writes = watchWrites(repo, sliceMs);
+
+          const outcomes = await manager.unimportMany(
+            paths.map((path) => vault.files.get(path)!)
+          );
+
+          expect(outcomes.map(({ status }) => status)).toEqual(
+            paths.map(() => 'unimported')
+          );
+          expect(repo.rows('article')).toEqual([]);
+          expect(writes.bulkMutate).toHaveBeenCalledOnce();
+          expect(writes.outside()).toBe(0);
+          const [statements] = writes.bulkMutate.mock.calls[0];
+          expect(writes.save).toHaveBeenCalledTimes(
+            Math.ceil(statements.length / sliceMs)
+          );
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('writes nothing when no file is a live article', async () => {
+    const { repo, vault, manager } = await wireUnimport({ [NOTE]: null });
+    const writes = watchWrites(repo, 1);
+    const mutate = vi.spyOn(repo, 'mutate');
+
+    const outcomes = await manager.unimportMany([vault.files.get(NOTE)!]);
+
+    expect(outcomes.map(({ status }) => status)).toEqual(['skipped']);
+    expect(mutate).not.toHaveBeenCalled();
+    expect(writes.save).not.toHaveBeenCalled();
+  });
+
+  it('fails the file whose rows the run stopped at and every one after, leaving them articles, the ones before it un-imported', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc
@@ -8502,7 +8560,9 @@ describe('unimportMany', () => {
           .chain((count) =>
             fc.tuple(fc.constant(count), fc.nat({ max: count - 1 }))
           ),
-        async ([count, failing]) => {
+        fc.integer({ min: 1, max: 12 }),
+        async ([count, failing], sliceMs) => {
+          vi.restoreAllMocks();
           const paths = Array.from({ length: count }, (_, i) => `n/${i}.md`);
           const wired = await wireUnimport(
             Object.fromEntries(
@@ -8512,21 +8572,82 @@ describe('unimportMany', () => {
               ])
             )
           );
-          const { repo, vault, manager, reviewManager } = wired;
-          paths.forEach((path, i) => seedArticle(repo, `id${i}`, path));
-          // The real delete, which the spy below stands in front of
-          const deleteRow: ReviewManager['deleteRow'] = (table, id) =>
-            ReviewManager.prototype.deleteRow.call(
-              reviewManager,
-              table,
-              id
-            ) as Promise<void>;
-          vi.spyOn(reviewManager, 'deleteRow').mockImplementation(
-            async (table, id) => {
-              if (id === `id${failing}`) throw new Error('disk full');
-              return deleteRow(table, id);
-            }
+          const { repo, vault, manager } = wired;
+          paths.forEach((path, i) =>
+            seedArticle(repo, `id${i}`, path, { reviews: 1 })
           );
+          // The failing file's own row delete is a statement SQLite rejects
+          watchWrites(repo, sliceMs, (statements) =>
+            statements.map((statement) =>
+              statement.query === 'DELETE FROM article WHERE id = $1' &&
+              statement.params?.[0] === `id${failing}`
+                ? { query: 'not a statement' }
+                : statement
+            )
+          );
+          const files = paths.map((path) => vault.files.get(path)!);
+
+          const outcomes = await manager.unimportMany(files);
+
+          // The chunks before the one holding the failing statement stay
+          const perFile = deleteRowStatements('article', 'x').length;
+          const committed =
+            Math.floor((perFile * (failing + 1) - 1) / sliceMs) * sliceMs;
+          const done = (i: number) => perFile * (i + 1) <= committed;
+          expect(outcomes.map(({ status }) => status)).toEqual(
+            files.map((_, i) => (done(i) ? 'unimported' : 'failed'))
+          );
+          for (const outcome of outcomes.filter(
+            ({ status }) => status === 'failed'
+          )) {
+            expect(outcome.reason).toMatch(/syntax error/);
+          }
+          expect(repo.rows('article').map(({ id }) => id)).toEqual(
+            paths.flatMap((_, i) => (done(i) ? [] : [`id${i}`]))
+          );
+          for (const [i, path] of paths.entries()) {
+            expect(vault.frontmatterOf(path)).toStrictEqual(
+              done(i) ? {} : { 'ir-id': `id${i}`, tags: [ARTICLE_TAG] }
+            );
+          }
+          expect(wired.forgetIf.mock.calls).toEqual(
+            paths.flatMap((_, i) => (done(i) ? [[`id${i}`]] : []))
+          );
+          expect(wired.getHighlights.mock.calls).toEqual(
+            files.filter((_, i) => done(i)).map((file) => [file])
+          );
+        }
+      ),
+      { numRuns: 40 }
+    );
+  });
+
+  it('carries on past a file that cannot be looked up, reporting each in the order given', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc
+          .integer({ min: 1, max: 4 })
+          .chain((count) =>
+            fc.tuple(fc.constant(count), fc.nat({ max: count - 1 }))
+          ),
+        async ([count, failing]) => {
+          vi.restoreAllMocks();
+          const paths = Array.from({ length: count }, (_, i) => `n/${i}.md`);
+          const wired = await wireUnimport(
+            Object.fromEntries(
+              paths.map((path, i) => [
+                path,
+                { 'ir-id': `id${i}`, tags: [ARTICLE_TAG] },
+              ])
+            )
+          );
+          const { repo, vault, manager } = wired;
+          paths.forEach((path, i) => seedArticle(repo, `id${i}`, path));
+          const query = repo.query.bind(repo) as TestRepository['query'];
+          vi.spyOn(repo, 'query').mockImplementation((sql, params, options) => {
+            if (params?.[0] === `id${failing}`) throw new Error('disk full');
+            return query(sql, params, options);
+          });
           const files = paths.map((path) => vault.files.get(path)!);
 
           const outcomes = await manager.unimportMany(files);
@@ -8545,7 +8666,7 @@ describe('unimportMany', () => {
             'ir-id': `id${failing}`,
             tags: [ARTICLE_TAG],
           });
-          expect(wired.getHighlights.mock.calls).toEqual(
+          expect(wired.unimporting.mock.calls).toEqual(
             files.filter((_, i) => i !== failing).map((file) => [file])
           );
           expect(wired.logged).toHaveBeenCalledWith(new Error('disk full'));
@@ -8883,7 +9004,7 @@ describe('undoImports', () => {
         async (specs) => {
           vi.restoreAllMocks();
           const notes = undoNotes(specs);
-          const { repo, vault, manager, reviewManager, getHighlights } =
+          const { repo, vault, manager, getHighlights } =
             await wireUnimport(notes);
           const before = Object.fromEntries(
             Object.keys(notes).map((path) => [
@@ -8896,14 +9017,21 @@ describe('undoImports', () => {
           const made = results.flatMap(({ madeFile }) =>
             madeFile ? [madeFile.path] : []
           );
-          const deleteRow = vi.spyOn(reviewManager, 'deleteRow');
+          // Every row delete, in a run or on its own, is a `mutate`
+          const mutate = vi.spyOn(repo, 'mutate');
           getHighlights.mockClear();
 
           const undone = await manager.undoImports(results);
 
           const ids = results.map(({ articleId }) => articleId).reverse();
           expect(undone).toEqual(ids);
-          expect(deleteRow.mock.calls.map(([, id]) => id)).toEqual(ids);
+          expect(
+            mutate.mock.calls
+              .filter(
+                ([query]) => query === 'DELETE FROM article WHERE id = $1'
+              )
+              .map(([, params]) => params?.[0])
+          ).toEqual(ids);
           expect(repo.rows('article')).toEqual([]);
           expect(vault.paths()).toEqual(paths);
           expect(vault.trashed).toEqual(made.reverse());

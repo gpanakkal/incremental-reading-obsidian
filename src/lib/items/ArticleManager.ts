@@ -63,6 +63,7 @@ import type { WebPage } from '#/lib/web-viewer';
 import { Keymap, type App, type TFile } from 'obsidian';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
+import { deleteRowStatements } from './row-delete';
 import type { SnippetManager } from './SnippetManager';
 
 /**
@@ -2022,33 +2023,61 @@ export class ArticleManager extends ItemManager {
 
   // #region UN-IMPORT
   /**
-   * Make each of `files` that is a live article a plain file again, one after
-   * another: its row goes for good, with its review history (see
-   * `ReviewManager.deleteRow`), and a note loses its `ir-id`, its article tag
-   * and every auto-import trigger tag, so nothing imports it again. The
-   * snippets and cards taken from it keep reviewing with no parent, until an
-   * import of the note adopts them again. A copy stays where it is, a plain
-   * note now.
+   * Make each of `files` that is a live article a plain file again: its row
+   * goes for good, with its review history (see `ReviewManager.deleteRow`),
+   * and a note loses its `ir-id`, its article tag and every auto-import
+   * trigger tag, so nothing imports it again. The snippets and cards taken
+   * from it keep reviewing with no parent, until an import of the note adopts
+   * them again. A copy stays where it is, a plain note now.
    *
-   * The row goes first: while it is there, the `ir-id` repairer would put
-   * back whatever the note lost. A note whose properties can't be cleared
-   * after is left with an orphan `ir-id`, the leftover the startup notice
-   * offers to deal with.
+   * The rows go first, all of them in one paced run (see
+   * `SQLiteRepository.bulkMutate`), saving once a chunk rather than once a
+   * file: while a row is there, the `ir-id` repairer would put back whatever
+   * the note lost. Only then is each note's frontmatter cleared, one after
+   * another. A note whose properties can't be cleared after is left with an
+   * orphan `ir-id`, the leftover the startup notice offers to deal with. A
+   * file whose rows the run didn't delete fails, as does every one after it
+   * once the run stops; the rows of one it stopped part way through are
+   * still there, its snippets and cards freed, which un-importing it again
+   * finishes.
    *
    * Quiet, as {@link importMany} is: the caller says what came of the batch,
    * and refreshes whatever shows the rows, which a hard delete never reports
-   * as changed. One file that fails never stops the rest.
+   * as changed. One file that can't be looked up never stops the rest.
    * @returns what came of each file, in the order given: `unimported`,
    * `skipped` for one that is no live article, or `failed` with a short reason
    */
   async unimportMany(files: readonly TFile[]): Promise<BulkOutcome[]> {
     const outcomes: BulkOutcome[] = [];
-    for (const file of files) outcomes.push(await this.unimportQuietly(file));
+    // The live articles found, and where their outcomes go
+    const found: { at: number; file: TFile; id: string }[] = [];
+    for (const file of files) {
+      const row = await this.unimportRow(file);
+      if (typeof row === 'string') {
+        found.push({ at: outcomes.length, file, id: row });
+        outcomes.push({ file, status: 'unimported' });
+      } else {
+        outcomes.push(row);
+      }
+    }
+
+    const failures = await this.deleteArticleRows(found);
+    for (const [i, { at, file }] of found.entries()) {
+      const reason = failures[i];
+      outcomes[at] =
+        reason === null
+          ? await this.clearArticleProperties(file)
+          : { file, status: 'failed', reason };
+    }
     return outcomes;
   }
 
-  /** One file of {@link unimportMany}. */
-  private async unimportQuietly(file: TFile): Promise<BulkOutcome> {
+  /**
+   * The id of the live article row `file` is, for {@link unimportMany} to
+   * delete, or what comes of it when there is none to: `skipped`, or
+   * `failed` while saving is paused or the lookup fails.
+   */
+  private async unimportRow(file: TFile): Promise<string | BulkOutcome> {
     try {
       const lookup = liveArticleLookup(file, this.app);
       const [row] = lookup
@@ -2064,14 +2093,55 @@ export class ArticleManager extends ItemManager {
           reason: 'saving to the database is paused',
         };
       }
-      // Before the row goes, which would make the note an orphan to import
-      this.plugin.autoImportWatcher?.unimporting(file);
-      await this.plugin.reviewManager.deleteRow('article', row.id);
+      return row.id;
     } catch (error) {
       console.error(error);
       return { file, status: 'failed', reason: errorReason(error) };
     }
+  }
 
+  /**
+   * Delete the article rows `rows` name for good, in one paced run (see
+   * {@link unimportMany}).
+   * @returns for each, in order, `null` once its row is gone, or why it isn't
+   */
+  private async deleteArticleRows(
+    rows: readonly { file: TFile; id: string }[]
+  ): Promise<(string | null)[]> {
+    // Before the rows go, which would make each note an orphan to import
+    for (const { file } of rows) {
+      this.plugin.autoImportWatcher?.unimporting(file);
+    }
+    const statements = rows.map(({ id }) => deleteRowStatements('article', id));
+    // How many statements went in before the run stopped, and why it did
+    let stopped: { written: number; reason: string } | null = null;
+    try {
+      await this.repo.bulkMutate(statements.flat());
+    } catch (error) {
+      const short = error instanceof BulkMutateError;
+      const cause: unknown = short ? error.cause : error;
+      console.error(cause);
+      stopped = {
+        written: short ? error.committed : 0,
+        reason: errorReason(cause),
+      };
+    }
+    let end = 0;
+    return rows.map(({ id }, i) => {
+      end += statements[i].length;
+      if (stopped && end > stopped.written) return stopped.reason;
+      // As `deleteRow` does, so a session left on the row cannot resume onto
+      // an id that no longer exists
+      this.plugin.sessionTracker?.forgetIf(id);
+      return null;
+    });
+  }
+
+  /**
+   * Take the article properties off `file`, whose row {@link unimportMany}
+   * has deleted, and reload its highlights.
+   */
+  private async clearArticleProperties(file: TFile): Promise<BulkOutcome> {
     let outcome: BulkOutcome = { file, status: 'unimported' };
     try {
       // Does nothing to a file with no frontmatter, whose row was all of it

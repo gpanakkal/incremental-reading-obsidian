@@ -2,16 +2,18 @@ import { AutoImportWatcher } from '#/lib/AutoImportWatcher';
 import {
   type CandidateChecks,
   folderSource,
+  unimportChecks,
 } from '#/lib/bulk-import/candidates';
 import { listSource } from '#/lib/bulk-import/list-source';
 import {
   itemCount,
   selectionMayImport,
+  selectionMayUnimport,
   selectionRoots,
   selectionSource,
 } from '#/lib/bulk-import/selection';
 import { tagSource } from '#/lib/bulk-import/tag-source';
-import type { FilterSources } from '#/lib/bulk-import/types';
+import type { BulkMode, FilterSources } from '#/lib/bulk-import/types';
 import { createEmitter } from '#/lib/emitter';
 import {
   explorerComparator,
@@ -1158,6 +1160,19 @@ export default class IncrementalReadingPlugin extends Plugin {
             this.importFromFolder(abstractFile);
           });
       });
+      // Asked of the database while the menu is built, as for a file's
+      // "Un-import article" below
+      if (this.reviewManager.hasArticleUnder(abstractFile.path)) {
+        menu.addItem((item) => {
+          item
+            .setTitle('Un-import from folder…')
+            .setIcon('lucide-folder-x')
+            .setSection('incremental-reading')
+            .onClick(() => {
+              this.unimportFromFolder(abstractFile);
+            });
+        });
+      }
       return;
     }
 
@@ -1289,8 +1304,10 @@ export default class IncrementalReadingPlugin extends Plugin {
   /**
    * The entries for a menu on several files and folders at once: **Import N
    * items…**, N counting the selection with what a selected folder covers
-   * left out, when anything in it could import. Not in the review tab, and
-   * not before the review manager is up, as {@link addIRMenuItems}.
+   * left out, when anything in it could import, and **Un-import N items…**
+   * when it holds a live article or a folder with one under it. Not in the
+   * review tab, and not before the review manager is up, as
+   * {@link addIRMenuItems}.
    */
   addSelectionMenuItems(
     menu: Menu,
@@ -1298,18 +1315,39 @@ export default class IncrementalReadingPlugin extends Plugin {
     leaf?: WorkspaceLeaf | null
   ): void {
     if (leaf?.view instanceof ReviewView || !this.reviewManager) return;
+    const { reviewManager } = this;
     const roots = selectionRoots(files);
-    if (!selectionMayImport(roots)) return;
-    menu.addSections(['incremental-reading']);
-    menu.addItem((item) => {
-      item
-        .setTitle(`Import ${itemCount(roots.length)}…`)
-        .setIcon(PLUGIN_ICON)
-        .setSection('incremental-reading')
-        .onClick(() => {
-          this.importSelection(files);
-        });
+    const mayImport = selectionMayImport(roots);
+    // Asked of the database while the menu is built, which sql.js answers at
+    // once, as for a file's "Un-import article"
+    const mayUnimport = selectionMayUnimport(roots, {
+      isArticle: (file) => reviewManager.articleIdAt(file) !== null,
+      hasArticleUnder: (folder) => reviewManager.hasArticleUnder(folder.path),
     });
+    if (!mayImport && !mayUnimport) return;
+    menu.addSections(['incremental-reading']);
+    if (mayImport) {
+      menu.addItem((item) => {
+        item
+          .setTitle(`Import ${itemCount(roots.length)}…`)
+          .setIcon(PLUGIN_ICON)
+          .setSection('incremental-reading')
+          .onClick(() => {
+            this.importSelection(files);
+          });
+      });
+    }
+    if (mayUnimport) {
+      menu.addItem((item) => {
+        item
+          .setTitle(`Un-import ${itemCount(roots.length)}…`)
+          .setIcon('lucide-file-x')
+          .setSection('incremental-reading')
+          .onClick(() => {
+            this.unimportSelection(files);
+          });
+      });
+    }
   }
 
   /**
@@ -1374,15 +1412,75 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   /**
-   * What the bulk dialog's filters list, in the file explorer's order as it
-   * is now: read once per dialog, as `importFromFolder` reads it.
+   * Offer the live articles `files`, a Files-view selection, holds for
+   * un-import in the bulk dialog, as {@link importSelection} offers its files
+   * for import. See `unimportChecks`.
    */
-  bulkImportSources(): FilterSources {
+  unimportSelection(files: readonly TAbstractFile[]): BulkImportModal {
+    const source = selectionSource(
+      files,
+      this.candidateChecks('unimport'),
+      explorerComparator(readExplorerSortOrder(this.app.workspace))
+    );
+    const modal = new BulkImportModal(this, {
+      source: { ...source, heading: `Un-importing ${source.title}` },
+      mode: 'unimport',
+    });
+    modal.open();
+    return modal;
+  }
+
+  /**
+   * Offer the live articles directly in `folder`, and with "Include
+   * subfolders" those under it, for un-import in the bulk dialog, as
+   * {@link importFromFolder} offers its files for import.
+   */
+  unimportFromFolder(folder: TFolder): BulkImportModal {
+    const modal = new BulkImportModal(this, {
+      source: folderSource(
+        folder,
+        this.candidateChecks('unimport'),
+        explorerComparator(readExplorerSortOrder(this.app.workspace))
+      ),
+      mode: 'unimport',
+    });
+    modal.open();
+    return modal;
+  }
+
+  /**
+   * The bulk dialog with the filter bar, un-importing what the user picks
+   * there, from the review home's ⋮ menu.
+   */
+  openBulkUnimport(): BulkImportModal {
+    const modal = new BulkImportModal(this, {
+      mode: 'unimport',
+      filterBar: true,
+    });
+    modal.open();
+    return modal;
+  }
+
+  /**
+   * What decides which files a bulk dialog in `mode` lists: for an import,
+   * files that can be imported and are no item yet; for an un-import, live
+   * articles (see `unimportChecks`).
+   */
+  candidateChecks(mode: BulkMode): CandidateChecks {
     const { reviewManager } = this;
     const checks: CandidateChecks = {
       app: this.app,
       isItemAtPath: (file) => reviewManager.isItemFileAt(file, file.path),
     };
+    return mode === 'unimport' ? unimportChecks(checks, reviewManager) : checks;
+  }
+
+  /**
+   * What the bulk dialog's filters list in `mode`, in the file explorer's
+   * order as it is now: read once per dialog, as `importFromFolder` reads it.
+   */
+  bulkImportSources(mode: BulkMode = 'import'): FilterSources {
+    const checks = this.candidateChecks(mode);
     const compare = explorerComparator(
       readExplorerSortOrder(this.app.workspace)
     );

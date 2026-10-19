@@ -15,6 +15,38 @@ export interface CandidateChecks {
    * file with no frontmatter, a PDF say, an item (`ReviewManager.isItemFileAt`).
    */
   isItemAtPath: (file: TFile) => boolean;
+  /**
+   * The mode's own test of a file, in place of {@link isImportCandidate}'s:
+   * an un-import's (see {@link unimportChecks}).
+   */
+  eligible?: (file: TFile) => boolean | Promise<boolean>;
+}
+
+/**
+ * Whether `file` passes `checks`: the mode's own test if it has one, an
+ * import's otherwise (see {@link isImportCandidate}). What every source asks.
+ */
+export async function isCandidate(
+  file: TFile,
+  checks: CandidateChecks
+): Promise<boolean> {
+  return checks.eligible
+    ? checks.eligible(file)
+    : isImportCandidate(file, checks);
+}
+
+/**
+ * `checks` for a bulk un-import: a file is offered when it is a live article
+ * (see `ReviewManager.articleIdAt`), a note by its cached `ir-id` naming the
+ * row at its path, anything else by the row at its path. A snippet's or
+ * card's note never is, nor a plain one, a deleted article's, or a copy of an
+ * article's note. Its content is never read.
+ */
+export function unimportChecks(
+  checks: CandidateChecks,
+  articles: { articleIdAt(file: TFile): string | null }
+): CandidateChecks {
+  return { ...checks, eligible: (file) => articles.articleIdAt(file) !== null };
 }
 
 /**
@@ -43,8 +75,8 @@ export const inDataDirectory = (path: string) =>
   path === DATA_DIRECTORY || path.startsWith(`${DATA_DIRECTORY}/`);
 
 /**
- * The files directly in `folder` that can be imported (see
- * {@link isImportCandidate}), in the order `compare` puts them in (the file
+ * The files directly in `folder` that pass `checks` (see
+ * {@link isCandidate}), in the order `compare` puts them in (the file
  * explorer's, see `explorerComparator`), each checked only once the one
  * before it has been, so its row shows as soon as it passes. A file whose
  * check fails is left out; the rest are still checked. Files `compare` ties
@@ -75,7 +107,7 @@ export function folderSource(
   const verdict = (file: TFile) => {
     let known = verdicts.get(file);
     if (!known) {
-      known = isImportCandidate(file, checks).catch((error: unknown) => {
+      known = isCandidate(file, checks).catch((error: unknown) => {
         // One file that can't be read, gone since the scan began say,
         // hides only itself
         console.error(error);

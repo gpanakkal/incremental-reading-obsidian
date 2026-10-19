@@ -10,11 +10,22 @@ export interface BulkImporter {
   ): Promise<BulkOutcome[]>;
 }
 
-/** The notice listing each file that failed and why, one per line. */
-export function describeFailures(failed: readonly BulkOutcome[]): string {
+/** What runs a bulk un-import: `ReviewManager`. */
+export interface BulkUnimporter {
+  unimportArticles(files: readonly TFile[]): Promise<BulkOutcome[]>;
+}
+
+/**
+ * The notice listing each file that failed and why, one per line, saying
+ * what failed: `import` unless told.
+ */
+export function describeFailures(
+  failed: readonly BulkOutcome[],
+  verb: 'import' | 'un-import' = 'import'
+): string {
   const count = `${failed.length} file${failed.length === 1 ? '' : 's'}`;
   return [
-    `Couldn't import ${count}:`,
+    `Couldn't ${verb} ${count}:`,
     ...failed.map(({ file, reason }) => `${file.path}: ${reason}`),
   ].join('\n');
 }
@@ -48,5 +59,33 @@ export async function importChosen(
   });
   const failed = outcomes.filter(({ status }) => status === 'failed');
   if (failed.length > 0) notify(describeFailures(failed), { kind: 'error' });
+  return outcomes;
+}
+
+/**
+ * Un-import `files`, chosen from what `title` names (see
+ * `ArticleManager.unimportMany`), then say how it went as {@link importChosen}
+ * does: one notice counting what was un-imported, and when any failed a
+ * second one listing them. Never asks first; the caller has. Not undoable.
+ * @param onUnimported told what came of it before anything is said, for what
+ *   shows the rows to catch up (see `refreshAfterUnimport`)
+ */
+export async function unimportChosen(
+  unimporter: BulkUnimporter,
+  files: readonly TFile[],
+  title: string,
+  onUnimported?: (outcomes: readonly BulkOutcome[]) => Promise<void>
+): Promise<BulkOutcome[]> {
+  const outcomes = await unimporter.unimportArticles(files);
+  await onUnimported?.(outcomes);
+  const done = outcomes.filter(({ status }) => status === 'unimported');
+  notify(`${done.length} of ${outcomes.length} un-imported from ${title}`, {
+    kind: 'success',
+    category: 'import',
+  });
+  const failed = outcomes.filter(({ status }) => status === 'failed');
+  if (failed.length > 0) {
+    notify(describeFailures(failed, 'un-import'), { kind: 'error' });
+  }
   return outcomes;
 }

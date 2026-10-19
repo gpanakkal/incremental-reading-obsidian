@@ -276,6 +276,7 @@ function makeMenuReceiver({
   type = 'article',
   editor = null,
   sourceMode = false,
+  anyArticle = true,
 }: {
   page?: ReviewPage;
   file?: TFile | null;
@@ -285,9 +286,12 @@ function makeMenuReceiver({
   editor?: ReturnType<typeof makeMountedEditor> | null;
   /** The mode the tab is already in, as the constructor would have left it. */
   sourceMode?: boolean;
+  /** Whether any live article row is there to un-import. */
+  anyArticle?: boolean;
 } = {}) {
   const openFile = vi.fn();
   const revealInFolder = vi.fn();
+  const openBulkUnimport = vi.fn();
   const leaf = { id: 'review-leaf' };
   const receiver = {
     file,
@@ -295,7 +299,13 @@ function makeMenuReceiver({
     leaf,
     activeEditor: editor,
     sourceMode,
-    plugin: { store: { getState: () => ({ page }) } },
+    plugin: {
+      store: { getState: () => ({ page }) },
+      reviewManager: {
+        hasArticleUnder: (folder: string) => folder === '/' && anyArticle,
+      },
+      openBulkUnimport,
+    },
     app: {
       workspace: {
         trigger: vi.fn(),
@@ -319,6 +329,7 @@ function makeMenuReceiver({
     editor,
     openFile,
     revealInFolder,
+    openBulkUnimport,
   };
 }
 
@@ -2236,6 +2247,34 @@ describe('ReviewView.onPaneMenu', () => {
     expect(itemTitled(menu, 'Open in new tab')?.section).toBe('pane');
   });
 
+  it('offers the bulk un-import on the home screen alone, while any article is there, among its own entries, opening the dialog for it', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom<ReviewPage>('home', 'review'),
+        fc.boolean(),
+        menuSourceArb,
+        (page, anyArticle, source) => {
+          const { view, openBulkUnimport } = makeMenuReceiver({
+            page,
+            anyArticle,
+          });
+
+          const menu = paneMenu(view, source);
+
+          const entry = menu.items.find(({ icon }) => icon === 'lucide-file-x');
+          if (page !== 'home' || !anyArticle) {
+            expect(entry).toBeUndefined();
+            return;
+          }
+          expect(entry?.section).toBe('pane');
+          expect(openBulkUnimport).not.toHaveBeenCalled();
+          click(entry);
+          expect(openBulkUnimport).toHaveBeenCalledOnce();
+        }
+      )
+    );
+  });
+
   it("opens the item's note in a markdown tab of its own", () => {
     // The review tab keeps reviewing; the note opens beside it, which is the
     // whole point of the entry.
@@ -2353,7 +2392,10 @@ describe('ReviewView.onPaneMenu', () => {
 
         const menu = paneMenu(view, source);
 
-        expect(menu.items).toHaveLength(0);
+        // The home screen's bulk un-import, which is about no file, aside
+        expect(
+          menu.items.filter(({ icon }) => icon !== 'lucide-file-x')
+        ).toHaveLength(0);
         expect(triggered(app, 'file-menu')).toBeUndefined();
       })
     );

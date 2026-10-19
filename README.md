@@ -107,12 +107,14 @@ This is especially handy for:
 
 #### Bulk imports
 
-Import many selected files and folders (or the contents of a folder) by right clicking on them in the Files view and selecting **Import n items…** or **Import from folder…**, respectively.
+Import many selected files and folders (or the contents of a folder) by right clicking on them in the Files view and selecting **Import n items...** or **Import from folder...**, respectively.
 
 > [!tip]
 > Select many files in the Files view with Alt-click (Option-click on macOS), or Shift-click to select a range of files.
 
-Alternatively, click **Bulk import…** on the review home screen to select files by folder, frontmatter tags, or [search](https://help.obsidian.md/Plugins/Search).
+Alternatively, click **Bulk import...** on the review home screen to select files by folder, frontmatter tags, or [search](https://help.obsidian.md/Plugins/Search).
+
+To undo a bulk import, use **Undo last action**, right-click on a folder and select **Un-import from folder**, or open the **more options** menu in the top right of the review home screen and select **Bulk un-import...**
 
 #### Automatic imports
 To import everything that arrives in a folder (for example, a Web Clipper inbox), enable **Auto-import files added to folders** and list the folders under **Watched folders**. Notes and PDFs created, moved, or synced into those folders or their subfolders will become articles.
@@ -134,12 +136,11 @@ To import notes when certain tags are added to frontmatter, enable **Auto-import
 ## Known limitations and issues
 
 - Creating snippets and cards on partial code blocks, blockquotes, LaTeX, and other types of special formatting can break the formatting. It is recommended to include the entire formatted section (such as the entire code block) when making the snippet or card, and then editing it afterwards as desired.
-- A snippet or card made from the middle of a line reads as it did there. If its start would turn into a tag, heading, list, quote, emphasis, rule, code block or link definition the note didn't show (`word#tag` selected from the `#`), a backslash goes before the character that would start it, which source mode shows, and spaces it would start with are dropped. A tag that was one in the note, like `#tag` in `see #tag`, stays a tag, and so does one in a `%%` comment, which Obsidian lists in the tag pane though reading view hides it. One selected from inside inline code, math, an HTML comment (`<!-- … -->`, or a line it starts) or the middle of a line in a code block gets a backslash, since the note didn't show it as a tag there. A selection from inside a list's number (`2. item` of `12. item`) stays a list, as it was in the note.
-- A snippet or card never turns its first paragraph into a heading the note didn't show, wherever it starts. If a line of only `-` or `=` follows it, which would underline it into a heading, that line keeps the meaning it had in the note: a rule (`---`) gets a blank line before it, and anything else gets a backslash (a line in code or in an HTML block such as `<div>` was text there). This can change any line down the first paragraph, not just the second, because live preview underlines a paragraph of any length while reading view only does so for one a single line long. So a selection that starts in a list item, a quote, a heading, code or a longer paragraph needs this. And when the selection's second line started a paragraph of its own in the note, as after a heading (`# Title part` over `next`, selected from `part`), a blank line keeps the two apart, so the second line reads as it did, heading and all. Code blocks are recognized inside quotes and lists nested to any depth.
-- A few cases are left alone. A `$` that closed math in the note can open math at the snippet's start (`$a$b and c$` selected from the second `$`). The rest of a code span, math or comment cut in half reads as Markdown. Code spans, math and HTML comments that run over several lines aren't recognized, nor is code indented by four spaces, nor a code block that a list item's later line opens in a quote indented past three spaces (`1.  a` over `    > ````). A selection from the start of a line in a code block keeps its start as it is (see partial code blocks above), though an underline on its second line still gets a backslash.
 - When you rename or move a file and Obsidian doesn't update links (**Automatically update internal links** is off and you choose **Do not update**), the plugin still points every snippet's, card's and copied article's `source` link at where the file went, once Obsidian is done asking.
-- In reading view, a highlight doesn't cover the text of an embed or a footnote number inside it. A highlight that starts or ends at the beginning of a table row, or inside a link's URL or the note name before an alias, isn't shown at all. One that starts or ends in code inside a list or quote, or at the start of a paragraph line that begins like a numbered list item (`2024. A year`), can be off by a few characters.
+- Reading mode is not fully supported. Some features are disabled or don't work as intended.
+
 ### PDFs
+
 - Snippets and cards from a PDF that isn't an article find it by their link alone. If the PDF is moved while Obsidian is closed, they lose their highlights, **Go to context** won't work, and importing the PDF won't pick them up.
 - Text from a PDF goes into its snippet or card as plain text: anything in it that would turn into Markdown (links, tags, headings, math and so on) or a Templater command gets a backslash, so it reads exactly as the PDF does. Source mode, and the line you're editing, show those backslashes, and a search that spans one won't find the text: `US$5` won't find `US\$5`.
 - Invisible characters in a PDF's text, such as zero-width spaces, soft hyphens and the direction controls that can make text read backwards, are left out of its snippets and cards. The marks that place punctuation in Hebrew or Arabic text stay, and so do the joiners and variation selectors emoji and some scripts need, though the England, Scotland and Wales flags read as a plain black flag, as in note names. The PDF itself keeps them all, so a line that holds a direction control may select differently from how it looks; drag past the line's end to take all of it.

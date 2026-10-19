@@ -10,7 +10,7 @@ import {
 import fc from 'fast-check';
 import { TFile } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { describeFailures, importChosen } from './run-import';
+import { describeFailures, importChosen, unimportChosen } from './run-import';
 import type { BulkImportOptions, BulkOutcome } from './types';
 
 // #region HELPERS
@@ -48,6 +48,21 @@ const optionsArb: fc.Arbitrary<BulkImportOptions> = fc.record({
   fixedIntervalDays: fc.option(fc.integer(), { nil: null }),
   makeCopy: fc.boolean(),
 });
+
+/** Files with paths of their own, each with what came of un-importing it. */
+const unimportResultsArb = resultsArb.map((outcomes) =>
+  outcomes.map(
+    (outcome): BulkOutcome =>
+      outcome.status === 'imported'
+        ? { file: outcome.file, status: 'unimported' }
+        : outcome
+  )
+);
+
+/** An un-importer whose un-imports come out as `outcomes`. */
+function makeUnimporter(outcomes: BulkOutcome[]) {
+  return { unimportArticles: vi.fn().mockResolvedValue(outcomes) };
+}
 
 /** An importer whose imports come out as `outcomes`. */
 function makeImporter(outcomes: BulkOutcome[]) {
@@ -228,5 +243,119 @@ describe('describeFailures', () => {
         );
       })
     );
+  });
+});
+
+describe('describeFailures of an un-import', () => {
+  it('says the same of the files as an import, the verb aside', () => {
+    fc.assert(
+      fc.property(resultsArb, (outcomes) => {
+        const failed = outcomes.filter((o) => o.status === 'failed');
+        fc.pre(failed.length > 0);
+
+        const [header, ...lines] = describeFailures(failed, 'un-import').split(
+          '\n'
+        );
+        const [importHeader, ...importLines] =
+          describeFailures(failed).split('\n');
+
+        expect(lines).toEqual(importLines);
+        expect(header).not.toBe(importHeader);
+        expect(header).toMatch(/un-import/);
+        expect(header.replace('un-import', 'import')).toBe(importHeader);
+      })
+    );
+  });
+});
+
+describe('unimportChosen', () => {
+  it('un-imports the files given, in order, once each, and returns what came of it', async () => {
+    await fc.assert(
+      fc.asyncProperty(unimportResultsArb, async (outcomes) => {
+        const unimporter = makeUnimporter(outcomes);
+        const files = outcomes.map(({ file }) => file);
+
+        await expect(unimportChosen(unimporter, files, 'notes')).resolves.toBe(
+          outcomes
+        );
+        expect(unimporter.unimportArticles).toHaveBeenCalledExactlyOnceWith(
+          files
+        );
+      })
+    );
+  });
+
+  it('waits for what it hands what came of it before saying anything', async () => {
+    await fc.assert(
+      fc.asyncProperty(unimportResultsArb, async (outcomes) => {
+        vi.restoreAllMocks();
+        const said = vi.spyOn(notices, 'notify');
+        let settled = false;
+        const onUnimported = vi.fn(async () => {
+          await Promise.resolve();
+          expect(said).not.toHaveBeenCalled();
+          settled = true;
+        });
+
+        await unimportChosen(
+          makeUnimporter(outcomes),
+          outcomes.map(({ file }) => file),
+          'notes',
+          onUnimported
+        );
+
+        expect(onUnimported).toHaveBeenCalledExactlyOnceWith(outcomes);
+        expect(settled).toBe(true);
+        expect(said).toHaveBeenCalled();
+        const [[, options]] = said.mock.calls;
+        expect(options).toEqual({ kind: 'success', category: 'import' });
+      })
+    );
+  });
+
+  it('counts what was un-imported out of all it was given, then lists only the failures, if any', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        unimportResultsArb,
+        // No digits, so the only numbers in the summary are its counts
+        fc.string().filter((title) => !/\d/.test(title)),
+        async (outcomes, title) => {
+          Notice.reset();
+
+          await unimportChosen(
+            makeUnimporter(outcomes),
+            outcomes.map(({ file }) => file),
+            title
+          );
+
+          const done = outcomes.filter((o) => o.status === 'unimported');
+          const failed = outcomes.filter((o) => o.status === 'failed');
+          const [summary, ...rest] = Notice.messages;
+          expect(summary).toContain(title);
+          expect(summary.match(/\d+/g)?.map(Number)).toEqual([
+            done.length,
+            outcomes.length,
+          ]);
+          expect(rest).toEqual(
+            failed.length > 0 ? [describeFailures(failed, 'un-import')] : []
+          );
+        }
+      )
+    );
+  });
+
+  it('leaves the failures up as long as an error stays up', async () => {
+    const failure: BulkOutcome = {
+      file: makeFile('notes/a.md'),
+      status: 'failed',
+      reason: 'broken',
+    };
+
+    await unimportChosen(makeUnimporter([failure]), [failure.file], 'notes');
+    const [summary, failures] = Notice.instances;
+    notify('next');
+
+    expect(summary.hides).toBe(1);
+    expect(failures.hides).toBe(0);
   });
 });

@@ -1,11 +1,16 @@
 import { DATA_DIRECTORY } from '#/lib/constants';
 import type { ExplorerComparator } from '#/lib/explorer-order';
+import ReviewManager from '#/lib/items/ReviewManager';
+import { TestRepository } from '#/test/item-vault';
+import { makeLinkVault } from '#/test/link-vault';
 import fc from 'fast-check';
 import { TFile, TFolder, type TAbstractFile } from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   folderSource,
+  isCandidate,
   isImportCandidate,
+  unimportChecks,
   type CandidateChecks,
 } from './candidates';
 import type { ScanEvent } from './types';
@@ -688,5 +693,160 @@ describe('folderSource scan, subfolders included or not', () => {
         }
       )
     );
+  });
+});
+
+describe('isCandidate', () => {
+  it("answers as an import's checks do for checks with no test of their own", async () => {
+    await fc.assert(
+      fc.asyncProperty(fileSpecArb, folderPathArb, async (spec, path) => {
+        const file = makeFile(makeFolder(path), spec);
+        const { checks } = makeChecks(new Map([[file.path, spec]]));
+
+        expect(await isCandidate(file, checks)).toBe(
+          await isImportCandidate(file, checks)
+        );
+      })
+    );
+  });
+
+  it("answers with the checks' own test when they have one, sync or not, asking nothing else", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fileSpecArb,
+        fc.boolean(),
+        fc.boolean(),
+        async (spec, answer, later) => {
+          const file = makeFile(makeFolder('notes'), spec);
+          const { checks, readBinary } = makeChecks(
+            new Map([[file.path, spec]])
+          );
+          const eligible = vi.fn(() =>
+            later ? Promise.resolve(answer) : answer
+          );
+
+          expect(await isCandidate(file, { ...checks, eligible })).toBe(answer);
+          expect(eligible).toHaveBeenCalledExactlyOnceWith(file);
+          expect(readBinary).not.toHaveBeenCalled();
+          expect(checks.isItemAtPath).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+});
+
+describe('folderSource with unimportChecks', () => {
+  it('lists exactly the live articles the item layer names, in order, whatever their type, content or place, reading none', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uniqueArray(fc.tuple(fileSpecArb, fc.boolean()), {
+          selector: ([spec]) => fileNameOf(spec),
+          maxLength: 8,
+        }),
+        folderPathArb,
+        async (marked, path) => {
+          const folder = makeFolder(path);
+          const files = marked.map(([spec]) => makeFile(folder, spec));
+          folder.children = files;
+          const articles = new Set(
+            files.filter((_, i) => marked[i][1]).map(({ path }) => path)
+          );
+          const { checks, readBinary } = makeChecks(
+            new Map(files.map((file, i) => [file.path, marked[i][0]]))
+          );
+          const articleIdAt = vi.fn((file: TFile) =>
+            articles.has(file.path) ? 'id' : null
+          );
+
+          const events = await collect(
+            folderSource(
+              folder,
+              unimportChecks(checks, { articleIdAt }),
+              byName
+            ).scan(new AbortController().signal)
+          );
+
+          expect(
+            events.flatMap((e) => (e.type === 'file' ? [e.file] : []))
+          ).toEqual(
+            [...files].sort(byName).filter(({ path }) => articles.has(path))
+          );
+          expect(articleIdAt.mock.calls.map(([file]) => file)).toEqual(
+            [...files].sort(byName)
+          );
+          expect(readBinary).not.toHaveBeenCalled();
+          expect(checks.isItemAtPath).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it("lists a live note or PDF article, never a snippet's or card's note, a plain note, a deleted article or a note whose ir-id is another's", async () => {
+    // What the review manager answers, as the plugin wires it
+    const notes: Record<string, Record<string, unknown> | null> = {
+      'n/live.md': { 'ir-id': 'live' },
+      'n/live.pdf': null,
+      'n/snippet.md': { 'ir-id': 'snippet' },
+      'n/card.md': { 'ir-id': 'card' },
+      'n/plain.md': null,
+      'n/deleted.md': { 'ir-id': 'deleted' },
+      // The ir-id of the article at `n/live.md`: a copy of its note
+      'n/copy.md': { 'ir-id': 'live' },
+    };
+    const vault = makeLinkVault(notes);
+    const repo = await TestRepository.create();
+    const article = (id: string, reference: string, deleted = 0) =>
+      repo.mutate(
+        `INSERT INTO article (id, reference, due, interval, priority, deleted)
+         VALUES ($1, $2, 0, 86400000, 30, $3)`,
+        [id, reference, deleted]
+      );
+    article('live', 'n/live.md');
+    article('pdf', 'n/live.pdf');
+    article('deleted', 'n/deleted.md', 1);
+    repo.mutate(
+      `INSERT INTO snippet (id, reference, parent, due, interval, priority)
+       VALUES ('snippet', 'n/snippet.md', 'live', 0, 86400000, 30)`
+    );
+    repo.mutate(
+      `INSERT INTO srs_card (id, reference, parent, created_at, due,
+         stability, difficulty, elapsed_days, scheduled_days, state)
+       VALUES ('card', 'n/card.md', 'live', 0, 0, 0, 0, 0, 0, 0)`
+    );
+    const manager = new ReviewManager(
+      {
+        app: vault.app,
+        settings: { dayRolloverOffset: 4 },
+        registerEvent: vi.fn(),
+      } as never,
+      repo
+    );
+    const folder = makeFolder('n');
+    folder.children = Object.keys(notes).map((path) => {
+      const name = path.slice(2);
+      const dot = name.lastIndexOf('.');
+      return makeFile(folder, {
+        name: name.slice(0, dot),
+        extension: name.slice(dot + 1),
+        pdfBytes: false,
+        irId: undefined,
+        hasRow: false,
+      });
+    });
+    const checks: CandidateChecks = {
+      app: vault.app as never,
+      isItemAtPath: () => false,
+    };
+
+    const events = await collect(
+      folderSource(folder, unimportChecks(checks, manager), byName).scan(
+        new AbortController().signal
+      )
+    );
+
+    expect(
+      events.flatMap((e) => (e.type === 'file' ? [e.file.path] : []))
+    ).toEqual(['n/live.md', 'n/live.pdf']);
+    repo.dispose();
   });
 });
