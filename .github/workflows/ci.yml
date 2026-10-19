@@ -4,6 +4,13 @@ on:
   pull_request:
     types: [opened, reopened]
   push:
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.editorconfig'
+      - '.prettierignore'
+      - 'prettier.config.js'
+      - '.github/workflows/release.yml'
 
 jobs:
   build:
