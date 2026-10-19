@@ -1016,7 +1016,7 @@ export class IRSettingTab extends PluginSettingTab {
       },
       {
         type: 'group',
-        heading: 'Notifications and reminders',
+        heading: 'Notices and reminders',
         items: [
           {
             type: 'box',
