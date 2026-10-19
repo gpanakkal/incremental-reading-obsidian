@@ -138,14 +138,12 @@ For example, adding **#clippings** auto-imports pages saved by Obsidian Web Clip
 ## Known limitations and issues
 
 - Creating snippets and cards on partial code blocks, blockquotes, LaTeX, and other types of special formatting can break the formatting. It is recommended to include the entire formatted section (such as the entire code block) when making the snippet or card, and then editing it afterwards as desired.
-- When you rename or move a file and Obsidian doesn't update links (**Automatically update internal links** is off and you choose **Do not update**), the plugin still points every snippet's, card's and copied article's `source` link at where the file went, once Obsidian is done asking.
 - Reading mode is not fully supported. Some features are disabled or don't work as intended.
 
 ### PDFs
 
-- Snippets and cards from a PDF that isn't an article find it by their link alone. If the PDF is moved while Obsidian is closed, they lose their highlights, **Go to context** won't work, and importing the PDF won't pick them up.
-- Text from a PDF goes into its snippet or card as plain text: anything in it that would turn into Markdown (links, tags, headings, math and so on) or a Templater command gets a backslash, so it reads exactly as the PDF does. Source mode, and the line you're editing, show those backslashes, and a search that spans one won't find the text: `US$5` won't find `US\$5`.
-- Invisible characters in a PDF's text, such as zero-width spaces, soft hyphens and the direction controls that can make text read backwards, are left out of its snippets and cards. The marks that place punctuation in Hebrew or Arabic text stay, and so do the joiners and variation selectors emoji and some scripts need, though the England, Scotland and Wales flags read as a plain black flag, as in note names. The PDF itself keeps them all, so a line that holds a direction control may select differently from how it looks; drag past the line's end to take all of it.
+- If a PDF article is moved while Obsidian is closed, it loses its snippet and card highlights, **Go to context** won't work, and importing the PDF won't pick them up.
+- For security reasons, invisible characters in a PDF's text such as zero-width spaces, soft hyphens, and text direction controls, are left out when making snippets and cards. For reverse-direction lines in PDFs, drag-select past the line's end to take all of it.
 - A snippet or card that runs onto the next page is highlighted up to the end of its first page.
 - A scanned PDF has no text to select, so nothing can be made from it.
 
@@ -158,16 +156,16 @@ For example, adding **#clippings** auto-imports pages saved by Obsidian Web Clip
 
 ## Terminology
 
-- **SRS** — stands for Spaced Repetition System.
-- **Review** — includes both your first exposure to learning material and subsequent re-visits.
-- **Article** — a full text you've imported.
-- **Snippet** — a section of text you have extracted.
-- **Card** — a question and answer entry that is scheduled using the spaced repetition algorithm.
-- **Item** — an article, snippet, or card.
-- **Source** — an external note that (1) an article was imported from, or (2) a snippet or card was made from.
-- **Parent** — the item that a snippet or card is made from.
-- **Self-contained** — understandable by itself. This is vital for cards, which must have a unique and clear prompt for the spaced repetition algorithm to work as expected.
-- **Atomic** — cannot be simplified without loss of meaning. Cards should be as atomic as possible. See [atomic memory](https://supermemo.guru/wiki/Atomic_memory).
+- **SRS**: Spaced Repetition System.
+- **Review**: includes both your first exposure to learning material and subsequent re-visits.
+- **Article**: any learning material you've imported.
+- **Snippet**: a section of text you have extracted.
+- **Card**: a question and answer entry that is scheduled using the spaced repetition algorithm.
+- **Item**: an article, snippet, or card.
+- **Source**: an external note that (1) an article was imported from, or (2) a snippet or card was made from.
+- **Parent**: the item that a snippet or card is made from.
+- **Self-contained**: understandable by itself. This is vital for cards, which must have a unique and clear prompt for the spaced repetition algorithm to work as expected.
+- **Atomic**: cannot be simplified without loss of meaning. Cards should be as atomic as possible. See [atomic memory](https://supermemo.guru/wiki/Atomic_memory).
 
 ## How incremental reading works in this plugin
 
@@ -206,7 +204,7 @@ To avoid side effects, this plugin does not modify files outside its data folder
 
 Plugin data (items and the SQLite database) is stored in the `incremental-reading/` folder.
 
-Articles are imported where they are unless you turn on **Make a copy** in the import dialog (or the **Copy articles when importing** setting), which puts a copy in the plugin data folder. You can delete the original after that if you no longer need it. A copied note links back to its original in its `source` property. A copied PDF keeps no link to its original, since a PDF has no properties to hold one. A copy takes its original's name, minus anything a snippet or card name can't hold: characters like `#` and `:`, control and text-direction characters, and other characters that don't show. When that changes the name, a notice tells you what the copy is called.
+Files are imported in-place unless you turn on **Make a copy** in the import dialog (or the **Copy articles when importing** setting), which puts a copy in the plugin data folder. You can delete the original after that if you no longer need it.
 
 When you make a snippet or card, a new note is created in the plugin data folder to hold its content.
 
