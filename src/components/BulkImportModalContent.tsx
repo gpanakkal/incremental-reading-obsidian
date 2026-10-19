@@ -4,6 +4,8 @@ import {
   ticksReducer,
   untickedFiles,
   type CheckState,
+  type Ticks,
+  type TicksAction,
 } from '#/lib/bulk-import/ticks';
 import {
   buildTree,
@@ -19,6 +21,7 @@ import type {
 } from '#/lib/bulk-import/types';
 import { isCopyImportable } from '#/lib/mime';
 import type { TFile } from 'obsidian';
+import type { ComponentChildren } from 'preact';
 import { useLayoutEffect, useMemo, useReducer, useState } from 'react';
 import { ImportOptionsFields, useImportOptions } from './ImportOptions';
 import { LoadingSpinner } from './LoadingSpinner';
@@ -31,16 +34,40 @@ interface ScanState {
 
 const NOT_STARTED: ScanState = { events: [], done: false };
 
+/** The rows unticked on a source no row was unticked on yet. */
+/** The ticks, for the source they were set on. */
+interface TicksOn {
+  source: CandidateSource | null;
+  ticks: Ticks;
+}
+
+/**
+ * `ticksReducer` on the ticks set on `source`: a new source starts from
+ * `NO_TICKS`, every row ticked, and the same one again keeps its ticks.
+ */
+function ticksOnReducer(
+  state: TicksOn,
+  { source, action }: { source: CandidateSource | null; action: TicksAction }
+): TicksOn {
+  const same = state.source === source;
+  const ticks = ticksReducer(same ? state.ticks : NO_TICKS, action);
+  return same && ticks === state.ticks ? state : { source, ticks };
+}
+
 /**
  * What `source`'s scan reports, each event kept as soon as the scan yields
- * it. A change of `subfolders` or unmounting stops the scan and forgets what
- * it found; a change starts it over.
+ * it. A change of `source` or `subfolders` or unmounting stops the scan and
+ * forgets what it found; a change starts it over. Without a source, nothing.
  */
-function useScan(source: CandidateSource, subfolders: boolean): ScanState {
+function useScan(
+  source: CandidateSource | null,
+  subfolders: boolean
+): ScanState {
   const [state, setState] = useState<ScanState>(NOT_STARTED);
   // Run before the screen paints: rows a toggle drops are gone in that frame,
   // and rows the source answers for at once are back before it shows
   useLayoutEffect(() => {
+    if (!source) return;
     const controller = new AbortController();
     const { signal } = controller;
     void (async () => {
@@ -167,8 +194,17 @@ function TreeRows({
 }
 
 export interface BulkImportModalContentProps {
-  /** Where the files come from. */
-  source: CandidateSource;
+  /**
+   * Where the files come from; `null` lists nothing, until a filter above
+   * makes a source. A new source scans afresh, every row ticked again.
+   */
+  source: CandidateSource | null;
+  /**
+   * The filter bar, above the options, for a dialog whose source the user
+   * picks there. It is handed the "Include subfolders" toggle to place where
+   * a filter that can go deeper wants it, and the toggle shows nowhere else.
+   */
+  renderFilterBar?: (subfoldersToggle: ComponentChildren) => ComponentChildren;
   /**
    * What the options start at. `includeSubfolders` counts only for a source
    * that `canIncludeSubfolders`.
@@ -204,11 +240,14 @@ export function BulkImportModalContent({
   onConfirm,
   onCancel,
   onIncludeSubfoldersChange,
+  renderFilterBar,
 }: BulkImportModalContentProps) {
   const [includeSubfolders, setIncludeSubfolders] = useState(
-    () => source.canIncludeSubfolders === true && defaults.includeSubfolders
+    defaults.includeSubfolders
   );
-  const scan = useScan(source, includeSubfolders);
+  const canGoDeeper = source?.canIncludeSubfolders === true;
+  // A source that cannot go deeper scans its top level whatever the toggle
+  const scan = useScan(source, canGoDeeper && includeSubfolders);
   const tree = useMemo(
     () => buildTree(scan.events, scan.done),
     [scan.events, scan.done]
@@ -218,12 +257,19 @@ export function BulkImportModalContent({
     [scan.events, scan.done]
   );
   const files = useMemo(() => treeFiles(tree), [tree]);
-  const [ticks, dispatch] = useReducer(ticksReducer, NO_TICKS);
+  // The ticks, for the source they were set on: a new source starts with
+  // every row ticked
+  const [ticksOn, dispatchOn] = useReducer(ticksOnReducer, {
+    source,
+    ticks: NO_TICKS,
+  });
+  const dispatch = (action: TicksAction) => dispatchOn({ source, action });
+  const ticks = ticksOn.source === source ? ticksOn.ticks : NO_TICKS;
   // Before the screen paints, so a file found under an unticked folder never
   // shows ticked
   useLayoutEffect(() => {
-    dispatch({ type: 'found', tree });
-  }, [tree]);
+    dispatchOn({ source, action: { type: 'found', tree } });
+  }, [source, tree]);
   const unticked = useMemo(() => untickedFiles(ticks), [ticks]);
   const states = useMemo(() => folderStates(ticks, tree), [ticks, tree]);
   const { values, update, current } = useImportOptions({
@@ -250,8 +296,32 @@ export function BulkImportModalContent({
     });
   };
 
+  const subfoldersToggle = (
+    <div className="ir-toggle ir-bulk-import-subfolders">
+      <label className="ir-toggle-label">
+        <div
+          className={
+            'checkbox-container' + (includeSubfolders ? ' is-enabled' : '')
+          }
+        >
+          <input
+            type="checkbox"
+            checked={includeSubfolders}
+            onChange={(e) => {
+              const on = e.currentTarget.checked;
+              setIncludeSubfolders(on);
+              onIncludeSubfoldersChange(on);
+            }}
+          />
+        </div>
+        Include subfolders
+      </label>
+    </div>
+  );
+
   return (
     <div className="ir-scheduling-modal ir-bulk-import">
+      {renderFilterBar?.(subfoldersToggle)}
       <div
         className="ir-bulk-import-options"
         onKeyDown={(e) => {
@@ -268,28 +338,7 @@ export function BulkImportModalContent({
           initialInterval={null}
         />
       </div>
-      {source.canIncludeSubfolders && (
-        <div className="ir-toggle">
-          <label className="ir-toggle-label">
-            <div
-              className={
-                'checkbox-container' + (includeSubfolders ? ' is-enabled' : '')
-              }
-            >
-              <input
-                type="checkbox"
-                checked={includeSubfolders}
-                onChange={(e) => {
-                  const on = e.currentTarget.checked;
-                  setIncludeSubfolders(on);
-                  onIncludeSubfoldersChange(on);
-                }}
-              />
-            </div>
-            Include subfolders
-          </label>
-        </div>
-      )}
+      {!renderFilterBar && canGoDeeper && subfoldersToggle}
       <ul className="ir-bulk-import-list">
         <TreeRows
           entries={tree}
@@ -298,12 +347,17 @@ export function BulkImportModalContent({
           folderStates={states}
           toggleFolder={toggleFolder}
         />
-        {topScanning && (
+        {source && topScanning && (
           <li>
             <LoadingSpinner label="Finding files to import" />
           </li>
         )}
       </ul>
+      {!source && (
+        <div className="ir-bulk-import-prompt">
+          Choose what to import above to list its files
+        </div>
+      )}
       {scan.done && files.length === 0 && (
         <div className="ir-bulk-import-empty">No files to import here</div>
       )}

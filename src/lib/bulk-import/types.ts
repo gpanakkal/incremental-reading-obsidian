@@ -1,4 +1,4 @@
-import type { TFile } from 'obsidian';
+import type { TFile, TFolder } from 'obsidian';
 
 /**
  * What a candidate source reports while it scans, in display order:
@@ -99,4 +99,12 @@ export interface BulkOutcome extends Partial<ImportedArticle> {
   file: TFile;
   status: 'imported' | 'unimported' | 'skipped' | 'failed';
   reason?: string;
+}
+
+/**
+ * What the bulk dialog's filter bar makes candidate sources with, one maker
+ * per filter: the folder chosen, for the folder filter.
+ */
+export interface FilterSources {
+  folder: (folder: TFolder) => CandidateSource;
 }

@@ -1644,9 +1644,74 @@ body:not(.is-mobile) .ir-review-interface .ir-card-editor .ir-review-scroller {
 }
 
 .ir-bulk-import-count,
-.ir-bulk-import-empty {
+.ir-bulk-import-empty,
+.ir-bulk-import-prompt {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+}
+
+/* The filter bar of the bulk import dialog opened from the review home: its
+   filters as a segmented control, drawn as the item-type filter is (one
+   field from the `--input-*` tokens), over the pressed filter's input row. */
+.ir-scheduling-modal > .ir-bulk-import-filter {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--size-4-2);
+}
+
+.ir-bulk-import-filter-segments {
+  display: flex;
+  align-self: flex-start;
+  gap: var(--size-2-1);
+  padding: var(--size-2-1);
+  background-color: var(--background-modifier-form-field);
+  border: var(--input-border-width) solid var(--background-modifier-border);
+  border-radius: var(--input-radius);
+}
+
+/* Two classes, to outrank Obsidian's `button:not(.clickable-icon)` face, as
+   the item-type filter's toggles do. */
+.ir-bulk-import-filter-segments .ir-bulk-import-filter-segment {
+  height: auto;
+  padding: var(--size-2-1) var(--size-4-2);
+  border-radius: var(--radius-s);
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+}
+
+.ir-bulk-import-filter-segments .ir-bulk-import-filter-segment.is-active {
+  background-color: var(--interactive-normal);
+  box-shadow: var(--input-shadow);
+  color: var(--text-normal);
+}
+
+@media (hover: hover) {
+  .ir-bulk-import-filter-segments
+    .ir-bulk-import-filter-segment:not(.is-active):hover {
+    background-color: var(--background-modifier-hover);
+    color: var(--text-normal);
+  }
+}
+
+.ir-bulk-import-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--size-4-2) var(--size-4-4);
+}
+
+.ir-bulk-import-filter-row .ir-bulk-import-folder-input {
+  flex: 1 1 12em;
+  min-width: 0;
+}
+
+/* Before the filter bar has a source, the list holds nothing at all; its
+   border alone would read as a broken field over the line saying why. */
+.ir-scheduling-modal > .ir-bulk-import-list:empty {
+  display: none;
 }
 
 /* The highlight behind the blanked answer comes from Obsidian, not from here:

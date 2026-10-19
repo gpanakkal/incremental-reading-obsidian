@@ -1,3 +1,7 @@
+import {
+  FilteredBulkImport,
+  folderFilter,
+} from '#/components/BulkImportFilterBar';
 import { BulkImportModalContent } from '#/components/BulkImportModalContent';
 import { importChosen } from '#/lib/bulk-import/run-import';
 import type {
@@ -9,13 +13,13 @@ import { Modal, type TFile } from 'obsidian';
 import { render } from 'preact';
 
 /**
- * What a bulk modal is opened on: where its files come from, and what it does
- * with them. Only importing is built so far.
+ * What a bulk modal is opened on: where its files come from, or a filter bar
+ * for the user to say (`filterBar`), and what it does with them. Only
+ * importing is built so far.
  */
-export interface BulkImportRequest {
-  source: CandidateSource;
-  mode: 'import';
-}
+export type BulkImportRequest =
+  | { source: CandidateSource; mode: 'import'; filterBar?: false }
+  | { filterBar: true; mode: 'import'; source?: undefined };
 
 /**
  * The one dialog for importing many files at once: shared import options over
@@ -44,19 +48,19 @@ export class BulkImportModal extends Modal {
     });
   }
 
-  private confirm(files: TFile[], options: BulkImportOptions) {
+  /** Import `files`, from what `from` names, and close. */
+  private confirm(files: TFile[], options: BulkImportOptions, from: string) {
     // Not again on a second confirm while the import runs
     if (this.importing) return;
-    const { plugin, request } = this;
-    const { title } = request.source;
+    const { plugin } = this;
     this.importing = importChosen(
-      plugin.reviewManager,
+      this.plugin.reviewManager,
       files,
       options,
-      title,
+      from,
       (outcomes) => {
         // One entry for the whole of it, which the summary's button undoes
-        const entry = plugin.actions.recordImport({ from: title, outcomes });
+        const entry = plugin.actions.recordImport({ from, outcomes });
         return entry ? plugin.actions.undoAction(entry) : undefined;
       }
     );
@@ -65,6 +69,10 @@ export class BulkImportModal extends Modal {
 
   onOpen() {
     const { plugin, request, contentEl } = this;
+    if (request.filterBar) {
+      this.openFiltered();
+      return;
+    }
     this.setTitle(
       request.source.heading ?? `Importing from ${request.source.title}`
     );
@@ -79,7 +87,37 @@ export class BulkImportModal extends Modal {
         onIncludeSubfoldersChange={(on) =>
           void plugin.saveUiState({ folderImportIncludeSubfolders: on })
         }
-        onConfirm={(files, options) => this.confirm(files, options)}
+        onConfirm={(files, options) =>
+          this.confirm(files, options, request.source.title)
+        }
+        onCancel={() => this.close()}
+      />,
+      contentEl
+    );
+  }
+
+  /**
+   * The dialog with the filter bar, listing nothing until a filter makes a
+   * source. The file explorer's order is read once, here.
+   */
+  private openFiltered() {
+    const { plugin, contentEl } = this;
+    const sources = plugin.bulkImportSources();
+    this.setTitle('Bulk import');
+    render(
+      <FilteredBulkImport
+        segments={[folderFilter(plugin.app, sources.folder)]}
+        defaults={{
+          priority: plugin.settings.defaultPriority,
+          makeCopy: plugin.settings.copyOnImport,
+          includeSubfolders: plugin.data.ui.folderImportIncludeSubfolders,
+        }}
+        onIncludeSubfoldersChange={(on) =>
+          void plugin.saveUiState({ folderImportIncludeSubfolders: on })
+        }
+        onConfirm={(files, options, source) =>
+          this.confirm(files, options, source.title)
+        }
         onCancel={() => this.close()}
       />,
       contentEl

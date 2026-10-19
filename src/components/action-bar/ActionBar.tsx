@@ -1,4 +1,5 @@
 import { CardCogPlus } from '#/components/icons/CardCog';
+import { FilesPlus } from '#/components/icons/FilesPlus';
 import { ScissorsPlus } from '#/components/icons/ScissorsPlus';
 import { useAppSelector } from '#/hooks/useAppSelector';
 import {
@@ -103,7 +104,12 @@ export function ActionBar() {
         {/* setting a tabIndex makes the action bar focusable */}
         <div ref={leadRef} className="ir-bar-lead">
           <GlobalActions />
-          {page === 'home' && <LeftoverAction />}
+          {page === 'home' && (
+            <>
+              <BulkImportAction />
+              <LeftoverAction />
+            </>
+          )}
           {page !== 'home' && (
             <>
               <ButtonWithIcon
@@ -223,6 +229,28 @@ function HomeActions() {
     >
       Begin Review
     </TextButton>
+  );
+}
+
+/**
+ * Opens the bulk-import modal. Shown whatever is due: importing is how an
+ * empty queue fills.
+ *
+ * In the leading zone, ahead of the leftover button, so the begin-review
+ * button keeps the bar's midpoint to itself.
+ */
+function BulkImportAction() {
+  const { plugin } = useReviewContext();
+  return (
+    <ButtonWithIcon
+      tooltip="Import many files at once"
+      id="bulk-import-button"
+      handleClick={() => {
+        plugin.openBulkImport();
+      }}
+    >
+      <FilesPlus />
+    </ButtonWithIcon>
   );
 }
 

@@ -1536,3 +1536,147 @@ describe('BulkImportModal on a Files-view selection', () => {
     modal.close();
   });
 });
+
+describe('BulkImportModal: filter bar', () => {
+  /**
+   * A plugin whose vault holds the folder `notes`, whose source is `scan`'s,
+   * made by `bulkImportSources` as the plugin's is.
+   */
+  function makeFilterPlugin(
+    scan: ReturnType<typeof makeSource>,
+    { includeSubfolders = false, copyOnImport = false } = {}
+  ) {
+    const made = makePlugin(copyOnImport, { includeSubfolders });
+    const notes = Object.assign(new TFolder(), {
+      path: 'notes',
+      name: 'notes',
+    });
+    const folder = vi.fn((_folder: TFolder) => scan.source);
+    const bulkImportSources = vi.fn(() => ({ folder }));
+    Object.assign(made.plugin, {
+      app: { vault: { getAllFolders: () => [notes] } },
+      bulkImportSources,
+    });
+    return { ...made, notes, folder, bulkImportSources };
+  }
+
+  function openFiltered(plugin: IncrementalReadingPlugin) {
+    const modal = new BulkImportModal(plugin, {
+      mode: 'import',
+      filterBar: true,
+    });
+    vi.spyOn(modal, 'close').mockImplementation(() => modal.onClose());
+    document.body.append(modal.contentEl);
+    void act(() => modal.onOpen());
+    return modal;
+  }
+
+  async function chooseNotes(modal: BulkImportModal) {
+    const input = modal.contentEl.querySelector<HTMLInputElement>(
+      '.ir-bulk-import-filter-row input[type="text"]'
+    )!;
+    input.focus();
+    input.value = 'no';
+    input.dispatchEvent(new Event('input'));
+    await settle();
+    await click(document.querySelector<HTMLElement>('.suggestion-item')!);
+    await settle();
+  }
+
+  function filterToggle(modal: BulkImportModal) {
+    return modal.contentEl.querySelector<HTMLInputElement>(
+      '.ir-bulk-import-filter-row .ir-bulk-import-subfolders input'
+    );
+  }
+
+  it('lists nothing until a folder is picked, then the files the source made for it finds', async () => {
+    const scan = makeSource('notes', { deeper: true });
+    const { plugin, notes, folder, bulkImportSources } = makeFilterPlugin(scan);
+    const modal = openFiltered(plugin);
+
+    expect(rows(modal)).toEqual([]);
+    expect(
+      modal.contentEl.querySelector('.ir-bulk-import-prompt')
+    ).not.toBeNull();
+    expect(scan.runs).toEqual([]);
+    // The explorer's order, read as the dialog opens
+    expect(bulkImportSources).toHaveBeenCalledOnce();
+
+    await chooseNotes(modal);
+    await scan.add(makeFile('a.md'));
+
+    expect(folder).toHaveBeenCalledExactlyOnceWith(notes);
+    expect(rows(modal).map(nameOf)).toEqual(['a']);
+    expect(bulkImportSources).toHaveBeenCalledOnce();
+    modal.close();
+  });
+
+  it('imports the ticked files with the default options, saying it imported them from the folder picked', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), async (copyOnImport) => {
+        Notice.reset();
+        const scan = makeSource('Reading', { deeper: true });
+        const { plugin, importArticles } = makeFilterPlugin(scan, {
+          copyOnImport,
+        });
+        const modal = openFiltered(plugin);
+        await chooseNotes(modal);
+        const file = makeFile('a.md');
+        await scan.add(file);
+
+        await click(confirmButton(modal));
+        await modal.closed;
+
+        expect(importArticles).toHaveBeenCalledExactlyOnceWith([{ file }], {
+          priority: plugin.settings.defaultPriority,
+          fixedIntervalDays: null,
+          makeCopy: copyOnImport,
+        });
+        expect(Notice.messages).toEqual([
+          expect.stringMatching(/\b1\b.*Reading/),
+        ]);
+        document.body.replaceChildren();
+      }),
+      { numRuns: 4 }
+    );
+  });
+
+  it('imports nothing when cancelled', async () => {
+    const scan = makeSource('notes', { deeper: true });
+    const { plugin, importArticles } = makeFilterPlugin(scan);
+    const modal = openFiltered(plugin);
+    // Spied on already: this hands back that spy
+    const close = vi.spyOn(modal, 'close');
+    await chooseNotes(modal);
+    await scan.add(makeFile('a.md'));
+
+    await click(button(modal, /^Cancel$/));
+    await modal.closed;
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(scan.signal()?.aborted).toBe(true);
+    expect(importArticles).not.toHaveBeenCalled();
+  });
+
+  it('opens Include subfolders as last left, remembering each switch', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), async (startOn) => {
+        const scan = makeSource('notes', { deeper: true });
+        const { plugin, saveUiState } = makeFilterPlugin(scan, {
+          includeSubfolders: startOn,
+        });
+        const modal = openFiltered(plugin);
+        expect(filterToggle(modal)?.checked).toBe(startOn);
+
+        await click(filterToggle(modal)!);
+
+        expect(saveUiState).toHaveBeenCalledExactlyOnceWith({
+          folderImportIncludeSubfolders: !startOn,
+        });
+        modal.close();
+        document.body.replaceChildren();
+      }),
+      { numRuns: 4 }
+    );
+  });
+});

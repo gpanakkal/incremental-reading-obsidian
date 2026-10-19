@@ -50,7 +50,7 @@ import { LeftoverWatch } from '#/views/LeftoverModal';
 // The Vitest alias points `obsidian` at this same file, so the `Menu` built
 // here is the one the plugin fills — importing it by path is what gives TS the
 // stub's recorded `items`, which the real class does not expose.
-import type { ScanEvent } from '#/lib/bulk-import/types';
+import type { FilterSources, ScanEvent } from '#/lib/bulk-import/types';
 import {
   getIconIds,
   Menu,
@@ -1113,6 +1113,7 @@ function makeLoadReceiver() {
     }),
     addExtractCommands: vi.fn(),
     addImportCommands: vi.fn(),
+    addBulkImportCommand: vi.fn(),
     addCommand: vi.fn(),
     registerEvent: vi.fn(),
     addSettingTab: vi.fn(),
@@ -1431,6 +1432,16 @@ describe('IncrementalReadingPlugin onload', () => {
 
     expect(ribbonIcons).toEqual([PLUGIN_ICON]);
     expect(iconsAtRibbon[0]).toContain(PLUGIN_ICON);
+  });
+
+  it('registers the bulk import command', async () => {
+    const { receiver } = makeLoadReceiver();
+
+    await IncrementalReadingPlugin.prototype.onload.call(
+      receiver as unknown as IncrementalReadingPlugin
+    );
+
+    expect(receiver.addBulkImportCommand).toHaveBeenCalledOnce();
   });
 });
 
@@ -1960,10 +1971,10 @@ describe('IncrementalReadingPlugin.importFromFolder', () => {
         expect(open).toHaveBeenCalledOnce();
         expect(open.mock.contexts[0]).toBe(modal);
         expect(modal.request.mode).toBe('import');
-        expect(modal.request.source.title).toBe('reading');
+        expect(modal.request.source?.title).toBe('reading');
         // A PDF is an item by the row at its path, which the item layer knows
         const events: ScanEvent[] = [];
-        for await (const event of modal.request.source.scan(
+        for await (const event of modal.request.source!.scan(
           new AbortController().signal
         )) {
           events.push(event);
@@ -2014,7 +2025,7 @@ describe('IncrementalReadingPlugin.importFromFolder', () => {
       ) as BulkImportModal;
       explorerState.sortOrder = 'alphabetical';
       const events: ScanEvent[] = [];
-      for await (const event of modal.request.source.scan(
+      for await (const event of modal.request.source!.scan(
         new AbortController().signal
       )) {
         events.push(event);
@@ -2191,7 +2202,7 @@ describe('IncrementalReadingPlugin.importSelection', () => {
       ) as BulkImportModal;
       explorerState.sortOrder = 'alphabetical';
       const events: ScanEvent[] = [];
-      for await (const event of modal.request.source.scan(
+      for await (const event of modal.request.source!.scan(
         new AbortController().signal
       )) {
         events.push(event);
@@ -2200,7 +2211,7 @@ describe('IncrementalReadingPlugin.importSelection', () => {
       expect(open).toHaveBeenCalledOnce();
       expect(open.mock.contexts[0]).toBe(modal);
       expect(modal.request.mode).toBe('import');
-      expect(modal.request.source.title).toMatch(/\b3\b/);
+      expect(modal.request.source?.title).toMatch(/\b3\b/);
       // Each PDF is an item by the row at its path; Z to A, as it opened
       expect(isItemFileAt.mock.calls).toEqual(
         ['c', 'b', 'a'].map((name) => [pdf(name), `papers/${name}.pdf`])
@@ -2209,6 +2220,129 @@ describe('IncrementalReadingPlugin.importSelection', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('IncrementalReadingPlugin bulk import command', () => {
+  /** The plugin with the command registered, loaded or not. */
+  function makeReceiver(loaded: boolean) {
+    const commands = new Map<
+      string,
+      { name: string; checkCallback: (checking: boolean) => boolean | void }
+    >();
+    const receiver = {
+      reviewManager: loaded ? {} : undefined,
+      openBulkImport: vi.fn(),
+      addCommand: vi.fn(
+        (command: {
+          id: string;
+          name: string;
+          checkCallback: (checking: boolean) => boolean | void;
+        }) => {
+          commands.set(command.id, command);
+        }
+      ),
+    };
+    (
+      IncrementalReadingPlugin.prototype as unknown as {
+        addBulkImportCommand(): void;
+      }
+    ).addBulkImportCommand.call(receiver);
+    return { receiver, commands };
+  }
+
+  it('is offered once the plugin has loaded, opening the dialog only when run', () => {
+    fc.assert(
+      fc.property(fc.boolean(), fc.boolean(), (loaded, checking) => {
+        const { receiver, commands } = makeReceiver(loaded);
+
+        expect([...commands.keys()]).toEqual(['bulk-import']);
+        const offered = commands.get('bulk-import')!.checkCallback(checking);
+
+        expect(offered).toBe(loaded);
+        expect(receiver.openBulkImport).toHaveBeenCalledTimes(
+          loaded && !checking ? 1 : 0
+        );
+      })
+    );
+  });
+});
+
+describe('IncrementalReadingPlugin.openBulkImport', () => {
+  it('opens the bulk import dialog with its filter bar, on no source yet', () => {
+    vi.stubGlobal('document', { createElement: () => ({}) });
+    try {
+      const open = vi
+        .spyOn(BulkImportModal.prototype, 'open')
+        .mockImplementation(() => {});
+      const receiver = { app: {} };
+
+      const modal = IncrementalReadingPlugin.prototype.openBulkImport.call(
+        receiver as unknown as IncrementalReadingPlugin
+      ) as BulkImportModal;
+
+      expect(open).toHaveBeenCalledOnce();
+      expect(open.mock.contexts[0]).toBe(modal);
+      expect(modal.request).toEqual({ mode: 'import', filterBar: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('IncrementalReadingPlugin.bulkImportSources', () => {
+  it("makes a folder's source, asking the item layer about each file, in the explorer's order as it was asked for", async () => {
+    // Where the explorer keeps its order (see `readExplorerSortOrder`)
+    const explorerState = { sortOrder: 'byModifiedTime' };
+    const receiver = {
+      app: {
+        workspace: {
+          getLeavesOfType: (type: string) =>
+            type === 'file-explorer'
+              ? [{ view: { getState: () => explorerState } }]
+              : [],
+        },
+      },
+      // Asked about each PDF in turn, in the order the dialog lists them
+      reviewManager: {
+        isItemFileAt: vi.fn((_file: TFile, _path: string) => true),
+      },
+    };
+    const folder = makeFolder('papers/deep');
+    const pdf = (basename: string, mtime: number) =>
+      Object.assign(new TFile(), {
+        path: `papers/deep/${basename}.pdf`,
+        name: `${basename}.pdf`,
+        basename,
+        extension: 'pdf',
+        stat: { mtime, ctime: 0, size: 0 },
+      });
+    // Newest first, `b` `c` `a`; by name, as the folder holds them, `a` `b` `c`
+    folder.children = [pdf('a', 1), pdf('b', 3), pdf('c', 2)];
+
+    const sources = IncrementalReadingPlugin.prototype.bulkImportSources.call(
+      receiver as unknown as IncrementalReadingPlugin
+    ) as FilterSources;
+    explorerState.sortOrder = 'alphabetical';
+    const source = sources.folder(folder);
+    const events: ScanEvent[] = [];
+    for await (const event of source.scan(new AbortController().signal)) {
+      events.push(event);
+    }
+
+    expect(source.title).toBe('deep');
+    expect(source.canIncludeSubfolders).toBe(true);
+    expect(events).toEqual([{ type: 'folder-done', path: folder.path }]);
+    expect(
+      receiver.reviewManager.isItemFileAt.mock.calls.map(([file, path]) => [
+        file.basename,
+        path,
+      ])
+    ).toEqual([
+      ['b', 'papers/deep/b.pdf'],
+      ['c', 'papers/deep/c.pdf'],
+      ['a', 'papers/deep/a.pdf'],
+    ]);
   });
 });
 

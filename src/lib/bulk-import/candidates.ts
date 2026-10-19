@@ -39,7 +39,7 @@ export async function isImportCandidate(
 }
 
 /** Whether `path` is the data directory or a folder inside it. */
-const inDataDirectory = (path: string) =>
+export const inDataDirectory = (path: string) =>
   path === DATA_DIRECTORY || path.startsWith(`${DATA_DIRECTORY}/`);
 
 /**

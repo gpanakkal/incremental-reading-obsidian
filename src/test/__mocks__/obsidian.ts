@@ -503,6 +503,77 @@ export class FuzzySuggestModal<T> extends Modal {
     return [];
   }
 }
+/**
+ * Obsidian's suggestion popup under a text input, working as its own does
+ * (read from obsidian.asar): input or focus while the input has focus lists
+ * `getSuggestions` of its value, at most `limit` of them, as
+ * `.suggestion-item`s in a `.suggestion-container` on the body, or closes the
+ * popup when there are none; an item cancels its mousedown, so pressing it
+ * keeps the input's focus, and clicking it selects it, which only calls the
+ * `onSelect` callback; blur closes the popup. Unlike Obsidian's, it shows the
+ * popup without checking the input is visible (jsdom lays nothing out) and
+ * has no arrow-key or Enter navigation.
+ */
+export abstract class AbstractInputSuggest<T> {
+  app: unknown;
+  limit = 100;
+  protected readonly textInputEl: HTMLInputElement;
+  private selectCb?: (value: T, evt: MouseEvent | KeyboardEvent) => unknown;
+  private suggestEl: HTMLElement | null = null;
+
+  constructor(app: unknown, textInputEl: HTMLInputElement) {
+    this.app = app;
+    this.textInputEl = textInputEl;
+    textInputEl.addEventListener('input', () => void this.onInputChange());
+    textInputEl.addEventListener('focus', () => void this.onInputChange());
+    textInputEl.addEventListener('blur', () => this.close());
+  }
+
+  protected abstract getSuggestions(query: string): T[] | Promise<T[]>;
+  abstract renderSuggestion(value: T, el: HTMLElement): void;
+
+  setValue(value: string) {
+    this.textInputEl.value = value;
+  }
+  getValue(): string {
+    return this.textInputEl.value;
+  }
+  onSelect(callback: (value: T, evt: MouseEvent | KeyboardEvent) => unknown) {
+    this.selectCb = callback;
+    return this;
+  }
+  selectSuggestion(value: T, evt: MouseEvent | KeyboardEvent) {
+    this.selectCb?.(value, evt);
+  }
+  open() {}
+  close() {
+    this.suggestEl?.remove();
+    this.suggestEl = null;
+  }
+
+  private async onInputChange() {
+    const input = this.textInputEl;
+    if (input.ownerDocument.activeElement !== input) return;
+    let suggestions = await this.getSuggestions(this.getValue());
+    this.close();
+    if (suggestions.length === 0) return;
+    if (this.limit > 0) suggestions = suggestions.slice(0, this.limit);
+    const container = input.ownerDocument.createElement('div');
+    container.className = 'suggestion-container';
+    for (const value of suggestions) {
+      const item = input.ownerDocument.createElement('div');
+      item.className = 'suggestion-item';
+      this.renderSuggestion(value, item);
+      item.addEventListener('mousedown', (evt) => evt.preventDefault());
+      item.addEventListener('click', (evt) =>
+        this.selectSuggestion(value, evt)
+      );
+      container.appendChild(item);
+    }
+    input.ownerDocument.body.appendChild(container);
+    this.suggestEl = container;
+  }
+}
 /** Base of Obsidian's non-file views; the web viewer's among them. */
 export class ItemView {}
 export class FileView {

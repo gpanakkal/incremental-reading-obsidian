@@ -1,11 +1,15 @@
 import { AutoImportWatcher } from '#/lib/AutoImportWatcher';
-import { folderSource } from '#/lib/bulk-import/candidates';
+import {
+  type CandidateChecks,
+  folderSource,
+} from '#/lib/bulk-import/candidates';
 import {
   itemCount,
   selectionMayImport,
   selectionRoots,
   selectionSource,
 } from '#/lib/bulk-import/selection';
+import type { FilterSources } from '#/lib/bulk-import/types';
 import { createEmitter } from '#/lib/emitter';
 import {
   explorerComparator,
@@ -249,6 +253,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.addExtractCommands();
 
     this.addImportCommands();
+    this.addBulkImportCommand();
 
     this.addCommand({
       id: 'create-empty-article',
@@ -1352,6 +1357,36 @@ export default class IncrementalReadingPlugin extends Plugin {
     return modal;
   }
 
+  /**
+   * The bulk import dialog with the filter bar, from the review home or the
+   * palette: the user picks the folder there. It always opens, whatever
+   * `showImportDialog` says.
+   */
+  openBulkImport(): BulkImportModal {
+    const modal = new BulkImportModal(this, {
+      mode: 'import',
+      filterBar: true,
+    });
+    modal.open();
+    return modal;
+  }
+
+  /**
+   * What the bulk dialog's filters list, in the file explorer's order as it
+   * is now: read once per dialog, as `importFromFolder` reads it.
+   */
+  bulkImportSources(): FilterSources {
+    const { reviewManager } = this;
+    const checks: CandidateChecks = {
+      app: this.app,
+      isItemAtPath: (file) => reviewManager.isItemFileAt(file, file.path),
+    };
+    const compare = explorerComparator(
+      readExplorerSortOrder(this.app.workspace)
+    );
+    return { folder: (folder) => folderSource(folder, checks, compare) };
+  }
+
   async importArticle(
     file: TFile,
     opts?: {
@@ -1468,6 +1503,22 @@ export default class IncrementalReadingPlugin extends Plugin {
   /** The import command every user gets; the rest are advanced. */
   private addImportCommands() {
     this.addImportCommand('import-article', 'Import article');
+  }
+
+  /**
+   * "Bulk import…": the bulk import dialog with its filter bar, as the review
+   * home's button opens it. Unavailable until the plugin has loaded.
+   */
+  private addBulkImportCommand() {
+    this.addCommand({
+      id: 'bulk-import',
+      name: 'Bulk import…',
+      checkCallback: (checking: boolean) => {
+        if (!this.reviewManager) return false;
+        if (!checking) this.openBulkImport();
+        return true;
+      },
+    });
   }
 
   /**

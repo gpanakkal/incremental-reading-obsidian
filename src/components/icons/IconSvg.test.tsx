@@ -2,6 +2,7 @@
 import { render, type ComponentChild, type ComponentType } from 'preact';
 import { describe, expect, it } from 'vitest';
 import { CardCog, CardCogPlus } from './CardCog';
+import { FilesPlus } from './FilesPlus';
 import type { IconProps } from './IconSvg';
 import { ScissorsPlus } from './ScissorsPlus';
 
@@ -27,6 +28,7 @@ function pathData(svg: SVGSVGElement): string[] {
 const ICONS: [string, ComponentType<IconProps>][] = [
   ['CardCog', CardCog],
   ['CardCogPlus', CardCogPlus],
+  ['FilesPlus', FilesPlus],
   ['ScissorsPlus', ScissorsPlus],
 ];
 

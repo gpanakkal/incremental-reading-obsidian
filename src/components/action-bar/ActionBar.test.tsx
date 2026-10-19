@@ -93,6 +93,7 @@ function mountBar({
   leaf = makeLeaf(),
   reviewView = { showMoreOptionsMenu, leaf },
   leftovers,
+  openBulkImport = vi.fn(),
 }: {
   showMoreOptionsMenu?: () => void;
   actions?: ReturnType<typeof makeActions>;
@@ -100,10 +101,20 @@ function mountBar({
   reviewView?: object;
   /** The plugin's watch over notes left without review data, once it has one. */
   leftovers?: ReturnType<typeof makeLeftoverWatch>;
+  /** Opens the bulk import dialog with its filter bar. */
+  openBulkImport?: () => void;
 } = {}): HTMLElement {
   return mount(
     <ReviewContextProvider
-      plugin={{ actions, app: {}, leftovers, ...GRADE_INTERVALS_ON } as never}
+      plugin={
+        {
+          actions,
+          app: {},
+          leftovers,
+          openBulkImport,
+          ...GRADE_INTERVALS_ON,
+        } as never
+      }
       reviewView={reviewView as never}
       reviewManager={REVIEW_MANAGER as never}
     >
@@ -130,6 +141,10 @@ const REVIEW_MANAGER = {
 
 function moreOptionsButton(container: HTMLElement): HTMLButtonElement | null {
   return container.querySelector<HTMLButtonElement>('#more-options-button');
+}
+
+function bulkImportButton(container: HTMLElement) {
+  return container.querySelector<HTMLButtonElement>('#bulk-import-button');
 }
 
 function beginReviewButton(container: HTMLElement): HTMLButtonElement {
@@ -695,6 +710,64 @@ describe('ActionBar', () => {
     });
   });
 
+  describe('bulk import button', () => {
+    it('shows on the home screen alone', () => {
+      fc.assert(
+        fc.property(fc.constantFrom(...PAGES), (page) => {
+          wireQueue();
+          if (page === 'home') reduxState.page = 'home';
+          else wireCurrentItem();
+
+          const container = mountBar();
+
+          expect(bulkImportButton(container) !== null).toBe(page === 'home');
+          render(null, container);
+          Object.assign(reduxState, defaultReduxState);
+        })
+      );
+    });
+
+    it('sits in the leading zone, ahead of the leftover button', () => {
+      // The user asked for it on the left, before "manage leftover notes".
+      wireQueue();
+      const container = mountBar({ leftovers: makeLeftoverWatch(2) });
+
+      const bulk = bulkImportButton(container)!;
+      const leftover = queryLeftoverButton(container)!;
+      expect(bulk.parentElement).toBe(zone(container, 'lead'));
+      expect(
+        bulk.compareDocumentPosition(leftover) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+    });
+
+    it('opens the bulk import dialog, whether or not anything is due', () => {
+      fc.assert(
+        fc.property(
+          fc.record({
+            totalRows: fc.nat(3),
+            isLoading: fc.boolean(),
+            isError: fc.boolean(),
+          }),
+          (queue) => {
+            wireQueue(queue);
+            const openBulkImport = vi.fn();
+            const container = mountBar({ openBulkImport });
+
+            const button = bulkImportButton(container)!;
+            expect(button.disabled).toBe(false);
+            expect(openBulkImport).not.toHaveBeenCalled();
+            button.click();
+
+            expect(openBulkImport).toHaveBeenCalledOnce();
+            expect(dispatch).not.toHaveBeenCalled();
+            render(null, container);
+          }
+        )
+      );
+    });
+  });
+
   describe('home button', () => {
     it('returns to the home screen', () => {
       reduxState.page = 'review';
@@ -737,13 +810,14 @@ describe('ActionBar', () => {
       }
     );
 
-    it('leads the start edge, after the arrows, leaving the middle zone to the begin-review button', async () => {
+    it('leads the start edge, after the arrows and bulk import, leaving the middle zone to the begin-review button', async () => {
       const container = mountBar({ leftovers: makeLeftoverWatch(1) });
       await settle();
 
       expect(zoneChildren(container, 'lead')).toEqual([
         navigateButton(container, 'back'),
         navigateButton(container, 'forward'),
+        bulkImportButton(container),
         queryLeftoverButton(container),
       ]);
       expect(zoneChildren(container, 'center')).toEqual([
@@ -954,10 +1028,10 @@ describe('ActionBar', () => {
         const [back, forward, next] = zoneChildren(container, 'lead');
         expect(back.id).toBe('navigate-back-button');
         expect(forward.id).toBe('navigate-forward-button');
-        // In review the session's own actions follow them in the same zone. The
-        // home screen has none, and its one button sits in the middle zone.
+        // In review the session's own actions follow them in the same zone. On
+        // the home screen bulk import does, and begin-review has the middle.
         if (page === 'home') {
-          expect(next).toBeUndefined();
+          expect(next).toBe(bulkImportButton(container));
           expect(zoneChildren(container, 'center')).toEqual([
             beginReviewButton(container),
           ]);
@@ -1139,7 +1213,7 @@ describe('ActionBar', () => {
       ]);
     });
 
-    it('hold the arrows alone at the start edge on the home screen', async () => {
+    it('are followed by bulk import alone at the start edge on the home screen', async () => {
       // Nothing there acts on a review session, and the begin-review button is
       // the middle zone's whole contents.
       reduxState.page = 'home';
@@ -1149,6 +1223,7 @@ describe('ActionBar', () => {
       expect(zoneChildren(container, 'lead')).toEqual([
         navigateButton(container, 'back'),
         navigateButton(container, 'forward'),
+        bulkImportButton(container),
       ]);
       expect(zoneChildren(container, 'center')).toEqual([
         beginReviewButton(container),
