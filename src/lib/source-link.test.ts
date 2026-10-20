@@ -9,6 +9,20 @@ import {
 
 // #region HELPERS
 /**
+ * The characters with these codes, built from their codes since lint rejects
+ * control characters in a regex.
+ */
+const charsOf = (codes: readonly number[]) =>
+  codes.map((code) => String.fromCharCode(code));
+
+/** Every code from `from` to `to`, both included. */
+const codeRange = (from: number, to: number) =>
+  Array.from({ length: to - from + 1 }, (_, i) => from + i);
+
+/** Characters no file or folder name can hold: the controls and DEL. */
+const UNNAMEABLE = new Set(charsOf([...codeRange(0x00, 0x1f), 0x7f]));
+
+/**
  * A file or folder name as Obsidian lets one be linked to: spaces, brackets
  * of the round kind, `%` and the like included; none of the characters a
  * name can't hold or a link can't carry (`\ / : * ? " < > | # ^ [ ]`), and
@@ -25,7 +39,8 @@ const segmentArb = fc
   })
   .filter(
     (s) =>
-      !/[\\/:*?"<>|#^[\]\x00-\x1F\x7F]/.test(s) &&
+      !/[\\/:*?"<>|#^[\]]/.test(s) &&
+      ![...s].some((char) => UNNAMEABLE.has(char)) &&
       !/%[0-9A-Fa-f]{2}/.test(s) &&
       s.trim() === s &&
       s !== '.' &&
@@ -36,10 +51,15 @@ const segmentArb = fc
  * A markdown link's target as Obsidian writes it (`YE` in its bundle):
  * only spaces, backslashes and control characters are URL-encoded.
  */
+const ENCODED_BY_OBSIDIAN = new Set([
+  '\\',
+  ' ',
+  ...charsOf([0x00, 0x08, 0x0b, 0x0c, ...codeRange(0x0e, 0x1f)]),
+]);
 const obsidianEncoded = (target: string) =>
-  target.replace(/[\\\x00\x08\x0B\x0C\x0E-\x1F ]/g, (c) =>
-    encodeURIComponent(c)
-  );
+  [...target]
+    .map((c) => (ENCODED_BY_OBSIDIAN.has(c) ? encodeURIComponent(c) : c))
+    .join('');
 
 /**
  * Whether the round brackets in `text` balance, as a bare markdown link
@@ -224,6 +244,18 @@ describe('parseSourceLink', () => {
       subpath: '#page=2',
       alias: 'a',
     });
+  });
+
+  it('reads no bare markdown link target holding a space or control character, and every other character as written', () => {
+    // Every code up to U+00FF, so DEL and the C1 controls show they pass too;
+    // round brackets aside, which only fail to balance
+    for (let code = 0; code <= 0xff; code++) {
+      if (code === 0x28 || code === 0x29) continue;
+      const char = String.fromCharCode(code);
+      expect(parseSourceLink(`[a](x${char}y.pdf)`) === null, `U+${code}`).toBe(
+        code <= 0x20
+      );
+    }
   });
 
   it('reads an embed, an empty target, and spaces inside the brackets', () => {

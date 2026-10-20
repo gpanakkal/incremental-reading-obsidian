@@ -23,11 +23,17 @@ export interface SourceLink {
 const WIKILINK = /^!?\[\[([^\]|#]*)(#[^\]|]*)?(?:\|([^\]]*))?\]\]$/;
 
 /**
- * Characters Obsidian encodes in a markdown link's target (spaces and the
- * control characters among them: `YE` in its bundle), so a bare target never
- * holds one as written.
+ * Whether `text` holds a character Obsidian encodes in a markdown link's
+ * target (spaces and the control characters among them: `YE` in its bundle),
+ * which a bare target never holds as written. Those are U+0000 to U+0020, so
+ * a code test stands in for a regex of control characters, which lint rejects.
  */
-const ENCODED_IN_TARGET = /[ \x00-\x1F]/;
+function holdsEncodedInTarget(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) <= 0x20) return true;
+  }
+  return false;
+}
 
 /**
  * A markdown link's text and target: `[text](target)`, maybe `!`-prefixed,
@@ -60,7 +66,7 @@ function readMarkdownLink(
     if (!inner.endsWith('>') || target.includes('>')) return null;
     return { alias, target, angled: true };
   }
-  if (ENCODED_IN_TARGET.test(inner)) return null;
+  if (holdsEncodedInTarget(inner)) return null;
   let depth = 0;
   for (const char of inner) {
     if (char === '(') depth += 1;

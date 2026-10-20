@@ -54,6 +54,13 @@ const SIGNATURE_LENGTH = Math.max(
  * when the response has no body to read them from or ends before them.
  */
 async function fetchLeadingBytes(url: string): Promise<Uint8Array | null> {
+  // `fetch`, not `requestUrl`: `url` is the vault's own resource URL
+  // (`app://` on desktop, the WebView's file server on mobile), never a
+  // network endpoint. `requestUrl` cannot read it: on desktop it goes through
+  // Electron's `net.request`, which rejects it ("ClientRequest only supports
+  // http: and https: protocols"), and on mobile it is native HTTP outside the
+  // WebView. Only `fetch` streams, so only `fetch` can stop after the
+  // signature instead of reading whole PDFs.
   const response = await fetch(url, {
     // Relies on undocumented URL serving; see readLeadingBytes for what and
     // for the fallback when it fails. A single range is a CORS-safelisted
