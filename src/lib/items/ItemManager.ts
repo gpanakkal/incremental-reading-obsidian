@@ -14,6 +14,8 @@ import {
 } from '#/lib/source-link';
 import type {
   ArticleRow,
+  IArticleBase,
+  ISnippetBase,
   MissingItem,
   MutationStatement,
   NoteType,
@@ -562,6 +564,28 @@ export class ItemManager {
     await this.repo.mutate(`UPDATE ${table} SET deleted = 0 WHERE id = $1`, [
       id,
     ]);
+  }
+
+  /**
+   * Write `text`'s new priority with the interval and due it leaves (see
+   * `IRScheduler.reprioritize`).
+   * @param lastReview `text`'s latest review, if it has one
+   */
+  protected async reprioritizeText(
+    table: 'article' | 'snippet',
+    text: IArticleBase | ISnippetBase,
+    newPriority: number,
+    lastReview: { review_time: number } | undefined
+  ): Promise<void> {
+    const { interval, due } = IRScheduler.reprioritize(
+      text,
+      newPriority,
+      lastReview?.review_time
+    );
+    await this.repo.mutate(
+      `UPDATE ${table} SET priority = $1, due = $2, interval = $3 WHERE id = $4`,
+      [newPriority, due, interval, text.id]
+    );
   }
 
   /** Recalculate and set due_fuzz for a single row */

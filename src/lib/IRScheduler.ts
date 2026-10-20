@@ -134,6 +134,38 @@ export default class IRScheduler {
   }
 
   /**
+   * The interval and due a priority change leaves `text` with. Its stored
+   * interval is the gap its last review set: the pre-growth interval times the
+   * old priority's multiplier (see `nextInterval`). A change swaps that
+   * multiplier for the new one, recovering the pre-growth interval by rounding
+   * so the swap is exactly undone by changing back: every multiplier is above
+   * 1, so rounding the scaled-up interval never loses the base. The change does
+   * not grow the interval; only a review does. Due moves with the interval,
+   * from the last review, and keeps its fuzz.
+   *
+   * A text never reviewed keeps both: its interval is the base its first review
+   * grows, by the multiplier the priority has then. So does a text on a fixed
+   * interval, which priority doesn't schedule.
+   * @param lastReviewTime when `text` was last reviewed, if it ever was
+   */
+  static reprioritize(
+    text: IArticleBase | ISnippetBase,
+    newPriority: number,
+    lastReviewTime: number | undefined
+  ): { interval: number; due: number | null } {
+    const fixed =
+      'fixed_interval_days' in text && text.fixed_interval_days !== null;
+    if (lastReviewTime === undefined || fixed || newPriority === text.priority)
+      return { interval: text.interval, due: text.due };
+
+    const base = Math.round(
+      text.interval / this.getIntervalMultiplier(text.priority)
+    );
+    const interval = Math.round(base * this.getIntervalMultiplier(newPriority));
+    return { interval, due: lastReviewTime + interval };
+  }
+
+  /**
    * Get the time until the nth review from now as a Unix timestamp, assuming
    * all reviews happen on time and the priority is never changed
    *

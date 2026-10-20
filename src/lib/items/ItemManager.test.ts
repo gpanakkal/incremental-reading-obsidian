@@ -1,5 +1,11 @@
+import {
+  MAXIMUM_PRIORITY,
+  MINIMUM_PRIORITY,
+  MS_PER_YEAR,
+} from '#/lib/constants';
+import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
-import type { NoteType, SQLiteRepository } from '#/lib/types';
+import type { IArticleBase, NoteType, SQLiteRepository } from '#/lib/types';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
 import type { CachedMetadata, TFile } from 'obsidian';
@@ -7,8 +13,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ItemManager } from './ItemManager';
 
 // #region HELPERS
-/** Opens the protected `reconcileNote` to the tests. */
+/** Opens the protected `reprioritizeText` and `reconcileNote` to the tests. */
 class TestManager extends ItemManager {
+  reprioritize(
+    ...args: Parameters<ItemManager['reprioritizeText']>
+  ): Promise<void> {
+    return this.reprioritizeText(...args);
+  }
+
   reconcile(
     row: { id: string; deleted: boolean },
     file: TFile,
@@ -529,6 +541,98 @@ const TO = {
 } as TFile;
 const FROM = 'papers/Paper.pdf';
 // #endregion
+
+describe('reprioritizeText', () => {
+  const priorityArb = fc.integer({
+    min: MINIMUM_PRIORITY,
+    max: MAXIMUM_PRIORITY,
+  });
+  const textArb = fc.record({
+    id: fc.uuid(),
+    interval: fc.integer({ min: 1, max: MS_PER_YEAR * 10 }),
+    priority: priorityArb,
+    due: fc.option(fc.nat()),
+    fixed_interval_days: fc.constant(null),
+  }) as fc.Arbitrary<IArticleBase>;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("writes the new priority with the interval and due it leaves to the text's row", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('article' as const, 'snippet' as const),
+        textArb,
+        priorityArb,
+        fc.option(fc.nat(), { nil: undefined }),
+        async (table, text, newPriority, reviewTime) => {
+          const { repo, mutate } = makeRepo();
+          const manager = new TestManager({} as never, repo);
+          await manager.reprioritize(
+            table,
+            text,
+            newPriority,
+            reviewTime === undefined ? undefined : { review_time: reviewTime }
+          );
+
+          const { interval, due } = IRScheduler.reprioritize(
+            text,
+            newPriority,
+            reviewTime
+          );
+          expect(mutate).toHaveBeenCalledExactlyOnceWith(
+            `UPDATE ${table} SET priority = $1, due = $2, interval = $3 WHERE id = $4`,
+            [newPriority, due, interval, text.id]
+          );
+        }
+      )
+    );
+  });
+
+  it('leaves the row as it was after a run of changes back to the starting priority', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: MS_PER_YEAR * 10 }),
+        priorityArb,
+        fc.array(priorityArb, { maxLength: 10 }),
+        fc.nat(),
+        async (base, priority, changes, reviewTime) => {
+          const { repo, mutate } = makeRepo();
+          const manager = new TestManager({} as never, repo);
+          const interval = IRScheduler.nextInterval({
+            interval: base,
+            priority,
+            fixed_interval_days: null,
+          } as IArticleBase);
+          const start = {
+            id: 'a',
+            interval,
+            priority,
+            due: reviewTime + interval,
+            fixed_interval_days: null,
+          } as IArticleBase;
+
+          let text = start;
+          for (const p of [...changes, priority]) {
+            mutate.mockClear();
+            await manager.reprioritize('article', text, p, {
+              review_time: reviewTime,
+            });
+            const [, params] = mutate.mock.calls[0] as [string, number[]];
+            text = {
+              ...text,
+              priority: params[0],
+              due: params[1],
+              interval: params[2],
+            };
+          }
+          expect(text).toEqual(start);
+        }
+      )
+    );
+  });
+});
 
 describe('retargetSources', () => {
   afterEach(() => {
