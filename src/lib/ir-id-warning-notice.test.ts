@@ -2,22 +2,24 @@
 import { Notice } from '#/test/__mocks__/obsidian';
 import fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ARTICLE_TAG, CARD_TAG, SNIPPET_TAG } from './constants';
 import {
+  createDamagedNotesNotice,
   createIrIdWarning,
-  createTypeTagNotices,
+  DAMAGED_NOTES_NAMED,
+  damagedNotesMessage,
   IR_ID_WARNING_MAX_LIFETIME_MS,
-  IR_ID_WARNING_MESSAGE,
   IR_ID_WARNING_WINDOW_MS,
   irIdWarningMessage,
   persistentNotice,
-  typeTagRestoredMessage,
   type IrIdWarningDeps,
   type NoticeFactory,
   type NoticeTarget,
 } from './ir-id-warning-notice';
 
 // #region HELPERS
+
+/** What the warnings under test say, unless a case names its own. */
+const IR_ID_WARNING_MESSAGE = "Don't edit the ir-id property.";
 
 /** How long Obsidian's hide animation runs before it detaches the element. */
 const HIDE_ANIMATION_MS = 120;
@@ -60,7 +62,7 @@ function makeNotices() {
 }
 
 /**
- * A warning over fake notices, showing the repair path's message unless the
+ * A warning over fake notices, showing {@link IR_ID_WARNING_MESSAGE} unless the
  * case names one of its own.
  */
 function makeWarning(
@@ -163,22 +165,7 @@ const capFor = (gaps: readonly number[], windowMs: number, slack = 0) =>
 
 // #endregion
 
-describe('typeTagRestoredMessage', () => {
-  it('names the tag it put back, in a message short enough to read on a phone', () => {
-    for (const tag of [ARTICLE_TAG, SNIPPET_TAG, CARD_TAG]) {
-      const message = typeTagRestoredMessage(tag);
-      expect(message).toContain(tag);
-      expect(message.length).toBeLessThanOrEqual(140);
-    }
-  });
-});
-
 describe('irIdWarningMessage', () => {
-  it('warns about ir-id in a message short enough to read on a phone', () => {
-    expect(IR_ID_WARNING_MESSAGE).toContain('ir-id');
-    expect(IR_ID_WARNING_MESSAGE.length).toBeLessThanOrEqual(140);
-  });
-
   it('shows no count for a window that caught a single event', () => {
     fc.assert(
       fc.property(
@@ -832,9 +819,65 @@ describe('createIrIdWarning', () => {
   });
 });
 
-describe('createTypeTagNotices', () => {
+describe('damagedNotesMessage', () => {
+  /** A vault path ending in a note name of its own. */
+  const pathArb = fc
+    .tuple(
+      fc.array(fc.stringMatching(/^[a-z]{1,6}$/), { maxLength: 2 }),
+      fc.stringMatching(/^[A-Za-z0-9]{1,10}$/)
+    )
+    .map(([folders, name]) => ({
+      name,
+      path: [...folders, `${name}.md`].join('/'),
+    }));
+
+  it('names the first notes without folder or extension, and counts the rest', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(pathArb, {
+          minLength: 1,
+          maxLength: 8,
+          selector: ({ path }) => path,
+        }),
+        (notes) => {
+          const message = damagedNotesMessage(notes.map(({ path }) => path));
+          const named = notes.slice(0, DAMAGED_NOTES_NAMED);
+          for (const { name } of named) expect(message).toContain(`"${name}"`);
+          for (const { path } of notes.slice(DAMAGED_NOTES_NAMED)) {
+            expect(message).not.toContain(`"${path}"`);
+          }
+          expect(message).not.toContain('.md"');
+          const rest = notes.length - named.length;
+          if (rest > 0) expect(message).toContain(` and ${rest} more `);
+          else expect(message).not.toMatch(/\d+ more/);
+        }
+      )
+    );
+  });
+
+  it('lists the names it shows in order, the last joined by "and"', () => {
+    expect(damagedNotesMessage(['a/One.md'])).toMatch(/: "One" lost its /);
+    expect(damagedNotesMessage(['One.md', 'Two.md'])).toMatch(
+      /: "One" and "Two" lost their /
+    );
+    expect(damagedNotesMessage(['One.md', 'Two.md', 'Three.md'])).toMatch(
+      /: "One", "Two" and "Three" lost their /
+    );
+    expect(
+      damagedNotesMessage(['One.md', 'Two.md', 'Three.md', 'Four.md'])
+    ).toMatch(/: "One", "Two", "Three" and 1 more lost their /);
+  });
+
+  it('keeps an extension other than .md, which is part of what the user sees', () => {
+    expect(damagedNotesMessage(['notes/Card.mdx'])).toContain('"Card.mdx"');
+    expect(damagedNotesMessage(['notes/Plain'])).toContain('"Plain"');
+  });
+});
+
+describe('createDamagedNotesNotice', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    document.body.replaceChildren();
   });
 
   afterEach(() => {
@@ -842,40 +885,58 @@ describe('createTypeTagNotices', () => {
     vi.restoreAllMocks();
   });
 
-  const typeTagArb = fc.constantFrom(ARTICLE_TAG, SNIPPET_TAG, CARD_TAG);
+  it('raises one notice naming the notes, and adds later ones to it while it is up', () => {
+    const { raised, createNotice } = makeNotices();
+    const notice = createDamagedNotesNotice(createNotice);
 
-  it('raises one notice per tag in a burst, naming it and counting the notes it went back on', () => {
-    fc.assert(
-      fc.property(fc.array(typeTagArb, { maxLength: 12 }), (tags) => {
-        vi.clearAllTimers();
-        document.body.replaceChildren();
-        const { raised, createNotice } = makeNotices();
-        const notices = createTypeTagNotices({ createNotice });
+    notice.report(['One.md']);
+    notice.report(['Two.md', 'One.md']);
 
-        for (const tag of tags) notices.warn(tag);
-
-        const distinct = [...new Set(tags)];
-        expect(raised.map(({ messages }) => messages[0])).toStrictEqual(
-          distinct.map(typeTagRestoredMessage)
-        );
-        for (const [i, tag] of distinct.entries()) {
-          const count = tags.filter((each) => each === tag).length;
-          expect(raised[i].messages.at(-1)).toBe(
-            irIdWarningMessage(typeTagRestoredMessage(tag), count)
-          );
-        }
-      })
-    );
+    expect(createNotice).toHaveBeenCalledOnce();
+    expect(raised[0].messages).toStrictEqual([
+      damagedNotesMessage(['One.md']),
+      damagedNotesMessage(['One.md', 'Two.md']),
+    ]);
   });
 
-  it('hides every notice it has up when disposed', () => {
+  it('raises a fresh notice, naming only the new notes, once the last was dismissed', () => {
+    for (const dismiss of ['click', 'detach'] as const) {
+      document.body.replaceChildren();
+      const { raised, createNotice } = makeNotices();
+      const notice = createDamagedNotesNotice(createNotice);
+      notice.report(['One.md']);
+
+      // A click leaves the element in the document while the hide animates
+      if (dismiss === 'click') raised[0].containerEl.click();
+      else raised[0].containerEl.remove();
+      notice.report(['Two.md']);
+
+      expect(raised.map(({ messages }) => messages)).toStrictEqual([
+        [damagedNotesMessage(['One.md'])],
+        [damagedNotesMessage(['Two.md'])],
+      ]);
+    }
+  });
+
+  it('says nothing for a report naming no notes', () => {
+    const { createNotice } = makeNotices();
+    const notice = createDamagedNotesNotice(createNotice);
+
+    notice.report([]);
+
+    expect(createNotice).not.toHaveBeenCalled();
+  });
+
+  it('hides the notice it has up when disposed, and raises a fresh one after', () => {
     const { raised, createNotice } = makeNotices();
-    const notices = createTypeTagNotices({ createNotice });
-    notices.warn(ARTICLE_TAG);
-    notices.warn(CARD_TAG);
+    const notice = createDamagedNotesNotice(createNotice);
+    notice.dispose();
+    notice.report(['One.md']);
 
-    notices.dispose();
+    notice.dispose();
+    notice.report(['Two.md']);
 
-    expect(raised.map(({ hides }) => hides)).toStrictEqual([1, 1]);
+    expect(raised.map(({ hides }) => hides)).toStrictEqual([1, 0]);
+    expect(raised[1].messages).toStrictEqual([damagedNotesMessage(['Two.md'])]);
   });
 });

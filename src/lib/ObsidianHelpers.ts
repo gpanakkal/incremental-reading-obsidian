@@ -7,6 +7,7 @@ import {
   normalizePath,
   parseYaml,
   type App,
+  type CachedMetadata,
   type DataWriteOptions,
   type Editor,
   type EditorPosition,
@@ -354,8 +355,8 @@ export class ObsidianHelpers {
    * knows such a file by the row at its path.
    *
    * A deleted note has no type either, though the vault may still hold its
-   * text: any caller can meet one, as the action bar re-reads its note's type
-   * when the delete marks the row. Gone is either no longer the vault's file at
+   * text: any caller can meet one, as the reading-mode bar re-reads its
+   * note's type on each change the metadata cache reports. Gone is either no longer the vault's file at
    * its path, or, for a note the vault holds no text for and so reads off the
    * disk, already gone from there: a delete reaches the disk before the vault
    * reports it. A failed read of a note still on disk, or one the disk can't
@@ -377,6 +378,27 @@ export class ObsidianHelpers {
     // Deleted once the vault reports it, though its text may still be cached
     if (app.vault.getFileByPath(note.path) !== note) return null;
     return this.typeOfTags(frontmatter.tags);
+  }
+
+  /**
+   * {@link getNoteType} answered from `cache`, the metadata cache's parse of
+   * `note`, as its `changed` event hands it over, so with no read. A read made
+   * on hearing the event can answer for other text than the event's own: the
+   * vault keeps no text for a note over its cache limit (64 KiB, read from
+   * obsidian.asar: `cacheLimit=65536`), so each read goes to the disk, and an
+   * earlier, slower one can land after a later one.
+   *
+   * The cache's `frontmatter` is the block's YAML parsed as
+   * {@link readFrontMatter} parses it, and none for a note without a block or
+   * with one that doesn't parse, which names no type.
+   */
+  static noteTypeFromCache(
+    note: TFile,
+    cache: CachedMetadata | null,
+    app: App
+  ): NoteType | null {
+    if (app.vault.getFileByPath(note.path) !== note) return null;
+    return this.typeOfTags(cache?.frontmatter?.tags);
   }
 
   /**
@@ -607,7 +629,7 @@ export class ObsidianHelpers {
   /**
    * A note's cached frontmatter, with a lone `tags` string read as a list of
    * one. The list is a copy: the cache's own object is what every other reader
-   * of the note sees, the ir-id repairer included, and rewriting it there made
+   * of the note sees, the ir-id watch included, and rewriting it there made
    * `tags: a, b` read as the single entry `a, b` until the note was reparsed.
    */
   static getFrontMatter(

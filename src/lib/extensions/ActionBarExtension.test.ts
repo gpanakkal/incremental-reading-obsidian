@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { DISMISS_ICON_STROKE, PLUGIN_ICON } from '#/lib/constants';
+import {
+  ARTICLE_TAG,
+  CARD_TAG,
+  DISMISS_ICON_STROKE,
+  PLUGIN_ICON,
+  SNIPPET_TAG,
+} from '#/lib/constants';
 import { configureSuccessNotices } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { registerPluginIcon } from '#/lib/plugin-icon';
@@ -7,6 +13,7 @@ import type {
   DataChangeEvent,
   DataChangeListener,
   IArticleBase,
+  NoteType,
   ReviewItem,
 } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
@@ -18,7 +25,11 @@ import {
 import { EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import fc from 'fast-check';
-import { type MarkdownFileInfo, type TFile } from 'obsidian';
+import {
+  type CachedMetadata,
+  type MarkdownFileInfo,
+  type TFile,
+} from 'obsidian';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   actionBarExtension,
@@ -178,6 +189,13 @@ function makeContainer(): HTMLElement {
   return el;
 }
 
+/** What the metadata cache calls its `changed` listeners with. */
+type MetadataChangedListener = (
+  file: TFile,
+  data: string,
+  cache: CachedMetadata
+) => void;
+
 /** Editors mounted by {@link mountPanel}, torn down after each test. */
 const mountedViews: EditorView[] = [];
 
@@ -191,12 +209,29 @@ const mountedViews: EditorView[] = [];
  */
 function mountPanel(
   harness: ReturnType<typeof makeHarness>,
-  options: { providePlugin?: boolean } = {}
+  options: {
+    providePlugin?: boolean;
+    /** What reading the note's type answers; `'article'` by default. */
+    noteType?: () => Promise<NoteType | null>;
+  } = {}
 ) {
   const file = makeFile();
+  /** The `changed` listener the bar holds on the metadata cache, if any. */
+  let onChanged: MetadataChangedListener | null = null;
+  /** The file at each path, as the vault has it. */
+  const vaultFiles = new Map<string, TFile>([[file.path, file]]);
   const app = {
     isMobile: false,
-    metadataCache: { on: vi.fn(() => ({})), offref: vi.fn() },
+    vault: {
+      getFileByPath: (path: string) => vaultFiles.get(path) ?? null,
+    },
+    metadataCache: {
+      on: vi.fn((_name: string, listener: MetadataChangedListener) => {
+        onChanged = listener;
+        return {};
+      }),
+      offref: vi.fn(),
+    },
   };
   const parent = document.createElement('div');
   // Satisfies the extension's "not a sub-editor" check.
@@ -212,7 +247,9 @@ function mountPanel(
     info,
     editorView: view,
   }));
-  vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
+  const getNoteType = options.noteType
+    ? vi.spyOn(Obsidian, 'getNoteType').mockImplementation(options.noteType)
+    : vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
 
   view = new EditorView({
     state: EditorState.create({
@@ -231,6 +268,31 @@ function mountPanel(
   return {
     view,
     file,
+    app,
+    getNoteType,
+    /**
+     * Report a change to `changed` (the open file by default) whose parse has
+     * `frontmatter`, as the metadata cache does once it has read the new text.
+     */
+    reportChange: (
+      frontmatter: Record<string, unknown> | undefined,
+      changed: TFile = file
+    ) => onChanged?.(changed, '', frontmatter ? { frontmatter } : {}),
+    /**
+     * Show `other` in this editor instead, as a leaf opening another note
+     * does, then run a transaction for the bar to see it by.
+     */
+    switchTo: (other: TFile) => {
+      vaultFiles.set(other.path, other);
+      info = { file: other, app } as unknown as MarkdownFileInfo;
+      view?.dispatch({ changes: { from: 0, insert: ' ' } });
+    },
+    /** Take the open file out of the vault, as a delete does. */
+    dropFromVault: () => vaultFiles.delete(file.path),
+    /** The bar on screen, if any. */
+    bar: () => parent.querySelector('.ir-action-bar'),
+    /** Whether the bar is on screen. */
+    hasBar: () => parent.querySelector('.ir-action-bar') !== null,
     /** Drop the file info, as a detached editor would. */
     clearInfo: () => {
       info = null;
@@ -1010,5 +1072,187 @@ describe('the edit-mode action bar panel', () => {
 
     expect(panel.barButtons()).toEqual([]);
     expect(harness.listenerCount()).toBe(0);
+  });
+});
+
+describe("the edit-mode bar following its note's type", () => {
+  /** Any `tags` value, type tags well represented, as a list or a lone string. */
+  const tagsArb = fc.oneof(
+    fc.array(
+      fc.oneof(fc.constantFrom(ARTICLE_TAG, SNIPPET_TAG, CARD_TAG), fc.string())
+    ),
+    fc.constantFrom(ARTICLE_TAG, SNIPPET_TAG, CARD_TAG, 'other'),
+    fc.constant(undefined),
+    fc.integer()
+  );
+
+  /** Whether `tags` names any item type, worked out apart from the code. */
+  const namesAType = (tags: unknown) =>
+    (Array.isArray(tags) || typeof tags === 'string') &&
+    [ARTICLE_TAG, SNIPPET_TAG, CARD_TAG].some((tag) => tags.includes(tag));
+
+  it('takes the bar off once the cache shows the type tags gone, reading nothing', async () => {
+    // The reported bug: an un-import strips the tags from the open note
+    const panel = mountPanel(makeHarness({ item: null }));
+    await tick();
+    expect(panel.hasBar()).toBe(true);
+
+    panel.reportChange({ tags: ['keep-me'] });
+
+    expect(panel.hasBar()).toBe(false);
+    // Read once, when the editor opened, and never again
+    expect(panel.getNoteType).toHaveBeenCalledOnce();
+  });
+
+  it('shows and hides the bar as each reported change names a type or none', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.array(tagsArb, { maxLength: 6 }), async (changes) => {
+        const panel = mountPanel(makeHarness(), {
+          noteType: async () => null,
+        });
+        await tick();
+        for (const tags of changes) {
+          panel.reportChange(tags === undefined ? {} : { tags });
+          expect(panel.hasBar()).toBe(namesAType(tags));
+        }
+        panel.view.destroy();
+      }),
+      { numRuns: 40 }
+    );
+  });
+
+  it('takes the bar off a note whose changed text has no frontmatter', async () => {
+    const panel = mountPanel(makeHarness());
+    await tick();
+
+    panel.reportChange(undefined);
+
+    expect(panel.hasBar()).toBe(false);
+  });
+
+  it('leaves the bar alone for a change to another note', async () => {
+    const panel = mountPanel(makeHarness());
+    await tick();
+
+    panel.reportChange({ tags: [] }, makeFile('notes/other.md'));
+
+    expect(panel.hasBar()).toBe(true);
+  });
+
+  it('takes the bar off a note the vault no longer holds, whatever its tags', async () => {
+    const panel = mountPanel(makeHarness());
+    await tick();
+
+    panel.dropFromVault();
+    panel.reportChange({ tags: [ARTICLE_TAG] });
+
+    expect(panel.hasBar()).toBe(false);
+  });
+
+  it('drops a read of the note that lands after a newer change', async () => {
+    // A note over the vault's cache limit is read from the disk, slowly: its
+    // un-import can be reported before the read made on opening it answers
+    let answer: (type: NoteType | null) => void = () => {};
+    const panel = mountPanel(makeHarness({ item: null }), {
+      noteType: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    });
+
+    panel.reportChange({ tags: ['keep-me'] });
+    answer('article');
+    await tick();
+
+    expect(panel.hasBar()).toBe(false);
+  });
+
+  it('applies the read made on opening when no change came after it', async () => {
+    let answer: (type: NoteType | null) => void = () => {};
+    const panel = mountPanel(makeHarness(), {
+      noteType: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    });
+    expect(panel.hasBar()).toBe(false);
+
+    answer('snippet');
+    await tick();
+
+    expect(panel.hasBar()).toBe(true);
+  });
+
+  it('follows another note opened in the same editor, and only it', async () => {
+    const panel = mountPanel(makeHarness(), { noteType: async () => null });
+    await tick();
+    const other = makeFile('notes/other.md');
+
+    panel.switchTo(other);
+    await tick();
+    // Its type is read afresh, and the old note's watch handed over
+    expect(panel.getNoteType).toHaveBeenLastCalledWith(other, panel.app);
+    expect(panel.app.metadataCache.offref).toHaveBeenCalledOnce();
+
+    panel.reportChange({ tags: [ARTICLE_TAG] });
+    expect(panel.hasBar()).toBe(false);
+    panel.reportChange({ tags: [ARTICLE_TAG] }, other);
+    expect(panel.hasBar()).toBe(true);
+  });
+
+  it('drops a read for a note this editor has since moved on from', async () => {
+    // Opening a note, a change to it, then another note: the first read
+    // answering last is about a note no longer shown
+    const answers: ((type: NoteType | null) => void)[] = [];
+    const panel = mountPanel(makeHarness(), {
+      noteType: () =>
+        new Promise((resolve) => {
+          answers.push(resolve);
+        }),
+    });
+    panel.reportChange({ tags: [] });
+    panel.switchTo(makeFile('notes/other.md'));
+    expect(answers).toHaveLength(2);
+
+    answers[0]('article');
+    await tick();
+
+    expect(panel.hasBar()).toBe(false);
+  });
+
+  it('keeps the bar it has through changes that keep the type', async () => {
+    const harness = makeHarness();
+    const panel = mountPanel(harness);
+    await tick();
+    const bar = panel.bar();
+
+    panel.reportChange({ tags: [ARTICLE_TAG, 'more'] });
+    await tick();
+
+    expect(panel.bar()).toBe(bar);
+    expect(harness.reviewManager.getReviewItemFromFile).toHaveBeenCalledOnce();
+  });
+
+  it('lets go of the cache when the editor goes away', async () => {
+    const panel = mountPanel(makeHarness());
+    await tick();
+    const ref = panel.app.metadataCache.on.mock.results[0]?.value as unknown;
+
+    panel.view.destroy();
+
+    expect(panel.app.metadataCache.offref).toHaveBeenCalledExactlyOnceWith(ref);
+  });
+
+  it('ignores a change reported after the editor is gone', async () => {
+    const panel = mountPanel(makeHarness());
+    await tick();
+    const typed = vi.spyOn(Obsidian, 'noteTypeFromCache');
+    // With no file info left to unsubscribe through, the listener outlives it
+    panel.clearInfo();
+    panel.view.destroy();
+
+    panel.reportChange({ tags: [ARTICLE_TAG] });
+
+    expect(typed).not.toHaveBeenCalled();
   });
 });

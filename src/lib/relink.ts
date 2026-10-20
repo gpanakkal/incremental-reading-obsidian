@@ -282,8 +282,8 @@ function refusal(
  * source links are pointed at the target. The user hears how it went.
  *
  * The row is relinked even if the note's frontmatter can't be written
- * (malformed YAML, say): the note is at the row's reference either way, and a
- * review fetch puts the id back once it can.
+ * (malformed YAML, say): the note is at the row's reference either way, which
+ * is how a review fetch finds it while it has no id.
  */
 export async function relinkItem(
   plugin: IncrementalReadingPlugin,

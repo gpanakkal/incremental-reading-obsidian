@@ -146,10 +146,10 @@ const snippetRowArb = fc.record<SnippetRow>({
 
 /**
  * Minimal Obsidian App stub. rowToReviewSnippet reads frontmatter via
- * `app.metadataCache.getFileCache` and fire-and-forgets a `setFrontmatter`
- * write through `app.fileManager.processFrontMatter` when frontmatter is
- * missing. Both need to resolve cleanly so the test doesn't emit unhandled
- * promise rejections.
+ * `app.metadataCache.getFileCache`. It no longer writes a note's missing
+ * frontmatter back (0166), but `app.fileManager.processFrontMatter` still
+ * resolves cleanly so a write, if one came back, fails an assertion rather
+ * than emitting an unhandled promise rejection.
  */
 function makeApp(): Record<string, unknown> {
   return {
@@ -914,7 +914,7 @@ describe('rowToReviewSnippet', () => {
     expect(deleteCall).toBeDefined();
   });
 
-  it('calls setFrontmatter when the file has an ir-id but lacks the snippet tag', async () => {
+  it('writes nothing to the note when the file has an ir-id but lacks the snippet tag', async () => {
     const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeSnippetRow({
@@ -940,10 +940,10 @@ describe('rowToReviewSnippet', () => {
     );
     manager.rowToReviewSnippet(row);
     await Promise.resolve();
-    expect(processFrontMatterSpy).toHaveBeenCalled();
+    expect(processFrontMatterSpy).not.toHaveBeenCalled();
   });
 
-  it('does not call setFrontmatter when the file has both matching ir-id and the snippet tag', async () => {
+  it('writes nothing to a note that has both its matching ir-id and the snippet tag', async () => {
     const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     const row = makeSnippetRow({
@@ -1078,7 +1078,7 @@ describe('rowToReviewSnippet on a note the metadata cache is still re-reading', 
     );
   });
 
-  it('still restores the id and tag of a parsed note that has no frontmatter', async () => {
+  it('writes no id or tag into a parsed note that has no frontmatter', async () => {
     const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     await fc.assert(
@@ -1106,8 +1106,7 @@ describe('rowToReviewSnippet on a note the metadata cache is still re-reading', 
             data: SnippetManager.rowToBase(row),
             file: fakeFile,
           });
-          expect(processFrontMatter).toHaveBeenCalledTimes(1);
-          expect(processFrontMatter.mock.calls[0][0]).toBe(fakeFile);
+          expect(processFrontMatter).not.toHaveBeenCalled();
         }
       )
     );

@@ -23,7 +23,7 @@ export interface NoticeTarget {
  */
 export type NoticeFactory = (message: string) => NoticeTarget;
 
-/** Opens the kind of notice {@link createIrIdWarning} needs. */
+/** Opens the kind of notice {@link createIrIdWarning} and {@link createDamagedNotesNotice} need. */
 export const persistentNotice: NoticeFactory = (message) =>
   notify(message, { persist: true });
 
@@ -40,21 +40,6 @@ export const hostTimer: Timer = (run, ms) => {
   const id = window.setTimeout(run, ms);
   return () => window.clearTimeout(id);
 };
-
-/**
- * The repair path's message: what the user is told, once, however many notes
- * the burst damaged.
- */
-export const IR_ID_WARNING_MESSAGE =
-  "Incremental Reading: don't edit the ir-id property. It's how a note finds its review data.";
-
-/**
- * What the user is told once the repair path has put back a type tag they
- * removed, one notice per tag however many notes the burst touched.
- */
-export function typeTagRestoredMessage(tag: string): string {
-  return `Incremental Reading: restored the ${tag} tag. Item notes need it.`;
-}
 
 /** How long the notice stays up after the most recent damage event. */
 export const IR_ID_WARNING_WINDOW_MS = NOTICE_MIN_DURATION_MS;
@@ -101,11 +86,7 @@ export interface IrIdWarning {
    * already on screen and bump its count.
    *
    * Says nothing about *which* note, or what happened to it — the caller decides
-   * what counts as an event worth warning about. For the repair path, in
-   * particular, it is the caller's job not to call this for the plugin's own
-   * repair write, which re-fires `changed`, nor while Obsidian is still indexing
-   * the vault, when every note that legitimately has no `ir-id` would warn at
-   * once.
+   * what counts as an event worth warning about.
    */
   warn(): void;
   /** Hide anything on screen and cancel the timer. For plugin unload. */
@@ -146,10 +127,9 @@ interface OpenWarning {
  * screen, so every event within the window folds into the notice already up and
  * bumps the count it displays (if {@link IrIdWarningDeps.showCount} allows).
  *
- * The plugin keeps one of these per kind of event, each with its own message:
- * one for damage already written and repaired, one for an edit refused before
- * it was made. The two never fire for the same action, and one notice each
- * keeps what happened unambiguous.
+ * The plugin keeps one of these for an edit refused before it was made. Damage
+ * already written elsewhere names its notes instead (see
+ * {@link createDamagedNotesNotice}).
  *
  * The window slides: each event carries the notice {@link IrIdWarningDeps.windowMs}
  * further, so it is still there when the burst ends rather than expiring in the
@@ -278,36 +258,86 @@ export function createIrIdWarning({
   };
 }
 
-export interface TypeTagNotices {
-  /** Report one note whose type tag `tag` was put back. */
-  warn(tag: string): void;
-  /** Hide every notice up and cancel their timers. For plugin unload. */
+/** How many notes {@link damagedNotesMessage} names before counting the rest. */
+export const DAMAGED_NOTES_NAMED = 3;
+
+/** A note's name as the user sees it: its file name, less a `.md`. */
+function noteName(path: string): string {
+  const file = path.slice(path.lastIndexOf('/') + 1);
+  return file.endsWith('.md') ? file.slice(0, -'.md'.length) : file;
+}
+
+/**
+ * What the user is told about notes that lost their `ir-id` or item tag
+ * outside the plugin: the first few by name, the rest counted.
+ */
+export function damagedNotesMessage(paths: readonly string[]): string {
+  const named = paths
+    .slice(0, DAMAGED_NOTES_NAMED)
+    .map((p) => `"${noteName(p)}"`);
+  const rest = paths.length - named.length;
+  const list =
+    rest > 0
+      ? `${named.join(', ')} and ${rest} more`
+      : named.length > 1
+        ? `${named.slice(0, -1).join(', ')} and ${named[named.length - 1]}`
+        : named[0];
+  const its = paths.length > 1 ? 'their' : 'its';
+  return `Incremental Reading: ${list} lost ${its} ir-id or item tag. Undo that edit to keep ${its} review data.`;
+}
+
+export interface DamagedNotesNotice {
+  /** Report notes that lost their `ir-id` or item tag. */
+  report(paths: readonly string[]): void;
+  /** Hide the notice if it is up. For plugin unload. */
   dispose(): void;
 }
 
 /**
- * The repair path's notices about type tags it put back: one warning per tag,
- * so each notice names its tag, and a burst putting the same tag back on many
- * notes folds into the one notice and counts them off on it.
+ * One notice naming the notes that lost their `ir-id` or item tag, kept up
+ * until the user dismisses it: the edit isn't undone for them, so it must not
+ * slip by. Notes reported while it is up are added to it rather than stacking
+ * another, since Sync can deliver a damaged folder over several passes.
  */
-export function createTypeTagNotices(
-  deps: Omit<IrIdWarningDeps, 'message'>
-): TypeTagNotices {
-  const warnings = new Map<string, IrIdWarning>();
+export function createDamagedNotesNotice(
+  createNotice: NoticeFactory
+): DamagedNotesNotice {
+  let open: {
+    notice: NoticeTarget;
+    paths: string[];
+    dismissed: boolean;
+  } | null = null;
   return {
-    warn(tag) {
-      let warning = warnings.get(tag);
-      if (!warning) {
-        warning = createIrIdWarning({
-          ...deps,
-          message: typeTagRestoredMessage(tag),
-        });
-        warnings.set(tag, warning);
+    report(paths) {
+      if (paths.length === 0) return;
+      // Rewriting a notice the user dismissed would show them nothing. A click
+      // hides it (Obsidian's `Notice` listens for one: undocumented), but the
+      // element stays in the document while the hide animates, so the click is
+      // watched as well as the element leaving (a swipe on a phone)
+      const shown =
+        open && !open.dismissed && open.notice.containerEl.isConnected
+          ? open
+          : null;
+      const all = [...new Set([...(shown?.paths ?? []), ...paths])];
+      const message = damagedNotesMessage(all);
+      if (shown) {
+        shown.notice.setMessage(message);
+        shown.paths = all;
+        return;
       }
-      warning.warn();
+      const state = {
+        notice: createNotice(message),
+        paths: all,
+        dismissed: false,
+      };
+      state.notice.containerEl.addEventListener('click', () => {
+        state.dismissed = true;
+      });
+      open = state;
     },
     dispose() {
-      warnings.forEach((warning) => warning.dispose());
+      open?.notice.hide();
+      open = null;
     },
   };
 }

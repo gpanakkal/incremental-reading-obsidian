@@ -109,6 +109,10 @@ const propertyKeys = () =>
     els.map((el) => el.getAttribute('data-property-key'))
   );
 
+/** The edit-mode action bar on the note's tab. */
+const actionBar = () =>
+  window.locator('.mod-root .markdown-source-view .ir-action-bar-panel');
+
 /** The pills of the tags property the note's tab shows. */
 const tagPills = () =>
   properties()
@@ -215,6 +219,7 @@ test('un-imports an article from its menu in Files, leaving a plain note with it
   const before = await articleCount();
   await importFromFiles();
   expect(await articleCount()).toBe(before + 1);
+  await expect(actionBar()).toBeVisible();
 
   await chooseFromMenu(fileRow(), 'Un-import article');
   await expect(confirmation()).toContainText(
@@ -226,6 +231,8 @@ test('un-imports an article from its menu in Files, leaving a plain note with it
     window.locator('.notice').filter({ hasText: 'Un-imported "Unimport me"' })
   ).toBeVisible();
   await expect(tagPills()).toHaveText(['keep-me']);
+  // Gone from the open note without switching away, as from any plain note
+  await expect(actionBar()).toHaveCount(0);
   expect(await propertyKeys()).toEqual(['tags']);
   await expect.poll(noteText).not.toMatch(/ir-id/);
   expect(await articleCount()).toBe(before);

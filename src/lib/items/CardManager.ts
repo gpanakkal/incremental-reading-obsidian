@@ -162,7 +162,7 @@ export class CardManager extends ItemManager {
     // Missing, which is never stored: see `MissingItem`
     if (!file) return null;
 
-    if (!this.reconcileNote(row, file, 'card', CARD_TAG)) return null;
+    if (!this.reconcileNote(row, file, 'card')) return null;
 
     return {
       data: base,
