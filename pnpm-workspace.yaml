@@ -23,3 +23,8 @@ packageExtensions:
       '@codemirror/view': '*'
 trustPolicyExclude:
   - 'react-redux' # required due to a change in their publishing process https://github.com/reduxjs/reselect/issues/752
+overrides:
+  # obsidian pins moment 2.29.4, which GHSA-4p3w-j4w9-5jqw (path traversal via a
+  # non-string locale name) flags in the plugin directory review. The plugin never
+  # imports moment itself; drop this once obsidian depends on >=2.31.0.
+  moment: 2.31.0
