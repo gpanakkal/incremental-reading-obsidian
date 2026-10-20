@@ -3137,6 +3137,14 @@ input.ir-queue-page-input {
   overflow: auto;
 }
 
+/* On a phone Obsidian makes `.modal-content` a flex column (`.is-phone
+   .modal-content`, read from obsidian.asar), so once the list overflows its
+   lines shrink to fit, and the preview, scrolling inside, has no content
+   floor: it collapsed to its border. None shrink; the list scrolls instead */
+.ir-leftover-modal .modal-content > * {
+  flex-shrink: 0;
+}
+
 .ir-leftover-modal .modal-button-container {
   flex-shrink: 0;
 }
