@@ -2403,12 +2403,13 @@ describe('reprioritize', () => {
             /UPDATE snippet SET priority = \$1, due = \$2, interval = \$3 WHERE id = \$4/i
           );
           expect(params[0]).toBe(newPriority);
-          const expectedInterval = IRScheduler.nextInterval({
-            ...snippet,
-            priority: newPriority,
-          });
-          expect(params[2]).toBe(expectedInterval);
-          expect(params[1]).toBe(reviewTime + expectedInterval);
+          const { interval, due } = IRScheduler.reprioritize(
+            snippet,
+            newPriority,
+            reviewTime
+          );
+          expect(params[2]).toBe(interval);
+          expect(params[1]).toBe(due);
           expect(params[3]).toBe(snippet.id);
         }
       )

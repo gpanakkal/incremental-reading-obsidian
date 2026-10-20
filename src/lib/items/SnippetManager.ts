@@ -978,23 +978,17 @@ export class SnippetManager extends ItemManager {
     });
   }
   /**
-   * Change the priority of a snippet and recalculate its next due date
+   * Change the priority of a snippet, rescaling the interval its last review
+   * set and moving its due date with it (see `IRScheduler.reprioritize`)
    */
   async reprioritize(snippet: ISnippetBase, newPriority: number) {
     IRScheduler.validatePriority(newPriority);
 
-    const lastReview = await this.getLastReview(snippet);
-    const newInterval = IRScheduler.nextInterval({
-      ...snippet,
-      priority: newPriority,
-    });
-    const newDueTime = lastReview
-      ? lastReview.review_time + newInterval
-      : snippet.due;
-
-    await this.repo.mutate(
-      `UPDATE snippet SET priority = $1, due = $2, interval = $3 WHERE id = $4`,
-      [newPriority, newDueTime, newInterval, snippet.id]
+    await this.reprioritizeText(
+      'snippet',
+      snippet,
+      newPriority,
+      await this.getLastReview(snippet)
     );
   }
 }

@@ -17,6 +17,52 @@ import IRScheduler from './IRScheduler';
 import type { IArticleBase, ISnippetBase } from './types';
 import { clamp, intSequence } from './utils';
 
+// #region HELPERS
+const priorityArb = fc.integer({
+  min: MINIMUM_PRIORITY,
+  max: MAXIMUM_PRIORITY,
+});
+/** Any time a review could have been made at. */
+const reviewTimeArb = fc.integer({ min: 0, max: MAX_VALID_TIMESTAMP_DATE });
+/** A pre-growth interval: what a review grows by the priority's multiplier. */
+const baseArb = fc.integer({ min: 1, max: MS_PER_YEAR * 10 });
+
+/**
+ * A text as the review at `reviewTime` left it: its interval grown from `base`
+ * by `priority`'s multiplier, due that long after the review.
+ */
+function reviewedText(
+  base: number,
+  priority: number,
+  reviewTime: number
+): IArticleBase {
+  const interval = IRScheduler.nextInterval({
+    interval: base,
+    priority,
+    fixed_interval_days: null,
+  } as IArticleBase);
+  return {
+    interval,
+    priority,
+    due: reviewTime + interval,
+    fixed_interval_days: null,
+  } as IArticleBase;
+}
+
+/** `text` with the priority, interval, and due a priority change gave it. */
+function reprioritized<T extends IArticleBase | ISnippetBase>(
+  text: T,
+  newPriority: number,
+  lastReviewTime: number | undefined
+): T {
+  return {
+    ...text,
+    priority: newPriority,
+    ...IRScheduler.reprioritize(text, newPriority, lastReviewTime),
+  };
+}
+// #endregion
+
 const validDisplayPriorityPattern = /^\d(\.\d)?$/;
 
 describe('transformPriority', () => {
@@ -398,6 +444,159 @@ describe('getIntervalMultiplier', () => {
             expected,
             10
           );
+        }
+      )
+    );
+  });
+});
+
+describe('reprioritize', () => {
+  it('restores the interval and due exactly when a run of changes ends at the starting priority', () => {
+    fc.assert(
+      fc.property(
+        baseArb,
+        priorityArb,
+        fc.array(priorityArb, { maxLength: 10 }),
+        reviewTimeArb,
+        (base, priority, changes, reviewTime) => {
+          const start = reviewedText(base, priority, reviewTime);
+          const end = [...changes, priority].reduce<IArticleBase>(
+            (text, p) => reprioritized(text, p, reviewTime),
+            start
+          );
+          expect(end).toEqual(start);
+        }
+      )
+    );
+  });
+
+  it('ends within 1 ms of an interval no review made when a run of changes ends at the starting priority', () => {
+    fc.assert(
+      fc.property(
+        baseArb,
+        priorityArb,
+        fc.array(priorityArb, { minLength: 1, maxLength: 10 }),
+        reviewTimeArb,
+        (interval, priority, changes, reviewTime) => {
+          const start = {
+            interval,
+            priority,
+            due: reviewTime + interval,
+          } as ISnippetBase;
+          const end = [...changes, priority].reduce<ISnippetBase>(
+            (text, p) => reprioritized(text, p, reviewTime),
+            start
+          );
+          expect(Math.abs(end.interval - interval)).toBeLessThanOrEqual(1);
+          expect(end.due).toBe(reviewTime + end.interval);
+        }
+      )
+    );
+  });
+
+  it('gives the interval the last review would have under the new priority, due that long after it', () => {
+    fc.assert(
+      fc.property(
+        baseArb,
+        priorityArb,
+        priorityArb,
+        reviewTimeArb,
+        (base, priority, newPriority, reviewTime) => {
+          const text = reviewedText(base, priority, reviewTime);
+          const { interval, due } = IRScheduler.reprioritize(
+            text,
+            newPriority,
+            reviewTime
+          );
+          expect(interval).toBe(
+            reviewedText(base, newPriority, reviewTime).interval
+          );
+          expect(due).toBe(reviewTime + interval);
+        }
+      )
+    );
+  });
+
+  it('scales any interval by the ratio of the multipliers, to within rounding', () => {
+    fc.assert(
+      fc.property(
+        baseArb,
+        priorityArb,
+        priorityArb,
+        reviewTimeArb,
+        (interval, priority, newPriority, reviewTime) => {
+          const text = { interval, priority } as ISnippetBase;
+          const result = IRScheduler.reprioritize(
+            text,
+            newPriority,
+            reviewTime
+          ).interval;
+          const ratio =
+            IRScheduler.getIntervalMultiplier(newPriority) /
+            IRScheduler.getIntervalMultiplier(priority);
+          expect(Math.abs(result - interval * ratio)).toBeLessThanOrEqual(1.5);
+        }
+      )
+    );
+  });
+
+  it('leaves the interval and due alone for a text never reviewed', () => {
+    fc.assert(
+      fc.property(
+        baseArb,
+        priorityArb,
+        priorityArb,
+        fc.option(reviewTimeArb),
+        (interval, priority, newPriority, due) => {
+          const text = { interval, priority, due } as ISnippetBase;
+          expect(
+            IRScheduler.reprioritize(text, newPriority, undefined)
+          ).toEqual({ interval, due });
+        }
+      )
+    );
+  });
+
+  it('leaves the interval and due alone for an article on a fixed interval', () => {
+    fc.assert(
+      fc.property(
+        baseArb,
+        priorityArb,
+        priorityArb,
+        reviewTimeArb,
+        fc.integer({
+          min: MINIMUM_FIXED_REVIEW_INTERVAL,
+          max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+        }),
+        fc.option(reviewTimeArb),
+        (interval, priority, newPriority, reviewTime, fixedDays, due) => {
+          const text = {
+            interval,
+            priority,
+            due,
+            fixed_interval_days: fixedDays,
+          } as IArticleBase;
+          expect(
+            IRScheduler.reprioritize(text, newPriority, reviewTime)
+          ).toEqual({ interval, due });
+        }
+      )
+    );
+  });
+
+  it('leaves the interval and due alone when the priority is unchanged', () => {
+    fc.assert(
+      fc.property(
+        baseArb,
+        priorityArb,
+        reviewTimeArb,
+        fc.option(reviewTimeArb),
+        (interval, priority, reviewTime, due) => {
+          const text = { interval, priority, due } as ISnippetBase;
+          expect(IRScheduler.reprioritize(text, priority, reviewTime)).toEqual({
+            interval,
+            due,
+          });
         }
       )
     );

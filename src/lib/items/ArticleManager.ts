@@ -1941,23 +1941,17 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * Change the priority of an article and recalculate its next due date
+   * Change the priority of an article, rescaling the interval its last review
+   * set and moving its due date with it (see `IRScheduler.reprioritize`)
    */
   async reprioritize(article: IArticleBase, newPriority: number) {
     IRScheduler.validatePriority(newPriority);
 
-    const lastReview = await this.getLastReview(article);
-    const newInterval = IRScheduler.nextInterval({
-      ...article,
-      priority: newPriority,
-    });
-    const newDueTime = lastReview
-      ? lastReview.review_time + newInterval
-      : article.due;
-
-    await this.repo.mutate(
-      `UPDATE article SET priority = $1, due = $2, interval = $3 WHERE id = $4`,
-      [newPriority, newDueTime, newInterval, article.id]
+    await this.reprioritizeText(
+      'article',
+      article,
+      newPriority,
+      await this.getLastReview(article)
     );
   }
   /**
