@@ -3579,6 +3579,53 @@ describe('getNoteType', () => {
 });
 
 // ---------------------------------------------------------------------------
+// noteTypeFromCache
+// ---------------------------------------------------------------------------
+describe('noteTypeFromCache', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('answers the type the cached tags name, reading and writing nothing', () => {
+    fc.assert(
+      fc.property(
+        fc.dictionary(fc.string(), jsonRoundTripArb),
+        tagsValueArb,
+        (rest, tags) => {
+          const { app, file, cachedRead, writes } = makeNoteApp('');
+          const frontmatter = { ...rest, tags };
+          expect(
+            ObsidianHelpers.noteTypeFromCache(file, { frontmatter }, app)
+          ).toBe(expectedTypeOf(tags));
+          expect(cachedRead).not.toHaveBeenCalled();
+          expectNoWrites(writes);
+        }
+      )
+    );
+  });
+
+  it('answers null for a note the cache holds no frontmatter for', () => {
+    const { app, file } = makeNoteApp('');
+    expect(ObsidianHelpers.noteTypeFromCache(file, {}, app)).toBeNull();
+    expect(ObsidianHelpers.noteTypeFromCache(file, null, app)).toBeNull();
+  });
+
+  it('answers null for a note the vault no longer holds, whatever its tags', () => {
+    fc.assert(
+      fc.property(typeTagArb, fc.boolean(), (tag, replaced) => {
+        const { app, getFileByPath } = makeNoteApp('');
+        if (!replaced) getFileByPath.mockReturnValue(null);
+        expect(
+          ObsidianHelpers.noteTypeFromCache(
+            makeTFile(),
+            { frontmatter: { tags: [tag] } },
+            app
+          )
+        ).toBeNull();
+      })
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // isSourceNote
 // ---------------------------------------------------------------------------
 describe('isSourceNote', () => {

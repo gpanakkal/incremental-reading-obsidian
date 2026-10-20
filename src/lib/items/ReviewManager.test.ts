@@ -1006,8 +1006,8 @@ describe('ReviewManager.anyDue', () => {
 
   it('writes nothing over rows that getDue writes to', async () => {
     vi.setSystemTime(YEAR_2000_MS);
-    // A note without its id and a row without its fuzz: getDue squares the
-    // one and fills in the other
+    // A row without its fuzz, which getDue fills in. Its note lacks its id,
+    // which no fetch writes back any more (0166)
     const rows: DueRow[] = [
       { table: 'article', due: YEAR_2000_MS, state: 0, note: 'bare' },
     ];
@@ -1026,7 +1026,7 @@ describe('ReviewManager.anyDue', () => {
     await vi.waitFor(() =>
       expect(dumpItemTables(fetched.repo)).not.toEqual(fetchedBefore)
     );
-    expect(fetched.processFrontMatter).toHaveBeenCalled();
+    expect(fetched.processFrontMatter).not.toHaveBeenCalled();
   });
 
   it('counts a learning card only once it is due now, and any other card due by the end of the day', async () => {
@@ -3864,8 +3864,6 @@ describe('ReviewManager on a file without frontmatter', () => {
         Obsidian.updateFrontMatter(file, () => {}, app as never),
       getNoteType: ({ app }, file) => Obsidian.getNoteType(file, app as never),
       getItemType: ({ manager }, file) => manager.articles.getItemType(file),
-      setFrontmatter: ({ manager }, file) =>
-        manager.articles.setFrontmatter(file, 'id', 'ir-article'),
       fetch: ({ manager, row }) =>
         manager.getReviewItemFromId(row?.id ?? 'none'),
       getDue: ({ manager }) => manager.articles.getDue(),

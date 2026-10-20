@@ -2020,39 +2020,33 @@ test.describe("Removing an item note's type tag", () => {
   }
 
   /**
-   * Waits for the `round`th notice saying the tag is back, then dismisses it,
-   * so the next round's notice is a fresh one rather than a count bumped on
-   * this one.
+   * Waits for the `round`th notice naming the note, then dismisses it, so the
+   * next round's notice is a fresh one rather than names added to this one.
    */
-  async function expectRestoreNotice(
-    tag: string,
+  async function expectDamageNotice(
+    reference: string,
     notices: () => Promise<string[]>,
     round: number
   ) {
-    const message = tag;
+    // Named in quotes ahead of what it lost; the import's own notice names it too
+    const name = `"${path.basename(reference, '.md')}" lost`;
     await expect
       .poll(
         async () =>
-          (await notices()).filter((text) => text.includes(message)).length
+          (await notices()).filter((text) => text.includes(name)).length
       )
       .toBe(round);
-    const notice = window.locator('.notice').filter({ hasText: message });
+    const notice = window.locator('.notice').filter({ hasText: name });
     await notice.click();
     await expect(notice).toHaveCount(0);
   }
 
   /**
-   * The tag is back, last, with the user's own tags in their order and every
-   * other property still shown, the user's own among them.
+   * The tag stays off: the notice comes from the pass that used to put it
+   * back, so by now nothing will. The user's own tags and property are kept.
    */
-  async function expectTagShownRestored(
-    view: View,
-    tag: string,
-    keys: (string | null)[]
-  ) {
-    await expect(tagPills(view)).toHaveText(['mine', 'also-mine', tag], {
-      timeout: 5_000,
-    });
+  async function expectTagLeftOff(view: View, keys: (string | null)[]) {
+    await expect(tagPills(view)).toHaveText(['mine', 'also-mine']);
     await expect.poll(() => propertyKeys(view)).toEqual(keys);
     await expect(
       properties(view).and(window.locator('[data-property-key="extra"]'))
@@ -2060,7 +2054,7 @@ test.describe("Removing an item note's type tag", () => {
   }
 
   for (const { kind, table, tag, make } of kinds) {
-    test(`puts back a ${kind} note's type tag removed in live preview, source mode or reading mode`, async () => {
+    test(`reports a ${kind} note whose type tag was removed in live preview, source mode or reading mode, leaving it off`, async () => {
       await setDefaultEditingMode(window, 'live-preview');
       const { reference, keys } = await showTaggedItemNote(make, table, tag);
       const notices = await watchNotices(window);
@@ -2070,10 +2064,10 @@ test.describe("Removing an item note's type tag", () => {
       await tagPill(livePreview, tag)
         .locator('.multi-select-pill-remove-button')
         .click();
-      await expectRestoreNotice(tag, notices, 1);
-      await expectTagShownRestored(livePreview, tag, keys);
+      await expectDamageNotice(reference, notices, 1);
+      await expectTagLeftOff(livePreview, keys);
 
-      // Back where it was for the next round: the restore appends it
+      // Back where it was for the next round
       const reset = async (view: View) => {
         await setTags(reference, ['mine', tag, 'also-mine']);
         await expect(tagPills(view)).toHaveText(['mine', tag, 'also-mine']);
@@ -2082,7 +2076,7 @@ test.describe("Removing an item note's type tag", () => {
 
       // Source mode: the tag's YAML line selected and deleted from the
       // keyboard. Source mode shows the YAML rather than properties, so the
-      // restored tag is looked for once back in live preview.
+      // tags are looked at once back in live preview.
       await executeCommandById(window, 'editor:toggle-source');
       await window.evaluate((tag) => {
         const { app } = window as unknown as { app: PageApp };
@@ -2098,9 +2092,9 @@ test.describe("Removing an item note's type tag", () => {
         );
       }, tag);
       await window.keyboard.press('Backspace');
-      await expectRestoreNotice(tag, notices, 2);
+      await expectDamageNotice(reference, notices, 2);
       await executeCommandById(window, 'editor:toggle-source');
-      await expectTagShownRestored(livePreview, tag, keys);
+      await expectTagLeftOff(livePreview, keys);
       await reset(livePreview);
 
       // Reading mode's properties, which write past the editor
@@ -2109,8 +2103,8 @@ test.describe("Removing an item note's type tag", () => {
       await tagPill(reading, tag)
         .locator('.multi-select-pill-remove-button')
         .click();
-      await expectRestoreNotice(tag, notices, 3);
-      await expectTagShownRestored(reading, tag, keys);
+      await expectDamageNotice(reference, notices, 3);
+      await expectTagLeftOff(reading, keys);
     });
   }
 });

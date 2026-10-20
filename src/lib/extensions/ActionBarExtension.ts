@@ -616,22 +616,35 @@ function createPriorityInput(
 /**
  * ViewPlugin that resolves the note type once per file and writes it into
  * actionBarStateField via setNoteTypeEffect. Keeping this out of compute()
- * ensures compute stays a pure stateâ†’value function with no side effects.
+ * ensures compute stays a pure state→value function with no side effects.
+ *
+ * The type of a file just opened is read from the note, since the metadata
+ * cache may not have parsed it yet; every change after that is typed from the
+ * parse the cache's `changed` event carries. The newest answer wins: a read
+ * still under way when a newer answer lands is dropped, so a note opened just
+ * before it is un-imported can't get its bar back from the tagged text.
  */
 const noteTypePlugin = ViewPlugin.define((view) => {
   let destroyed = false;
   let lastFilePath: string | undefined;
   let metadataCacheRef: EventRef | undefined;
+  /** Bumped by each answer started, so only the newest is applied. */
+  let latest = 0;
+
+  const apply = (resolved: NoteType | null) => {
+    const current = view.state.field(actionBarStateField).noteType;
+    if (resolved !== current) {
+      view.dispatch({ effects: setNoteTypeEffect.of(resolved) });
+    }
+  };
 
   const lookup = (filePath: string) => {
     const { info } = Obsidian.getFileInfoFromState(view.state);
     if (!info?.file || !info.app) return;
+    const thisLookup = ++latest;
     void Obsidian.getNoteType(info.file, info.app).then((resolved) => {
-      if (destroyed) return;
-      const current = view.state.field(actionBarStateField).noteType;
-      if (resolved !== current) {
-        view.dispatch({ effects: setNoteTypeEffect.of(resolved) });
-      }
+      if (destroyed || thisLookup !== latest) return;
+      apply(resolved);
     });
     lastFilePath = filePath;
   };
@@ -640,9 +653,14 @@ const noteTypePlugin = ViewPlugin.define((view) => {
     if (metadataCacheRef) {
       app.metadataCache.offref(metadataCacheRef);
     }
-    metadataCacheRef = app.metadataCache.on('changed', (changedFile) => {
-      if (changedFile.path === filePath) lookup(filePath);
-    });
+    metadataCacheRef = app.metadataCache.on(
+      'changed',
+      (changedFile, _data, cache) => {
+        if (destroyed || changedFile.path !== filePath) return;
+        latest += 1;
+        apply(Obsidian.noteTypeFromCache(changedFile, cache, app));
+      }
+    );
   };
 
   // Initial lookup on mount

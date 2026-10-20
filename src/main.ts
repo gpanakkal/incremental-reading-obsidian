@@ -26,7 +26,6 @@ import {
   refusedPathsWarning,
   startupWarning,
 } from '#/lib/item-path-guard';
-import { withTag } from '#/lib/item-tags';
 import { checkImportable } from '#/lib/items/ArticleManager';
 import { appendLog } from '#/lib/log-file';
 import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
@@ -64,17 +63,16 @@ import {
   registerSnippetHighlightPostProcessor,
 } from './lib/extensions/SnippetHighlightPostProcessor';
 import { registerTransclusionHostPostProcessor } from './lib/extensions/TransclusionHostPostProcessor';
-import { createIrIdRepairer } from './lib/ir-id-repair';
 import {
   type IrIdWarning,
   type NoticeTarget,
   type Timer,
+  createDamagedNotesNotice,
   createIrIdWarning,
-  createTypeTagNotices,
   hostTimer,
-  IR_ID_WARNING_MESSAGE,
   persistentNotice,
 } from './lib/ir-id-warning-notice';
+import { createIrIdWatch } from './lib/ir-id-watch';
 import ReviewManager from './lib/items/ReviewManager';
 import { scanForMovedNotes } from './lib/moved-note-scan';
 import { configureSuccessNotices } from './lib/notices';
@@ -805,77 +803,34 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   /**
-   * Put back `ir-id` frontmatter and item type tags that were changed outside
-   * the plugin, and bring a row back when a mangled id is undone. See
-   * {@link createIrIdRepairer}.
+   * Tell the user about item notes whose `ir-id` or type tag was taken off
+   * outside the plugin. See {@link createIrIdWatch}, which used to put them back
+   * and now only reports them (0166).
    *
-   * Registered here rather than in {@link onload} for two reasons. The repairs
-   * read and write the database, which does not exist until
-   * {@link initReviewManager} has run; and Obsidian presents the whole vault to
-   * the metadata cache before the layout is ready, so by now the first index —
-   * one `changed` per file in the vault — is already over. Anything mangled while
-   * Obsidian was closed is caught on that item's next review fetch, as it was
-   * before this existed.
+   * Registered here rather than in {@link onload} for two reasons. The check
+   * reads the database, which does not exist until {@link initReviewManager}
+   * has run; and Obsidian presents the whole vault to the metadata cache before
+   * the layout is ready, so by now the first index (one `changed` per file in
+   * the vault) is already over.
    */
   private watchIrIdFrontmatter() {
-    const { vault, metadataCache } = this.app;
-    // One notice at a time however many notes a single burst damages: a checkout
-    // or a folder arriving over Sync can name a great many at once, and a stack
-    // of identical warnings would be worse than the edit it is warning about
-    const warning = createIrIdWarning({
-      createNotice: persistentNotice,
-      message: IR_ID_WARNING_MESSAGE,
-    });
-    this.register(() => warning.dispose());
-    const tagNotices = createTypeTagNotices({ createNotice: persistentNotice });
-    this.register(() => tagNotices.dispose());
+    // One notice naming every note a burst damaged, however many: a checkout
+    // or a folder arriving over Sync can name a great many at once
+    const notice = createDamagedNotesNotice(persistentNotice);
+    this.register(() => notice.dispose());
 
-    const repairer = createIrIdRepairer({
+    const watch = createIrIdWatch({
       repo: this.reviewManager.repo,
-      vault,
-      metadataCache,
-      // A tag is added inside the write, off the note as it is on disk now, so
-      // another writer's edit since the cache read is kept and the tag never
-      // doubles
-      writeIrId: (file, id, tag) =>
-        Obsidian.updateFrontMatter(
-          file,
-          (frontmatter) => {
-            frontmatter['ir-id'] = id;
-            if (tag !== undefined) {
-              frontmatter.tags = withTag(frontmatter.tags, tag);
-            }
-          },
-          this.app
-        ),
-      writeTag: (file, tag) =>
-        Obsidian.updateFrontMatter(
-          file,
-          (frontmatter) => {
-            frontmatter.tags = withTag(frontmatter.tags, tag);
-          },
-          this.app
-        ),
-      // A row coming back comes back at a new `reference`, and highlights are
-      // cached by note path. The queue table patches itself from the
-      // repository's own change events.
-      onRepaired: async (repairs) => {
-        if (!repairs.some(({ kind }) => kind === 'undelete')) return;
-        await this.reviewManager.refreshAllHighlights();
-        await invalidateCurrentItemQuery();
-      },
-      // Once per damaged note; the warning folds them into the one notice and
-      // counts them off on it
-      onDamage: (paths) => paths.forEach(() => warning.warn()),
-      onTagRestored: (repairs) =>
-        repairs.forEach(({ tag }) => tagNotices.warn(tag)),
+      vault: this.app.vault,
+      metadataCache: this.app.metadataCache,
+      onDamage: (paths) => notice.report(paths),
     });
-    this.register(() => repairer.dispose());
+    this.register(() => watch.dispose());
 
     this.registerEvent(
       this.app.metadataCache.on('changed', (file) => {
         if (!this.reviewManager) return;
-        repairer.handleChange(file);
+        watch.handleChange(file);
       })
     );
   }

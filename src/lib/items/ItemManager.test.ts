@@ -25,9 +25,10 @@ class TestManager extends ItemManager {
     row: { id: string; deleted: boolean },
     file: TFile,
     type: NoteType,
-    tag: string
+    // The tag a note of this type carries, which nothing writes back (0166)
+    _tag: string
   ): boolean {
-    return this.reconcileNote(row, file, type, tag);
+    return this.reconcileNote(row, file, type);
   }
 }
 
@@ -52,8 +53,9 @@ function wire(cache: CachedMetadata | null) {
     } as never,
     repo
   );
-  const setFrontmatter = vi
-    .spyOn(manager, 'setFrontmatter')
+  // Every frontmatter write the managers make goes through here
+  const writeNote = vi
+    .spyOn(Obsidian, 'updateFrontMatter')
     .mockResolvedValue(undefined);
   const markDeleted = vi
     .spyOn(manager, 'markDeleted')
@@ -61,7 +63,7 @@ function wire(cache: CachedMetadata | null) {
   const markUndeleted = vi
     .spyOn(manager, 'markUndeleted')
     .mockResolvedValue(undefined);
-  return { manager, mutate, setFrontmatter, markDeleted, markUndeleted };
+  return { manager, mutate, writeNote, markDeleted, markUndeleted };
 }
 
 const FILE = { path: 'notes/item.md', extension: 'md' } as TFile;
@@ -235,12 +237,12 @@ describe('reconcileNote', () => {
   it('leaves a note the cache is still re-reading alone and keeps the row', async () => {
     await fc.assert(
       fc.asyncProperty(rowArb, typeArb, fc.string(), async (row, type, tag) => {
-        const { manager, mutate, setFrontmatter, markDeleted, markUndeleted } =
+        const { manager, mutate, writeNote, markDeleted, markUndeleted } =
           wire(null);
 
         expect(manager.reconcile(row, FILE, type, tag)).toBe(true);
 
-        expect(setFrontmatter).not.toHaveBeenCalled();
+        expect(writeNote).not.toHaveBeenCalled();
         expect(markDeleted).not.toHaveBeenCalled();
         expect(markUndeleted).not.toHaveBeenCalled();
         expect(mutate).not.toHaveBeenCalled();
@@ -256,7 +258,7 @@ describe('reconcileNote', () => {
             Boolean(frontmatter?.['ir-id']) && frontmatter?.['ir-id'] !== row.id
         ),
         async ({ row, type, tag, frontmatter }) => {
-          const { manager, setFrontmatter, markDeleted, markUndeleted } = wire({
+          const { manager, writeNote, markDeleted, markUndeleted } = wire({
             // The read normalizes `tags` in place; keep the generated value intact
             frontmatter: structuredClone(frontmatter),
           } as CachedMetadata);
@@ -264,14 +266,16 @@ describe('reconcileNote', () => {
           expect(manager.reconcile(row, FILE, type, tag)).toBe(false);
 
           expect(markDeleted.mock.calls).toStrictEqual([[row.id, type]]);
-          expect(setFrontmatter).not.toHaveBeenCalled();
+          expect(writeNote).not.toHaveBeenCalled();
           expect(markUndeleted).not.toHaveBeenCalled();
         }
       )
     );
   });
 
-  it("keeps the row for a note making no other claim, restoring whichever of its id and tag it lacks and lifting the row's tombstone", async () => {
+  it("keeps the row for a note making no other claim, lifting the row's tombstone and writing nothing to the note", async () => {
+    // A note missing its id or tag may be newer than the row: stripped by an
+    // un-import on another device and synced here first (0166)
     await fc.assert(
       fc.asyncProperty(
         settledArb.filter(
@@ -279,22 +283,14 @@ describe('reconcileNote', () => {
             !frontmatter?.['ir-id'] || frontmatter['ir-id'] === row.id
         ),
         async ({ row, type, tag, frontmatter }) => {
-          const irId: unknown = frontmatter?.['ir-id'];
-          const tags: unknown = frontmatter?.tags;
-          const hasTag =
-            frontmatter !== undefined &&
-            'tags' in frontmatter &&
-            (Array.isArray(tags) ? tags.includes(tag) : tags === tag);
-          const { manager, setFrontmatter, markDeleted, markUndeleted } = wire({
+          const { manager, writeNote, markDeleted, markUndeleted } = wire({
             // The read normalizes `tags` in place; keep the generated value intact
             frontmatter: structuredClone(frontmatter),
           } as CachedMetadata);
 
           expect(manager.reconcile(row, FILE, type, tag)).toBe(true);
 
-          expect(setFrontmatter.mock.calls).toStrictEqual(
-            irId === row.id && hasTag ? [] : [[FILE, row.id, tag]]
-          );
+          expect(writeNote).not.toHaveBeenCalled();
           expect(markUndeleted.mock.calls).toStrictEqual(
             row.deleted ? [[row.id, type]] : []
           );
@@ -306,22 +302,21 @@ describe('reconcileNote', () => {
 
   it('judges the note once its parse lands', () => {
     const cache: { current: CachedMetadata | null } = { current: null };
-    const { manager, setFrontmatter } = wire(null);
+    const { manager, writeNote, markUndeleted } = wire(null);
     vi.spyOn(manager.app.metadataCache, 'getFileCache').mockImplementation(
       () => cache.current
     );
-    const row = { id: 'a1', deleted: false };
+    const row = { id: 'a1', deleted: true };
 
     manager.reconcile(row, FILE, 'article', 'ir-article');
-    expect(setFrontmatter).not.toHaveBeenCalled();
+    expect(markUndeleted).not.toHaveBeenCalled();
 
     cache.current = {
       frontmatter: { tags: ['ir-article'] },
     } as unknown as CachedMetadata;
     manager.reconcile(row, FILE, 'article', 'ir-article');
-    expect(setFrontmatter.mock.calls).toStrictEqual([
-      [FILE, 'a1', 'ir-article'],
-    ]);
+    expect(markUndeleted.mock.calls).toStrictEqual([['a1', 'article']]);
+    expect(writeNote).not.toHaveBeenCalled();
   });
 });
 
@@ -339,7 +334,7 @@ describe('reconcileNote on a file without frontmatter', () => {
         async ({ row, type, tag, frontmatter }, settled, file) => {
           // Whatever the cache holds for it, a PDF's frontmatter is not the
           // row's to read or repair
-          const { manager, setFrontmatter, markDeleted, markUndeleted } = wire(
+          const { manager, writeNote, markDeleted, markUndeleted } = wire(
             settled
               ? ({
                   frontmatter: structuredClone(frontmatter),
@@ -349,65 +344,9 @@ describe('reconcileNote on a file without frontmatter', () => {
 
           expect(manager.reconcile(row, file, type, tag)).toBe(true);
 
-          expect(setFrontmatter).not.toHaveBeenCalled();
+          expect(writeNote).not.toHaveBeenCalled();
           expect(markDeleted).not.toHaveBeenCalled();
           expect(markUndeleted).not.toHaveBeenCalled();
-        }
-      )
-    );
-  });
-});
-
-describe('setFrontmatter', () => {
-  it('never writes to a file without frontmatter', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        binaryFileArb,
-        fc.string(),
-        fc.oneof(fc.string(), fc.array(fc.string())),
-        async (file, id, tags) => {
-          const processFrontMatter = vi.fn().mockResolvedValue(undefined);
-          const process = vi.fn().mockResolvedValue('');
-          const manager = new TestManager(
-            {
-              app: { fileManager: { processFrontMatter }, vault: { process } },
-            } as never,
-            makeRepo().repo
-          );
-
-          await manager.setFrontmatter(file, id, tags);
-
-          expect(processFrontMatter).not.toHaveBeenCalled();
-          expect(process).not.toHaveBeenCalled();
-        }
-      )
-    );
-  });
-
-  it('writes the id and tags into a markdown note', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.string(),
-        fc.oneof(fc.string(), fc.array(fc.string())),
-        async (id, tags) => {
-          const frontmatter: Record<string, unknown> = {};
-          const processFrontMatter = vi.fn(
-            async (_file: TFile, fn: (fm: Record<string, unknown>) => void) => {
-              fn(frontmatter);
-            }
-          );
-          const manager = new TestManager(
-            { app: { fileManager: { processFrontMatter } } } as never,
-            makeRepo().repo
-          );
-
-          await manager.setFrontmatter(FILE, id, tags);
-
-          expect(processFrontMatter).toHaveBeenCalledOnce();
-          expect(frontmatter).toStrictEqual({
-            'ir-id': id,
-            tags: Obsidian._mergeTags(undefined, tags),
-          });
         }
       )
     );

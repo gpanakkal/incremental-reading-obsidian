@@ -382,23 +382,14 @@ export class ItemManager {
   }
 
   /**
-   * Use when creating items or to repair frontmatter on fetch
-   */
-  async setFrontmatter(file: TFile, id: string, tags: string | string[]) {
-    await Obsidian.updateFrontMatter(
-      file,
-      {
-        'ir-id': id,
-        tags,
-      },
-      this.app
-    );
-  }
-
-  /**
-   * Square a row with the note at its reference, as a review fetch finds them:
-   * put back the row's `ir-id` and tag where the note lacks them, and bring the
-   * row back from a tombstone now that its note is there.
+   * Square a row with the note at its reference, as a review fetch finds them,
+   * and bring the row back from a tombstone now that its note is there.
+   *
+   * A note lacking the row's `ir-id` or tag is left as it is. The fetch can't
+   * tell whether the note or the database is the newer of the two: a note
+   * stripped by an un-import on another device reaches this one over Sync
+   * before the database without the row does, and writing the id back here
+   * re-imported it on both. Ordering the two is 0161's.
    *
    * A note the metadata cache is part way through re-reading is left alone.
    * Obsidian points a note's cache entry at the hash of its new content before
@@ -420,8 +411,7 @@ export class ItemManager {
   protected reconcileNote(
     row: { id: string; deleted: boolean },
     file: TFile,
-    type: NoteType,
-    tag: string
+    type: NoteType
   ): boolean {
     if (!supportsFrontmatter(file)) return true;
     if (!this.app.metadataCache.getFileCache(file)) return true;
@@ -432,11 +422,6 @@ export class ItemManager {
     if (fileId && fileId !== row.id) {
       void this.markDeleted(row.id, type);
       return false;
-    }
-
-    // some frontmatter is missing; impute it
-    if (!fileId || !frontmatter?.tags?.includes(tag)) {
-      void this.setFrontmatter(file, row.id, tag);
     }
 
     if (row.deleted) {

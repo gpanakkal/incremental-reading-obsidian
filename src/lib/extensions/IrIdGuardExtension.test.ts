@@ -459,6 +459,21 @@ describe('irIdGuardExtension', () => {
     );
   });
 
+  it('refuses deleting the whole ir-id line in the editor', () => {
+    // The repair on `changed` is gone (0166), so this guard is all that keeps
+    // an editor edit from stripping the id
+    const start = NOTE.indexOf(ID_LINE);
+    const state = wire(NOTE);
+
+    const next = state.update({
+      changes: { from: start, to: start + ID_LINE.length + 1 },
+      userEvent: 'delete.selection',
+    }).state;
+
+    expect(next.doc.toString()).toBe(NOTE);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
   it('applies a change that stays clear of the entry, including one inserted at either boundary', () => {
     fc.assert(
       fc.property(

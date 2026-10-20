@@ -414,7 +414,7 @@ export class ArticleManager extends ItemManager {
     // Missing, which is never stored: see `MissingItem`
     if (!file) return null;
 
-    if (!this.reconcileNote(row, file, 'article', ARTICLE_TAG)) return null;
+    if (!this.reconcileNote(row, file, 'article')) return null;
 
     if (this.plugin.settings.fuzzTextReviews && row.due_fuzz === null) {
       void this.setReviewTimeFuzz(row.id, 'article');
@@ -2026,8 +2026,8 @@ export class ArticleManager extends ItemManager {
    *
    * The rows go first, all of them in one paced run (see
    * `SQLiteRepository.bulkMutate`), saving once a chunk rather than once a
-   * file: while a row is there, the `ir-id` repairer would put back whatever
-   * the note lost. Only then is each note's frontmatter cleared, one after
+   * file: while a row is there, the `ir-id` watch would report the note as
+   * damaged for what it lost. Only then is each note's frontmatter cleared, one after
    * another. A note whose properties can't be cleared after is left with an
    * orphan `ir-id`, the leftover the startup notice offers to deal with. A
    * file whose rows the run didn't delete fails, as does every one after it
@@ -2271,7 +2271,7 @@ export class ArticleManager extends ItemManager {
  * the copy, itself no article, is offered no un-import.
  *
  * A note with no `ir-id` at a live row's path is that row's note, as a review
- * fetch takes it (`ItemManager.reconcileNote`, which puts the id back): an
+ * fetch takes it (`ItemManager.reconcileNote`): an
  * article imported before notes carried ids, or one whose properties were
  * cleared, or one the cache is still parsing. `reference` is unique, so no
  * other note can be at that path to be mistaken for it.

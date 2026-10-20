@@ -82,9 +82,9 @@ function makeRepo(): SQLiteRepository {
 
 function makePlugin(appOverrides: Record<string, unknown> = {}) {
   return {
-    // rowToReviewCard reads frontmatter via metadataCache.getFileCache and
-    // fire-and-forgets a setFrontmatter write via fileManager.processFrontMatter.
-    // Both stubs must resolve cleanly to avoid unhandled rejections.
+    // rowToReviewCard reads frontmatter via metadataCache.getFileCache and no
+    // longer writes it back (0166). Both stubs resolve cleanly anyway, so a
+    // write that came back would not surface as an unhandled rejection.
     app: {
       metadataCache: { getFileCache: () => ({}) },
       fileManager: { processFrontMatter: async () => undefined },
@@ -1245,7 +1245,7 @@ describe('rowToReviewCard on a note the metadata cache is still re-reading', () 
     );
   });
 
-  it('still restores the id and tag of a parsed note that has no frontmatter', async () => {
+  it('writes no id or tag into a parsed note that has no frontmatter', async () => {
     const fakeFile = { path: 'cards/test.md', extension: 'md' } as TFile;
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
     await fc.assert(
@@ -1267,8 +1267,7 @@ describe('rowToReviewCard on a note the metadata cache is still re-reading', () 
           data: CardManager.rowToDisplay(row),
           file: fakeFile,
         });
-        expect(processFrontMatter).toHaveBeenCalledTimes(1);
-        expect(processFrontMatter.mock.calls[0][0]).toBe(fakeFile);
+        expect(processFrontMatter).not.toHaveBeenCalled();
       })
     );
   });
