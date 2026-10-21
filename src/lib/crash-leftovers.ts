@@ -260,7 +260,7 @@ export async function resolveLeftover(
   // A note of no known type is adopted only as a type the user chose
   if (action === 'adopt' && !as) return false;
   const what = DOING[action](`"${file.basename}"`);
-  if (refusedWrite(repo, what)) return false;
+  if (await refusedWrite(repo, what)) return false;
   try {
     const claim =
       app.vault.getFileByPath(file.path) === file ? claimOf(app, file) : null;

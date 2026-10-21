@@ -302,7 +302,7 @@ export class CardManager extends ItemManager {
     // the answer's start can form syntax there that the note didn't
     const [a, b] = bounds;
     const answer = Markdown.escapeCutStart(line, bounds, 'answer');
-    if (refusedWrite(this.repo, 'create the card')) return null;
+    if (await refusedWrite(this.repo, 'create the card')) return null;
 
     try {
       const withDelimiters = this.delimitText(
@@ -388,7 +388,7 @@ export class CardManager extends ItemManager {
     // Each start escaped where it forms syntax the note didn't there
     const pre = Markdown.escapeCutStart(doc, [from, from + a], 'note');
     const hidden = Markdown.escapeCutStart(doc, [from + a, from + b], 'answer');
-    if (refusedWrite(this.repo, 'create the card')) return null;
+    if (await refusedWrite(this.repo, 'create the card')) return null;
 
     try {
       // Its second line kept from underlining its first, as delimited
@@ -453,7 +453,7 @@ export class CardManager extends ItemManager {
     PdfOrigin & {
       answer: readonly [number, number];
     }): Promise<ReviewCard | null> {
-    if (refusedWrite(this.repo, 'create the card')) return null;
+    if (await refusedWrite(this.repo, 'create the card')) return null;
     const pdf = originFile(origin);
     try {
       const escaped = Markdown.escapeAround(text, answer);

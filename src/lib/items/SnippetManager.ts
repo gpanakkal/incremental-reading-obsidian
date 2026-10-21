@@ -372,7 +372,7 @@ export class SnippetManager extends ItemManager {
       console.warn(`[createSnippet] Could not access the CodeMirror view`);
     }
 
-    if (refusedWrite(this.repo, 'create the snippet')) return null;
+    if (await refusedWrite(this.repo, 'create the snippet')) return null;
 
     // Its parent's row is found before anything is made: a parent that is an
     // item with no row behind it would otherwise leave a note made for nothing
@@ -537,7 +537,7 @@ export class SnippetManager extends ItemManager {
     end: number;
     subpath: string;
   }): Promise<ReviewSnippet | null> {
-    if (refusedWrite(this.repo, 'create the snippet')) return null;
+    if (await refusedWrite(this.repo, 'create the snippet')) return null;
     const dueTime = Date.now() + TEXT_REVIEW_INTERVALS.TOMORROW;
     const pdf = originFile(origin);
     const { article } = origin;

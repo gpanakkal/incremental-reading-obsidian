@@ -58,7 +58,10 @@ const operationArb = fc.nat({ max: 8 }).chain((count) =>
 
 /** A repository refusing writes with `refusal`, or allowing them for null. */
 const repoRefusing = (refusal: Error | null) =>
-  ({ writeRefusal: () => refusal }) as unknown as SQLiteRepository;
+  ({
+    writeRefusal: () => refusal,
+    readiness: refusal ? 'starting' : 'ready',
+  }) as unknown as SQLiteRepository;
 
 // #endregion
 
@@ -178,22 +181,24 @@ describe('refusedWrite', () => {
     vi.restoreAllMocks();
   });
 
-  it('answers false, and says nothing, while writes are allowed', () => {
+  it('answers false, and says nothing, while writes are allowed', async () => {
     const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
 
-    expect(refusedWrite(repoRefusing(null), 'create the snippet')).toBe(false);
+    expect(await refusedWrite(repoRefusing(null), 'create the snippet')).toBe(
+      false
+    );
     expect(notify).not.toHaveBeenCalled();
   });
 
-  it('answers true, and says what was not done and why, while writes are refused', () => {
-    fc.assert(
-      fc.property(fc.string(), fc.string(), (action, reason) => {
+  it('answers true, and says what was not done and why, while writes are refused', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.string(), fc.string(), async (action, reason) => {
         vi.restoreAllMocks();
         const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
 
-        expect(refusedWrite(repoRefusing(new Error(reason)), action)).toBe(
-          true
-        );
+        expect(
+          await refusedWrite(repoRefusing(new Error(reason)), action)
+        ).toBe(true);
         expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
           kind: 'error',
         });

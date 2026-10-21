@@ -23,6 +23,7 @@ import {
 } from '#/lib/mime';
 import { type ItemTable, evictedSpot } from '#/lib/moved-note-scan';
 import type { PositionRow } from '#/lib/position-store';
+import { assertReady, outlastMerge } from '#/lib/readiness';
 import {
   describeReclaim,
   REBIND_LOG_TOPIC,
@@ -151,7 +152,12 @@ export default class ReviewManager {
     return this.cards.parseCloze(text, delimiters);
   }
 
+  /**
+   * @throws {ActionRefusedError} while the database is not ready (see
+   *   `requireReady`), held first over a merge under way
+   */
   async reviewCard(card: ISRSCardDisplay, grade: Grade, reviewTime?: Date) {
+    await assertReady(this.#repo, 'db-write', 'grade the card');
     return this.cards.review(card, grade, reviewTime);
   }
   // #endregion
@@ -218,12 +224,14 @@ export default class ReviewManager {
 
   /**
    * Add a SnippetReview and set the next review date
+   * @throws {ActionRefusedError} as {@link reviewCard} does
    */
   async reviewSnippet(
     snippet: ISnippetBase,
     reviewTime?: number,
     nextReviewInterval?: number
   ) {
+    await assertReady(this.#repo, 'db-write', 'mark the snippet reviewed');
     return this.snippets.review(snippet, reviewTime, nextReviewInterval);
   }
   // #endregion
@@ -262,6 +270,10 @@ export default class ReviewManager {
     entries: readonly AutoImportEntry[],
     { priority, mode }: { priority: number; mode: AutoImportMode }
   ): Promise<BulkOutcome[]> {
+    // Nothing asked for this now, and a note it fails is never tried again
+    // while the plugin runs (see `AutoImportWatcher`), so a merge is waited
+    // out; `importMany` still refuses one the database isn't ready for
+    await outlastMerge(this.#repo);
     const makeCopy =
       mode === 'copy' ||
       (mode === 'inherit' && this.plugin.settings.copyOnImport);
@@ -332,11 +344,13 @@ export default class ReviewManager {
     return this.articles.create(priority, directory);
   }
 
+  /** @throws {ActionRefusedError} as {@link reviewCard} does */
   async reviewArticle(
     article: IArticleBase,
     reviewTime?: number,
     nextReviewInterval?: number
   ) {
+    await assertReady(this.#repo, 'db-write', 'mark the article reviewed');
     return this.articles.review(article, reviewTime, nextReviewInterval);
   }
 
@@ -352,8 +366,10 @@ export default class ReviewManager {
 
   /**
    * Change the priority of an article or snippet and recalculate its next due date
+   * @throws {ActionRefusedError} as {@link reviewCard} does
    */
   async reprioritize(item: IArticleBase | ISnippetBase, newPriority: number) {
+    await assertReady(this.#repo, 'db-write', 'change the priority');
     if (isArticle(item)) {
       return this.articles.reprioritize(item, newPriority);
     }
@@ -363,12 +379,13 @@ export default class ReviewManager {
   /**
    * Set a new interval without adjusting due date if due in today's review day
    * @param changes an object with the new interval or the new priority
-   * @returns
+   * @throws {ActionRefusedError} as {@link reviewCard} does
    */
   async manageFixedInterval(
     article: IArticleBase,
     changes: { newIntervalDays: number } | { newPriority: number }
   ) {
+    await assertReady(this.#repo, 'db-write', 'change the review interval');
     if ('newIntervalDays' in changes) {
       return this.articles.setFixedInterval(article, changes.newIntervalDays);
     } else {
@@ -815,7 +832,9 @@ export default class ReviewManager {
     return null;
   }
 
+  /** @throws {ActionRefusedError} as {@link reviewCard} does */
   async dismissItem(item: MaybeMissingItem): Promise<void> {
+    await assertReady(this.#repo, 'db-write', 'dismiss the item');
     const type = item.data.type;
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 1 WHERE id = $1`, [
@@ -828,7 +847,9 @@ export default class ReviewManager {
     this.plugin.sessionTracker?.forgetIf(item.data.id);
   }
 
+  /** @throws {ActionRefusedError} as {@link reviewCard} does */
   async unDismissItem(item: MaybeMissingItem): Promise<void> {
+    await assertReady(this.#repo, 'db-write', 'restore the item');
     const type = item.data.type;
     const table = type === 'card' ? 'srs_card' : type;
     await this.#repo.mutate(`UPDATE ${table} SET dismissed = 0 WHERE id = $1`, [

@@ -16,6 +16,7 @@ import {
   encodeAnchor,
   MAX_ANCHOR_PAGE,
 } from '#/lib/pdf/pdf-anchor';
+import { refusalReason } from '#/lib/readiness';
 import { formatSourceLink } from '#/lib/source-link';
 import type {
   ISRSCard,
@@ -24,7 +25,11 @@ import type {
   SRSCardRow,
 } from '#/lib/types';
 import { excludedIdsOf, seenElsewhereArb } from '#/test/due-query';
-import { makeItemVault, TestRepository } from '#/test/item-vault';
+import {
+  makeItemVault,
+  runOutMergeWait,
+  TestRepository,
+} from '#/test/item-vault';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { TFile } from 'obsidian';
@@ -78,6 +83,7 @@ function makeRepo(): SQLiteRepository {
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
     writeRefusal: vi.fn(() => null),
+    readiness: 'ready',
   } as unknown as SQLiteRepository;
 }
 
@@ -462,6 +468,7 @@ function makeRealRepo(db: Database): SQLiteRepository {
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
     writeRefusal: vi.fn(() => null),
+    readiness: 'ready',
   } as unknown as SQLiteRepository;
 }
 
@@ -1289,6 +1296,7 @@ describe('fetchMany', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     const result = await manager.fetchMany();
@@ -1494,6 +1502,7 @@ describe('fetch', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     const result = await manager.fetch(row.id);
@@ -1532,6 +1541,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
   }
 
@@ -1585,6 +1595,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const manager = new CardManager(makePlugin(), repo);
@@ -1619,6 +1630,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     // Whatever it is asked for, under whatever settings
     await fc.assert(
@@ -1671,6 +1683,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     await manager.getDue(undefined, undefined, ['excluded-id']);
@@ -1717,6 +1730,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const manager = new CardManager(makePlugin(claiming(rowA.reference)), repo);
@@ -1753,6 +1767,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const manager = new CardManager(
@@ -2358,6 +2373,7 @@ describe('review', () => {
             handleFileChange: vi.fn(),
             onDataChange: vi.fn(() => vi.fn()),
             writeRefusal: vi.fn(() => null),
+            readiness: 'ready',
           } as unknown as SQLiteRepository;
           const manager = new CardManager(makePlugin(), repo);
           await manager.review(card, grade, new Date());
@@ -2408,6 +2424,7 @@ describe('review', () => {
             handleFileChange: vi.fn(),
             onDataChange: vi.fn(() => vi.fn()),
             writeRefusal: vi.fn(() => null),
+            readiness: 'ready',
           } as unknown as SQLiteRepository;
           const manager = new CardManager(makePlugin(), repo);
           await manager.review(card, grade, new Date());
@@ -2463,6 +2480,7 @@ describe('review', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     await manager.review(card, Rating.Again, new Date());
@@ -2486,6 +2504,7 @@ describe('review', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     // The caller records an undo entry only if this resolves, so a missing
@@ -2509,6 +2528,7 @@ describe('review', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     const manager = new CardManager(makePlugin(), repo);
     await manager.review(card, Rating.Good, new Date());
@@ -2549,6 +2569,7 @@ describe('review — FSRS settings', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
   }
 
@@ -5401,51 +5422,57 @@ describe('making and deleting a card, with its note and its row as one unit', ()
     }
   });
 
-  it('makes no note, and says why, while writes are refused', async () => {
-    const wired = await wire();
-    wired.repo.refuseWrites(new Error('Saving is paused.'));
-    const refused = expect.stringContaining('Saving is paused.');
+  it.each(['starting', 'merging'] as const)(
+    'makes no note, and says why, while not ready (%s)',
+    async (state) => {
+      const wired = await wire();
+      if (state === 'merging') {
+        wired.repo.holdMerging();
+        runOutMergeWait();
+      } else wired.repo.refuseWrites(new Error('Saving is paused.'));
+      const refused = expect.stringContaining(refusalReason(state));
 
-    expect(await wired.fromPdf()).toBeNull();
-    expect(wired.notify).toHaveBeenLastCalledWith(refused, { kind: 'error' });
+      expect(await wired.fromPdf()).toBeNull();
+      expect(wired.notify).toHaveBeenLastCalledWith(refused, { kind: 'error' });
 
-    const doc = 'a line of text';
-    const editor = makeEditor(doc);
-    expect(
-      await wired.manager.createFromSelection(
-        editor as never,
-        { file: wired.vault.files.get(NOTE) } as never,
-        { from: 0, to: doc.length, text: doc },
-        [2, 6]
-      )
-    ).toBeNull();
-    expect(wired.notify).toHaveBeenLastCalledWith(refused, { kind: 'error' });
+      const doc = 'a line of text';
+      const editor = makeEditor(doc);
+      expect(
+        await wired.manager.createFromSelection(
+          editor as never,
+          { file: wired.vault.files.get(NOTE) } as never,
+          { from: 0, to: doc.length, text: doc },
+          [2, 6]
+        )
+      ).toBeNull();
+      expect(wired.notify).toHaveBeenLastCalledWith(refused, { kind: 'error' });
 
-    vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
-      line: doc,
-      lineNumber: 0,
-      start: 0,
-      end: doc.length,
-    });
-    vi.spyOn(Obsidian, 'getSelectionWithBounds').mockReturnValue({
-      selection: 'line',
-      start: { line: 0, ch: 2 },
-      end: { line: 0, ch: 6 },
-      startOffset: 2,
-      endOffset: 6,
-    });
-    expect(
-      await wired.manager.create(
-        editor as never,
-        { file: wired.vault.files.get(NOTE) } as never
-      )
-    ).toBeNull();
-    expect(wired.notify).toHaveBeenLastCalledWith(refused, { kind: 'error' });
+      vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
+        line: doc,
+        lineNumber: 0,
+        start: 0,
+        end: doc.length,
+      });
+      vi.spyOn(Obsidian, 'getSelectionWithBounds').mockReturnValue({
+        selection: 'line',
+        start: { line: 0, ch: 2 },
+        end: { line: 0, ch: 6 },
+        startOffset: 2,
+        endOffset: 6,
+      });
+      expect(
+        await wired.manager.create(
+          editor as never,
+          { file: wired.vault.files.get(NOTE) } as never
+        )
+      ).toBeNull();
+      expect(wired.notify).toHaveBeenLastCalledWith(refused, { kind: 'error' });
 
-    expect(wired.vault.paths()).toEqual([NOTE, PDF]);
-    expect(wired.vault.processFrontMatter).not.toHaveBeenCalled();
-    expect(editor.text).toBe(doc);
-  });
+      expect(wired.vault.paths()).toEqual([NOTE, PDF]);
+      expect(wired.vault.processFrontMatter).not.toHaveBeenCalled();
+      expect(editor.text).toBe(doc);
+    }
+  );
 
   it('keeps the row as it was, and the note, when the note is not deleted, and deletes nothing while writes are refused', async () => {
     for (const why of ['cancelled', 'trash fails', 'refused'] as const) {

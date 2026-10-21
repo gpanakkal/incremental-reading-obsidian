@@ -32,6 +32,12 @@ import { noteFingerprint } from '#/lib/note-fingerprint';
 import type { NoticeAction } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import {
+  gate,
+  MERGE_WAIT_MS,
+  outlastMerge,
+  refusalReason,
+} from '#/lib/readiness';
+import {
   applyFrontmatterLinkEdits,
   rebaseLinks,
   resolveLinks,
@@ -447,7 +453,7 @@ export class ArticleManager extends ItemManager {
     makeCopy?: boolean
   ): Promise<ImportResult | null> {
     if (!checkImportable(file)) return null;
-    if (refusedWrite(this.repo, `import "${file.name}"`)) return null;
+    if (await refusedWrite(this.repo, `import "${file.name}"`)) return null;
     if (this.importing.has(file.path)) return null;
 
     const willCopy =
@@ -512,6 +518,9 @@ export class ArticleManager extends ItemManager {
     entries: readonly BulkImportEntry[],
     { priority, fixedIntervalDays, makeCopy }: BulkImportOptions
   ): Promise<BulkOutcome[]> {
+    // Checked once, before any file is touched (see `gate`)
+    const refused = await this.refusedBatch(entries.map(({ file }) => file));
+    if (refused) return refused;
     const started: { writer: HeldWriter; run: Promise<BulkOutcome> }[] = [];
     for (const { file, stripFromSource } of entries) {
       const writer = new HeldWriter();
@@ -550,6 +559,22 @@ export class ArticleManager extends ItemManager {
       outcomes.push(await run);
     }
     return outcomes;
+  }
+
+  /**
+   * Every one of `files` failed, each saying why, when the repository is not
+   * ready for a batch to start (see `gate`); null when it is. A merge under
+   * way is waited out for a moment first, as for any action that writes
+   * files (see `refusedAction`). Quiet, as the batches are: the reasons are
+   * the caller's to say.
+   */
+  private async refusedBatch(
+    files: readonly TFile[]
+  ): Promise<BulkOutcome[] | null> {
+    const state = await outlastMerge(this.repo, MERGE_WAIT_MS);
+    if (gate(state, 'multi-step') === 'allow') return null;
+    const reason = refusalReason(state);
+    return files.map((file) => ({ file, status: 'failed', reason }));
   }
 
   /** One file of {@link importMany}, writing its rows through `writer`. */
@@ -1564,7 +1589,7 @@ export class ArticleManager extends ItemManager {
     priority: number,
     fixedIntervalDays: number | null
   ): Promise<ImportResult | null> {
-    if (refusedWrite(this.repo, `import "${page.title}"`)) return null;
+    if (await refusedWrite(this.repo, `import "${page.title}"`)) return null;
     try {
       return await this.withCopyTarget(
         { basename: page.title, extension: 'md' },
@@ -1641,7 +1666,7 @@ export class ArticleManager extends ItemManager {
    * Create a new empty article
    */
   async create(priority: number, directory?: string) {
-    if (refusedWrite(this.repo, 'create the article')) return null;
+    if (await refusedWrite(this.repo, 'create the article')) return null;
     try {
       const newNoteName = Obsidian.createTitle(
         `New article ${getDateString()}`
@@ -1910,7 +1935,8 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * Rename an article's note, saying why when the name is refused.
+   * Rename an article's note, saying why when the name is refused, or when
+   * the database isn't ready to follow it (see `refusedWrite`).
    * @param newName The basename excluding the file extension
    * @returns whether it was renamed: if not, it keeps its old name
    */
@@ -1918,6 +1944,9 @@ export class ArticleManager extends ItemManager {
     const { file } = article;
     if (!Obsidian.isValidRename(newName, file.basename)) {
       Obsidian.notify(INVALID_TITLE_MESSAGE);
+      return false;
+    }
+    if (await refusedWrite(this.repo, `rename "${file.basename}"`)) {
       return false;
     }
 
@@ -2047,6 +2076,9 @@ export class ArticleManager extends ItemManager {
    * `skipped` for one that is no live article, or `failed` with a short reason
    */
   async unimportMany(files: readonly TFile[]): Promise<BulkOutcome[]> {
+    // Checked once, before any file is touched (see `gate`)
+    const refused = await this.refusedBatch(files);
+    if (refused) return refused;
     const outcomes: BulkOutcome[] = [];
     // The live articles found, and where their outcomes go
     const found: { at: number; file: TFile; id: string }[] = [];

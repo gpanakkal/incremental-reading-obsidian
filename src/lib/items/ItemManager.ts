@@ -500,7 +500,7 @@ export class ItemManager {
     { prompt = true }: { prompt?: boolean },
     action: string
   ): Promise<DeleteOutcome> {
-    if (refusedWrite(this.repo, action)) return 'refused';
+    if (await refusedWrite(this.repo, action)) return 'refused';
     let declined = false;
     try {
       const row = (

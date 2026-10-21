@@ -1,6 +1,8 @@
 import { NOT_PURGED } from '#/lib/items/row-delete';
+import { MERGE_WAIT_MS } from '#/lib/readiness';
 import { SYNCED_TABLES } from '#/lib/repository/row-stamps';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
+import type { Readiness } from '#/lib/types';
 import type { Primitive } from '#/lib/utility-types';
 import { readFileSync } from 'fs';
 import type { App, TFile } from 'obsidian';
@@ -41,6 +43,20 @@ function getEmptyDb(): Promise<{ SQL: SqlJsStatic; bytes: Uint8Array }> {
  * with only the write of its file stubbed. Writes can be refused as saving
  * paused refuses them, through {@link refuseWrites}.
  */
+/**
+ * Make the gate's wait for a merge under way to end (`MERGE_WAIT_MS`, see
+ * `refusedAction`) run out at once rather than after a second, for an action
+ * asked for while {@link TestRepository.holdMerging} holds a merge that it
+ * must be refused over. Undone by `vi.restoreAllMocks()`.
+ */
+export function runOutMergeWait() {
+  const later = globalThis.setTimeout;
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+    run: () => void,
+    ms?: number
+  ) => later(run, ms === MERGE_WAIT_MS ? 0 : ms)) as never);
+}
+
 export class TestRepository extends SQLJSRepository {
   static async create(): Promise<TestRepository> {
     const { SQL, bytes } = await getEmptyDb();
@@ -59,6 +75,42 @@ export class TestRepository extends SQLJSRepository {
   /** Refuse writes, as a changed file on disk that won't load does. */
   refuseWrites(error = new Error('Saving is paused.')) {
     this.blockWrites(error);
+  }
+
+  /** Whether {@link holdMerging} holds the repository merging. */
+  #heldMerging = false;
+  #heldListeners = new Set<(state: Readiness) => void>();
+
+  override get readiness(): Readiness {
+    const state = super.readiness;
+    return this.#heldMerging && state === 'ready' ? 'merging' : state;
+  }
+
+  override onReadinessChange(listener: (state: Readiness) => void) {
+    const stop = super.onReadinessChange(listener);
+    this.#heldListeners.add(listener);
+    return () => {
+      stop();
+      this.#heldListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Hold the repository `merging`, as a reload taking in a file another
+   * device wrote does, telling its listeners, until the function returned is
+   * called.
+   */
+  holdMerging(): () => void {
+    const tell = () => {
+      const state = this.readiness;
+      for (const listener of [...this.#heldListeners]) listener(state);
+    };
+    this.#heldMerging = true;
+    tell();
+    return () => {
+      this.#heldMerging = false;
+      tell();
+    };
   }
 
   /**

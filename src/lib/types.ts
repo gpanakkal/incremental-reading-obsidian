@@ -246,6 +246,12 @@ export interface BulkMutateOptions {
   now?: () => number;
 }
 
+/**
+ * Whether the repository is ready for actions to start; see
+ * `SQLiteRepository.readiness`.
+ */
+export type Readiness = 'starting' | 'merging' | 'ready';
+
 export interface SQLiteRepository {
   /**
    * Run a read. A failed one resolves to no rows unless `throwOnError` is set.
@@ -298,6 +304,20 @@ export interface SQLiteRepository {
    * must not write repairs then. Absent counts as false.
    */
   readonly refetchingAfterReload?: boolean;
+  /**
+   * Whether actions may start (see `gate` in `readiness.ts`): `starting`
+   * while the repository starts up, migrates, or refuses writes (see
+   * {@link writeRefusal}); `merging` while it reads and takes in a file
+   * another device wrote; `ready` otherwise.
+   */
+  readonly readiness: Readiness;
+  /**
+   * Be told of each change of {@link readiness}, as it happens.
+   * @returns a function that unsubscribes
+   */
+  onReadinessChange(listener: (state: Readiness) => void): () => void;
+  /** Resolves once {@link readiness} is `ready`: at once, if it is. */
+  whenReady(): Promise<void>;
   /**
    * Subscribe to row-level changes on item tables. Returns an unsubscribe fn.
    */

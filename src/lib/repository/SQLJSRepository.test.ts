@@ -9,6 +9,8 @@ import {
 import { getDeviceId } from '#/lib/device-id';
 import * as notices from '#/lib/notices';
 import type { SyncHoldReason } from '#/lib/obsidian-sync';
+import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { requireReady } from '#/lib/readiness';
 import type { DataChangeEvent, MutationStatement, NoteType } from '#/lib/types';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
@@ -2702,7 +2704,8 @@ describe('start, holding for Sync', () => {
 
         const repo = await startRepo(app, { holdForSync: hold });
 
-        expect(hold).toHaveBeenCalledOnce();
+        // A startup with no file has nothing to migrate, so never holds
+        expect(hold).toHaveBeenCalledTimes(hasFile ? 1 : 0);
         expect(articleIds(repo).sort()).toEqual(hasFile ? [...ids].sort() : []);
         const dbReads = adapter.readBinary.mock.calls.filter(
           ([path]) => path === DATABASE_FILE_PATH
@@ -2757,29 +2760,28 @@ describe('start, holding for Sync', () => {
     );
   });
 
-  it('property: holds a startup with no file, then loads one Sync delivered, or starts empty', async () => {
+  it('property: never holds a startup with no file, and takes in a copy Sync delivers after', async () => {
     await fc.assert(
       fc.asyncProperty(indexViewArb, deliveryArb, async (index, delivery) => {
-        const { app, files, adapter } = makeVault(index);
-        const { hold, release } = makeHold();
+        const { app, files } = makeVault(index);
+        const hold = vi.fn(async () => 'waited' as const);
         const onWriteBlocked = vi.fn();
 
-        const starting = startRepo(app, { holdForSync: hold, onWriteBlocked });
-        await settle();
-        expect(hold).toHaveBeenCalledOnce();
-        expect(hold).toHaveBeenCalledWith('create');
+        const repo = await startRepo(app, {
+          holdForSync: hold,
+          onWriteBlocked,
+        });
 
+        expect(hold).not.toHaveBeenCalled();
+        expect(repo.readiness).toBe('ready');
+        expect(articleIds(repo)).toEqual([]);
         const arrived = await deliveredBytes(delivery);
-        if (arrived) files.set(DATABASE_FILE_PATH, arrived);
-        release();
-        const repo = await starting;
-
+        if (arrived) {
+          files.set(DATABASE_FILE_PATH, arrived);
+          await repo.handleFileChange(dbFileChange);
+        }
         const ids = delivery.kind === 'nothing' ? [] : delivery.ids;
         expect(articleIds(repo).sort()).toEqual([...ids].sort());
-        expect(hold).toHaveBeenCalledOnce();
-        expect(backupWrites(adapter)).toHaveLength(
-          delivery.kind === 'stale' ? 1 : 0
-        );
         // A delivered file is this database's own, so writes save over it
         insertArticleRow(repo, 'later');
         await settle();
@@ -2787,6 +2789,7 @@ describe('start, holding for Sync', () => {
         expect((await idsInFile(files)).sort()).toEqual(
           [...ids, 'later'].sort()
         );
+        expect(hold).not.toHaveBeenCalled();
         repo.db?.close();
       })
     );
@@ -2794,11 +2797,11 @@ describe('start, holding for Sync', () => {
 
   it('property: gives up starting, writing nothing, when the hold says not to go ahead', async () => {
     await fc.assert(
-      fc.asyncProperty(fc.boolean(), articleIdsArb, async (hasFile, ids) => {
+      fc.asyncProperty(articleIdsArb, async (ids) => {
         const stale = await staleFileWith(ids);
-        const files = new Map<string, Uint8Array>(
-          hasFile ? [[DATABASE_FILE_PATH, stale]] : []
-        );
+        const files = new Map<string, Uint8Array>([
+          [DATABASE_FILE_PATH, stale],
+        ]);
         const { app, adapter } = makeVault(INDEXED, files);
 
         const error = await startRepo(app, {
@@ -2811,7 +2814,7 @@ describe('start, holding for Sync', () => {
           message: 'Database startup was cancelled while waiting for Sync',
         });
         expect(adapter.writeBinary).not.toHaveBeenCalled();
-        expect(files.get(DATABASE_FILE_PATH)).toBe(hasFile ? stale : undefined);
+        expect(files.get(DATABASE_FILE_PATH)).toBe(stale);
       })
     );
   });
@@ -2839,28 +2842,24 @@ describe('start, holding for Sync', () => {
 
   it('property: refuses to start, writing nothing, when the file Sync delivered cannot be loaded', async () => {
     await fc.assert(
-      fc.asyncProperty(
-        fc.boolean(),
-        unloadableFileArb,
-        async (hasFile, file) => {
-          const files = new Map<string, Uint8Array>(
-            hasFile ? [[DATABASE_FILE_PATH, await staleFileWith(['a'])]] : []
-          );
-          const { app, adapter } = makeVault(INDEXED, files);
-          const broken = await unloadableBytes(file);
+      fc.asyncProperty(unloadableFileArb, async (file) => {
+        const files = new Map<string, Uint8Array>([
+          [DATABASE_FILE_PATH, await staleFileWith(['a'])],
+        ]);
+        const { app, adapter } = makeVault(INDEXED, files);
+        const broken = await unloadableBytes(file);
 
-          const error = await startRepo(app, {
-            holdForSync: async () => {
-              files.set(DATABASE_FILE_PATH, broken);
-              return 'waited' as const;
-            },
-          }).catch((e: unknown) => e);
+        const error = await startRepo(app, {
+          holdForSync: async () => {
+            files.set(DATABASE_FILE_PATH, broken);
+            return 'waited' as const;
+          },
+        }).catch((e: unknown) => e);
 
-          expect(error).toBeInstanceOf(DatabaseLoadError);
-          expect(adapter.writeBinary).not.toHaveBeenCalled();
-          expect(files.get(DATABASE_FILE_PATH)).toBe(broken);
-        }
-      )
+        expect(error).toBeInstanceOf(DatabaseLoadError);
+        expect(adapter.writeBinary).not.toHaveBeenCalled();
+        expect(files.get(DATABASE_FILE_PATH)).toBe(broken);
+      })
     );
   });
 
@@ -2917,56 +2916,60 @@ describe('start, holding for Sync', () => {
 
   it('property: a startup the plugin unloads under writes no database file and gives up', async () => {
     await fc.assert(
-      fc.asyncProperty(
-        fc.boolean(),
-        articleIdsArb,
-        abortPointArb,
-        async (hasFile, ids, abortAt) => {
-          const stale = await staleFileWith(ids);
-          const files = new Map<string, Uint8Array>(
-            hasFile ? [[DATABASE_FILE_PATH, stale]] : []
-          );
-          const { app, adapter } = makeVault(INDEXED, files);
-          const controller = new AbortController();
-          if (abortAt.kind === 'before') controller.abort();
-          const { hold, release } = makeHold();
+      fc.asyncProperty(articleIdsArb, abortPointArb, async (ids, abortAt) => {
+        const stale = await staleFileWith(ids);
+        const files = new Map<string, Uint8Array>([
+          [DATABASE_FILE_PATH, stale],
+        ]);
+        const { app, adapter } = makeVault(INDEXED, files);
+        const controller = new AbortController();
+        if (abortAt.kind === 'before') controller.abort();
+        const { hold, release } = makeHold();
 
-          const starting = startRepo(app, {
-            holdForSync: hold,
-            signal: controller.signal,
-          }).catch((e: unknown) => e);
-          await settle();
-          if (abortAt.kind === 'while-held') controller.abort();
-          // The hold has said to go ahead, as it does when Sync settles at
-          // the moment of the unload
-          release('waited');
-          if (abortAt.kind === 'after-hold') {
-            for (let i = 0; i < abortAt.hops; i++) await Promise.resolve();
-            controller.abort();
-          }
-          const outcome = await starting;
-
-          const dbWrites = adapter.writeBinary.mock.calls.filter(
-            ([path]) => path === DATABASE_FILE_PATH
-          );
-          if (outcome instanceof SQLJSRepository) {
-            // Done before the unload, and the plugin's to dispose of from then
-            // on: the abort leaves it open
-            expect(abortAt.kind).toBe('after-hold');
-            expect(articleIds(outcome).sort()).toEqual(
-              hasFile ? [...ids].sort() : []
-            );
-            outcome.dispose();
-          } else {
-            expect(outcome).toBeInstanceOf(StartupCancelledError);
-            expect(dbWrites).toHaveLength(0);
-            expect(files.get(DATABASE_FILE_PATH)).toBe(
-              hasFile ? stale : undefined
-            );
-          }
+        const starting = startRepo(app, {
+          holdForSync: hold,
+          signal: controller.signal,
+        }).catch((e: unknown) => e);
+        await settle();
+        if (abortAt.kind === 'while-held') controller.abort();
+        // The hold has said to go ahead, as it does when Sync settles at
+        // the moment of the unload
+        release('waited');
+        if (abortAt.kind === 'after-hold') {
+          for (let i = 0; i < abortAt.hops; i++) await Promise.resolve();
+          controller.abort();
         }
-      )
+        const outcome = await starting;
+
+        const dbWrites = adapter.writeBinary.mock.calls.filter(
+          ([path]) => path === DATABASE_FILE_PATH
+        );
+        if (outcome instanceof SQLJSRepository) {
+          // Done before the unload, and the plugin's to dispose of from then
+          // on: the abort leaves it open
+          expect(abortAt.kind).toBe('after-hold');
+          expect(articleIds(outcome).sort()).toEqual([...ids].sort());
+          outcome.dispose();
+        } else {
+          expect(outcome).toBeInstanceOf(StartupCancelledError);
+          expect(dbWrites).toHaveLength(0);
+          expect(files.get(DATABASE_FILE_PATH)).toBe(stale);
+        }
+      })
     );
+  });
+
+  it('gives up a startup with no file, writing nothing, when the plugin unloaded before it began', async () => {
+    const { app, adapter } = makeVault(INDEXED);
+    const controller = new AbortController();
+    controller.abort();
+
+    const error = await startRepo(app, { signal: controller.signal }).catch(
+      (e: unknown) => e
+    );
+
+    expect(error).toBeInstanceOf(StartupCancelledError);
+    expect(adapter.writeBinary).not.toHaveBeenCalled();
   });
 
   it('does not hold a merge after startup, even of a file that needs migrating', async () => {
@@ -4707,5 +4710,261 @@ describe("telling another device's copy from this device's own save", () => {
       expect(repo.startupKind).toBeNull();
       repo.dispose();
     });
+  });
+});
+
+describe('readiness', () => {
+  beforeEach(() => {
+    stubWasm();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'debug').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Hold the next read of the database file until the test releases it,
+   * handing back what is on disk by then.
+   */
+  function holdNextRead(
+    adapter: ReturnType<typeof makeVault>['adapter'],
+    files: Map<string, Uint8Array>
+  ) {
+    let release = () => {};
+    adapter.readBinary.mockImplementationOnce(
+      (path: string) =>
+        new Promise<ArrayBuffer>((resolve) => {
+          release = () => resolve(files.get(path)!.slice().buffer);
+        })
+    );
+    return () => release();
+  }
+
+  /** Every state `repo` tells its listeners of, in order. */
+  function recordStates(repo: SQLJSRepository) {
+    const told: string[] = [];
+    repo.onReadinessChange((state) => told.push(state));
+    return told;
+  }
+
+  it('is starting while startup loads and classifies the file, and ready once it hands the repository over', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const { app } = makeVault(INDEXED, files);
+    const seen: string[] = [];
+    const proto = SQLJSRepository.prototype as unknown as {
+      loadDb: (this: SQLJSRepository) => Promise<unknown>;
+    };
+    const loadDb = proto.loadDb;
+    vi.spyOn(proto, 'loadDb').mockImplementation(async function (
+      this: SQLJSRepository
+    ) {
+      seen.push(this.readiness);
+      return (await loadDb.call(this)) as unknown;
+    });
+
+    const repo = await startRepo(app);
+
+    expect(seen).toEqual(['starting']);
+    expect(repo.readiness).toBe('ready');
+    repo.dispose();
+  });
+
+  it('is ready, and stays so, for a startup that makes a new database', async () => {
+    const { app } = makeVault(INDEXED);
+
+    const repo = await startRepo(app);
+
+    expect(repo.readiness).toBe('ready');
+    await expect(repo.whenReady()).resolves.toBeUndefined();
+    repo.dispose();
+  });
+
+  it('is merging while a reload reads and takes in a file, and ready before the refetch it asks for', async () => {
+    const { repo, files, adapter, onReloadFromDisk } = await startOver(['a']);
+    const told = recordStates(repo);
+    const release = holdNextRead(adapter, files);
+    let duringRefetch: string | null = null;
+    onReloadFromDisk.mockImplementation(() => {
+      duringRefetch = repo.readiness;
+    });
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['a', 'b']));
+
+    const reload = repo.handleFileChange(dbFileChange);
+    await settle();
+    expect(repo.readiness).toBe('merging');
+    let ready = false;
+    void repo.whenReady().then(() => (ready = true));
+    await settle();
+    expect(ready).toBe(false);
+
+    release();
+    await reload;
+
+    expect(articleIds(repo).sort()).toEqual(['a', 'b']);
+    expect(duringRefetch).toBe('ready');
+    expect(ready).toBe(true);
+    expect(told).toEqual(['merging', 'ready']);
+    repo.dispose();
+  });
+
+  it('lands a plain write asked for during a merge once the merge ends, in the database taken in, and on disk', async () => {
+    vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    const { repo, files, adapter } = await startOver(['a']);
+    const release = holdNextRead(adapter, files);
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['a', 'b']));
+    const reload = repo.handleFileChange(dbFileChange);
+    await settle();
+
+    const write = requireReady(repo, 'db-write', 'grade the card').then(
+      (allowed) => {
+        if (allowed) insertArticleRow(repo, 'graded');
+        return allowed;
+      }
+    );
+    await settle();
+    expect(articleIds(repo).sort()).toEqual(['a']);
+    release();
+    await reload;
+
+    expect(await write).toBe(true);
+    expect(articleIds(repo).sort()).toEqual(['a', 'b', 'graded']);
+    await settle();
+    expect((await idsInFile(files)).sort()).toEqual(['a', 'b', 'graded']);
+    repo.dispose();
+  });
+
+  it('lands a plain write asked for during a merge that fails partway, as the merge ends', async () => {
+    vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    const { repo, files, adapter } = await startOver(['a']);
+    const told = recordStates(repo);
+    const release = holdNextRead(adapter, files);
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['a', 'b']));
+    vi.spyOn(
+      repo as unknown as { reloadDb(): Promise<unknown> },
+      'reloadDb'
+    ).mockRejectedValueOnce(new Error('Failed partway'));
+    const reload = repo.handleFileChange(dbFileChange);
+    await settle();
+
+    const write = requireReady(repo, 'db-write', 'grade the card');
+    release();
+    await reload;
+
+    expect(await write).toBe(true);
+    expect(repo.readiness).toBe('ready');
+    expect(told).toEqual(['merging', 'ready']);
+    repo.dispose();
+  });
+
+  it('lets a plain write held over a merge through when a transaction holds the merge back, then merges once it ends', async () => {
+    vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+    const { repo, files, adapter } = await startOver(['a']);
+    const told = recordStates(repo);
+    const release = holdNextRead(adapter, files);
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['a', 'b']));
+    const reload = repo.handleFileChange(dbFileChange);
+    await settle();
+    let endTransaction = () => {};
+    const transaction = repo.transaction(
+      () => new Promise<void>((resolve) => (endTransaction = resolve))
+    );
+    const write = requireReady(repo, 'db-write', 'grade the card');
+
+    release();
+    await reload;
+    // Not waiting on the transaction, which the merge waits for instead
+    expect(await write).toBe(true);
+    expect(told).toEqual(['merging', 'ready']);
+    endTransaction();
+    await transaction;
+    await vi.waitFor(() => expect(articleIds(repo).sort()).toEqual(['a', 'b']));
+
+    expect(told).toEqual(['merging', 'ready', 'merging', 'ready']);
+    repo.dispose();
+  });
+
+  it('is merging while it reads its own save coming back, and ready after', async () => {
+    const { repo, files, adapter } = await startOver(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const told = recordStates(repo);
+    const release = holdNextRead(adapter, files);
+
+    const reload = repo.handleFileChange(dbFileChange);
+    await settle();
+    expect(repo.readiness).toBe('merging');
+    release();
+    await reload;
+
+    expect(repo.readiness).toBe('ready');
+    expect(told).toEqual(['merging', 'ready']);
+    repo.dispose();
+  });
+
+  it('property: is starting once a reload finds a file it cannot load, until one loads', async () => {
+    await fc.assert(
+      fc.asyncProperty(unloadableFileArb, async (file) => {
+        const { repo, files } = await startOver(['a']);
+        const told = recordStates(repo);
+        files.set(DATABASE_FILE_PATH, await unloadableBytes(file));
+
+        await repo.handleFileChange(dbFileChange);
+
+        expect(repo.readiness).toBe('starting');
+        expect(told).toEqual(['merging', 'starting']);
+        let ready = false;
+        void repo.whenReady().then(() => (ready = true));
+        files.set(DATABASE_FILE_PATH, await dbFileWith(['a', 'c']));
+        await repo.handleFileChange(dbFileChange);
+        await settle();
+
+        expect(repo.readiness).toBe('ready');
+        expect(ready).toBe(true);
+        // Still refused while the next reload reads: only a load lifts it
+        expect(told).toEqual(['merging', 'starting', 'ready']);
+        repo.dispose();
+      })
+    );
+  });
+
+  it('keeps a wait for readiness waiting when a merge ends refusing writes', async () => {
+    const { repo, files, adapter } = await startOver(['a']);
+    const release = holdNextRead(adapter, files);
+    files.set(DATABASE_FILE_PATH, new Uint8Array([1, 2, 3]));
+    const reload = repo.handleFileChange(dbFileChange);
+    await settle();
+    let ready = false;
+    void repo.whenReady().then(() => (ready = true));
+
+    release();
+    await reload;
+    await settle();
+
+    expect(repo.readiness).toBe('starting');
+    expect(ready).toBe(false);
+    repo.dispose();
+  });
+
+  it('is starting for good once disposed, and says so', async () => {
+    const { repo } = await startOver(['a']);
+    const told = recordStates(repo);
+
+    repo.dispose();
+
+    expect(repo.readiness).toBe('starting');
+    expect(told).toEqual(['starting']);
+  });
+
+  it('tells a listener nothing once it unsubscribes', async () => {
+    const { repo } = await startOver(['a']);
+    const listener = vi.fn();
+    const stop = repo.onReadinessChange(listener);
+
+    stop();
+    repo.dispose();
+
+    expect(listener).not.toHaveBeenCalled();
   });
 });

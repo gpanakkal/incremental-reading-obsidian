@@ -23,6 +23,7 @@ import type {
   DataChangeOp,
   MutationStatement,
   NoteType,
+  Readiness,
   RowTypes,
   SQLiteRepository,
 } from '#/lib/types';
@@ -226,6 +227,18 @@ export class SQLJSRepository implements SQLiteRepository {
   #loadedStamp: WriteVector | null = null;
   /** What startup found the file on disk to be; see {@link startupKind}. */
   #startupKind: IncomingKind | null = null;
+  /**
+   * Set while {@link start} runs, so {@link readiness} is `starting` until
+   * the file on disk is loaded, migrated and classified (see
+   * {@link startupKind}): a write before that would bump this device's write
+   * stamp and hide what the file was.
+   */
+  #starting = false;
+  /** Set while a reload reads, classifies and takes in the file on disk. */
+  #merging = false;
+  #readinessListeners = new Set<(state: Readiness) => void>();
+  /** The {@link readiness} listeners were last told of. */
+  #toldReadiness: Readiness = 'ready';
 
   /**
    * Use .start to instantiate
@@ -273,10 +286,11 @@ export class SQLJSRepository implements SQLiteRepository {
    * @param onWriteBlocked called when writes start being refused; see
    * {@link blockWrites}
    * @param onWritesResumed called when a reload ends the refusal
-   * @param holdForSync awaited before migrating the file, or before starting
-   * on a new database when there is none, after which a wait has the file
-   * read afresh: Sync may have delivered a newer one meanwhile. Not awaited
-   * on a startup that does neither, nor ever again after startup.
+   * @param holdForSync awaited before migrating the file, after which a wait
+   * has the file read afresh: Sync may have delivered a newer one meanwhile.
+   * Not awaited on a startup with nothing to migrate, a new database
+   * included, nor ever again after startup: a copy Sync delivers later is
+   * classified and taken in when it arrives (see `#answerIncoming`).
    * @param signal an abort stops startup wherever it has got to
    * @throws {DatabaseLoadError} if the file exists but cannot be loaded
    * @throws {MigrationVerificationError} if migrating the file loses data
@@ -297,6 +311,8 @@ export class SQLJSRepository implements SQLiteRepository {
   }): Promise<SQLJSRepository> {
     const repo = new SQLJSRepository({ ...params, app: params.plugin.app });
     repo.#syncHold = params.holdForSync;
+    repo.#starting = true;
+    repo.#readinessChanged();
     // An unload stops startup wherever it has got to, so an instance being
     // replaced never saves over the file its successor is loading. Only
     // until `start` hands the repository over, which is the plugin's to
@@ -313,11 +329,9 @@ export class SQLJSRepository implements SQLiteRepository {
     // Read before loading, which stores the stamp of the file it loads
     const known = loadKnownWriteVector(repo.app);
     try {
-      let exists = await repo.dbExists();
-      if (!exists && (await repo.#waitOnSync('create'))) {
-        exists = await repo.dbExists();
-      }
-      if (exists) {
+      // No file, no wait: a copy Sync delivers later is taken in by the
+      // reload its arrival asks for (see `#answerIncoming`)
+      if (await repo.dbExists()) {
         const loaded = await repo.loadDb();
         assertLive();
         if (loaded !== null) {
@@ -337,6 +351,8 @@ export class SQLJSRepository implements SQLiteRepository {
       return repo;
     } finally {
       repo.#syncHold = undefined;
+      repo.#starting = false;
+      repo.#readinessChanged();
       signal?.removeEventListener('abort', stop);
     }
   }
@@ -408,6 +424,7 @@ export class SQLJSRepository implements SQLiteRepository {
     this.#disposed = true;
     this.db?.close();
     this.db = null;
+    this.#readinessChanged();
   }
 
   /**
@@ -418,6 +435,7 @@ export class SQLJSRepository implements SQLiteRepository {
   protected blockWrites(error: Error): Error {
     const alreadyBlocked = this.#writeBlock !== null;
     this.#writeBlock = error;
+    this.#readinessChanged();
     if (!alreadyBlocked) this.#onWriteBlocked?.(error);
     return error;
   }
@@ -446,6 +464,50 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   get refetchingAfterReload(): boolean {
     return this.#reloadCallbacks > 0;
+  }
+
+  /**
+   * Whether actions may start (see `gate` in `readiness.ts`): `starting`
+   * while {@link start} runs or writes are refused (see
+   * {@link writeRefusal}), `merging` while a reload reads, classifies and
+   * takes in the file on disk, `ready` otherwise.
+   */
+  get readiness(): Readiness {
+    if (this.#starting || this.writeRefusal()) return 'starting';
+    return this.#merging ? 'merging' : 'ready';
+  }
+
+  onReadinessChange(listener: (state: Readiness) => void): () => void {
+    this.#readinessListeners.add(listener);
+    return () => this.#readinessListeners.delete(listener);
+  }
+
+  whenReady(): Promise<void> {
+    if (this.readiness === 'ready') return Promise.resolve();
+    return new Promise((resolve) => {
+      const stop = this.onReadinessChange((state) => {
+        if (state !== 'ready') return;
+        stop();
+        resolve();
+      });
+    });
+  }
+
+  /** Tell the {@link readiness} listeners, if it changed since last told. */
+  #readinessChanged() {
+    const state = this.readiness;
+    if (state === this.#toldReadiness) return;
+    this.#toldReadiness = state;
+    for (const listener of [...this.#readinessListeners]) listener(state);
+  }
+
+  /**
+   * Mark a reload's read, classification and take-in as under way, or over.
+   * A write block it set or lifted meanwhile is told when it ends.
+   */
+  #setMerging(merging: boolean) {
+    this.#merging = merging;
+    this.#readinessChanged();
   }
 
   get dbFilePath() {
@@ -518,6 +580,7 @@ export class SQLJSRepository implements SQLiteRepository {
    * changed again since, as the reload that follows decides instead.
    */
   async #reloadOnce() {
+    this.#setMerging(true);
     try {
       const incoming = await this.#readIncoming();
       // What follows may export or save the database, which would end a
@@ -540,6 +603,8 @@ export class SQLJSRepository implements SQLiteRepository {
         );
         return;
       }
+      // Taken in: what follows only refetches
+      this.#setMerging(false);
       this.#reloadCallbacks++;
       try {
         await this.onReloadFromDisk?.();
@@ -564,6 +629,8 @@ export class SQLJSRepository implements SQLiteRepository {
         }
         console.error(error);
       }
+    } finally {
+      this.#setMerging(false);
     }
   }
 
