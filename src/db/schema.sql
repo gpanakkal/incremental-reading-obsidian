@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS article (
   scroll_top INTEGER NOT NULL DEFAULT 0, -- top-visible document character offset; for a PDF, page * 100000 + top in PDF points (0 = unset)
   updated_at INTEGER NOT NULL DEFAULT 0, -- logical ms clock of the last write that changed the row (0 = never stamped)
   updated_by TEXT NOT NULL DEFAULT '', -- device id of that write
+  note_mtime INTEGER DEFAULT NULL, -- the note's mtime as of the plugin's last write of its identity frontmatter (NULL = unknown)
   CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(fixed_interval_days > 0),
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS snippet (
   end_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
   updated_at INTEGER NOT NULL DEFAULT 0,
   updated_by TEXT NOT NULL DEFAULT '',
+  note_mtime INTEGER DEFAULT NULL, -- see article.note_mtime
   CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
@@ -89,6 +91,7 @@ CREATE TABLE IF NOT EXISTS srs_card (
   state INTEGER NOT NULL,
   updated_at INTEGER NOT NULL DEFAULT 0,
   updated_by TEXT NOT NULL DEFAULT '',
+  note_mtime INTEGER DEFAULT NULL, -- see article.note_mtime
   CHECK(state >= 0 AND state <= 3),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
   CHECK(deleted = FALSE OR deleted = TRUE)
@@ -144,4 +147,4 @@ CREATE TABLE IF NOT EXISTS write_stamp (
   generation INTEGER NOT NULL
 );
 
-PRAGMA user_version = 12;
+PRAGMA user_version = 13;

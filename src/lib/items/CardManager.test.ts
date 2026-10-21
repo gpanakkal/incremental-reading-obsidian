@@ -5618,3 +5618,39 @@ describe('adoptLeftover', () => {
     expect(repo.rows('srs_card')[0]).toMatchObject({ parent: null });
   });
 });
+
+describe('the note fingerprint a new card records', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The `note_mtime` the card row `id` holds. */
+  const fingerprintOf = (repo: TestRepository, id: unknown) =>
+    repo.storedRows('srs_card').find((row) => row.id === id)?.note_mtime;
+
+  it('is the one the write of its id and tag left its note with', async () => {
+    const { vault, repo, fromPdf } = await wire();
+
+    const card = await fromPdf();
+
+    const note = vault.files.get(card!.file.path)!;
+    expect(vault.frontmatterOf(note.path)).toMatchObject({
+      'ir-id': card!.data.id,
+    });
+    expect(fingerprintOf(repo, card!.data.id)).toBe(note.stat.mtime);
+  });
+
+  it("is the adopted leftover's mtime", async () => {
+    const vault = makeItemVault({
+      'cards/left.md': { 'ir-id': 'left-1', tags: [CARD_TAG] },
+    });
+    const repo = await TestRepository.create();
+    vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(null);
+    const manager = new CardManager({ app: vault.app } as never, repo);
+    const file = vault.files.get('cards/left.md')!;
+
+    await manager.adoptLeftover(file, 'left-1');
+
+    expect(fingerprintOf(repo, 'left-1')).toBe(file.stat.mtime);
+  });
+});

@@ -92,15 +92,18 @@ export class TestRepository extends SQLJSRepository {
   /**
    * The rows of `table` as readers see them, as plain objects: with no
    * tombstone of a row deleted for good (an item row's `NOT_PURGED`, a log or
-   * rebind row's `deleted`), and with no stamp, which says when a row was
-   * written rather than what it holds. {@link storedRows} has everything.
+   * rebind row's `deleted`), with no stamp, which says when a row was written
+   * rather than what it holds, and with no note fingerprint, which says what
+   * the note was like when its identity was last written (see
+   * `noteFingerprint`). {@link storedRows} has everything.
    */
   rows(table: string): Record<string, unknown>[] {
     const live = (SYNCED_TABLES as readonly string[]).includes(table)
       ? ` WHERE ${ITEM_TABLES.has(table) ? NOT_PURGED : 'deleted = FALSE'}`
       : '';
     return this.storedRows(table, live).map(
-      ({ updated_at: _at, updated_by: _by, ...content }) => content
+      ({ updated_at: _at, updated_by: _by, note_mtime: _mtime, ...content }) =>
+        content
     );
   }
 
@@ -166,6 +169,7 @@ export function makeItemVault(
     append: vi.fn(async (file: TFile, data: string) => {
       check('append', file.path);
       bodies.set(file.path, (bodies.get(file.path) ?? '') + data);
+      base.touch(file);
     }),
     copy: vi.fn(async (file: TFile, path: string) => {
       check('copy', path);

@@ -9,6 +9,7 @@ import {
   type RowId,
   evictedSpot,
 } from './moved-note-scan';
+import { recordFingerprint } from './note-fingerprint';
 import type { NoticeKind } from './notices';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import type { NoteType, SQLiteRepository } from './types';
@@ -191,10 +192,12 @@ export async function relinkRow<F extends RelinkFile>(
         [evictedSpot({ table: row.table, id: tombstone.id }), tombstone.id]
       );
     }
-    await repo.mutate(`UPDATE ${row.table} SET reference = $1 WHERE id = $2`, [
-      target.path,
-      row.id,
-    ]);
+    // The fingerprint was the lost note's, and proves nothing about the
+    // target until the caller has written the item's identity into it
+    await repo.mutate(
+      `UPDATE ${row.table} SET reference = $1, note_mtime = NULL WHERE id = $2`,
+      [target.path, row.id]
+    );
     return { ok: true, from: current.reference };
   });
 }
@@ -273,6 +276,25 @@ function refusal(
 }
 
 /**
+ * Record on `row` the fingerprint `target` was left with by the write of the
+ * item's identity into it (see `recordFingerprint`). The relink stands without
+ * it: the row is only left with no fingerprint, which proves nothing.
+ */
+async function recordRelinkFingerprint(
+  repo: SQLiteRepository,
+  row: RowId,
+  target: TFile
+): Promise<void> {
+  const statement = recordFingerprint(row.table, row.id, target);
+  if (!statement) return;
+  try {
+    await repo.mutate(statement.query, statement.params);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+/**
  * Relink `row` to `target` (see {@link relinkRow}), then make the file the
  * item's own: a note gains the item's `ir-id` and tag, so the note is known as
  * the item's by the same frontmatter every other note is; a file with no
@@ -311,6 +333,7 @@ export async function relinkItem(
       { 'ir-id': row.id, tags: TAG_BY_TABLE[row.table] },
       app
     );
+    await recordRelinkFingerprint(reviewManager.repo, row, target);
   } catch (error) {
     console.error(error);
     notice += `, but its frontmatter could not be updated`;

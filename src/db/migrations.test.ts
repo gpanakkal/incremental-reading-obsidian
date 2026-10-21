@@ -509,6 +509,7 @@ describe('migration v3 — backfill interval on article and snippet', () => {
       scroll_top: 42,
       updated_at: 0,
       updated_by: '',
+      note_mtime: null,
     });
   });
 });
@@ -1620,6 +1621,49 @@ describe('migration v12 — stamp each save with its device and generation', () 
     expect(() =>
       db.exec(`INSERT INTO write_stamp (device) VALUES ('d')`)
     ).toThrow(/NOT NULL/);
+  });
+
+  it('reports no work to do when run a second time', () => {
+    applyMigrations(db, migrations);
+    expect(applyMigrations(db, migrations)).toBe(false);
+  });
+});
+
+describe("migration v13 — record each item note's mtime", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb(SCHEMA_V0);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 12)
+    );
+    insertArticle(db, 'a1', 'notes/a1.md');
+  });
+
+  it('gives every item table a note mtime, unknown on every row it had', () => {
+    applyMigrations(db, migrations);
+
+    expect(getSchemaVersion(db)).toBe(13);
+    for (const table of ['article', 'snippet', 'srs_card']) {
+      expect(columnNames(db, table)).toContain('note_mtime');
+    }
+    expect(selectAll(db, 'article')).toEqual([
+      expect.objectContaining({ id: 'a1', note_mtime: null }),
+    ]);
+  });
+
+  it('leaves the review logs and rebinds without one', () => {
+    applyMigrations(db, migrations);
+
+    for (const table of [
+      'article_review',
+      'snippet_review',
+      'srs_card_review',
+      'rebind',
+    ]) {
+      expect(columnNames(db, table)).not.toContain('note_mtime');
+    }
   });
 
   it('reports no work to do when run a second time', () => {

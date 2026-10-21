@@ -885,35 +885,49 @@ describe('rowToReviewSnippet', () => {
     expect(removeHighlightSpy).not.toHaveBeenCalled();
   });
 
-  it('returns null and calls markDeleted when frontmatter has a different ir-id', async () => {
-    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
-    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    const row = makeSnippetRow({ id: 'row-id-001' });
-    const repo = makeSimpleRepo();
-    const manager = new SnippetManager(
-      {
-        app: {
-          metadataCache: {
-            getFileCache: () => ({
-              frontmatter: { 'ir-id': 'different-id', tags: [SNIPPET_TAG] },
-            }),
+  it.each([
+    { noteMtime: 5_000, deletes: true },
+    { noteMtime: 5_001, deletes: false },
+    { noteMtime: 4_999, deletes: false },
+  ])(
+    'returns null when frontmatter has a different ir-id, and tombstones the row only when the note has the mtime it recorded (note at $noteMtime)',
+    async ({ noteMtime, deletes }) => {
+      const fakeFile = {
+        path: 'snippets/test.md',
+        extension: 'md',
+        stat: { ctime: 0, mtime: noteMtime, size: 0 },
+      } as TFile;
+      vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
+      const row = {
+        ...makeSnippetRow({ id: 'row-id-001' }),
+        note_mtime: 5_000,
+      };
+      const repo = makeSimpleRepo();
+      const manager = new SnippetManager(
+        {
+          app: {
+            metadataCache: {
+              getFileCache: () => ({
+                frontmatter: { 'ir-id': 'different-id', tags: [SNIPPET_TAG] },
+              }),
+            },
+            fileManager: { processFrontMatter: async () => undefined },
           },
-          fileManager: { processFrontMatter: async () => undefined },
-        },
-        settings: { fuzzTextReviews: false },
-      } as never,
-      repo
-    );
-    const result = manager.rowToReviewSnippet(row);
-    expect(result).toBeNull();
-    await Promise.resolve();
-    const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls as [string, unknown[]][];
-    const deleteCall = mutateCalls.find(([sql]) =>
-      sql.includes('SET deleted = 1')
-    );
-    expect(deleteCall).toBeDefined();
-  });
+          settings: { fuzzTextReviews: false },
+        } as never,
+        repo
+      );
+      const result = manager.rowToReviewSnippet(row);
+      expect(result).toBeNull();
+      await Promise.resolve();
+      const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
+        .calls as [string, unknown[]][];
+      const deleteCall = mutateCalls.find(([sql]) =>
+        sql.includes('SET deleted = 1')
+      );
+      expect(deleteCall !== undefined).toBe(deletes);
+    }
+  );
 
   it('writes nothing to the note when the file has an ir-id but lacks the snippet tag', async () => {
     const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
@@ -1006,25 +1020,42 @@ describe('rowToReviewSnippet', () => {
     expect(undeleteCall).toBeUndefined();
   });
 
-  it('calls markUndeleted when the file exists but the row is flagged as deleted', async () => {
-    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
-    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    const row = makeSnippetRow({ deleted: true, due_fuzz: 0 });
-    const repo = makeSimpleRepo();
-    const manager = new SnippetManager(
-      { app: makeApp(), settings: { fuzzTextReviews: false } } as never,
-      repo
-    );
-    manager.rowToReviewSnippet(row);
-    await Promise.resolve();
-    const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls as [string, unknown[]][];
-    const undeleteCall = mutateCalls.find(([sql]) =>
-      sql.includes('SET deleted = 0')
-    );
-    expect(undeleteCall).toBeDefined();
-    expect(undeleteCall![1][0]).toBe(row.id);
-  });
+  it.each([{ noteMtime: 5_000 }, { noteMtime: 5_001 }, { noteMtime: 4_999 }])(
+    'never brings back a tombstoned row whose note carries its ir-id, whatever its mtime (note at $noteMtime)',
+    async ({ noteMtime }) => {
+      const fakeFile = {
+        path: 'snippets/test.md',
+        extension: 'md',
+        stat: { ctime: 0, mtime: noteMtime, size: 0 },
+      } as TFile;
+      vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
+      const row = {
+        ...makeSnippetRow({ deleted: true, due_fuzz: 0 }),
+        note_mtime: 5_000,
+      };
+      const repo = makeSimpleRepo();
+      const manager = new SnippetManager(
+        {
+          app: {
+            ...makeApp(),
+            metadataCache: {
+              getFileCache: () => ({
+                frontmatter: { 'ir-id': row.id, tags: [SNIPPET_TAG] },
+              }),
+            },
+          },
+          settings: { fuzzTextReviews: false },
+        } as never,
+        repo
+      );
+      // Still the row's to review: the note at its path is its own
+      expect(manager.rowToReviewSnippet(row)).not.toBeNull();
+      await Promise.resolve();
+      expect(
+        (repo.mutate as ReturnType<typeof vi.fn>).mock.calls
+      ).toStrictEqual([]);
+    }
+  );
 });
 
 /**
@@ -4647,5 +4678,48 @@ describe('undoReview', () => {
     await expect(
       manager.undoReview(reviews[0].before, reviews[0].id)
     ).rejects.toThrow(reviews[0].id);
+  });
+});
+
+describe('the note fingerprint a new snippet records', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The `note_mtime` the snippet row `id` holds. */
+  const fingerprintOf = (repo: TestRepository, id: unknown) =>
+    repo.storedRows('snippet').find((row) => row.id === id)?.note_mtime;
+
+  it('is the one the write of its id and tag left its note with, snipped from a note', async () => {
+    const { vault, repo, snip } = await wireSnippets({
+      'notes/source.md': null,
+    });
+
+    const snippet = await snip('notes/source.md');
+
+    const note = vault.files.get(snippet!.file.path)!;
+    expect(vault.frontmatterOf(note.path)).toMatchObject({
+      'ir-id': snippet!.data.id,
+    });
+    expect(fingerprintOf(repo, snippet!.data.id)).toBe(note.stat.mtime);
+  });
+
+  it('is the one the write of its id and tag left its note with, snipped from a PDF', async () => {
+    const { vault, repo, result } = await snipPdf(null);
+
+    const note = vault.files.get(result!.file.path)!;
+    expect(fingerprintOf(repo, result!.data.id)).toBe(note.stat.mtime);
+  });
+
+  it("is the adopted leftover's mtime", async () => {
+    const { vault, repo, manager } = await wireSnippets({
+      'snippets/left.md': { 'ir-id': 'left-1', tags: [SNIPPET_TAG] },
+    });
+    vi.spyOn(Obsidian, 'getSourceFile').mockReturnValue(null);
+    const file = vault.files.get('snippets/left.md')!;
+
+    await manager.adoptLeftover(file, 'left-1');
+
+    expect(fingerprintOf(repo, 'left-1')).toBe(file.stat.mtime);
   });
 });

@@ -692,6 +692,124 @@ describe('relinkItem', () => {
     }
   );
 
+  describe('the note fingerprint', () => {
+    /** The `note_mtime` the `table` row `i` holds. */
+    const fingerprintOf = (repo: TestRepository, table: ItemTable) =>
+      repo.query(`SELECT note_mtime FROM ${table} WHERE id = 'i'`)[0];
+
+    /** A row `i` at `gone.md`, which recorded a fingerprint of that note. */
+    function wireLost(table: ItemTable) {
+      const repo = TestRepository.create();
+      insertItem(repo, {
+        table,
+        id: 'i',
+        reference: 'gone.md',
+        deleted: false,
+      });
+      repo.mutate(`UPDATE ${table} SET note_mtime = 1 WHERE id = 'i'`);
+      return repo;
+    }
+
+    it.each(TABLE_TAGS)(
+      'is the one the write of the $table’s id and tag left the target with',
+      async ({ table }) => {
+        const repo = wireLost(table);
+        const { plugin } = makePlugin(repo, { 'new.md': {} });
+        const target = {
+          ...makeFile('new.md'),
+          stat: { ctime: 0, mtime: 500, size: 0 },
+        } as TFile;
+        const write =
+          plugin.app.fileManager.processFrontMatter.getMockImplementation()!;
+        plugin.app.fileManager.processFrontMatter.mockImplementation(
+          async (file, fn) => {
+            await write(file, fn);
+            file.stat.mtime = 900;
+          }
+        );
+
+        await relinkItem(plugin as never, { table, id: 'i' }, target);
+
+        expect(fingerprintOf(repo, table)).toEqual({ note_mtime: 900 });
+      }
+    );
+
+    it.each(TABLE_TAGS)(
+      'is unknown once the $table is relinked to a target whose frontmatter cannot be written',
+      async ({ table }) => {
+        const repo = wireLost(table);
+        const { plugin } = makePlugin(repo);
+        plugin.app.fileManager.processFrontMatter.mockRejectedValue(
+          new Error('bad YAML')
+        );
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        const target = {
+          ...makeFile('new.md'),
+          stat: { ctime: 0, mtime: 500, size: 0 },
+        } as TFile;
+
+        const result = await relinkItem(
+          plugin as never,
+          { table, id: 'i' },
+          target
+        );
+
+        expect(result).toEqual({ ok: true, from: 'gone.md' });
+        expect(fingerprintOf(repo, table)).toEqual({ note_mtime: null });
+      }
+    );
+
+    it('is unknown for a target with no frontmatter, and the relink stands when it cannot be saved', async () => {
+      const repo = TestRepository.create();
+      insertItem(repo, {
+        table: 'article',
+        id: 'i',
+        reference: 'gone.pdf',
+        deleted: false,
+      });
+      repo.mutate(`UPDATE article SET note_mtime = 1 WHERE id = 'i'`);
+      const { plugin } = makePlugin(repo);
+      const target = {
+        ...makeFile('new.pdf'),
+        stat: { ctime: 0, mtime: 500, size: 0 },
+      } as TFile;
+
+      await relinkItem(plugin as never, { table: 'article', id: 'i' }, target);
+
+      expect(fingerprintOf(repo, 'article')).toEqual({ note_mtime: null });
+    });
+
+    it('leaves the relink standing when the fingerprint cannot be saved', async () => {
+      const repo = wireLost('article');
+      const { plugin } = makePlugin(repo, { 'new.md': {} });
+      const target = {
+        ...makeFile('new.md'),
+        stat: { ctime: 0, mtime: 500, size: 0 },
+      } as TFile;
+      vi.spyOn(repo, 'mutate').mockImplementation((query, params) => {
+        if (query.includes('SET note_mtime = $1')) throw new Error('disk full');
+        return repo.rawMutate(query, params);
+      });
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const result = await relinkItem(
+        plugin as never,
+        { table: 'article', id: 'i' },
+        target
+      );
+
+      expect(result).toEqual({ ok: true, from: 'gone.md' });
+      expect(readRows(repo)).toEqual([
+        expect.objectContaining({ id: 'i', reference: 'new.md' }),
+      ]);
+      expect(fingerprintOf(repo, 'article')).toEqual({ note_mtime: null });
+      expect(error).toHaveBeenCalled();
+      expect(Notice.messages).toStrictEqual([
+        expect.stringContaining('new.md'),
+      ]);
+    });
+  });
+
   it.each([
     ['x|y/new.md', true],
     ['x y/new.md', false],

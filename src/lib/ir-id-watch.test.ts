@@ -2,7 +2,13 @@ import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
-import type { App, CachedMetadata, TFile } from 'obsidian';
+import {
+  type App,
+  type CachedMetadata,
+  MarkdownView,
+  type TFile,
+  type Workspace,
+} from 'obsidian';
 import { resolve } from 'path';
 import initSqlJs, { type SqlJsStatic } from 'sql.js';
 import {
@@ -26,8 +32,10 @@ import {
   classifyTag,
   createIrIdWatch,
   readsAsTampering,
+  shownInMarkdownView,
 } from './ir-id-watch';
 import { TAG_BY_TABLE, hasTag, withTag } from './item-tags';
+import { purgedReference } from './items/row-delete';
 import { type Holder, ITEM_TABLES, type ItemTable } from './moved-note-scan';
 
 // #region HELPERS
@@ -197,6 +205,9 @@ function wire(
     vault: vault.vault,
     metadataCache: vault.metadataCache,
     onDamage,
+    // Every change is an edit made to a note on screen unless a test says
+    // otherwise
+    isShown: () => true,
     yieldToHost: pause,
     schedule: scheduler.schedule,
     ...overrides,
@@ -584,6 +595,70 @@ describe('classifyTag', () => {
   });
 });
 
+describe('shownInMarkdownView', () => {
+  /** A leaf holding a markdown view of the note at `path`, or of none. */
+  const markdownLeaf = (path: string | null) => ({
+    view: Object.assign(Object.create(MarkdownView.prototype) as object, {
+      file: path === null ? null : { path },
+    }),
+  });
+
+  /**
+   * A tab restored at startup and not shown since: Obsidian gives it a
+   * placeholder view, not a `MarkdownView`, though its state names the note.
+   */
+  const deferredLeaf = (path: string) => ({
+    isDeferred: true,
+    view: { file: { path }, getState: () => ({ file: path }) },
+  });
+
+  const workspaceOf = (leaves: readonly object[]) => {
+    const getLeavesOfType = vi.fn(() => leaves);
+    return {
+      workspace: { getLeavesOfType } as unknown as Pick<
+        Workspace,
+        'getLeavesOfType'
+      >,
+      getLeavesOfType,
+    };
+  };
+
+  it('answers whether any markdown view shows the note, in whatever window', () => {
+    fc.assert(
+      fc.property(
+        fc
+          .array(fc.option(pathArb, { nil: null }), { maxLength: 6 })
+          .chain((shown) => {
+            const open = shown.filter((path) => path !== null);
+            // The note asked about is one of those shown about as often as not
+            const path =
+              open.length > 0
+                ? fc.oneof(fc.constantFrom(...open), pathArb)
+                : pathArb;
+            return fc.tuple(fc.constant(shown), path);
+          }),
+        ([shown, path]) => {
+          // Leaves in popout windows come back from the same call
+          const { workspace, getLeavesOfType } = workspaceOf(
+            shown.map(markdownLeaf)
+          );
+
+          expect(shownInMarkdownView(workspace, path)).toBe(
+            shown.includes(path)
+          );
+          expect(getLeavesOfType).toHaveBeenCalledWith('markdown');
+        }
+      )
+    );
+  });
+
+  it('does not count a tab whose view has not loaded yet', () => {
+    const { workspace } = workspaceOf([deferredLeaf('notes/one.md')]);
+
+    expect(shownInMarkdownView(workspace, 'notes/one.md')).toBe(false);
+  });
+});
+
 describe('createIrIdWatch', () => {
   const ROW: StoredRow = {
     table: 'article',
@@ -592,10 +667,12 @@ describe('createIrIdWatch', () => {
     deleted: false,
   };
 
-  describe('a note un-imported on another device, arriving over Sync first', () => {
-    it('raises one notice naming the note, and writes nothing back to it or its row', async () => {
-      // The 0166 flow: this device still holds the row; the note arrives with
-      // its id and tag stripped by a write that never went through an editor
+  describe('a note stripped of its id and tag by a write past the editor', () => {
+    /**
+     * A watch over `ROW` and its note, reporting to the real notice, with the
+     * note open in a tab here or not.
+     */
+    function wireNotice(shown: boolean) {
       const writes = vi
         .spyOn(Obsidian, 'updateFrontMatter')
         .mockResolvedValue(undefined);
@@ -609,16 +686,27 @@ describe('createIrIdWatch', () => {
         message,
       }));
       const notice = createDamagedNotesNotice(createNotice);
-      const { watch, repo, vault, scheduler } = wire(
+      const harness = wire(
         [ROW],
         [{ path: ROW.reference, irId: 'a1', tags: [ARTICLE_TAG, 'keep'] }],
-        { onDamage: (paths) => notice.report(paths) }
+        {
+          onDamage: (paths) => notice.report(paths),
+          isShown: (path) => shown && path === ROW.reference,
+        }
       );
+      return { ...harness, writes, createNotice };
+    }
+
+    it('raises one notice naming a note open here, and writes nothing back to it or its row', async () => {
+      // Reading mode's properties editor, say: an edit made inside Obsidian
+      // that the editor guard could not stop
+      const { watch, repo, vault, scheduler, writes, createNotice } =
+        wireNotice(true);
       const rowsBefore = readRows(repo);
 
       vault.notes.set(ROW.reference, { tags: ['keep'] });
       watch.handleChange(changed(ROW.reference));
-      // Sync touching it again before the pass runs is still the one notice
+      // Touched again before the pass runs is still the one notice
       watch.handleChange(changed(ROW.reference));
       scheduler.run();
       await vi.waitFor(() => expect(createNotice).toHaveBeenCalled());
@@ -630,9 +718,136 @@ describe('createIrIdWatch', () => {
       expect(vault.notes.get(ROW.reference)).toStrictEqual({ tags: ['keep'] });
       expect(readRows(repo)).toStrictEqual(rowsBefore);
     });
+
+    it('raises no notice and writes nothing for a note not open here, nor once the database arrives', async () => {
+      // The 0166 flow: un-imported on another device, the note arrives over
+      // Sync before the database without its row does
+      const { watch, repo, vault, scheduler, writes, createNotice } =
+        wireNotice(false);
+      const rowsBefore = readRows(repo);
+
+      vault.notes.set(ROW.reference, { tags: ['keep'] });
+      watch.handleChange(changed(ROW.reference));
+      watch.handleChange(changed(ROW.reference));
+      scheduler.run();
+      await watch.flush();
+
+      expect(createNotice).not.toHaveBeenCalled();
+      expect(writes).not.toHaveBeenCalled();
+      expect(vault.notes.get(ROW.reference)).toStrictEqual({ tags: ['keep'] });
+      expect(readRows(repo)).toStrictEqual(rowsBefore);
+
+      // The database follows, with the row deleted for good
+      repo.mutate(
+        `UPDATE article SET deleted = TRUE, reference = $1 WHERE id = 'a1'`,
+        [purgedReference('a1')]
+      );
+      watch.handleChange(changed(ROW.reference));
+      await watch.flush();
+
+      expect(createNotice).not.toHaveBeenCalled();
+      expect(writes).not.toHaveBeenCalled();
+    });
   });
 
-  it('reports exactly the notes that lost their id or tag, and never writes a row', async () => {
+  describe('whether the note was on screen', () => {
+    const NOTE: FakeNote = {
+      path: ROW.reference,
+      irId: 'a1',
+      tags: [ARTICLE_TAG],
+    };
+
+    it('asks as each change comes in, so a tab closed before the pass still counts', async () => {
+      let open = true;
+      const isShown = vi.fn(() => open);
+      const { watch, vault, onDamage } = wire([ROW], [NOTE], { isShown });
+
+      vault.notes.set(ROW.reference, { tags: [] });
+      watch.handleChange(changed(ROW.reference));
+      expect(isShown).toHaveBeenCalledWith(ROW.reference);
+      open = false;
+
+      expect(await watch.flush()).toStrictEqual([ROW.reference]);
+      expect(onDamage).toHaveBeenCalledWith([ROW.reference]);
+    });
+
+    it.each([
+      { order: 'shown first', shown: [true, false] },
+      { order: 'shown last', shown: [false, true] },
+    ])(
+      'reports a note shown at any one change of a burst ($order)',
+      async ({ shown }) => {
+        const answers = [...shown];
+        const { watch, vault } = wire([ROW], [NOTE], {
+          isShown: () => answers.shift() ?? false,
+        });
+
+        vault.notes.set(ROW.reference, { tags: [] });
+        watch.handleChange(changed(ROW.reference));
+        watch.handleChange(changed(ROW.reference));
+
+        expect(await watch.flush()).toStrictEqual([ROW.reference]);
+      }
+    );
+
+    it('tells of a loss first seen closed once the note changes again on screen', async () => {
+      let open = false;
+      const { watch, vault, onDamage } = wire([ROW], [NOTE], {
+        isShown: () => open,
+      });
+
+      vault.notes.set(ROW.reference, { tags: [] });
+      watch.handleChange(changed(ROW.reference));
+      expect(await watch.flush()).toStrictEqual([]);
+
+      open = true;
+      watch.handleChange(changed(ROW.reference));
+      expect(await watch.flush()).toStrictEqual([ROW.reference]);
+      expect(onDamage).toHaveBeenCalledOnce();
+    });
+
+    it('does not tell again of a loss already told of when it changes while closed', async () => {
+      let open = true;
+      const { watch, vault, onDamage } = wire([ROW], [NOTE], {
+        isShown: () => open,
+      });
+
+      vault.notes.set(ROW.reference, { tags: [] });
+      watch.handleChange(changed(ROW.reference));
+      await watch.flush();
+      open = false;
+      watch.handleChange(changed(ROW.reference));
+      await watch.flush();
+      open = true;
+      watch.handleChange(changed(ROW.reference));
+      await watch.flush();
+
+      expect(onDamage).toHaveBeenCalledOnce();
+    });
+
+    it('forgets a loss once the note is found whole while closed, telling of the next', async () => {
+      let open = true;
+      const { watch, vault, onDamage } = wire([ROW], [NOTE], {
+        isShown: () => open,
+      });
+
+      vault.notes.set(ROW.reference, { tags: [] });
+      watch.handleChange(changed(ROW.reference));
+      await watch.flush();
+      open = false;
+      vault.notes.set(ROW.reference, { 'ir-id': 'a1', tags: [ARTICLE_TAG] });
+      watch.handleChange(changed(ROW.reference));
+      await watch.flush();
+      open = true;
+      vault.notes.set(ROW.reference, { tags: [] });
+      watch.handleChange(changed(ROW.reference));
+      await watch.flush();
+
+      expect(onDamage).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('reports exactly the notes on screen that lost their id or tag, and never writes a row', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.uniqueArray(storedRowArb, {
@@ -647,7 +862,8 @@ describe('createIrIdWatch', () => {
           }),
           { maxLength: 6 }
         ),
-        async (rows, generated) => {
+        fc.array(pathArb, { maxLength: 6 }),
+        async (rows, generated, extraShown) => {
           // Notes sit where rows point as well as anywhere else
           const notes = [
             ...rows.map(({ reference, id }, i) => ({
@@ -661,7 +877,14 @@ describe('createIrIdWatch', () => {
               note !== undefined &&
               all.findIndex((other) => other?.path === note.path) === i
           ) as FakeNote[];
-          const { watch, repo, onDamage } = wire(rows, notes);
+          // Every other note open in a tab, along with paths no note is at
+          const shown = new Set([
+            ...notes.filter((_, i) => i % 2 === 0).map(({ path }) => path),
+            ...extraShown,
+          ]);
+          const { watch, repo, onDamage } = wire(rows, notes, {
+            isShown: (path) => shown.has(path),
+          });
           const rowsBefore = readRows(repo);
 
           for (const note of notes) watch.handleChange(changed(note.path));
@@ -673,8 +896,9 @@ describe('createIrIdWatch', () => {
                 .filter(({ reference }) => reference === path)
                 .map(({ table, id, deleted }) => holder(table, id, deleted));
               return (
-                readsAsTampering({ path, irId }, holders) ||
-                classifyTag({ path, irId }, tags, holders) !== null
+                shown.has(path) &&
+                (readsAsTampering({ path, irId }, holders) ||
+                  classifyTag({ path, irId }, tags, holders) !== null)
               );
             })
             .map(({ path }) => path);
@@ -953,6 +1177,7 @@ describe('createIrIdWatch', () => {
         vault: vault.vault,
         metadataCache: vault.metadataCache,
         onDamage,
+        isShown: () => true,
       });
 
       watch.handleChange(changed(ROW.reference));

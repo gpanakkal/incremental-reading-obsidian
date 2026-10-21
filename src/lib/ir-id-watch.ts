@@ -1,8 +1,10 @@
 import {
+  MarkdownView,
   normalizePath,
   type MetadataCache,
   type TFile,
   type Vault,
+  type Workspace,
 } from 'obsidian';
 import { hasTag, TAG_BY_TABLE } from './item-tags';
 import { supportsFrontmatter } from './mime';
@@ -89,6 +91,23 @@ export function classifyTag(
   return { row: { table, id }, path, tag };
 }
 
+/**
+ * Whether a markdown tab on this device, in any window, shows the note at
+ * `path` right now. `getLeavesOfType` covers popout windows too. A tab not yet
+ * loaded since the app started holds a placeholder view rather than a
+ * `MarkdownView`, and shows nothing.
+ */
+export function shownInMarkdownView(
+  workspace: Pick<Workspace, 'getLeavesOfType'>,
+  path: string
+): boolean {
+  return workspace
+    .getLeavesOfType('markdown')
+    .some(
+      ({ view }) => view instanceof MarkdownView && view.file?.path === path
+    );
+}
+
 /** How long changed notes pile up before a pass reads the database. */
 export const DEBOUNCE_MS = 250;
 
@@ -110,6 +129,12 @@ export interface IrIdWatchDeps {
    * after a pass has found it whole.
    */
   onDamage: (paths: readonly string[]) => void;
+  /**
+   * Whether a markdown tab on this device shows the note at `path` right now
+   * (see {@link shownInMarkdownView}). Asked as each change comes in; only a
+   * note shown at one of its changes is ever told of.
+   */
+  isShown: (path: string) => boolean;
   yieldToHost?: () => Promise<void>;
   /** Runs `pass` after `ms`; returns a function that cancels it. */
   schedule?: (pass: () => void, ms: number) => () => void;
@@ -137,16 +162,26 @@ export interface IrIdWatch {
  * one place none of them can be told apart. This used to put the id and tag
  * back, and bring a row back for an id undone (0166): a note un-imported on
  * another device reaches this one over Sync before the database without its row
- * does, so the repair re-imported it, and Sync carried that back. Until a note
- * and its row can be ordered (0161), nothing here writes.
+ * does, so the repair re-imported it, and Sync carried that back. Nothing here
+ * writes.
+ *
+ * Nor is every loss reported: only one in a note a markdown tab here showed when
+ * the change came in (`isShown`). The report is a fallback for the edits made
+ * inside Obsidian that the editor guard cannot stop, such as reading mode's
+ * properties editor, and those are made to a note on screen. A note changed
+ * while closed is as likely one that arrived over Sync ahead of its database
+ * (the 0166 flow), so it is passed over. Two cases are given up for that:
+ * Sync stripping a note that happens to be open here is reported, and an
+ * external editor stripping a closed note is not. A note's mtime cannot tell
+ * these apart either, since every edit moves it.
  *
  * It is also the earliest moment the new value can be read. An in-place
  * frontmatter edit raises vault `modify` first, but the cache has not reparsed
  * the note by then, so a `getFileCache` read from a `modify` handler still
  * returns the `ir-id` from before the edit.
  *
- * Changes are batched rather than judged one at a time: a change costs a `Set`
- * insert and no database work at all, and a whole burst (a vault being indexed,
+ * Changes are batched rather than judged one at a time: a change costs a `Map`
+ * insert, a look over the open tabs and no database work at all, and a whole burst (a vault being indexed,
  * a folder arriving over Sync) is answered by one `IN (…)` read per item table
  * however many notes it covers.
  */
@@ -155,6 +190,7 @@ export function createIrIdWatch({
   vault,
   metadataCache,
   onDamage,
+  isShown,
   yieldToHost: pause = yieldToHost,
   schedule = (pass, ms) => {
     const timer = window.setTimeout(pass, ms);
@@ -163,7 +199,8 @@ export function createIrIdWatch({
   debounceMs = DEBOUNCE_MS,
   pathBatch = PATH_BATCH,
 }: IrIdWatchDeps): IrIdWatch {
-  const pending = new Set<string>();
+  /** Changed notes, each with whether a tab showed it at any of its changes. */
+  const pending = new Map<string, boolean>();
   let cancelScheduled: (() => void) | null = null;
   let disposed = false;
   // Passes run one at a time. The chain swallows failures only so it stays
@@ -200,25 +237,27 @@ export function createIrIdWatch({
   const reported = new Set<string>();
 
   /** The notes in `batch` newly found damaged, now remembered as told of. */
-  async function damagedIn(batch: readonly string[]): Promise<string[]> {
+  async function damagedIn(
+    batch: readonly (readonly [path: string, shown: boolean])[]
+  ): Promise<string[]> {
     // A note gone since the change was remembered, or mid-parse, is skipped
-    const found = batch.flatMap((path) => {
+    const found = batch.flatMap(([path, shown]) => {
       const at = claimAt(path);
-      return at ? [at] : [];
+      return at ? [{ ...at, shown }] : [];
     });
     const holders = await holdersOf(
       repo,
       found.map(({ claim }) => claim.path)
     );
     const damaged: string[] = [];
-    for (const { claim, tags } of found) {
+    for (const { claim, tags, shown } of found) {
       const atPath = holders.get(claim.path) ?? [];
       const lost =
         readsAsTampering(claim, atPath) ||
         classifyTag(claim, tags, atPath) !== null;
       if (!lost) {
         reported.delete(claim.path);
-      } else if (!reported.has(claim.path)) {
+      } else if (shown && !reported.has(claim.path)) {
         reported.add(claim.path);
         damaged.push(claim.path);
       }
@@ -261,7 +300,12 @@ export function createIrIdWatch({
       // remembered: a vault being indexed runs this once per file in it.
       if (!supportsFrontmatter(file)) return;
 
-      pending.add(file.path);
+      // Asked now rather than at the pass: a tab closed in between still saw
+      // the edit
+      pending.set(
+        file.path,
+        pending.get(file.path) === true || isShown(file.path)
+      );
       // A fixed window from the first change of a burst, not a timer pushed back
       // by each: an index that keeps the cache busy for a minute would otherwise
       // put every report off until it finished.

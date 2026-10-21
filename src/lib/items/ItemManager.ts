@@ -4,8 +4,14 @@ import {
   SOURCE_INDEX_TIMEOUT_MS,
   SOURCE_PROPERTY_NAME,
 } from '#/lib/constants';
+import { claimsIdentity } from '#/lib/ir-id-watch';
 import IRScheduler from '#/lib/IRScheduler';
 import { supportsFrontmatter } from '#/lib/mime';
+import {
+  type IrIdRelation,
+  noteFingerprint,
+  reconcileAction,
+} from '#/lib/note-fingerprint';
 import { STAMP_COLUMNS } from '#/lib/repository/row-stamps';
 import {
   formatSourceLink,
@@ -38,6 +44,7 @@ import type { SQLiteRepository } from '../types';
 import {
   NOT_PURGED,
   REVIEW_LOG_OF,
+  purgedReference,
   tombstoneRowStatements,
 } from './row-delete';
 
@@ -391,14 +398,25 @@ export class ItemManager {
   }
 
   /**
-   * Square a row with the note at its reference, as a review fetch finds them,
-   * and bring the row back from a tombstone now that its note is there.
+   * Square a row with the note at its reference, as a review fetch finds them:
+   * tombstone a live row whose note now carries another item's `ir-id`, only
+   * when the note is provably the one the plugin last wrote the row's identity
+   * into, its mtime equal to the row's `note_mtime` (see `reconcileAction`). A
+   * note that came over Sync ahead of the database that goes with it, or behind
+   * it, has some other mtime, and the row is left for the next fetch, once one
+   * of the two has caught up.
    *
-   * A note lacking the row's `ir-id` or tag is left as it is. The fetch can't
-   * tell whether the note or the database is the newer of the two: a note
+   * A tombstoned row is never brought back here, even with a note carrying its
+   * `ir-id` at its reference: a restore revives it through
+   * `ReviewManager.handleCreation`, and the note of a row tombstoned on another
+   * device can still be here only because Sync has yet to delete it (see
+   * `reconcileAction`).
+   *
+   * A note lacking the row's `ir-id` or tag is left as it is, matching
+   * fingerprint or not: no identity frontmatter is written from a fetch. A note
    * stripped by an un-import on another device reaches this one over Sync
    * before the database without the row does, and writing the id back here
-   * re-imported it on both. Ordering the two is 0161's.
+   * re-imported it on both.
    *
    * A note the metadata cache is part way through re-reading is left alone.
    * Obsidian points a note's cache entry at the hash of its new content before
@@ -414,11 +432,16 @@ export class ItemManager {
    * A file with no frontmatter, a PDF say, has no id or tag to square: the
    * file at a row's reference is that row's file by its path alone. Its
    * tombstone is left to the vault events that track such files.
-   * @returns false when the note claims another item's id. The row is marked
-   * deleted then, and has no note to review.
+   * @returns false when the note claims another item's id: the row has no
+   * note to review, whether or not it could be tombstoned for it.
    */
   protected reconcileNote(
-    row: { id: string; deleted: boolean },
+    row: {
+      id: string;
+      deleted: boolean | number;
+      reference: string;
+      note_mtime?: number | null;
+    },
     file: TFile,
     type: NoteType
   ): boolean {
@@ -426,21 +449,28 @@ export class ItemManager {
     if (!this.app.metadataCache.getFileCache(file)) return true;
 
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
-    const fileId = frontmatter?.['ir-id'];
-    // id is present but doesn't match
+    const fileId: unknown = frontmatter?.['ir-id'];
+    const relation: IrIdRelation = !claimsIdentity(fileId)
+      ? 'none'
+      : fileId === row.id
+        ? 'same'
+        : 'other';
+    const action = reconcileAction({
+      noteMtime: noteFingerprint(file),
+      rowMtime: row.note_mtime ?? null,
+      relation,
+      rowState: !row.deleted
+        ? 'live'
+        : row.reference === purgedReference(row.id)
+          ? 'purged'
+          : 'tombstoned',
+    });
     // The refetch after a reload reads a database Sync just delivered, and
     // the notes it delivers as separate files may not have landed yet: what
     // they say is no grounds to change the row then. A later read decides.
     const repair = !this.repo.refetchingAfterReload;
-    if (fileId && fileId !== row.id) {
-      if (repair) void this.markDeleted(row.id, type);
-      return false;
-    }
-
-    if (row.deleted && repair) {
-      void this.markUndeleted(row.id, type);
-    }
-    return true;
+    if (repair && action === 'tombstone') void this.markDeleted(row.id, type);
+    return relation !== 'other';
   }
 
   /**

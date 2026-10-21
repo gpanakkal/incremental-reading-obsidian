@@ -643,4 +643,17 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 13,
+    description:
+      "Record each item note's mtime as of the plugin's last identity write",
+    up: (db) => {
+      // NULL reads as unknown: a row from before this migration proves nothing
+      // about its note, so reconciliation leaves it alone until the next
+      // identity write records one
+      for (const table of ['article', 'snippet', 'srs_card']) {
+        addColumnIfNotExists(db, table, 'note_mtime', 'INTEGER DEFAULT NULL');
+      }
+    },
+  },
 ];

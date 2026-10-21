@@ -28,6 +28,7 @@ import {
   sniffMimeType,
   supportsFrontmatter,
 } from '#/lib/mime';
+import { noteFingerprint } from '#/lib/note-fingerprint';
 import type { NoticeAction } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import {
@@ -341,12 +342,14 @@ function imported(
 
 /**
  * The write that makes the article `id`, deleted or not, the live article at
- * `path`.
+ * `file`, whose identity frontmatter it now answers to as the note stands (see
+ * `noteFingerprint`).
  */
-function relinkRow(path: string, id: string): MutationStatement {
+function relinkRow(file: TFile, id: string): MutationStatement {
   return {
-    query: 'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
-    params: [path, id],
+    query:
+      'UPDATE article SET reference = $1, deleted = FALSE, note_mtime = $2 WHERE id = $3',
+    params: [file.path, noteFingerprint(file), id],
   };
 }
 
@@ -875,7 +878,7 @@ export class ArticleManager extends ItemManager {
       )) as Pick<ArticleRow, 'id' | 'deleted'>[];
       if (rows[0]) {
         const claimed = await writer.commit(
-          relinkRow(file.path, existingId),
+          relinkRow(file, existingId),
           this.inPlaceClaim(file, existingId)
         );
         await this.afterImport(
@@ -914,7 +917,7 @@ export class ArticleManager extends ItemManager {
         (undo) => undo()
       );
       return writer.commit(
-        this.importRow(id, file.path, priority, fixedIntervalDays),
+        this.importRow(id, file, priority, fixedIntervalDays),
         this.inPlaceClaim(file, id)
       );
     });
@@ -1010,7 +1013,7 @@ export class ArticleManager extends ItemManager {
    * import is by default, adopting what was taken from it as an import does.
    */
   async adoptLeftover(file: TFile, id: string): Promise<void> {
-    await this.insertImported(id, file.path, DEFAULT_PRIORITY, null);
+    await this.insertImported(id, file, DEFAULT_PRIORITY, null);
     await this.afterImport(
       file.basename,
       'in place',
@@ -1020,16 +1023,16 @@ export class ArticleManager extends ItemManager {
     );
   }
 
-  /** Add the row of a newly imported article at `reference`, due now. */
+  /** Add the row of a newly imported article at `file`, due now. */
   private async insertImported(
     id: string,
-    reference: string,
+    file: TFile,
     priority: number,
     fixedIntervalDays: number | null
   ) {
     const { query, params } = this.importRow(
       id,
-      reference,
+      file,
       priority,
       fixedIntervalDays
     );
@@ -1037,28 +1040,31 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * The write that adds a newly imported article at `reference`, due now,
-   * fuzzed if text reviews are. Drawn here, not on its first fetch as for a row
-   * that predates fuzzing (see `rowToReviewArticle`): a batch fetches none of
-   * its rows, which unfuzzed would come up in the order they were imported.
+   * The write that adds a newly imported article at `file`, due now, fuzzed if
+   * text reviews are. Drawn here, not on its first fetch as for a row that
+   * predates fuzzing (see `rowToReviewArticle`): a batch fetches none of its
+   * rows, which unfuzzed would come up in the order they were imported. Built
+   * once the note's identity frontmatter is written, so the fingerprint it
+   * records is the one that write left (see `noteFingerprint`).
    */
   private importRow(
     id: string,
-    reference: string,
+    file: TFile,
     priority: number,
     fixedIntervalDays: number | null
   ): MutationStatement {
     return {
       query:
-        'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days, due_fuzz) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        'INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days, due_fuzz, note_mtime) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
       params: [
         id,
-        reference,
+        file.path,
         Date.now(),
         TEXT_BASE_REVIEW_INTERVAL,
         priority,
         fixedIntervalDays,
         this.plugin.settings.fuzzTextReviews ? IRScheduler.getDueFuzz() : null,
+        noteFingerprint(file),
       ],
     };
   }
@@ -1138,7 +1144,7 @@ export class ArticleManager extends ItemManager {
     if (refusedInPlace(file, report)) return null;
     const id = crypto.randomUUID();
     const claimed = await writer.commit(
-      this.importRow(id, file.path, priority, fixedIntervalDays),
+      this.importRow(id, file, priority, fixedIntervalDays),
       this.inPlaceClaim(file, id)
     );
     await this.afterImport(
@@ -1278,7 +1284,7 @@ export class ArticleManager extends ItemManager {
         return {
           copy: made,
           claimed: await writer.commit(
-            this.importRow(id, made.path, priority, fixedIntervalDays),
+            this.importRow(id, made, priority, fixedIntervalDays),
             this.copyClaim(file, taken, id, made)
           ),
         };
@@ -1398,7 +1404,7 @@ export class ArticleManager extends ItemManager {
       )) as Pick<ArticleRow, 'id' | 'deleted'>[];
       if (rows[0]) {
         const claimed = await writer.commit(
-          relinkRow(file.path, existingId),
+          relinkRow(file, existingId),
           this.inPlaceClaim(file, existingId)
         );
         // No copy was made — the record now points at this note, so its
@@ -1514,7 +1520,7 @@ export class ArticleManager extends ItemManager {
         return {
           copy,
           claimed: await writer.commit(
-            this.importRow(id, copy.path, priority, fixedIntervalDays),
+            this.importRow(id, copy, priority, fixedIntervalDays),
             this.copyClaim(file, taken, id, copy)
           ),
         };
@@ -1601,12 +1607,7 @@ export class ArticleManager extends ItemManager {
               (created) => this.app.fileManager.trashFile(created)
             );
 
-            await this.insertImported(
-              id,
-              made.path,
-              priority,
-              fixedIntervalDays
-            );
+            await this.insertImported(id, made, priority, fixedIntervalDays);
             return made;
           });
 
@@ -1694,8 +1695,15 @@ export class ArticleManager extends ItemManager {
         // Insert into database with immediate due time
         const dueTime = Date.now();
         await this.repo.mutate(
-          'INSERT INTO article (id, reference, due, interval, priority) VALUES ($1, $2, $3, $4, $5)',
-          [id, articleFile.path, dueTime, TEXT_BASE_REVIEW_INTERVAL, priority]
+          'INSERT INTO article (id, reference, due, interval, priority, note_mtime) VALUES ($1, $2, $3, $4, $5, $6)',
+          [
+            id,
+            articleFile.path,
+            dueTime,
+            TEXT_BASE_REVIEW_INTERVAL,
+            priority,
+            noteFingerprint(articleFile),
+          ]
         );
       });
 

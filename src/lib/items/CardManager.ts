@@ -1,5 +1,6 @@
 import { refusedWrite, withCompensation } from '#/lib/compensation';
 import { Markdown } from '#/lib/Markdown';
+import { noteFingerprint } from '#/lib/note-fingerprint';
 import { decodeAnchor } from '#/lib/pdf/pdf-anchor';
 import type { PdfHighlight } from '#/lib/pdf/pdf-highlights';
 import {
@@ -555,7 +556,7 @@ export class CardManager extends ItemManager {
         }
 
         // create the database entry: the commit point
-        await this.insertRow(card, parent);
+        await this.insertRow(card, parent, cardFile);
         return card;
       });
 
@@ -567,8 +568,12 @@ export class CardManager extends ItemManager {
     }
   }
 
-  /** Add the row of the new card `card`, the child of `parent`. */
-  private async insertRow(card: SRSCard, parent: string | null) {
+  /**
+   * Add the row of the new card `card`, the child of `parent`, whose note
+   * `file` has its identity frontmatter by now: the row records the
+   * fingerprint that left it with (see `noteFingerprint`).
+   */
+  private async insertRow(card: SRSCard, parent: string | null, file: TFile) {
     const params = [
       card.id,
       card.reference,
@@ -584,11 +589,12 @@ export class CardManager extends ItemManager {
       card.reps,
       card.lapses,
       card.state,
+      noteFingerprint(file),
     ];
     await this.repo.mutate(
       `INSERT INTO srs_card (id, reference, parent, created_at, due, last_review, ` +
-        `stability, difficulty, elapsed_days, scheduled_days, learning_steps, reps, lapses, state) ` +
-        `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+        `stability, difficulty, elapsed_days, scheduled_days, learning_steps, reps, lapses, state, note_mtime) ` +
+        `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
       params
     );
   }
@@ -603,7 +609,11 @@ export class CardManager extends ItemManager {
     const card = new SRSCard(file.path);
     card.id = id;
     const source = Obsidian.getSourceFile(file, this.app);
-    await this.insertRow(card, source ? await this.findParentId(source) : null);
+    await this.insertRow(
+      card,
+      source ? await this.findParentId(source) : null,
+      file
+    );
   }
 
   /**

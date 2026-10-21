@@ -1952,36 +1952,50 @@ describe('rowToReviewArticle', () => {
     expect(mutateCalls).toHaveLength(0);
   });
 
-  it('returns null and calls markDeleted when frontmatter has a different ir-id', async () => {
-    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
-    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    const row = makeArticleRow({ id: 'row-id-001' });
-    const repo = makeSimpleRepo();
-    // Return frontmatter whose ir-id does NOT match the row id
-    const manager = new ArticleManager(
-      {
-        app: {
-          metadataCache: {
-            getFileCache: () => ({
-              frontmatter: { 'ir-id': 'different-id', tags: [ARTICLE_TAG] },
-            }),
+  it.each([
+    { noteMtime: 5_000, deletes: true },
+    { noteMtime: 5_001, deletes: false },
+    { noteMtime: 4_999, deletes: false },
+  ])(
+    'returns null when frontmatter has a different ir-id, and tombstones the row only when the note has the mtime it recorded (note at $noteMtime)',
+    async ({ noteMtime, deletes }) => {
+      const fakeFile = {
+        path: 'articles/test.md',
+        extension: 'md',
+        stat: { ctime: 0, mtime: noteMtime, size: 0 },
+      } as TFile;
+      vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
+      const row = {
+        ...makeArticleRow({ id: 'row-id-001' }),
+        note_mtime: 5_000,
+      };
+      const repo = makeSimpleRepo();
+      // Return frontmatter whose ir-id does NOT match the row id
+      const manager = new ArticleManager(
+        {
+          app: {
+            metadataCache: {
+              getFileCache: () => ({
+                frontmatter: { 'ir-id': 'different-id', tags: [ARTICLE_TAG] },
+              }),
+            },
+            fileManager: { processFrontMatter: async () => undefined },
           },
-          fileManager: { processFrontMatter: async () => undefined },
-        },
-        settings: { fuzzTextReviews: false },
-      } as never,
-      repo
-    );
-    const result = manager.rowToReviewArticle(row);
-    expect(result).toBeNull();
-    await Promise.resolve();
-    const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls as [string, unknown[]][];
-    const deleteCall = mutateCalls.find(([sql]) =>
-      sql.includes('SET deleted = 1')
-    );
-    expect(deleteCall).toBeDefined();
-  });
+          settings: { fuzzTextReviews: false },
+        } as never,
+        repo
+      );
+      const result = manager.rowToReviewArticle(row);
+      expect(result).toBeNull();
+      await Promise.resolve();
+      const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
+        .calls as [string, unknown[]][];
+      const deleteCall = mutateCalls.find(([sql]) =>
+        sql.includes('SET deleted = 1')
+      );
+      expect(deleteCall !== undefined).toBe(deletes);
+    }
+  );
 
   it('writes nothing to the note when the file has an ir-id but lacks the article tag', async () => {
     const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
@@ -2103,25 +2117,42 @@ describe('rowToReviewArticle', () => {
     expect(undeleteCall).toBeUndefined();
   });
 
-  it('calls markUndeleted when the file exists but the row is flagged as deleted', async () => {
-    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
-    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    const row = makeArticleRow({ deleted: true, due_fuzz: 0 });
-    const repo = makeSimpleRepo();
-    const manager = new ArticleManager(
-      { app: makeApp(), settings: { fuzzTextReviews: false } } as never,
-      repo
-    );
-    manager.rowToReviewArticle(row);
-    await Promise.resolve();
-    const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls as [string, unknown[]][];
-    const undeleteCall = mutateCalls.find(([sql]) =>
-      sql.includes('SET deleted = 0')
-    );
-    expect(undeleteCall).toBeDefined();
-    expect(undeleteCall![1][0]).toBe(row.id);
-  });
+  it.each([{ noteMtime: 5_000 }, { noteMtime: 5_001 }, { noteMtime: 4_999 }])(
+    'never brings back a tombstoned row whose note carries its ir-id, whatever its mtime (note at $noteMtime)',
+    async ({ noteMtime }) => {
+      const fakeFile = {
+        path: 'articles/test.md',
+        extension: 'md',
+        stat: { ctime: 0, mtime: noteMtime, size: 0 },
+      } as TFile;
+      vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
+      const row = {
+        ...makeArticleRow({ deleted: true, due_fuzz: 0 }),
+        note_mtime: 5_000,
+      };
+      const repo = makeSimpleRepo();
+      const manager = new ArticleManager(
+        {
+          app: {
+            ...makeApp(),
+            metadataCache: {
+              getFileCache: () => ({
+                frontmatter: { 'ir-id': row.id, tags: [ARTICLE_TAG] },
+              }),
+            },
+          },
+          settings: { fuzzTextReviews: false },
+        } as never,
+        repo
+      );
+      // Still the row's to review: the note at its path is its own
+      expect(manager.rowToReviewArticle(row)).not.toBeNull();
+      await Promise.resolve();
+      expect(
+        (repo.mutate as ReturnType<typeof vi.fn>).mock.calls
+      ).toStrictEqual([]);
+    }
+  );
 });
 
 /**
@@ -3386,8 +3417,9 @@ describe('reads during the refetch after a reload (0174)', () => {
 
   /**
    * A database holding a tombstone whose note claims it, a row whose note
-   * claims another id, and a row with no fuzz while fuzz is on: each read
-   * once wrote a repair. Writes reach `writeBinary`.
+   * claims another id and is provably the one its row was written with, and a
+   * row with no fuzz while fuzz is on: each read once wrote a repair. Writes
+   * reach `writeBinary`.
    */
   async function wireReload() {
     const vault = makeItemVault({
@@ -3409,6 +3441,10 @@ describe('reads during the refetch after a reload (0174)', () => {
     seedArticle(repo, 'tomb', 'tomb.md', { deleted: true });
     seedArticle(repo, 'taken', 'taken.md');
     seedArticle(repo, 'plain', 'plain.md');
+    // The fingerprint that lets a read tombstone `taken` (see `reconcileAction`)
+    repo.mutate(`UPDATE article SET note_mtime = $1 WHERE id = 'taken'`, [
+      vault.files.get('taken.md')!.stat.mtime,
+    ]);
     // Reloads the database in place, as a file Sync delivered would
     vi.spyOn(
       repo as unknown as { reloadDb(): Promise<unknown> },
@@ -3418,8 +3454,10 @@ describe('reads during the refetch after a reload (0174)', () => {
       { app: vault.app, settings: { fuzzTextReviews: true } } as never,
       repo
     );
+    // Every column, as a fetch's `SELECT *` reads them: `rows` leaves out the
+    // fingerprint
     const readAll = () =>
-      (repo.rows('article') as unknown as ArticleRow[]).map((row) =>
+      (repo.storedRows('article') as unknown as ArticleRow[]).map((row) =>
         manager.rowToReviewArticle(row)
       );
     const settle = () => new Promise((done) => setTimeout(done, 0));
@@ -3443,7 +3481,7 @@ describe('reads during the refetch after a reload (0174)', () => {
     expect(repo.dump()).toBe(before);
   });
 
-  it('repairs the rows on a read made outside one', async () => {
+  it("tombstones the row whose note is provably another's on a read made outside one, and revives no tombstone", async () => {
     const { repo, writeBinary, readAll, settle } = await wireReload();
 
     readAll();
@@ -3453,7 +3491,8 @@ describe('reads during the refetch after a reload (0174)', () => {
     const deleted = Object.fromEntries(
       repo.rows('article').map((row) => [String(row.id), row.deleted] as const)
     );
-    expect(deleted).toEqual({ tomb: 0, taken: 1, plain: 0 });
+    // A tombstone is revived only through `handleCreation` (0175)
+    expect(deleted).toEqual({ tomb: 1, taken: 1, plain: 0 });
   });
 });
 
@@ -5785,7 +5824,8 @@ describe('import', () => {
 
       const [sql, params] = lastMutateCall(repo);
       expect(sql).toContain('UPDATE article SET reference');
-      expect(params).toEqual([IMPORT_FILE.path, EXISTING_ID]);
+      // A stand-in file with no stat has no fingerprint to record
+      expect(params).toEqual([IMPORT_FILE.path, null, EXISTING_ID]);
       expect(Obsidian.updateFrontMatter).not.toHaveBeenCalled();
     });
 
@@ -5889,8 +5929,8 @@ describe('import', () => {
       await manager.import(file, DEFAULT_PRIORITY, null, false);
 
       expect(lastMutateCall(repo)).toEqual([
-        'UPDATE article SET reference = $1, deleted = FALSE WHERE id = $2',
-        [file.path, 'elsewhere'],
+        'UPDATE article SET reference = $1, deleted = FALSE, note_mtime = $2 WHERE id = $3',
+        [file.path, null, 'elsewhere'],
       ]);
       expect(Notice.messages).toStrictEqual([
         expect.stringContaining('"my-note"'),
@@ -9562,5 +9602,141 @@ describe('undoReview', () => {
     await expect(
       manager.undoReview(reviews[0].before, reviews[0].id)
     ).rejects.toThrow(reviews[0].id);
+  });
+});
+
+describe('the note fingerprint an identity write leaves', () => {
+  beforeEach(() => {
+    // A write of many rows yields through `window`, which this node
+    // environment lacks
+    vi.stubGlobal('window', globalThis);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const NOTE = 'notes/Note.md';
+
+  /** The `note_mtime` the article row `id` holds, read past every filter. */
+  const fingerprintOf = (repo: TestRepository, id: unknown) =>
+    repo.storedRows('article').find((row) => row.id === id)?.note_mtime;
+
+  it('is recorded by an import in place, as the write of its id and tag left the note', async () => {
+    const { vault, repo, manager } = await wireArticles(
+      { [NOTE]: { title: 'x' } },
+      null
+    );
+    const file = vault.files.get(NOTE)!;
+    const untouched = file.stat.mtime;
+
+    const result = await manager.import(file, DEFAULT_PRIORITY, null, false);
+
+    expect(file.stat.mtime).toBeGreaterThan(untouched);
+    expect(fingerprintOf(repo, result?.articleId)).toBe(file.stat.mtime);
+  });
+
+  it('is recorded by an import as a copy, as the write of its id and tag left the copy', async () => {
+    const { vault, repo, manager } = await wireArticles(
+      { [NOTE]: { title: 'x' } },
+      null
+    );
+
+    const result = await manager.import(
+      vault.files.get(NOTE)!,
+      DEFAULT_PRIORITY,
+      null,
+      true
+    );
+
+    const copy = vault.files.get(result!.article!.file.path)!;
+    expect(copy.path).not.toBe(NOTE);
+    expect(fingerprintOf(repo, result?.articleId)).toBe(copy.stat.mtime);
+  });
+
+  it('is recorded when an import links a note to the deleted article whose id it carries', async () => {
+    for (const copy of [false, true]) {
+      vi.restoreAllMocks();
+      const { vault, repo, manager } = await wireArticles(
+        { [NOTE]: { 'ir-id': 'kept', tags: [ARTICLE_TAG] } },
+        null
+      );
+      repo.mutate(
+        `INSERT INTO article (id, reference, due, interval, priority, deleted, note_mtime)
+         VALUES ('kept', 'gone/Old.md', 0, 86400000, 30, TRUE, 1)`
+      );
+      const file = vault.files.get(NOTE)!;
+
+      await manager.import(file, DEFAULT_PRIORITY, null, copy);
+
+      expect(repo.storedRows('article')).toStrictEqual([
+        expect.objectContaining({
+          id: 'kept',
+          reference: NOTE,
+          deleted: 0,
+          note_mtime: file.stat.mtime,
+        }),
+      ]);
+    }
+  });
+
+  it('is recorded by a web page import, as the note was left once its text was in', async () => {
+    const { vault, repo, manager } = await wireArticles({}, null);
+
+    const result = await manager.importWebPage(
+      { title: 'Page', markdown: 'Body', url: null },
+      DEFAULT_PRIORITY,
+      null
+    );
+
+    const note = vault.files.get(result!.article!.file.path)!;
+    expect(vault.bodyOf(note.path)).toBe('Body');
+    expect(fingerprintOf(repo, result?.articleId)).toBe(note.stat.mtime);
+  });
+
+  it('is recorded by a new empty article, as the write of its tag left the note', async () => {
+    const { vault, repo, manager } = await wireArticles({}, null);
+
+    const article = await manager.create(DEFAULT_PRIORITY);
+
+    const note = vault.files.get(article!.file.path)!;
+    expect(fingerprintOf(repo, article?.data.id)).toBe(note.stat.mtime);
+  });
+
+  it('is not recorded for a file with no frontmatter, which its path alone makes the article', async () => {
+    const { vault, repo, manager } = await wireArticles({ [PDF]: null }, null);
+
+    const result = await manager.import(
+      vault.files.get(PDF)!,
+      DEFAULT_PRIORITY,
+      null,
+      false
+    );
+
+    expect(result?.articleId).toBeDefined();
+    expect(fingerprintOf(repo, result?.articleId)).toBeNull();
+  });
+
+  it('is not recorded by an un-import: the row is deleted for good, and nothing reads it', async () => {
+    const { vault, repo, manager } = await wireUnimport({
+      [NOTE]: { 'ir-id': 'a', tags: [ARTICLE_TAG] },
+    });
+    seedArticle(repo, 'a', NOTE);
+    const mutate = vi.spyOn(repo, 'mutate');
+    const bulkMutate = vi.spyOn(repo, 'bulkMutate');
+
+    const [outcome] = await manager.unimportMany([vault.files.get(NOTE)!]);
+
+    expect(outcome.status).toBe('unimported');
+    expect(vault.frontmatterOf(NOTE)).toStrictEqual({});
+    expect(fingerprintOf(repo, 'a')).toBeNull();
+    const writes = [
+      ...mutate.mock.calls.map(([query]) => query),
+      ...bulkMutate.mock.calls.flatMap(([statements]) =>
+        statements.map(({ query }) => query)
+      ),
+    ];
+    expect(writes.some((query) => query.includes('note_mtime'))).toBe(false);
   });
 });

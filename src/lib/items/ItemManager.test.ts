@@ -11,6 +11,7 @@ import fc from 'fast-check';
 import type { CachedMetadata, TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ItemManager } from './ItemManager';
+import { purgedReference } from './row-delete';
 
 // #region HELPERS
 /** Opens the protected `reprioritizeText` and `reconcileNote` to the tests. */
@@ -22,7 +23,7 @@ class TestManager extends ItemManager {
   }
 
   reconcile(
-    row: { id: string; deleted: boolean },
+    row: ReconcileRow,
     file: TFile,
     type: NoteType,
     // The tag a note of this type carries, which nothing writes back (0166)
@@ -68,11 +69,51 @@ function wire(cache: CachedMetadata | null) {
 
 const FILE = { path: 'notes/item.md', extension: 'md' } as TFile;
 
-// Row ids are UUIDs; any non-empty string stands in for one
-const rowArb = fc.record({
-  id: fc.string({ minLength: 1 }),
-  deleted: fc.boolean(),
-});
+/** The row `reconcileNote` squares with its note. */
+interface ReconcileRow {
+  id: string;
+  deleted: boolean;
+  reference: string;
+  note_mtime: number | null;
+}
+
+/** The note at `FILE`'s path, last modified at `mtime` (no stat when null). */
+const noteAt = (mtime: number | null) =>
+  (mtime === null
+    ? { ...FILE }
+    : { ...FILE, stat: { ctime: 0, mtime, size: 0 } }) as TFile;
+
+// Row ids are UUIDs; any non-empty string stands in for one. A row is live,
+// tombstoned, or deleted for good (its reference let go to the sentinel).
+const rowArb: fc.Arbitrary<ReconcileRow> = fc
+  .record({
+    id: fc.string({ minLength: 1 }),
+    state: fc.constantFrom('live', 'tombstoned', 'purged'),
+    note_mtime: fc.option(fc.integer({ min: 1 }), { nil: null }),
+  })
+  .map(({ id, state, note_mtime }) => ({
+    id,
+    deleted: state !== 'live',
+    reference: state === 'purged' ? purgedReference(id) : FILE.path,
+    note_mtime,
+  }));
+
+/**
+ * The note's mtime against the row's fingerprint: the same, a millisecond
+ * either side, anything at all, or none to read.
+ */
+const noteMtimeArb = (row: ReconcileRow): fc.Arbitrary<number | null> =>
+  fc.oneof(
+    fc.constant(row.note_mtime),
+    fc.constant(row.note_mtime === null ? null : row.note_mtime + 1),
+    fc.constant(row.note_mtime === null ? null : row.note_mtime - 1),
+    fc.integer({ min: 0 }),
+    fc.constant(null)
+  );
+
+/** Whether the note's mtime proves it is the one the row was written with. */
+const proven = (row: ReconcileRow, noteMtime: number | null) =>
+  row.note_mtime !== null && noteMtime === row.note_mtime;
 const typeArb = fc.constantFrom<NoteType>('article', 'snippet', 'card');
 
 /** Whatever YAML can put under a key: absent, null, scalars, lists. */
@@ -113,6 +154,7 @@ const settledArb = fc
       type: fc.constant(type),
       tag: fc.constant(tag),
       frontmatter: frontmatterArb,
+      noteMtime: noteMtimeArb(row),
     });
   });
 
@@ -256,22 +298,26 @@ describe('reconcileNote', () => {
     );
   });
 
-  it('gives up the row to a note claiming another id, and writes nothing to the note', async () => {
+  it('refuses the row a note claiming another id, tombstoning a live row only when the note is provably the one it was written with', async () => {
     await fc.assert(
       fc.asyncProperty(
         settledArb.filter(
           ({ row, frontmatter }) =>
             Boolean(frontmatter?.['ir-id']) && frontmatter?.['ir-id'] !== row.id
         ),
-        async ({ row, type, tag, frontmatter }) => {
+        async ({ row, type, tag, frontmatter, noteMtime }) => {
           const { manager, writeNote, markDeleted, markUndeleted } = wire({
             // The read normalizes `tags` in place; keep the generated value intact
             frontmatter: structuredClone(frontmatter),
           } as CachedMetadata);
 
-          expect(manager.reconcile(row, FILE, type, tag)).toBe(false);
+          expect(manager.reconcile(row, noteAt(noteMtime), type, tag)).toBe(
+            false
+          );
 
-          expect(markDeleted.mock.calls).toStrictEqual([[row.id, type]]);
+          expect(markDeleted.mock.calls).toStrictEqual(
+            !row.deleted && proven(row, noteMtime) ? [[row.id, type]] : []
+          );
           expect(writeNote).not.toHaveBeenCalled();
           expect(markUndeleted).not.toHaveBeenCalled();
         }
@@ -279,7 +325,7 @@ describe('reconcileNote', () => {
     );
   });
 
-  it("keeps the row for a note making no other claim, lifting the row's tombstone and writing nothing to the note", async () => {
+  it('keeps the row for a note making no other claim, and never lifts a tombstone', async () => {
     // A note missing its id or tag may be newer than the row: stripped by an
     // un-import on another device and synced here first (0166)
     await fc.assert(
@@ -288,18 +334,22 @@ describe('reconcileNote', () => {
           ({ row, frontmatter }) =>
             !frontmatter?.['ir-id'] || frontmatter['ir-id'] === row.id
         ),
-        async ({ row, type, tag, frontmatter }) => {
+        async ({ row, type, tag, frontmatter, noteMtime }) => {
           const { manager, writeNote, markDeleted, markUndeleted } = wire({
             // The read normalizes `tags` in place; keep the generated value intact
             frontmatter: structuredClone(frontmatter),
           } as CachedMetadata);
 
-          expect(manager.reconcile(row, FILE, type, tag)).toBe(true);
-
-          expect(writeNote).not.toHaveBeenCalled();
-          expect(markUndeleted.mock.calls).toStrictEqual(
-            row.deleted ? [[row.id, type]] : []
+          expect(manager.reconcile(row, noteAt(noteMtime), type, tag)).toBe(
+            true
           );
+
+          // Not even for a note carrying the row's id that is provably the
+          // one it was written with: a restore revives the row through
+          // `handleCreation`, and trashing keeps mtime, so a note trashed on
+          // another device reads the same until Sync brings its deletion
+          expect(markUndeleted).not.toHaveBeenCalled();
+          expect(writeNote).not.toHaveBeenCalled();
           expect(markDeleted).not.toHaveBeenCalled();
         }
       )
@@ -309,40 +359,104 @@ describe('reconcileNote', () => {
   // The notes Sync delivers may not have landed with the database (0174)
   it('judges the note but repairs no row during the refetch after a reload', async () => {
     await fc.assert(
-      fc.asyncProperty(settledArb, async ({ row, type, tag, frontmatter }) => {
-        const claimsOther =
-          Boolean(frontmatter?.['ir-id']) && frontmatter?.['ir-id'] !== row.id;
-        const { manager, mutate, writeNote, markDeleted, markUndeleted } = wire(
-          { frontmatter: structuredClone(frontmatter) } as CachedMetadata
-        );
-        Object.assign(manager.repo, { refetchingAfterReload: true });
+      fc.asyncProperty(
+        settledArb,
+        fc.integer({ min: 0 }),
+        async ({ row, type, tag, frontmatter }, mtime) => {
+          const claimsOther =
+            Boolean(frontmatter?.['ir-id']) &&
+            frontmatter?.['ir-id'] !== row.id;
+          const { manager, mutate, writeNote, markDeleted, markUndeleted } =
+            wire({
+              frontmatter: structuredClone(frontmatter),
+            } as CachedMetadata);
+          Object.assign(manager.repo, { refetchingAfterReload: true });
+          // A live row and a note that is provably its own, so that only the
+          // refetch keeps a note claiming another id from tombstoning it
+          const live = { ...row, deleted: false, note_mtime: mtime };
 
-        expect(manager.reconcile(row, FILE, type, tag)).toBe(!claimsOther);
+          expect(manager.reconcile(live, noteAt(mtime), type, tag)).toBe(
+            !claimsOther
+          );
 
-        expect(markDeleted).not.toHaveBeenCalled();
-        expect(markUndeleted).not.toHaveBeenCalled();
-        expect(mutate).not.toHaveBeenCalled();
-        expect(writeNote).not.toHaveBeenCalled();
-      })
+          expect(markDeleted).not.toHaveBeenCalled();
+          expect(markUndeleted).not.toHaveBeenCalled();
+          expect(mutate).not.toHaveBeenCalled();
+          expect(writeNote).not.toHaveBeenCalled();
+        }
+      )
     );
+  });
+
+  it('never touches a row deleted for good, whatever its note says', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        settledArb,
+        fc.integer({ min: 0 }),
+        async ({ row, type, tag, frontmatter }, mtime) => {
+          const { manager, mutate, markDeleted, markUndeleted } = wire({
+            frontmatter: structuredClone(frontmatter),
+          } as CachedMetadata);
+          const purged = {
+            ...row,
+            deleted: true,
+            reference: purgedReference(row.id),
+            note_mtime: mtime,
+          };
+
+          manager.reconcile(purged, noteAt(mtime), type, tag);
+
+          expect(markDeleted).not.toHaveBeenCalled();
+          expect(markUndeleted).not.toHaveBeenCalled();
+          expect(mutate).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  it('reads a row with no fingerprint recorded as proving nothing about its note', () => {
+    const { manager, markDeleted, markUndeleted } = wire({
+      frontmatter: { 'ir-id': 'someone-else' },
+    } as unknown as CachedMetadata);
+    // As a row read before its table had the column
+    const unrecorded = {
+      id: 'a1',
+      deleted: false,
+      reference: FILE.path,
+    } as ReconcileRow;
+
+    expect(
+      manager.reconcile(unrecorded, noteAt(5), 'article', 'ir-article')
+    ).toBe(false);
+    expect(markDeleted).not.toHaveBeenCalled();
+    expect(markUndeleted).not.toHaveBeenCalled();
   });
 
   it('judges the note once its parse lands', () => {
     const cache: { current: CachedMetadata | null } = { current: null };
-    const { manager, writeNote, markUndeleted } = wire(null);
+    const { manager, writeNote, markDeleted } = wire(null);
     vi.spyOn(manager.app.metadataCache, 'getFileCache').mockImplementation(
       () => cache.current
     );
-    const row = { id: 'a1', deleted: true };
+    const row = {
+      id: 'a1',
+      deleted: false,
+      reference: FILE.path,
+      note_mtime: 1_000,
+    };
 
-    manager.reconcile(row, FILE, 'article', 'ir-article');
-    expect(markUndeleted).not.toHaveBeenCalled();
+    expect(manager.reconcile(row, noteAt(1_000), 'article', 'ir-article')).toBe(
+      true
+    );
+    expect(markDeleted).not.toHaveBeenCalled();
 
     cache.current = {
-      frontmatter: { tags: ['ir-article'] },
+      frontmatter: { 'ir-id': 'b2', tags: ['ir-article'] },
     } as unknown as CachedMetadata;
-    manager.reconcile(row, FILE, 'article', 'ir-article');
-    expect(markUndeleted.mock.calls).toStrictEqual([['a1', 'article']]);
+    expect(manager.reconcile(row, noteAt(1_000), 'article', 'ir-article')).toBe(
+      false
+    );
+    expect(markDeleted.mock.calls).toStrictEqual([['a1', 'article']]);
     expect(writeNote).not.toHaveBeenCalled();
   });
 });
