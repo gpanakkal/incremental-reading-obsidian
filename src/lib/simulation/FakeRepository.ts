@@ -1,4 +1,5 @@
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
+import type { ReplaySettings } from '#/lib/repository/scheduling-replay';
 import { readFileSync } from 'fs';
 import type { App } from 'obsidian';
 import { resolve } from 'path';
@@ -57,7 +58,12 @@ export class FakeRepository extends SQLJSRepository {
    */
   static async createReal(
     fakeVault: FakeVault,
-    opts: { deviceId: string; clock?: () => number; dbFilePath?: string }
+    opts: {
+      deviceId: string;
+      clock?: () => number;
+      dbFilePath?: string;
+      replaySettings?: () => ReplaySettings;
+    }
   ): Promise<FakeRepository> {
     const dbFilePath = opts.dbFilePath ?? DEFAULT_DB_PATH;
     const repo = new FakeRepository({
@@ -66,6 +72,7 @@ export class FakeRepository extends SQLJSRepository {
       schema: SCHEMA,
       deviceId: opts.deviceId,
       stampClock: opts.clock,
+      replaySettings: opts.replaySettings,
     });
     repo.#stub = false;
     const onDisk = fakeVault.adapter.diskBytes(dbFilePath)?.byteLength;
