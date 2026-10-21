@@ -28,9 +28,12 @@ export interface StampSource {
   now: () => number;
 }
 
+/** The start of the error a refused `DELETE` of a synced row raises. */
+export const HARD_DELETE_REFUSED = 'Synced rows are tombstoned, never deleted:';
+
 const NOW_FUNCTION = 'ir_stamp_now';
 const DEVICE_FUNCTION = 'ir_stamp_device';
-const TRIGGER_KINDS = ['same', 'update', 'insert'] as const;
+const TRIGGER_KINDS = ['same', 'update', 'insert', 'delete'] as const;
 
 function triggerName(table: string, kind: (typeof TRIGGER_KINDS)[number]) {
   return `ir_stamp_${table}_${kind}`;
@@ -69,6 +72,10 @@ function unchanged(columns: readonly string[]): string {
  * - A changed row is stamped unless the statement set its stamp itself, as
  *   copying another device's row will.
  * - An inserted row is stamped unless it came with a stamp (`updated_at` > 0).
+ * - A `DELETE` is refused (`RAISE(ABORT)`), cascades included: a synced row
+ *   is tombstoned (`deleted = 1`), or the next merge brings it back from a
+ *   device that still has it. Only retention's pruning and migrations delete,
+ *   disarmed (see {@link withHardDeletesAllowed}).
  *
  * Tables that have no stamp columns yet (a database still to be migrated) are
  * left alone; arm again once they have them. Arming again replaces the
@@ -103,6 +110,10 @@ export function armRowStamps(db: Database, source: StampSource): void {
       AFTER INSERT ON main.${table}
       WHEN NEW.updated_at = 0
       BEGIN ${stamp('NEW')} END;
+
+      CREATE TEMP TRIGGER ${triggerName(table, 'delete')}
+      BEFORE DELETE ON main.${table}
+      BEGIN SELECT RAISE(ABORT, '${HARD_DELETE_REFUSED} ${table}'); END;
     `);
   }
 }
@@ -110,12 +121,32 @@ export function armRowStamps(db: Database, source: StampSource): void {
 /**
  * Take the stamp triggers off `db`'s connection, as migrations need: a table
  * rebuild renames tables the triggers name, and a migration's own writes are
- * no device's edits.
+ * no device's edits. Takes the guard against deleting synced rows off too.
  */
 export function disarmRowStamps(db: Database): void {
   for (const table of SYNCED_TABLES) {
     for (const kind of TRIGGER_KINDS) {
       db.exec(`DROP TRIGGER IF EXISTS temp.${triggerName(table, kind)}`);
     }
+  }
+}
+
+/**
+ * Run `work` with the stamp triggers, and with them the guard against
+ * deleting synced rows, off `db`'s connection, arming them again from
+ * `source` afterwards, whether `work` returns or throws. For deletes that
+ * must not reach other devices as edits: retention's pruning of rows every
+ * device has long since tombstoned.
+ */
+export function withHardDeletesAllowed<T>(
+  db: Database,
+  source: StampSource,
+  work: () => T
+): T {
+  disarmRowStamps(db);
+  try {
+    return work();
+  } finally {
+    armRowStamps(db, source);
   }
 }

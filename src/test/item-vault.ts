@@ -1,6 +1,6 @@
 import { NOT_PURGED } from '#/lib/items/row-delete';
 import { MERGE_WAIT_MS } from '#/lib/readiness';
-import { SYNCED_TABLES } from '#/lib/repository/row-stamps';
+import { disarmRowStamps, SYNCED_TABLES } from '#/lib/repository/row-stamps';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import type { Readiness } from '#/lib/types';
 import type { Primitive } from '#/lib/utility-types';
@@ -70,6 +70,20 @@ export class TestRepository extends SQLJSRepository {
     repo.db.exec('PRAGMA foreign_keys = ON');
     repo.registerUpdateHook();
     return repo;
+  }
+
+  /**
+   * Run `query`, a hard delete of synced rows, as a plugin version before
+   * tombstones made them; armed row stamps refuse one (0173), so they are
+   * taken off for it and armed again after.
+   */
+  hardDelete(query: string, params: Primitive[] = []) {
+    disarmRowStamps(this.db!);
+    try {
+      return this.mutate(query, params);
+    } finally {
+      this.registerUpdateHook();
+    }
   }
 
   /** Refuse writes, as a changed file on disk that won't load does. */

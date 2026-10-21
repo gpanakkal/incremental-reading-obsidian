@@ -12,6 +12,7 @@ import {
   disarmRowStamps,
   STAMP_COLUMNS,
   SYNCED_TABLES,
+  withHardDeletesAllowed,
 } from './row-stamps';
 import { SQLJSRepository } from './SQLJSRepository';
 
@@ -436,7 +437,7 @@ describe('armRowStamps', () => {
       db
         .exec(`SELECT tbl_name FROM sqlite_temp_master`)[0]
         .values.map(([table]) => table)
-    ).toEqual(['article', 'article', 'article']);
+    ).toEqual(['article', 'article', 'article', 'article']);
 
     db.exec(`ALTER TABLE article ADD COLUMN extra INTEGER`);
     armRowStamps(db, source);
@@ -460,6 +461,72 @@ describe('armRowStamps', () => {
       `INSERT INTO article (id, reference, due, interval, priority) VALUES ('a', 'n/a.md', 0, 1, 30)`
     );
     expect(snapshot(repo.database).get('article:a')?.updated_at).toBe(0);
+  });
+
+  it.each(SYNCED_TABLES)(
+    'refuses to delete a row of %s, keeping every row',
+    (table) => {
+      const repo = StampingRepository.make(() => 1);
+      seed(repo.database);
+      armRowStamps(repo.database, { deviceId: () => DEVICE, now: () => 1 });
+      repo.database.exec('PRAGMA foreign_keys = ON');
+      const before = snapshot(repo.database);
+
+      expect(() => repo.mutate(`DELETE FROM ${table}`)).toThrow();
+
+      expect(snapshot(repo.database)).toEqual(before);
+    }
+  );
+
+  it('refuses a delete by cascade, too', () => {
+    const repo = StampingRepository.make(() => 1);
+    seed(repo.database);
+    armRowStamps(repo.database, { deviceId: () => DEVICE, now: () => 1 });
+    repo.database.exec('PRAGMA foreign_keys = ON');
+    // Only the review log's guard stands between the item and the cascade
+    repo.database.exec('DROP TRIGGER temp.ir_stamp_article_delete');
+
+    expect(() =>
+      repo.database.run(`DELETE FROM article WHERE id = 'a0'`)
+    ).toThrow();
+    expect(snapshot(repo.database).has('article:a0')).toBe(true);
+  });
+
+  it('deletes inside withHardDeletesAllowed, and refuses again after it', () => {
+    const repo = StampingRepository.make(() => 7);
+    const db = repo.database;
+    seed(db);
+    const source = { deviceId: () => DEVICE, now: () => 7 };
+    armRowStamps(db, source);
+
+    const result = withHardDeletesAllowed(db, source, () => {
+      db.run(`DELETE FROM article_review WHERE id = 'r-a0'`);
+      return 'done';
+    });
+
+    expect(result).toBe('done');
+    expect(snapshot(db).has('article_review:r-a0')).toBe(false);
+    expect(() => db.run(`DELETE FROM article_review`)).toThrow();
+    db.run(`UPDATE article SET priority = 40 WHERE id = 'a1'`);
+    expect(snapshot(db).get('article:a1')).toMatchObject({
+      updated_at: 7,
+      updated_by: DEVICE,
+    });
+  });
+
+  it('refuses again after withHardDeletesAllowed, even when its work throws', () => {
+    const repo = StampingRepository.make(() => 1);
+    const db = repo.database;
+    seed(db);
+    const source = { deviceId: () => DEVICE, now: () => 1 };
+
+    expect(() =>
+      withHardDeletesAllowed(db, source, () => {
+        throw new Error('boom');
+      })
+    ).toThrow('boom');
+
+    expect(() => db.run(`DELETE FROM snippet`)).toThrow();
   });
 
   it('names the stamp columns the schema gives every synced table', () => {

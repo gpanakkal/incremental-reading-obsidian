@@ -29,7 +29,9 @@ import {
   type MockInstance,
 } from 'vitest';
 import { BulkMutateError } from './BulkMutateError';
+import { backupFileName, type BackupKind } from './retention';
 import * as rowMerge from './row-merge';
+import { disarmRowStamps } from './row-stamps';
 import {
   DatabaseLoadError,
   SQLJSRepository,
@@ -332,6 +334,15 @@ class SyncedTestRepository extends SQLJSRepository {
       },
       exists: async () => true,
       mkdir: async () => {},
+      list: async (folder: string) => ({
+        files: [...repo.otherFiles.keys()].filter((path) =>
+          path.startsWith(`${folder}/`)
+        ),
+        folders: [],
+      }),
+      remove: async (path: string) => {
+        repo.otherFiles.delete(path);
+      },
     };
     repo = new SyncedTestRepository({
       app: {
@@ -595,6 +606,14 @@ interface IndexView {
  * Sync rewrites a file or the index churns around a plugin reload. `files` is
  * the disk; the index answers from `index` alone.
  */
+/** How often `adapter` was asked whether `path` exists. */
+function existsCalls(
+  adapter: ReturnType<typeof makeVault>['adapter'],
+  path: string
+): number {
+  return adapter.exists.mock.calls.filter(([asked]) => asked === path).length;
+}
+
 function makeVault(
   indexAtStart: IndexView,
   files: Map<string, Uint8Array> = new Map(),
@@ -622,6 +641,17 @@ function makeVault(
     }),
     mkdir: vi.fn(async () => {}),
     write: vi.fn(async () => {}),
+    list: vi.fn(async (folder: string) => ({
+      files: [...files.keys()].filter(
+        (path) =>
+          path.startsWith(`${folder}/`) &&
+          !path.slice(folder.length + 1).includes('/')
+      ),
+      folders: [],
+    })),
+    remove: vi.fn(async (path: string) => {
+      files.delete(path);
+    }),
   };
   const vault = {
     adapter,
@@ -1212,6 +1242,7 @@ describe('foreign keys after save', () => {
     insertArticle(repo, 'a1');
     insertArticleReview(repo, 'r1', 'a1');
 
+    disarmRowStamps(repo.db!); // armed, they refuse a hard delete (0173)
     repo.mutate(`DELETE FROM article WHERE id = $1`, ['a1']);
 
     expect(repo.query(`SELECT id FROM article_review`)).toEqual([]);
@@ -1247,6 +1278,9 @@ describe('foreign keys after save', () => {
             expect(foreignKeysPragma(repo)).toBe(1);
           }
 
+          // Armed, the stamps refuse a hard delete (0173); off, the cascade
+          // shows whether foreign keys are on
+          disarmRowStamps(repo.db!);
           repo.mutate(`DELETE FROM article`);
           expect(repo.query(`SELECT id FROM article_review`)).toEqual([]);
         }
@@ -2712,7 +2746,7 @@ describe('start, holding for Sync', () => {
         );
         // Once to load and once to back up, with a file; never without
         expect(dbReads).toHaveLength(hasFile ? 2 : 0);
-        expect(adapter.exists).toHaveBeenCalledTimes(hasFile ? 2 : 1);
+        expect(existsCalls(adapter, DATABASE_FILE_PATH)).toBe(1);
         repo.db?.close();
       })
     );
@@ -2723,7 +2757,7 @@ describe('start, holding for Sync', () => {
 
     const repo = await startRepo(app);
 
-    expect(adapter.exists).toHaveBeenCalledOnce();
+    expect(existsCalls(adapter, DATABASE_FILE_PATH)).toBe(1);
     repo.db?.close();
   });
 
@@ -4967,4 +5001,322 @@ describe('readiness', () => {
 
     expect(listener).not.toHaveBeenCalled();
   });
+});
+
+describe('retention: pruning old backups and tombstones', () => {
+  beforeEach(() => {
+    stubWasm();
+    vi.spyOn(console, 'debug').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** A vault holding `db` as the database file and a backup folder of `backups`. */
+  function vaultWith(db: Uint8Array | null, backups: readonly string[] = []) {
+    const files = new Map<string, Uint8Array>(
+      backups.map((path) => [path, new Uint8Array([1])])
+    );
+    if (db) files.set(DATABASE_FILE_PATH, db);
+    const vault = makeVault(INDEXED, files);
+    vault.adapter.exists.mockImplementation(
+      async (path: string) => files.has(path) || path === BACKUP_DIRECTORY
+    );
+    return vault;
+  }
+
+  /** The path of a backup of `kind` at `version`, written `age` ms ago. */
+  function backupAged(kind: BackupKind, version: number, age: number) {
+    return `${BACKUP_DIRECTORY}/${backupFileName(version, kind, new Date(Date.now() - age))}`;
+  }
+
+  /** Every backup left in `files`. */
+  function backupsIn(files: Map<string, Uint8Array>): string[] {
+    return [...files.keys()]
+      .filter((path) => path.startsWith(`${BACKUP_DIRECTORY}/`))
+      .sort();
+  }
+
+  /**
+   * A database file another device saved, holding a live article, a
+   * tombstone just short of 180 days old, and one a day past them with a
+   * review and a `rebind` row of its own.
+   */
+  async function fileWithTombstones(): Promise<Uint8Array> {
+    const SQL = await getSharedSql();
+    const db = new SQL.Database(await getEmptyDbBytes());
+    const now = Date.now();
+    const tombstone = `INSERT INTO article
+      (id, reference, due, interval, priority, deleted, updated_at, updated_by)
+      VALUES ($1, $2, 0, 1, 30, 1, $3, 'x')`;
+    db.run(tombstone, [
+      'gone',
+      '/ir-deleted/gone',
+      now - STALE_AFTER_MS - DAY_MS,
+    ]);
+    db.run(
+      `INSERT INTO article_review (id, article_id, review_time, updated_at, updated_by)
+       VALUES ('gone-review', 'gone', 0, $1, 'x')`,
+      [now - DAY_MS]
+    );
+    db.run(
+      `INSERT INTO rebind (article_id, old_reference, new_reference, rebound_at, updated_at, updated_by)
+       VALUES ('gone', 'a.md', 'b.md', 0, $1, 'x')`,
+      [now - DAY_MS]
+    );
+    // A minute of slack for the test's own run time
+    db.run(tombstone, ['kept', 'n/kept.md', now - STALE_AFTER_MS + 60_000]);
+    insertArticleRows(db, ['live']);
+    stampAsRemote(db);
+    const bytes = db.export();
+    db.close();
+    return bytes;
+  }
+
+  /** The values `sql` selects from the database file `bytes`, sorted. */
+  async function keysIn(
+    bytes: Uint8Array | undefined,
+    sql: string
+  ): Promise<string[]> {
+    const SQL = await getSharedSql();
+    const db = new SQL.Database(bytes);
+    const keys = (db.exec(sql)[0]?.values ?? []).flat().map(String).sort();
+    db.close();
+    return keys;
+  }
+
+  it('deletes a tombstone past 180 days with its review and rebind row at startup, and saves the file without them', async () => {
+    const { app, files } = vaultWith(await fileWithTombstones());
+
+    const repo = await startRepo(app);
+
+    const file = files.get(DATABASE_FILE_PATH);
+    expect(articleIds(repo).sort()).toEqual(['kept', 'live']);
+    expect(await keysIn(file, 'SELECT id FROM article')).toEqual([
+      'kept',
+      'live',
+    ]);
+    expect(await keysIn(file, 'SELECT id FROM article_review')).toEqual([]);
+    expect(await keysIn(file, 'SELECT article_id FROM rebind')).toEqual([]);
+    repo.dispose();
+  });
+
+  it('keeps the tombstones a migration carries over unstamped at the first startup after the upgrade', async () => {
+    const SQL = await getSharedSql();
+    const old = new SQL.Database(await staleFileWith(['a', 'b']));
+    old.exec(`UPDATE article SET deleted = 1, updated_at = 0, updated_by = ''`);
+    const { app, files } = vaultWith(old.export());
+    old.close();
+
+    const repo = await startRepo(app);
+
+    const file = files.get(DATABASE_FILE_PATH);
+    expect(
+      await keysIn(file, 'SELECT id FROM article WHERE deleted = 1')
+    ).toEqual(['a', 'b']);
+    expect(
+      repo.db!.exec('SELECT id, updated_at FROM article ORDER BY id')[0].values
+    ).toEqual([
+      ['a', 0],
+      ['b', 0],
+    ]);
+    repo.dispose();
+  });
+
+  it('writes nothing at startup when nothing is past its window', async () => {
+    const { app, adapter } = vaultWith(await dbFileWith(['a']), [
+      backupAged('merge', LATEST_VERSION, 40 * DAY_MS),
+    ]);
+
+    const repo = await startRepo(app);
+
+    expect(adapter.list).toHaveBeenCalledOnce();
+    expect(adapter.writeBinary).not.toHaveBeenCalled();
+    expect(adapter.remove).not.toHaveBeenCalled();
+    repo.dispose();
+  });
+
+  it('prunes and writes nothing at startup on a copy last saved more than 180 days ago', async () => {
+    const now = Date.now();
+    const SQL = await getSharedSql();
+    const db = new SQL.Database(
+      await fileStamped(['a'], { away: now - STALE_AFTER_MS - DAY_MS })
+    );
+    db.run(
+      `INSERT INTO article (id, reference, due, interval, priority, deleted, updated_at, updated_by)
+       VALUES ('gone', '/ir-deleted/gone', 0, 1, 30, 1, $1, 'away')`,
+      [now - 400 * DAY_MS]
+    );
+    const { app, adapter } = vaultWith(db.export());
+    db.close();
+
+    const repo = await startRepo(app);
+
+    expect(articleIds(repo).sort()).toEqual(['a', 'gone']);
+    expect(adapter.writeBinary).not.toHaveBeenCalled();
+    repo.dispose();
+  });
+
+  it('drops a device that has not saved in 180 days from the write stamp, and saves that', async () => {
+    const now = Date.now();
+    const { app, files } = vaultWith(
+      await fileStamped(['a'], {
+        away: now - STALE_AFTER_MS - DAY_MS,
+        near: now - DAY_MS,
+      })
+    );
+
+    const repo = await startRepo(app);
+
+    const stamp = await stampOf(files.get(DATABASE_FILE_PATH));
+    expect(Object.keys(stamp)).not.toContain('away');
+    expect(stamp.near).toBe(now - DAY_MS);
+    repo.dispose();
+  });
+
+  it('keeps five merge backups, nothing else past 30 days, and the newest migration backup of each version, at startup', async () => {
+    const daily = [31, 32, 33, 34, 35, 36, 37].map((d) =>
+      backupAged('merge', LATEST_VERSION, d * DAY_MS)
+    );
+    const old = backupAged('merge', LATEST_VERSION, 40 * DAY_MS);
+    const v10 = backupAged('migration', 10, 200 * DAY_MS);
+    const v11 = backupAged('migration', 11, 200 * DAY_MS);
+    const { app, files } = vaultWith(await dbFileWith(['a']), [
+      ...daily,
+      old,
+      v10,
+      v11,
+    ]);
+
+    const repo = await startRepo(app);
+
+    expect(backupsIn(files)).toEqual([...daily.slice(0, 5), v10, v11].sort());
+    repo.dispose();
+  });
+
+  it('deletes old backups at startup over a database it had to make', async () => {
+    const newer = [1, 2, 3, 4, 5].map((d) =>
+      backupAged('stale', LATEST_VERSION, d * DAY_MS)
+    );
+    const old = backupAged('stale', LATEST_VERSION, 31 * DAY_MS);
+    const { app, files } = vaultWith(null, [...newer, old]);
+
+    const repo = await startRepo(app);
+
+    expect(backupsIn(files)).toEqual([...newer].sort());
+    repo.dispose();
+  });
+
+  it('deletes old backups once a reload that backed up memory is done, and not after a reload that backed nothing up', async () => {
+    const start = Date.now() + 3650 * DAY_MS;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(start);
+    const ours = await fileStamped(['a'], { remote: start - DAY_MS });
+    const { app, files, adapter } = vaultWith(ours);
+    const repo = await startRepo(app);
+    vi.setSystemTime(start + STALE_AFTER_MS + DAY_MS);
+    const old = [41, 42, 43, 44, 45, 46].map((d) =>
+      backupAged('stale', LATEST_VERSION, d * DAY_MS)
+    );
+    for (const path of old) files.set(path, new Uint8Array([1]));
+    expect(adapter.list).toHaveBeenCalledOnce(); // at startup
+
+    // Saved by a device that has moved on since: this device is stale
+    files.set(
+      DATABASE_FILE_PATH,
+      await fileStamped(['fresh'], { other: Date.now() })
+    );
+    await repo.handleFileChange(dbFileChange);
+
+    expect(articleIds(repo)).toEqual(['fresh']);
+    const [backup] = backupWrites(adapter);
+    expect(backupsIn(files)).toEqual([backup, ...old.slice(0, 4)].sort());
+
+    // Its own file again, backing nothing up
+    await repo.handleFileChange(dbFileChange);
+    expect(adapter.list).toHaveBeenCalledTimes(2);
+    repo.dispose();
+  });
+
+  it('waits while writes are refused, and runs once the reload that lifts the refusal is done', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { app, files, adapter } = vaultWith(await dbFileWith(['a']));
+    const repo = await startRepo(app);
+    const loaded = files.get(DATABASE_FILE_PATH);
+    files.set(DATABASE_FILE_PATH, await unloadableBytes({ ahead: 1 }));
+    await repo.handleFileChange(dbFileChange);
+    expect(repo.writeRefusal()).not.toBeNull();
+    const old = backupAged('merge', LATEST_VERSION, 400 * DAY_MS);
+    const newer = [1, 2, 3, 4, 5].map((d) =>
+      backupAged('merge', LATEST_VERSION, d * DAY_MS)
+    );
+    for (const path of [old, ...newer]) files.set(path, new Uint8Array([1]));
+
+    await repo.applyRetention();
+    expect(adapter.list).toHaveBeenCalledOnce(); // at startup
+    expect(adapter.remove).not.toHaveBeenCalled();
+
+    files.set(DATABASE_FILE_PATH, await savedOnTopBy(loaded, ['b']));
+    await repo.handleFileChange(dbFileChange);
+
+    expect(repo.writeRefusal()).toBeNull();
+    expect(adapter.remove.mock.calls).toEqual([[old]]);
+    repo.dispose();
+  });
+
+  it('waits while a transaction is open, and runs after the next reload', async () => {
+    const { app, files, adapter } = vaultWith(await dbFileWith(['a']));
+    const repo = await startRepo(app);
+    const old = backupAged('merge', LATEST_VERSION, 400 * DAY_MS);
+    const newer = [1, 2, 3, 4, 5].map((d) =>
+      backupAged('merge', LATEST_VERSION, d * DAY_MS)
+    );
+    for (const path of [old, ...newer]) files.set(path, new Uint8Array([1]));
+
+    await repo.transaction(async () => {
+      await repo.applyRetention();
+    });
+    expect(adapter.remove).not.toHaveBeenCalled();
+
+    await repo.handleFileChange(dbFileChange); // its own file, unchanged
+    expect(adapter.remove.mock.calls).toEqual([[old]]);
+    repo.dispose();
+  });
+
+  it('logs a failure to list the backups, having saved what it pruned from the database', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { app, files, adapter } = vaultWith(await fileWithTombstones());
+    const failure = new Error('EIO');
+    adapter.list.mockRejectedValueOnce(failure);
+
+    const repo = await startRepo(app);
+
+    expect(errors).toHaveBeenCalledOnce();
+    expect(errors.mock.calls[0]).toContain(failure);
+    expect(
+      await keysIn(files.get(DATABASE_FILE_PATH), 'SELECT id FROM article')
+    ).toEqual(['kept', 'live']);
+    repo.dispose();
+  });
+
+  it.each([
+    { over: 'a file it loaded', file: true },
+    { over: 'a database it had to make', file: false },
+  ])(
+    'stops a startup over $over cancelled while it pruned',
+    async ({ file }) => {
+      const controller = new AbortController();
+      const { app, adapter } = vaultWith(file ? await dbFileWith(['a']) : null);
+      adapter.list.mockImplementationOnce(async () => {
+        controller.abort();
+        return { files: [], folders: [] };
+      });
+
+      await expect(
+        startRepo(app, { signal: controller.signal })
+      ).rejects.toBeInstanceOf(StartupCancelledError);
+    }
+  );
 });

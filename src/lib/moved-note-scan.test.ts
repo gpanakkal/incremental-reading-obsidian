@@ -1,4 +1,6 @@
+import { disarmRowStamps } from '#/lib/repository/row-stamps';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
+import type { Primitive } from '#/lib/utility-types';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
 import type { App, CachedMetadata, TFile } from 'obsidian';
@@ -67,6 +69,20 @@ class TestRepository extends SQLJSRepository {
   }
 
   protected override async save() {}
+
+  /**
+   * Run `query`, a hard delete of synced rows, as a plugin version before
+   * tombstones made them; armed row stamps refuse one (0173), so they are
+   * taken off for it and armed again after.
+   */
+  hardDelete(query: string, params: Primitive[] = []) {
+    disarmRowStamps(this.db!);
+    try {
+      return this.mutate(query, params);
+    } finally {
+      this.registerUpdateHook();
+    }
+  }
 
   /**
    * The real transaction, still reachable once a spy has taken over the
@@ -434,7 +450,8 @@ function wire(world: ScanWorld, onYield?: (count: number) => void) {
 function raceTheWrite(run: ReturnType<typeof wire>, sql: string) {
   run.transaction.mockImplementationOnce(
     <T>(work: () => T | Promise<T>): Promise<T> => {
-      run.repo.mutate(sql);
+      if (sql.startsWith('DELETE')) run.repo.hardDelete(sql);
+      else run.repo.mutate(sql);
       return run.repo.openTransaction(work);
     }
   );

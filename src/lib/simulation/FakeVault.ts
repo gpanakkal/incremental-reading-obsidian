@@ -52,6 +52,21 @@ class FakeAdapter {
     return Promise.resolve();
   }
 
+  /** The files directly in `folder`, as Obsidian lists them (full paths). */
+  list(folder: string): Promise<{ files: string[]; folders: string[] }> {
+    const files = this.paths().filter(
+      (path) =>
+        path.startsWith(`${folder}/`) &&
+        !path.slice(folder.length + 1).includes('/')
+    );
+    return Promise.resolve({ files, folders: [] });
+  }
+
+  remove(path: string): Promise<void> {
+    this.#files.delete(path);
+    return Promise.resolve();
+  }
+
   resolvePendingWrite(): void {
     this.#pendingWrites.shift()?.resolve();
   }
