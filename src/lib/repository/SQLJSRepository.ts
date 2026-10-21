@@ -51,6 +51,10 @@ import {
 import { armRowStamps, disarmRowStamps } from './row-stamps';
 import { recordSave } from './save-stats';
 import {
+  DEFAULT_REPLAY_SETTINGS,
+  type ReplaySettings,
+} from './scheduling-replay';
+import {
   bumpWriteStamp,
   classifyIncoming,
   loadKnownWriteVector,
@@ -201,6 +205,8 @@ export class SQLJSRepository implements SQLiteRepository {
    * holding that save would otherwise count the row as seen (row-merge.ts).
    */
   #rowClock = () => Math.max(this.#stampClock(), this.#ownGeneration + 1);
+  /** The settings a merge replays review logs with, as they are now. */
+  #replaySettings: () => ReplaySettings;
   /** Tells writes that changed nothing from the rest, which alone save. */
   #content = new ContentWatch();
   /** How many {@link onReloadFromDisk} calls are running. */
@@ -236,10 +242,14 @@ export class SQLJSRepository implements SQLiteRepository {
     deviceId?: string;
     /** Stands in for `Date.now` as the clock of stamps, for tests. */
     stampClock?: () => number;
+    /** The settings a merge replays review logs with (see `mergeInto`). */
+    replaySettings?: () => ReplaySettings;
   }) {
     this.app = params.app;
     this.#deviceId = params.deviceId;
     this.#stampClock = params.stampClock ?? (() => Date.now());
+    this.#replaySettings =
+      params.replaySettings ?? (() => DEFAULT_REPLAY_SETTINGS);
     this.adapter = params.app.vault.adapter;
     this.#dbFilePath = normalizePath(params.dbFilePath);
     this.#schema = params.schema;
@@ -283,6 +293,7 @@ export class SQLJSRepository implements SQLiteRepository {
     onWritesResumed?: () => void;
     holdForSync?: SyncHold;
     signal?: AbortSignal;
+    replaySettings?: () => ReplaySettings;
   }): Promise<SQLJSRepository> {
     const repo = new SQLJSRepository({ ...params, app: params.plugin.app });
     repo.#syncHold = params.holdForSync;
@@ -694,10 +705,12 @@ export class SQLJSRepository implements SQLiteRepository {
       }
       if (lossy && !(await this.#backUpMemory(db, 'merge'))) return false;
       try {
-        report = mergeInto(db, incoming, {
-          deviceId: () => this.#device(),
-          now: this.#rowClock,
-        });
+        report = mergeInto(
+          db,
+          incoming,
+          { deviceId: () => this.#device(), now: this.#rowClock },
+          this.#replaySettings()
+        );
         // The merge takes the newer generation of each device, this one's too
         this.#readOwnGeneration(db);
       } catch (error) {

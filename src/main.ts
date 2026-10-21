@@ -657,6 +657,10 @@ export default class IncrementalReadingPlugin extends Plugin {
       dbFilePath: DATABASE_FILE_PATH,
       schema: databaseSchema as string,
       signal: unloaded.signal,
+      replaySettings: () => ({
+        fsrsParams: this.settings.fsrsParams,
+        fuzzTextReviews: this.settings.fuzzTextReviews,
+      }),
       holdForSync: (reason) =>
         holdForSync({
           getSync: () => getSyncPlugin(this.app),

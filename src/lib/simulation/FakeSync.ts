@@ -1,3 +1,4 @@
+import type { ReplaySettings } from '#/lib/repository/scheduling-replay';
 import type { TAbstractFile } from 'obsidian';
 import { FakeRepository } from './FakeRepository';
 import { DEFAULT_DB_PATH, FakeVault } from './FakeVault';
@@ -17,7 +18,12 @@ export interface FakeDevice {
  */
 export async function makeDevice(
   name: string,
-  opts: { now: number; bytes?: ArrayBuffer }
+  opts: {
+    now: number;
+    bytes?: ArrayBuffer;
+    /** The settings its merges replay review logs with. */
+    replaySettings?: ReplaySettings;
+  }
 ): Promise<FakeDevice> {
   const vault = new FakeVault({ autoResolveWrites: true });
   if (opts.bytes) vault.setDiskBytes(opts.bytes.slice(0));
@@ -25,6 +31,7 @@ export async function makeDevice(
   const repo = await FakeRepository.createReal(vault, {
     deviceId: name,
     clock: () => clock.now,
+    replaySettings: opts.replaySettings && (() => opts.replaySettings!),
   });
   return { name, vault, repo, clock };
 }

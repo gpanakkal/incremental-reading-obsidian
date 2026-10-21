@@ -8,6 +8,11 @@ import {
   type StampSource,
   type SyncedTable,
 } from './row-stamps';
+import {
+  readDivergences,
+  replaySchedules,
+  type ReplaySettings,
+} from './scheduling-replay';
 
 /** How a synced table's rows are merged with another device's copy. */
 export interface MergeTable {
@@ -126,17 +131,25 @@ export function previewMerge(db: Database, incoming: Database): MergeReport {
  * the merge and armed again from `stamps` after it, as after a migration.
  * The result depends only on the two copies, so merging the same pair either
  * way round gives the same rows, and merging again changes nothing.
+ *
+ * Given `replay`, an item whose review log the two copies disagree on then
+ * gets its scheduling columns from the merged log instead of the row that
+ * won (see `replaySchedules`), in the same transaction: those rows are this
+ * device's writes, stamped by the triggers armed again first.
+ * @param replay the settings to replay review logs with; none, no replay
  * @throws if a statement fails, having rolled back and changed nothing
  */
 export function mergeInto(
   db: Database,
   incoming: Database,
-  stamps: StampSource
+  stamps: StampSource,
+  replay?: ReplaySettings
 ): MergeReport {
   disarmRowStamps(db);
   try {
     return withAttached(db, incoming, () =>
       inTransaction(db, true, () => {
+        const diverged = replay && readDivergences(db, INCOMING_SCHEMA);
         const report = sum(
           MERGE_TABLES.map((table) => {
             const planned = planTable(db, table);
@@ -145,6 +158,10 @@ export function mergeInto(
           })
         );
         mergeWriteStamps(db);
+        if (diverged) {
+          armRowStamps(db, stamps);
+          report.written += replaySchedules(db, diverged, replay);
+        }
         return report;
       })
     );
