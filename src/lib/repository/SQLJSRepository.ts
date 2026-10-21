@@ -13,6 +13,7 @@ import {
   TABLE_NAMES,
 } from '#/lib/constants';
 import { getDeviceId } from '#/lib/device-id';
+import { notify } from '#/lib/notices';
 import type { SyncHoldReason } from '#/lib/obsidian-sync';
 import { yieldToHost } from '#/lib/pacing';
 import type {
@@ -41,6 +42,12 @@ import initSqlJs, {
 } from 'sql.js';
 import { BulkMutateError } from './BulkMutateError';
 import { ContentWatch, type ContentMark } from './content-watch';
+import {
+  mergeInto,
+  openIncoming,
+  previewMerge,
+  type MergeReport,
+} from './row-merge';
 import { armRowStamps, disarmRowStamps } from './row-stamps';
 import { recordSave } from './save-stats';
 import {
@@ -180,6 +187,20 @@ export class SQLJSRepository implements SQLiteRepository {
    * `armRowStamps`, `bumpWriteStamp`).
    */
   #stampClock: () => number;
+  /**
+   * This device's generation in the database in memory (its `write_stamp`
+   * row, 0 if none), read each time the row stamps are armed: after every
+   * save, load and merge.
+   */
+  #ownGeneration = 0;
+  /**
+   * The clock row stamps are drawn from: {@link #stampClock}, but always past
+   * the generation this device last saved, so a row it writes is never
+   * stamped at or below a save it already sent (a write in the same
+   * millisecond as a save, or after the clock went back). Another device
+   * holding that save would otherwise count the row as seen (row-merge.ts).
+   */
+  #rowClock = () => Math.max(this.#stampClock(), this.#ownGeneration + 1);
   /** Tells writes that changed nothing from the rest, which alone save. */
   #content = new ContentWatch();
   /** How many {@link onReloadFromDisk} calls are running. */
@@ -476,8 +497,8 @@ export class SQLJSRepository implements SQLiteRepository {
    *
    * The file is read once, and what to do with it is decided by its write
    * stamp (see {@link #answerIncoming}): this device's own save coming back
-   * is left alone, while another device's copy is taken on, backing up the
-   * database in memory first when that drops saves the copy lacks.
+   * is left alone, while another device's copy is taken on, or merged into
+   * memory when each holds saves the other lacks.
    *
    * A file that fails to load leaves the database in memory as it was, still
    * readable, but refuses writes until a later reload succeeds: the file on
@@ -569,17 +590,21 @@ export class SQLJSRepository implements SQLiteRepository {
    * - a copy from a device away for months (`stale-other`) is left alone,
    *   and memory saved over it, so that device takes this one on in turn.
    * - a copy that has every save memory has (`fast-forward`) is taken on.
-   * - one that lacks some (`stale-self`, `merge`) is taken on after memory is
-   *   backed up, since the saves it lacks are dropped.
+   * - one from a device that has every save memory has, but more than six
+   *   months on (`stale-self`), is taken on after memory is backed up, since
+   *   the saves it lacks are dropped.
+   * - one where each has saves the other lacks (`merge`) is merged into
+   *   memory (see {@link #mergeIncoming}), and never taken on.
    *
    * A file that is not a database is loaded all the same, which refuses it.
    * So is every file while writes are refused, since only loading one lifts
    * the refusal. One older than the write stamp (an older plugin version
-   * wrote it) can't be placed, so is taken on with a backup.
+   * wrote it) can't be placed, so is merged.
    * @returns whether to take the file on
    * @throws if the backup fails, taking nothing on
    */
   async #answerIncoming(incoming: {
+    bytes: ArrayBuffer;
     stamp: WriteVector | 'unstamped' | 'unreadable';
   }): Promise<boolean> {
     const { stamp } = incoming;
@@ -608,22 +633,116 @@ export class SQLJSRepository implements SQLiteRepository {
       case 'fast-forward':
         return true;
       case 'stale-self':
-      case 'merge': {
-        const db = this.db;
-        await this.backupDatabase(getSchemaVersion(db), {
-          marker: kind === 'merge' ? 'merge' : 'stale',
-          data: this.#exportDb(db).buffer as ArrayBuffer,
+        return this.#backUpMemory(this.db, 'stale');
+      case 'merge':
+        // A database started without a file merges nothing: its first save
+        // is still checking that no file appeared, and would find this one
+        // and refuse writes. Taken on instead, as a reload makes that save
+        // write nothing.
+        if (this.#fresh) return this.#backUpMemory(this.db, 'merge');
+        return this.#mergeIncoming(this.db, incoming.bytes);
+    }
+  }
+
+  /**
+   * Back up the database in memory before another device's copy changes it.
+   * @returns whether to go on: not when the repository was disposed meanwhile,
+   * or a transaction opened, which holds the reload back
+   * @throws if the backup fails
+   */
+  async #backUpMemory(db: Database, marker: BackupMarker): Promise<boolean> {
+    await this.backupDatabase(getSchemaVersion(db), {
+      marker,
+      data: this.#exportDb(db).buffer as ArrayBuffer,
+    });
+    // Reloads run one at a time, so only disposal can have replaced
+    // the database meanwhile
+    if (this.#disposed) return false;
+    if (this.#txDepth > 0) {
+      this.#reloadPending = true;
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Merge another device's copy into memory, row by row (see `mergeInto`),
+   * then save, so that the other device takes the result on as a
+   * fast-forward. The one way into a merge.
+   *
+   * Memory is backed up first only when the merge would lose rows of this
+   * device's that the copy never saw, and the user is told how many. Should
+   * the merge itself fail, nothing of it stays, and the copy is taken on
+   * after a backup instead, as before merging existed.
+   * @returns whether to take the copy on instead
+   * @throws if the backup fails, merging nothing
+   */
+  async #mergeIncoming(db: Database, bytes: ArrayBuffer): Promise<boolean> {
+    let incoming: Database;
+    try {
+      incoming = openIncoming(this.#sql!, new Uint8Array(bytes), migrations);
+    } catch (error) {
+      return this.#mergeFailed(db, error, false);
+    }
+    let report: MergeReport;
+    try {
+      let lossy: boolean;
+      try {
+        lossy = previewMerge(db, incoming).replaced > 0;
+      } catch (error) {
+        return await this.#mergeFailed(db, error, false);
+      }
+      if (lossy && !(await this.#backUpMemory(db, 'merge'))) return false;
+      try {
+        report = mergeInto(db, incoming, {
+          deviceId: () => this.#device(),
+          now: this.#rowClock,
         });
-        // Reloads run one at a time, so only disposal can have replaced
-        // the database meanwhile
-        if (this.#disposed) return false;
-        if (this.#txDepth > 0) {
-          this.#reloadPending = true;
-          return false;
-        }
-        return true;
+        // The merge takes the newer generation of each device, this one's too
+        this.#readOwnGeneration(db);
+      } catch (error) {
+        return await this.#mergeFailed(db, error, lossy);
+      }
+    } finally {
+      incoming.close();
+    }
+    // Listeners hear of the rows the merge changed, as of any write
+    this.#flushChanges();
+    // Straight to `save`, past the gate that skips writes changing nothing
+    // (`#contentChanged`, 0174): a merge that changed no row still has a
+    // write stamp the other device must take on. `save` logs its own failures
+    this.save().catch(() => undefined);
+    if (report.replaced > 0) {
+      notify(
+        `Merged changes from another device, replacing ${report.replaced} ` +
+          `local ${report.replaced === 1 ? 'change' : 'changes'}. ` +
+          `A backup was saved.`
+      );
+    }
+    if (report.written > 0) {
+      // Merged rows may be ahead of the notes Sync brings, as a reload's are
+      this.#reloadCallbacks++;
+      try {
+        await this.onReloadFromDisk?.();
+      } finally {
+        this.#reloadCallbacks--;
       }
     }
+    return false;
+  }
+
+  /**
+   * Fall back to taking a copy on that could not be merged, after memory is
+   * backed up, unless it already was.
+   * @returns whether to take the copy on
+   */
+  async #mergeFailed(
+    db: Database,
+    error: unknown,
+    backedUp: boolean
+  ): Promise<boolean> {
+    console.error('Incremental Reading - Failed to merge database:', error);
+    return backedUp || this.#backUpMemory(db, 'merge');
   }
 
   /**
@@ -865,10 +984,16 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   #armRowStamps(db: Database) {
+    this.#readOwnGeneration(db);
     armRowStamps(db, {
       deviceId: () => this.#device(),
-      now: this.#stampClock,
+      now: this.#rowClock,
     });
+  }
+
+  /** Cache this device's generation in `db` (see {@link #ownGeneration}). */
+  #readOwnGeneration(db: Database) {
+    this.#ownGeneration = readWriteVector(db)?.[this.#device()] ?? 0;
   }
 
   /** This device's id (see `getDeviceId`), read on first use. */

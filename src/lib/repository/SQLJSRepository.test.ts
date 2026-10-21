@@ -7,6 +7,7 @@ import {
   DATABASE_FILE_PATH,
 } from '#/lib/constants';
 import { getDeviceId } from '#/lib/device-id';
+import * as notices from '#/lib/notices';
 import type { SyncHoldReason } from '#/lib/obsidian-sync';
 import type { DataChangeEvent, MutationStatement, NoteType } from '#/lib/types';
 import fc from 'fast-check';
@@ -26,6 +27,7 @@ import {
   type MockInstance,
 } from 'vitest';
 import { BulkMutateError } from './BulkMutateError';
+import * as rowMerge from './row-merge';
 import {
   DatabaseLoadError,
   SQLJSRepository,
@@ -788,6 +790,79 @@ async function staleFileWith(ids: readonly string[]): Promise<Uint8Array> {
   const bytes = db.export();
   db.close();
   return bytes;
+}
+
+/**
+ * Bytes of a database file holding exactly `ids` that another device saved
+ * on top of `over`, a file this device wrote: it has every save `over` has,
+ * so it is taken on whole (a fast-forward) rather than merged.
+ */
+async function fileOver(
+  over: Uint8Array | undefined,
+  ids: readonly string[]
+): Promise<Uint8Array> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(await getEmptyDbBytes());
+  insertArticleRows(db, ids);
+  if (over) {
+    const prior = new SQL.Database(over);
+    const [stamps] = prior.exec('SELECT device, generation FROM write_stamp');
+    prior.close();
+    for (const row of stamps?.values ?? []) {
+      db.run('INSERT INTO write_stamp (device, generation) VALUES (?, ?)', row);
+    }
+  }
+  stampAsRemote(db);
+  const bytes = db.export();
+  db.close();
+  return bytes;
+}
+
+/**
+ * Bytes of another device's copy holding `ids` as it changed them after this
+ * device last saw them: stamped later than any write here, with a priority
+ * of 40 where {@link insertArticleRow} writes 30. Merged in, they replace
+ * this device's rows of the same ids, which that device never saw.
+ */
+async function newerFileWith(ids: readonly string[]): Promise<Uint8Array> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(await dbFileWith(ids));
+  db.run(`UPDATE article SET priority = 40, updated_at = $1, updated_by = $2`, {
+    $1: Date.now() + DAY_MS,
+    $2: REMOTE_DEVICE,
+  });
+  const bytes = db.export();
+  db.close();
+  return bytes;
+}
+
+/**
+ * `bytes` with a review whose article neither copy has, as only a file
+ * damaged by hand holds: it can't be merged, so it is taken on after a
+ * backup instead.
+ */
+async function unmergeable(bytes: Uint8Array): Promise<Uint8Array> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(bytes);
+  db.run(
+    `INSERT INTO article_review (id, article_id, review_time)
+     VALUES ('dangling', 'no-such-article', 0)`
+  );
+  const result = db.export();
+  db.close();
+  return result;
+}
+
+/** Priority of each article row the repository can see, by id. */
+function priorities(repo: SQLJSRepository): Record<string, number> {
+  return Object.fromEntries(
+    (
+      repo.query('SELECT id, priority FROM article') as {
+        id: string;
+        priority: number;
+      }[]
+    ).map(({ id, priority }) => [id, priority])
+  );
 }
 
 /** Make every migration's verification fail, as data loss would. */
@@ -1877,7 +1952,7 @@ describe('external sync while a transaction is open', () => {
     insertArticleRow(repo, 'local-1');
     await repo.settleSaves();
 
-    repo.beginSync(await remoteDbBytes(['remote-1']));
+    repo.beginSync(await fileOver(repo.diskBytes, ['remote-1']));
     await repo.landSync();
 
     expect(articleIds(repo)).toEqual(['remote-1']);
@@ -2894,7 +2969,7 @@ describe('start, holding for Sync', () => {
     );
   });
 
-  it('does not hold a reload after startup, even one that migrates', async () => {
+  it('does not hold a merge after startup, even of a file that needs migrating', async () => {
     const { repo, files, hold } = await (async () => {
       const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
       const vault = makeVault(INDEXED, files);
@@ -2907,7 +2982,7 @@ describe('start, holding for Sync', () => {
     await repo.handleFileChange(dbFileChange);
 
     expect(hold).not.toHaveBeenCalled();
-    expect(articleIds(repo)).toEqual(['b']);
+    expect(articleIds(repo).sort()).toEqual(['a', 'b']);
     expect(await readVersion(files)).toBe(LATEST_VERSION);
     repo.db?.close();
   });
@@ -2983,7 +3058,7 @@ describe('reloading a file that changed on disk', () => {
     );
   });
 
-  it('property: migrates a v9 file another device wrote, and keeps saving', async () => {
+  it('property: merges a v9 file another device wrote, and keeps saving', async () => {
     await fc.assert(
       fc.asyncProperty(
         articleIdsArb,
@@ -3000,22 +3075,18 @@ describe('reloading a file that changed on disk', () => {
           files.set(DATABASE_FILE_PATH, await staleFileWith(staleIds));
           await repo.handleFileChange(dbFileChange);
 
-          expect(onReloadFromDisk).toHaveBeenCalledOnce();
-          // Memory, which an unstamped file can't be placed against, and the
-          // file before migrating it
-          const backups = backupWrites(adapter);
-          expect(backups).toHaveLength(2);
-          expect(backups.filter((path) => /_v9_/.test(path))).toHaveLength(1);
-          expect(
-            backups.filter((path) =>
-              path.includes(`_v${LATEST_VERSION}_merge_`)
-            )
-          ).toHaveLength(1);
-          expect(articleIds(repo).sort()).toEqual([...staleIds].sort());
+          const merged = [...new Set([...localIds, ...staleIds])].sort();
+          // Its rows are the unstamped rows both started from, so none of
+          // this device's is lost, and only rows it lacked are written
+          expect(onReloadFromDisk).toHaveBeenCalledTimes(
+            staleIds.some((id) => !localIds.includes(id)) ? 1 : 0
+          );
+          expect(backupWrites(adapter)).toEqual([]);
+          expect(articleIds(repo).sort()).toEqual(merged);
           insertArticleRow(repo, 'local-write');
           await settle();
           expect((await idsInFile(files)).sort()).toEqual(
-            [...staleIds, 'local-write'].sort()
+            [...merged, 'local-write'].sort()
           );
           repo.db?.close();
         }
@@ -3027,7 +3098,7 @@ describe('reloading a file that changed on disk', () => {
     { handler: true, warned: 'the migration failure handler' },
     { handler: false, warned: 'onWriteBlocked' },
   ])(
-    'stops saving when migrating a changed file loses data, warning through $warned',
+    'stops saving when migrating a changed file it cannot merge loses data, warning through $warned',
     async ({ handler }) => {
       const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
       const { app } = makeVault(INDEXED, files);
@@ -3038,7 +3109,8 @@ describe('reloading a file that changed on disk', () => {
         ...(handler ? { onMigrationFailure } : {}),
       });
       failMigrationVerification();
-      const stale = await staleFileWith(['b']);
+      // Taken on whole, so migrated as a load is, with its verification
+      const stale = await unmergeable(await staleFileWith(['b']));
       files.set(DATABASE_FILE_PATH, stale);
 
       await repo.handleFileChange(dbFileChange);
@@ -3232,7 +3304,8 @@ describe('reloading a file that changed on disk', () => {
   });
 
   it('passes over a failed migration of a file that changed again before it finished', async () => {
-    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const initial = await dbFileWith(['a']);
+    const files = new Map([[DATABASE_FILE_PATH, initial]]);
     const { app, adapter } = makeVault(INDEXED, files);
     const onMigrationFailure = vi.fn();
     const onWriteBlocked = vi.fn();
@@ -3247,10 +3320,13 @@ describe('reloading a file that changed on disk', () => {
       return bytes;
     });
 
-    files.set(DATABASE_FILE_PATH, await staleFileWith(['stale']));
+    files.set(
+      DATABASE_FILE_PATH,
+      await unmergeable(await staleFileWith(['stale']))
+    );
     const first = repo.handleFileChange(dbFileChange);
     await settle();
-    files.set(DATABASE_FILE_PATH, await dbFileWith(['b']));
+    files.set(DATABASE_FILE_PATH, await fileOver(initial, ['b']));
     const second = repo.handleFileChange(dbFileChange);
     releaseFirst();
     await Promise.all([first, second]);
@@ -3468,9 +3544,12 @@ describe('dispose', () => {
     expect(adapter.readBinary).not.toHaveBeenCalled();
   });
 
-  it('leaves nothing open when disposed while migrating a changed file', async () => {
+  it('leaves nothing open when disposed while taking on a changed file', async () => {
     const { repo, adapter, files } = await startOver(['a']);
-    files.set(DATABASE_FILE_PATH, await staleFileWith(['b']));
+    files.set(
+      DATABASE_FILE_PATH,
+      await unmergeable(await staleFileWith(['b']))
+    );
     // The reload reads the file, then the backup reads it again: hold that one
     const read = adapter.readBinary.getMockImplementation()!;
     let release!: () => void;
@@ -3970,6 +4049,44 @@ describe("telling another device's copy from this device's own save", () => {
     );
   });
 
+  it('property: stamps every row it writes past the generation it last saved, however the clock moves, and the next save past the row', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          fc.oneof(fc.constant(0), fc.integer({ min: -DAY_MS, max: DAY_MS })),
+          { minLength: 1, maxLength: 6 }
+        ),
+        async (moves) => {
+          vi.useFakeTimers({ toFake: ['Date'] });
+          vi.setSystemTime(FIXED_DUE);
+          const { repo, files } = await startStored([]);
+          const ownGeneration = async () => {
+            const stamp = await stampOf(files.get(DATABASE_FILE_PATH));
+            const mine = Object.keys(stamp).find((d) => d !== REMOTE_DEVICE);
+            return mine === undefined ? 0 : stamp[mine];
+          };
+
+          for (const [i, move] of moves.entries()) {
+            const saved = await ownGeneration();
+            // The same millisecond as that save, or the clock gone back
+            vi.setSystemTime(Date.now() + move);
+            insertArticleRow(repo, `row-${i}`);
+            const [[stamped]] = repo.db!.exec(
+              'SELECT updated_at FROM article WHERE id = $1',
+              [`row-${i}`]
+            )[0].values as number[][];
+            expect(stamped).toBeGreaterThan(saved);
+            await settle();
+            expect(await ownGeneration()).toBeGreaterThanOrEqual(stamped);
+          }
+          repo.db?.close();
+          vi.useRealTimers();
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
   it('leaves its own copy coming back alone, without reloading or saving again', async () => {
     const { repo, adapter, onReloadFromDisk } = await startStored(['a']);
     insertArticleRow(repo, 'b');
@@ -3986,7 +4103,7 @@ describe("telling another device's copy from this device's own save", () => {
     repo.db?.close();
   });
 
-  it('backs up memory, then takes on, a copy from another device that lands while a save of its own is in flight', async () => {
+  it('merges a copy from another device that lands while a save of its own is in flight, then saves the merge after it', async () => {
     const { repo, adapter, files, onReloadFromDisk } = await startStored(['a']);
     let finishWrite!: () => void;
     const write = adapter.writeBinary.getMockImplementation()!;
@@ -4000,13 +4117,16 @@ describe("telling another device's copy from this device's own save", () => {
     files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
     await repo.handleFileChange(dbFileChange);
 
-    expect(articleIds(repo)).toEqual(['remote']);
+    expect(articleIds(repo).sort()).toEqual(['a', 'b', 'remote']);
     expect(onReloadFromDisk).toHaveBeenCalledOnce();
-    const [backup] = markedBackups(adapter, 'merge');
-    expect((await idsIn(files.get(backup))).sort()).toEqual(['a', 'b']);
-    expect(backupWrites(adapter)).toHaveLength(1);
+    expect(backupWrites(adapter)).toEqual([]);
+    // Held here, the older save lands last; the report of it brings the
+    // merge back over it
     finishWrite();
     await settle();
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+    expect((await idsInFile(files)).sort()).toEqual(['a', 'b', 'remote']);
     repo.db?.close();
   });
 
@@ -4109,15 +4229,20 @@ describe("telling another device's copy from this device's own save", () => {
     repo.db?.close();
   });
 
-  it('takes on a file no device stamped, as an older plugin version writes, after backing up memory', async () => {
+  it('merges a file no device stamped, as an older plugin version writes, whose rows lose to every stamped one', async () => {
     const { repo, files, adapter } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const old = await getSharedSql().then((SQL) => SQL.Database);
+    const stale = new old(await staleFileWith(['old', 'b']));
+    stale.run(`UPDATE article SET priority = 40`);
+    files.set(DATABASE_FILE_PATH, stale.export());
+    stale.close();
 
-    files.set(DATABASE_FILE_PATH, await staleFileWith(['old']));
     await repo.handleFileChange(dbFileChange);
 
-    expect(articleIds(repo)).toEqual(['old']);
-    const [backup] = markedBackups(adapter, 'merge');
-    expect(await idsIn(files.get(backup))).toEqual(['a']);
+    expect(priorities(repo)).toEqual({ a: 30, b: 30, old: 40 });
+    expect(backupWrites(adapter)).toEqual([]);
     repo.db?.close();
   });
 
@@ -4157,12 +4282,12 @@ describe("telling another device's copy from this device's own save", () => {
     return open;
   }
 
-  it('takes nothing on when disposed while backing memory up', async () => {
+  it('merges nothing when disposed while backing memory up', async () => {
     const { repo, files, adapter, onReloadFromDisk } = await startStored(['a']);
     insertArticleRow(repo, 'b');
     await settle();
     const openBackup = holdBackup(adapter);
-    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    files.set(DATABASE_FILE_PATH, await newerFileWith(['b']));
     const reload = repo.handleFileChange(dbFileChange);
     await settle();
 
@@ -4174,12 +4299,12 @@ describe("telling another device's copy from this device's own save", () => {
     expect(repo.db).toBeNull();
   });
 
-  it('holds back taking a copy on when a transaction opens while memory is backed up', async () => {
+  it('holds back a merge when a transaction opens while memory is backed up', async () => {
     const { repo, files, adapter } = await startStored(['a']);
     insertArticleRow(repo, 'b');
     await settle();
     const openBackup = holdBackup(adapter);
-    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    files.set(DATABASE_FILE_PATH, await newerFileWith(['b']));
     const reload = repo.handleFileChange(dbFileChange);
     await settle();
 
@@ -4194,19 +4319,19 @@ describe("telling another device's copy from this device's own save", () => {
     finishWork();
 
     await expect(transaction).resolves.toBeUndefined();
-    expect(articleIds(repo).sort()).toEqual(['a', 'b', 'x', 'y']);
+    expect(priorities(repo)).toEqual({ a: 30, b: 30, x: 30, y: 30 });
     await settle();
     repo.db?.close();
   });
 
   // The commit's save would write over the copy, leaving its own echo for
   // the held reload to find; one that fails leaves the copy on disk
-  it('takes the held copy on once the transaction settles, when its save leaves the copy on disk', async () => {
+  it('merges the held copy once the transaction settles, when its save leaves the copy on disk', async () => {
     const { repo, files, adapter } = await startStored(['a']);
     insertArticleRow(repo, 'b');
     await settle();
     const openBackup = holdBackup(adapter);
-    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    files.set(DATABASE_FILE_PATH, await newerFileWith(['b']));
     const reload = repo.handleFileChange(dbFileChange);
     await settle();
 
@@ -4221,7 +4346,9 @@ describe("telling another device's copy from this device's own save", () => {
     finishWork();
 
     await expect(transaction).rejects.toThrow('EBUSY');
-    await vi.waitFor(() => expect(articleIds(repo)).toEqual(['remote']));
+    await vi.waitFor(() =>
+      expect(priorities(repo)).toEqual({ a: 30, b: 40, x: 30 })
+    );
     repo.db?.close();
   });
 
@@ -4237,16 +4364,16 @@ describe("telling another device's copy from this device's own save", () => {
     repo.db?.close();
   });
 
-  it('takes nothing on, and keeps saving, when backing memory up fails', async () => {
+  it('merges nothing, and keeps saving, when backing memory up fails', async () => {
     const { repo, files, adapter, onReloadFromDisk } = await startStored(['a']);
     insertArticleRow(repo, 'b');
     await settle();
     adapter.mkdir.mockRejectedValueOnce(new Error('disk full'));
 
-    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    files.set(DATABASE_FILE_PATH, await newerFileWith(['b', 'remote']));
     await repo.handleFileChange(dbFileChange);
 
-    expect(articleIds(repo).sort()).toEqual(['a', 'b']);
+    expect(priorities(repo)).toEqual({ a: 30, b: 30 });
     expect(onReloadFromDisk).not.toHaveBeenCalled();
     expect(repo.writeRefusal()).toBeNull();
     repo.db?.close();
@@ -4332,6 +4459,166 @@ describe("telling another device's copy from this device's own save", () => {
       repo.db?.close();
     }
   );
+
+  it('backs up its own changes the copy never saw before a merge replaces them, and says how many', async () => {
+    const { repo, files, adapter } = await startStored(['a']);
+    const said = vi.spyOn(notices, 'notify');
+    insertArticleRow(repo, 'b');
+    insertArticleRow(repo, 'c');
+    await settle();
+
+    files.set(DATABASE_FILE_PATH, await newerFileWith(['b', 'c', 'remote']));
+    await repo.handleFileChange(dbFileChange);
+
+    expect(priorities(repo)).toEqual({ a: 30, b: 40, c: 40, remote: 40 });
+    const [backup] = markedBackups(adapter, 'merge');
+    expect((await idsIn(files.get(backup))).sort()).toEqual(['a', 'b', 'c']);
+    expect(backupWrites(adapter)).toHaveLength(1);
+    expect(said).toHaveBeenCalledOnce();
+    expect(said.mock.calls[0][0]).toMatch(/\b2 local changes\b/);
+    repo.db?.close();
+  });
+
+  it('counts a single replaced change in the singular', async () => {
+    const { repo, files } = await startStored(['a']);
+    const said = vi.spyOn(notices, 'notify');
+    insertArticleRow(repo, 'b');
+    await settle();
+
+    files.set(DATABASE_FILE_PATH, await newerFileWith(['b']));
+    await repo.handleFileChange(dbFileChange);
+
+    expect(said.mock.calls[0][0]).toMatch(/\b1 local change\b/);
+    repo.db?.close();
+  });
+
+  it('merges a copy that loses nothing of its own without a backup or a notice', async () => {
+    const { repo, files, adapter } = await startStored(['a']);
+    const said = vi.spyOn(notices, 'notify');
+    insertArticleRow(repo, 'b');
+    await settle();
+
+    files.set(DATABASE_FILE_PATH, await newerFileWith(['a', 'remote']));
+    await repo.handleFileChange(dbFileChange);
+
+    expect(priorities(repo)).toEqual({ a: 40, b: 30, remote: 40 });
+    expect(backupWrites(adapter)).toEqual([]);
+    expect(said).not.toHaveBeenCalled();
+    repo.db?.close();
+  });
+
+  it('tells listeners of the rows a merge brings, and refetches as after a reload', async () => {
+    const { repo, files, onReloadFromDisk } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const events: DataChangeEvent[] = [];
+    repo.onDataChange((event) => events.push(event));
+    const refetching: boolean[] = [];
+    onReloadFromDisk.mockImplementation(() => {
+      refetching.push(repo.refetchingAfterReload);
+    });
+
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    await repo.handleFileChange(dbFileChange);
+
+    expect(events).toEqual([
+      { table: 'article', op: 'insert', ids: ['remote'] },
+    ]);
+    expect(refetching).toEqual([true]);
+    expect(repo.refetchingAfterReload).toBe(false);
+    repo.db?.close();
+  });
+
+  it('saves a merge that brings no row, only saves of other devices, so they reach the next device', async () => {
+    const { repo, files, onReloadFromDisk } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const writes = files.get(DATABASE_FILE_PATH);
+
+    const incoming = await dbFileWith(['a']);
+    files.set(DATABASE_FILE_PATH, incoming);
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(onReloadFromDisk).not.toHaveBeenCalled();
+    expect(files.get(DATABASE_FILE_PATH)).not.toBe(incoming);
+    expect(files.get(DATABASE_FILE_PATH)).not.toBe(writes);
+    const saved = await stampOf(files.get(DATABASE_FILE_PATH));
+    expect(saved[REMOTE_DEVICE]).toBe((await stampOf(incoming))[REMOTE_DEVICE]);
+    expect((await idsInFile(files)).sort()).toEqual(['a', 'b']);
+    repo.db?.close();
+  });
+
+  it('takes on a copy it cannot merge, after backing memory up', async () => {
+    const { repo, files, adapter, onReloadFromDisk } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+
+    files.set(
+      DATABASE_FILE_PATH,
+      await unmergeable(await dbFileWith(['remote']))
+    );
+    await repo.handleFileChange(dbFileChange);
+
+    expect(articleIds(repo)).toEqual(['remote']);
+    expect(onReloadFromDisk).toHaveBeenCalledOnce();
+    const [backup] = markedBackups(adapter, 'merge');
+    expect((await idsIn(files.get(backup))).sort()).toEqual(['a', 'b']);
+    expect(backupWrites(adapter)).toHaveLength(1);
+    repo.db?.close();
+  });
+
+  it('takes on a copy it cannot read for merging, after backing memory up once', async () => {
+    const { repo, files, adapter } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    vi.spyOn(rowMerge, 'previewMerge').mockImplementationOnce(() => {
+      throw new Error('no such column');
+    });
+
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    await repo.handleFileChange(dbFileChange);
+
+    expect(articleIds(repo)).toEqual(['remote']);
+    expect(markedBackups(adapter, 'merge')).toHaveLength(1);
+    expect(backupWrites(adapter)).toHaveLength(1);
+    repo.db?.close();
+  });
+
+  it('backs memory up, then refuses writes, for a copy whose migration fails', async () => {
+    const { repo, files, adapter } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const SQL = await getSharedSql();
+    const broken = new SQL.Database(await staleFileWith(['remote']));
+    broken.exec('DROP TABLE article_review');
+    files.set(DATABASE_FILE_PATH, broken.export());
+    broken.close();
+
+    await repo.handleFileChange(dbFileChange);
+
+    expect(articleIds(repo).sort()).toEqual(['a', 'b']);
+    expect(markedBackups(adapter, 'merge')).toHaveLength(1);
+    expect(repo.writeRefusal()).toBeInstanceOf(Error);
+    repo.db?.close();
+  });
+
+  it('backs memory up once when a merge it backed up for fails, then takes the copy on', async () => {
+    const { repo, files, adapter } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+
+    files.set(
+      DATABASE_FILE_PATH,
+      await unmergeable(await newerFileWith(['b']))
+    );
+    await repo.handleFileChange(dbFileChange);
+
+    expect(priorities(repo)).toEqual({ b: 40 });
+    expect(markedBackups(adapter, 'merge')).toHaveLength(1);
+    expect(backupWrites(adapter)).toHaveLength(1);
+    repo.db?.close();
+  });
 
   it('remembers the stamp of every file it writes or takes on', async () => {
     const { repo, files, app } = await startStored(['a']);
