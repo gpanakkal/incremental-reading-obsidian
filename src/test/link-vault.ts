@@ -5,6 +5,9 @@ import { noteText } from './note-text';
 /** The "New link format" setting: how Obsidian writes a new link's path. */
 export type LinkFormat = 'shortest' | 'relative' | 'absolute';
 
+/** Where the fake disk clock starts: the mtime of the first file added is the next. */
+const FIRST_MTIME = 1_700_000_000_000;
+
 /**
  * A vault of files, the notes among them with frontmatter, that resolves links
  * as Obsidian's `MetadataCache.getLinkpathDest` does (read from its bundle):
@@ -24,15 +27,24 @@ export function makeLinkVault(
 ) {
   const files = new Map<string, TFile>();
   const frontmatter = new Map<string, Record<string, unknown>>();
+  // Every write lands at a later mtime than the last, as on a disk whose
+  // clock only moves forward
+  let clock = FIRST_MTIME;
+  /** Give `file` the mtime of a write landing now, as Obsidian does once it settles. */
+  const touch = (file: TFile) => {
+    file.stat.mtime = ++clock;
+  };
 
   const add = (path: string, fm: Record<string, unknown> | null = null) => {
     const name = path.slice(path.lastIndexOf('/') + 1);
     const dot = name.lastIndexOf('.');
+    const mtime = ++clock;
     const file = {
       path,
       name,
       basename: dot > 0 ? name.slice(0, dot) : name,
       extension: dot > 0 ? name.slice(dot + 1) : '',
+      stat: { ctime: mtime, mtime, size: 0 },
     } as TFile;
     files.set(path, file);
     if (fm) frontmatter.set(path, fm);
@@ -127,6 +139,7 @@ export function makeLinkVault(
       const fm = frontmatter.get(file.path) ?? {};
       edit(fm);
       frontmatter.set(file.path, fm);
+      touch(file);
     }
   );
   const app = {
@@ -153,8 +166,9 @@ export function makeLinkVault(
     files.delete(from);
     const fm = frontmatter.get(from);
     frontmatter.delete(from);
-    const moved = add(to, fm ?? null);
-    // The same file object, as Obsidian keeps it
+    const { stat: _stat, ...moved } = add(to, fm ?? null);
+    // The same file object, as Obsidian keeps it, and its mtime with it: a
+    // rename never touches it
     Object.assign(file, moved);
     files.set(to, file);
     return file;
@@ -164,6 +178,7 @@ export function makeLinkVault(
     app,
     files,
     add,
+    touch,
     move,
     resolve,
     processFrontMatter,

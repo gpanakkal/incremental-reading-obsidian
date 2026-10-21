@@ -12,6 +12,7 @@ import {
 import IRScheduler from '#/lib/IRScheduler';
 import { Markdown } from '#/lib/Markdown';
 import { getMimeType, supportsFrontmatter } from '#/lib/mime';
+import { noteFingerprint } from '#/lib/note-fingerprint';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { decodeAnchor, MIN_ANCHOR } from '#/lib/pdf/pdf-anchor';
 import {
@@ -627,7 +628,11 @@ export class SnippetManager extends ItemManager {
     });
   }
 
-  /** Add the row of the snippet `id` whose note is `snippetFile`. */
+  /**
+   * Add the row of the snippet `id` whose note is `snippetFile`, with the
+   * fingerprint its identity frontmatter, written by now, left it with (see
+   * `noteFingerprint`).
+   */
   private async insertRow(
     snippetFile: TFile,
     id: string,
@@ -638,8 +643,8 @@ export class SnippetManager extends ItemManager {
   ) {
     const query =
       `INSERT INTO snippet ` +
-      `(id, reference, due, interval, priority, parent, start_offset, end_offset) ` +
-      `VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
+      `(id, reference, due, interval, priority, parent, start_offset, end_offset, note_mtime) ` +
+      `VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`;
     await this.repo.mutate(query, [
       id,
       snippetFile.path,
@@ -649,6 +654,7 @@ export class SnippetManager extends ItemManager {
       parentId,
       offsets?.start ?? null,
       offsets?.end ?? null,
+      noteFingerprint(snippetFile),
     ]);
   }
 

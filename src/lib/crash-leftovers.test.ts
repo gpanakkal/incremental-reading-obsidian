@@ -425,6 +425,33 @@ describe('resolveLeftover', () => {
     );
   });
 
+  it('records on the adopted row the fingerprint its tag left the note with, tagged as another type or untagged', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        typeArb,
+        fc.constantFrom<NoteType | null>(null, 'article', 'snippet', 'card'),
+        async (type, taggedAs) => {
+          vi.restoreAllMocks();
+          const path = `${DATA_DIRECTORY}/x/a.md`;
+          const { vault, repo, deps, leftover } = await wireLeftover(
+            taggedAs,
+            path
+          );
+          const file = vault.files.get(path)!;
+          const untouched = file.stat.mtime;
+
+          await resolveLeftover(deps, leftover, 'adopt', type);
+
+          const [row] = repo.storedRows(TABLE_OF[type]);
+          expect(row.note_mtime).toBe(file.stat.mtime);
+          // Only a note that needed the tag was written
+          expect(file.stat.mtime > untouched).toBe(taggedAs !== type);
+        }
+      ),
+      { numRuns: 16 }
+    );
+  });
+
   it('adopts a snippet or card as a child of the item its source links to', async () => {
     for (const type of ['snippet', 'card'] as const) {
       vi.restoreAllMocks();

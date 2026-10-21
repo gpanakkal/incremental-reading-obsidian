@@ -77,7 +77,7 @@ import {
   hostTimer,
   persistentNotice,
 } from './lib/ir-id-warning-notice';
-import { createIrIdWatch } from './lib/ir-id-watch';
+import { createIrIdWatch, shownInMarkdownView } from './lib/ir-id-watch';
 import ReviewManager, { type ItemPositionRow } from './lib/items/ReviewManager';
 import { scanForMovedNotes } from './lib/moved-note-scan';
 import { configureSuccessNotices } from './lib/notices';
@@ -839,6 +839,7 @@ export default class IncrementalReadingPlugin extends Plugin {
       vault: this.app.vault,
       metadataCache: this.app.metadataCache,
       onDamage: (paths) => notice.report(paths),
+      isShown: (path) => shownInMarkdownView(this.app.workspace, path),
     });
     this.register(() => watch.dispose());
 
