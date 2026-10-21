@@ -46,6 +46,7 @@ import { refreshHighlightsEffect } from '../extensions';
 import { ArticleManager } from './ArticleManager';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
+import { NOT_PURGED } from './row-delete';
 
 /** A snippet's offsets as its row holds them: none, for one without. */
 type StoredOffsets = Pick<SnippetRow, 'id' | 'start_offset' | 'end_offset'>;
@@ -691,7 +692,7 @@ export class SnippetManager extends ItemManager {
   }
 
   async fetch(id: string): Promise<ReviewSnippet | null> {
-    const query = `SELECT * FROM snippet WHERE id = $1`;
+    const query = `SELECT * FROM snippet WHERE id = $1 AND ${NOT_PURGED}`;
     const result = await this.repo.query(query, [id]);
     if (!result[0]) return null;
     return this.rowToReviewSnippet(result[0] as SnippetRow);
@@ -717,9 +718,8 @@ export class SnippetManager extends ItemManager {
       conditions.push('dismissed = 0');
     }
 
-    if (!opts?.includeDeleted) {
-      conditions.push('deleted = FALSE');
-    }
+    // Even with the deleted, never those deleted for good
+    conditions.push(opts?.includeDeleted ? NOT_PURGED : 'deleted = FALSE');
 
     if (opts?.excludeIds && opts.excludeIds.length) {
       conditions.push(idNotIn(opts.excludeIds, params));
@@ -909,7 +909,7 @@ export class SnippetManager extends ItemManager {
     const lastReview = (
       await this.repo.query(
         `SELECT * FROM snippet_review WHERE snippet_id = $1 ` +
-          `ORDER BY review_time DESC LIMIT 1`,
+          `AND deleted = FALSE ORDER BY review_time DESC LIMIT 1`,
         [snippet.id]
       )
     )[0] as ISnippetReview | undefined;
@@ -955,14 +955,16 @@ export class SnippetManager extends ItemManager {
   async undoReview(originalSnippet: ISnippetBase, reviewId: string) {
     await this.repo.transaction(async () => {
       const reviewRow = (
-        await this.repo.query(`SELECT * FROM snippet_review WHERE id = $1`, [
-          reviewId,
-        ])
+        await this.repo.query(
+          `SELECT * FROM snippet_review WHERE id = $1 AND deleted = FALSE`,
+          [reviewId]
+        )
       )[0] as ISnippetReview;
       if (!reviewRow)
         throw new Error(`No snippet review found with ID "${reviewId}"`);
       await this.repo.mutate(
-        `DELETE FROM snippet_review WHERE snippet_id = $1 AND (id = $2 OR review_time > $3)`,
+        // Tombstoned, not deleted, so the undo reaches the other devices
+        `UPDATE snippet_review SET deleted = TRUE WHERE snippet_id = $1 AND (id = $2 OR review_time > $3)`,
         [originalSnippet.id, reviewId, reviewRow.review_time]
       );
       await this.repo.mutate(

@@ -62,7 +62,7 @@ class TestRepository extends SQLJSRepository {
 
   rebinds() {
     const [result] = this.db?.exec(
-      'SELECT article_id, old_reference, new_reference, rebound_at FROM rebind ORDER BY article_id'
+      'SELECT article_id, old_reference, new_reference, rebound_at FROM rebind WHERE deleted = FALSE ORDER BY article_id'
     ) ?? [undefined];
     return result?.values ?? [];
   }

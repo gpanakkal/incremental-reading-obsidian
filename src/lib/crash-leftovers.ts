@@ -1,5 +1,6 @@
 import type { ArticleManager } from '#/lib/items/ArticleManager';
 import type { CardManager } from '#/lib/items/CardManager';
+import { NOT_PURGED } from '#/lib/items/row-delete';
 import type { SnippetManager } from '#/lib/items/SnippetManager';
 import type { App, TFile } from 'obsidian';
 import { refusedWrite } from './compensation';
@@ -118,9 +119,13 @@ const DOING: Readonly<Record<LeftoverAction, (name: string) => string>> = {
 /** Whether the database holds any item at all. */
 export async function holdsItems(repo: SQLiteRepository): Promise<boolean> {
   for (const table of ITEM_TABLES) {
-    const rows = await repo.query(`SELECT 1 FROM ${table} LIMIT 1`, [], {
-      throwOnError: true,
-    });
+    const rows = await repo.query(
+      `SELECT 1 FROM ${table} WHERE ${NOT_PURGED} LIMIT 1`,
+      [],
+      {
+        throwOnError: true,
+      }
+    );
     if (rows.length > 0) return true;
   }
   return false;
@@ -137,7 +142,7 @@ async function heldIds(
     const marks = batch.map((_, j) => `$${j + 1}`).join(', ');
     for (const table of ITEM_TABLES) {
       const rows = (await repo.query(
-        `SELECT id FROM ${table} WHERE id IN (${marks})`,
+        `SELECT id FROM ${table} WHERE id IN (${marks}) AND ${NOT_PURGED}`,
         [...batch],
         { throwOnError: true }
       )) as unknown as { id: string }[];

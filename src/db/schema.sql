@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS article (
   dismissed INTEGER NOT NULL DEFAULT FALSE,
   deleted INTEGER NOT NULL DEFAULT FALSE,
   scroll_top INTEGER NOT NULL DEFAULT 0, -- top-visible document character offset; for a PDF, page * 100000 + top in PDF points (0 = unset)
+  updated_at INTEGER NOT NULL DEFAULT 0, -- logical ms clock of the last write that changed the row (0 = never stamped)
+  updated_by TEXT NOT NULL DEFAULT '', -- device id of that write
   CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(fixed_interval_days > 0),
@@ -24,7 +26,11 @@ CREATE INDEX IF NOT EXISTS article_due ON article(due);
 CREATE TABLE IF NOT EXISTS article_review (
   id TEXT NOT NULL PRIMARY KEY, -- UUID
   article_id TEXT NOT NULL REFERENCES article(id) ON DELETE CASCADE,
-  review_time INTEGER NOT NULL
+  review_time INTEGER NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT FALSE, -- undone; kept so the undo reaches other devices
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  updated_by TEXT NOT NULL DEFAULT '',
+  CHECK(deleted = FALSE OR deleted = TRUE)
 );
 
 CREATE TABLE IF NOT EXISTS snippet (
@@ -40,6 +46,8 @@ CREATE TABLE IF NOT EXISTS snippet (
   scroll_top INTEGER NOT NULL DEFAULT 0, -- top-visible document character offset (0 = unset)
   start_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
   end_offset INTEGER DEFAULT NULL, -- character offset from start of parent note's body
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  updated_by TEXT NOT NULL DEFAULT '',
   CHECK(interval > 0),
   CHECK(priority >= 10 AND priority <= 50),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
@@ -54,7 +62,11 @@ CREATE INDEX IF NOT EXISTS snippet_due ON snippet(due);
 CREATE TABLE IF NOT EXISTS snippet_review (
   id TEXT NOT NULL PRIMARY KEY, -- UUID
   snippet_id TEXT NOT NULL REFERENCES snippet(id) ON DELETE CASCADE,
-  review_time INTEGER NOT NULL
+  review_time INTEGER NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT FALSE,
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  updated_by TEXT NOT NULL DEFAULT '',
+  CHECK(deleted = FALSE OR deleted = TRUE)
 );
 
 CREATE TABLE IF NOT EXISTS srs_card (
@@ -75,6 +87,8 @@ CREATE TABLE IF NOT EXISTS srs_card (
   reps INTEGER NOT NULL DEFAULT 0,
   lapses INTEGER NOT NULL DEFAULT 0,
   state INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  updated_by TEXT NOT NULL DEFAULT '',
   CHECK(state >= 0 AND state <= 3),
   CHECK(dismissed = FALSE OR dismissed = TRUE),
   CHECK(deleted = FALSE OR deleted = TRUE)
@@ -97,8 +111,12 @@ CREATE TABLE IF NOT EXISTS srs_card_review (
   learning_steps INTEGER NOT NULL DEFAULT 0,
   rating INTEGER NOT NULL,
   state INTEGER NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT FALSE,
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  updated_by TEXT NOT NULL DEFAULT '',
   CHECK(state >= 0 AND state <= 3),
-  CHECK(rating >= 0 AND rating <= 4)
+  CHECK(rating >= 0 AND rating <= 4),
+  CHECK(deleted = FALSE OR deleted = TRUE)
 );
 
 -- The startup scan's rebinds of articles known by path alone (PDFs), matched
@@ -109,9 +127,13 @@ CREATE TABLE IF NOT EXISTS rebind (
   article_id TEXT NOT NULL PRIMARY KEY REFERENCES article(id) ON DELETE CASCADE,
   old_reference TEXT NOT NULL, -- where the row pointed before it was rebound
   new_reference TEXT NOT NULL, -- where the scan rebound it to
-  rebound_at INTEGER NOT NULL -- unix timestamp
+  rebound_at INTEGER NOT NULL, -- unix timestamp
+  deleted INTEGER NOT NULL DEFAULT FALSE,
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  updated_by TEXT NOT NULL DEFAULT '',
+  CHECK(deleted = FALSE OR deleted = TRUE)
 );
 
 CREATE INDEX IF NOT EXISTS rebind_old_reference ON rebind(old_reference);
 
-PRAGMA user_version = 10;
+PRAGMA user_version = 11;

@@ -69,7 +69,7 @@ import { ArticleManager, type ImportResult } from './ArticleManager';
 import { CardManager } from './CardManager';
 import { ItemManager } from './ItemManager';
 import ReviewManager from './ReviewManager';
-import { deleteRowStatements } from './row-delete';
+import { deleteRowStatements, NOT_PURGED, purgedReference } from './row-delete';
 import { SnippetManager } from './SnippetManager';
 
 // #region HELPERS
@@ -3014,12 +3014,12 @@ describe('fetchMany (includeDeleted option)', () => {
     expect(sql).toMatch(/deleted = FALSE/i);
   });
 
-  it('produces no WHERE clause when all filters are disabled', async () => {
+  it('filters out only rows deleted for good when all filters are disabled', async () => {
     const repo = makeSimpleRepo();
     const manager = new ArticleManager({} as never, repo);
     await manager.fetchMany({ includeDismissed: true, includeDeleted: true });
     const [sql] = lastQueryCall(repo);
-    expect(sql).not.toContain(' WHERE ');
+    expect(sql).toContain(`WHERE ${NOT_PURGED} ORDER BY`);
   });
 });
 
@@ -8579,8 +8579,9 @@ describe('unimportMany', () => {
           // The failing file's own row delete is a statement SQLite rejects
           watchWrites(repo, sliceMs, (statements) =>
             statements.map((statement) =>
-              statement.query === 'DELETE FROM article WHERE id = $1' &&
-              statement.params?.[0] === `id${failing}`
+              statement.query ===
+                deleteRowStatements('article', 'x').at(-1)!.query &&
+              statement.params?.includes(`id${failing}`)
                 ? { query: 'not a statement' }
                 : statement
             )
@@ -8846,6 +8847,42 @@ describe('what an import reports it did', () => {
     );
   });
 
+  it('imports anew a note whose ir-id names only an article deleted for good, which stays deleted', async () => {
+    for (const makeCopy of [false, true]) {
+      vi.restoreAllMocks();
+      const { repo, vault, manager } = await wireUnimport({
+        [NOTE]: { 'ir-id': 'gone' },
+      });
+      seedArticle(repo, 'gone', 'notes/old.md');
+      for (const { query, params } of deleteRowStatements('article', 'gone')) {
+        repo.mutate(query, params);
+      }
+      vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+
+      const result = await manager.import(
+        vault.files.get(NOTE)!,
+        DEFAULT_PRIORITY,
+        null,
+        makeCopy
+      );
+
+      const label = JSON.stringify({ makeCopy });
+      expect(result, label).toMatchObject({ effect: 'created' });
+      expect(result?.articleId, label).not.toBe('gone');
+      expect(
+        repo.rows('article').map(({ id }) => id),
+        label
+      ).toEqual([result?.articleId]);
+      expect(
+        repo
+          .storedRows('article', ` WHERE id = 'gone'`)
+          .map(({ deleted, reference }) => [deleted, reference]),
+        label
+      ).toEqual([[1, purgedReference('gone')]]);
+      repo.dispose();
+    }
+  });
+
   it('brings back a deleted article where its file is, or links the article its ir-id names, deleted or not', async () => {
     const cases = [
       // A PDF is known by its path alone
@@ -9036,9 +9073,10 @@ describe('undoImports', () => {
           expect(
             mutate.mock.calls
               .filter(
-                ([query]) => query === 'DELETE FROM article WHERE id = $1'
+                ([query]) =>
+                  query === deleteRowStatements('article', 'x').at(-1)!.query
               )
-              .map(([, params]) => params?.[0])
+              .map(([, params]) => params?.[1])
           ).toEqual(ids);
           expect(repo.rows('article')).toEqual([]);
           expect(vault.paths()).toEqual(paths);
@@ -9295,5 +9333,83 @@ describe('undoImports', () => {
     expect(repo.rows('article')).toEqual([]);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('notes/n0.md'));
     repo.dispose();
+  });
+});
+
+describe('undoReview', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** An article reviewed at each of `times`, by a real repository. */
+  async function reviewedArticle(times: number[]) {
+    const repo = await TestRepository.create();
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority) VALUES ('a', 'n/a.md', 0, 86400000, 30)`
+    );
+    const manager = new ArticleManager(
+      { settings: { fuzzTextReviews: false } } as never,
+      repo
+    );
+    const article = () =>
+      ArticleManager.rowToBase(repo.rows('article')[0] as never);
+    const reviews: { id: string; before: IArticleBase }[] = [];
+    for (const time of times) {
+      const before = article();
+      reviews.push({ id: await manager.review(before, time), before });
+    }
+    return { repo, manager, article, reviews };
+  }
+
+  it('property: tombstones the review and those after it, leaving the article as if they never happened', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uniqueArray(fc.integer({ min: 1, max: 2 ** 40 }), {
+          minLength: 1,
+          maxLength: 4,
+        }),
+        fc.nat(),
+        fc.integer({ min: 1, max: 2 ** 40 }),
+        async (unsorted, pick, next) => {
+          const times = [...unsorted].sort((a, b) => a - b);
+          const undone = pick % times.length;
+          const undoing = await reviewedArticle(times);
+          const never = await reviewedArticle(times.slice(0, undone));
+          const { id, before } = undoing.reviews[undone];
+
+          await undoing.manager.undoReview(before, id);
+
+          expect(
+            undoing.repo
+              .storedRows('article_review', ' WHERE deleted = TRUE')
+              .map((row) => [row.id, (row.updated_at as number) > 0])
+          ).toEqual(undoing.reviews.slice(undone).map((r) => [r.id, true]));
+          const target = { id: 'a' } as never;
+          expect(await undoing.manager['getReviewCount'](target)).toBe(undone);
+          expect(
+            (await undoing.manager['getLastReview'](target))?.review_time
+          ).toBe(times[undone - 1]);
+          expect(undoing.repo.rows('article')).toEqual(
+            never.repo.rows('article')
+          );
+          // The next review reads nothing of what was undone
+          await undoing.manager.review(undoing.article(), next);
+          await never.manager.review(never.article(), next);
+          expect(undoing.repo.rows('article')).toEqual(
+            never.repo.rows('article')
+          );
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('refuses to undo a review already undone', async () => {
+    const { manager, reviews } = await reviewedArticle([10]);
+    await manager.undoReview(reviews[0].before, reviews[0].id);
+
+    await expect(
+      manager.undoReview(reviews[0].before, reviews[0].id)
+    ).rejects.toThrow(reviews[0].id);
   });
 });

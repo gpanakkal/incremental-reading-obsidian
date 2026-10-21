@@ -9,13 +9,10 @@ import {
 import { parseTagList } from './tags';
 import { cleanFolderList } from './watched-folders';
 
-/**
- * localStorage key holding this device's id. Obsidian namespaces
- * `loadLocalStorage`/`saveLocalStorage` per vault *and* per install, so the
- * value never travels with a synced vault — which is what makes it usable as
- * the device half of {@link ReviewSession}.
- */
-export const DEVICE_ID_KEY = 'incremental-reading-device-id';
+// This device's id, the device half of `ReviewSession` as well as the
+// `updated_by` of every database row it writes: one helper, so the two can
+// never disagree
+export { DEVICE_ID_KEY, getDeviceId } from './device-id';
 
 /**
  * Where the user left off in review, kept across restarts.
@@ -163,21 +160,6 @@ export function sessionItemId(
 ): string | null {
   if (!session || session.deviceId !== deviceId) return null;
   return session.itemId;
-}
-
-/**
- * This device's id, generated on first use. Stored outside `data.json` so it
- * stays put when the vault syncs — see {@link DEVICE_ID_KEY}.
- */
-export function getDeviceId(
-  app: Pick<App, 'loadLocalStorage' | 'saveLocalStorage'>
-): string {
-  const stored: unknown = app.loadLocalStorage(DEVICE_ID_KEY);
-  if (typeof stored === 'string' && stored) return stored;
-
-  const deviceId = crypto.randomUUID();
-  app.saveLocalStorage(DEVICE_ID_KEY, deviceId);
-  return deviceId;
 }
 
 /**

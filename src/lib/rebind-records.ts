@@ -57,6 +57,7 @@ export async function readRebinds(
     `SELECT r.article_id, r.old_reference, r.new_reference, r.rebound_at,
             a.reference, a.deleted
      FROM rebind r LEFT JOIN article a ON a.id = r.article_id
+     WHERE r.deleted = FALSE
      ORDER BY r.article_id`,
     []
   )) as unknown as {
@@ -81,7 +82,7 @@ export async function readRebinds(
  * Record that the startup scan rebound an article. An earlier rebind of the
  * same article still in its window keeps its old path and its time: the
  * article's own file is still expected there, and a stand-in going missing in
- * turn is no news of it. A lapsed one is simply replaced.
+ * turn is no news of it. A lapsed or forgotten one is simply replaced.
  */
 export async function recordRebind(
   repo: Pick<SQLiteRepository, 'mutate'>,
@@ -93,17 +94,19 @@ export async function recordRebind(
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (article_id) DO UPDATE SET
        new_reference = excluded.new_reference,
-       old_reference = CASE WHEN rebound_at >= $5
+       old_reference = CASE WHEN deleted = FALSE AND rebound_at >= $5
          THEN old_reference ELSE excluded.old_reference END,
-       rebound_at = CASE WHEN rebound_at >= $5
-         THEN rebound_at ELSE excluded.rebound_at END`,
+       rebound_at = CASE WHEN deleted = FALSE AND rebound_at >= $5
+         THEN rebound_at ELSE excluded.rebound_at END,
+       deleted = FALSE`,
     [move.id, move.from, move.to, at, at - RECLAIM_WINDOW_MS]
   );
 }
 
 /**
  * Drop an article's rebind record — only the one made at `reboundAt`, when
- * given, so a record written since is kept.
+ * given, so a record written since is kept. Tombstoned, not deleted, so the
+ * drop reaches the other devices.
  */
 export async function forgetRebind(
   repo: Pick<SQLiteRepository, 'mutate'>,
@@ -111,11 +114,14 @@ export async function forgetRebind(
   reboundAt?: number
 ): Promise<void> {
   if (reboundAt === undefined) {
-    await repo.mutate('DELETE FROM rebind WHERE article_id = $1', [articleId]);
+    await repo.mutate(
+      'UPDATE rebind SET deleted = TRUE WHERE article_id = $1',
+      [articleId]
+    );
     return;
   }
   await repo.mutate(
-    'DELETE FROM rebind WHERE article_id = $1 AND rebound_at = $2',
+    'UPDATE rebind SET deleted = TRUE WHERE article_id = $1 AND rebound_at = $2',
     [articleId, reboundAt]
   );
 }
@@ -140,7 +146,7 @@ export async function reclaimAtPath(
     const claims = (await repo.query(
       `SELECT r.article_id, r.new_reference FROM rebind r
        JOIN article a ON a.id = r.article_id
-       WHERE r.old_reference = $1 AND r.rebound_at >= $2
+       WHERE r.old_reference = $1 AND r.rebound_at >= $2 AND r.deleted = FALSE
          AND a.reference = r.new_reference`,
       [path, now - RECLAIM_WINDOW_MS]
     )) as unknown as { article_id: string; new_reference: string }[];

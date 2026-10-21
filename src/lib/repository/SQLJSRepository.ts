@@ -12,6 +12,7 @@ import {
   LOG_DIRECTORY,
   TABLE_NAMES,
 } from '#/lib/constants';
+import { getDeviceId } from '#/lib/device-id';
 import type { SyncHoldReason } from '#/lib/obsidian-sync';
 import { yieldToHost } from '#/lib/pacing';
 import type {
@@ -39,6 +40,7 @@ import initSqlJs, {
   type QueryExecResult,
 } from 'sql.js';
 import { BulkMutateError } from './BulkMutateError';
+import { armRowStamps, disarmRowStamps } from './row-stamps';
 // @ts-ignore - WASM imported as base64 string via custom esbuild plugin.
 // Points at the binary shipped with the installed sql.js package so the bundled
 // WASM stays in lockstep with the sql.js version in node_modules.
@@ -150,6 +152,10 @@ export class SQLJSRepository implements SQLiteRepository {
   #syncHold: SyncHold | undefined;
   /** Whether startup waited on Sync, which may have changed the file. */
   #waitedOnSync = false;
+  /** The `updated_by` of every row this device writes; read on first use. */
+  #deviceId: string | undefined;
+  /** The clock row stamps are drawn from (see `armRowStamps`). */
+  #stampClock: () => number;
 
   /**
    * Use .start to instantiate
@@ -162,8 +168,14 @@ export class SQLJSRepository implements SQLiteRepository {
     onReloadFromDisk?: () => void | Promise<void>;
     onWriteBlocked?: (error: Error) => void;
     onWritesResumed?: () => void;
+    /** Stands in for this install's id (see `getDeviceId`), for tests. */
+    deviceId?: string;
+    /** Stands in for `Date.now` as the clock of row stamps, for tests. */
+    stampClock?: () => number;
   }) {
     this.app = params.app;
+    this.#deviceId = params.deviceId;
+    this.#stampClock = params.stampClock ?? (() => Date.now());
     this.adapter = params.app.vault.adapter;
     this.#dbFilePath = normalizePath(params.dbFilePath);
     this.#schema = params.schema;
@@ -631,8 +643,12 @@ export class SQLJSRepository implements SQLiteRepository {
    * skipped — but the app removes items by soft-deleting (an `UPDATE` that sets
    * `deleted`/`dismissed`), which resolves normally, so this is not hit in
    * practice.
+   *
+   * Arms the row stamps on the same connection too (see `armRowStamps`),
+   * which `export` drops just as it drops the hook.
    */
   protected registerUpdateHook() {
+    if (this.db) this.#armRowStamps(this.db);
     this.db?.updateHook((op, _dbName, table, rowId) => {
       const noteType = ITEM_TABLE_TO_NOTE_TYPE[table];
       if (!noteType) return; // not a queue-item table (e.g. a review log)
@@ -643,10 +659,20 @@ export class SQLJSRepository implements SQLiteRepository {
       const byOp =
         this.#pendingChanges.get(noteType) ??
         new Map<DataChangeOp, Set<string>>();
+      // The stamp an insert's trigger writes is part of the insert
+      if (byOp.get('insert')?.has(id)) return;
+
       const ids = byOp.get(op) ?? new Set<string>();
       ids.add(id);
       byOp.set(op, ids);
       this.#pendingChanges.set(noteType, byOp);
+    });
+  }
+
+  #armRowStamps(db: Database) {
+    armRowStamps(db, {
+      deviceId: () => (this.#deviceId ??= getDeviceId(this.app)),
+      now: this.#stampClock,
     });
   }
 
@@ -995,6 +1021,10 @@ export class SQLJSRepository implements SQLiteRepository {
           }
         }
 
+        // A migration's writes are no device's edits, and its table rebuilds
+        // rename tables the stamp triggers name. The save after it arms them
+        // again, over the migrated tables.
+        disarmRowStamps(this.db);
         const updated = applyMigrations(this.db, pending);
 
         if (updated) {

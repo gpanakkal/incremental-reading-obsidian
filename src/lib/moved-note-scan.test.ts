@@ -770,11 +770,11 @@ function logged(run: ReturnType<typeof wire>) {
   return { log, deps: { ...run.deps, log, dateNow: () => WALL_CLOCK } };
 }
 
-/** Every rebind record, read straight off the database. */
+/** Every live rebind record, read straight off the database. */
 function readRebindRows(repo: TestRepository) {
   const [result] = repo.db?.exec(
     `SELECT article_id, old_reference, new_reference, rebound_at
-     FROM rebind ORDER BY article_id`
+     FROM rebind WHERE deleted = FALSE ORDER BY article_id`
   ) ?? [undefined];
   return (result?.values ?? []).map(([id, from, to, at]) => ({
     id: String(id),

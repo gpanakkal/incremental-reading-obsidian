@@ -53,6 +53,7 @@ import {
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
+import { NOT_PURGED } from './row-delete';
 import SRSCard from './SRSCard';
 import SRSCardReview from './SRSCardReview';
 
@@ -798,7 +799,7 @@ export class CardManager extends ItemManager {
   }
 
   async fetch(id: string): Promise<ReviewCard | null> {
-    const query = `SELECT * FROM srs_card WHERE id = $1`;
+    const query = `SELECT * FROM srs_card WHERE id = $1 AND ${NOT_PURGED}`;
     const result = await this.repo.query(query, [id]);
     if (!result[0]) return null;
     return this.rowToReviewCard(result[0] as SRSCardRow);
@@ -840,9 +841,8 @@ export class CardManager extends ItemManager {
       conditions.push('dismissed = 0');
     }
 
-    if (!opts?.includeDeleted) {
-      conditions.push('deleted = FALSE');
-    }
+    // Even with the deleted, never those deleted for good
+    conditions.push(opts?.includeDeleted ? NOT_PURGED : 'deleted = FALSE');
 
     if (opts?.excludeIds && opts.excludeIds.length) {
       conditions.push(idNotIn(opts.excludeIds, params));
@@ -1041,7 +1041,10 @@ export class CardManager extends ItemManager {
 
     const { nextCard, reviewLog } = recordLog;
     const storedCard = (
-      await this.repo.query(`SELECT * FROM srs_card WHERE id = $1`, [card.id])
+      await this.repo.query(
+        `SELECT * FROM srs_card WHERE id = $1 AND ${NOT_PURGED}`,
+        [card.id]
+      )
     )[0] as SRSCardRow;
     if (!storedCard) {
       throw new Error(`No card found with id ${card.id}`);
@@ -1117,7 +1120,7 @@ export class CardManager extends ItemManager {
   async rollbackBeforeReview(card: ISRSCardDisplay, reviewRowId: string) {
     const reviewRow = (
       await this.repo.query(
-        `SELECT * FROM srs_card_review WHERE id = $1 AND card_id = $2`,
+        `SELECT * FROM srs_card_review WHERE id = $1 AND card_id = $2 AND deleted = FALSE`,
         [reviewRowId, card.id]
       )
     )[0] as SRSCardReviewRow | undefined;
@@ -1159,9 +1162,10 @@ export class CardManager extends ItemManager {
       ];
       await this.repo.mutate(updateQuery, updateParams);
 
-      // delete the specified review and all following reviews for this card
+      // Tombstone the specified review and all following reviews for this
+      // card, rather than delete them, so the undo reaches the other devices
       await this.repo.mutate(
-        `DELETE FROM srs_card_review WHERE card_id = $1 AND review >= $2`,
+        `UPDATE srs_card_review SET deleted = TRUE WHERE card_id = $1 AND review >= $2`,
         [card.id, reviewRow.review]
       );
     });

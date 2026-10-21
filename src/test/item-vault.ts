@@ -1,3 +1,5 @@
+import { NOT_PURGED } from '#/lib/items/row-delete';
+import { SYNCED_TABLES } from '#/lib/repository/row-stamps';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import type { Primitive } from '#/lib/utility-types';
 import { readFileSync } from 'fs';
@@ -8,6 +10,13 @@ import { vi } from 'vitest';
 import { makeLinkVault } from './link-vault';
 
 const SCHEMA = readFileSync(resolve(__dirname, '../db/schema.sql'), 'utf-8');
+
+/** The tables whose rows are items, which a delete for good tombstones. */
+const ITEM_TABLES: ReadonlySet<string> = new Set([
+  'article',
+  'snippet',
+  'srs_card',
+]);
 
 let emptyDb: Promise<{ SQL: SqlJsStatic; bytes: Uint8Array }> | null = null;
 
@@ -67,9 +76,24 @@ export class TestRepository extends SQLJSRepository {
       });
   }
 
-  /** The rows of `table`, as plain objects. */
+  /**
+   * The rows of `table` as readers see them, as plain objects: with no
+   * tombstone of a row deleted for good (an item row's `NOT_PURGED`, a log or
+   * rebind row's `deleted`), and with no stamp, which says when a row was
+   * written rather than what it holds. {@link storedRows} has everything.
+   */
   rows(table: string): Record<string, unknown>[] {
-    return this.query(`SELECT * FROM ${table}`) as unknown as Record<
+    const live = (SYNCED_TABLES as readonly string[]).includes(table)
+      ? ` WHERE ${ITEM_TABLES.has(table) ? NOT_PURGED : 'deleted = FALSE'}`
+      : '';
+    return this.storedRows(table, live).map(
+      ({ updated_at: _at, updated_by: _by, ...content }) => content
+    );
+  }
+
+  /** Every row of `table`, tombstones and stamps included, as plain objects. */
+  storedRows(table: string, where = ''): Record<string, unknown>[] {
+    return this.query(`SELECT * FROM ${table}${where}`) as unknown as Record<
       string,
       unknown
     >[];

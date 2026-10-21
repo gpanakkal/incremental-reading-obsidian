@@ -42,6 +42,7 @@ import type { TFile } from 'obsidian';
 import { resolve } from 'path';
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { tombstoneRowStatements } from './row-delete';
 import { SnippetManager } from './SnippetManager';
 
 // #region HELPERS
@@ -4067,6 +4068,13 @@ describe('delete', () => {
 
   const NOTE = { path: 'items/note.md', extension: 'md' } as TFile;
 
+  /** The writes that tombstone the row `id` with its history, as mutate gets them. */
+  const tombstoned = (id: string) =>
+    tombstoneRowStatements('snippet', id).map(({ query, params }) => [
+      query,
+      params,
+    ]);
+
   it('trashes the note without a word, and drops the row, when told not to prompt', async () => {
     await fc.assert(
       fc.asyncProperty(fc.uuid(), async (id) => {
@@ -4079,10 +4087,7 @@ describe('delete', () => {
         // linked to: a PDF its source links to among them
         expect(fileManager.trashFile).toHaveBeenCalledExactlyOnceWith(NOTE);
         expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
-        expect(mutate).toHaveBeenCalledExactlyOnceWith(
-          `DELETE FROM snippet WHERE id = $1`,
-          [id]
-        );
+        expect(mutate.mock.calls).toEqual(tombstoned(id));
       })
     );
   });
@@ -4097,7 +4102,7 @@ describe('delete', () => {
         NOTE
       );
       expect(fileManager.trashFile).not.toHaveBeenCalled();
-      expect(mutate).toHaveBeenCalledOnce();
+      expect(mutate.mock.calls).toEqual(tombstoned('id-1'));
       vi.restoreAllMocks();
     }
   });
@@ -4131,7 +4136,7 @@ describe('delete', () => {
 
       expect(fileManager.trashFile).not.toHaveBeenCalled();
       expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
-      expect(mutate).toHaveBeenCalledOnce();
+      expect(mutate.mock.calls).toEqual(tombstoned('id-1'));
       vi.restoreAllMocks();
     }
   });
@@ -4605,5 +4610,75 @@ describe('adoptLeftover', () => {
       parent: null,
       priority: DEFAULT_PRIORITY,
     });
+  });
+});
+
+describe('undoReview', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** A snippet reviewed at each of `times`, by a real repository. */
+  async function reviewedSnippet(times: number[]) {
+    const repo = await TestRepository.create();
+    repo.mutate(
+      `INSERT INTO snippet (id, reference, due, interval, priority) VALUES ('s', 's/s.md', 0, 86400000, 30)`
+    );
+    const manager = new SnippetManager(
+      { settings: { fuzzTextReviews: false } } as never,
+      repo
+    );
+    const snippet = () =>
+      SnippetManager.rowToBase(repo.rows('snippet')[0] as never);
+    const reviews: { id: string; before: ISnippetBase }[] = [];
+    for (const time of times) {
+      const before = snippet();
+      reviews.push({ id: await manager.review(before, time), before });
+    }
+    return { repo, manager, snippet, reviews };
+  }
+
+  it('property: tombstones the review and those after it, leaving the snippet as if they never happened', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uniqueArray(fc.integer({ min: 1, max: 2 ** 40 }), {
+          minLength: 1,
+          maxLength: 4,
+        }),
+        fc.nat(),
+        async (unsorted, pick) => {
+          const times = [...unsorted].sort((a, b) => a - b);
+          const undone = pick % times.length;
+          const undoing = await reviewedSnippet(times);
+          const never = await reviewedSnippet(times.slice(0, undone));
+          const { id, before } = undoing.reviews[undone];
+
+          await undoing.manager.undoReview(before, id);
+
+          expect(
+            undoing.repo
+              .storedRows('snippet_review', ' WHERE deleted = TRUE')
+              .map((row) => [row.id, (row.updated_at as number) > 0])
+          ).toEqual(undoing.reviews.slice(undone).map((r) => [r.id, true]));
+          expect(
+            (await undoing.manager['getLastReview']({ id: 's' } as never))
+              ?.review_time
+          ).toBe(times[undone - 1]);
+          expect(undoing.repo.rows('snippet')).toEqual(
+            never.repo.rows('snippet')
+          );
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('refuses to undo a review already undone', async () => {
+    const { manager, reviews } = await reviewedSnippet([10]);
+    await manager.undoReview(reviews[0].before, reviews[0].id);
+
+    await expect(
+      manager.undoReview(reviews[0].before, reviews[0].id)
+    ).rejects.toThrow(reviews[0].id);
   });
 });

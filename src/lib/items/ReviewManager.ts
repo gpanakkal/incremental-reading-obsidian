@@ -66,7 +66,7 @@ import {
 import { ArticleManager, liveArticleLookup } from './ArticleManager';
 import { type CardSelection, CardManager } from './CardManager';
 import { type FileMove, followSourceLinks } from './follow-source-links';
-import { deleteRowStatements } from './row-delete';
+import { deleteRowStatements, NOT_PURGED, purgedReference } from './row-delete';
 import { SnippetManager } from './SnippetManager';
 
 /**
@@ -463,7 +463,8 @@ export default class ReviewManager {
    */
   async #getParentPaths(): Promise<Map<string, string>> {
     const rows = (await this.#repo.query(
-      'SELECT id, reference FROM article UNION ALL SELECT id, reference FROM snippet'
+      `SELECT id, reference FROM article WHERE ${NOT_PURGED} ` +
+        `UNION ALL SELECT id, reference FROM snippet WHERE ${NOT_PURGED}`
     )) as { id: string; reference: string }[] | null;
     return new Map((rows ?? []).map((row) => [row.id, row.reference]));
   }
@@ -475,8 +476,8 @@ export default class ReviewManager {
   async #getParentPath(parentId: string | null): Promise<Map<string, string>> {
     if (parentId === null) return new Map();
     const rows = (await this.#repo.query(
-      'SELECT id, reference FROM article WHERE id = $1 ' +
-        'UNION ALL SELECT id, reference FROM snippet WHERE id = $1',
+      `SELECT id, reference FROM article WHERE id = $1 AND ${NOT_PURGED} ` +
+        `UNION ALL SELECT id, reference FROM snippet WHERE id = $1 AND ${NOT_PURGED}`,
       [parentId]
     )) as { id: string; reference: string }[] | null;
     return new Map((rows ?? []).map((row) => [row.id, row.reference]));
@@ -678,7 +679,10 @@ export default class ReviewManager {
    */
   async getQueueRow(id: string): Promise<QueueRow | null> {
     const articleRow = (
-      await this.#repo.query('SELECT * FROM article WHERE id = $1', [id])
+      await this.#repo.query(
+        `SELECT * FROM article WHERE id = $1 AND ${NOT_PURGED}`,
+        [id]
+      )
     )[0] as ArticleRow | undefined;
     if (articleRow) {
       return this.#includeInQueue(articleRow)
@@ -687,7 +691,10 @@ export default class ReviewManager {
     }
 
     const snippetRow = (
-      await this.#repo.query('SELECT * FROM snippet WHERE id = $1', [id])
+      await this.#repo.query(
+        `SELECT * FROM snippet WHERE id = $1 AND ${NOT_PURGED}`,
+        [id]
+      )
     )[0] as SnippetRow | undefined;
     if (snippetRow) {
       if (!this.#includeInQueue(snippetRow)) return null;
@@ -698,7 +705,10 @@ export default class ReviewManager {
     }
 
     const cardRow = (
-      await this.#repo.query('SELECT * FROM srs_card WHERE id = $1', [id])
+      await this.#repo.query(
+        `SELECT * FROM srs_card WHERE id = $1 AND ${NOT_PURGED}`,
+        [id]
+      )
     )[0] as SRSCardRow | undefined;
     if (cardRow) {
       if (!this.#includeInQueue(cardRow)) return null;
@@ -817,23 +827,22 @@ export default class ReviewManager {
   /**
    * Remove the `table` row `id` for good, leaving its note, if any, alone.
    *
-   * Its review history and any startup rebind of it go with it. Deleted by
-   * hand as well as by their `ON DELETE CASCADE`, so they go even on a
-   * connection that has foreign keys off. The snippets and cards taken from
+   * Its review history and any startup rebind of it go with it. All are
+   * tombstoned rather than deleted (see `tombstoneRowStatements`), so the
+   * delete reaches the other devices. The snippets and cards taken from
    * it stay, with no parent, as if taken from nothing: `parent` has no foreign
    * key to clear it, and one left naming a row that no longer exists would be
    * a parent no lookup can find. All in one transaction, so a failed delete
    * leaves everything as it was.
    *
-   * A hard `DELETE` reports no data change (see
-   * `SQLJSRepository.registerUpdateHook`), so whatever shows the row must be
-   * refreshed by the caller. An id no row of `table` holds changes nothing.
+   * Whatever shows the row should still be refreshed by the caller. An id no
+   * row of `table` holds changes nothing.
    * @throws whatever the delete throws, after rolling it back
    */
   async deleteRow(table: ItemTable, id: string): Promise<void> {
     // An article's row has no `parent`, and reads as having none
     const [row] = (await this.#repo.query(
-      `SELECT * FROM ${table} WHERE id = $1`,
+      `SELECT * FROM ${table} WHERE id = $1 AND ${NOT_PURGED}`,
       [id]
     )) as { parent?: string | null }[];
     if (!row) return;
@@ -849,8 +858,8 @@ export default class ReviewManager {
       // A save failing after the commit throws as well, with the delete held
       // in memory for the next save to write: only a rolled-back one failed
       const [left] = await this.#repo.query(
-        `SELECT id FROM ${table} WHERE id = $1`,
-        [id]
+        `SELECT id FROM ${table} WHERE id = $1 AND reference != $2`,
+        [id, purgedReference(id)]
       );
       if (left) throw error;
       // Lost if Obsidian closes before anything else saves
@@ -1281,7 +1290,7 @@ export default class ReviewManager {
     // note exists and has the right ir-id in frontmatter to ignore copies
     const row = (
       await this.#repo.query(
-        `SELECT reference, deleted FROM ${table} WHERE id = $1`,
+        `SELECT reference, deleted FROM ${table} WHERE id = $1 AND ${NOT_PURGED}`,
         [id]
       )
     )[0] as { reference: string; deleted: unknown } | undefined;
@@ -1296,7 +1305,7 @@ export default class ReviewManager {
     }
 
     await this.#repo.mutate(
-      `UPDATE ${table} SET deleted = FALSE, reference = $1 WHERE id = $2`,
+      `UPDATE ${table} SET deleted = FALSE, reference = $1 WHERE id = $2 AND ${NOT_PURGED}`,
       [file.path, id]
     );
     const came = row && (row.reference !== file.path || Boolean(row.deleted));
