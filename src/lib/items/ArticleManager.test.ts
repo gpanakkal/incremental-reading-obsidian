@@ -31,6 +31,7 @@ import { configureSuccessNotices, type NotifyOptions } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { refusalReason } from '#/lib/readiness';
 import { BulkMutateError } from '#/lib/repository/BulkMutateError';
+import { initialText, replayText } from '#/lib/repository/scheduling-replay';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import { matchFrontmatterTags, stripFrontmatterTags } from '#/lib/tags';
 import type {
@@ -1233,6 +1234,98 @@ const otherPropertiesArb = fc.dictionary(
   fc.constantFrom('source', 'aliases', 'priority', 'cssclasses', 'Tagline'),
   fc.oneof(fc.string(), fc.integer(), fc.array(fc.string(), { maxLength: 2 }))
 );
+
+/** Moments apart from any wall clock, for reviews a test places in time. */
+const UNDO_T = 1_790_000_000_000;
+
+/** What the fuzz spy draws: never a fuzz an article starts with. */
+const UNDO_FUZZ = -7;
+
+/**
+ * Article `a` on a real database as imported, due at {@link UNDO_T}, never
+ * reviewed, reviewed by `review`, which notes the article as it was before.
+ */
+async function undoableArticle(
+  priority: number,
+  fixed: number | null,
+  fuzzTextReviews = false
+) {
+  const repo = await TestRepository.create();
+  repo.mutate(
+    `INSERT INTO article (id, reference, due, interval, priority, fixed_interval_days)
+     VALUES ('a', 'n/a.md', $1, $2, $3, $4)`,
+    [UNDO_T, TEXT_BASE_REVIEW_INTERVAL, priority, fixed]
+  );
+  const manager = new ArticleManager(
+    { settings: { fuzzTextReviews } } as never,
+    repo
+  );
+  const article = () =>
+    ArticleManager.rowToBase(repo.rows('article')[0] as never);
+  const review = async (at: number) => {
+    const before = article();
+    return { id: await manager.review(before, at), before };
+  };
+  const undo = (reviewed: { id: string; before: IArticleBase }) =>
+    manager.undoReview(reviewed.before, reviewed.id);
+  /** Every review of the article, undone ones included. */
+  const log = () =>
+    repo.storedRows('article_review').map((r) => ({
+      id: r.id as string,
+      at: r.review_time as number,
+      deleted: r.deleted as number,
+    }));
+  /** The schedule the live log implies, replayed from the import. */
+  const replayed = () => {
+    const { priority: p, fixed_interval_days } = article();
+    return replayText(
+      log(),
+      { priority: p, fixed_interval_days },
+      { fuzzTextReviews },
+      initialText({ due: UNDO_T, due_fuzz: null })
+    );
+  };
+  return { repo, manager, article, review, undo, log, replayed };
+}
+
+/** A change to an article's rules made in the review tab. */
+type RulesChange =
+  | { kind: 'priority'; priority: number }
+  | { kind: 'fixed'; days: number }
+  | { kind: 'unfixed'; priority: number };
+
+const rulesChangeArb: fc.Arbitrary<RulesChange> = fc.oneof(
+  fc.record({
+    kind: fc.constant('priority' as const),
+    priority: fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+  }),
+  fc.record({
+    kind: fc.constant('fixed' as const),
+    days: fc.integer({
+      min: MINIMUM_FIXED_REVIEW_INTERVAL,
+      max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+    }),
+  }),
+  fc.record({
+    kind: fc.constant('unfixed' as const),
+    priority: fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+  })
+);
+
+/** Make `change` to `article` as the review tab makes it. */
+async function changeRules(
+  manager: ArticleManager,
+  article: IArticleBase,
+  change: RulesChange
+) {
+  if (change.kind === 'priority') {
+    await manager.reprioritize(article, change.priority);
+  } else if (change.kind === 'fixed') {
+    await manager.setFixedInterval(article, change.days);
+  } else {
+    await manager.disableFixedInterval(article, change.priority);
+  }
+}
 
 // #endregion
 
@@ -9778,6 +9871,133 @@ describe('undoReview', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
+
+  it('property: undoing a review after the rules changed leaves the article as the change leaves it without that review', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        fc.option(
+          fc.integer({
+            min: MINIMUM_FIXED_REVIEW_INTERVAL,
+            max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+          }),
+          { nil: null }
+        ),
+        fc.array(fc.integer({ min: 1, max: 60 * MS_PER_DAY }), {
+          minLength: 1,
+          maxLength: 5,
+        }),
+        fc.nat(),
+        rulesChangeArb,
+        async (priority, fixed, gaps, pick, change) => {
+          // Only a fixed interval is unfixed in the review tab
+          fc.pre(change.kind !== 'unfixed' || fixed !== null);
+          const undone = pick % gaps.length;
+          const undoing = await undoableArticle(priority, fixed);
+          const never = await undoableArticle(priority, fixed);
+          const reviewed = [];
+          let at = UNDO_T;
+          for (const [i, gap] of gaps.entries()) {
+            at += gap;
+            reviewed.push(await undoing.review(at));
+            if (i < undone) await never.review(at);
+          }
+          await changeRules(undoing.manager, undoing.article(), change);
+          await changeRules(never.manager, never.article(), change);
+
+          await undoing.undo(reviewed[undone]);
+
+          expect(undoing.repo.rows('article')).toEqual(
+            never.repo.rows('article')
+          );
+        }
+      ),
+      { numRuns: 60 }
+    );
+  }, 60_000);
+
+  it('property: undoing a review never takes back another device’s review, whenever its clock dated it, and leaves the article as the reviews left imply', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: MINIMUM_PRIORITY, max: MAXIMUM_PRIORITY }),
+        fc.option(
+          fc.integer({
+            min: MINIMUM_FIXED_REVIEW_INTERVAL,
+            max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+          }),
+          { nil: null }
+        ),
+        fc.boolean(),
+        fc.array(
+          fc.oneof(
+            fc.record({
+              kind: fc.constant('review' as const),
+              gap: fc.integer({ min: 1, max: 60 * MS_PER_DAY }),
+            }),
+            // Another device's review, merged in: dated by a clock ahead of
+            // this one or behind it
+            fc.record({
+              kind: fc.constant('theirs' as const),
+              skew: fc.integer({ min: -60 * MS_PER_DAY, max: 60 * MS_PER_DAY }),
+            }),
+            fc.record({ kind: fc.constant('undo' as const), pick: fc.nat() })
+          ),
+          { maxLength: 12 }
+        ),
+        async (priority, fixed, fuzz, events) => {
+          vi.restoreAllMocks();
+          vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(UNDO_FUZZ);
+          const article = await undoableArticle(priority, fixed, fuzz);
+          const reviewed: Awaited<ReturnType<typeof article.review>>[] = [];
+          const theirs: string[] = [];
+          let now = UNDO_T;
+          for (const [i, event] of events.entries()) {
+            const live = article.log().filter((r) => !r.deleted);
+            if (event.kind === 'review') {
+              // Reviewed after every review it has, at an even moment:
+              // theirs are at odd ones, so no two share one
+              const after = Math.max(now, ...live.map((r) => r.at)) + event.gap;
+              now = after + (after % 2);
+              reviewed.push(await article.review(now));
+            } else if (event.kind === 'theirs') {
+              const dated = now + event.skew;
+              const id = `theirs-${i}`;
+              article.repo.mutate(
+                `INSERT INTO article_review (id, article_id, review_time, updated_at, updated_by)
+                 VALUES ($1, 'a', $2, 1, 'other')`,
+                [id, dated - (dated % 2) + 1]
+              );
+              theirs.push(id);
+              // The article as the merge that brought it in leaves it
+              const { interval, due, due_fuzz } = article.replayed();
+              article.repo.mutate(
+                `UPDATE article SET interval = $1, due = $2, due_fuzz = $3 WHERE id = 'a'`,
+                [interval, due, due_fuzz]
+              );
+            } else {
+              const mine = reviewed.filter((r) =>
+                live.some((l) => l.id === r.id)
+              );
+              if (mine.length === 0) continue;
+              const undone = mine[event.pick % mine.length];
+
+              await article.undo(undone);
+
+              const log = article.log();
+              expect(log.find((r) => r.id === undone.id)?.deleted).toBe(1);
+              expect(
+                log.filter((r) => theirs.includes(r.id) && r.deleted)
+              ).toEqual([]);
+              const { interval, due, due_fuzz, dismissed } = article.article();
+              expect({ interval, due, due_fuzz }).toEqual(article.replayed());
+              expect(dismissed).toBe(undone.before.dismissed);
+            }
+          }
+        }
+      ),
+      { numRuns: 60 }
+    );
+  }, 120_000);
 
   /** An article reviewed at each of `times`, by a real repository. */
   async function reviewedArticle(times: number[]) {

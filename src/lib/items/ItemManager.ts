@@ -7,12 +7,18 @@ import {
 import { claimsIdentity } from '#/lib/ir-id-watch';
 import IRScheduler from '#/lib/IRScheduler';
 import { supportsFrontmatter } from '#/lib/mime';
+import type { ItemTable } from '#/lib/moved-note-scan';
 import {
   type IrIdRelation,
   noteFingerprint,
   reconcileAction,
 } from '#/lib/note-fingerprint';
 import { STAMP_COLUMNS } from '#/lib/repository/row-stamps';
+import {
+  liveInOrder,
+  REPLAYED_LOGS,
+  type TextRules,
+} from '#/lib/repository/scheduling-replay';
 import {
   formatSourceLink,
   linkNamesPath,
@@ -27,20 +33,27 @@ import type {
   MutationStatement,
   NoteType,
   RowTypes,
-  SRSCardRow,
   SnippetRow,
+  SRSCardRow,
   TableName,
 } from '#/lib/types';
 import type { Primitive } from '#/lib/utility-types';
 import type IncrementalReadingPlugin from '#/main';
 import {
+  normalizePath,
   type App,
   type TAbstractFile,
   type TFile,
-  normalizePath,
 } from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
+import {
+  notedLog,
+  planUndo,
+  textAfterUndo,
+  type AuthoredReview,
+  type UndoPlan,
+} from './review-undo';
 import {
   NOT_PURGED,
   REVIEW_LOG_OF,
@@ -55,6 +68,14 @@ export class ItemManager {
   plugin: IncrementalReadingPlugin;
   app: App;
   repo: SQLiteRepository;
+  /**
+   * The ids of the live reviews the item had just before each review made
+   * here this session, by the review's id: what the item as it was before the
+   * review, which its undo is handed, reflects (see `planUndo`). In memory,
+   * as the undo stack is; ids alone, read back from the log at undo time (see
+   * `notedLog`), as an item's log can run to hundreds of reviews.
+   */
+  protected readonly logsBefore = new Map<string, string[]>();
 
   constructor(plugin: IncrementalReadingPlugin, repo: SQLiteRepository) {
     this.plugin = plugin;
@@ -629,6 +650,106 @@ export class ItemManager {
       `UPDATE ${table} SET priority = $1, due = $2, interval = $3 WHERE id = $4`,
       [newPriority, due, interval, text.id]
     );
+  }
+
+  /** Every review of `itemId` in `table`'s log, undone ones included. */
+  private async readLog(
+    table: ItemTable,
+    itemId: string
+  ): Promise<AuthoredReview[]> {
+    const { log, parent, at } = REPLAYED_LOGS.find(
+      ({ item }) => item === table
+    )!;
+    const rating = table === 'srs_card' ? 'rating' : 'NULL';
+    return (await this.repo.query(
+      `SELECT id, ${at} AS at, ${rating} AS rating, updated_by, deleted
+       FROM ${log} WHERE ${parent} = $1`,
+      [itemId]
+    )) as unknown as AuthoredReview[];
+  }
+
+  /**
+   * Note the live reviews of `itemId` before review `reviewId` of it is
+   * written, for its undo (see {@link logsBefore}). Called in the review's
+   * transaction, so no merge comes between the two.
+   */
+  protected async noteLogBefore(
+    table: ItemTable,
+    itemId: string,
+    reviewId: string
+  ): Promise<void> {
+    this.logsBefore.set(
+      reviewId,
+      liveInOrder(await this.readLog(table, itemId)).map(({ id }) => id)
+    );
+  }
+
+  /**
+   * Tombstone review `reviewId` of `itemId` and the reviews undoing it takes
+   * with it (see `planUndo`), rather than delete them, so the undo reaches
+   * the other devices. Called in the undo's transaction.
+   * @throws when it is no live review of the item, undone already
+   */
+  protected async takeBackReview(
+    table: ItemTable,
+    itemId: string,
+    reviewId: string
+  ): Promise<UndoPlan> {
+    const reviews = await this.readLog(table, itemId);
+    const noted = this.logsBefore.get(reviewId);
+    const plan = planUndo(reviews, reviewId, noted && notedLog(reviews, noted));
+    if (!plan) {
+      throw new Error(`No review "${reviewId}" of ${table} ${itemId} to undo`);
+    }
+    const [log, parent] = REVIEW_LOG_OF[table];
+    const taken = [...plan.taken];
+    await this.repo.mutate(
+      `UPDATE ${log} SET deleted = TRUE WHERE ${parent} = $1 AND id IN ` +
+        `(${taken.map((_, i) => `$${i + 2}`).join(', ')})`,
+      [itemId, ...taken]
+    );
+    return plan;
+  }
+
+  /**
+   * Undo review `reviewId` of `original`, the text as it was before it: take
+   * it back with the later reviews this device made of it, and give it the
+   * schedule the reviews left imply under its rules now (see
+   * `textAfterUndo`), dismissed or not as it was, all in one transaction.
+   */
+  protected async undoTextReview(
+    table: 'article' | 'snippet',
+    original: IArticleBase | ISnippetBase,
+    reviewId: string
+  ): Promise<void> {
+    const taken = await this.repo.transaction(async () => {
+      const plan = await this.takeBackReview(table, original.id, reviewId);
+      const [now] = (await this.repo.query(
+        `SELECT * FROM ${table} WHERE id = $1`,
+        [original.id]
+      )) as unknown as TextRules[];
+      const { interval, due, due_fuzz } = textAfterUndo(
+        plan,
+        original,
+        now,
+        this.plugin.settings
+      );
+      await this.repo.mutate(
+        `UPDATE ${table} SET dismissed = $1, due = $2, interval = $3, due_fuzz = $4 WHERE id = $5`,
+        [original.dismissed, due, interval, due_fuzz, original.id]
+      );
+      return plan.taken;
+    });
+    this.forgetNotes(taken);
+  }
+
+  /**
+   * Drop the notes of reviews an undo took back, which no undo can take
+   * again: each later one of this device's goes with the undone one, though
+   * its own undo is still on the stack.
+   */
+  protected forgetNotes(taken: Iterable<string>): void {
+    for (const id of taken) this.logsBefore.delete(id);
   }
 
   /**

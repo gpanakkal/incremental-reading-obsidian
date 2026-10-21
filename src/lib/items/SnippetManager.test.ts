@@ -4695,6 +4695,44 @@ describe('undoReview', () => {
     );
   });
 
+  it('keeps a review another device dated after the undone one, leaving the snippet as that review alone leaves it', async () => {
+    const undoing = await reviewedSnippet([10 * MS_PER_DAY]);
+    const theirs = await reviewedSnippet([11 * MS_PER_DAY]);
+    // Made on a device whose clock runs ahead, and merged in since
+    undoing.repo.mutate(
+      `INSERT INTO snippet_review (id, snippet_id, review_time, updated_at, updated_by)
+       VALUES ('theirs', 's', $1, 1, 'other')`,
+      [11 * MS_PER_DAY]
+    );
+
+    await undoing.manager.undoReview(
+      undoing.reviews[0].before,
+      undoing.reviews[0].id
+    );
+
+    expect(
+      undoing.repo
+        .storedRows('snippet_review')
+        .map(({ id, deleted }) => [id, deleted])
+    ).toEqual([
+      [undoing.reviews[0].id, 1],
+      ['theirs', 0],
+    ]);
+    expect(undoing.repo.rows('snippet')).toEqual(theirs.repo.rows('snippet'));
+  });
+
+  it('drops what the undone review and those taken back with it noted for their undos', async () => {
+    const { manager, reviews } = await reviewedSnippet([10, 20, 30]);
+
+    await manager.undoReview(reviews[1].before, reviews[1].id);
+
+    expect([
+      ...(
+        manager as unknown as { logsBefore: Map<string, unknown> }
+      ).logsBefore.keys(),
+    ]).toEqual([reviews[0].id]);
+  });
+
   it('refuses to undo a review already undone', async () => {
     const { manager, reviews } = await reviewedSnippet([10]);
     await manager.undoReview(reviews[0].before, reviews[0].id);

@@ -1890,6 +1890,7 @@ export class ArticleManager extends ItemManager {
     const reviewId = crypto.randomUUID();
 
     await this.repo.transaction(async () => {
+      await this.noteLogBefore('article', article.id, reviewId);
       await this.repo.mutate(
         'INSERT INTO article_review (id, article_id, review_time) VALUES ($1, $2, $3)',
         [reviewId, article.id, reviewed]
@@ -1904,34 +1905,11 @@ export class ArticleManager extends ItemManager {
   }
 
   /**
-   * Reset the article and remove all reviews from the specified one onwards
+   * Undo review `reviewId` of the article, `originalArticle` being the article
+   * as it was before it (see `undoTextReview`)
    */
   async undoReview(originalArticle: IArticleBase, reviewId: string) {
-    await this.repo.transaction(async () => {
-      const reviewRow = (
-        await this.repo.query(
-          `SELECT * FROM article_review WHERE id = $1 AND deleted = FALSE`,
-          [reviewId]
-        )
-      )[0] as IArticleReview;
-      if (!reviewRow)
-        throw new Error(`No article review found with ID "${reviewId}"`);
-      await this.repo.mutate(
-        // Tombstoned, not deleted, so the undo reaches the other devices
-        `UPDATE article_review SET deleted = TRUE WHERE article_id = $1 AND (id = $2 OR review_time > $3)`,
-        [originalArticle.id, reviewId, reviewRow.review_time]
-      );
-      await this.repo.mutate(
-        `UPDATE article SET dismissed = $1, due = $2, interval = $3, due_fuzz = $4 WHERE id = $5`,
-        [
-          originalArticle.dismissed,
-          originalArticle.due,
-          originalArticle.interval,
-          originalArticle.due_fuzz,
-          originalArticle.id,
-        ]
-      );
-    });
+    await this.undoTextReview('article', originalArticle, reviewId);
   }
 
   /**

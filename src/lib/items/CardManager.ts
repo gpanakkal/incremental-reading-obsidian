@@ -17,7 +17,6 @@ import type {
   MissingItem,
   ReviewCard,
   SQLiteRepository,
-  SRSCardReviewRow,
   SRSCardRow,
 } from '#/lib/types';
 import { getEndOfDay, reviewDayOf, searchAll } from '#/lib/utils';
@@ -54,6 +53,7 @@ import {
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
+import { cardAfterUndo } from './review-undo';
 import { NOT_PURGED } from './row-delete';
 import SRSCard from './SRSCard';
 import SRSCardReview from './SRSCardReview';
@@ -1065,6 +1065,7 @@ export class CardManager extends ItemManager {
     );
 
     await this.repo.transaction(async () => {
+      await this.noteLogBefore('srs_card', card.id, reviewRow.id);
       const updatedCard = CardManager.baseToRow(nextCard);
       let updateQuery = `UPDATE srs_card SET `;
       const columnUpdateSegments = [
@@ -1121,29 +1122,27 @@ export class CardManager extends ItemManager {
   }
 
   /**
-   * Undo the review `reviewRowId` of `card`, and every later one: the card as
-   * it was before it, dismissed or not, all in one transaction. A dismissal
-   * put back by a write of its own could be lost on its own, leaving a card
-   * that was dismissed back in the queue.
+   * Undo the review `reviewRowId` of `card`: take it back with the later
+   * reviews this device made of it, and give the card the state the reviews
+   * left imply (see `cardAfterUndo`), dismissed or not as it was, all in one
+   * transaction. A dismissal put back by a write of its own could be lost on
+   * its own, leaving a card that was dismissed back in the queue.
    * @param card the card as it was before the review
+   * @throws when the review is no live review of the card, undone already
    */
   async rollbackBeforeReview(card: ISRSCardDisplay, reviewRowId: string) {
-    const reviewRow = (
-      await this.repo.query(
-        `SELECT * FROM srs_card_review WHERE id = $1 AND card_id = $2 AND deleted = FALSE`,
-        [reviewRowId, card.id]
-      )
-    )[0] as SRSCardReviewRow | undefined;
-    if (!reviewRow) {
-      throw new Error(
-        `No card review found with id ${reviewRowId} for card ${card.id}`
+    const taken = await this.repo.transaction(async () => {
+      const plan = await this.takeBackReview('srs_card', card.id, reviewRowId);
+      const [{ created_at }] = (await this.repo.query(
+        `SELECT created_at FROM srs_card WHERE id = $1`,
+        [card.id]
+      )) as unknown as Pick<SRSCardRow, 'created_at'>[];
+      const updatedCard = cardAfterUndo(
+        plan,
+        CardManager.displayToRow(card),
+        created_at,
+        this.plugin.settings.fsrsParams
       );
-    }
-
-    const rolledBackCard = this.getFsrs().rollback(card, reviewRow);
-    await this.repo.transaction(async () => {
-      // update the card row
-      const updatedCard = CardManager.baseToRow({ ...card, ...rolledBackCard });
       let updateQuery = `UPDATE srs_card SET `;
       const columnUpdateSegments = [
         `due = $1, last_review = $2`,
@@ -1171,13 +1170,8 @@ export class CardManager extends ItemManager {
         card.id,
       ];
       await this.repo.mutate(updateQuery, updateParams);
-
-      // Tombstone the specified review and all following reviews for this
-      // card, rather than delete them, so the undo reaches the other devices
-      await this.repo.mutate(
-        `UPDATE srs_card_review SET deleted = TRUE WHERE card_id = $1 AND review >= $2`,
-        [card.id, reviewRow.review]
-      );
+      return plan.taken;
     });
+    this.forgetNotes(taken);
   }
 }
