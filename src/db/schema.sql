@@ -136,4 +136,12 @@ CREATE TABLE IF NOT EXISTS rebind (
 
 CREATE INDEX IF NOT EXISTS rebind_old_reference ON rebind(old_reference);
 
-PRAGMA user_version = 11;
+-- One row per device that ever saved the file: the generation of its latest
+-- save, max(previous + 1, now). Read to tell this device's own save coming
+-- back from another device's copy. Not a synced row table: no row stamps.
+CREATE TABLE IF NOT EXISTS write_stamp (
+  device TEXT NOT NULL PRIMARY KEY,
+  generation INTEGER NOT NULL
+);
+
+PRAGMA user_version = 12;

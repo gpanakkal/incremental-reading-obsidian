@@ -9,6 +9,13 @@ import type { Database } from 'sql.js';
  */
 export const UNTRACKED_COLUMNS: ReadonlySet<string> = new Set<string>();
 
+/**
+ * Tables whose writes are no change to the content. `write_stamp` (0168) is
+ * bumped by `save()` itself, just before it exports: counting that bump
+ * would make a save look like a write that needs one more save after it.
+ */
+export const UNTRACKED_TABLES: ReadonlySet<string> = new Set(['write_stamp']);
+
 /** Prefix of the TEMP triggers that count content changes. */
 const TRIGGER_PREFIX = 'ir_content_';
 /** The SQL function those triggers call, bound to {@link ContentWatch}. */
@@ -36,8 +43,9 @@ function column(db: Database, sql: string): unknown[] {
  * counts every row an UPDATE matched, even one it rewrote with the values it
  * already had. So every table gets TEMP triggers that call back here on an
  * INSERT, a DELETE, or an UPDATE that changes a column outside
- * {@link UNTRACKED_COLUMNS} (`OLD.c IS NOT NEW.c`, byte for byte). A change
- * to the schema itself shows in `schema_version` instead.
+ * {@link UNTRACKED_COLUMNS} (`OLD.c IS NOT NEW.c`, byte for byte). Tables in
+ * {@link UNTRACKED_TABLES} get none. A change to the schema itself shows in
+ * `schema_version` instead.
  *
  * TEMP triggers live in the connection, not the file: they are never saved,
  * and they go when sql.js `export()` reopens the connection (along with the
@@ -115,7 +123,9 @@ export class ContentWatch {
       db,
       `SELECT name FROM main.sqlite_master
          WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'`
-    ).map(String);
+    )
+      .map(String)
+      .filter((name) => !UNTRACKED_TABLES.has(name));
     let made = 0;
     tables.forEach((table, i) => {
       const trigger = (op: 'INSERT' | 'DELETE' | 'UPDATE', when = '') => {

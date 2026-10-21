@@ -32,6 +32,12 @@ import {
   StartupCancelledError,
   type SyncHold,
 } from './SQLJSRepository';
+import {
+  KNOWN_WRITE_STAMP_KEY,
+  readWriteVector,
+  STALE_AFTER_MS,
+  type WriteVector,
+} from './write-stamp';
 
 /** The schema version every migrated or fresh database ends at. */
 const LATEST_VERSION = migrations[migrations.length - 1].version;
@@ -233,23 +239,46 @@ function insertArticleRows(db: Database, ids: readonly string[]) {
   db.exec('COMMIT');
 }
 
+/** The device that saved every other device's copy of the file below. */
+const REMOTE_DEVICE = 'remote-device';
+let remoteGeneration = 0;
+
+/**
+ * Stamp `db` as saved once more by another device, as every copy Sync brings
+ * down is. One that was not would read as this device's own save coming
+ * back, and be left alone.
+ */
+function stampAsRemote(db: Database) {
+  remoteGeneration = Math.max(remoteGeneration + 1, Date.now());
+  db.run(
+    `INSERT INTO write_stamp (device, generation) VALUES ($1, $2)
+     ON CONFLICT (device) DO UPDATE SET generation = excluded.generation`,
+    [REMOTE_DEVICE, remoteGeneration]
+  );
+}
+
 const remoteDbCache = new Map<string, Uint8Array>();
 
 /**
  * Serialized bytes of a database holding exactly `ids` — what another device's
- * copy of the file looks like once Obsidian Sync brings it down.
+ * copy of the file looks like once Obsidian Sync brings it down. Stamped anew
+ * on every call, as each copy follows another save.
  */
 async function remoteDbBytes(ids: readonly string[]): Promise<Uint8Array> {
   const key = ids.join(',');
-  const cached = remoteDbCache.get(key);
-  if (cached) return cached;
-
   const SQL = await getSharedSql();
-  const db = new SQL.Database(await getEmptyDbBytes());
-  insertArticleRows(db, ids);
+  let rows = remoteDbCache.get(key);
+  if (!rows) {
+    const db = new SQL.Database(await getEmptyDbBytes());
+    insertArticleRows(db, ids);
+    rows = db.export();
+    db.close();
+    remoteDbCache.set(key, rows);
+  }
+  const db = new SQL.Database(rows);
+  stampAsRemote(db);
   const bytes = db.export();
   db.close();
-  remoteDbCache.set(key, bytes);
   return bytes;
 }
 
@@ -275,21 +304,30 @@ class SyncedTestRepository extends SQLJSRepository {
   #inFlightSync: Promise<void> | null = null;
   #sqlStatic!: initSqlJs.SqlJsStatic;
 
+  /** Every other file written, such as backups. */
+  otherFiles = new Map<string, Uint8Array>();
+
   static async create(): Promise<SyncedTestRepository> {
     const SQL = await getSharedSql();
     const schema = getSharedSchema();
     let repo!: SyncedTestRepository;
     const adapter = {
-      writeBinary: async (_path: string, data: ArrayBuffer) => {
-        repo.diskBytes = new Uint8Array(data.slice(0));
+      writeBinary: async (path: string, data: ArrayBuffer) => {
+        const bytes = new Uint8Array(data.slice(0));
+        if (path === SYNCED_DB_PATH) repo.diskBytes = bytes;
+        else repo.otherFiles.set(path, bytes);
       },
       // Resolves against whatever is on disk when the read lands rather than
       // when it was issued, so a save that beats the read wins — as it would
       // on a real filesystem.
-      readBinary: async (_path: string) => {
+      readBinary: async (path: string) => {
+        const other = repo.otherFiles.get(path);
+        if (other) return other.slice().buffer;
         await new Promise<void>((release) => repo.#parkedReads.push(release));
         return repo.diskBytes.slice().buffer;
       },
+      exists: async () => true,
+      mkdir: async () => {},
     };
     repo = new SyncedTestRepository({
       app: {
@@ -316,9 +354,9 @@ class SyncedTestRepository extends SQLJSRepository {
    * harmless there but would pile thousands up over a fuzz run. Nothing reads
    * the old instance either way.
    */
-  protected override async reloadDb() {
+  protected override async reloadDb(bytes?: ArrayBuffer) {
     const previous = this.db;
-    const result = await super.reloadDb();
+    const result = await super.reloadDb(bytes);
     if (this.db !== previous) previous?.close();
     return result;
   }
@@ -366,11 +404,7 @@ class SyncedTestRepository extends SQLJSRepository {
     this.#inFlightSync = null;
   }
 
-  /**
-   * Wait out the floating `save()` a non-transactional `mutate` starts. Until
-   * it settles `pendingSaveCount` is non-zero, which makes `handleFileChange`
-   * ignore an incoming sync.
-   */
+  /** Wait out the floating `save()` a non-transactional `mutate` starts. */
   async settleSaves(): Promise<void> {
     for (let i = 0; this.pendingSaveCount > 0 && i < 20; i++) {
       await Promise.resolve();
@@ -634,6 +668,7 @@ async function dbFileWith(ids: readonly string[]): Promise<Uint8Array> {
   const SQL = await getSharedSql();
   const db = new SQL.Database(await getEmptyDbBytes());
   insertArticleRows(db, ids);
+  stampAsRemote(db);
   const bytes = db.export();
   db.close();
   return bytes;
@@ -749,7 +784,7 @@ const INDEXED: IndexView = { folder: true, file: true };
 async function staleFileWith(ids: readonly string[]): Promise<Uint8Array> {
   const SQL = await getSharedSql();
   const db = new SQL.Database(await dbFileWith(ids));
-  db.exec('DROP TABLE rebind; PRAGMA user_version = 9');
+  db.exec('DROP TABLE rebind; DROP TABLE write_stamp; PRAGMA user_version = 9');
   const bytes = db.export();
   db.close();
   return bytes;
@@ -850,6 +885,67 @@ const abortPointArb = fc.oneof(
   fc.constant({ kind: 'while-held' as const }),
   fc.nat({ max: 40 }).map((hops) => ({ kind: 'after-hold' as const, hops }))
 );
+/** Give `app` a localStorage of its own, as every vault has. */
+function withStorage(app: App): App & { storage: Map<string, unknown> } {
+  const storage = new Map<string, unknown>();
+  return Object.assign(app, {
+    storage,
+    loadLocalStorage: (key: string): unknown => storage.get(key) ?? null,
+    saveLocalStorage: (key: string, data: unknown) => {
+      storage.set(key, data);
+    },
+  });
+}
+
+/** Bytes of a database file holding `ids`, stamped with exactly `stamp`. */
+async function fileStamped(
+  ids: readonly string[],
+  stamp: WriteVector
+): Promise<Uint8Array> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(await getEmptyDbBytes());
+  insertArticleRows(db, ids);
+  for (const [device, generation] of Object.entries(stamp)) {
+    db.run('INSERT INTO write_stamp VALUES ($1, $2)', [device, generation]);
+  }
+  const bytes = db.export();
+  db.close();
+  return bytes;
+}
+
+/** The write stamp of the database file `bytes`. */
+async function stampOf(bytes: Uint8Array | undefined): Promise<WriteVector> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(bytes);
+  const [rows] = db.exec('SELECT device, generation FROM write_stamp');
+  db.close();
+  return Object.fromEntries(rows?.values ?? []) as WriteVector;
+}
+
+/** Ids of every article row in the database file `bytes`. */
+async function idsIn(bytes: Uint8Array | undefined): Promise<string[]> {
+  return idsInFile(new Map(bytes ? [[DATABASE_FILE_PATH, bytes]] : []));
+}
+
+/**
+ * `files` with `ids` added to its database file and another device's
+ * generation raised: that device's next save, made on top of this one's.
+ */
+async function savedOnTopBy(
+  bytes: Uint8Array | undefined,
+  ids: readonly string[]
+): Promise<Uint8Array> {
+  const SQL = await getSharedSql();
+  const db = new SQL.Database(bytes);
+  insertArticleRows(db, ids);
+  stampAsRemote(db);
+  const out = db.export();
+  db.close();
+  return out;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 // #endregion
 
 describe('onDataChange', () => {
@@ -1924,6 +2020,26 @@ describe('external sync while a transaction is open', () => {
     expect(articleIds(repo)).toContain('local-3');
   });
 
+  // The reload reads the file before it can tell whether a transaction is
+  // open, and one can open while the read is under way.
+  it('holds back a reload whose read was under way when a transaction opened', async () => {
+    const repo = await SyncedTestRepository.create();
+    insertArticleRow(repo, 'local-0');
+    await repo.settleSaves();
+    repo.beginSync(await remoteDbBytes(['remote-1']));
+
+    await repo.transaction(async () => {
+      insertArticleRow(repo, 'local-1');
+      await repo.landSync();
+      insertArticleRow(repo, 'local-2');
+    });
+
+    expect(articleIds(repo)).toEqual(
+      expect.arrayContaining(['local-0', 'local-1', 'local-2'])
+    );
+    await repo.settleSync();
+  });
+
   // Subscribers refresh the review queue from these events. An id the reload
   // discarded would leave the queue showing a row the database does not hold.
   it('never announces a row the reload discarded', async () => {
@@ -2850,6 +2966,7 @@ describe('reloading a file that changed on disk', () => {
           files.set(DATABASE_FILE_PATH, await dbFileWith(laterIds));
           await repo.handleFileChange(dbFileChange);
           // Told once, as writes resume, and not again by a later reload
+          files.set(DATABASE_FILE_PATH, await dbFileWith(laterIds));
           await repo.handleFileChange(dbFileChange);
           expect(onWritesResumed).toHaveBeenCalledOnce();
 
@@ -2884,7 +3001,16 @@ describe('reloading a file that changed on disk', () => {
           await repo.handleFileChange(dbFileChange);
 
           expect(onReloadFromDisk).toHaveBeenCalledOnce();
-          expect(backupWrites(adapter)).toHaveLength(1);
+          // Memory, which an unstamped file can't be placed against, and the
+          // file before migrating it
+          const backups = backupWrites(adapter);
+          expect(backups).toHaveLength(2);
+          expect(backups.filter((path) => /_v9_/.test(path))).toHaveLength(1);
+          expect(
+            backups.filter((path) =>
+              path.includes(`_v${LATEST_VERSION}_merge_`)
+            )
+          ).toHaveLength(1);
           expect(articleIds(repo).sort()).toEqual([...staleIds].sort());
           insertArticleRow(repo, 'local-write');
           await settle();
@@ -3137,14 +3263,14 @@ describe('reloading a file that changed on disk', () => {
   });
 
   it('does not reload the file its own save is writing', async () => {
-    const { repo, adapter } = await startOver(['a']);
+    const { repo, adapter, files, onReloadFromDisk } = await startOver(['a']);
     let finishWrite!: () => void;
     const write = adapter.writeBinary.getMockImplementation()!;
     adapter.writeBinary.mockImplementationOnce(async (path, data) => {
       await new Promise<void>((resolve) => (finishWrite = resolve));
       return write(path, data);
     });
-    adapter.readBinary.mockClear();
+    const db = repo.db;
 
     insertArticleRow(repo, 'b');
     await settle();
@@ -3153,7 +3279,9 @@ describe('reloading a file that changed on disk', () => {
     finishWrite();
     await settle();
 
-    expect(adapter.readBinary).not.toHaveBeenCalled();
+    expect(onReloadFromDisk).not.toHaveBeenCalled();
+    expect(repo.db).toBe(db);
+    expect((await idsInFile(files)).sort()).toEqual(['a', 'b']);
     repo.db?.close();
   });
 
@@ -3188,7 +3316,7 @@ describe('reloading a file that changed on disk', () => {
 
   it('holds a reload that comes due while a transaction is open until it settles', async () => {
     const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
-    const { app } = makeVault(INDEXED, files);
+    const { app, adapter } = makeVault(INDEXED, files);
     let finishListener!: () => void;
     const listenerHeld = new Promise<void>((r) => (finishListener = r));
     const onReloadFromDisk = vi
@@ -3213,12 +3341,20 @@ describe('reloading a file that changed on disk', () => {
     finishListener();
     await firstReload;
     await settle();
+    const reads = adapter.readBinary.mock.calls.length;
     finishWork();
 
     await expect(transaction).resolves.toBeUndefined();
     expect(articleIds(repo).sort()).toEqual(['b', 'x', 'y']);
+    // The held reload runs once the transaction settles. The commit's save
+    // has written over the copy that came due by then, so it finds this
+    // device's own save, and memory stays as it is.
+    await vi.waitFor(() =>
+      expect(adapter.readBinary.mock.calls.length).toBeGreaterThan(reads)
+    );
     await settle();
-    expect(onReloadFromDisk).toHaveBeenCalledTimes(2);
+    expect(articleIds(repo).sort()).toEqual(['b', 'x', 'y']);
+    expect(onReloadFromDisk).toHaveBeenCalledOnce();
     repo.db?.close();
   });
 
@@ -3764,5 +3900,524 @@ describe('skipping saves that change nothing (0174)', () => {
 
     expect(seen).toEqual([true, true, true]);
     expect(repo.refetchingAfterReload).toBe(false);
+  });
+});
+
+describe("telling another device's copy from this device's own save", () => {
+  beforeEach(() => {
+    stubWasm();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'debug').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** A started repository over a file holding `ids`, with localStorage. */
+  async function startStored(ids: readonly string[]) {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(ids)]]);
+    const vault = makeVault(INDEXED, files);
+    const app = withStorage(vault.app);
+    const onReloadFromDisk = vi.fn();
+    const repo = await startRepo(app, { onReloadFromDisk });
+    const device = app.storage.get('incremental-reading-device-id');
+    return { ...vault, app, repo, onReloadFromDisk, device };
+  }
+
+  /** Paths of the backups written with `marker` in their name. */
+  function markedBackups(
+    adapter: ReturnType<typeof makeVault>['adapter'],
+    marker: string
+  ) {
+    return backupWrites(adapter).filter((path) =>
+      path.includes(`_v${LATEST_VERSION}_${marker}_`)
+    );
+  }
+
+  it('property: stamps every save with this device at one past its last generation or the clock, whichever is later', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.integer({ min: -DAY_MS, max: DAY_MS }), {
+          minLength: 1,
+          maxLength: 6,
+        }),
+        async (moves) => {
+          vi.useFakeTimers({ toFake: ['Date'] });
+          vi.setSystemTime(FIXED_DUE);
+          const { repo, files } = await startStored([]);
+          const remote = (await stampOf(files.get(DATABASE_FILE_PATH)))[
+            REMOTE_DEVICE
+          ];
+          let last = -Infinity;
+
+          for (const [i, move] of moves.entries()) {
+            vi.setSystemTime(Date.now() + move);
+            insertArticleRow(repo, `row-${i}`);
+            await settle();
+            const stamp = await stampOf(files.get(DATABASE_FILE_PATH));
+            const mine = Object.keys(stamp).find((d) => d !== REMOTE_DEVICE)!;
+
+            last = Math.max(last + 1, Date.now());
+            expect(stamp).toEqual({ [REMOTE_DEVICE]: remote, [mine]: last });
+          }
+          repo.db?.close();
+          vi.useRealTimers();
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('leaves its own copy coming back alone, without reloading or saving again', async () => {
+    const { repo, adapter, onReloadFromDisk } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const db = repo.db;
+    const writes = adapter.writeBinary.mock.calls.length;
+
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(onReloadFromDisk).not.toHaveBeenCalled();
+    expect(repo.db).toBe(db);
+    expect(adapter.writeBinary).toHaveBeenCalledTimes(writes);
+    repo.db?.close();
+  });
+
+  it('backs up memory, then takes on, a copy from another device that lands while a save of its own is in flight', async () => {
+    const { repo, adapter, files, onReloadFromDisk } = await startStored(['a']);
+    let finishWrite!: () => void;
+    const write = adapter.writeBinary.getMockImplementation()!;
+    adapter.writeBinary.mockImplementationOnce(async (path, data) => {
+      await new Promise<void>((resolve) => (finishWrite = resolve));
+      return write(path, data);
+    });
+    insertArticleRow(repo, 'b');
+    await settle();
+
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    await repo.handleFileChange(dbFileChange);
+
+    expect(articleIds(repo)).toEqual(['remote']);
+    expect(onReloadFromDisk).toHaveBeenCalledOnce();
+    const [backup] = markedBackups(adapter, 'merge');
+    expect((await idsIn(files.get(backup))).sort()).toEqual(['a', 'b']);
+    expect(backupWrites(adapter)).toHaveLength(1);
+    finishWrite();
+    await settle();
+    repo.db?.close();
+  });
+
+  it('leaves a copy from a device away for more than 180 days alone, and saves its own over it', async () => {
+    const { repo, files, adapter, onReloadFromDisk } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+
+    files.set(
+      DATABASE_FILE_PATH,
+      await fileStamped(['ancient'], {
+        away: Date.now() - STALE_AFTER_MS - DAY_MS,
+      })
+    );
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(articleIds(repo).sort()).toEqual(['a', 'b']);
+    expect((await idsInFile(files)).sort()).toEqual(['a', 'b']);
+    expect(onReloadFromDisk).not.toHaveBeenCalled();
+    expect(backupWrites(adapter)).toEqual([]);
+    repo.db?.close();
+  });
+
+  it("backs up its own copy, then takes on another device's, when its own last save is more than 180 days older", async () => {
+    // Later than any generation stamped so far
+    const start = Date.now() + 3650 * DAY_MS;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(start);
+    const { repo, files, adapter, onReloadFromDisk } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+
+    vi.setSystemTime(start + STALE_AFTER_MS + DAY_MS);
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['fresh']));
+    await repo.handleFileChange(dbFileChange);
+
+    expect(articleIds(repo)).toEqual(['fresh']);
+    expect(onReloadFromDisk).toHaveBeenCalledOnce();
+    const [backup] = markedBackups(adapter, 'stale');
+    expect((await idsIn(files.get(backup))).sort()).toEqual(['a', 'b']);
+    expect(backupWrites(adapter)).toHaveLength(1);
+    repo.db?.close();
+  });
+
+  it('takes on a copy that has every save it has, backing nothing up', async () => {
+    const { repo, files, adapter, onReloadFromDisk } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+
+    files.set(
+      DATABASE_FILE_PATH,
+      await savedOnTopBy(files.get(DATABASE_FILE_PATH), ['c'])
+    );
+    await repo.handleFileChange(dbFileChange);
+
+    expect(articleIds(repo).sort()).toEqual(['a', 'b', 'c']);
+    expect(onReloadFromDisk).toHaveBeenCalledOnce();
+    expect(backupWrites(adapter)).toEqual([]);
+    repo.db?.close();
+  });
+
+  it('saves over an older copy of its own when no save of its own is on the way', async () => {
+    const { repo, files, onReloadFromDisk } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const older = files.get(DATABASE_FILE_PATH);
+    insertArticleRow(repo, 'c');
+    await settle();
+
+    files.set(DATABASE_FILE_PATH, older!);
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(articleIds(repo).sort()).toEqual(['a', 'b', 'c']);
+    expect((await idsInFile(files)).sort()).toEqual(['a', 'b', 'c']);
+    expect(onReloadFromDisk).not.toHaveBeenCalled();
+    repo.db?.close();
+  });
+
+  it('leaves an older copy of its own alone while a save of its own is on the way', async () => {
+    const { repo, files, adapter } = await startStored(['a']);
+    let finishWrite!: () => void;
+    const write = adapter.writeBinary.getMockImplementation()!;
+    adapter.writeBinary.mockImplementationOnce(async (path, data) => {
+      await new Promise<void>((resolve) => (finishWrite = resolve));
+      return write(path, data);
+    });
+    insertArticleRow(repo, 'b');
+    await settle();
+    const writes = adapter.writeBinary.mock.calls.length;
+
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(adapter.writeBinary).toHaveBeenCalledTimes(writes);
+    finishWrite();
+    await settle();
+    expect((await idsInFile(files)).sort()).toEqual(['a', 'b']);
+    repo.db?.close();
+  });
+
+  it('takes on a file no device stamped, as an older plugin version writes, after backing up memory', async () => {
+    const { repo, files, adapter } = await startStored(['a']);
+
+    files.set(DATABASE_FILE_PATH, await staleFileWith(['old']));
+    await repo.handleFileChange(dbFileChange);
+
+    expect(articleIds(repo)).toEqual(['old']);
+    const [backup] = markedBackups(adapter, 'merge');
+    expect(await idsIn(files.get(backup))).toEqual(['a']);
+    repo.db?.close();
+  });
+
+  it('saves its own copy over one from a device away for months even while a save of its own is on the way', async () => {
+    const { repo, files, adapter } = await startStored(['a']);
+    let finishWrite!: () => void;
+    const write = adapter.writeBinary.getMockImplementation()!;
+    adapter.writeBinary.mockImplementationOnce(async (path, data) => {
+      await new Promise<void>((resolve) => (finishWrite = resolve));
+      return write(path, data);
+    });
+    insertArticleRow(repo, 'b');
+    await settle();
+    const writes = adapter.writeBinary.mock.calls.length;
+
+    files.set(
+      DATABASE_FILE_PATH,
+      await fileStamped(['ancient'], {
+        away: Date.now() - STALE_AFTER_MS - DAY_MS,
+      })
+    );
+    await repo.handleFileChange(dbFileChange);
+    await settle();
+
+    expect(adapter.writeBinary.mock.calls.length).toBeGreaterThan(writes);
+    finishWrite();
+    await settle();
+    expect((await idsInFile(files)).sort()).toEqual(['a', 'b']);
+    repo.db?.close();
+  });
+
+  /** Hold the next backup at creating its folder until the gate opens. */
+  function holdBackup(adapter: ReturnType<typeof makeVault>['adapter']) {
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    adapter.mkdir.mockImplementationOnce(() => gate);
+    return open;
+  }
+
+  it('takes nothing on when disposed while backing memory up', async () => {
+    const { repo, files, adapter, onReloadFromDisk } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const openBackup = holdBackup(adapter);
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    const reload = repo.handleFileChange(dbFileChange);
+    await settle();
+
+    repo.dispose();
+    openBackup();
+    await reload;
+
+    expect(onReloadFromDisk).not.toHaveBeenCalled();
+    expect(repo.db).toBeNull();
+  });
+
+  it('holds back taking a copy on when a transaction opens while memory is backed up', async () => {
+    const { repo, files, adapter } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const openBackup = holdBackup(adapter);
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    const reload = repo.handleFileChange(dbFileChange);
+    await settle();
+
+    let finishWork!: () => void;
+    const transaction = repo.transaction(async () => {
+      insertArticleRow(repo, 'x');
+      await new Promise<void>((resolve) => (finishWork = resolve));
+      insertArticleRow(repo, 'y');
+    });
+    openBackup();
+    await reload;
+    finishWork();
+
+    await expect(transaction).resolves.toBeUndefined();
+    expect(articleIds(repo).sort()).toEqual(['a', 'b', 'x', 'y']);
+    await settle();
+    repo.db?.close();
+  });
+
+  // The commit's save would write over the copy, leaving its own echo for
+  // the held reload to find; one that fails leaves the copy on disk
+  it('takes the held copy on once the transaction settles, when its save leaves the copy on disk', async () => {
+    const { repo, files, adapter } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const openBackup = holdBackup(adapter);
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    const reload = repo.handleFileChange(dbFileChange);
+    await settle();
+
+    let finishWork!: () => void;
+    const transaction = repo.transaction(async () => {
+      insertArticleRow(repo, 'x');
+      await new Promise<void>((resolve) => (finishWork = resolve));
+    });
+    openBackup();
+    await reload;
+    adapter.writeBinary.mockRejectedValueOnce(new Error('EBUSY'));
+    finishWork();
+
+    await expect(transaction).rejects.toThrow('EBUSY');
+    await vi.waitFor(() => expect(articleIds(repo)).toEqual(['remote']));
+    repo.db?.close();
+  });
+
+  it('keeps what it had, refusing writes, when the changed file cannot be read', async () => {
+    const { repo, adapter, onReloadFromDisk } = await startStored(['a']);
+    adapter.readBinary.mockRejectedValueOnce(new Error('EBUSY'));
+
+    await repo.handleFileChange(dbFileChange);
+
+    expect(articleIds(repo)).toEqual(['a']);
+    expect(repo.writeRefusal()).toBeInstanceOf(Error);
+    expect(onReloadFromDisk).not.toHaveBeenCalled();
+    repo.db?.close();
+  });
+
+  it('takes nothing on, and keeps saving, when backing memory up fails', async () => {
+    const { repo, files, adapter, onReloadFromDisk } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    adapter.mkdir.mockRejectedValueOnce(new Error('disk full'));
+
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    await repo.handleFileChange(dbFileChange);
+
+    expect(articleIds(repo).sort()).toEqual(['a', 'b']);
+    expect(onReloadFromDisk).not.toHaveBeenCalled();
+    expect(repo.writeRefusal()).toBeNull();
+    repo.db?.close();
+  });
+
+  it('neither writes nor moves its write stamp for a write that changes nothing (0174)', async () => {
+    const { repo, adapter } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const writes = adapter.writeBinary.mock.calls.length;
+    const stamp = readWriteVector(repo.db as Database);
+
+    repo.mutate('UPDATE article SET priority = priority WHERE id = $1', ['a']);
+    await settle();
+
+    expect(adapter.writeBinary).toHaveBeenCalledTimes(writes);
+    expect(readWriteVector(repo.db as Database)).toEqual(stamp);
+    repo.db?.close();
+  });
+
+  it.each([
+    {
+      kind: 'behind',
+      // An older copy of its own, no save on the way
+      copy: (older: Uint8Array) => Promise.resolve(older),
+    },
+    {
+      kind: 'stale-other',
+      copy: () =>
+        fileStamped(['ancient'], {
+          away: Date.now() - STALE_AFTER_MS - DAY_MS,
+        }),
+    },
+  ])(
+    'saves unchanged memory over a $kind copy, past the gate that skips writes changing nothing (0174)',
+    async ({ copy }) => {
+      const { repo, adapter, files } = await startStored(['a']);
+      insertArticleRow(repo, 'b');
+      await settle();
+      const older = files.get(DATABASE_FILE_PATH)!;
+      insertArticleRow(repo, 'c');
+      await settle();
+      // The gate is on: a write that changes nothing saves nothing
+      repo.mutate('UPDATE article SET priority = priority WHERE id = $1', [
+        'a',
+      ]);
+      await settle();
+      const writes = adapter.writeBinary.mock.calls.length;
+
+      files.set(DATABASE_FILE_PATH, await copy(older));
+      await repo.handleFileChange(dbFileChange);
+      await settle();
+
+      expect(adapter.writeBinary).toHaveBeenCalledTimes(writes + 1);
+      expect((await idsInFile(files)).sort()).toEqual(['a', 'b', 'c']);
+      repo.db?.close();
+    }
+  );
+
+  it.each([
+    {
+      kind: 'fast-forward',
+      copy: (mine: Uint8Array) => savedOnTopBy(mine, ['remote']),
+    },
+    { kind: 'merge', copy: () => dbFileWith(['remote']) },
+  ])(
+    'says it is refetching while the reload callback runs after taking on a $kind copy',
+    async ({ copy }) => {
+      const { repo, files, onReloadFromDisk } = await startStored(['a']);
+      insertArticleRow(repo, 'b');
+      await settle();
+      const seen: boolean[] = [];
+      onReloadFromDisk.mockImplementation(() => {
+        seen.push(repo.refetchingAfterReload);
+      });
+
+      files.set(DATABASE_FILE_PATH, await copy(files.get(DATABASE_FILE_PATH)!));
+      await repo.handleFileChange(dbFileChange);
+
+      expect(articleIds(repo)).toContain('remote');
+      expect(seen).toEqual([true]);
+      expect(repo.refetchingAfterReload).toBe(false);
+      repo.db?.close();
+    }
+  );
+
+  it('remembers the stamp of every file it writes or takes on', async () => {
+    const { repo, files, app } = await startStored(['a']);
+    const known = () => app.storage.get(KNOWN_WRITE_STAMP_KEY);
+    expect(known()).toEqual(await stampOf(files.get(DATABASE_FILE_PATH)));
+
+    insertArticleRow(repo, 'b');
+    await settle();
+    expect(known()).toEqual(await stampOf(files.get(DATABASE_FILE_PATH)));
+
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    await repo.handleFileChange(dbFileChange);
+    expect(known()).toEqual(await stampOf(files.get(DATABASE_FILE_PATH)));
+    repo.db?.close();
+  });
+
+  describe('at startup', () => {
+    /** A first session over a file holding `ids` that writes `written`. */
+    async function firstSession(ids: readonly string[], written: string) {
+      const started = await startStored(ids);
+      insertArticleRow(started.repo, written);
+      await settle();
+      started.repo.dispose();
+      return started;
+    }
+
+    it('finds the file it last wrote to be its own echo, reporting nothing', async () => {
+      const { app } = await firstSession(['a'], 'b');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const repo = await startRepo(app);
+
+      expect(repo.startupKind).toBe('echo');
+      expect(warn).not.toHaveBeenCalled();
+      repo.dispose();
+    });
+
+    it('takes a later save made on top of its own for a fast-forward, reporting nothing', async () => {
+      const { app, files } = await firstSession(['a'], 'b');
+      files.set(
+        DATABASE_FILE_PATH,
+        await savedOnTopBy(files.get(DATABASE_FILE_PATH), ['c'])
+      );
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const repo = await startRepo(app);
+
+      expect(repo.startupKind).toBe('fast-forward');
+      expect(articleIds(repo).sort()).toEqual(['a', 'b', 'c']);
+      expect(warn).not.toHaveBeenCalled();
+      repo.dispose();
+    });
+
+    it("reports a file another device wrote while the plugin was not running that lacks this device's last save", async () => {
+      const { app, files } = await firstSession(['a'], 'b');
+      files.set(DATABASE_FILE_PATH, await dbFileWith(['other']));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const repo = await startRepo(app);
+
+      expect(repo.startupKind).toBe('merge');
+      expect(articleIds(repo)).toEqual(['other']);
+      expect(warn).toHaveBeenCalledOnce();
+      repo.dispose();
+    });
+
+    it('classifies nothing when this device stored no stamp, or the file has none', async () => {
+      const { repo: first } = await startStored(['a']);
+      expect(first.startupKind).toBeNull();
+      first.dispose();
+
+      const { app, files } = await firstSession(['a'], 'b');
+      files.set(DATABASE_FILE_PATH, await staleFileWith(['old']));
+      const repo = await startRepo(app);
+      expect(repo.startupKind).toBeNull();
+      repo.dispose();
+    });
+
+    it('classifies nothing when it starts on a new database', async () => {
+      const app = withStorage(makeVault(INDEXED).app);
+      app.storage.set(KNOWN_WRITE_STAMP_KEY, { someone: 1 });
+
+      const repo = await startRepo(app);
+
+      expect(repo.startupKind).toBeNull();
+      repo.dispose();
+    });
   });
 });

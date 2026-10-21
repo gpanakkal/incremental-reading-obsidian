@@ -5,6 +5,7 @@ import { FakeRepository } from './FakeRepository';
 import { FakeReviewManager } from './FakeReviewManager';
 import { FakeVault } from './FakeVault';
 
+export { FakeSync, makeDevice, type FakeDevice } from './FakeSync';
 export { FakeRepository, FakeReviewManager, FakeVault };
 
 export const FIXED_NOW = 1_700_000_000_000;
