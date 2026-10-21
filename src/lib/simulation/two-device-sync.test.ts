@@ -189,6 +189,7 @@ describe('two devices syncing one database file', () => {
     expect(idsBackedUp(b).sort()).toEqual(['a1', 'b-old']);
   });
 
+  // Load-dependent: ~3s alone, past vitest's 5s default under the full suite
   it('property: never drops a row without a backup, never reloads its own copy, and agrees once Sync settles', async () => {
     await fc.assert(
       fc.asyncProperty(
@@ -247,5 +248,5 @@ describe('two devices syncing one database file', () => {
       ),
       { numRuns: 150 }
     );
-  });
+  }, 60_000);
 });
