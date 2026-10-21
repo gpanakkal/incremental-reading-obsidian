@@ -294,6 +294,11 @@ export interface SQLiteRepository {
    */
   writeRefusal(): Error | null;
   /**
+   * True while the reads that follow a reload of the database file run: they
+   * must not write repairs then. Absent counts as false.
+   */
+  readonly refetchingAfterReload?: boolean;
+  /**
    * Subscribe to row-level changes on item tables. Returns an unsubscribe fn.
    */
   onDataChange(listener: DataChangeListener): () => void;

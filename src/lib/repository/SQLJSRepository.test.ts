@@ -6,6 +6,7 @@ import {
   DATA_DIRECTORY,
   DATABASE_FILE_PATH,
 } from '#/lib/constants';
+import { getDeviceId } from '#/lib/device-id';
 import type { SyncHoldReason } from '#/lib/obsidian-sync';
 import type { DataChangeEvent, MutationStatement, NoteType } from '#/lib/types';
 import fc from 'fast-check';
@@ -3414,5 +3415,354 @@ describe('writeRefusal', () => {
     expect(() => insertArticleRow(repo, 'b')).toThrow(
       repo.writeRefusal()!.message
     );
+  });
+});
+
+describe('skipping saves that change nothing (0174)', () => {
+  beforeEach(() => {
+    // bulkMutate yields through `window.setTimeout`, which node lacks
+    vi.stubGlobal('window', globalThis);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Writes of the database file itself, leaving out backups. */
+  const dbWrites = (adapter: ReturnType<typeof makeVault>['adapter']) =>
+    adapter.writeBinary.mock.calls.filter(
+      ([path]) => path === DATABASE_FILE_PATH
+    ).length;
+
+  it('writes the file for a change, and not for the same value again', async () => {
+    const { repo, adapter } = await startOver(['a']);
+    adapter.writeBinary.mockClear();
+    const setPriority = (priority: number) =>
+      repo.mutate('UPDATE article SET priority = $1 WHERE id = $2', [
+        priority,
+        'a',
+      ]);
+
+    setPriority(37);
+    await settle();
+    expect(dbWrites(adapter)).toBe(1);
+
+    setPriority(37);
+    await settle();
+    expect(dbWrites(adapter)).toBe(1);
+  });
+
+  it('stamps and writes a change, and neither for the same value again', async () => {
+    const { repo, adapter, app } = await startOver(['a']);
+    const stamp = () =>
+      repo.db!.exec(
+        `SELECT updated_at, updated_by FROM article WHERE id = 'a'`
+      )[0].values[0];
+    const setPriority = (priority: number) =>
+      repo.mutate('UPDATE article SET priority = $1 WHERE id = $2', [
+        priority,
+        'a',
+      ]);
+    setPriority(37);
+    await settle();
+    const [stampedAt] = stamp();
+    adapter.writeBinary.mockClear();
+
+    setPriority(37);
+    await settle();
+    expect(stamp()).toEqual([stampedAt, getDeviceId(app)]);
+    expect(dbWrites(adapter)).toBe(0);
+
+    setPriority(38);
+    await settle();
+    const [at, by] = stamp();
+    expect(at).toBeGreaterThan(stampedAt as number);
+    expect(by).toBe(getDeviceId(app));
+    expect(dbWrites(adapter)).toBe(1);
+  });
+
+  it('writes a change to a stamp alone, as a merge of a newer row makes', async () => {
+    const { repo, adapter } = await startOver(['a']);
+    adapter.writeBinary.mockClear();
+
+    repo.mutate(
+      `UPDATE article SET updated_at = $1, updated_by = 'device-b' WHERE id = 'a'`,
+      [Number.MAX_SAFE_INTEGER]
+    );
+    await settle();
+
+    expect(dbWrites(adapter)).toBe(1);
+  });
+
+  it('writes once per update that changes a value, across saves', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.integer({ min: 20, max: 22 }), { maxLength: 12 }),
+        async (priorities) => {
+          const { repo, adapter } = await startOver(['a']);
+          const [{ priority: first }] = repo.query(
+            'SELECT priority FROM article'
+          ) as { priority: number }[];
+          adapter.writeBinary.mockClear();
+
+          let current = first;
+          let changed = 0;
+          for (const priority of priorities) {
+            if (priority !== current) changed++;
+            current = priority;
+            repo.mutate('UPDATE article SET priority = $1 WHERE id = $2', [
+              priority,
+              'a',
+            ]);
+            // Each save reopens the connection, dropping what tells changes
+            await settle();
+          }
+
+          expect(dbWrites(adapter)).toBe(changed);
+        }
+      ),
+      { numRuns: 25 }
+    );
+  });
+
+  it('writes nothing for a transaction that changes nothing, once for one that does', async () => {
+    const { repo, adapter } = await startOver(['a', 'b']);
+    adapter.writeBinary.mockClear();
+
+    await repo.transaction(() => {
+      repo.mutate('UPDATE article SET deleted = 0 WHERE id = $1', ['a']);
+      repo.mutate('UPDATE article SET deleted = 1 WHERE id = $1', ['nobody']);
+    });
+    expect(dbWrites(adapter)).toBe(0);
+
+    await repo.transaction(() => {
+      repo.mutate('UPDATE article SET deleted = 0 WHERE id = $1', ['a']);
+      repo.mutate('UPDATE article SET deleted = 1 WHERE id = $1', ['b']);
+    });
+    expect(dbWrites(adapter)).toBe(1);
+  });
+
+  it('writes a bulk run once a chunk that changed something', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.boolean(), { minLength: 1, maxLength: 8 }),
+        async (deletes) => {
+          const { repo, adapter } = await startOver(['a']);
+          adapter.writeBinary.mockClear();
+          // One statement a chunk: each takes a whole slice on this clock
+          let tick = 0;
+          const now = () => (tick += 1);
+
+          let deleted = false;
+          let changed = 0;
+          for (const value of deletes) {
+            if (value !== deleted) changed++;
+            deleted = value;
+          }
+          await repo.bulkMutate(
+            deletes.map((value) => ({
+              query: 'UPDATE article SET deleted = $1 WHERE id = $2',
+              params: [value ? 1 : 0, 'a'],
+            })),
+            { sliceMs: 1, now }
+          );
+
+          expect(dbWrites(adapter)).toBe(changed);
+        }
+      ),
+      { numRuns: 25 }
+    );
+  });
+
+  it('saves on the next write, even one that changes nothing, once a save failed', async () => {
+    const { repo, adapter, files } = await startOver(['a']);
+    vi.spyOn(console, 'error').mockReturnValue(undefined);
+    adapter.writeBinary.mockRejectedValueOnce(new Error('disk full'));
+    adapter.writeBinary.mockClear();
+    const setPriority = (priority: number) =>
+      repo.mutate('UPDATE article SET priority = $1 WHERE id = $2', [
+        priority,
+        'a',
+      ]);
+    const priorityOnDisk = async () => {
+      const SQL = await getSharedSql();
+      const db = new SQL.Database(files.get(DATABASE_FILE_PATH));
+      const [[priority]] = db.exec('SELECT priority FROM article')[0].values;
+      db.close();
+      return priority;
+    };
+
+    setPriority(37);
+    await settle();
+    expect(dbWrites(adapter)).toBe(1);
+
+    setPriority(37);
+    await settle();
+    expect(dbWrites(adapter)).toBe(2);
+    expect(await priorityOnDisk()).toBe(37);
+
+    setPriority(37);
+    await settle();
+    expect(dbWrites(adapter)).toBe(2);
+  });
+
+  it('saves again after a failed save that ended after a later one that wrote', async () => {
+    const { repo, adapter } = await startOver(['a']);
+    vi.spyOn(console, 'error').mockReturnValue(undefined);
+    adapter.writeBinary.mockClear();
+    let failFirst: (error: Error) => void = () => {};
+    adapter.writeBinary.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          failFirst = reject;
+        })
+    );
+    const setPriority = (priority: number) =>
+      repo.mutate('UPDATE article SET priority = $1 WHERE id = $2', [
+        priority,
+        'a',
+      ]);
+
+    setPriority(37);
+    setPriority(38);
+    await settle();
+    failFirst(new Error('disk full'));
+    await settle();
+    expect(dbWrites(adapter)).toBe(2);
+
+    // The later save held the earlier one's change, so nothing is owed
+    setPriority(38);
+    await settle();
+    expect(dbWrites(adapter)).toBe(2);
+  });
+
+  it('still owes a failed save when an earlier one that wrote ends after it', async () => {
+    const { repo, adapter, files } = await startOver(['a']);
+    vi.spyOn(console, 'error').mockReturnValue(undefined);
+    adapter.writeBinary.mockClear();
+    let finishFirst: () => void = () => {};
+    adapter.writeBinary
+      .mockImplementationOnce(
+        (path: string, data: ArrayBuffer) =>
+          new Promise<void>((resolve) => {
+            finishFirst = () => {
+              files.set(path, new Uint8Array(data.slice(0)));
+              resolve();
+            };
+          })
+      )
+      .mockRejectedValueOnce(new Error('disk full'));
+    const setPriority = (priority: number) =>
+      repo.mutate('UPDATE article SET priority = $1 WHERE id = $2', [
+        priority,
+        'a',
+      ]);
+
+    setPriority(37);
+    setPriority(38);
+    await settle();
+    finishFirst();
+    await settle();
+    expect(dbWrites(adapter)).toBe(2);
+
+    // Only the failed save held 38
+    setPriority(38);
+    await settle();
+    expect(dbWrites(adapter)).toBe(3);
+  });
+
+  it('leaves the file holding what memory does after every committed write whose save went through', async () => {
+    type Write = {
+      kind: 'mutate' | 'transaction' | 'rollback' | 'bulk';
+      priorities: number[];
+      /** Whether the save this write asks for, if any, fails. */
+      fails: boolean;
+    };
+    const writeArb: fc.Arbitrary<Write> = fc.record({
+      kind: fc.constantFrom('mutate', 'transaction', 'rollback', 'bulk'),
+      priorities: fc.array(fc.integer({ min: 20, max: 22 }), {
+        minLength: 1,
+        maxLength: 3,
+      }),
+      fails: fc.boolean(),
+    });
+    const SQL = await getSharedSql();
+    const priorities = (db: Database) =>
+      JSON.stringify(db.exec('SELECT id, priority FROM article ORDER BY id'));
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(writeArb, { maxLength: 10 }),
+        async (writes) => {
+          const { repo, adapter, files } = await startOver(['a', 'b']);
+          vi.spyOn(console, 'error').mockReturnValue(undefined);
+          const update = (priority: number, i: number) => ({
+            query: 'UPDATE article SET priority = $1 WHERE id = $2',
+            params: [priority, i % 2 ? 'b' : 'a'],
+          });
+
+          const write = adapter.writeBinary.getMockImplementation()!;
+          for (const { kind, priorities: values, fails } of writes) {
+            // Drops a failure the last write left unused, having saved nothing
+            adapter.writeBinary.mockReset().mockImplementation(write);
+            if (fails) {
+              adapter.writeBinary.mockRejectedValueOnce(new Error('disk full'));
+            }
+            const statements = values.map(update);
+            if (kind === 'mutate') {
+              repo.mutate(statements[0].query, statements[0].params);
+            } else if (kind === 'bulk') {
+              await repo.bulkMutate(statements).catch(() => undefined);
+            } else {
+              await repo
+                .transaction(() => {
+                  for (const { query, params } of statements) {
+                    repo.mutate(query, params);
+                  }
+                  if (kind === 'rollback') throw new Error('rolled back');
+                })
+                .catch(() => undefined);
+            }
+            await settle();
+
+            // A rollback commits nothing, so asks for no save
+            if (kind === 'rollback' || (fails && dbWrites(adapter) > 0))
+              continue;
+            const onDisk = new SQL.Database(files.get(DATABASE_FILE_PATH));
+            expect(priorities(onDisk)).toBe(priorities(repo.db as Database));
+            onDisk.close();
+          }
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('says it is refetching only while the reload callback runs, even one that throws', async () => {
+    const { repo, files, onReloadFromDisk } = await startOver(['a']);
+    const seen: boolean[] = [];
+    onReloadFromDisk.mockImplementationOnce(async () => {
+      seen.push(repo.refetchingAfterReload);
+      await nextMacrotask();
+      seen.push(repo.refetchingAfterReload);
+    });
+    onReloadFromDisk.mockImplementationOnce(() => {
+      seen.push(repo.refetchingAfterReload);
+      throw new Error('refetch failed');
+    });
+    vi.spyOn(console, 'error').mockReturnValue(undefined);
+    expect(repo.refetchingAfterReload).toBe(false);
+
+    for (const ids of [
+      ['a', 'b'],
+      ['a', 'b', 'c'],
+    ]) {
+      files.set(DATABASE_FILE_PATH, await dbFileWith(ids));
+      await repo.handleFileChange(dbFileChange);
+    }
+
+    expect(seen).toEqual([true, true, true]);
+    expect(repo.refetchingAfterReload).toBe(false);
   });
 });

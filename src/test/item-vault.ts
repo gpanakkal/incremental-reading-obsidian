@@ -77,6 +77,19 @@ export class TestRepository extends SQLJSRepository {
   }
 
   /**
+   * Every row of every table as stored (tombstones and stamps included), as
+   * one string, to tell whether any changed.
+   */
+  dump(): string {
+    const tables = this.query(
+      `SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`
+    ) as unknown as { name: string }[];
+    return JSON.stringify(
+      tables.map(({ name }) => [name, this.storedRows(name)])
+    );
+  }
+
+  /**
    * The rows of `table` as readers see them, as plain objects: with no
    * tombstone of a row deleted for good (an item row's `NOT_PURGED`, a log or
    * rebind row's `deleted`), and with no stamp, which says when a row was

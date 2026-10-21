@@ -187,10 +187,6 @@ export class SnippetManager extends ItemManager {
 
     if (!this.reconcileNote(row, file, 'snippet')) return null;
 
-    if (this.plugin.settings.fuzzTextReviews && row.due_fuzz === null) {
-      void this.setReviewTimeFuzz(row.id, 'snippet');
-    }
-
     return {
       data: base,
       file,

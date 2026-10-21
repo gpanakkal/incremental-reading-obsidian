@@ -428,12 +428,16 @@ export class ItemManager {
     const frontmatter = Obsidian.getFrontMatter(file, this.app);
     const fileId = frontmatter?.['ir-id'];
     // id is present but doesn't match
+    // The refetch after a reload reads a database Sync just delivered, and
+    // the notes it delivers as separate files may not have landed yet: what
+    // they say is no grounds to change the row then. A later read decides.
+    const repair = !this.repo.refetchingAfterReload;
     if (fileId && fileId !== row.id) {
-      void this.markDeleted(row.id, type);
+      if (repair) void this.markDeleted(row.id, type);
       return false;
     }
 
-    if (row.deleted) {
+    if (row.deleted && repair) {
       void this.markUndeleted(row.id, type);
     }
     return true;
@@ -597,14 +601,26 @@ export class ItemManager {
     );
   }
 
-  /** Recalculate and set due_fuzz for a single row */
-  async setReviewTimeFuzz(
-    id: string,
-    table: 'article' | 'snippet'
-  ): Promise<void> {
-    await this.repo.mutate(`UPDATE ${table} SET due_fuzz = $1 WHERE id = $2`, [
-      IRScheduler.getDueFuzz(),
-      id,
-    ]);
+  /**
+   * Give every `table` row that has no due_fuzz one, for when fuzzing is
+   * turned on. Rows get theirs as they are made and reviewed while it is on,
+   * so this is a one-time backfill, not a repair made whenever a row is read.
+   *
+   * Live rows alone: a deleted or purged row is left as it is, unstamped, so
+   * it never reads as this device's latest edit and outranks a later restore
+   * made on another device when databases merge.
+   */
+  async backfillReviewTimeFuzz(table: 'article' | 'snippet'): Promise<void> {
+    const rows = (await this.repo.query(
+      `SELECT id FROM ${table} WHERE due_fuzz IS NULL AND deleted = FALSE`
+    )) as { id: string }[];
+    if (rows.length === 0) return;
+    await this.repo.bulkMutate(
+      rows.map(({ id }) => ({
+        query: `UPDATE ${table} SET due_fuzz = $1
+          WHERE id = $2 AND due_fuzz IS NULL AND deleted = FALSE`,
+        params: [IRScheduler.getDueFuzz(), id],
+      }))
+    );
   }
 }
