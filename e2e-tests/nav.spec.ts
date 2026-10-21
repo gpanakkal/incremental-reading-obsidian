@@ -1,3 +1,4 @@
+import { POSITIONS_KEY } from '#/lib/reading-positions';
 import test, {
   expect,
   type ElectronApplication,
@@ -242,25 +243,34 @@ test.describe('Review history navigation', () => {
   }
 
   /**
-   * The scroll anchor saved for the item in the review tab, or 0 while none
-   * is. Not a check: what a scroll is waited on by before review moves away,
-   * since nothing on screen says when the position is saved.
+   * The scroll anchor this device holds for the item in the review tab (the
+   * position store's localStorage tier), or 0 while it holds none. Not a
+   * check: what a scroll is waited on by before review moves away, since
+   * nothing on screen says when the position is kept.
    *
    * Unofficial: `window.app`, `app.plugins.plugins`, `reviewManager.repo`.
+   * `loadLocalStorage` is API.
    */
   const savedScroll = () =>
-    window.evaluate((viewType) => {
-      const { app } = window as unknown as ScrollTestWindow;
-      const reference =
-        app.workspace.getLeavesOfType(viewType)[0]?.view.file?.path;
-      const [row] = app.plugins.plugins[
-        'incremental-reading'
-      ].reviewManager.repo.query(
-        'SELECT scroll_top FROM article WHERE reference = $1',
-        [reference]
-      );
-      return row?.scroll_top ?? 0;
-    }, REVIEW_VIEW_TYPE);
+    window.evaluate(
+      ([viewType, key]) => {
+        const { app } = window as unknown as ScrollTestWindow;
+        const reference =
+          app.workspace.getLeavesOfType(viewType)[0]?.view.file?.path;
+        const [row] = app.plugins.plugins[
+          'incremental-reading'
+        ].reviewManager.repo.query(
+          'SELECT id FROM article WHERE reference = $1',
+          [reference]
+        );
+        const entries = app.loadLocalStorage(key) as Record<
+          string,
+          { position?: number }
+        > | null;
+        return (row?.id && entries?.[row.id]?.position) || 0;
+      },
+      [REVIEW_VIEW_TYPE, POSITIONS_KEY] as const
+    );
 
   /**
    * Scroll the review editor well down the item, the way a reader does, and
@@ -1320,6 +1330,7 @@ type TestWindowLike = {
 /** The slice of Obsidian's `window.app` the scroll tests reach into. */
 type ScrollTestWindow = {
   app: {
+    loadLocalStorage(key: string): unknown;
     workspace: {
       getLeavesOfType(type: string): {
         view: { file?: { path: string } | null };
@@ -1331,7 +1342,7 @@ type ScrollTestWindow = {
         {
           reviewManager: {
             repo: {
-              query(sql: string, params: unknown[]): { scroll_top?: number }[];
+              query(sql: string, params: unknown[]): { id?: string }[];
             };
           };
         }

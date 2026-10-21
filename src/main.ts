@@ -32,6 +32,11 @@ import { getMimeType, isCopyImportable, isImportable } from '#/lib/mime';
 import { trackNavbarFootprint } from '#/lib/navbar-footprint';
 import { isPdfView, stopPdfTabSelections } from '#/lib/pdf/obsidian-pdf';
 import { registerPluginIcon } from '#/lib/plugin-icon';
+import type { PositionStore } from '#/lib/position-store';
+import {
+  createPositionStore,
+  registerPositionFlushes,
+} from '#/lib/reading-positions';
 import { REBIND_LOG_TOPIC } from '#/lib/rebind-records';
 import { goToReviewPlace } from '#/lib/review-history';
 import {
@@ -73,7 +78,7 @@ import {
   persistentNotice,
 } from './lib/ir-id-warning-notice';
 import { createIrIdWatch } from './lib/ir-id-watch';
-import ReviewManager from './lib/items/ReviewManager';
+import ReviewManager, { type ItemPositionRow } from './lib/items/ReviewManager';
 import { scanForMovedNotes } from './lib/moved-note-scan';
 import { configureSuccessNotices } from './lib/notices';
 import {
@@ -190,6 +195,11 @@ export default class IncrementalReadingPlugin extends Plugin {
   readonly onSettingsChange = this.settingsChanged.subscribe;
   sessionTracker?: SessionTracker;
   reviewManager!: ReviewManager;
+  /**
+   * Where the reader is in each item (see `#/lib/position-store`). Set with
+   * {@link reviewManager}, before any editor extension can ask for it.
+   */
+  positions!: PositionStore<ItemPositionRow>;
   store!: typeof store;
   actions!: Actions;
   /**
@@ -372,6 +382,11 @@ export default class IncrementalReadingPlugin extends Plugin {
 
         this.store = store;
         await this.initReviewManager();
+        this.positions = createPositionStore(this.app, this.reviewManager);
+        registerPositionFlushes(this, this.positions);
+        // What a killed app left in localStorage. Tabs restoring alongside
+        // keep their entries; the rest are dropped once written.
+        void this.positions.flushAll();
         this.actions = new Actions(this);
         // Nothing is resumed here: a review tab restored with the workspace
         // resumes itself as it mounts (`ReviewView.resumeUnclaimedSession`),

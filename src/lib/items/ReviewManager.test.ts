@@ -3043,260 +3043,172 @@ describe('ReviewManager.handleExternalRename', () => {
 });
 
 // ---------------------------------------------------------------------------
-// saveScrollPosition
+// positionIdOf
 // ---------------------------------------------------------------------------
 
-describe('ReviewManager.saveScrollPosition', () => {
+describe('ReviewManager.positionIdOf', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('does nothing when noteType is null', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(null);
-    await manager.saveScrollPosition(FAKE_FILE, 100);
-    expect(repo.mutate).not.toHaveBeenCalled();
+  it.each([null, 'card'] as const)(
+    'answers null for a note of type %s, without looking for a row',
+    async (noteType) => {
+      const manager = new ReviewManager(makePlugin(), makeRepo());
+      vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(noteType);
+      const findArticle = vi.spyOn(manager.articles, 'findArticle');
+      const findSnippet = vi.spyOn(manager.snippets, 'findSnippet');
+      await expect(manager.positionIdOf(FAKE_FILE)).resolves.toBeNull();
+      expect(findArticle).not.toHaveBeenCalled();
+      expect(findSnippet).not.toHaveBeenCalled();
+    }
+  );
+
+  it("answers an article's row id, looked up as an article", async () => {
+    const manager = new ReviewManager(makePlugin(), makeRepo());
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
+    vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(
+      makeArticleRow({ id: 'art-1' }) as never
+    );
+    const findSnippet = vi.spyOn(manager.snippets, 'findSnippet');
+    await expect(manager.positionIdOf(FAKE_FILE)).resolves.toBe('art-1');
+    expect(findSnippet).not.toHaveBeenCalled();
   });
 
-  it('does nothing when noteType is card', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('card');
-    await manager.saveScrollPosition(FAKE_FILE, 100);
-    expect(repo.mutate).not.toHaveBeenCalled();
+  it("answers a snippet's row id, looked up as a snippet", async () => {
+    const manager = new ReviewManager(makePlugin(), makeRepo());
+    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
+    vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
+      makeSnippetRow({ id: 'snip-1' }) as never
+    );
+    const findArticle = vi.spyOn(manager.articles, 'findArticle');
+    await expect(manager.positionIdOf(FAKE_FILE)).resolves.toBe('snip-1');
+    expect(findArticle).not.toHaveBeenCalled();
   });
 
   it.each(['article', 'snippet'] as const)(
-    'mutates %s table with the rounded offset in scroll_top',
+    'answers null for a %s note with no row',
     async (noteType) => {
-      await fc.assert(
-        fc.asyncProperty(
-          fc.float({ min: 0, max: 10000, noNaN: true }),
-          async (offset) => {
-            vi.restoreAllMocks();
-            const repo = makeRepo();
-            const manager = new ReviewManager(makePlugin(), repo);
-            vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(noteType);
-            await manager.saveScrollPosition(FAKE_FILE, offset);
-            const [sql, params] = (repo.mutate as ReturnType<typeof vi.fn>).mock
-              .calls[0] as [string, unknown[]];
-            expect(sql).toContain(`UPDATE ${noteType}`);
-            expect(sql).toContain('scroll_top');
-            expect(params[0]).toBe(Math.round(offset));
-          }
-        )
-      );
+      const manager = new ReviewManager(makePlugin(), makeRepo());
+      vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(noteType);
+      vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(null);
+      vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(null);
+      await expect(manager.positionIdOf(FAKE_FILE)).resolves.toBeNull();
     }
   );
-});
 
-// ---------------------------------------------------------------------------
-// loadScrollPosition
-// ---------------------------------------------------------------------------
-
-describe('ReviewManager.loadScrollPosition', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('returns null when noteType is null', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue(null);
-    const result = await manager.loadScrollPosition(FAKE_FILE);
-    expect(result).toBeNull();
-  });
-
-  it('returns null when noteType is card', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('card');
-    const result = await manager.loadScrollPosition(FAKE_FILE);
-    expect(result).toBeNull();
-  });
-
-  it('returns null when article row not found', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
-    vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(null);
-    const result = await manager.loadScrollPosition(FAKE_FILE);
-    expect(result).toBeNull();
-  });
-
-  it('returns null when article row scroll_top is 0 (unset)', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
-    vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(
-      makeArticleRow({ scroll_top: 0 }) as never
-    );
-    const result = await manager.loadScrollPosition(FAKE_FILE);
-    expect(result).toBeNull();
-  });
-
-  it('returns the offset when article row has scroll_top > 0', async () => {
+  it("answers a binary article's or snippet's row id, and null for a card or an untracked file", async () => {
     await fc.assert(
-      fc.asyncProperty(
-        fc.integer({ min: 1, max: 100000 }),
-        async (scrollTop) => {
-          vi.restoreAllMocks();
-          const repo = makeRepo();
-          const manager = new ReviewManager(makePlugin(), repo);
-          vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
-          vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(
-            makeArticleRow({ scroll_top: scrollTop }) as never
-          );
-          const result = await manager.loadScrollPosition(FAKE_FILE);
-          expect(result).toBe(scrollTop);
-        }
-      )
+      fc.asyncProperty(binaryFileArb, itemTableArb, async (file, table) => {
+        vi.restoreAllMocks();
+        const { manager, row } = wireBinary(file, table);
+        const kept = table === 'article' || table === 'snippet';
+        await expect(manager.positionIdOf(file)).resolves.toBe(
+          kept ? row?.id : null
+        );
+      })
     );
-  });
-
-  it('returns null when snippet row not found', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
-    vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(null);
-    const result = await manager.loadScrollPosition(FAKE_FILE);
-    expect(result).toBeNull();
-  });
-
-  it('returns null when snippet row scroll_top is 0 (unset)', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
-    vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
-      makeSnippetRow({ scroll_top: 0 }) as never
-    );
-    const result = await manager.loadScrollPosition(FAKE_FILE);
-    expect(result).toBeNull();
-  });
-
-  it('returns the offset when snippet row has scroll_top > 0', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.integer({ min: 1, max: 100000 }),
-        async (scrollTop) => {
-          vi.restoreAllMocks();
-          const repo = makeRepo();
-          const manager = new ReviewManager(makePlugin(), repo);
-          vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
-          vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
-            makeSnippetRow({ scroll_top: scrollTop }) as never
-          );
-          const result = await manager.loadScrollPosition(FAKE_FILE);
-          expect(result).toBe(scrollTop);
-        }
-      )
-    );
-  });
-
-  it('card noteType does not call findArticle or findSnippet', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('card');
-    const articleSpy = vi.spyOn(manager.articles, 'findArticle');
-    const snippetSpy = vi.spyOn(manager.snippets, 'findSnippet');
-    const result = await manager.loadScrollPosition(FAKE_FILE);
-    expect(result).toBeNull();
-    expect(articleSpy).not.toHaveBeenCalled();
-    expect(snippetSpy).not.toHaveBeenCalled();
-  });
-
-  it('article noteType calls findArticle but not findSnippet', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
-    const articleSpy = vi
-      .spyOn(manager.articles, 'findArticle')
-      .mockResolvedValue(null);
-    const snippetSpy = vi.spyOn(manager.snippets, 'findSnippet');
-    await manager.loadScrollPosition(FAKE_FILE);
-    expect(articleSpy).toHaveBeenCalled();
-    expect(snippetSpy).not.toHaveBeenCalled();
-  });
-
-  it('snippet noteType calls findSnippet but not findArticle', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
-    const articleSpy = vi.spyOn(manager.articles, 'findArticle');
-    const snippetSpy = vi
-      .spyOn(manager.snippets, 'findSnippet')
-      .mockResolvedValue(null);
-    await manager.loadScrollPosition(FAKE_FILE);
-    expect(snippetSpy).toHaveBeenCalled();
-    expect(articleSpy).not.toHaveBeenCalled();
-  });
-
-  it('returns null when scroll_top is not a number', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('article');
-    // scroll_top is undefined — exercises the typeof check
-    vi.spyOn(manager.articles, 'findArticle').mockResolvedValue(
-      makeArticleRow({ scroll_top: undefined as unknown as number }) as never
-    );
-    const result = await manager.loadScrollPosition(FAKE_FILE);
-    expect(result).toBeNull();
-  });
-
-  it('snippet: returns null when scroll_top is not a number', async () => {
-    const repo = makeRepo();
-    const manager = new ReviewManager(makePlugin(), repo);
-    vi.spyOn(Obsidian, 'getNoteType').mockResolvedValue('snippet');
-    vi.spyOn(manager.snippets, 'findSnippet').mockResolvedValue(
-      makeSnippetRow({ scroll_top: undefined as unknown as number }) as never
-    );
-    const result = await manager.loadScrollPosition(FAKE_FILE);
-    expect(result).toBeNull();
   });
 });
 
 // ---------------------------------------------------------------------------
-// scroll position of a binary item
+// readPosition / writePosition
 // ---------------------------------------------------------------------------
 
-describe('ReviewManager scroll position of a binary item', () => {
+describe('ReviewManager reading position rows', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("saves and loads an article's or snippet's position in its own row, and none for a card or an untracked file", async () => {
+  /** A manager over a real database holding one article and one snippet. */
+  async function wireRows(article: number, snippet: number) {
+    const repo = TestRepository.create();
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority, scroll_top) VALUES ('a1', 'a.md', 0, 1, 20, $1)`,
+      [article]
+    );
+    repo.mutate(
+      `INSERT INTO snippet (id, reference, due, interval, priority, scroll_top) VALUES ('s1', 's.md', 0, 1, 20, $1)`,
+      [snippet]
+    );
+    const manager = new ReviewManager(makePlugin(), repo);
+    const stored = (table: 'article' | 'snippet', id: string) => {
+      const [result] = repo.db?.exec(
+        `SELECT scroll_top, updated_at FROM ${table} WHERE id = '${id}'`
+      ) ?? [undefined];
+      const [scrollTop, updatedAt] = result?.values[0] ?? [];
+      return { scrollTop, updatedAt: Number(updatedAt) };
+    };
+    return { repo, manager, stored };
+  }
+
+  it("reads an article's or snippet's position with its table and stamp", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.nat(), fc.nat(), async (article, snippet) => {
+        const { manager, stored } = await wireRows(article, snippet);
+        const read = await manager.readPosition('a1');
+        expect(read).toEqual({
+          table: 'article',
+          position: article,
+          updatedAt: stored('article', 'a1').updatedAt,
+          updatedBy: expect.any(String) as unknown,
+        });
+        expect(read?.updatedAt).toBeGreaterThan(0);
+        await expect(manager.readPosition('s1')).resolves.toMatchObject({
+          table: 'snippet',
+          position: snippet,
+        });
+      })
+    );
+  });
+
+  it('reads no row for an unknown id or a purged row', async () => {
+    const { repo, manager } = await wireRows(5, 6);
+    repo.mutate(
+      `UPDATE article SET deleted = TRUE, reference = $1 WHERE id = 'a1'`,
+      [purgedReference('a1')]
+    );
+    await expect(manager.readPosition('a1')).resolves.toBeNull();
+    await expect(manager.readPosition('nope')).resolves.toBeNull();
+  });
+
+  it('writes the rounded position into the row it read, and only that row', async () => {
     await fc.assert(
       fc.asyncProperty(
-        binaryFileArb,
-        itemTableArb,
-        fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER }),
-        async (file, table, position) => {
-          vi.restoreAllMocks();
-          const { manager, row, repo } = wireBinary(file, table);
-          const { mutate } = repo as unknown as {
-            mutate: ReturnType<typeof vi.fn>;
-          };
-          if (row) Object.assign(row, { scroll_top: position });
-
-          await manager.saveScrollPosition(file, position);
-          const loaded = await manager.loadScrollPosition(file);
-
-          const kept = table === 'article' || table === 'snippet';
-          expect(mutate.mock.calls).toEqual(
-            kept
-              ? [
-                  [
-                    `UPDATE ${table} SET scroll_top = $1 WHERE reference = $2`,
-                    [position, file.path],
-                  ],
-                ]
-              : []
+        fc.constantFrom('a1', 's1'),
+        fc.double({ min: 1, max: 1e9, noNaN: true }),
+        async (id, position) => {
+          const { manager, stored } = await wireRows(5, 6);
+          const row = await manager.readPosition(id);
+          await manager.writePosition(id, position, row!);
+          const table = row!.table;
+          const other = table === 'article' ? 'snippet' : 'article';
+          const otherId = id === 'a1' ? 's1' : 'a1';
+          expect(stored(table, id).scrollTop).toBe(Math.round(position));
+          expect(stored(other, otherId).scrollTop).toBe(
+            other === 'article' ? 5 : 6
           );
-          expect(loaded).toBe(kept ? position : null);
         }
       )
     );
+  });
+
+  it('writes nothing to a row purged after it was read', async () => {
+    const { repo, manager, stored } = await wireRows(5, 6);
+    const row = await manager.readPosition('a1');
+    repo.mutate(
+      `UPDATE article SET deleted = TRUE, reference = $1 WHERE id = 'a1'`,
+      [purgedReference('a1')]
+    );
+    await manager.writePosition('a1', 99, row!);
+    expect(stored('article', 'a1').scrollTop).toBe(5);
   });
 });
 

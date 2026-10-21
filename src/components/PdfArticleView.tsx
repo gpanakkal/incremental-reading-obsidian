@@ -18,12 +18,6 @@ import { useEffect, useRef, useState } from 'react';
 import { useReviewContext } from './ReviewContext';
 
 /**
- * How long the view has to rest before where it rests is saved. pdf.js
- * reports a scroll every frame; this saves it once it ends.
- */
-const POSITION_SAVE_DELAY_MS = 500;
-
-/**
  * A PDF article in review, in Obsidian's own PDF viewer: toolbar, zoom, find
  * and sidebar as in a PDF tab, with review's action bar above it.
  *
@@ -33,8 +27,9 @@ const POSITION_SAVE_DELAY_MS = 500;
  * PDF internals aren't what `obsidian-pdf` knows, found at once or only when
  * the viewer first opens the file.
  *
- * The item opens where its reader stopped, saved as they read, with the
- * passages its snippets were extracted from highlighted.
+ * The item opens where its reader stopped, kept as they read by the plugin's
+ * position store (localStorage as they read, the database once the item is
+ * left), with the passages its snippets were extracted from highlighted.
  */
 export function PdfArticleView({
   item,
@@ -45,7 +40,7 @@ export function PdfArticleView({
 }) {
   const { plugin, reviewView } = useReviewContext();
   const { vault } = plugin.app;
-  const { reviewManager } = plugin;
+  const { positions } = plugin;
   const itemId = item.data.id;
   const hostRef = useRef<HTMLDivElement>(null);
   // Built during the first render, so a missing viewer shows the fallback on
@@ -84,29 +79,17 @@ export function PdfArticleView({
     let active = true;
     const file = item.file;
     // Where the reader is. Carried over when this reruns for a file swapped
-    // under the item, or else where the item's row says they stopped, then
-    // kept current by the viewer.
+    // under the item, or else where the store says they stopped, then kept
+    // current by the viewer.
     let position: PdfPosition | null = getPdfLocation(shown);
-    /** What the item's row holds, as far as this view knows. */
-    let stored: number | null = null;
-    let saveTimer: number | undefined;
-
-    // Only a position the row doesn't hold yet: opening at the saved one
-    // reports it straight back. Each save writes the whole database out.
-    const save = () => {
-      window.clearTimeout(saveTimer);
-      if (!position) return;
-      const packed = packPdfPosition(position.page, position.top);
-      if (packed === stored) return;
-      stored = packed;
-      reviewManager.saveScrollPosition(file, packed).catch((error: unknown) => {
-        console.warn('Incremental Reading: PDF position not saved', error);
-      });
-    };
+    // This view's hold on the item's position. pdf.js reports a move every
+    // frame; the store keeps each in memory and leaves the database alone
+    // until the last view on the item lets go. Opening at the saved position
+    // reports it straight back, which the store takes for no move.
+    const held = positions.open(itemId);
     const moved = (to: PdfPosition) => {
       position = to;
-      window.clearTimeout(saveTimer);
-      saveTimer = window.setTimeout(save, POSITION_SAVE_DELAY_MS);
+      held.set(packPdfPosition(to.page, to.top));
     };
     const stopWatching = onPdfViewMove(shown, {
       moved,
@@ -146,16 +129,15 @@ export function PdfArticleView({
     });
 
     // Where it opens: where a link put it, where the reader is, carried over,
-    // or else where the item's row says they stopped
+    // or else where the store says they stopped
     const start = linkedAt
       ? Promise.resolve(linkedAt)
       : position
         ? Promise.resolve(pdfPositionSubpath(position))
-        : reviewManager
-            .loadScrollPosition(file)
+        : held
+            .restore()
             .catch(() => null)
             .then((saved) => {
-              stored = saved;
               position ??= saved === null ? null : unpackPdfPosition(saved);
               return position ? pdfPositionSubpath(position) : undefined;
             });
@@ -168,10 +150,10 @@ export function PdfArticleView({
       stopArrivals();
       vault.offref(modifyRef);
       stopWatching();
-      // Left before the view rested long enough to be saved
-      save();
+      // The last view on the item letting go writes it to the database
+      held.close();
     };
-  }, [shown, item.file, itemId, reviewView, vault, reviewManager]);
+  }, [shown, item.file, itemId, reviewView, vault, positions]);
 
   if (!shown) return <>{fallback}</>;
   return <div className="ir-pdf-article" ref={hostRef} />;

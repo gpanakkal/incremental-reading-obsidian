@@ -116,12 +116,23 @@ function spyScrollIntoView() {
   return vi.spyOn(EditorView, 'scrollIntoView').mockReturnValue(FAKE_EFFECT);
 }
 
+/**
+ * The review manager the extension asks for the note's item id, carrying the
+ * position handle the store opens for that id: `handle.restore` answers
+ * `offset`, and `handle.set` records each position the extension hands over.
+ */
 function makeReviewManager(offset?: number | null) {
   return {
-    saveScrollPosition: vi.fn().mockResolvedValue(undefined),
-    loadScrollPosition: vi.fn().mockResolvedValue(offset ?? null),
+    positionIdOf: vi.fn().mockResolvedValue(ITEM_ID),
+    handle: {
+      restore: vi.fn().mockResolvedValue(offset ?? null),
+      set: vi.fn(),
+      close: vi.fn(),
+    },
   };
 }
+
+const ITEM_ID = 'item-1';
 
 function makePlugin(
   reviewManager:
@@ -129,9 +140,11 @@ function makePlugin(
     | null
     | undefined = undefined
 ) {
+  const resolved =
+    reviewManager !== undefined ? reviewManager : makeReviewManager();
   return {
-    reviewManager:
-      reviewManager !== undefined ? reviewManager : makeReviewManager(),
+    reviewManager: resolved,
+    positions: { open: vi.fn(() => resolved?.handle) },
   };
 }
 
@@ -396,6 +409,89 @@ describe('early return — no reviewManager', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The position store: one handle per view, on the note's item id
+// ---------------------------------------------------------------------------
+describe('position store handle', () => {
+  it("opens the store's handle on the id of the note's item", async () => {
+    const reviewManager = makeReviewManager(null);
+    const plugin = makePlugin(reviewManager);
+    const file = makeTFile();
+    const view = makeView({ plugin, file });
+    factory(view as never);
+    await vi.runAllTimersAsync();
+
+    expect(reviewManager.positionIdOf.mock.calls).toEqual([[file]]);
+    expect(plugin.positions.open.mock.calls).toEqual([[ITEM_ID]]);
+  });
+
+  it('closes the handle once, when the view goes', async () => {
+    const reviewManager = makeReviewManager(null);
+    const view = makeView({ plugin: makePlugin(reviewManager) });
+    const instance = factory(view as never);
+    await vi.runAllTimersAsync();
+    expect(reviewManager.handle.close).not.toHaveBeenCalled();
+
+    instance.destroy();
+    expect(reviewManager.handle.close).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['has no item id (a card, or no row)', () => Promise.resolve(null)],
+    ['cannot be looked up', () => Promise.reject(new Error('no db'))],
+  ])(
+    'neither opens a handle, restores, nor listens when the note %s',
+    async (_label, answer) => {
+      const reviewManager = makeReviewManager(200);
+      reviewManager.positionIdOf.mockImplementation(answer);
+      const plugin = makePlugin(reviewManager);
+      const view = makeView({ plugin, propertiesWidget: makeWidgetElement() });
+      const instance = factory(view as never);
+      await vi.runAllTimersAsync();
+
+      expect(plugin.positions.open).not.toHaveBeenCalled();
+      expect(view.dispatch).not.toHaveBeenCalled();
+      expect(view.scrollDOM.addEventListener).not.toHaveBeenCalled();
+      instance.destroy();
+      expect(reviewManager.handle.close).not.toHaveBeenCalled();
+    }
+  );
+
+  it('opens no handle when destroyed while the item id is looked up', async () => {
+    const reviewManager = makeReviewManager(null);
+    let answer: (id: string) => void = () => {};
+    reviewManager.positionIdOf.mockReturnValue(
+      new Promise<string>((resolve) => {
+        answer = resolve;
+      })
+    );
+    const plugin = makePlugin(reviewManager);
+    const view = makeView({ plugin });
+    const instance = factory(view as never);
+    await vi.advanceTimersByTimeAsync(0);
+
+    instance.destroy();
+    answer(ITEM_ID);
+    await vi.runAllTimersAsync();
+
+    expect(plugin.positions.open).not.toHaveBeenCalled();
+    expect(reviewManager.handle.close).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when the plugin has no position store yet', async () => {
+    const reviewManager = makeReviewManager(200);
+    const view = makeView({
+      plugin: { reviewManager, positions: undefined } as never,
+      propertiesWidget: makeWidgetElement(),
+    });
+    factory(view as never);
+    await vi.runAllTimersAsync();
+
+    expect(reviewManager.positionIdOf).not.toHaveBeenCalled();
+    expect(view.scrollDOM.addEventListener).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Restore — properties widget already rendered on mount
 // ---------------------------------------------------------------------------
 describe('restore on mount (properties widget present)', () => {
@@ -420,9 +516,12 @@ describe('restore on mount (properties widget present)', () => {
     await vi.runAllTimersAsync();
 
     expect(view.scrollDOM.addEventListener).toHaveBeenCalledWith(
-      'scrollend',
+      'scroll',
       expect.any(Function),
-      expect.objectContaining({ signal: expect.any(AbortSignal) })
+      expect.objectContaining({
+        signal: expect.any(AbortSignal) as unknown,
+        passive: true,
+      })
     );
   });
 
@@ -432,7 +531,7 @@ describe('restore on mount (properties widget present)', () => {
     factory(view as never);
     await vi.runAllTimersAsync();
 
-    expect(reviewManager.loadScrollPosition).toHaveBeenCalledTimes(1);
+    expect(reviewManager.handle.restore).toHaveBeenCalledTimes(1);
   });
 
   it('queries for .metadata-container by the exact selector string', async () => {
@@ -450,7 +549,7 @@ describe('restore on mount (properties widget present)', () => {
     await vi.runAllTimersAsync();
 
     // loadScrollPosition ran, which means the widget was found via the selector
-    expect(reviewManager.loadScrollPosition).toHaveBeenCalled();
+    expect(reviewManager.handle.restore).toHaveBeenCalled();
   });
 
   it('scrolls the stored offset to the top of the viewport', async () => {
@@ -539,10 +638,7 @@ describe('handleScroll', () => {
     scrollHandler();
 
     expect(view.posAtCoords).toHaveBeenLastCalledWith({ x: 1, y: 1 }, false);
-    expect(reviewManager.saveScrollPosition).toHaveBeenCalledWith(
-      expect.anything(),
-      1234
-    );
+    expect(reviewManager.handle.set).toHaveBeenCalledWith(1234);
   });
 
   it('offsets the probe point by 1px inside the scroller rect', async () => {
@@ -577,7 +673,7 @@ describe('handleScroll', () => {
 
     scrollHandler();
 
-    expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
+    expect(reviewManager.handle.set).not.toHaveBeenCalled();
   });
 });
 
@@ -604,10 +700,10 @@ describe('anchor walk', () => {
       () => void,
     ];
     handleScroll();
-    const call = reviewManager.saveScrollPosition.mock.calls.at(-1) as
-      | [unknown, number]
+    const call = reviewManager.handle.set.mock.calls.at(-1) as
+      | [number]
       | undefined;
-    return { offset: call?.[1], view };
+    return { offset: call?.[0], view };
   }
 
   // 'first line' is line 1 (0-10), the empty line 2 is 11, 'second line' is
@@ -712,10 +808,7 @@ describe('anchor walk', () => {
     ];
     handleScroll();
 
-    expect(reviewManager.saveScrollPosition).toHaveBeenCalledWith(
-      expect.anything(),
-      10
-    );
+    expect(reviewManager.handle.set).toHaveBeenCalledWith(10);
   });
 
   it('never saves a position on a row above the edge, wherever the hit test lands', async () => {
@@ -788,7 +881,7 @@ describe('isRestoring guard', () => {
     )[1];
     scrollHandler();
 
-    expect(reviewManager.saveScrollPosition).toHaveBeenCalledTimes(1);
+    expect(reviewManager.handle.set).toHaveBeenCalledTimes(1);
   });
 
   it('does not save while isRestoring is true (within the 200ms window)', async () => {
@@ -812,7 +905,7 @@ describe('isRestoring guard', () => {
     if (calls.length > 0) {
       const scrollHandler = (calls[0] as [string, () => void])[1];
       scrollHandler();
-      expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
+      expect(reviewManager.handle.set).not.toHaveBeenCalled();
     }
     await vi.runAllTimersAsync();
   });
@@ -856,7 +949,7 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     triggerMutation();
     await vi.runAllTimersAsync();
 
-    expect(reviewManager.loadScrollPosition).toHaveBeenCalled();
+    expect(reviewManager.handle.restore).toHaveBeenCalled();
     expect(spy).toHaveBeenCalledWith(50, { y: 'start' });
   });
 
@@ -893,7 +986,7 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     factory(view as never);
     await vi.runAllTimersAsync();
 
-    expect(reviewManager.loadScrollPosition).toHaveBeenCalled();
+    expect(reviewManager.handle.restore).toHaveBeenCalled();
   });
 
   it('queries for .metadata-container by the exact selector inside the observer callback', async () => {
@@ -936,11 +1029,11 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     await vi.advanceTimersByTimeAsync(10);
 
     // restore not yet reached (the if(widget) branch was false)
-    expect(reviewManager.loadScrollPosition).not.toHaveBeenCalled();
+    expect(reviewManager.handle.restore).not.toHaveBeenCalled();
 
     // 300ms fallback still runs and calls restore
     await vi.runAllTimersAsync();
-    expect(reviewManager.loadScrollPosition).toHaveBeenCalledTimes(1);
+    expect(reviewManager.handle.restore).toHaveBeenCalledTimes(1);
   });
 
   it('clears the 300ms fallback timeout when observer fires first', async () => {
@@ -962,7 +1055,7 @@ describe('waitForPropertiesAndRestore — MutationObserver path', () => {
     await vi.runAllTimersAsync();
 
     // loadScrollPosition called exactly once (fallback didn't fire separately)
-    expect(reviewManager.loadScrollPosition).toHaveBeenCalledTimes(1);
+    expect(reviewManager.handle.restore).toHaveBeenCalledTimes(1);
     expect(disconnect).toHaveBeenCalledTimes(1);
   });
 });
@@ -986,7 +1079,7 @@ describe('saving waits for the mount-time restore', () => {
 
     await vi.runAllTimersAsync();
     expect(view.scrollDOM.addEventListener).toHaveBeenCalledWith(
-      'scrollend',
+      'scroll',
       expect.any(Function),
       expect.anything()
     );
@@ -1008,7 +1101,7 @@ describe('saving waits for the mount-time restore', () => {
     triggerMutation();
     await vi.runAllTimersAsync();
 
-    const [load] = reviewManager.loadScrollPosition.mock.invocationCallOrder;
+    const [load] = reviewManager.handle.restore.mock.invocationCallOrder;
     const [listen] = view.scrollDOM.addEventListener.mock.invocationCallOrder;
     expect(listen).toBeGreaterThan(load);
   });
@@ -1026,7 +1119,7 @@ describe('saving waits for the mount-time restore', () => {
     instance.destroy();
     await vi.runAllTimersAsync();
 
-    expect(reviewManager.loadScrollPosition).not.toHaveBeenCalled();
+    expect(reviewManager.handle.restore).not.toHaveBeenCalled();
     expect(view.dispatch).not.toHaveBeenCalled();
     expect(view.scrollDOM.addEventListener).not.toHaveBeenCalled();
   });
@@ -1056,7 +1149,7 @@ describe('saving waits for the mount-time restore', () => {
     triggerMutation();
     await vi.advanceTimersByTimeAsync(10);
 
-    expect(reviewManager.loadScrollPosition).toHaveBeenCalledTimes(1);
+    expect(reviewManager.handle.restore).toHaveBeenCalledTimes(1);
     expect(view.scrollDOM.addEventListener).toHaveBeenCalledTimes(1);
   });
 
@@ -1076,14 +1169,14 @@ describe('saving waits for the mount-time restore', () => {
     instance.destroy();
     await vi.runAllTimersAsync();
 
-    expect(reviewManager.loadScrollPosition).not.toHaveBeenCalled();
+    expect(reviewManager.handle.restore).not.toHaveBeenCalled();
     expect(view.dispatch).not.toHaveBeenCalled();
   });
 
   it('does not listen for scrolls when destroyed while the saved position loads', async () => {
     const reviewManager = makeReviewManager(null);
     let finishLoading: (offset: number | null) => void = () => {};
-    reviewManager.loadScrollPosition.mockReturnValue(
+    reviewManager.handle.restore.mockReturnValue(
       new Promise((resolve) => {
         finishLoading = resolve;
       })
@@ -1094,7 +1187,7 @@ describe('saving waits for the mount-time restore', () => {
     });
     const instance = factory(view as never);
     await vi.advanceTimersByTimeAsync(10);
-    expect(reviewManager.loadScrollPosition).toHaveBeenCalled();
+    expect(reviewManager.handle.restore).toHaveBeenCalled();
 
     instance.destroy();
     finishLoading(null);
@@ -1263,7 +1356,7 @@ describe('restore on mount — note opened to a particular place', () => {
         }
         // Saving the reader's scrolling carries on either way.
         expect(view.scrollDOM.addEventListener).toHaveBeenCalledWith(
-          'scrollend',
+          'scroll',
           expect.any(Function),
           expect.anything()
         );
