@@ -1,4 +1,5 @@
 import { CLOZE_DELIMITERS } from '#/lib/constants';
+import { NOT_PURGED } from '#/lib/items/row-delete';
 import test, {
   expect,
   type ElectronApplication,
@@ -412,9 +413,9 @@ test.describe('Snippets and cards from a PDF article', () => {
   const textItem = (page: Page, n: number, idx: number) =>
     pdfPage(page, n).locator(`.textLayer [data-idx="${idx}"]`);
 
-  /** Every snippet row, with its note's body. */
+  /** Every snippet row not deleted for good, with its note's body. */
   const snippets = (page: Page) =>
-    page.evaluate(async () => {
+    page.evaluate(async (notPurged) => {
       const { app } = window as unknown as {
         app: PageApp & {
           vault: {
@@ -430,7 +431,8 @@ test.describe('Snippets and cards from a PDF article', () => {
       };
       const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
       const rows = repo.query(
-        'SELECT reference, parent, start_offset, end_offset FROM snippet'
+        `SELECT reference, parent, start_offset, end_offset FROM snippet
+         WHERE ${notPurged}`
       );
       return Promise.all(
         rows.map(async (row) => {
@@ -448,11 +450,11 @@ test.describe('Snippets and cards from a PDF article', () => {
           };
         })
       );
-    });
+    }, NOT_PURGED);
 
-  /** Every card row, with its note's body. */
+  /** Every card row not deleted for good, with its note's body. */
   const cards = (page: Page) =>
-    page.evaluate(async () => {
+    page.evaluate(async (notPurged) => {
       const { app } = window as unknown as {
         app: PageApp & {
           vault: {
@@ -467,7 +469,9 @@ test.describe('Snippets and cards from a PDF article', () => {
         };
       };
       const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
-      const rows = repo.query('SELECT reference, parent FROM srs_card');
+      const rows = repo.query(
+        `SELECT reference, parent FROM srs_card WHERE ${notPurged}`
+      );
       return Promise.all(
         rows.map(async (row) => {
           const file = app.vault.getFileByPath(row.reference as string);
@@ -482,7 +486,7 @@ test.describe('Snippets and cards from a PDF article', () => {
           };
         })
       );
-    });
+    }, NOT_PURGED);
 
   /** Select `answer` in the answer modal's text, as the user would. */
   const selectAnswer = async (page: Page, answer: string) => {
@@ -624,9 +628,7 @@ test.describe('Snippets and cards from a PDF article', () => {
       .click();
     await executeCommandById(window, 'incremental-reading:create-card');
 
-    await expect
-      .poll(notices)
-      .toHaveLength(4);
+    await expect.poll(notices).toHaveLength(4);
     expect(await snippets(window)).toEqual([]);
     expect(await cards(window)).toEqual([]);
     await expect(confirmButton(window)).toHaveCount(0);
@@ -1270,9 +1272,7 @@ test.describe('Snippets and cards from a PDF article', () => {
     await executeCommandById(window, 'incremental-reading:extract-selection');
     await executeCommandById(window, 'incremental-reading:create-card');
 
-    await expect
-      .poll(notices)
-      .toHaveLength(2);
+    await expect.poll(notices).toHaveLength(2);
     expect(await snippets(window)).toEqual([]);
     expect(await cards(window)).toEqual([]);
     await expect(answerText(window)).toHaveCount(0);
