@@ -152,7 +152,7 @@ describe('two devices syncing one database file', () => {
     expect(idsBackedUp(b)).toEqual([]);
   });
 
-  it('backs up the saves a device drops when it takes on a copy saved alongside its own', async () => {
+  it('merges a copy saved alongside its own, keeping the saves of both without a backup', async () => {
     const a = await makeDevice('a', { now: T });
     await write(a, 'a1');
     const b = await makeDevice('b', {
@@ -163,9 +163,11 @@ describe('two devices syncing one database file', () => {
     await write(a, 'a2');
 
     await sync.deliver(b, a);
+    expect(idsHeld(a)).toEqual(['a1', 'a2', 'b1']);
 
-    expect(idsHeld(a)).toEqual(['a1', 'b1']);
-    expect(idsBackedUp(a).sort()).toEqual(['a1', 'a2']);
+    await sync.deliver(a, b);
+    expect(idsHeld(b)).toEqual(['a1', 'a2', 'b1']);
+    expect([...idsBackedUp(a), ...idsBackedUp(b)]).toEqual([]);
   });
 
   it('leaves a copy from a device away for more than 180 days alone, and the away device takes this one on', async () => {
@@ -187,7 +189,7 @@ describe('two devices syncing one database file', () => {
     expect(idsBackedUp(b).sort()).toEqual(['a1', 'b-old']);
   });
 
-  it('property: never drops a row without a backup, never reloads its own copy, and agrees after a round trip with no writes', async () => {
+  it('property: never drops a row without a backup, never reloads its own copy, and agrees once Sync settles', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(stepArb, { maxLength: 14 }),
@@ -235,10 +237,10 @@ describe('two devices syncing one database file', () => {
             for (const id of written) expect(kept).toContain(id);
           }
 
-          // A round trip with no writes in between leaves both alike
+          // Sync left running with no writes in between leaves both alike
           const [a, b] = devices;
-          if (await sync.deliver(a, b)) {
-            await sync.deliver(b, a);
+          if (a.vault.adapter.diskBytes() && b.vault.adapter.diskBytes()) {
+            await sync.quiesce(a, b);
             expect(idsHeld(a)).toEqual(idsHeld(b));
           }
         }

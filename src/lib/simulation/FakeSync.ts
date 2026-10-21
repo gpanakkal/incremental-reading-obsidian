@@ -64,6 +64,36 @@ export class FakeSync {
     return true;
   }
 
+  /**
+   * Deliver each device's file to the next, round and round (back and forth
+   * for two), until every disk holds the same file: Sync left running with no
+   * one writing.
+   * @returns how many deliveries that took
+   * @throws if they still differ after four rounds
+   */
+  async quiesce(...devices: FakeDevice[]) {
+    const bytesOf = (device: FakeDevice) => {
+      const bytes = device.vault.adapter.diskBytes(this.dbFilePath);
+      return bytes ? new Uint8Array(bytes) : null;
+    };
+    const same = () => {
+      const [first, ...rest] = devices.map(bytesOf);
+      return rest.every(
+        (other) =>
+          other?.byteLength === first?.byteLength &&
+          (!other || other.every((byte, i) => byte === first![i]))
+      );
+    };
+    const maxDeliveries = 4 * devices.length;
+    for (let deliveries = 0; deliveries < maxDeliveries; deliveries++) {
+      if (same()) return deliveries;
+      const from = deliveries % devices.length;
+      await this.deliver(devices[from], devices[(from + 1) % devices.length]);
+    }
+    if (same()) return maxDeliveries;
+    throw new Error(`still apart after ${maxDeliveries} deliveries`);
+  }
+
   async #report(device: FakeDevice) {
     await device.repo.settle();
     await device.repo.handleFileChange({
