@@ -4,6 +4,7 @@ import {
   AUTO_IMPORT_TAG,
   DATA_DIRECTORY,
 } from '#/lib/constants';
+import { deleteRowStatements, NOT_PURGED } from '#/lib/items/row-delete';
 import { WATCHED_FOLDER_LEDGER_KEY } from '#/lib/watched-folder-ledger';
 import test, {
   expect,
@@ -85,6 +86,7 @@ type PageApp = {
               params?: unknown[]
             ): Record<string, unknown>[] | Promise<Record<string, unknown>[]>;
             mutate(sql: string, params?: unknown[]): unknown;
+            db: { exec(sql: string): unknown };
           };
         };
         autoImportWatcher: { flushNow(): Promise<void> };
@@ -143,14 +145,16 @@ const noteState = (notePath: string) =>
     };
   }, notePath);
 
-/** How many articles the database holds. */
+/** How many articles the database holds, not counting those deleted for good. */
 const articleCount = () =>
-  window.evaluate(async () => {
+  window.evaluate(async (notPurged) => {
     const { app } = window as unknown as { app: PageApp };
     const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
-    const [row] = await repo.query('SELECT COUNT(*) AS count FROM article');
+    const [row] = await repo.query(
+      `SELECT COUNT(*) AS count FROM article WHERE ${notPurged}`
+    );
     return row.count as number;
-  });
+  }, NOT_PURGED);
 
 /**
  * Import whatever the watcher has queued now, rather than once it settles, and
@@ -200,6 +204,45 @@ const setFrontmatter = (notePath: string, key: string, value: unknown) =>
       );
     },
     { at: notePath, name: key, to: value }
+  );
+
+/**
+ * Remove the article row `id` with its history outright, leaving no tombstone,
+ * as a database that never had it would be. The plugin refuses `DELETE`s of
+ * synced rows with temporary triggers (see `armRowStamps` in
+ * `src/lib/repository/row-stamps.ts`), so they are dropped first, as
+ * `withHardDeletesAllowed` does; the repository arms them again on its next
+ * save.
+ */
+const loseArticleRow = (articleId: string) =>
+  window.evaluate(async (id) => {
+    const { repo } = (window as unknown as { app: PageApp }).app.plugins
+      .plugins['incremental-reading'].reviewManager;
+    const hardDelete = async (sql: string) => {
+      const triggers = (await repo.query(
+        `SELECT name FROM sqlite_temp_master
+         WHERE type = 'trigger' AND tbl_name IN ('article', 'article_review')`
+      )) as { name: string }[];
+      for (const { name } of triggers) {
+        repo.db.exec(`DROP TRIGGER temp.${name}`);
+      }
+      await repo.mutate(sql, [id]);
+    };
+    await hardDelete('DELETE FROM article_review WHERE article_id = $1');
+    await hardDelete('DELETE FROM article WHERE id = $1');
+  }, articleId);
+
+/** Delete the article row `id` for good, with the writes un-importing runs. */
+const unimportArticleRow = (articleId: string) =>
+  window.evaluate(
+    async (statements) => {
+      const { repo } = (window as unknown as { app: PageApp }).app.plugins
+        .plugins['incremental-reading'].reviewManager;
+      for (const { query, params } of statements) {
+        await repo.mutate(query, params);
+      }
+    },
+    deleteRowStatements('article', articleId)
   );
 
 /** Wait for the note at `notePath` to be an article, and return its id. */
@@ -324,14 +367,7 @@ A page read before the reset.
 
   // As deleting the data folder does: the note keeps its ir-id, with no row
   // behind it
-  await window.evaluate(async (articleId) => {
-    const { repo } = (window as unknown as { app: PageApp }).app.plugins
-      .plugins['incremental-reading'].reviewManager;
-    await repo.mutate('DELETE FROM article_review WHERE article_id = $1', [
-      articleId,
-    ]);
-    await repo.mutate('DELETE FROM article WHERE id = $1', [articleId]);
-  }, id);
+  await loseArticleRow(id);
   expect(await noteState(notePath)).toMatchObject({ irId: id, rowIds: [] });
 
   // Any later change, the trigger tag kept
@@ -580,14 +616,7 @@ test('imports what is created in, moved into or copied into a watched folder, an
 
   // As un-importing does: the row deleted, the plugin's frontmatter stripped
   const id = (await noteState(moved)).irId!;
-  await window.evaluate(async (articleId) => {
-    const { repo } = (window as unknown as { app: PageApp }).app.plugins
-      .plugins['incremental-reading'].reviewManager;
-    await repo.mutate('DELETE FROM article_review WHERE article_id = $1', [
-      articleId,
-    ]);
-    await repo.mutate('DELETE FROM article WHERE id = $1', [articleId]);
-  }, id);
+  await unimportArticleRow(id);
   await setFrontmatter(moved, 'ir-id', undefined);
   await setFrontmatter(moved, 'tags', undefined);
   // Edited after, as is the note that was there before watching began
@@ -687,14 +716,7 @@ test('imports what was added to a watched folder while Obsidian was closed when 
 
   // As un-importing does: the row deleted, the plugin's frontmatter stripped
   const [unimported] = notes;
-  await window.evaluate(async (articleId) => {
-    const { repo } = (window as unknown as { app: PageApp }).app.plugins
-      .plugins['incremental-reading'].reviewManager;
-    await repo.mutate('DELETE FROM article_review WHERE article_id = $1', [
-      articleId,
-    ]);
-    await repo.mutate('DELETE FROM article WHERE id = $1', [articleId]);
-  }, ids[0]);
+  await unimportArticleRow(ids[0]);
   await setFrontmatter(unimported, 'ir-id', undefined);
   await setFrontmatter(unimported, 'tags', undefined);
   await expect.poll(async () => (await noteState(unimported)).irId).toBeNull();
