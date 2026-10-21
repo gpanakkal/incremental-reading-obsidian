@@ -693,7 +693,7 @@ describe('holdForSync', () => {
     return { promise, settled, notify, ...notices };
   }
 
-  const reasonArb = fc.constantFrom<SyncHoldReason>('migrate', 'create');
+  const reasonArb = fc.constantFrom<SyncHoldReason>('migrate');
   const stateOf = (fields: FakeSyncFields) =>
     readSyncState(makeSync(fields), DATABASE_FILE_PATH);
   /** Every Sync that reads as paused. */

@@ -5,8 +5,13 @@ import {
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { refusalReason } from '#/lib/readiness';
 import type { IArticleBase, NoteType, SQLiteRepository } from '#/lib/types';
-import { makeItemVault, TestRepository } from '#/test/item-vault';
+import {
+  makeItemVault,
+  runOutMergeWait,
+  TestRepository,
+} from '#/test/item-vault';
 import fc from 'fast-check';
 import type { CachedMetadata, TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -1179,24 +1184,33 @@ describe('deleteWithNote', () => {
     );
   });
 
-  it('deletes nothing, and says why, while writes are refused', async () => {
+  it('deletes nothing, and says why, while not ready', async () => {
     await fc.assert(
-      fc.asyncProperty(itemRowArb, async (row) => {
-        vi.restoreAllMocks();
-        const wired = await wireDelete(row);
-        wired.repo.refuseWrites(new Error('Saving is paused.'));
+      fc.asyncProperty(
+        itemRowArb,
+        fc.constantFrom('starting' as const, 'merging' as const),
+        async (row, state) => {
+          vi.restoreAllMocks();
+          const wired = await wireDelete(row);
+          if (state === 'merging') {
+            wired.repo.holdMerging();
+            runOutMergeWait();
+          } else wired.repo.refuseWrites(new Error('Saving is paused.'));
+          const rowsBefore = wired.repo.rows(row.table);
 
-        expect(await wired.manager.delete(row.table, row.id, {})).toBe(
-          'refused'
-        );
+          expect(await wired.manager.delete(row.table, row.id, {})).toBe(
+            'refused'
+          );
 
-        expect(wired.promptForFileDeletion).not.toHaveBeenCalled();
-        expect(wired.vault.paths()).toEqual([ITEM_NOTE]);
-        expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
-          expect.stringContaining('Saving is paused.'),
-          { kind: 'error' }
-        );
-      }),
+          expect(wired.promptForFileDeletion).not.toHaveBeenCalled();
+          expect(wired.vault.paths()).toEqual([ITEM_NOTE]);
+          expect(wired.repo.rows(row.table)).toEqual(rowsBefore);
+          expect(wired.notify).toHaveBeenCalledExactlyOnceWith(
+            expect.stringContaining(refusalReason(state)),
+            { kind: 'error' }
+          );
+        }
+      ),
       { numRuns: 10 }
     );
   });

@@ -29,6 +29,7 @@ import {
 } from '#/lib/item-path-guard';
 import { configureSuccessNotices, type NotifyOptions } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { refusalReason } from '#/lib/readiness';
 import { BulkMutateError } from '#/lib/repository/BulkMutateError';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import { matchFrontmatterTags, stripFrontmatterTags } from '#/lib/tags';
@@ -52,7 +53,11 @@ import {
   seenElsewhereArb,
   textItemSpecArb,
 } from '#/test/due-query';
-import { makeItemVault, TestRepository } from '#/test/item-vault';
+import {
+  makeItemVault,
+  runOutMergeWait,
+  TestRepository,
+} from '#/test/item-vault';
 import { cachePosition, makeLinkVault, sectionsOf } from '#/test/link-vault';
 import { noteText } from '#/test/note-text';
 import {
@@ -139,6 +144,7 @@ function makeRepo(
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
     writeRefusal: vi.fn(() => null),
+    readiness: 'ready',
   } as unknown as SQLiteRepository;
 }
 
@@ -450,6 +456,7 @@ function makeSimpleRepo(): SQLiteRepository {
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
     writeRefusal: vi.fn(() => null),
+    readiness: 'ready',
   } as unknown as SQLiteRepository;
 }
 
@@ -523,6 +530,7 @@ async function makeSqlJsRepo(): Promise<{
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
     writeRefusal: vi.fn(() => null),
+    readiness: 'ready',
   } as unknown as SQLiteRepository;
   return { repo, db };
 }
@@ -758,6 +766,19 @@ const refusal = (named = ''): unknown =>
   expect.stringMatching(
     new RegExp(`${escapeRegExp(named)}.*Saving is paused\\.$`, 's')
   );
+
+/** The ways the database can be not ready for an action (see `gate`). */
+const notReadyArb = fc.constantFrom('starting' as const, 'merging' as const);
+
+/** Make `repo` not ready, as `state`: refusing writes, or merging. */
+function makeNotReady(repo: TestRepository, state: 'starting' | 'merging') {
+  if (state === 'starting') repo.refuseWrites(new Error('Saving is paused.'));
+  else {
+    // One that outlasts the wait for it (see `refusedAction`)
+    repo.holdMerging();
+    runOutMergeWait();
+  }
+}
 
 /** An import's confirmation, by the title it names and the priority given. */
 const importedWithPriority = (title: string, priority: number): unknown =>
@@ -1384,6 +1405,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
   }
 
@@ -1594,6 +1616,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1628,6 +1651,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1659,6 +1683,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1705,6 +1730,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -1737,6 +1763,7 @@ describe('getDue', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     // Whatever it is asked for, under whatever settings
     await fc.assert(
@@ -2257,6 +2284,7 @@ describe('fetchMany', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     const manager = new ArticleManager({} as never, repo);
     const result = await manager.fetchMany();
@@ -2404,6 +2432,7 @@ describe('fetch', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     const manager = new ArticleManager({} as never, repo);
     vi.spyOn(Obsidian, 'getNote').mockReturnValue(null);
@@ -2422,6 +2451,7 @@ describe('fetch', () => {
           handleFileChange: vi.fn(),
           onDataChange: vi.fn(() => vi.fn()),
           writeRefusal: vi.fn(() => null),
+          readiness: 'ready',
         } as unknown as SQLiteRepository;
         const manager = new ArticleManager({} as never, repo);
         await manager.fetch(id);
@@ -2444,6 +2474,7 @@ describe('fetch', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     const manager = new ArticleManager(
       { app: makeApp(), settings: { fuzzReviewTimes: false } } as never,
@@ -2814,6 +2845,7 @@ describe('rename', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
     const manager = new ArticleManager(
       { app: { fileManager: { renameFile } } } as never,
@@ -2876,6 +2908,44 @@ describe('rename', () => {
       })
     );
   });
+  it.each(['starting', 'merging'] as const)(
+    'renames nothing, and says why, while not ready (%s)',
+    async (state) => {
+      const renameFile = vi
+        .spyOn(Obsidian, 'renameFile')
+        .mockResolvedValue(undefined);
+      const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+      // A merge that outlasts the wait for it (see `refusedAction`)
+      runOutMergeWait();
+      const mutate = vi.fn();
+      const repo = {
+        ...makeSimpleRepo(),
+        mutate,
+        readiness: state,
+        writeRefusal: () =>
+          state === 'starting' ? new Error('Saving is paused.') : null,
+        onReadinessChange: () => () => undefined,
+      } as unknown as SQLiteRepository;
+      const manager = new ArticleManager({} as never, repo);
+      const article = {
+        data: makeArticle({ id: 'art-1' }),
+        file: {
+          basename: 'old-name',
+          extension: 'md',
+          parent: null,
+        } as unknown as TFile,
+      };
+
+      await expect(manager.rename(article, 'new-name')).resolves.toBe(false);
+
+      expect(renameFile).not.toHaveBeenCalled();
+      expect(mutate).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining(refusalReason(state)),
+        { kind: 'error' }
+      );
+    }
+  );
 });
 
 describe('reprioritize', () => {
@@ -3227,6 +3297,7 @@ describe('getDue (filter correctness)', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -3270,6 +3341,7 @@ describe('getDue (filter correctness)', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -3528,6 +3600,7 @@ describe('fuzzing (getDue sort)', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -3553,6 +3626,7 @@ describe('fuzzing (getDue sort)', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -3582,6 +3656,7 @@ describe('fuzzing (getDue sort)', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -3609,6 +3684,7 @@ describe('fuzzing (getDue sort)', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -3635,6 +3711,7 @@ describe('fuzzing (getDue sort)', () => {
       handleFileChange: vi.fn(),
       onDataChange: vi.fn(() => vi.fn()),
       writeRefusal: vi.fn(() => null),
+      readiness: 'ready',
     } as unknown as SQLiteRepository;
 
     const plugin = {
@@ -6814,6 +6891,65 @@ describe('making an article, with its note and its row as one unit', () => {
       kind: 'error',
     });
   });
+
+  it('makes and imports nothing, and says why, while a merge is under way', async () => {
+    const merging: unknown = expect.stringContaining(refusalReason('merging'));
+    for (const makeCopy of [true, false]) {
+      for (const path of [SOURCE, PDF]) {
+        vi.restoreAllMocks();
+        const { vault, repo, manager, notify, before } = await wireArticles(
+          { [path]: path === PDF ? null : { title: 'x' } },
+          null
+        );
+        repo.holdMerging();
+        runOutMergeWait();
+        const file = vault.files.get(path)!;
+
+        expect(
+          await manager.import(file, DEFAULT_PRIORITY, null, makeCopy)
+        ).toBeNull();
+
+        expect(vault.paths()).toEqual([path]);
+        expect(vault.frontmatterOf(path)).toEqual(before[path]);
+        expect(repo.rows('article')).toEqual([]);
+        expect(notify).toHaveBeenCalledExactlyOnceWith(merging, {
+          kind: 'error',
+        });
+        expect(notify.mock.calls[0][0]).toContain(`"${file.name}"`);
+      }
+    }
+
+    vi.restoreAllMocks();
+    const { vault, repo, manager, notify } = await wireArticles({}, null);
+    repo.holdMerging();
+    runOutMergeWait();
+    expect(await manager.create(DEFAULT_PRIORITY)).toBeNull();
+    expect(vault.paths()).toEqual([]);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(merging, { kind: 'error' });
+  });
+
+  it('waits out a merge that ends within a moment, then imports or makes the article', async () => {
+    const merging: unknown = expect.stringContaining(refusalReason('merging'));
+    const { vault, repo, manager, notify } = await wireArticles(
+      { [SOURCE]: { title: 'x' } },
+      null
+    );
+    const file = vault.files.get(SOURCE)!;
+
+    let release = repo.holdMerging();
+    const imported = manager.import(file, DEFAULT_PRIORITY, null, false);
+    await Promise.resolve();
+    release();
+    expect(await imported).not.toBeNull();
+    release = repo.holdMerging();
+    const made = manager.create(DEFAULT_PRIORITY);
+    await Promise.resolve();
+    release();
+    expect(await made).not.toBeNull();
+
+    expect(repo.rows('article')).toHaveLength(2);
+    expect(notify).not.toHaveBeenCalledWith(merging, expect.anything());
+  });
 });
 
 describe('importWebPage', () => {
@@ -7371,6 +7507,74 @@ describe('importMany', () => {
 
   const pathOf = ({ name, pdf }: { name: string; pdf: boolean }) =>
     pdf ? `papers/${name}.pdf` : `notes/${name}.md`;
+
+  it('property: touches no file and writes no row while the database is not ready, failing every file with why, and tells the user nothing itself', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fileSpecsArb,
+        optionsArb,
+        notReadyArb,
+        async (specs, options, state) => {
+          vi.restoreAllMocks();
+          const { vault, repo, notify, manager, before } = await wireArticles(
+            Object.fromEntries(
+              specs.map((spec) => [pathOf(spec), spec.pdf ? null : {}])
+            ),
+            null
+          );
+          makeNotReady(repo, state);
+          const paths = vault.paths();
+          const files = specs.map((spec) => vault.files.get(pathOf(spec))!);
+
+          const outcomes = await manager.importMany(
+            files.map((file) => ({ file })),
+            options
+          );
+
+          expect(outcomes).toStrictEqual(
+            files.map((file) => ({
+              file,
+              status: 'failed',
+              reason: refusalReason(state),
+            }))
+          );
+          expect(vault.paths()).toEqual(paths);
+          for (const spec of specs) {
+            expect(vault.frontmatterOf(pathOf(spec))).toEqual(
+              before[pathOf(spec)]
+            );
+          }
+          expect(repo.rows('article')).toEqual([]);
+          expect(notify).not.toHaveBeenCalled();
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('waits out a merge that ends within a moment, then imports every file', async () => {
+    const { vault, repo, manager } = await wireArticles(
+      { 'notes/a.md': {}, 'notes/b.md': {} },
+      null
+    );
+    const files = ['notes/a.md', 'notes/b.md'].map(
+      (path) => vault.files.get(path)!
+    );
+    const release = repo.holdMerging();
+
+    const outcomes = manager.importMany(
+      files.map((file) => ({ file })),
+      { priority: DEFAULT_PRIORITY, fixedIntervalDays: null, makeCopy: false }
+    );
+    await Promise.resolve();
+    expect(repo.rows('article')).toEqual([]);
+    release();
+
+    expect((await outcomes).map(({ status }) => status)).not.toContain(
+      'failed'
+    );
+    expect(repo.rows('article')).toHaveLength(2);
+  });
 
   it('imports every file with the options given, isolating the ones that throw, and tells the user nothing', async () => {
     await fc.assert(
@@ -8441,6 +8645,49 @@ describe('unimportMany', () => {
   });
 
   const NOTE = 'notes/Note.md';
+
+  it('property: deletes no row and clears no property while the database is not ready, failing every file with why', async () => {
+    await fc.assert(
+      fc.asyncProperty(notReadyArb, async (state) => {
+        vi.restoreAllMocks();
+        const { repo, vault, manager, unimporting } = await wireUnimport({
+          [NOTE]: { 'ir-id': 'a', tags: ['ir-article'] },
+        });
+        seedArticle(repo, 'a', NOTE, { reviews: 1 });
+        const rowsBefore = repo.rows('article');
+        const before = structuredClone(vault.frontmatterOf(NOTE));
+        makeNotReady(repo, state);
+        const file = vault.files.get(NOTE)!;
+
+        const outcomes = await manager.unimportMany([file]);
+
+        expect(outcomes).toStrictEqual([
+          { file, status: 'failed', reason: refusalReason(state) },
+        ]);
+        expect(repo.rows('article')).toEqual(rowsBefore);
+        expect(repo.rows('article_review')).toHaveLength(1);
+        expect(vault.frontmatterOf(NOTE)).toEqual(before);
+        expect(unimporting).not.toHaveBeenCalled();
+      })
+    );
+  });
+
+  it('waits out a merge that ends within a moment, then un-imports', async () => {
+    const { repo, vault, manager } = await wireUnimport({
+      [NOTE]: { 'ir-id': 'a', tags: ['ir-article'] },
+    });
+    seedArticle(repo, 'a', NOTE, { reviews: 1 });
+    const file = vault.files.get(NOTE)!;
+    const release = repo.holdMerging();
+
+    const outcomes = manager.unimportMany([file]);
+    await Promise.resolve();
+    expect(repo.rows('article')).toHaveLength(1);
+    release();
+
+    expect(await outcomes).toStrictEqual([{ file, status: 'unimported' }]);
+    expect(repo.rows('article')).toEqual([]);
+  });
 
   it('deletes the row and its history, frees its snippets and cards, and strips only the article and trigger tags', async () => {
     await fc.assert(

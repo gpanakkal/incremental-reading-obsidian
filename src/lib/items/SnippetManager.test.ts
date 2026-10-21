@@ -18,6 +18,7 @@ import IRScheduler from '#/lib/IRScheduler';
 import { Markdown } from '#/lib/Markdown';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { encodeAnchor, MAX_ANCHOR_PAGE } from '#/lib/pdf/pdf-anchor';
+import { refusalReason } from '#/lib/readiness';
 import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
 import type {
   ISnippetBase,
@@ -34,7 +35,11 @@ import {
   seenElsewhereArb,
   textItemSpecArb,
 } from '#/test/due-query';
-import { makeItemVault, TestRepository } from '#/test/item-vault';
+import {
+  makeItemVault,
+  runOutMergeWait,
+  TestRepository,
+} from '#/test/item-vault';
 import { EditorSelection, EditorState } from '@codemirror/state';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
@@ -88,6 +93,7 @@ function makeSimpleRepo(): SQLiteRepository {
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
     writeRefusal: vi.fn(() => null),
+    readiness: 'ready',
   } as unknown as SQLiteRepository;
 }
 
@@ -107,6 +113,7 @@ function makeRepoWithLastReview(
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
     writeRefusal: vi.fn(() => null),
+    readiness: 'ready',
   } as unknown as SQLiteRepository;
 }
 
@@ -234,6 +241,7 @@ async function makeSqlJsRepo(): Promise<{
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
     writeRefusal: vi.fn(() => null),
+    readiness: 'ready',
   } as unknown as SQLiteRepository;
   return { repo, db };
 }
@@ -620,11 +628,14 @@ async function snipPdf(failure: 'note' | 'frontmatter' | 'row' | null) {
  */
 async function wireSnippets(
   notes: Record<string, Record<string, unknown> | null>,
-  refused = false
+  refused: boolean | 'merging' = false
 ) {
   const vault = makeItemVault(notes);
   const repo = await TestRepository.create();
-  if (refused) repo.refuseWrites(new Error('Saving is paused.'));
+  if (refused === 'merging') {
+    repo.holdMerging();
+    runOutMergeWait();
+  } else if (refused) repo.refuseWrites(new Error('Saving is paused.'));
   const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
   vi.spyOn(console, 'warn').mockReturnValue(undefined);
   const manager = new SnippetManager(
@@ -2591,6 +2602,7 @@ function makeOrphanRepoStub(rows: SnippetRow[]): SQLiteRepository {
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
     writeRefusal: vi.fn(() => null),
+    readiness: 'ready',
   } as unknown as SQLiteRepository;
 }
 
@@ -4215,22 +4227,28 @@ describe('create, with its note and its row as one unit', () => {
     }
   });
 
-  it('makes nothing, and says why, while writes are refused', async () => {
-    const { vault, notify, snip } = await wireSnippets(
-      { [PARENT]: null },
-      true
-    );
+  it.each([
+    [true, 'starting'],
+    ['merging', 'merging'],
+  ] as const)(
+    'makes nothing, and says why, while not ready (%s)',
+    async (refused, state) => {
+      const { vault, notify, snip } = await wireSnippets(
+        { [PARENT]: null },
+        refused
+      );
 
-    const result = await snip(PARENT);
+      const result = await snip(PARENT);
 
-    expect(result).toBeNull();
-    expect(vault.paths()).toEqual([PARENT]);
-    expect(vault.processFrontMatter).not.toHaveBeenCalled();
-    expect(notify).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining('Saving is paused.'),
-      { kind: 'error' }
-    );
-  });
+      expect(result).toBeNull();
+      expect(vault.paths()).toEqual([PARENT]);
+      expect(vault.processFrontMatter).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining(refusalReason(state)),
+        { kind: 'error' }
+      );
+    }
+  );
 
   it('makes no note when the parent is an item with no row behind it', async () => {
     const { vault, snip } = await wireSnippets({
@@ -4298,27 +4316,33 @@ describe('createFromPdf, with its note and its row as one unit', () => {
     expect(vault.trashed).toEqual([]);
   });
 
-  it('makes nothing, and says why, while writes are refused', async () => {
-    const { vault, notify, manager } = await wireSnippets(
-      { [PDF]: null },
-      true
-    );
+  it.each([
+    [true, 'starting'],
+    ['merging', 'merging'],
+  ] as const)(
+    'makes nothing, and says why, while not ready (%s)',
+    async (refused, state) => {
+      const { vault, notify, manager } = await wireSnippets(
+        { [PDF]: null },
+        refused
+      );
 
-    const result = await manager.createFromPdf({
-      pdf: vault.files.get(PDF)!,
-      text: 'text',
-      start: 1e10,
-      end: 1e10 + 4,
-      subpath: '#page=1',
-    });
+      const result = await manager.createFromPdf({
+        pdf: vault.files.get(PDF)!,
+        text: 'text',
+        start: 1e10,
+        end: 1e10 + 4,
+        subpath: '#page=1',
+      });
 
-    expect(result).toBeNull();
-    expect(vault.paths()).toEqual([PDF]);
-    expect(notify).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining('Saving is paused.'),
-      { kind: 'error' }
-    );
-  });
+      expect(result).toBeNull();
+      expect(vault.paths()).toEqual([PDF]);
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining(refusalReason(state)),
+        { kind: 'error' }
+      );
+    }
+  );
 });
 
 describe('delete while writes are refused', () => {

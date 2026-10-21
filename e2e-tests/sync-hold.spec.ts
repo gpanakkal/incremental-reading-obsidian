@@ -250,6 +250,10 @@ const readSchema = () =>
     'utf8'
   ));
 
+/** The schema version a migrated database ends at: the schema's own. */
+const latestVersion = () =>
+  Number(/PRAGMA user_version\s*=\s*(\d+)/.exec(readSchema())![1]);
+
 const writeDatabaseFile = (bytes: Uint8Array) =>
   fs.writeFile(path.join(vaultPath, DATABASE_FILE_PATH), bytes);
 
@@ -398,7 +402,7 @@ test('with Sync paused, a startup migrates at once and says so', async () => {
   await expect(notice(SYNC_HOLD_MESSAGES.paused.migrate)).toBeVisible();
   expect(await version9Backups()).toHaveLength(1);
   expect(await readDatabaseFile()).toEqual({
-    version: 10,
+    version: latestVersion(),
     articles: expectedArticles(STALE_PRIORITIES),
   });
   await expectQueueShowsEveryItem();
@@ -423,7 +427,7 @@ test('when Sync never delivers, a startup migrates once the wait runs out, warni
   await expect.poll(pluginArticles).toEqual(expectedArticles(STALE_PRIORITIES));
   await expect(notice(SYNC_HOLD_MESSAGES.waiting)).toHaveCount(0);
   expect(await version9Backups()).toHaveLength(1);
-  expect((await readDatabaseFile()).version).toBe(10);
+  expect((await readDatabaseFile()).version).toBe(latestVersion());
   await expectQueueShowsEveryItem();
 });
 

@@ -36,7 +36,7 @@ import {
   store,
   type ReviewPage,
 } from '#/lib/store';
-import type { ReviewItem } from '#/lib/types';
+import type { Readiness, ReviewItem } from '#/lib/types';
 import * as UnimportModule from '#/lib/unimport-article';
 import {
   loadWatchedFolderLedger,
@@ -800,9 +800,24 @@ async function startDatabase(
  * back and firing `rename` for it.
  */
 async function startRenames(items: readonly string[] = []) {
-  vi.spyOn(SQLJSRepository, 'start').mockResolvedValue({
+  const readinessListeners = new Set<(state: Readiness) => void>();
+  const repo = {
     onDataChange: vi.fn(() => () => {}),
-  } as unknown as SQLJSRepository);
+    readiness: 'ready' as Readiness,
+    writeRefusal: () => null,
+    onReadinessChange: (listener: (state: Readiness) => void) => {
+      readinessListeners.add(listener);
+      return () => readinessListeners.delete(listener);
+    },
+  };
+  /** Have the repository become `state`, telling its listeners. */
+  const becomes = (state: Readiness) => {
+    repo.readiness = state;
+    for (const listener of [...readinessListeners]) listener(state);
+  };
+  vi.spyOn(SQLJSRepository, 'start').mockResolvedValue(
+    repo as unknown as SQLJSRepository
+  );
   vi.spyOn(ReviewManager.prototype, 'isItemFileAt').mockImplementation(
     (_file, path) => items.includes(path)
   );
@@ -874,6 +889,7 @@ async function startRenames(items: readonly string[] = []) {
     notify,
     entries,
     vaultRename,
+    becomes,
   };
 }
 
@@ -3747,6 +3763,33 @@ describe('IncrementalReadingPlugin renames', () => {
     expect(follow).not.toHaveBeenCalled();
   });
 
+  it.each(['rename', 'delete'] as const)(
+    'follows a %s heard during a merge once the merge ends, and none heard while saving is paused',
+    async (kind) => {
+      const renames = await startRenames(['a.md']);
+      await renames.start();
+      const heard = kind === 'rename' ? renames.follow : renames.deletion;
+      const hear = (file: TFile) =>
+        kind === 'rename' ? renames.rename(file, 'a.md') : renames.remove(file);
+      const merged = tFileAt('b.md');
+
+      renames.becomes('merging');
+      hear(merged);
+      await Promise.resolve();
+      expect(heard).not.toHaveBeenCalled();
+      renames.becomes('ready');
+      await Promise.resolve();
+      expect(heard).toHaveBeenCalledOnce();
+
+      renames.becomes('starting');
+      hear(tFileAt('c.md'));
+      renames.becomes('ready');
+      await Promise.resolve();
+      expect(heard).toHaveBeenCalledOnce();
+      expect(renames.notify).not.toHaveBeenCalled();
+    }
+  );
+
   it('follows a renamed file, but not a folder, when the rename breaks no link', async () => {
     const renames = await startRenames(['a.md']);
     await renames.start();
@@ -4427,7 +4470,7 @@ describe('IncrementalReadingPlugin database startup and Sync', () => {
     const { started, hold } = startWith(appWithSync(null));
     await started;
 
-    await expect(hold()('create')).resolves.toBe('at-once');
+    await expect(hold()('migrate')).resolves.toBe('at-once');
     expect(notify).not.toHaveBeenCalled();
   });
 

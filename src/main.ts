@@ -108,6 +108,7 @@ import {
   resetCurrentOnMatch,
   startItemCacheEviction,
 } from './lib/query-client';
+import { followWhenReady } from './lib/readiness';
 import {
   DatabaseLoadError,
   SQLJSRepository,
@@ -809,16 +810,24 @@ export default class IncrementalReadingPlugin extends Plugin {
   private onVaultDelete(file: TAbstractFile) {
     if (!this.reviewManager) return;
     const path = this.itemPathGuard?.pathBeforeDeletion(file) ?? file.path;
-    void this.reviewManager
-      .handleDeletion(file, path)
-      .then(() => resetCurrentOnMatch(file, this.reviewManager));
+    // Once any merge under way is over, which would drop the mark
+    followWhenReady(this.reviewManager.repo, () => {
+      void this.reviewManager
+        .handleDeletion(file, path)
+        .then(() => resetCurrentOnMatch(file, this.reviewManager));
+    });
   }
 
-  /** Point the database at where `file` moved from `oldPath`. */
+  /**
+   * Point the database at where `file` moved from `oldPath`, once any merge
+   * under way is over, which would drop the row's new reference.
+   */
   private followRename(file: TAbstractFile, oldPath: string) {
-    void this.reviewManager
-      .handleExternalRename(file, oldPath)
-      .then(() => invalidateCacheOnMatch(file, this.reviewManager));
+    followWhenReady(this.reviewManager.repo, () => {
+      void this.reviewManager
+        .handleExternalRename(file, oldPath)
+        .then(() => invalidateCacheOnMatch(file, this.reviewManager));
+    });
   }
 
   /**
@@ -1007,8 +1016,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         // Last, once every row is where its note is: a note the scan just
         // pointed a row at is no leftover, nor one just imported by its tag.
         // Notes only, by the cache, read once it is clean.
-        // TODO(0081): once the startup hold for Obsidian Sync lands, wait for
-        // its settled signal here too. Until then, a note Sync brings down
+        // No startup hold waits for Obsidian Sync to settle (0171 dropped it
+        // in favour of merging later arrivals), so a note Sync brings down
         // before the database reads as a leftover; the notice only asks, and
         // `resolveLeftover` looks again before it acts.
         .then(async () => {

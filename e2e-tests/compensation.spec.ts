@@ -62,6 +62,9 @@ type PageWindow = {
     vault: {
       getFiles(): { path: string }[];
       setConfig(key: string, value: unknown): void;
+      adapter: {
+        readBinary: (this: unknown, path: string) => Promise<ArrayBuffer>;
+      };
     };
     metadataCache: {
       getCache(path: string): { frontmatter?: Record<string, unknown> } | null;
@@ -72,9 +75,16 @@ type PageWindow = {
         {
           reviewManager: {
             repo: {
+              readonly readiness: string;
+              readonly dbFilePath: string;
+              handleFileChange(file: { path: string }): Promise<void>;
+              save(): Promise<void>;
               blockWrites(error: Error): Error;
               mutate: (query: string, params?: unknown[]) => unknown;
               query(query: string, params?: unknown[]): unknown[];
+              onReadinessChange: (
+                listener: (state: string) => void
+              ) => () => void;
             };
           };
           leftovers?: { current: readonly unknown[] };
@@ -114,6 +124,56 @@ async function pauseSaving(window: Page) {
     const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
     repo.blockWrites(new Error('Paused for the test.'));
   });
+}
+
+/**
+ * Hold the repository merging, as it is while it takes in a copy of the
+ * database another device wrote: its read of the file is held until
+ * {@link endMerge}. Through the page's adapter and the repository's own
+ * `handleFileChange`, the path a Sync download takes.
+ */
+async function holdMerging(window: Page) {
+  await window.evaluate(async () => {
+    const { app } = window as unknown as PageWindow;
+    const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+    // A fresh vault's database is in memory until its first write, and a
+    // file that isn't there would read as one that won't load. `save` is
+    // protected, so reached past its type.
+    await repo.save();
+    const { adapter } = app.vault;
+    const original = adapter.readBinary;
+    // Called on the adapter, which it reads its folder from
+    const read = (path: string) =>
+      original.call(adapter, path) as Promise<ArrayBuffer>;
+    const w = window as unknown as { __irEndMerge?: () => void };
+    adapter.readBinary = (path) => {
+      if (path !== repo.dbFilePath) return read(path);
+      adapter.readBinary = read;
+      return new Promise((resolve) => {
+        w.__irEndMerge = () => resolve(read(path));
+      });
+    };
+    void repo.handleFileChange({ path: repo.dbFilePath });
+  });
+  await expect.poll(() => readiness(window)).toBe('merging');
+}
+
+/** Let the read {@link holdMerging} held go on, ending the merge. */
+async function endMerge(window: Page) {
+  await window.evaluate(() =>
+    (window as unknown as { __irEndMerge?: () => void }).__irEndMerge?.()
+  );
+  await expect.poll(() => readiness(window)).toBe('ready');
+}
+
+/** The repository's readiness (see `SQLiteRepository.readiness`). */
+async function readiness(window: Page): Promise<string> {
+  return window.evaluate(
+    () =>
+      (window as unknown as PageWindow).app.plugins.plugins[
+        'incremental-reading'
+      ].reviewManager.repo.readiness
+  );
 }
 
 /** Write the note at vault path `path`, holding `frontmatter`, then `body`. */
@@ -202,9 +262,7 @@ test.describe('Making items while saving is paused', () => {
 
     await expect
       .poll(notices)
-      .toContainEqual(
-        expect.stringMatching(/snippet.*paused/)
-      );
+      .toContainEqual(expect.stringMatching(/snippet.*paused/));
     expect(await itemFiles(window)).toEqual([]);
     expect(await rowCount(window, 'snippet')).toBe(0);
   });
@@ -238,6 +296,57 @@ test.describe('Making items while saving is paused', () => {
         `${SOURCE}.md`
       )
     ).toEqual(before);
+  });
+});
+
+test.describe('Making items while the database takes in another copy', () => {
+  test.beforeEach(start);
+
+  test('imports nothing, says so, and leaves the note byte for byte as it was', async () => {
+    const notices = await watchNotices(window);
+    await openNote(window, SOURCE);
+    const before = await fs.readFile(`${vaultPath}/${SOURCE}.md`);
+    await holdMerging(window);
+
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+
+    await expect
+      .poll(notices)
+      .toContainEqual(expect.stringMatching(/"Security Principles\.md"/));
+    expect(await readiness(window)).toBe('merging');
+    expect(await rowCount(window, 'article')).toBe(0);
+    expect(await itemFiles(window)).toEqual([]);
+    expect(await fs.readFile(`${vaultPath}/${SOURCE}.md`)).toEqual(before);
+    await endMerge(window);
+    expect(await rowCount(window, 'article')).toBe(0);
+    expect(await fs.readFile(`${vaultPath}/${SOURCE}.md`)).toEqual(before);
+  });
+
+  test('imports once a merge that ends within a moment is over', async () => {
+    await openNote(window, SOURCE);
+    await holdMerging(window);
+    // The merge ends a moment after the import starts waiting it out, well
+    // within the wait (`MERGE_WAIT_MS`): timed in the page, as round trips
+    // to it would make the moment unknown
+    await window.evaluate(() => {
+      const { repo } = (window as unknown as PageWindow).app.plugins.plugins[
+        'incremental-reading'
+      ].reviewManager;
+      const w = window as unknown as { __irEndMerge?: () => void };
+      const listen = repo.onReadinessChange;
+      repo.onReadinessChange = (listener) => {
+        repo.onReadinessChange = listen;
+        globalThis.setTimeout(() => w.__irEndMerge?.(), 100);
+        return Reflect.apply(listen, repo, [listener]) as () => void;
+      };
+    });
+
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+
+    await expect.poll(() => rowCount(window, 'article')).toBe(1);
+    expect(await readiness(window)).toBe('ready');
   });
 });
 

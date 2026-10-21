@@ -2,6 +2,7 @@ import { DISMISS_ICON_STROKE, PLUGIN_ICON } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { fetchByFile, invalidateCacheOnMatch } from '#/lib/query-client';
+import { isRefusal } from '#/lib/readiness';
 import {
   isReviewArticle,
   isReviewCard,
@@ -240,6 +241,8 @@ function renderReviewModeActions(
                 kind: 'success',
               });
             } catch (error) {
+              // A refusal has said why already (see `requireReady`)
+              if (isRefusal(error)) return;
               Obsidian.notify(`Failed to update priority`, { kind: 'error' });
               console.error(error);
             }
@@ -389,6 +392,7 @@ export function renderStandaloneActionBarDOM(
 
           await invalidateCacheOnMatch(item.file, reviewManager);
         } catch (error) {
+          if (isRefusal(error)) return;
           console.error('Failed to toggle dismiss status:', error);
           Obsidian.notify('Failed to update item', { kind: 'error' });
         }

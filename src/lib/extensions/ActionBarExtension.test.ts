@@ -9,6 +9,7 @@ import {
 import { configureSuccessNotices } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { registerPluginIcon } from '#/lib/plugin-icon';
+import { ActionRefusedError } from '#/lib/readiness';
 import type {
   DataChangeEvent,
   DataChangeListener,
@@ -489,6 +490,26 @@ describe('renderStandaloneActionBarDOM', () => {
       'Failed to toggle dismiss status:',
       expect.any(Error)
     );
+  });
+
+  it('says nothing more of a write the database refused, which said why itself, and leaves the label as it was', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const file = makeFile();
+    const harness = makeHarness({ item: makeItem({ dismissed: false, file }) });
+    harness.reviewManager.dismissItem.mockRejectedValueOnce(
+      new ActionRefusedError('dismiss the item')
+    );
+    const container = makeContainer();
+    const notify = vi.spyOn(Obsidian, 'notify');
+
+    renderStandaloneActionBarDOM(file, harness.plugin, container);
+    await tick();
+    dismissButton(container).click();
+    await tick();
+
+    expect(notify).not.toHaveBeenCalled();
+    expect(logged).not.toHaveBeenCalled();
+    expect(iconName(dismissButton(container))).toBe(DISMISS);
   });
 
   it('opens a known item in review in the current tab', async () => {

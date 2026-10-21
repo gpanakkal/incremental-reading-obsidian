@@ -244,9 +244,11 @@ export const SYNC_POLL_MS = 500;
 
 /**
  * What a startup is about to do that Sync could make wrong: migrate the
- * database file this device has, or start a new one because it has none.
+ * database file this device has. Starting a new database when there is none
+ * no longer waits (0171): a copy Sync delivers later is taken in when it
+ * arrives.
  */
-export type SyncHoldReason = 'migrate' | 'create';
+export type SyncHoldReason = 'migrate';
 
 export const SYNC_HOLD_MESSAGES = {
   waiting:
@@ -255,19 +257,12 @@ export const SYNC_HOLD_MESSAGES = {
     migrate:
       'Incremental reading: Sync is paused; migrating the local database. ' +
       'If another device has newer data, resume Sync first.',
-    create:
-      'Incremental reading: Sync is paused; starting a new database. ' +
-      'If another device has data, resume Sync first.',
   },
   timeout: {
     migrate:
       "Incremental reading: Sync didn't finish delivering the review " +
       "database, so this device's copy was migrated. If another device has " +
       'newer data, its copy may conflict with this one.',
-    create:
-      "Incremental reading: Sync didn't finish delivering the review " +
-      'database, so a new one was started. If another device has data, its ' +
-      'copy may conflict with this one.',
   },
 } as const;
 

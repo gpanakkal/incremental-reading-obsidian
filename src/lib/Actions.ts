@@ -43,6 +43,7 @@ import {
   invalidateItemQuery,
   queryClient,
 } from './query-client';
+import { isRefusal } from './readiness';
 import { markContextFlash } from './review-position';
 import {
   type SelectionKind,
@@ -233,7 +234,8 @@ export class Actions {
         },
       });
     } catch (error) {
-      console.error(error);
+      // A refusal has said why already (see `requireReady`)
+      if (!isRefusal(error)) console.error(error);
     }
   };
 
@@ -271,7 +273,7 @@ export class Actions {
         },
       });
     } catch (error) {
-      console.error(error);
+      if (!isRefusal(error)) console.error(error);
     }
   };
 
@@ -285,7 +287,8 @@ export class Actions {
       await this.plugin.reviewManager.reprioritize(item.data, priority);
       await invalidateItemQuery(item.data.id);
       Obsidian.notify(`Priority set to ${priority / 10}`, { kind: 'success' });
-    } catch (_error) {
+    } catch (error) {
+      if (isRefusal(error)) return;
       Obsidian.notify(
         `Failed to update priority for "${item.data.reference}"`,
         { kind: 'error' }
@@ -298,15 +301,30 @@ export class Actions {
     article: ReviewArticle,
     changes: { newIntervalDays: number } | { newPriority: number }
   ) => {
-    await this.plugin.reviewManager.manageFixedInterval(article.data, changes);
+    try {
+      await this.plugin.reviewManager.manageFixedInterval(
+        article.data,
+        changes
+      );
+    } catch (error) {
+      if (isRefusal(error)) return;
+      throw error;
+    }
     await invalidateItemQuery(article.data.id);
   };
 
   gradeCard = async (card: ReviewCard, grade: Grade) => {
-    const reviewRowId = await this.plugin.reviewManager.reviewCard(
-      card.data,
-      grade
-    );
+    let reviewRowId: string;
+    try {
+      reviewRowId = await this.plugin.reviewManager.reviewCard(
+        card.data,
+        grade
+      );
+    } catch (error) {
+      // Told why already, and nothing graded (see `requireReady`)
+      if (isRefusal(error)) return;
+      throw error;
+    }
     this._recordReview(reviewRowId, 'card');
     const wasDismissed = card.data.dismissed;
     if (wasDismissed) {
@@ -337,7 +355,12 @@ export class Actions {
     // Check if it was being reviewed to conditionally navigate review back to
     // item upon undoing, since items can also be dismissed outside review
     const wasBeingReviewed = item.data.id === store.getState().currentItemId;
-    await this.plugin.reviewManager.dismissItem(item);
+    try {
+      await this.plugin.reviewManager.dismissItem(item);
+    } catch (error) {
+      if (isRefusal(error)) return;
+      throw error;
+    }
     await invalidateItemQuery(item.data.id);
 
     this._pushUndo({
@@ -362,7 +385,12 @@ export class Actions {
   };
 
   unDismissItem = async (item: MaybeMissingItem) => {
-    await this.plugin.reviewManager.unDismissItem(item);
+    try {
+      await this.plugin.reviewManager.unDismissItem(item);
+    } catch (error) {
+      if (isRefusal(error)) return;
+      throw error;
+    }
     await invalidateItemQuery(item.data.id);
     const { currentItemId } = store.getState();
     if (currentItemId === null) {
@@ -383,7 +411,7 @@ export class Actions {
    */
   deleteItem = async (item: ReviewItem) => {
     const name = `delete "${itemName(item)}"`;
-    if (refusedWrite(this.plugin.reviewManager.repo, name)) return;
+    if (await refusedWrite(this.plugin.reviewManager.repo, name)) return;
     // The row is marked deleted first, and back when the note isn't deleted
     // after all: marked by the vault's `delete` event alone, a write failing
     // there would leave the row behind for a note that is gone. A note can't
@@ -1101,8 +1129,7 @@ export class Actions {
    */
   undoEntry = async (target: ActionStackEntry | undefined) => {
     // The stack holds no `undefined`, so none is found for it either
-    const index = this.undoStack.findIndex((entry) => entry === target);
-    const actionEntry = this.undoStack[index];
+    const actionEntry = this.undoStack.find((entry) => entry === target);
     if (actionEntry === undefined) {
       Obsidian.notify('Already undone');
       return;
@@ -1110,14 +1137,21 @@ export class Actions {
     // Refused before anything is reversed, and kept for once saving resumes
     if (
       actionEntry.writes !== false &&
-      refusedWrite(
+      (await refusedWrite(
         this.plugin.reviewManager.repo,
         `undo ${actionEntry.description}`
-      )
+      ))
     ) {
       return;
     }
-    this.undoStack.splice(index, 1);
+    // Looked for again: the check may have waited out a merge, while another
+    // undo took the entry off the stack or one below it
+    const at = this.undoStack.indexOf(actionEntry);
+    if (at === -1) {
+      Obsidian.notify('Already undone');
+      return;
+    }
+    this.undoStack.splice(at, 1);
     // Emitted before the reversal runs, not after: the entry is already off the
     // stack, and an undo that throws partway would otherwise leave subscribers
     // reading an entry that is no longer there.
@@ -1133,7 +1167,7 @@ export class Actions {
     }
     if (miss === 'retry') {
       // Where it was: on top, when what was above it has gone meanwhile
-      this.undoStack.splice(index, 0, actionEntry);
+      this.undoStack.splice(at, 0, actionEntry);
       this.emitter.emit();
       Obsidian.notify(`Didn't undo ${actionEntry.description}`);
       return;

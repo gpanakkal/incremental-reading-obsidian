@@ -15,6 +15,7 @@ import {
   fetchCurrentItem,
   invalidateCurrentItemQuery,
 } from '#/lib/query-client';
+import { ActionRefusedError, refusalReason } from '#/lib/readiness';
 import * as reviewPosition from '#/lib/review-position';
 import type { SuccessNoticeLevel } from '#/lib/settings';
 import {
@@ -31,6 +32,7 @@ import {
   NOTE_TYPES,
   type MaybeMissingItem,
   type NoteType,
+  type Readiness,
   type ReviewArticle,
   type ReviewCard,
   type ReviewItem,
@@ -45,6 +47,7 @@ import fc from 'fast-check';
 // here is the one `ObsidianHelpers.notify` constructs — importing it by path is
 // what gives TS the mock's `messages`/`reset`, which the real class lacks.
 import { Notice } from '#/test/__mocks__/obsidian';
+import { runOutMergeWait } from '#/test/item-vault';
 import { showSuccessNotices } from '#/test/success-notices';
 import * as CardAnswerModal from '#/views/CardAnswerModal';
 import type ReviewView from '#/views/ReviewView';
@@ -84,7 +87,7 @@ function makePlugin() {
     reviewManager: {
       dismissItem: vi.fn().mockResolvedValue(undefined),
       unDismissItem: vi.fn().mockResolvedValue(undefined),
-      repo: { writeRefusal: () => null },
+      repo: { writeRefusal: () => null, readiness: 'ready' },
     },
     app: {
       workspace: {
@@ -135,7 +138,7 @@ function makeReviewingPlugin({
       articles: { undoReview: reverse },
       snippets: { undoReview: reverse },
       cards: { rollbackBeforeReview: reverse },
-      repo: { writeRefusal: () => null },
+      repo: { writeRefusal: () => null, readiness: 'ready' },
     },
     app: {
       workspace: {
@@ -586,11 +589,32 @@ const contextEStateArb = fc.option(
   { nil: null }
 );
 
+/**
+ * A database merging another device's copy until `becomes` ends the merge,
+ * telling the gate's listeners as the real one does.
+ */
+function mergingRepo() {
+  const listeners = new Set<(state: Readiness) => void>();
+  const repo = {
+    readiness: 'merging' as Readiness,
+    writeRefusal: () => null,
+    onReadinessChange: (listener: (state: Readiness) => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    becomes(next: Readiness) {
+      repo.readiness = next;
+      for (const listener of [...listeners]) listener(next);
+    },
+  };
+  return repo;
+}
+
 /** Actions over a plugin whose database refuses writes with `reason`. */
 function refusing(reason: string) {
   const plugin = makePlugin();
   Object.assign(plugin.reviewManager, {
-    repo: { writeRefusal: () => new Error(reason) },
+    repo: { writeRefusal: () => new Error(reason), readiness: 'starting' },
   });
   return new Actions(plugin);
 }
@@ -4071,31 +4095,147 @@ describe('Actions — undo of a card made from a note', () => {
   });
 });
 
+describe('Actions — plain writes the database refused', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Each action whose one write `method` of the review manager makes. */
+  const WRITES = [
+    {
+      method: 'reviewArticle',
+      run: (a: Actions, item: (type: NoteType) => ReviewItem) =>
+        a.reviewArticle(item('article') as ReviewArticle),
+    },
+    {
+      method: 'reviewSnippet',
+      run: (a: Actions, item: (type: NoteType) => ReviewItem) =>
+        a.reviewSnippet(item('snippet') as ReviewSnippet),
+    },
+    {
+      method: 'reviewCard',
+      run: (a: Actions, item: (type: NoteType) => ReviewItem) =>
+        a.gradeCard(item('card') as ReviewCard, 3),
+    },
+    {
+      method: 'reprioritize',
+      run: (a: Actions, item: (type: NoteType) => ReviewItem) =>
+        a.reprioritize(item('article') as ReviewText, 40),
+    },
+    {
+      method: 'manageFixedInterval',
+      run: (a: Actions, item: (type: NoteType) => ReviewItem) =>
+        a.manageFixedInterval(item('article') as ReviewArticle, {
+          newIntervalDays: 3,
+        }),
+    },
+    {
+      method: 'dismissItem',
+      run: (a: Actions, item: (type: NoteType) => ReviewItem) =>
+        a.dismissItem(item('snippet')),
+    },
+    {
+      method: 'unDismissItem',
+      run: (a: Actions, item: (type: NoteType) => ReviewItem) =>
+        a.unDismissItem(item('snippet')),
+    },
+  ] as const;
+
+  it.each(WRITES)(
+    'leaves $method refused quietly, the user told why already: no undo, no confirmation, no failure, nothing thrown',
+    async ({ method, run }) => {
+      const plugin = makeReviewingPlugin({
+        reviewId: 'review-1',
+        dayRolloverOffset: 4,
+      });
+      Object.assign(plugin.reviewManager, {
+        [method]: vi.fn().mockRejectedValue(new ActionRefusedError(method)),
+      });
+      const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+      const logged = vi.spyOn(console, 'error').mockReturnValue(undefined);
+      const actions = new Actions(plugin);
+      const item = (type: NoteType) =>
+        makeTypedItem(type, { id: type, dismissed: false });
+
+      await expect(run(actions, item)).resolves.toBeUndefined();
+
+      expect(actions.undoStack).toEqual([]);
+      expect(notify).not.toHaveBeenCalled();
+      expect(logged).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(WRITES)(
+    'still lets any other failure of $method out',
+    async ({ method, run }) => {
+      const plugin = makeReviewingPlugin({
+        reviewId: 'review-1',
+        dayRolloverOffset: 4,
+      });
+      const failure = new Error('disk full');
+      Object.assign(plugin.reviewManager, {
+        [method]: vi.fn().mockRejectedValue(failure),
+      });
+      const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+      const logged = vi.spyOn(console, 'error').mockReturnValue(undefined);
+      const actions = new Actions(plugin);
+      const item = (type: NoteType) =>
+        makeTypedItem(type, { id: type, dismissed: false });
+
+      const outcome = await run(actions, item).then(
+        () => null,
+        (error: unknown) => error
+      );
+
+      // Thrown on, logged, or told as a failure: anything but swallowed
+      const told =
+        outcome === failure ||
+        logged.mock.calls.some(([error]) => error === failure) ||
+        notify.mock.calls.some(([, options]) => options?.kind === 'error');
+      expect(told).toBe(true);
+      expect(actions.undoStack).toEqual([]);
+    }
+  );
+});
+
 describe('Actions.deleteItem', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('deletes no note, and says why, while writes are refused: its row would be left behind', async () => {
-    const plugin = makePlugin();
-    Object.assign(plugin.reviewManager, {
-      repo: { writeRefusal: () => new Error('Saving is paused.') },
-    });
-    const promptForFileDeletion = vi.fn().mockResolvedValue(true);
-    Object.assign(plugin.app, { fileManager: { promptForFileDeletion } });
-    const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
-    const item = makeReviewItem('my-article');
+  it.each(['starting', 'merging'] as const)(
+    'deletes no note, and says why, while not ready (%s): its row would be left behind',
+    async (state) => {
+      const plugin = makePlugin();
+      const markDeleted = vi.fn();
+      // A merge that outlasts the wait for it (see `refusedAction`)
+      runOutMergeWait();
+      Object.assign(plugin.reviewManager, {
+        repo: {
+          writeRefusal: () =>
+            state === 'starting' ? new Error('Saving is paused.') : null,
+          readiness: state,
+          onReadinessChange: () => () => undefined,
+        },
+        articles: { markDeleted },
+      });
+      const promptForFileDeletion = vi.fn().mockResolvedValue(true);
+      Object.assign(plugin.app, { fileManager: { promptForFileDeletion } });
+      const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+      const item = makeReviewItem('my-article');
 
-    await new Actions(plugin).deleteItem(item);
+      await new Actions(plugin).deleteItem(item);
 
-    expect(promptForFileDeletion).not.toHaveBeenCalled();
-    expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
-      kind: 'error',
-    });
-    const [message] = notify.mock.calls[0];
-    expect(message).toContain('my-article');
-    expect(message).toContain('Saving is paused.');
-  });
+      expect(promptForFileDeletion).not.toHaveBeenCalled();
+      expect(markDeleted).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+        kind: 'error',
+      });
+      const [message] = notify.mock.calls[0];
+      expect(message).toContain('my-article');
+      expect(message).toContain(refusalReason(state));
+    }
+  );
 
   it('marks the row deleted before deleting the note as Obsidian does, then moves on', async () => {
     const wired = wireDeleteItem(async () => true);
@@ -4397,7 +4537,10 @@ describe('Actions.recordImport', () => {
   it('is held while writes are refused, as every undo that writes is', async () => {
     const { actions, undoImports } = wireImports();
     Object.assign(actions.plugin.reviewManager, {
-      repo: { writeRefusal: () => new Error('Saving is paused.') },
+      repo: {
+        writeRefusal: () => new Error('Saving is paused.'),
+        readiness: 'starting',
+      },
     });
     const entry = actions.recordImport({
       name: 'a',
@@ -4448,6 +4591,35 @@ describe('Actions.undoEntry', () => {
         }
       )
     );
+  });
+
+  it('undoes an entry asked for twice while a merge is under way once, after the merge', async () => {
+    const { actions } = wireImports();
+    const repo = mergingRepo();
+    Object.assign(actions.plugin.reviewManager, { repo });
+    const below: ActionStackEntry = {
+      description: 'below',
+      undo: vi.fn(),
+      writes: true,
+    };
+    const target: ActionStackEntry = {
+      description: 'target',
+      undo: vi.fn(),
+      writes: true,
+    };
+    actions._pushUndo(below);
+    actions._pushUndo(target);
+
+    const first = actions.undoEntry(target);
+    const second = actions.undoEntry(target);
+    await Promise.resolve();
+    expect(target.undo).not.toHaveBeenCalled();
+    repo.becomes('ready');
+    await Promise.all([first, second]);
+
+    expect(target.undo).toHaveBeenCalledOnce();
+    expect(below.undo).not.toHaveBeenCalled();
+    expect(actions.undoStack).toEqual([below]);
   });
 
   it('property: puts an entry to try again back where it was, or on top once what was above it is gone', async () => {

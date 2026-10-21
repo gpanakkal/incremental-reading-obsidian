@@ -8,6 +8,7 @@ import {
 import { resolveItemContext } from '#/lib/item-context';
 import { evictedSpot } from '#/lib/moved-note-scan';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { ActionRefusedError } from '#/lib/readiness';
 import {
   describeReclaim,
   readRebinds,
@@ -20,6 +21,7 @@ import type {
   IArticleBase,
   ISnippetBase,
   NoteType,
+  Readiness,
   ReviewArticle,
   ReviewCard,
   ReviewItem,
@@ -68,7 +70,30 @@ function makeRepo(): SQLiteRepository {
     transaction: vi.fn(async (work: () => unknown) => work()),
     handleFileChange: vi.fn(),
     onDataChange: vi.fn(() => vi.fn()),
+    readiness: 'ready',
   } as unknown as SQLiteRepository;
+}
+
+/**
+ * {@link makeRepo}, ready as `state`, which the test changes with `becomes`,
+ * telling the repository's listeners as the real one does.
+ */
+function makeGatedRepo(state: Readiness) {
+  const listeners = new Set<(state: Readiness) => void>();
+  const repo = Object.assign(makeRepo(), {
+    readiness: state,
+    writeRefusal: () =>
+      repo.readiness === 'starting' ? new Error('Saving is paused.') : null,
+    onReadinessChange: (listener: (state: Readiness) => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    becomes(next: Readiness) {
+      repo.readiness = next;
+      for (const listener of [...listeners]) listener(next);
+    },
+  });
+  return repo;
 }
 
 function makePlugin(appOverrides: Record<string, unknown> = {}) {
@@ -5792,5 +5817,124 @@ describe('ReviewManager.backfillReviewTimeFuzz', () => {
 
     expect(articles.mock.calls).toEqual([['article']]);
     expect(snippets.mock.calls).toEqual([['snippet']]);
+  });
+});
+
+describe('readiness gate', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Each plain database write the manager gates, with the write it makes
+   * once let through.
+   */
+  const GATED = [
+    {
+      name: 'reviewCard',
+      run: (m: ReviewManager) => m.reviewCard(makeReviewCard(0).data, 3),
+      write: (m: ReviewManager) =>
+        vi.spyOn(m.cards, 'review').mockResolvedValue('review-1' as never),
+    },
+    {
+      name: 'reviewSnippet',
+      run: (m: ReviewManager) => m.reviewSnippet(makeSnippetBase()),
+      write: (m: ReviewManager) =>
+        vi.spyOn(m.snippets, 'review').mockResolvedValue('review-1' as never),
+    },
+    {
+      name: 'reviewArticle',
+      run: (m: ReviewManager) => m.reviewArticle(makeArticleBase()),
+      write: (m: ReviewManager) =>
+        vi.spyOn(m.articles, 'review').mockResolvedValue('review-1' as never),
+    },
+    {
+      name: 'reprioritize',
+      run: (m: ReviewManager) => m.reprioritize(makeArticleBase(), 40),
+      write: (m: ReviewManager) =>
+        vi.spyOn(m.articles, 'reprioritize').mockResolvedValue(undefined),
+    },
+    {
+      name: 'manageFixedInterval',
+      run: (m: ReviewManager) =>
+        m.manageFixedInterval(makeArticleBase(), { newIntervalDays: 3 }),
+      write: (m: ReviewManager) =>
+        vi.spyOn(m.articles, 'setFixedInterval').mockResolvedValue(undefined),
+    },
+    {
+      name: 'dismissItem',
+      run: (m: ReviewManager) => m.dismissItem(makeReviewItem('article')),
+      write: (m: ReviewManager) => vi.spyOn(m.repo, 'mutate'),
+    },
+    {
+      name: 'unDismissItem',
+      run: (m: ReviewManager) => m.unDismissItem(makeReviewItem('snippet')),
+      write: (m: ReviewManager) => vi.spyOn(m.repo, 'mutate'),
+    },
+  ] as const;
+
+  it.each(GATED)(
+    '$name holds over a merge, then writes once it ends ready',
+    async ({ run, write }) => {
+      const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+      const repo = makeGatedRepo('merging');
+      const manager = new ReviewManager(makePlugin(), repo);
+      const writes = write(manager);
+      let done = false;
+
+      const ran = run(manager).then(() => (done = true));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(writes).not.toHaveBeenCalled();
+      expect(done).toBe(false);
+      repo.becomes('ready');
+      await ran;
+
+      expect(writes).toHaveBeenCalledOnce();
+      expect(notify).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(GATED)(
+    '$name writes nothing, and says why, while saving is paused',
+    async ({ name, run, write }) => {
+      const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
+      const repo = makeGatedRepo('starting');
+      const manager = new ReviewManager(makePlugin(), repo);
+      const writes = write(manager);
+
+      const error = await run(manager).catch((e: unknown) => e);
+
+      expect(error, name).toBeInstanceOf(ActionRefusedError);
+      expect(writes).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining('Saving is paused.'),
+        { kind: 'error' }
+      );
+    }
+  );
+
+  it('imports tagged notes only once a merge under way ends, then as the database allows', async () => {
+    const repo = makeGatedRepo('merging');
+    const manager = new ReviewManager(makePlugin(), repo);
+    const importMany = vi
+      .spyOn(manager.articles, 'importMany')
+      .mockResolvedValue([]);
+    const entries = [{ file: FAKE_FILE, matchedTags: ['read'] }];
+
+    const imported = manager.importTaggedNotes(entries, {
+      priority: 30,
+      mode: 'inPlace',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(importMany).not.toHaveBeenCalled();
+    repo.becomes('ready');
+    await imported;
+
+    expect(importMany).toHaveBeenCalledExactlyOnceWith(
+      [{ file: FAKE_FILE, stripFromSource: ['read'] }],
+      { priority: 30, fixedIntervalDays: null, makeCopy: false }
+    );
   });
 });

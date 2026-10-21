@@ -1,4 +1,4 @@
-import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
+import { refusedAction } from './readiness';
 import type { SQLiteRepository } from './types';
 
 /**
@@ -57,19 +57,17 @@ export async function withCompensation<T>(
 }
 
 /**
- * Check, before an operation touches any file, that its database write won't
- * be refused — while saving is paused, say (see `SQLJSRepository.blockWrites`)
- * — and say so when it would be. A refusal found only at the commit would
- * have the operation make its note and then take it back again.
+ * Check, before an operation touches any file, that the repository is ready
+ * for it (see `refusedAction` in `readiness.ts`) — that its database write
+ * won't be refused while saving is paused, nor dropped by a merge under way,
+ * which it waits out for a moment first — and say so when it isn't. A refusal found only at the commit would have
+ * the operation make its note and then take it back again.
  * @param action what was not done, as in "Couldn't {action}"
- * @returns whether writes are refused, so the operation must not start
+ * @returns whether the operation must not start
  */
-export function refusedWrite(repo: SQLiteRepository, action: string): boolean {
-  const refusal = repo.writeRefusal();
-  if (!refusal) return false;
-  Obsidian.notify(
-    `Couldn't ${action}: saving to the database is paused. ${refusal.message}`,
-    { kind: 'error' }
-  );
-  return true;
+export function refusedWrite(
+  repo: SQLiteRepository,
+  action: string
+): Promise<boolean> {
+  return refusedAction(repo, action);
 }
