@@ -1227,6 +1227,10 @@ export class IRSettingTab extends PluginSettingTab {
     }
     await this.plugin.saveSettings();
 
+    if (key === 'fuzzTextReviews' && value === true) {
+      // Rows made while it was off have no fuzz to sort by
+      this.plugin.reviewManager?.backfillReviewTimeFuzz().catch(console.error);
+    }
     if (key === 'showAdvancedImportCommands') {
       this.plugin.toggleAdvancedCommands(
         this.plugin.settings.showAdvancedImportCommands

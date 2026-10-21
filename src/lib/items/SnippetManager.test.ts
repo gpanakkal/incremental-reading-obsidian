@@ -2088,67 +2088,34 @@ describe('fuzzing (rowToReviewSnippet)', () => {
     vi.restoreAllMocks();
   });
 
-  it('fires setReviewTimeFuzz when fuzzTextReviews=true and due_fuzz is null', async () => {
-    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
-    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(3600000);
+  // Fuzz is backfilled when it's turned on, never written by a read (0174)
+  it('never writes, whatever the fuzz setting and whether the row has fuzz', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        fc.option(fc.integer({ min: -21_600_000, max: 21_600_000 })),
+        (fuzzTextReviews, dueFuzz) => {
+          vi.spyOn(Obsidian, 'getNote').mockReturnValue({
+            path: 'snippets/test.md',
+            extension: 'md',
+          } as TFile);
+          const repo = makeSimpleRepo();
+          const manager = new SnippetManager(
+            { app: makeApp(), settings: { fuzzTextReviews } } as never,
+            repo
+          );
 
-    const row = makeSnippetRow({ due_fuzz: null });
-    const repo = makeSimpleRepo();
-    const manager = new SnippetManager(
-      { app: makeApp(), settings: { fuzzTextReviews: true } } as never,
-      repo
+          expect(
+            manager.rowToReviewSnippet(makeSnippetRow({ due_fuzz: dueFuzz }))
+          ).not.toBeNull();
+
+          const { mutate } = repo as unknown as {
+            mutate: ReturnType<typeof vi.fn>;
+          };
+          expect(mutate).not.toHaveBeenCalled();
+        }
+      )
     );
-
-    manager.rowToReviewSnippet(row);
-    await Promise.resolve();
-
-    const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls as [string, unknown[]][];
-    const fuzzCall = mutateCalls.find(([sql]) => sql.includes('SET due_fuzz'));
-    expect(fuzzCall).toBeDefined();
-    expect(fuzzCall![1][0]).toBe(3600000);
-    expect(fuzzCall![1][1]).toBe(row.id);
-  });
-
-  it('does not fire setReviewTimeFuzz when fuzzTextReviews=false', async () => {
-    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
-    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-
-    const row = makeSnippetRow({ due_fuzz: null });
-    const repo = makeSimpleRepo();
-    const manager = new SnippetManager(
-      { app: makeApp(), settings: { fuzzTextReviews: false } } as never,
-      repo
-    );
-
-    manager.rowToReviewSnippet(row);
-    await Promise.resolve();
-
-    const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls as [string, unknown[]][];
-    const fuzzCall = mutateCalls.find(([sql]) => sql.includes('SET due_fuzz'));
-    expect(fuzzCall).toBeUndefined();
-  });
-
-  it('does not fire setReviewTimeFuzz when due_fuzz is already set', async () => {
-    const fakeFile = { path: 'snippets/test.md', extension: 'md' } as TFile;
-    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-
-    const row = makeSnippetRow({ due_fuzz: 12345 });
-    const repo = makeSimpleRepo();
-    const manager = new SnippetManager(
-      { app: makeApp(), settings: { fuzzTextReviews: true } } as never,
-      repo
-    );
-
-    manager.rowToReviewSnippet(row);
-    await Promise.resolve();
-
-    const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls as [string, unknown[]][];
-    const fuzzCall = mutateCalls.find(([sql]) => sql.includes('SET due_fuzz'));
-    expect(fuzzCall).toBeUndefined();
   });
 });
 

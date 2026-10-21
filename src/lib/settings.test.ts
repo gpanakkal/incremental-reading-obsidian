@@ -211,6 +211,12 @@ function makeTab(
     syncReviewTitleBars: vi.fn(() => {
       events.push(`title-bars:${settings.reviewTitleBar}`);
     }),
+    reviewManager: {
+      backfillReviewTimeFuzz: vi.fn(() => {
+        events.push('backfill-fuzz');
+        return Promise.resolve();
+      }),
+    } as { backfillReviewTimeFuzz: ReturnType<typeof vi.fn> } | undefined,
   };
   // Every tag in the vault, as `getTags` keys them, for the tag suggestions
   const app = {
@@ -960,6 +966,38 @@ describe('IRSettingTab.getControlValue', () => {
 });
 
 describe('IRSettingTab.setControlValue', () => {
+  // Rows made while fuzz was off get theirs when it is turned on, not as
+  // they are read (0174)
+  it('backfills fuzz once saved, only when fuzz is turned on', async () => {
+    await fc.assert(
+      fc.asyncProperty(settingsArb, fc.boolean(), async (generated, on) => {
+        const { tab, events } = makeTab(buildSettings(generated));
+
+        await tab.setControlValue('fuzzTextReviews', on);
+
+        expect(events).toEqual(on ? ['save', 'backfill-fuzz'] : ['save']);
+      })
+    );
+  });
+
+  it('turns fuzz on before the database has started, and logs a failed backfill', async () => {
+    const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
+    const early = makeTab(structuredClone(DEFAULT_SETTINGS));
+    early.plugin.reviewManager = undefined;
+    await early.tab.setControlValue('fuzzTextReviews', true);
+    expect(early.plugin.settings.fuzzTextReviews).toBe(true);
+
+    const failing = makeTab(structuredClone(DEFAULT_SETTINGS));
+    const failure = new Error('refused');
+    failing.plugin.reviewManager!.backfillReviewTimeFuzz.mockRejectedValue(
+      failure
+    );
+    await failing.tab.setControlValue('fuzzTextReviews', true);
+    await Promise.resolve();
+    expect(error).toHaveBeenCalledWith(failure);
+    error.mockRestore();
+  });
+
   it('stores a priority shown out of 5 as a whole number out of 50', async () => {
     await fc.assert(
       fc.asyncProperty(

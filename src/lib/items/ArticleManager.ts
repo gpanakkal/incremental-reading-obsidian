@@ -416,10 +416,6 @@ export class ArticleManager extends ItemManager {
 
     if (!this.reconcileNote(row, file, 'article')) return null;
 
-    if (this.plugin.settings.fuzzTextReviews && row.due_fuzz === null) {
-      void this.setReviewTimeFuzz(row.id, 'article');
-    }
-
     return {
       data: base,
       file,

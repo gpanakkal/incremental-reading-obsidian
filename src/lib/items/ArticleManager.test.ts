@@ -30,6 +30,7 @@ import {
 import { configureSuccessNotices, type NotifyOptions } from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { BulkMutateError } from '#/lib/repository/BulkMutateError';
+import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import { matchFrontmatterTags, stripFrontmatterTags } from '#/lib/tags';
 import type {
   ArticleRow,
@@ -60,7 +61,7 @@ import {
 } from '#/test/success-notices';
 import fc from 'fast-check';
 import { readFileSync } from 'fs';
-import type { TFile } from 'obsidian';
+import type { TAbstractFile, TFile } from 'obsidian';
 import { resolve } from 'path';
 import initSqlJs, { type Database } from 'sql.js';
 
@@ -69,7 +70,12 @@ import { ArticleManager, type ImportResult } from './ArticleManager';
 import { CardManager } from './CardManager';
 import { ItemManager } from './ItemManager';
 import ReviewManager from './ReviewManager';
-import { deleteRowStatements, NOT_PURGED, purgedReference } from './row-delete';
+import {
+  deleteRowStatements,
+  NOT_PURGED,
+  purgedReference,
+  tombstoneRowStatements,
+} from './row-delete';
 import { SnippetManager } from './SnippetManager';
 
 // #region HELPERS
@@ -1087,11 +1093,28 @@ function watchWrites(
     });
   // Undocumented to callers: `save` is the repository's own
   const save = vi.spyOn(repo as unknown as { save(): Promise<void> }, 'save');
+  // A chunk that changes nothing has nothing to save (0174)
+  let chunks = 0;
+  let changedChunks = 0;
+  const transaction = repo.transaction.bind(
+    repo
+  ) as TestRepository['transaction'];
+  vi.spyOn(repo, 'transaction').mockImplementation(async (work) => {
+    const before = repo.dump();
+    chunks += 1;
+    try {
+      return await transaction(work);
+    } finally {
+      if (repo.dump() !== before) changedChunks += 1;
+    }
+  });
   return {
     bulkMutate,
     save,
     outside: () => outside,
     stopped: () => stopped,
+    chunks: () => chunks,
+    changedChunks: () => changedChunks,
   };
 }
 
@@ -3238,69 +3261,199 @@ describe('fuzzing (rowToReviewArticle)', () => {
     vi.restoreAllMocks();
   });
 
-  it('fires setReviewTimeFuzz when fuzzTextReviews=true and due_fuzz is null', async () => {
-    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
-    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-    vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(3600000);
+  // A read that wrote raced Sync: the refetch after a reload wrote the file
+  // Sync had just delivered (0174). Fuzz is backfilled when it's turned on.
+  it('never writes, whatever the fuzz setting and whether the row has fuzz', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        fc.option(fc.integer({ min: -21_600_000, max: 21_600_000 })),
+        (fuzzTextReviews, dueFuzz) => {
+          vi.spyOn(Obsidian, 'getNote').mockReturnValue({
+            path: 'articles/test.md',
+            extension: 'md',
+          } as TFile);
+          const repo = makeSimpleRepo();
+          const manager = new ArticleManager(
+            { app: makeApp(), settings: { fuzzTextReviews } } as never,
+            repo
+          );
 
-    const row = makeArticleRow({ due_fuzz: null });
-    const repo = makeSimpleRepo();
+          expect(
+            manager.rowToReviewArticle(makeArticleRow({ due_fuzz: dueFuzz }))
+          ).not.toBeNull();
+
+          const { mutate } = repo as unknown as {
+            mutate: ReturnType<typeof vi.fn>;
+          };
+          expect(mutate).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+});
+
+describe('backfillReviewTimeFuzz', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('gives fuzz to exactly the live rows without it, leaving the rest as they were', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          fc.record({
+            fuzz: fc.option(fc.integer({ min: 1, max: 1000 })),
+            state: fc.constantFrom('live', 'deleted', 'purged'),
+          }),
+          { maxLength: 6 }
+        ),
+        async (rows) => {
+          vi.restoreAllMocks();
+          vi.spyOn(IRScheduler, 'getDueFuzz').mockReturnValue(-7);
+          const repo = await TestRepository.create();
+          rows.forEach(({ fuzz, state }, i) => {
+            const id = `a${i}`;
+            seedArticle(repo, id, `${id}.md`);
+            repo.mutate('UPDATE article SET due_fuzz = $1 WHERE id = $2', [
+              fuzz,
+              id,
+            ]);
+            if (state === 'deleted') {
+              repo.mutate('UPDATE article SET deleted = TRUE WHERE id = $1', [
+                id,
+              ]);
+            }
+            if (state === 'purged') {
+              tombstoneRowStatements('article', id).forEach(
+                ({ query, params }) => repo.mutate(query, params)
+              );
+            }
+          });
+          const before = new Map(
+            repo.storedRows('article').map((row) => [row.id, row])
+          );
+          const bulkMutate = vi.spyOn(repo, 'bulkMutate');
+          const manager = new ArticleManager(
+            { app: makeApp(), settings: { fuzzTextReviews: true } } as never,
+            repo
+          );
+
+          await manager.backfillReviewTimeFuzz('article');
+
+          const after = new Map(
+            repo.storedRows('article').map((row) => [row.id, row])
+          );
+          rows.forEach(({ fuzz, state }, i) => {
+            const id = `a${i}`;
+            if (state === 'live') {
+              expect(after.get(id)?.due_fuzz).toBe(fuzz ?? -7);
+            } else {
+              expect(after.get(id)).toStrictEqual(before.get(id));
+            }
+          });
+          expect(bulkMutate).toHaveBeenCalledTimes(
+            rows.some(({ fuzz, state }) => fuzz === null && state === 'live')
+              ? 1
+              : 0
+          );
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('writes nothing the second time', async () => {
+    const repo = await TestRepository.create();
+    seedArticle(repo, 'a', 'a.md');
     const manager = new ArticleManager(
       { app: makeApp(), settings: { fuzzTextReviews: true } } as never,
       repo
     );
+    await manager.backfillReviewTimeFuzz('article');
+    const bulkMutate = vi.spyOn(repo, 'bulkMutate');
 
-    manager.rowToReviewArticle(row);
+    await manager.backfillReviewTimeFuzz('article');
 
-    // give the fire-and-forgotten promise a chance to run
-    await Promise.resolve();
+    expect(bulkMutate).not.toHaveBeenCalled();
+  });
+});
 
-    const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls as [string, unknown[]][];
-    const fuzzCall = mutateCalls.find(([sql]) => sql.includes('SET due_fuzz'));
-    expect(fuzzCall).toBeDefined();
-    expect(fuzzCall![1][0]).toBe(3600000);
-    expect(fuzzCall![1][1]).toBe(row.id);
+describe('reads during the refetch after a reload (0174)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
-  it('does not fire setReviewTimeFuzz when fuzzTextReviews=false', async () => {
-    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
-    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
-
-    const row = makeArticleRow({ due_fuzz: null });
-    const repo = makeSimpleRepo();
+  /**
+   * A database holding a tombstone whose note claims it, a row whose note
+   * claims another id, and a row with no fuzz while fuzz is on: each read
+   * once wrote a repair. Writes reach `writeBinary`.
+   */
+  async function wireReload() {
+    const vault = makeItemVault({
+      'tomb.md': { 'ir-id': 'tomb', tags: [ARTICLE_TAG] },
+      'taken.md': { 'ir-id': 'someone-else', tags: [ARTICLE_TAG] },
+      'plain.md': { 'ir-id': 'plain', tags: [ARTICLE_TAG] },
+    });
+    const repo = await TestRepository.create();
+    const writeBinary = vi.fn().mockResolvedValue(undefined);
+    repo.app = {
+      vault: { adapter: { writeBinary }, getFolderByPath: () => ({}) },
+    } as never;
+    // The real save, which the test repository stubs out
+    type Saving = { save: () => Promise<void> };
+    const save = (SQLJSRepository.prototype as unknown as Saving).save;
+    vi.spyOn(repo as unknown as Saving, 'save').mockImplementation(
+      () => save.call(repo) as Promise<void>
+    );
+    seedArticle(repo, 'tomb', 'tomb.md', { deleted: true });
+    seedArticle(repo, 'taken', 'taken.md');
+    seedArticle(repo, 'plain', 'plain.md');
+    // Reloads the database in place, as a file Sync delivered would
+    vi.spyOn(
+      repo as unknown as { reloadDb(): Promise<unknown> },
+      'reloadDb'
+    ).mockResolvedValue(repo.db);
     const manager = new ArticleManager(
-      { app: makeApp(), settings: { fuzzTextReviews: false } } as never,
+      { app: vault.app, settings: { fuzzTextReviews: true } } as never,
       repo
     );
+    const readAll = () =>
+      (repo.rows('article') as unknown as ArticleRow[]).map((row) =>
+        manager.rowToReviewArticle(row)
+      );
+    const settle = () => new Promise((done) => setTimeout(done, 0));
+    await settle();
+    writeBinary.mockClear();
+    return { repo, writeBinary, readAll, settle };
+  }
 
-    manager.rowToReviewArticle(row);
-    await Promise.resolve();
+  it('writes nothing to the database', async () => {
+    const { repo, writeBinary, readAll, settle } = await wireReload();
+    const before = repo.dump();
+    repo.onReloadFromDisk = async () => {
+      readAll();
+      await settle();
+    };
 
-    const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls as [string, unknown[]][];
-    const fuzzCall = mutateCalls.find(([sql]) => sql.includes('SET due_fuzz'));
-    expect(fuzzCall).toBeUndefined();
+    await repo.handleFileChange({ path: repo.dbFilePath } as TAbstractFile);
+    await settle();
+
+    expect(writeBinary).not.toHaveBeenCalled();
+    expect(repo.dump()).toBe(before);
   });
 
-  it('does not fire setReviewTimeFuzz when due_fuzz is already set', async () => {
-    const fakeFile = { path: 'articles/test.md', extension: 'md' } as TFile;
-    vi.spyOn(Obsidian, 'getNote').mockReturnValue(fakeFile);
+  it('repairs the rows on a read made outside one', async () => {
+    const { repo, writeBinary, readAll, settle } = await wireReload();
 
-    const row = makeArticleRow({ due_fuzz: 12345 });
-    const repo = makeSimpleRepo();
-    const manager = new ArticleManager(
-      { app: makeApp(), settings: { fuzzTextReviews: true } } as never,
-      repo
+    readAll();
+    await settle();
+
+    expect(writeBinary).toHaveBeenCalled();
+    const deleted = Object.fromEntries(
+      repo.rows('article').map((row) => [String(row.id), row.deleted] as const)
     );
-
-    manager.rowToReviewArticle(row);
-    await Promise.resolve();
-
-    const mutateCalls = (repo.mutate as ReturnType<typeof vi.fn>).mock
-      .calls as [string, unknown[]][];
-    const fuzzCall = mutateCalls.find(([sql]) => sql.includes('SET due_fuzz'));
-    expect(fuzzCall).toBeUndefined();
+    expect(deleted).toEqual({ tomb: 0, taken: 1, plain: 0 });
   });
 });
 
@@ -7550,7 +7703,7 @@ describe('importMany', () => {
         fc.integer({ min: 1, max: 8 }),
         async (specs, options, sliceMs) => {
           vi.restoreAllMocks();
-          // Fuzzed, a fetched article gets its fuzz written on the spot
+          // Fuzzed: no read writes fuzz any more (0174), so no writes outside
           const { repo, manager, files } = await batchWorld(specs, {
             fuzz: true,
           });
@@ -7564,9 +7717,8 @@ describe('importMany', () => {
           expect(writes.bulkMutate).toHaveBeenCalledOnce();
           expect(writes.outside()).toBe(0);
           const [statements] = writes.bulkMutate.mock.calls[0];
-          expect(writes.save).toHaveBeenCalledTimes(
-            Math.ceil(statements.length / sliceMs)
-          );
+          expect(writes.chunks()).toBe(Math.ceil(statements.length / sliceMs));
+          expect(writes.save).toHaveBeenCalledTimes(writes.changedChunks());
         }
       ),
       { numRuns: 30 }
@@ -8531,9 +8683,8 @@ describe('unimportMany', () => {
           expect(writes.bulkMutate).toHaveBeenCalledOnce();
           expect(writes.outside()).toBe(0);
           const [statements] = writes.bulkMutate.mock.calls[0];
-          expect(writes.save).toHaveBeenCalledTimes(
-            Math.ceil(statements.length / sliceMs)
-          );
+          expect(writes.chunks()).toBe(Math.ceil(statements.length / sliceMs));
+          expect(writes.save).toHaveBeenCalledTimes(writes.changedChunks());
         }
       ),
       { numRuns: 30 }

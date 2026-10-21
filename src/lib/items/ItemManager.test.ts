@@ -306,6 +306,27 @@ describe('reconcileNote', () => {
     );
   });
 
+  // The notes Sync delivers may not have landed with the database (0174)
+  it('judges the note but repairs no row during the refetch after a reload', async () => {
+    await fc.assert(
+      fc.asyncProperty(settledArb, async ({ row, type, tag, frontmatter }) => {
+        const claimsOther =
+          Boolean(frontmatter?.['ir-id']) && frontmatter?.['ir-id'] !== row.id;
+        const { manager, mutate, writeNote, markDeleted, markUndeleted } = wire(
+          { frontmatter: structuredClone(frontmatter) } as CachedMetadata
+        );
+        Object.assign(manager.repo, { refetchingAfterReload: true });
+
+        expect(manager.reconcile(row, FILE, type, tag)).toBe(!claimsOther);
+
+        expect(markDeleted).not.toHaveBeenCalled();
+        expect(markUndeleted).not.toHaveBeenCalled();
+        expect(mutate).not.toHaveBeenCalled();
+        expect(writeNote).not.toHaveBeenCalled();
+      })
+    );
+  });
+
   it('judges the note once its parse lands', () => {
     const cache: { current: CachedMetadata | null } = { current: null };
     const { manager, writeNote, markUndeleted } = wire(null);

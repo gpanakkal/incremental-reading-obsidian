@@ -40,7 +40,9 @@ import initSqlJs, {
   type QueryExecResult,
 } from 'sql.js';
 import { BulkMutateError } from './BulkMutateError';
+import { ContentWatch, type ContentMark } from './content-watch';
 import { armRowStamps, disarmRowStamps } from './row-stamps';
+import { recordSave } from './save-stats';
 // @ts-ignore - WASM imported as base64 string via custom esbuild plugin.
 // Points at the binary shipped with the installed sql.js package so the bundled
 // WASM stays in lockstep with the sql.js version in node_modules.
@@ -156,6 +158,17 @@ export class SQLJSRepository implements SQLiteRepository {
   #deviceId: string | undefined;
   /** The clock row stamps are drawn from (see `armRowStamps`). */
   #stampClock: () => number;
+  /** Tells writes that changed nothing from the rest, which alone save. */
+  #content = new ContentWatch();
+  /** How many {@link onReloadFromDisk} calls are running. */
+  #reloadCallbacks = 0;
+  /**
+   * Saves begun so far, and the latest of them that wrote and that failed
+   * (0174). Each exports when it begins, so holds all an earlier one did:
+   * past a failure no later save made good, memory holds changes the file
+   * lacks, and the next write saves even if it changes nothing.
+   */
+  #saves = { begun: 0, wrote: 0, failed: 0 };
 
   /**
    * Use .start to instantiate
@@ -327,6 +340,16 @@ export class SQLJSRepository implements SQLiteRepository {
     if (refusal) throw refusal;
   }
 
+  /**
+   * Whether this is inside {@link onReloadFromDisk}: reads made then are the
+   * refetch of a database just swapped in, possibly ahead of the notes that
+   * Sync delivers as separate files, so they must not write repairs
+   * (`ItemManager.reconcileNote`).
+   */
+  get refetchingAfterReload(): boolean {
+    return this.#reloadCallbacks > 0;
+  }
+
   get dbFilePath() {
     return this.#dbFilePath;
   }
@@ -411,7 +434,12 @@ export class SQLJSRepository implements SQLiteRepository {
         );
         return;
       }
-      await this.onReloadFromDisk?.();
+      this.#reloadCallbacks++;
+      try {
+        await this.onReloadFromDisk?.();
+      } finally {
+        this.#reloadCallbacks--;
+      }
     } catch (error) {
       if (this.#reloadAgain) {
         console.error(error);
@@ -483,10 +511,11 @@ export class SQLJSRepository implements SQLiteRepository {
     }
 
     this.#pendingChanges.clear();
+    const mark = this.#markContent(); // 0174
     const result = this._execSql(query, params, { throwOnError: true });
     this.#flushChanges();
     // `save` logs its own failures, and the caller has its result already
-    this.save().catch(() => undefined);
+    if (this.#contentChanged(mark)) this.save().catch(() => undefined); // 0174
     return result as [][];
   }
 
@@ -524,6 +553,7 @@ export class SQLJSRepository implements SQLiteRepository {
     }
 
     this.#pendingChanges.clear();
+    const mark = this.#markContent(); // 0174
     this.db.exec('BEGIN');
     this.#txDepth++;
     let result: T;
@@ -542,7 +572,7 @@ export class SQLJSRepository implements SQLiteRepository {
     this.db.exec('COMMIT');
     this.#flushChanges();
     try {
-      await this.save();
+      if (this.#contentChanged(mark)) await this.save(); // 0174
     } finally {
       // Even past a failed save: the reload may be what lifts the refusal
       // that failed it
@@ -699,6 +729,27 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   /**
+   * Where a write starts, for {@link #contentChanged}: a write that leaves
+   * every row as it was has nothing to save (0174).
+   */
+  #markContent(): ContentMark | null {
+    return this.db ? this.#content.mark(this.db) : null;
+  }
+
+  /** Whether the write begun at `mark` changed anything, so must be saved. */
+  #contentChanged(mark: ContentMark | null): boolean {
+    if (
+      this.db &&
+      this.#saves.failed <= this.#saves.wrote &&
+      !this.#content.changedSince(this.db, mark)
+    ) {
+      recordSave('skipped');
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Execute one or more queries and return an array of objects corresponding to table rows.
    * Use `query` or `mutate` methods above instead where possible.
    *
@@ -788,6 +839,7 @@ export class SQLJSRepository implements SQLiteRepository {
     if (!this.db) throw new Error('Database was not initialized on repository');
     this.pendingSaveCount++;
     let wroteFresh = false;
+    const save = ++this.#saves.begun;
     try {
       const source = this.db;
       const data = source.export().buffer;
@@ -820,13 +872,16 @@ export class SQLJSRepository implements SQLiteRepository {
       // and a save still waiting then dropped one for good.
       wroteFresh = this.#fresh;
       this.#fresh = false;
-      return await this.app.vault.adapter.writeBinary(
+      recordSave('saved');
+      await this.app.vault.adapter.writeBinary(
         normalizePath(this.#dbFilePath),
         data as ArrayBuffer
       );
+      this.#saves.wrote = Math.max(this.#saves.wrote, save);
     } catch (error) {
       // Nothing was written that this database can count as its file
       if (wroteFresh) this.#fresh = true;
+      this.#saves.failed = Math.max(this.#saves.failed, save);
       if (error instanceof Error) {
         console.error('Incremental Reading - Failed to save database:', {
           error: 'message' in error ? error.message : error,

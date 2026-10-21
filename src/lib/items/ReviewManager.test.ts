@@ -749,8 +749,8 @@ const TAG_BY_TABLE: Record<ItemTable, string> = {
 
 /**
  * A manager over a real database holding `rows` and a vault holding their
- * notes, fuzzing text reviews so that a due row missing its fuzz gets one on
- * fetch.
+ * notes, fuzzing text reviews: a due row missing its fuzz once got one on
+ * fetch, which no read writes any more (0174).
  */
 function wireDueRows(rows: readonly DueRow[]) {
   const repo = TestRepository.create();
@@ -1009,10 +1009,11 @@ describe('ReviewManager.anyDue', () => {
     );
   });
 
-  it('writes nothing over rows that getDue writes to', async () => {
+  it('writes nothing to the rows it reads, nor does getDue', async () => {
     vi.setSystemTime(YEAR_2000_MS);
-    // A row without its fuzz, which getDue fills in. Its note lacks its id,
-    // which no fetch writes back any more (0166)
+    // A row without its fuzz, which getDue filled in until fuzz became a
+    // backfill (0174). Its note lacks its id, which no fetch writes back any
+    // more (0166)
     const rows: DueRow[] = [
       { table: 'article', due: YEAR_2000_MS, state: 0, note: 'bare' },
     ];
@@ -1028,9 +1029,8 @@ describe('ReviewManager.anyDue', () => {
       limit: 1,
       typesToInclude: { article: true },
     });
-    await vi.waitFor(() =>
-      expect(dumpItemTables(fetched.repo)).not.toEqual(fetchedBefore)
-    );
+    await new Promise((settle) => setTimeout(settle, 0));
+    expect(dumpItemTables(fetched.repo)).toEqual(fetchedBefore);
     expect(fetched.processFrontMatter).not.toHaveBeenCalled();
   });
 
@@ -5852,5 +5852,33 @@ describe('ReviewManager.articleIdAt', () => {
     const manager = new ReviewManager(makePlugin(vault.app), repo);
 
     expect(manager.articleIdAt(vault.files.get('articles/x.md')!)).toBeNull();
+  });
+});
+
+describe('ReviewManager.backfillReviewTimeFuzz', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('backfills articles and snippets, each in its own table', async () => {
+    const { manager } = wireDueRows([]);
+    const articles = vi
+      .spyOn(manager.articles, 'backfillReviewTimeFuzz')
+      .mockResolvedValue(undefined);
+    const snippets = vi
+      .spyOn(manager.snippets, 'backfillReviewTimeFuzz')
+      .mockResolvedValue(undefined);
+
+    await manager.backfillReviewTimeFuzz();
+
+    expect(articles.mock.calls).toEqual([['article']]);
+    expect(snippets.mock.calls).toEqual([['snippet']]);
   });
 });

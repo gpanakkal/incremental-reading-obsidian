@@ -180,6 +180,12 @@ export default class ReviewManager {
     return await this.snippets.refreshAllHighlights();
   }
 
+  /** See `ItemManager.backfillReviewTimeFuzz`. */
+  async backfillReviewTimeFuzz(): Promise<void> {
+    await this.articles.backfillReviewTimeFuzz('article');
+    await this.snippets.backfillReviewTimeFuzz('snippet');
+  }
+
   /**
    * Update snippet offsets in the database.
    * Used to persist offset changes after document edits.
