@@ -83,7 +83,12 @@ export function readWriteVector(db: Database): WriteVector | null {
     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'write_stamp'"
   );
   if (!tables) return null;
-  const vector: Record<string, number> = {};
+  // Null prototype: a device id is any string, and a plain object would
+  // swallow one spelled `__proto__`.
+  const vector: Record<string, number> = Object.create(null) as Record<
+    string,
+    number
+  >;
   const rows = db
     .exec('SELECT device, generation FROM write_stamp')
     .flatMap(({ values }) => values);
