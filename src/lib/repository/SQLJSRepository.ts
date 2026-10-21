@@ -43,6 +43,7 @@ import initSqlJs, {
 } from 'sql.js';
 import { BulkMutateError } from './BulkMutateError';
 import { ContentWatch, type ContentMark } from './content-watch';
+import { backupFileName, pruneBackups, pruneDatabase } from './retention';
 import {
   mergeInto,
   openIncoming,
@@ -220,6 +221,11 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   #saves = { begun: 0, wrote: 0, failed: 0 };
   /**
+   * Whether a backup was written since retention last ran (0173): the reload
+   * pass that wrote it runs {@link applyRetention} once it is done.
+   */
+  #retentionDue = false;
+  /**
    * The write stamp of the file {@link reloadDb} last read, as it was before
    * any migration: what startup measures against the stamp this device last
    * knew the file by.
@@ -336,6 +342,8 @@ export class SQLJSRepository implements SQLiteRepository {
         assertLive();
         if (loaded !== null) {
           repo.#classifyAtStartup(known);
+          await repo.applyRetention();
+          assertLive();
           return repo;
         }
         // Sync deleting the file while startup waited for it leaves nothing
@@ -348,6 +356,8 @@ export class SQLJSRepository implements SQLiteRepository {
       assertLive();
       if (created === null) throw new Error('Failed to create a database');
       repo.#fresh = true;
+      await repo.applyRetention(); // backups outlive a database deleted
+      assertLive();
       return repo;
     } finally {
       repo.#syncHold = undefined;
@@ -386,6 +396,38 @@ export class SQLJSRepository implements SQLiteRepository {
         'was not running, and lacks saves this device knew of:',
       { kind, known, loaded }
     );
+  }
+
+  /**
+   * Apply the retention policy (0173, `retention.ts`): delete tombstones and
+   * `write_stamp` devices past the sync horizon, saving if any went, then
+   * backups past their window. Runs once at startup and after each reload
+   * pass that wrote a backup. While writes are refused or a transaction is
+   * open it does nothing and stays due, for the next pass. Never throws: a
+   * failure is logged, and retried after the next backup.
+   */
+  async applyRetention(): Promise<void> {
+    const db = this.db;
+    // 0171: also wait for `readiness === 'ready'` here once that lands; until
+    // then the write block is the gate
+    if (!db || this.writeRefusal() || this.#txDepth > 0) {
+      this.#retentionDue = true;
+      return;
+    }
+    this.#retentionDue = false;
+    const now = this.#stampClock();
+    try {
+      const pruned = pruneDatabase(db, now, {
+        deviceId: () => this.#device(),
+        now: this.#rowClock,
+      });
+      // Saved at once, past 0174's gate: `write_stamp` is no content to it,
+      // yet memory's stamp must match the last export (`classifyIncoming`)
+      if (pruned.rows + pruned.devices > 0) await this.save();
+      await pruneBackups(this.adapter, now);
+    } catch (error) {
+      console.error('Incremental Reading - Retention failed:', error);
+    }
   }
 
   /**
@@ -556,6 +598,10 @@ export class SQLJSRepository implements SQLiteRepository {
           }
           this.#reloadAgain = false;
           await this.#reloadOnce();
+          // A change that came in meanwhile is answered first
+          if (this.#retentionDue && !this.#reloadAgain) {
+            await this.applyRetention();
+          }
         } while (this.#reloadAgain && !this.#disposed);
       } finally {
         this.#reloading = null;
@@ -1567,10 +1613,13 @@ export class SQLJSRepository implements SQLiteRepository {
       from?.data ??
       (await this.adapter.readBinary(normalizePath(this.#dbFilePath)));
 
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const marker = from ? `_${from.marker}` : '';
-    const backupFileName = `ir-user-data_v${currentVersion}${marker}_${timestamp}.sqlite`;
-    const backupPath = normalizePath(`${BACKUP_DIRECTORY}/${backupFileName}`);
+    // Named by the clock retention measures its age on
+    const name = backupFileName(
+      currentVersion,
+      from?.marker ?? 'migration',
+      new Date(this.#stampClock())
+    );
+    const backupPath = normalizePath(`${BACKUP_DIRECTORY}/${name}`);
 
     await this.adapter.writeBinary(backupPath, originalData);
 
@@ -1588,6 +1637,7 @@ export class SQLJSRepository implements SQLiteRepository {
     }
 
     console.debug(`Incremental Reading - Database backed up to ${backupPath}`);
+    this.#retentionDue = true;
     return backupPath;
   }
 

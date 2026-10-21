@@ -82,11 +82,15 @@ function fromSrc(path: string): string {
   return relative(SRC, path).split(sep).join('/');
 }
 
-/** Where a hard delete of a synced row may still be written. */
+/**
+ * Where a hard delete of a synced row may still be written: migrations,
+ * tests, and retention's pruning of rows past the sync horizon (0173).
+ */
 function mayHardDelete(path: string): boolean {
   const rel = fromSrc(path);
   return (
     rel === 'db/migrations.ts' ||
+    rel === 'lib/repository/retention.ts' ||
     rel.startsWith('test/') ||
     /\.test\.[cm]?[jt]sx?$/.test(rel)
   );
@@ -377,10 +381,12 @@ describe('hard deletes of synced rows', () => {
     ).toEqual(['2: DELETE FROM rebind', '4: DELETE FROM snippet']);
   });
 
-  it('may be written in migrations and tests alone', () => {
+  it('may be written in migrations, retention and tests alone', () => {
     expect(
       [
         'db/migrations.ts',
+        'lib/repository/retention.ts',
+        'lib/repository/row-merge.ts',
         'db/migration-helpers.ts',
         'test/item-vault.ts',
         'lib/foo.test.ts',
@@ -388,7 +394,7 @@ describe('hard deletes of synced rows', () => {
         'lib/foo.ts',
         'lib/test-utils.ts',
       ].map((rel) => mayHardDelete(join(SRC, rel)))
-    ).toEqual([true, false, true, true, true, false, false]);
+    ).toEqual([true, true, false, false, true, true, true, false, false]);
   });
 
   it('are looked for in every source file of every folder, nothing else', () => {

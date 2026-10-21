@@ -147,7 +147,7 @@ let sharedRepo: TestRepository;
 /** Empty every item table of {@link sharedRepo}. */
 function resetSharedRepo(): TestRepository {
   for (const table of Object.values(TABLE_OF)) {
-    sharedRepo.mutate(`DELETE FROM ${table}`);
+    sharedRepo.hardDelete(`DELETE FROM ${table}`);
   }
   return sharedRepo;
 }

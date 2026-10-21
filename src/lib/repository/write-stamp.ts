@@ -11,7 +11,12 @@ import type { Database } from 'sql.js';
  */
 export type WriteVector = Readonly<Record<string, number>>;
 
-/** A device that last saved this long before another is stale (180 days). */
+/**
+ * A device that last saved this long before another is stale (180 days).
+ * Also retention's window for tombstones and `write_stamp` devices
+ * (`retention.ts`), which must never be shorter: a tombstone pruned while a
+ * device that still has the row live could be merged would bring the row back.
+ */
 export const STALE_AFTER_MS = 180 * 24 * 60 * 60 * 1000;
 
 /**

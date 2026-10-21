@@ -7460,7 +7460,7 @@ describe("an import notice's Open button", () => {
           repo.mutate('UPDATE article SET deleted = 1 WHERE id = $1', [id]);
         }
         if (loss === 'row removed') {
-          repo.mutate('DELETE FROM article WHERE id = $1', [id]);
+          repo.hardDelete('DELETE FROM article WHERE id = $1', [id]);
         }
         notify.mockClear();
 
