@@ -3036,6 +3036,7 @@ describe('reloading a file that changed on disk', () => {
     vi.restoreAllMocks();
   });
 
+  // Load-dependent: ~4s alone, past vitest's 5s default under the full suite
   it('property: keeps what it had, and stops saving, until the changed file can be loaded', async () => {
     await fc.assert(
       fc.asyncProperty(
@@ -3093,7 +3094,7 @@ describe('reloading a file that changed on disk', () => {
         }
       )
     );
-  });
+  }, 60_000);
 
   // Load-dependent: ~3s alone, past vitest's 5s default under the full suite
   it('property: merges a v9 file another device wrote, and keeps saving', async () => {
