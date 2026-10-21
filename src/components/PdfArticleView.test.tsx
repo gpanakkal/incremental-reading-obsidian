@@ -3,6 +3,7 @@ import * as PdfItemHighlights from '#/lib/extensions/PdfItemHighlights';
 import type { PdfOpenResult, PdfViewer } from '#/lib/pdf/obsidian-pdf';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
 import { packPdfPosition, type PdfPosition } from '#/lib/pdf/position';
+import { PositionStore } from '#/lib/position-store';
 import type { ReviewItem } from '#/lib/types';
 import fc from 'fast-check';
 import { Scope, type TFile } from 'obsidian';
@@ -40,7 +41,9 @@ type ModifyHandler = (file: TFile) => void;
 
 /**
  * The review context the view reads, over a vault whose `modify` listeners
- * the test fires by hand.
+ * the test fires by hand, and a real position store over an item row holding
+ * `saved` (`null`: `0`, nothing saved). `written` lists every position the
+ * store writes to that row.
  */
 function wireContext(saved: number | null = null) {
   const handlers = new Set<ModifyHandler>();
@@ -79,11 +82,19 @@ function wireContext(saved: number | null = null) {
     else arrivals.set(id, eState);
   };
   const app = { vault };
-  const reviewManager = {
-    loadScrollPosition: vi.fn((_: TFile) => Promise.resolve(saved)),
-    saveScrollPosition: vi.fn((_: TFile, __: number) => Promise.resolve()),
+  const rows = {
+    read: vi.fn((_id: string) =>
+      Promise.resolve({ position: saved ?? 0, updatedAt: 0, updatedBy: '' })
+    ),
+    write: vi.fn((_id: string, _position: number) => Promise.resolve()),
   };
-  const plugin = { app, reviewManager };
+  const positions = new PositionStore({
+    storage: { load: () => null, save: () => {} },
+    rows,
+    deviceId: () => 'device',
+  });
+  const written = () => rows.write.mock.calls.map(([, position]) => position);
+  const plugin = { app, positions };
   vi.spyOn(ReviewContext, 'useReviewContext').mockReturnValue({
     plugin,
     reviewView,
@@ -100,7 +111,8 @@ function wireContext(saved: number | null = null) {
     plugin,
     vault,
     reviewView,
-    reviewManager,
+    rows,
+    written,
     handlers,
     modify,
     showHighlights,
@@ -169,7 +181,7 @@ function mount(): { container: HTMLElement; unmount: () => void } {
  */
 async function settle() {
   await act(async () => {
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
   });
 }
 
@@ -371,14 +383,14 @@ describe('PdfArticleView reading position', () => {
     await fc.assert(
       fc.asyncProperty(positionArb(), async ({ page, top }) => {
         vi.restoreAllMocks();
-        const { reviewManager } = wireContext(packPdfPosition(page, top));
+        const { rows } = wireContext(packPdfPosition(page, top));
         const viewer = makeViewer();
         vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
 
         const { unmount } = mount();
         await settle();
 
-        expect(reviewManager.loadScrollPosition.mock.calls).toEqual([[file]]);
+        expect(rows.read.mock.calls).toEqual([[item.data.id]]);
         expect(viewer.open.mock.calls).toEqual([
           [file, `#page=${page}&offset=0,${top}`],
         ]);
@@ -402,8 +414,24 @@ describe('PdfArticleView reading position', () => {
   );
 
   it('opens it at its start when the saved position cannot be read', async () => {
-    const { reviewManager } = wireContext();
-    reviewManager.loadScrollPosition.mockRejectedValue(new Error('no db'));
+    const { rows } = wireContext();
+    rows.read.mockRejectedValue(new Error('no db'));
+    const viewer = makeViewer();
+    vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
+
+    mount();
+    await settle();
+
+    expect(viewer.open.mock.calls).toEqual([[file, undefined]]);
+  });
+
+  it('opens it at its start when the store fails to answer', async () => {
+    const { plugin } = wireContext(AT_PAGE_3);
+    vi.spyOn(plugin.positions, 'open').mockReturnValue({
+      restore: () => Promise.reject(new Error('broken')),
+      set: () => {},
+      close: () => {},
+    });
     const viewer = makeViewer();
     vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
 
@@ -414,9 +442,13 @@ describe('PdfArticleView reading position', () => {
   });
 
   it('never opens it once unmounted before the saved position is read', async () => {
-    const { reviewManager } = wireContext();
-    let resolveSaved: (value: number | null) => void = () => {};
-    reviewManager.loadScrollPosition.mockReturnValue(
+    const { rows } = wireContext();
+    let resolveSaved: (value: {
+      position: number;
+      updatedAt: number;
+      updatedBy: string;
+    }) => void = () => {};
+    rows.read.mockReturnValue(
       new Promise((resolve) => {
         resolveSaved = resolve;
       })
@@ -427,87 +459,62 @@ describe('PdfArticleView reading position', () => {
     await settle();
 
     unmount();
-    resolveSaved(AT_PAGE_3);
+    resolveSaved({ position: AT_PAGE_3, updatedAt: 0, updatedBy: '' });
     await settle();
 
     expect(viewer.open).not.toHaveBeenCalled();
   });
 
-  it('saves where the view comes to rest, once it has rested a while', async () => {
+  it('writes nothing to the database as the view moves, and where it rests once it is left', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(positionArb(), { minLength: 1, maxLength: 20 }),
         async (moves) => {
           vi.restoreAllMocks();
           vi.useFakeTimers();
-          const { reviewManager } = wireContext();
-          const { move } = wirePosition();
+          const { written } = wireContext();
+          const { move, stop } = wirePosition();
           const viewer = makeViewer();
           vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
           const { unmount } = mount();
           await settle();
 
-          // A scroll: one report per frame, never a long enough pause
+          // A scroll: one report per frame
           for (const position of moves) {
             move(position);
-            vi.advanceTimersByTime(499);
+            vi.advanceTimersByTime(16);
           }
-          expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
+          vi.advanceTimersByTime(1000);
+          await settle();
+          expect(written()).toEqual([]);
 
-          vi.advanceTimersByTime(1);
-          const last = moves[moves.length - 1];
-          expect(reviewManager.saveScrollPosition.mock.calls).toEqual([
-            [file, packPdfPosition(last.page, last.top)],
-          ]);
-
-          // Leaving it at rest saves nothing more
           unmount();
-          expect(reviewManager.saveScrollPosition).toHaveBeenCalledOnce();
+          await settle();
+          const last = moves[moves.length - 1];
+          expect(written()).toEqual([packPdfPosition(last.page, last.top)]);
+          expect(stop).toHaveBeenCalledOnce();
           vi.useRealTimers();
         }
       )
     );
   });
 
-  it('saves a position not yet saved when the item is left', async () => {
-    vi.useFakeTimers();
-    const { reviewManager } = wireContext();
-    const { move, stop } = wirePosition();
-    const viewer = makeViewer();
-    vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
-    const { unmount } = mount();
-    await settle();
-
-    move({ page: 3, top: 700 });
-    unmount();
-
-    expect(reviewManager.saveScrollPosition.mock.calls).toEqual([
-      [file, AT_PAGE_3],
-    ]);
-    expect(stop).toHaveBeenCalledOnce();
-    // and not again once the delay is up
-    vi.advanceTimersByTime(1000);
-    expect(reviewManager.saveScrollPosition).toHaveBeenCalledOnce();
-  });
-
-  it('saves nothing when the view never moved', async () => {
-    vi.useFakeTimers();
-    const { reviewManager } = wireContext(AT_PAGE_3);
+  it('writes nothing when the view never moved', async () => {
+    const { written } = wireContext(AT_PAGE_3);
     wirePosition();
     const viewer = makeViewer();
     vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
     const { unmount } = mount();
     await settle();
 
-    vi.advanceTimersByTime(1000);
     unmount();
+    await settle();
 
-    expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
+    expect(written()).toEqual([]);
   });
 
-  it('saves nothing when the view comes to rest where it was saved', async () => {
-    vi.useFakeTimers();
-    const { reviewManager } = wireContext(AT_PAGE_3);
+  it('writes nothing when the view comes to rest where it was saved', async () => {
+    const { written } = wireContext(AT_PAGE_3);
     const { move } = wirePosition();
     const viewer = makeViewer();
     vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
@@ -517,68 +524,20 @@ describe('PdfArticleView reading position', () => {
     // Opened there, pdf.js reports it straight back; and a move that rounds
     // to it is no move either
     move({ page: 3, top: 700 });
-    vi.advanceTimersByTime(1000);
+    move({ page: 4, top: 10 });
     move({ page: 3, top: 700.4 });
     unmount();
-
-    expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
-  });
-
-  it('saves a position again only once it differs from the last one saved', async () => {
-    vi.useFakeTimers();
-    const { reviewManager } = wireContext();
-    const { move } = wirePosition();
-    const viewer = makeViewer();
-    vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
-    const { unmount } = mount();
     await settle();
 
-    for (const position of [
-      { page: 3, top: 700 },
-      { page: 3, top: 700 },
-      { page: 4, top: 10 },
-      { page: 3, top: 700 },
-    ]) {
-      move(position);
-      vi.advanceTimersByTime(500);
-    }
-    unmount();
-
-    expect(reviewManager.saveScrollPosition.mock.calls).toEqual([
-      [file, AT_PAGE_3],
-      [file, packPdfPosition(4, 10)],
-      [file, AT_PAGE_3],
-    ]);
+    expect(written()).toEqual([]);
   });
 
-  it('warns, rather than failing, when a position cannot be saved', async () => {
-    const { reviewManager } = wireContext();
-    const error = new Error('database closed');
-    reviewManager.saveScrollPosition.mockRejectedValue(error);
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const { move } = wirePosition();
-    const viewer = makeViewer();
-    vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
-    const { unmount } = mount();
-    await settle();
-
-    move({ page: 3, top: 700 });
-    unmount();
-    await settle();
-
-    expect(warn).toHaveBeenCalledExactlyOnceWith(
-      'Incremental Reading: PDF position not saved',
-      error
-    );
-  });
-
-  it('puts the view back where it opened after a resize moves it, and saves nothing for it', async () => {
+  it('puts the view back where it opened after a resize moves it, and writes nothing for it', async () => {
     await fc.assert(
       fc.asyncProperty(positionArb(), positionArb(), async (stopped, moved) => {
         vi.restoreAllMocks();
-        vi.useFakeTimers();
         const saved = packPdfPosition(stopped.page, stopped.top);
-        const { reviewManager } = wireContext(saved);
+        const { written } = wireContext(saved);
         const { move, resize, setPosition } = wirePosition();
         const viewer = makeViewer();
         vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
@@ -588,12 +547,11 @@ describe('PdfArticleView reading position', () => {
         move(stopped);
 
         resize(moved);
-        vi.advanceTimersByTime(1000);
         unmount();
+        await settle();
 
         expect(setPosition.mock.calls).toEqual([[viewer, stopped]]);
-        expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
-        vi.useRealTimers();
+        expect(written()).toEqual([]);
       })
     );
   });
@@ -602,8 +560,7 @@ describe('PdfArticleView reading position', () => {
     await fc.assert(
       fc.asyncProperty(positionArb(), positionArb(), async (stopped, moved) => {
         vi.restoreAllMocks();
-        vi.useFakeTimers();
-        const { reviewManager } = wireContext(
+        const { written } = wireContext(
           packPdfPosition(stopped.page, stopped.top)
         );
         const { resize, setPosition } = wirePosition();
@@ -613,19 +570,17 @@ describe('PdfArticleView reading position', () => {
         await settle();
 
         resize(moved);
-        vi.advanceTimersByTime(1000);
         unmount();
+        await settle();
 
         expect(setPosition.mock.calls).toEqual([[viewer, stopped]]);
-        expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
-        vi.useRealTimers();
+        expect(written()).toEqual([]);
       })
     );
   });
 
-  it("puts the view back at the reader's last move after a resize, and saves that move as ever", async () => {
-    vi.useFakeTimers();
-    const { reviewManager } = wireContext(AT_PAGE_3);
+  it("puts the view back at the reader's last move after a resize, and keeps that move", async () => {
+    const { written } = wireContext(AT_PAGE_3);
     const { move, resize, setPosition } = wirePosition();
     const viewer = makeViewer();
     vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
@@ -633,32 +588,20 @@ describe('PdfArticleView reading position', () => {
     await settle();
 
     move({ page: 4, top: 10 });
-    vi.advanceTimersByTime(100);
     resize({ page: 4, top: 30 });
     resize({ page: 4, top: 35 });
-    vi.advanceTimersByTime(400);
-    expect(reviewManager.saveScrollPosition.mock.calls).toEqual([
-      [file, packPdfPosition(4, 10)],
-    ]);
-
-    // The reader's own moves after it are saved as before
-    move({ page: 5, top: 20 });
-    vi.advanceTimersByTime(500);
     unmount();
+    await settle();
 
     expect(setPosition.mock.calls).toEqual([
       [viewer, { page: 4, top: 10 }],
       [viewer, { page: 4, top: 10 }],
     ]);
-    expect(reviewManager.saveScrollPosition.mock.calls).toEqual([
-      [file, packPdfPosition(4, 10)],
-      [file, packPdfPosition(5, 20)],
-    ]);
+    expect(written()).toEqual([packPdfPosition(4, 10)]);
   });
 
-  it('saves where a resize left the view, as before, when it cannot put it back', async () => {
-    vi.useFakeTimers();
-    const { reviewManager } = wireContext(AT_PAGE_3);
+  it('keeps where a resize left the view, as a move, when it cannot put it back', async () => {
+    const { written } = wireContext(AT_PAGE_3);
     const { move, resize, setPosition } = wirePosition(null, false);
     const viewer = makeViewer();
     vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
@@ -667,20 +610,15 @@ describe('PdfArticleView reading position', () => {
     move({ page: 3, top: 700 });
 
     resize({ page: 3, top: 723 });
-    vi.advanceTimersByTime(499);
-    expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
     unmount();
+    await settle();
 
     expect(setPosition.mock.calls).toEqual([[viewer, { page: 3, top: 700 }]]);
-    expect(reviewManager.saveScrollPosition.mock.calls).toEqual([
-      [file, packPdfPosition(3, 723)],
-    ]);
+    expect(written()).toEqual([packPdfPosition(3, 723)]);
   });
 
-  it('saves where a resize left a view it has no place for yet, as before', async () => {
-    vi.useFakeTimers();
-    const { reviewManager } = wireContext();
+  it('keeps where a resize left a view it has no place for yet, as a move', async () => {
+    const { written } = wireContext();
     const { resize, setPosition } = wirePosition();
     const viewer = makeViewer();
     vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
@@ -688,18 +626,15 @@ describe('PdfArticleView reading position', () => {
     await settle();
 
     resize({ page: 2, top: 15 });
-    vi.advanceTimersByTime(500);
     unmount();
+    await settle();
 
     expect(setPosition).not.toHaveBeenCalled();
-    expect(reviewManager.saveScrollPosition.mock.calls).toEqual([
-      [file, packPdfPosition(2, 15)],
-    ]);
+    expect(written()).toEqual([packPdfPosition(2, 15)]);
   });
 
-  it('saves nothing for a resize it can neither undo nor find the view after', async () => {
-    vi.useFakeTimers();
-    const { reviewManager } = wireContext();
+  it('writes nothing for a resize it can neither undo nor find the view after', async () => {
+    const { written } = wireContext();
     const { resize } = wirePosition(null, false);
     const viewer = makeViewer();
     vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
@@ -707,10 +642,10 @@ describe('PdfArticleView reading position', () => {
     await settle();
 
     resize(null);
-    vi.advanceTimersByTime(1000);
     unmount();
+    await settle();
 
-    expect(reviewManager.saveScrollPosition).not.toHaveBeenCalled();
+    expect(written()).toEqual([]);
   });
 
   it('reloads a file changed on disk where its reader is', async () => {
@@ -747,7 +682,7 @@ describe('PdfArticleView reading position', () => {
   });
 
   it('keeps its place, rather than the saved one, when its file is swapped under it', async () => {
-    const { reviewManager } = wireContext(AT_PAGE_3);
+    wireContext(AT_PAGE_3);
     const { move } = wirePosition();
     const viewer = makeViewer();
     vi.spyOn(ObsidianPdf, 'createPdfViewer').mockReturnValue(viewer);
@@ -771,7 +706,6 @@ describe('PdfArticleView reading position', () => {
       [file, '#page=3&offset=0,700'],
       [renamed, '#page=5&offset=0,120'],
     ]);
-    expect(reviewManager.loadScrollPosition).toHaveBeenCalledOnce();
   });
 });
 

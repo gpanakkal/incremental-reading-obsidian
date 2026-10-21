@@ -22,6 +22,7 @@ import {
   supportsFrontmatter,
 } from '#/lib/mime';
 import { type ItemTable, evictedSpot } from '#/lib/moved-note-scan';
+import type { PositionRow } from '#/lib/position-store';
 import {
   describeReclaim,
   REBIND_LOG_TOPIC,
@@ -94,6 +95,11 @@ const refusedAt = (path: string) =>
 function irIdOf(frontmatter: Record<string, unknown>): string | undefined {
   const id = frontmatter['ir-id'];
   return typeof id === 'string' ? id : undefined;
+}
+
+/** An item row's reading position, and which table the row is in. */
+export interface ItemPositionRow extends PositionRow {
+  table: 'article' | 'snippet';
 }
 
 export default class ReviewManager {
@@ -1319,45 +1325,55 @@ export default class ReviewManager {
   }
 
   /**
-   * Save the scroll anchor for an article or snippet. Cards are excluded.
-   *
-   * For a note, the `scroll_top` column holds the top-visible document
-   * character offset rather than the pixel offset it originally stored — a
-   * logical anchor survives viewport-width and layout changes. Legacy pixel
-   * values self-correct: a row written before this change restores to the
-   * wrong spot once, then the next scroll overwrites it with a real character
-   * offset. For a PDF article it holds a packed page and top (see
-   * `#/lib/pdf/position`).
+   * The id an article's or snippet's reading position is kept under (see
+   * `#/lib/position-store`), or `null` for a card or a note with no row.
    */
-  async saveScrollPosition(file: TFile, offset: number) {
+  async positionIdOf(file: TFile): Promise<string | null> {
     const noteType = await this.articles.getItemType(file);
-    if (!noteType || noteType === 'card') return;
-
-    await this.#repo.mutate(
-      `UPDATE ${noteType} SET scroll_top = $1 WHERE reference = $2`,
-      [Math.round(offset), file.path]
-    );
-  }
-
-  /**
-   * Load the saved scroll anchor for an article or snippet, as
-   * {@link saveScrollPosition} stored it. Returns `null` when nothing is stored
-   * (`0`) or the file is not an article/snippet.
-   */
-  async loadScrollPosition(file: TFile): Promise<number | null> {
-    const noteType = await this.articles.getItemType(file);
-
     let row: ArticleRow | SnippetRow | null = null;
     if (noteType === 'article') {
       row = await this.articles.findArticle(file);
     } else if (noteType === 'snippet') {
       row = await this.snippets.findSnippet(file);
     }
+    return row?.id ?? null;
+  }
 
-    if (row && typeof row.scroll_top === 'number' && row.scroll_top > 0) {
-      return row.scroll_top;
-    }
+  /**
+   * The reading position stored in article or snippet `id`'s row, with the
+   * row's change stamp, or `null` when no such row exists.
+   *
+   * The `scroll_top` column holds the top-visible document character offset
+   * for a note — a logical anchor that survives viewport-width and layout
+   * changes; a legacy pixel value restores to the wrong spot once, then the
+   * next position stored replaces it — and a packed page and top for a PDF
+   * article (see `#/lib/pdf/position`). `0` means unset.
+   */
+  async readPosition(id: string): Promise<ItemPositionRow | null> {
+    const [row] = ((await this.#repo.query(
+      `SELECT 'article' AS item_table, scroll_top, updated_at, updated_by FROM article WHERE id = $1 AND ${NOT_PURGED} ` +
+        `UNION ALL SELECT 'snippet', scroll_top, updated_at, updated_by FROM snippet WHERE id = $1 AND ${NOT_PURGED}`,
+      [id]
+    )) ?? []) as unknown as {
+      item_table: ItemPositionRow['table'];
+      scroll_top: number;
+      updated_at: number;
+      updated_by: string;
+    }[];
+    if (!row) return null;
+    return {
+      table: row.item_table,
+      position: row.scroll_top,
+      updatedAt: row.updated_at,
+      updatedBy: row.updated_by,
+    };
+  }
 
-    return null;
+  /** Store `position` in the row {@link readPosition} found for `id`. */
+  async writePosition(id: string, position: number, row: ItemPositionRow) {
+    await this.#repo.mutate(
+      `UPDATE ${row.table} SET scroll_top = $1 WHERE id = $2 AND ${NOT_PURGED}`,
+      [Math.round(position), id]
+    );
   }
 }

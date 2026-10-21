@@ -2,15 +2,20 @@ import { EditorSelection } from '@codemirror/state';
 import { EditorView, ViewPlugin } from '@codemirror/view';
 import { clearPositioned, wasPositioned } from '../ephemeral-position';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
+import type { PositionHandle } from '../position-store';
 import { irPluginFacet } from './irPluginFacet';
 
 /**
  * CodeMirror extension that saves and restores scroll position for IR notes.
  *
  * Behavior:
- * - On mount: Restores scroll position from database (after properties widget renders)
- * - On scroll: Saves position to database (debounced via scrollend event)
- * - Only activates for files with ir-* tags
+ * - On mount: Restores the item's reading position (after properties widget
+ *   renders) from the plugin's position store: where any tab on this device
+ *   last was, else what the database holds
+ * - On scroll: Hands the position to the store, once per frame (browsers fire
+ *   `scroll` at most once per frame). The store keeps it in localStorage and
+ *   writes the database only once the last tab on the item closes
+ * - Only activates for articles and snippets
  *
  * The position is stored as a **document character offset** (the top-visible
  * position), not a pixel offset: a logical anchor survives viewport-width
@@ -26,6 +31,7 @@ export const scrollPositionExtension = ViewPlugin.define(
     let fallbackTimeout: number | undefined;
     let abortController: AbortController | null = null;
     let mutationObserver: MutationObserver | null = null;
+    let handle: PositionHandle | null = null;
     const propertiesLoadTimeoutMs = 300;
 
     const plugin = view.state.facet(irPluginFacet);
@@ -48,11 +54,16 @@ export const scrollPositionExtension = ViewPlugin.define(
     // keep track of if the ViewPlugin was destroyed
     let destroyed = false;
     // Kick off async noteType check; initialise listeners only when confirmed IR note.
-    void Obsidian.getNoteType(file, app).then((noteType) => {
+    void Obsidian.getNoteType(file, app).then(async (noteType) => {
       if (destroyed || !noteType) return;
 
-      const reviewManager = plugin.reviewManager;
-      if (!reviewManager) return;
+      const { reviewManager, positions } = plugin;
+      if (!reviewManager || !positions) return;
+      // A card has no reading position, nor does a note without a row
+      const id = await reviewManager.positionIdOf(file).catch(() => null);
+      if (destroyed || !id) return;
+      const position = positions.open(id);
+      handle = position;
 
       // Character offset of the document position at the top edge of the
       // viewport. `precise: false` makes posAtCoords clamp to the nearest
@@ -106,7 +117,7 @@ export const scrollPositionExtension = ViewPlugin.define(
         const { info } = Obsidian.getFileInfoFromState(view.state);
         if (!info || !info.file) return;
 
-        void reviewManager.saveScrollPosition(info.file, topVisibleOffset());
+        position.set(topVisibleOffset());
       };
 
       // Restore scroll position after properties widget has rendered.
@@ -115,7 +126,7 @@ export const scrollPositionExtension = ViewPlugin.define(
       // a search or backlinks result, go-to-context, back/forward. Obsidian has
       // already scrolled there by now, and restoring would scroll away from it.
       const restoreScrollPosition = async () => {
-        const offset = await reviewManager.loadScrollPosition(file);
+        const offset = await position.restore();
         if (offset === null || wasPositioned(info)) return;
 
         isRestoring = true;
@@ -195,8 +206,9 @@ export const scrollPositionExtension = ViewPlugin.define(
               if (destroyed) return;
               // Add scroll listener with AbortController for clean lifecycle
               abortController = new AbortController();
-              view.scrollDOM.addEventListener('scrollend', handleScroll, {
+              view.scrollDOM.addEventListener('scroll', handleScroll, {
                 signal: abortController.signal,
+                passive: true,
               });
             })
             .catch(() => {});
@@ -207,6 +219,8 @@ export const scrollPositionExtension = ViewPlugin.define(
     return {
       destroy() {
         destroyed = true;
+        // The last tab on the item closing writes it to the database
+        handle?.close();
         abortController?.abort();
         mutationObserver?.disconnect();
         if (fallbackTimeout !== undefined) {
