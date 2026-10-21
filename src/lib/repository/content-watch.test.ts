@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import initSqlJs, { type Database, type SqlValue } from 'sql.js';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ContentWatch } from './content-watch';
+import { bumpWriteStamp } from './write-stamp';
 
 // #region HELPERS
 
@@ -270,6 +271,21 @@ describe('ContentWatch', () => {
     );
     expect(changes(watch, db, `UPDATE stamps SET updated_at = 1`)).toBe(false);
     expect(changes(watch, db, `UPDATE stamps SET updated_at = 2`)).toBe(true);
+  });
+
+  it('counts no bump of the write stamp, as `save()` makes before it exports, while still counting other tables', () => {
+    const db = makeDb();
+    db.exec(
+      'CREATE TABLE write_stamp (device TEXT NOT NULL PRIMARY KEY, generation INTEGER NOT NULL)'
+    );
+    const watch = new ContentWatch();
+
+    for (const now of [1, 1, 5]) {
+      const mark = watch.mark(db);
+      bumpWriteStamp(db, 'me', now);
+      expect(watch.changedSince(db, mark)).toBe(false);
+    }
+    expect(changes(watch, db, `UPDATE t SET x = 2`)).toBe(true);
   });
 
   it('keeps its triggers out of the saved file', () => {

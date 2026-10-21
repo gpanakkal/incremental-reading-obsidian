@@ -628,4 +628,19 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 12,
+    description: 'Stamp each save with the saving device and a generation',
+    up: (db) => {
+      db.exec(`
+        -- One row per device that ever saved the file: the generation of its latest
+        -- save, max(previous + 1, now). Read to tell this device's own save coming
+        -- back from another device's copy. Not a synced row table: no row stamps.
+        CREATE TABLE IF NOT EXISTS write_stamp (
+          device TEXT NOT NULL PRIMARY KEY,
+          generation INTEGER NOT NULL
+        );
+      `);
+    },
+  },
 ];

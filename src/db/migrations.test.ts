@@ -1540,7 +1540,10 @@ describe('migration v11 â€” stamp synced rows, tombstone logs and rebinds',
   });
 
   it('gives every synced table a stamp, and the logs and rebinds a deleted flag, reading 0 on every row it had', () => {
-    applyMigrations(db, migrations);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 11)
+    );
 
     expect(getSchemaVersion(db)).toBe(11);
     for (const table of [
@@ -1569,6 +1572,54 @@ describe('migration v11 â€” stamp synced rows, tombstone logs and rebinds',
     for (const table of ['article_review', 'rebind']) {
       expect(() => db.exec(`UPDATE ${table} SET deleted = 2`)).toThrow(/CHECK/);
     }
+  });
+
+  it('reports no work to do when run a second time', () => {
+    applyMigrations(db, migrations);
+    expect(applyMigrations(db, migrations)).toBe(false);
+  });
+});
+
+describe('migration v12 — stamp each save with its device and generation', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb(SCHEMA_V0);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 11)
+    );
+    insertArticle(db, 'a1', 'notes/a1.md');
+  });
+
+  it('adds an empty write stamp keyed by device, leaving every row as it was', () => {
+    const before = selectAll(db, 'article');
+
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 12)
+    );
+
+    expect(getSchemaVersion(db)).toBe(12);
+    expect(columnNames(db, 'write_stamp')).toEqual(['device', 'generation']);
+    expect(selectAll(db, 'write_stamp')).toEqual([]);
+    expect(selectAll(db, 'article')).toEqual(before);
+  });
+
+  it('keeps one generation per device', () => {
+    applyMigrations(db, migrations);
+    const insert = `INSERT INTO write_stamp (device, generation) VALUES ('d', 1)`;
+    db.exec(insert);
+
+    expect(() => db.exec(insert)).toThrow(/UNIQUE|PRIMARY KEY/);
+  });
+
+  it('refuses a device without a generation', () => {
+    applyMigrations(db, migrations);
+
+    expect(() =>
+      db.exec(`INSERT INTO write_stamp (device) VALUES ('d')`)
+    ).toThrow(/NOT NULL/);
   });
 
   it('reports no work to do when run a second time', () => {

@@ -43,6 +43,16 @@ import { BulkMutateError } from './BulkMutateError';
 import { ContentWatch, type ContentMark } from './content-watch';
 import { armRowStamps, disarmRowStamps } from './row-stamps';
 import { recordSave } from './save-stats';
+import {
+  bumpWriteStamp,
+  classifyIncoming,
+  loadKnownWriteVector,
+  readFileWriteVector,
+  readWriteVector,
+  saveKnownWriteVector,
+  type IncomingKind,
+  type WriteVector,
+} from './write-stamp';
 // @ts-ignore - WASM imported as base64 string via custom esbuild plugin.
 // Points at the binary shipped with the installed sql.js package so the bundled
 // WASM stays in lockstep with the sql.js version in node_modules.
@@ -58,6 +68,15 @@ const ITEM_TABLE_TO_NOTE_TYPE: Readonly<Record<string, NoteType>> = {
   snippet: 'snippet',
   srs_card: 'card',
 };
+
+/**
+ * Why a copy of the database was backed up: before a migration (no marker),
+ * before another device's copy replaced one this device could not merge
+ * (`merge`), or before a copy from a device away for months replaced this
+ * device's own stale one (`stale`). Named in the file, so each kind can be
+ * pruned on its own.
+ */
+export type BackupMarker = 'merge' | 'stale';
 
 /**
  * The database file is on disk but could not be loaded. Nothing was written
@@ -156,7 +175,10 @@ export class SQLJSRepository implements SQLiteRepository {
   #waitedOnSync = false;
   /** The `updated_by` of every row this device writes; read on first use. */
   #deviceId: string | undefined;
-  /** The clock row stamps are drawn from (see `armRowStamps`). */
+  /**
+   * The clock row stamps and write stamp generations are drawn from (see
+   * `armRowStamps`, `bumpWriteStamp`).
+   */
   #stampClock: () => number;
   /** Tells writes that changed nothing from the rest, which alone save. */
   #content = new ContentWatch();
@@ -169,6 +191,14 @@ export class SQLJSRepository implements SQLiteRepository {
    * lacks, and the next write saves even if it changes nothing.
    */
   #saves = { begun: 0, wrote: 0, failed: 0 };
+  /**
+   * The write stamp of the file {@link reloadDb} last read, as it was before
+   * any migration: what startup measures against the stamp this device last
+   * knew the file by.
+   */
+  #loadedStamp: WriteVector | null = null;
+  /** What startup found the file on disk to be; see {@link startupKind}. */
+  #startupKind: IncomingKind | null = null;
 
   /**
    * Use .start to instantiate
@@ -183,7 +213,7 @@ export class SQLJSRepository implements SQLiteRepository {
     onWritesResumed?: () => void;
     /** Stands in for this install's id (see `getDeviceId`), for tests. */
     deviceId?: string;
-    /** Stands in for `Date.now` as the clock of row stamps, for tests. */
+    /** Stands in for `Date.now` as the clock of stamps, for tests. */
     stampClock?: () => number;
   }) {
     this.app = params.app;
@@ -248,6 +278,8 @@ export class SQLJSRepository implements SQLiteRepository {
       repo.dispose(); // closes a database opened since
       throw new StartupCancelledError();
     };
+    // Read before loading, which stores the stamp of the file it loads
+    const known = loadKnownWriteVector(repo.app);
     try {
       let exists = await repo.dbExists();
       if (!exists && (await repo.#waitOnSync('create'))) {
@@ -256,7 +288,10 @@ export class SQLJSRepository implements SQLiteRepository {
       if (exists) {
         const loaded = await repo.loadDb();
         assertLive();
-        if (loaded !== null) return repo;
+        if (loaded !== null) {
+          repo.#classifyAtStartup(known);
+          return repo;
+        }
         // Sync deleting the file while startup waited for it leaves nothing
         // to load, which is no failure to load
         if (!repo.#waitedOnSync || (await repo.dbExists())) {
@@ -272,6 +307,37 @@ export class SQLJSRepository implements SQLiteRepository {
       repo.#syncHold = undefined;
       signal?.removeEventListener('abort', stop);
     }
+  }
+
+  /**
+   * What the file on disk was at startup, measured against the stamp of the
+   * file this device last wrote or took on: anything but `echo` means
+   * something else wrote it while the plugin was not running. Null when
+   * startup made a new database, or this device had no stamp stored (a first
+   * run, or localStorage that can't be read), or the file had none (an older
+   * plugin version wrote it).
+   */
+  get startupKind(): IncomingKind | null {
+    return this.#startupKind;
+  }
+
+  /**
+   * Classify the file startup loaded (see {@link startupKind}). Nothing is
+   * left to back up by now: the copy this device last wrote is gone from
+   * disk, and was never loaded. So a file that lacks this device's last save
+   * is only reported.
+   */
+  #classifyAtStartup(known: WriteVector | null) {
+    const loaded = this.#loadedStamp;
+    if (!known || !loaded) return;
+    const kind = classifyIncoming(known, loaded, this.#stampClock());
+    this.#startupKind = kind;
+    if (kind === 'echo' || kind === 'fast-forward') return;
+    console.warn(
+      'Incremental Reading - The database file changed while the plugin ' +
+        'was not running, and lacks saves this device knew of:',
+      { kind, known, loaded }
+    );
   }
 
   /**
@@ -359,12 +425,6 @@ export class SQLJSRepository implements SQLiteRepository {
     if (file.path !== this.dbFilePath || file.deleted) {
       return;
     }
-    // skip reload if the changes resulted from saving this db instance to disk.
-    // Not for a database made without a file, whose saves have not written
-    // one yet: the file is someone else's, and its save must not win.
-    if (this.pendingSaveCount > 0 && !this.#fresh) {
-      return;
-    }
     // A reload replaces `this.db` wholesale, which would orphan an open
     // transaction: its BEGIN belongs to the database being discarded, so the
     // writes made so far vanish, later ones land outside any transaction, and
@@ -414,6 +474,11 @@ export class SQLJSRepository implements SQLiteRepository {
   /**
    * One pass of {@link #reloadFromDisk}.
    *
+   * The file is read once, and what to do with it is decided by its write
+   * stamp (see {@link #answerIncoming}): this device's own save coming back
+   * is left alone, while another device's copy is taken on, backing up the
+   * database in memory first when that drops saves the copy lacks.
+   *
    * A file that fails to load leaves the database in memory as it was, still
    * readable, but refuses writes until a later reload succeeds: the file on
    * disk is newer than memory, and saving memory over it would discard
@@ -422,7 +487,16 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   async #reloadOnce() {
     try {
-      const db = await this.reloadDb();
+      const incoming = await this.#readIncoming();
+      // What follows may export or save the database, which would end a
+      // transaction opened while the file was read; hold it back like any
+      // reload that comes due during one
+      if (this.#txDepth > 0) {
+        this.#reloadPending = true;
+        return;
+      }
+      if (incoming && !(await this.#answerIncoming(incoming))) return;
+      const db = incoming ? await this.reloadDb(incoming.bytes) : null;
       if (this.#disposed) return;
       if (db === null) {
         if (this.#reloadAgain) return;
@@ -457,6 +531,97 @@ export class SQLJSRepository implements SQLiteRepository {
           this.blockWrites(error);
         }
         console.error(error);
+      }
+    }
+  }
+
+  /**
+   * Read the database file and its write stamp, or null if it can't be read.
+   */
+  async #readIncoming(): Promise<{
+    bytes: ArrayBuffer;
+    stamp: WriteVector | 'unstamped' | 'unreadable';
+  } | null> {
+    try {
+      this.#sql ||= await this.loadWasm();
+      const bytes = await this.app.vault.adapter.readBinary(
+        normalizePath(this.#dbFilePath)
+      );
+      const stamp = readFileWriteVector(
+        this.#sql,
+        new Uint8Array(bytes),
+        migrations[migrations.length - 1].version
+      );
+      return { bytes, stamp };
+    } catch (error) {
+      console.error('Incremental Reading - Failed to read database:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Decide what to do with the file that arrived, by its write stamp against
+   * the stamp of the database in memory (see `classifyIncoming`):
+   *
+   * - this device's own save coming back (`echo`), or an older one
+   *   (`behind`), is left alone. A file older than memory with no save of
+   *   memory on the way would stay older, so memory is saved over it.
+   * - a copy from a device away for months (`stale-other`) is left alone,
+   *   and memory saved over it, so that device takes this one on in turn.
+   * - a copy that has every save memory has (`fast-forward`) is taken on.
+   * - one that lacks some (`stale-self`, `merge`) is taken on after memory is
+   *   backed up, since the saves it lacks are dropped.
+   *
+   * A file that is not a database is loaded all the same, which refuses it.
+   * So is every file while writes are refused, since only loading one lifts
+   * the refusal. One older than the write stamp (an older plugin version
+   * wrote it) can't be placed, so is taken on with a backup.
+   * @returns whether to take the file on
+   * @throws if the backup fails, taking nothing on
+   */
+  async #answerIncoming(incoming: {
+    stamp: WriteVector | 'unstamped' | 'unreadable';
+  }): Promise<boolean> {
+    const { stamp } = incoming;
+    if (stamp === 'unreadable' || this.#writeBlock || !this.db) return true;
+    const kind =
+      stamp === 'unstamped'
+        ? 'merge'
+        : classifyIncoming(
+            readWriteVector(this.db) ?? {},
+            stamp,
+            this.#stampClock()
+          );
+    switch (kind) {
+      case 'echo':
+        return false;
+      case 'behind':
+      case 'stale-other':
+        if (kind === 'stale-other' || this.pendingSaveCount === 0) {
+          // Straight to `save`, past the gate that skips writes changing
+          // nothing (`#contentChanged`, 0174): memory is unchanged on
+          // purpose, and the point is to put it over the file. `save` logs
+          // its own failures
+          this.save().catch(() => undefined);
+        }
+        return false;
+      case 'fast-forward':
+        return true;
+      case 'stale-self':
+      case 'merge': {
+        const db = this.db;
+        await this.backupDatabase(getSchemaVersion(db), {
+          marker: kind === 'merge' ? 'merge' : 'stale',
+          data: this.#exportDb(db).buffer as ArrayBuffer,
+        });
+        // Reloads run one at a time, so only disposal can have replaced
+        // the database meanwhile
+        if (this.#disposed) return false;
+        if (this.#txDepth > 0) {
+          this.#reloadPending = true;
+          return false;
+        }
+        return true;
       }
     }
   }
@@ -701,9 +866,30 @@ export class SQLJSRepository implements SQLiteRepository {
 
   #armRowStamps(db: Database) {
     armRowStamps(db, {
-      deviceId: () => (this.#deviceId ??= getDeviceId(this.app)),
+      deviceId: () => this.#device(),
       now: this.#stampClock,
     });
+  }
+
+  /** This device's id (see `getDeviceId`), read on first use. */
+  #device(): string {
+    return (this.#deviceId ??= getDeviceId(this.app));
+  }
+
+  /**
+   * Serialize `db`, putting back what that takes away. sql.js `export()`
+   * frees every statement, closes the connection, reads the file out of its
+   * FS and opens it again, so `db` is a new connection afterwards: the update
+   * hook and row stamps are gone and every connection-level pragma is back at
+   * its default (`foreign_keys` OFF, which would leave `ON DELETE CASCADE`
+   * unenforced for the rest of the session). Called with no transaction
+   * open, so the pragma takes.
+   */
+  #exportDb(db: Database): Uint8Array {
+    const data = db.export();
+    db.exec('PRAGMA foreign_keys = ON');
+    this.registerUpdateHook();
+    return data;
   }
 
   /** Resolve a rowid to its UUID `id`, or null if the row is gone. */
@@ -842,15 +1028,13 @@ export class SQLJSRepository implements SQLiteRepository {
     const save = ++this.#saves.begun;
     try {
       const source = this.db;
-      const data = source.export().buffer;
-      // sql.js `export()` frees every statement, closes the connection, reads
-      // the file out of its FS and opens it again, so `source` is a new
-      // connection from here on: the update hook is gone and every
-      // connection-level pragma is back at its default (`foreign_keys` OFF,
-      // which would leave `ON DELETE CASCADE` unenforced for the rest of the
-      // session). The transaction has committed by now, so the pragma takes.
-      source.exec('PRAGMA foreign_keys = ON');
-      this.registerUpdateHook();
+      // Inside the save, never on its own: a write of its own would ask for
+      // a save. So a write that changed nothing, which asks for none
+      // (`#contentChanged`, 0174), moves no generation either; and
+      // `write_stamp` is no content to that check, so the bump asks for no
+      // save after this one
+      const stamp = bumpWriteStamp(source, this.#device(), this.#stampClock());
+      const data = this.#exportDb(source).buffer;
       if (this.#fresh) {
         // Shared, so saves started together all wait on one check rather
         // than a later one finding the file an earlier one just wrote
@@ -878,6 +1062,8 @@ export class SQLJSRepository implements SQLiteRepository {
         data as ArrayBuffer
       );
       this.#saves.wrote = Math.max(this.#saves.wrote, save);
+      // In the order writes land, so the last one on disk is the one kept
+      saveKnownWriteVector(this.app, stamp);
     } catch (error) {
       // Nothing was written that this database can count as its file
       if (wroteFresh) this.#fresh = true;
@@ -998,18 +1184,21 @@ export class SQLJSRepository implements SQLiteRepository {
    * Attempt to reload a pre-existing database from disk.
    * If migrations are pending, backs up the database first and verifies
    * data integrity after applying them.
+   * @param bytes the file, already read; read afresh when not given
    * @returns a Database, or `null` if the file is invalid or not found
    * @throws if the latest schema version is lower than the database's
    * current version, or if post-migration verification fails
    */
-  protected async reloadDb(): Promise<Database | null> {
+  protected async reloadDb(bytes?: ArrayBuffer): Promise<Database | null> {
     const previous = this.db;
     let candidate: Database | null = null;
     try {
       this.#sql ||= await this.loadWasm();
-      const dbArrayBuffer = await this.app.vault.adapter.readBinary(
-        normalizePath(this.#dbFilePath)
-      );
+      const dbArrayBuffer =
+        bytes ??
+        (await this.app.vault.adapter.readBinary(
+          normalizePath(this.#dbFilePath)
+        ));
       if (this.#disposed) return null;
       // Use browser-compatible Uint8Array instead of Node.js Buffer
       // for mobile compatibility
@@ -1027,6 +1216,7 @@ export class SQLJSRepository implements SQLiteRepository {
       if (candidate.exec('SELECT 1 FROM sqlite_master LIMIT 1').length === 0) {
         throw new Error('the file holds no database');
       }
+      const loadedStamp = readWriteVector(candidate);
 
       const currentDbVersion = getSchemaVersion(candidate);
       const latestSchemaVersion = migrations[migrations.length - 1].version;
@@ -1054,6 +1244,7 @@ export class SQLJSRepository implements SQLiteRepository {
       // not leaves the previous one in place, never a broken or empty stand-in
       // that a later write would save over the file.
       this.db = candidate;
+      this.#loadedStamp = loadedStamp;
       this.registerUpdateHook();
       this.#fresh = false;
 
@@ -1118,6 +1309,9 @@ export class SQLJSRepository implements SQLiteRepository {
         this.#writeBlock = null;
         this.#onWritesResumed?.();
       }
+      // The file on disk is this one now (or its migration, saved above)
+      const stamp = readWriteVector(this.db);
+      if (stamp) saveKnownWriteVector(this.app, stamp);
       // Nothing holds the replaced database across an await: reloads wait
       // out transactions, and every other use is synchronous
       previous?.close();
@@ -1148,10 +1342,15 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   /**
-   * Back up the database file before applying migrations.
+   * Back up the database file before applying migrations, or `from.data`,
+   * the database in memory, before another device's copy replaces it.
    * Verifies backup integrity via SHA-256 checksum comparison.
+   * @param currentVersion the schema version of what is backed up
    */
-  protected async backupDatabase(currentVersion: number): Promise<string> {
+  protected async backupDatabase(
+    currentVersion: number,
+    from?: { marker: BackupMarker; data: ArrayBuffer }
+  ): Promise<string> {
     const dirExists = await this.adapter.exists(
       normalizePath(BACKUP_DIRECTORY)
     );
@@ -1159,12 +1358,13 @@ export class SQLJSRepository implements SQLiteRepository {
       await this.adapter.mkdir(normalizePath(BACKUP_DIRECTORY));
     }
 
-    const originalData = await this.adapter.readBinary(
-      normalizePath(this.#dbFilePath)
-    );
+    const originalData =
+      from?.data ??
+      (await this.adapter.readBinary(normalizePath(this.#dbFilePath)));
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backupFileName = `ir-user-data_v${currentVersion}_${timestamp}.sqlite`;
+    const marker = from ? `_${from.marker}` : '';
+    const backupFileName = `ir-user-data_v${currentVersion}${marker}_${timestamp}.sqlite`;
     const backupPath = normalizePath(`${BACKUP_DIRECTORY}/${backupFileName}`);
 
     await this.adapter.writeBinary(backupPath, originalData);
