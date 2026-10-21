@@ -17,6 +17,7 @@ import {
   MAX_ANCHOR_PAGE,
 } from '#/lib/pdf/pdf-anchor';
 import { refusalReason } from '#/lib/readiness';
+import { initialCard, replayCard } from '#/lib/repository/scheduling-replay';
 import { formatSourceLink } from '#/lib/source-link';
 import type {
   ISRSCard,
@@ -59,6 +60,7 @@ import {
 } from 'vitest';
 import { CardManager } from './CardManager';
 import { tombstoneRowStatements } from './row-delete';
+import SRSCard from './SRSCard';
 
 // #region HELPERS
 
@@ -595,6 +597,108 @@ async function gradedCard(dismissed: boolean, grade: Grade) {
   );
   const reviewId = await manager.review(before, grade, new Date(0));
   return { repo, manager, before, reviewId, row: repo.rows('srs_card') };
+}
+
+/** Moments apart from any wall clock, for grades a test places in time. */
+const UNDO_T = 1_790_000_000_000;
+
+/** FSRS parameters a user can set, fuzz on or off. */
+const undoParamsArb: fc.Arbitrary<Partial<FSRSParameters>> = fc.record({
+  request_retention: fc.double({ min: 0.7, max: 0.99, noNaN: true }),
+  maximum_interval: fc.integer({ min: 1, max: 36_500 }),
+  enable_fuzz: fc.boolean(),
+  enable_short_term: fc.boolean(),
+  learning_steps: fc.constantFrom([], ['1m', '10m'], ['10m'], ['1d']),
+  relearning_steps: fc.constantFrom([], ['10m'], ['1h', '1d']),
+});
+
+/** Gaps between two grades: the same millisecond, minutes, or months. */
+const undoGapArb = fc.oneof(
+  fc.constant(0),
+  fc.integer({ min: 1, max: 60_000 }),
+  fc.integer({ min: 1, max: 90 * MS_PER_DAY })
+);
+
+/**
+ * A card made at `createdAt` on a real database, never graded, graded with
+ * `params` by `grade`, which notes the card as it was before each grade.
+ */
+async function undoableCard(
+  params: Partial<FSRSParameters>,
+  createdAt = UNDO_T
+) {
+  const repo = await TestRepository.create();
+  const plugin = {
+    app: {},
+    settings: { dayRolloverOffset: 4, fsrsParams: generatorParameters(params) },
+  } as never;
+  const manager = new CardManager(plugin, repo);
+  const card = new SRSCard('cards/c.md', new Date(createdAt));
+  card.id = 'c';
+  // The row records its note's fingerprint, so the note needs a `stat`
+  const file = makeItemVault({ 'cards/c.md': {} }).files.get('cards/c.md')!;
+  await (
+    manager as unknown as {
+      insertRow(card: SRSCard, parent: null, file: TFile): Promise<void>;
+    }
+  ).insertRow(card, null, file);
+  /** The card's row without its stamp. */
+  const row = () => repo.rows('srs_card')[0];
+  const grade = async (rating: Grade, at: number) => {
+    const before = row();
+    const id = await manager.review(
+      CardManager.rowToDisplay(before as never),
+      rating,
+      new Date(at)
+    );
+    return { id, before };
+  };
+  const undo = (graded: { id: string; before: Record<string, unknown> }) =>
+    manager.rollbackBeforeReview(
+      CardManager.rowToDisplay(graded.before as never),
+      graded.id
+    );
+  /** Every review of the card, undone ones included. */
+  const log = () =>
+    repo.storedRows('srs_card_review').map((r) => ({
+      id: r.id as string,
+      at: r.review as number,
+      rating: r.rating as number,
+      deleted: r.deleted as number,
+      by: r.updated_by as string,
+    }));
+  /** The FSRS columns the live log implies, graded from a new card. */
+  const replayed = () =>
+    replayCard(log(), params, initialCard(row().created_at as number));
+  return { repo, plugin, manager, row, grade, undo, log, replayed };
+}
+
+/** The FSRS columns of a card row. */
+function fsrsColumns(row: Record<string, unknown>) {
+  const {
+    due,
+    last_review,
+    stability,
+    difficulty,
+    elapsed_days,
+    scheduled_days,
+    learning_steps,
+    reps,
+    lapses,
+    state,
+  } = row;
+  return {
+    due,
+    last_review,
+    stability,
+    difficulty,
+    elapsed_days,
+    scheduled_days,
+    learning_steps,
+    reps,
+    lapses,
+    state,
+  };
 }
 
 // #endregion
@@ -5514,6 +5618,262 @@ describe('rollbackBeforeReview', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
+
+  // Found by 0170's review: ts-fsrs `rollback` was handed the card as it was
+  // before the grade, not after, so the card came back a rep short and due
+  // when the undone grade was made (grades 20 days apart, fuzz off)
+  it.each([
+    { grades: [Rating.Good, Rating.Good], reps: 1 },
+    { grades: [Rating.Good, Rating.Good, Rating.Good], reps: 2 },
+    {
+      grades: [
+        Rating.Good,
+        Rating.Good,
+        Rating.Good,
+        Rating.Good,
+        Rating.Again,
+      ],
+      reps: 4,
+    },
+  ])(
+    'puts a card back exactly as it was before its last grade, $reps reps',
+    async ({ grades, reps }) => {
+      const card = await undoableCard({});
+      const graded = [];
+      for (const [i, rating] of grades.entries()) {
+        graded.push(
+          await card.grade(rating as Grade, UNDO_T + (i + 1) * 20 * MS_PER_DAY)
+        );
+      }
+      const last = graded[graded.length - 1];
+
+      await card.undo(last);
+
+      expect(card.row()).toEqual(last.before);
+      expect(card.row().reps).toBe(reps);
+    }
+  );
+
+  it('keeps what each grade noted for its undo only until it is undone or taken back with an earlier one', async () => {
+    const card = await undoableCard({});
+    const notes = () =>
+      [
+        ...(
+          card.manager as unknown as { logsBefore: Map<string, unknown> }
+        ).logsBefore.keys(),
+      ].sort();
+    const graded = [];
+    for (let i = 1; i <= 4; i++) {
+      graded.push(await card.grade(Rating.Good, UNDO_T + i * MS_PER_DAY));
+    }
+    expect(notes()).toEqual(graded.map((g) => g.id).sort());
+
+    await card.undo(graded[3]);
+    expect(notes()).toEqual(
+      graded
+        .slice(0, 3)
+        .map((g) => g.id)
+        .sort()
+    );
+
+    // Takes back the grades after it too, whose undos are still stacked
+    await card.undo(graded[1]);
+    expect(notes()).toEqual([graded[0].id]);
+  });
+
+  it('property: undoing a grade puts the card back exactly as it was before it, whatever the grades, parameters and gaps', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        undoParamsArb,
+        fc.array(
+          fc.oneof(
+            fc.record({ grade: gradeArb, gap: undoGapArb }),
+            fc.constant('undo' as const)
+          ),
+          { maxLength: 12 }
+        ),
+        async (params, steps) => {
+          const card = await undoableCard(params);
+          const undoable: Awaited<ReturnType<typeof card.grade>>[] = [];
+          let at = UNDO_T;
+          for (const step of steps) {
+            if (step !== 'undo') {
+              at += step.gap;
+              undoable.push(await card.grade(step.grade, at));
+              continue;
+            }
+            const last = undoable.pop();
+            if (!last) continue;
+
+            await card.undo(last);
+
+            expect(card.row()).toEqual(last.before);
+          }
+        }
+      ),
+      { numRuns: 40 }
+    );
+  }, 60_000);
+
+  it('property: undoing any grade takes back the later ones with it, leaving the card as it was before it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        undoParamsArb,
+        fc.array(fc.record({ grade: gradeArb, gap: undoGapArb }), {
+          minLength: 1,
+          maxLength: 8,
+        }),
+        fc.nat(),
+        async (params, grades, pick) => {
+          const card = await undoableCard(params);
+          const graded = [];
+          let at = UNDO_T;
+          for (const { grade, gap } of grades) {
+            at += gap;
+            graded.push(await card.grade(grade, at));
+          }
+          const undone = pick % graded.length;
+
+          await card.undo(graded[undone]);
+
+          expect(card.row()).toEqual(graded[undone].before);
+          expect(
+            card
+              .log()
+              .filter((r) => r.deleted)
+              .map((r) => r.id)
+              .sort()
+          ).toEqual(
+            graded
+              .slice(undone)
+              .map((g) => g.id)
+              .sort()
+          );
+        }
+      ),
+      { numRuns: 40 }
+    );
+  }, 60_000);
+
+  it('property: undoing a grade another session made takes back the grades dated after it, leaving the card as it was before it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        undoParamsArb,
+        fc.array(
+          fc.record({
+            grade: gradeArb,
+            gap: fc.integer({ min: 1, max: 90 * MS_PER_DAY }),
+          }),
+          { minLength: 1, maxLength: 8 }
+        ),
+        fc.nat(),
+        async (params, grades, pick) => {
+          const card = await undoableCard(params);
+          const graded = [];
+          let at = UNDO_T;
+          for (const { grade, gap } of grades) {
+            at += gap;
+            graded.push(await card.grade(grade, at));
+          }
+          const undone = graded[pick % graded.length];
+
+          // As after a reload: the undo has no note of what the card had
+          await new CardManager(card.plugin, card.repo).rollbackBeforeReview(
+            CardManager.rowToDisplay(undone.before as never),
+            undone.id
+          );
+
+          expect(card.row()).toEqual(undone.before);
+          expect(
+            card
+              .log()
+              .filter((r) => r.deleted)
+              .map((r) => r.id)
+          ).toEqual(graded.slice(graded.indexOf(undone)).map((g) => g.id));
+        }
+      ),
+      { numRuns: 30 }
+    );
+  }, 60_000);
+
+  it('property: undoing a grade never takes back another device’s review, whenever its clock dated it, and leaves the card as the reviews left imply', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        undoParamsArb,
+        fc.array(
+          fc.oneof(
+            fc.record({
+              kind: fc.constant('grade' as const),
+              grade: gradeArb,
+              gap: fc.integer({ min: 1, max: 90 * MS_PER_DAY }),
+            }),
+            // Another device's review, merged in: dated by a clock ahead of
+            // this one or behind it
+            fc.record({
+              kind: fc.constant('theirs' as const),
+              grade: gradeArb,
+              skew: fc.integer({ min: -90 * MS_PER_DAY, max: 90 * MS_PER_DAY }),
+            }),
+            fc.record({ kind: fc.constant('undo' as const), pick: fc.nat() })
+          ),
+          { maxLength: 12 }
+        ),
+        async (params, events) => {
+          const card = await undoableCard(params);
+          const graded: Awaited<ReturnType<typeof card.grade>>[] = [];
+          const theirs: string[] = [];
+          let now = UNDO_T;
+          for (const [i, event] of events.entries()) {
+            const live = card.log().filter((r) => !r.deleted);
+            if (event.kind === 'grade') {
+              // Graded after every review the card has, at an even moment:
+              // theirs are at odd ones, so no two share one
+              const after = Math.max(now, ...live.map((r) => r.at)) + event.gap;
+              now = after + (after % 2);
+              graded.push(await card.grade(event.grade, now));
+            } else if (event.kind === 'theirs') {
+              const dated = now + event.skew;
+              const id = `theirs-${i}`;
+              card.repo.mutate(
+                `INSERT INTO srs_card_review (id, card_id, due, review,
+                   stability, difficulty, elapsed_days, last_elapsed_days,
+                   scheduled_days, rating, state, updated_at, updated_by)
+                 VALUES ($1, 'c', 0, $2, 0, 0, 0, 0, 0, $3, 0, 1, 'other')`,
+                [id, dated - (dated % 2) + 1, event.grade]
+              );
+              theirs.push(id);
+              // The card as the merge that brought it in leaves it
+              const merged = card.replayed();
+              card.repo.mutate(
+                `UPDATE srs_card SET due = $1, last_review = $2,
+                   stability = $3, difficulty = $4, elapsed_days = $5,
+                   scheduled_days = $6, learning_steps = $7, reps = $8,
+                   lapses = $9, state = $10 WHERE id = 'c'`,
+                Object.values(merged) as never
+              );
+            } else {
+              const mine = graded.filter((g) =>
+                live.some((r) => r.id === g.id)
+              );
+              if (mine.length === 0) continue;
+              const undone = mine[event.pick % mine.length];
+
+              await card.undo(undone);
+
+              const log = card.log();
+              expect(log.find((r) => r.id === undone.id)?.deleted).toBe(1);
+              expect(
+                log.filter((r) => theirs.includes(r.id) && r.deleted)
+              ).toEqual([]);
+              expect(fsrsColumns(card.row())).toEqual(card.replayed());
+              expect(card.row().dismissed).toBe(undone.before.dismissed);
+            }
+          }
+        }
+      ),
+      { numRuns: 60 }
+    );
+  }, 120_000);
 
   it('puts the card back dismissed or not as it was before the grade, and tombstones the review', async () => {
     await fc.assert(

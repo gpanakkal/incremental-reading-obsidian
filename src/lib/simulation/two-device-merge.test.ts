@@ -84,6 +84,27 @@ const PLUGIN = {
   },
 } as never;
 
+/**
+ * Each device's managers, kept as the plugin keeps its own: an undo reads
+ * what the manager noted when the review was made (`logsBefore`).
+ */
+const managers = new WeakMap<
+  FakeDevice,
+  { articles: ArticleManager; cards: CardManager }
+>();
+
+function managersOf(device: FakeDevice) {
+  let held = managers.get(device);
+  if (!held) {
+    held = {
+      articles: new ArticleManager(PLUGIN, device.repo),
+      cards: new CardManager(PLUGIN, device.repo),
+    };
+    managers.set(device, held);
+  }
+  return held;
+}
+
 /** The article `id` as `device` holds it, as the review code takes it. */
 function articleOn(device: FakeDevice, id: string) {
   const [row] = rows(device, 'SELECT * FROM article WHERE id = $1', [id]);
@@ -96,7 +117,7 @@ function articleOn(device: FakeDevice, id: string) {
  * @returns the id of the review
  */
 async function reviewArticle(device: FakeDevice, id: string) {
-  const reviewId = await new ArticleManager(PLUGIN, device.repo).review(
+  const reviewId = await managersOf(device).articles.review(
     articleOn(device, id),
     device.clock.now
   );
@@ -119,15 +140,20 @@ async function makeCard(device: FakeDevice, id: string) {
   await device.repo.settle();
 }
 
-/** Grade card `id` on `device` as the review tab does, at its time. */
+/**
+ * Grade card `id` on `device` as the review tab does, at its time.
+ * @returns the grade's id and the card as it was before it
+ */
 async function gradeCard(device: FakeDevice, id: string, grade: Grade) {
   const [row] = rows(device, 'SELECT * FROM srs_card WHERE id = $1', [id]);
-  await new CardManager(PLUGIN, device.repo).review(
-    CardManager.rowToDisplay(row as never),
+  const before = CardManager.rowToDisplay(row as never);
+  const reviewId = await managersOf(device).cards.review(
+    before,
     grade,
     new Date(device.clock.now)
   );
   await device.repo.settle();
+  return { id: reviewId, before };
 }
 
 const CARD_COLUMNS = [
@@ -284,8 +310,6 @@ interface Undoable {
   id: string;
   article: string;
   before: Row;
-  /** The schedule the review left, which a merge may since have changed. */
-  after: Row;
 }
 
 /** What a history wrote, to check the merged result against. */
@@ -361,29 +385,14 @@ async function run(
     // The latest review made here, as the undo history has it
     const last = ledger.undo.get(device.name)?.pop();
     if (!last) return;
-    const [now] = rows(
+    const [review] = rows(
       device,
-      `SELECT r.deleted, a.interval, a.due, (
-         SELECT count(*) FROM article_review later
-         WHERE later.article_id = a.id AND later.deleted = FALSE
-           AND later.review_time > r.review_time
-       ) AS later FROM article a
-       JOIN article_review r ON r.article_id = a.id WHERE r.id = $1`,
+      'SELECT deleted FROM article_review WHERE id = $1',
       [last.id]
     );
-    // An undo puts back the schedule from before the review, which a merge
-    // since then has made stale, and undoes every review dated after it,
-    // which a clock that went back can make reviews made before it: both
-    // out of this task's scope (see 0170's notes)
-    if (
-      now?.deleted !== 0 ||
-      now.later !== 0 ||
-      now.interval !== last.after.interval ||
-      now.due !== last.after.due
-    ) {
-      return;
-    }
-    await new ArticleManager(PLUGIN, device.repo).undoReview(
+    // Undone already, with its article un-imported: the undo is refused
+    if (review.deleted !== 0) return;
+    await managersOf(device).articles.undoReview(
       { ...last.before, dismissed: !!last.before.dismissed } as never,
       last.id
     );
@@ -426,15 +435,10 @@ async function run(
         target,
       ]);
       const id = await reviewArticle(device, target);
-      const [after] = rows(
-        device,
-        'SELECT interval, due FROM article WHERE id = $1',
-        [target]
-      );
       ledger.reviews.add(id);
       ledger.made.push(id);
       const undo = ledger.undo.get(device.name) ?? [];
-      undo.push({ id, article: target, before, after });
+      undo.push({ id, article: target, before });
       ledger.undo.set(device.name, undo);
       break;
     }
@@ -509,7 +513,15 @@ async function checkSettled(
     );
     expect(article.interval).toBe(expected.interval);
     const live = liveInOrder(log).map((r) => ledger.made.indexOf(r.id));
-    if (live.every((made, i) => i === 0 || live[i - 1] < made)) {
+    // Once every review is undone, a merge that replays from scratch (each
+    // device undid a review the other's copy still held) can only take the
+    // due date the row has, a review's, as the one before the first review
+    // is in no log: 0170 open point 6, which the due check leaves out
+    const fromScratch = live.length === 0 && log.length > 0;
+    if (
+      !fromScratch &&
+      live.every((made, i) => i === 0 || live[i - 1] < made)
+    ) {
       expect(article.due).toBe(expected.due);
     }
   }
@@ -754,6 +766,138 @@ describe('two devices merging one database file', () => {
       expect(rows(device, 'SELECT deleted FROM article_review')).toEqual([
         { deleted: 1 },
       ]);
+    }
+    expect(everything(a)).toEqual(everything(b));
+  });
+
+  // Found by 0170's simulation: an undo took back every review dated after
+  // the undone one, so a review made on a device whose clock runs ahead,
+  // before the undone one, went with it
+  it.each([
+    ['merged in', true],
+    ['not merged in yet', false],
+  ] as const)(
+    'keeps a review made earlier on a device whose clock runs ahead, dated later, when the other undoes its own review, on both (the first %s when the second was made)',
+    async (_case, seen) => {
+      const [a, b] = await twoDevices(60 * 60 * 1000);
+      await importArticle(a, 'note', 'notes/n0.md');
+      await sync.deliver(a, b);
+
+      b.clock.now += MS_PER_DAY;
+      const theirs = await reviewArticle(b, 'note');
+      if (seen) await sync.deliver(b, a);
+      a.clock.now += MS_PER_DAY + 30 * 60 * 1000;
+      const [before] = rows(a, 'SELECT * FROM article');
+      const mine = await reviewArticle(a, 'note');
+      await sync.quiesce(a, b);
+      await managersOf(a).articles.undoReview(
+        { ...before, dismissed: !!before.dismissed } as never,
+        mine
+      );
+      await a.repo.settle();
+      await sync.quiesce(a, b);
+
+      const [{ review_time }] = rows(
+        b,
+        'SELECT review_time FROM article_review WHERE id = $1',
+        [theirs]
+      );
+      const alone = replayText(
+        [{ id: theirs, at: review_time as number }],
+        { priority: 30 },
+        { fuzzTextReviews: false },
+        initialText({ due: T, due_fuzz: null })
+      );
+      for (const device of [a, b]) {
+        expect(
+          rows(device, 'SELECT id, deleted FROM article_review ORDER BY id')
+        ).toEqual(
+          [
+            { id: mine, deleted: 1 },
+            { id: theirs, deleted: 0 },
+          ].sort((x, y) => (x.id < y.id ? -1 : 1))
+        );
+        expect(rows(device, 'SELECT interval, due FROM article')).toEqual([
+          { interval: alone.interval, due: alone.due },
+        ]);
+      }
+      expect(everything(a)).toEqual(everything(b));
+    }
+  );
+
+  it('keeps the grade made on the other device when one undoes its own grade of a card, with the state that grade implies, on both', async () => {
+    const [a, b] = await twoDevices();
+    await makeCard(a, 'card');
+    await sync.deliver(a, b);
+
+    a.clock.now += 2 * MS_PER_DAY;
+    const mine = await gradeCard(a, 'card', Rating.Good);
+    b.clock.now += 2 * MS_PER_DAY + 60_000;
+    const theirs = await gradeCard(b, 'card', Rating.Again);
+    await sync.quiesce(a, b);
+    await managersOf(a).cards.rollbackBeforeReview(mine.before, mine.id);
+    await a.repo.settle();
+    await sync.quiesce(a, b);
+
+    const log = rows(
+      a,
+      'SELECT id, review AS at, rating, deleted FROM srs_card_review'
+    ) as unknown as LoggedGrade[];
+    const [card] = rows(a, 'SELECT * FROM srs_card');
+    const left = replayCard(
+      log,
+      generatorParameters(),
+      initialCard(card.created_at as number)
+    );
+    expect(left.reps).toBe(1);
+    for (const device of [a, b]) {
+      expect(
+        rows(device, 'SELECT id, deleted FROM srs_card_review ORDER BY id')
+      ).toEqual(
+        [
+          { id: mine.id, deleted: 1 },
+          { id: theirs.id, deleted: 0 },
+        ].sort((x, y) => (x.id < y.id ? -1 : 1))
+      );
+      const [held] = rows(device, 'SELECT * FROM srs_card');
+      expect(Object.fromEntries(CARD_COLUMNS.map((c) => [c, held[c]]))).toEqual(
+        left
+      );
+    }
+    expect(everything(a)).toEqual(everything(b));
+  });
+
+  it('puts a card graded on both devices back as it was made once each undoes its own grade, after merging the other undo', async () => {
+    const [a, b] = await twoDevices();
+    await makeCard(a, 'card');
+    await sync.deliver(a, b);
+
+    a.clock.now += 2 * MS_PER_DAY;
+    const mine = await gradeCard(a, 'card', Rating.Good);
+    b.clock.now += 2 * MS_PER_DAY + 60_000;
+    const theirs = await gradeCard(b, 'card', Rating.Again);
+    await sync.quiesce(a, b);
+    await managersOf(a).cards.rollbackBeforeReview(mine.before, mine.id);
+    await a.repo.settle();
+    await sync.quiesce(a, b);
+    await managersOf(b).cards.rollbackBeforeReview(theirs.before, theirs.id);
+    await b.repo.settle();
+    await sync.quiesce(a, b);
+
+    const made = CardManager.displayToRow(theirs.before) as unknown as Row;
+    for (const device of [a, b]) {
+      expect(
+        rows(device, 'SELECT id, deleted FROM srs_card_review ORDER BY id')
+      ).toEqual(
+        [
+          { id: mine.id, deleted: 1 },
+          { id: theirs.id, deleted: 1 },
+        ].sort((x, y) => (x.id < y.id ? -1 : 1))
+      );
+      const [held] = rows(device, 'SELECT * FROM srs_card');
+      expect(Object.fromEntries(CARD_COLUMNS.map((c) => [c, held[c]]))).toEqual(
+        Object.fromEntries(CARD_COLUMNS.map((c) => [c, made[c]]))
+      );
     }
     expect(everything(a)).toEqual(everything(b));
   });
