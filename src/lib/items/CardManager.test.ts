@@ -53,6 +53,7 @@ import {
   vi,
 } from 'vitest';
 import { CardManager } from './CardManager';
+import { tombstoneRowStatements } from './row-delete';
 
 // #region HELPERS
 
@@ -5221,6 +5222,13 @@ describe('delete', () => {
 
   const NOTE = { path: 'items/note.md', extension: 'md' } as TFile;
 
+  /** The writes that tombstone the row `id` with its history, as mutate gets them. */
+  const tombstoned = (id: string) =>
+    tombstoneRowStatements('srs_card', id).map(({ query, params }) => [
+      query,
+      params,
+    ]);
+
   it('trashes the note without a word, and drops the row, when told not to prompt', async () => {
     await fc.assert(
       fc.asyncProperty(fc.uuid(), async (id) => {
@@ -5233,10 +5241,7 @@ describe('delete', () => {
         // linked to: a PDF its source links to among them
         expect(fileManager.trashFile).toHaveBeenCalledExactlyOnceWith(NOTE);
         expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
-        expect(mutate).toHaveBeenCalledExactlyOnceWith(
-          `DELETE FROM srs_card WHERE id = $1`,
-          [id]
-        );
+        expect(mutate.mock.calls).toEqual(tombstoned(id));
       })
     );
   });
@@ -5251,7 +5256,7 @@ describe('delete', () => {
         NOTE
       );
       expect(fileManager.trashFile).not.toHaveBeenCalled();
-      expect(mutate).toHaveBeenCalledOnce();
+      expect(mutate.mock.calls).toEqual(tombstoned('id-1'));
       vi.restoreAllMocks();
     }
   });
@@ -5282,7 +5287,7 @@ describe('delete', () => {
 
       expect(fileManager.trashFile).not.toHaveBeenCalled();
       expect(fileManager.promptForFileDeletion).not.toHaveBeenCalled();
-      expect(mutate).toHaveBeenCalledOnce();
+      expect(mutate.mock.calls).toEqual(tombstoned('id-1'));
       vi.restoreAllMocks();
     }
   });
@@ -5483,7 +5488,7 @@ describe('rollbackBeforeReview', () => {
     vi.restoreAllMocks();
   });
 
-  it('puts the card back dismissed or not as it was before the grade, and drops the review', async () => {
+  it('puts the card back dismissed or not as it was before the grade, and tombstones the review', async () => {
     await fc.assert(
       fc.asyncProperty(fc.boolean(), gradeArb, async (dismissed, grade) => {
         const { repo, manager, before, reviewId } = await gradedCard(
@@ -5495,10 +5500,24 @@ describe('rollbackBeforeReview', () => {
 
         const [card] = repo.rows('srs_card');
         expect(card.dismissed).toBe(Number(dismissed));
-        expect(repo.rows('srs_card_review')).toEqual([]);
+        // Kept, flagged, so the undo reaches the other devices
+        expect(
+          repo
+            .storedRows('srs_card_review')
+            .map(({ id, deleted }) => [id, deleted])
+        ).toEqual([[reviewId, 1]]);
       }),
       { numRuns: 16 }
     );
+  });
+
+  it('refuses to undo a review already undone', async () => {
+    const { manager, before, reviewId } = await gradedCard(false, Rating.Good);
+    await manager.rollbackBeforeReview(before, reviewId);
+
+    await expect(
+      manager.rollbackBeforeReview(before, reviewId)
+    ).rejects.toThrow(reviewId);
   });
 
   it('changes nothing when any of its writes fails, the dismissal included', async () => {
@@ -5506,7 +5525,8 @@ describe('rollbackBeforeReview', () => {
       fc.asyncProperty(
         fc.boolean(),
         gradeArb,
-        fc.constantFrom('UPDATE srs_card', 'DELETE FROM srs_card_review'),
+        fc.constantFrom('UPDATE srs_card SET', 'UPDATE srs_card_review'),
+
         async (dismissed, grade, failing) => {
           const graded = await gradedCard(dismissed, grade);
           const reviews = graded.repo.rows('srs_card_review');

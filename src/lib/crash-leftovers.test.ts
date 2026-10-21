@@ -1,5 +1,6 @@
 import { ArticleManager } from '#/lib/items/ArticleManager';
 import { CardManager } from '#/lib/items/CardManager';
+import { tombstoneRowStatements } from '#/lib/items/row-delete';
 import { SnippetManager } from '#/lib/items/SnippetManager';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
 import fc from 'fast-check';
@@ -19,6 +20,7 @@ import {
   resolveLeftover,
 } from './crash-leftovers';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
+
 import type { NoteType } from './types';
 
 // #region HELPERS
@@ -85,6 +87,8 @@ const noteArb = fc.record({
   /** The table holding the row: any, as an id is held wherever it is. */
   rowType: fc.constantFrom<NoteType>('article', 'snippet', 'card'),
   deletedRow: fc.boolean(),
+  /** Deleted for good: a tombstone, which holds the id for no reader. */
+  purgedRow: fc.boolean(),
   folder: fc.constantFrom(...FOLDERS),
   tagsAsString: fc.boolean(),
   /** Another item type's tag too, which `typeOfTags` ranks against it. */
@@ -174,6 +178,15 @@ async function wireNotes(notes: NoteCase[]) {
         `elsewhere/${i}.md`,
         note.deletedRow
       );
+      if (note.purgedRow) {
+        const table = note.rowType === 'card' ? 'srs_card' : note.rowType;
+        for (const { query, params } of tombstoneRowStatements(
+          table,
+          note.id
+        )) {
+          repo.mutate(query, params);
+        }
+      }
       inserted.add(note.id);
     }
   }
@@ -238,11 +251,15 @@ describe('findLeftovers', () => {
 
         const found = await findLeftovers(deps);
 
-        const held = new Set(
-          notes.flatMap((note) =>
-            note.hasRow && typeof note.id === 'string' ? [note.id] : []
-          )
-        );
+        // The first note with an id is the one whose row says if it's held
+        const held = new Set<string>();
+        const seen = new Set<string>();
+        for (const note of notes) {
+          if (!note.hasRow || typeof note.id !== 'string') continue;
+          if (seen.has(note.id)) continue;
+          seen.add(note.id);
+          if (!note.purgedRow) held.add(note.id);
+        }
         const expected = notes.flatMap((note, i) =>
           typeof note.id === 'string' && !held.has(note.id)
             ? [{ path: pathOf(note, i), id: note.id }]
@@ -284,6 +301,7 @@ describe('findLeftovers', () => {
         id: undefined,
         hasRow: false,
         deletedRow: false,
+        purgedRow: false,
         folder: `${DATA_DIRECTORY}/`,
         tagsAsString: false,
         secondTag: null,
@@ -312,6 +330,7 @@ describe('findLeftovers', () => {
           hasRow: false,
           rowType: 'article',
           deletedRow: false,
+          purgedRow: false,
           folder,
           tagsAsString: false,
           secondTag: null,

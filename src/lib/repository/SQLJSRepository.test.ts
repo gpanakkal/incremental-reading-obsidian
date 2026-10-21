@@ -1,4 +1,5 @@
 import { MigrationVerificationError } from '#/db/migration-helpers';
+import { migrations } from '#/db/migrations';
 import {
   BACKUP_DIRECTORY,
   BATCHED_MUTATION_SLICE_MS,
@@ -19,6 +20,7 @@ import {
   describe,
   expect,
   it,
+  onTestFinished,
   vi,
   type MockInstance,
 } from 'vitest';
@@ -29,6 +31,9 @@ import {
   StartupCancelledError,
   type SyncHold,
 } from './SQLJSRepository';
+
+/** The schema version every migrated or fresh database ends at. */
+const LATEST_VERSION = migrations[migrations.length - 1].version;
 
 // #region HELPERS
 
@@ -2167,6 +2172,83 @@ describe('start', () => {
     );
   });
 
+  it('leaves the rows a migration carries over unstamped, then stamps the next write to each', async () => {
+    const files = new Map([
+      [DATABASE_FILE_PATH, await staleFileWith(['a', 'b'])],
+    ]);
+    const { app } = makeVault(INDEXED, files);
+    const repo = await startRepo(app);
+    const stamps = () =>
+      repo.db!.exec(
+        'SELECT id, updated_at > 0, updated_by != $1 FROM article ORDER BY id',
+        ['']
+      )[0].values;
+    expect(stamps()).toEqual([
+      ['a', 0, 0],
+      ['b', 0, 0],
+    ]);
+
+    repo.mutate(`UPDATE article SET priority = 40 WHERE id = 'a'`);
+
+    expect(stamps()).toEqual([
+      ['a', 1, 1],
+      ['b', 0, 0],
+    ]);
+    repo.db?.close();
+  });
+
+  it('stamps nothing a migration writes, which is no deviceâ€™s edit', async () => {
+    // A migration still to come, that rewrites a row the file already stamps
+    migrations.push({
+      version: LATEST_VERSION + 1,
+      description: 'test-only rewrite',
+      up: (db) => db.exec(`UPDATE article SET priority = 40`),
+    });
+    onTestFinished(() => void migrations.pop());
+    const SQL = await getSharedSql();
+    const db = new SQL.Database(await dbFileWith(['a']));
+    db.exec(`UPDATE article SET updated_at = 7, updated_by = 'device-b'`);
+    const files = new Map([[DATABASE_FILE_PATH, db.export()]]);
+    db.close();
+    const { app } = makeVault(INDEXED, files);
+
+    const repo = await startRepo(app);
+
+    expect(
+      repo.db!.exec('SELECT priority, updated_at, updated_by FROM article')[0]
+        .values
+    ).toEqual([[40, 7, 'device-b']]);
+    repo.db?.close();
+  });
+
+  it('stamps writes on the connection each save reopens, and saves no trigger into the file', async () => {
+    const files = new Map([[DATABASE_FILE_PATH, await dbFileWith(['a'])]]);
+    const { app } = makeVault(INDEXED, files);
+    const repo = await startRepo(app);
+    const stampOf = (db: { exec: Database['exec'] }) =>
+      db.exec(`SELECT updated_at FROM article WHERE id = 'a'`)[0].values[0][0];
+
+    const stamps: unknown[] = [];
+    for (const priority of [40, 20]) {
+      repo.mutate(`UPDATE article SET priority = $1 WHERE id = 'a'`, [
+        priority,
+      ]);
+      await settle();
+      stamps.push(stampOf(repo.db!));
+    }
+
+    expect(stamps[0]).toBeGreaterThan(0);
+    expect(stamps[1]).toBeGreaterThan(stamps[0] as number);
+    const SQL = await getSharedSql();
+    const saved = new SQL.Database(files.get(DATABASE_FILE_PATH));
+    expect(stampOf(saved)).toBe(stamps[1]);
+    expect(
+      saved.exec(`SELECT name FROM sqlite_master WHERE type = 'trigger'`)
+    ).toEqual([]);
+    saved.close();
+    repo.db?.close();
+  });
+
   it('refuses to start, leaving the file as it was, when migrating it loses data', async () => {
     failMigrationVerification();
     const stale = await staleFileWith(['a']);
@@ -2408,7 +2490,7 @@ describe('start, holding for Sync', () => {
             expect(files.get(DATABASE_FILE_PATH)).toBe(arrived);
           } else {
             expect(backupWrites(adapter)).toHaveLength(1);
-            expect(await readVersion(files)).toBe(10);
+            expect(await readVersion(files)).toBe(LATEST_VERSION);
             expect((await idsInFile(files)).sort()).toEqual([...ids].sort());
           }
           repo.db?.close();
@@ -2559,7 +2641,7 @@ describe('start, holding for Sync', () => {
     );
 
     expect(articleIds(repo)).toEqual(['a']);
-    expect(await readVersion(files)).toBe(10);
+    expect(await readVersion(files)).toBe(LATEST_VERSION);
     repo.db?.close();
   });
 
@@ -2709,7 +2791,7 @@ describe('start, holding for Sync', () => {
 
     expect(hold).not.toHaveBeenCalled();
     expect(articleIds(repo)).toEqual(['b']);
-    expect(await readVersion(files)).toBe(10);
+    expect(await readVersion(files)).toBe(LATEST_VERSION);
     repo.db?.close();
   });
 });
@@ -2866,7 +2948,7 @@ describe('reloading a file that changed on disk', () => {
     files.set(DATABASE_FILE_PATH, await staleFileWith(['b']));
     await repo.handleFileChange(dbFileChange);
 
-    expect(await readVersion(files)).toBe(10);
+    expect(await readVersion(files)).toBe(LATEST_VERSION);
     insertArticleRow(repo, 'c');
     await settle();
     expect((await idsInFile(files)).sort()).toEqual(['b', 'c']);

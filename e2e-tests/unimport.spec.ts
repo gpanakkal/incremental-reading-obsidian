@@ -144,12 +144,18 @@ const cachedIrId = () =>
     return app.metadataCache.getCache(notePath)?.frontmatter?.['ir-id'];
   }, NOTE);
 
-/** How many articles the database holds, deleted ones included. */
+/**
+ * How many articles the database holds, deleted ones included, but not the
+ * tombstones of those deleted for good (`NOT_PURGED` in `row-delete.ts`).
+ */
 const articleCount = () =>
   window.evaluate(async () => {
     const { app } = window as unknown as { app: PageApp };
     const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
-    const [row] = await repo.query('SELECT COUNT(*) AS count FROM article');
+    const [row] = await repo.query(
+      `SELECT COUNT(*) AS count FROM article
+       WHERE reference != ('/ir-deleted/' || id)`
+    );
     return row.count as number;
   });
 

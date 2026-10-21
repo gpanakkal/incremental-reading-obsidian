@@ -582,4 +582,50 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 11,
+    description: 'Stamp every synced row and tombstone review logs and rebinds',
+    up: (db) => {
+      // Listed here rather than shared, so that later changes to what is
+      // synced can't rewrite what this migration did
+      const synced = [
+        'article',
+        'article_review',
+        'snippet',
+        'snippet_review',
+        'srs_card',
+        'srs_card_review',
+        'rebind',
+      ];
+      for (const table of synced) {
+        // 0 reads as never stamped: any stamp beats it
+        addColumnIfNotExists(
+          db,
+          table,
+          'updated_at',
+          'INTEGER NOT NULL DEFAULT 0'
+        );
+        addColumnIfNotExists(
+          db,
+          table,
+          'updated_by',
+          "TEXT NOT NULL DEFAULT ''"
+        );
+      }
+      // The item tables have had theirs since before the migration chain
+      for (const table of [
+        'article_review',
+        'snippet_review',
+        'srs_card_review',
+        'rebind',
+      ]) {
+        addColumnIfNotExists(
+          db,
+          table,
+          'deleted',
+          'INTEGER NOT NULL DEFAULT FALSE CHECK(deleted = FALSE OR deleted = TRUE)'
+        );
+      }
+    },
+  },
 ];

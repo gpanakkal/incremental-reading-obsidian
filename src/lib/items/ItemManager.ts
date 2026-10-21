@@ -6,6 +6,7 @@ import {
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import { supportsFrontmatter } from '#/lib/mime';
+import { STAMP_COLUMNS } from '#/lib/repository/row-stamps';
 import {
   formatSourceLink,
   linkNamesPath,
@@ -34,15 +35,14 @@ import {
 } from 'obsidian';
 import { ObsidianHelpers as Obsidian } from '../ObsidianHelpers';
 import type { SQLiteRepository } from '../types';
+import {
+  NOT_PURGED,
+  REVIEW_LOG_OF,
+  tombstoneRowStatements,
+} from './row-delete';
 
 /** How deleting an item with its note went: see `deleteWithNote`. */
 export type DeleteOutcome = 'deleted' | 'declined' | 'refused' | 'failed';
-
-/** The review log of each table whose items have notes to delete. */
-const REVIEW_LOG_OF = {
-  snippet: ['snippet_review', 'snippet_id'],
-  srs_card: ['srs_card_review', 'card_id'],
-} as const;
 
 export class ItemManager {
   plugin: IncrementalReadingPlugin;
@@ -128,21 +128,30 @@ export class ItemManager {
     table: TableName;
   } | null> {
     let row: SRSCardRow | SnippetRow | ArticleRow | null = (
-      await this.repo.query('SELECT * FROM srs_card WHERE id = $1', [id])
+      await this.repo.query(
+        `SELECT * FROM srs_card WHERE id = $1 AND ${NOT_PURGED}`,
+        [id]
+      )
     )[0] as SRSCardRow | null;
     if (row) {
       return { row, table: 'srs_card' };
     }
 
     row = (
-      await this.repo.query('SELECT * FROM snippet WHERE id = $1', [id])
+      await this.repo.query(
+        `SELECT * FROM snippet WHERE id = $1 AND ${NOT_PURGED}`,
+        [id]
+      )
     )[0] as SnippetRow | null;
     if (row) {
       return { row, table: 'snippet' };
     }
 
     row = (
-      await this.repo.query('SELECT * FROM article WHERE id = $1', [id])
+      await this.repo.query(
+        `SELECT * FROM article WHERE id = $1 AND ${NOT_PURGED}`,
+        [id]
+      )
     )[0] as ArticleRow | null;
     if (row) {
       return { row, table: 'article' };
@@ -432,7 +441,8 @@ export class ItemManager {
 
   /**
    * Drop the `table` row `id` and delete its note, as one: a note left with
-   * no row, or a row whose note is gone, is half a deletion.
+   * no row, or a row whose note is gone, is half a deletion. The row and its
+   * review history are tombstoned (see `tombstoneRowStatements`), not deleted.
    *
    * The row goes first, and is put back as it was when the note is not
    * deleted after all — the user turns down Obsidian's prompt, or the trash
@@ -460,29 +470,42 @@ export class ItemManager {
     let declined = false;
     try {
       const row = (
-        await this.repo.query(`SELECT * FROM ${table} WHERE id = $1`, [id])
+        await this.repo.query(
+          `SELECT * FROM ${table} WHERE id = $1 AND ${NOT_PURGED}`,
+          [id]
+        )
       )[0] as SnippetRow | SRSCardRow | undefined;
       if (!row) throw new Error(`No ${table} row was found with ID "${id}"`);
 
-      // Read too, as the row's delete can take them with it: its foreign
-      // key cascades while sql.js still has foreign keys on
+      // The live ones, which the delete tombstones with the row, and a
+      // turned-down delete must bring back without those undone before
       const [log, column] = REVIEW_LOG_OF[table];
-      const reviews = await this.repo.query(
-        `SELECT * FROM ${log} WHERE ${column} = $1`,
+      const reviews = (await this.repo.query(
+        `SELECT id FROM ${log} WHERE ${column} = $1 AND deleted = FALSE`,
         [id],
         { throwOnError: true }
-      );
+      )) as unknown as { id: string }[];
 
       const file = Obsidian.getNote(row.reference, this.app);
       await withCompensation(async (step) => {
         await step(
-          () => this.repo.mutate(`DELETE FROM ${table} WHERE id = $1`, [id]),
+          () =>
+            this.repo.transaction(async () => {
+              for (const { query, params } of tombstoneRowStatements(
+                table,
+                id
+              )) {
+                await this.repo.mutate(query, params);
+              }
+            }),
           () =>
             this.repo.transaction(async () => {
               await this.restoreRow(table, row);
-              // Those the cascade left are still there
               for (const review of reviews) {
-                await this.restoreRow(log, review, { orIgnore: true });
+                await this.repo.mutate(
+                  `UPDATE ${log} SET deleted = FALSE WHERE id = $1`,
+                  [review.id]
+                );
               }
             })
         );
@@ -520,20 +543,21 @@ export class ItemManager {
   }
 
   /**
-   * Put `row`, read whole from `table`, back as it was.
-   * @param options.orIgnore leave a row already there as it is
+   * Put `row`, read whole from `table`, back as it was, all but its stamp: a
+   * write that undoes another is a newer one, and is stamped as such.
    */
-  private async restoreRow(
-    table: string,
-    row: object,
-    { orIgnore = false }: { orIgnore?: boolean } = {}
-  ) {
-    const columns = Object.keys(row);
+  private async restoreRow(table: string, row: { id: string }) {
+    // Its id among them, written as it is
+    const columns = Object.keys(row).filter(
+      (column) => !(STAMP_COLUMNS as readonly string[]).includes(column)
+    );
+
+    // Numbered in the order they appear: sql.js binds an array by position
     await this.repo.mutate(
-      `INSERT ${orIgnore ? 'OR IGNORE ' : ''}INTO ${table} (${columns.join(', ')}) VALUES (${columns
-        .map((_, i) => `$${i + 1}`)
-        .join(', ')})`,
-      Object.values(row) as Primitive[]
+      `UPDATE ${table} SET ${columns
+        .map((column, i) => `${column} = $${i + 1}`)
+        .join(', ')} WHERE id = $${columns.length + 1}`,
+      [...columns.map((c) => (row as Record<string, Primitive>)[c]), row.id]
     );
   }
 

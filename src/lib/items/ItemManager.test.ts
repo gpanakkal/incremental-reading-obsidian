@@ -208,9 +208,15 @@ async function wireDelete(row: ItemRowCase, confirm = true) {
     }
   }
   const log = row.table === 'snippet' ? 'snippet_review' : 'srs_card_review';
+  // What is live, as readers see it: a tombstone is no row to them, and a
+  // stamp is no content, which a write that puts a row back renews
+  const live = (rows: Record<string, unknown>[]) =>
+    rows
+      .filter(({ deleted }) => deleted === 0)
+      .map(({ updated_at: _at, updated_by: _by, ...content }) => content);
   const stored = () => ({
-    rows: repo.rows(row.table),
-    reviews: repo.rows(log),
+    rows: live(repo.rows(row.table)),
+    reviews: live(repo.rows(log)),
   });
   const before = stored();
   vi.spyOn(console, 'error').mockReturnValue(undefined);
@@ -903,12 +909,20 @@ describe('deleteWithNote', () => {
           // delete then, rather than going with it
           if (!foreignKeys) wired.repo.db!.exec('PRAGMA foreign_keys = OFF');
           if (why === 'trash fails') wired.vault.fail('trash');
+          const [{ updated_at: stampedBefore }] = wired.repo.storedRows(
+            row.table
+          );
 
           expect(
             await wired.manager.delete(row.table, row.id, { prompt })
           ).toBe(why === 'cancelled' ? 'declined' : 'failed');
 
           expect(wired.stored()).toEqual(wired.before);
+          // Put back by a write newer than the delete it undid
+          expect(
+            wired.repo.storedRows(row.table)[0].updated_at
+          ).toBeGreaterThan(stampedBefore as number);
+
           expect(wired.vault.paths()).toEqual([ITEM_NOTE]);
         }
       ),
@@ -949,7 +963,10 @@ describe('deleteWithNote', () => {
       fc.asyncProperty(itemRowArb, fc.boolean(), async (row, prompt) => {
         vi.restoreAllMocks();
         const wired = await wireDelete(row);
-        wired.repo.failWrite((query) => query.startsWith('DELETE FROM'));
+        // The last of its writes, so the ones before it are rolled back
+        wired.repo.failWrite((query) =>
+          query.startsWith(`UPDATE ${row.table} SET deleted`)
+        );
 
         expect(await wired.manager.delete(row.table, row.id, { prompt })).toBe(
           'failed'

@@ -63,7 +63,7 @@ import type { WebPage } from '#/lib/web-viewer';
 import { Keymap, type App, type TFile } from 'obsidian';
 import { idNotIn } from './id-exclusion';
 import { ItemManager } from './ItemManager';
-import { deleteRowStatements } from './row-delete';
+import { deleteRowStatements, NOT_PURGED } from './row-delete';
 import type { SnippetManager } from './SnippetManager';
 
 /**
@@ -874,7 +874,7 @@ export class ArticleManager extends ItemManager {
     }
     if (existingId) {
       const rows = (await this.repo.query(
-        'SELECT id, deleted FROM article WHERE id = $1',
+        `SELECT id, deleted FROM article WHERE id = $1 AND ${NOT_PURGED}`,
         [existingId]
       )) as Pick<ArticleRow, 'id' | 'deleted'>[];
       if (rows[0]) {
@@ -1219,7 +1219,7 @@ export class ArticleManager extends ItemManager {
     // Any rebind record, reclaimable or not: a stale one costs only a suffix
     const rows = await this.repo.query(
       `SELECT 1 FROM article WHERE reference = $1
-       UNION ALL SELECT 1 FROM rebind WHERE old_reference = $1`,
+       UNION ALL SELECT 1 FROM rebind WHERE old_reference = $1 AND deleted = FALSE`,
       [path]
     );
     // Checked and claimed with no await between, so two imports can't both
@@ -1397,7 +1397,7 @@ export class ArticleManager extends ItemManager {
     const existingId = frontmatter?.['ir-id'];
     if (existingId) {
       const rows = (await this.repo.query(
-        'SELECT id, deleted FROM article WHERE id = $1',
+        `SELECT id, deleted FROM article WHERE id = $1 AND ${NOT_PURGED}`,
         [existingId]
       )) as Pick<ArticleRow, 'id' | 'deleted'>[];
       if (rows[0]) {
@@ -1770,7 +1770,7 @@ export class ArticleManager extends ItemManager {
   }
 
   async fetch(id: string): Promise<ReviewArticle | null> {
-    const query = `SELECT * FROM article WHERE id = $1`;
+    const query = `SELECT * FROM article WHERE id = $1 AND ${NOT_PURGED}`;
     const result = await this.repo.query(query, [id]);
     if (!result[0]) return null;
     return this.rowToReviewArticle(result[0] as ArticleRow);
@@ -1796,9 +1796,8 @@ export class ArticleManager extends ItemManager {
       conditions.push('dismissed = 0');
     }
 
-    if (!opts?.includeDeleted) {
-      conditions.push('deleted = FALSE');
-    }
+    // Even with the deleted, never those deleted for good
+    conditions.push(opts?.includeDeleted ? NOT_PURGED : 'deleted = FALSE');
 
     if (opts?.excludeIds && opts.excludeIds.length) {
       conditions.push(idNotIn(opts.excludeIds, params));
@@ -1826,7 +1825,7 @@ export class ArticleManager extends ItemManager {
     const lastReview = (
       await this.repo.query(
         `SELECT * FROM article_review WHERE article_id = $1 ` +
-          `ORDER BY review_time DESC LIMIT 1`,
+          `AND deleted = FALSE ORDER BY review_time DESC LIMIT 1`,
         [article.id]
       )
     )[0] as IArticleReview | undefined;
@@ -1835,7 +1834,7 @@ export class ArticleManager extends ItemManager {
 
   protected async getReviewCount(article: IArticleBase) {
     const queryResult = (await this.repo.query(
-      `SELECT COUNT(id) FROM article_review WHERE article_id = $1`,
+      `SELECT COUNT(id) FROM article_review WHERE article_id = $1 AND deleted = FALSE`,
       [article.id]
     )) as unknown as [{ 'COUNT(id)': number }];
     const reviewCount = queryResult[0]['COUNT(id)'];
@@ -1881,14 +1880,16 @@ export class ArticleManager extends ItemManager {
   async undoReview(originalArticle: IArticleBase, reviewId: string) {
     await this.repo.transaction(async () => {
       const reviewRow = (
-        await this.repo.query(`SELECT * FROM article_review WHERE id = $1`, [
-          reviewId,
-        ])
+        await this.repo.query(
+          `SELECT * FROM article_review WHERE id = $1 AND deleted = FALSE`,
+          [reviewId]
+        )
       )[0] as IArticleReview;
       if (!reviewRow)
         throw new Error(`No article review found with ID "${reviewId}"`);
       await this.repo.mutate(
-        `DELETE FROM article_review WHERE article_id = $1 AND (id = $2 OR review_time > $3)`,
+        // Tombstoned, not deleted, so the undo reaches the other devices
+        `UPDATE article_review SET deleted = TRUE WHERE article_id = $1 AND (id = $2 OR review_time > $3)`,
         [originalArticle.id, reviewId, reviewRow.review_time]
       );
       await this.repo.mutate(

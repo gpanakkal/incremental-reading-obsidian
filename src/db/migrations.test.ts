@@ -507,6 +507,8 @@ describe('migration v3 — backfill interval on article and snippet', () => {
       deleted: 0,
       fixed_interval_days: 3,
       scroll_top: 42,
+      updated_at: 0,
+      updated_by: '',
     });
   });
 });
@@ -1469,9 +1471,13 @@ describe('migration v10 — record startup rebinds of PDF articles', () => {
     insertArticle(db, 'a1', 'papers/a1.pdf');
     const before = selectAll(db, 'article');
 
-    applyMigrations(db, migrations);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 10)
+    );
 
     expect(getSchemaVersion(db)).toBe(10);
+
     expect(columnNames(db, 'rebind')).toEqual([
       'article_id',
       'old_reference',
@@ -1516,8 +1522,64 @@ describe('migration v10 — record startup rebinds of PDF articles', () => {
   });
 });
 
+describe('migration v11 â€” stamp synced rows, tombstone logs and rebinds', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb(SCHEMA_V0);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 10)
+    );
+    insertArticle(db, 'a1', 'notes/a1.md');
+    db.exec(
+      `INSERT INTO article_review (id, article_id, review_time) VALUES ('r1', 'a1', 5);
+       INSERT INTO rebind (article_id, old_reference, new_reference, rebound_at)
+         VALUES ('a1', 'old.pdf', 'notes/a1.md', 6);`
+    );
+  });
+
+  it('gives every synced table a stamp, and the logs and rebinds a deleted flag, reading 0 on every row it had', () => {
+    applyMigrations(db, migrations);
+
+    expect(getSchemaVersion(db)).toBe(11);
+    for (const table of [
+      'article',
+      'article_review',
+      'snippet',
+      'snippet_review',
+      'srs_card',
+      'srs_card_review',
+      'rebind',
+    ]) {
+      expect(columnNames(db, table)).toEqual(
+        expect.arrayContaining(['updated_at', 'updated_by', 'deleted'])
+      );
+    }
+    for (const table of ['article', 'article_review', 'rebind']) {
+      expect(selectAll(db, table)).toEqual([
+        expect.objectContaining({ updated_at: 0, updated_by: '', deleted: 0 }),
+      ]);
+    }
+  });
+
+  it('refuses a deleted flag that is neither true nor false', () => {
+    applyMigrations(db, migrations);
+
+    for (const table of ['article_review', 'rebind']) {
+      expect(() => db.exec(`UPDATE ${table} SET deleted = 2`)).toThrow(/CHECK/);
+    }
+  });
+
+  it('reports no work to do when run a second time', () => {
+    applyMigrations(db, migrations);
+    expect(applyMigrations(db, migrations)).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Schema version consistency
+
 // ---------------------------------------------------------------------------
 
 describe('schema version consistency', () => {

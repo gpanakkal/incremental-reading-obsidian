@@ -8,7 +8,11 @@ import {
 import { resolveItemContext } from '#/lib/item-context';
 import { evictedSpot } from '#/lib/moved-note-scan';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
-import { describeReclaim, recordRebind } from '#/lib/rebind-records';
+import {
+  describeReclaim,
+  readRebinds,
+  recordRebind,
+} from '#/lib/rebind-records';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
 import type {
@@ -44,6 +48,7 @@ import {
 } from 'vitest';
 import { CardManager } from './CardManager';
 import ReviewManager from './ReviewManager';
+import { purgedReference } from './row-delete';
 
 // #region HELPERS
 
@@ -4950,6 +4955,25 @@ describe('ReviewManager reads the frontmatter of a renamed or created note witho
     );
   });
 
+  it('leaves a row deleted for good deleted, though a note turns up with its ir-id', async () => {
+    await fc.assert(
+      fc.asyncProperty(tableArb, async (table) => {
+        const tag = TABLE_TAG[table];
+        const wired = wireRenames({});
+        wired.insert(table, 'row', 'IR/gone.md');
+        await wired.manager.deleteRow(table, 'row');
+
+        // Restored from the trash, say, or copied from a backup
+        const file = wired.add('IR/gone.md', { 'ir-id': 'row', tags: [tag] });
+        await wired.manager.handleCreation(file);
+
+        expect(wired.repo.rows(table)).toStrictEqual([
+          { id: 'row', reference: purgedReference('row'), deleted: true },
+        ]);
+      })
+    );
+  });
+
   it('leaves the rows alone for a created note with no ir-id, or no type tag', async () => {
     await fc.assert(
       fc.asyncProperty(
@@ -5397,7 +5421,10 @@ describe('ReviewManager.deleteRow', () => {
         [id, `article/${id}.md`, YEAR_2000_MS]
       );
 
-    /** Every row the database holds, item, log and rebind alike. */
+    /**
+     * Every live row the database holds, item, log and rebind alike: a
+     * tombstone (`deleted`) is no row to anything that reads them.
+     */
     const dump = () =>
       Object.fromEntries(
         [
@@ -5410,9 +5437,10 @@ describe('ReviewManager.deleteRow', () => {
           ['rebind', 'SELECT article_id, NULL FROM rebind'],
         ].map(([table, sql]) => [
           table,
-          (repo.db!.exec(`${sql} ORDER BY 1`)[0]?.values ?? []).map(
-            ([id, other]) => [id, other]
-          ),
+          (
+            repo.db!.exec(`${sql} WHERE deleted = FALSE ORDER BY 1`)[0]
+              ?.values ?? []
+          ).map(([id, other]) => [id, other]),
         ])
       );
 
@@ -5484,8 +5512,85 @@ describe('ReviewManager.deleteRow', () => {
     );
   });
 
+  it('property: leaves a stamped tombstone that no list, count or lookup shows', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        scenarioArb,
+        fc.boolean(),
+        async (scenario, dismissed) => {
+          const wired = wireDeletion(scenario);
+          wired.insert(scenario.table, 'target', null);
+          if (dismissed) {
+            wired.repo.mutate(
+              `UPDATE ${scenario.table} SET dismissed = 1 WHERE id = 'target'`
+            );
+          }
+          for (let n = 0; n < scenario.logs; n++)
+            wired.log(scenario.table, 'target', n);
+          if (scenario.rebound && scenario.table === 'article')
+            wired.rebind('target');
+          scenario.others.forEach(({ table, parent, logs }, i) => {
+            wired.insert(
+              table,
+              `other-${i}`,
+              table === 'article' ? null : parent
+            );
+            for (let n = 0; n < logs; n++) wired.log(table, `other-${i}`, n);
+          });
+          const { manager, repo } = wired;
+
+          await manager.deleteRow(scenario.table, 'target');
+
+          // Kept, so the delete reaches the other devices, its path let go
+          const [logTable, column] = LOG_OF[scenario.table];
+          const stored = (sql: string) => repo.db!.exec(sql)[0]?.values ?? [];
+          expect(
+            stored(
+              `SELECT deleted, reference, updated_at > 0 FROM ${scenario.table} WHERE id = 'target'`
+            )
+          ).toEqual([[1, purgedReference('target'), 1]]);
+          expect(
+            stored(
+              `SELECT deleted, updated_at > 0 FROM ${logTable} WHERE ${column} = 'target'
+             UNION ALL SELECT deleted, updated_at > 0 FROM rebind WHERE article_id = 'target'`
+            ).filter(([deleted, stamped]) => deleted !== 1 || stamped !== 1)
+          ).toEqual([]);
+
+          const all = { includeDismissed: true, includeDeleted: true };
+          const listed = [
+            ...(await manager.articles.fetchMany(all)),
+            ...(await manager.snippets.fetchMany(all)),
+            ...(await manager.cards.fetchMany(all)),
+          ].map(({ id }) => id);
+          expect(listed).not.toContain('target');
+          expect(await manager.articles.findById('target')).toBeNull();
+          expect(await manager.hasItemRow('target')).toBe(false);
+          expect(await manager.getQueueRow('target')).toBeNull();
+          expect(await manager.getItemOrMissingFromId('target')).toBeNull();
+          expect(
+            (await readRebinds(repo)).map(({ articleId }) => articleId)
+          ).not.toContain('target');
+          if (scenario.table === 'article') {
+            expect(await manager.articles.fetch('target')).toBeNull();
+            const target = { id: 'target' } as never;
+            expect(await manager.articles['getReviewCount'](target)).toBe(0);
+            expect(
+              await manager.articles['getLastReview'](target)
+            ).toBeUndefined();
+          }
+          if (scenario.table === 'snippet') {
+            expect(
+              await manager.snippets['getLastReview']({ id: 'target' } as never)
+            ).toBeUndefined();
+          }
+        }
+      )
+    );
+  });
+
   it.each(['article', 'snippet', 'srs_card'] as const)(
     'drops a remembered session pointing at the deleted %s row',
+
     async (table) => {
       const wired = wireDeletion();
       wired.insert(table, 'target', null);
@@ -5560,7 +5665,7 @@ describe('ReviewManager.deleteRow', () => {
     wired.insert('srs_card', 'card', 'target');
     const before = wired.dump();
     wired.repo.db!.exec(
-      `CREATE TRIGGER refuse BEFORE DELETE ON article
+      `CREATE TRIGGER refuse BEFORE UPDATE OF deleted ON article
        BEGIN SELECT RAISE(ABORT, 'disk full'); END`
     );
 
