@@ -438,7 +438,8 @@ interface WatchedFoldersHost {
  * the field adds the folder it names, if it can be watched, and clears it;
  * otherwise the row says why and keeps the text. Each change saves the whole
  * list through the tab's `autoImportFolders` binding. Typing suggests the
- * folders that could be watched; picking one fills the field, for Enter to add.
+ * folders that could be watched; picking one adds it as Enter would, leaving
+ * the field focused for the next (seen on desktop).
  *
  * A row the tab draws, since no declarative control holds a list: Obsidian
  * (1.13.7) calls this each time it draws the row, in the tab or in the
@@ -539,10 +540,15 @@ function drawWatchedFolders(
     includeRoot: false,
     exclude: (path) => folders().includes(path),
   });
+  // No focus() after the pick: Obsidian's popup cancels mousedown on its
+  // items and takes Enter through its own scope (1.13.7, undocumented), so the
+  // field never loses focus on desktop. A phone's tap should keep it too, the
+  // same class drawing the popup there, but no device has confirmed it; and
+  // forcing focus would raise a keyboard the user may have dismissed
   suggest.onSelect((folder) => {
     suggest.setValue(folder.path);
     suggest.close();
-    checkList();
+    add();
   });
 
   drawChips();

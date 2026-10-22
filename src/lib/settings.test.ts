@@ -2777,42 +2777,138 @@ describe('IRSettingTab watched folders suggestions', () => {
     );
   });
 
-  it('fills the field with the folder picked, adding it only on Enter, as typed', async () => {
+  /** Click the suggestion that reads `path`, as the user would. */
+  async function pick(path: string) {
+    const item = [
+      ...document.querySelectorAll<HTMLElement>('.suggestion-item'),
+    ].find((el) => el.textContent === path);
+    if (!item) throw new Error(`${path} isn't suggested`);
+    item.click();
+    await settle();
+  }
+
+  it('adds the folder picked at once, clearing the message that none is watched, with the field ready for the next', async () => {
+    const { tab, plugin } = makeTab(watchingSettings([], true), [
+      'Inbox',
+      'Reading/Inbox',
+    ]);
+    const row = drawWatchedFolders(tab);
+    await typeFocused(row.field, 'inb');
+    expect(row.message()).toEqual(expect.stringMatching(/\S/));
+
+    await pick('Reading/Inbox');
+
+    expect(row.message()).toBeUndefined();
+    expect(row.chips()).toEqual(['Reading/Inbox']);
+    expect(plugin.settings.autoImportFolders).toEqual(['Reading/Inbox']);
+    expect(plugin.saveSettings).toHaveBeenCalledOnce();
+    expect(row.field.value).toBe('');
+    expect(suggested()).toEqual([]);
+    expect(document.activeElement).toBe(row.field);
+
+    // One keystroke away: the field still has focus, so typing suggests again
+    typeInto(row.field, 'i');
+    await settle();
+    await pick('Inbox');
+
+    expect(row.chips()).toEqual(['Reading/Inbox', 'Inbox']);
+    expect(plugin.saveSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats a folder picked as Enter treats one typed: adds it if it can be watched, else says why and keeps it in the field', async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.constantFrom('Inbox', 'Reading/Inbox', 'a, b'),
+        storedFoldersArb.chain((stored) =>
+          fc.tuple(
+            fc.constant(stored),
+            // What the popup lists, as drawn: maybe stale, maybe paths no
+            // folder has, maybe a watched folder spelled another way
+            fc.array(
+              stored.length > 0
+                ? fc.oneof(
+                    typedFolderArb,
+                    fc
+                      .constantFrom(...stored)
+                      .chain((folder) =>
+                        fc.constantFrom(
+                          `${folder}/`,
+                          folder.toUpperCase(),
+                          folder.toLowerCase()
+                        )
+                      )
+                  )
+                : typedFolderArb,
+              { minLength: 1, maxLength: 4 }
+            )
+          )
+        ),
         fc.boolean(),
-        async (folder, watching) => {
+        fc.boolean(),
+        fc.array(folderArb, { maxLength: 3 }),
+        fc.nat(),
+        async ([stored, drawn], watching, listedExist, others, at) => {
           document.body.replaceChildren();
-          const { tab, plugin } = makeTab(watchingSettings([], watching), [
-            'Inbox',
-            'Reading/Inbox',
-            'a, b',
-          ]);
+          vi.restoreAllMocks();
+          // As the field holds it: an input drops line breaks
+          const listed = drawn.map((path) => path.replace(/[\r\n]/g, ''));
+          const vault = [
+            ...stored,
+            ...others,
+            ...(listedExist ? listed.map(normalizeFolderPath) : []),
+          ];
+          const settings = watchingSettings(stored, watching);
+          const before = structuredClone(settings);
+          const { tab, plugin } = makeTab(settings, vault);
+          vi.spyOn(plugin.app.vault, 'getAllFolders').mockReturnValue(
+            listed.map((path) =>
+              Object.assign(new TFolder(), {
+                path,
+                name: path.slice(path.lastIndexOf('/') + 1),
+              })
+            )
+          );
           const row = drawWatchedFolders(tab);
-          await typeFocused(row.field, folder.slice(0, 3));
-          // What was typed is no folder, which the row says until the pick
-          pressEnter(row.field);
-          expect(row.message()).toEqual(expect.stringMatching(/\S/));
-          const item = [
-            ...document.querySelectorAll<HTMLElement>('.suggestion-item'),
-          ].find((el) => el.textContent === folder)!;
+          await typeFocused(row.field, '');
+          const offered = suggested();
+          fc.pre(offered.length > 0);
+          const path = offered[at % offered.length] ?? '';
 
-          item.click();
-          await settle();
+          await pick(path);
 
-          expect(row.field.value).toBe(folder);
+          expect(document.activeElement).toBe(row.field);
           expect(suggested()).toEqual([]);
-          expect(row.chips()).toEqual([]);
-          expect(plugin.saveSettings).not.toHaveBeenCalled();
-          expect(row.message()).toBe(watchListProblem([], watching));
-
-          pressEnter(row.field);
-          await settle();
-
-          expect(row.chips()).toEqual([folder]);
-          expect(row.field.value).toBe('');
-          expect(plugin.saveSettings).toHaveBeenCalledOnce();
+          const folder = normalizeFolderPath(path);
+          const problem = folderToWatchProblem(folder, (candidate) =>
+            vault.includes(candidate)
+          );
+          if (path.trim() === '') {
+            expect(row.field.value).toBe(path);
+            expect(row.message()).toBe(watchListProblem(stored, watching));
+            expect(row.chips()).toEqual(stored);
+            expect(plugin.settings).toEqual(before);
+            expect(plugin.saveSettings).not.toHaveBeenCalled();
+          } else if (problem) {
+            expect(row.field.value).toBe(path);
+            expect(row.message()).toBe(problem);
+            expect(row.chips()).toEqual(stored);
+            expect(plugin.settings).toEqual(before);
+            expect(plugin.saveSettings).not.toHaveBeenCalled();
+          } else if (stored.includes(folder)) {
+            expect(row.field.value).toBe('');
+            expect(row.message()).toBeUndefined();
+            expect(row.chips()).toEqual(stored);
+            expect(plugin.settings).toEqual(before);
+            expect(plugin.saveSettings).not.toHaveBeenCalled();
+          } else {
+            expect(row.field.value).toBe('');
+            expect(row.message()).toBeUndefined();
+            expect(row.chips()).toEqual([...stored, folder]);
+            expect(plugin.settings).toEqual({
+              ...before,
+              autoImportFolders: [...stored, folder],
+            });
+            expect(plugin.saveSettings).toHaveBeenCalledOnce();
+          }
         }
       )
     );
