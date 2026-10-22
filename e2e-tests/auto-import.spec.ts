@@ -832,7 +832,7 @@ test("suggests the vault's tags in the trigger tags field, but the plugin's item
   await expect(field).toHaveValue(/^#ir-import #e2e-suggest\s*$/);
 });
 
-test('suggests the folders that could be watched as the field is typed in, a pick filling it for Enter to add', async () => {
+test('suggests the folders that could be watched as the field is typed in, a pick adding it at once with the field ready for the next', async () => {
   await window.evaluate(async () => {
     const { app } = window as unknown as { app: PageApp };
     await app.vault.createFolder('Inbox');
@@ -840,38 +840,45 @@ test('suggests the folders that could be watched as the field is typed in, a pic
     await app.vault.createFolder('Reading/Inbox');
   });
   const settings = await openPluginSettings(app, window);
-  const row = settings.locator('.vertical-tab-content .setting-item').filter({
-    has: settings
-      .locator('.setting-item-name')
-      .getByText('Watched folders', { exact: true }),
-  });
+  const settingRow = (name: string) =>
+    settings.locator('.vertical-tab-content .setting-item').filter({
+      has: settings
+        .locator('.setting-item-name')
+        .getByText(name, { exact: true }),
+    });
+  const toggle = settingRow('Auto-import files added to folders').locator(
+    '.checkbox-container'
+  );
+  const row = settingRow('Watched folders');
   const field = row.getByRole('textbox');
+  const message = row.locator('.setting-item-error');
   const chips = row.locator('.ir-folder-chip');
   const suggestions = settings.locator(
     '.suggestion-container .suggestion-item'
   );
+  // Watching with no folders says so, until a pick adds one
+  await toggle.click();
+  await expect(message).toBeVisible();
 
   await field.fill('INB');
   await expect(suggestions).toHaveText(['Inbox', 'Reading/Inbox']);
 
   await suggestions.filter({ hasText: /^Reading\/Inbox$/ }).click();
-  await expect(field).toHaveValue('Reading/Inbox');
-  await expect(suggestions).toHaveCount(0);
-  await expect(chips).toHaveCount(0);
-
-  await field.press('Enter');
   await expect(chips).toHaveText(['Reading/Inbox']);
   await expect(field).toHaveValue('');
+  await expect(message).toBeHidden();
+  await expect(suggestions).toHaveCount(0);
+  await expect(field).toBeFocused();
 
-  // A folder watched is offered no more
-  await field.fill('inbox');
+  // Typed straight into the field the pick left focused; a folder watched is
+  // offered no more
+  await settings.keyboard.type('inbox');
   await expect(suggestions).toHaveText(['Inbox']);
 
-  // Enter while the list is open picks the highlighted one, adding nothing
-  await field.press('Enter');
-  await expect(field).toHaveValue('Inbox');
-  await expect(suggestions).toHaveCount(0);
-  await expect(chips).toHaveText(['Reading/Inbox']);
+  // Enter while the list is open picks the highlighted one, adding it too
   await field.press('Enter');
   await expect(chips).toHaveText(['Reading/Inbox', 'Inbox']);
+  await expect(field).toHaveValue('');
+  await expect(suggestions).toHaveCount(0);
+  await expect(field).toBeFocused();
 });
