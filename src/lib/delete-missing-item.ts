@@ -4,7 +4,8 @@ import { promptForConfirmation } from '#/views/ConfirmModal';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import { queryClient } from './query-client';
 import { tableOf } from './relink';
-import { resetCurrentItem, store } from './store';
+import { leaveGoneItem } from './review-history';
+import { store } from './store';
 
 /**
  * Once the user confirms, delete the item `row`, whose note is missing, for
@@ -50,10 +51,7 @@ export async function deleteMissingItem(
     return false;
   }
 
-  // Resetting is what asks the queue for the next item due
-  if (store.getState().currentItemId === row.id) {
-    store.dispatch(resetCurrentItem());
-  }
+  if (store.getState().currentItemId === row.id) leaveGoneItem(store);
   await invalidateQueue();
   return true;
 }

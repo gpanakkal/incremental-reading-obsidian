@@ -125,3 +125,32 @@ export function goToReviewPlace(
     store.dispatch(action);
   }
 }
+
+/** Set while {@link leaveGoneItem} moves review on. */
+let leavingGoneItem = false;
+
+/**
+ * Move review off the item it is on, which no longer exists, onto whatever the
+ * queue has due next — leaving no way back to it in any tab's history.
+ *
+ * Leaving an item records it, so back returns there. Back to one that is gone
+ * would only bounce off it to the next item due (see `ReviewView.leaveIfGone`):
+ * review stays where it was, with a forward entry for that same place.
+ */
+export function leaveGoneItem(store: ReviewStore): void {
+  leavingGoneItem = true;
+  try {
+    // Resetting is what asks the queue for the next item due
+    store.dispatch(resetCurrentItem());
+  } finally {
+    leavingGoneItem = false;
+  }
+}
+
+/**
+ * Whether the place change under way is {@link leaveGoneItem}'s, which no tab
+ * records. Read by every tab, since every tab shows the one store.
+ */
+export function isLeavingGoneItem(): boolean {
+  return leavingGoneItem;
+}

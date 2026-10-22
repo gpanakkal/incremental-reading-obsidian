@@ -3,6 +3,7 @@ import { type Query, QueryClient } from '@tanstack/react-query';
 import type { TAbstractFile, TFile } from 'obsidian';
 import { CLOZE_DELIMITERS, QUERY_STALE_TIME } from './constants';
 import type ReviewManager from './items/ReviewManager';
+import { leaveGoneItem } from './review-history';
 import { getSeenIds, resetCurrentItem, setCurrentItemId, store } from './store';
 import {
   type DataChangeEvent,
@@ -271,6 +272,31 @@ export async function resetCurrentOnMatch(
   }
 
   store.dispatch(resetCurrentItem());
+}
+
+/**
+ * Move review off the item it is on, onto whatever is due next, when that item
+ * has no row any more: deleted for good, as an un-import does, on this device
+ * or on another whose database a reload has just taken in.
+ *
+ * Its row rather than its note decides, as for every other reader of a
+ * tombstone. A reload's rows can be ahead of the notes Sync brings, and an item
+ * whose note has not arrived yet still exists, as a missing item.
+ *
+ * Left alone, review stays on the id. Nothing else moves it: the item query
+ * just comes back empty for it, which review shows as the end of the queue —
+ * the summary, with items still due.
+ *
+ * Unless review has already moved off it by the time the lookup returns.
+ */
+export async function leaveCurrentItemIfPurged(
+  reviewManager: ReviewManager
+): Promise<void> {
+  const { currentItemId } = store.getState();
+  if (currentItemId === null) return;
+  if (await reviewManager.hasItemRow(currentItemId)) return;
+  if (store.getState().currentItemId !== currentItemId) return;
+  leaveGoneItem(store);
 }
 
 /**

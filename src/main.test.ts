@@ -4247,6 +4247,91 @@ describe('IncrementalReadingPlugin database reload', () => {
   });
 });
 
+describe('IncrementalReadingPlugin database reload: the item under review', () => {
+  afterEach(() => {
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  it('moves review off an item another device deleted for good, before refetching it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string(),
+        fc.boolean(),
+        fc.constantFrom<ReviewPage>('home', 'review'),
+        async (currentId, rowKept, page) => {
+          store.dispatch(resetSession());
+          store.dispatch(setCurrentItemId(currentId));
+          store.dispatch(setPage(page));
+          const hasItemRow = vi
+            .spyOn(ReviewManager.prototype, 'hasItemRow')
+            .mockResolvedValue(rowKept);
+          const { reload } = await startDatabase(undefined);
+          // The spy `startDatabase` set up, handed back rather than replaced
+          const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+          /** Which item review held as each refetch of the item started. */
+          const heldAtRefetch: (string | null)[] = [];
+          invalidate.mockImplementation(async (filters) => {
+            if (filters?.queryKey?.[0] === 'current-review-item') {
+              heldAtRefetch.push(store.getState().currentItemId);
+            }
+          });
+
+          await reload();
+
+          const expected = rowKept ? currentId : null;
+          expect(hasItemRow).toHaveBeenCalledWith(currentId);
+          expect(store.getState().currentItemId).toBe(expected);
+          expect(store.getState().page).toBe(page);
+          expect(heldAtRefetch.length).toBeGreaterThan(0);
+          for (const held of heldAtRefetch) expect(held).toBe(expected);
+          vi.restoreAllMocks();
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('reloads without error while review holds an item and the review manager is not up yet', async () => {
+    store.dispatch(setCurrentItemId('held'));
+    let reloaded: Promise<unknown> = Promise.resolve();
+    vi.spyOn(SQLJSRepository, 'start').mockImplementation((params) => {
+      // The repository reloading before `start` has handed it back
+      reloaded = Promise.resolve(params.onReloadFromDisk?.());
+      return Promise.resolve({
+        onDataChange: vi.fn(() => () => {}),
+        handleFileChange: vi.fn(async () => {}),
+      } as unknown as SQLJSRepository);
+    });
+    vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue(undefined);
+    await (
+      IncrementalReadingPlugin.prototype as unknown as {
+        initReviewManager(): Promise<void>;
+      }
+    ).initReviewManager.call({
+      app: { vault: { on: vi.fn() } },
+      register: vi.fn(),
+      registerEvent: vi.fn(),
+      followMovedNotes: vi.fn(),
+      createLeftoverWatch: vi.fn(),
+    });
+
+    await expect(reloaded).resolves.toBeUndefined();
+    expect(store.getState().currentItemId).toBe('held');
+  });
+
+  it('looks no row up while review holds no item', async () => {
+    store.dispatch(resetSession());
+    const hasItemRow = vi.spyOn(ReviewManager.prototype, 'hasItemRow');
+    const { reload } = await startDatabase(undefined);
+
+    await reload();
+
+    expect(hasItemRow).not.toHaveBeenCalled();
+    expect(store.getState().currentItemId).toBeNull();
+  });
+});
+
 describe('IncrementalReadingPlugin review reminders', () => {
   afterEach(() => {
     vi.restoreAllMocks();

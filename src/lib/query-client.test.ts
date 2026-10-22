@@ -11,6 +11,7 @@ import {
   currentItemQueryKey,
   getCurrentItemSync,
   invalidateCacheOnMatch,
+  leaveCurrentItemIfPurged,
   queryClient,
   resetCurrentOnMatch,
   startItemCacheEviction,
@@ -177,6 +178,52 @@ function wireMissing() {
   } as unknown as ReviewManager;
   return manager;
 }
+
+/**
+ * A ReviewManager stub over a database whose only rows are `rows` and whose
+ * queue holds `due`, in order, as the reads after a reload see them: an id
+ * with no row looks up as nothing, as a tombstone does. `rowCheck` holds the
+ * row lookup open, when given, until the case settles it.
+ */
+function makeRowManager(
+  rows: ReadonlySet<string>,
+  due: readonly ReviewItem[],
+  rowCheck?: Promise<void>
+) {
+  const hasItemRow = vi.fn(async (id: string) => {
+    await rowCheck;
+    return rows.has(id);
+  });
+  const manager = {
+    hasItemRow,
+    getItemOrMissingFromId: vi.fn(async (id: string) =>
+      rows.has(id) ? makeReviewItem(id) : null
+    ),
+    getDue: vi.fn().mockResolvedValue({
+      all: due,
+      cards: due.filter(({ data }) => data.type === 'card'),
+      snippets: due.filter(({ data }) => data.type === 'snippet'),
+      articles: due.filter(({ data }) => data.type === 'article'),
+    }),
+    cards: { updateDelimiters: vi.fn().mockResolvedValue(undefined) },
+  } as unknown as ReviewManager;
+  return { manager, hasItemRow };
+}
+
+/** Items due, of any type, under distinct ids none of which is `exclude`. */
+const dueItemsArb = (exclude: string) =>
+  fc
+    .uniqueArray(fc.tuple(fc.string(), noteTypeArb), {
+      selector: ([id]) => id,
+      maxLength: 5,
+    })
+    .map((entries) =>
+      entries
+        .filter(([id]) => id !== exclude)
+        .map(([id, type]) => makeTypedItem(id, type))
+    );
+
+const pageArb = fc.constantFrom<ReviewPage>('home', 'review');
 
 // #endregion
 
@@ -1076,5 +1123,94 @@ describe('startItemCacheEviction', () => {
         expect(queryClient.getQueryData(leftKey)).toBe('left');
       })
     );
+  });
+});
+
+describe('leaveCurrentItemIfPurged', () => {
+  afterEach(() => {
+    resetCacheAndStore();
+    vi.restoreAllMocks();
+  });
+
+  it('moves review off an item whose row is gone onto the first item due, and to the end of the queue only when nothing is', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string().chain((currentId) =>
+          fc.record({
+            currentId: fc.constant(currentId),
+            page: pageArb,
+            due: dueItemsArb(currentId),
+          })
+        ),
+        async ({ currentId, page, due }) => {
+          resetCacheAndStore();
+          store.dispatch(setCurrentItemId(currentId));
+          store.dispatch(setPage(page));
+          const { manager, hasItemRow } = makeRowManager(
+            new Set(due.map(({ data }) => data.id)),
+            due
+          );
+
+          await leaveCurrentItemIfPurged(manager);
+          // What review then reads for the id the store holds: the refetch a
+          // reload runs, or the advance a reset starts
+          const shown = await currentItemQueryFn(
+            manager,
+            store.getState().currentItemId
+          );
+
+          expect(hasItemRow).toHaveBeenCalledWith(currentId);
+          expect(shown).toBe(due[0] ?? null);
+          expect(store.getState().currentItemId).toBe(due[0]?.data.id ?? null);
+          expect(store.getState().page).toBe(page);
+        }
+      )
+    );
+  });
+
+  it('leaves review exactly where it is on an item that still has a row', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.string(), pageArb, async (currentId, page) => {
+        resetCacheAndStore();
+        store.dispatch(setCurrentItemId(currentId));
+        store.dispatch(setPage(page));
+        const before = store.getState();
+        const { manager } = makeRowManager(new Set([currentId]), []);
+
+        await leaveCurrentItemIfPurged(manager);
+
+        expect(store.getState()).toBe(before);
+      })
+    );
+  });
+
+  it('leaves review alone once it has moved off the item by the time the lookup returns', async () => {
+    await fc.assert(
+      fc.asyncProperty(leaveArb, async ([currentId, picked]) => {
+        resetCacheAndStore();
+        store.dispatch(setCurrentItemId(currentId));
+        const lookup = deferred<void>();
+        const { manager } = makeRowManager(new Set(), [], lookup.promise);
+
+        const leaving = leaveCurrentItemIfPurged(manager);
+        store.dispatch(setCurrentItemId(picked));
+        const meanwhile = store.getState();
+        lookup.resolve();
+        await leaving;
+
+        expect(store.getState()).toBe(meanwhile);
+      })
+    );
+  });
+
+  it('looks nothing up while review holds no item', async () => {
+    resetCacheAndStore();
+    const before = store.getState();
+    const { manager, hasItemRow } = makeRowManager(new Set(), []);
+
+    await leaveCurrentItemIfPurged(manager);
+
+    expect(hasItemRow).not.toHaveBeenCalled();
+    expect(store.getState()).toBe(before);
   });
 });

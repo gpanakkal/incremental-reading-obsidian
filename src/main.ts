@@ -104,6 +104,7 @@ import {
   applyQueueChange,
   invalidateCacheOnMatch,
   invalidateCurrentItemQuery,
+  leaveCurrentItemIfPurged,
   queryClient,
   resetCurrentOnMatch,
   startItemCacheEviction,
@@ -698,6 +699,13 @@ export default class IncrementalReadingPlugin extends Plugin {
         void this.reviewManager?.snippets.persistPendingOffsets();
       },
       onReloadFromDisk: async () => {
+        // Before the refetch below, which would otherwise read nothing for an
+        // item another device deleted for good and show the summary in its
+        // place. Here rather than in a review tab: a tab in the background,
+        // as one on mobile is behind another, must not come back to it.
+        if (this.reviewManager) {
+          await leaveCurrentItemIfPurged(this.reviewManager);
+        }
         await invalidateCurrentItemQuery();
         // A swapped-in database reports no change to any row, so the queue
         // would keep what it last read, a failed read included

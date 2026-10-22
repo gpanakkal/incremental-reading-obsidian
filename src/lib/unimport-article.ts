@@ -4,8 +4,9 @@ import { promptForConfirmation } from '#/views/ConfirmModal';
 import type { TFile } from 'obsidian';
 import { CONTENT_TITLE_SLICE_LENGTH } from './constants';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
-import { queryClient } from './query-client';
-import { resetCurrentItem, store } from './store';
+import { leaveCurrentItemIfPurged, queryClient } from './query-client';
+import { leaveGoneItem } from './review-history';
+import { store } from './store';
 import { getContentSlice } from './utils';
 
 /**
@@ -58,14 +59,7 @@ export async function refreshAfterUnimport(
   // A failed one may have lost its row before its properties failed
   if (!outcomes.some(({ status }) => status !== 'skipped')) return;
 
-  const { currentItemId } = store.getState();
-  if (
-    currentItemId !== null &&
-    !(await plugin.reviewManager.hasItemRow(currentItemId))
-  ) {
-    // Resetting is what asks the queue for the next item due
-    store.dispatch(resetCurrentItem());
-  }
+  await leaveCurrentItemIfPurged(plugin.reviewManager);
   // `'all'`, as `applyQueueChange` does, for pages not on screen
   await queryClient.invalidateQueries({
     queryKey: ['queue'],
@@ -85,7 +79,7 @@ export async function refreshAfterImportUndo(
   if (undone.length === 0) return;
   const { currentItemId } = store.getState();
   if (currentItemId !== null && undone.includes(currentItemId)) {
-    store.dispatch(resetCurrentItem());
+    leaveGoneItem(store);
   }
   await queryClient.invalidateQueries({
     queryKey: ['queue'],
