@@ -123,7 +123,7 @@ export async function refusedAction(
  * once `bound` milliseconds pass first.
  */
 function afterMerge(
-  repo: ReadinessSource,
+  repo: Pick<ReadinessSource, 'readiness' | 'onReadinessChange'>,
   bound = Infinity
 ): Promise<Readiness> {
   return new Promise((resolve) => {
@@ -153,7 +153,7 @@ function afterMerge(
  *   for the work's own check
  */
 export function outlastMerge(
-  repo: ReadinessSource,
+  repo: Pick<ReadinessSource, 'readiness' | 'onReadinessChange'>,
   bound = Infinity
 ): Promise<Readiness> {
   const state = repo.readiness;
