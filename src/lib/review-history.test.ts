@@ -6,6 +6,8 @@ import {
   actionsToReach,
   goToReviewPlace,
   isDestination,
+  isLeavingGoneItem,
+  leaveGoneItem,
   placeOf,
   placeToEphemeralState,
   readPlace,
@@ -615,5 +617,49 @@ describe('goToReviewPlace', () => {
         expect(store.getState().editState).toEqual(before.editState);
       })
     );
+  });
+});
+
+describe('leaveGoneItem', () => {
+  it('puts review between items, which asks the queue for the next one due', () => {
+    fc.assert(
+      fc.property(seededStateArb, (state) => {
+        seedStore(state);
+
+        leaveGoneItem(store);
+
+        expect(store.getState().currentItemId).toBeNull();
+      })
+    );
+  });
+
+  it('marks the place change as its own only while it dispatches', () => {
+    const seen: boolean[] = [];
+    const recorder = {
+      getState: () => store.getState(),
+      dispatch: (action: UnknownAction) => {
+        seen.push(isLeavingGoneItem());
+        return action;
+      },
+    };
+
+    expect(isLeavingGoneItem()).toBe(false);
+    leaveGoneItem(recorder);
+
+    expect(seen).toEqual([true]);
+    expect(isLeavingGoneItem()).toBe(false);
+  });
+
+  it('stops marking place changes even when dispatching throws', () => {
+    const failing = {
+      getState: () => store.getState(),
+      dispatch: () => {
+        throw new Error('listener failed');
+      },
+    };
+
+    expect(() => leaveGoneItem(failing)).toThrow();
+
+    expect(isLeavingGoneItem()).toBe(false);
   });
 });

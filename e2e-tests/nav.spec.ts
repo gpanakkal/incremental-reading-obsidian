@@ -1,3 +1,4 @@
+import { tombstoneRowStatements } from '#/lib/items/row-delete';
 import { POSITIONS_KEY } from '#/lib/reading-positions';
 import test, {
   expect,
@@ -962,6 +963,52 @@ test.describe('Review history navigation', () => {
       await expect(explorerRow(notKept)).toHaveCount(0);
     });
   });
+
+  /**
+   * Delete the article row `id` for good as another device's un-import does,
+   * and take it in the way this one takes in that device's database: the
+   * refetch a reload from disk ends on. The rows are written here rather than
+   * merged from a second file, which comes to the same database.
+   */
+  async function deleteOnAnotherDevice(id: string) {
+    await window.evaluate(
+      async (statements) => {
+        const { repo } = (window as unknown as RepoWindow).app.plugins.plugins[
+          'incremental-reading'
+        ].reviewManager;
+        for (const { query, params } of statements) {
+          await repo.mutate(query, params);
+        }
+        await repo.onReloadFromDisk?.();
+      },
+      tombstoneRowStatements('article', id)
+    );
+  }
+
+  test('an item deleted for good on another device after going back to it gives way to the next item due', async () => {
+    await importTwoArticles();
+    const first = await beginReview();
+    const other = await openOtherFromQueue(first);
+    // Home, then the first item: the place review had before
+    await executeCommandById(window, 'app:go-back');
+    await expectReviewHome(window);
+    await executeCommandById(window, 'app:go-back');
+    await expectLandedOn(first);
+
+    await deleteOnAnotherDevice(first.id);
+
+    // Bounded well inside `CURRENT_ITEM_REFETCH_TIME`, so no poll can be what
+    // moves review on; and the summary never shows while the other is due
+    await expectLandedOn(other);
+    await expect(window.locator('.ir-review-summary')).toHaveCount(0);
+
+    // No way back to the deleted item, which would only bounce off it to the
+    // other again: back goes where review was before it
+    await executeCommandById(window, 'app:go-back');
+    await expectReviewHome(window);
+    await executeCommandById(window, 'app:go-forward');
+    await expectLandedOn(other);
+  });
 });
 
 test.describe('Review button on a note', () => {
@@ -1365,6 +1412,24 @@ type HeaderTestWindow = {
     };
     workspace: {
       getLeaf(where: 'split'): { openFile(file: unknown): Promise<void> };
+    };
+  };
+};
+
+type RepoWindow = {
+  app: {
+    plugins: {
+      plugins: Record<
+        string,
+        {
+          reviewManager: {
+            repo: {
+              mutate(query: string, params?: unknown[]): Promise<unknown>;
+              onReloadFromDisk?: () => void | Promise<void>;
+            };
+          };
+        }
+      >;
     };
   };
 };

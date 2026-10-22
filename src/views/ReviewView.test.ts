@@ -6,9 +6,12 @@ import {
   FORBIDDEN_TITLE_CHARS,
   PLUGIN_ICON,
 } from '#/lib/constants';
+import { deleteMissingItem } from '#/lib/delete-missing-item';
 import type ReviewManager from '#/lib/items/ReviewManager';
+import { ObsidianHelpers } from '#/lib/ObsidianHelpers';
 import type { ExtractedMarkdownEditor } from '#/lib/obsidian-editor';
 import type { PdfViewer } from '#/lib/pdf/obsidian-pdf';
+import { leaveCurrentItemIfPurged, queryClient } from '#/lib/query-client';
 import {
   goToReviewPlace,
   isDestination,
@@ -32,6 +35,10 @@ import {
   type SelectionKind,
 } from '#/lib/store';
 import { NOTE_TYPES, type NoteType, type ReviewItem } from '#/lib/types';
+import {
+  refreshAfterImportUndo,
+  refreshAfterUnimport,
+} from '#/lib/unimport-article';
 import type IncrementalReadingPlugin from '#/main';
 // The mock is what `obsidian` resolves to at runtime (see vitest.config.ts), so
 // importing it by path is the same module — but with the stub's own surface
@@ -44,6 +51,7 @@ import {
   Scope,
   type MenuItem,
 } from '#/test/__mocks__/obsidian';
+import * as ConfirmModalModule from '#/views/ConfirmModal';
 import ReviewView, {
   HEADER_HIDDEN_CLASS,
   HEADER_SHOWN_CLASS,
@@ -4129,5 +4137,162 @@ describe('ReviewView.onOpen', () => {
 
     expect(reviewOpened).toHaveBeenCalledOnce();
     unload(view);
+  });
+});
+
+/**
+ * Every way review is moved off an item whose row has just gone for good,
+ * `purgedId`, with `rows` answering for which rows remain.
+ */
+const leaveVia = {
+  reload: (_purgedId: string, rows: ReviewManager) =>
+    leaveCurrentItemIfPurged(rows),
+  'local un-import': (_purgedId: string, rows: ReviewManager) =>
+    refreshAfterUnimport(
+      { reviewManager: rows } as unknown as IncrementalReadingPlugin,
+      [{ status: 'unimported' }] as never
+    ),
+  'import undo': (purgedId: string) => refreshAfterImportUndo([purgedId]),
+  'missing-item delete': async (purgedId: string) => {
+    vi.spyOn(ConfirmModalModule, 'promptForConfirmation').mockResolvedValue(
+      true
+    );
+    vi.spyOn(ObsidianHelpers, 'getNote').mockReturnValue(null);
+    vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue();
+    const plugin = {
+      app: {},
+      reviewManager: { deleteRow: vi.fn(async () => {}) },
+    } as unknown as IncrementalReadingPlugin;
+    await deleteMissingItem(plugin, {
+      id: purgedId,
+      type: 'article',
+      reference: `${purgedId}.md`,
+    });
+  },
+} satisfies Record<
+  string,
+  (purgedId: string, rows: ReviewManager) => Promise<void>
+>;
+
+describe('ReviewView history over an item deleted for good', () => {
+  beforeEach(() => {
+    store.dispatch(resetSession());
+  });
+
+  afterEach(() => {
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  it('never lands on an item deleted on another device, whether the deletion is taken in before or after history goes back to it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc
+          .uniqueArray(fc.string(), { minLength: 2, maxLength: 5 })
+          .chain((visited) =>
+            fc.record({
+              visited: fc.constant(visited),
+              // Any item left behind, never the one review is on
+              target: fc.constantFrom(...visited.slice(0, -1)),
+              takenIn: fc.constantFrom('before', 'after'),
+            })
+          ),
+        async ({ visited, target, takenIn }) => {
+          store.dispatch(resetSession());
+          const { view, reviewManager } = await openHistoryView();
+          /** Ids whose rows a reload has since found deleted for good. */
+          const purged = new Set<string>();
+          reviewManager.getItemOrMissingFromId.mockImplementation(
+            async (id: string) => (purged.has(id) ? null : { data: { id } })
+          );
+          const rows = {
+            hasItemRow: vi.fn(async (id: string) => !purged.has(id)),
+          } as unknown as ReviewManager;
+          /** The deletion coming in, and the reload's check that follows. */
+          const takeInDeletion = async () => {
+            purged.add(target);
+            await leaveCurrentItemIfPurged(rows);
+          };
+          try {
+            store.dispatch(setPage('review'));
+            for (const id of visited) store.dispatch(setCurrentItemId(id));
+
+            if (takenIn === 'before') await takeInDeletion();
+            view.setEphemeralState(
+              placeToEphemeralState({ page: 'review', itemId: target })
+            );
+            await flushLookups();
+            if (takenIn === 'after') await takeInDeletion();
+
+            // Between items: asking the queue for the next one due
+            expect(placeOf(store.getState())).toEqual({
+              page: 'review',
+              itemId: null,
+            });
+          } finally {
+            unload(view);
+          }
+        }
+      ),
+      { numRuns: 40 }
+    );
+  });
+
+  it('leaves no entry for the item behind, so back from the next one goes where review was before it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.uniqueArray(fc.string(), { minLength: 2, maxLength: 6 }),
+        fc.constantFrom(
+          'reload',
+          'local un-import',
+          'import undo',
+          'missing-item delete'
+        ),
+        async (ids, via) => {
+          store.dispatch(resetSession());
+          // The last id is the one due next; the one before it, the item purged
+          const visited = ids.slice(0, -1);
+          const purgedId = visited[visited.length - 1];
+          const next = ids[ids.length - 1];
+          const { view, leaf, reviewManager } = await openHistoryView();
+          const purged = new Set<string>();
+          reviewManager.getItemOrMissingFromId.mockImplementation(
+            async (id: string) => (purged.has(id) ? null : { data: { id } })
+          );
+          const rows = {
+            hasItemRow: vi.fn(async (id: string) => !purged.has(id)),
+          } as unknown as ReviewManager;
+          try {
+            store.dispatch(setPage('review'));
+            for (const id of visited) store.dispatch(setCurrentItemId(id));
+            const before = [...leaf.history.backHistory];
+
+            purged.add(purgedId);
+            await leaveVia[via](purgedId, rows);
+            // The queue hands over the next item due
+            store.dispatch(setCurrentItemId(next));
+            expect(leaf.history.backHistory).toEqual(before);
+
+            // Back, as Obsidian takes it: the top entry off, review's own place
+            // onto the forward stack
+            const entry = leaf.history.backHistory.pop()!;
+            leaf.history.forwardHistory.push(
+              view.historyEntryFor(placeOf(store.getState()))
+            );
+            view.setEphemeralState(entry.eState);
+            await flushLookups();
+
+            expect(placeOf(store.getState())).toEqual(readPlace(entry.eState));
+            expect(backPlaces(leaf)).not.toContainEqual({
+              page: 'review',
+              itemId: purgedId,
+            });
+          } finally {
+            unload(view);
+          }
+        }
+      ),
+      { numRuns: 40 }
+    );
   });
 });

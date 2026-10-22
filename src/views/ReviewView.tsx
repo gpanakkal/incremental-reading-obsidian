@@ -10,6 +10,7 @@ import {
   actionsToReach,
   goToReviewPlace,
   isDestination,
+  isLeavingGoneItem,
   placeOf,
   placeToEphemeralState,
   readPlace,
@@ -389,7 +390,8 @@ export default class ReviewView extends FileView {
    * render effect, and the editor has not re-rendered — so the rest of the view
    * still describes the place being left too.
    *
-   * Review between items is never recorded (see `isDestination`). An advance
+   * Review between items is never recorded (see `isDestination`), nor an item
+   * left because it no longer exists (see `leaveGoneItem`). An advance
    * that comes back to the item it left — undo lands there — would otherwise
    * leave that item on top of the back stack, making the next back a step that
    * goes nowhere, so the entry is taken back off. Only while it is still the top
@@ -400,7 +402,7 @@ export default class ReviewView extends FileView {
     const left = this.#place;
     if (samePlace(left, next)) return;
     this.#place = next;
-    if (!this.#open || this.#applyingHistory) return;
+    if (!this.#open || this.#applyingHistory || isLeavingGoneItem()) return;
 
     if (isDestination(left)) {
       const entry = this.historyEntryFor(left);
