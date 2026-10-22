@@ -10,6 +10,7 @@ import { hasTag, TAG_BY_TABLE } from './item-tags';
 import { supportsFrontmatter } from './mime';
 import { holdersOf, type Holder, type RowId } from './moved-note-scan';
 import { yieldToHost } from './pacing';
+import { MERGE_WAIT_MS, outlastMerge } from './readiness';
 import type { SQLiteRepository } from './types';
 
 /**
@@ -108,6 +109,63 @@ export function shownInMarkdownView(
     );
 }
 
+/**
+ * How far a note's mtime may sit from this device's clock, either way, for a
+ * change to it to count as a write made here just now: the time from a write to
+ * the metadata cache's `changed` for it, on a busy phone, with room for a disk
+ * that keeps mtimes coarse.
+ *
+ * Narrower, and a note stripped here goes untold on a slow device; a disk that
+ * keeps mtimes to 2 s (FAT32, as on some SD cards) already puts such a write
+ * near the edge. Wider, and more Sync deliveries pass for writes made here,
+ * each then left to the wait on the database alone (see `settleAfterSync`),
+ * which tells of a note that beats its database by longer than that wait.
+ */
+export const LOCAL_WRITE_WINDOW_MS = 2000;
+
+/**
+ * Whether a change to a note that left it at `mtime`, seen at `now`, can be a
+ * write made on this device: one made here takes this device's clock as it
+ * lands. Obsidian Sync writes what it brings down with the mtime it had on the
+ * device it came from (`vault.modifyBinary(file, data, { mtime })`, read from
+ * obsidian.asar, 1.13; not documented), so a note arriving over Sync is as old
+ * as the trip made it, give or take however far the two clocks disagree. A
+ * trip quicker than the window, or a clock running ahead by the trip, passes
+ * for a write made here; the pass waits on the database for those (see
+ * {@link IrIdWatchDeps.settle}).
+ *
+ * The mtime is the cached `TFile.stat`, fresh by the time `changed` comes in:
+ * a write lands, the adapter stats the file and raises `modified`, the vault
+ * copies that stat onto the file and raises `modify`, and only then does the
+ * metadata cache re-read the note (read from `FileSystemAdapter.write` and
+ * `CapacitorAdapter.write` in obsidian.asar, 1.13; not documented).
+ *
+ * A change with no mtime to read is taken as one made here, as every change
+ * was before this was looked at. A real `TFile` always has one.
+ */
+export function writtenHere(
+  mtime: number | undefined,
+  now: number,
+  windowMs = LOCAL_WRITE_WINDOW_MS
+): boolean {
+  if (typeof mtime !== 'number') return true;
+  return Math.abs(now - mtime) <= windowMs;
+}
+
+/**
+ * What a pass that found a note damaged waits on before it says so, by
+ * default: Sync bringing the database that goes with the note, which can land
+ * just after it, then the merge taking that in (see `outlastMerge`), waited
+ * out for no longer than an action waits on one.
+ */
+export async function settleAfterSync(
+  repo: Pick<SQLiteRepository, 'readiness' | 'onReadinessChange'>,
+  waitMs = MERGE_WAIT_MS
+): Promise<void> {
+  await new Promise((resolve) => window.setTimeout(resolve, waitMs));
+  await outlastMerge(repo, waitMs);
+}
+
 /** How long changed notes pile up before a pass reads the database. */
 export const DEBOUNCE_MS = 250;
 
@@ -115,7 +173,7 @@ export const DEBOUNCE_MS = 250;
 export const PATH_BATCH = 200;
 
 export interface IrIdWatchDeps {
-  repo: Pick<SQLiteRepository, 'query'>;
+  repo: Pick<SQLiteRepository, 'query' | 'readiness' | 'onReadinessChange'>;
   vault: Pick<Vault, 'getFileByPath'>;
   metadataCache: Pick<MetadataCache, 'getFileCache'>;
   /**
@@ -132,9 +190,18 @@ export interface IrIdWatchDeps {
   /**
    * Whether a markdown tab on this device shows the note at `path` right now
    * (see {@link shownInMarkdownView}). Asked as each change comes in; only a
-   * note shown at one of its changes is ever told of.
+   * note shown at one of its changes, by a change {@link writtenHere}, is ever
+   * told of.
    */
   isShown: (path: string) => boolean;
+  /** This device's clock, for {@link writtenHere}. */
+  now?: () => number;
+  /**
+   * What a pass that found notes damaged waits on before it looks at them
+   * again and tells of the ones still damaged. Defaults to
+   * {@link settleAfterSync}.
+   */
+  settle?: () => Promise<void>;
   yieldToHost?: () => Promise<void>;
   /** Runs `pass` after `ms`; returns a function that cancels it. */
   schedule?: (pass: () => void, ms: number) => () => void;
@@ -144,7 +211,9 @@ export interface IrIdWatchDeps {
 
 export interface IrIdWatch {
   /** Remember a note the metadata cache has re-read, for the next pass. */
-  handleChange(file: Pick<TFile, 'path' | 'extension'>): void;
+  handleChange(
+    file: Pick<TFile, 'path' | 'extension'> & Partial<Pick<TFile, 'stat'>>
+  ): void;
   /** Run a pass now over everything remembered; answers what it newly reported. */
   flush(): Promise<string[]>;
   /** Drop any pending pass and stop taking changes. */
@@ -166,14 +235,21 @@ export interface IrIdWatch {
  * writes.
  *
  * Nor is every loss reported: only one in a note a markdown tab here showed when
- * the change came in (`isShown`). The report is a fallback for the edits made
- * inside Obsidian that the editor guard cannot stop, such as reading mode's
- * properties editor, and those are made to a note on screen. A note changed
+ * the change came in (`isShown`), by a write made here (`writtenHere`). The
+ * report is a fallback for the edits made inside Obsidian that the editor guard
+ * cannot stop, such as reading mode's properties editor, and those are made
+ * here, to a note on screen, just before the cache sees them. A note changed
  * while closed is as likely one that arrived over Sync ahead of its database
- * (the 0166 flow), so it is passed over. Two cases are given up for that:
- * Sync stripping a note that happens to be open here is reported, and an
- * external editor stripping a closed note is not. A note's mtime cannot tell
- * these apart either, since every edit moves it.
+ * (the 0166 flow), so it is passed over, and so is an open one that Sync
+ * brought with the mtime it had on another device (0181). An external editor
+ * stripping a closed note is given up for that.
+ *
+ * A Sync delivery can still pass for a write made here (a quick trip, clocks
+ * apart), so a pass that finds damage waits (`settle`) for Sync to bring the
+ * database the note goes with, and for the merge that takes it in, then looks
+ * again: a note un-imported elsewhere is no row's by then, and only what is
+ * still damaged is told of. A note that beats its database by longer than
+ * that, or a merge still under way when the wait gives up, is still told of.
  *
  * It is also the earliest moment the new value can be read. An in-place
  * frontmatter edit raises vault `modify` first, but the cache has not reparsed
@@ -191,6 +267,8 @@ export function createIrIdWatch({
   metadataCache,
   onDamage,
   isShown,
+  now = Date.now,
+  settle = () => settleAfterSync(repo),
   yieldToHost: pause = yieldToHost,
   schedule = (pass, ms) => {
     const timer = window.setTimeout(pass, ms);
@@ -199,7 +277,10 @@ export function createIrIdWatch({
   debounceMs = DEBOUNCE_MS,
   pathBatch = PATH_BATCH,
 }: IrIdWatchDeps): IrIdWatch {
-  /** Changed notes, each with whether a tab showed it at any of its changes. */
+  /**
+   * Changed notes, each with whether any of its changes was a write made here
+   * while a tab showed it.
+   */
   const pending = new Map<string, boolean>();
   let cancelScheduled: (() => void) | null = null;
   let disposed = false;
@@ -236,48 +317,63 @@ export function createIrIdWatch({
   /** Damaged notes already told of, until a pass finds them whole again. */
   const reported = new Set<string>();
 
-  /** The notes in `batch` newly found damaged, now remembered as told of. */
-  async function damagedIn(
-    batch: readonly (readonly [path: string, shown: boolean])[]
-  ): Promise<string[]> {
-    // A note gone since the change was remembered, or mid-parse, is skipped
-    const found = batch.flatMap(([path, shown]) => {
+  /**
+   * Whether each note at `paths` has lost its `ir-id` or type tag, read
+   * against the database as it is now. A note gone since the change was
+   * remembered, or mid-parse, is left out.
+   */
+  async function lossesAt(
+    paths: readonly string[]
+  ): Promise<Map<string, boolean>> {
+    const found = paths.flatMap((path) => {
       const at = claimAt(path);
-      return at ? [{ ...at, shown }] : [];
+      return at ? [at] : [];
     });
     const holders = await holdersOf(
       repo,
       found.map(({ claim }) => claim.path)
     );
-    const damaged: string[] = [];
-    for (const { claim, tags, shown } of found) {
+    const losses = new Map<string, boolean>();
+    for (const { claim, tags } of found) {
       const atPath = holders.get(claim.path) ?? [];
-      const lost =
+      losses.set(
+        claim.path,
         readsAsTampering(claim, atPath) ||
-        classifyTag(claim, tags, atPath) !== null;
-      if (!lost) {
-        reported.delete(claim.path);
-      } else if (shown && !reported.has(claim.path)) {
-        reported.add(claim.path);
-        damaged.push(claim.path);
-      }
+          classifyTag(claim, tags, atPath) !== null
+      );
     }
-    return damaged;
+    return losses;
   }
 
   async function runPass(): Promise<string[]> {
-    const paths = [...pending];
+    const changes = [...pending];
     pending.clear();
-    const damaged: string[] = [];
-    for (let i = 0; i < paths.length; i += pathBatch) {
-      damaged.push(...(await damagedIn(paths.slice(i, i + pathBatch))));
+    /** Damaged by a write made here, and not told of yet. */
+    const suspects: string[] = [];
+    for (let i = 0; i < changes.length; i += pathBatch) {
+      const batch = changes.slice(i, i + pathBatch);
+      const losses = await lossesAt(batch.map(([path]) => path));
+      for (const [path, local] of batch) {
+        const lost = losses.get(path);
+        if (lost === false) reported.delete(path);
+        else if (lost && local && !reported.has(path)) suspects.push(path);
+      }
       // Nothing after the last batch waits on the thread being free, so only
       // the gaps between batches are paid for
-      if (i + pathBatch < paths.length) await pause();
+      if (i + pathBatch < changes.length) await pause();
     }
     // Not once disposed: whatever is told about this is torn down alongside
     // the watch, and a notice raised as the plugin unloads would be left on
     // screen with nothing behind it
+    if (disposed || suspects.length === 0) return [];
+
+    await settle();
+    // Nor read once disposed: the repository goes with the plugin
+    if (disposed) return [];
+    // Only notes open here get this far, so one read answers them all
+    const losses = await lossesAt(suspects);
+    const damaged = suspects.filter((path) => losses.get(path) === true);
+    for (const path of damaged) reported.add(path);
     if (disposed) return [];
     if (damaged.length > 0) onDamage(damaged);
     return damaged;
@@ -301,10 +397,11 @@ export function createIrIdWatch({
       if (!supportsFrontmatter(file)) return;
 
       // Asked now rather than at the pass: a tab closed in between still saw
-      // the edit
+      // the edit, and a write made here is only fresh as it comes in
       pending.set(
         file.path,
-        pending.get(file.path) === true || isShown(file.path)
+        pending.get(file.path) === true ||
+          (isShown(file.path) && writtenHere(file.stat?.mtime, now()))
       );
       // A fixed window from the first change of a burst, not a timer pushed back
       // by each: an index that keeps the cache busy for a minute would otherwise

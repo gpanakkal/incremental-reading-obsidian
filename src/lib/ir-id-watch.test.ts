@@ -26,17 +26,22 @@ import { createDamagedNotesNotice } from './ir-id-warning-notice';
 import {
   DEBOUNCE_MS,
   type IrIdWatchDeps,
+  LOCAL_WRITE_WINDOW_MS,
   type NoteClaim,
   PATH_BATCH,
   claimsIdentity,
   classifyTag,
   createIrIdWatch,
   readsAsTampering,
+  settleAfterSync,
   shownInMarkdownView,
+  writtenHere,
 } from './ir-id-watch';
 import { TAG_BY_TABLE, hasTag, withTag } from './item-tags';
 import { purgedReference } from './items/row-delete';
 import { type Holder, ITEM_TABLES, type ItemTable } from './moved-note-scan';
+import { MERGE_WAIT_MS } from './readiness';
+import type { Readiness } from './types';
 
 // #region HELPERS
 
@@ -178,6 +183,46 @@ function makeScheduler() {
 /** The changed-file object Obsidian hands a `changed` handler. */
 const changed = (path: string, extension = 'md') => ({ path, extension });
 
+/** {@link changed}, for a note whose last write left it at `mtime`. */
+const changedAt = (path: string, mtime: number) => ({
+  ...changed(path),
+  stat: { ctime: mtime, mtime, size: 0 },
+});
+
+/** Let every promise that can settle without a timer settle. */
+const drain = () => new Promise((resolve) => setImmediate(resolve));
+
+/** A wait the test ends by hand, for `settle`. */
+function makeGate() {
+  let open = () => {};
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { settle: vi.fn(() => opened), open: () => open() };
+}
+
+/**
+ * A repository's readiness, which a test moves to `merging` and back as a
+ * reload would, telling its listeners each time.
+ */
+function makeReadiness() {
+  const listeners = new Set<(state: Readiness) => void>();
+  const source = {
+    readiness: 'ready' as Readiness,
+    onReadinessChange(listener: (state: Readiness) => void) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    set(state: Readiness) {
+      source.readiness = state;
+      for (const listener of [...listeners]) listener(state);
+    },
+  };
+  return source;
+}
+
 interface Harness {
   repo: TestRepository;
   vault: ReturnType<typeof makeVault>;
@@ -208,6 +253,8 @@ function wire(
     // Every change is an edit made to a note on screen unless a test says
     // otherwise
     isShown: () => true,
+    // Nothing arrives while a pass waits on Sync unless a test says so
+    settle: async () => {},
     yieldToHost: pause,
     schedule: scheduler.schedule,
     ...overrides,
@@ -595,6 +642,102 @@ describe('classifyTag', () => {
   });
 });
 
+describe('writtenHere', () => {
+  const mtimeArb = fc.integer({ min: 0, max: 2 ** 45 });
+  const windowArb = fc.nat({ max: 10_000_000 });
+
+  it('takes a change for a write made here exactly when its mtime is within the window of the clock, either side', () => {
+    fc.assert(
+      fc.property(
+        mtimeArb,
+        windowArb,
+        fc.integer({ min: -20_000_000, max: 20_000_000 }),
+        (mtime, windowMs, offset) => {
+          expect(writtenHere(mtime, mtime + offset, windowMs)).toBe(
+            Math.abs(offset) <= windowMs
+          );
+        }
+      )
+    );
+  });
+
+  it('counts the edges of the window in, and the next millisecond out', () => {
+    fc.assert(
+      fc.property(
+        mtimeArb,
+        windowArb,
+        fc.constantFrom(-1, 1),
+        (mtime, windowMs, side) => {
+          expect(writtenHere(mtime, mtime + side * windowMs, windowMs)).toBe(
+            true
+          );
+          expect(
+            writtenHere(mtime, mtime + side * (windowMs + 1), windowMs)
+          ).toBe(false);
+        }
+      )
+    );
+  });
+
+  it(`defaults to a window of ${LOCAL_WRITE_WINDOW_MS}ms`, () => {
+    fc.assert(
+      fc.property(mtimeArb, fc.constantFrom(-1, 1), (mtime, side) => {
+        const edge = side * LOCAL_WRITE_WINDOW_MS;
+        expect(writtenHere(mtime, mtime + edge)).toBe(true);
+        expect(writtenHere(mtime, mtime + edge + side)).toBe(false);
+      })
+    );
+  });
+
+  it('takes a change with no mtime to read for a write made here', () => {
+    fc.assert(
+      fc.property(fc.integer(), windowArb, (now, windowMs) => {
+        expect(writtenHere(undefined, now, windowMs)).toBe(true);
+      })
+    );
+  });
+});
+
+describe('settleAfterSync', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('waits its wait out, then any merge under way by then, for at most as long again', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        // Not 0: the fake clock runs a 0ms timer set inside another one a
+        // millisecond late (`duringTick` in @sinonjs/fake-timers)
+        fc.option(fc.integer({ min: 1, max: 5000 }), { nil: undefined }),
+        // When a merge starts and ends, from the call
+        fc
+          .tuple(fc.nat({ max: 15_000 }), fc.nat({ max: 15_000 }))
+          .map(([x, y]) => ({ start: Math.min(x, y), end: Math.max(x, y) })),
+        async (waitMs, merge) => {
+          vi.useFakeTimers();
+          const wait = waitMs ?? MERGE_WAIT_MS;
+          const repo = makeReadiness();
+          // Set before the wait's own timer, so these win a tie with it
+          setTimeout(() => repo.set('merging'), merge.start);
+          setTimeout(() => repo.set('ready'), merge.end);
+          const started = Date.now();
+          let settledAfter: number | null = null;
+          void settleAfterSync(repo, waitMs).then(() => {
+            settledAfter = Date.now() - started;
+          });
+
+          await vi.advanceTimersByTimeAsync(4 * wait + 20_000);
+
+          const mergingAtWait = merge.start <= wait && wait < merge.end;
+          expect(settledAfter).toBe(
+            mergingAtWait ? Math.min(merge.end, 2 * wait) : wait
+          );
+        }
+      ).afterEach(() => vi.useRealTimers())
+    );
+  });
+});
+
 describe('shownInMarkdownView', () => {
   /** A leaf holding a markdown view of the note at `path`, or of none. */
   const markdownLeaf = (path: string | null) => ({
@@ -847,6 +990,256 @@ describe('createIrIdWatch', () => {
     });
   });
 
+  describe('whether the change was a write made here', () => {
+    const NOW = 1_800_000_000_000;
+
+    it('reports a damaged note only for a change made here while a tab showed it, at any one change of a burst', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.array(
+            fc.record({
+              shown: fc.boolean(),
+              // How long before now the change left the note's mtime, or no
+              // mtime to read
+              age: fc.option(
+                fc.integer({
+                  min: -3 * LOCAL_WRITE_WINDOW_MS,
+                  max: 3 * LOCAL_WRITE_WINDOW_MS,
+                }),
+                { nil: null }
+              ),
+            }),
+            { minLength: 1, maxLength: 4 }
+          ),
+          async (changes) => {
+            const answers = changes.map(({ shown }) => shown);
+            const { watch } = wire(
+              [ROW],
+              [{ path: ROW.reference, tags: [ARTICLE_TAG] }],
+              { isShown: () => answers.shift() ?? false, now: () => NOW }
+            );
+
+            for (const { age } of changes) {
+              watch.handleChange(
+                age === null
+                  ? changed(ROW.reference)
+                  : changedAt(ROW.reference, NOW - age)
+              );
+            }
+
+            const local = changes.some(
+              ({ shown, age }) =>
+                shown &&
+                (age === null || Math.abs(age) <= LOCAL_WRITE_WINDOW_MS)
+            );
+            expect(await watch.flush()).toStrictEqual(
+              local ? [ROW.reference] : []
+            );
+          }
+        )
+      );
+    });
+  });
+
+  describe('waiting on Sync before telling', () => {
+    /** What can become of a damaged note while a pass waits on Sync. */
+    const FATES = [
+      'unchanged',
+      // Its database arrives, the row deleted for good by an un-import
+      'purged',
+      // Undone here, as the notice asks
+      'restored',
+      // Its tag put back, but not its id
+      'retagged',
+      'removed',
+    ] as const;
+    type Fate = (typeof FATES)[number];
+    /** Whether a note met with `fate` is still damaged after it. */
+    const STILL_DAMAGED: Record<Fate, boolean> = {
+      unchanged: true,
+      purged: false,
+      restored: false,
+      retagged: true,
+      removed: false,
+    };
+
+    it('tells of only the notes still damaged once the wait is over, and of none before', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.array(fc.constantFrom(...FATES), { minLength: 1, maxLength: 6 }),
+          async (fates) => {
+            const rows = fates.map(
+              (_, i): StoredRow => ({
+                ...ROW,
+                id: `a${i}`,
+                reference: `notes/${i}.md`,
+              })
+            );
+            const gate = makeGate();
+            const { watch, repo, vault, onDamage } = wire(
+              rows,
+              rows.map(({ reference }) => ({
+                path: reference,
+                tags: [ARTICLE_TAG],
+              })),
+              { settle: gate.settle }
+            );
+            for (const { reference } of rows) {
+              watch.handleChange(changed(reference));
+            }
+
+            const pass = watch.flush();
+            await drain();
+            expect(gate.settle).toHaveBeenCalledOnce();
+            expect(onDamage).not.toHaveBeenCalled();
+            for (const [i, fate] of fates.entries()) {
+              const { id, reference } = rows[i];
+              if (fate === 'purged') {
+                repo.mutate(
+                  `UPDATE article SET deleted = TRUE, reference = $1 WHERE id = $2`,
+                  [purgedReference(id), id]
+                );
+              } else if (fate === 'restored') {
+                vault.notes.set(reference, { 'ir-id': id, tags: [ARTICLE_TAG] });
+              } else if (fate === 'retagged') {
+                vault.notes.set(reference, { tags: [ARTICLE_TAG, 'x'] });
+              } else if (fate === 'removed') {
+                vault.remove(reference);
+              }
+            }
+            gate.open();
+
+            const expected = rows
+              .filter((_, i) => STILL_DAMAGED[fates[i]])
+              .map(({ reference }) => reference);
+            expect(await pass).toStrictEqual(expected);
+            expect(onDamage.mock.calls).toStrictEqual(
+              expected.length > 0 ? [[expected]] : []
+            );
+          }
+        )
+      );
+    });
+
+    it('tells of a note found whole after the wait once it loses its id again, and of one told of only once', async () => {
+      const { watch, vault, onDamage } = wire(
+        [ROW, { ...ROW, id: 'a2', reference: 'notes/two.md' }],
+        [
+          { path: ROW.reference, tags: [ARTICLE_TAG] },
+          { path: 'notes/two.md', tags: [ARTICLE_TAG] },
+        ],
+        {
+          settle: async () => {
+            // Put back while the first pass waits, as an undo would
+            if (onDamage.mock.calls.length === 0) {
+              vault.notes.set(ROW.reference, {
+                'ir-id': ROW.id,
+                tags: [ARTICLE_TAG],
+              });
+            }
+          },
+        }
+      );
+      watch.handleChange(changed(ROW.reference));
+      watch.handleChange(changed('notes/two.md'));
+      expect(await watch.flush()).toStrictEqual(['notes/two.md']);
+
+      vault.notes.set(ROW.reference, { tags: [ARTICLE_TAG] });
+      watch.handleChange(changed(ROW.reference));
+      watch.handleChange(changed('notes/two.md'));
+
+      expect(await watch.flush()).toStrictEqual([ROW.reference]);
+      expect(onDamage.mock.calls).toStrictEqual([
+        [['notes/two.md']],
+        [[ROW.reference]],
+      ]);
+    });
+
+    it('waits on nothing when a pass finds nothing to tell of', async () => {
+      // Whole, closed, written elsewhere, and already told of
+      const notes: FakeNote[] = [
+        { path: 'notes/whole.md', irId: 'w', tags: [ARTICLE_TAG] },
+        { path: 'notes/closed.md', tags: [ARTICLE_TAG] },
+        { path: 'notes/synced.md', tags: [ARTICLE_TAG] },
+        { path: 'notes/told.md', tags: [ARTICLE_TAG] },
+      ];
+      // Any wait after the first never ends
+      const settle = vi
+        .fn(() => new Promise<void>(() => {}))
+        .mockImplementationOnce(async () => {});
+      const { watch, onDamage } = wire(
+        notes.map(({ path }, i) => ({
+          ...ROW,
+          id: i === 0 ? 'w' : `n${i}`,
+          reference: path,
+        })),
+        notes,
+        {
+          isShown: (path) => path !== 'notes/closed.md',
+          now: () => 0,
+          settle,
+        }
+      );
+      watch.handleChange(changed('notes/told.md'));
+      expect(await watch.flush()).toStrictEqual(['notes/told.md']);
+
+      watch.handleChange(changed('notes/whole.md'));
+      watch.handleChange(changed('notes/closed.md'));
+      watch.handleChange(
+        changedAt('notes/synced.md', LOCAL_WRITE_WINDOW_MS + 1)
+      );
+      watch.handleChange(changed('notes/told.md'));
+
+      expect(await watch.flush()).toStrictEqual([]);
+      expect(settle).toHaveBeenCalledOnce();
+      expect(onDamage).toHaveBeenCalledOnce();
+    });
+
+    it('neither reads the database nor tells anything once disposed during the wait', async () => {
+      const gate = makeGate();
+      const { watch, repo, onDamage } = wire(
+        [ROW],
+        [{ path: ROW.reference, tags: [ARTICLE_TAG] }],
+        { settle: gate.settle }
+      );
+      watch.handleChange(changed(ROW.reference));
+
+      const pass = watch.flush();
+      await drain();
+      watch.dispose();
+      // The repository may be closed by now, as it is on unload
+      const query = vi.spyOn(repo, 'query');
+      gate.open();
+
+      expect(await pass).toStrictEqual([]);
+      expect(query).not.toHaveBeenCalled();
+      expect(onDamage).not.toHaveBeenCalled();
+    });
+
+    it('tells nothing once disposed while the look after the wait reads the database', async () => {
+      const harness: { current?: Harness } = {};
+      const settle = async () => {
+        const { repo, watch } = harness.current!;
+        const query = vi.spyOn(repo, 'query');
+        query.mockImplementationOnce((...args) => {
+          watch.dispose();
+          query.mockRestore();
+          return repo.query(...args);
+        });
+      };
+      harness.current = wire(
+        [ROW],
+        [{ path: ROW.reference, tags: [ARTICLE_TAG] }],
+        { settle }
+      );
+      const { watch, onDamage } = harness.current;
+      watch.handleChange(changed(ROW.reference));
+
+      expect(await watch.flush()).toStrictEqual([]);
+      expect(onDamage).not.toHaveBeenCalled();
+    });
+  });
+
   it('reports exactly the notes on screen that lost their id or tag, and never writes a row', async () => {
     await fc.assert(
       fc.asyncProperty(
@@ -1065,10 +1458,11 @@ describe('createIrIdWatch', () => {
       for (const path of paths) watch.handleChange(changed(path));
       expect(await watch.flush()).toStrictEqual(paths);
 
-      // One read per item table per slice, a pause in each gap between
-      // slices, and none after the last
+      // One read per item table per slice, and one more for every note found
+      // damaged, read again together after the wait; a pause in each gap
+      // between slices, and none after the last
       const slices = Math.ceil(count / 2);
-      expect(query).toHaveBeenCalledTimes(slices * ITEM_TABLES.length);
+      expect(query).toHaveBeenCalledTimes((slices + 1) * ITEM_TABLES.length);
       expect(pausedAfter).toStrictEqual(
         Array.from(
           { length: slices - 1 },
@@ -1165,12 +1559,17 @@ describe('createIrIdWatch', () => {
     });
   });
 
-  it('defaults to the real timer, the host yield and the stock batch size', async () => {
+  it('defaults to the real timer and clock, the wait on Sync, the host yield and the stock batch size', async () => {
     vi.useFakeTimers();
     try {
       const repo = TestRepository.create();
+      const synced = { ...ROW, id: 'a2', reference: 'notes/synced.md' };
       insertItem(repo, ROW);
-      const vault = makeVault([{ path: ROW.reference }]);
+      insertItem(repo, synced);
+      const vault = makeVault([
+        { path: ROW.reference },
+        { path: synced.reference },
+      ]);
       const onDamage = vi.fn();
       const watch = createIrIdWatch({
         repo,
@@ -1180,13 +1579,14 @@ describe('createIrIdWatch', () => {
         isShown: () => true,
       });
 
-      watch.handleChange(changed(ROW.reference));
-      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS - 1);
+      watch.handleChange(changedAt(ROW.reference, Date.now()));
+      watch.handleChange(
+        changedAt(synced.reference, Date.now() - LOCAL_WRITE_WINDOW_MS - 1)
+      );
+      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS - 1 + MERGE_WAIT_MS);
       expect(onDamage).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      await vi.waitFor(() =>
-        expect(onDamage.mock.calls).toStrictEqual([[[ROW.reference]]])
-      );
+      expect(onDamage.mock.calls).toStrictEqual([[[ROW.reference]]]);
 
       // Cancelling goes through the same timer
       watch.handleChange(changed(ROW.reference));

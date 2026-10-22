@@ -1,7 +1,9 @@
-import { createIrIdWatch } from '#/lib/ir-id-watch';
+import { createIrIdWatch, LOCAL_WRITE_WINDOW_MS } from '#/lib/ir-id-watch';
 import ReviewManager from '#/lib/items/ReviewManager';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
+import { MERGE_WAIT_MS } from '#/lib/readiness';
 import { makeItemVault, TestRepository } from '#/test/item-vault';
+import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import initSqlJs from 'sql.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -37,13 +39,23 @@ class DeviceRepository extends TestRepository {
   }
 }
 
+/** How a device's tabs and clock stand, as its `ir-id` watch reads them. */
+interface Screen {
+  /** Whether a markdown tab here shows the note. */
+  shown: boolean;
+  /** This device's clock. */
+  now: number;
+}
+
 /**
  * One device: a vault holding `notes`, a real database and item managers over
- * them, and the `ir-id` watch reporting to `onDamage`.
+ * them, and the `ir-id` watch reporting to `onDamage`. Sync delivers to a note
+ * no tab on the device shows, unless `screen` is changed.
  */
 async function makeDevice(
   notes: Record<string, Record<string, unknown> | null>
 ) {
+  const screen: Screen = { shown: false, now: 0 };
   const vault = makeItemVault(notes);
   const repo = await DeviceRepository.make();
   const plugin: Record<string, unknown> = {
@@ -69,13 +81,20 @@ async function makeDevice(
     vault: vault.app.vault,
     metadataCache: vault.app.metadataCache,
     onDamage,
-    // Sync delivers to a note no tab on the device shows
-    isShown: () => false,
+    isShown: () => screen.shown,
+    now: () => screen.now,
     // Passes are run by hand, with `flush`
     schedule: () => () => {},
     yieldToHost: async () => {},
   });
-  return { vault, repo, articles: reviewManager.articles, watch, onDamage };
+  return {
+    vault,
+    repo,
+    articles: reviewManager.articles,
+    watch,
+    onDamage,
+    screen,
+  };
 }
 
 type Device = Awaited<ReturnType<typeof makeDevice>>;
@@ -202,6 +221,156 @@ describe('a note un-imported on one device, with Sync carrying the note and the 
       expect((await look(b, id)).fetched).toBeNull();
     }
   );
+
+  describe('with the note open on the other device', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /**
+     * The note, Sync-delivered `age` ms after the device it came from wrote it
+     * by this device's clock (negative when that one's clock runs ahead), and
+     * the database: first, being merged when the note lands until `mergeMs`
+     * after; or after, landing `dbAfterMs` after the pass starts and merged in
+     * `mergeMs`.
+     */
+    type Delivery =
+      | { first: 'db'; age: number; mergeMs: number }
+      | { first: 'note'; age: number; dbAfterMs: number; mergeMs: number };
+
+    const anyAgeArb = fc.integer({ min: -1e9, max: 1e9 });
+    /** An age no write made on this device could have. */
+    const foreignAgeArb = fc.oneof(
+      fc.integer({ min: LOCAL_WRITE_WINDOW_MS + 1, max: 1e9 }),
+      fc.integer({ min: -1e9, max: -LOCAL_WRITE_WINDOW_MS - 1 })
+    );
+    const deliveryArb: fc.Arbitrary<Delivery> = fc.oneof(
+      // A merge ending inside the pass's wait, however the note is dated
+      fc.record({
+        first: fc.constant('db' as const),
+        age: anyAgeArb,
+        mergeMs: fc.integer({ min: 0, max: 2 * MERGE_WAIT_MS - 1 }),
+      }),
+      // The database landing inside the pass's wait, however the note is dated
+      fc.record({
+        first: fc.constant('note' as const),
+        age: anyAgeArb,
+        dbAfterMs: fc.integer({ min: 0, max: MERGE_WAIT_MS - 1 }),
+        mergeMs: fc.integer({ min: 0, max: MERGE_WAIT_MS - 1 }),
+      }),
+      // Either landing however late, the note dated as no write made here
+      fc.record({
+        first: fc.constant('db' as const),
+        age: foreignAgeArb,
+        mergeMs: fc.integer({ min: 0, max: 600_000 }),
+      }),
+      fc.record({
+        first: fc.constant('note' as const),
+        age: foreignAgeArb,
+        dbAfterMs: fc.integer({ min: 0, max: 600_000 }),
+        mergeMs: fc.integer({ min: 0, max: 600_000 }),
+      })
+    );
+
+    /** Let every promise that can settle without a timer settle. */
+    const drain = () => new Promise((resolve) => setImmediate(resolve));
+
+    /**
+     * Sync bringing `a`'s note and database to `b` as `delivery` orders and
+     * times them, `b` showing the note, while a pass of `b`'s watch runs from
+     * the moment the note lands. Answers what the pass reported.
+     */
+    async function deliverWhileOpen(a: Device, b: Device, delivery: Delivery) {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      b.screen.shown = true;
+      b.screen.now = a.vault.files.get(NOTE)!.stat.mtime + delivery.age;
+      const merge = async (afterMs: number, done: () => void) => {
+        await vi.advanceTimersByTimeAsync(afterMs);
+        await deliverDb(a, b);
+        done();
+      };
+
+      if (delivery.first === 'db') {
+        // The file has landed, and the reload is taking it in
+        const done = b.repo.holdMerging();
+        await deliverNote(a, b, NOTE);
+        const pass = b.watch.flush();
+        await drain();
+        await merge(delivery.mergeMs, done);
+        await vi.advanceTimersByTimeAsync(3 * MERGE_WAIT_MS);
+        return pass;
+      }
+      await deliverNote(a, b, NOTE);
+      const pass = b.watch.flush();
+      await drain();
+      await vi.advanceTimersByTimeAsync(delivery.dbAfterMs);
+      await merge(delivery.mergeMs, b.repo.holdMerging());
+      await vi.advanceTimersByTimeAsync(3 * MERGE_WAIT_MS);
+      return pass;
+    }
+
+    it('neither reports nor writes anything for a note un-imported on one device, whichever file Sync brings first', async () => {
+      await fc.assert(
+        fc.asyncProperty(deliveryArb, async (delivery) => {
+          const { a, b, id } = await importedOnBoth();
+          await a.articles.unimportMany([a.vault.files.get(NOTE)!]);
+          const bWrites = vi.spyOn(b.repo, 'mutate');
+          const bNoteWrites = vi.spyOn(Obsidian, 'updateFrontMatter');
+
+          const reported = await deliverWhileOpen(a, b, delivery);
+          vi.useRealTimers();
+
+          expect(reported).toStrictEqual([]);
+          expect(b.onDamage).not.toHaveBeenCalled();
+          expect(bWrites).not.toHaveBeenCalled();
+          expect(bNoteWrites).not.toHaveBeenCalled();
+          expect(stateOf(b)).toStrictEqual(stateOf(a));
+          expect((await look(b, id)).fetched).toBeNull();
+          bWrites.mockRestore();
+          bNoteWrites.mockRestore();
+        })
+          // The next run sets up on the real clock, a failed one too
+          .afterEach(() => vi.useRealTimers()),
+        { numRuns: 40 }
+      );
+    });
+
+    it('still reports a note stripped on this device while it is open, once the wait for Sync has passed', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({
+            min: -LOCAL_WRITE_WINDOW_MS,
+            max: LOCAL_WRITE_WINDOW_MS,
+          }),
+          async (offset) => {
+            const { b } = await importedOnBoth();
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            b.screen.shown = true;
+            const file = b.vault.files.get(NOTE)!;
+            // Reading mode's properties editor, say, writing here and now
+            await b.vault.app.fileManager.processFrontMatter(file, (fm) => {
+              delete fm['ir-id'];
+              delete fm.tags;
+            });
+            b.screen.now = file.stat.mtime + offset;
+            b.watch.handleChange(file);
+
+            const pass = b.watch.flush();
+            await drain();
+            await vi.advanceTimersByTimeAsync(MERGE_WAIT_MS - 1);
+            expect(b.onDamage).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(1);
+
+            expect(await pass).toStrictEqual([NOTE]);
+            expect(b.onDamage.mock.calls).toStrictEqual([[[NOTE]]]);
+          }
+        )
+          // The next run sets up on the real clock
+          .afterEach(() => vi.useRealTimers()),
+        { numRuns: 15 }
+      );
+    });
+  });
 
   it('keeps the article on the other device, its note untouched, while only the stripped note has arrived', async () => {
     const { a, b, id } = await importedOnBoth();
