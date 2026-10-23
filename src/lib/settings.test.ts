@@ -175,12 +175,7 @@ function makeTab(
   vaultTags: readonly string[] = []
 ) {
   const folderPaths = new Set(folders);
-  const data: IRPluginData = {
-    settings,
-    session: { deviceId: 'device-a', itemId: 'item-1' },
-    warnedRefusedPaths: ['a|b.md'],
-    ui: { folderImportIncludeSubfolders: true },
-  };
+  const data: IRPluginData = { settings };
   const saved: IRPluginData[] = [];
   const events: string[] = [];
   const plugin = {

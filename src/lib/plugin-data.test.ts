@@ -1,17 +1,14 @@
 import * as fc from 'fast-check';
 import { describe, expect, it, vi } from 'vitest';
 import { AUTO_IMPORT_TAG } from './constants';
+import { LEGACY_DEVICE_STATE_KEYS } from './device-state';
 import {
   AUTO_IMPORT_WATERMARK_KEY,
-  DEFAULT_UI_STATE,
   DEVICE_ID_KEY,
   getDeviceId,
   loadAutoImportWatermark,
   parsePluginData,
-  parseSession,
-  parseUiState,
   saveAutoImportWatermark,
-  sessionItemId,
 } from './plugin-data';
 import { DEFAULT_SETTINGS } from './settings';
 import { parseTagList } from './tags';
@@ -32,32 +29,51 @@ function makeLocalStorage(initial: Record<string, unknown> = {}) {
   };
 }
 
-const makeSession = (deviceId = 'device-a', itemId = 'item-1') => ({
-  deviceId,
-  itemId,
-});
+const legacyKeys: readonly string[] = LEGACY_DEVICE_STATE_KEYS;
+
+/** The device state an older version kept beside the settings, any of it. */
+const legacyStateArb = fc.record(
+  {
+    session: fc.oneof(
+      fc.record({ deviceId: fc.string(), itemId: fc.string() }),
+      fc.anything()
+    ),
+    ui: fc.oneof(
+      fc.record({ folderImportIncludeSubfolders: fc.boolean() }),
+      fc.anything()
+    ),
+    warnedRefusedPaths: fc.oneof(fc.array(fc.string()), fc.anything()),
+  },
+  { requiredKeys: [] }
+);
 
 // #endregion
 
 describe('parsePluginData', () => {
-  it('reads the item paths the user was warned of, as strings only, and none from a file without them', () => {
-    expect(
-      parsePluginData({
-        settings: {},
-        warnedRefusedPaths: ['a|.md', 7, null, 'b#.md'],
-      }).warnedRefusedPaths
-    ).toStrictEqual(['a|.md', 'b#.md']);
-    expect(
-      parsePluginData({ settings: {}, warnedRefusedPaths: 'a|.md' })
-        .warnedRefusedPaths
-    ).toStrictEqual([]);
-    expect(parsePluginData({ settings: {} }).warnedRefusedPaths).toStrictEqual(
-      []
+  it('reads settings alone, never the device state an older version kept beside them, in either shape of the file', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc
+            .oneof(fc.dictionary(fc.string(), fc.anything()), fc.anything())
+            .map((settings) => ({ settings })),
+          // Written before settings had a key of their own
+          fc.dictionary(
+            fc
+              .string()
+              .filter((key) => key !== 'settings' && !legacyKeys.includes(key)),
+            fc.anything()
+          )
+        ),
+        legacyStateArb,
+        (file, state) => {
+          const data = parsePluginData({ ...file, ...state });
+
+          expect(data).toStrictEqual(parsePluginData(file));
+          expect(Object.keys(data)).toEqual(['settings']);
+        }
+      )
     );
-    expect(
-      parsePluginData({ defaultPriority: 42, warnedRefusedPaths: ['a|.md'] })
-        .warnedRefusedPaths
-    ).toStrictEqual(['a|.md']);
   });
 
   it('reads a file written before session state existed as settings', () => {
@@ -65,17 +81,12 @@ describe('parsePluginData', () => {
 
     expect(data.settings.defaultPriority).toBe(42);
     expect(data.settings.skipHomeScreen).toBe(true);
-    expect(data.session).toBeNull();
   });
 
-  it('reads settings and session from their own keys', () => {
-    const data = parsePluginData({
-      settings: { defaultPriority: 42 },
-      session: makeSession(),
-    });
+  it('reads settings from their own key', () => {
+    const data = parsePluginData({ settings: { defaultPriority: 42 } });
 
     expect(data.settings.defaultPriority).toBe(42);
-    expect(data.session).toEqual(makeSession());
   });
 
   it('fills in defaults for missing settings', () => {
@@ -91,7 +102,6 @@ describe('parsePluginData', () => {
     for (const raw of [null, undefined, 'nonsense', 42, ['a']]) {
       const data = parsePluginData(raw);
       expect(data.settings).toEqual(DEFAULT_SETTINGS);
-      expect(data.session).toBeNull();
     }
   });
 
@@ -372,152 +382,14 @@ describe('parsePluginData', () => {
           defaultPriority: fc.integer(),
           copyOnImport: fc.boolean(),
         }),
-        fc.option(fc.record({ deviceId: fc.string(), itemId: fc.string() }), {
-          nil: undefined,
-        }),
-        (settings, session) => {
-          const data = parsePluginData({
-            settings,
-            ...(session && { session }),
-          });
+        legacyStateArb,
+        (settings, state) => {
+          const data = parsePluginData({ settings, ...state });
 
           expect(data.settings).toEqual({ ...DEFAULT_SETTINGS, ...settings });
-          expect(data.session).toEqual(
-            session?.deviceId && session.itemId ? session : null
-          );
         }
       )
     );
-  });
-});
-
-describe('how the dialogs were last left', () => {
-  /** A stored `ui`: a valid one, one with a field gone wrong, or anything. */
-  const storedUiArb = fc.oneof(
-    fc.record({ folderImportIncludeSubfolders: fc.boolean() }),
-    fc.record(
-      { folderImportIncludeSubfolders: fc.anything() },
-      { requiredKeys: [] }
-    ),
-    fc.dictionary(fc.string(), fc.anything()),
-    fc.anything()
-  );
-  const expectedUi = (stored: unknown) => {
-    const field: unknown =
-      typeof stored === 'object' && stored !== null && !Array.isArray(stored)
-        ? (stored as Record<string, unknown>).folderImportIncludeSubfolders
-        : undefined;
-    return {
-      folderImportIncludeSubfolders: typeof field === 'boolean' ? field : false,
-    };
-  };
-
-  it('starts with "Include subfolders" off', () => {
-    expect(DEFAULT_UI_STATE).toEqual({ folderImportIncludeSubfolders: false });
-  });
-
-  it('keeps a saved on or off for "Include subfolders" and reads anything else as off, settings and session as they would be without it', () => {
-    fc.assert(
-      fc.property(
-        storedUiArb,
-        // Settings of any shape, a malformed half included
-        fc.oneof(fc.dictionary(fc.string(), fc.anything()), fc.anything()),
-        fc.option(fc.record({ deviceId: fc.string(), itemId: fc.string() })),
-        (stored, settings, session) => {
-          const without = parsePluginData({ settings, session });
-          const data = parsePluginData({ settings, session, ui: stored });
-
-          expect(data.ui).toEqual(expectedUi(stored));
-          expect(data.settings).toEqual(without.settings);
-          expect(data.session).toEqual(without.session);
-          expect(parseUiState(stored)).toEqual(expectedUi(stored));
-        }
-      )
-    );
-  });
-
-  it('starts as it first opens for a file saved before it was kept, or no file at all', () => {
-    fc.assert(
-      fc.property(
-        fc.oneof(
-          fc.dictionary(fc.string(), fc.anything()).map((settings) => ({
-            settings,
-          })),
-          fc.dictionary(
-            fc.string().filter((key) => key !== 'ui'),
-            fc.anything()
-          ),
-          fc.anything()
-        ),
-        (raw) => {
-          // A file of any shape without `ui` of its own
-          fc.pre(
-            typeof raw !== 'object' ||
-              raw === null ||
-              Array.isArray(raw) ||
-              !('ui' in raw)
-          );
-          expect(parsePluginData(raw).ui).toEqual(DEFAULT_UI_STATE);
-        }
-      )
-    );
-  });
-
-  it("reads into an object of each file's own, so a change to one is no other's", () => {
-    fc.assert(
-      fc.property(storedUiArb, (stored) => {
-        const first = parsePluginData({ settings: {}, ui: stored }).ui;
-        first.folderImportIncludeSubfolders =
-          !first.folderImportIncludeSubfolders;
-
-        expect(DEFAULT_UI_STATE.folderImportIncludeSubfolders).toBe(false);
-        expect(parsePluginData({ settings: {}, ui: stored }).ui).toEqual(
-          expectedUi(stored)
-        );
-        expect(parsePluginData({ settings: {} }).ui).toEqual({
-          folderImportIncludeSubfolders: false,
-        });
-      })
-    );
-  });
-});
-
-describe('parseSession', () => {
-  it('accepts a well-formed pointer', () => {
-    expect(parseSession(makeSession())).toEqual(makeSession());
-  });
-
-  it('rejects anything missing an id', () => {
-    const malformed = [
-      null,
-      undefined,
-      'item-1',
-      [makeSession()],
-      {},
-      { itemId: 'item-1' },
-      { deviceId: 'device-a' },
-      { deviceId: 'device-a', itemId: '' },
-      { deviceId: '', itemId: 'item-1' },
-      { deviceId: 7, itemId: 'item-1' },
-      { deviceId: 'device-a', itemId: 7 },
-    ];
-    for (const raw of malformed) {
-      expect(parseSession(raw)).toBeNull();
-    }
-  });
-});
-
-describe('sessionItemId', () => {
-  it('returns the item when the pointer belongs to this device', () => {
-    expect(sessionItemId(makeSession('device-a'), 'device-a')).toBe('item-1');
-  });
-
-  it('ignores a pointer another device synced over', () => {
-    expect(sessionItemId(makeSession('device-b'), 'device-a')).toBeNull();
-  });
-
-  it('has nothing to resume without a pointer', () => {
-    expect(sessionItemId(null, 'device-a')).toBeNull();
   });
 });
 

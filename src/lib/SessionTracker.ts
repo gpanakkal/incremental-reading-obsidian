@@ -1,4 +1,4 @@
-import type { ReviewSession } from './plugin-data';
+import type { ReviewSession } from './device-state';
 import type { ReviewPage } from './store';
 
 /**
@@ -28,7 +28,7 @@ interface SessionTrackerOptions {
 }
 
 /**
- * Mirrors "the item currently open in review" into `data.json`.
+ * Mirrors "the item currently open in review" into this device's storage.
  *
  * Both discard rules are already store transitions, so there is nothing to wire
  * into the components: going back to the home screen moves `page` off
@@ -61,7 +61,7 @@ export class SessionTracker {
    * left before it has been arrived at. See {@link commit}.
    */
   #holding = true;
-  /** Serializes writes: `saveData` replaces the whole file, so order matters. */
+  /** Serializes writes: each replaces the stored pointer, so order matters. */
   #pending: Promise<void> = Promise.resolve();
 
   constructor({
@@ -106,7 +106,7 @@ export class SessionTracker {
    * teardown sends arrives *after* this point — {@link commit} and the store
    * listener both stop here — so a timer still running was put there by the
    * user leaving the item, by finishing the last one due or by going back to
-   * the home screen. Dropping it would leave `data.json` naming an item review
+   * the home screen. Dropping it would leave the saved pointer naming an item review
    * had already left and resume onto it next launch, which is the whole of what
    * the delay was protecting against, inverted.
    */
@@ -141,7 +141,7 @@ export class SessionTracker {
    * the store has no current item to match against and so nothing else
    * notices: dismissing a note from its own action bar is the one that
    * prompted this. `resumeSession` would catch it on the way back in, since it
-   * resolves the pointer before trusting it, but only after `data.json` has
+   * resolves the pointer before trusting it, but only after the saved pointer has
    * spent the interval naming an item nothing will show. Kept truthful at the
    * point of the change instead.
    *
@@ -164,7 +164,7 @@ export class SessionTracker {
    * the emptying of the store that follows.
    *
    * The closing tab has the last word, so whichever tab closes last is the one
-   * `data.json` remembers — the shape the future multiple-review-tabs feature
+   * the saved pointer remembers — the shape the future multiple-review-tabs feature
    * needs, where the pointer cannot be left to whichever write happened to land
    * most recently. A tab closing on an item writes that item; a tab that had
    * already left it — the home screen, or "nothing due" after the last item —
@@ -225,7 +225,7 @@ export class SessionTracker {
    * The item review is meant to come back to, as of right now.
    *
    * Null the moment review leaves the item, while the write recording that is
-   * still on the timer: `data.json` lags a departure by up to
+   * still on the timer: the saved pointer lags a departure by up to
    * {@link SESSION_CLEAR_DELAY}, so a resume reading the file inside that window
    * would reopen the item review just finished with. Read this instead —
    * see `Plugin.resumeSession`.

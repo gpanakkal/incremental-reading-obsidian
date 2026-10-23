@@ -6,6 +6,13 @@ import {
   DATA_DIRECTORY,
   PLUGIN_ICON,
 } from '#/lib/constants';
+import {
+  loadDeviceState,
+  SESSION_KEY,
+  UI_STATE_KEY,
+  WARNED_PATHS_KEY,
+  type ReviewSession,
+} from '#/lib/device-state';
 import { refusedPathsWarning } from '#/lib/item-path-guard';
 import ReviewManager from '#/lib/items/ReviewManager';
 import { SnippetManager } from '#/lib/items/SnippetManager';
@@ -18,7 +25,11 @@ import {
 } from '#/lib/obsidian-sync';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import * as ObsidianPdf from '#/lib/pdf/obsidian-pdf';
-import { loadAutoImportWatermark, type ReviewSession } from '#/lib/plugin-data';
+import {
+  DEVICE_ID_KEY,
+  loadAutoImportWatermark,
+  parsePluginData,
+} from '#/lib/plugin-data';
 import { queryClient } from '#/lib/query-client';
 import {
   DatabaseLoadError,
@@ -268,11 +279,11 @@ function makeResumeReceiver({
   tracked?: string | null;
   item?: ReviewItem | null;
 } = {}) {
-  const saveSession = vi.fn(() => Promise.resolve());
+  const saveSession = vi.fn();
   const getItemOrMissingFromId = vi.fn(() => Promise.resolve(item));
   const forget = vi.fn();
   const receiver = {
-    data: { session },
+    deviceState: { session },
     app: { loadLocalStorage: vi.fn(() => DEVICE), saveLocalStorage: vi.fn() },
     reviewManager: { getItemOrMissingFromId },
     sessionTracker:
@@ -398,6 +409,7 @@ function makeFollowReceiver({
     offref: vi.fn(),
   };
   const saveData = vi.fn(() => Promise.resolve());
+  const saveLocalStorage = vi.fn();
   const startupScan = vi.fn(() => Promise.resolve());
   const runCatchUpScan = vi.fn(() => Promise.resolve());
   const watcher = { runCatchUpScan };
@@ -411,7 +423,7 @@ function makeFollowReceiver({
             (resolve) => (makeWatcher = () => resolve(watcher))
           ),
     },
-    data: { warnedRefusedPaths: [...warned] },
+    deviceState: { warnedRefusedPaths: [...warned] },
     saveData,
     rememberWarnedPaths: (
       IncrementalReadingPlugin.prototype as unknown as {
@@ -434,6 +446,7 @@ function makeFollowReceiver({
         getMarkdownFiles: vi.fn(() => [note]),
       },
       metadataCache,
+      saveLocalStorage,
     },
   };
   return {
@@ -446,6 +459,7 @@ function makeFollowReceiver({
     claimMovedFiles,
     itemPathsWithRefusedChars,
     saveData,
+    saveLocalStorage,
     startupScan,
     runCatchUpScan,
     /** Have `watchAutoImports` make the watcher, when `watcherMade` was false. */
@@ -907,7 +921,7 @@ function makeCreationReceiver(refused: (string | null)[]) {
   const unloaders: (() => void)[] = [];
   const handleCreation = vi.fn(() => Promise.resolve(refused.shift() ?? null));
   const receiver = {
-    data: { warnedRefusedPaths: ['old|.md'] },
+    deviceState: { warnedRefusedPaths: ['old|.md'] },
     saveData: vi.fn(() => Promise.resolve()),
     rememberWarnedPaths: (
       IncrementalReadingPlugin.prototype as unknown as {
@@ -916,6 +930,7 @@ function makeCreationReceiver(refused: (string | null)[]) {
     ).rememberWarnedPaths,
     reviewManager: undefined as unknown,
     app: {
+      saveLocalStorage: vi.fn(),
       vault: {
         on: vi.fn((_name: string, callback: (file: unknown) => void) => {
           created = callback;
@@ -1151,6 +1166,74 @@ function makeLoadReceiver() {
   };
   return { receiver, ribbonIcons, iconsAtRibbon };
 }
+
+/**
+ * Obsidian's per-vault localStorage as its source has it: values kept as
+ * JSON, `null` for a key never set, and any falsy value removing the key.
+ */
+function makeObsidianLocalStorage(initial: Record<string, unknown> = {}) {
+  const entries = new Map<string, string>();
+  const saveLocalStorage = vi.fn((key: string, data: unknown) => {
+    if (data) entries.set(key, JSON.stringify(data));
+    else entries.delete(key);
+  });
+  for (const [key, value] of Object.entries(initial)) {
+    if (value) entries.set(key, JSON.stringify(value));
+  }
+  return {
+    entries,
+    loadLocalStorage: (key: string): unknown => {
+      const json = entries.get(key);
+      return json ? (JSON.parse(json) as unknown) : null;
+    },
+    saveLocalStorage,
+  };
+}
+
+/**
+ * A bare plugin over `storage`, whose `data.json` holds `raw`. What it writes
+ * to the file lands in `written`, as JSON would keep it.
+ */
+function makeStoragePlugin(
+  storage: ReturnType<typeof makeObsidianLocalStorage>,
+  raw: unknown = { settings: {} }
+) {
+  const plugin = new IncrementalReadingPlugin({} as never, {} as never);
+  const written: unknown[] = [];
+  // The obsidian mock's Plugin has neither to spy on
+  const saveData = vi.fn((data: unknown) => {
+    written.push(JSON.parse(JSON.stringify(data)));
+    return Promise.resolve();
+  });
+  Object.assign(plugin, {
+    app: storage,
+    loadData: vi.fn(() => Promise.resolve(raw)),
+    saveData,
+  });
+  return { plugin, saveData, written };
+}
+
+/** A session pointer of any shape, empty ids included, or none. */
+const sessionOrNoneArb = fc.option(
+  fc.record({ deviceId: fc.string(), itemId: fc.string() }),
+  { nil: null }
+);
+
+/** What a device may already keep for itself, any key left unset. */
+const storedDeviceStateArb = fc.record(
+  {
+    [SESSION_KEY]: fc.oneof(
+      fc.string().map((itemId) => ({ deviceId: DEVICE, itemId })),
+      fc.anything()
+    ),
+    [UI_STATE_KEY]: fc.oneof(
+      fc.record({ folderImportIncludeSubfolders: fc.boolean() }),
+      fc.anything()
+    ),
+    [WARNED_PATHS_KEY]: fc.oneof(fc.array(fc.string()), fc.anything()),
+  },
+  { requiredKeys: [] }
+);
 
 // #endregion
 
@@ -2871,42 +2954,184 @@ describe('IncrementalReadingPlugin.syncReviewTitleBars', () => {
   });
 });
 
-describe('IncrementalReadingPlugin.saveUiState', () => {
-  it('writes the change into the whole file, the rest of it as it was', async () => {
+describe('IncrementalReadingPlugin.loadSettings', () => {
+  it("writes data.json back once, settings alone, only when it carried device state, and keeps this device's own", async () => {
+    const legacyKeys = ['session', 'ui', 'warnedRefusedPaths'];
+    const legacyStateArb = fc.record(
+      {
+        session: fc.oneof(
+          fc.string().map((itemId) => ({ deviceId: DEVICE, itemId })),
+          fc.record({ deviceId: fc.string(), itemId: fc.string() }),
+          fc.anything()
+        ),
+        ui: fc.oneof(
+          fc.record({ folderImportIncludeSubfolders: fc.boolean() }),
+          fc.anything()
+        ),
+        warnedRefusedPaths: fc.oneof(fc.array(fc.string()), fc.anything()),
+      },
+      { requiredKeys: [] }
+    );
+    const settingsArb = fc.dictionary(
+      fc
+        .string()
+        .filter((key) => key !== 'settings' && !legacyKeys.includes(key)),
+      fc.jsonValue()
+    );
+
     await fc.assert(
       fc.asyncProperty(
-        fc.boolean(),
+        fc.oneof(
+          fc
+            .tuple(settingsArb, legacyStateArb)
+            .map(([settings, state]) => ({ settings, ...state })),
+          fc
+            .tuple(settingsArb, legacyStateArb)
+            .map(([settings, state]) => ({ ...settings, ...state })),
+          fc.jsonValue()
+        ),
+        storedDeviceStateArb,
+        async (raw, stored) => {
+          const storage = makeObsidianLocalStorage({
+            ...stored,
+            [DEVICE_ID_KEY]: DEVICE,
+          });
+          const first = makeStoragePlugin(storage, raw);
+
+          await first.plugin.loadSettings();
+
+          const carried =
+            typeof raw === 'object' &&
+            raw !== null &&
+            !Array.isArray(raw) &&
+            legacyKeys.some((key) => key in raw);
+          expect(first.plugin.settings).toBe(first.plugin.data.settings);
+          expect(first.plugin.data).toStrictEqual(parsePluginData(raw));
+          expect(first.written).toStrictEqual(
+            carried
+              ? [
+                  {
+                    settings: JSON.parse(
+                      JSON.stringify(first.plugin.settings)
+                    ) as unknown,
+                  },
+                ]
+              : []
+          );
+          // What it holds in memory is what is stored, migration included
+          expect(first.plugin.deviceState).toStrictEqual(
+            loadDeviceState(storage)
+          );
+
+          const second = makeStoragePlugin(storage, first.written[0] ?? raw);
+          await second.plugin.loadSettings();
+
+          expect(second.saveData).not.toHaveBeenCalled();
+          expect(second.plugin.deviceState).toStrictEqual(
+            first.plugin.deviceState
+          );
+        }
+      )
+    );
+  });
+
+  it("resumes this device's pointer from a file an older version wrote, and not another device's", async () => {
+    const own = makeObsidianLocalStorage({ [DEVICE_ID_KEY]: DEVICE });
+    const { plugin } = makeStoragePlugin(own, {
+      settings: {},
+      session: { deviceId: DEVICE, itemId: 'item-1' },
+    });
+    await plugin.loadSettings();
+    expect(plugin.deviceState.session).toStrictEqual({
+      deviceId: DEVICE,
+      itemId: 'item-1',
+    });
+
+    const other = makeObsidianLocalStorage({ [DEVICE_ID_KEY]: DEVICE });
+    const foreign = makeStoragePlugin(other, {
+      settings: {},
+      session: { deviceId: 'device-b', itemId: 'item-1' },
+    });
+    await foreign.plugin.loadSettings();
+    expect(foreign.plugin.deviceState.session).toBeNull();
+    expect(foreign.written).toHaveLength(1);
+  });
+
+  it('still loads when writing the file back without device state fails, and retries next load', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const storage = makeObsidianLocalStorage({ [DEVICE_ID_KEY]: DEVICE });
+    const raw = {
+      settings: { defaultPriority: 42 },
+      session: { deviceId: DEVICE, itemId: 'item-1' },
+    };
+    const first = makeStoragePlugin(storage, raw);
+    first.saveData.mockRejectedValueOnce(new Error('disk full'));
+
+    await expect(first.plugin.loadSettings()).resolves.toBeUndefined();
+    expect(first.plugin.settings.defaultPriority).toBe(42);
+    expect(first.plugin.deviceState.session).toStrictEqual(raw.session);
+
+    const second = makeStoragePlugin(storage, raw);
+    await second.plugin.loadSettings();
+    expect(second.saveData).toHaveBeenCalledOnce();
+    expect(second.plugin.deviceState).toStrictEqual(first.plugin.deviceState);
+  });
+});
+
+describe('IncrementalReadingPlugin.saveSession', () => {
+  it("keeps the pointer in this device's storage, never data.json, the rest as it was", () => {
+    fc.assert(
+      fc.property(storedDeviceStateArb, sessionOrNoneArb, (stored, session) => {
+        const storage = makeObsidianLocalStorage(stored);
+        const { plugin, saveData } = makeStoragePlugin(storage);
+        plugin.deviceState = loadDeviceState(storage);
+        const before = loadDeviceState(storage);
+
+        plugin.saveSession(session);
+
+        expect(saveData).not.toHaveBeenCalled();
+        expect(plugin.deviceState.session).toBe(session);
+        expect(storage.saveLocalStorage).toHaveBeenCalledExactlyOnceWith(
+          SESSION_KEY,
+          session
+        );
+        expect(loadDeviceState(storage)).toStrictEqual({
+          ...before,
+          session:
+            session?.deviceId && session.itemId
+              ? { deviceId: session.deviceId, itemId: session.itemId }
+              : null,
+        });
+      })
+    );
+  });
+});
+
+describe('IncrementalReadingPlugin.saveUiState', () => {
+  it("keeps the change in this device's storage, never data.json, the rest as it was", () => {
+    fc.assert(
+      fc.property(
+        storedDeviceStateArb,
         fc.record(
           { folderImportIncludeSubfolders: fc.boolean() },
           { requiredKeys: [] }
         ),
-        async (before, change) => {
-          const plugin = new IncrementalReadingPlugin({} as never, {} as never);
-          const session = { deviceId: 'device-a', itemId: 'item-1' };
-          plugin.data = {
-            settings: { defaultPriority: 42 },
-            session,
-            warnedRefusedPaths: ['a|b.md'],
-            ui: { folderImportIncludeSubfolders: before },
-          } as never;
-          // The obsidian mock's Plugin has no saveData to spy on
-          const written: unknown[] = [];
-          const saveData = vi.fn((data: unknown) => {
-            written.push(structuredClone(data));
-            return Promise.resolve();
-          });
-          plugin.saveData = saveData;
+        (stored, change) => {
+          const storage = makeObsidianLocalStorage(stored);
+          const { plugin, saveData } = makeStoragePlugin(storage);
+          plugin.deviceState = loadDeviceState(storage);
+          const before = loadDeviceState(storage);
+          const ui = { ...before.ui, ...change };
 
-          await plugin.saveUiState(change);
+          plugin.saveUiState(change);
 
-          const expected = {
-            settings: { defaultPriority: 42 },
-            session,
-            warnedRefusedPaths: ['a|b.md'],
-            ui: { folderImportIncludeSubfolders: before, ...change },
-          };
-          expect(saveData).toHaveBeenCalledExactlyOnceWith(plugin.data);
-          expect(written).toEqual([expected]);
+          expect(saveData).not.toHaveBeenCalled();
+          expect(plugin.deviceState.ui).toStrictEqual(ui);
+          expect(storage.saveLocalStorage).toHaveBeenCalledExactlyOnceWith(
+            UI_STATE_KEY,
+            ui
+          );
+          expect(loadDeviceState(storage)).toStrictEqual({ ...before, ui });
         }
       )
     );
@@ -2983,7 +3208,7 @@ describe('IncrementalReadingPlugin.resumeSession', () => {
 
   it('leaves the pointer on disk to tracking once it is running', async () => {
     // A departure tracking has not written out yet still names the item in
-    // `data.json`; resuming from the file would reopen what review just left.
+    // storage; resuming from there would reopen what review just left.
     const { receiver, getItemOrMissingFromId } = makeResumeReceiver({
       session: { deviceId: DEVICE, itemId: 'item-1' },
       tracked: null,
@@ -3628,10 +3853,12 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
     followMovedNotes(heard);
     heard.finishIndexing();
     await vi.waitFor(() =>
-      expect(heard.saveData).toHaveBeenCalledExactlyOnceWith({
-        warnedRefusedPaths: ['a|b.md'],
-      })
+      expect(heard.saveLocalStorage).toHaveBeenCalledExactlyOnceWith(
+        WARNED_PATHS_KEY,
+        ['a|b.md']
+      )
     );
+    expect(heard.saveData).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
 
     const same = makeFollowReceiver({
@@ -3644,7 +3871,7 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
       expect(same.itemPathsWithRefusedChars).toHaveBeenCalled()
     );
     await settle();
-    expect(same.saveData).not.toHaveBeenCalled();
+    expect(same.saveLocalStorage).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
 
     const fresh = makeFollowReceiver({
@@ -3654,10 +3881,12 @@ describe('IncrementalReadingPlugin.followMovedNotes', () => {
     followMovedNotes(fresh);
     fresh.finishIndexing();
     await vi.waitFor(() =>
-      expect(fresh.saveData).toHaveBeenCalledExactlyOnceWith({
-        warnedRefusedPaths: ['a|b.md', 'c>.md'],
-      })
+      expect(fresh.saveLocalStorage).toHaveBeenCalledExactlyOnceWith(
+        WARNED_PATHS_KEY,
+        ['a|b.md', 'c>.md']
+      )
     );
+    expect(fresh.saveData).not.toHaveBeenCalled();
     expect(notify).toHaveBeenCalledExactlyOnceWith(
       refusedPathsWarning(['a|b.md', 'c>.md']),
       { persist: true }
@@ -3887,10 +4116,15 @@ describe('IncrementalReadingPlugin.watchCreations', () => {
       refusedPathsWarning(['a|.md', 'b#.md'])
     );
     await vi.waitFor(() =>
-      expect(watch.receiver.saveData).toHaveBeenCalledExactlyOnceWith({
-        warnedRefusedPaths: ['old|.md', 'a|.md', 'b#.md'],
-      })
+      expect(
+        watch.receiver.app.saveLocalStorage
+      ).toHaveBeenCalledExactlyOnceWith(WARNED_PATHS_KEY, [
+        'old|.md',
+        'a|.md',
+        'b#.md',
+      ])
     );
+    expect(watch.receiver.saveData).not.toHaveBeenCalled();
   });
 
   it('drops a waiting notice when the plugin unloads', async () => {

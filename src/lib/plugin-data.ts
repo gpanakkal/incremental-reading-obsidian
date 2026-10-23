@@ -1,4 +1,5 @@
 import type { App } from 'obsidian';
+import { LEGACY_DEVICE_STATE_KEYS } from './device-state';
 import {
   DEFAULT_SETTINGS,
   isAutoImportMode,
@@ -15,64 +16,35 @@ import { cleanFolderList } from './watched-folders';
 export { DEVICE_ID_KEY, getDeviceId } from './device-id';
 
 /**
- * Where the user left off in review, kept across restarts.
+ * Everything the plugin keeps in `data.json`: the settings, under their own key.
  *
- * `data.json` is synced along with the rest of the plugin's settings, so the
- * pointer carries the device that wrote it and is ignored everywhere else:
- * resuming one device's half-read article on another would silently override
- * that device's own queue order.
- */
-export interface ReviewSession {
-  deviceId: string;
-  itemId: string;
-}
-
-/**
- * Everything the plugin keeps in `data.json`. Settings live under their own key
- * so session state can be written without the settings tab knowing about it,
- * and vice versa — both writers go through the one in-memory object, since
- * `saveData` replaces the whole file.
+ * Settings alone, since Sync copies the file to every device: whatever belongs
+ * to one device lives in its localStorage instead (see `device-state.ts`).
  */
 export interface IRPluginData {
   settings: IRPluginSettings;
-  session: ReviewSession | null;
-  /**
-   * The item paths that break links the user was last told of, so that the
-   * startup notice comes back only for new ones (see `startupWarning`).
-   */
-  warnedRefusedPaths: string[];
-  /** How the plugin's dialogs were last left; see {@link UiState}. */
-  ui: UiState;
 }
-
-/**
- * Choices made in dialogs rather than in the settings tab, remembered so each
- * dialog opens the way the user left it.
- */
-export interface UiState {
-  /** Whether the folder import dialog's "Include subfolders" is on. */
-  folderImportIncludeSubfolders: boolean;
-}
-
-/** {@link UiState} for a file that has none: everything as it first opens. */
-export const DEFAULT_UI_STATE: Readonly<UiState> = {
-  folderImportIncludeSubfolders: false,
-};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /**
- * Read `data.json` into its two halves, filling in defaults.
+ * Read `data.json`'s settings, filling in defaults.
  *
  * Files written before session state existed are the settings object itself,
  * with no `settings` key — those are read whole as settings. No `IRPluginSettings`
- * field is named `settings`, so the two shapes can't be confused.
+ * field is named `settings`, so the two shapes can't be confused. In neither
+ * shape is the device state an older version kept beside the settings read as
+ * settings: `migrateLegacyDeviceState` moves it out.
  */
 export function parsePluginData(raw: unknown): IRPluginData {
   const data = isRecord(raw) ? raw : {};
   const legacy = !('settings' in data);
-  const saved = legacy ? data : isRecord(data.settings) ? data.settings : {};
+  const saved = legacy
+    ? withoutDeviceState(data)
+    : isRecord(data.settings)
+      ? data.settings
+      : {};
   const settings = { ...DEFAULT_SETTINGS, ...saved };
   // A hand-edited or newer file can hold any value here; one the review tab
   // doesn't know would leave it matching none of its three choices.
@@ -115,51 +87,17 @@ export function parsePluginData(raw: unknown): IRPluginData {
       )
     : [];
 
-  return {
-    settings,
-    session: legacy ? null : parseSession(data.session),
-    warnedRefusedPaths: Array.isArray(data.warnedRefusedPaths)
-      ? data.warnedRefusedPaths.filter(
-          (path): path is string => typeof path === 'string'
-        )
-      : [],
-    ui: parseUiState(data.ui),
-  };
+  return { settings };
 }
 
-/**
- * Stored {@link UiState}, each field not saved as one of its own values left
- * at its default. Always a new object, never {@link DEFAULT_UI_STATE} itself,
- * which a dialog writing to it would change for every later read.
- */
-export function parseUiState(raw: unknown): UiState {
-  const ui = isRecord(raw) ? raw : {};
-  return {
-    folderImportIncludeSubfolders:
-      typeof ui.folderImportIncludeSubfolders === 'boolean'
-        ? ui.folderImportIncludeSubfolders
-        : DEFAULT_UI_STATE.folderImportIncludeSubfolders,
-  };
-}
-
-/** A stored session pointer, or null when absent or malformed. */
-export function parseSession(raw: unknown): ReviewSession | null {
-  if (!isRecord(raw)) return null;
-  const { deviceId, itemId } = raw;
-  if (typeof deviceId !== 'string' || !deviceId) return null;
-  if (typeof itemId !== 'string' || !itemId) return null;
-  return { deviceId, itemId };
-}
-
-/**
- * The item to resume, or null when the pointer belongs to another device.
- */
-export function sessionItemId(
-  session: ReviewSession | null,
-  deviceId: string
-): string | null {
-  if (!session || session.deviceId !== deviceId) return null;
-  return session.itemId;
+/** `data` without the keys device state was once kept under. */
+function withoutDeviceState(
+  data: Record<string, unknown>
+): Record<string, unknown> {
+  const legacyKeys: readonly string[] = LEGACY_DEVICE_STATE_KEYS;
+  return Object.fromEntries(
+    Object.entries(data).filter(([key]) => !legacyKeys.includes(key))
+  );
 }
 
 /**

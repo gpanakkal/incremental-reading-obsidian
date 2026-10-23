@@ -141,10 +141,11 @@ export class BulkImportModal extends Modal {
         defaults={{
           priority: plugin.settings.defaultPriority,
           makeCopy: plugin.settings.copyOnImport,
-          includeSubfolders: plugin.data.ui.folderImportIncludeSubfolders,
+          includeSubfolders:
+            plugin.deviceState.ui.folderImportIncludeSubfolders,
         }}
         onIncludeSubfoldersChange={(on) =>
-          void plugin.saveUiState({ folderImportIncludeSubfolders: on })
+          plugin.saveUiState({ folderImportIncludeSubfolders: on })
         }
         onConfirm={(files, options) =>
           this.confirm(files, options, request.source.title)
@@ -197,10 +198,11 @@ export class BulkImportModal extends Modal {
         defaults={{
           priority: plugin.settings.defaultPriority,
           makeCopy: plugin.settings.copyOnImport,
-          includeSubfolders: plugin.data.ui.folderImportIncludeSubfolders,
+          includeSubfolders:
+            plugin.deviceState.ui.folderImportIncludeSubfolders,
         }}
         onIncludeSubfoldersChange={(on) =>
-          void plugin.saveUiState({ folderImportIncludeSubfolders: on })
+          plugin.saveUiState({ folderImportIncludeSubfolders: on })
         }
         onConfirm={(files, options, source) =>
           this.confirm(files, options, source.title)

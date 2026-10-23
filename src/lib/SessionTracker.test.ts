@@ -2,7 +2,12 @@
 
 import * as fc from 'fast-check';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ReviewSession } from './plugin-data';
+import {
+  loadDeviceState,
+  type ReviewSession,
+  sessionItemId,
+  writeSession,
+} from './device-state';
 import { SESSION_CLEAR_DELAY, SessionTracker } from './SessionTracker';
 import {
   resetCurrentItem,
@@ -47,6 +52,85 @@ const openItem = (itemId: string) => {
   store.dispatch(setPage('review'));
   store.dispatch(setCurrentItemId(itemId));
 };
+
+/**
+ * Obsidian's per-vault localStorage as its source has it: values kept as
+ * JSON, `null` for a key never set, and any falsy value removing the key.
+ */
+function makeLocalStorage() {
+  const entries = new Map<string, string>();
+  return {
+    loadLocalStorage: (key: string): unknown => {
+      const json = entries.get(key);
+      return json ? (JSON.parse(json) as unknown) : null;
+    },
+    saveLocalStorage: (key: string, data: unknown) => {
+      if (data) entries.set(key, JSON.stringify(data));
+      else entries.delete(key);
+    },
+  };
+}
+
+/** A tracker saving to `app`'s localStorage, as the plugin wires it. */
+function makeStoredTracker(app: ReturnType<typeof makeLocalStorage>) {
+  const tracker = new SessionTracker({
+    store,
+    deviceId: DEVICE,
+    initialItemId: sessionItemId(loadDeviceState(app).session, DEVICE),
+    save: (session) => {
+      writeSession(app, session);
+      return Promise.resolve();
+    },
+  });
+  return { tracker, stop: tracker.start() };
+}
+
+type StoreStep =
+  | { op: 'open'; itemId: string }
+  | { op: 'advance'; itemId: string | null }
+  | { op: 'home' }
+  | { op: 'review' };
+
+/** Any run of the transitions review goes through, item ids short to collide. */
+const stepsArb = fc.array(
+  fc.oneof(
+    fc
+      .string({ minLength: 1, maxLength: 3 })
+      .map((itemId): StoreStep => ({ op: 'open', itemId })),
+    fc
+      .option(fc.string({ minLength: 1, maxLength: 3 }), { nil: null })
+      .map((itemId): StoreStep => ({ op: 'advance', itemId })),
+    fc.constant<StoreStep>({ op: 'home' }),
+    fc.constant<StoreStep>({ op: 'review' })
+  ),
+  { maxLength: 12 }
+);
+
+/** What review is showing, as a pointer: null unless on an item. */
+const shownItemId = () => {
+  const { page, currentItemId } = store.getState();
+  return page === 'review' ? currentItemId : null;
+};
+
+/**
+ * Push `steps` through the review store, letting each write land, and say
+ * whether review showed an item at any point.
+ */
+async function runSteps(steps: StoreStep[]): Promise<boolean> {
+  let shown = false;
+  for (const step of steps) {
+    if (step.op === 'open') openItem(step.itemId);
+    if (step.op === 'advance') {
+      store.dispatch(resetCurrentItem());
+      if (step.itemId) store.dispatch(setCurrentItemId(step.itemId));
+    }
+    if (step.op === 'home') store.dispatch(setPage('home'));
+    if (step.op === 'review') store.dispatch(setPage('review'));
+    await flush();
+    shown ||= shownItemId() !== null;
+  }
+  return shown;
+}
 
 // #endregion
 
@@ -682,6 +766,33 @@ describe('SessionTracker', () => {
           expect(written?.itemId ?? null).toBe(shown);
         }
       )
+    );
+  });
+
+  it("leaves this device's storage naming whatever review is showing, for the next launch to resume", async () => {
+    await fc.assert(
+      fc.asyncProperty(stepsArb, stepsArb, async (before, after) => {
+        const app = makeLocalStorage();
+        let remembered: string | null = null;
+
+        // One launch, then a quit, then the next launch over the same storage
+        for (const steps of [before, after]) {
+          store.dispatch(resetSession());
+          const { tracker, stop } = makeStoredTracker(app);
+          expect(tracker.itemId).toBe(remembered);
+          // The last launch's item stands until review shows one of its own
+          if (await runSteps(steps)) remembered = shownItemId();
+          await settle();
+          await tracker.suspend();
+          stop();
+
+          expect(loadDeviceState(app).session).toStrictEqual(
+            remembered === null
+              ? null
+              : { deviceId: DEVICE, itemId: remembered }
+          );
+        }
+      })
     );
   });
 });

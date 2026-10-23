@@ -1,3 +1,4 @@
+import { UI_STATE_KEY } from '#/lib/device-state';
 import test, {
   expect,
   type ElectronApplication,
@@ -447,23 +448,20 @@ test.describe('Importing from a folder', () => {
     await modal.getByRole('button', { name: 'Cancel' }).click();
     await expect(modal).toHaveCount(0);
 
-    // Saved, so the plugin loaded again below reads it
+    // Saved for this device, so the plugin loaded again below reads it.
+    // Unofficial: `app.loadLocalStorage`.
     await expect
-      .poll(async () => {
-        try {
-          const data = await fs.readFile(
-            path.join(
-              vaultPath,
-              '.obsidian/plugins/incremental-reading/data.json'
-            ),
-            'utf8'
-          );
-          return (JSON.parse(data) as { ui?: unknown }).ui;
-        } catch {
-          // Not written yet, or caught halfway through a write
-          return null;
-        }
-      })
+      .poll(() =>
+        window.evaluate(
+          (key) =>
+            (
+              window as unknown as {
+                app: { loadLocalStorage(key: string): unknown };
+              }
+            ).app.loadLocalStorage(key),
+          UI_STATE_KEY
+        )
+      )
       .toEqual({ folderImportIncludeSubfolders: true });
     // Loaded again, as at the next start. Unofficial: `app.plugins`.
     await window.evaluate(async () => {

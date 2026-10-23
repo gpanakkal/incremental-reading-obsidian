@@ -912,6 +912,81 @@ test.describe('Review session', () => {
     await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
   });
 
+  test('resumes the item review was on after a reload, without writing the synced data.json', async () => {
+    // `data.json` travels to every device with Sync, so the pointer lives in
+    // this device's localStorage. Unofficial: `window.app`, `app.plugins`, and
+    // `vault.writePluginData`, which `Plugin.saveData` writes through; the
+    // vault outlives the plugin, so the watch sees the reloaded instance too.
+    type WatchedWindow = {
+      app: {
+        vault: {
+          writePluginData: (dir: string, ...rest: unknown[]) => unknown;
+        };
+        plugins: {
+          plugins: Record<string, unknown>;
+          disablePlugin(id: string): Promise<void>;
+          enablePlugin(id: string): Promise<boolean>;
+        };
+      };
+      __irDataWrites: string[];
+    };
+    await window.evaluate(() => {
+      const page = window as unknown as WatchedWindow;
+      const { vault } = page.app;
+      const { writePluginData } = vault;
+      page.__irDataWrites = [];
+      vault.writePluginData = (dir, ...rest) => {
+        if (dir.endsWith('incremental-reading')) page.__irDataWrites.push(dir);
+        return writePluginData.call(vault, dir, ...rest);
+      };
+    });
+
+    for (const note of [
+      'sources/Memorizing a programming language using spaced repetition',
+      'sources/Security Principles',
+    ]) {
+      await openNote(window, note);
+      await executeCommandById(window, 'incremental-reading:import-article');
+      await finalizeArticleImport(window);
+    }
+    await executeCommandById(window, 'incremental-reading:learn');
+    await window.locator('css=#begin-review-button').click();
+    await expect(window.locator('.ir-title')).toBeVisible();
+    // Whichever of the two comes first, review moves on to the other
+    const second = (await reviewTitle(window, ARTICLE_TITLE).isVisible())
+      ? 'Security Principles'
+      : ARTICLE_TITLE;
+    await window
+      .getByRole('button', { name: 'Skip for current review session' })
+      .click();
+    await expect(reviewTitle(window, second)).toBeVisible();
+
+    // Loaded again, as at the next start
+    await window.evaluate(async () => {
+      const { plugins } = (window as unknown as WatchedWindow).app;
+      await plugins.disablePlugin('incremental-reading');
+      await plugins.enablePlugin('incremental-reading');
+    });
+    await expect
+      .poll(() =>
+        window.evaluate(
+          () =>
+            'incremental-reading' in
+            (window as unknown as WatchedWindow).app.plugins.plugins
+        )
+      )
+      .toBe(true);
+
+    // The review tab outlives the plugin and mounts again, resuming by itself
+    // (Learn would toggle the focused tab home instead)
+    await expect(reviewTitle(window, second)).toBeVisible();
+    expect(
+      await window.evaluate(
+        () => (window as unknown as WatchedWindow).__irDataWrites
+      )
+    ).toEqual([]);
+  });
+
   test('lands on the home screen when the remembered item is dismissed elsewhere', async () => {
     // Dismissing from the note's own pane happens with no review tab open, so
     // the plugin has no current item to match the dismissal against — the

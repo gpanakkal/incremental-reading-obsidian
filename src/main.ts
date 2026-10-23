@@ -55,6 +55,17 @@ import {
 import databaseSchema from './db/schema.sql';
 import { Actions } from './lib/Actions';
 import { DATABASE_FILE_PATH, PLUGIN_ICON } from './lib/constants';
+import {
+  type DeviceState,
+  type ReviewSession,
+  type UiState,
+  loadDeviceState,
+  migrateLegacyDeviceState,
+  sessionItemId,
+  writeSession,
+  writeUiState,
+  writeWarnedPaths,
+} from './lib/device-state';
 import { recordEphemeralState } from './lib/ephemeral-position';
 import { createIRExtensions, IR_ID_LOCKED_NOTICE } from './lib/extensions';
 import { registerFileExplorerActiveFileClick } from './lib/extensions/FileExplorerActiveFileClick';
@@ -94,11 +105,8 @@ import {
 import { ObsidianHelpers as Obsidian } from './lib/ObsidianHelpers';
 import {
   type IRPluginData,
-  type ReviewSession,
-  type UiState,
   getDeviceId,
   parsePluginData,
-  sessionItemId,
 } from './lib/plugin-data';
 import {
   applyQueueChange,
@@ -183,8 +191,13 @@ function withResolvers<T>() {
 }
 
 export default class IncrementalReadingPlugin extends Plugin {
-  /** Everything persisted to `data.json`; `settings` is this object's own half. */
+  /** Everything persisted to `data.json`: the settings, nothing else. */
   data!: IRPluginData;
+  /**
+   * What this device keeps for itself in localStorage, loaded at startup and
+   * kept in step with every write (see `device-state.ts`).
+   */
+  deviceState!: DeviceState;
   // `declare`: Obsidian 1.13 types `Plugin.settings` as `unknown`, so this
   // narrows it without emitting a class field.
   declare settings: IRPluginSettings;
@@ -510,11 +523,36 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.stopDebugTiming?.();
   }
 
+  /**
+   * Read the settings from `data.json` and this device's own state from
+   * localStorage, first moving any device state an older version left in
+   * `data.json` over — the one time this writes the file without the
+   * settings tab asking.
+   */
   async loadSettings() {
-    this.data = parsePluginData(await this.loadData());
+    const raw: unknown = await this.loadData();
+    this.data = parsePluginData(raw);
     // The same object, not a copy: every `plugin.settings.x = y; saveSettings()`
     // call site keeps working, and its edit is already in what gets written.
     this.settings = this.data.settings;
+    const carried = migrateLegacyDeviceState(
+      this.app,
+      raw,
+      getDeviceId(this.app)
+    );
+    this.deviceState = loadDeviceState(this.app);
+    if (!carried) return;
+    // Only cleanup: the state is already in localStorage and the settings in
+    // memory, so a failed write must not stop the plugin loading. The next
+    // load finds the keys again and retries, taking nothing over twice.
+    try {
+      await this.saveData(this.data);
+    } catch (error: unknown) {
+      console.error(
+        'Incremental Reading: could not remove device state from data.json',
+        error
+      );
+    }
   }
 
   /**
@@ -559,21 +597,22 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   /**
-   * Persist (or drop) the item review left off on. Writes the whole file, since
-   * that is all `saveData` can do — hence the single shared {@link data}.
+   * Persist (or drop) the item review left off on, in this device's
+   * localStorage: never `data.json`, which Sync would carry to every device
+   * on every item review lands on.
    */
-  async saveSession(session: ReviewSession | null) {
-    this.data.session = session;
-    await this.saveData(this.data);
+  saveSession(session: ReviewSession | null) {
+    this.deviceState.session = session;
+    writeSession(this.app, session);
   }
 
   /**
    * Remember `change` to how a dialog was left, so it opens that way next
-   * time, restarts included. Writes the whole file, as {@link saveSession}.
+   * time, restarts included. Per device, as {@link saveSession}.
    */
-  async saveUiState(change: Partial<UiState>) {
-    Object.assign(this.data.ui, change);
-    await this.saveData(this.data);
+  saveUiState(change: Partial<UiState>) {
+    Object.assign(this.deviceState.ui, change);
+    writeUiState(this.app, this.deviceState.ui);
   }
 
   /**
@@ -593,12 +632,12 @@ export default class IncrementalReadingPlugin extends Plugin {
     if (store.getState().currentItemId) return false;
 
     // Tracking owns the pointer once it is running: a departure it has not
-    // written out yet is still a departure, while `data.json` would still name
-    // the item for another `SESSION_CLEAR_DELAY`. Only startup, which runs
-    // before tracking begins, reads the file.
+    // written out yet is still a departure, while the saved pointer would still
+    // name the item for another `SESSION_CLEAR_DELAY`. Only startup, which runs
+    // before tracking begins, reads the saved one.
     const itemId = this.sessionTracker
       ? this.sessionTracker.itemId
-      : sessionItemId(this.data.session, getDeviceId(this.app));
+      : sessionItemId(this.deviceState.session, getDeviceId(this.app));
     if (!itemId) return false;
 
     const item = await this.reviewManager.getItemOrMissingFromId(itemId);
@@ -607,30 +646,33 @@ export default class IncrementalReadingPlugin extends Plugin {
     // moments after the click records the item still on screen.
     if (!item || item.data.dismissed) {
       // Through tracking where it is running, so that its own idea of what is
-      // on disk goes with the pointer; straight to the file at startup, which
+      // on disk goes with the pointer; straight to storage at startup, which
       // is the only time there is no tracker to tell.
       if (this.sessionTracker) this.sessionTracker.forget();
-      else await this.saveSession(null);
+      else this.saveSession(null);
       return false;
     }
     store.dispatch(setCurrentItemId(itemId));
     return true;
   }
 
-  /** Keep `data.json` in step with the item review is showing. */
+  /** Keep the stored session in step with the item review is showing. */
   private startSessionTracking() {
     const deviceId = getDeviceId(this.app);
     this.sessionTracker = new SessionTracker({
       store,
       deviceId,
-      initialItemId: sessionItemId(this.data.session, deviceId),
-      save: (session) => this.saveSession(session),
+      initialItemId: sessionItemId(this.deviceState.session, deviceId),
+      save: (session) => {
+        this.saveSession(session);
+        return Promise.resolve();
+      },
     });
     this.register(this.sessionTracker.start());
     // Quitting empties the review session the same way leaving it does; stop
     // mirroring before any of that teardown can be written out. The write that
     // suspending settles goes on the quit's own task list, so the app waits for
-    // `data.json` rather than closing over a half-finished save.
+    // the pointer rather than closing over a half-finished save.
     this.registerEvent(
       this.app.workspace.on('quit', (tasks) => {
         const suspended = this.sessionTracker?.suspend();
@@ -792,8 +834,8 @@ export default class IncrementalReadingPlugin extends Plugin {
     const arrivals = createArrivalWarning({
       notify: (message, paths) => {
         Obsidian.notify(message);
-        void this.rememberWarnedPaths([
-          ...this.data.warnedRefusedPaths,
+        this.rememberWarnedPaths([
+          ...this.deviceState.warnedRefusedPaths,
           ...paths,
         ]);
       },
@@ -812,9 +854,9 @@ export default class IncrementalReadingPlugin extends Plugin {
   }
 
   /** Keep `paths` as the item paths that break links the user has heard of. */
-  private async rememberWarnedPaths(paths: readonly string[]) {
-    this.data.warnedRefusedPaths = [...new Set(paths)];
-    await this.saveData(this.data);
+  private rememberWarnedPaths(paths: readonly string[]) {
+    this.deviceState.warnedRefusedPaths = [...new Set(paths)];
+    writeWarnedPaths(this.app, this.deviceState.warnedRefusedPaths);
   }
 
   /**
@@ -1016,11 +1058,11 @@ export default class IncrementalReadingPlugin extends Plugin {
           const paths = await this.reviewManager.itemPathsWithRefusedChars();
           const { warn, remember } = startupWarning(
             paths,
-            this.data.warnedRefusedPaths
+            this.deviceState.warnedRefusedPaths
           );
           if (warn)
             Obsidian.notify(refusedPathsWarning(paths)!, { persist: true });
-          if (remember) await this.rememberWarnedPaths(remember);
+          if (remember) this.rememberWarnedPaths(remember);
         })
         .catch((error: unknown) => {
           console.error(

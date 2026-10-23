@@ -8,9 +8,9 @@ import type {
   ScanEvent,
 } from '#/lib/bulk-import/types';
 import { MINIMUM_FIXED_REVIEW_INTERVAL } from '#/lib/constants';
+import type { UiState } from '#/lib/device-state';
 import { explorerComparator } from '#/lib/explorer-order';
 import IRScheduler from '#/lib/IRScheduler';
-import type { UiState } from '#/lib/plugin-data';
 import { queryClient } from '#/lib/query-client';
 import { DEFAULT_SETTINGS } from '#/lib/settings';
 import type IncrementalReadingPlugin from '#/main';
@@ -45,7 +45,6 @@ function makePlugin(
   const ui: UiState = { folderImportIncludeSubfolders: includeSubfolders };
   const saveUiState = vi.fn((change: Partial<UiState>) => {
     Object.assign(ui, change);
-    return Promise.resolve();
   });
   // The entry an import records for an undo, and its notice button
   const entry = { description: 'importing', undo: vi.fn() };
@@ -57,7 +56,7 @@ function makePlugin(
   const plugin = {
     app: {},
     settings: { ...DEFAULT_SETTINGS, copyOnImport },
-    data: { ui },
+    deviceState: { ui },
     saveUiState,
     reviewManager: { importArticles },
     actions,
