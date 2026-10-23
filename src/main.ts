@@ -110,6 +110,7 @@ import {
   startItemCacheEviction,
 } from './lib/query-client';
 import { followWhenReady } from './lib/readiness';
+import { enableDebugTiming } from './lib/repository/phase-timing';
 import {
   DatabaseLoadError,
   SQLJSRepository,
@@ -241,7 +242,12 @@ export default class IncrementalReadingPlugin extends Plugin {
 
   MarkdownEditor!: typeof ExtractedMarkdownEditor;
 
+  /** Turns off the reload timing log `onload` may have turned on. */
+  private stopDebugTiming?: () => void;
+
   async onload() {
+    // A developer switch for timing reloads of the database file (0184)
+    this.stopDebugTiming = enableDebugTiming();
     await this.loadSettings();
     // Success notices follow this plugin's levels, inside review or not
     configureSuccessNotices(this);
@@ -501,6 +507,7 @@ export default class IncrementalReadingPlugin extends Plugin {
   onunload() {
     this.reviewManager?.repo.dispose();
     configureSuccessNotices(null);
+    this.stopDebugTiming?.();
   }
 
   async loadSettings() {

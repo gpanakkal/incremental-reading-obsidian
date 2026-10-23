@@ -43,6 +43,7 @@ import initSqlJs, {
 } from 'sql.js';
 import { BulkMutateError } from './BulkMutateError';
 import { ContentWatch, type ContentMark } from './content-watch';
+import { markPhase } from './phase-timing';
 import { backupFileName, pruneBackups, pruneDatabase } from './retention';
 import {
   mergeInto,
@@ -626,9 +627,11 @@ export class SQLJSRepository implements SQLiteRepository {
    * changed again since, as the reload that follows decides instead.
    */
   async #reloadOnce() {
+    markPhase('start');
     this.#setMerging(true);
     try {
       const incoming = await this.#readIncoming();
+      markPhase('read');
       // What follows may export or save the database, which would end a
       // transaction opened while the file was read; hold it back like any
       // reload that comes due during one
@@ -638,6 +641,7 @@ export class SQLJSRepository implements SQLiteRepository {
       }
       if (incoming && !(await this.#answerIncoming(incoming))) return;
       const db = incoming ? await this.reloadDb(incoming.bytes) : null;
+      markPhase('take-in');
       if (this.#disposed) return;
       if (db === null) {
         if (this.#reloadAgain) return;
@@ -657,6 +661,7 @@ export class SQLJSRepository implements SQLiteRepository {
       } finally {
         this.#reloadCallbacks--;
       }
+      markPhase('refetch');
     } catch (error) {
       if (this.#reloadAgain) {
         console.error(error);
@@ -677,6 +682,7 @@ export class SQLJSRepository implements SQLiteRepository {
       }
     } finally {
       this.#setMerging(false);
+      markPhase('end');
     }
   }
 
@@ -741,6 +747,7 @@ export class SQLJSRepository implements SQLiteRepository {
             stamp,
             this.#stampClock()
           );
+    markPhase('classify');
     switch (kind) {
       case 'echo':
         return false;
@@ -805,6 +812,7 @@ export class SQLJSRepository implements SQLiteRepository {
     let incoming: Database;
     try {
       incoming = openIncoming(this.#sql!, new Uint8Array(bytes), migrations);
+      markPhase('open');
     } catch (error) {
       return this.#mergeFailed(db, error, false);
     }
@@ -822,6 +830,7 @@ export class SQLJSRepository implements SQLiteRepository {
       } else {
         // Nothing merged yet: memory is backed up as it stands, then merged
         if (!(await this.#backUpMemory(db, 'merge'))) return false;
+        markPhase('backup');
         try {
           report = mergeInto(db, incoming, stamps, this.#replaySettings());
         } catch (error) {
@@ -833,8 +842,10 @@ export class SQLJSRepository implements SQLiteRepository {
     } finally {
       incoming.close();
     }
+    markPhase('close');
     // Listeners hear of the rows the merge changed, as of any write
     this.#flushChanges();
+    markPhase('flush');
     // Straight to `save`, past the gate that skips writes changing nothing
     // (`#contentChanged`, 0174): a merge that changed no row still has a
     // write stamp the other device must take on. `save` logs its own failures
@@ -858,6 +869,7 @@ export class SQLJSRepository implements SQLiteRepository {
       } finally {
         this.#reloadCallbacks--;
       }
+      markPhase('refetch');
     }
     return false;
   }
@@ -1291,6 +1303,7 @@ export class SQLJSRepository implements SQLiteRepository {
       // save after this one
       const stamp = bumpWriteStamp(source, this.#device(), this.#stampClock());
       const data = this.#exportDb(source).buffer;
+      markPhase('export');
       if (this.#fresh) {
         // Shared, so saves started together all wait on one check rather
         // than a later one finding the file an earlier one just wrote
@@ -1313,10 +1326,14 @@ export class SQLJSRepository implements SQLiteRepository {
       wroteFresh = this.#fresh;
       this.#fresh = false;
       recordSave('saved');
+      // Before the write: the modify event it raises can start the next reload
+      // before the write resolves
+      markPhase('save');
       await this.app.vault.adapter.writeBinary(
         normalizePath(this.#dbFilePath),
         data as ArrayBuffer
       );
+      markPhase('write');
       this.#saves.wrote = Math.max(this.#saves.wrote, save);
       // In the order writes land, so the last one on disk is the one kept
       saveKnownWriteVector(this.app, stamp);
