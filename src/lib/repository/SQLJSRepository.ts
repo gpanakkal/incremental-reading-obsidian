@@ -846,6 +846,10 @@ export class SQLJSRepository implements SQLiteRepository {
           `A backup was saved.`
       );
     }
+    // Merged, committed and its save under way: what follows only refetches,
+    // as after a take-in (see `#reloadOnce`), so writes held over the merge
+    // land now instead of waiting out the refetch too
+    this.#setMerging(false);
     if (report.written > 0) {
       // Merged rows may be ahead of the notes Sync brings, as a reload's are
       this.#reloadCallbacks++;

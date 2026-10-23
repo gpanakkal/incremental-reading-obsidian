@@ -4568,6 +4568,32 @@ describe("telling another device's copy from this device's own save", () => {
     repo.db?.close();
   });
 
+  it('is ready before the refetch a merge asks for, which it does not wait out', async () => {
+    const { repo, files, onReloadFromDisk } = await startStored(['a']);
+    insertArticleRow(repo, 'b');
+    await settle();
+    const told: string[] = [];
+    repo.onReadinessChange((state) => told.push(state));
+    let duringRefetch: string | null = null;
+    let endRefetch = () => {};
+    onReloadFromDisk.mockImplementation(() => {
+      duringRefetch = repo.readiness;
+      return new Promise<void>((resolve) => (endRefetch = resolve));
+    });
+
+    files.set(DATABASE_FILE_PATH, await dbFileWith(['remote']));
+    const reload = repo.handleFileChange(dbFileChange);
+    await vi.waitFor(() => expect(duringRefetch).not.toBeNull());
+
+    expect(duringRefetch).toBe('ready');
+    expect(told).toEqual(['merging', 'ready']);
+    expect(articleIds(repo).sort()).toEqual(['a', 'b', 'remote']);
+    endRefetch();
+    await reload;
+    expect(told).toEqual(['merging', 'ready']);
+    repo.db?.close();
+  });
+
   it('saves a merge that brings no row, only saves of other devices, so they reach the next device', async () => {
     const { repo, files, onReloadFromDisk } = await startStored(['a']);
     insertArticleRow(repo, 'b');
