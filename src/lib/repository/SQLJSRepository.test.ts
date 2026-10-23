@@ -4611,7 +4611,7 @@ describe("telling another device's copy from this device's own save", () => {
     const { repo, files, adapter } = await startStored(['a']);
     insertArticleRow(repo, 'b');
     await settle();
-    vi.spyOn(rowMerge, 'previewMerge').mockImplementationOnce(() => {
+    vi.spyOn(rowMerge, 'mergeUnlessLossy').mockImplementationOnce(() => {
       throw new Error('no such column');
     });
 

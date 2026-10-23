@@ -15,6 +15,7 @@ import {
   INCOMING_SCHEMA,
   MERGE_TABLES,
   mergeInto,
+  mergeUnlessLossy,
   openIncoming,
   previewMerge,
   type MergeReport,
@@ -906,6 +907,70 @@ describe('previewMerge', () => {
       { numRuns: 150 }
     );
   }, 60_000);
+});
+
+describe('mergeUnlessLossy', () => {
+  it('property: merges as mergeInto does, unless that would replace a row, then changes nothing', () => {
+    fc.assert(
+      fc.property(copyArb, copyArb, (mine, theirs) => {
+        const db = build(mine, true);
+        const before = everything(db);
+        const copy = incoming(theirs);
+        const { replaced } = previewMerge(db, copy);
+
+        const report = mergeUnlessLossy(db, copy, THIS_DEVICE);
+
+        if (replaced > 0) {
+          expect(report).toBeNull();
+          expect(everything(db)).toEqual(before);
+        } else {
+          const expected = merged(mine, theirs);
+          expect(report).toEqual(expected.report);
+          expect(everything(db)).toEqual(everything(expected.db));
+        }
+        expect(attached(db)).toEqual(['main', 'temp']);
+        // Nor leaves its working tables behind, whichever it did
+        expect(
+          db.exec(
+            "SELECT name FROM temp.sqlite_master WHERE name LIKE 'ir_merge%'"
+          )
+        ).toEqual([]);
+      }),
+      { numRuns: 200 }
+    );
+  }, 60_000);
+
+  it('arms the stamp triggers again whether it merges or changes nothing', () => {
+    // Unstamped copies of one row: the greater content wins, replacing this
+    // device's row when the other copy holds it
+    const holding = (priority: number): Copy => ({
+      articles: [
+        {
+          id: 'k0',
+          reference: 'n0.md',
+          priority,
+          updated_at: 0,
+          updated_by: '',
+        },
+      ],
+    });
+    for (const [mine, theirs, lossy] of [
+      [10, 50, true],
+      [50, 10, false],
+    ] as const) {
+      const db = build(holding(mine), true);
+
+      const report = mergeUnlessLossy(
+        db,
+        incoming(holding(theirs)),
+        THIS_DEVICE
+      );
+
+      expect(report === null).toBe(lossy);
+      db.run("UPDATE article SET priority = 20 WHERE id = 'k0'");
+      expect(stamp(articles(db)[0])).toEqual([1e12, 'here']);
+    }
+  });
 });
 
 describe('attaching the copy', () => {

@@ -46,8 +46,8 @@ import { ContentWatch, type ContentMark } from './content-watch';
 import { backupFileName, pruneBackups, pruneDatabase } from './retention';
 import {
   mergeInto,
+  mergeUnlessLossy,
   openIncoming,
-  previewMerge,
   type MergeReport,
 } from './row-merge';
 import { armRowStamps, disarmRowStamps } from './row-stamps';
@@ -810,25 +810,26 @@ export class SQLJSRepository implements SQLiteRepository {
     }
     let report: MergeReport;
     try {
-      let lossy: boolean;
+      const stamps = { deviceId: () => this.#device(), now: this.#rowClock };
+      let clean: MergeReport | null;
       try {
-        lossy = previewMerge(db, incoming).replaced > 0;
+        clean = mergeUnlessLossy(db, incoming, stamps, this.#replaySettings());
       } catch (error) {
         return await this.#mergeFailed(db, error, false);
       }
-      if (lossy && !(await this.#backUpMemory(db, 'merge'))) return false;
-      try {
-        report = mergeInto(
-          db,
-          incoming,
-          { deviceId: () => this.#device(), now: this.#rowClock },
-          this.#replaySettings()
-        );
-        // The merge takes the newer generation of each device, this one's too
-        this.#readOwnGeneration(db);
-      } catch (error) {
-        return await this.#mergeFailed(db, error, lossy);
+      if (clean) {
+        report = clean;
+      } else {
+        // Nothing merged yet: memory is backed up as it stands, then merged
+        if (!(await this.#backUpMemory(db, 'merge'))) return false;
+        try {
+          report = mergeInto(db, incoming, stamps, this.#replaySettings());
+        } catch (error) {
+          return await this.#mergeFailed(db, error, true);
+        }
       }
+      // The merge takes the newer generation of each device, this one's too
+      this.#readOwnGeneration(db);
     } finally {
       incoming.close();
     }

@@ -1,6 +1,7 @@
 import { applyMigrations, type Migration } from '#/db/migration-helpers';
 import type initSqlJs from 'sql.js';
 import type { Database } from 'sql.js';
+import { markPhase } from './phase-timing';
 import {
   armRowStamps,
   disarmRowStamps,
@@ -60,8 +61,12 @@ export interface MergeReport {
 
 /** The schema name another device's copy is attached under. */
 export const INCOMING_SCHEMA = 'ir_incoming';
-const WIN = 'ir_merge_win';
-const EVICT = 'ir_merge_evict';
+/**
+ * The temp tables a table's merge is worked out in (see {@link planTable}),
+ * a pair per table, so that every table is planned before any is written.
+ */
+const winOf = (table: string) => `ir_merge_win_${table}`;
+const evictOf = (table: string) => `ir_merge_evict_${table}`;
 
 /**
  * Where a row that gave up its unique value goes: the same spot
@@ -104,10 +109,17 @@ export function openIncoming(
  */
 export function previewMerge(db: Database, incoming: Database): MergeReport {
   return withAttached(db, incoming, () =>
-    inTransaction(db, false, () =>
-      sum(MERGE_TABLES.map((table) => planTable(db, table)))
+    inTransaction(
+      db,
+      () => false,
+      () => planTables(db)
     )
   );
+}
+
+/** Work out the merge of every table (see {@link planTable}), writing none. */
+function planTables(db: Database): MergeReport {
+  return sum(MERGE_TABLES.map((table) => planTable(db, table)));
 }
 
 /**
@@ -145,28 +157,66 @@ export function mergeInto(
   stamps: StampSource,
   replay?: ReplaySettings
 ): MergeReport {
+  return merge(db, incoming, stamps, replay, false)!;
+}
+
+/**
+ * {@link mergeInto}, unless the merge would replace rows of this device's
+ * that the other copy never saw (see `MergeReport.replaced`): then nothing,
+ * so that the caller backs this device up first. Works the merge out once
+ * where {@link previewMerge} and then {@link mergeInto} work it out twice.
+ * @returns the merge's report, or null when it would replace a row and so
+ * changed nothing
+ * @throws if a statement fails, having rolled back and changed nothing
+ */
+export function mergeUnlessLossy(
+  db: Database,
+  incoming: Database,
+  stamps: StampSource,
+  replay?: ReplaySettings
+): MergeReport | null {
+  return merge(db, incoming, stamps, replay, true);
+}
+
+function merge(
+  db: Database,
+  incoming: Database,
+  stamps: StampSource,
+  replay: ReplaySettings | undefined,
+  unlessLossy: boolean
+): MergeReport | null {
   disarmRowStamps(db);
   try {
     return withAttached(db, incoming, () =>
-      inTransaction(db, true, () => {
-        const diverged = replay && readDivergences(db, INCOMING_SCHEMA);
-        const report = sum(
-          MERGE_TABLES.map((table) => {
-            const planned = planTable(db, table);
-            applyTable(db, table);
-            return planned;
-          })
-        );
-        mergeWriteStamps(db);
-        if (diverged) {
-          armRowStamps(db, stamps);
-          report.written += replaySchedules(db, diverged, replay);
+      inTransaction(
+        db,
+        (report) => report !== null,
+        () => {
+          // Each table's plan reads only its own rows and the write stamps,
+          // none of which an earlier table's writes touch, so planning them
+          // all first is planning each just before it is written
+          const report = planTables(db);
+          markPhase('plan');
+          if (unlessLossy && report.replaced > 0) return null;
+          // Read before anything is written, as where a replay starts is each
+          // copy's log and schedule (see `readDivergences`)
+          const diverged = replay && readDivergences(db, INCOMING_SCHEMA);
+          markPhase('divergences');
+          for (const table of MERGE_TABLES) applyTable(db, table);
+          mergeWriteStamps(db);
+          markPhase('apply');
+          if (diverged) {
+            armRowStamps(db, stamps);
+            report.written += replaySchedules(db, diverged, replay);
+            markPhase('replay');
+          }
+          return report;
         }
-        return report;
-      })
+      )
     );
   } finally {
     armRowStamps(db, stamps);
+    markPhase('rearm');
   }
 }
 
@@ -180,12 +230,19 @@ function sum(reports: MergeReport[]): MergeReport {
   );
 }
 
-/** Run `work` in a transaction, committing only when `commit` is set. */
-function inTransaction<T>(db: Database, commit: boolean, work: () => T): T {
+/**
+ * Run `work` in a transaction, committing only when `commit` says so of its
+ * result.
+ */
+function inTransaction<T>(
+  db: Database,
+  commit: (result: T) => boolean,
+  work: () => T
+): T {
   db.exec('BEGIN');
   try {
     const result = work();
-    db.exec(commit ? 'COMMIT' : 'ROLLBACK');
+    db.exec(commit(result) ? 'COMMIT' : 'ROLLBACK');
     return result;
   } catch (error) {
     db.exec('ROLLBACK');
@@ -335,11 +392,17 @@ const parkedSet = (key: string, unique: string) =>
  */
 function planTable(db: Database, table: MergeTable): MergeReport {
   const { name, key, unique } = table;
+  const [WIN, EVICT] = [winOf(name), evictOf(name)];
   const columns = columnsOf(db, name);
   const content = columns.filter(
     (c) => c !== key && !(STAMP_COLUMNS as readonly string[]).includes(c)
   );
   const newer = `(${orderOf('i', content, table)}) > (${orderOf('m', content, table)})`;
+  // Most rows are alike in both copies, and none of those wins (each case
+  // below then asks `newer`, which is false between equals): ruled out by
+  // a plain comparison first, which costs a fraction of `newer`'s (the
+  // keys, which the join matches, compare alike too)
+  const same = columns.map((c) => `i.${c} IS m.${c}`).join(' AND ');
   db.exec(`
     DROP TABLE IF EXISTS temp.${WIN};
     DROP TABLE IF EXISTS temp.${EVICT};
@@ -357,7 +420,7 @@ function planTable(db: Database, table: MergeTable): MergeReport {
       END AS ir_unseen
     FROM ${INCOMING_SCHEMA}.${name} i
     LEFT JOIN main.${name} m ON m.${key} = i.${key}
-    WHERE m.${key} IS NULL OR CASE
+    WHERE m.${key} IS NULL OR NOT (${same}) AND CASE
       -- A delete beats a write made without knowledge of it, whichever is
       -- newer: a live row wins over a tombstone only from a copy that holds
       -- the save the tombstone came in (see seenIn), and a tombstone wins
@@ -400,7 +463,7 @@ function planTable(db: Database, table: MergeTable): MergeReport {
       UPDATE temp.${WIN} SET ${parked}
       WHERE ${key} IN (SELECT evicted FROM temp.${EVICT});
       -- A temp table of this merge's own, never a synced one
-      DELETE FROM temp.ir_merge_evict
+      DELETE FROM temp.ir_merge_evict_${name}
       WHERE evicted IN (SELECT ${key} FROM temp.${WIN});
     `);
   }
@@ -427,6 +490,7 @@ function planTable(db: Database, table: MergeTable): MergeReport {
  */
 function applyTable(db: Database, table: MergeTable) {
   const { name, key, unique } = table;
+  const [WIN, EVICT] = [winOf(name), evictOf(name)];
   const columns = columnsOf(db, name);
   const rewritten = columns.filter((c) => c !== key);
   if (unique) {

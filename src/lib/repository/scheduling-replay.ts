@@ -9,6 +9,7 @@ import {
   generatorParameters,
   Rating,
   type Card,
+  type FSRS,
   type FSRSParameters,
   type Grade,
 } from 'ts-fsrs';
@@ -183,7 +184,15 @@ export function replayCard(
   params: Partial<FSRSParameters>,
   from: CardSchedule
 ): CardSchedule {
-  const scheduler = fsrs(generatorParameters(params));
+  return replayCardWith(fsrs(generatorParameters(params)), history, from);
+}
+
+/** {@link replayCard} with a scheduler made once for many cards. */
+function replayCardWith(
+  scheduler: FSRS,
+  history: readonly LoggedGrade[],
+  from: CardSchedule
+): CardSchedule {
   let card: Card = toCard(from);
   for (const { at, rating } of liveInOrder(history)) {
     if (rating === Number(Rating.Manual)) continue;
@@ -334,7 +343,14 @@ function rowsOf(db: Database, sql: string, params: SqlValue[] = []): Row[] {
   const statement = db.prepare(sql, params);
   const rows: Row[] = [];
   try {
-    while (statement.step()) rows.push(statement.getAsObject());
+    // As `getAsObject`, which asks for the column names again for every row
+    const names = statement.getColumnNames();
+    while (statement.step()) {
+      const values = statement.get();
+      const row: Row = {};
+      names.forEach((name, i) => (row[name] = values[i]));
+      rows.push(row);
+    }
   } finally {
     statement.free();
   }
@@ -351,21 +367,61 @@ const RULE_COLUMNS = {
   srs_card: [],
 } as const satisfies Record<ReplayedLog['item'], readonly (keyof TextRules)[]>;
 
-/** `schema`'s log of `id` under `table`, every row, as replays read them. */
-function logOf(
+/**
+ * `schema`'s log of each item of `ids` under `table`, every row, as replays
+ * read them, by item: one statement for every item, by the index on the
+ * log's item column (migration v14).
+ * @param ids the items, as a JSON array (see {@link jsonIds})
+ */
+function logsOf(
   db: Database,
   schema: string,
   table: ReplayedLog,
-  id: string
-): LoggedGrade[] {
+  ids: string
+): Map<string, LoggedGrade[]> {
   const rating = table.item === 'srs_card' ? 'rating' : 'NULL';
-  return rowsOf(
+  const logs = new Map<string, LoggedGrade[]>();
+  const rows = rowsOf(
     db,
-    `SELECT id, ${table.at} AS at, ${rating} AS rating, deleted
-     FROM ${schema}.${table.log} WHERE ${table.parent} = ?`,
-    [id]
-  ) as unknown as LoggedGrade[];
+    `SELECT ${table.parent} AS item, id, ${table.at} AS at,
+       ${rating} AS rating, deleted
+     FROM ${schema}.${table.log}
+     WHERE ${table.parent} IN (SELECT value FROM json_each(?))`,
+    [ids]
+  );
+  for (const { item, ...review } of rows) {
+    const log = logs.get(item as string) ?? [];
+    log.push(review as unknown as LoggedGrade);
+    logs.set(item as string, log);
+  }
+  return logs;
 }
+
+/**
+ * `schema`'s rows of `table` keyed `ids`, by id, with the columns `columns`
+ * (and the id), as one statement.
+ * @param ids the rows, as a JSON array (see {@link jsonIds})
+ * @param where a further condition the rows must meet
+ */
+function rowsById(
+  db: Database,
+  schema: string,
+  table: string,
+  columns: string,
+  ids: string,
+  where = 'TRUE'
+): Map<string, Row> {
+  const rows = rowsOf(
+    db,
+    `SELECT id AS ir_id, ${columns} FROM ${schema}.${table}
+     WHERE id IN (SELECT value FROM json_each(?)) AND ${where}`,
+    [ids]
+  );
+  return new Map(rows.map(({ ir_id, ...row }) => [ir_id as string, row]));
+}
+
+/** `ids` as the JSON array SQL reads them from (`json_each`). */
+const jsonIds = (ids: Iterable<string>) => JSON.stringify([...ids]);
 
 /**
  * The items both copies hold whose live reviews differ between the main
@@ -381,42 +437,38 @@ export function readDivergences(db: Database, incoming: string): Divergences {
     const { log, item, parent } = table;
     const onlyLiveIn = (here: string, there: string) => `
       SELECT a.${parent} AS item FROM ${here}.${log} a
-      WHERE a.deleted = 0 AND NOT EXISTS (
-        SELECT 1 FROM ${there}.${log} b WHERE b.id = a.id AND b.deleted = 0
-      )`;
+      LEFT JOIN ${there}.${log} b ON b.id = a.id
+      WHERE a.deleted = 0 AND (b.id IS NULL OR b.deleted <> 0)`;
+    // Materialized, the copies are compared once, not once per filter
     const ids = rowsOf(
       db,
-      `SELECT item FROM (
+      `WITH diverged (item) AS MATERIALIZED (
          ${onlyLiveIn('main', incoming)} UNION ${onlyLiveIn(incoming, 'main')}
        )
+       SELECT item FROM diverged
        WHERE item IN (SELECT id FROM main.${item})
          AND item IN (SELECT id FROM ${incoming}.${item})`
     ).map((row) => row.item as string);
+    const items = new Map<string, Divergence>();
+    divergences.set(table, items);
     const columns = columnsOf(item);
     const rules: readonly string[] = RULE_COLUMNS[item];
-    const items = new Map<string, Divergence>();
+    const list = jsonIds(ids);
+    const schemas = ['main', incoming];
+    const read = schemas.map((schema) => ({
+      rows: rowsById(db, schema, item, [...columns, ...rules].join(', '), list),
+      logs: logsOf(db, schema, table, list),
+    }));
+    const only = (row: Row, keys: readonly string[]) =>
+      Object.fromEntries(keys.map((key) => [key, row[key]]));
     for (const id of ids) {
-      const schemas = ['main', incoming];
-      const rows = schemas.map(
-        (schema) =>
-          rowsOf(
-            db,
-            `SELECT ${[...columns, ...rules].join(', ')}
-             FROM ${schema}.${item} WHERE id = ?`,
-            [id]
-          )[0]
-      );
-      const only = (row: Row, keys: readonly string[]) =>
-        Object.fromEntries(keys.map((key) => [key, row[key]]));
+      const rows = read.map(({ rows }) => rows.get(id)!);
       items.set(id, {
-        logs: schemas.map((schema) =>
-          liveInOrder(logOf(db, schema, table, id))
-        ),
+        logs: read.map(({ logs }) => liveInOrder(logs.get(id) ?? [])),
         schedules: rows.map((row) => only(row, columns)),
         rules: rows.map((row) => only(row, rules)),
       });
     }
-    divergences.set(table, items);
   }
   return divergences;
 }
@@ -436,51 +488,59 @@ export function replaySchedules(
   settings: ReplaySettings
 ): number {
   let changed = 0;
+  const scheduler = fsrs(generatorParameters(settings.fsrsParams));
   for (const [table, items] of divergences) {
     const { item } = table;
     const columns = columnsOf(item);
-    for (const [id, { logs, schedules, rules }] of items) {
-      const [row] = rowsOf(
-        db,
-        `SELECT * FROM ${item} WHERE id = ? AND ${NOT_PURGED}`,
-        [id]
-      );
-      if (!row) continue;
-      const history = logOf(db, 'main', table, id);
-      const { from, rest } = startOf(logs, liveInOrder(history));
-      const schedule =
-        item === 'srs_card'
-          ? replayCard(
-              rest,
-              settings.fsrsParams,
-              from === null
-                ? initialCard(row.created_at as number)
-                : (schedules[from] as unknown as CardSchedule)
-            )
-          : replayText(
-              rest,
-              row as unknown as TextRules,
-              settings,
-              from === null
-                ? initialText(row as unknown as TextSchedule)
-                : underRules(
-                    schedules[from] as unknown as TextSchedule,
-                    rules[from] as unknown as TextRules,
-                    row as unknown as TextRules,
-                    logs[from]
-                  )
-            );
-      db.run(
-        `UPDATE ${item} SET ${columns.map((c) => `${c} = ?`).join(', ')}
-         WHERE id = ?`,
-        [
+    const list = jsonIds(items.keys());
+    // Every row is read before any is written, which changes no read: each
+    // write is to its own row, and the reads are of the rows' own columns
+    const rows = rowsById(db, 'main', item, '*', list, NOT_PURGED);
+    const histories = logsOf(db, 'main', table, list);
+    const update = db.prepare(
+      `UPDATE ${item} SET ${columns.map((c) => `${c} = ?`).join(', ')}
+       WHERE id = ?`
+    );
+    try {
+      for (const [id, { logs, schedules, rules }] of items) {
+        const row = rows.get(id);
+        if (!row) continue;
+        const { from, rest } = startOf(
+          logs,
+          liveInOrder(histories.get(id) ?? [])
+        );
+        const schedule =
+          item === 'srs_card'
+            ? replayCardWith(
+                scheduler,
+                rest,
+                from === null
+                  ? initialCard(row.created_at as number)
+                  : (schedules[from] as unknown as CardSchedule)
+              )
+            : replayText(
+                rest,
+                row as unknown as TextRules,
+                settings,
+                from === null
+                  ? initialText(row as unknown as TextSchedule)
+                  : underRules(
+                      schedules[from] as unknown as TextSchedule,
+                      rules[from] as unknown as TextRules,
+                      row as unknown as TextRules,
+                      logs[from]
+                    )
+              );
+        update.run([
           ...columns.map(
             (c) => (schedule as unknown as Record<string, SqlValue>)[c]
           ),
           id,
-        ]
-      );
-      changed += db.getRowsModified();
+        ]);
+        changed += db.getRowsModified();
+      }
+    } finally {
+      update.free();
     }
   }
   return changed;

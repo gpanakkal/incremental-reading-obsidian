@@ -1048,6 +1048,97 @@ describe('merging with replay', () => {
     );
   }, 60_000);
 
+  it('property: gives each item of a merge the row merging it alone gives it, however many diverge together', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            events: eventsArb,
+            priority: priorityArb,
+            fixed: fixedArb,
+            stamps: fc.tuple(
+              fc.integer({ min: 1, max: 9 }),
+              fc.integer({ min: 1, max: 9 })
+            ),
+          }),
+          { minLength: 2, maxLength: 3 }
+        ),
+        fsrsParamsArb,
+        (items, fsrsParams) => {
+          const settings = { fsrsParams, fuzzTextReviews: false };
+          const start = text(TEXT_BASE_REVIEW_INTERVAL, T, null);
+          const ids = items.map((_, n) => `i${n}`);
+          // Each item's reviews named after it, so no two items share one
+          const logs = items.map(({ events }, n) =>
+            logsOf(events, ids[n]).map((side) =>
+              side.map((r) => ({ ...r, id: `${ids[n]}-${r.id}` }))
+            )
+          );
+          /** One device's copy of the items `only` names, or of them all. */
+          const copyOf = (side: 0 | 1, only?: number): Copy => {
+            const copy: Required<Copy> = {
+              articles: [],
+              snippets: [],
+              cards: [],
+              articleReviews: [],
+              snippetReviews: [],
+              cardReviews: [],
+            };
+            for (const [n, { priority, fixed, stamps }] of items.entries()) {
+              if (only !== undefined && n !== only) continue;
+              const id = ids[n];
+              const log = asLog(logs[n][side]);
+              const stamp = {
+                updated_at: stamps[side],
+                updated_by: side ? 'b' : 'a',
+              };
+              const rules = { priority, fixed_interval_days: fixed };
+              copy.articles.push({
+                id,
+                ...rules,
+                ...stamp,
+                schedule: textAfter(log, rules, start),
+              });
+              copy.snippets.push({
+                id,
+                priority,
+                ...stamp,
+                schedule: textAfter(log, { priority }, start),
+              });
+              copy.cards.push({
+                id,
+                created_at: T - DAY,
+                ...stamp,
+                schedule: replayCard(log, fsrsParams, initialCard(T - DAY)),
+              });
+              copy.articleReviews.push(...logs[n][side]);
+              copy.snippetReviews.push(...logs[n][side]);
+              copy.cardReviews.push(...logs[n][side]);
+            }
+            return copy;
+          };
+          for (const [mine, theirs] of [
+            [0, 1],
+            [1, 0],
+          ] as const) {
+            const { db } = merged(copyOf(mine), copyOf(theirs), settings);
+            for (const [n, id] of ids.entries()) {
+              const { db: alone } = merged(
+                copyOf(mine, n),
+                copyOf(theirs, n),
+                settings
+              );
+              for (const { item } of REPLAYED_LOGS) {
+                expect(row(db, item, id)).toEqual(row(alone, item, id));
+              }
+            }
+          }
+        }
+      ),
+      { numRuns: 50 }
+    );
+  }, 60_000);
+
   describe('cases', () => {
     const R1 = T + 3_600_000;
     const R2 = T + 9 * DAY;
