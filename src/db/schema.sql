@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS article_review (
   CHECK(deleted = FALSE OR deleted = TRUE)
 );
 
+CREATE INDEX IF NOT EXISTS article_review_article ON article_review(article_id);
+
 CREATE TABLE IF NOT EXISTS snippet (
   id TEXT NOT NULL PRIMARY KEY, -- UUID
   reference TEXT NOT NULL UNIQUE, -- pointer to the file's location in the vault
@@ -70,6 +72,8 @@ CREATE TABLE IF NOT EXISTS snippet_review (
   updated_by TEXT NOT NULL DEFAULT '',
   CHECK(deleted = FALSE OR deleted = TRUE)
 );
+
+CREATE INDEX IF NOT EXISTS snippet_review_snippet ON snippet_review(snippet_id);
 
 CREATE TABLE IF NOT EXISTS srs_card (
   id TEXT NOT NULL PRIMARY KEY, -- UUID
@@ -122,6 +126,8 @@ CREATE TABLE IF NOT EXISTS srs_card_review (
   CHECK(deleted = FALSE OR deleted = TRUE)
 );
 
+CREATE INDEX IF NOT EXISTS srs_card_review_card ON srs_card_review(card_id);
+
 -- The startup scan's rebinds of articles known by path alone (PDFs), matched
 -- by filename rather than proven. Kept for a while, so that the article's own
 -- file turning up late at the old path (Sync still downloading it, say) can
@@ -147,4 +153,4 @@ CREATE TABLE IF NOT EXISTS write_stamp (
   generation INTEGER NOT NULL
 );
 
-PRAGMA user_version = 13;
+PRAGMA user_version = 14;

@@ -656,4 +656,21 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 14,
+    description: 'Index each review log by the item it logs',
+    up: (db) => {
+      // A merge reads the log of every item whose copies disagree on it, and
+      // replays it (scheduling-replay.ts): unindexed, each item scanned the
+      // whole log
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS article_review_article
+          ON article_review(article_id);
+        CREATE INDEX IF NOT EXISTS snippet_review_snippet
+          ON snippet_review(snippet_id);
+        CREATE INDEX IF NOT EXISTS srs_card_review_card
+          ON srs_card_review(card_id);
+      `);
+    },
+  },
 ];

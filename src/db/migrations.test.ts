@@ -1642,7 +1642,10 @@ describe("migration v13 — record each item note's mtime", () => {
   });
 
   it('gives every item table a note mtime, unknown on every row it had', () => {
-    applyMigrations(db, migrations);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 13)
+    );
 
     expect(getSchemaVersion(db)).toBe(13);
     for (const table of ['article', 'snippet', 'srs_card']) {
@@ -1664,6 +1667,46 @@ describe("migration v13 — record each item note's mtime", () => {
     ]) {
       expect(columnNames(db, table)).not.toContain('note_mtime');
     }
+  });
+
+  it('reports no work to do when run a second time', () => {
+    applyMigrations(db, migrations);
+    expect(applyMigrations(db, migrations)).toBe(false);
+  });
+});
+
+describe('migration v14 — index each review log by its item', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb(SCHEMA_V0);
+    applyMigrations(
+      db,
+      migrations.filter((m) => m.version <= 13)
+    );
+  });
+
+  /** How SQLite would look up the rows of one item in `log`. */
+  function lookupPlan(log: string, parent: string): string {
+    const [plan] = db.exec(
+      `EXPLAIN QUERY PLAN SELECT * FROM ${log} WHERE ${parent} = 'x'`
+    );
+    return plan.values.map((row) => String(row[3])).join(' ');
+  }
+
+  it.each([
+    ['article_review', 'article_id'],
+    ['snippet_review', 'snippet_id'],
+    ['srs_card_review', 'card_id'],
+  ])('looks up the %s rows of one item by index', (log, parent) => {
+    expect(lookupPlan(log, parent)).toMatch(/^SCAN/);
+
+    applyMigrations(db, migrations);
+
+    expect(getSchemaVersion(db)).toBe(14);
+    expect(lookupPlan(log, parent)).toMatch(
+      new RegExp(String.raw`^SEARCH ${log} USING INDEX \w+ \(${parent}=\?\)`)
+    );
   });
 
   it('reports no work to do when run a second time', () => {
