@@ -211,5 +211,14 @@
       ],
       "key": "W"
     }
+  ],
+  "incremental-reading:undo": [
+    {
+      "modifiers": [
+        "Mod",
+        "Shift"
+      ],
+      "key": "Z"
+    }
   ]
 }
