@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
 import { ARTICLE_TAG, DATA_DIRECTORY, SNIPPET_TAG } from '#/lib/constants';
-import { actionsFor, type Leftover } from '#/lib/crash-leftovers';
+import {
+  actionsFor,
+  type Leftover,
+  type LeftoverAction,
+} from '#/lib/crash-leftovers';
 import * as Notices from '#/lib/notices';
 import { ObsidianHelpers as Obsidian } from '#/lib/ObsidianHelpers';
 import { Notice } from '#/test/__mocks__/obsidian';
@@ -147,6 +151,188 @@ const stripOf = (row: Element) =>
   [
     ...row.querySelectorAll<HTMLButtonElement>('.setting-item-control button'),
   ].find((b) => b.textContent === 'Remove IR properties') ?? null;
+
+/** The "Keep as" box on `row`, or `null`. */
+const keepOf = (row: Element) =>
+  row.querySelector<HTMLInputElement>(
+    '.setting-item-control .ir-leftover-keep input[type="checkbox"]'
+  );
+
+/** The box over the lines that checks or unchecks every "Keep as" box. */
+const allBoxOf = (modal: LeftoverModal) =>
+  modal.contentEl.querySelector<HTMLInputElement>(
+    '.ir-leftover-all input[type="checkbox"]'
+  )!;
+
+/** What a checkbox shows. */
+type BoxState = 'checked' | 'unchecked' | 'indeterminate';
+
+/**
+ * What `box` shows. Obsidian's CSS draws the indeterminate dash only for
+ * `data-indeterminate="true"`, so that must agree with the property, and
+ * a box is never both checked and indeterminate.
+ */
+function boxState(box: HTMLInputElement): BoxState {
+  expect(box.getAttribute('data-indeterminate') === 'true').toBe(
+    box.indeterminate
+  );
+  expect(box.checked && box.indeterminate).toBe(false);
+  if (box.indeterminate) return 'indeterminate';
+  return box.checked ? 'checked' : 'unchecked';
+}
+
+/**
+ * What the user can do in the modal: click a line's "Keep as" box, pick a
+ * type, press its trash or "Remove IR properties" (again, taking it back), or
+ * click the box over the lines. `at` is any index, wrapped to a line.
+ */
+type UserAction =
+  | { do: 'box'; at: number }
+  | { do: 'pick'; at: number; as: SaveType }
+  | { do: 'trash' | 'strip'; at: number }
+  | { do: 'all' };
+
+const userActionArb: fc.Arbitrary<UserAction> = fc.oneof(
+  fc.record({ do: fc.constant('box' as const), at: fc.nat() }),
+  fc.record({
+    do: fc.constant('pick' as const),
+    at: fc.nat(),
+    as: fc.constantFrom<SaveType>('article', 'snippet'),
+  }),
+  fc.record({
+    do: fc.constantFrom('trash' as const, 'strip' as const),
+    at: fc.nat(),
+  }),
+  fc.record({ do: fc.constant('all' as const) })
+);
+
+/** Leftovers recognized and not, offered the trash or stripping or both. */
+const mixedLeftoversArb = fc
+  .array(
+    fc.record({
+      kind: fc.constantFrom<Leftover['kind']>('made', 'in-place'),
+      type: fc.constantFrom<Leftover['type']>(
+        'article',
+        'snippet',
+        'card',
+        null
+      ),
+    }),
+    { minLength: 1, maxLength: 5 }
+  )
+  .map((specs) =>
+    specs.map(
+      ({ kind, type }, i): Leftover => ({
+        file: fileAt('notes', `n${i}`),
+        id: `id-${i}`,
+        type,
+        kind,
+      })
+    )
+  );
+
+/**
+ * A line as it should be: the type its dropdown holds, whether its box was
+ * last left checked, and the trash or stripping pressed.
+ */
+interface LineModel {
+  type: SaveType | null;
+  kept: boolean;
+  other: 'trash' | 'strip' | null;
+  offers: LeftoverAction[];
+}
+
+const lineModel = (leftover: Leftover): LineModel => ({
+  type: shownType(leftover) || null,
+  kept: true,
+  other: null,
+  offers: actionsFor(leftover),
+});
+
+/** Whether a line's box can be checked: it shows a type to keep it as. */
+const canKeep = (line: LineModel) => line.type !== null && line.other === null;
+
+/** What Confirm should do with a line, `null` for leaving it be. */
+function modelChoice(line: LineModel): LeftoverChoice | null {
+  if (line.other) return { action: line.other };
+  return canKeep(line) && line.kept
+    ? { action: 'adopt', as: line.type! }
+    : null;
+}
+
+/** What the box over the lines should show, and whether it should be off. */
+function modelAll(lines: readonly LineModel[]): [BoxState, boolean] {
+  const keepable = lines.filter(canKeep);
+  const kept = keepable.filter((line) => line.kept).length;
+  const state: BoxState =
+    kept === 0
+      ? 'unchecked'
+      : kept === keepable.length
+        ? 'checked'
+        : 'indeterminate';
+  return [state, keepable.length === 0];
+}
+
+/**
+ * Do `action` in `modal` as the user would, and to `lines` as it should go:
+ * a click on a box that's off, or a pick of the type shown, does nothing.
+ */
+function act(
+  modal: LeftoverModal,
+  rows: readonly Element[],
+  lines: LineModel[],
+  action: UserAction
+) {
+  if (action.do === 'all') {
+    allBoxOf(modal).click();
+    const keepable = lines.filter(canKeep);
+    const keep = !keepable.every((line) => line.kept);
+    for (const line of keepable) line.kept = keep;
+    return;
+  }
+  const i = action.at % lines.length;
+  const line = lines[i];
+  const row = rows[i];
+  if (action.do === 'box') {
+    keepOf(row)!.click();
+    if (canKeep(line)) line.kept = !line.kept;
+  } else if (action.do === 'pick') {
+    pickFrom(dropdownOf(row)!, action.as);
+    if (line.other === null && line.type === action.as) return;
+    line.type = action.as;
+    line.kept = true;
+    line.other = null;
+  } else if (line.offers.includes(action.do)) {
+    (action.do === 'trash' ? trashOf(row) : stripOf(row))!.click();
+    line.other = line.other === action.do ? null : action.do;
+  }
+}
+
+/**
+ * Expect `modal` to show `lines`, one to each of `rows` in order: the box over
+ * them, each line's box and dropdown, and whether Confirm is on.
+ */
+function expectShows(
+  modal: LeftoverModal,
+  rows: readonly Element[],
+  lines: readonly LineModel[],
+  confirm: HTMLButtonElement
+) {
+  const [state, off] = modelAll(lines);
+  expect(boxState(allBoxOf(modal))).toBe(state);
+  expect(allBoxOf(modal).disabled).toBe(off);
+  expect(rows).toHaveLength(lines.length);
+  for (const [i, row] of rows.entries()) {
+    const line = lines[i];
+    const keep = keepOf(row)!;
+    expect(boxState(keep)).toBe(
+      canKeep(line) && line.kept ? 'checked' : 'unchecked'
+    );
+    expect(keep.disabled).toBe(!canKeep(line));
+    expect(dropdownOf(row)!.value).toBe(canKeep(line) ? line.type : '');
+  }
+  expect(confirm.disabled).toBe(!lines.some((line) => modelChoice(line)));
+}
 
 /**
  * Pick `value` from `select` as the user would: picking what it shows already
@@ -398,6 +584,18 @@ describe('LeftoverModal', () => {
           const strip = stripOf(row);
           expect(strip !== null).toBe(actions.includes('strip'));
           expect(strip?.getAttribute('aria-pressed') ?? 'false').toBe('false');
+          // In front of the dropdown, and of its own label's text
+          const keep = keepOf(row)!;
+          expect(keep.parentElement!.firstChild).toBe(keep);
+          // Named by its label's text, in the span a phone hides but for
+          // screen readers
+          expect(
+            keep.labels![0].querySelector('.ir-leftover-keep-text')?.textContent
+          ).toBeTruthy();
+          expect(
+            keep.compareDocumentPosition(dropdown!) &
+              Node.DOCUMENT_POSITION_FOLLOWING
+          ).toBeTruthy();
         }
       })
     );
@@ -453,12 +651,13 @@ describe('LeftoverModal', () => {
       expect(button().getAttribute('aria-pressed')).toBe('false');
       expect(button().classList.contains('mod-cta')).toBe(false);
 
-      // Pressing it twice takes it back, the note's own type shown, and
+      // Pressing it twice takes it back, the type picked before shown, and
       // chosen, again
       button().click();
       button().click();
       expect(button().getAttribute('aria-pressed')).toBe('false');
-      expect(dropdownOf(row)!.value).toBe(leftover.type);
+      expect(dropdownOf(row)!.value).toBe('snippet');
+      expect(keepOf(row)!.checked).toBe(true);
       expect(confirmButton().disabled).toBe(false);
 
       // The placeholder is no choice, should a change ever land on it
@@ -553,6 +752,139 @@ describe('LeftoverModal', () => {
     );
   });
 
+  it('reflects the "Keep as" boxes in the box over the lines, and keeps each box off while its line shows no type, whatever the user does', () => {
+    fc.assert(
+      fc.property(
+        mixedLeftoversArb,
+        fc.array(userActionArb, { maxLength: 12 }),
+        (leftovers, actions) => {
+          document.body.innerHTML = '';
+          const { modal, rows, confirmButton } = openModal(
+            leftovers,
+            async () => true
+          );
+          const lines = leftovers.map(lineModel);
+          const check = () =>
+            expectShows(modal, rows(), lines, confirmButton());
+
+          check();
+          for (const action of actions) {
+            act(modal, rows(), lines, action);
+            check();
+          }
+        }
+      ),
+      { numRuns: 150 }
+    );
+  });
+
+  it('saves only the notes whose boxes are checked on Confirm, along with those trashed or stripped, and shows the lines left as they were, whatever the user does', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        mixedLeftoversArb,
+        fc.array(userActionArb, { maxLength: 12 }),
+        fc.array(fc.boolean(), { minLength: 5, maxLength: 5 }),
+        fc.array(userActionArb, { maxLength: 6 }),
+        async (leftovers, actions, fails, after) => {
+          document.body.innerHTML = '';
+          const resolve = vi.fn(
+            async (leftover: Leftover) => !fails[leftovers.indexOf(leftover)]
+          );
+          const { modal, rows, confirmButton } = openModal(leftovers, resolve);
+          const lines = leftovers.map(lineModel);
+          for (const action of actions) act(modal, rows(), lines, action);
+          const expected = leftovers.flatMap((leftover, i) => {
+            const choice = modelChoice(lines[i]);
+            return choice ? [[leftover, choice]] : [];
+          });
+
+          confirmButton().click();
+          for (let i = 0; i <= expected.length; i++) await settle();
+
+          expect(resolve.mock.calls).toEqual(expected);
+          // A line done goes; one not done stays, as it was
+          const left = lines.filter(
+            (line, i) => !modelChoice(line) || fails[i]
+          );
+          expectShows(modal, rows(), left, confirmButton());
+          if (left.length === 0) return;
+          for (const action of after) {
+            act(modal, rows(), left, action);
+            expectShows(modal, rows(), left, confirmButton());
+          }
+        }
+      ),
+      { numRuns: 60 }
+    );
+  });
+
+  it('leaves a recognized note be once its box is unchecked, saving the others, and reflects only the lines left', async () => {
+    const resolve = vi.fn(async () => true);
+    const { modal, rows, rowOf, confirmButton, close } = openModal(
+      [MADE, IN_PLACE],
+      resolve
+    );
+    expect(keepOf(rowOf(MADE))!.checked).toBe(true);
+    expect(keepOf(rowOf(IN_PLACE))!.checked).toBe(true);
+
+    keepOf(rowOf(MADE))!.click();
+    expect(boxState(allBoxOf(modal))).toBe('indeterminate');
+    // What it would be kept as still shows
+    expect(dropdownOf(rowOf(MADE))!.value).toBe('snippet');
+    confirmButton().click();
+    await vi.waitFor(() => expect(rows()).toHaveLength(1));
+
+    expect(resolve.mock.calls).toEqual([
+      [IN_PLACE, { action: 'adopt', as: 'article' }],
+    ]);
+    expect(rows()[0].textContent).toContain(MADE.file.basename);
+    expect(boxState(allBoxOf(modal))).toBe('unchecked');
+    expect(allBoxOf(modal).disabled).toBe(false);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, Leftover, 'trash' | 'strip']>([
+    ['the trash', MADE, 'trash'],
+    ['stripping', IN_PLACE, 'strip'],
+  ])(
+    "unchecks a note's box while %s stands in for keeping it, and checks it again only if it was checked before",
+    (_, leftover, other) => {
+      const { modal, rowOf } = openModal([leftover], async () => true);
+      const row = rowOf(leftover);
+      const button = () => (other === 'trash' ? trashOf(row) : stripOf(row))!;
+
+      for (const wasKept of [true, false]) {
+        expect(keepOf(row)!.checked).toBe(wasKept);
+        button().click();
+        expect(keepOf(row)!.checked).toBe(false);
+        expect(keepOf(row)!.disabled).toBe(true);
+        // Nothing left to check
+        expect(allBoxOf(modal).disabled).toBe(true);
+        button().click();
+        expect(keepOf(row)!.checked).toBe(wasKept);
+        expect(keepOf(row)!.disabled).toBe(false);
+        if (wasKept) keepOf(row)!.click();
+      }
+    }
+  );
+
+  it("keeps a note's box off after Confirm while it shows no type, turning the rest back on", async () => {
+    const untyped: Leftover = { ...IN_PLACE, type: null };
+    const run = deferred<boolean>();
+    const { modal, rowOf, confirmButton } = openModal(
+      [MADE, untyped],
+      () => run.promise
+    );
+
+    confirmButton().click();
+    expect(keepOf(rowOf(MADE))!.disabled).toBe(true);
+    run.settle(false);
+
+    await vi.waitFor(() => expect(keepOf(rowOf(MADE))!.disabled).toBe(false));
+    expect(keepOf(rowOf(untyped))!.disabled).toBe(true);
+    expect(allBoxOf(modal).disabled).toBe(false);
+  });
+
   it("keeps a note's line, with what went wrong, when what was chosen for it was not done", async () => {
     const resolve = vi.fn(async (leftover: Leftover) => leftover !== MADE);
     const { rows, confirmButton, rowOf, close } = openModal(
@@ -640,7 +972,7 @@ describe('LeftoverModal', () => {
 
   it('turns every choice off while what was chosen is being done', async () => {
     const run = deferred<boolean>();
-    const { rowOf, confirmButton, cancelButton } = openModal(
+    const { modal, rowOf, confirmButton, cancelButton } = openModal(
       [MADE, IN_PLACE],
       () => run.promise
     );
@@ -650,12 +982,13 @@ describe('LeftoverModal', () => {
 
     const controls = [rowOf(MADE), rowOf(IN_PLACE)].flatMap((row) => [
       // Not Obsidian's hidden copy it measures the dropdown's width with
-      ...row.querySelectorAll<HTMLButtonElement | HTMLSelectElement>(
-        'button, select:not(.is-measuring)'
-      ),
+      ...row.querySelectorAll<
+        HTMLButtonElement | HTMLSelectElement | HTMLInputElement
+      >('button, select:not(.is-measuring), input'),
     ]);
     expect(controls.length).toBeGreaterThan(0);
     expect(controls.every((c) => c.disabled)).toBe(true);
+    expect(allBoxOf(modal).disabled).toBe(true);
     expect(confirmButton().disabled).toBe(true);
     // Cancel stays on: closing stops what is not yet under way
     expect(cancelButton().disabled).toBe(false);
@@ -664,6 +997,8 @@ describe('LeftoverModal', () => {
       expect(dropdownOf(rowOf(IN_PLACE))!.disabled).toBe(false)
     );
     expect(trashOf(rowOf(MADE))!.disabled).toBe(false);
+    expect(keepOf(rowOf(IN_PLACE))!.disabled).toBe(false);
+    expect(allBoxOf(modal).disabled).toBe(false);
   });
 
   it('does nothing chosen, and closes, on Cancel', async () => {
