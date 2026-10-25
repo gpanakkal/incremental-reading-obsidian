@@ -196,17 +196,41 @@ test.describe('Action Bar', () => {
     await executeCommandById(window, 'incremental-reading:learn');
     await window.locator('css=#begin-review-button').click();
 
-    const articleToggle = window.locator('css=#ir-type-filter-article');
+    const filterButton = window.locator('css=.ir-type-filter-button');
+    const menu = window.getByRole('menu');
+    const articleRow = menu.locator(
+      'css=.ir-type-filter-row[data-type="article"]'
+    );
 
-    // stop reviewing articles
-    await articleToggle.click();
-    await expect(articleToggle).toHaveAttribute('aria-pressed', 'false');
+    await filterButton.click();
+
+    // stop reviewing articles; the menu stays open for the next toggle
+    await articleRow.click();
+    await expect(articleRow).toHaveAttribute('aria-checked', 'false');
+    await expect(filterButton).toHaveClass(/\bis-filtered\b/);
     await expect(reviewTitle(window, ARTICLE_TITLE)).not.toBeVisible();
+    await expect(menu).toBeVisible();
 
     // review articles again
-    await articleToggle.click();
-    await expect(articleToggle).toHaveAttribute('aria-pressed', 'true');
+    await articleRow.click();
+    await expect(articleRow).toHaveAttribute('aria-checked', 'true');
+    await expect(filterButton).not.toHaveClass(/\bis-filtered\b/);
     await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
+    await expect(menu).toBeVisible();
+
+    // a click outside closes it
+    await window.locator('.ir-review-interface .cm-content').first().click();
+    await expect(menu).toHaveCount(0);
+
+    // so do a second click on the icon, and Escape
+    await filterButton.click();
+    await expect(menu).toBeVisible();
+    await filterButton.click();
+    await expect(menu).toHaveCount(0);
+    await filterButton.click();
+    await expect(menu).toBeVisible();
+    await window.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
 
     // the cards-only command drives the same filter
 

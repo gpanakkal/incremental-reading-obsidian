@@ -843,15 +843,10 @@ body.is-phone:not(.is-floating-nav):not(.auto-full-screen) {
 }
 
 .ir-action-bar .clickable-icon svg.lucide,
-.ir-queue-type-icon svg.lucide,
-.ir-type-filter svg.lucide {
+.ir-queue-type-icon svg.lucide {
   height: var(--icon-size);
   width: var(--icon-size);
   stroke-width: var(--icon-stroke);
-}
-
-.ir-type-filter svg.lucide {
-  --icon-stroke: 1.25px;
 }
 
 .ir-bar-separator {
@@ -1147,98 +1142,147 @@ body:not(.is-mobile) .ir-grade-row {
   align-content: center;
 }
 
-/* The item-type filter reads as one field rather than three bar buttons, so it
-   borrows the `--input-*` tokens Obsidian draws the priority box beside it
-   with.
+/* The item-type filter is one icon in the bar and a small menu under it
+   (`TypeFilterMenu`). The icon takes the accent while some type is left out,
+   so a filtered review is visible without opening anything; three classes to
+   outrank Obsidian's own `.clickable-icon` colour. */
+.ir-review-button.ir-type-filter-button.is-filtered {
+  color: var(--text-accent);
+}
 
-   `--icon-size` is retargeted on the container rather than set on the icons:
-   the rule above already sizes every bar icon off it, so one knob here drops
-   the three toggles a step below the bar's other icons and keeps them there
-   wherever those move. */
-.ir-type-filter {
+.ir-review-button.ir-type-filter-button[aria-expanded='true'] {
+  background-color: var(--background-modifier-hover);
+}
+
+/* Fixed and portalled to `body`, placed from the icon's bounding box: the bar
+   scrolls sideways and would clip an absolutely positioned child, and inside
+   the workspace a transformed ancestor would make `fixed` resolve against it
+   instead of the window. */
+.ir-type-filter-menu {
   --icon-size: var(--icon-s);
   --icon-stroke: var(--icon-s-stroke-width);
+  position: fixed;
+  z-index: var(--layer-popover);
   display: flex;
-  align-items: center;
-  /* On mobile its zone (`.ir-bar-lead`) sets no `align-items`, so a bare flex
-     item stretches to its full height; the priority box handles this on its
-     own wrapper. Centering keeps the filter level with the taller icon buttons
-     there. */
-  align-self: center;
-  flex-shrink: 0;
+  flex-direction: column;
   gap: var(--size-2-1);
-  padding: var(--size-2-1);
-  background-color: var(--background-modifier-form-field);
-  border: var(--input-border-width) solid var(--background-modifier-border);
-  border-radius: var(--input-radius);
+  min-width: 10rem;
+  padding: var(--size-2-2);
+  background-color: var(--background-primary);
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-s);
+  animation: ir-type-filter-slide-down 0.12s ease-out;
+}
+
+/* Flipped above the icon when there is no room below, so it slides up from
+   the icon instead. */
+.ir-type-filter-menu[data-side='above'] {
+  animation-name: ir-type-filter-slide-up;
+}
+
+@keyframes ir-type-filter-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes ir-type-filter-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ir-type-filter-menu,
+  .ir-type-filter-menu[data-side='above'] {
+    animation: none;
+  }
+}
+
+.ir-type-filter-menu svg.lucide {
+  height: var(--icon-size);
+  width: var(--icon-size);
+  stroke-width: var(--icon-stroke);
 }
 
 /* Two classes, not one. Obsidian's `button:not(.clickable-icon)` paints every
-   button a face — background colour and shadow — and outranks a lone plugin
-   class, so a single-class rule here loses the transparent background it asks
-   for. Its `height: var(--input-height)` is overridden for the same reason:
-   these are icons in a row, not full-height fields. */
-.ir-type-filter .ir-type-filter-toggle {
+   button a face — background colour and shadow — and a fixed height, and it
+   outranks a lone plugin class. */
+.ir-type-filter-menu .ir-type-filter-row {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  gap: var(--size-4-2);
+  width: 100%;
   height: auto;
-  padding: var(--size-2-2);
+  padding: var(--size-2-2) var(--size-4-2) var(--size-2-2) var(--size-2-2);
   border-radius: var(--radius-s);
   background-color: transparent;
   box-shadow: none;
-  color: var(--text-faint);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
   cursor: pointer;
-  transition:
-    background-color 0.15s ease,
-    color 0.15s ease;
 }
 
-/* Each toggle carries its type's own tint — the one the queue table gives that
-   type's rows, so an article reads blue in both places. The triple is named
-   here and mixed below, which keeps the enabled and hover washes to one rule
-   apiece rather than three each.
+.ir-type-filter-menu .ir-type-filter-row.is-enabled {
+  color: var(--text-normal);
+}
 
-   Declaring it on the button is what makes it resolve: a `var()` nested inside
-   a custom property is substituted against the element the property is declared
-   on, and Obsidian puts `--color-*-rgb` on `body`, which the button inherits
-   from. The same line on `:root` would find nothing and render as transparent.
-   See the `--ir-transclusion-*` block at the top of this file. */
-.ir-type-filter .ir-type-filter-toggle[data-type='article'] {
+.ir-type-filter-menu .ir-type-filter-row:focus-visible {
+  box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
+}
+
+/* Gated on a pointer that can hover: a touch device leaves `:hover` on
+   whatever a tap landed on, which would strand a row grey after the tap. */
+@media (hover: hover) {
+  .ir-type-filter-menu .ir-type-filter-row:hover {
+    background-color: var(--background-modifier-hover);
+  }
+}
+
+/* Each type icon carries its type's own tint while that type is on — the one
+   the queue table gives that type's rows, so an article reads blue in both
+   places.
+
+   Declared on the row rather than on `:root`: a `var()` nested inside a custom
+   property is substituted against the element the property is declared on,
+   and Obsidian puts `--color-*-rgb` on `body`. See the `--ir-transclusion-*`
+   block at the top of this file. */
+.ir-type-filter-row[data-type='article'] {
   --ir-type-tint-rgb: var(--color-blue-rgb);
 }
 
-.ir-type-filter .ir-type-filter-toggle[data-type='snippet'] {
+.ir-type-filter-row[data-type='snippet'] {
   --ir-type-tint-rgb: var(--color-yellow-rgb);
 }
 
-.ir-type-filter .ir-type-filter-toggle[data-type='card'] {
+.ir-type-filter-row[data-type='card'] {
   --ir-type-tint-rgb: var(--color-green-rgb);
 }
 
-/* Enabled: the type's wash behind the icon, at the row tint's own alpha. The
-   glyph goes back to normal text rather than taking the tint's hue — yellow on
-   yellow is barely legible, and "on" is already carried by the wash. */
-.ir-type-filter .ir-type-filter-toggle.is-enabled {
+.ir-type-filter-row-icon {
+  display: flex;
+  padding: var(--size-2-2);
+  border-radius: var(--radius-s);
+  color: var(--text-faint);
+}
+
+.ir-type-filter-row.is-enabled .ir-type-filter-row-icon {
   background-color: rgba(var(--ir-type-tint-rgb), 0.2);
   color: var(--text-normal);
 }
 
-/* Attribute weight to match the tints above, as the queue rows' own hover does.
-   Gated on a pointer that can hover: a touch device fakes one and leaves
-   `:hover` on whatever a tap landed on, which would strand a toggle grey over
-   its tint until the next tap elsewhere. */
-@media (hover: hover) {
-  .ir-type-filter .ir-type-filter-toggle:hover,
-  .ir-type-filter .ir-type-filter-toggle[data-type]:hover {
-    background-color: var(--background-modifier-hover);
-    color: var(--text-muted);
-  }
+.ir-type-filter-row-check {
+  display: flex;
+  margin-inline-start: auto;
+  visibility: hidden;
+}
 
-  .ir-type-filter .ir-type-filter-toggle.is-enabled[data-type]:hover {
-    background-color: rgba(var(--ir-type-tint-rgb), 0.35);
-    color: var(--text-normal);
-  }
+.ir-type-filter-row.is-enabled .ir-type-filter-row-check {
+  visibility: visible;
 }
 
 .ir-priority-input,
@@ -1290,14 +1334,6 @@ body:not(.is-mobile) .ir-grade-row {
   --input-radius: var(--radius-s);
   --input-padding: var(--size-4-1) var(--size-2-2);
   max-width: 40px;
-}
-
-/* `.is-mobile` retargets `--input-radius` to a full pill, which the filter
-   borrows along with the rest of the field's tokens — and a pill around three
-   square icons reads as a stray button. Same climb-down the priority input
-   makes above, so the two boxes keep matching corners on mobile. */
-.is-mobile .ir-type-filter {
-  --input-radius: var(--radius-s);
 }
 
 .ir-review-interface {
