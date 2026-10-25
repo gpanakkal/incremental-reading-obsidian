@@ -65,12 +65,6 @@ export interface BulkImportOptions {
 /** One file of a bulk import. */
 export interface BulkImportEntry {
   file: TFile;
-  /**
-   * Tags to take off `file` once a copy of it is the article, so it doesn't
-   * ask to be imported again: the trigger tags it was imported by. The copy
-   * keeps them. Nothing is taken off a file imported where it is.
-   */
-  stripFromSource?: readonly string[];
 }
 
 /**

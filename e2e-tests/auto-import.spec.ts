@@ -399,115 +399,6 @@ A page read before the reset.
   expect(await articleCount()).toBe(before);
 });
 
-test('imports a copy of a note tagged in copy mode, moving the tag to it, and never imports the note again', async () => {
-  const settings = await openPluginSettings(app, window);
-  const settingRow = (name: string) =>
-    settings.locator('.vertical-tab-content .setting-item').filter({
-      has: settings
-        .locator('.setting-item-name')
-        .getByText(name, { exact: true }),
-    });
-  const toggle = settingRow('Auto-import notes by tag').locator(
-    '.checkbox-container'
-  );
-  await setToggle(toggle, true);
-  // By role: Obsidian sizes the dropdown off a hidden copy of the select
-  await settingRow('Where to import tagged notes')
-    .getByRole('combobox')
-    .selectOption({ label: 'Make a copy' });
-  // Saved, so the plugin loaded again below reads it
-  await expect
-    .poll(async () => {
-      try {
-        const data = await fs.readFile(
-          path.join(
-            vaultPath,
-            '.obsidian/plugins/incremental-reading/data.json'
-          ),
-          'utf8'
-        );
-        return (JSON.parse(data) as { settings?: unknown }).settings;
-      } catch {
-        // Not written yet, or caught halfway through a write
-        return null;
-      }
-    })
-    .toMatchObject({ autoImportOnTag: true, autoImportMode: 'copy' });
-  await window.evaluate(() =>
-    (window as unknown as { app: PageApp }).app.setting.close()
-  );
-  const before = await articleCount();
-  const articlesBefore = await articleFiles();
-  const notePath = 'inbox/Clipped page.md';
-  const copyPath = `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/Clipped page.md`;
-
-  await writeVaultFile(
-    notePath,
-    `---\ntags: [${AUTO_IMPORT_TAG}, keep-me]\n---\nA clipped page.\n`
-  );
-
-  const id = await expectImported(copyPath);
-  expect((await noteState(copyPath)).tags).toEqual(
-    expect.arrayContaining([AUTO_IMPORT_TAG, 'keep-me'])
-  );
-  await expect
-    .poll(async () => (await noteState(notePath)).tags)
-    .toEqual(['keep-me']);
-  expect(await noteState(notePath)).toMatchObject({ irId: null, rowIds: [] });
-  expect(await articleCount()).toBe(before + 1);
-
-  // Loaded again, as at the next start, then both notes changed after
-  await window.evaluate(async () => {
-    const { app } = window as unknown as { app: PageApp };
-    await app.plugins.disablePlugin('incremental-reading');
-    await app.plugins.enablePlugin('incremental-reading');
-  });
-  await expect
-    .poll(() =>
-      window.evaluate(() => {
-        const { plugins } = (window as unknown as { app: PageApp }).app.plugins;
-        return 'incremental-reading' in plugins;
-      })
-    )
-    .toBe(true);
-  for (const at of [notePath, copyPath]) {
-    await window.evaluate(async (at) => {
-      const { app } = window as unknown as { app: PageApp };
-      await app.fileManager.processFrontMatter(
-        app.vault.getFileByPath(at),
-        (frontmatter) => {
-          frontmatter.read = true;
-        }
-      );
-    }, at);
-  }
-  await expect
-    .poll(() =>
-      window.evaluate(
-        (paths) => {
-          const { app } = window as unknown as { app: PageApp };
-          return paths.map(
-            (at) =>
-              app.metadataCache.getFileCache(app.vault.getFileByPath(at))
-                ?.frontmatter?.read
-          );
-        },
-        [notePath, copyPath]
-      )
-    )
-    .toEqual([true, true]);
-  await flushAutoImports();
-
-  expect(await articleCount()).toBe(before + 1);
-  expect(await noteState(notePath)).toMatchObject({
-    irId: null,
-    tags: ['keep-me'],
-    rowIds: [],
-  });
-  expect(await noteState(copyPath)).toMatchObject({ irId: id, rowIds: [id] });
-  expect(await articleFiles()).toEqual([...articlesBefore, copyPath].sort());
-});
-
 test('imports the notes tagged while Obsidian was closed when it next starts, once, but none tagged before importing by tag was on', async () => {
   const saveSettings = () =>
     window.evaluate(() =>
@@ -721,26 +612,16 @@ test('imports what was added to a watched folder while Obsidian was closed when 
   });
 
   // Started again with one more note added while closed, so there is a sign
-  // that the look at the folder is over. In copy mode from here on: nothing
-  // marks the note it copies, so only the record of what was seen keeps it
-  // from being imported again at every launch
-  await setPluginSetting(window, 'autoImportMode', 'copy');
-  await window.evaluate(() =>
-    (window as unknown as { app: PageApp }).app.plugins.plugins[
-      'incremental-reading'
-    ].saveSettings()
-  );
-  const copied = `${folder}/Third.md`;
-  const copyOf = (name: string) =>
-    `${DATA_DIRECTORY}/${ARTICLE_DIRECTORY}/${name}.md`;
+  // that the look at the folder is over. Nothing marks the PDF, so only the
+  // record of what was seen keeps it from being imported again at every launch
+  const third = `${folder}/Third.md`;
   await restart(() => clip('Third'));
 
   await expect(importNotices()).toHaveText([/\b1 article\b/]);
-  await expectImported(copyOf('Third'));
+  const thirdId = await expectImported(third);
   expect(await articleReferences()).toEqual(
-    [...before, ...notes, pdf, copyOf('Third')].sort()
+    [...before, ...notes, pdf, third].sort()
   );
-  expect(await noteState(copied)).toMatchObject({ irId: null, rowIds: [] });
 
   // As un-importing does: the row deleted, the plugin's frontmatter stripped
   const [unimported] = notes;
@@ -751,11 +632,14 @@ test('imports what was added to a watched folder while Obsidian was closed when 
   await restart(() => clip('Fourth'));
 
   await expect(importNotices()).toHaveText([/\b1 article\b/]);
-  await expectImported(copyOf('Fourth'));
+  await expectImported(`${folder}/Fourth.md`);
   expect(await articleReferences()).toEqual(
-    [...before, notes[1], pdf, copyOf('Third'), copyOf('Fourth')].sort()
+    [...before, notes[1], pdf, third, `${folder}/Fourth.md`].sort()
   );
-  expect(await noteState(copied)).toMatchObject({ irId: null, rowIds: [] });
+  expect(await noteState(third)).toMatchObject({
+    irId: thirdId,
+    rowIds: [thirdId],
+  });
   expect(await noteState(unimported)).toMatchObject({
     irId: null,
     rowIds: [],
@@ -911,4 +795,68 @@ test('suggests the folders that could be watched as the field is typed in, a pic
   await expect(field).toHaveValue('');
   await expect(suggestions).toHaveCount(0);
   await expect(field).toBeFocused();
+});
+
+test('imports in place, once, a note both tagged and in a watched folder however it gets there, whatever copying on import says', async () => {
+  await window.evaluate(async () => {
+    const { app } = window as unknown as { app: PageApp };
+    await app.vault.createFolder('Inbox');
+    await app.vault.create('Inbox/Here before.md', 'Here before watching.\n');
+  });
+  await setPluginSetting(window, 'autoImportOnTag', true);
+  await setPluginSetting(window, 'copyOnImport', true);
+  // As an older version stored it; nothing reads it now
+  await setPluginSetting(window, 'autoImportMode', 'copy');
+  await setPluginSetting(window, 'autoImportOnFolder', true);
+  await setPluginSetting(window, 'autoImportFolders', ['Inbox']);
+  // Saving tells the watcher, as the settings tab does
+  await window.evaluate(() =>
+    (window as unknown as { app: PageApp }).app.plugins.plugins[
+      'incremental-reading'
+    ].saveSettings()
+  );
+  const before = await articleCount();
+  const articlesBefore = await articleFiles();
+  const tagged = `---\ntags: [${AUTO_IMPORT_TAG}]\n---\nBody.\n`;
+
+  // Created in the folder already tagged
+  await window.evaluate(async (content) => {
+    const { app } = window as unknown as { app: PageApp };
+    await app.vault.create('Inbox/Created tagged.md', content);
+  }, tagged);
+  await expectImported('Inbox/Created tagged.md');
+
+  // Tagged while in the folder, there from before it was watched
+  await setFrontmatter('Inbox/Here before.md', 'tags', [AUTO_IMPORT_TAG]);
+  await expectImported('Inbox/Here before.md');
+
+  // Moved in tagged, before the import its tag queued
+  await window.evaluate(async (content) => {
+    const { app } = window as unknown as { app: PageApp };
+    const file = await app.vault.create('Moved tagged.md', content);
+    await app.fileManager.renameFile(file, 'Inbox/Moved tagged.md');
+  }, tagged);
+  await expectImported('Inbox/Moved tagged.md');
+
+  // Arrived untagged, then tagged once it is an article
+  await window.evaluate(async () => {
+    const { app } = window as unknown as { app: PageApp };
+    await app.vault.create('Inbox/Arrived plain.md', 'Plain.\n');
+  });
+  const id = await expectImported('Inbox/Arrived plain.md');
+  await setFrontmatter('Inbox/Arrived plain.md', 'tags', [
+    AUTO_IMPORT_TAG,
+    ARTICLE_TAG,
+  ]);
+  await expect
+    .poll(async () => (await noteState('Inbox/Arrived plain.md')).tags)
+    .toContain(AUTO_IMPORT_TAG);
+  await flushAutoImports();
+
+  expect(await noteState('Inbox/Arrived plain.md')).toMatchObject({
+    irId: id,
+    rowIds: [id],
+  });
+  expect(await articleCount()).toBe(before + 4);
+  expect(await articleFiles()).toEqual(articlesBefore);
 });

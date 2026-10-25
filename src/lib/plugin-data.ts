@@ -3,7 +3,6 @@ import { ACTION_COOLDOWN_SECONDS } from './constants';
 import { LEGACY_DEVICE_STATE_KEYS } from './device-state';
 import {
   DEFAULT_SETTINGS,
-  isAutoImportMode,
   isReviewTitleBar,
   isSuccessNoticeLevel,
   type IRPluginSettings,
@@ -26,6 +25,13 @@ export interface IRPluginData {
   settings: IRPluginSettings;
 }
 
+/**
+ * Settings an older version stored that no longer exist, dropped as read so
+ * the next save leaves them out. `autoImportMode` chose where auto-imports
+ * went; they always import in place now, whatever it held.
+ */
+const RETIRED_SETTING_KEYS: readonly string[] = ['autoImportMode'];
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -47,6 +53,9 @@ export function parsePluginData(raw: unknown): IRPluginData {
       ? data.settings
       : {};
   const settings = { ...DEFAULT_SETTINGS, ...saved };
+  for (const key of RETIRED_SETTING_KEYS) {
+    delete (settings as Record<string, unknown>)[key];
+  }
   // A hand-edited or newer file can hold any value here; one the review tab
   // doesn't know would leave it matching none of its three choices.
   if (!isReviewTitleBar(settings.reviewTitleBar)) {
@@ -83,10 +92,6 @@ export function parsePluginData(raw: unknown): IRPluginData {
           ACTION_COOLDOWN_SECONDS.MAX
         )
       : ACTION_COOLDOWN_SECONDS.DEFAULT;
-  // One the dropdown doesn't offer would show as none of its choices
-  if (!isAutoImportMode(settings.autoImportMode)) {
-    settings.autoImportMode = DEFAULT_SETTINGS.autoImportMode;
-  }
   // Read on every file created or moved, so held to the same, and kept as the
   // settings tab keeps them
   settings.autoImportOnFolder = settings.autoImportOnFolder === true;

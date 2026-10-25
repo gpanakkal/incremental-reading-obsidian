@@ -3043,6 +3043,38 @@ describe('IncrementalReadingPlugin.loadSettings', () => {
     );
   });
 
+  it('never writes data.json just to drop a retired setting, which the next save leaves out', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(fc.constantFrom('inPlace', 'copy', 'inherit'), fc.jsonValue()),
+        fc.boolean(),
+        async (stored, legacy) => {
+          const saved = { defaultPriority: 42, autoImportMode: stored };
+          const storage = makeObsidianLocalStorage({ [DEVICE_ID_KEY]: DEVICE });
+          const { plugin, saveData, written } = makeStoragePlugin(
+            storage,
+            legacy ? saved : { settings: saved }
+          );
+
+          await plugin.loadSettings();
+
+          expect(saveData).not.toHaveBeenCalled();
+          expect(plugin.settings).not.toHaveProperty('autoImportMode');
+
+          await plugin.saveSettings();
+
+          expect(written).toStrictEqual([
+            {
+              settings: JSON.parse(JSON.stringify(plugin.settings)) as unknown,
+            },
+          ]);
+          expect(written[0]).not.toHaveProperty('settings.autoImportMode');
+          expect(plugin.settings.defaultPriority).toBe(42);
+        }
+      )
+    );
+  });
+
   it("resumes this device's pointer from a file an older version wrote, and not another device's", async () => {
     const own = makeObsidianLocalStorage({ [DEVICE_ID_KEY]: DEVICE });
     const { plugin } = makeStoragePlugin(own, {
@@ -4251,7 +4283,7 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
 
     expect(watch.importTaggedNotes).toHaveBeenCalledExactlyOnceWith(
       [{ file, matchedTags: [AUTO_IMPORT_TAG] }],
-      { priority: 17, mode: 'inPlace' }
+      { priority: 17 }
     );
   });
 
@@ -4274,19 +4306,20 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
     expect(watch.recordImport).not.toHaveBeenCalled();
   });
 
-  it('imports in the way of importing tagged notes set when the batch is imported', async () => {
-    for (const mode of ['inPlace', 'copy', 'inherit'] as const) {
+  it('imports at the default priority set when the batch is imported, whatever copying on import says', async () => {
+    for (const copyOnImport of [false, true]) {
       const watch = makeAutoImportReceiver();
       watch.startReviewManager();
       const { settings } = watch.receiver;
 
       watch.change('inbox/clip.md', { tags: [AUTO_IMPORT_TAG] });
-      settings.autoImportMode = mode;
+      settings.defaultPriority = 41;
+      settings.copyOnImport = copyOnImport;
       await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
 
       expect(watch.importTaggedNotes).toHaveBeenCalledExactlyOnceWith(
         expect.anything(),
-        { priority: settings.defaultPriority, mode }
+        { priority: 41 }
       );
     }
   });
@@ -4415,29 +4448,8 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
         { file: pdf, matchedTags: [] },
         { file: note, matchedTags: [] },
       ],
-      { priority: 23, mode: 'inPlace' }
+      { priority: 23 }
     );
-  });
-
-  it('imports a file arriving in a watched folder in the way of importing tagged notes set', async () => {
-    for (const mode of ['inPlace', 'copy', 'inherit'] as const) {
-      const watch = makeAutoImportReceiver();
-      watch.startReviewManager();
-      Object.assign(watch.receiver.settings, {
-        autoImportOnTag: false,
-        autoImportOnFolder: true,
-        autoImportFolders: ['Inbox'],
-        autoImportMode: mode,
-      });
-
-      const file = watch.arrive('Inbox/paper.pdf');
-      await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
-
-      expect(watch.importTaggedNotes).toHaveBeenCalledExactlyOnceWith(
-        [{ file, matchedTags: [] }],
-        { priority: watch.receiver.settings.defaultPriority, mode }
-      );
-    }
   });
 
   it('ignores arrivals until the review manager is up, and follows the watched folders as they are at each', async () => {
