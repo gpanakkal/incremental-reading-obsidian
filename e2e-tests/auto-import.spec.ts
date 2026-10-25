@@ -157,6 +157,20 @@ const articleCount = () =>
   }, NOT_PURGED);
 
 /**
+ * The paths the database's articles point at, sorted, not counting those
+ * deleted for good: a count that comes out wrong names no culprit.
+ */
+const articleReferences = () =>
+  window.evaluate(async (notPurged) => {
+    const { app } = window as unknown as { app: PageApp };
+    const { repo } = app.plugins.plugins['incremental-reading'].reviewManager;
+    const rows = await repo.query(
+      `SELECT reference FROM article WHERE ${notPurged}`
+    );
+    return rows.map((row) => row.reference as string).sort();
+  }, NOT_PURGED);
+
+/**
  * Import whatever the watcher has queued now, rather than once it settles, and
  * wait for it: nothing queued means nothing is imported.
  */
@@ -637,9 +651,21 @@ test('imports what was added to a watched folder while Obsidian was closed when 
   const folder = 'Clippings';
   const hereBefore = `${folder}/Here before.md`;
   await writeVaultFile(hereBefore, 'Here before watching.\n');
+  // Written from outside, so in the vault only once Obsidian's file watcher
+  // tells of it, which can take longer than the settings below take to
+  // change (macOS): it would arrive after watching began, and be imported
   await expect
-    .poll(async () => (await noteState(hereBefore)).rowIds)
-    .toEqual([]);
+    .poll(() =>
+      window.evaluate(
+        (at) =>
+          (window as unknown as { app: PageApp }).app.vault.getFileByPath(
+            at
+          ) !== null,
+        hereBefore
+      )
+    )
+    .toBe(true);
+  expect((await noteState(hereBefore)).rowIds).toEqual([]);
   await setPluginSetting(window, 'autoImportOnFolder', true);
   await setPluginSetting(window, 'autoImportFolders', [folder]);
   // Saving tells the watcher, as the settings tab does
@@ -658,7 +684,7 @@ test('imports what was added to a watched folder while Obsidian was closed when 
       )
     )
     .toEqual({ folders: [folder], paths: [hereBefore] });
-  const before = await articleCount();
+  const before = await articleReferences();
   /** Close Obsidian, run `whileClosed` from outside it, and start it again. */
   const restart = async (whileClosed: () => Promise<void>) => {
     await expect.poll(() => pendingSaves(window)).toBe(0);
@@ -688,7 +714,7 @@ test('imports what was added to a watched folder while Obsidian was closed when 
   const ids = [];
   for (const notePath of notes) ids.push(await expectImported(notePath));
   await expect.poll(() => rowIdsAt(pdf)).toHaveLength(1);
-  expect(await articleCount()).toBe(before + 3);
+  expect(await articleReferences()).toEqual([...before, ...notes, pdf].sort());
   expect(await noteState(hereBefore)).toMatchObject({
     irId: null,
     rowIds: [],
@@ -711,7 +737,9 @@ test('imports what was added to a watched folder while Obsidian was closed when 
 
   await expect(importNotices()).toHaveText([/\b1 article\b/]);
   await expectImported(copyOf('Third'));
-  expect(await articleCount()).toBe(before + 4);
+  expect(await articleReferences()).toEqual(
+    [...before, ...notes, pdf, copyOf('Third')].sort()
+  );
   expect(await noteState(copied)).toMatchObject({ irId: null, rowIds: [] });
 
   // As un-importing does: the row deleted, the plugin's frontmatter stripped
@@ -724,7 +752,9 @@ test('imports what was added to a watched folder while Obsidian was closed when 
 
   await expect(importNotices()).toHaveText([/\b1 article\b/]);
   await expectImported(copyOf('Fourth'));
-  expect(await articleCount()).toBe(before + 4);
+  expect(await articleReferences()).toEqual(
+    [...before, notes[1], pdf, copyOf('Third'), copyOf('Fourth')].sort()
+  );
   expect(await noteState(copied)).toMatchObject({ irId: null, rowIds: [] });
   expect(await noteState(unimported)).toMatchObject({
     irId: null,
