@@ -215,15 +215,31 @@ describe('registerPositionFlushes', () => {
     expect(store.flushAll).toHaveBeenCalledOnce();
   });
 
-  it("hands the app's quit a flush to wait for", () => {
+  it("hands the app's quit a flush to wait for, settled in a task after it", async () => {
+    let finish!: () => void;
     const store = makeStore();
+    store.flushAll.mockReturnValue(
+      new Promise<void>((resolve) => (finish = resolve))
+    );
     const { plugin, fire } = makePlugin();
     registerPositionFlushes(plugin, store);
     const addPromise = vi.fn();
     fire('quit', { addPromise });
-    expect(addPromise).toHaveBeenCalledWith(
-      store.flushAll.mock.results[0].value
-    );
+    expect(store.flushAll).toHaveBeenCalledOnce();
+    expect(addPromise).toHaveBeenCalledOnce();
+    const handed = addPromise.mock.calls[0][0] as Promise<void>;
+    let settled = false;
+    void handed.then(() => {
+      settled = true;
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    finish();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(settled).toBe(false);
+    await handed;
+    expect(settled).toBe(true);
   });
 
   it('writes waiting moves to localStorage at unload', () => {
