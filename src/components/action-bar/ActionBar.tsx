@@ -331,7 +331,7 @@ function BulkImportAction() {
   const { plugin } = useReviewContext();
   return (
     <ButtonWithIcon
-      tooltip="Import many files at once"
+      tooltip="Bulk import from vault"
       id="bulk-import-button"
       handleClick={() => {
         plugin.openBulkImport();
