@@ -1,6 +1,6 @@
 import IRScheduler from '#/lib/IRScheduler';
 import type { ComponentChildren } from 'preact';
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 
 /**
  * Note: pass a `key` prop with the item's ID to ensure priority is updated
@@ -9,6 +9,10 @@ import { useEffect, useRef, useState } from 'react';
  * `leading` takes the place of the text label, e.g. an icon button. It sits
  * outside the `<label>` so a click on it never lands on the input instead, and
  * the input is named with `aria-label` in the text's place.
+ *
+ * Escape drops the edit in progress and shows the stored priority again: the
+ * one this field last saved, even before it comes back as `initialPriority`,
+ * or else the one passed in.
  */
 export function PriorityField({
   initialPriority,
@@ -22,18 +26,31 @@ export function PriorityField({
   leading?: ComponentChildren;
 }) {
   const hasLeading = leading !== undefined;
-  const [displayPrio, setDisplayPrio] = useState<number>(initialPriority / 10);
-  const prevPriorityRef = useRef(initialPriority);
+  /** The priority last stored, whether passed in or saved from here. */
+  const [stored, setStored] = useState(initialPriority);
+  /** The `initialPriority` of the last render. */
+  const [seenPriority, setSeenPriority] = useState(initialPriority);
+  /**
+   * The edit in progress: the display priority it cleans up to, and the text
+   * typed when that changes nothing, which stays on screen until the edit ends
+   * so a half-typed number like "4." isn't cut short.
+   */
+  const [draft, setDraft] = useState<{
+    value: number;
+    text: string | null;
+  } | null>(null);
 
-  useEffect(
-    function updatePrioOnRerender() {
-      if (prevPriorityRef.current !== initialPriority) {
-        prevPriorityRef.current = initialPriority;
-        setDisplayPrio(initialPriority / 10);
-      }
-    },
-    [initialPriority]
-  );
+  // Follow a new stored priority, except the one this field just saved
+  if (seenPriority !== initialPriority) {
+    setSeenPriority(initialPriority);
+    if (stored !== initialPriority) {
+      setStored(initialPriority);
+      setDraft(null);
+    }
+  }
+
+  const storedText = String(stored / 10);
+  const held = draft ? draft.value : stored / 10;
 
   return (
     <div className="ir-priority-container">
@@ -43,30 +60,34 @@ export function PriorityField({
         <input
           id={'ir-priority-input'}
           aria-label={hasLeading ? 'Priority' : undefined}
-          value={displayPrio}
+          value={draft ? (draft.text ?? String(draft.value)) : storedText}
           className={'ir-priority-input'}
           type="text"
           inputMode="numeric"
           onChange={(e) => {
+            const text = e.currentTarget.value;
+            let value = held;
             try {
-              const adjusted = IRScheduler.adjustDisplayPriorityOnChange(
-                e.currentTarget.value
-              );
-              setDisplayPrio(adjusted);
+              value = IRScheduler.adjustDisplayPriorityOnChange(text);
             } catch (_error) {
               /* fall back to prior value */
             }
+            setDraft({ value, text: value === held ? text : null });
           }}
           onBlur={() => {
-            const transformed = IRScheduler.transformPriority(displayPrio);
-            prevPriorityRef.current = transformed;
+            const transformed = IRScheduler.transformPriority(held);
+            setStored(transformed);
+            setDraft(null);
             void onBlur(transformed);
           }}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.currentTarget.blur();
             } else if (e.key === 'Escape') {
-              setDisplayPrio(initialPriority / 10);
+              // Restored here rather than by the re-render, which would set
+              // the value after select() and so drop the selection
+              e.currentTarget.value = storedText;
+              setDraft(null);
               e.currentTarget.select();
             }
           }}
@@ -77,7 +98,7 @@ export function PriorityField({
             (
             {Math.round(
               IRScheduler.getIntervalMultiplier(
-                IRScheduler.transformPriority(displayPrio)
+                IRScheduler.transformPriority(held)
               ) * 100
             ) / 100}
             x interval multiplier)
