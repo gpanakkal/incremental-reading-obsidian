@@ -235,3 +235,11 @@ export const MORE_OPTIONS_SECTIONS: string[] = [
   '',
   'danger',
 ];
+
+/**
+ * Tooltip and accessible name of the review bar's button that opens the
+ * scheduling modal, and the name of the command that does the same; kept here
+ * so e2e specs can find it without importing the component (and Obsidian with
+ * it).
+ */
+export const SCHEDULING_BUTTON_LABEL = 'Manage scheduling';

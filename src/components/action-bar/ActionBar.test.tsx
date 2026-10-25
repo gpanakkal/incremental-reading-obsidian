@@ -14,11 +14,13 @@ import {
   store,
 } from '#/lib/store';
 import type { MaybeMissingItem, NoteType, ReviewItem } from '#/lib/types';
+import { SchedulingModal } from '#/views/SchedulingModal';
 import fc from 'fast-check';
 import { type ComponentChild, render } from 'preact';
 import { Rating } from 'ts-fsrs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActionBar } from './ActionBar';
+import { SCHEDULING_BUTTON_CLASS } from './TextScheduler';
 
 // #region HELPERS
 
@@ -258,6 +260,8 @@ function makeActions() {
     review: vi.fn(),
     skipItem: vi.fn(),
     gradeCard: vi.fn(),
+    reprioritize: vi.fn(),
+    manageFixedInterval: vi.fn(),
     undo: vi.fn(() => {
       undoStack.pop();
       emit();
@@ -365,20 +369,29 @@ const GRADES = [
 
 /**
  * An item carrying only what the bar reads: `type` and `dismissed` pick the
- * buttons, and the scheduler reads `id` and `priority`. A null
- * `fixed_interval_days` keeps articles on the priority field, as snippets are.
+ * buttons, and the scheduler reads `id`, `priority` and `fixed_interval_days`.
+ * The default null interval keeps articles on the priority field, as snippets
+ * are.
  */
 function makeItem(
   type: NoteType,
-  { dismissed = false }: { dismissed?: boolean } = {}
+  {
+    dismissed = false,
+    fixedIntervalDays = null,
+    priority = 50,
+  }: {
+    dismissed?: boolean;
+    fixedIntervalDays?: number | null;
+    priority?: number;
+  } = {}
 ): ReviewItem {
   return {
     data: {
       id: `${type}-id`,
       type,
       dismissed,
-      priority: 50,
-      fixed_interval_days: null,
+      priority,
+      fixed_interval_days: fixedIntervalDays,
     },
     file: {},
   } as never;
@@ -427,6 +440,15 @@ function queryButton(
   return container.querySelector<HTMLButtonElement>(
     `button[aria-label="${label}"]`
   );
+}
+
+/** The icon buttons that open the scheduling modal. */
+function querySchedulingButtons(container: HTMLElement): HTMLButtonElement[] {
+  return [
+    ...container.querySelectorAll<HTMLButtonElement>(
+      `button.${SCHEDULING_BUTTON_CLASS}`
+    ),
+  ];
 }
 
 function getButton(container: HTMLElement, label: string): HTMLButtonElement {
@@ -526,26 +548,32 @@ function layOutLead(width: number) {
 
 // lucide-react resolves `useContext` against its own preact copy, which is not
 // the instance rendering here (see the react→preact aliasing TODO in
-// vitest.config.ts). The icons are incidental to this component's behavior.
-vi.mock('lucide-react', () => ({
-  ArchiveRestore: () => null,
-  ArrowLeft: () => null,
-  ArrowRight: () => null,
-  Ban: () => null,
-  FileQuestionMark: () => null,
-  CalendarSync: () => null,
-  Check: () => null,
-  EllipsisVertical: () => null,
-  Eye: () => null,
-  FileText: () => null,
-  House: () => null,
-  Scissors: () => null,
-  SkipForward: () => null,
-  TextSelect: () => null,
-  Trash2: () => null,
-  Undo2: () => null,
-  X: () => null,
-}));
+// vitest.config.ts). The icons are incidental to this component's behavior,
+// except the two naming a text's scheduling strategy, which draw a marked
+// stand-in to tell them apart.
+vi.mock('lucide-react', async () => {
+  const { h } = await import('preact');
+  return {
+    ArchiveRestore: () => null,
+    ArrowLeft: () => null,
+    ArrowRight: () => null,
+    Ban: () => null,
+    FileQuestionMark: () => null,
+    CalendarSync: () => h('svg', { 'data-icon': 'calendar-sync' }),
+    Flag: () => h('svg', { 'data-icon': 'flag' }),
+    Check: () => null,
+    EllipsisVertical: () => null,
+    Eye: () => null,
+    FileText: () => null,
+    House: () => null,
+    Scissors: () => null,
+    SkipForward: () => null,
+    TextSelect: () => null,
+    Trash2: () => null,
+    Undo2: () => null,
+    X: () => null,
+  };
+});
 
 // react-redux is mocked rather than spied on because its exports are
 // non-configurable: `vi.spyOn(ReactRedux, 'useDispatch')` throws
@@ -1555,11 +1583,11 @@ describe('ActionBar', () => {
           'Mark reviewed',
           'Create snippet',
           'Create card',
-          'Change scheduling strategy',
           'Show answer',
         ]) {
           expect(queryButton(container, label)).toBeNull();
         }
+        expect(querySchedulingButtons(container)).toHaveLength(0);
         for (const [grade] of GRADES) {
           expect(queryGradeButton(container, grade)).toBeNull();
         }
@@ -1590,12 +1618,99 @@ describe('ActionBar', () => {
       expect(actions.skipItem).toHaveBeenCalledWith(item);
     });
 
-    it('offers to change its scheduling strategy', () => {
-      const container = mountItemBar(makeItem(type));
+    it('saves the priority or interval its scheduling field holds when the field loses focus', () => {
+      fc.assert(
+        fc.property(
+          fc.option(fc.integer({ min: 1, max: 10_000 }), { nil: null }),
+          fc.integer({ min: 10, max: 50 }),
+          (fixedIntervalDays, priority) => {
+            try {
+              const actions = makeActions();
+              const item = makeItem(type, { fixedIntervalDays, priority });
+              const container = mountItemBar(item, { actions });
+              const fixed = type === 'article' && fixedIntervalDays !== null;
 
-      expect(
-        queryButton(container, 'Change scheduling strategy')
-      ).not.toBeNull();
+              // preact/compat listens for `onBlur` as focusout
+              container
+                .querySelector<HTMLInputElement>(
+                  fixed ? '#ir-fixed-interval-input' : '#ir-priority-input'
+                )!
+                .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+
+              if (fixed) {
+                expect(actions.manageFixedInterval).toHaveBeenCalledWith(item, {
+                  newIntervalDays: fixedIntervalDays,
+                });
+                expect(actions.reprioritize).not.toHaveBeenCalled();
+              } else {
+                expect(actions.reprioritize).toHaveBeenCalledWith(
+                  item,
+                  priority
+                );
+                expect(actions.manageFixedInterval).not.toHaveBeenCalled();
+              }
+            } finally {
+              document.body.innerHTML = '';
+              vi.restoreAllMocks();
+            }
+          }
+        )
+      );
+    });
+
+    it('opens the scheduling modal on it from the icon leading its scheduling field', () => {
+      // Any interval on a snippet is ignored: only articles are scheduled on
+      // one, so a snippet keeps its priority field whatever the column holds.
+      fc.assert(
+        fc.property(
+          fc.option(fc.integer({ min: 1, max: 10_000 }), { nil: null }),
+          fc.integer({ min: 10, max: 50 }),
+          (fixedIntervalDays, priority) => {
+            const opened: SchedulingModal[] = [];
+            vi.spyOn(SchedulingModal.prototype, 'open').mockImplementation(
+              function (this: SchedulingModal) {
+                opened.push(this);
+              }
+            );
+            try {
+              const item = makeItem(type, { fixedIntervalDays, priority });
+              const container = mountItemBar(item);
+              const fixed = type === 'article' && fixedIntervalDays !== null;
+
+              const buttons = querySchedulingButtons(container);
+              expect(buttons).toHaveLength(1);
+              const [button] = buttons;
+              expect(button.getAttribute('aria-label')).toBeTruthy();
+              expect(
+                button.querySelector('svg')?.getAttribute('data-icon')
+              ).toBe(fixed ? 'calendar-sync' : 'flag');
+
+              // The icon stands in for the field's text label, so the input
+              // is named some other way, and a click on the icon is not
+              // forwarded to it by an enclosing <label>.
+              const input = container.querySelector<HTMLInputElement>(
+                fixed ? '#ir-fixed-interval-input' : '#ir-priority-input'
+              )!;
+              expect(input.getAttribute('aria-label')).toBeTruthy();
+              expect(
+                container.querySelector(
+                  fixed ? '#ir-priority-input' : '#ir-fixed-interval-input'
+                )
+              ).toBeNull();
+              expect(button.closest('label')).toBeNull();
+
+              button.click();
+
+              expect(opened).toHaveLength(1);
+              expect(opened[0].item).toBe(item);
+              expect(opened[0].plugin.actions).toBeDefined();
+            } finally {
+              document.body.innerHTML = '';
+              vi.restoreAllMocks();
+            }
+          }
+        )
+      );
     });
 
     it('offers nothing that only makes sense for a card', () => {
@@ -1619,7 +1734,7 @@ describe('ActionBar', () => {
         const container = mountItemBar(makeItem('card'), { showAnswer });
 
         expect(queryButton(container, 'Mark reviewed')).toBeNull();
-        expect(queryButton(container, 'Change scheduling strategy')).toBeNull();
+        expect(querySchedulingButtons(container)).toHaveLength(0);
         document.body.innerHTML = '';
       }
     });

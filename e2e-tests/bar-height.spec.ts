@@ -146,6 +146,9 @@ async function expectControlsLevel(page: Page, bar: string) {
           ':scope > .ir-bar-lead > button.clickable-icon',
           ':scope > .ir-bar-center > button.clickable-icon',
           ':scope > .ir-bar-trail > button.clickable-icon',
+          // The scheduling icon leading the priority or interval field
+          ':scope > .ir-bar-center > .ir-priority-container > button.clickable-icon',
+          ':scope > .ir-bar-center > .ir-fixed-interval-container > button.clickable-icon',
         ].join(', ')
       )
     )
