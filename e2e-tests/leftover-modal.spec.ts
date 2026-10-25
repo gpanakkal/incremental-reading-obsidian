@@ -41,6 +41,9 @@ test.afterEach(async () => {
  */
 type PageApp = {
   vault: { getFileByPath(path: string): unknown };
+  metadataCache: {
+    getFileCache(file: unknown): { frontmatter?: unknown } | null;
+  };
   plugins: {
     plugins: Record<
       string,
@@ -67,18 +70,24 @@ const mutate = (sql: string, params: unknown[] = []) =>
     [sql, params] as const
   );
 
-/** Write a note into the vault and wait for Obsidian to index it. */
+/**
+ * Write a note into the vault and wait for Obsidian to index it, frontmatter
+ * included: the leftover scan reads tags and ids off the metadata cache, which
+ * parses a note some time after the vault first lists it.
+ */
 async function writeVaultFile(at: string, content: string) {
   await fs.mkdir(path.dirname(path.join(vaultPath, at)), { recursive: true });
   await fs.writeFile(path.join(vaultPath, at), content);
   await expect
     .poll(() =>
-      window.evaluate(
-        (p) =>
-          (window as unknown as { app: PageApp }).app.vault.getFileByPath(p) !==
-          null,
-        at
-      )
+      window.evaluate((p) => {
+        const { app } = window as unknown as { app: PageApp };
+        const file = app.vault.getFileByPath(p);
+        return (
+          file !== null &&
+          app.metadataCache.getFileCache(file)?.frontmatter !== undefined
+        );
+      }, at)
     )
     .toBe(true);
 }

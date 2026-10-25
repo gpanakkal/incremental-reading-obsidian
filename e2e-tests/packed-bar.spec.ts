@@ -46,6 +46,11 @@ const BAR = `.workspace-leaf.mod-active [data-type="${REVIEW_VIEW_TYPE}"] .ir-ac
 /** Viewports pinned for every check: CI's headed window is ~1024px wide. */
 const WIDE = { width: 1600, height: 900 };
 const NARROW = { width: 640, height: 900 };
+/**
+ * A popout's tab spans its whole window, with no ribbon or sidebar beside it,
+ * so the bar packs only at a width that leaves less room than NARROW does.
+ */
+const POPOUT_NARROW = { width: 480, height: 900 };
 const PHONE = { width: 420, height: 900 };
 
 type Box = { left: number; right: number; width: number };
@@ -207,7 +212,7 @@ test.describe('Separator between undo and the item actions', () => {
     // Bounded: within a few frames, not whenever something else in the page
     // next happens to catch the bar up
     const promptly = { timeout: 3_000 };
-    await popout.setViewportSize(NARROW);
+    await popout.setViewportSize(POPOUT_NARROW);
     expectBetween(
       await expectBar(
         popout,
