@@ -6,7 +6,7 @@ import {
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import type { SchedulingStrategy } from '#/lib/types';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { FixedIntervalField } from './action-bar/FixedIntervalField';
 import { PriorityField } from './action-bar/PriorityField';
 import type { SchedulingModalProps } from './types';
@@ -27,8 +27,16 @@ export function SchedulingModalContent({
     fixedIntervalDays: schedule.intervalDays ?? MINIMUM_FIXED_REVIEW_INTERVAL,
   });
 
+  /**
+   * The values as last committed, ahead of the re-render. A field's Enter
+   * commits by blurring the field, then bubbles here to confirm within the
+   * same keydown, before state from the blur reaches this closure.
+   */
+  const committedRef = useRef(scheduleValues);
+
   const updateValues = (updates: Partial<typeof scheduleValues>) => {
-    setScheduleValues((prev) => ({ ...prev, ...updates }));
+    committedRef.current = { ...committedRef.current, ...updates };
+    setScheduleValues(committedRef.current);
   };
 
   const handleToggle = (value: boolean) => {
@@ -39,13 +47,26 @@ export function SchedulingModalContent({
     }
   };
 
+  /**
+   * Saving is async and the modal stays open until it finishes, so a second
+   * Enter (key repeat) or click in the meantime must not confirm again.
+   */
+  const closedRef = useRef(false);
+
+  const close: typeof onClose = (result) => {
+    if (closedRef.current) return;
+    closedRef.current = true;
+    onClose(result);
+  };
+
   const handleEnter = () => {
+    const committed = committedRef.current;
     const value =
       strategy === 'priority'
-        ? scheduleValues.priority
-        : scheduleValues.fixedIntervalDays;
+        ? committed.priority
+        : committed.fixedIntervalDays;
 
-    onClose({ strategy, value });
+    close({ strategy, value });
   };
 
   const intervalTooltip =
@@ -61,7 +82,11 @@ export function SchedulingModalContent({
     <div
       className="ir-scheduling-modal"
       onKeyDown={(e) => {
-        if (e.key === 'Enter') {
+        // A focused button's own Enter activation clicks it, so Enter on
+        // Cancel cancels. Tag check, not instanceof: a popout window has its
+        // own HTMLButtonElement.
+        const onButton = (e.target as HTMLElement).tagName === 'BUTTON';
+        if (e.key === 'Enter' && !onButton) {
           e.preventDefault();
           handleEnter();
         }
@@ -99,7 +124,7 @@ export function SchedulingModalContent({
       ) : (
         <>
           <FixedIntervalField
-            initialInterval={schedule.intervalDays}
+            initialInterval={scheduleValues.fixedIntervalDays}
             onBlur={(intervalDays: number) =>
               updateValues({ fixedIntervalDays: intervalDays })
             }
@@ -110,7 +135,7 @@ export function SchedulingModalContent({
       <div className="modal-button-container">
         <button
           onClick={() => {
-            onClose('cancel');
+            close('cancel');
           }}
         >
           Cancel
