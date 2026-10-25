@@ -1,3 +1,4 @@
+import { actionCooldownFor } from '#/lib/action-cooldown';
 import { AutoImportWatcher } from '#/lib/AutoImportWatcher';
 import {
   AUTO_IMPORT_DEBOUNCE_MS,
@@ -519,6 +520,7 @@ function makeExtractReceiver({
   tabFile = { path: 'papers/a.pdf', extension: 'pdf' } as TFile | null,
   otherViewType = 'image',
   loaded = true,
+  cooldownSeconds = 0.4,
 } = {}) {
   const reviewView = Object.create(ReviewView.prototype) as ReviewView;
   // The review tab's item, by its file's extension; `null` for none
@@ -545,6 +547,7 @@ function makeExtractReceiver({
   const receiver = {
     // Absent until the plugin has finished loading
     reviewManager: loaded ? {} : undefined,
+    settings: { actionCooldownSeconds: cooldownSeconds },
     actions,
     register: vi.fn((unloader: () => void) => unloaders.push(unloader)),
     addCommand: vi.fn(
@@ -3544,6 +3547,83 @@ describe('IncrementalReadingPlugin.addExtractCommands', () => {
         expect(actions.createCard).not.toHaveBeenCalled();
       })
     );
+  });
+
+  describe("under the review tab's double-click guard", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    /** Whole milliseconds, up past the setting's maximum, 0 (off) included. */
+    const cooldownMsArb = fc.integer({ min: 0, max: 5000 });
+    const delayArb = fc.integer({ min: 0, max: 10_000 });
+    const timeArb = fc.integer({ min: 0, max: 1e9 });
+    /** The review tab's item: a note, with an editor, or a PDF, without. */
+    const itemFiles = fc.constantFrom(
+      { itemExtension: 'md', editor: true },
+      { itemExtension: 'pdf', editor: false }
+    );
+
+    /** Show an item in the review tab at `armedAt`, the way its bar does. */
+    function armAt(reviewView: ReviewView, armedAt: number) {
+      vi.spyOn(performance, 'now').mockReturnValue(armedAt);
+      actionCooldownFor(reviewView).show('item', armedAt);
+    }
+
+    it('makes nothing until the cooldown after the item showed has run out, yet stays available', () => {
+      fc.assert(
+        fc.property(
+          kinds,
+          itemFiles,
+          timeArb,
+          cooldownMsArb,
+          delayArb,
+          (kind, itemFile, armedAt, cooldownMs, delay) => {
+            const { actions, reviewView, run } = makeExtractReceiver({
+              ...itemFile,
+              cooldownSeconds: cooldownMs / 1000,
+            });
+            armAt(reviewView, armedAt);
+            vi.spyOn(performance, 'now').mockReturnValue(armedAt + delay);
+
+            expect(run(kind, true)).toBe(true);
+            run(kind);
+
+            expect(actions.extract.mock.calls).toEqual(
+              delay >= cooldownMs ? [[kind, reviewView]] : []
+            );
+          }
+        )
+      );
+    });
+
+    it("never holds a note's or a PDF's own tab, which have no items to cycle", () => {
+      fc.assert(
+        fc.property(
+          kinds,
+          fc.constantFrom('note' as const, 'pdf' as const),
+          timeArb,
+          (kind, where, now) => {
+            const { actions, reviewView, run } = makeExtractReceiver({
+              where,
+              cooldownSeconds: 2,
+            });
+            // A review tab elsewhere, its guard running
+            armAt(reviewView, now);
+
+            run(kind);
+
+            const made =
+              where === 'pdf'
+                ? actions.extractFromPdfTab
+                : kind === 'snippet'
+                  ? actions.createSnippet
+                  : actions.createCard;
+            expect(made).toHaveBeenCalledOnce();
+          }
+        )
+      );
+    });
   });
 });
 

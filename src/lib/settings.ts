@@ -24,6 +24,7 @@ import {
   type StepUnit,
 } from 'ts-fsrs';
 import {
+  ACTION_COOLDOWN_SECONDS,
   AUTO_IMPORT_TAG,
   DATA_DIRECTORY,
   DAY_ROLLOVER_OFFSET_HOURS,
@@ -47,6 +48,11 @@ export interface IRPluginSettings {
   copyOnImport: boolean;
   createEmptyInCurrentFolder: boolean;
   dayRolloverOffset: number;
+  /**
+   * Seconds the action bar and review commands ignore presses for once the
+   * item on screen changes; see {@link ACTION_COOLDOWN_SECONDS}.
+   */
+  actionCooldownSeconds: number;
   showAdvancedImportCommands: boolean;
   showAdvancedImportMenuItems: boolean;
   fuzzTextReviews: boolean; // intra-day fuzzing for items except cards
@@ -148,6 +154,7 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   copyOnImport: false,
   createEmptyInCurrentFolder: true,
   dayRolloverOffset: DAY_ROLLOVER_OFFSET_HOURS.DEFAULT,
+  actionCooldownSeconds: ACTION_COOLDOWN_SECONDS.DEFAULT,
   showAdvancedImportCommands: false,
   showAdvancedImportMenuItems: false,
   fuzzTextReviews: true,
@@ -197,6 +204,9 @@ export function formatRolloverHour(hours: number): string {
   const hourOfDay = ((hours % 24) + 24) % 24;
   return `${hourOfDay % 12 || 12} ${hourOfDay < 12 ? 'AM' : 'PM'}`;
 }
+
+/** A double-click guard as its slider shows it, in seconds: `0.4 s`. */
+export const formatCooldown = (seconds: number) => `${seconds.toFixed(1)} sec`;
 
 /** A targeted retention as its slider shows it, to two decimal places: `0.90`. */
 export const formatRetention = (retention: number) => retention.toFixed(2);
@@ -269,6 +279,7 @@ const CONTROL_BINDINGS = {
   copyOnImport: topLevel('copyOnImport'),
   createEmptyInCurrentFolder: topLevel('createEmptyInCurrentFolder'),
   dayRolloverOffset: topLevel('dayRolloverOffset'),
+  actionCooldownSeconds: topLevel('actionCooldownSeconds'),
   fuzzTextReviews: topLevel('fuzzTextReviews'),
   skipHomeScreen: topLevel('skipHomeScreen'),
   reviewTitleBar: topLevel('reviewTitleBar'),
@@ -1090,6 +1101,21 @@ export class IRSettingTab extends PluginSettingTab {
               step: 1,
               defaultValue: DAY_ROLLOVER_OFFSET_HOURS.DEFAULT,
               displayFormat: formatRolloverHour,
+            },
+          },
+          {
+            name: 'Repeat action guard',
+            desc:
+              `Ignore consecutive action bar clicks and review shortcuts for a` +
+              ` short time to avoid accidental actions. Set to 0 to disable.`,
+            control: {
+              type: 'slider',
+              key: 'actionCooldownSeconds',
+              min: ACTION_COOLDOWN_SECONDS.MIN,
+              max: ACTION_COOLDOWN_SECONDS.MAX,
+              step: ACTION_COOLDOWN_SECONDS.STEP,
+              defaultValue: ACTION_COOLDOWN_SECONDS.DEFAULT,
+              displayFormat: formatCooldown,
             },
           },
           {

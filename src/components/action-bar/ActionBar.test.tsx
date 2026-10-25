@@ -2,6 +2,7 @@
 import { ReviewContextProvider } from '#/components/ReviewContext';
 import type { QueuePage } from '#/components/types';
 import * as ReactQuery from '#/hooks/useReactQuery';
+import { actionCooldownFor } from '#/lib/action-cooldown';
 import type { ActionStackEntry } from '#/lib/Actions';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import { currentItemQueryFn } from '#/lib/query-client';
@@ -21,7 +22,9 @@ import {
 } from '#/lib/types';
 import { SchedulingModal } from '#/views/SchedulingModal';
 import fc from 'fast-check';
+import { Scope } from 'obsidian';
 import { type ComponentChild, render } from 'preact';
+import { act } from 'preact/test-utils';
 import { Rating } from 'ts-fsrs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActionBar } from './ActionBar';
@@ -554,6 +557,86 @@ function layOutLead(width: number) {
         : []) as unknown as DOMRectList;
     }
   );
+}
+
+/** `makeItem`, under an id of its own: another item of the same type. */
+function itemWithId(type: NoteType, id: string): ReviewItem {
+  const item = makeItem(type);
+  return { ...item, data: { ...item.data, id } } as ReviewItem;
+}
+
+/** Put the clock the double-click guard reads at `now`. */
+function setNow(now: number) {
+  vi.spyOn(performance, 'now').mockReturnValue(now);
+}
+
+/**
+ * Mount the review page with `item` on screen and the double-click guard set
+ * to `seconds`, at the moment `mountedAt`. `show` re-renders the bar with
+ * another item (or the same one refetched) at the clock's current reading,
+ * the way a new answer from the current-item query does.
+ */
+function mountGuardedBar(
+  item: MaybeMissingItem,
+  {
+    seconds,
+    mountedAt,
+    showAnswer = false,
+    history = false,
+    selectionMode = null,
+  }: {
+    seconds: number;
+    mountedAt: number;
+    showAnswer?: boolean;
+    /** Give the tab a page to go back to and one to go forward to. */
+    history?: boolean;
+    selectionMode?: SelectionKind | null;
+  }
+) {
+  reduxState.page = 'review';
+  reduxState.showAnswer = showAnswer;
+  reduxState.selectionMode = selectionMode;
+  const actions = { ...makeActions(), toggleReviewType: vi.fn() };
+  const reviewView = history
+    ? { ...makeReviewView(), leaf: makeLeaf({ back: 1, forward: 1 }) }
+    : makeReviewView();
+  const currentItem = vi
+    .spyOn(ReactQuery, 'useCurrentItem')
+    .mockReturnValue({ data: item } as never);
+  const tree = () => (
+    <ReviewContextProvider
+      plugin={
+        {
+          actions,
+          // The type filter's menu pushes a keymap scope while open
+          app: {
+            scope: new Scope(),
+            keymap: { pushScope: vi.fn(), popScope: vi.fn() },
+          },
+          settings: {
+            showGradeIntervals: true,
+            actionCooldownSeconds: seconds,
+          },
+          onSettingsChange: () => () => {},
+        } as never
+      }
+      reviewView={reviewView as never}
+      reviewManager={REVIEW_MANAGER as never}
+    >
+      <ActionBar />
+    </ReviewContextProvider>
+  );
+  setNow(mountedAt);
+  const container = mount(tree());
+  const show = (next: MaybeMissingItem) => {
+    currentItem.mockReturnValue({ data: next } as never);
+    render(tree() as never, container);
+  };
+  const unmount = () => {
+    render(null, container);
+    container.remove();
+  };
+  return { container, actions, reviewView, show, unmount };
 }
 
 // #endregion
@@ -1816,7 +1899,7 @@ describe('ActionBar', () => {
 
         const row = container.querySelector('.ir-action-bar')
           ?.nextElementSibling as HTMLElement | null;
-        expect(row?.className).toBe('ir-grade-row');
+        expect(row?.classList.contains('ir-grade-row')).toBe(true);
         expect(Array.from(row?.children ?? [])).toEqual([
           gradeGroup(container),
         ]);
@@ -1849,7 +1932,7 @@ describe('ActionBar', () => {
 
           const row = container.querySelector('.ir-action-bar')
             ?.nextElementSibling as HTMLElement | null;
-          expect(row?.className).toBe('ir-grade-row');
+          expect(row?.classList.contains('ir-grade-row')).toBe(true);
           expect(Array.from(row?.children ?? [])).toEqual([
             gradeGroup(container),
           ]);
@@ -2087,6 +2170,450 @@ describe('ActionBar', () => {
         expect(cancelButton(container)).toBeNull();
         render(null, container);
       }
+    });
+  });
+});
+
+describe('ActionBar double-click guard', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    Object.assign(reduxState, defaultReduxState);
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  /** Whole milliseconds, up past the setting's maximum, 0 (off) included. */
+  const cooldownMsArb = fc.integer({ min: 0, max: 5000 });
+  const delayArb = fc.integer({ min: 0, max: 10_000 });
+  const timeArb = fc.integer({ min: 0, max: 1e9 });
+
+  it('drops clicks until the cooldown after the next item shows has run out', () => {
+    fc.assert(
+      fc.property(
+        timeArb,
+        delayArb,
+        cooldownMsArb,
+        delayArb,
+        (mountedAt, gap, cooldownMs, delay) => {
+          const bar = mountGuardedBar(itemWithId('article', 'first'), {
+            seconds: cooldownMs / 1000,
+            mountedAt,
+          });
+          try {
+            const changedAt = mountedAt + gap;
+            setNow(changedAt);
+            bar.show(itemWithId('article', 'second'));
+            setNow(changedAt + delay);
+
+            getButton(bar.container, 'Mark reviewed').click();
+
+            expect(bar.actions.review.mock.calls.length).toBe(
+              delay >= cooldownMs ? 1 : 0
+            );
+          } finally {
+            bar.unmount();
+          }
+        }
+      )
+    );
+  });
+
+  it('does not restart the cooldown when a refetch hands back the same item', () => {
+    fc.assert(
+      fc.property(
+        timeArb,
+        cooldownMsArb,
+        delayArb,
+        delayArb,
+        (mountedAt, cooldownMs, refetchDelay, delay) => {
+          const bar = mountGuardedBar(itemWithId('article', 'first'), {
+            seconds: cooldownMs / 1000,
+            mountedAt,
+          });
+          try {
+            setNow(mountedAt + refetchDelay);
+            // A fresh object, as every answer from the query is
+            bar.show(itemWithId('article', 'first'));
+            setNow(mountedAt + delay);
+
+            getButton(bar.container, 'Mark reviewed').click();
+
+            expect(bar.actions.review.mock.calls.length).toBe(
+              delay >= cooldownMs ? 1 : 0
+            );
+          } finally {
+            bar.unmount();
+          }
+        }
+      )
+    );
+  });
+
+  it("restarts the cooldown when a card shows its answer, since the grades take show answer's place", () => {
+    fc.assert(
+      fc.property(
+        timeArb,
+        delayArb,
+        cooldownMsArb,
+        delayArb,
+        (mountedAt, gap, cooldownMs, delay) => {
+          const card = itemWithId('card', 'card');
+          const bar = mountGuardedBar(card, {
+            seconds: cooldownMs / 1000,
+            mountedAt,
+          });
+          try {
+            const revealedAt = mountedAt + gap;
+            setNow(revealedAt);
+            reduxState.showAnswer = true;
+            bar.show(card);
+            setNow(revealedAt + delay);
+
+            const good = queryGradeButton(bar.container, 'Good');
+            expect(good).not.toBeNull();
+            good?.click();
+
+            expect(bar.actions.gradeCard.mock.calls.length).toBe(
+              delay >= cooldownMs ? 1 : 0
+            );
+          } finally {
+            bar.unmount();
+          }
+        }
+      )
+    );
+  });
+
+  it('restarts the cooldown on arriving from the home screen', () => {
+    fc.assert(
+      fc.property(
+        timeArb,
+        delayArb,
+        cooldownMsArb,
+        delayArb,
+        (mountedAt, gap, cooldownMs, delay) => {
+          // The home screen's own buttons read the queue
+          wireQueue();
+          const item = itemWithId('article', 'first');
+          const bar = mountGuardedBar(item, {
+            seconds: cooldownMs / 1000,
+            mountedAt,
+          });
+          try {
+            reduxState.page = 'home';
+            bar.show(item);
+            const arrivedAt = mountedAt + gap;
+            setNow(arrivedAt);
+            reduxState.page = 'review';
+            bar.show(item);
+            setNow(arrivedAt + delay);
+
+            getButton(bar.container, 'Mark reviewed').click();
+
+            expect(bar.actions.review.mock.calls.length).toBe(
+              delay >= cooldownMs ? 1 : 0
+            );
+          } finally {
+            bar.unmount();
+          }
+        }
+      )
+    );
+  });
+
+  it('arms the cooldown the review commands read for the same tab', () => {
+    fc.assert(
+      fc.property(timeArb, delayArb, (mountedAt, delay) => {
+        const bar = mountGuardedBar(itemWithId('article', 'first'), {
+          seconds: 1,
+          mountedAt,
+        });
+        try {
+          expect(
+            actionCooldownFor(bar.reviewView).isCoolingDown(
+              mountedAt + delay,
+              1
+            )
+          ).toBe(delay < 1000);
+        } finally {
+          bar.unmount();
+        }
+      })
+    );
+  });
+
+  it('leaves the buttons enabled while it holds clicks', () => {
+    const bar = mountGuardedBar(itemWithId('article', 'first'), {
+      seconds: 1,
+      mountedAt: 0,
+    });
+
+    expect(getButton(bar.container, 'Mark reviewed').disabled).toBe(false);
+  });
+
+  /** A cooldown still running `delay` ms after the item showed. */
+  const runningArb = fc
+    .integer({ min: 1, max: 5000 })
+    .chain((cooldownMs) =>
+      fc.tuple(
+        fc.constant(cooldownMs),
+        fc.integer({ min: 0, max: cooldownMs - 1 })
+      )
+    );
+
+  it('never holds the navigation buttons, whatever is left of the cooldown', () => {
+    fc.assert(
+      fc.property(timeArb, runningArb, (mountedAt, [cooldownMs, delay]) => {
+        dispatch.mockClear();
+        const bar = mountGuardedBar(itemWithId('article', 'first'), {
+          seconds: cooldownMs / 1000,
+          mountedAt,
+          history: true,
+        });
+        try {
+          setNow(mountedAt + delay);
+          const { leaf, showMoreOptionsMenu } = bar.reviewView;
+          const typeFilter = bar.container.querySelector<HTMLButtonElement>(
+            '.ir-type-filter-button'
+          );
+
+          getButton(bar.container, 'Navigate back').click();
+          getButton(bar.container, 'Navigate forward').click();
+          getButton(bar.container, 'Go to home screen').click();
+          // Inside act: the menu is state, flushed after the click
+          void act(() => typeFilter?.click());
+          getButton(bar.container, 'More options').click();
+
+          expect(leaf.history.back).toHaveBeenCalledTimes(1);
+          expect(leaf.history.forward).toHaveBeenCalledTimes(1);
+          expect(dispatch).toHaveBeenCalledWith(setPage('home'));
+          expect(typeFilter).not.toBeNull();
+          // The filter opens its menu rather than toggling a type (0156)
+          expect(document.querySelector('.ir-type-filter-menu')).not.toBeNull();
+          expect(showMoreOptionsMenu).toHaveBeenCalledTimes(1);
+        } finally {
+          bar.unmount();
+        }
+      })
+    );
+  });
+
+  it("holds undo and every one of the item's actions while the cooldown runs", () => {
+    fc.assert(
+      fc.property(
+        timeArb,
+        runningArb,
+        fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+        (mountedAt, [cooldownMs, delay], type) => {
+          dispatch.mockClear();
+          const item = itemWithId(type, 'first');
+          const bar = mountGuardedBar(item, {
+            seconds: cooldownMs / 1000,
+            mountedAt,
+          });
+          try {
+            // Something to undo, so the button is live; the same item again
+            // re-renders without restarting the cooldown
+            bar.actions.push('review');
+            bar.show(itemWithId(type, 'first'));
+            setNow(mountedAt + delay);
+            const itemButtons = Array.from(
+              bar.container.querySelectorAll<HTMLButtonElement>(
+                '.ir-bar-center button:not(:disabled)'
+              )
+            );
+
+            getButton(bar.container, 'Undo review').click();
+            itemButtons.forEach((button) => button.click());
+
+            expect(itemButtons.length).toBeGreaterThan(0);
+            for (const action of [
+              bar.actions.undo,
+              bar.actions.review,
+              bar.actions.skipItem,
+              bar.actions.dismissItem,
+              bar.actions.unDismissItem,
+              bar.actions.gradeCard,
+              bar.actions.extract,
+            ]) {
+              expect(action).not.toHaveBeenCalled();
+            }
+            expect(dispatch).not.toHaveBeenCalledWith(setShowAnswer(true));
+          } finally {
+            bar.unmount();
+          }
+        }
+      )
+    );
+  });
+
+  it('drops snippet and card creation until the cooldown after the next item shows has run out', () => {
+    fc.assert(
+      fc.property(
+        timeArb,
+        delayArb,
+        cooldownMsArb,
+        delayArb,
+        fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+        fc.constantFrom(
+          { kind: 'snippet' as const, label: 'Create snippet' },
+          { kind: 'card' as const, label: 'Create card' }
+        ),
+        (mountedAt, gap, cooldownMs, delay, type, { kind, label }) => {
+          const bar = mountGuardedBar(itemWithId(type, 'first'), {
+            seconds: cooldownMs / 1000,
+            mountedAt,
+          });
+          try {
+            const changedAt = mountedAt + gap;
+            setNow(changedAt);
+            bar.show(itemWithId(type, 'second'));
+            setNow(changedAt + delay);
+
+            getButton(bar.container, label).click();
+
+            expect(bar.actions.extract.mock.calls).toEqual(
+              delay >= cooldownMs ? [[kind, bar.reviewView]] : []
+            );
+          } finally {
+            bar.unmount();
+          }
+        }
+      )
+    );
+  });
+
+  it('drops snippet and card creation until the cooldown a creation armed has run out, with the item unchanged', () => {
+    // Making a snippet or card leaves the item on screen; `Actions` arms the
+    // tab's cooldown itself as it starts making one
+    fc.assert(
+      fc.property(
+        timeArb,
+        delayArb,
+        cooldownMsArb,
+        delayArb,
+        fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+        fc.constantFrom(
+          { kind: 'snippet' as const, label: 'Create snippet' },
+          { kind: 'card' as const, label: 'Create card' }
+        ),
+        (mountedAt, gap, cooldownMs, delay, type, { kind, label }) => {
+          const bar = mountGuardedBar(itemWithId(type, 'first'), {
+            seconds: cooldownMs / 1000,
+            mountedAt,
+          });
+          try {
+            const armedAt = mountedAt + gap;
+            actionCooldownFor(bar.reviewView).arm(armedAt);
+            setNow(armedAt + delay);
+
+            getButton(bar.container, label).click();
+
+            expect(bar.actions.extract.mock.calls).toEqual(
+              delay >= cooldownMs ? [[kind, bar.reviewView]] : []
+            );
+          } finally {
+            bar.unmount();
+          }
+        }
+      )
+    );
+  });
+
+  it("drops selection mode's confirm and cancel until the cooldown after the next item shows has run out", () => {
+    fc.assert(
+      fc.property(
+        timeArb,
+        delayArb,
+        cooldownMsArb,
+        delayArb,
+        fc.constantFrom<NoteType>('article', 'snippet', 'card'),
+        fc.constantFrom<SelectionKind>('snippet', 'card'),
+        fc.constantFrom(
+          {
+            id: 'confirm-selection-button',
+            action: 'confirmSelection' as const,
+          },
+          { id: 'cancel-selection-button', action: 'cancelSelection' as const }
+        ),
+        (mountedAt, gap, cooldownMs, delay, type, kind, { id, action }) => {
+          const bar = mountGuardedBar(itemWithId(type, 'first'), {
+            seconds: cooldownMs / 1000,
+            mountedAt,
+            selectionMode: kind,
+          });
+          try {
+            const changedAt = mountedAt + gap;
+            setNow(changedAt);
+            bar.show(itemWithId(type, 'second'));
+            setNow(changedAt + delay);
+
+            const button = bar.container.querySelector<HTMLButtonElement>(
+              `#${id}`
+            );
+            expect(button).not.toBeNull();
+            button?.click();
+
+            expect(bar.actions[action].mock.calls).toEqual(
+              delay >= cooldownMs ? [[bar.reviewView]] : []
+            );
+          } finally {
+            bar.unmount();
+          }
+        }
+      )
+    );
+  });
+
+  describe('where the grades sit in a row of their own', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        'ResizeObserver',
+        class {
+          observe() {}
+          disconnect() {}
+        }
+      );
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('drops clicks on the row as on the bar', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          timeArb,
+          cooldownMsArb,
+          delayArb,
+          async (mountedAt, cooldownMs, delay) => {
+            // No room at all
+            layOutBar(0);
+            const bar = mountGuardedBar(itemWithId('card', 'card'), {
+              seconds: cooldownMs / 1000,
+              mountedAt,
+              showAnswer: true,
+            });
+            try {
+              await settle();
+              setNow(mountedAt + delay);
+
+              const good = queryGradeButton(bar.container, 'Good');
+              expect(good?.closest('.ir-grade-row')).not.toBeNull();
+              good?.click();
+
+              expect(bar.actions.gradeCard.mock.calls.length).toBe(
+                delay >= cooldownMs ? 1 : 0
+              );
+            } finally {
+              bar.unmount();
+            }
+          }
+        ),
+        { numRuns: 30 }
+      );
     });
   });
 });

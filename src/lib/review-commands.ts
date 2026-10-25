@@ -2,13 +2,33 @@ import type IncrementalReadingPlugin from '#/main';
 import { openRelinkPicker } from '#/views/RelinkModal';
 import { SchedulingModal } from '#/views/SchedulingModal';
 import { type Grade, Rating } from 'ts-fsrs';
+import { actionCooldownFor } from './action-cooldown';
 import { getCurrentItemSync } from './query-client';
 import { tableOf } from './relink';
 import { cardsOnly, setShowAnswer, store } from './store';
 import { isMissingItem, isReviewCard, isReviewText } from './types';
 
+/**
+ * Whether the double-click guard of the review tab `view`, armed by its action
+ * bar when the item changes, is holding presses: a hotkey pressed twice, or
+ * held down, mustn't act on the item that replaced the one it was meant for.
+ * Commands it holds are still reported as available, so the hotkey is used up
+ * rather than passed on to the editor.
+ */
+export function isReviewCoolingDown(
+  plugin: Pick<IncrementalReadingPlugin, 'settings'>,
+  view: object
+): boolean {
+  return actionCooldownFor(view).isCoolingDown(
+    performance.now(),
+    plugin.settings.actionCooldownSeconds
+  );
+}
+
 /** Commands corresponding to buttons on the action bar */
 export function initReviewCommands(plugin: IncrementalReadingPlugin) {
+  const coolingDown = (view: object) => isReviewCoolingDown(plugin, view);
+
   plugin.addCommand({
     id: 'mark-review',
     name: 'Review: show answer/mark reviewed',
@@ -23,6 +43,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
         return false;
       }
       if (checking) return true;
+      if (coolingDown(view)) return;
 
       if (isCard) void store.dispatch(setShowAnswer(true));
       else void plugin.actions.review(currentItem);
@@ -39,6 +60,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       const item = getCurrentItemSync();
       if (!item) return false;
       if (checking) return true;
+      if (coolingDown(view)) return;
       void plugin.actions.skipItem(item);
     },
   });
@@ -53,6 +75,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       const item = getCurrentItemSync();
       if (!item || item.data.dismissed) return false;
       if (checking) return true;
+      if (coolingDown(view)) return;
       void plugin.actions.dismissItem(item);
     },
   });
@@ -67,6 +90,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
       const item = getCurrentItemSync();
       if (!item || !item.data.dismissed) return false;
       if (checking) return true;
+      if (coolingDown(view)) return;
       void plugin.actions.unDismissItem(item);
     },
   });
@@ -140,6 +164,7 @@ export function initReviewCommands(plugin: IncrementalReadingPlugin) {
     const item = getCurrentItemSync();
     if (!item || isMissingItem(item) || !isReviewCard(item)) return false;
     if (checking) return true;
+    if (coolingDown(view)) return;
     void plugin.actions.gradeCard(item, grade);
   };
 

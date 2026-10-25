@@ -1,6 +1,6 @@
 import * as fc from 'fast-check';
 import { describe, expect, it, vi } from 'vitest';
-import { AUTO_IMPORT_TAG } from './constants';
+import { ACTION_COOLDOWN_SECONDS, AUTO_IMPORT_TAG } from './constants';
 import { LEGACY_DEVICE_STATE_KEYS } from './device-state';
 import {
   AUTO_IMPORT_WATERMARK_KEY,
@@ -373,6 +373,37 @@ describe('parsePluginData', () => {
 
     expect(second.autoImportTags).toEqual([AUTO_IMPORT_TAG]);
     expect(DEFAULT_SETTINGS.autoImportTags).toEqual([AUTO_IMPORT_TAG]);
+  });
+
+  it('keeps a saved double-click guard within the slider, pulls one past it to its nearest end, and reads anything else as the default', () => {
+    const { MIN, MAX, DEFAULT } = ACTION_COOLDOWN_SECONDS;
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.double({ min: MIN, max: MAX, noNaN: true }),
+          fc.double(),
+          fc.anything()
+        ),
+        fc.boolean(),
+        (stored, legacy) => {
+          const saved = { actionCooldownSeconds: stored };
+          const { actionCooldownSeconds } = parsePluginData(
+            legacy ? saved : { settings: saved }
+          ).settings;
+
+          if (typeof stored !== 'number' || Number.isNaN(stored)) {
+            expect(actionCooldownSeconds).toBe(DEFAULT);
+          } else if (stored <= MIN) {
+            // -0 included, which comes back as the slider's own 0
+            expect(actionCooldownSeconds).toBe(MIN);
+          } else if (stored > MAX) {
+            expect(actionCooldownSeconds).toBe(MAX);
+          } else {
+            expect(actionCooldownSeconds).toBe(stored);
+          }
+        }
+      )
+    );
   });
 
   it('keeps saved settings and drops nothing, whatever else the file holds', () => {

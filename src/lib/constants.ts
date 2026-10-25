@@ -95,6 +95,17 @@ export const DAY_ROLLOVER_OFFSET_HOURS = {
   MAX: 12,
 };
 
+/**
+ * How long, in seconds, the action bar and review commands ignore presses after
+ * the item on screen changes (see `ActionCooldown`). 0 turns the guard off.
+ */
+export const ACTION_COOLDOWN_SECONDS = {
+  DEFAULT: 0.4,
+  MIN: 0,
+  MAX: 2,
+  STEP: 0.1,
+};
+
 export const TABLE_NAMES = Object.freeze([
   'article',
   'article_review',
