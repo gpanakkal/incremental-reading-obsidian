@@ -2992,6 +2992,35 @@ describe('transcludeLink', () => {
       })
     );
   });
+
+  it('puts what it is given before and after the embed', () => {
+    fc.assert(
+      fc.property(
+        fc.string(),
+        fc.string(),
+        fc.string(),
+        (link, before, after) => {
+          const replaceRange = vi.fn();
+          const editor = Object.assign(makeEditor(), { replaceRange });
+          const start: EditorPosition = { line: 0, ch: 0 };
+          const end: EditorPosition = { line: 0, ch: 3 };
+          ObsidianHelpers.transcludeLink(
+            editor,
+            link,
+            start,
+            end,
+            before,
+            after
+          );
+          expect(replaceRange).toHaveBeenCalledExactlyOnceWith(
+            `${before}!${link}${after}`,
+            start,
+            end
+          );
+        }
+      )
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -374,7 +374,8 @@ const escapedNoteArb = fc
  */
 async function snipWith(
   editor: { getSelection: () => string; cm?: { state: EditorState } },
-  viewSelection = ''
+  viewSelection = '',
+  app: Record<string, unknown> = {}
 ) {
   const createFromText = vi
     .spyOn(Obsidian, 'createFromText')
@@ -385,7 +386,7 @@ async function snipWith(
   const notify = vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
   const warn = vi.spyOn(console, 'warn').mockReturnValue(undefined);
   const manager = new SnippetManager(
-    { app: {}, settings: {} } as never,
+    { app, settings: {} } as never,
     makeSimpleRepo()
   );
   const createEntry = vi
@@ -434,7 +435,8 @@ async function snipSelection(
     ranges: [number, number][];
     mainIndex?: number;
   },
-  viewSelection = ''
+  viewSelection = '',
+  app: Record<string, unknown> = {}
 ) {
   const state = EditorState.create({
     doc,
@@ -451,7 +453,8 @@ async function snipSelection(
       getSelection: () => doc.slice(from, to),
       cm: { state },
     },
-    viewSelection
+    viewSelection,
+    app
   );
   return { from, to, text, title, offsets };
 }
@@ -4783,5 +4786,194 @@ describe('the note fingerprint a new snippet records', () => {
     await manager.adoptLeftover(file, 'left-1');
 
     expect(fingerprintOf(repo, 'left-1')).toBe(file.stat.mtime);
+  });
+});
+
+describe('create, from inside a block', () => {
+  const CODE = 'p\n\n```py\nx #ab\nef\n```\n\nq';
+
+  /** An app whose metadata cache reads any note as `sections`. */
+  const appReading = (
+    sections: { type: string; start: number; end: number }[]
+  ) => {
+    const computeMetadataAsync = vi.fn(async () => ({
+      sections: sections.map(({ type, start, end }) => ({
+        type,
+        position: { start: { offset: start }, end: { offset: end } },
+      })),
+    }));
+    return { metadataCache: { computeMetadataAsync }, computeMetadataAsync };
+  };
+  const CODE_APP = () =>
+    appReading([
+      { type: 'paragraph', start: 0, end: 1 },
+      { type: 'code', start: 3, end: 21 },
+      { type: 'paragraph', start: 23, end: 24 },
+    ]);
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('gives a snippet cut from a code block its fence, its text copied as it is and named after it alone', async () => {
+    const from = CODE.indexOf('#ab');
+    const { text, title, offsets } = await snipSelection(
+      { doc: CODE, ranges: [[from, CODE.length]] },
+      '',
+      CODE_APP()
+    );
+
+    expect(text).toBe('```py\n' + CODE.slice(from));
+    expect(title).toBe(CODE.slice(from));
+    expect(offsets).toEqual({ start: from, end: CODE.length });
+  });
+
+  it('takes in the fence line a snippet starts on, and highlights it too', async () => {
+    const { text, title, offsets } = await snipSelection(
+      { doc: CODE, ranges: [[5, 13]] },
+      '',
+      CODE_APP()
+    );
+
+    const cut = Markdown.escapeCutUnderline(
+      CODE,
+      3,
+      Markdown.escapeCutStart(CODE, [3, 13], 'note')
+    );
+    expect(text).toBe(cut + '\n```');
+    expect(title).toBe(cut);
+    expect(offsets).toEqual({ start: 3, end: 13 });
+  });
+
+  it('highlights only the selection inside math or a comment, not the delimiter it gets back', async () => {
+    for (const delimiter of ['$$', '%%']) {
+      const doc = `p\n\n${delimiter}\na^2\nb\n${delimiter}\n\nq`;
+      const type = delimiter === '$$' ? 'math' : 'comment';
+      const app = appReading([
+        { type: 'paragraph', start: 0, end: 1 },
+        { type, start: 3, end: 14 },
+        { type: 'paragraph', start: 16, end: 17 },
+      ]);
+      // Its first line, then its last
+      for (const [from, to] of [
+        [6, 9],
+        [10, 11],
+      ]) {
+        vi.restoreAllMocks();
+        const { text, title, offsets } = await snipSelection(
+          { doc, ranges: [[from, to]] },
+          '',
+          app
+        );
+
+        const cut = doc.slice(from, to);
+        expect(text).toBe(`${delimiter}\n${cut}\n${delimiter}`);
+        expect(title).toBe(cut);
+        expect(offsets).toEqual({ start: from, end: to });
+      }
+    }
+  });
+
+  it('takes in the math delimiter line a snippet starts on, and highlights it too', async () => {
+    const doc = 'p\n\n$$\na^2\n$$\n\nq';
+    const { text, offsets } = await snipSelection(
+      { doc, ranges: [[4, 9]] },
+      '',
+      appReading([
+        { type: 'paragraph', start: 0, end: 1 },
+        { type: 'math', start: 3, end: 12 },
+        { type: 'paragraph', start: 14, end: 15 },
+      ])
+    );
+
+    const cut = Markdown.escapeCutUnderline(
+      doc,
+      3,
+      Markdown.escapeCutStart(doc, [3, 9], 'note')
+    );
+    expect(text).toBe(cut + '\n$$');
+    expect(offsets).toEqual({ start: 3, end: 9 });
+  });
+
+  it('highlights exactly a selection inside code, math or a comment, blank lines beside its delimiters and all', async () => {
+    const delimiters = {
+      code: ['```py', '```'],
+      math: ['$$', '$$'],
+      comment: ['%%', '%%'],
+    } as const;
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(
+          ...(Object.keys(delimiters) as (keyof typeof delimiters)[])
+        ),
+        fc.array(fc.stringMatching(/^[a-z ]{0,6}$/), {
+          minLength: 1,
+          maxLength: 5,
+        }),
+        fc.nat(),
+        fc.nat(),
+        async (type, lines, a, b) => {
+          // Spies would otherwise keep earlier cases' calls
+          vi.restoreAllMocks();
+          const [opener, closer] = delimiters[type];
+          const start = 3;
+          const openEnd = start + opener.length;
+          const closeStart = openEnd + 1 + lines.join('\n').length + 1;
+          const doc = `p\n\n${opener}\n${lines.join('\n')}\n${closer}\n\nq`;
+          const end = closeStart + closer.length;
+          // From past the opening delimiter's line end to before the
+          // closing one, to after the start up to the closing one's start
+          const from = openEnd + 1 + (a % (closeStart - openEnd - 1));
+          const to = from + 1 + (b % (closeStart - from));
+          const { text, title, offsets } = await snipSelection(
+            { doc, ranges: [[from, to]] },
+            '',
+            appReading([
+              { type: 'paragraph', start: 0, end: 1 },
+              { type, start, end },
+              { type: 'paragraph', start: end + 2, end: end + 3 },
+            ])
+          );
+
+          const cut = doc.slice(from, to);
+          expect(offsets).toEqual({ start: from, end: to });
+          expect(title).toBe(cut);
+          expect(text).toBe(
+            opener +
+              (cut.startsWith('\n') ? '' : '\n') +
+              cut +
+              (cut.endsWith('\n') ? '' : '\n') +
+              closer
+          );
+        }
+      )
+    );
+  });
+
+  it('escapes a snippet cut from inside a quote as from a line start, and gives it the markers it lacks', async () => {
+    const doc = '> a > b';
+    const { text } = await snipSelection(
+      { doc, ranges: [[4, 7]] },
+      '',
+      appReading([{ type: 'blockquote', start: 0, end: 7 }])
+    );
+
+    const cut = Markdown.escapeCutStart(doc, [4, 7], 'note');
+    expect(cut).not.toBe('> b');
+    expect(text).toBe('> ' + cut);
+  });
+
+  it("reads no blocks for reading view's selection", async () => {
+    const app = CODE_APP();
+    await snipWith(
+      {
+        getSelection: () => '',
+        cm: { state: EditorState.create({ doc: CODE }) },
+      },
+      'x #ab',
+      app
+    );
+
+    expect(app.computeMetadataAsync).not.toHaveBeenCalled();
   });
 });

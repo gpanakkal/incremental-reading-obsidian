@@ -1,3 +1,10 @@
+import {
+  type ImputedDelimiters,
+  imputeDelimiters,
+  isLiteralAt,
+  openBlockAtEnd,
+  readSections,
+} from '#/lib/block-delimiters';
 import { refusedWrite, withCompensation } from '#/lib/compensation';
 import { Markdown } from '#/lib/Markdown';
 import { noteFingerprint } from '#/lib/note-fingerprint';
@@ -40,6 +47,8 @@ import {
 } from 'ts-fsrs';
 import {
   CARD_ANSWER_REPLACEMENT,
+  CARD_ANSWER_REPLACEMENT_IN_CODE,
+  CARD_ANSWER_REPLACEMENT_IN_MATH,
   CARD_TAG,
   CLOZE_DELIMITER_PATTERN,
   CLOZE_DELIMITERS,
@@ -154,8 +163,16 @@ export class CardManager extends ItemManager {
       throw new Error(`Valid cloze delimiters not found in: ${cardContent}`);
     }
     const [_, pre, _answer, post] = match;
-    const formattedContent = pre + CARD_ANSWER_REPLACEMENT + post;
-    return formattedContent;
+    // In code the placeholder's markup would show as it is, and in math it
+    // would break the formula. A card from a comment shows nothing anyway.
+    const block = openBlockAtEnd(pre);
+    const placeholder =
+      block === 'code'
+        ? CARD_ANSWER_REPLACEMENT_IN_CODE
+        : block === 'math'
+          ? CARD_ANSWER_REPLACEMENT_IN_MATH
+          : CARD_ANSWER_REPLACEMENT;
+    return pre + placeholder + post;
   }
 
   rowToReviewCard(row: SRSCardRow): ReviewCard | null {
@@ -299,9 +316,35 @@ export class CardManager extends ItemManager {
     );
 
     // The line starts a block in the note, its list marker cut off, so only
-    // the answer's start can form syntax there that the note didn't
+    // the answer's start can form syntax there that the note didn't, unless
+    // it is code. A line in a code block, math or a table gets the
+    // delimiters it lacks to render as it did (see `imputeDelimiters`).
+    // A whole line never splits a delimiter but where it is all delimiter,
+    // and then nothing is imputed, so the line's bounds stay as they are,
+    // as long as blank space by a delimiter isn't taken for part of it.
+    // `editor.cm`, the CodeMirror view, is undocumented Obsidian API.
     const [a, b] = bounds;
-    const answer = Markdown.escapeCutStart(line, bounds, 'answer');
+    const cm = editor.cm as Editor['cm'] | undefined;
+    const note = cm && {
+      doc: cm.state.doc.toString(),
+      lineFrom: cm.state.doc.line(lineNumber + 1).from,
+    };
+    const sections = note && (await readSections(this.app, note.doc));
+    const imputed =
+      note &&
+      sections &&
+      imputeDelimiters(
+        note.doc,
+        sections,
+        [note.lineFrom + start, note.lineFrom + end],
+        { overBlanks: false }
+      );
+    const answer =
+      note &&
+      sections &&
+      isLiteralAt(note.doc, sections, note.lineFrom + start + a)
+        ? line.slice(a, b)
+        : Markdown.escapeCutStart(line, bounds, 'answer');
     if (await refusedWrite(this.repo, 'create the card')) return null;
 
     try {
@@ -314,7 +357,8 @@ export class CardManager extends ItemManager {
         currentFile,
         withDelimiters,
         { line: lineNumber, ch: start },
-        { line: lineNumber, ch: end }
+        { line: lineNumber, ch: end },
+        imputed
       );
       // move the cursor to the next block
       editor.setSelection({ line: lineNumber + 1, ch: 0 });
@@ -324,6 +368,8 @@ export class CardManager extends ItemManager {
         lineNumber,
         start,
         end,
+        before: imputed?.before ?? '',
+        after: imputed?.after ?? '',
       };
     } catch (error) {
       if (error instanceof Error) {
@@ -369,12 +415,16 @@ export class CardManager extends ItemManager {
       Obsidian.notify(`The selected text changed before the card was made`);
       return null;
     }
-    // The span and its answer, snapped off any escape pair they split
+    // The span and its answer, snapped off any escape pair they split, and
+    // the span moved off any delimiter line it split (see `imputeDelimiters`)
     const doc = editor.getValue();
-    const [from, to] = Markdown.snapOffEscapes(doc, [
+    const snapped = Markdown.snapOffEscapes(doc, [
       selection.from,
       selection.to,
     ]);
+    const sections = await readSections(this.app, doc);
+    const imputed = sections && imputeDelimiters(doc, sections, snapped);
+    const [from, to] = imputed?.range ?? snapped;
     const text = doc.slice(from, to);
     const shift = selection.from - from;
     const start = editor.offsetToPos(from);
@@ -385,27 +435,33 @@ export class CardManager extends ItemManager {
       [answer[0] + shift, answer[1] + shift],
       { delimited: true }
     );
-    // Each start escaped where it forms syntax the note didn't there
-    const pre = Markdown.escapeCutStart(doc, [from, from + a], 'note');
-    const hidden = Markdown.escapeCutStart(doc, [from + a, from + b], 'answer');
+    // Each start escaped where it forms syntax the note didn't there, but
+    // where its delimiters give it back the context it had, or in code
+    const pre = imputed?.raw
+      ? text.slice(0, a)
+      : Markdown.escapeCutStart(doc, [from, from + a], 'note');
+    const hidden =
+      sections && isLiteralAt(doc, sections, from + a)
+        ? text.slice(a, b)
+        : Markdown.escapeCutStart(doc, [from + a, from + b], 'answer');
     if (await refusedWrite(this.repo, 'create the card')) return null;
 
     try {
+      const delimited = this.delimitText(pre + hidden + text.slice(b), [
+        pre.length,
+        pre.length + hidden.length,
+      ])[0];
       // Its second line kept from underlining its first, as delimited
-      const withDelimiters = Markdown.escapeCutUnderline(
-        doc,
-        from,
-        this.delimitText(pre + hidden + text.slice(b), [
-          pre.length,
-          pre.length + hidden.length,
-        ])[0]
-      );
+      const withDelimiters = imputed?.raw
+        ? delimited
+        : Markdown.escapeCutUnderline(doc, from, delimited);
       const reviewCard = await this.createAndEmbed(
         editor,
         currentFile,
         withDelimiters,
         start,
-        end
+        end,
+        imputed
       );
       // Off the embed's line, as `create` does, so live preview renders the
       // embed rather than revealing its source around the cursor. The span may
@@ -420,6 +476,8 @@ export class CardManager extends ItemManager {
         lineNumber: start.line,
         start: start.ch,
         end: end.ch,
+        before: imputed?.before ?? '',
+        after: imputed?.after ?? '',
       };
     } catch (error) {
       if (error instanceof Error) {
@@ -475,15 +533,28 @@ export class CardManager extends ItemManager {
     }
   }
 
-  /** Make the card's note and row, and put its embed in place of `start`–`end`. */
+  /**
+   * Make the card's note and row, and put its embed in place of `start`–`end`.
+   * With `imputed`, the note gets the delimiters its text lacks, and is named
+   * after its text alone, and the embed gets those its note needs around it.
+   */
   protected async createAndEmbed(
     editor: Editor,
     sourceFile: TFile,
     delimitedText: string,
     start: EditorPosition,
-    end: EditorPosition
+    end: EditorPosition,
+    imputed?: ImputedDelimiters | null
   ) {
-    const reviewCard = await this.createFileAndEntry(delimitedText, sourceFile);
+    const { open = '', close = '', before = '', after = '' } = imputed ?? {};
+    const reviewCard = await (open || close
+      ? this.createFileAndEntry(
+          open + delimitedText + close,
+          sourceFile,
+          undefined,
+          delimitedText
+        )
+      : this.createFileAndEntry(delimitedText, sourceFile));
     if (!reviewCard) throw new Error(`Failed to create card`);
 
     const linkToCard = Obsidian.generateMarkdownLink(
@@ -492,7 +563,7 @@ export class CardManager extends ItemManager {
       this.app,
       TRANSCLUSION_HIDE_TITLE_ALIAS
     );
-    Obsidian.transcludeLink(editor, linkToCard, start, end);
+    Obsidian.transcludeLink(editor, linkToCard, start, end, before, after);
     return reviewCard;
   }
 
@@ -508,7 +579,8 @@ export class CardManager extends ItemManager {
   protected async createFileAndEntry(
     delimitedText: string,
     sourceFile: TFile,
-    origin?: CardOrigin
+    origin?: CardOrigin,
+    title = origin?.title
   ) {
     try {
       const card = await withCompensation(async (step) => {
@@ -519,7 +591,7 @@ export class CardManager extends ItemManager {
               delimitedText,
               Obsidian.getDirectory('card'),
               this.app,
-              origin?.title
+              title
             ),
           (made) => this.app.fileManager.trashFile(made)
         );

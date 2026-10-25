@@ -1,5 +1,7 @@
 import {
   CARD_ANSWER_REPLACEMENT,
+  CARD_ANSWER_REPLACEMENT_IN_CODE,
+  CARD_ANSWER_REPLACEMENT_IN_MATH,
   CARD_TAG,
   CLOZE_DELIMITERS,
   DAY_ROLLOVER_OFFSET_HOURS,
@@ -998,12 +1000,26 @@ describe('hideAnswer', () => {
           .string({ maxLength: 30 })
           .filter((s) => !s.includes(LEFT) && !s.includes(RIGHT)),
         async (pre, answer, post) => {
+          // Outside math or a comment its line would open
+          fc.pre(!/^ {0,3}(\$\$|%%)/.test(pre));
           const content = `${pre}${LEFT}${answer}${RIGHT}${post}`;
           const result = CardManager.hideAnswer(content);
           expect(result).toBe(pre + CARD_ANSWER_REPLACEMENT + post);
         }
       )
     );
+  });
+
+  it('puts a placeholder that renders as such in code and math in place of an answer there', () => {
+    const hidden = (pre: string) =>
+      CardManager.hideAnswer(`${pre}${LEFT} x ${RIGHT} y\n${'```'}`);
+    expect(hidden('```js\na = ')).toBe(
+      `${'```'}js\na = ${CARD_ANSWER_REPLACEMENT_IN_CODE} y\n${'```'}`
+    );
+    expect(hidden('$$\na = ')).toContain(CARD_ANSWER_REPLACEMENT_IN_MATH);
+    // A fence's info string is no code, nor is what follows a closed block
+    expect(hidden('```js ')).toContain(CARD_ANSWER_REPLACEMENT);
+    expect(hidden('```\na\n```\n\n')).toContain(CARD_ANSWER_REPLACEMENT);
   });
 
   it('throws with a message mentioning the content when no valid cloze delimiters found', async () => {
@@ -6039,5 +6055,352 @@ describe('the note fingerprint a new card records', () => {
     await manager.adoptLeftover(file, 'left-1');
 
     expect(fingerprintOf(repo, 'left-1')).toBe(file.stat.mtime);
+  });
+});
+
+describe('making a card of text cut from inside a block', () => {
+  const sourceFile = { path: 'articles/source.md', extension: 'md' } as TFile;
+  const reviewCard = {
+    file: { path: 'cards/new.md', extension: 'md' },
+    data: { id: 'card-1' },
+  };
+  const LINK = '[[new|ir-hide-title]]';
+  const CODE = 'p\n\n```py\nx #ab\nef\n```\n\nq';
+  /** The sections of CODE, as the metadata cache reads them. */
+  const CODE_SECTIONS = [
+    { type: 'paragraph', start: 0, end: 1 },
+    { type: 'code', start: 3, end: 21 },
+    { type: 'paragraph', start: 23, end: 24 },
+  ];
+
+  /** A card manager whose metadata cache reads any note as `sections`. */
+  function setUp(sections: { type: string; start: number; end: number }[]) {
+    const toCache = ({ type, start, end }: (typeof sections)[number]) => ({
+      type,
+      position: { start: { offset: start }, end: { offset: end } },
+    });
+    const manager = new CardManager(
+      makePlugin({
+        metadataCache: {
+          getFileCache: () => ({}),
+          computeMetadataAsync: async () => ({
+            sections: sections.map(toCache),
+          }),
+        },
+      }),
+      makeRepo()
+    );
+    const createFileAndEntry = vi
+      .spyOn(
+        manager as unknown as {
+          createFileAndEntry: (text: string, file: TFile) => Promise<unknown>;
+        },
+        'createFileAndEntry'
+      )
+      .mockResolvedValue(reviewCard);
+    vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue(LINK);
+    return { manager, createFileAndEntry };
+  }
+
+  /** An editor over `doc` whose CodeMirror view reads it as the editor does. */
+  function makeCmEditor(doc: string) {
+    const editor = makeEditor(doc);
+    const cm = {
+      state: {
+        doc: {
+          toString: () => editor.text,
+          line: (n: number) => ({
+            from: editor.text
+              .split('\n')
+              .slice(0, n - 1)
+              .reduce((sum, line) => sum + line.length + 1, 0),
+          }),
+        },
+      },
+    };
+    return Object.assign(editor, { cm });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('closes a code block before the embed and opens it again after, and gives the note its fence, its text copied as it is', async () => {
+    const { manager, createFileAndEntry } = setUp(CODE_SECTIONS);
+    const editor = makeEditor(CODE);
+    const from = CODE.indexOf('#ab');
+    const to = CODE.indexOf('ef') + 1;
+
+    const result = await manager.createFromSelection(
+      editor as never,
+      { file: sourceFile } as never,
+      { from, to, text: CODE.slice(from, to) },
+      [4, 5]
+    );
+
+    const delimited = `#ab\n${LEFT} e ${RIGHT}`;
+    expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+      '```py\n' + delimited + '\n```',
+      sourceFile,
+      undefined,
+      delimited
+    );
+    expect(editor.text).toBe(
+      'p\n\n```py\nx \n```\n!' + LINK + '\n```py\nf\n```\n\nq'
+    );
+    expect(result).toMatchObject({ before: '\n```\n', after: '\n```py\n' });
+  });
+
+  it('takes the closing fence of a code block it takes the rest of, leaving no empty block after the embed', async () => {
+    const { manager, createFileAndEntry } = setUp(CODE_SECTIONS);
+    const editor = makeEditor(CODE);
+    const from = CODE.indexOf('#ab');
+    const to = CODE.indexOf('\n```\n');
+
+    const result = await manager.createFromSelection(
+      editor as never,
+      { file: sourceFile } as never,
+      { from, to, text: CODE.slice(from, to) },
+      [4, 6]
+    );
+
+    const delimited = `#ab\n${LEFT} ef ${RIGHT}\n\`\`\``;
+    expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+      '```py\n' + delimited,
+      sourceFile,
+      undefined,
+      delimited
+    );
+    expect(editor.text).toBe('p\n\n```py\nx \n```\n!' + LINK + '\n\nq');
+    expect(result).toMatchObject({ before: '\n```\n', after: '' });
+  });
+
+  it('copies an answer that starts in code as it is', async () => {
+    const { manager, createFileAndEntry } = setUp(CODE_SECTIONS);
+    const from = CODE.indexOf('#ab');
+    const to = from + 3;
+
+    await manager.createFromSelection(
+      makeEditor(CODE) as never,
+      { file: sourceFile } as never,
+      { from, to, text: '#ab' },
+      [0, 3]
+    );
+
+    expect(createFileAndEntry.mock.calls[0][0]).toBe(
+      `\`\`\`py\n${LEFT} #ab ${RIGHT}\n\`\`\``
+    );
+  });
+
+  it('escapes a cut from inside a quote as from a line start, and gives it the quote markers it lacks', async () => {
+    const doc = '> a > b\n\nq';
+    const { manager, createFileAndEntry } = setUp([
+      { type: 'blockquote', start: 0, end: 7 },
+      { type: 'paragraph', start: 9, end: 10 },
+    ]);
+    const editor = makeEditor(doc);
+
+    const result = await manager.createFromSelection(
+      editor as never,
+      { file: sourceFile } as never,
+      { from: 4, to: 7, text: '> b' },
+      [2, 3]
+    );
+
+    const pre = Markdown.escapeCutStart(doc, [4, 6], 'note');
+    const delimited = Markdown.escapeCutUnderline(
+      doc,
+      4,
+      `${pre}${LEFT} b ${RIGHT}`
+    );
+    expect(pre).not.toBe('> ');
+    expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+      '> ' + delimited,
+      sourceFile,
+      undefined,
+      delimited
+    );
+    expect(editor.text).toBe(`> a !${LINK}\n\nq`);
+    expect(result).toMatchObject({ before: '', after: '' });
+  });
+
+  it('wraps a card of a line in a code block in its fence, and parts the embed from the code around it', async () => {
+    const doc = 'p\n\n```py\nab#cd\n```';
+    const { manager, createFileAndEntry } = setUp([
+      { type: 'paragraph', start: 0, end: 1 },
+      { type: 'code', start: 3, end: doc.length },
+    ]);
+    const editor = makeCmEditor(doc);
+    vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
+      line: 'ab#cd',
+      lineNumber: 3,
+      start: 0,
+      end: 5,
+    });
+    vi.spyOn(Obsidian, 'getSelectionWithBounds').mockReturnValue({
+      selection: '#cd',
+      start: { line: 3, ch: 2 },
+      end: { line: 3, ch: 5 },
+      startOffset: 11,
+      endOffset: 14,
+    });
+
+    const result = await manager.create(
+      editor as never,
+      { file: sourceFile } as never
+    );
+
+    // Out of code, the answer's `#` would have been escaped
+    expect(Markdown.escapeCutStart('ab#cd', [2, 5], 'answer')).not.toBe('#cd');
+    const delimited = `ab${LEFT} #cd ${RIGHT}`;
+    expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+      '```py\n' + delimited + '\n```',
+      sourceFile,
+      undefined,
+      delimited
+    );
+    expect(editor.text).toBe(
+      `p\n\n\`\`\`py\n\`\`\`\n!${LINK}\n\`\`\`py\n\`\`\``
+    );
+    expect(result).toMatchObject({ before: '```\n', after: '\n```py' });
+  });
+
+  it("escapes the answer of a card of a list item's line by where it stands", async () => {
+    // A code block above, which an answer's offset counted from anywhere
+    // but the line's start in the note would land in
+    const code = '```\nxxxxxxxx\n```\n\n- ';
+    for (const { marker, line, a } of [
+      { marker: '[ ] ', line: 'ab#cd', a: 2 },
+      { marker: '', line: 'ab cd ef#gh', a: 8 },
+    ]) {
+      const doc = code + marker + line;
+      const { manager, createFileAndEntry } = setUp([
+        { type: 'code', start: 0, end: 16 },
+        { type: 'list', start: 18, end: doc.length },
+      ]);
+      const start = 2 + marker.length;
+      vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
+        line,
+        lineNumber: 4,
+        start,
+        end: start + line.length,
+      });
+      vi.spyOn(Obsidian, 'getSelectionWithBounds').mockReturnValue({
+        selection: line.slice(a),
+        start: { line: 4, ch: start + a },
+        end: { line: 4, ch: start + line.length },
+        startOffset: 18 + start + a,
+        endOffset: doc.length,
+      });
+
+      await manager.create(
+        makeCmEditor(doc) as never,
+        {
+          file: sourceFile,
+        } as never
+      );
+
+      const answer = Markdown.escapeCutStart(line, [a, line.length], 'answer');
+      expect(answer).not.toBe(line.slice(a));
+      expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+        `${line.slice(0, a)}${LEFT} ${answer} ${RIGHT}`,
+        sourceFile
+      );
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('copies an answer in code as it is, after a cut start out of it', async () => {
+    const doc = 'pq\n\n```\nab#cd\nx\n```';
+    const { manager, createFileAndEntry } = setUp([
+      { type: 'paragraph', start: 0, end: 2 },
+      { type: 'code', start: 4, end: doc.length },
+    ]);
+
+    await manager.createFromSelection(
+      makeEditor(doc) as never,
+      { file: sourceFile } as never,
+      { from: 1, to: 13, text: doc.slice(1, 13) },
+      [9, 12]
+    );
+
+    const pre = Markdown.escapeCutStart(doc, [1, 10], 'note');
+    expect(Markdown.escapeCutStart(doc, [10, 13], 'answer')).not.toBe('#cd');
+    expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+      Markdown.escapeCutUnderline(doc, 1, `${pre}${LEFT} #cd ${RIGHT}`) +
+        '\n```',
+      sourceFile,
+      undefined,
+      Markdown.escapeCutUnderline(doc, 1, `${pre}${LEFT} #cd ${RIGHT}`)
+    );
+  });
+
+  it('puts nothing around the embed where the note can not be read', async () => {
+    const manager = new CardManager(makePlugin(), makeRepo());
+    vi.spyOn(
+      manager as unknown as { createFileAndEntry: () => Promise<unknown> },
+      'createFileAndEntry'
+    ).mockResolvedValue(reviewCard);
+    vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue(LINK);
+    const editor = makeCmEditor(CODE);
+    const from = CODE.indexOf('#ab');
+
+    const fromSpan = await manager.createFromSelection(
+      editor as never,
+      { file: sourceFile } as never,
+      { from, to: from + 3, text: '#ab' },
+      [0, 3]
+    );
+    vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
+      line: 'ef',
+      lineNumber: 4,
+      start: 0,
+      end: 2,
+    });
+    vi.spyOn(Obsidian, 'getSelectionWithBounds').mockReturnValue({
+      selection: 'f',
+      start: { line: 4, ch: 1 },
+      end: { line: 4, ch: 2 },
+      startOffset: 0,
+      endOffset: 0,
+    });
+    const fromLine = await manager.create(
+      makeEditor(CODE) as never,
+      { file: sourceFile } as never
+    );
+
+    expect(fromSpan).toMatchObject({ before: '', after: '' });
+    expect(fromLine).toMatchObject({ before: '', after: '' });
+  });
+
+  it('imputes nothing for a card of a fence line', async () => {
+    const doc = '  ```py\nab\n```';
+    const { manager, createFileAndEntry } = setUp([
+      { type: 'code', start: 0, end: doc.length },
+    ]);
+    vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
+      line: '```py',
+      lineNumber: 0,
+      start: 2,
+      end: 7,
+    });
+    vi.spyOn(Obsidian, 'getSelectionWithBounds').mockReturnValue({
+      selection: 'py',
+      start: { line: 0, ch: 5 },
+      end: { line: 0, ch: 7 },
+      startOffset: 5,
+      endOffset: 7,
+    });
+
+    const result = await manager.create(
+      makeCmEditor(doc) as never,
+      { file: sourceFile } as never
+    );
+
+    expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+      `\`\`\`${LEFT} py ${RIGHT}`,
+      sourceFile
+    );
+    expect(result).toMatchObject({ before: '', after: '' });
   });
 });

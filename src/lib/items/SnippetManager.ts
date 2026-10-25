@@ -1,3 +1,4 @@
+import { imputeDelimiters, readSections } from '#/lib/block-delimiters';
 import { refusedWrite, withCompensation } from '#/lib/compensation';
 import {
   DEFAULT_PRIORITY,
@@ -348,24 +349,44 @@ export class SnippetManager extends ItemManager {
     // offsets for highlighting. `editor.cm`, the CodeMirror view, is
     // undocumented Obsidian API. Its main range is the one `getSelection`
     // reads.
+    //
+    // Cut from inside a code block, math, a quote or a table, the snippet
+    // gets the delimiters it lacks to render as it did, from Obsidian's own
+    // reading of the note's blocks, and is named after its text alone.
     const cm = editor.cm as Editor['cm'] | undefined;
     let source: {
       text: string;
+      title?: string;
       offsets: { start: number; end: number };
     } | null = null;
     if (cm) {
       const doc = cm.state.doc.toString();
       const { from, to } = cm.state.selection.main;
-      const [start, end] = Markdown.snapOffEscapes(doc, [from, to]);
+      const snapped = Markdown.snapOffEscapes(doc, [from, to]);
+      const sections = editorSelection
+        ? await readSections(this.app, doc)
+        : null;
+      // Blank lines beside a delimiter stay out of the highlight: unlike a
+      // card, a snippet replaces nothing, so it leaves no empty block behind
+      const imputed =
+        sections &&
+        imputeDelimiters(doc, sections, snapped, { overBlanks: false });
+      const [start, end] = imputed?.range ?? snapped;
       const bodyStart = Obsidian.getBodyStartOffset(doc);
+      // Its start escaped, and its second line kept from underlining its
+      // first into a heading the note didn't show, unless it starts where
+      // its delimiters give it back the context it had
+      const text = imputed?.raw
+        ? doc.slice(start, end)
+        : Markdown.escapeCutUnderline(
+            doc,
+            start,
+            Markdown.escapeCutStart(doc, [start, end], 'note')
+          );
+      const { open = '', close = '' } = imputed ?? {};
       source = {
-        // Its start escaped, and its second line kept from underlining its
-        // first into a heading the note didn't show
-        text: Markdown.escapeCutUnderline(
-          doc,
-          start,
-          Markdown.escapeCutStart(doc, [start, end], 'note')
-        ),
+        text: open + text + close,
+        title: open || close ? text : undefined,
         offsets: { start: start - bodyStart, end: end - bodyStart },
       };
     } else {
@@ -417,7 +438,7 @@ export class SnippetManager extends ItemManager {
                 : Markdown.escape(selection),
               Obsidian.getDirectory('snippet'),
               this.app,
-              editorSelection ? undefined : selection
+              editorSelection ? source?.title : selection
             ),
           (made) => this.app.fileManager.trashFile(made)
         );

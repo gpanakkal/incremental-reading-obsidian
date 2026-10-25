@@ -716,7 +716,7 @@ export class Actions {
       : await this.plugin.reviewManager.createCard(editor, view);
 
     if (result) {
-      const { reviewCard, line } = result;
+      const { reviewCard, line, before, after } = result;
 
       this._pushUndo({
         item: result.reviewCard,
@@ -742,8 +742,17 @@ export class Actions {
                     );
                     if (!cardEmbed) return data;
 
-                    const startOffset = cardEmbed.position.start.offset;
-                    const endOffset = cardEmbed.position.end.offset;
+                    // With the delimiters put around it, while they still are
+                    const embedStart = cardEmbed.position.start.offset;
+                    const embedEnd = cardEmbed.position.end.offset;
+                    const startOffset =
+                      data.slice(embedStart - before.length, embedStart) ===
+                      before
+                        ? embedStart - before.length
+                        : embedStart;
+                    const endOffset = data.startsWith(after, embedEnd)
+                      ? embedEnd + after.length
+                      : embedEnd;
                     restored = {
                       at: startOffset,
                       embed: data.slice(startOffset, endOffset),

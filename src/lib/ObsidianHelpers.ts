@@ -277,13 +277,19 @@ export class ObsidianHelpers {
     return { frontMatter: matches[1], body: matches[2] };
   }
 
+  /**
+   * Put an embed of `link` in place of `start`–`end`, with `before` and
+   * `after` around it.
+   */
   static transcludeLink(
     editor: Editor,
     link: string,
     start: EditorPosition,
-    end: EditorPosition
+    end: EditorPosition,
+    before = '',
+    after = ''
   ) {
-    editor.replaceRange(`!${link}`, start, end);
+    editor.replaceRange(`${before}!${link}${after}`, start, end);
   }
 
   /** Retrieves a note from the vault given a vault-relative reference */
