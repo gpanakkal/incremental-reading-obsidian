@@ -26,12 +26,15 @@ import {
 import {
   AUTO_IMPORT_DEBOUNCE_MS,
   AUTO_IMPORT_MAX_WAIT_MS,
+  AUTO_IMPORT_SYNC_PATIENCE_MS,
+  AUTO_IMPORT_SYNC_POLL_MS,
   AUTO_IMPORT_TAG,
   AUTO_IMPORT_WATERMARK_SLACK_MS,
   CARD_TAG,
   DATA_DIRECTORY,
   SNIPPET_TAG,
 } from './constants';
+import type { SyncGate } from './obsidian-sync';
 import {
   AUTO_IMPORT_WATERMARK_KEY,
   loadAutoImportWatermark,
@@ -228,11 +231,33 @@ function makeWatcher(
   };
   const importMany = makeImport(vault);
   const hasRow = makeRowLookup(vault);
+  let gate: SyncGate = 'open';
+  const onSyncWait = vi.fn((_waiting: number) => undefined);
+  /** What the watcher listens to of Sync: its recheck while it does. */
+  const syncWatch = {
+    recheck: null as (() => void) | null,
+    starts: 0,
+    stops: 0,
+  };
+  const watchSync = (recheck: () => void) => {
+    syncWatch.starts++;
+    syncWatch.recheck = recheck;
+    return () => {
+      syncWatch.stops++;
+      syncWatch.recheck = null;
+    };
+  };
+  let databaseReady = true;
+  const settleDatabase = vi.fn(() => Promise.resolve(databaseReady));
   const watcher = new AutoImportWatcher({
     app: vault.app,
     getConfig: () => current,
     importMany,
     hasRow,
+    syncGate: () => gate,
+    watchSync,
+    onSyncWait,
+    settleDatabase,
   });
   const stop = watcher.start();
   return {
@@ -241,6 +266,22 @@ function makeWatcher(
     importMany,
     hasRow,
     stop,
+    /** Told how many notes wait for Sync, each time that changes. */
+    onSyncWait,
+    /** Have Sync stand as `next` says from now on. */
+    setGate: (next: SyncGate) => {
+      gate = next;
+    },
+    /** How often the watcher began and stopped listening to Sync. */
+    syncWatch,
+    /** Have Sync tell of a change, as its `'status-change'` does. */
+    syncChanged: () => syncWatch.recheck?.(),
+    /** Asked before importing a note whose `ir-id` no row holds. */
+    settleDatabase,
+    /** Have the database settle ready, or not, from now on. */
+    setDatabaseReady: (ready: boolean) => {
+      databaseReady = ready;
+    },
     /** Change the settings, telling the watcher as the plugin does. */
     configure: (change: Partial<AutoImportConfig>) => {
       current = { ...current, ...change };
@@ -504,7 +545,7 @@ describe('AutoImportWatcher.consider', () => {
     );
   });
 
-  it('looks a note up by ir-id only when it carries one as a string, importing those no row holds', async () => {
+  it('looks a note up by ir-id only when it carries one as a string, again once the database settles for one no row holds, importing those no row holds', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(fc.record({ irId: irIdArb, rowHeld: fc.boolean() }), {
@@ -526,7 +567,9 @@ describe('AutoImportWatcher.consider', () => {
           const ids = notes
             .map(({ irId }) => irId)
             .filter((irId): irId is string => typeof irId === 'string');
-          expect(hasRow.mock.calls.map(([id]) => id)).toEqual(ids);
+          expect(hasRow.mock.calls.map(([id]) => id)).toEqual(
+            ids.flatMap((id) => (vault.rows.has(id) ? [id] : [id, id]))
+          );
           const wanted = files.filter((_, i) => {
             const { irId } = notes[i];
             return !(typeof irId === 'string' && vault.rows.has(irId));
@@ -978,7 +1021,12 @@ describe('AutoImportWatcher.unimporting', () => {
             file,
             moveOn === 'untagged'
               ? { tags: ['other'] }
-              : { 'ir-id': `${String(irId)}-new`, tags: TRIGGER }
+              : {
+                  // Not `String(irId)`: YAML can't write an object whose
+                  // `toString` isn't one, but the arbitrary can
+                  'ir-id': `${typeof irId === 'string' ? irId : 'id'}-new`,
+                  tags: TRIGGER,
+                }
           );
           change(file);
           await settle();
@@ -1010,6 +1058,458 @@ describe('AutoImportWatcher.unimporting', () => {
     await settle();
 
     expect(importMany).not.toHaveBeenCalled();
+  });
+
+  it('holds one whose ir-id YAML read as NaN while its cache still shows that id and a trigger tag', async () => {
+    // `.nan` in YAML: NaN equals nothing, itself included
+    const watching = makeWatcher();
+    const { vault, change, importMany } = watching;
+    const file = vault.add('a.md', { 'ir-id': Number.NaN, tags: TRIGGER });
+
+    unimport(watching, file);
+    change(file);
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+  });
+
+  it('counts no note it holds among those waiting for Sync', async () => {
+    const watching = makeWatcher();
+    const { vault, change, onSyncWait, setGate } = watching;
+    setGate('stalled');
+    // No id: one with an id no row holds is never counted anyway
+    const file = vault.add('a.md', { tags: TRIGGER });
+
+    unimport(watching, file);
+    change(file);
+    await settle();
+
+    expect(onSyncWait).not.toHaveBeenCalled();
+  });
+});
+
+describe('AutoImportWatcher and Sync', () => {
+  /** Queue a note with a trigger tag at `path`. */
+  const queueTagged = (
+    watching: ReturnType<typeof makeWatcher>,
+    path: string
+  ) => {
+    const file = watching.vault.add(path, { tags: TRIGGER });
+    watching.change(file);
+    return file;
+  };
+
+  /** The number of notes the watcher last said wait for Sync. */
+  const waiting = ({ onSyncWait }: ReturnType<typeof makeWatcher>) =>
+    onSyncWait.mock.lastCall?.[0] ?? 0;
+
+  it('holds every note queued, by trigger tag or arrival, while Sync is not open, says how many wait while it is stalled, and imports them together once it opens', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 3 }),
+        fc.boolean(),
+        fc.array(fc.constantFrom<SyncGate>('syncing', 'stalled'), {
+          maxLength: 5,
+        }),
+        async (tagged, withArrival, closed) => {
+          const watching = makeWatcher({ onFolder: true, folders: [INBOX] });
+          const { vault, importMany, onSyncWait, setGate } = watching;
+          setGate(closed[0] ?? 'open');
+          const paths: string[] = [];
+          for (let i = 0; i < tagged; i++) {
+            paths.push(queueTagged(watching, `n${i}.md`).path);
+          }
+          if (withArrival) {
+            const file = vault.create(`${INBOX}/a.md`);
+            watching.arrive(file);
+            vault.edit(file, { tags: ['Other'] });
+            watching.change(file);
+            paths.push(file.path);
+          }
+          await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+          for (const [i, gate] of closed.entries()) {
+            if (i > 0) {
+              setGate(gate);
+              await vi.advanceTimersByTimeAsync(AUTO_IMPORT_SYNC_POLL_MS);
+            }
+            expect(importMany).not.toHaveBeenCalled();
+            expect(waiting(watching)).toBe(
+              gate === 'stalled' ? paths.length : 0
+            );
+          }
+          setGate('open');
+          await vi.advanceTimersByTimeAsync(AUTO_IMPORT_SYNC_POLL_MS);
+
+          expect(
+            importedPaths(importMany).map((batch) => [...batch].sort())
+          ).toEqual([[...paths].sort()]);
+          expect(waiting(watching)).toBe(0);
+          // Told only of a change
+          const told = onSyncWait.mock.calls.map(([count]) => count);
+          expect(told.every((count, i) => count !== (told[i - 1] ?? 0))).toBe(
+            true
+          );
+          watching.stop();
+        }
+      )
+    );
+  });
+
+  it('counts the notes as waiting once Sync has been syncing for its patience, and not before, a note queued meanwhile among them', async () => {
+    const watching = makeWatcher();
+    watching.setGate('syncing');
+    queueTagged(watching, 'a.md');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+    await vi.advanceTimersByTimeAsync(
+      AUTO_IMPORT_SYNC_PATIENCE_MS - AUTO_IMPORT_SYNC_POLL_MS
+    );
+    expect(watching.onSyncWait).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_SYNC_POLL_MS);
+    expect(watching.onSyncWait.mock.calls).toEqual([[1]]);
+    queueTagged(watching, 'b.md');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(watching.onSyncWait.mock.calls).toEqual([[1], [2]]);
+
+    expect(watching.importMany).not.toHaveBeenCalled();
+  });
+
+  it('imports what waits when told to, whatever Sync is doing, once, and nothing when nothing waits', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<SyncGate>('syncing', 'stalled'),
+        fc.constantFrom<SyncGate>('syncing', 'stalled', 'open'),
+        async (gate, after) => {
+          const watching = makeWatcher();
+          const { watcher, importMany, setGate } = watching;
+          setGate(gate);
+          await watcher.importDespiteSync();
+          queueTagged(watching, 'a.md');
+          await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+          await watcher.importDespiteSync();
+          expect(importedPaths(importMany)).toEqual([['a.md']]);
+          expect(waiting(watching)).toBe(0);
+
+          setGate(after);
+          await settle();
+          await watcher.importDespiteSync();
+          expect(importMany).toHaveBeenCalledOnce();
+          watching.stop();
+        }
+      )
+    );
+  });
+
+  it("holds the startup scan's imports for Sync too", async () => {
+    const vault = makeVault();
+    const file = vault.add('a.md', { tags: TRIGGER });
+    saveAutoImportWatermark(vault.app, file.stat.mtime - 1);
+    const watching = makeWatcher({}, vault);
+    watching.setGate('stalled');
+
+    await watching.watcher.runCatchUpScan();
+    expect(watching.importMany).not.toHaveBeenCalled();
+    expect(waiting(watching)).toBe(1);
+
+    watching.setGate('open');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_SYNC_POLL_MS);
+    expect(importedPaths(watching.importMany)).toEqual([['a.md']]);
+  });
+
+  it('moves the moment last seen to on, with nothing to import, whatever Sync is doing', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<SyncGate>('syncing', 'stalled', 'open'),
+        async (gate) => {
+          const vault = makeVault();
+          saveAutoImportWatermark(vault.app, 1);
+          const watching = makeWatcher({}, vault);
+          watching.setGate(gate);
+
+          await watching.watcher.runCatchUpScan();
+
+          expect(seenAt(vault)).toBe(
+            Date.now() - AUTO_IMPORT_WATERMARK_SLACK_MS
+          );
+          expect(watching.onSyncWait).not.toHaveBeenCalled();
+          watching.stop();
+        }
+      )
+    );
+  });
+
+  it('listens to Sync only while it holds notes for it, importing as soon as a change Sync tells of finds it open, and stops listening once nothing waits or it is stopped', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.constantFrom<SyncGate>('syncing', 'stalled'), {
+          maxLength: 4,
+        }),
+        fc.boolean(),
+        async (closed, stopFirst) => {
+          const watching = makeWatcher();
+          const { syncWatch, setGate, importMany } = watching;
+          queueTagged(watching, 'open.md');
+          await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+          expect(importedPaths(importMany)).toEqual([['open.md']]);
+          expect(syncWatch.starts).toBe(0);
+
+          setGate('stalled');
+          queueTagged(watching, 'a.md');
+          await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+          expect(syncWatch).toMatchObject({ starts: 1, stops: 0 });
+          for (const gate of closed) {
+            setGate(gate);
+            watching.syncChanged();
+            await vi.advanceTimersByTimeAsync(0);
+          }
+          expect(importMany).toHaveBeenCalledOnce();
+          expect(syncWatch).toMatchObject({ starts: 1, stops: 0 });
+
+          if (stopFirst) {
+            watching.stop();
+            expect(syncWatch).toMatchObject({ starts: 1, stops: 1 });
+            setGate('open');
+            watching.syncChanged();
+            await settle();
+            expect(importMany).toHaveBeenCalledOnce();
+            return;
+          }
+          setGate('open');
+          watching.syncChanged();
+          // At once, with no wait for the next look
+          await vi.advanceTimersByTimeAsync(0);
+          expect(importedPaths(importMany)).toEqual([['open.md'], ['a.md']]);
+          expect(syncWatch).toMatchObject({ starts: 1, stops: 1 });
+          watching.syncChanged();
+          await settle();
+          expect(importMany).toHaveBeenCalledTimes(2);
+          watching.stop();
+        }
+      )
+    );
+  });
+
+  it('pays no heed to a change Sync tells of late, once it no longer waits on Sync, leaving what is queued to settle', async () => {
+    const watching = makeWatcher();
+    watching.setGate('stalled');
+    queueTagged(watching, 'a.md');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+    const late = watching.syncWatch.recheck!;
+    watching.setGate('open');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_SYNC_POLL_MS);
+    expect(watching.importMany).toHaveBeenCalledOnce();
+
+    queueTagged(watching, 'b.md');
+    late();
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS - 1);
+    expect(watching.importMany).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(importedPaths(watching.importMany)).toEqual([['a.md'], ['b.md']]);
+  });
+
+  it('counts Sync that goes back to syncing after a pause as stuck only once it has synced on end for its patience', async () => {
+    const watching = makeWatcher();
+    watching.setGate('stalled');
+    queueTagged(watching, 'a.md');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+    expect(waiting(watching)).toBe(1);
+
+    watching.setGate('syncing');
+    watching.syncChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(waiting(watching)).toBe(0);
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_SYNC_PATIENCE_MS - 1);
+    expect(waiting(watching)).toBe(0);
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_SYNC_POLL_MS);
+    expect(waiting(watching)).toBe(1);
+    expect(watching.importMany).not.toHaveBeenCalled();
+  });
+
+  it('property: imports a note whose ir-id no row holds only once Sync is open and the database settles ready, never despite Sync, never counting it waiting, and leaves it be when the database does not settle', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          fc.record({
+            gate: fc.constantFrom<SyncGate>('syncing', 'stalled', 'open'),
+            ready: fc.boolean(),
+            press: fc.boolean(),
+          }),
+          { minLength: 1, maxLength: 6 }
+        ),
+        fc.boolean(),
+        async (steps, withPlain) => {
+          const watching = makeWatcher();
+          const { vault, watcher, importMany, setGate, setDatabaseReady } =
+            watching;
+          setGate(steps[0].gate === 'open' ? 'syncing' : steps[0].gate);
+          const orphan = vault.add('orphan.md', {
+            'ir-id': 'gone',
+            tags: TRIGGER,
+          });
+          watching.change(orphan);
+          if (withPlain) queueTagged(watching, 'plain.md');
+          await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+          let orphanState: 'queued' | 'imported' | 'left' = 'queued';
+          let plainQueued = withPlain;
+          for (const { gate, ready, press } of steps) {
+            setGate(gate);
+            setDatabaseReady(ready);
+            if (press) await watcher.importDespiteSync();
+            await vi.advanceTimersByTimeAsync(AUTO_IMPORT_SYNC_POLL_MS);
+            const flushed = press || gate === 'open';
+            if (flushed) plainQueued = false;
+            if (orphanState === 'queued' && gate === 'open') {
+              orphanState = ready ? 'imported' : 'left';
+            }
+            const imported = importedPaths(importMany).flat();
+            expect(imported.includes('orphan.md')).toBe(
+              orphanState === 'imported'
+            );
+            expect(imported.includes('plain.md')).toBe(
+              withPlain && !plainQueued
+            );
+            expect(waiting(watching)).toBe(
+              gate === 'stalled' && plainQueued ? 1 : 0
+            );
+          }
+          // Left to its next change, not remembered as failed
+          if (orphanState === 'left') {
+            setGate('open');
+            setDatabaseReady(true);
+            watching.change(orphan);
+            await settle();
+            expect(importedPaths(importMany).flat()).toContain('orphan.md');
+          }
+          watching.stop();
+        }
+      )
+    );
+  });
+
+  it('asks the database to settle once a batch, only for notes whose ir-id no row holds', async () => {
+    const watching = makeWatcher();
+    const { vault, settleDatabase } = watching;
+    vault.rows.add('held');
+    watching.change(vault.add('held.md', { 'ir-id': 'held', tags: TRIGGER }));
+    queueTagged(watching, 'plain.md');
+    await settle();
+    expect(settleDatabase).not.toHaveBeenCalled();
+
+    watching.change(vault.add('o1.md', { 'ir-id': 'x', tags: TRIGGER }));
+    watching.change(vault.add('o2.md', { 'ir-id': 'y', tags: TRIGGER }));
+    await settle();
+    expect(settleDatabase).toHaveBeenCalledOnce();
+    expect(importedPaths(watching.importMany)).toEqual([
+      ['plain.md'],
+      ['o1.md', 'o2.md'],
+    ]);
+  });
+
+  it('property: checks a note whose ir-id no row holds again once the database settles, importing it only if it is still there, with that id and a trigger tag, by the tags it has then', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(
+          'none',
+          'untagged',
+          'other trigger',
+          'new id',
+          'deleted',
+          'replaced',
+          'unimported'
+        ),
+        async (meanwhile) => {
+          const watching = makeWatcher({ triggerTags: [TRIGGER, 'later'] });
+          const { vault, settleDatabase, importMany } = watching;
+          const file = vault.add('a.md', { 'ir-id': 'gone', tags: TRIGGER });
+          settleDatabase.mockImplementation(() => {
+            if (meanwhile === 'untagged') {
+              vault.edit(file, { 'ir-id': 'gone', tags: ['other'] });
+            } else if (meanwhile === 'other trigger') {
+              vault.edit(file, { 'ir-id': 'gone', tags: ['later'] });
+            } else if (meanwhile === 'new id') {
+              vault.edit(file, { 'ir-id': 'fresh', tags: TRIGGER });
+            } else if (meanwhile === 'deleted') {
+              vault.remove(file);
+            } else if (meanwhile === 'replaced') {
+              vault.add('a.md', { 'ir-id': 'gone', tags: TRIGGER });
+            } else if (meanwhile === 'unimported') {
+              watching.watcher.unimporting(file);
+            }
+            return Promise.resolve(true);
+          });
+          watching.change(file);
+          await settle();
+
+          const calls = importMany.mock.calls.map(([entries]) =>
+            entries.map(({ file: given, matchedTags }) => [given, matchedTags])
+          );
+          expect(calls).toEqual(
+            meanwhile === 'none'
+              ? [[[file, [TRIGGER]]]]
+              : meanwhile === 'other trigger'
+                ? [[[file, ['later']]]]
+                : []
+          );
+          watching.stop();
+        }
+      )
+    );
+  });
+
+  it('passes over a note whose row turns up while the database settles', async () => {
+    const watching = makeWatcher();
+    const { vault, settleDatabase } = watching;
+    settleDatabase.mockImplementation(() => {
+      vault.rows.add('late');
+      return Promise.resolve(true);
+    });
+    watching.change(vault.add('a.md', { 'ir-id': 'late', tags: TRIGGER }));
+    await settle();
+
+    expect(watching.importMany).not.toHaveBeenCalled();
+  });
+
+  it('keeps the moment last seen to before every note held for Sync, so one the startup scan found is found again after a restart', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 10 * 24 * 3600_000 }),
+        fc.constantFrom<SyncGate>('syncing', 'stalled'),
+        async (age, gate) => {
+          const vault = makeVault();
+          const now = Date.now();
+          vault.add('old.md', { tags: TRIGGER }, 'md', now - age);
+          saveAutoImportWatermark(vault.app, now - age - 1);
+          const first = makeWatcher({}, vault);
+          first.setGate(gate);
+          await first.watcher.runCatchUpScan();
+          await vi.advanceTimersByTimeAsync(AUTO_IMPORT_SYNC_POLL_MS);
+          first.stop();
+          expect(seenAt(vault)).toBeLessThan(now - age);
+
+          const second = makeWatcher({}, vault);
+          await second.watcher.runCatchUpScan();
+          expect(importedPaths(second.importMany)).toEqual([['old.md']]);
+          second.stop();
+        }
+      )
+    );
+  });
+
+  it('says none wait, and imports nothing, once stopped while holding notes for Sync', async () => {
+    const watching = makeWatcher();
+    watching.setGate('stalled');
+    queueTagged(watching, 'a.md');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+    expect(waiting(watching)).toBe(1);
+
+    watching.stop();
+    watching.setGate('open');
+    await settle();
+
+    expect(waiting(watching)).toBe(0);
+    expect(watching.importMany).not.toHaveBeenCalled();
   });
 });
 

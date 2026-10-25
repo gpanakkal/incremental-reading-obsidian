@@ -208,6 +208,21 @@ export const AUTO_IMPORT_MAX_WAIT_MS = 5000;
  * one already imported is passed over.
  */
 export const AUTO_IMPORT_WATERMARK_SLACK_MS = 60_000;
+/**
+ * How often `AutoImportWatcher` looks at Obsidian Sync again while it holds
+ * its imports back for Sync, besides each `'status-change'` Sync raises (see
+ * `subscribeSyncStatus`): for what raises none, such as Sync turned off, and
+ * for {@link AUTO_IMPORT_SYNC_PATIENCE_MS} running out.
+ */
+export const AUTO_IMPORT_SYNC_POLL_MS = 5000;
+/**
+ * How long `AutoImportWatcher` waits on Sync that keeps saying it is syncing
+ * before it counts its imports as stuck behind it and offers to import them
+ * anyway, as it does at once for Sync paused, offline or failing. Long enough
+ * for a large first sync of a new device, which brings the very rows and
+ * stripped notes the wait is for.
+ */
+export const AUTO_IMPORT_SYNC_PATIENCE_MS = 5 * 60_000;
 
 export const MAX_SQL_QUERY_PARAMS = 999;
 /**

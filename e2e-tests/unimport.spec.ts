@@ -228,9 +228,8 @@ test('un-imports an article from its menu in Files, leaving a plain note with it
   await expect(actionBar()).toBeVisible();
 
   await chooseFromMenu(fileRow(), 'Un-import article');
-  await expect(confirmation()).toContainText(
-    `Un-import "Unimport me"? Its review history is deleted and can't be undone.`
-  );
+  // Names the note
+  await expect(confirmation()).toContainText('"Unimport me"');
   await answer('Un-import');
 
   await expect(

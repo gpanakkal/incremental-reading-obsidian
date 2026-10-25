@@ -7,7 +7,10 @@ import {
   findSyncExclusions,
   getSyncPlugin,
   holdForSync,
+  isSignedOutOfObsidian,
+  readSyncGate,
   readSyncState,
+  subscribeSyncStatus,
   SYNC_HOLD_MESSAGES,
   SYNC_POLL_MS,
   SYNC_WAIT_NOTICE_DELAY_MS,
@@ -371,6 +374,215 @@ describe('readSyncState', () => {
       DATABASE_FILE_PATH,
       false
     );
+  });
+});
+
+describe('readSyncGate', () => {
+  it('property: opens for no Sync, or anything not shaped like it', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(fc.constantFrom(null, undefined), fc.anything()),
+        fc.boolean(),
+        (value, offline) => {
+          expect(readSyncGate(value, () => offline)).toBe('open');
+        }
+      )
+    );
+  });
+
+  it('property: holds while Sync starts or syncs, or has yet to bring in what changed, stalls while it is paused, failing, or offline with changes to come, and opens otherwise, or whatever it says while signed out', () => {
+    fc.assert(
+      fc.property(
+        fieldsArb,
+        fc.oneof(fc.constantFrom(...STATUSES), fc.string()),
+        fc.boolean(),
+        fc.boolean(),
+        (fields, status, offline, signedOut) => {
+          const sync = makeSync(fields);
+          vi.spyOn(sync, 'getStatus').mockReturnValue(status as Status);
+          const caughtUp = fields.ready && fields.newServerFiles.length === 0;
+          const expected =
+            status === 'uninitialized' || status === 'syncing'
+              ? 'syncing'
+              : status === 'paused' || status === 'error'
+                ? 'stalled'
+                : status !== 'synced' || caughtUp
+                  ? 'open'
+                  : offline
+                    ? 'stalled'
+                    : 'syncing';
+
+          expect(
+            readSyncGate(
+              sync,
+              () => offline,
+              () => signedOut
+            )
+          ).toBe(signedOut ? 'open' : expected);
+          if (!signedOut) {
+            expect(readSyncGate(sync, () => offline)).toBe(expected);
+          }
+        }
+      )
+    );
+  });
+
+  it('opens when Sync throws on being read', () => {
+    const sync = makeSync({ status: 'syncing' });
+    vi.spyOn(sync, 'getStatus').mockImplementation(() => {
+      throw new Error('gone');
+    });
+
+    expect(readSyncGate(sync, () => false)).toBe('open');
+  });
+});
+
+describe('isSignedOutOfObsidian', () => {
+  /** Storage holding `stored` under Obsidian's account key, and nothing else. */
+  const storageWith = (stored: string | null) => ({
+    getItem: (key: string) => (key === 'obsidian-account' ? stored : null),
+  });
+
+  it('property: signed in only while the account Obsidian stores has a token', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.string(),
+          fc.anything(),
+          fc.record({ token: fc.oneof(fc.string(), fc.anything()) })
+        ),
+        (account) => {
+          const token =
+            typeof account === 'object' && account !== null
+              ? (account as { token?: unknown }).token
+              : undefined;
+          const signedIn = typeof token === 'string' && token !== '';
+          const stored = JSON.stringify(account) ?? null;
+
+          expect(isSignedOutOfObsidian(storageWith(stored))).toBe(
+            stored === null || !signedIn
+          );
+        }
+      )
+    );
+  });
+
+  it('reads nothing stored, text that is no JSON, and storage that throws as signed out', () => {
+    expect(isSignedOutOfObsidian(storageWith(null))).toBe(true);
+    expect(isSignedOutOfObsidian(storageWith('{token'))).toBe(true);
+    expect(
+      isSignedOutOfObsidian({
+        getItem: () => {
+          throw new Error('blocked');
+        },
+      })
+    ).toBe(true);
+    expect(isSignedOutOfObsidian(storageWith('{"token":"t"}'))).toBe(false);
+  });
+});
+
+describe('subscribeSyncStatus', () => {
+  /** A window telling of going online and offline, as a test says. */
+  function makeWindow() {
+    const target = new EventTarget();
+    return {
+      win: {
+        addEventListener: (type: string, listener: EventListener) => {
+          target.addEventListener(type, listener);
+        },
+        removeEventListener: (type: string, listener: EventListener) => {
+          target.removeEventListener(type, listener);
+        },
+      } as unknown as Window,
+      go: (event: 'online' | 'offline') =>
+        target.dispatchEvent(new Event(event)),
+    };
+  }
+
+  it("property: calls back on each of Sync's status changes and each change online or offline, following the instance Sync is now, until stopped", () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.constantFrom('status', 'online', 'offline', 'swap', 'off'),
+          { maxLength: 10 }
+        ),
+        (steps) => {
+          const { win, go } = makeWindow();
+          const instances = [makeSync(), makeSync()];
+          let current: ReturnType<typeof makeSync> | null = instances[0];
+          const onChange = vi.fn();
+          const stop = subscribeSyncStatus(() => current, onChange, win);
+          /** The instance listened to, which a change tells of a new one. */
+          let followed: ReturnType<typeof makeSync> | null = current;
+          /** How often each instance was begun to be listened to. */
+          const follows = new Map(instances.map((sync) => [sync, 0]));
+          follows.set(instances[0], 1);
+          let calls = 0;
+          for (const step of steps) {
+            if (step === 'swap') {
+              current = current === instances[0] ? instances[1] : instances[0];
+            } else if (step === 'off') {
+              current = null;
+            } else {
+              if (step === 'status') followed?.trigger();
+              else go(step);
+              if (step !== 'status' || followed !== null) {
+                calls++;
+                if (current !== null && current !== followed) {
+                  follows.set(current, follows.get(current)! + 1);
+                }
+                followed = current;
+              }
+            }
+            expect(onChange).toHaveBeenCalledTimes(calls);
+            for (const sync of instances) {
+              expect(sync.listenerCount()).toBe(sync === followed ? 1 : 0);
+              // Once each time it is followed anew, to Sync's own event
+              expect(sync.on.mock.calls).toEqual(
+                Array.from({ length: follows.get(sync)! }, (): unknown[] => [
+                  'status-change',
+                  expect.any(Function),
+                ])
+              );
+            }
+          }
+
+          stop();
+          for (const sync of instances) {
+            expect(sync.listenerCount()).toBe(0);
+            sync.trigger();
+          }
+          go('online');
+          go('offline');
+          expect(onChange).toHaveBeenCalledTimes(calls);
+        }
+      )
+    );
+  });
+
+  it('listens to nothing of Sync off or not shaped like it, still hearing the network, and survives on and offref throwing', () => {
+    const { win, go } = makeWindow();
+    const onChange = vi.fn();
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    subscribeSyncStatus(() => ({ getStatus: 1 }), onChange, win);
+    go('offline');
+    expect(onChange).toHaveBeenCalledOnce();
+
+    const sync = makeSync();
+    sync.on.mockImplementation(() => {
+      throw new Error('on');
+    });
+    const stopThrowingOn = subscribeSyncStatus(() => sync, onChange, win);
+    stopThrowingOn();
+    expect(debug).toHaveBeenCalledOnce();
+
+    const other = makeSync();
+    other.offref.mockImplementation(() => {
+      throw new Error('offref');
+    });
+    subscribeSyncStatus(() => other, onChange, win)();
+    expect(other.offref).toHaveBeenCalledOnce();
+    expect(debug).toHaveBeenCalledTimes(2);
   });
 });
 

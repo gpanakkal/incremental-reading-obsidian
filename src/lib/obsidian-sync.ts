@@ -123,6 +123,133 @@ export function readSyncState(sync: unknown, path: string): SyncState {
 }
 
 /**
+ * Whether Sync lets automatic imports go ahead, for the whole vault:
+ *
+ * - `open`: Sync is off, not in a shape this plugin knows, not set up for
+ *   the vault, signed out of, or has brought in everything the server had;
+ * - `syncing`: Sync is starting, syncing, or has yet to hear from the server
+ *   what changed or to download it;
+ * - `stalled`: Sync can't bring anything in for now: paused, failing, or
+ *   with changes still to come while the device is offline.
+ */
+export type SyncGate = 'open' | 'syncing' | 'stalled';
+
+/**
+ * Where Sync stands for automatic imports (see {@link SyncGate}).
+ *
+ * `getStatus()` (obsidian.asar 1.13.7) answers `'error'` for anything that
+ * failed: one file to retry, the server out of reach, and for good while
+ * signed out with the vault still set up (`_sync` throws "Not logged in"
+ * each run), so signed out reads as open, as Sync brings nothing then.
+ * @param sync Sync's plugin instance, or nullish when Sync is off
+ * @param isOffline whether the device is offline
+ * @param isSignedOut whether no Obsidian account is signed in on the device
+ *   (see {@link isSignedOutOfObsidian})
+ */
+export function readSyncGate(
+  sync: unknown,
+  isOffline: () => boolean,
+  isSignedOut: () => boolean = () => false
+): SyncGate {
+  if (!isSyncInstance(sync)) return 'open';
+  try {
+    if (isSignedOut()) return 'open';
+    switch (sync.getStatus()) {
+      case 'uninitialized':
+      case 'syncing':
+        return 'syncing';
+      case 'paused':
+      case 'error':
+        return 'stalled';
+      case 'synced':
+        if (sync.ready && sync.newServerFiles.length === 0) return 'open';
+        return isOffline() ? 'stalled' : 'syncing';
+      default:
+        return 'open';
+    }
+  } catch {
+    return 'open';
+  }
+}
+
+/**
+ * Where Obsidian keeps the account signed in on the device: `localStorage`,
+ * shared by every vault, as JSON with a `token` that is empty or missing once
+ * signed out (undocumented, obsidian.asar 1.13.7, its `"obsidian-account"`).
+ */
+const ACCOUNT_STORAGE_KEY = 'obsidian-account';
+
+/**
+ * Whether no Obsidian account is signed in on the device, as `storage` holds
+ * it. Anything unreadable reads as signed out, so a change in how Obsidian
+ * keeps it leaves automatic imports as they are without Sync.
+ */
+export function isSignedOutOfObsidian(
+  storage: Pick<Storage, 'getItem'>
+): boolean {
+  try {
+    const account: unknown = JSON.parse(
+      storage.getItem(ACCOUNT_STORAGE_KEY) ?? 'null'
+    );
+    if (!isObject(account)) return true;
+    return typeof account.token !== 'string' || account.token === '';
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Call `onChange` whenever what {@link readSyncGate} reads may have changed:
+ * on each `'status-change'` Sync raises, and as the device goes online or
+ * offline. Sync raises one as each sync run starts and ends, for each file it
+ * brings in, on pause and resume, and every 30 s at least, as its timer
+ * starts a run (obsidian.asar 1.13.7); `ready` turns true with no event of
+ * its own, but always just before a run is asked for. Sync is looked up
+ * afresh on each, so an instance that changes is followed.
+ * @param getSync Sync's plugin instance as it is now, or nullish
+ * @returns the function that stops it
+ */
+export function subscribeSyncStatus(
+  getSync: () => unknown,
+  onChange: () => void,
+  win: Pick<Window, 'addEventListener' | 'removeEventListener'> = window
+): () => void {
+  let subscribed: { sync: SyncInstance; ref: unknown } | null = null;
+  const unsubscribe = () => {
+    if (!subscribed) return;
+    try {
+      subscribed.sync.offref(subscribed.ref);
+    } catch (error) {
+      console.debug('Incremental Reading - Sync offref failed', error);
+    }
+    subscribed = null;
+  };
+  const follow = () => {
+    const sync = getSync();
+    if (subscribed?.sync === sync) return;
+    unsubscribe();
+    if (!isSyncInstance(sync)) return;
+    try {
+      subscribed = { sync, ref: sync.on('status-change', changed) };
+    } catch (error) {
+      console.debug('Incremental Reading - Sync on failed', error);
+    }
+  };
+  function changed() {
+    follow();
+    onChange();
+  }
+  follow();
+  win.addEventListener('online', changed);
+  win.addEventListener('offline', changed);
+  return () => {
+    unsubscribe();
+    win.removeEventListener('online', changed);
+    win.removeEventListener('offline', changed);
+  };
+}
+
+/**
  * How a {@link waitForSyncedFile} ended: the state that ended it, or
  *
  * - `timeout`: it ran out of time first;
