@@ -642,12 +642,13 @@ type CardNote = typeof cardNoteArb extends fc.Arbitrary<infer T> ? T : never;
 /**
  * A card made of `note`'s line, whose embed now stands in its place, undone
  * with a card manager whose delete answers `deleted`, after `meanwhile` has
- * edited the note.
+ * edited the note. The card was made saying it put `around` the embed.
  */
 async function makeCardThenUndo(
   { before, after, line, embed }: CardNote,
   deleted: boolean,
-  meanwhile: (text: string) => string = (text) => text
+  meanwhile: (text: string) => string = (text) => text,
+  around = { before: '', after: '' }
 ) {
   const plugin = makePlugin();
   const sourceFile = makeTFile('source');
@@ -679,7 +680,7 @@ async function makeCardThenUndo(
   });
   const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
   Object.assign(plugin.reviewManager, {
-    createCard: vi.fn().mockResolvedValue({ reviewCard, line }),
+    createCard: vi.fn().mockResolvedValue({ reviewCard, line, ...around }),
     cards: { delete: deleteCard },
   });
   Object.assign(plugin.app.workspace, {
@@ -4077,6 +4078,62 @@ describe('Actions — undo of a card made from a note', () => {
           'Error: Kept the card "card"'
         );
       })
+    );
+  });
+
+  it('takes the delimiters it put around the embed out with it, while they are still there', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        cardNoteArb,
+        fc.record({ before: fc.string(), after: fc.string() }),
+        fc.boolean(),
+        async (note, around, kept) => {
+          vi.restoreAllMocks();
+          const written = kept ? around : { before: '', after: '' };
+          fc.pre(
+            kept ||
+              (!note.before.endsWith(around.before) &&
+                !note.after.startsWith(around.after))
+          );
+          const { text } = await makeCardThenUndo(
+            {
+              ...note,
+              before: note.before + written.before,
+              after: written.after + note.after,
+            },
+            true,
+            undefined,
+            around
+          );
+
+          expect(text()).toBe(note.before + note.line + note.after);
+        }
+      )
+    );
+  });
+
+  it('puts the embed back with the delimiters around it when the card is not deleted', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        cardNoteArb,
+        fc.record({ before: fc.string(), after: fc.string() }),
+        async (note, around) => {
+          vi.restoreAllMocks();
+          const written = {
+            ...note,
+            before: note.before + around.before,
+            after: around.after + note.after,
+          };
+          const { text } = await makeCardThenUndo(
+            written,
+            false,
+            undefined,
+            around
+          );
+
+          expect(text()).toBe(written.before + note.embed + written.after);
+        }
+      )
     );
   });
 

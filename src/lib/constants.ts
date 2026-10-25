@@ -155,6 +155,10 @@ export const CLOZE_GROUPS_PATTERN = new RegExp(
 
 // eslint-disable-next-line no-useless-escape -- this string is parsed twice
 export const CARD_ANSWER_REPLACEMENT = `<mark class="ir-hidden-answer">\\\_\\\_\\\_\\\_\\\_\\\_</mark>`;
+/** The hidden answer's stand-in in code, where markup shows as it is. */
+export const CARD_ANSWER_REPLACEMENT_IN_CODE = '______';
+/** The hidden answer's stand-in in math, which MathJax renders. */
+export const CARD_ANSWER_REPLACEMENT_IN_MATH = String.raw`\underline{\qquad}`;
 
 export const FRONTMATTER_PATTERN = /^(---\n[\s\S]*?\n---\n)([\s\S]*)$/;
 export const TRANSCLUSION_HIDE_TITLE_ALIAS = 'ir-hide-title';
