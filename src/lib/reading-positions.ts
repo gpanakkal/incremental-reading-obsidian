@@ -3,6 +3,7 @@ import type { ItemPositionRow } from '#/lib/items/ReviewManager';
 import type { App, Plugin } from 'obsidian';
 import { getDeviceId } from './device-id';
 import { type PositionStorage, PositionStore } from './position-store';
+import { addQuitTask } from './quit-task';
 
 /** The localStorage key, per vault, of every item's device-tier position. */
 export const POSITIONS_KEY = 'incremental-reading-positions';
@@ -83,7 +84,7 @@ export function registerPositionFlushes(
     for (const doc of [...watched.keys()]) unwatch(doc);
   });
   plugin.registerEvent(
-    workspace.on('quit', (tasks) => tasks.addPromise(store.flushAll()))
+    workspace.on('quit', (tasks) => addQuitTask(tasks, store.flushAll()))
   );
   plugin.register(() => store.persist());
 }

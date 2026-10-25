@@ -117,6 +117,7 @@ import {
   resetCurrentOnMatch,
   startItemCacheEviction,
 } from './lib/query-client';
+import { addQuitTask } from './lib/quit-task';
 import { followWhenReady } from './lib/readiness';
 import { enableDebugTiming } from './lib/repository/phase-timing';
 import {
@@ -676,7 +677,7 @@ export default class IncrementalReadingPlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on('quit', (tasks) => {
         const suspended = this.sessionTracker?.suspend();
-        if (suspended) tasks.addPromise(suspended);
+        if (suspended) addQuitTask(tasks, suspended);
       })
     );
   }

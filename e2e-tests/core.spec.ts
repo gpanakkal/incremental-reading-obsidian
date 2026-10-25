@@ -100,6 +100,49 @@ test('Can open the review interface from the ribbon button', async () => {
   ).toBeVisible();
 });
 
+test('closes as soon as it is quit, without Obsidian forcing the window shut', async () => {
+  // Obsidian's main process destroys a window still open 3 s after its close
+  // began, and quitting is held for the plugin's quit tasks first (the
+  // `BrowserWindow` `close` handler and `registerQuitHook`, read from
+  // obsidian.asar, 1.13; not documented). Tasks that settled too soon left the
+  // close to that fallback on every quit (0186). Unofficial: `app.plugins`.
+  await expect
+    .poll(() =>
+      window.evaluate(
+        () =>
+          (
+            window as unknown as {
+              app: {
+                plugins: { plugins: Record<string, { positions?: unknown }> };
+              };
+            }
+          ).app.plugins.plugins['incremental-reading']?.positions !== undefined
+      )
+    )
+    .toBe(true);
+  const forced = path.join(vaultPath, 'forced-close.txt');
+  await app.evaluate(({ BrowserWindow }, forced) => {
+    const nodeFs = (
+      process as unknown as {
+        getBuiltinModule(id: 'node:fs'): {
+          writeFileSync(file: string, data: string): void;
+        };
+      }
+    ).getBuiltinModule('node:fs');
+    type Win = { id: number; destroy: (this: Win) => void };
+    for (const win of BrowserWindow.getAllWindows() as Win[]) {
+      const { destroy } = win;
+      win.destroy = function () {
+        nodeFs.writeFileSync(forced, String(this.id));
+        destroy.call(this);
+      };
+    }
+  }, forced);
+
+  await closeElectron(app);
+  await expect(fs.access(forced)).rejects.toThrow();
+});
+
 test.describe('Article Importing', () => {
   test('can import Markdown from the file explorer context menu', async () => {
     // macOS uses native context menus which are invisible to Playwright
