@@ -8,6 +8,7 @@ import {
 } from '#/lib/items/row-delete';
 import SRSCard from '#/lib/items/SRSCard';
 import * as notices from '#/lib/notices';
+import { parseBackupName } from '#/lib/repository/retention';
 import { MERGE_TABLES } from '#/lib/repository/row-merge';
 import {
   initialCard,
@@ -22,7 +23,6 @@ import fc from 'fast-check';
 import type { TFile } from 'obsidian';
 import { generatorParameters, Rating, type Grade } from 'ts-fsrs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_DB_PATH } from './FakeVault';
 import { FakeSync, makeDevice, type FakeDevice } from './SimulationHarness';
 
 // #region HELPERS
@@ -208,9 +208,12 @@ function everything(device: FakeDevice): Record<string, Row[]> {
 }
 
 function backups(device: FakeDevice): string[] {
-  return device.vault.adapter
-    .paths()
-    .filter((path) => path !== DEFAULT_DB_PATH);
+  return (
+    device.vault.adapter
+      .paths()
+      // The database file's hidden siblings (`db-file.ts`) are no backups
+      .filter((path) => parseBackupName(path) !== null)
+  );
 }
 
 /**

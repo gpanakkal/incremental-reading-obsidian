@@ -6,6 +6,11 @@ export interface FakeFile {
 /** The path the database file is read from when a caller names none. */
 export const DEFAULT_DB_PATH = 'ir-user-data.sqlite';
 
+/** Whether Obsidian leaves `path` out of its index: a segment starts with `.` */
+function isHidden(path: string): boolean {
+  return path.split('/').some((segment) => segment.startsWith('.'));
+}
+
 class FakeAdapter {
   #pendingWrites: Array<{ resolve: () => void; reject: (e: Error) => void }> =
     [];
@@ -18,23 +23,78 @@ class FakeAdapter {
    */
   constructor(readonly autoResolveWrites: boolean) {}
 
-  /** Lands on disk once resolved, which is when Obsidian reports it. */
+  /**
+   * Lands on disk once resolved, which is when Obsidian reports it. A hidden
+   * file (a save's sibling, see `db-file.ts`) lands at once: only the file
+   * Obsidian and Sync see waits.
+   */
   writeBinary(path: string, data: ArrayBuffer): Promise<void> {
     this.#lastWrittenBytes = data;
-    if (this.autoResolveWrites) {
-      this.#files.set(path, data);
+    return this.#land(path, () => this.#files.set(path, data));
+  }
+
+  /** Run `put` now, or once resolved if `path` is one Obsidian sees. */
+  #land(path: string, put: () => void): Promise<void> {
+    if (this.autoResolveWrites || isHidden(path)) {
+      put();
       return Promise.resolve();
     }
     return new Promise((resolve, reject) => {
       this.#pendingWrites.push({
         resolve: () => {
-          this.#files.set(path, data);
+          put();
           resolve();
         },
         reject,
       });
     });
   }
+
+  /** A file's mtime changes whenever its bytes are replaced. */
+  #mtimes = new WeakMap<ArrayBuffer, number>();
+  #clock = 0;
+
+  stat(
+    path: string
+  ): Promise<{
+    type: 'file';
+    ctime: number;
+    mtime: number;
+    size: number;
+  } | null> {
+    const data = this.#files.get(path);
+    if (!data) return Promise.resolve(null);
+    if (!this.#mtimes.has(data)) this.#mtimes.set(data, ++this.#clock);
+    return Promise.resolve({
+      type: 'file',
+      ctime: 0,
+      mtime: this.#mtimes.get(data)!,
+      size: data.byteLength,
+    });
+  }
+
+  copy(from: string, to: string): Promise<void> {
+    const data = this.#files.get(from);
+    if (!data) return Promise.reject(new Error(`ENOENT: ${from}`));
+    this.#files.set(to, data.slice(0));
+    return Promise.resolve();
+  }
+
+  getFullPath(path: string): string {
+    return path;
+  }
+
+  /** Desktop's replacing rename (undocumented, see `atomicReplace`). */
+  readonly fsPromises = {
+    rename: (from: string, to: string): Promise<void> => {
+      const data = this.#files.get(from);
+      if (!data) return Promise.reject(new Error(`ENOENT: ${from}`));
+      return this.#land(to, () => {
+        this.#files.delete(from);
+        this.#files.set(to, data);
+      });
+    },
+  };
 
   readBinary(path: string): Promise<ArrayBuffer> {
     return Promise.resolve(this.#files.get(path) ?? new ArrayBuffer(0));

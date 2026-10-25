@@ -56,6 +56,7 @@ import {
   saveWatchedFolderLedger,
 } from '#/lib/watched-folder-ledger';
 import IncrementalReadingPlugin, {
+  recoveryMessage,
   startupFailureMessage,
   STILL_STARTING_NOTICE,
 } from '#/main';
@@ -75,6 +76,7 @@ import {
   removeIcon,
   type MenuItem,
 } from '#/test/__mocks__/obsidian';
+import * as backupPrompt from '#/views/BackupFailurePrompt';
 import { BulkImportModal } from '#/views/BulkImportModal';
 import { ImportModal } from '#/views/ImportModal';
 import ReviewView from '#/views/ReviewView';
@@ -4811,12 +4813,14 @@ describe('IncrementalReadingPlugin database startup and Sync', () => {
   ) {
     let hold: SyncHold | undefined;
     let signal: AbortSignal | undefined;
+    let startedWith: Parameters<typeof SQLJSRepository.start>[0] | undefined;
     const unloaders: (() => void)[] = [];
     const unload = () => unloaders.forEach((run) => run());
     const dispose = vi.fn();
     vi.spyOn(SQLJSRepository, 'start').mockImplementation((params) => {
       hold = params.holdForSync;
       signal = params.signal;
+      startedWith = params;
       whileStarting?.(unload);
       return Promise.resolve({
         onDataChange: vi.fn(() => () => {}),
@@ -4840,6 +4844,7 @@ describe('IncrementalReadingPlugin database startup and Sync', () => {
       started,
       hold: () => hold!,
       signal: () => signal!,
+      startedWith: () => startedWith!,
       unload,
       receiver,
       dispose,
@@ -4865,6 +4870,15 @@ describe('IncrementalReadingPlugin database startup and Sync', () => {
     await expect(started).rejects.toBeInstanceOf(StartupCancelledError);
     expect(dispose).toHaveBeenCalledOnce();
     expect(receiver.registerEvent).not.toHaveBeenCalled();
+  });
+
+  it('asks the user through the backup failure prompt when backing up before a migration fails', async () => {
+    const prompt = { ask: vi.fn(), close: vi.fn() };
+    vi.spyOn(backupPrompt, 'createBackupFailurePrompt').mockReturnValue(prompt);
+    const { started, startedWith } = startWith(appWithSync(null));
+    await started;
+
+    expect(startedWith().backupFailurePrompt).toBe(prompt);
   });
 
   it("holds the database's startup on this vault's Sync", async () => {
@@ -5096,6 +5110,18 @@ describe('startupFailureMessage', () => {
     );
   });
 
+  it('property: names the file and the copy of it kept when nothing could replace it', () => {
+    fc.assert(
+      fc.property(fc.string(), fc.string({ minLength: 1 }), (path, copy) => {
+        const message = startupFailureMessage(
+          new DatabaseLoadError(path, copy)
+        );
+        expect(message).toContain(path);
+        expect(message).toContain(copy);
+      })
+    );
+  });
+
   it.each([new Error('boom'), 'not an error', undefined])(
     'falls back to a general message for %s',
     (error) => {
@@ -5104,6 +5130,39 @@ describe('startupFailureMessage', () => {
       );
     }
   );
+});
+
+describe('recoveryMessage', () => {
+  /** Any path that doesn't itself say what the message is checked for. */
+  const pathArb = fc
+    .string()
+    .filter((path) => !path.includes('missing') && !path.includes('null'));
+
+  it('property: names the file, what it was restored from and any damaged copy, and says changes may be missing unless the save under way was restored', () => {
+    fc.assert(
+      fc.property(
+        pathArb,
+        fc.constantFrom('tmp' as const, 'prev' as const, 'backup' as const),
+        pathArb,
+        fc.option(pathArb),
+        (dbFilePath, source, path, corruptCopyPath) => {
+          const message = recoveryMessage(dbFilePath, {
+            source,
+            path,
+            corruptCopyPath,
+          });
+          expect(message).toContain(dbFilePath);
+          expect(message).toContain(path);
+          if (corruptCopyPath === null) {
+            expect(message).not.toContain('null');
+          } else {
+            expect(message).toContain(corruptCopyPath);
+          }
+          expect(message.includes('missing')).toBe(source !== 'tmp');
+        }
+      )
+    );
+  });
 });
 
 describe('IncrementalReadingPlugin unload', () => {

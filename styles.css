@@ -3165,6 +3165,20 @@ input.ir-queue-page-input {
   padding-inline: var(--size-4-4);
 }
 
+/* The failed-backup notice's buttons (BackupFailurePrompt.ts). Obsidian's
+   buttons take `--cursor`, `default` unless the user changes it */
+.ir-backup-failure-notice button:not(:disabled) {
+  cursor: pointer;
+}
+
+/* On a phone Obsidian lays a notice out as a row (`.is-phone .notice`, read
+   from obsidian.asar), which squeezes this one's long message beside its
+   buttons: stacked instead */
+.is-phone .notice.ir-backup-failure-notice {
+  flex-direction: column;
+  align-items: stretch;
+}
+
 /* #endregion */
 
 /* #region Leftover notes modal (LeftoverModal.ts) */

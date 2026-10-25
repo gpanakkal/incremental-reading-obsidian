@@ -51,18 +51,43 @@ export function createPositionStore(
  * background the app this way, and may kill it after), and the app quitting.
  * At unload, the moves still waiting in memory go to localStorage, for the
  * flush at the next load: the database refuses writes by then.
+ *
+ * So do they when the main window's page is going away (`pagehide`), as a
+ * reload ("Reload app without saving") or a closing window does: its
+ * document then goes hidden too, but a database save started there is cut
+ * off as the page dies (0217: Node's `writeFile` had already truncated the
+ * file, which was left empty). Backgrounding a mobile app or minimizing a
+ * window hides the document without a `pagehide`, and still flushes.
  */
 export function registerPositionFlushes(
   plugin: Plugin,
   store: Pick<PositionStore, 'flushAll' | 'persist'>
 ): void {
   const { workspace } = plugin.app;
+  /** Whether the main window's page is going away (see above). */
+  let leaving = false;
+  const pageHidden = () => {
+    leaving = true;
+    store.persist();
+  };
+  // A page kept in the back/forward cache comes back
+  const pageShown = () => {
+    leaving = false;
+  };
+  window.addEventListener('pagehide', pageHidden);
+  window.addEventListener('pageshow', pageShown);
+  plugin.register(() => {
+    window.removeEventListener('pagehide', pageHidden);
+    window.removeEventListener('pageshow', pageShown);
+  });
   /** Each watched document, and how to stop watching it. */
   const watched = new Map<Document, () => void>();
   const watch = (doc: Document) => {
     if (watched.has(doc)) return;
     const changed = () => {
-      if (doc.visibilityState === 'hidden') void store.flushAll();
+      if (doc.visibilityState === 'hidden' && !leaving) {
+        void store.flushAll();
+      }
     };
     doc.addEventListener('visibilitychange', changed);
     watched.set(doc, () =>

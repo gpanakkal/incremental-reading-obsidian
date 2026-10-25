@@ -1,7 +1,7 @@
 import { tombstoneRowStatements } from '#/lib/items/row-delete';
+import { parseBackupName } from '#/lib/repository/retention';
 import { STALE_AFTER_MS } from '#/lib/repository/write-stamp';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_DB_PATH } from './FakeVault';
 import { FakeSync, makeDevice, type FakeDevice } from './SimulationHarness';
 
 // #region HELPERS
@@ -18,9 +18,12 @@ function ids(device: FakeDevice, table: string, where = 'TRUE'): string[] {
 }
 
 function backups(device: FakeDevice): string[] {
-  return device.vault.adapter
-    .paths()
-    .filter((path) => path !== DEFAULT_DB_PATH);
+  return (
+    device.vault.adapter
+      .paths()
+      // The database file's hidden siblings (`db-file.ts`) are no backups
+      .filter((path) => parseBackupName(path) !== null)
+  );
 }
 
 function setClocks(now: number, ...devices: FakeDevice[]) {

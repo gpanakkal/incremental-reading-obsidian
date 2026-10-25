@@ -102,7 +102,7 @@ export class FakeRepository extends SQLJSRepository {
   }
 
   // A no-op over the stub; tests spy on it to control timing
-  protected override async reloadDb(bytes?: ArrayBuffer) {
-    return this.#stub ? this.db : super.reloadDb(bytes);
+  protected override async reloadDb(bytes?: ArrayBuffer, localCopy?: boolean) {
+    return this.#stub ? this.db : super.reloadDb(bytes, localCopy);
   }
 }
