@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
-import { MINIMUM_FIXED_REVIEW_INTERVAL } from '#/lib/constants';
+import {
+  MAXIMUM_FIXED_REVIEW_INTERVAL,
+  MINIMUM_FIXED_REVIEW_INTERVAL,
+} from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
 import fc from 'fast-check';
 import { type ComponentChild, h, render } from 'preact';
@@ -102,6 +105,87 @@ const typedArb = fc.oneof(
   fc.string(),
   fc.stringMatching(/^-?\d{0,4}(\.\d{0,2})?$/),
   fc.integer({ min: -100, max: 100 }).map(String)
+);
+/** Saves on Enter, which only gives up focus the field has. */
+function enter(input: HTMLInputElement) {
+  void act(() => {
+    input.focus();
+  });
+  press(input, 'Enter');
+}
+
+/** The interval the field shows for a stored `interval`. */
+function shown(interval: number | null): string {
+  return String(interval ?? MINIMUM_FIXED_REVIEW_INTERVAL);
+}
+
+/** Text that is no interval at all, so cleans up to whatever is held. */
+const notAnIntervalArb = fc.stringMatching(/^[^\d]{0,4}$/);
+
+/** Text that changes nothing when typed over a field holding `interval`. */
+function noOpArb(interval: number): fc.Arbitrary<string> {
+  const options = [notAnIntervalArb];
+  if (interval <= MAXIMUM_FIXED_REVIEW_INTERVAL) {
+    options.push(
+      fc.constantFrom(`${interval}`, `0${interval}`, `-${interval}`),
+      // Fractions are cut off
+      fc.stringMatching(/^\d{1,2}$/).map((tail) => `${interval}.${tail}`)
+    );
+  }
+  // Clamped down or up into range
+  if (interval === MAXIMUM_FIXED_REVIEW_INTERVAL) {
+    options.push(
+      fc
+        .integer({ min: MAXIMUM_FIXED_REVIEW_INTERVAL + 1, max: 99_999 })
+        .map(String)
+    );
+  }
+  if (interval === MINIMUM_FIXED_REVIEW_INTERVAL) {
+    options.push(fc.constantFrom('0', '-0', '0.5', '-1'));
+  }
+  return fc.oneof(...options);
+}
+
+/** A stored interval, with text that changes nothing typed over it. */
+const noOpEditArb = intervalArb.chain((interval) =>
+  fc.tuple(
+    fc.constant(interval),
+    noOpArb(interval ?? MINIMUM_FIXED_REVIEW_INTERVAL)
+  )
+);
+
+/** Intervals typing can reach, so the no-op texts include real numbers. */
+const reachableArb = fc.integer({
+  min: MINIMUM_FIXED_REVIEW_INTERVAL,
+  max: MAXIMUM_FIXED_REVIEW_INTERVAL,
+});
+
+/** What a user does to the field, or a new stored interval from outside. */
+type Step =
+  | { kind: 'type'; text: string }
+  | { kind: 'escape' | 'blur' | 'enter' }
+  | { kind: 'stored'; interval: number | null };
+
+const stepArb: fc.Arbitrary<Step> = fc.oneof(
+  {
+    weight: 4,
+    arbitrary: typedArb.map((text): Step => ({ kind: 'type', text })),
+  },
+  {
+    weight: 3,
+    arbitrary: reachableArb
+      .chain(noOpArb)
+      .map((text): Step => ({ kind: 'type', text })),
+  },
+  { weight: 1, arbitrary: fc.constant<Step>({ kind: 'escape' }) },
+  { weight: 1, arbitrary: fc.constant<Step>({ kind: 'blur' }) },
+  { weight: 1, arbitrary: fc.constant<Step>({ kind: 'enter' }) },
+  {
+    weight: 2,
+    arbitrary: fc
+      .option(reachableArb, { nil: null })
+      .map((interval): Step => ({ kind: 'stored', interval })),
+  }
 );
 // #endregion
 
@@ -278,6 +362,190 @@ describe('FixedIntervalField', () => {
         ).toBe(label);
         document.body.innerHTML = '';
       })
+    );
+  });
+
+  it('keeps what was typed on screen while an edit that changes nothing is open', () => {
+    fc.assert(
+      fc.property(noOpEditArb, ([interval, text]) => {
+        const { input, onBlur } = field({ initialInterval: interval });
+        const held = interval ?? MINIMUM_FIXED_REVIEW_INTERVAL;
+
+        const read = type(input, text);
+
+        expect(keptAfterTyping(held, read)).toBe(held);
+        // Clearing the field to type another number must work
+        expect(input.value).toBe(read);
+        expect(onBlur).not.toHaveBeenCalled();
+        document.body.innerHTML = '';
+      })
+    );
+  });
+
+  it('shows the stored interval, not what was typed, once an edit that changes nothing ends', () => {
+    fc.assert(
+      fc.property(
+        noOpEditArb,
+        fc.constantFrom('blur', 'enter', 'escape'),
+        ([interval, text], end) => {
+          const { input, onBlur } = field({ initialInterval: interval });
+
+          type(input, text);
+          if (end === 'blur') blur(input);
+          else if (end === 'enter') enter(input);
+          else press(input, 'Escape');
+
+          expect(input.value).toBe(shown(interval));
+          if (end === 'escape') expect(onBlur).not.toHaveBeenCalled();
+          else
+            expect(onBlur).toHaveBeenCalledExactlyOnceWith(
+              interval ?? MINIMUM_FIXED_REVIEW_INTERVAL
+            );
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('undoes any edit on Escape, showing the stored interval before selecting it', () => {
+    fc.assert(
+      fc.property(
+        intervalArb,
+        fc.array(fc.oneof(typedArb, reachableArb.chain(noOpArb)), {
+          minLength: 1,
+          maxLength: 4,
+        }),
+        (interval, edits) => {
+          const { input, onBlur } = field({ initialInterval: interval });
+          input.focus();
+          for (const text of edits) type(input, text);
+          // A value set after select() would drop the selection
+          let selected: string | null = null;
+          vi.spyOn(input, 'select').mockImplementation(() => {
+            selected = input.value;
+          });
+
+          press(input, 'Escape');
+
+          expect(selected).toBe(shown(interval));
+          expect(input.value).toBe(shown(interval));
+          blur(input);
+          expect(onBlur).toHaveBeenCalledExactlyOnceWith(
+            interval ?? MINIMUM_FIXED_REVIEW_INTERVAL
+          );
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('undoes an edit begun after a save back to the saved interval, though the save has yet to come back', () => {
+    fc.assert(
+      fc.property(
+        intervalArb,
+        typedArb,
+        typedArb,
+        fc.boolean(),
+        (before, first, second, rerendered) => {
+          const { root, input, onBlur } = field({ initialInterval: before });
+          type(input, first);
+          blur(input);
+          const saved = onBlur.mock.lastCall![0] as number;
+          // Whatever shows the field may render it again with its old interval
+          if (rerendered) field({ initialInterval: before, onBlur }, root);
+          expect(input.value).toBe(String(saved));
+          type(input, second);
+
+          press(input, 'Escape');
+
+          expect(input.value).toBe(String(saved));
+          blur(input);
+          expect(onBlur).toHaveBeenLastCalledWith(saved);
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('shows a new stored interval in place of an open edit, even one that cleans up to it', () => {
+    fc.assert(
+      fc.property(
+        intervalArb,
+        reachableArb.chain((i) => fc.tuple(fc.constant(i), noOpArb(i))),
+        typedArb,
+        (before, [after, text], first) => {
+          fc.pre(after !== before);
+          const { root, input, onBlur } = field({ initialInterval: before });
+          // Get the field holding `after` so that `text` changes nothing
+          type(input, first);
+          type(input, String(after));
+          type(input, text);
+
+          field({ initialInterval: after, onBlur }, root);
+
+          expect(input.value).toBe(String(after));
+          blur(input);
+          expect(onBlur).toHaveBeenCalledExactlyOnceWith(after);
+          document.body.innerHTML = '';
+        }
+      )
+    );
+  });
+
+  it('shows and saves what each step calls for, over any run of edits, saves, undos and new stored intervals', () => {
+    fc.assert(
+      fc.property(
+        intervalArb,
+        fc.array(stepArb, { minLength: 1, maxLength: 12 }),
+        (initial, steps) => {
+          const { root, input, onBlur } = field({ initialInterval: initial });
+          // What the user expects: the interval last stored, from outside or
+          // saved here, and the edit open on top of it
+          let stored = initial;
+          let seen = initial;
+          let edit: { held: number; shown: string } | null = null;
+          let saves = 0;
+
+          for (const step of steps) {
+            if (step.kind === 'type') {
+              const held: number = edit
+                ? edit.held
+                : (stored ?? MINIMUM_FIXED_REVIEW_INTERVAL);
+              const read = type(input, step.text);
+              const next = keptAfterTyping(held, read);
+              edit = { held: next, shown: next === held ? read : String(next) };
+            } else if (step.kind === 'escape') {
+              press(input, 'Escape');
+              edit = null;
+            } else if (step.kind === 'stored') {
+              field({ initialInterval: step.interval, onBlur }, root);
+              if (
+                step.interval !== seen &&
+                step.interval !== null &&
+                step.interval !== stored
+              ) {
+                stored = step.interval;
+                edit = null;
+              }
+              seen = step.interval;
+            } else {
+              const held: number = edit
+                ? edit.held
+                : (stored ?? MINIMUM_FIXED_REVIEW_INTERVAL);
+              if (step.kind === 'blur') blur(input);
+              else enter(input);
+              stored = held;
+              edit = null;
+              saves++;
+              expect(onBlur).toHaveBeenLastCalledWith(held);
+            }
+
+            expect(input.value).toBe(edit ? edit.shown : shown(stored));
+            expect(onBlur).toHaveBeenCalledTimes(saves);
+          }
+          document.body.innerHTML = '';
+        }
+      )
     );
   });
 });
