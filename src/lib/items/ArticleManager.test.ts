@@ -10196,10 +10196,10 @@ describe("importing a note claiming an article's id while the article's own note
           const warn = vi.spyOn(console, 'warn').mockReturnValue(undefined);
           const file = vault.files.get(CLAIMANT)!;
 
-          const [outcome] = await manager.importMany(
-            [{ file, stripFromSource: [] }],
-            { ...OPTIONS, makeCopy }
-          );
+          const [outcome] = await manager.importMany([{ file }], {
+            ...OPTIONS,
+            makeCopy,
+          });
 
           const rows = repo.rows('article');
           if (atReference !== 'same id') {
@@ -10269,10 +10269,10 @@ describe("importing a note claiming an article's id while the article's own note
     );
     const file = vault.files.get(REFERENCE)!;
 
-    const [outcome] = await manager.importMany(
-      [{ file, stripFromSource: [] }],
-      { ...OPTIONS, makeCopy: true }
-    );
+    const [outcome] = await manager.importMany([{ file }], {
+      ...OPTIONS,
+      makeCopy: true,
+    });
 
     expect(outcome).toMatchObject({ articleId: 'x', effect: 'linked' });
     expect(repo.rows('article')).toMatchObject([
