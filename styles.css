@@ -3239,4 +3239,63 @@ input.ir-queue-page-input {
   color: var(--text-error);
 }
 
+/* A line's "Keep as" box, in front of its dropdown, and the box over the
+   lines, at their end, over the lines' own boxes. The label is a click target
+   too. */
+.ir-leftover-modal .ir-leftover-keep,
+.ir-leftover-modal .ir-leftover-all {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ir-leftover-modal .ir-leftover-all {
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: var(--size-4-2);
+}
+
+.ir-leftover-modal .ir-leftover-keep input[type='checkbox'],
+.ir-leftover-modal .ir-leftover-all input[type='checkbox'] {
+  cursor: pointer;
+}
+
+.ir-leftover-modal .ir-leftover-keep:has(input:disabled),
+.ir-leftover-modal .ir-leftover-all:has(input:disabled) {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+.ir-leftover-modal .ir-leftover-keep input[type='checkbox']:disabled,
+.ir-leftover-modal .ir-leftover-all input[type='checkbox']:disabled {
+  cursor: not-allowed;
+}
+
+/* On a phone Obsidian stretches every input in a modal's setting control to
+   its full width (`.is-phone .modal .setting-item-control input`, read from
+   obsidian.asar), checkboxes too, drawing the box as a wide empty field; keep
+   it the size of its own checkbox rule */
+.is-phone
+  .ir-leftover-modal
+  .setting-item-control
+  .ir-leftover-keep
+  input[type='checkbox'] {
+  width: var(--checkbox-size);
+  margin: 0;
+  margin-inline-end: 6px;
+}
+
+/* A phone's line has no room for the text next to the box, which squeezes the
+   dropdown until its type is cut off; "Keep all" over the lines says what the
+   boxes are. Hidden but for screen readers, which name the box by it */
+.is-phone .ir-leftover-modal .ir-leftover-keep-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* #endregion */

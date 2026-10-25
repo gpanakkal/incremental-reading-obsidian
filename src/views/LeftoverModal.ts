@@ -55,10 +55,13 @@ function folderOf(path: string): string {
 
 /**
  * One leftover's line in a {@link LeftoverModal}, and what is chosen on it.
- * A note made as a type it can be saved as starts with that type chosen, and
- * shown in its "Save as…" dropdown, so Confirm saves it as that unless the
- * user changes it; any other starts with nothing chosen, Confirm leaving it
- * be. Taking back the trash or stripping returns a line to how it started.
+ * A note made as a type it can be saved as starts with that type in its
+ * "Save as…" dropdown and its "Keep as" box checked, so Confirm saves it as
+ * that unless the user changes it; any other starts with no type and the box
+ * unchecked, Confirm leaving it be. Unchecking the box leaves a note be,
+ * whatever type the dropdown shows; picking a type checks it. The trash or
+ * stripping, while pressed, stands in for keeping it, and taking either back
+ * returns the line to the type and box it had before.
  */
 interface Row {
   leftover: Leftover;
@@ -68,13 +71,32 @@ interface Row {
   name: HTMLElement;
   /** Where the note is previewed, just under the line; empty while closed. */
   preview: HTMLElement;
-  /** What is chosen for the line, `null` for leaving it be. */
-  choice: LeftoverChoice | null;
+  /** The type in the line's dropdown, `null` while it shows none. */
+  type: SaveType | null;
+  /**
+   * Whether the line's "Keep as" box is checked, which it shows only while
+   * the box can be (see {@link keepable}): picking a type checks it.
+   */
+  kept: boolean;
+  /** The trash or stripping, while pressed, in place of keeping the note. */
+  other: 'trash' | 'strip' | null;
   /** Show what is chosen on the line's controls. */
   show: () => void;
   /** Turn every control on the line off, or back on. */
   setDisabled: (disabled: boolean) => void;
 }
+
+/** What Confirm does with `row`'s note, `null` for leaving it be. */
+function choiceOf({ type, kept, other }: Row): LeftoverChoice | null {
+  if (other) return { action: other };
+  return kept && type ? { action: 'adopt', as: type } : null;
+}
+
+/**
+ * Whether `row`'s "Keep as" box can be checked: while its dropdown shows a
+ * type, which it doesn't while the trash or stripping is pressed.
+ */
+const keepable = (row: Row) => row.type !== null && row.other === null;
 
 /** A preview open in a {@link LeftoverModal}. */
 interface OpenPreview {
@@ -103,6 +125,11 @@ export class LeftoverModal extends Modal {
   ) => Promise<boolean>;
   #rows: Row[] = [];
   #buttonsEl: HTMLElement | null = null;
+  /**
+   * The box that checks or unchecks every line's "Keep as" box, kept across
+   * openings, as the lines are put back under it each time.
+   */
+  readonly #all = createEl('input', { type: 'checkbox' });
   #confirm: ButtonComponent | null = null;
   /** Whether Confirm is under way. */
   #running = false;
@@ -122,12 +149,19 @@ export class LeftoverModal extends Modal {
     super(app);
     this.#leftovers = leftovers;
     this.#resolve = resolve;
+    this.#all.addEventListener('change', () => this.#keepAll());
   }
 
   onOpen() {
     this.#closed = false;
     this.setTitle('Notes not found in the database');
     this.modalEl.classList.add('ir-leftover-modal');
+    // Above the lines, at the end, over their own boxes
+    createEl('label', {
+      cls: 'ir-leftover-all',
+      text: 'Keep all',
+      parent: this.contentEl,
+    }).prepend(this.#all);
     this.#rows = this.#leftovers.map((leftover) => this.#addRow(leftover));
     // In `modalEl`, below the content, where Obsidian puts its own
     const buttons = createDiv({
@@ -197,46 +231,72 @@ export class LeftoverModal extends Modal {
       leftover.type === 'article' || leftover.type === 'snippet'
         ? leftover.type
         : null;
-    const initial: LeftoverChoice | null = shown
-      ? { action: 'adopt', as: shown }
-      : null;
     const row: Row = {
       leftover,
       el,
       info,
       name,
       preview,
-      choice: initial,
+      type: shown,
+      kept: true,
+      other: null,
       show: () => {},
       setDisabled: () => {},
     };
-    const choose = (choice: LeftoverChoice | null) => {
-      row.choice = choice;
+    const changed = () => {
       row.show();
       this.#update();
     };
     const actions = actionsFor(leftover);
-    const dropdown = actions.includes('adopt')
-      ? new DropdownComponent(controls)
-          .addOption('', 'Save as…')
-          .addOptions(SAVE_TYPES)
-          .onChange((value) =>
-            choose(
-              value in SAVE_TYPES
-                ? { action: 'adopt', as: value as SaveType }
-                : null
-            )
-          )
-      : null;
-    // Shown while nothing is picked, but not one to pick
-    if (dropdown) dropdown.selectEl.options[0].disabled = true;
+    /** Whether the line's controls are turned off. */
+    let disabled = false;
+    /** Show what is chosen on the line's "Keep as" box, if it has one. */
+    let showBox = () => {};
+    let dropdown: DropdownComponent | null = null;
+    if (actions.includes('adopt')) {
+      // In front of the dropdown, its label a click target too. The text is
+      // its own span, which a phone hides but for screen readers (see
+      // styles.css)
+      const label = createEl('label', {
+        cls: 'ir-leftover-keep',
+        parent: controls,
+      });
+      const input = createEl('input', { type: 'checkbox', parent: label });
+      createSpan({
+        cls: 'ir-leftover-keep-text',
+        text: 'Keep as',
+        parent: label,
+      });
+      // Never fires while no type is shown, as the box is off then
+      input.addEventListener('change', () => {
+        row.kept = input.checked;
+        changed();
+      });
+      showBox = () => {
+        input.checked = keepable(row) && row.kept;
+        input.disabled = disabled || !keepable(row);
+      };
+      dropdown = new DropdownComponent(controls)
+        .addOption('', 'Save as…')
+        .addOptions(SAVE_TYPES)
+        .onChange((value) => {
+          // The placeholder is no type, should a change ever land on it
+          row.type = value in SAVE_TYPES ? (value as SaveType) : null;
+          row.kept = true;
+          row.other = null;
+          changed();
+        });
+      // Shown while nothing is picked, but not one to pick
+      dropdown.selectEl.options[0].disabled = true;
+    }
     /** A button chosen while pressed, and taken back pressed again. */
     const toggle = (action: 'trash' | 'strip') =>
       new ButtonComponent(controls)
         .setClass('ir-leftover-toggle')
-        .onClick(() =>
-          choose(row.choice?.action === action ? initial : { action })
-        );
+        .onClick(() => {
+          row.other = row.other === action ? null : action;
+          changed();
+        });
     const strip = actions.includes('strip')
       ? toggle('strip').setButtonText('Remove IR properties')
       : null;
@@ -250,24 +310,27 @@ export class LeftoverModal extends Modal {
       : null;
 
     row.show = () => {
-      const { choice } = row;
-      dropdown?.setValue(choice?.action === 'adopt' ? choice.as : '');
+      const { type, other } = row;
+      dropdown?.setValue(other ? '' : (type ?? ''));
+      showBox();
       for (const [button, action] of [
         [strip, 'strip'],
         [trash, 'trash'],
       ] as const) {
         if (!button) continue;
-        const pressed = choice?.action === action;
+        const pressed = other === action;
         button.buttonEl.setAttribute('aria-pressed', String(pressed));
         // Obsidian's own fill: the accent, or red on the trash
         if (pressed) button.setCta();
         else button.removeCta();
       }
     };
-    row.setDisabled = (disabled) => {
-      dropdown?.setDisabled(disabled);
-      strip?.setDisabled(disabled);
-      trash?.setDisabled(disabled);
+    row.setDisabled = (off) => {
+      disabled = off;
+      dropdown?.setDisabled(off);
+      strip?.setDisabled(off);
+      trash?.setDisabled(off);
+      row.show();
     };
     name.addEventListener('click', () => this.#togglePreview(row));
     name.addEventListener('keydown', (evt) => {
@@ -349,10 +412,40 @@ export class LeftoverModal extends Modal {
     }
   }
 
-  /** Confirm is on while something is chosen and nothing is under way. */
+  /**
+   * Check every line's "Keep as" box that can be, or uncheck them all if
+   * every one is checked already. A line with no type, or with the trash or
+   * stripping pressed, is left as it is.
+   */
+  #keepAll() {
+    const rows = this.#rows.filter(keepable);
+    const keep = !rows.every((row) => row.kept);
+    for (const row of rows) {
+      row.kept = keep;
+      row.show();
+    }
+    this.#update();
+  }
+
+  /**
+   * Confirm is on while something is chosen and nothing is under way. The
+   * box over the lines is checked while every "Keep as" box that can be is,
+   * unchecked while none is, and indeterminate in between; off while none
+   * can be, or something is under way.
+   */
   #update() {
+    const all = this.#all;
+    const rows = this.#rows.filter(keepable);
+    const kept = rows.filter((row) => row.kept).length;
+    all.checked = kept > 0 && kept === rows.length;
+    all.indeterminate = kept > 0 && kept < rows.length;
+    // Obsidian's checkbox, drawn by its own CSS, shows the dash for this
+    // attribute set to "true" only, not the `indeterminate` property (read
+    // from obsidian.asar)
+    all.setAttribute('data-indeterminate', String(all.indeterminate));
+    all.disabled = this.#running || rows.length === 0;
     this.#confirm?.setDisabled(
-      this.#running || !this.#rows.some((row) => row.choice)
+      this.#running || !this.#rows.some((row) => choiceOf(row))
     );
   }
 
@@ -361,14 +454,14 @@ export class LeftoverModal extends Modal {
    * while something is chosen and nothing is under way (see {@link #update}).
    */
   async #run() {
-    const chosen = this.#rows.filter((row) => row.choice);
+    const chosen = this.#rows.filter((row) => choiceOf(row));
     this.#running = true;
     this.#update();
     for (const row of this.#rows) row.setDisabled(true);
     for (const row of chosen) {
       // Closing stops what isn't under way yet
       if (this.#closed) break;
-      const choice = row.choice!;
+      const choice = choiceOf(row)!;
       row.info.querySelector('.ir-leftover-error')?.remove();
       let done = false;
       try {
