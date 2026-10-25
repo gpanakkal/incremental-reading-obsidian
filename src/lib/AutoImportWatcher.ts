@@ -12,12 +12,15 @@ import {
 import {
   AUTO_IMPORT_DEBOUNCE_MS,
   AUTO_IMPORT_MAX_WAIT_MS,
+  AUTO_IMPORT_SYNC_PATIENCE_MS,
+  AUTO_IMPORT_SYNC_POLL_MS,
   AUTO_IMPORT_WATERMARK_SLACK_MS,
   DATA_DIRECTORY,
   IMPORT_BLOCKED_TAGS,
 } from './constants';
 import { isImportable, supportsFrontmatter } from './mime';
 import { notify } from './notices';
+import type { SyncGate } from './obsidian-sync';
 import {
   loadAutoImportWatermark,
   saveAutoImportWatermark,
@@ -97,6 +100,32 @@ interface AutoImportWatcherOptions {
    * with one: import the note afresh.
    */
   hasRow: (id: string) => Promise<boolean>;
+  /**
+   * Whether Obsidian Sync lets imports go ahead now (see `readSyncGate`).
+   * Without it, they always may.
+   */
+  syncGate?: () => SyncGate;
+  /**
+   * Have `recheck` called whenever what {@link syncGate} reads may have
+   * changed (see `subscribeSyncStatus`), for as long as the watcher holds
+   * imports for Sync. Returns the function that stops it. Besides it, the
+   * watcher looks again every {@link AUTO_IMPORT_SYNC_POLL_MS}.
+   */
+  watchSync?: (recheck: () => void) => () => void;
+  /**
+   * Told how many notes wait for Sync that is paused, offline, failing or
+   * stuck, each time that changes; 0 once none do. See
+   * {@link AutoImportWatcher.importDespiteSync}.
+   */
+  onSyncWait?: (waiting: number) => void;
+  /**
+   * Wait for the database to take in what Sync may just have brought, then
+   * answer whether it is ready to be asked about rows (see
+   * `settleAfterSync`). Asked before importing a note whose `ir-id` no row
+   * holds, as its row may only be on its way. Without it, the database is
+   * always taken as settled.
+   */
+  settleDatabase?: () => Promise<boolean>;
 }
 
 /**
@@ -117,6 +146,16 @@ interface AutoImportWatcherOptions {
  * imported, as the import command imports it (see `hasRow`). A note whose
  * import failed is remembered until the plugin next loads, so it isn't tried
  * again on every edit.
+ *
+ * While Obsidian Sync is syncing, nothing is imported: what is queued waits
+ * until Sync is done, so a note it is still bringing in, such as one
+ * un-imported on another device, or the row of one imported there, is seen as
+ * it ends up. Sync paused, offline or failing holds it too; then, or once Sync
+ * has been syncing a long while, the plugin offers to import anyway (see
+ * {@link importDespiteSync}). The startup scan's imports wait the same way.
+ * A note with an `ir-id` no row holds is imported only once Sync is done and
+ * the database has taken in what it brought (see `settleDatabase`), never
+ * despite Sync: its row may be the one on its way.
  *
  * The watcher acts on changes, so a note that had a trigger tag before
  * importing by tag was turned on is left alone until it next changes. Changes
@@ -184,6 +223,19 @@ export class AutoImportWatcher {
    * goes with its hold.
    */
   readonly #unimported = new WeakMap<TFile, unknown>();
+  readonly #syncGate: () => SyncGate;
+  readonly #watchSync: (recheck: () => void) => () => void;
+  readonly #onSyncWait: (waiting: number) => void;
+  readonly #settleDatabase: () => Promise<boolean>;
+  /**
+   * Since when Sync has said it is syncing, without a break, while imports
+   * waited for it; null when it doesn't.
+   */
+  #syncingSince: number | null = null;
+  /** Stops {@link #watchSync}, while the watcher holds imports for Sync. */
+  #unwatchSync: (() => void) | null = null;
+  /** How many notes {@link #onSyncWait} was last told wait for Sync. */
+  #syncWaiting = 0;
   /**
    * Serializes imports: a batch is checked only once the one before it is
    * done, so a note it imported has its `ir-id`, and the row holding it, by
@@ -196,11 +248,19 @@ export class AutoImportWatcher {
     getConfig,
     importMany,
     hasRow,
+    syncGate = () => 'open',
+    watchSync = () => () => undefined,
+    onSyncWait = () => undefined,
+    settleDatabase = () => Promise.resolve(true),
   }: AutoImportWatcherOptions) {
     this.#app = app;
     this.#getConfig = getConfig;
     this.#importMany = importMany;
     this.#hasRow = hasRow;
+    this.#syncGate = syncGate;
+    this.#watchSync = watchSync;
+    this.#onSyncWait = onSyncWait;
+    this.#settleDatabase = settleDatabase;
   }
 
   /** Begin importing. Returns the cleanup to hand to `Plugin.register`. */
@@ -216,6 +276,8 @@ export class AutoImportWatcher {
       this.#queuedSince = null;
       this.#arrived.clear();
       this.#queuedArrivals.clear();
+      this.#stopWatchingSync();
+      this.#tellSyncWait(0);
     };
   }
 
@@ -238,6 +300,8 @@ export class AutoImportWatcher {
     if (arrived) this.#arrived.delete(file);
     const byArrival = arrived && this.#arrivalQualifies(file, cache, config);
     if (arrived && !byArrival) this.#notePassedOver(file, config);
+    // Its flush would pass it over anyway, and it would be counted waiting
+    if (this.#unimported.has(file)) return;
     if (!byArrival && this.#triggerTagsOf(file, cache, config) === null) {
       return;
     }
@@ -438,11 +502,89 @@ export class AutoImportWatcher {
   }
 
   /**
-   * Import whatever is waiting now rather than when it settles. Resolves once
-   * every import asked for so far is done.
+   * Import whatever is waiting now rather than when it settles, unless Sync
+   * holds it back (see `AutoImportWatcherOptions.syncGate`): then it waits,
+   * looked at again as Sync changes, and every so often. Resolves once every
+   * import asked for so far is done, or held.
    */
   flushNow(): Promise<void> {
     this.#cancelTimer();
+    if (this.#queued.size > 0 && this.#holdsForSync()) {
+      this.#unwatchSync ??= this.#watchSync(this.#recheckSync);
+      this.#timer = window.setTimeout(() => {
+        this.#timer = null;
+        void this.flushNow();
+      }, AUTO_IMPORT_SYNC_POLL_MS);
+      return this.#pending;
+    }
+    return this.#flush();
+  }
+
+  /** Look at Sync again, while imports wait for it. */
+  readonly #recheckSync = (): void => {
+    if (this.#unwatchSync === null) return;
+    void this.flushNow();
+  };
+
+  /** Stop looking at Sync, as nothing waits for it now. */
+  #stopWatchingSync(): void {
+    this.#syncingSince = null;
+    const unwatch = this.#unwatchSync;
+    this.#unwatchSync = null;
+    unwatch?.();
+  }
+
+  /**
+   * Import whatever is waiting now, whatever Sync is doing: the user's
+   * answer to being told imports wait for Sync (see `onSyncWait`).
+   */
+  importDespiteSync(): Promise<void> {
+    this.#cancelTimer();
+    return this.#flush();
+  }
+
+  /**
+   * Whether Sync holds back the imports queued now, telling `onSyncWait` how
+   * many wait on Sync stalled: paused, offline or failing, or syncing for
+   * {@link AUTO_IMPORT_SYNC_PATIENCE_MS} on end. Only those
+   * {@link importDespiteSync} would import count: not a note with an
+   * `ir-id`, which waits for Sync whatever the user says.
+   */
+  #holdsForSync(): boolean {
+    const gate = this.#syncGate();
+    if (gate === 'open') return false;
+    const now = Date.now();
+    if (gate === 'syncing') this.#syncingSince ??= now;
+    else this.#syncingSince = null;
+    const stalled =
+      this.#syncingSince === null ||
+      now - this.#syncingSince >= AUTO_IMPORT_SYNC_PATIENCE_MS;
+    this.#tellSyncWait(stalled ? this.#countImportableDespiteSync() : 0);
+    return true;
+  }
+
+  /** How many notes queued have no `ir-id` (see {@link #holdsForSync}). */
+  #countImportableDespiteSync(): number {
+    let count = 0;
+    for (const file of this.#queued) {
+      const id: unknown =
+        this.#app.metadataCache.getFileCache(file)?.frontmatter?.['ir-id'];
+      if (typeof id !== 'string') count++;
+    }
+    return count;
+  }
+
+  /** Tell `onSyncWait` that `waiting` notes wait for Sync, if that's news. */
+  #tellSyncWait(waiting: number): void {
+    if (waiting === this.#syncWaiting) return;
+    this.#syncWaiting = waiting;
+    this.#onSyncWait(waiting);
+  }
+
+  /** Import whatever is waiting now. */
+  #flush(): Promise<void> {
+    this.#stopWatchingSync();
+    this.#tellSyncWait(0);
     const batch = [...this.#queued];
     const arrivals = new Set(this.#queuedArrivals);
     this.#queued.clear();
@@ -703,12 +845,16 @@ export class AutoImportWatcher {
   ): Promise<ReadonlySet<TFile>> {
     const config = this.#getConfig();
     const entries: AutoImportEntry[] = [];
+    /** Notes with an `ir-id` no row holds, to wait for Sync again. */
+    const held: TFile[] = [];
+    /** Whether the database took in what Sync brought, once asked. */
+    let settled: Promise<boolean> | null = null;
     for (const file of batch) {
       // Gone if deleted, or if another file took its path. A rename moves
       // `file` with it, so a renamed note is still found, where it now is.
       if (this.#app.vault.getFileByPath(file.path) !== file) continue;
       const cache = this.#app.metadataCache.getFileCache(file);
-      const matchedTags =
+      let matchedTags =
         this.#triggerTagsOf(file, cache, config) ??
         (arrivals.has(file) && this.#arrivalQualifies(file, cache, config)
           ? []
@@ -718,10 +864,32 @@ export class AutoImportWatcher {
       // import replaces it. The plugin's own write of an `ir-id` comes back
       // here, so each import costs one lookup.
       const id: unknown = cache?.frontmatter?.['ir-id'];
-      if (typeof id === 'string' && (await this.#rowHolds(id))) continue;
+      if (typeof id === 'string') {
+        if (await this.#rowHolds(id)) continue;
+        // An orphan, or a note whose row Sync is still bringing, or a merge
+        // still taking in: imported only once neither can be, never despite
+        // Sync. A database that doesn't settle leaves it for its next change
+        if (this.#syncGate() !== 'open') {
+          held.push(file);
+          continue;
+        }
+        settled ??= this.#settleDatabase();
+        if (!(await settled) || (await this.#rowHolds(id))) continue;
+        // Read again as it is now: it may have changed while it waited, such
+        // as the trigger tag an un-import took off, which ends its hold
+        const now = this.#app.metadataCache.getFileCache(file);
+        if (this.#app.vault.getFileByPath(file.path) !== file) continue;
+        if (now?.frontmatter?.['ir-id'] !== id) continue;
+        matchedTags = this.#triggerTagsOf(file, now, config);
+        if (!matchedTags) continue;
+      }
       // Un-imported, or while the lookup ran, which may be why no row holds it
       if (this.#unimported.has(file)) continue;
       entries.push({ file, matchedTags });
+    }
+    if (held.length > 0 && this.#running) {
+      for (const file of held) this.#queued.add(file);
+      this.#schedule();
     }
     // Stopped while a lookup ran: the plugin is unloading
     if (entries.length === 0 || !this.#running) return new Set();
@@ -745,12 +913,15 @@ export class AutoImportWatcher {
   /**
    * Store the moment up to which every change was seen, if {@link
    * runCatchUpScan} has run while listening: back as far as the note waiting
-   * longest, as that is not imported yet, and further for the notes still
-   * being read (see `AUTO_IMPORT_WATERMARK_SLACK_MS`).
+   * longest, as that is not imported yet, or the oldest change of a note
+   * waiting, as one the startup scan found, or Sync brought with its old
+   * mtime, may wait for Sync for days; and further for the notes still being
+   * read (see `AUTO_IMPORT_WATERMARK_SLACK_MS`).
    */
   #recordSeen(): void {
     if (!this.#running || !this.#caughtUp) return;
-    const since = this.#queuedSince ?? Date.now();
+    let since = this.#queuedSince ?? Date.now();
+    for (const file of this.#queued) since = Math.min(since, file.stat.mtime);
     this.#record(since - AUTO_IMPORT_WATERMARK_SLACK_MS);
   }
 

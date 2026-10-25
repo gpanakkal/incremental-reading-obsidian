@@ -21,7 +21,7 @@ export async function unimportArticle(
   const confirmed = await promptForConfirmation(plugin.app, {
     title: 'Un-import article',
     paragraphs: [
-      `Un-import "${file.basename}"? Its review history is deleted and can't be undone. Snippets and cards taken from it keep reviewing.`,
+      `Un-import "${file.basename}"? Its review history is deleted, and this can't be undone. Snippets and cards taken from it are preserved.`,
     ],
     confirmText: 'Un-import',
     destructive: true,

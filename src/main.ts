@@ -88,7 +88,11 @@ import {
   hostTimer,
   persistentNotice,
 } from './lib/ir-id-warning-notice';
-import { createIrIdWatch, shownInMarkdownView } from './lib/ir-id-watch';
+import {
+  createIrIdWatch,
+  settleAfterSync,
+  shownInMarkdownView,
+} from './lib/ir-id-watch';
 import ReviewManager, { type ItemPositionRow } from './lib/items/ReviewManager';
 import { scanForMovedNotes } from './lib/moved-note-scan';
 import { configureSuccessNotices } from './lib/notices';
@@ -100,6 +104,9 @@ import {
   findSyncExclusions,
   getSyncPlugin,
   holdForSync,
+  isSignedOutOfObsidian,
+  readSyncGate,
+  subscribeSyncStatus,
   syncExclusionMessage,
 } from './lib/obsidian-sync';
 import { ObsidianHelpers as Obsidian } from './lib/ObsidianHelpers';
@@ -133,6 +140,7 @@ import {
 import { SessionTracker } from './lib/SessionTracker';
 import { type IRPluginSettings, IRSettingTab } from './lib/settings';
 import { setCurrentItemId, setPage, store } from './lib/store';
+import { SyncWaitNotice } from './lib/sync-wait-notice';
 import type { ReviewItem, SQLiteRepository } from './lib/types';
 import { unimportArticle } from './lib/unimport-article';
 import {
@@ -242,6 +250,11 @@ export default class IncrementalReadingPlugin extends Plugin {
   private reviewReminder?: ReviewReminder;
   /** Imports notes that gain a trigger tag. Unset until the database is up. */
   autoImportWatcher?: AutoImportWatcher;
+  /**
+   * Says, while a review tab is open, how many automatic imports wait for
+   * Sync. Unset until {@link autoImportWatcher} is.
+   */
+  syncWaitNotice?: SyncWaitNotice;
   /**
    * Settles with {@link autoImportWatcher} once {@link watchAutoImports} has
    * made it. The startup scan in {@link followMovedNotes} waits on this, not
@@ -950,6 +963,17 @@ export default class IncrementalReadingPlugin extends Plugin {
    * on needs no reload.
    */
   private watchAutoImports() {
+    const syncWaitNotice = new SyncWaitNotice({
+      // Loaded and not closing: a tab restored but never shown is deferred,
+      // its view no `ReviewView` yet (undocumented, as `isReviewOpen` above)
+      reviewOpen: () =>
+        this.app.workspace
+          .getLeavesOfType(ReviewView.viewType)
+          .some((leaf) => leaf.view instanceof ReviewView && leaf.view.isOpen),
+      importNow: () => void this.autoImportWatcher?.importDespiteSync(),
+    });
+    this.syncWaitNotice = syncWaitNotice;
+    this.register(() => syncWaitNotice.dispose());
     const watcher = new AutoImportWatcher({
       app: this.app,
       getConfig: () => ({
@@ -963,6 +987,20 @@ export default class IncrementalReadingPlugin extends Plugin {
       importMany: (entries, { priority, mode }) =>
         this.reviewManager.importTaggedNotes(entries, { priority, mode }),
       hasRow: (id) => this.reviewManager.hasItemRow(id),
+      syncGate: () =>
+        readSyncGate(
+          getSyncPlugin(this.app),
+          () => navigator.onLine === false,
+          () => isSignedOutOfObsidian(window.localStorage)
+        ),
+      watchSync: (recheck) =>
+        subscribeSyncStatus(() => getSyncPlugin(this.app), recheck),
+      onSyncWait: (waiting) => syncWaitNotice.setWaiting(waiting),
+      settleDatabase: async () => {
+        const { repo } = this.reviewManager;
+        await settleAfterSync(repo);
+        return repo.readiness === 'ready';
+      },
     });
     this.autoImportWatcher = watcher;
     this.register(watcher.start());

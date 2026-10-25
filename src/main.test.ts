@@ -32,6 +32,7 @@ import {
   parsePluginData,
 } from '#/lib/plugin-data';
 import { queryClient } from '#/lib/query-client';
+import { MERGE_WAIT_MS } from '#/lib/readiness';
 import {
   DatabaseLoadError,
   SQLJSRepository,
@@ -1036,10 +1037,14 @@ function makeAutoImportReceiver() {
     arrivalRefs,
     /**
      * Have the review manager up, importing through `importTaggedNotes` and
-     * looking ids up through `hasItemRow`.
+     * looking ids up through `hasItemRow`, over a database `readiness` says.
      */
-    startReviewManager() {
-      receiver.reviewManager = { importTaggedNotes, hasItemRow };
+    startReviewManager(readiness: Readiness = 'ready') {
+      receiver.reviewManager = {
+        importTaggedNotes,
+        hasItemRow,
+        repo: { readiness, onReadinessChange: () => () => undefined },
+      };
     },
     /** A note at `path` re-indexed with `frontmatter`, as Obsidian tells of it. */
     change(path: string, frontmatter: Record<string, unknown>) {
@@ -4297,12 +4302,26 @@ describe('IncrementalReadingPlugin.watchAutoImports', () => {
     });
     watch.change('known.md', { 'ir-id': 'kept', tags: [AUTO_IMPORT_TAG] });
     await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+    // The orphan only once the database has had its moment to settle
+    expect(watch.hasItemRow.mock.calls).toEqual([['gone']]);
+    expect(watch.importTaggedNotes).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(MERGE_WAIT_MS);
 
-    expect(watch.hasItemRow.mock.calls).toEqual([['gone'], ['kept']]);
+    expect(watch.hasItemRow.mock.calls).toEqual([['gone'], ['gone'], ['kept']]);
     expect(watch.importTaggedNotes).toHaveBeenCalledExactlyOnceWith(
       [{ file: orphan, matchedTags: [AUTO_IMPORT_TAG] }],
       expect.anything()
     );
+  });
+
+  it('leaves a note whose ir-id no row holds alone while the database is not ready', async () => {
+    const watch = makeAutoImportReceiver();
+    watch.startReviewManager('starting');
+
+    watch.change('orphan.md', { 'ir-id': 'gone', tags: [AUTO_IMPORT_TAG] });
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS + MERGE_WAIT_MS);
+
+    expect(watch.importTaggedNotes).not.toHaveBeenCalled();
   });
 
   it('ignores changes until the review manager is up', async () => {

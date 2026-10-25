@@ -115,9 +115,7 @@ describe('unimportArticle', () => {
               wired.plugin.app,
               {
                 title: 'Un-import article',
-                paragraphs: [
-                  `Un-import "${basename}"? Its review history is deleted and can't be undone. Snippets and cards taken from it keep reviewing.`,
-                ],
+                paragraphs: [expect.stringContaining(`"${basename}"`)],
                 confirmText: 'Un-import',
                 destructive: true,
               },

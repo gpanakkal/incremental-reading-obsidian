@@ -715,6 +715,13 @@ export default class ReviewView extends FileView {
     // The first review tab of a load is where notes left without review data
     // are asked about, once the startup scan has found them
     this.plugin.leftovers?.reviewOpened();
+    // Automatic imports waiting for Sync are told of in review tabs alone
+    this.plugin.syncWaitNotice?.reviewOpened();
+  }
+
+  /** Whether the tab has opened and not begun to close since. */
+  get isOpen(): boolean {
+    return this.#open;
   }
 
   /**
@@ -975,6 +982,7 @@ export default class ReviewView extends FileView {
     // Ahead of the check below: selection mode belongs to the editor this tab
     // just unmounted, whether or not the session outlives it.
     this.plugin.store.dispatch(setSelectionMode(null));
+    this.plugin.syncWaitNotice?.reviewClosed();
     // Another review tab is still open and still on its item: the session
     // belongs to it now, and ending it here would send that tab back to the
     // home screen and drop what it was reading.
