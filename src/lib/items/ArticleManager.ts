@@ -890,10 +890,14 @@ export class ArticleManager extends ItemManager {
     }
     if (existingId) {
       const rows = (await this.repo.query(
-        `SELECT id, deleted FROM article WHERE id = $1 AND ${NOT_PURGED}`,
+        `SELECT id, deleted, reference FROM article WHERE id = $1 AND ${NOT_PURGED}`,
         [existingId]
-      )) as Pick<ArticleRow, 'id' | 'deleted'>[];
-      if (rows[0]) {
+      )) as Pick<ArticleRow, 'id' | 'deleted' | 'reference'>[];
+      // A copy of the article's note is imported as an article of its own
+      if (
+        rows[0] &&
+        !ownNoteKeepsRow(this.app, existingId, rows[0].reference, file.path)
+      ) {
         const claimed = await writer.commit(
           relinkRow(file, existingId),
           this.inPlaceClaim(file, existingId)
@@ -914,7 +918,8 @@ export class ArticleManager extends ItemManager {
         warnIfRefused(file.path, report);
         return imported(existingId, effect);
       }
-      // Orphaned id + no reference match: fall through to fresh import
+      // Orphaned id, or a copy's, + no reference match: fall through to fresh
+      // import, which gives the note an id of its own
     }
 
     // Past here a new article is made where the note is. An article it
@@ -1411,10 +1416,14 @@ export class ArticleManager extends ItemManager {
     const existingId = frontmatter?.['ir-id'];
     if (existingId) {
       const rows = (await this.repo.query(
-        `SELECT id, deleted FROM article WHERE id = $1 AND ${NOT_PURGED}`,
+        `SELECT id, deleted, reference FROM article WHERE id = $1 AND ${NOT_PURGED}`,
         [existingId]
-      )) as Pick<ArticleRow, 'id' | 'deleted'>[];
-      if (rows[0]) {
+      )) as Pick<ArticleRow, 'id' | 'deleted' | 'reference'>[];
+      // A copy of the article's note gets a copy of its own, as any note does
+      const copyOfLive =
+        rows[0] !== undefined &&
+        ownNoteKeepsRow(this.app, existingId, rows[0].reference, file.path);
+      if (rows[0] && !copyOfLive) {
         const claimed = await writer.commit(
           relinkRow(file, existingId),
           this.inPlaceClaim(file, existingId)
@@ -1438,11 +1447,13 @@ export class ArticleManager extends ItemManager {
         return imported(existingId, effect);
       }
       // Orphaned ir-id: warn but proceed with creating the copy
-      report.warn(
-        `Warning: source note has article metadata but no ` +
-          `matching record; creating copy`,
-        { persist: true }
-      );
+      if (!copyOfLive) {
+        report.warn(
+          `Warning: source note has article metadata but no ` +
+            `matching record; creating copy`,
+          { persist: true }
+        );
+      }
     }
 
     // Read once Obsidian has read the note, so its cache describes this text
@@ -2286,4 +2297,24 @@ export function liveArticleLookup(
     sql: 'SELECT id FROM article WHERE id = $1 AND reference = $2 AND deleted = FALSE',
     params: [id, file.path],
   };
+}
+
+/**
+ * Whether the item `id`, whose row names `reference`, still has its own note
+ * there while another note, at `path`, claims `id` too: the note at a row's
+ * reference is that row's note iff it carries the row's `ir-id`. The note at
+ * `path` is then a copy (Make a copy duplicates frontmatter, `ir-id` and all),
+ * which never takes the row. With nothing at `reference`, or a note claiming
+ * another id or none, the note at `path` is the item's own note come back.
+ */
+export function ownNoteKeepsRow(
+  app: App,
+  id: string,
+  reference: string,
+  path: string
+): boolean {
+  if (reference === path) return false;
+  const file = app.vault.getFileByPath(reference);
+  if (!file) return false;
+  return Obsidian.getFrontMatter(file, app)?.['ir-id'] === id;
 }

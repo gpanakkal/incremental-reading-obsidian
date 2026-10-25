@@ -824,6 +824,8 @@ export default class IncrementalReadingPlugin extends Plugin {
         void applyQueueChange(event, this.reviewManager);
       })
     );
+    // And highlights with their parent rows, however those move
+    this.register(this.reviewManager.snippets.watchParentMoves());
   }
 
   /**

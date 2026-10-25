@@ -64,7 +64,11 @@ import {
   compareStrings,
   getEndOfDay,
 } from '../utils';
-import { ArticleManager, liveArticleLookup } from './ArticleManager';
+import {
+  ArticleManager,
+  liveArticleLookup,
+  ownNoteKeepsRow,
+} from './ArticleManager';
 import { type CardSelection, CardManager } from './CardManager';
 import { type FileMove, followSourceLinks } from './follow-source-links';
 import { deleteRowStatements, NOT_PURGED, purgedReference } from './row-delete';
@@ -1084,6 +1088,12 @@ export default class ReviewManager {
     const table = type === 'card' ? 'srs_card' : type;
 
     if (rowId) {
+      // A copy carries its original's id, as Make a copy writes it: renaming
+      // the copy is a plain note's rename while the original is still there
+      const row = await this.#rowOf(table, rowId);
+      if (row && ownNoteKeepsRow(this.app, rowId, row.reference, file.path)) {
+        return [{ from: oldPath, file: concreteFile }];
+      }
       // Renaming a note to match the reference of a deleted row restores it,
       // e.g. after deleting a note and recreating it under another name
       await this.#repo.mutate(
@@ -1322,22 +1332,11 @@ export default class ReviewManager {
 
     const table = type === 'card' ? 'srs_card' : type;
 
-    // Copying a note also triggers a creation event; check that the original
-    // note exists and has the right ir-id in frontmatter to ignore copies
-    const row = (
-      await this.#repo.query(
-        `SELECT reference, deleted FROM ${table} WHERE id = $1 AND ${NOT_PURGED}`,
-        [id]
-      )
-    )[0] as { reference: string; deleted: unknown } | undefined;
-    if (row && row.reference !== file.path) {
-      const referencedFile = this.app.vault.getFileByPath(row.reference);
-      if (
-        referencedFile &&
-        Obsidian.getFrontMatter(referencedFile, this.app)?.['ir-id'] === id
-      ) {
-        return null;
-      }
+    // Copying a note also triggers a creation event, which leaves the row
+    // with its original
+    const row = await this.#rowOf(table, id);
+    if (row && ownNoteKeepsRow(this.app, id, row.reference, file.path)) {
+      return null;
     }
 
     await this.#repo.mutate(
@@ -1346,6 +1345,19 @@ export default class ReviewManager {
     );
     const came = row && (row.reference !== file.path || Boolean(row.deleted));
     return came ? refusedAt(file.path) : null;
+  }
+
+  /** The `reference` and `deleted` of row `id` in `table`, unless purged. */
+  async #rowOf(
+    table: ItemTable,
+    id: string
+  ): Promise<{ reference: string; deleted: unknown } | undefined> {
+    return (
+      await this.#repo.query(
+        `SELECT reference, deleted FROM ${table} WHERE id = $1 AND ${NOT_PURGED}`,
+        [id]
+      )
+    )[0] as { reference: string; deleted: unknown } | undefined;
   }
 
   /**

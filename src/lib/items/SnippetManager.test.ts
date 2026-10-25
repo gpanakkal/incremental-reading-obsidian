@@ -4977,3 +4977,311 @@ describe('create, from inside a block', () => {
     expect(app.computeMetadataAsync).not.toHaveBeenCalled();
   });
 });
+
+describe('highlights following their parent rows', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Where the parent's row was, and where it is moved to. */
+  const FROM = 'notes/From.md';
+  const TO = 'notes/To.md';
+  /** Another parent's note, whose highlights nothing moves. */
+  const UNRELATED = 'notes/Unrelated.md';
+
+  /** What is at the path a parent's row moved away from. */
+  type LeftBehind =
+    | 'nothing'
+    | 'same id'
+    | 'pdf'
+    | 'other id'
+    | 'no id'
+    | 'bare';
+  /**
+   * What left behind is still the parent's own note, which follows its row
+   * itself: a rename on its way, or a synced database landing before it.
+   */
+  const STILL_ITS_NOTE: readonly LeftBehind[] = ['nothing', 'same id', 'pdf'];
+
+  const PARENT_KINDS = [
+    { table: 'article', tag: ARTICLE_TAG },
+    { table: 'snippet', tag: SNIPPET_TAG },
+  ] as const;
+
+  /**
+   * A manager over a real database holding parent `p` of `kind` at
+   * {@link FROM} and article `u` at {@link UNRELATED}, each with one snippet
+   * highlighted in it, and a tracker holding both notes' highlights. What is
+   * at {@link FROM} (or a PDF beside it, as `from` says) and {@link TO} is
+   * as given; `toTracked` has the tracker hold {@link TO}'s highlights too,
+   * none, as an open note's are. {@link UNRELATED} claims `unrelatedId`.
+   */
+  async function wireMove(
+    kind: (typeof PARENT_KINDS)[number],
+    leftBehind: LeftBehind,
+    toExists: boolean,
+    toTracked: boolean,
+    unrelatedId = 'u'
+  ) {
+    const from = leftBehind === 'pdf' ? 'notes/From.pdf' : FROM;
+    const notes: Record<string, Record<string, unknown> | null> = {
+      [UNRELATED]: { 'ir-id': unrelatedId, tags: [ARTICLE_TAG] },
+    };
+    if (leftBehind === 'pdf') notes[from] = null;
+    if (leftBehind === 'same id') {
+      notes[FROM] = { 'ir-id': 'p', tags: [kind.tag] };
+    }
+    if (leftBehind === 'other id') {
+      notes[FROM] = { 'ir-id': 'other', tags: [kind.tag] };
+    }
+    if (leftBehind === 'no id') notes[FROM] = { tags: [kind.tag] };
+    if (leftBehind === 'bare') notes[FROM] = null;
+    if (toExists) notes[TO] = { 'ir-id': 'p', tags: [kind.tag] };
+    const vault = makeItemVault(notes);
+    const repo = await TestRepository.create();
+    repo.mutate(
+      `INSERT INTO ${kind.table} (id, reference, due, interval, priority)
+       VALUES ('p', $1, 0, 1, 10)`,
+      [from]
+    );
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority)
+       VALUES ('u', $1, 0, 1, 10)`,
+      [UNRELATED]
+    );
+    for (const parent of ['p', 'u']) {
+      repo.mutate(
+        `INSERT INTO snippet (id, reference, parent, due, interval, priority,
+           start_offset, end_offset)
+         VALUES ($1, $2, $3, 0, 1, 10, 1, 5)`,
+        [`of-${parent}`, `snippets/of-${parent}.md`, parent]
+      );
+    }
+    const trigger = vi.fn();
+    const app = { ...vault.app, workspace: { trigger } };
+    const manager = new SnippetManager({ app, settings: {} } as never, repo);
+    const tracker = manager.offsetTracker;
+    const held = (parent: string) => [
+      {
+        id: `of-${parent}`,
+        parent,
+        start_offset: 1,
+        end_offset: 5,
+      } as SnippetHighlight,
+    ];
+    tracker.loadHighlights(from, held('p'));
+    tracker.loadHighlights(UNRELATED, held('u'));
+    if (toTracked) tracker.loadHighlights(TO, []);
+    const follow = vi.spyOn(manager, 'followParentMoves');
+    const stop = manager.watchParentMoves();
+    /** Settles once every change heard so far has been followed. */
+    const followed = () =>
+      Promise.all(follow.mock.results.map(({ value }) => value as unknown));
+    /** Paths `ir-highlights-changed` was raised for, in order. */
+    const redrawn = () =>
+      (trigger.mock.calls as [string, string][])
+        .filter(([event]) => event === 'ir-highlights-changed')
+        .map(([, path]) => path);
+    return {
+      repo,
+      manager,
+      tracker,
+      follow,
+      stop,
+      followed,
+      redrawn,
+      held,
+      from,
+    };
+  }
+
+  it('drops the highlights of a note its parent row moved away from and redraws it, giving them to the note the row moved to', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...PARENT_KINDS),
+        fc.constantFrom<LeftBehind>(
+          'nothing',
+          'same id',
+          'pdf',
+          'other id',
+          'no id',
+          'bare'
+        ),
+        fc.boolean(),
+        fc.boolean(),
+        async (kind, leftBehind, toExists, toTracked) => {
+          const wired = await wireMove(kind, leftBehind, toExists, toTracked);
+
+          // As any writer moves it: a rename, the startup scan, Relink
+          wired.repo.mutate(
+            `UPDATE ${kind.table} SET reference = $1 WHERE id = 'p'`,
+            [TO]
+          );
+          await wired.followed();
+
+          if (STILL_ITS_NOTE.includes(leftBehind)) {
+            // Its rename moves the entry itself, so there must be one to move
+            expect(wired.tracker.getHighlights(wired.from)).toStrictEqual(
+              wired.held('p')
+            );
+            expect(wired.redrawn()).toStrictEqual([]);
+          } else {
+            expect(wired.tracker.getHighlights(FROM)).toStrictEqual([]);
+            expect(wired.redrawn()).toContain(FROM);
+            expect(wired.tracker.getHighlights(TO)).toMatchObject(
+              toExists ? [{ id: 'of-p', parent: 'p' }] : []
+            );
+            expect(wired.redrawn().includes(TO)).toBe(toExists);
+            expect(wired.tracker.getTrackedPaths().includes(TO)).toBe(toExists);
+          }
+          expect(wired.tracker.getHighlights(UNRELATED)).toStrictEqual(
+            wired.held('u')
+          );
+          expect(wired.redrawn()).not.toContain(UNRELATED);
+          wired.stop();
+          wired.repo.dispose();
+        }
+      )
+    );
+  });
+
+  it('leaves a rename that lands after its synced row the highlights to move', async () => {
+    const wired = await wireMove(PARENT_KINDS[0], 'same id', false, false);
+
+    // The database synced from the device the note was renamed on comes first
+    wired.repo.mutate(`UPDATE article SET reference = $1 WHERE id = 'p'`, [TO]);
+    await wired.followed();
+    // Then the rename itself, which moves the note's entry along
+    wired.tracker.renameFile(FROM, TO);
+
+    expect(wired.tracker.getHighlights(TO)).toStrictEqual(wired.held('p'));
+    wired.stop();
+    wired.repo.dispose();
+  });
+
+  it('reads nothing for writes that move no parent of a highlight held', async () => {
+    const wired = await wireMove(PARENT_KINDS[0], 'other id', true, false);
+    const query = vi.spyOn(wired.repo, 'query');
+
+    // A move of a row no highlight held names as its parent
+    wired.repo.mutate(
+      `UPDATE snippet SET reference = 'snippets/moved.md' WHERE id = 'of-p'`
+    );
+    await wired.followed();
+
+    expect(wired.follow).toHaveBeenCalledOnce();
+    expect(query).not.toHaveBeenCalled();
+    expect(wired.redrawn()).toStrictEqual([]);
+    wired.stop();
+    wired.repo.dispose();
+  });
+
+  it('leaves a parent that stayed where its highlights are held alone, whatever its note claims', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...PARENT_KINDS),
+        fc.constantFrom<LeftBehind>(
+          'nothing',
+          'same id',
+          'pdf',
+          'other id',
+          'no id',
+          'bare'
+        ),
+        async (kind, atItsPath) => {
+          const wired = await wireMove(kind, atItsPath, true, false);
+
+          wired.repo.mutate(
+            `UPDATE ${kind.table} SET priority = 20 WHERE id = 'p'`
+          );
+          await wired.followed();
+
+          expect(wired.follow).toHaveBeenCalledOnce();
+          expect(wired.tracker.getHighlights(wired.from)).toStrictEqual(
+            wired.held('p')
+          );
+          expect(wired.redrawn()).toStrictEqual([]);
+          wired.stop();
+          wired.repo.dispose();
+        }
+      )
+    );
+  });
+
+  it('follows only updates to the article and snippet tables', async () => {
+    const ops = ['insert', 'update', 'delete'] as const;
+    const tables = ['article', 'snippet', 'card'] as const;
+    for (const op of ops) {
+      for (const table of tables) {
+        const wired = await wireMove(PARENT_KINDS[0], 'other id', true, false);
+        wired.stop();
+        // Moved unheard, then told of as `table` and `op`
+        wired.repo.mutate(`UPDATE article SET reference = $1 WHERE id = 'p'`, [
+          TO,
+        ]);
+        const query = vi.spyOn(wired.repo, 'query');
+
+        await wired.manager.followParentMoves({ table, op, ids: ['p'] });
+
+        // A snippet row `p` is none, so nothing moved there
+        const follows = op === 'update' && table === 'article';
+        expect(wired.tracker.getHighlights(FROM)).toStrictEqual(
+          follows ? [] : wired.held('p')
+        );
+        const asks = op === 'update' && table !== 'card';
+        expect(query.mock.calls.length > 0).toBe(asks);
+        wired.repo.dispose();
+      }
+    }
+  });
+
+  it('follows every parent one write moves', async () => {
+    const wired = await wireMove(
+      PARENT_KINDS[0],
+      'other id',
+      true,
+      false,
+      'other'
+    );
+
+    wired.repo.mutate(
+      `UPDATE article SET reference = CASE id WHEN 'p' THEN $1 ELSE $2 END`,
+      [TO, 'notes/Elsewhere.md']
+    );
+    await wired.followed();
+
+    expect(wired.tracker.getHighlights(FROM)).toStrictEqual([]);
+    expect(wired.tracker.getHighlights(UNRELATED)).toStrictEqual([]);
+    expect(wired.tracker.getHighlights(TO)).toMatchObject([
+      { id: 'of-p', parent: 'p' },
+    ]);
+    wired.stop();
+    wired.repo.dispose();
+  });
+
+  it('stops following once stopped', async () => {
+    const wired = await wireMove(PARENT_KINDS[0], 'other id', true, false);
+
+    wired.stop();
+    wired.repo.mutate(`UPDATE article SET reference = $1 WHERE id = 'p'`, [TO]);
+
+    expect(wired.follow).not.toHaveBeenCalled();
+    wired.repo.dispose();
+  });
+
+  it('logs a failure to read where the parents are, changing nothing', async () => {
+    const wired = await wireMove(PARENT_KINDS[0], 'other id', true, false);
+    const failure = new Error('db busy');
+    vi.spyOn(wired.repo, 'query').mockRejectedValue(failure);
+    const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
+
+    wired.repo.mutate(`UPDATE article SET reference = $1 WHERE id = 'p'`, [TO]);
+    await wired.followed();
+
+    expect(error).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(wired.tracker.getHighlights(FROM)).toStrictEqual(wired.held('p'));
+    expect(wired.redrawn()).toStrictEqual([]);
+    wired.stop();
+    wired.repo.dispose();
+  });
+});
