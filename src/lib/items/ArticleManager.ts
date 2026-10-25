@@ -494,16 +494,14 @@ export class ArticleManager extends ItemManager {
    * would be refused for every time). Quiet: nothing here tells the user
    * anything, so the caller can say it once for the whole batch. One file
    * that fails short of its rows never stops the rest; one whose rows fail to
-   * be written does (see below). A file copied has its entry's
-   * `stripFromSource` tags taken off it.
+   * be written does (see below).
    *
    * In two phases, as every `mutate` saves the whole database file: first each
    * file in turn, up to its import's commit point, with its note's
-   * frontmatter or its copy written then (see {@link HeldWriter}), and a
-   * copied file's tags stripped; then every file's rows in one paced run (see
-   * `SQLiteRepository.bulkMutate`), saving once a chunk. A file whose rows
-   * that run didn't write is failed, and its frontmatter or copy taken back,
-   * with its stripped tags put back on it; once the run stops, no file after
+   * frontmatter or its copy written then (see {@link HeldWriter}); then
+   * every file's rows in one paced run (see `SQLiteRepository.bulkMutate`),
+   * saving once a chunk. A file whose rows that run didn't write is failed,
+   * and its frontmatter or copy taken back; once the run stops, no file after
    * it is written. No transaction is held open across the first phase: the
    * run's chunks would join it, and its writes to files would hold it open.
    *
@@ -522,15 +520,14 @@ export class ArticleManager extends ItemManager {
     const refused = await this.refusedBatch(entries.map(({ file }) => file));
     if (refused) return refused;
     const started: { writer: HeldWriter; run: Promise<BulkOutcome> }[] = [];
-    for (const { file, stripFromSource } of entries) {
+    for (const { file } of entries) {
       const writer = new HeldWriter();
       const run = this.importQuietly(
         file,
         priority,
         fixedIntervalDays,
         makeCopy,
-        writer,
-        stripFromSource
+        writer
       );
       started.push({ writer, run });
       // On to the next once this one has reached its commit point, or ended
@@ -583,8 +580,7 @@ export class ArticleManager extends ItemManager {
     priority: number,
     fixedIntervalDays: number | null,
     makeCopy: boolean,
-    writer: RowWriter,
-    stripFromSource: readonly string[] = []
+    writer: RowWriter
   ): Promise<BulkOutcome> {
     if (!isImportable(file)) {
       return {
@@ -621,8 +617,7 @@ export class ArticleManager extends ItemManager {
         fixedIntervalDays,
         isCopyImportable(file) && makeCopy && !inDataDirectory(file),
         quiet,
-        writer,
-        stripFromSource
+        writer
       );
     } catch (error) {
       console.error(error);
@@ -642,7 +637,6 @@ export class ArticleManager extends ItemManager {
    * it is or as a copy, its rows written through `writer`. Holds its path in
    * `importing` until done, from the caller's own synchronous step, so no
    * second import of it can start.
-   * @param stripFromSource tags to take off `file` once it is copied
    * @returns what the import did, or null when it did nothing, its report
    *   having said why
    * @throws whatever the import throws, its report having said nothing of it
@@ -653,8 +647,7 @@ export class ArticleManager extends ItemManager {
     fixedIntervalDays: number | null,
     willCopy: boolean,
     report: ImportReport,
-    writer: RowWriter,
-    stripFromSource: readonly string[] = []
+    writer: RowWriter
   ): Promise<ImportedArticle | null> {
     // Read once: a rename during the import changes `file.path` in place
     const { path } = file;
@@ -674,8 +667,7 @@ export class ArticleManager extends ItemManager {
           priority,
           fixedIntervalDays,
           report,
-          writer,
-          stripFromSource
+          writer
         );
       }
       return await this.importInPlace(
@@ -1384,18 +1376,13 @@ export class ArticleManager extends ItemManager {
 
   /**
    * Copy a file to the data directory, then import the copy
-   * @param stripFromSource tags to take off `file` once the copy is the
-   *   article, so the tags that asked for the import end on the note carrying
-   *   the `ir-id` and `file` no longer asks. Only when a copy is made: a
-   *   note linked back to its own row keeps them.
    */
   private async importCopy(
     file: TFile,
     priority: number,
     fixedIntervalDays: number | null,
     report: ImportReport,
-    writer: RowWriter,
-    stripFromSource: readonly string[]
+    writer: RowWriter
   ) {
     if (inDataDirectory(file)) {
       report.refuse({
@@ -1530,17 +1517,6 @@ export class ArticleManager extends ItemManager {
           (properties) =>
             applyFrontmatterLinkEdits(properties, frontmatterLinks)
         );
-
-        // The trigger tags went to the copy with the rest of the note's
-        // properties; off the note, they no longer ask for an import. Before
-        // the commit point, so rows a batch fails to write put them back
-        if (stripFromSource.length > 0) {
-          await step(
-            () =>
-              Obsidian.removeFrontMatterTags(file, stripFromSource, this.app),
-            (undo) => undo()
-          );
-        }
 
         return {
           copy,

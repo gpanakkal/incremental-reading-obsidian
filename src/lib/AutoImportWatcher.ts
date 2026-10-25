@@ -25,7 +25,6 @@ import {
   loadAutoImportWatermark,
   saveAutoImportWatermark,
 } from './plugin-data';
-import type { AutoImportMode } from './settings';
 import { matchFrontmatterTags } from './tags';
 import {
   ledgerArrivals,
@@ -56,8 +55,6 @@ export interface AutoImportConfig {
   triggerTags: readonly string[];
   /** The priority an imported note starts with. */
   priority: number;
-  /** Whether a note is imported where it is or as a copy, for `importMany`. */
-  mode: AutoImportMode;
   /** Whether a file that arrives in one of {@link folders} is imported. */
   onFolder: boolean;
   /** The watched folders' vault paths, as `cleanFolderList` keeps them. */

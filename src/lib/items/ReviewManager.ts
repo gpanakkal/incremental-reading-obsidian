@@ -29,7 +29,6 @@ import {
   REBIND_LOG_TOPIC,
   reclaimAtPath,
 } from '#/lib/rebind-records';
-import type { AutoImportMode } from '#/lib/settings';
 import {
   type ArticleRow,
   type IArticleBase,
@@ -261,28 +260,22 @@ export default class ReviewManager {
   }
 
   /**
-   * Import notes for their trigger tags (see `AutoImportWatcher`), as
-   * {@link importArticles} does, copied or not as `mode` says, with
-   * `inherit` read as `copyOnImport` is now. A note copied loses the tags
-   * that triggered it, which its copy keeps, so it isn't imported again.
+   * Import notes for their trigger tags or their arrival in a watched folder
+   * (see `AutoImportWatcher`), as {@link importArticles} does, always where
+   * they are: a copy would leave its note unmarked, for its next trigger to
+   * import again, whatever `copyOnImport` says.
    */
   async importTaggedNotes(
     entries: readonly AutoImportEntry[],
-    { priority, mode }: { priority: number; mode: AutoImportMode }
+    { priority }: { priority: number }
   ): Promise<BulkOutcome[]> {
     // Nothing asked for this now, and a note it fails is never tried again
     // while the plugin runs (see `AutoImportWatcher`), so a merge is waited
     // out; `importMany` still refuses one the database isn't ready for
     await outlastMerge(this.#repo);
-    const makeCopy =
-      mode === 'copy' ||
-      (mode === 'inherit' && this.plugin.settings.copyOnImport);
     return this.articles.importMany(
-      entries.map(({ file, matchedTags }) => ({
-        file,
-        stripFromSource: matchedTags,
-      })),
-      { priority, fixedIntervalDays: null, makeCopy }
+      entries.map(({ file }) => ({ file })),
+      { priority, fixedIntervalDays: null, makeCopy: false }
     );
   }
 

@@ -204,7 +204,7 @@ To avoid side effects, this plugin does not modify files outside its data folder
 
 Plugin data (items and the SQLite database) is stored in the `incremental-reading/` folder.
 
-Files are imported in-place unless you turn on **Make a copy** in the import dialog (or the **Copy articles when importing** setting), which puts a copy in the plugin data folder. You can delete the original after that if you no longer need it.
+Files are imported in-place unless you turn on **Make a copy** in the import dialog (or the **Copy articles when importing** setting), which puts a copy in the plugin data folder. You can delete the original after that if you no longer need it. Automatic imports are always in-place.
 
 When you make a snippet or card, a new note is created in the plugin data folder to hold its content.
 

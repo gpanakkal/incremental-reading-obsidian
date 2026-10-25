@@ -72,8 +72,6 @@ export interface IRPluginSettings {
   autoImportOnTag: boolean;
   /** The trigger tags, as {@link parseTagList} reads them. */
   autoImportTags: string[];
-  /** Whether a note imported by its trigger tag is copied. */
-  autoImportMode: AutoImportMode;
   /** Whether a file that arrives in a watched folder is imported by itself. */
   autoImportOnFolder: boolean;
   /** The watched folders' vault paths, as {@link cleanFolderList} keeps them. */
@@ -126,26 +124,6 @@ export const isSuccessNoticeLevel = (
   typeof value === 'string' &&
   Object.hasOwn(SUCCESS_NOTICE_LEVEL_OPTIONS, value);
 
-/**
- * How a note is imported by its trigger tag: where it is, as a copy, or as
- * `copyOnImport` says. Copying moves the trigger tag to the copy (see
- * `ArticleManager.importMany`), so the original isn't imported again.
- */
-export type AutoImportMode = 'inPlace' | 'copy' | 'inherit';
-
-/** Each {@link AutoImportMode}, as the settings dropdown names it. */
-export const AUTO_IMPORT_MODE_OPTIONS: Readonly<
-  Record<AutoImportMode, string>
-> = Object.freeze({
-  inPlace: 'In place',
-  copy: 'Make a copy',
-  inherit: 'Same as manual imports',
-});
-
-/** Whether `value` is an {@link AutoImportMode}; see {@link isReviewTitleBar}. */
-export const isAutoImportMode = (value: unknown): value is AutoImportMode =>
-  typeof value === 'string' && Object.hasOwn(AUTO_IMPORT_MODE_OPTIONS, value);
-
 const FSRS_PARAMETER_DEFAULTS = Object.freeze(generatorParameters());
 
 export const DEFAULT_SETTINGS: IRPluginSettings = {
@@ -168,8 +146,6 @@ export const DEFAULT_SETTINGS: IRPluginSettings = {
   remindDueSnippets: true,
   autoImportOnTag: true,
   autoImportTags: [AUTO_IMPORT_TAG],
-  // Not `inherit`: turning on `copyOnImport` mustn't start copying clippings
-  autoImportMode: 'inPlace',
   // Off, as importing by tag is, and no folder is a given
   autoImportOnFolder: false,
   autoImportFolders: [],
@@ -299,7 +275,6 @@ const CONTROL_BINDINGS = {
       settings.autoImportTags = parseTagList(value);
     },
   },
-  autoImportMode: topLevel('autoImportMode'),
   autoImportOnFolder: topLevel('autoImportOnFolder'),
   // The list the watched folders row shows as chips; no declarative control
   // holds it (`drawWatchedFolders`)
@@ -967,7 +942,7 @@ export class IRSettingTab extends PluginSettingTab {
             type: 'box',
             name: 'Auto-import notes by tag',
             desc:
-              'Automatically import any note when one of the trigger ' +
+              'Automatically import any note in-place when one of the trigger ' +
               'tags is added to frontmatter. Tags in the note body are ignored. Does not affect notes that already have a matching tag.',
             control: { type: 'toggle', key: 'autoImportOnTag' },
             items: [
@@ -985,26 +960,15 @@ export class IRSettingTab extends PluginSettingTab {
                     ),
                 },
               },
-              {
-                name: 'Where to import tagged notes',
-                control: {
-                  type: 'dropdown',
-                  key: 'autoImportMode',
-                  options: AUTO_IMPORT_MODE_OPTIONS,
-                },
-              },
             ],
           },
           {
             type: 'box',
             name: 'Auto-import files added to folders',
             desc:
-              'Automatically import any note or PDF when it is added to a ' +
-              'watched folder or its subfolders: created there, moved in, or ' +
-              'synced from another device. Files already there are not ' +
-              'imported, nor are notes un-imported while there. Use "Import ' +
-              'from folder…" for those. "Where to import tagged notes" ' +
-              'applies here too.',
+              'Automatically import any note or PDF in-place when it is added to a ' +
+              'watched folder or its subfolders. Files already there are not ' +
+              'imported.',
             control: { type: 'toggle', key: 'autoImportOnFolder' },
             items: [
               {

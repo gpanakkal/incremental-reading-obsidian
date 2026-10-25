@@ -25,7 +25,6 @@ import {
 } from './constants';
 import type { IRPluginData } from './plugin-data';
 import {
-  AUTO_IMPORT_MODE_OPTIONS,
   CONTINUED_GROUP_CLASS,
   DEFAULT_SETTINGS,
   drawResettableRows,
@@ -66,9 +65,6 @@ const REVIEW_TITLE_BARS = ['obsidian', 'show', 'hide'] as const;
 
 /** Each success notice level, as stored. */
 const SUCCESS_NOTICE_LEVELS = ['all', 'minimal', 'none'] as const;
-
-/** Each way of importing a note by its trigger tag, as stored. */
-const AUTO_IMPORT_MODES = ['inPlace', 'copy', 'inherit'] as const;
 
 /** Any text at all, not just the printable ASCII `fc.string()` defaults to. */
 const textArb = (constraints: fc.StringConstraints = {}) =>
@@ -138,7 +134,6 @@ const settingsArb = fc.record({
     remindDueSnippets: fc.boolean(),
     autoImportOnTag: fc.boolean(),
     autoImportTags: fc.array(textArb()),
-    autoImportMode: fc.constantFrom(...AUTO_IMPORT_MODES),
     autoImportOnFolder: fc.boolean(),
     autoImportFolders: fc.array(textArb()),
     fsrsParams: fc.record({
@@ -925,7 +920,6 @@ describe('IRSettingTab.getControlValue', () => {
           remindDueSnippets: tab.getControlValue('remindDueSnippets'),
           autoImportOnTag: tab.getControlValue('autoImportOnTag'),
           autoImportTags: tab.getControlValue('autoImportTags'),
-          autoImportMode: tab.getControlValue('autoImportMode'),
           autoImportOnFolder: tab.getControlValue('autoImportOnFolder'),
           autoImportFolders: tab.getControlValue('autoImportFolders'),
           maximumInterval: tab.getControlValue('fsrsParams.maximum_interval'),
@@ -956,7 +950,6 @@ describe('IRSettingTab.getControlValue', () => {
           autoImportTags: settings.autoImportTags
             .map((tag) => `#${tag}`)
             .join(' '),
-          autoImportMode: settings.autoImportMode,
           autoImportOnFolder: settings.autoImportOnFolder,
           autoImportFolders: settings.autoImportFolders,
           maximumInterval: fsrsParams.maximum_interval,
@@ -1056,7 +1049,6 @@ describe('IRSettingTab.setControlValue', () => {
       ['remindDueArticles', fc.boolean()],
       ['remindDueSnippets', fc.boolean()],
       ['autoImportOnTag', fc.boolean()],
-      ['autoImportMode', fc.constantFrom(...AUTO_IMPORT_MODES)],
       ['autoImportOnFolder', fc.boolean()],
     ] as const;
     const fsrsKeys = [
@@ -1248,18 +1240,6 @@ describe('IRSettingTab.setControlValue', () => {
     expect(Object.keys(REVIEW_TITLE_BAR_OPTIONS)).toEqual(REVIEW_TITLE_BARS);
   });
 
-  it('names every way of importing a note by tag in its dropdown', () => {
-    const [control] = declaredControls()
-      .map((row) => row.control)
-      .filter((row) => row.key === 'autoImportMode');
-
-    expect(control).toMatchObject({ type: 'dropdown' });
-    expect(control.type === 'dropdown' && control.options).toEqual(
-      AUTO_IMPORT_MODE_OPTIONS
-    );
-    expect(Object.keys(AUTO_IMPORT_MODE_OPTIONS)).toEqual(AUTO_IMPORT_MODES);
-  });
-
   it('names every success notice level in both of its dropdowns', () => {
     const controls = declaredControls()
       .map((row) => row.control)
@@ -1402,13 +1382,6 @@ describe('IRSettingTab.getSettingDefinitions', () => {
           key: 'autoImportTags',
           defaultValue: '#ir-import',
           validate,
-        },
-      },
-      {
-        control: {
-          type: 'dropdown',
-          key: 'autoImportMode',
-          options: AUTO_IMPORT_MODE_OPTIONS,
         },
       },
       {
@@ -1571,7 +1544,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     );
   });
 
-  it('draws importing by tag as one box: its toggle beside its description, then the trigger tags and where to import', () => {
+  it('draws importing by tag as one box: its toggle beside its description, then the trigger tags', () => {
     const { tab } = makeTab(structuredClone(DEFAULT_SETTINGS));
 
     expect(boxHeadedBy(tab, 'Auto-import notes by tag')).toStrictEqual({
@@ -1590,14 +1563,6 @@ describe('IRSettingTab.getSettingDefinitions', () => {
             key: 'autoImportTags',
             defaultValue: '#ir-import',
             validate: expect.any(Function) as unknown,
-          },
-        },
-        {
-          name: expect.any(String) as unknown,
-          control: {
-            type: 'dropdown',
-            key: 'autoImportMode',
-            options: AUTO_IMPORT_MODE_OPTIONS,
           },
         },
       ],

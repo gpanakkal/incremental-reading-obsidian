@@ -264,15 +264,26 @@ describe('parsePluginData', () => {
     );
   });
 
-  it('imports tagged notes in place unless told otherwise, whatever copying on import says', () => {
+  it('drops a stored way of auto-importing, whatever it held, reading the rest as if it were never there', () => {
     fc.assert(
-      fc.property(fc.anything(), fc.boolean(), (copyOnImport, legacy) => {
-        const saved = { copyOnImport };
-        const data = parsePluginData(legacy ? saved : { settings: saved });
+      fc.property(
+        fc.oneof(fc.constantFrom('inPlace', 'copy', 'inherit'), fc.anything()),
+        fc.dictionary(fc.string(), fc.anything()),
+        fc.boolean(),
+        (stored, rest, legacy) => {
+          const others = { ...rest };
+          delete others.autoImportMode;
+          const wrap = (saved: Record<string, unknown>) =>
+            legacy ? saved : { settings: saved };
 
-        expect(DEFAULT_SETTINGS.autoImportMode).toBe('inPlace');
-        expect(data.settings.autoImportMode).toBe('inPlace');
-      })
+          const data = parsePluginData(
+            wrap({ ...others, autoImportMode: stored })
+          );
+
+          expect(data.settings).not.toHaveProperty('autoImportMode');
+          expect(data).toEqual(parsePluginData(wrap(others)));
+        }
+      )
     );
   });
 
@@ -293,30 +304,6 @@ describe('parsePluginData', () => {
 
         expect(data.settings.autoImportOnFolder).toBe(stored === true);
       })
-    );
-  });
-
-  it('keeps a known way of importing tagged notes and replaces anything else with in place', () => {
-    const MODES: unknown[] = ['inPlace', 'copy', 'inherit'];
-    fc.assert(
-      fc.property(
-        fc.oneof(
-          fc.constantFrom(...MODES),
-          fc.constantFrom('Copy', 'inplace', ' copy', '', 'toString'),
-          // not strings, though each reads as a mode once made one
-          fc.constantFrom(['copy'], { toString: () => 'copy' }),
-          fc.anything()
-        ),
-        fc.boolean(),
-        (stored, legacy) => {
-          const saved = { autoImportMode: stored };
-          const data = parsePluginData(legacy ? saved : { settings: saved });
-
-          expect(data.settings.autoImportMode).toBe(
-            MODES.includes(stored) ? stored : 'inPlace'
-          );
-        }
-      )
     );
   });
 

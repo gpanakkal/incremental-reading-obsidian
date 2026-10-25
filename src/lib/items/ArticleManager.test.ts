@@ -33,7 +33,6 @@ import { refusalReason } from '#/lib/readiness';
 import { BulkMutateError } from '#/lib/repository/BulkMutateError';
 import { initialText, replayText } from '#/lib/repository/scheduling-replay';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
-import { matchFrontmatterTags, stripFrontmatterTags } from '#/lib/tags';
 import type {
   ArticleRow,
   IArticleBase,
@@ -8386,7 +8385,7 @@ describe('importMany', () => {
   });
 });
 
-describe('importMany, copying a note imported for its trigger tags', () => {
+describe('importMany, copying a note', () => {
   beforeEach(() => {
     // A write of many rows yields through `window`, which this node
     // environment lacks
@@ -8415,10 +8414,7 @@ describe('importMany, copying a note imported for its trigger tags', () => {
     'other'
   );
 
-  /**
-   * A clipped note's properties, its tags written any way Obsidian reads
-   * them, and the trigger tags among them that asked for the import.
-   */
+  /** A clipped note's properties, its tags written any way Obsidian reads them. */
   const clippedArb = fc
     .record({
       tags: fc.oneof(
@@ -8436,20 +8432,11 @@ describe('importMany, copying a note imported for its trigger tags', () => {
         Object.fromEntries(
           Object.entries(record).filter(([, value]) => value !== undefined)
         ) as Record<string, unknown>
-    )
-    .chain((frontmatter) =>
-      fc
-        .subarray(['ir-import', 'clip', 'read/later', 'other'])
-        .map((triggers) => ({
-          frontmatter,
-          // As the watcher hands them on: those the note carries
-          stripFromSource: matchFrontmatterTags(frontmatter, triggers),
-        }))
     );
 
-  it('makes the copy the article, carrying all the note had, and takes off the note only the tags that asked', async () => {
+  it('makes the copy the article, carrying all the note had, and leaves the note as it was', async () => {
     await fc.assert(
-      fc.asyncProperty(clippedArb, async ({ frontmatter, stripFromSource }) => {
+      fc.asyncProperty(clippedArb, async (frontmatter) => {
         vi.restoreAllMocks();
         const { vault, repo, manager } = await wireArticles(
           { [NOTE]: structuredClone(frontmatter) },
@@ -8458,20 +8445,20 @@ describe('importMany, copying a note imported for its trigger tags', () => {
         try {
           const file = vault.files.get(NOTE)!;
 
-          const outcomes = await manager.importMany(
-            [{ file, stripFromSource }],
-            OPTIONS
-          );
+          const outcomes = await manager.importMany([{ file }], OPTIONS);
 
           expect(outcomes).toEqual([
             importedOutcome(file, repo.rows('article')[0], { copied: true }),
           ]);
           const [row] = repo.rows('article');
           expect(row.reference).toBe(COPY);
-          // The note keeps all else, its other tags included
-          const left = structuredClone(frontmatter);
-          stripFrontmatterTags(left, stripFromSource);
-          expect(vault.frontmatterOf(NOTE) ?? {}).toEqual(left);
+          // Nothing is written to the note
+          expect(
+            vault.processFrontMatter.mock.calls.filter(
+              ([target]) => target === file
+            )
+          ).toEqual([]);
+          expect(vault.frontmatterOf(NOTE) ?? {}).toEqual(frontmatter);
           // The copy's text opens with the note's properties as they were,
           // which its own are written into
           expect(vault.bodyOf(COPY)).toBe(noteText(frontmatter));
@@ -8498,10 +8485,7 @@ describe('importMany, copying a note imported for its trigger tags', () => {
     );
     const file = vault.files.get(NOTE)!;
 
-    await manager.importMany(
-      [{ file, stripFromSource: ['ir-import'] }],
-      OPTIONS
-    );
+    await manager.importMany([{ file }], OPTIONS);
 
     const copy = vault.files.get(COPY)!;
     const appended = vault.app.vault.append.mock.invocationCallOrder[0];
@@ -8520,34 +8504,7 @@ describe('importMany, copying a note imported for its trigger tags', () => {
     repo.dispose();
   });
 
-  it('writes nothing to the note when no tags are to be taken off it', async () => {
-    for (const stripFromSource of [undefined, []]) {
-      vi.restoreAllMocks();
-      const { vault, repo, manager } = await wireArticles(
-        { [NOTE]: { tags: ['ir-import'] } },
-        null
-      );
-      const file = vault.files.get(NOTE)!;
-
-      const outcomes = await manager.importMany(
-        [{ file, stripFromSource }],
-        OPTIONS
-      );
-
-      expect(outcomes).toEqual([
-        importedOutcome(file, repo.rows('article')[0], { copied: true }),
-      ]);
-      expect(
-        vault.processFrontMatter.mock.calls.filter(
-          ([target]) => target === file
-        )
-      ).toEqual([]);
-      expect(vault.frontmatterOf(NOTE)).toEqual({ tags: ['ir-import'] });
-      repo.dispose();
-    }
-  });
-
-  it('leaves the tags on a note whose ir-id a row holds, which is linked back to its row, not copied', async () => {
+  it('leaves a note whose ir-id a row holds as it was, linking it back to its row, not copied', async () => {
     for (const deleted of [false, true]) {
       vi.restoreAllMocks();
       const frontmatter = {
@@ -8565,10 +8522,7 @@ describe('importMany, copying a note imported for its trigger tags', () => {
       );
       const file = vault.files.get(NOTE)!;
 
-      const outcomes = await manager.importMany(
-        [{ file, stripFromSource: ['ir-import'] }],
-        OPTIONS
-      );
+      const outcomes = await manager.importMany([{ file }], OPTIONS);
 
       // Brought back when deleted, which an undo deletes again
       expect(outcomes).toEqual([
@@ -8593,10 +8547,7 @@ describe('importMany, copying a note imported for its trigger tags', () => {
     );
     const file = vault.files.get(inData)!;
 
-    const outcomes = await manager.importMany(
-      [{ file, stripFromSource: ['ir-import'] }],
-      OPTIONS
-    );
+    const outcomes = await manager.importMany([{ file }], OPTIONS);
 
     expect(outcomes).toEqual([importedOutcome(file, repo.rows('article')[0])]);
     const [row] = repo.rows('article');
@@ -8622,49 +8573,39 @@ describe('importMany, copying a note imported for its trigger tags', () => {
       );
       const file = vault.files.get(path)!;
 
-      const outcomes = await manager.importMany(
-        [{ file, stripFromSource: ['ir-import'] }],
-        OPTIONS
-      );
+      const outcomes = await manager.importMany([{ file }], OPTIONS);
 
       expect(outcomes).toEqual([
         importedOutcome(file, repo.rows('article')[0], { copied: true }),
       ]);
       const [row] = repo.rows('article');
       expect(row.reference).toBe(`${ARTICLES_FOLDER}/${name}`);
-      expect(vault.frontmatterOf(path)).toEqual({ tags: ['other'] });
+      expect(vault.frontmatterOf(path)).toEqual({
+        tags: ['ir-import', 'other'],
+      });
       repo.dispose();
     }
   });
 
-  it('takes the copy back and leaves the note as it was when its tags cannot be taken off, or its row cannot be saved', async () => {
-    for (const failure of ['strip', 'row'] as const) {
-      vi.restoreAllMocks();
-      const frontmatter = { tags: ['ir-import', 'other'], title: 'x' };
-      const { vault, repo, manager } = await wireArticles(
-        { [NOTE]: structuredClone(frontmatter) },
-        failure === 'row' ? 'row' : null
-      );
-      if (failure === 'strip') {
-        vault.fail('frontmatter', (path) => path === NOTE);
-      }
-      const file = vault.files.get(NOTE)!;
+  it('takes the copy back and leaves the note as it was when its row cannot be saved', async () => {
+    const frontmatter = { tags: ['ir-import', 'other'], title: 'x' };
+    const { vault, repo, manager } = await wireArticles(
+      { [NOTE]: structuredClone(frontmatter) },
+      'row'
+    );
+    const file = vault.files.get(NOTE)!;
 
-      const outcomes = await manager.importMany(
-        [{ file, stripFromSource: ['ir-import'] }],
-        OPTIONS
-      );
+    const outcomes = await manager.importMany([{ file }], OPTIONS);
 
-      expect(outcomes).toMatchObject([{ file, status: 'failed' }]);
-      expect(repo.rows('article')).toEqual([]);
-      expect(vault.paths()).toEqual([NOTE]);
-      expect(vault.trashed).toEqual([COPY]);
-      expect(vault.frontmatterOf(NOTE)).toEqual(frontmatter);
-      repo.dispose();
-    }
+    expect(outcomes).toMatchObject([{ file, status: 'failed' }]);
+    expect(repo.rows('article')).toEqual([]);
+    expect(vault.paths()).toEqual([NOTE]);
+    expect(vault.trashed).toEqual([COPY]);
+    expect(vault.frontmatterOf(NOTE)).toEqual(frontmatter);
+    repo.dispose();
   });
 
-  it('puts back the tags of every note whose row the batch did not write, keeping them off those it did', async () => {
+  it('keeps the copies of the notes whose rows the batch wrote and takes back the rest, leaving every note as it was', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc
@@ -8696,7 +8637,7 @@ describe('importMany, copying a note imported for its trigger tags', () => {
           );
 
           const outcomes = await manager.importMany(
-            files.map((file) => ({ file, stripFromSource: ['ir-import'] })),
+            files.map((file) => ({ file })),
             OPTIONS
           );
 
@@ -8706,14 +8647,10 @@ describe('importMany, copying a note imported for its trigger tags', () => {
           names.forEach((name, i) => {
             const note = `notes/${name}.md`;
             const copy = `${ARTICLES_FOLDER}/${name}.md`;
+            expect(vault.frontmatterOf(note)).toEqual(frontmatter);
             if (i < failAt) {
-              expect(vault.frontmatterOf(note)).toEqual({
-                ...frontmatter,
-                tags: ['other'],
-              });
               expect(vault.files.has(copy)).toBe(true);
             } else {
-              expect(vault.frontmatterOf(note)).toEqual(frontmatter);
               expect(vault.trashed).toContain(copy);
             }
           });
