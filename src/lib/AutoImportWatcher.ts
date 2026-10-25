@@ -273,7 +273,8 @@ export class AutoImportWatcher {
     const frontmatter = cache?.frontmatter;
     if (
       frontmatter === undefined ||
-      frontmatter['ir-id'] !== this.#unimported.get(file) ||
+      // `Object.is`, as YAML reads `.nan` as NaN, which equals nothing
+      !Object.is(frontmatter['ir-id'], this.#unimported.get(file)) ||
       matchFrontmatterTags(frontmatter, config.triggerTags).length === 0
     ) {
       this.#unimported.delete(file);
@@ -412,6 +413,14 @@ export class AutoImportWatcher {
     const config = this.#getConfig();
     if (oldPath !== undefined) this.#followMove(oldPath, file.path, config);
     if (!this.#watches(file.path, config)) return;
+    // Seen there, so no arrival, whatever tells of it. The ledger forgets a
+    // file deleted, and Obsidian tells of a file only once it is new to the
+    // vault, but a file it tells of late, after the ledger has taken it as
+    // seen, stays as it is. So does one deleted with Obsidian closed and
+    // written again before the startup scan, as left alone as one written
+    // again before Obsidian started: the ledger is the last launch's until
+    // then, and holds the path still (see `#catchUpOnArrivals`)
+    if (this.#loadLedger()?.paths.has(file.path)) return;
     if (!isImportable(file)) {
       this.#notePassedOver(file, config);
       return;
@@ -585,8 +594,31 @@ export class AutoImportWatcher {
     ) {
       return;
     }
+    this.#seedArrivals(ledger, folders);
     const paths = this.#watchedFiles(config).map(({ path }) => path);
     this.#keepLedger(reconcileLedger(plainLedger(ledger), folders, paths));
+  }
+
+  /**
+   * Take the arrivals waiting outside the folders `ledger` records and
+   * `folders` keeps watched as seen, as the ledger is about to take all a
+   * folder newly watched holds: what it holds once the watcher is told it is
+   * watched stays as it is, even if the watcher heard of it arriving first.
+   * It can, in the moment between a setting being changed and saved, as when
+   * the settings are written to by hand. One waiting in a folder no longer
+   * watched is no arrival either. A file waiting in a folder still watched
+   * still arrived there, even under one newly watched. A file a flush has
+   * taken is left to it, and one queued for a trigger tag too stays queued
+   * for that.
+   */
+  #seedArrivals(ledger: HeldLedger, folders: readonly string[]): void {
+    const kept = folders.filter((folder) => ledger.folders.includes(folder));
+    for (const file of this.#arrived) {
+      if (!isUnderAnyFolder(file.path, kept)) this.#arrived.delete(file);
+    }
+    for (const file of this.#queuedArrivals) {
+      if (!isUnderAnyFolder(file.path, kept)) this.#queuedArrivals.delete(file);
+    }
   }
 
   /**

@@ -246,6 +246,13 @@ function makeWatcher(
       current = { ...current, ...change };
       watcher.configChanged();
     },
+    /**
+     * Change the settings without telling the watcher yet, as writing to them
+     * by hand does until it saves them.
+     */
+    rewrite: (change: Partial<AutoImportConfig>) => {
+      current = { ...current, ...change };
+    },
     /** Tell the watcher `file` was re-indexed as its cache now stands. */
     change: (file: TFile) => {
       watcher.consider(file, vault.cacheOf(file));
@@ -2680,6 +2687,64 @@ describe('AutoImportWatcher, the ledger of watched folders, at startup', () => {
     expect(seenPaths(vault)).toEqual(new Set());
   });
 
+  it('never takes a file it has seen in a watched folder for an arrival, however late it hears of its creation, and imports each it has not seen once', async () => {
+    /**
+     * A file in the watched folder at startup: whether an earlier launch saw
+     * it, and when the watcher hears it was created, if it does: before the
+     * startup scan, as a late `create` from the vault loading would, or after.
+     */
+    const fileArb = fc.record({
+      extension: fc.constantFrom('md', 'pdf'),
+      seen: fc.boolean(),
+      heard: fc.constantFrom(null, 'beforeScan', 'afterScan'),
+    });
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fileArb, { maxLength: 6 }),
+        // Whether a flush of what it heard of runs before the scan
+        fc.boolean(),
+        async (files, flushFirst) => {
+          const vault = makeVault();
+          const made = files.map(({ extension, ...file }, i) => ({
+            ...file,
+            file: vault.add(`${INBOX}/${i}.${extension}`, {}, extension),
+          }));
+          storeLedger(
+            vault,
+            [INBOX],
+            made.filter(({ seen }) => seen).map(({ file }) => file.path)
+          );
+          const { watcher, importMany, arrive, stop } = makeWatcher(
+            { onFolder: true, folders: [INBOX] },
+            vault
+          );
+          const hear = (when: string) => {
+            for (const { file, heard } of made) {
+              if (heard === when) arrive(file);
+            }
+          };
+
+          hear('beforeScan');
+          if (flushFirst) await settle();
+          await watcher.runCatchUpScan();
+          hear('afterScan');
+          await settle();
+          stop();
+
+          expect(importedPaths(importMany).flat().sort()).toEqual(
+            made
+              .filter(({ seen }) => !seen)
+              .map(({ file }) => file.path)
+              .sort()
+          );
+          expect(seenPaths(vault)).toEqual(
+            new Set(made.map(({ file }) => file.path))
+          );
+        }
+      )
+    );
+  });
+
   it('does nothing once stopped', async () => {
     const vault = makeVault();
     storeLedger(vault, [INBOX], []);
@@ -2762,6 +2827,124 @@ describe('AutoImportWatcher, the ledger of watched folders, as settings change',
     );
 
     expect(importedPaths(next.importMany)).toEqual([[unseen.path]]);
+  });
+
+  it('takes what a newly watched folder holds once told as seen, a file it heard of arriving before then included, and imports what arrives after, and notes for their trigger tags', async () => {
+    /**
+     * A file in the folder about to be watched, and when the watcher hears
+     * it was created: before the settings change, between the change and the
+     * watcher being told of it, or after. A note is read as it is created,
+     * or, if heard of in between, before the watcher is told or after.
+     */
+    const fileArb = fc.record({
+      extension: fc.constantFrom('md', 'pdf'),
+      heard: fc.constantFrom('beforeChange', 'beforeTold', 'afterTold'),
+      readBeforeTold: fc.boolean(),
+      tagged: fc.boolean(),
+    });
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fileArb, { maxLength: 6 }),
+        fc.boolean(),
+        async (files, enabled) => {
+          const vault = makeVault();
+          const watching = await launch(
+            { enabled, onFolder: true, folders: [INBOX] },
+            vault
+          );
+          const made = files.map((file, i) => ({
+            ...file,
+            path: `${CLIPS}/${i}.${file.extension}`,
+            file: null as TFile | null,
+          }));
+          type Made = (typeof made)[number];
+          const create = (one: Made) => {
+            one.file = vault.create(one.path);
+            watching.arrive(one.file);
+          };
+          const read = ({ file, extension, tagged }: Made) => {
+            if (extension !== 'md') return;
+            vault.edit(file!, tagged ? { tags: [TRIGGER] } : {});
+            watching.change(file!);
+          };
+
+          for (const file of made) {
+            if (file.heard !== 'beforeChange') continue;
+            create(file);
+            read(file);
+          }
+          watching.rewrite({ folders: [INBOX, CLIPS] });
+          for (const file of made) {
+            if (file.heard !== 'beforeTold') continue;
+            create(file);
+            if (file.readBeforeTold) read(file);
+          }
+          watching.watcher.configChanged();
+          for (const file of made) {
+            if (file.heard === 'beforeTold' && !file.readBeforeTold) {
+              read(file);
+            } else if (file.heard === 'afterTold') {
+              create(file);
+              read(file);
+            }
+          }
+          await settle();
+          watching.stop();
+
+          expect(importedPaths(watching.importMany).flat().sort()).toEqual(
+            made
+              .filter(
+                ({ heard, extension, tagged }) =>
+                  heard === 'afterTold' ||
+                  (enabled && tagged && extension === 'md')
+              )
+              .map(({ path }) => path)
+              .sort()
+          );
+          expect(seenPaths(vault)).toEqual(
+            new Set(made.map(({ path }) => path))
+          );
+        }
+      )
+    );
+  });
+
+  it('still imports a file it heard of arriving in a folder watched before, when a folder inside it is newly watched', async () => {
+    const vault = makeVault();
+    const watching = await launch({ onFolder: true, folders: [INBOX] }, vault);
+    const inner = `${INBOX}/${CLIPS}`;
+    const pdf = vault.add(`${inner}/a.pdf`, undefined, 'pdf');
+    const note = vault.create(`${inner}/b.md`);
+    watching.arrive(pdf);
+    watching.arrive(note);
+
+    watching.configure({ folders: [INBOX, inner] });
+    vault.edit(note, {});
+    watching.change(note);
+    await settle();
+
+    expect(importedPaths(watching.importMany)).toEqual([[pdf.path, note.path]]);
+  });
+
+  it('forgets a file it heard of arriving in a folder no longer watched, so watching it again takes it as seen', async () => {
+    const vault = makeVault();
+    const watching = await launch(
+      { onFolder: true, folders: [INBOX, CLIPS] },
+      vault
+    );
+    const pdf = vault.add(`${CLIPS}/a.pdf`, undefined, 'pdf');
+    const note = vault.create(`${CLIPS}/b.md`);
+    watching.arrive(pdf);
+    watching.arrive(note);
+
+    watching.configure({ folders: [INBOX] });
+    watching.configure({ folders: [INBOX, CLIPS] });
+    vault.edit(note, {});
+    watching.change(note);
+    await settle();
+
+    expect(watching.importMany).not.toHaveBeenCalled();
+    expect(seenPaths(vault)).toEqual(new Set([pdf.path, note.path]));
   });
 
   it('stores nothing while the folders watched stay the same, in whatever order', async () => {
@@ -2938,6 +3121,43 @@ describe('AutoImportWatcher, the ledger of watched folders, as files move and go
     );
 
     expect(importedPaths(next.importMany)).toEqual([[`${INBOX}/a.pdf`]]);
+  });
+
+  it('imports a file arriving while it runs once, not again when told late it was created, un-imported or not, but again once deleted and written anew at its path', async () => {
+    const watching = await makeCaughtUp();
+    const { vault, arrive, change, importMany } = watching;
+    /** Create a PDF and a note at `paths`, telling the watcher, and read both. */
+    const arriveBoth = (...paths: string[]) => {
+      const made = paths.map((path) => vault.create(path));
+      for (const file of made) arrive(file);
+      vault.edit(made[1], {});
+      change(made[1]);
+      return made;
+    };
+    const [pdf, note] = arriveBoth(`${INBOX}/a.pdf`, `${INBOX}/b.md`);
+    await settle();
+
+    arrive(pdf);
+    arrive(note);
+    await settle();
+    // Un-imported: the rows gone, the note's `ir-id` stripped
+    vault.rows.clear();
+    vault.edit(note, {});
+    change(note);
+    arrive(pdf);
+    arrive(note);
+    await settle();
+    expect(importedPaths(importMany)).toEqual([[pdf.path, note.path]]);
+
+    deleteFile(watching, pdf);
+    deleteFile(watching, note);
+    arriveBoth(pdf.path, note.path);
+    await settle();
+
+    expect(importedPaths(importMany)).toEqual([
+      [pdf.path, note.path],
+      [pdf.path, note.path],
+    ]);
   });
 
   it('forgets every file in a deleted folder', async () => {
