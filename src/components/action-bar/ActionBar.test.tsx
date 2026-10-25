@@ -13,7 +13,12 @@ import {
   setShowAnswer,
   store,
 } from '#/lib/store';
-import type { MaybeMissingItem, NoteType, ReviewItem } from '#/lib/types';
+import {
+  type MaybeMissingItem,
+  NOTE_TYPES,
+  type NoteType,
+  type ReviewItem,
+} from '#/lib/types';
 import { SchedulingModal } from '#/views/SchedulingModal';
 import fc from 'fast-check';
 import { type ComponentChild, render } from 'preact';
@@ -23,6 +28,13 @@ import { ActionBar } from './ActionBar';
 import { SCHEDULING_BUTTON_CLASS } from './TextScheduler';
 
 // #region HELPERS
+
+/** A set of item types in the shape the store keeps the type filter in. */
+function typesRecord(
+  types: readonly NoteType[]
+): Partial<Record<NoteType, true>> {
+  return Object.fromEntries(types.map((type) => [type, true]));
+}
 
 /** Render a component into a detached jsdom container and return it. */
 function mount(node: ComponentChild): HTMLElement {
@@ -586,7 +598,9 @@ const defaultReduxState = {
   page: 'home' as 'home' | 'review',
   currentItemId: null as string | null,
   showAnswer: false,
-  typesToReview: { article: true, snippet: true, card: true },
+  typesToReview: { article: true, snippet: true, card: true } as Partial<
+    Record<NoteType, true>
+  >,
   selectionMode: null as SelectionKind | null,
   hasSelection: false,
 };
@@ -692,17 +706,30 @@ describe('ActionBar', () => {
     // A contract on the cache key rather than on what renders: the button and
     // the table must ask for the same page, or the two read separate cache
     // entries that can disagree about whether anything is due
-    it('reads the queue page the table shows, so both share one fetch', () => {
-      wireQueue({ totalRows: 3 });
+    // The filter is the one review draws from, so the button is off exactly
+    // when nothing of the types review would start on is queued
+    it('property: reads the queue page the table shows, filtered to the types under review, so both share one fetch', () => {
+      fc.assert(
+        fc.property(fc.subarray([...NOTE_TYPES]), (types) => {
+          try {
+            reduxState.typesToReview = typesRecord(types);
+            wireQueue({ totalRows: 3 });
 
-      mountBar();
+            mountBar();
 
-      expect(ReactQuery.useQueue).toHaveBeenCalledWith({
-        slice: {
-          pageNumber: 0,
-          entriesPerPage: QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
-        },
-      });
+            expect(ReactQuery.useQueue).toHaveBeenCalledWith({
+              slice: {
+                pageNumber: 0,
+                entriesPerPage: QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
+              },
+              typesToInclude: typesRecord(types),
+            });
+          } finally {
+            document.body.innerHTML = '';
+            vi.restoreAllMocks();
+          }
+        })
+      );
     });
   });
 
@@ -839,7 +866,7 @@ describe('ActionBar', () => {
       }
     );
 
-    it('leads the start edge, after the arrows and bulk import, leaving the middle zone to the begin-review button', async () => {
+    it('leads the start edge, after the arrows, bulk import and the type filter, leaving the middle zone to the begin-review button', async () => {
       const container = mountBar({ leftovers: makeLeftoverWatch(1) });
       await settle();
 
@@ -847,6 +874,7 @@ describe('ActionBar', () => {
         navigateButton(container, 'back'),
         navigateButton(container, 'forward'),
         bulkImportButton(container),
+        typeFilter(container),
         queryLeftoverButton(container),
       ]);
       expect(zoneChildren(container, 'center')).toEqual([
@@ -1242,9 +1270,10 @@ describe('ActionBar', () => {
       ]);
     });
 
-    it('are followed by bulk import alone at the start edge on the home screen', async () => {
-      // Nothing there acts on a review session, and the begin-review button is
-      // the middle zone's whole contents.
+    it('are followed by bulk import and the type filter at the start edge on the home screen', async () => {
+      // The filter keeps the slot it has in review, with bulk import standing
+      // where home does there; the begin-review button is the middle zone's
+      // whole contents.
       reduxState.page = 'home';
       const container = mountBar();
       await settle();
@@ -1253,6 +1282,7 @@ describe('ActionBar', () => {
         navigateButton(container, 'back'),
         navigateButton(container, 'forward'),
         bulkImportButton(container),
+        typeFilter(container),
       ]);
       expect(zoneChildren(container, 'center')).toEqual([
         beginReviewButton(container),
