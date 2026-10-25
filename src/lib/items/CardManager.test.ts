@@ -300,6 +300,8 @@ function makeEditor(initial: string) {
       return text;
     },
     getValue: () => text,
+    getLine: (line: number) => text.split('\n')[line],
+    posToOffset,
     offsetToPos: (offset: number) => {
       const lines = text.slice(0, offset).split('\n');
       return { line: lines.length - 1, ch: lines[lines.length - 1].length };
@@ -6402,5 +6404,681 @@ describe('making a card of text cut from inside a block', () => {
       sourceFile
     );
     expect(result).toMatchObject({ before: '', after: '' });
+  });
+});
+
+describe('create, from a selection over several lines', () => {
+  const sourceFile = { path: 'articles/source.md', extension: 'md' } as TFile;
+  const reviewCard = {
+    file: { path: 'cards/new.md', extension: 'md' },
+    data: { id: 'card-1' },
+  };
+  const LINK = '[[new|ir-hide-title]]';
+  const EMBED = '!' + LINK;
+
+  type Section = { type: string; start: number; end: number };
+
+  /**
+   * A card manager whose metadata cache reads any note as `sections`, its
+   * lines `listLines` items of a list.
+   */
+  function setUp(sections: Section[], listLines: number[] = []) {
+    const toCache = ({ type, start, end }: Section) => ({
+      type,
+      position: { start: { offset: start }, end: { offset: end } },
+    });
+    const listItems = listLines.map((line) => ({
+      position: { start: { line }, end: { line } },
+    }));
+    const manager = new CardManager(
+      makePlugin({
+        metadataCache: {
+          getFileCache: () => ({ listItems }),
+          computeMetadataAsync: async () => ({
+            sections: sections.map(toCache),
+          }),
+        },
+      }),
+      makeRepo()
+    );
+    const createFileAndEntry = vi
+      .spyOn(
+        manager as unknown as {
+          createFileAndEntry: (text: string, file: TFile) => Promise<unknown>;
+        },
+        'createFileAndEntry'
+      )
+      .mockResolvedValue(reviewCard);
+    const notify = vi.spyOn(Obsidian, 'notify').mockImplementation(() => {});
+    vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue(LINK);
+    return { manager, createFileAndEntry, notify };
+  }
+
+  /**
+   * An editor over `doc` with `from`–`to` selected, the head at `head`, and
+   * a CodeMirror view reading it as the editor does.
+   */
+  function makeSelectedEditor(
+    doc: string,
+    from: number,
+    to: number,
+    head = to
+  ) {
+    const editor = makeEditor(doc);
+    const cm = {
+      state: {
+        doc: {
+          toString: () => editor.text,
+          line: (n: number) => ({
+            from: editor.posToOffset({ line: n - 1, ch: 0 }),
+          }),
+        },
+      },
+    };
+    return Object.assign(editor, {
+      cm,
+      getSelection: () => doc.slice(from, to),
+      getCursor: (which?: 'from' | 'to') =>
+        editor.offsetToPos(
+          which === 'from' ? from : which === 'to' ? to : head
+        ),
+    });
+  }
+
+  /** What making a card did: the note's text, the card's, and the result. */
+  async function made(
+    createFileAndEntry: { mock: { calls: unknown[][] } },
+    editor: ReturnType<typeof makeEditor>,
+    make: () => Promise<unknown>
+  ) {
+    const result = await make();
+    return {
+      text: editor.text,
+      card: createFileAndEntry.mock.calls,
+      result,
+      selected: editor.setSelection.mock.calls,
+    };
+  }
+
+  const lineStart = (doc: string, line: number) =>
+    doc
+      .split('\n')
+      .slice(0, line)
+      .reduce((sum, l) => sum + l.length + 1, 0);
+  const lineOf = (doc: string, at: number) =>
+    doc.slice(0, at).split('\n').length - 1;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('makes one card from the first line through the last, the selection its answer, its embed in their place', async () => {
+    const doc = 'aa bb\n\ncc dd\n\nee';
+    const { manager, createFileAndEntry } = setUp([
+      { type: 'paragraph', start: 0, end: 5 },
+      { type: 'paragraph', start: 7, end: 12 },
+      { type: 'paragraph', start: 14, end: 16 },
+    ]);
+    const editor = makeSelectedEditor(doc, 3, 9);
+
+    const result = await manager.create(
+      editor as never,
+      { file: sourceFile } as never
+    );
+
+    expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+      `aa ${LEFT} bb\n\ncc ${RIGHT} dd`,
+      sourceFile
+    );
+    expect(editor.text).toBe(`${EMBED}\n\nee`);
+    expect(result).toMatchObject({
+      line: 'aa bb\n\ncc dd',
+      before: '',
+      after: '',
+    });
+  });
+
+  it('reads the lines of the selection, wherever its head is', async () => {
+    const doc = 'aa bb\ncc dd';
+    const { manager, createFileAndEntry } = setUp([
+      { type: 'paragraph', start: 0, end: 11 },
+    ]);
+
+    await manager.create(
+      makeSelectedEditor(doc, 3, 8, 3) as never,
+      { file: sourceFile } as never
+    );
+
+    expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+      `aa ${LEFT} bb\ncc ${RIGHT} dd`,
+      sourceFile
+    );
+  });
+
+  it("cuts the first line's list marker off, as from a line of its own, but keeps the later lines'", async () => {
+    const doc = 'x\n\n- aa bb\n- cc dd\n\ny';
+    const { manager, createFileAndEntry } = setUp(
+      [
+        { type: 'paragraph', start: 0, end: 1 },
+        { type: 'list', start: 3, end: 18 },
+        { type: 'paragraph', start: 20, end: 21 },
+      ],
+      [2, 3]
+    );
+    const cases = [
+      { from: doc.indexOf('bb'), card: `aa ${LEFT} bb\n- cc ${RIGHT} dd` },
+      // From inside the first line's marker, which starts with its text
+      { from: doc.indexOf('- aa'), card: `${LEFT} aa bb\n- cc ${RIGHT} dd` },
+    ];
+    for (const { from, card } of cases) {
+      const editor = makeSelectedEditor(doc, from, doc.indexOf(' dd'));
+      createFileAndEntry.mockClear();
+
+      await manager.create(editor as never, { file: sourceFile } as never);
+
+      expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+        card,
+        sourceFile
+      );
+      expect(editor.text).toBe(`x\n\n- ${EMBED}\n\ny`);
+    }
+  });
+
+  it('leaves the blank space around the selection out of the answer, and the lines that hold only that out of the card', async () => {
+    const doc = 'aa bb\n\ncc dd\n\nee';
+    const sections = [
+      { type: 'paragraph', start: 0, end: 5 },
+      { type: 'paragraph', start: 7, end: 12 },
+      { type: 'paragraph', start: 14, end: 16 },
+    ];
+    const cases = [
+      // From a blank line into the next paragraph
+      { from: 6, to: 9, card: `${LEFT} cc ${RIGHT} dd`, rest: 'aa bb\n\n' },
+      // A line selected whole, up to the next line's start
+      { from: 7, to: 13, card: `${LEFT} cc dd ${RIGHT}`, rest: 'aa bb\n\n' },
+      // Ending on a blank line, the line before it the last
+      { from: 3, to: 13, card: `aa ${LEFT} bb\n\ncc dd ${RIGHT}`, rest: '' },
+    ];
+    for (const { from, to, card, rest } of cases) {
+      const { manager, createFileAndEntry } = setUp(sections);
+      const editor = makeSelectedEditor(doc, from, to);
+
+      await manager.create(editor as never, { file: sourceFile } as never);
+
+      expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+        card,
+        sourceFile
+      );
+      expect(editor.text).toBe(`${rest}${EMBED}\n\nee`);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('leaves a list item selected no further than its marker out of the card, as a line selected up to its start is', async () => {
+    const doc = 'x\n\n- aa bb\n- cc dd\n\n1. ee\n2. ff';
+    const { manager, createFileAndEntry } = setUp(
+      [
+        { type: 'paragraph', start: 0, end: 1 },
+        { type: 'list', start: 3, end: 18 },
+        { type: 'list', start: 20, end: doc.length },
+      ],
+      [2, 3, 5, 6]
+    );
+    const cases = [
+      // Up to the next item's text, onto one line
+      {
+        from: doc.indexOf('bb'),
+        to: doc.indexOf('cc'),
+        card: `aa ${LEFT} bb ${RIGHT}`,
+        text: `x\n\n- ${EMBED}\n- cc dd\n\n1. ee\n2. ff`,
+      },
+      // Into a numbered item's marker, the lines before it kept
+      {
+        from: doc.indexOf('bb'),
+        to: doc.indexOf('. ff'),
+        card: `aa ${LEFT} bb\n- cc dd\n\n1. ee ${RIGHT}`,
+        text: `x\n\n- ${EMBED}\n2. ff`,
+      },
+    ];
+    for (const { from, to, card, text } of cases) {
+      const editor = makeSelectedEditor(doc, from, to);
+      createFileAndEntry.mockClear();
+
+      await manager.create(editor as never, { file: sourceFile } as never);
+
+      expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+        card,
+        sourceFile
+      );
+      expect(editor.text).toBe(text);
+    }
+  });
+
+  it('makes no card of a selection of nothing but a list marker', async () => {
+    const doc = '- aa\n- bb';
+    for (const [from, to] of [
+      [4, 7],
+      [5, 7],
+    ]) {
+      const { manager, createFileAndEntry, notify } = setUp(
+        [{ type: 'list', start: 0, end: doc.length }],
+        [0, 1]
+      );
+      const editor = makeSelectedEditor(doc, from, to);
+
+      const result = await manager.create(
+        editor as never,
+        { file: sourceFile } as never
+      );
+
+      expect(result).toBeUndefined();
+      expect(createFileAndEntry).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledOnce();
+      expect(editor.text).toBe(doc);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('makes a list item selected whole, from its marker to the next line, a card of its text', async () => {
+    const doc = '- aa bb\n- cc';
+    const { manager, createFileAndEntry } = setUp(
+      [{ type: 'list', start: 0, end: doc.length }],
+      [0, 1]
+    );
+    const editor = makeSelectedEditor(doc, 0, 8);
+
+    await manager.create(editor as never, { file: sourceFile } as never);
+
+    expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+      `${LEFT} aa bb ${RIGHT}`,
+      sourceFile
+    );
+    expect(editor.text).toBe(`- ${EMBED}\n- cc`);
+    // Off the embed's line, onto the next
+    expect(editor.setSelection).toHaveBeenCalledExactlyOnceWith({
+      line: 1,
+      ch: 0,
+    });
+  });
+
+  it('makes no card outside a note, nor with nothing selected', async () => {
+    const doc = 'aa\nbb';
+    for (const [file, to] of [
+      [null, 4],
+      [sourceFile, 0],
+    ] as const) {
+      const { manager, createFileAndEntry, notify } = setUp([]);
+      const editor = makeSelectedEditor(doc, 0, to);
+
+      const result = await manager.create(editor as never, { file } as never);
+
+      expect(result ?? null).toBeNull();
+      expect(createFileAndEntry).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledOnce();
+      expect(editor.text).toBe(doc);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('makes no card of a selection of only blank space', async () => {
+    const doc = 'aa\n \n\nbb';
+    const { manager, createFileAndEntry, notify } = setUp([]);
+    const editor = makeSelectedEditor(doc, 2, 6);
+
+    const result = await manager.create(
+      editor as never,
+      { file: sourceFile } as never
+    );
+
+    expect(result).toBeUndefined();
+    expect(createFileAndEntry).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledOnce();
+    expect(editor.text).toBe(doc);
+  });
+
+  it('gives a card cut from inside a code block its fence, and closes the block before the embed', async () => {
+    const doc = 'p\n\n```py\nx #ab\nef\n```\n\nq r';
+    const { manager, createFileAndEntry } = setUp([
+      { type: 'paragraph', start: 0, end: 1 },
+      { type: 'code', start: 3, end: 21 },
+      { type: 'paragraph', start: 23, end: 26 },
+    ]);
+    const editor = makeSelectedEditor(doc, doc.indexOf('f\n'), doc.length - 2);
+
+    const result = await manager.create(
+      editor as never,
+      { file: sourceFile } as never
+    );
+
+    const delimited = `e${LEFT} f\n\`\`\`\n\nq ${RIGHT} r`;
+    expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+      '```py\n' + delimited,
+      sourceFile,
+      undefined,
+      delimited
+    );
+    expect(editor.text).toBe(`p\n\n\`\`\`py\nx #ab\n\`\`\`\n${EMBED}`);
+    expect(result).toMatchObject({ line: 'ef\n```\n\nq r' });
+  });
+
+  it('keeps the quote the selection starts in a quote in the card', async () => {
+    const doc = '> aa bb\n> cc\n\ndd';
+    const { manager, createFileAndEntry } = setUp([
+      { type: 'blockquote', start: 0, end: 12 },
+      { type: 'paragraph', start: 14, end: 16 },
+    ]);
+    const editor = makeSelectedEditor(doc, doc.indexOf('bb'), doc.length);
+
+    await manager.create(editor as never, { file: sourceFile } as never);
+
+    expect(createFileAndEntry.mock.calls[0][0]).toBe(
+      `> aa ${LEFT} bb\n> cc\n\ndd ${RIGHT}`
+    );
+    expect(editor.text).toBe(EMBED);
+  });
+
+  /**
+   * A note of blocks of every kind the card's span can cut into or cross,
+   * blank lines apart, their sections as the metadata cache reads them,
+   * the lines of its lists, and the length of each line's list marker as the
+   * line of a card made of it is cut.
+   */
+  const noteArb = fc
+    .array(
+      fc.record({
+        kind: fc.constantFrom(
+          'paragraph',
+          'list',
+          'code',
+          'math',
+          'blockquote'
+        ),
+        lines: fc.array(
+          fc.string({
+            unit: fc.constantFrom('a', 'b', ' ', '#', '*', '_', '\\', '`'),
+            maxLength: 6,
+          }),
+          { minLength: 1, maxLength: 3 }
+        ),
+        marker: fc.constantFrom('- ', '1. ', '  - [ ] ', '* '),
+      }),
+      { minLength: 1, maxLength: 5 }
+    )
+    .chain((blocks) =>
+      fc
+        .array(fc.constantFrom('\n\n', '\n\n\n', '\n \n'), {
+          minLength: blocks.length,
+          maxLength: blocks.length,
+        })
+        .map((gaps) => {
+          let doc = '';
+          const sections: Section[] = [];
+          const listLines: number[] = [];
+          const cuts = new Map<number, number>();
+          blocks.forEach(({ kind, lines, marker }, i) => {
+            if (i > 0) doc += gaps[i];
+            const firstLine = lineOf(doc, doc.length);
+            const body =
+              kind === 'list'
+                ? lines.map((l) => marker + l)
+                : kind === 'code'
+                  ? ['```py', ...lines, '```']
+                  : kind === 'math'
+                    ? ['$$', ...lines, '$$']
+                    : kind === 'blockquote'
+                      ? lines.map((l) => '> ' + l)
+                      : lines;
+            if (kind === 'list') {
+              lines.forEach((_, j) => {
+                listLines.push(firstLine + j);
+                // As far as the line of a card is cut, `* ` not
+                const item = marker + lines[j];
+                cuts.set(
+                  firstLine + j,
+                  item.length - Markdown.getListItemText(item).length
+                );
+              });
+            }
+            const start = doc.length;
+            doc += body.join('\n');
+            sections.push({ type: kind, start, end: doc.length });
+          });
+          return { doc, sections, listLines, cuts };
+        })
+    );
+
+  /** {@link noteArb} with a selection in it from one line into another. */
+  const multiLineArb = noteArb
+    .chain((note) =>
+      fc
+        .tuple(fc.nat(note.doc.length), fc.nat(note.doc.length))
+        .map(([x, y]) => ({
+          ...note,
+          from: Math.min(x, y),
+          to: Math.max(x, y),
+          headAtStart: x > y,
+        }))
+    )
+    .filter(({ doc, from, to }) => lineOf(doc, from) !== lineOf(doc, to));
+
+  it('makes the card of a selection over several lines of the span of its lines, the selection its answer, the blank space around it left out', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        multiLineArb,
+        async ({ doc, sections, listLines, cuts, from, to, headAtStart }) => {
+          const selected = doc.slice(from, to);
+          const a = from + selected.length - selected.trimStart().length;
+          let b = to - selected.length + selected.trimEnd().length;
+          fc.pre(a < b);
+          const first = lineOf(doc, a);
+          let last = lineOf(doc, b);
+          const cut = (line: number) => cuts.get(line) ?? 0;
+          // A last line selected no further than its marker is no line of it
+          while (last > first && b - lineStart(doc, last) <= cut(last)) {
+            b = a + doc.slice(a, lineStart(doc, last)).trimEnd().length;
+            last = lineOf(doc, b);
+          }
+          const nothing =
+            first === last && b - lineStart(doc, first) <= cut(first);
+
+          const quick = setUp(sections, listLines);
+          const editor = makeSelectedEditor(
+            doc,
+            from,
+            to,
+            headAtStart ? from : to
+          );
+          const actual = await made(quick.createFileAndEntry, editor, () =>
+            quick.manager.create(
+              editor as never,
+              {
+                file: sourceFile,
+              } as never
+            )
+          );
+
+          // The same card as of the trimmed selection on its one line, or
+          // as of the span of its lines chosen in selection mode
+          const expected = setUp(sections, listLines);
+          const reference = makeSelectedEditor(doc, a, b);
+          const spanFrom = lineStart(doc, first) + (cuts.get(first) ?? 0);
+          const spanTo = lineStart(doc, last) + doc.split('\n')[last].length;
+          const wanted = await made(
+            expected.createFileAndEntry,
+            reference,
+            () =>
+              first === last
+                ? expected.manager.create(
+                    reference as never,
+                    {
+                      file: sourceFile,
+                    } as never
+                  )
+                : expected.manager.createFromSelection(
+                    reference as never,
+                    { file: sourceFile } as never,
+                    {
+                      from: spanFrom,
+                      to: spanTo,
+                      text: doc.slice(spanFrom, spanTo),
+                    },
+                    [Math.max(a - spanFrom, 0), b - spanFrom]
+                  )
+          );
+          expect(actual).toStrictEqual(wanted);
+          expect(actual.card).toHaveLength(nothing ? 0 : 1);
+          vi.restoreAllMocks();
+        }
+      ),
+      { numRuns: 300 }
+    );
+  });
+
+  it('makes the card of plain text selected from inside one line into another of those whole lines, delimiters at the ends of the selection', async () => {
+    // Paragraphs and list items of plain words, which need no escaping nor
+    // imputing, and a selection from a word's char on one line to one on a
+    // later line, none of it in a list marker
+    const plainNoteArb = fc
+      .array(
+        fc.record({
+          list: fc.boolean(),
+          lines: fc.array(fc.stringMatching(/^[ab]{1,3}( [ab]{1,3}){0,2}$/), {
+            minLength: 1,
+            maxLength: 3,
+          }),
+        }),
+        { minLength: 1, maxLength: 4 }
+      )
+      .map((blocks) => {
+        let doc = '';
+        const sections: Section[] = [];
+        const listLines: number[] = [];
+        // Where each line's text starts, past its marker, and ends
+        const contents: { from: number; to: number }[] = [];
+        blocks.forEach(({ list, lines }, i) => {
+          if (i > 0) doc += '\n\n';
+          const start = doc.length;
+          lines.forEach((line, j) => {
+            if (j > 0) doc += '\n';
+            if (list) {
+              listLines.push(lineOf(doc, doc.length));
+              doc += '- ';
+            }
+            contents.push({ from: doc.length, to: doc.length + line.length });
+            doc += line;
+          });
+          sections.push({
+            type: list ? 'list' : 'paragraph',
+            start,
+            end: doc.length,
+          });
+        });
+        return { doc, sections, listLines, contents };
+      })
+      .filter(({ contents }) => contents.length > 1);
+    const caseArb = plainNoteArb.chain((note) =>
+      fc
+        .tuple(
+          fc.nat(note.contents.length - 1),
+          fc.nat(note.contents.length - 1),
+          fc.nat(),
+          fc.nat(),
+          fc.boolean()
+        )
+        .filter(([i, j]) => i !== j)
+        .map(([i, j, x, y, headAtStart]) => {
+          const [first, last] = [
+            note.contents[Math.min(i, j)],
+            note.contents[Math.max(i, j)],
+          ];
+          // Starting on a word's char, ending after one
+          const starts = [...note.doc.slice(first.from, first.to)]
+            .map((c, k) => (c === ' ' ? -1 : first.from + k))
+            .filter((k) => k >= 0);
+          const ends = [...note.doc.slice(last.from, last.to)]
+            .map((c, k) => (c === ' ' ? -1 : last.from + k + 1))
+            .filter((k) => k >= 0);
+          return {
+            ...note,
+            first,
+            last,
+            from: starts[x % starts.length],
+            to: ends[y % ends.length],
+            headAtStart,
+          };
+        })
+    );
+
+    await fc.assert(
+      fc.asyncProperty(
+        caseArb,
+        async ({
+          doc,
+          sections,
+          listLines,
+          first,
+          last,
+          from,
+          to,
+          headAtStart,
+        }) => {
+          const { manager, createFileAndEntry } = setUp(sections, listLines);
+          const editor = makeSelectedEditor(
+            doc,
+            from,
+            to,
+            headAtStart ? from : to
+          );
+
+          await manager.create(editor as never, { file: sourceFile } as never);
+
+          expect(createFileAndEntry).toHaveBeenCalledExactlyOnceWith(
+            doc.slice(first.from, from) +
+              `${LEFT} ${doc.slice(from, to)} ${RIGHT}` +
+              doc.slice(to, last.to),
+            sourceFile
+          );
+          expect(editor.text).toBe(
+            doc.slice(0, first.from) + EMBED + doc.slice(last.to)
+          );
+          vi.restoreAllMocks();
+        }
+      ),
+      { numRuns: 200 }
+    );
+  });
+
+  it('leaves the note so that the text the card was made of, put back in place of its embed, restores it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        multiLineArb,
+        async ({ doc, sections, listLines, from, to }) => {
+          fc.pre(doc.slice(from, to).trim() !== '');
+          const { manager } = setUp(sections, listLines);
+          const editor = makeSelectedEditor(doc, from, to);
+
+          const result = (await manager.create(
+            editor as never,
+            { file: sourceFile } as never
+          )) as { line: string; before: string; after: string } | undefined;
+          if (!result) {
+            expect(editor.text).toBe(doc);
+            vi.restoreAllMocks();
+            return;
+          }
+
+          const placed = result.before + EMBED + result.after;
+          const at = editor.text.indexOf(placed);
+          expect(at).toBeGreaterThanOrEqual(0);
+          expect(
+            editor.text.slice(0, at) +
+              result.line +
+              editor.text.slice(at + placed.length)
+          ).toBe(doc);
+          vi.restoreAllMocks();
+        }
+      ),
+      { numRuns: 300 }
+    );
   });
 });

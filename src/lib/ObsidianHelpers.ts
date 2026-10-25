@@ -743,13 +743,45 @@ export class ObsidianHelpers {
   }
 
   /**
-   * Get the line the cursor is currently in,
-   * subtracting leading bullet points
-   * TODO: handle multi-line formatting
+   * Take `tags` off `file`'s frontmatter, leaving its other tags (see
+   * `stripFrontmatterTags`), and dropping `tags` once nothing is left in it.
+   * A file with no frontmatter is left alone.
+   * @returns how to take it back: each tag key it changed put back as it was
    */
-  static smartGetline(editor: Editor, file: TFile, app: App) {
-    const cursor = editor.getCursor();
-    const block = this.getCurrentLine(editor);
+  static async removeFrontMatterTags(
+    file: TFile,
+    tags: readonly string[],
+    app: App
+  ): Promise<() => Promise<void>> {
+    let before: Record<string, unknown> = {};
+    await this.updateFrontMatter(
+      file,
+      (frontmatter) => {
+        before = stripFrontmatterTags(frontmatter, tags);
+      },
+      app
+    );
+    return async () => {
+      if (Object.keys(before).length === 0) return;
+      await this.updateFrontMatter(
+        file,
+        (frontmatter) => Object.assign(frontmatter, before),
+        app
+      );
+    };
+  }
+
+  /**
+   * Get line `lineNumber`, by default the one the cursor is in,
+   * subtracting leading bullet points
+   */
+  static smartGetline(
+    editor: Editor,
+    file: TFile,
+    app: App,
+    lineNumber = editor.getCursor().line
+  ) {
+    const block = { line: editor.getLine(lineNumber), lineNumber };
     // check if we're in a bullet list
     const listItems = app.metadataCache.getFileCache(file)?.listItems;
     const defaultReturn = {
@@ -773,7 +805,7 @@ export class ObsidianHelpers {
     const newStart = block.line.length - withoutBullet.length;
     return {
       line: withoutBullet,
-      lineNumber: cursor.line,
+      lineNumber,
       start: newStart,
       end: block.line.length,
     };
