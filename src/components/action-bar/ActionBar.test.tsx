@@ -201,7 +201,7 @@ function undoButton(container: HTMLElement): HTMLButtonElement {
 }
 
 function typeFilter(container: HTMLElement): HTMLElement {
-  const filter = container.querySelector<HTMLElement>('.ir-type-filter');
+  const filter = container.querySelector<HTMLElement>('.ir-type-filter-button');
   if (!filter) throw new Error('type filter not rendered');
   return filter;
 }
@@ -565,6 +565,7 @@ vi.mock('lucide-react', async () => {
     EllipsisVertical: () => null,
     Eye: () => null,
     FileText: () => null,
+    Funnel: () => null,
     House: () => null,
     Scissors: () => null,
     SkipForward: () => null,

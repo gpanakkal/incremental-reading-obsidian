@@ -2,66 +2,87 @@
 import { ReviewContextProvider } from '#/components/ReviewContext';
 import { NOTE_TYPES, type NoteType } from '#/lib/types';
 import fc from 'fast-check';
-import { type ComponentChild, render } from 'preact';
+import { Scope } from 'obsidian';
+import { render } from 'preact';
+import { act } from 'preact/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ReviewTypeFilter, typeToggleId } from './ReviewTypeFilter';
+import { ReviewTypeFilter } from './ReviewTypeFilter';
 
 // #region HELPERS
 
-/** Render a component into a detached jsdom container and return it. */
-function mount(node: ComponentChild): HTMLElement {
-  const container = document.createElement('div');
-  document.body.appendChild(container);
-  render(node as never, container);
-  return container;
+let mounted: HTMLElement | null = null;
+
+function unmount() {
+  const root = mounted;
+  mounted = null;
+  if (root) void act(() => render(null, root));
+  document.body.innerHTML = '';
 }
 
 /**
- * Put `types` on in the store and mount the filter. Returns the container and
- * the toggle action, which is all the filter reaches out of itself for.
+ * Put `types` on in the store, mount the filter and open its menu. Returns the
+ * toggle action, which is all the filter reaches out of itself for.
  *
- * Mocks are cleared here rather than in `afterEach`: the properties below run
- * this many times per `it`, and a spy counted across cases would read as a
- * click the filter never made.
+ * Mocks are made here rather than shared: the properties below run this many
+ * times per `it`, and a spy counted across cases would read as a click the
+ * filter never made.
  */
-function mountFilter(types: readonly NoteType[]) {
-  document.body.innerHTML = '';
-  reduxState.typesToReview = types.reduce(
-    (acc, type) => Object.assign(acc, { [type]: true }),
-    {} as Partial<Record<NoteType, true>>
+function mountOpenFilter(types: readonly NoteType[]) {
+  unmount();
+  reduxState.typesToReview = Object.fromEntries(
+    types.map((type) => [type, true])
   );
   const toggleReviewType = vi.fn();
-  const container = mount(
-    <ReviewContextProvider
-      plugin={{ actions: { toggleReviewType } } as never}
-      reviewView={{} as never}
-      reviewManager={{} as never}
-    >
-      <ReviewTypeFilter />
-    </ReviewContextProvider>
-  );
-  return { container, toggleReviewType };
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  mounted = container;
+  void act(() => {
+    render(
+      <ReviewContextProvider
+        plugin={
+          {
+            actions: { toggleReviewType },
+            app: {
+              scope: new Scope(),
+              keymap: { pushScope: vi.fn(), popScope: vi.fn() },
+            },
+          } as never
+        }
+        reviewView={{} as never}
+        reviewManager={{} as never}
+      >
+        <ReviewTypeFilter />
+      </ReviewContextProvider>,
+      container
+    );
+  });
+  void act(() => {
+    container
+      .querySelector('.ir-type-filter-button')
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+  });
+  return { toggleReviewType };
 }
 
-function toggle(container: HTMLElement, type: NoteType): HTMLButtonElement {
-  const button = container.querySelector<HTMLButtonElement>(
-    `#${typeToggleId(type)}`
+function row(type: NoteType): HTMLElement {
+  const found = document.querySelector<HTMLElement>(
+    `.ir-type-filter-row[data-type="${type}"]`
   );
-  if (!button) throw new Error(`no toggle rendered for ${type}`);
-  return button;
+  if (!found) throw new Error(`no row for ${type}`);
+  return found;
 }
 
-/** Every set of types review can be left filtered to, the empty one included. */
 const typesArb = fc.subarray([...NOTE_TYPES]);
 
 // #endregion
 
 // lucide-react resolves `useContext` against its own preact copy, which is not
 // the instance rendering here (see the react→preact aliasing TODO in
-// vitest.config.ts). Which glyph each type draws is not this component's
-// behavior — `typeIcons.ts` decides that.
+// vitest.config.ts). The glyphs are not this component's behavior.
 vi.mock('lucide-react', () => ({
+  Check: () => null,
   FileText: () => null,
+  Funnel: () => null,
   Scissors: () => null,
 }));
 
@@ -79,114 +100,33 @@ vi.mock('react-redux', () => ({
 
 describe('ReviewTypeFilter', () => {
   afterEach(() => {
-    document.body.innerHTML = '';
+    unmount();
     vi.restoreAllMocks();
   });
 
-  it('renders one toggle per item type, in reading order', () => {
-    // An article yields snippets and a snippet yields cards, so the row reads
-    // left to right the way a session runs.
-    const { container } = mountFilter(NOTE_TYPES);
-
-    const ids = Array.from(
-      container.querySelectorAll('.ir-type-filter-toggle')
-    ).map((el) => el.id);
-
-    expect(ids).toEqual(NOTE_TYPES.map(typeToggleId));
-  });
-
-  it('holds the toggles in a single box rather than loose in the bar', () => {
-    // The group is one field, like the priority input beside it: styles.css
-    // hangs the box, the icon size and the enabled colours off this class.
-    const { container } = mountFilter(NOTE_TYPES);
-
-    const group = container.querySelector('.ir-type-filter');
-
-    expect(group).not.toBeNull();
-    expect(group?.querySelectorAll('.ir-type-filter-toggle')).toHaveLength(
-      NOTE_TYPES.length
-    );
-  });
-
-  it('tags each toggle with its type, which the tints hang off', () => {
-    // styles.css gives an enabled toggle the same wash the queue table gives
-    // that type's rows, and reaches both through `data-type`.
-    const { container } = mountFilter(NOTE_TYPES);
-
-    for (const type of NOTE_TYPES) {
-      expect(toggle(container, type).dataset.type).toBe(type);
-    }
-  });
-
-  it('marks a toggle enabled exactly when its type is being reviewed', () => {
+  it('shows the types review draws from as checked', () => {
     fc.assert(
       fc.property(typesArb, (types) => {
-        const { container } = mountFilter(types);
+        mountOpenFilter(types);
 
         for (const type of NOTE_TYPES) {
-          const enabled = types.includes(type);
-          // The whole class list, not just `is-enabled`: styles.css reaches
-          // the toggle through `ir-type-filter-toggle`, and a disabled one
-          // must carry that and nothing else.
-          expect(Array.from(toggle(container, type).classList)).toEqual(
-            enabled
-              ? ['ir-type-filter-toggle', 'is-enabled']
-              : ['ir-type-filter-toggle']
-          );
-          expect(toggle(container, type).getAttribute('aria-pressed')).toBe(
-            String(enabled)
+          expect(row(type).getAttribute('aria-checked')).toBe(
+            String(types.includes(type))
           );
         }
       })
     );
   });
 
-  it('says in its tooltip whether each type is being reviewed', () => {
-    // `aria-label` is both the accessible name and what Obsidian renders its
-    // themed tooltip from, so the two cannot disagree.
-    fc.assert(
-      fc.property(typesArb, (types) => {
-        const labelsWith = (on: readonly NoteType[]) => {
-          const { container } = mountFilter(on);
-          return NOTE_TYPES.map((type) =>
-            toggle(container, type).getAttribute('aria-label')
-          );
-        };
-        const reviewing = labelsWith(NOTE_TYPES);
-        const notReviewing = labelsWith([]);
-        const shown = labelsWith(types);
-
-        NOTE_TYPES.forEach((type, i) => {
-          expect(reviewing[i]).toMatch(type);
-          expect(notReviewing[i]).toMatch(type);
-          expect(reviewing[i]).not.toBe(notReviewing[i]);
-          expect(shown[i]).toBe(
-            types.includes(type) ? reviewing[i] : notReviewing[i]
-          );
-        });
-      })
-    );
-  });
-
-  it('leaves the icons unlabelled so only the toggle draws a tooltip', () => {
-    // A label on the SVG renders a second tooltip inside the button's own —
-    // and crashes Obsidian's tooltip handler, which is HTMLElement-only.
-    const { container } = mountFilter(NOTE_TYPES);
-
-    for (const svg of container.querySelectorAll('svg')) {
-      expect(svg.hasAttribute('aria-label')).toBe(false);
-    }
-  });
-
-  it('hands the clicked type to the filter, whatever it was set to', () => {
+  it('asks review to flip the pressed type', () => {
     fc.assert(
       fc.property(
         typesArb,
         fc.constantFrom(...NOTE_TYPES),
         (types, clicked) => {
-          const { container, toggleReviewType } = mountFilter(types);
+          const { toggleReviewType } = mountOpenFilter(types);
 
-          toggle(container, clicked).click();
+          void act(() => row(clicked).click());
 
           expect(toggleReviewType.mock.calls).toEqual([[clicked]]);
         }
@@ -194,26 +134,13 @@ describe('ReviewTypeFilter', () => {
     );
   });
 
-  it('changes nothing on its own — the click only asks', () => {
-    // The rendered state comes from the store, so a toggle that painted itself
-    // would disagree with review the moment the change was rejected or racing.
-    fc.assert(
-      fc.property(
-        typesArb,
-        fc.constantFrom(...NOTE_TYPES),
-        (types, clicked) => {
-          const { container } = mountFilter(types);
+  it('gives the icon a tooltip of its own', () => {
+    mountOpenFilter(NOTE_TYPES);
 
-          toggle(container, clicked).click();
-
-          expect(
-            toggle(container, clicked).classList.contains('is-enabled')
-          ).toBe(types.includes(clicked));
-          expect(toggle(container, clicked).getAttribute('aria-pressed')).toBe(
-            String(types.includes(clicked))
-          );
-        }
-      )
-    );
+    expect(
+      document
+        .querySelector('.ir-type-filter-button')
+        ?.getAttribute('aria-label')
+    ).toMatch(/\S/);
   });
 });
