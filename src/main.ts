@@ -124,7 +124,7 @@ import {
   SQLJSRepository,
   StartupCancelledError,
 } from './lib/repository/SQLJSRepository';
-import { initReviewCommands } from './lib/review-commands';
+import { initReviewCommands, isReviewCoolingDown } from './lib/review-commands';
 import {
   type ReviewReminder,
   startReviewReminder,
@@ -1611,19 +1611,31 @@ export default class IncrementalReadingPlugin extends Plugin {
      */
     const inReadingMode = (view: MarkdownView | ReviewView) =>
       view instanceof MarkdownView && view.currentMode === view.previewMode;
-    /** The one check both commands make, so they can't drift apart. */
+    /**
+     * The one check both commands make, so they can't drift apart.
+     *
+     * In the review tab, the double-click guard the action bar arms when the
+     * item changes holds them as it holds the review commands: a hotkey
+     * pressed twice mustn't make a snippet or card of the item that just
+     * replaced the one it was meant for. A held press is still reported as
+     * available, so the hotkey is used up rather than typed into the editor.
+     * A note's own tab has no items to cycle through, so nothing holds it.
+     */
     const extractCallback =
       (kind: 'snippet' | 'card') =>
       (checking: boolean): boolean | void => {
         if (!this.reviewManager) return false;
-        if (extractFromPdf(kind, checking)) return true;
+        const reviewView = this.getActiveReviewView();
+        // Held presses run as checks: available, but nothing done
+        const onlyCheck =
+          checking || (!!reviewView && isReviewCoolingDown(this, reviewView));
+        if (extractFromPdf(kind, onlyCheck)) return true;
         if (!this.app.workspace.activeEditor?.editor) return false;
 
         const view =
-          this.getActiveReviewView() ??
-          this.app.workspace.getActiveViewOfType(MarkdownView);
+          reviewView ?? this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view || inReadingMode(view)) return false;
-        if (checking) return true;
+        if (onlyCheck) return true;
 
         if (view instanceof ReviewView) void this.actions.extract(kind, view);
         else if (kind === 'snippet') void this.actions.createSnippet();

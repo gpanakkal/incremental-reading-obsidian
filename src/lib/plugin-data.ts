@@ -1,4 +1,5 @@
 import type { App } from 'obsidian';
+import { ACTION_COOLDOWN_SECONDS } from './constants';
 import { LEGACY_DEVICE_STATE_KEYS } from './device-state';
 import {
   DEFAULT_SETTINGS,
@@ -71,6 +72,17 @@ export function parsePluginData(raw: unknown): IRPluginData {
           .join(',')
       )
     : [...DEFAULT_SETTINGS.autoImportTags];
+  // Read on every press in review: a hand edit past the slider's range could
+  // hold the bar for minutes after each item, and a non-number holds nothing
+  // the slider can show.
+  const cooldown: unknown = settings.actionCooldownSeconds;
+  settings.actionCooldownSeconds =
+    typeof cooldown === 'number' && !Number.isNaN(cooldown)
+      ? Math.min(
+          Math.max(cooldown, ACTION_COOLDOWN_SECONDS.MIN),
+          ACTION_COOLDOWN_SECONDS.MAX
+        )
+      : ACTION_COOLDOWN_SECONDS.DEFAULT;
   // One the dropdown doesn't offer would show as none of its choices
   if (!isAutoImportMode(settings.autoImportMode)) {
     settings.autoImportMode = DEFAULT_SETTINGS.autoImportMode;

@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { App } from 'obsidian';
 import {
+  E2E_PLUGIN_DATA,
   isPageClosedError,
   projectRoot,
   sourceVaultPath,
@@ -165,6 +166,10 @@ export async function pushVaultCopy(device: AndroidDevice, prefix: string) {
   for (const { source, target } of files) {
     await device.push(source, `${deviceRoot}/${target}`);
   }
+  await device.push(
+    Buffer.from(JSON.stringify(E2E_PLUGIN_DATA)),
+    `${deviceRoot}/${pluginDir}/data.json`
+  );
   return name;
 }
 

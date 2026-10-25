@@ -37,7 +37,10 @@ import {
  */
 void (async () => {
   await deleteVaultCopy(path.join(testVaultsDir, 'codegen'));
-  const vaultPath = await createVaultCopy('', 'codegen', true);
+  // Real defaults, not the test seed: this vault is for a person to look at
+  const vaultPath = await createVaultCopy('', 'codegen', true, {
+    settings: {},
+  });
   const app = await launchElectron(vaultPath);
 
   const window = await openVault(app, vaultPath);

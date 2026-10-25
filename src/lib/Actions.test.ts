@@ -1,3 +1,4 @@
+import { actionCooldownFor } from '#/lib/action-cooldown';
 import { Actions, itemName, type ActionStackEntry } from '#/lib/Actions';
 import type {
   BulkOutcome,
@@ -2782,6 +2783,142 @@ describe('Actions.confirmSelection', () => {
         expect(prompt).not.toHaveBeenCalled();
         vi.restoreAllMocks();
       })
+    );
+  });
+});
+
+describe('Actions — the double-click guard on making snippets and cards', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const timeArb = fc.integer({ min: 0, max: 1e9 });
+  /** Whole milliseconds, up past the setting's maximum, 0 (off) included. */
+  const cooldownMsArb = fc.integer({ min: 0, max: 5000 });
+  const delayArb = fc.integer({ min: 0, max: 10_000 });
+  /** A selection with something in it. */
+  const filledEditorArb = editorArb.filter((e) => e.anchor !== e.head);
+
+  /**
+   * A review tab with something selected to make a snippet or card of: text
+   * in its editor, or text in a PDF article's viewer.
+   */
+  function selectedIn(
+    source: 'text' | 'pdf',
+    editor: { doc: string; anchor: number; head: number }
+  ) {
+    if (source === 'text') return makeSelectingView(editor).reviewView;
+    const { reviewView } = makeSelectingView(null, pdfFile());
+    withPdfViewer(reviewView, SELECTED);
+    return reviewView;
+  }
+
+  /**
+   * Stub every maker so that it takes `wait` ms by the guard's clock, as the
+   * database write and a card's answer modal do.
+   */
+  function slowMakers(actions: Actions, startedAt: number, wait: number) {
+    const takeWait = () => {
+      vi.spyOn(performance, 'now').mockReturnValue(startedAt + wait);
+      return Promise.resolve(null);
+    };
+    vi.spyOn(actions, 'createSnippet').mockImplementation(takeWait);
+    vi.spyOn(actions, 'createCard').mockImplementation(takeWait);
+    vi.spyOn(actions, 'createPdfSnippet').mockImplementation(takeWait);
+    vi.spyOn(actions, 'createPdfCard').mockImplementation(takeWait);
+    vi.spyOn(CardAnswerModal, 'promptForCardAnswer').mockResolvedValue([0, 1]);
+  }
+
+  it.each(['extract', 'confirmSelection'] as const)(
+    '%s arms the guard from the moment making starts, not once it is made',
+    async (method) => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom('text' as const, 'pdf' as const),
+          selectionKindArb,
+          filledEditorArb,
+          timeArb,
+          delayArb,
+          cooldownMsArb,
+          delayArb,
+          async (source, kind, editor, pressedAt, wait, cooldownMs, delay) => {
+            const actions = new Actions(makePlugin() as never);
+            slowMakers(actions, pressedAt, wait);
+            wireSelectionMode(method === 'extract' ? null : kind);
+            const reviewView = selectedIn(source, editor);
+            vi.spyOn(performance, 'now').mockReturnValue(pressedAt);
+
+            await (method === 'extract'
+              ? actions.extract(kind, reviewView)
+              : actions.confirmSelection(reviewView));
+
+            expect(
+              actionCooldownFor(reviewView).isCoolingDown(
+                pressedAt + delay,
+                cooldownMs / 1000
+              )
+            ).toBe(delay < cooldownMs);
+            vi.restoreAllMocks();
+          }
+        )
+      );
+    }
+  );
+
+  it('arms nothing on a press that makes nothing', async () => {
+    // Entering the mode, refusing the other kind's command in it, and asking
+    // for a selection first: none would make a second snippet if repeated
+    const pressesMakingNothing = fc.oneof(
+      fc.record({
+        what: fc.constant('enter mode' as const),
+        kind: selectionKindArb,
+        editor: editorArb.map((e) => ({ ...e, head: e.anchor })),
+      }),
+      fc.record({
+        what: fc.constant('other kind in mode' as const),
+        kind: selectionKindArb,
+        editor: filledEditorArb,
+      }),
+      fc.record({
+        what: fc.constant('confirm with nothing selected' as const),
+        kind: selectionKindArb,
+        editor: editorArb.map((e) => ({ ...e, head: e.anchor })),
+      })
+    );
+    await fc.assert(
+      fc.asyncProperty(
+        pressesMakingNothing,
+        timeArb,
+        fc.integer({ min: 1, max: 5000 }),
+        async ({ what, kind, editor }, pressedAt, cooldownMs) => {
+          Notice.reset();
+          const { actions, createSnippet, createCard } = wireSelectionActions();
+          const other = kind === 'snippet' ? 'card' : 'snippet';
+          wireSelectionMode(
+            what === 'enter mode'
+              ? null
+              : what === 'other kind in mode'
+                ? other
+                : kind
+          );
+          const { reviewView } = makeSelectingView(editor);
+          vi.spyOn(performance, 'now').mockReturnValue(pressedAt);
+
+          await (what === 'confirm with nothing selected'
+            ? actions.confirmSelection(reviewView)
+            : actions.extract(kind, reviewView));
+
+          expect(createSnippet).not.toHaveBeenCalled();
+          expect(createCard).not.toHaveBeenCalled();
+          expect(
+            actionCooldownFor(reviewView).isCoolingDown(
+              pressedAt,
+              cooldownMs / 1000
+            )
+          ).toBe(false);
+          vi.restoreAllMocks();
+        }
+      )
     );
   });
 });

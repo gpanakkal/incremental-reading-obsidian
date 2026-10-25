@@ -9,6 +9,7 @@ import {
 import { useLeafHistory } from '#/hooks/useLeafHistory';
 import { usePacked } from '#/hooks/usePacked';
 import { useCurrentItem, useQueue } from '#/hooks/useReactQuery';
+import { actionCooldownFor } from '#/lib/action-cooldown';
 import type { ActionStackEntry } from '#/lib/Actions';
 import {
   DISMISS_ICON_STROKE,
@@ -98,10 +99,18 @@ export function ActionBar() {
   useLayoutEffect(() => {
     leadRef.current?.classList.toggle(PACKED_CLASS, leadPacked);
   }, [leadPacked]);
+  const ignoreDuringCooldown = useCooldownGuard(
+    itemActions ? `${currentItem.data.id}:${showAnswer}` : null
+  );
 
   return (
     <>
-      <div ref={barRef} className="ir-action-bar" tabIndex={-1}>
+      <div
+        ref={barRef}
+        className="ir-action-bar"
+        tabIndex={-1}
+        onClickCapture={ignoreDuringCooldown}
+      >
         {/* setting a tabIndex makes the action bar focusable */}
         <div ref={leadRef} className="ir-bar-lead">
           <GlobalActions />
@@ -129,7 +138,13 @@ export function ActionBar() {
             </>
           )}
         </div>
-        <div className="ir-bar-center">
+        <div
+          className={
+            itemActions
+              ? `ir-bar-center ${COOLDOWN_GUARD_CLASS}`
+              : 'ir-bar-center'
+          }
+        >
           {page === 'home' && <HomeActions />}
           {itemActions && selectionMode !== null && (
             <SelectionActions kind={selectionMode} />
@@ -166,12 +181,78 @@ export function ActionBar() {
         )}
       </div>
       {gradedCard && gradePlacement === 'row' && (
-        <div className="ir-grade-row">
+        <div
+          className={`ir-grade-row ${COOLDOWN_GUARD_CLASS}`}
+          onClickCapture={ignoreDuringCooldown}
+        >
           <GradeGroup card={gradedCard} />
         </div>
       )}
     </>
   );
+}
+
+/**
+ * On what the double-click guard holds: the item's own actions (the bar's
+ * center while an item is up, and the grade row) and undo. Navigation — the
+ * history arrows, home, the type filter, ⋮ — stays live: a second click there
+ * lands on the same button, doing what the first asked for again rather than
+ * acting on an item the user hasn't seen.
+ */
+const COOLDOWN_GUARD_CLASS = 'ir-cooldown-guard';
+
+/**
+ * Arms the review tab's double-click guard whenever `shown` — what the bar's
+ * buttons act on — changes, and returns the capture-phase click handler that
+ * swallows clicks on {@link COOLDOWN_GUARD_CLASS} while it is armed (see
+ * `ActionCooldown`).
+ *
+ * `shown` names the item and whether a card's answer is up: revealing the
+ * answer puts the grades where the show-answer button was, so a double click
+ * on it would grade the card unread. Home and a bar without an item are both
+ * null, so leaving for home or arriving from it arms the guard too.
+ *
+ * Armed in a layout effect, which runs once the new buttons are in the DOM and
+ * before they are painted: the guard runs from when the item can be seen, not
+ * from the click that asked for it, since grading and fetching the next item
+ * take a while of their own.
+ *
+ * Nothing changes on screen while it is armed. Dimming the bar for a fraction
+ * of a second after every review would flicker, and `pointer-events: none`
+ * would drop the hover state and tooltip of a button under the pointer.
+ * Swallowing the click alone leaves every button looking and hovering as
+ * before. Keyboard activation (Enter or Space on a focused button) and taps
+ * arrive as clicks too, so they are covered.
+ */
+function useCooldownGuard(
+  shown: string | null
+): (e: {
+  target: EventTarget | null;
+  stopPropagation(): void;
+  preventDefault(): void;
+}) => void {
+  const { plugin, reviewView } = useReviewContext();
+  const cooldown = actionCooldownFor(reviewView);
+  useLayoutEffect(() => {
+    cooldown.show(shown, performance.now());
+  }, [cooldown, shown]);
+
+  return (e) => {
+    // Duck-typed: a popout window's elements fail `instanceof Element` here
+    const target = e.target as Partial<Element> | null;
+    if (!target?.closest?.(`.${COOLDOWN_GUARD_CLASS}`)) return;
+    if (
+      cooldown.isCoolingDown(
+        performance.now(),
+        plugin.settings.actionCooldownSeconds
+      )
+    ) {
+      // Capture phase on an ancestor: stopping here keeps the click from ever
+      // reaching the button's own handler.
+      e.stopPropagation();
+      e.preventDefault();
+    }
+  };
 }
 
 /**
@@ -386,6 +467,7 @@ function UndoAction() {
         lastAction ? `Undo ${lastAction.description}` : 'Nothing to undo'
       }
       id="undo-button"
+      className={COOLDOWN_GUARD_CLASS}
       disabled={lastAction === undefined}
       handleClick={async () => {
         await actions.undo();

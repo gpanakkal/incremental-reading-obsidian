@@ -76,7 +76,8 @@ const noThrottlingArgs = isHeadless
 export async function createVaultCopy(
   prefix: string,
   subDirectory?: string,
-  adminElevated?: boolean
+  adminElevated?: boolean,
+  pluginData: object = E2E_PLUGIN_DATA
 ) {
   await fs.mkdir(testVaultsDir, { recursive: true });
   const id = crypto.randomUUID().slice(0, 8);
@@ -107,9 +108,23 @@ export async function createVaultCopy(
       await fs.symlink(path.join(projectRoot, file), target);
     }
   }
+  await fs.writeFile(
+    path.join(pluginDir, 'data.json'),
+    JSON.stringify(pluginData)
+  );
 
   return vaultPath;
 }
+
+/**
+ * The plugin data every test vault starts with. It turns the double-click
+ * guard off: with it on, the action bar ignores clicks for a moment after the
+ * item changes, and tests click the next item's buttons as soon as they show.
+ * The guard's own spec turns it back on with `setPluginSetting`. A vault made
+ * for a person rather than a test (`codegen.ts`) passes its own data instead,
+ * so what they see are the plugin's real defaults.
+ */
+export const E2E_PLUGIN_DATA = { settings: { actionCooldownSeconds: 0 } };
 
 export const deleteVaultCopy = async (vaultPath: string) =>
   await fs.rm(vaultPath, { recursive: true, force: true });

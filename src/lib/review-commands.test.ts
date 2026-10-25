@@ -7,6 +7,7 @@ import ReviewView from '#/views/ReviewView';
 import fc from 'fast-check';
 import type { Command, TFile } from 'obsidian';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { actionCooldownFor } from './action-cooldown';
 import { currentItemQueryKey, queryClient } from './query-client';
 import { initReviewCommands } from './review-commands';
 import { setCurrentItemId, setShowAnswer, store } from './store';
@@ -167,6 +168,69 @@ function relinkSetup({
     throw new Error(`${RELINK_ID} registered no checkCallback`);
   }
   return { command, check: command.checkCallback, plugin, commands };
+}
+
+/** The commands the double-click guard holds, and the state each acts in. */
+const GUARDED_COMMANDS = [
+  { id: 'mark-review', type: 'article', showAnswer: false, dismissed: false },
+  { id: 'mark-review', type: 'card', showAnswer: false, dismissed: false },
+  { id: 'skip-item', type: 'article', showAnswer: false, dismissed: false },
+  { id: 'dismiss-item', type: 'article', showAnswer: false, dismissed: false },
+  { id: 'undismiss-item', type: 'article', showAnswer: false, dismissed: true },
+  { id: 'grade-card-again', type: 'card', showAnswer: true, dismissed: false },
+  { id: 'grade-card-hard', type: 'card', showAnswer: true, dismissed: false },
+  { id: 'grade-card-good', type: 'card', showAnswer: true, dismissed: false },
+  { id: 'grade-card-easy', type: 'card', showAnswer: true, dismissed: false },
+] as const;
+
+type GuardedCase = (typeof GUARDED_COMMANDS)[number];
+
+/**
+ * One guarded command over a review tab holding an item fit for it, with the
+ * guard set to `seconds`. `acted` says whether running it did anything: called
+ * an action, or (for a card's mark-review) put the answer up.
+ */
+function guardedSetup(guarded: GuardedCase, seconds: number) {
+  const view = { file: {} } as unknown as ReviewView;
+  const actions = {
+    review: vi.fn(async () => {}),
+    skipItem: vi.fn(async () => {}),
+    dismissItem: vi.fn(async () => {}),
+    unDismissItem: vi.fn(async () => {}),
+    gradeCard: vi.fn(async () => {}),
+  };
+  const commands = new Map<string, Command>();
+  const plugin = {
+    addCommand: (command: Command) => commands.set(command.id, command),
+    getActiveReviewView: () => view,
+    settings: { actionCooldownSeconds: seconds },
+    actions,
+  } as unknown as IncrementalReadingPlugin;
+  initReviewCommands(plugin);
+
+  store.dispatch(setShowAnswer(guarded.showAnswer));
+  store.dispatch(setCurrentItemId('item-1'));
+  queryClient.setQueryData(currentItemQueryKey('item-1'), {
+    data: {
+      id: 'item-1',
+      type: guarded.type,
+      dismissed: guarded.dismissed,
+      reference: 'note.md',
+    },
+    file: {},
+  } as unknown as MaybeMissingItem);
+
+  const check = commands.get(guarded.id)?.checkCallback;
+  if (!check) throw new Error(`${guarded.id} registered no checkCallback`);
+  const acted = () =>
+    Object.values(actions).some((action) => action.mock.calls.length > 0) ||
+    (!guarded.showAnswer && store.getState().showAnswer);
+  return { view, check, acted };
+}
+
+/** Put the clock that both the bar and the commands read at `now`. */
+function setNow(now: number) {
+  vi.spyOn(performance, 'now').mockReturnValue(now);
 }
 
 // #endregion
@@ -360,5 +424,51 @@ describe('review commands on a missing item', () => {
       paths: [],
     });
     expect(commands.get(id)?.checkCallback?.(true)).toBe(true);
+  });
+});
+
+describe('double-click guard on review commands', () => {
+  afterEach(() => {
+    store.dispatch(setShowAnswer(false));
+  });
+
+  // Per command, not one property drawing commands at random: a draw can
+  // leave a command never run inside the guard, so dropping its check passes.
+  it.each(GUARDED_COMMANDS)(
+    '$id ($type) holds a run before the guard ends and runs one at or after',
+    (guarded) => {
+      fc.assert(
+        fc.property(
+          fc.integer({ min: 0, max: 1e9 }),
+          fc.integer({ min: 0, max: 5000 }),
+          fc.integer({ min: 0, max: 10_000 }),
+          (changedAt, cooldownMs, delay) => {
+            const { view, check, acted } = guardedSetup(
+              guarded,
+              cooldownMs / 1000
+            );
+            actionCooldownFor(view).show('item-1', changedAt);
+            setNow(changedAt + delay);
+
+            check(false);
+
+            expect(acted()).toBe(delay >= cooldownMs);
+          }
+        )
+      );
+    }
+  );
+
+  it('still reports a held command as available, so its hotkey is used up', () => {
+    fc.assert(
+      fc.property(fc.constantFrom(...GUARDED_COMMANDS), (guarded) => {
+        const { view, check, acted } = guardedSetup(guarded, 1);
+        actionCooldownFor(view).show('item-1', 0);
+        setNow(0);
+
+        expect(check(true)).toBe(true);
+        expect(acted()).toBe(false);
+      })
+    );
   });
 });

@@ -33,6 +33,7 @@ import {
   FOLDER_CHIP_PATH_CLASS,
   FOLDER_CHIPS_CLASS,
   FOLDER_LIST_ROW_CLASS,
+  formatCooldown,
   formatPriority,
   formatRetention,
   formatRolloverHour,
@@ -123,6 +124,7 @@ const settingsArb = fc.record({
     copyOnImport: fc.boolean(),
     createEmptyInCurrentFolder: fc.boolean(),
     dayRolloverOffset: fc.integer(),
+    actionCooldownSeconds: fc.double(),
     showAdvancedImportCommands: fc.boolean(),
     showAdvancedImportMenuItems: fc.boolean(),
     fuzzTextReviews: fc.boolean(),
@@ -841,6 +843,21 @@ describe('formatPriority', () => {
   });
 });
 
+describe('formatCooldown', () => {
+  it('shows each step the slider allows to one decimal place', () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 0, max: 20 }), (tenths) => {
+        const shown = formatCooldown(tenths / 10);
+
+        expect(shown).toMatch(/^\d\.\d(?!\d)/);
+        expect(parseFloat(shown)).toBe(tenths / 10);
+        // a step reached by adding 0.1s carries float noise
+        expect(formatCooldown(tenths * 0.1)).toBe(shown);
+      })
+    );
+  });
+});
+
 describe('formatRetention', () => {
   it('shows each retention step to two decimal places', () => {
     fc.assert(
@@ -886,6 +903,7 @@ describe('IRSettingTab.getControlValue', () => {
             'createEmptyInCurrentFolder'
           ),
           dayRolloverOffset: tab.getControlValue('dayRolloverOffset'),
+          actionCooldownSeconds: tab.getControlValue('actionCooldownSeconds'),
           fuzzTextReviews: tab.getControlValue('fuzzTextReviews'),
           skipHomeScreen: tab.getControlValue('skipHomeScreen'),
           reviewTitleBar: tab.getControlValue('reviewTitleBar'),
@@ -920,6 +938,7 @@ describe('IRSettingTab.getControlValue', () => {
           copyOnImport: settings.copyOnImport,
           createEmptyInCurrentFolder: settings.createEmptyInCurrentFolder,
           dayRolloverOffset: settings.dayRolloverOffset,
+          actionCooldownSeconds: settings.actionCooldownSeconds,
           fuzzTextReviews: settings.fuzzTextReviews,
           skipHomeScreen: settings.skipHomeScreen,
           reviewTitleBar: settings.reviewTitleBar,
@@ -1021,6 +1040,7 @@ describe('IRSettingTab.setControlValue', () => {
       ['copyOnImport', fc.boolean()],
       ['createEmptyInCurrentFolder', fc.boolean()],
       ['dayRolloverOffset', fc.integer()],
+      ['actionCooldownSeconds', fc.double({ noNaN: true })],
       ['fuzzTextReviews', fc.boolean()],
       ['skipHomeScreen', fc.boolean()],
       ['reviewTitleBar', fc.constantFrom(...REVIEW_TITLE_BARS)],
@@ -1433,6 +1453,17 @@ describe('IRSettingTab.getSettingDefinitions', () => {
         },
       },
       {
+        control: {
+          type: 'slider',
+          key: 'actionCooldownSeconds',
+          min: 0,
+          max: 2,
+          step: 0.1,
+          defaultValue: 0.4,
+          displayFormat: formatCooldown,
+        },
+      },
+      {
         control: toggle('fuzzTextReviews'),
       },
       {
@@ -1667,6 +1698,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
     ).toEqual([
       ['defaultPriority', formatPriority],
       ['dayRolloverOffset', formatRolloverHour],
+      ['actionCooldownSeconds', formatCooldown],
       ['fsrsParams.request_retention', formatRetention],
     ]);
   });
@@ -1693,6 +1725,7 @@ describe('IRSettingTab.getSettingDefinitions', () => {
       'defaultPriority',
       'autoImportTags',
       'dayRolloverOffset',
+      'actionCooldownSeconds',
       'fsrsParams.request_retention',
       'fsrsParams.maximum_interval',
       'fsrsParams.learning_steps',

@@ -22,6 +22,7 @@ import {
   type WorkspaceLeaf,
 } from 'obsidian';
 import { type Grade, Rating } from 'ts-fsrs';
+import { actionCooldownFor } from './action-cooldown';
 import { refusedWrite, withCompensation } from './compensation';
 import { CONTENT_TITLE_SLICE_LENGTH, MS_PER_DAY } from './constants';
 import { flashSnippetContext } from './context-flash';
@@ -856,6 +857,7 @@ export class Actions {
       return;
     }
     if (isPdf) {
+      this._armCooldown(reviewView);
       await this._makeFromPdf(kind, reviewView);
       return;
     }
@@ -865,6 +867,7 @@ export class Actions {
       this.plugin.store.dispatch(setSelectionMode(kind));
       return;
     }
+    this._armCooldown(reviewView);
     if (kind === 'snippet') await this.createSnippet();
     else await this.createCard();
   };
@@ -903,6 +906,7 @@ export class Actions {
         );
         return;
       }
+      this._armCooldown(reviewView);
       this.plugin.store.dispatch(setSelectionMode(null));
       await this._makeFromPdf(kind, reviewView);
       return;
@@ -919,6 +923,7 @@ export class Actions {
       return;
     }
 
+    this._armCooldown(reviewView);
     this.plugin.store.dispatch(setSelectionMode(null));
     if (kind === 'snippet') {
       // Made of the editor's selection, so that is dropped only afterwards.
@@ -934,6 +939,17 @@ export class Actions {
     }
     this._dropSelection(cm);
   };
+
+  /**
+   * Start the review tab's double-click guard as a snippet or card starts
+   * being made, before any wait: the item stays on screen, so nothing else
+   * would arm it, and a second press of the button or hotkey would make a
+   * second one. Entering the mode, or a press that only explains why nothing
+   * was made, arms nothing.
+   */
+  private _armCooldown(reviewView: ReviewView) {
+    actionCooldownFor(reviewView).arm(performance.now());
+  }
 
   /** Leave selection mode having made nothing, and drop what was selected. */
   cancelSelection = (reviewView: ReviewView) => {
