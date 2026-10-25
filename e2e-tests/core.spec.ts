@@ -243,6 +243,57 @@ test.describe('Action Bar', () => {
     await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
   });
 
+  test('Can filter the upcoming items on the home screen by type', async () => {
+    await openNote(
+      window,
+      'sources/Memorizing a programming language using spaced repetition'
+    );
+    await executeCommandById(window, 'incremental-reading:import-article');
+    await finalizeArticleImport(window);
+    // A card is listed in the upcoming table though it is not due until
+    // tomorrow, so it needs no backdating here
+    const paragraph =
+      'Explain the security functions: Confidentiality, Integrity and Availability (CIA).';
+    await openNote(window, 'sources/Security Principles');
+    await scrollToText(window, paragraph);
+    await selectParagraph(window, paragraph);
+    await executeCommandById(window, 'incremental-reading:create-card');
+    await executeCommandById(window, 'incremental-reading:learn');
+
+    const articleItem = window.locator('.ir-queue-row[data-type="article"]');
+    const cardItem = window.locator('.ir-queue-row[data-type="card"]');
+    const filterButton = window.locator('css=.ir-type-filter-button');
+    const menu = window.getByRole('menu');
+    const typeRow = (type: string) =>
+      menu.locator(`css=.ir-type-filter-row[data-type="${type}"]`);
+    await expect(articleItem).toHaveCount(1);
+    await expect(cardItem).toHaveCount(1);
+
+    // only articles
+    await filterButton.click();
+    await typeRow('card').click();
+    await expect(cardItem).toHaveCount(0);
+    await expect(articleItem).toHaveCount(1);
+
+    // nothing at all, and nothing to begin a review of
+    await typeRow('article').click();
+    await expect(articleItem).toHaveCount(0);
+    await expect(window.locator('css=#begin-review-button')).toBeDisabled();
+
+    // articles back, cards still off
+    await typeRow('article').click();
+    await expect(articleItem).toHaveCount(1);
+    await expect(cardItem).toHaveCount(0);
+
+    // the filter set on the home screen is the one review draws from
+    await window.keyboard.press('Escape');
+    await window.locator('css=#begin-review-button').click();
+    await expect(reviewTitle(window, ARTICLE_TITLE)).toBeVisible();
+    await filterButton.click();
+    await expect(typeRow('card')).toHaveAttribute('aria-checked', 'false');
+    await expect(typeRow('article')).toHaveAttribute('aria-checked', 'true');
+  });
+
   test('Can review articles', async () => {
     await openNote(
       window,

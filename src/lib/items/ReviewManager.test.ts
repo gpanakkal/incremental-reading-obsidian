@@ -16,19 +16,20 @@ import {
 } from '#/lib/rebind-records';
 import { SQLJSRepository } from '#/lib/repository/SQLJSRepository';
 import type { SnippetHighlight } from '#/lib/SnippetOffsetTracker';
-import type {
-  ArticleRow,
-  IArticleBase,
-  ISnippetBase,
-  NoteType,
-  Readiness,
-  ReviewArticle,
-  ReviewCard,
-  ReviewItem,
-  ReviewSnippet,
-  SnippetRow,
-  SQLiteRepository,
-  SRSCardRow,
+import {
+  type ArticleRow,
+  type IArticleBase,
+  type ISnippetBase,
+  NOTE_TYPES,
+  type NoteType,
+  type Readiness,
+  type ReviewArticle,
+  type ReviewCard,
+  type ReviewItem,
+  type ReviewSnippet,
+  type SnippetRow,
+  type SQLiteRepository,
+  type SRSCardRow,
 } from '#/lib/types';
 import { getEndOfDay } from '#/lib/utils';
 import { makeLinkVault } from '#/test/link-vault';
@@ -326,6 +327,59 @@ function wireDueAt(dueTimes: number[]) {
   );
   return manager;
 }
+
+/** One queued item for {@link wireTypedQueue}: its type and due time. */
+type TypedDue = { type: NoteType; due: number };
+
+/**
+ * Wire a manager whose queue holds `items`, each fetched by its own type's
+ * manager, with ids `<type>-<index>` so every row is told apart. Returns the
+ * manager and each type's `fetchMany` spy.
+ */
+function wireTypedQueue(items: readonly TypedDue[]) {
+  const repo = makeRepo();
+  const manager = new ReviewManager(makePlugin(), repo);
+  const rows = (type: NoteType) =>
+    items.flatMap((item, i): (ArticleRow | SnippetRow | SRSCardRow)[] => {
+      if (item.type !== type) return [];
+      const fields = {
+        id: `${type}-${i}`,
+        reference: `${type}s/${i}.md`,
+        due: item.due,
+        due_fuzz: null,
+      };
+      if (type === 'article') return [makeArticleRow(fields)];
+      if (type === 'snippet') return [makeSnippetRow(fields)];
+      return [makeCardRow(fields)];
+    });
+  const reads = {
+    article: vi
+      .spyOn(manager.articles, 'fetchMany')
+      .mockResolvedValue(rows('article') as never),
+    snippet: vi
+      .spyOn(manager.snippets, 'fetchMany')
+      .mockResolvedValue(rows('snippet') as never),
+    card: vi
+      .spyOn(manager.cards, 'fetchMany')
+      .mockResolvedValue(rows('card') as never),
+  };
+  vi.spyOn(Obsidian, 'getNote').mockImplementation(
+    (reference: string) => ({ path: reference, extension: 'md' }) as TFile
+  );
+  return { manager, reads };
+}
+
+/** Order two strings by UTF-16 code unit, as the queue's tie-break does. */
+function byCodeUnit(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+/** Any set of item types, in the shape the store keeps the type filter in. */
+const typesToIncludeArb = fc
+  .subarray([...NOTE_TYPES])
+  .map((types) => Object.fromEntries(types.map((type) => [type, true])))
+  .map((types) => types as Partial<Record<NoteType, true>>);
 
 /**
  * Start of `date`'s review day under the rollover offset `makePlugin` sets:
@@ -1822,6 +1876,86 @@ describe('ReviewManager.getQueue', () => {
       expect(page.lastDue).toBeNull();
     });
   });
+
+  describe('filtered to item types', () => {
+    /** Any mix of items, due on a small domain so ties across types occur. */
+    const itemsArb = fc.array(
+      fc.record({
+        type: fc.constantFrom(...NOTE_TYPES),
+        due: fc.integer({ min: 1, max: 6 }).map((n) => n * 1000),
+      }),
+      { maxLength: 15 }
+    );
+
+    it('property: lists, counts and bounds only the items of the types given, and every item when none are given', async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          itemsArb,
+          fc.option(typesToIncludeArb, { nil: undefined }),
+          fc.option(
+            fc.record({
+              pageNumber: fc.nat({ max: 6 }),
+              entriesPerPage: fc.integer({ min: 1, max: 5 }),
+            }),
+            { nil: undefined }
+          ),
+          async (items, typesToInclude, slice) => {
+            vi.restoreAllMocks();
+            const { manager } = wireTypedQueue(items);
+
+            const page = await manager.getQueue({ typesToInclude, slice });
+
+            // Closed form from the generators: kept by type, then in the
+            // queue's (due, type, id) order
+            const kept = items
+              .map((item, i) => ({ ...item, id: `${item.type}-${i}` }))
+              .filter((item) => !typesToInclude || item.type in typesToInclude)
+              .sort(
+                (a, b) =>
+                  a.due - b.due ||
+                  byCodeUnit(a.type, b.type) ||
+                  byCodeUnit(a.id, b.id)
+              );
+            const ids = kept.map((item) => item.id);
+            const expected = slice
+              ? (() => {
+                  const lastPage = Math.max(
+                    0,
+                    Math.ceil(ids.length / slice.entriesPerPage) - 1
+                  );
+                  const start =
+                    Math.min(slice.pageNumber, lastPage) * slice.entriesPerPage;
+                  return ids.slice(start, start + slice.entriesPerPage);
+                })()
+              : ids;
+            expect(page.rows.map((row) => row.id)).toEqual(expected);
+            expect(page.totalRows).toBe(kept.length);
+            expect(page.firstDue?.getTime() ?? null).toBe(
+              kept.length ? kept[0].due : null
+            );
+            expect(page.lastDue?.getTime() ?? null).toBe(
+              kept.length ? kept[kept.length - 1].due : null
+            );
+          }
+        )
+      );
+    });
+
+    it('property: never reads the table of a type filtered out', async () => {
+      await fc.assert(
+        fc.asyncProperty(itemsArb, typesToIncludeArb, async (items, types) => {
+          vi.restoreAllMocks();
+          const { manager, reads } = wireTypedQueue(items);
+
+          await manager.getQueue({ typesToInclude: types });
+
+          for (const type of NOTE_TYPES) {
+            expect(reads[type]).toHaveBeenCalledTimes(type in types ? 1 : 0);
+          }
+        })
+      );
+    });
+  });
 });
 
 describe('ReviewManager.getQueue on a database it cannot read', () => {
@@ -1985,6 +2119,45 @@ describe('ReviewManager.findPageForDate', () => {
               : Math.floor(matchedIndex / entriesPerPage);
 
           expect(page).toBe(expected);
+        }
+      )
+    );
+  });
+
+  it('property: counts pages in the queue filtered to the types given, and in the whole queue when none are given', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.constantFrom(...NOTE_TYPES), { maxLength: 30 }),
+        fc.option(typesToIncludeArb, { nil: undefined }),
+        fc.integer({ min: 1, max: 6 }), // entries per page
+        fc.integer({ min: -3, max: 33 }), // target day offset
+        async (types, typesToInclude, entriesPerPage, dayOffset) => {
+          vi.restoreAllMocks();
+          // Item i is due just after day i starts, so it is the first item
+          // due on or after day i in the unfiltered queue.
+          const day0 = startOfDay(new Date(2024, 5, 1));
+          const { manager } = wireTypedQueue(
+            types.map((type, i) => ({ type, due: day0 + i * MS_PER_DAY + 1 }))
+          );
+
+          const page = await manager.findPageForDate(
+            new Date(2024, 5, 1 + dayOffset),
+            entriesPerPage,
+            typesToInclude
+          );
+
+          // The days of the items kept, already in queue order
+          const keptDays = types.flatMap((type, day) =>
+            !typesToInclude || type in typesToInclude ? [day] : []
+          );
+          const lastPage = Math.max(
+            0,
+            Math.ceil(keptDays.length / entriesPerPage) - 1
+          );
+          const index = keptDays.findIndex((day) => day >= dayOffset);
+          expect(page).toBe(
+            index === -1 ? lastPage : Math.floor(index / entriesPerPage)
+          );
         }
       )
     );

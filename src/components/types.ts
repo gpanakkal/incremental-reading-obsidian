@@ -1,4 +1,5 @@
 import type { getMarkdownController } from '#/lib/obsidian-editor';
+import type { IRPluginState } from '#/lib/store';
 import type { NoteType, ReviewText, SchedulingStrategy } from '#/lib/types';
 import type IncrementalReadingPlugin from '#/main';
 import type { TFile } from 'obsidian';
@@ -66,6 +67,11 @@ export interface QueueRow {
  */
 export type QueueSubset = {
   date?: Date;
+  /**
+   * The item types to list: the review type filter, typed off the store so
+   * the two can't drift apart. Left out, every type is listed.
+   */
+  typesToInclude?: IRPluginState['typesToReview'];
   slice?: {
     pageNumber: number;
     entriesPerPage: number;

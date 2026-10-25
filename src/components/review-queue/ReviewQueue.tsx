@@ -1,6 +1,7 @@
 import { LoadingSpinner } from '#/components/LoadingSpinner';
 import { useReviewContext } from '#/components/ReviewContext';
 import type { QueueRow } from '#/components/types';
+import { useAppSelector } from '#/hooks/useAppSelector';
 import { useQueue } from '#/hooks/useReactQuery';
 import { QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE } from '#/lib/constants';
 import { deleteMissingItem } from '#/lib/delete-missing-item';
@@ -83,7 +84,19 @@ export function queueRowMenu(
 export function ReviewQueue() {
   const { plugin, reviewManager } = useReviewContext();
   const store = useStore<IRPluginState>();
-  const [pageNumber, setPageNumber] = useState(0);
+  // The review type filter, which the queue shares with review itself: one
+  // setting, flipped from either screen
+  const typesToReview = useAppSelector((state) => state.typesToReview);
+  // The page is held together with the filter it was chosen under, and reads
+  // as the first page under any other. A filter change makes a different
+  // queue, where page 3 of the old one names nothing in particular. Tying the
+  // two together also discards a date lookup that resolves after the filter
+  // changed: its page was counted in the old queue.
+  const [paging, setPaging] = useState({ types: typesToReview, page: 0 });
+  const pageNumber = paging.types === typesToReview ? paging.page : 0;
+  const setPageNumber = (page: number) => {
+    setPaging({ types: typesToReview, page });
+  };
   /** Ticket for the most recent date lookup; older results are discarded. */
   const latestJump = useRef(0);
   /**
@@ -98,6 +111,7 @@ export function ReviewQueue() {
       pageNumber,
       entriesPerPage: QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
     },
+    typesToInclude: typesToReview,
   });
 
   function handleRowClick(row: QueueRow) {
@@ -116,7 +130,11 @@ export function ReviewQueue() {
   function handleJumpToDate(date: Date) {
     const token = ++latestJump.current;
     void reviewManager
-      .findPageForDate(date, QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE)
+      .findPageForDate(
+        date,
+        QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
+        typesToReview
+      )
       .then((page) => {
         if (token === latestJump.current) setPageNumber(page);
       })

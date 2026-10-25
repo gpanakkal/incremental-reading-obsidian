@@ -9,8 +9,10 @@ import {
   resetSession,
   setCurrentItemId,
   setShowAnswer,
+  setTypesToReview,
   store,
 } from '#/lib/store';
+import { NOTE_TYPES, type NoteType } from '#/lib/types';
 import * as UnimportArticleModule from '#/lib/unimport-article';
 import { Menu } from '#/test/__mocks__/obsidian';
 import * as RelinkModalModule from '#/views/RelinkModal';
@@ -154,6 +156,19 @@ async function flush() {
   await Promise.resolve();
 }
 
+/** A set of item types in the shape the store keeps the type filter in. */
+function typesRecord(
+  types: readonly NoteType[]
+): Partial<Record<NoteType, true>> {
+  return Object.fromEntries(types.map((type) => [type, true]));
+}
+
+/** What the queue last asked `useQueue` for. */
+function lastQueueSubset() {
+  const { calls } = vi.mocked(ReactQuery.useQueue).mock;
+  return calls[calls.length - 1][0];
+}
+
 // #endregion
 
 // lucide-react resolves `useContext` against its own preact copy, which is not
@@ -169,7 +184,10 @@ vi.mock('lucide-react', () => ({
 // "Cannot redefine property". This is the documented cannot-be-spied case.
 vi.mock('react-redux', () => ({
   useDispatch: () => vi.fn(),
-  useSelector: () => undefined,
+  // Read off the module's store, where the type filter lives. Nothing
+  // subscribes, so a test that changes the store renders again by hand.
+  useSelector: (selector: (state: unknown) => unknown) =>
+    selector(store.getState()),
   // The module's own store, so a row click is read back from where review
   // reads it.
   useStore: () => store,
@@ -775,6 +793,91 @@ describe('ReviewQueue', () => {
       expect(container.querySelector('.ir-queue-controls')).toBeNull();
       expect(container.querySelector('.ir-queue-table')).toBeNull();
     });
+  });
+});
+
+describe('ReviewQueue under the review type filter', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    store.dispatch(resetSession());
+    vi.restoreAllMocks();
+  });
+
+  /** Any set of item types, none included. */
+  const typesArb = fc.subarray([...NOTE_TYPES]);
+
+  it('property: lists and looks dates up in the queue filtered to the types under review', async () => {
+    await fc.assert(
+      fc.asyncProperty(typesArb, async (types) => {
+        vi.restoreAllMocks();
+        store.dispatch(setTypesToReview(types));
+        const { findPageForDate } = wireQueue({ totalRows: 41 });
+        const container = mount(<ReviewQueue />);
+
+        enterDate(container, '2026-07-13');
+        await flush();
+
+        expect(lastQueueSubset().typesToInclude).toEqual(typesRecord(types));
+        expect(findPageForDate).toHaveBeenCalledWith(
+          expect.any(Date),
+          QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
+          typesRecord(types)
+        );
+        render(null, container);
+      })
+    );
+  });
+
+  it('property: goes back to the first page when the filter changes', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: 5 }),
+        typesArb,
+        async (page, types) => {
+          vi.restoreAllMocks();
+          // 101 rows at 20 per page → 6 pages
+          wireQueue({
+            totalRows: 101,
+            findPageForDate: vi.fn().mockResolvedValue(page),
+          });
+          const container = mount(<ReviewQueue />);
+          enterDate(container, '2026-07-13');
+          await flush();
+          expect(pageIndicator(container)).toBe(`${page + 1}/6`);
+
+          store.dispatch(setTypesToReview(types));
+          render(<ReviewQueue />, container);
+
+          expect(pageIndicator(container)).toBe('1/6');
+          expect(lastQueueSubset().slice?.pageNumber).toBe(0);
+          render(null, container);
+          store.dispatch(resetSession());
+        }
+      )
+    );
+  });
+
+  it('ignores a date lookup that resolves after the filter changed, and heeds the next one', async () => {
+    const deferred: ((page: number) => void)[] = [];
+    const findPageForDate = vi.fn(
+      () => new Promise<number>((resolve) => deferred.push(resolve))
+    );
+    wireQueue({ totalRows: 101, findPageForDate });
+    const container = mount(<ReviewQueue />);
+
+    enterDate(container, '2026-07-13');
+    store.dispatch(setTypesToReview(['article']));
+    render(<ReviewQueue />, container);
+    deferred[0](4); // counted in the queue before the filter changed
+    await flush();
+
+    expect(pageIndicator(container)).toBe('1/6');
+
+    enterDate(container, '2026-08-01');
+    deferred[1](3);
+    await flush();
+
+    expect(pageIndicator(container)).toBe('4/6');
   });
 });
 

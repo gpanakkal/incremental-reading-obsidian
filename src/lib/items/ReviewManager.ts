@@ -605,12 +605,15 @@ export default class ReviewManager {
   async getQueue(subset?: QueueSubset): Promise<QueuePage> {
     const dueBy = subset?.date?.getTime() ?? Number.POSITIVE_INFINITY;
     const fetch = { dueBy, throwOnError: true };
+    const types = subset?.typesToInclude;
+    // A type filtered out is never read, rather than read and dropped
+    const wants = (type: NoteType) => !types || type in types;
 
     const [articleRows, snippetRows, cardRows, parentPaths] = await Promise.all(
       [
-        this.articles.fetchMany(fetch),
-        this.snippets.fetchMany(fetch),
-        this.cards.fetchMany(fetch),
+        wants('article') ? this.articles.fetchMany(fetch) : [],
+        wants('snippet') ? this.snippets.fetchMany(fetch) : [],
+        wants('card') ? this.cards.fetchMany(fetch) : [],
         this.#getParentPaths(),
       ]
     );
@@ -676,9 +679,16 @@ export default class ReviewManager {
    *
    * Returns the last page when nothing is due that late, and 0 for an empty
    * queue.
+   *
+   * `typesToInclude` must be the filter the table's pages were fetched with,
+   * or the rank is taken in a different queue than the one on screen.
    */
-  async findPageForDate(date: Date, entriesPerPage: number): Promise<number> {
-    const { rows } = await this.getQueue();
+  async findPageForDate(
+    date: Date,
+    entriesPerPage: number,
+    typesToInclude?: QueueSubset['typesToInclude']
+  ): Promise<number> {
+    const { rows } = await this.getQueue({ typesToInclude });
     const lastPage = Math.max(0, Math.ceil(rows.length / entriesPerPage) - 1);
 
     // One review day ends where the next begins, so the start of `date`'s day

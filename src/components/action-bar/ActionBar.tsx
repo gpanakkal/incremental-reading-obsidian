@@ -63,8 +63,9 @@ import { TextScheduler } from './TextScheduler';
  * it would take that guarantee with it.
  *
  * Leading zone: the actions that act on the review session rather than on the
- * item in it — the tab's history, home, the type filter, undo — and, on the
- * home screen, the notes not found in the database. Middle: the item's own
+ * item in it — the tab's history, home, the type filter, undo — with bulk
+ * import and the notes not found in the database in place of home and undo on
+ * the home screen. Middle: the item's own
  * actions. Trailing: the ⋮, which belongs to the view.
  *
  * A card's grades lead the middle zone while they fit there, and take a row of
@@ -104,23 +105,25 @@ export function ActionBar() {
         {/* setting a tabIndex makes the action bar focusable */}
         <div ref={leadRef} className="ir-bar-lead">
           <GlobalActions />
-          {page === 'home' && (
-            <>
-              <BulkImportAction />
-              <LeftoverAction />
-            </>
+          {page === 'home' ? (
+            <BulkImportAction />
+          ) : (
+            <ButtonWithIcon
+              tooltip="Go to home screen"
+              handleClick={() => {
+                dispatch(setPage('home'));
+              }}
+            >
+              <House />
+            </ButtonWithIcon>
           )}
-          {page !== 'home' && (
+          {/* On both pages, in the same slot: it filters the queue on home
+              and what review draws from, which are one setting */}
+          <ReviewTypeFilter />
+          {page === 'home' ? (
+            <LeftoverAction />
+          ) : (
             <>
-              <ButtonWithIcon
-                tooltip="Go to home screen"
-                handleClick={() => {
-                  dispatch(setPage('home'));
-                }}
-              >
-                <House />
-              </ButtonWithIcon>
-              <ReviewTypeFilter />
               <UndoAction />
               {itemActions && <Separator className={JOINT_SEPARATOR_CLASS} />}
             </>
@@ -192,14 +195,18 @@ const JOINT_SEPARATOR_CLASS = 'ir-bar-joint';
 
 function HomeActions() {
   const store = useStore<IRPluginState>();
+  const typesToReview = useAppSelector((state) => state.typesToReview);
   // The same slice the queue table asks for, so both read one cache entry
   // under the ['queue', subset] key rather than each fetching the queue.
   // React Query compares keys structurally, so the matching shape is enough.
+  // Filtered as review is, so the button is off when nothing of the types
+  // review would draw from is queued.
   const { data, isLoading, isError } = useQueue({
     slice: {
       pageNumber: 0,
       entriesPerPage: QUEUE_TABLE_DEFAULT_ENTRIES_PER_PAGE,
     },
+    typesToInclude: typesToReview,
   });
 
   // An empty queue is an empty *due* queue (getQueue returns only due items),
