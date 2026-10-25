@@ -3595,8 +3595,21 @@ describe('reads during the refetch after a reload (0174)', () => {
     });
     const repo = await TestRepository.create();
     const writeBinary = vi.fn().mockResolvedValue(undefined);
+    // A save writes a hidden sibling, checks its size and renames it into
+    // place, on desktop (`db-file.ts`)
+    const stat = async (path: string) => {
+      const call = writeBinary.mock.calls.filter(([to]) => to === path).pop();
+      if (!call) return null;
+      return { size: (call[1] as ArrayBuffer).byteLength, mtime: 0, ctime: 0 };
+    };
+    const adapter = {
+      writeBinary,
+      stat,
+      getFullPath: (path: string) => path,
+      fsPromises: { rename: async () => {} },
+    };
     repo.app = {
-      vault: { adapter: { writeBinary }, getFolderByPath: () => ({}) },
+      vault: { adapter, getFolderByPath: () => ({}) },
     } as never;
     // The real save, which the test repository stubs out
     type Saving = { save: () => Promise<void> };

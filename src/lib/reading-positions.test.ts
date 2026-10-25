@@ -252,6 +252,51 @@ describe('registerPositionFlushes', () => {
     expect(store.flushAll).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['the main document', () => document],
+    ['a popout', (popout: Document) => popout],
+  ])(
+    'writes waiting moves to localStorage, not the database, when %s goes hidden as the page goes away',
+    (_, hiddenDoc) => {
+      const store = makeStore();
+      const popout = makeDocument();
+      const { plugin } = makePlugin([popout]);
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+      registerPositionFlushes(plugin, store);
+
+      window.dispatchEvent(new Event('pagehide'));
+      expect(store.persist).toHaveBeenCalledOnce();
+      const doc = hiddenDoc(popout);
+      if (doc === document) doc.dispatchEvent(new Event('visibilitychange'));
+      else popout.setHidden(true);
+      expect(store.flushAll).not.toHaveBeenCalled();
+    }
+  );
+
+  it('flushes on hiding again once a page that went away comes back', () => {
+    const store = makeStore();
+    const { plugin } = makePlugin();
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    registerPositionFlushes(plugin, store);
+
+    window.dispatchEvent(new Event('pagehide'));
+    window.dispatchEvent(new Event('pageshow'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(store.flushAll).toHaveBeenCalledOnce();
+  });
+
+  it('stops listening for the page going away at unload', () => {
+    const store = makeStore();
+    const { plugin, unload } = makePlugin();
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    registerPositionFlushes(plugin, store);
+    unload();
+    store.persist.mockClear();
+
+    window.dispatchEvent(new Event('pagehide'));
+    expect(store.persist).not.toHaveBeenCalled();
+  });
+
   it('stops watching every document at unload', () => {
     const store = makeStore();
     const popout = makeDocument();

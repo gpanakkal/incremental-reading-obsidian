@@ -43,8 +43,21 @@ import initSqlJs, {
 } from 'sql.js';
 import { BulkMutateError } from './BulkMutateError';
 import { ContentWatch, type ContentMark } from './content-watch';
+import {
+  dbFilePaths,
+  fingerprintOf,
+  isDatabaseBuffer,
+  writeDatabaseFile,
+  type DbFilePaths,
+  type FileFingerprint,
+} from './db-file';
 import { markPhase } from './phase-timing';
-import { backupFileName, pruneBackups, pruneDatabase } from './retention';
+import {
+  backupFileName,
+  backupsNewestFirst,
+  pruneBackups,
+  pruneDatabase,
+} from './retention';
 import {
   mergeInto,
   mergeUnlessLossy,
@@ -93,19 +106,63 @@ const ITEM_TABLE_TO_NOTE_TYPE: Readonly<Record<string, NoteType>> = {
 export type BackupMarker = 'merge' | 'stale';
 
 /**
+ * How long a live file that holds no database must stay unchanged before
+ * the database in memory is saved over it (see `#holdDamaged`).
+ */
+export const DAMAGED_FILE_HOLD_MS = 10_000;
+
+/** Whether `a` and `b` hold the same bytes. */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
  * The database file is on disk but could not be loaded. Nothing was written
  * to it.
  */
 export class DatabaseLoadError extends Error {
-  constructor(readonly dbFilePath: string) {
+  /**
+   * @param corruptCopyPath where a file that held no database was copied
+   * before no local copy could stand in for it (see `#recover`)
+   */
+  constructor(
+    readonly dbFilePath: string,
+    readonly corruptCopyPath: string | null = null
+  ) {
     super(`Db file found at ${dbFilePath}, but failed to load`);
     this.name = 'DatabaseLoadError';
   }
 }
 
 /**
- * Startup was told to stop while it waited on Sync — the plugin is unloading.
- * Nothing was written.
+ * The live database file held no database at startup (empty, cut short, or
+ * corrupt), so it was copied aside and a local copy loaded in its place.
+ */
+export interface RecoveryReport {
+  /**
+   * `tmp`: the save under way when the file was cut short; `prev`: the file
+   * as this device last wrote it before its last save; `backup`: a backup
+   * in `BACKUP_DIRECTORY`.
+   */
+  source: 'tmp' | 'prev' | 'backup';
+  /** The file loaded. */
+  path: string;
+  /**
+   * Where the damaged file was copied, or null when there was no file to
+   * copy: it was missing, and a local copy stood in for it.
+   */
+  corruptCopyPath: string | null;
+}
+
+/** A file that opened as something other than a whole database. */
+class DamagedFileError extends Error {}
+
+/**
+ * Startup was told to stop while it waited on Sync, or on the user's answer
+ * to a failed backup (see {@link BackupFailurePrompt}) — the plugin is
+ * unloading. Nothing was written.
  */
 export class StartupCancelledError extends Error {
   constructor() {
@@ -125,11 +182,50 @@ export type SyncHold = (
   reason: SyncHoldReason
 ) => Promise<'waited' | 'at-once' | 'cancelled'>;
 
+/**
+ * Puts it to the user when backing up the database before a startup
+ * migration fails (0217), as a disk that is full would. The migration
+ * waits on the answer, and startup with it, for as long as it takes.
+ */
+export interface BackupFailurePrompt {
+  /**
+   * Asked each time the backup fails, the first time and after each retry.
+   * @returns `'retry'` to try the backup again, or `'proceed'` to migrate
+   * without one
+   */
+  ask(error: unknown): Promise<'retry' | 'proceed'>;
+  /**
+   * The backup landed, the user went ahead without it, or startup was
+   * cancelled: nothing is waiting on an answer any more.
+   */
+  close(): void;
+}
+
 export class SQLJSRepository implements SQLiteRepository {
   app: App;
   adapter: DataAdapter;
   db: Database | null = null;
   #dbFilePath: string;
+  /** The live file and its hidden siblings (see `db-file.ts`). */
+  #paths: DbFilePaths;
+  /**
+   * The file writes of saves, one after another: they share the `tmp` file,
+   * which two at once would mix.
+   */
+  #fileWrites: Promise<unknown> = Promise.resolve();
+  /**
+   * The live file as this instance last wrote it, or as it was when startup
+   * loaded it: a save copies the live file to `prev` only while it still
+   * matches, so `prev` never holds a file cut short or another device's.
+   */
+  #knownGood: FileFingerprint | null = null;
+  /** Whether the last {@link reloadDb} failed on a file holding no database. */
+  #loadDamaged = false;
+  /** The wait under way in {@link #holdDamaged}, if any. */
+  #damagedHold: number | null = null;
+  /** Bumped by every cancel, so a hold started before one never arms. */
+  #damagedHoldRun = 0;
+  #onRecovered?: (report: RecoveryReport) => void;
   #schema: string;
   #sql: initSqlJs.SqlJsStatic | null = null;
   protected pendingSaveCount: number = 0;
@@ -155,6 +251,12 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   #reloadPending = false;
   /**
+   * Whether the reload pass under way was held back by a transaction while
+   * it answered the file it read (see {@link #backUpMemory}), so left that
+   * file unanswered.
+   */
+  #answerHeldBack = false;
+  /**
    * Why writes are refused, or null while they are allowed. Set when the file
    * on disk is one this repository could not load, or one it did not expect
    * to find, so that nothing it holds in memory is saved over that file. A
@@ -171,8 +273,28 @@ export class SQLJSRepository implements SQLiteRepository {
   #fresh = false;
   /** The check, made by the first save, that a fresh database's path is free. */
   #freshPathCheck: Promise<void> | null = null;
+  /**
+   * Whether `db` is a local copy startup put in place of a missing file
+   * (see `start`), or of a damaged one that a whole file replaced while the
+   * user was asked about a failed backup (see `#backUpBeforeMigrating`),
+   * that no save has written to the file's path yet, nor any
+   * reload reconciled with a file found there. Its saves first check the
+   * path, and merge a file found there rather than write over it; see
+   * {@link save}.
+   */
+  #restoredPending = false;
+  /** The check, made by the first save, of a restored database's path. */
+  #restoredPathCheck: Promise<void> | null = null;
   /** Set by {@link dispose}; nothing is read from or written to disk after. */
   #disposed = false;
+  /** Settles {@link #whenDisposed}. */
+  #markDisposed!: () => void;
+  /** Settles on {@link dispose}, to stop waiting on what never answers. */
+  readonly #whenDisposed = new Promise<void>((resolve) => {
+    this.#markDisposed = resolve;
+  });
+  /** Asked while {@link start} runs; see {@link #backUpBeforeMigrating}. */
+  #backupFailurePrompt: BackupFailurePrompt | undefined;
   /** The reload under way, if any. See {@link #reloadFromDisk}. */
   #reloading: Promise<void> | null = null;
   /** Whether the file changed again while {@link #reloading} was under way. */
@@ -258,6 +380,8 @@ export class SQLJSRepository implements SQLiteRepository {
     onReloadFromDisk?: () => void | Promise<void>;
     onWriteBlocked?: (error: Error) => void;
     onWritesResumed?: () => void;
+    onRecovered?: (report: RecoveryReport) => void;
+    backupFailurePrompt?: BackupFailurePrompt;
     /** Stands in for this install's id (see `getDeviceId`), for tests. */
     deviceId?: string;
     /** Stands in for `Date.now` as the clock of stamps, for tests. */
@@ -272,6 +396,9 @@ export class SQLJSRepository implements SQLiteRepository {
       params.replaySettings ?? (() => DEFAULT_REPLAY_SETTINGS);
     this.adapter = params.app.vault.adapter;
     this.#dbFilePath = normalizePath(params.dbFilePath);
+    this.#paths = dbFilePaths(this.#dbFilePath);
+    this.#onRecovered = params.onRecovered;
+    this.#backupFailurePrompt = params.backupFailurePrompt;
     this.#schema = params.schema;
     this.#onMigrationFailure = params.onMigrationFailure;
     this.onReloadFromDisk = params.onReloadFromDisk;
@@ -293,15 +420,22 @@ export class SQLJSRepository implements SQLiteRepository {
    * @param onWriteBlocked called when writes start being refused; see
    * {@link blockWrites}
    * @param onWritesResumed called when a reload ends the refusal
+   * @param onRecovered called once startup has put a local copy in place of
+   * a file that held no database (see `#recover`)
    * @param holdForSync awaited before migrating the file, after which a wait
    * has the file read afresh: Sync may have delivered a newer one meanwhile.
    * Not awaited on a startup with nothing to migrate, a new database
    * included, nor ever again after startup: a copy Sync delivers later is
    * classified and taken in when it arrives (see `#answerIncoming`).
+   * @param backupFailurePrompt asked when backing up before a migration
+   * fails, startup waiting on the answer; without one, nothing is migrated
+   * unbacked: startup stops, or passes over a local copy (see
+   * `#backUpBeforeMigrating`)
    * @param signal an abort stops startup wherever it has got to
    * @throws {DatabaseLoadError} if the file exists but cannot be loaded
    * @throws {MigrationVerificationError} if migrating the file loses data
-   * @throws {StartupCancelledError} if `holdForSync` says not to go ahead
+   * @throws {StartupCancelledError} if `holdForSync` says not to go ahead,
+   * or `signal` aborts while `backupFailurePrompt` is asked
    * @throws if no database can be created
    */
   static async start(params: {
@@ -312,6 +446,8 @@ export class SQLJSRepository implements SQLiteRepository {
     onReloadFromDisk?: () => void | Promise<void>;
     onWriteBlocked?: (error: Error) => void;
     onWritesResumed?: () => void;
+    onRecovered?: (report: RecoveryReport) => void;
+    backupFailurePrompt?: BackupFailurePrompt;
     holdForSync?: SyncHold;
     signal?: AbortSignal;
     replaySettings?: () => ReplaySettings;
@@ -339,9 +475,14 @@ export class SQLJSRepository implements SQLiteRepository {
       // No file, no wait: a copy Sync delivers later is taken in by the
       // reload its arrival asks for (see `#answerIncoming`)
       if (await repo.dbExists()) {
+        // Taken before the read: a file that changes after it no longer
+        // matches, which only skips the next copy to `prev`
+        const before = await repo.#fingerprintLive();
         const loaded = await repo.loadDb();
         assertLive();
         if (loaded !== null) {
+          // Unless a migration saved since, which took its own
+          repo.#knownGood ??= before;
           repo.#classifyAtStartup(known);
           await repo.applyRetention();
           assertLive();
@@ -350,8 +491,37 @@ export class SQLJSRepository implements SQLiteRepository {
         // Sync deleting the file while startup waited for it leaves nothing
         // to load, which is no failure to load
         if (!repo.#waitedOnSync || (await repo.dbExists())) {
-          throw new DatabaseLoadError(repo.dbFilePath);
+          // A file from a newer plugin version, or one that can't be read,
+          // may hold everything: left alone
+          if (!repo.#loadDamaged) throw new DatabaseLoadError(repo.dbFilePath);
+          let report: RecoveryReport;
+          try {
+            report = await repo.#recover();
+          } finally {
+            assertLive(); // an unload meanwhile is no failure to load
+          }
+          await repo.#finishRecovery(report, known, assertLive);
+          return repo;
         }
+      }
+      // No file: a local copy left beside where it was stands in for it
+      // before a new database does (0217). Sync may bring the file down
+      // meanwhile, which its first save then merges (see `save`)
+      repo.#restoredPending = true;
+      let restored: Omit<RecoveryReport, 'corruptCopyPath'> | null;
+      try {
+        restored = await repo.#loadLocalCopy();
+      } finally {
+        assertLive();
+      }
+      if (!restored) repo.#restoredPending = false;
+      if (restored) {
+        await repo.#finishRecovery(
+          { ...restored, corruptCopyPath: null },
+          known,
+          assertLive
+        );
+        return repo;
       }
       const created = await repo.initDb();
       assertLive();
@@ -365,6 +535,211 @@ export class SQLJSRepository implements SQLiteRepository {
       repo.#starting = false;
       repo.#readinessChanged();
       signal?.removeEventListener('abort', stop);
+    }
+  }
+
+  /**
+   * Save memory over a live file that holds no database once it has stayed
+   * so, untouched, for {@link DAMAGED_FILE_HOLD_MS} (0217): the empty or cut
+   * copy another device's broken save left, which Sync carries everywhere.
+   * Writes stay refused meanwhile. Not at once: Sync writes in place, so a
+   * file read half-written looks the same until its write ends, and the
+   * change that ends it starts a reload, which cancels this. A file holding
+   * no database has no rows to lose, and every device's own rows come back
+   * through merge, so saving over it is safe once it has settled.
+   * @param block the refusal this waits out; a later one is another's
+   * @param damaged the file as the read that found it damaged had it
+   */
+  async #holdDamaged(block: Error, damaged: ArrayBuffer) {
+    const run = this.#damagedHoldRun;
+    const seen = await this.#fingerprintLive();
+    if (!seen || run !== this.#damagedHoldRun || this.#disposed) return;
+    this.#damagedHold = window.setTimeout(() => {
+      this.#damagedHold = null;
+      void this.#replaceDamaged(block, seen, damaged, run);
+    }, DAMAGED_FILE_HOLD_MS);
+  }
+
+  #cancelDamagedHold() {
+    this.#damagedHoldRun++;
+    if (this.#damagedHold !== null) window.clearTimeout(this.#damagedHold);
+    this.#damagedHold = null;
+  }
+
+  /**
+   * The end of {@link #holdDamaged}'s wait. The bytes are compared as well as
+   * the fingerprint: that was taken after the read, so a write that ended
+   * between the two (Sync's own, say) left a whole file it describes.
+   */
+  async #replaceDamaged(
+    block: Error,
+    seen: FileFingerprint,
+    damaged: ArrayBuffer,
+    run: number
+  ) {
+    const settled = () =>
+      run === this.#damagedHoldRun &&
+      !this.#disposed &&
+      this.#writeBlock === block;
+    const now = await this.#fingerprintLive();
+    let unchanged =
+      now !== null && now.size === seen.size && now.mtime === seen.mtime;
+    if (unchanged && settled()) {
+      try {
+        const bytes = await this.adapter.readBinary(this.#paths.live);
+        unchanged = sameBytes(new Uint8Array(bytes), new Uint8Array(damaged));
+      } catch {
+        unchanged = false;
+      }
+    }
+    // A reload since decides instead
+    if (!settled()) return;
+    if (!unchanged) {
+      // Changed with no reload asked for: one now takes a whole file in, or
+      // starts the hold again on a damaged one (held back past a transaction
+      // like any other)
+      void this.#reloadFromDisk();
+      return;
+    }
+    console.warn(
+      'Incremental Reading - The database file has held no database for ' +
+        `${DAMAGED_FILE_HOLD_MS / 1000} s; saving the database in memory over it:`,
+      { dbPath: this.#dbFilePath, size: seen.size }
+    );
+    try {
+      await this.save();
+    } catch {
+      return; // `save` logged it; writes stay refused
+    }
+    if (this.#writeBlock !== block) return;
+    this.#writeBlock = null;
+    this.#readinessChanged();
+    this.#onWritesResumed?.();
+  }
+
+  /** The live file's fingerprint, or null if it can't be had. */
+  async #fingerprintLive(): Promise<FileFingerprint | null> {
+    try {
+      return await fingerprintOf(this.adapter, this.#paths.live);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Put a local copy in place of a live file that held no database (0217):
+   * copy the damaged file aside, then load the first of these that loads:
+   *
+   * 1. `tmp`, the save a reload or kill cut short while it wrote the live
+   *    file in place (mobile), which is newer than anything else here;
+   * 2. `prev`, the live file as this device wrote it before its last save;
+   * 3. the backups in `BACKUP_DIRECTORY`, newest first.
+   *
+   * Never starts fresh: with nothing to load, or the damaged file not
+   * copied, startup stops as it would without recovery. Startup's Sync hold
+   * is dropped: Sync already holds the damaged file as its newest version
+   * when this device wrote it, and the hold would read the live file again.
+   * @returns what was loaded
+   * @throws {DatabaseLoadError} if nothing loads, or the copy fails
+   * @throws {MigrationVerificationError} if migrating a copy loses data
+   */
+  async #recover(): Promise<RecoveryReport> {
+    const { live } = this.#paths;
+    const corruptCopyPath = this.#paths.corrupt(new Date(this.#stampClock()));
+    try {
+      await this.adapter.copy(live, corruptCopyPath);
+    } catch (error) {
+      console.error(
+        'Incremental Reading - Could not copy the damaged database file:',
+        error
+      );
+      throw new DatabaseLoadError(this.#dbFilePath);
+    }
+    const loaded = await this.#loadLocalCopy();
+    if (!loaded) throw new DatabaseLoadError(this.#dbFilePath, corruptCopyPath);
+    return { ...loaded, corruptCopyPath };
+  }
+
+  /**
+   * Load the first local copy of the database file that loads, in the order
+   * of {@link #recover}: `tmp`, `prev`, then the backups newest first.
+   * Startup's Sync hold is dropped: it would read the live file again,
+   * which is the file being stood in for.
+   * @returns what was loaded, or null if nothing was
+   * @throws {MigrationVerificationError} if migrating a copy loses data
+   */
+  async #loadLocalCopy(): Promise<Omit<
+    RecoveryReport,
+    'corruptCopyPath'
+  > | null> {
+    this.#syncHold = undefined;
+    const { live, tmp, prev } = this.#paths;
+    const candidates: Array<Omit<RecoveryReport, 'corruptCopyPath'>> = [
+      { source: 'tmp', path: tmp },
+      { source: 'prev', path: prev },
+      ...(await this.#listBackups()).map((path) => ({
+        source: 'backup' as const,
+        path,
+      })),
+    ];
+    for (const candidate of candidates) {
+      let bytes: ArrayBuffer;
+      try {
+        bytes = await this.adapter.readBinary(candidate.path);
+      } catch {
+        continue; // not there
+      }
+      // `reloadDb` refuses these too; skipped here without its error log
+      if (!isDatabaseBuffer(new Uint8Array(bytes))) continue;
+      // Loads nothing once disposed
+      const loaded = await this.reloadDb(bytes, true);
+      if (loaded) {
+        console.warn(
+          'Incremental Reading - Loaded a local copy of the database file ' +
+            'in place of the file itself:',
+          { live, ...candidate }
+        );
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * After a local copy was loaded in place of the live file (see
+   * `#recover`, `#loadLocalCopy`): save it over the live file at once, so
+   * Sync carries a database again rather than the damage or the absence,
+   * then prune and tell `onRecovered`.
+   */
+  async #finishRecovery(
+    report: RecoveryReport,
+    known: WriteVector | null,
+    assertLive: () => void
+  ) {
+    // Before the save below bumps this device's stamp
+    this.#classifyAtStartup(known);
+    // `save` logs its own failure, and the next write saves again. Not
+    // while writes are refused: a file met at the path refused them, and
+    // its hold saves (see `#holdDamaged`)
+    if (!this.#writeBlock) await this.save().catch(() => undefined);
+    assertLive();
+    await this.applyRetention();
+    assertLive();
+    this.#onRecovered?.(report);
+  }
+
+  /**
+   * The backups in `BACKUP_DIRECTORY`, newest first; none if it can't be
+   * listed, as when it is missing.
+   */
+  async #listBackups(): Promise<string[]> {
+    try {
+      const { files } = await this.adapter.list(
+        normalizePath(BACKUP_DIRECTORY)
+      );
+      return backupsNewestFirst(files).map(({ path }) => path);
+    } catch {
+      return [];
     }
   }
 
@@ -465,6 +840,8 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   dispose() {
     this.#disposed = true;
+    this.#markDisposed();
+    this.#cancelDamagedHold();
     this.db?.close();
     this.db = null;
     this.#readinessChanged();
@@ -599,8 +976,15 @@ export class SQLJSRepository implements SQLiteRepository {
           }
           this.#reloadAgain = false;
           await this.#reloadOnce();
-          // A change that came in meanwhile is answered first
-          if (this.#retentionDue && !this.#reloadAgain) {
+          // A change that came in meanwhile is answered first. Not while a
+          // restored copy has yet to meet the file: retention may save, and
+          // that save would wait on this very reload to check the path (see
+          // `#checkRestoredPath`). Left due for the next pass
+          if (
+            this.#retentionDue &&
+            !this.#reloadAgain &&
+            !this.#restoredPending
+          ) {
             await this.applyRetention();
           }
         } while (this.#reloadAgain && !this.#disposed);
@@ -628,6 +1012,8 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   async #reloadOnce() {
     markPhase('start');
+    // Whatever the file is now, this pass decides afresh
+    this.#cancelDamagedHold();
     this.#setMerging(true);
     try {
       const incoming = await this.#readIncoming();
@@ -639,18 +1025,42 @@ export class SQLJSRepository implements SQLiteRepository {
         this.#reloadPending = true;
         return;
       }
-      if (incoming && !(await this.#answerIncoming(incoming))) return;
+      // A restored copy meets the file at its path here, and is merged with
+      // it, takes it on, or is refused by it like any memory (see `save`).
+      // An answer that fails, or that a transaction holds back, leaves it to
+      // meet the file again, so no save writes over the file unmerged
+      if (incoming) {
+        const restored = this.#restoredPending;
+        this.#restoredPending = false;
+        this.#answerHeldBack = false;
+        let takeOn: boolean;
+        try {
+          takeOn = await this.#answerIncoming(incoming, restored);
+        } catch (error) {
+          if (restored) this.#restoredPending = true;
+          throw error;
+        }
+        if (restored && this.#answerHeldBack) this.#restoredPending = true;
+        if (!takeOn) return;
+      }
       const db = incoming ? await this.reloadDb(incoming.bytes) : null;
       markPhase('take-in');
       if (this.#disposed) return;
       if (db === null) {
         if (this.#reloadAgain) return;
-        this.blockWrites(
+        // A restored copy never takes on a file it has not merged, which a
+        // refusal would end in: its saves keep checking instead (see `save`)
+        if (!incoming && this.#restoredPending) return;
+        const block = this.blockWrites(
           new Error(
             'The database file changed on disk but could not be loaded. ' +
               'Changes will not be saved until it loads.'
           )
         );
+        // `#loadDamaged` is the read just made only when one was made
+        if (incoming && this.#loadDamaged) {
+          void this.#holdDamaged(block, incoming.bytes);
+        }
         return;
       }
       // Taken in: what follows only refetches
@@ -698,11 +1108,16 @@ export class SQLJSRepository implements SQLiteRepository {
       const bytes = await this.app.vault.adapter.readBinary(
         normalizePath(this.#dbFilePath)
       );
-      const stamp = readFileWriteVector(
-        this.#sql,
-        new Uint8Array(bytes),
-        migrations[migrations.length - 1].version
-      );
+      // A file cut short can still give up its stamp, and would then be
+      // merged, its zero-filled rows with it: placed nowhere, so loaded,
+      // which refuses it (0217)
+      const stamp = isDatabaseBuffer(new Uint8Array(bytes))
+        ? readFileWriteVector(
+            this.#sql,
+            new Uint8Array(bytes),
+            migrations[migrations.length - 1].version
+          )
+        : 'unreadable';
       return { bytes, stamp };
     } catch (error) {
       console.error('Incremental Reading - Failed to read database:', error);
@@ -730,13 +1145,21 @@ export class SQLJSRepository implements SQLiteRepository {
    * So is every file while writes are refused, since only loading one lifts
    * the refusal. One older than the write stamp (an older plugin version
    * wrote it) can't be placed, so is merged.
+   * @param restored whether memory is a restored copy meeting the file at its
+   * path (see {@link #restoredPending}): a fast-forward is merged too. Its
+   * stamp can claim less than it holds: writes made since the restore wait on
+   * this answer before their save stamps them, and a copy migrated on the way
+   * in carries no stamp yet. Taking the file on would drop those rows
    * @returns whether to take the file on
    * @throws if the backup fails, taking nothing on
    */
-  async #answerIncoming(incoming: {
-    bytes: ArrayBuffer;
-    stamp: WriteVector | 'unstamped' | 'unreadable';
-  }): Promise<boolean> {
+  async #answerIncoming(
+    incoming: {
+      bytes: ArrayBuffer;
+      stamp: WriteVector | 'unstamped' | 'unreadable';
+    },
+    restored: boolean
+  ): Promise<boolean> {
     const { stamp } = incoming;
     if (stamp === 'unreadable' || this.#writeBlock || !this.db) return true;
     const kind =
@@ -762,6 +1185,7 @@ export class SQLJSRepository implements SQLiteRepository {
         }
         return false;
       case 'fast-forward':
+        if (restored) return this.#mergeIncoming(this.db, incoming.bytes);
         return true;
       case 'stale-self':
         return this.#backUpMemory(this.db, 'stale');
@@ -791,6 +1215,7 @@ export class SQLJSRepository implements SQLiteRepository {
     if (this.#disposed) return false;
     if (this.#txDepth > 0) {
       this.#reloadPending = true;
+      this.#answerHeldBack = true;
       return false;
     }
     return true;
@@ -1293,8 +1718,16 @@ export class SQLJSRepository implements SQLiteRepository {
     if (!this.db) throw new Error('Database was not initialized on repository');
     this.pendingSaveCount++;
     let wroteFresh = false;
+    let wroteRestored = false;
     const save = ++this.#saves.begun;
     try {
+      if (this.#restoredPending) {
+        // Before the export below, so a file merged in is part of it
+        this.#restoredPathCheck ??= this.#checkRestoredPath();
+        await this.#restoredPathCheck;
+        // A damaged file found there refuses writes, and its hold saves
+        if (this.#disposed || !this.db || this.#writeBlock) return;
+      }
       const source = this.db;
       // Inside the save, never on its own: a write of its own would ask for
       // a save. So a write that changed nothing, which asks for none
@@ -1325,14 +1758,32 @@ export class SQLJSRepository implements SQLiteRepository {
       // and a save still waiting then dropped one for good.
       wroteFresh = this.#fresh;
       this.#fresh = false;
+      wroteRestored = this.#restoredPending;
+      this.#restoredPending = false;
       recordSave('saved');
       // Before the write: the modify event it raises can start the next reload
       // before the write resolves
       markPhase('save');
-      await this.app.vault.adapter.writeBinary(
-        normalizePath(this.#dbFilePath),
-        data as ArrayBuffer
+      // Queued at once, so saves reach the disk in the order they began. The
+      // same check as above is made again before each step that writes,
+      // the last right before the live file is replaced: a save waiting on
+      // another's write must not land after a reload or a newer instance
+      // took the file on (0217)
+      const write = this.#fileWrites.then(() =>
+        writeDatabaseFile(
+          this.app.vault.adapter,
+          this.#paths,
+          data as ArrayBuffer,
+          {
+            stillCurrent: () => !this.#disposed && this.db === source,
+            knownGood: () => this.#knownGood,
+          }
+        )
       );
+      this.#fileWrites = write.catch(() => undefined);
+      const written = await write;
+      if (!written.landed) return;
+      this.#knownGood = written.fingerprint;
       markPhase('write');
       this.#saves.wrote = Math.max(this.#saves.wrote, save);
       // In the order writes land, so the last one on disk is the one kept
@@ -1340,6 +1791,10 @@ export class SQLJSRepository implements SQLiteRepository {
     } catch (error) {
       // Nothing was written that this database can count as its file
       if (wroteFresh) this.#fresh = true;
+      if (wroteRestored) {
+        this.#restoredPending = true;
+        this.#restoredPathCheck = null; // checked afresh by the next save
+      }
       this.#saves.failed = Math.max(this.#saves.failed, save);
       if (error instanceof Error) {
         console.error('Incremental Reading - Failed to save database:', {
@@ -1395,6 +1850,26 @@ export class SQLJSRepository implements SQLiteRepository {
         )
       );
     }
+  }
+
+  /**
+   * Settle once a restored database (see {@link #restoredPending}) may be
+   * saved: at once if its path is still free; if a file has appeared there
+   * (Sync brought it down), once a reload has read it and merged it into
+   * memory, taken it on, or refused it, exactly as a copy Sync delivers
+   * later is answered (see `#answerIncoming`). The file is never written
+   * over unread.
+   * @throws if the file there could not be read, leaving the next save to
+   * check again
+   */
+  async #checkRestoredPath() {
+    if (!(await this.adapter.exists(normalizePath(this.#dbFilePath)))) return;
+    await this.#reloadFromDisk();
+    if (!this.#restoredPending) return;
+    this.#restoredPathCheck = null;
+    throw new Error(
+      `A database file appeared at ${this.#dbFilePath} but could not be read`
+    );
   }
 
   /**
@@ -1458,13 +1933,21 @@ export class SQLJSRepository implements SQLiteRepository {
    * If migrations are pending, backs up the database first and verifies
    * data integrity after applying them.
    * @param bytes the file, already read; read afresh when not given
+   * @param localCopy whether `bytes` are a local copy standing in for the
+   * file (see `#loadLocalCopy`), not the file on disk: a failed migration
+   * save keeps them. Only the call given it: a reload its migration save
+   * runs reads the file itself
    * @returns a Database, or `null` if the file is invalid or not found
    * @throws if the latest schema version is lower than the database's
    * current version, or if post-migration verification fails
    */
-  protected async reloadDb(bytes?: ArrayBuffer): Promise<Database | null> {
+  protected async reloadDb(
+    bytes?: ArrayBuffer,
+    localCopy = false
+  ): Promise<Database | null> {
     const previous = this.db;
     let candidate: Database | null = null;
+    this.#loadDamaged = false;
     try {
       this.#sql ||= await this.loadWasm();
       const dbArrayBuffer =
@@ -1473,21 +1956,38 @@ export class SQLJSRepository implements SQLiteRepository {
           normalizePath(this.#dbFilePath)
         ));
       if (this.#disposed) return null;
-      // Use browser-compatible Uint8Array instead of Node.js Buffer
-      // for mobile compatibility
-      candidate = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
-      candidate.exec('PRAGMA foreign_keys = ON');
-      const result = candidate.exec('PRAGMA integrity_check');
-      const status = result[0]?.values[0]?.[0] as string;
-      if (status !== 'ok') {
-        throw new Error(`integrity_check failed: ${status}`);
-      }
-      // SQLite opens a file too short to hold a header as an empty database,
-      // which would pass for one at schema version 0 and be migrated and saved
-      // over whatever the file was meant to hold — a sync still in progress,
-      // say. Every database this plugin writes has tables.
-      if (candidate.exec('SELECT 1 FROM sqlite_master LIMIT 1').length === 0) {
-        throw new Error('the file holds no database');
+      // Whatever fails here is the file's own damage (see `#recover`)
+      try {
+        // Use browser-compatible Uint8Array instead of Node.js Buffer
+        // for mobile compatibility
+        candidate = new this.#sql.Database(new Uint8Array(dbArrayBuffer));
+        candidate.exec('PRAGMA foreign_keys = ON');
+        const result = candidate.exec('PRAGMA integrity_check');
+        const status = result[0]?.values[0]?.[0] as string;
+        if (status !== 'ok') {
+          throw new Error(`integrity_check failed: ${status}`);
+        }
+        // SQLite opens a file too short to hold a header as an empty
+        // database, which would pass for one at schema version 0 and be
+        // migrated and saved over whatever the file was meant to hold — a
+        // sync still in progress, say. Every database this plugin writes has
+        // tables.
+        if (
+          candidate.exec('SELECT 1 FROM sqlite_master LIMIT 1').length === 0
+        ) {
+          throw new Error('the file holds no database');
+        }
+        // Some cut-off writes still pass the checks above: SQLite reads a
+        // last page cut short as whole, its missing tail as zeros, which
+        // silently wipes the rows stored there. Saves only ever write whole
+        // databases (`writeDatabaseFile`), so this refuses nothing they wrote
+        if (!isDatabaseBuffer(new Uint8Array(dbArrayBuffer))) {
+          throw new Error('the file is cut short');
+        }
+      } catch (error) {
+        throw new DamagedFileError(
+          error instanceof Error ? error.message : String(error)
+        );
       }
       const loadedStamp = readWriteVector(candidate);
 
@@ -1513,6 +2013,22 @@ export class SQLJSRepository implements SQLiteRepository {
         return await this.reloadDb();
       }
 
+      // What is migrated, which recovery reads from a copy, not the file.
+      // Before it stands as the database: a file that changed while the user
+      // was asked about a failed backup is read again
+      if (
+        getPendingMigrations(candidate, migrations).length > 0 &&
+        !(await this.#backUpBeforeMigrating(
+          currentDbVersion,
+          dbArrayBuffer,
+          localCopy
+        ))
+      ) {
+        candidate.close();
+        candidate = null;
+        return await this.reloadDb();
+      }
+
       // Only a file that loaded replaces the database in memory: one that did
       // not leaves the previous one in place, never a broken or empty stand-in
       // that a later write would save over the file.
@@ -1523,8 +2039,6 @@ export class SQLJSRepository implements SQLiteRepository {
 
       const pending = getPendingMigrations(this.db, migrations);
       if (pending.length > 0) {
-        await this.backupDatabase(currentDbVersion);
-
         const preRowCounts = this.snapshotRowCounts();
         const preFkIssues = this.foreignKeyCheck();
 
@@ -1574,17 +2088,28 @@ export class SQLJSRepository implements SQLiteRepository {
             );
           }
 
-          await this.save();
+          try {
+            await this.save();
+          } catch (error) {
+            // A local copy stays in memory unsaved rather than give way to
+            // the next copy or a new database, whose save would write over
+            // the `tmp` copy: the next save writes it, or merges a file found
+            // at its path (see `#checkRestoredPath`). `save` logs its failure
+            if (!localCopy) throw error;
+          }
         }
       }
 
-      if (this.#writeBlock) {
+      // Not by a local copy, which is not the file: a refusal now is one its
+      // migration save met at the path (a damaged file Sync brought down)
+      if (this.#writeBlock && !localCopy) {
         this.#writeBlock = null;
         this.#onWritesResumed?.();
       }
-      // The file on disk is this one now (or its migration, saved above)
+      // The file on disk is this one now (or its migration, saved above).
+      // Not a local copy, until a save of it lands, which records its own
       const stamp = readWriteVector(this.db);
-      if (stamp) saveKnownWriteVector(this.app, stamp);
+      if (stamp && !localCopy) saveKnownWriteVector(this.app, stamp);
       // Nothing holds the replaced database across an await: reloads wait
       // out transactions, and every other use is synchronous
       previous?.close();
@@ -1603,6 +2128,7 @@ export class SQLJSRepository implements SQLiteRepository {
       ) {
         throw error;
       }
+      this.#loadDamaged = error instanceof DamagedFileError;
       if (error instanceof Error) {
         console.error('Incremental Reading - Failed to reload database:', {
           error: error?.message || error,
@@ -1615,6 +2141,83 @@ export class SQLJSRepository implements SQLiteRepository {
   }
 
   /**
+   * Back up `data`, the file or local copy `reloadDb` is about to migrate.
+   * A backup failing at startup is put to the user through
+   * `backupFailurePrompt` (0217), startup waiting on the answer, readiness
+   * `starting` meanwhile: retried until it lands, or gone without at their
+   * word. A local copy is migrated so too, verification still stopping a
+   * migration that loses rows: giving the copy up would start a new
+   * database, whose save writes over the `tmp` copy.
+   * @param localCopy see `reloadDb`
+   * @returns false when the file on disk changed while the user was asked
+   * (Sync may have brought down a newer one), so is to be read again. Never
+   * for a local copy, whose first save checks its path (see `save`) when a
+   * database is there by then
+   * @throws {StartupCancelledError} if disposed while the user was asked
+   * @throws the backup's failure, with nobody to ask: after startup, or
+   * without a prompt. The file is left unmigrated
+   */
+  async #backUpBeforeMigrating(
+    version: number,
+    data: ArrayBuffer,
+    localCopy: boolean
+  ): Promise<boolean> {
+    const prompt = this.#starting ? this.#backupFailurePrompt : undefined;
+    let asked = false;
+    try {
+      for (;;) {
+        try {
+          await this.backupDatabase(version, { data });
+          break;
+        } catch (error) {
+          if (!prompt) throw error;
+          // Unloaded while it failed: no notice to flash up and take down
+          if (this.#disposed) throw new StartupCancelledError();
+          asked = true;
+          // An unload never answers: the prompt may never settle
+          const choice = await Promise.race([
+            prompt.ask(error),
+            this.#whenDisposed,
+          ]);
+          if (this.#disposed) throw new StartupCancelledError();
+          if (choice === 'proceed') {
+            console.error(
+              'Incremental Reading - Migrating the database without a ' +
+                'backup, as the user chose after backing it up failed:',
+              error
+            );
+            break;
+          }
+        }
+      }
+    } finally {
+      if (asked) prompt?.close();
+    }
+    if (!asked) return true;
+    let now: ArrayBuffer | null;
+    try {
+      now = await this.adapter.readBinary(this.#paths.live);
+    } catch {
+      now = null; // gone
+    }
+    if (localCopy) {
+      // In place of a damaged file (`#recover`), which Sync may have replaced
+      // with a whole one meanwhile: the copy's first save meets it as it
+      // would a file appearing in place of a missing one (see `save`). One
+      // still damaged, or gone, is saved over at once as before
+      if (now && isDatabaseBuffer(new Uint8Array(now))) {
+        this.#restoredPending = true;
+      }
+      return true;
+    }
+    now ??= new ArrayBuffer(0); // gone: read again, as having waited
+    if (sameBytes(new Uint8Array(now), new Uint8Array(data))) return true;
+    // As after a wait on Sync: the file may be gone for good (see `start`)
+    this.#waitedOnSync = true;
+    return false;
+  }
+
+  /**
    * Back up the database file before applying migrations, or `from.data`,
    * the database in memory, before another device's copy replaces it.
    * Verifies backup integrity via SHA-256 checksum comparison.
@@ -1622,7 +2225,7 @@ export class SQLJSRepository implements SQLiteRepository {
    */
   protected async backupDatabase(
     currentVersion: number,
-    from?: { marker: BackupMarker; data: ArrayBuffer }
+    from?: { marker?: BackupMarker; data: ArrayBuffer }
   ): Promise<string> {
     const dirExists = await this.adapter.exists(
       normalizePath(BACKUP_DIRECTORY)

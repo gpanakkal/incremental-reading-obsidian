@@ -128,6 +128,7 @@ import { addQuitTask } from './lib/quit-task';
 import { followWhenReady } from './lib/readiness';
 import { enableDebugTiming } from './lib/repository/phase-timing';
 import {
+  type RecoveryReport,
   DatabaseLoadError,
   SQLJSRepository,
   StartupCancelledError,
@@ -149,6 +150,7 @@ import {
   asWebViewer,
   readWebPage,
 } from './lib/web-viewer';
+import { createBackupFailurePrompt } from './views/BackupFailurePrompt';
 import { BulkImportModal } from './views/BulkImportModal';
 import { ImportModal } from './views/ImportModal';
 import { LeftoverWatch } from './views/LeftoverModal';
@@ -161,6 +163,14 @@ import ReviewView from './views/ReviewView';
  * data loss.
  */
 export function startupFailureMessage(error: unknown): string {
+  if (error instanceof DatabaseLoadError && error.corruptCopyPath) {
+    return (
+      `Incremental reading: the database file ${error.dbFilePath} holds no ` +
+      `database (it may be empty or cut short), and no local copy could ` +
+      `replace it, so the plugin did not start. Obsidian Sync's version ` +
+      `history for the file may hold an earlier copy.`
+    );
+  }
   if (error instanceof DatabaseLoadError) {
     return (
       `Incremental reading: the database file ${error.dbFilePath} could not ` +
@@ -169,6 +179,38 @@ export function startupFailureMessage(error: unknown): string {
     );
   }
   return `Failed to initialize plugin. See the console for details.`;
+}
+
+/**
+ * The notice for a startup that put a local copy in place of a database file
+ * that held no database, or was missing (see `SQLJSRepository.#recover`).
+ */
+export function recoveryMessage(
+  dbFilePath: string,
+  report: RecoveryReport
+): string {
+  const from = {
+    tmp: `the save that was under way (${report.path})`,
+    prev: `the copy kept before the last save (${report.path})`,
+    backup: `the backup ${report.path}`,
+  }[report.source];
+  // The save under way holds every change made; the others may lack some
+  const missing =
+    report.source === 'tmp'
+      ? ''
+      : ` Changes made after that copy was saved are missing; Obsidian ` +
+        `Sync's version history for the file may hold a newer copy.`;
+  if (report.corruptCopyPath === null) {
+    return (
+      `Incremental reading: the database file ${dbFilePath} was not there, so ` +
+      `it was restored from ${from}.${missing}`
+    );
+  }
+  return (
+    `Incremental reading: the database file ${dbFilePath} held no database ` +
+    `(it may have been cut short), so it was restored from ${from}. ` +
+    `The damaged file was kept at ${report.corruptCopyPath}.${missing}`
+  );
 }
 
 /** Shown for a way into review used before the database is up. */
@@ -736,6 +778,8 @@ export default class IncrementalReadingPlugin extends Plugin {
           createNotice: persistentNotice,
           notify: (message, options) => Obsidian.notify(message, options),
         }),
+      // Startup, and so the plugin, waits on the user's answer
+      backupFailurePrompt: createBackupFailurePrompt(this.app),
       onMigrationFailure: (error) => {
         console.error(
           'Incremental Reading - Migration verification failed:',
@@ -754,6 +798,9 @@ export default class IncrementalReadingPlugin extends Plugin {
         writesBlockedNotice = persistentNotice(
           `Incremental reading: ${error.message}`
         );
+      },
+      onRecovered: (report) => {
+        persistentNotice(recoveryMessage(DATABASE_FILE_PATH, report));
       },
       onWritesResumed: () => {
         writesBlockedNotice?.hide();

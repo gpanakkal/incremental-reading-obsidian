@@ -128,6 +128,12 @@ export class Notice {
     Notice.instances.push(this);
   }
 
+  /** Rewrites the message's element, as Obsidian's does. */
+  setMessage(message: string) {
+    this.messageEl.textContent = message;
+    return this;
+  }
+
   hide() {
     this.hides++;
   }

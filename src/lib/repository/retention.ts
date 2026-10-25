@@ -97,6 +97,14 @@ function newestFirst(a: { time: number; path: string }, b: typeof a) {
   return b.time - a.time || (a.path < b.path ? 1 : -1);
 }
 
+/** The backups among `paths`, newest first; files that are none left out. */
+export function backupsNewestFirst(paths: readonly string[]): BackupFile[] {
+  return paths
+    .map(parseBackupName)
+    .filter((backup): backup is BackupFile => backup !== null)
+    .sort(newestFirst);
+}
+
 /**
  * The backups among `paths` that retention deletes at `now` (see the module
  * doc), in the order given. Files that are no backup are never among them.
@@ -105,10 +113,7 @@ export function selectBackupsToPrune(
   paths: readonly string[],
   now: number
 ): string[] {
-  const backups = paths
-    .map(parseBackupName)
-    .filter((backup): backup is BackupFile => backup !== null)
-    .sort(newestFirst);
+  const backups = backupsNewestFirst(paths);
   const kept = new Set<string>();
   const counts = new Map<'memory' | 'migration', number>();
   const versionsKept = new Set<number>();

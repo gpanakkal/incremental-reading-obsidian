@@ -1,3 +1,4 @@
+import { parseBackupName } from '#/lib/repository/retention';
 import { STALE_AFTER_MS } from '#/lib/repository/write-stamp';
 import fc from 'fast-check';
 import initSqlJs, { type SqlJsStatic } from 'sql.js';
@@ -10,7 +11,6 @@ import {
   it,
   vi,
 } from 'vitest';
-import { DEFAULT_DB_PATH } from './FakeVault';
 import { FakeSync, makeDevice, type FakeDevice } from './SimulationHarness';
 
 // #region HELPERS
@@ -42,17 +42,20 @@ function idsHeld(device: FakeDevice): string[] {
 
 /** Ids of the article rows in every backup on `device`'s disk. */
 function idsBackedUp(device: FakeDevice): string[] {
-  return device.vault.adapter
-    .paths()
-    .filter((path) => path !== DEFAULT_DB_PATH)
-    .flatMap((path) => {
-      const db = new SQL.Database(
-        new Uint8Array(device.vault.adapter.diskBytes(path)!)
-      );
-      const [rows] = db.exec('SELECT id FROM article');
-      db.close();
-      return (rows?.values ?? []).map(([id]) => id as string);
-    });
+  return (
+    device.vault.adapter
+      .paths()
+      // The database file's hidden siblings (`db-file.ts`) are no backups
+      .filter((path) => parseBackupName(path) !== null)
+      .flatMap((path) => {
+        const db = new SQL.Database(
+          new Uint8Array(device.vault.adapter.diskBytes(path)!)
+        );
+        const [rows] = db.exec('SELECT id FROM article');
+        db.close();
+        return (rows?.values ?? []).map(([id]) => id as string);
+      })
+  );
 }
 
 /** How many times `device` has taken a file on (`reloadDb`). */
