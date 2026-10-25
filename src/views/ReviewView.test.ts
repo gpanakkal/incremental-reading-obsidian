@@ -4037,7 +4037,8 @@ describe('ReviewView places in an item a link names', () => {
   });
 
   it('keeps the place while review is still on its way to the item', async () => {
-    // Home first, as Begin Review would leave it, then review between items
+    // Home first, as the begin review button would leave it, then review
+    // between items
     const { view, follow } = await openWithTarget('target');
     try {
       store.dispatch(setPage('home'));

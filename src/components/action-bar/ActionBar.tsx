@@ -44,6 +44,7 @@ import {
   Eye,
   FileQuestionMark,
   House,
+  Play,
   SkipForward,
   Undo2,
   X,
@@ -299,14 +300,16 @@ function HomeActions() {
   // apart from one, as the table below it does.
   const nothingDue = isLoading || !data || data.totalRows === 0;
 
+  // Labelled through the button's aria-label (ButtonWithIcon), never the SVG:
+  // Obsidian's tooltip handler crashes on an aria-labelled SVG.
   return (
-    <TextButton
+    <ButtonWithIcon
       tooltip={
         isError
           ? "Couldn't load the queue"
           : nothingDue
             ? 'Nothing due for review'
-            : 'Start reviewing the queue'
+            : 'Learn'
       }
       id="begin-review-button"
       disabled={isError || nothingDue}
@@ -315,8 +318,8 @@ function HomeActions() {
         goToReviewPlace(store, null);
       }}
     >
-      Begin Review
-    </TextButton>
+      <Play />
+    </ButtonWithIcon>
   );
 }
 

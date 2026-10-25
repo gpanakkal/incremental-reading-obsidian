@@ -1186,8 +1186,8 @@ export default class IncrementalReadingPlugin extends Plugin {
       store.dispatch(setPage(landOnItem ? 'review' : 'home'));
     } else if (alreadyActive) {
       // review is open and focused, so toggle between home and item review
-      // pages. Review from home is the top of the queue, as Begin Review is,
-      // not the item the store kept while home was up.
+      // pages. Review from home is the top of the queue, as the begin review
+      // button is, not the item the store kept while home was up.
       if (store.getState().page === 'home') goToReviewPlace(store, null);
       else store.dispatch(setPage('home'));
     }
