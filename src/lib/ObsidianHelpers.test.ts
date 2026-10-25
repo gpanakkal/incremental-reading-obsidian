@@ -5230,6 +5230,40 @@ describe('smartGetline', () => {
     expect(result.end).toBe(bulletLine.length);
   });
 
+  it("reads the line it is given rather than the cursor's, as a list item if one is there", () => {
+    const lines = ['plain', '- item text'];
+    const editor = makeEditor({
+      getCursor: vi.fn().mockReturnValue({ line: 0, ch: 0 }),
+      getLine: vi.fn((line: number) => lines[line]),
+    });
+    const listItems = [
+      {
+        position: {
+          start: { line: 1, col: 0, offset: 6 },
+          end: { line: 1, col: 11, offset: 17 },
+        },
+      },
+    ];
+    const app = makeApp({
+      metadataCache: {
+        getFileCache: vi.fn().mockReturnValue({ listItems }),
+      } as unknown as App['metadataCache'],
+    });
+
+    expect(ObsidianHelpers.smartGetline(editor, makeTFile(), app, 1)).toEqual({
+      line: 'item text',
+      lineNumber: 1,
+      start: 2,
+      end: 11,
+    });
+    expect(ObsidianHelpers.smartGetline(editor, makeTFile(), app)).toEqual({
+      line: 'plain',
+      lineNumber: 0,
+      start: 0,
+      end: 5,
+    });
+  });
+
   it('returns default when file cache is null', () => {
     const editor = makeEditor({
       getCursor: vi.fn().mockReturnValue({ line: 0, ch: 0 }),

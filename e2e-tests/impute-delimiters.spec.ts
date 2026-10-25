@@ -1,3 +1,4 @@
+import { CLOZE_DELIMITERS } from '#/lib/constants';
 import test, {
   expect,
   type ElectronApplication,
@@ -290,4 +291,72 @@ test('gives a snippet cut from a cell of a table only that column, first column 
       [['Purpose'], ['facts over']],
     ])
   );
+});
+
+test('makes one card of a selection from one paragraph into the next, which undoing takes back', async () => {
+  await setDefaultEditingMode(window, 'live-preview');
+  const path = 'Multi-block card note.md';
+  const doc =
+    'Intro\n\nThe first paragraph runs on.\n\nThe second paragraph follows it.\n\nOutro';
+  await openNewNote(window, path, doc);
+  await select(window, doc.indexOf('paragraph runs'), doc.indexOf(' follows'));
+  await executeCommandById(window, 'incremental-reading:create-card');
+  const [card] = await itemNotes(window, 'srs_card', 1);
+
+  // One embed where both paragraphs were, the text around them as it was
+  const editor = window.locator(
+    '.workspace-leaf.mod-active .markdown-source-view'
+  );
+  await expect(editor.locator('.internal-embed')).toHaveCount(1);
+  await expect(
+    editor.locator('.cm-line', { hasText: /^Outro$/ })
+  ).toBeVisible();
+
+  // Both paragraphs in the card, the selection its answer
+  await openNewNote(window, card, '', 'preview');
+  const preview = window.locator(
+    '.workspace-leaf.mod-active .markdown-preview-view'
+  );
+  const [left, right] = CLOZE_DELIMITERS;
+  await expect(
+    preview.locator('p', { hasText: `The first ${left} paragraph runs on.` })
+  ).toBeVisible();
+  await expect(
+    preview.locator('p', {
+      hasText: `The second paragraph ${right} follows it.`,
+    })
+  ).toBeVisible();
+
+  // Undo finds the embed through the metadata cache, which reads the note
+  // only once the editor saves it: undoing before then takes back the card
+  // but not the note (a race of every card's undo, not this test's to fix)
+  await expect
+    .poll(() =>
+      window.evaluate((path) => {
+        const { app } = window as unknown as {
+          app: {
+            vault: { getFileByPath(path: string): unknown };
+            metadataCache: {
+              getFileCache(file: unknown): { embeds?: unknown[] } | null;
+            };
+          };
+        };
+        const file = app.vault.getFileByPath(path);
+        return app.metadataCache.getFileCache(file)?.embeds?.length ?? 0;
+      }, path)
+    )
+    .toBe(1);
+  await executeCommandById(window, 'incremental-reading:undo');
+  await expect
+    .poll(() =>
+      window.evaluate(async (path) => {
+        const { app } = window as unknown as {
+          app: PageApp & {
+            vault: { read(file: unknown): Promise<string> };
+          };
+        };
+        return app.vault.read(app.vault.getFileByPath(path));
+      }, path)
+    )
+    .toBe(doc);
 });

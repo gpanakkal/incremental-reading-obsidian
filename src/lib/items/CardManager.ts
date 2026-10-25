@@ -295,23 +295,72 @@ export class CardManager extends ItemManager {
       return null;
     }
 
-    // remove leading indent and bullet/number/checkbox formatting
-    const { line, lineNumber, start, end } = Obsidian.smartGetline(
-      editor,
-      currentFile,
-      this.app
-    );
     const selectionBounds = Obsidian.getSelectionWithBounds(editor);
     if (!selectionBounds) {
       Obsidian.notify('Text must be selected');
       return;
     }
+    let selected: { start: EditorPosition; end: EditorPosition } =
+      selectionBounds;
+    if (selected.start.line !== selected.end.line) {
+      // A selection over several lines: the blank space around it is no
+      // answer (a line selected whole ends at the next line's start)
+      const { selection, startOffset, endOffset } = selectionBounds;
+      if (!selection.trim()) {
+        Obsidian.notify('Text must be selected');
+        return;
+      }
+      const from =
+        startOffset + selection.length - selection.trimStart().length;
+      let to = endOffset - selection.length + selection.trimEnd().length;
+      selected = {
+        start: editor.offsetToPos(from),
+        end: editor.offsetToPos(to),
+      };
+      // Nor is a last line selected no further than its list marker, which a
+      // card of it cuts off: the line before it is the last
+      while (
+        selected.end.line > selected.start.line &&
+        selected.end.ch <=
+          Obsidian.smartGetline(
+            editor,
+            currentFile,
+            this.app,
+            selected.end.line
+          ).start
+      ) {
+        // `from` holds the selection's first non-blank char, before this line
+        to =
+          from +
+          editor
+            .getRange(selected.start, { line: selected.end.line, ch: 0 })
+            .trimEnd().length;
+        selected = { ...selected, end: editor.offsetToPos(to) };
+      }
+      if (selected.start.line !== selected.end.line) {
+        return this.createFromLines(editor, view, currentFile, selected);
+      }
+    }
+
+    // remove leading indent and bullet/number/checkbox formatting
+    const { line, lineNumber, start, end } = Obsidian.smartGetline(
+      editor,
+      currentFile,
+      this.app,
+      selected.start.line
+    );
+    // Nothing past the list marker the line is cut from: nothing to ask
+    if (selected.end.ch <= start) {
+      Obsidian.notify('Text must be selected');
+      return;
+    }
 
     // Moved off any escape pair it splits, and off a backslash that would
-    // escape the delimiter put after it
+    // escape the delimiter put after it. One starting in the list marker cut
+    // off starts with the line.
     const bounds = Markdown.snapOffEscapes(
       line,
-      [selectionBounds.start.ch - start, selectionBounds.end.ch - start],
+      [Math.max(selected.start.ch - start, 0), selected.end.ch - start],
       { delimited: true }
     );
 
@@ -378,6 +427,35 @@ export class CardManager extends ItemManager {
       Obsidian.notify(`Failed to create card`, { kind: 'error' });
       return null;
     }
+  }
+
+  /**
+   * Make a card, as {@link create} does of the cursor's line, of the lines a
+   * selection spans: from the first's start, its list marker cut off as
+   * `create` cuts it, to the last's end, the selection its answer. The span
+   * is then made a card of as one chosen in selection mode is, its delimiters
+   * imputed where it cuts into a block.
+   *
+   * @param selected the selection, starting and ending on different lines
+   */
+  private createFromLines(
+    editor: Editor,
+    view: MarkdownView | ReviewView,
+    file: TFile,
+    selected: { start: EditorPosition; end: EditorPosition }
+  ) {
+    const { start, end } = selected;
+    const cut = Obsidian.smartGetline(editor, file, this.app, start.line).start;
+    const from = editor.posToOffset({ line: start.line, ch: cut });
+    const to = editor.posToOffset({
+      line: end.line,
+      ch: editor.getLine(end.line).length,
+    });
+    const text = editor.getValue().slice(from, to);
+    return this.createFromSelection(editor, view, { from, to, text }, [
+      Math.max(editor.posToOffset(start) - from, 0),
+      editor.posToOffset(end) - from,
+    ]);
   }
 
   /**
