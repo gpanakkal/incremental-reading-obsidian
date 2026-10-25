@@ -177,6 +177,8 @@ function makeImportVault(bytes: Uint8Array = NOTE_BYTES) {
   return {
     cachedRead: vi.fn().mockResolvedValue('# Content'),
     getAbstractFileByPathInsensitive: vi.fn(() => null),
+    // No other file: nothing at any row's reference to claim its id
+    getFileByPath: vi.fn(() => null),
     readBinary: vi.fn().mockResolvedValue(bytes.slice().buffer),
     getResourcePath: vi.fn((file: TFile) => `app://vault/${file.path}`),
   };
@@ -10142,5 +10144,141 @@ describe('the note fingerprint an identity write leaves', () => {
       ),
     ];
     expect(writes.some((query) => query.includes('note_mtime'))).toBe(false);
+  });
+});
+
+describe("importing a note claiming an article's id while the article's own note holds it", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const REFERENCE = 'notes/R.md';
+  const CLAIMANT = 'notes/R 1.md';
+  const OPTIONS = { priority: DEFAULT_PRIORITY, fixedIntervalDays: null };
+
+  /**
+   * What is at the article's reference: nothing, its own note, a note
+   * claiming another id, one claiming none, or a file with no frontmatter.
+   */
+  type AtReference = 'nothing' | 'same id' | 'other id' | 'no id' | 'bare';
+
+  it('links the note to the row only when no note at its reference still claims it, and imports a copy as an article of its own', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<AtReference>(
+          'nothing',
+          'same id',
+          'other id',
+          'no id',
+          'bare'
+        ),
+        fc.boolean(),
+        fc.boolean(),
+        async (atReference, deleted, makeCopy) => {
+          vi.restoreAllMocks();
+          const notes: Record<string, Record<string, unknown> | null> = {
+            [CLAIMANT]: { 'ir-id': 'x', tags: [ARTICLE_TAG] },
+          };
+          if (atReference === 'same id') {
+            notes[REFERENCE] = { 'ir-id': 'x', tags: [ARTICLE_TAG] };
+          }
+          if (atReference === 'other id') {
+            notes[REFERENCE] = { 'ir-id': 'y', tags: [ARTICLE_TAG] };
+          }
+          if (atReference === 'no id') notes[REFERENCE] = { tags: ['a'] };
+          if (atReference === 'bare') notes[REFERENCE] = null;
+          const { vault, repo, manager } = await wireArticles(notes, null);
+          repo.mutate(
+            `INSERT INTO article (id, reference, due, interval, priority, deleted)
+             VALUES ('x', $1, 0, 1, 10, $2)`,
+            [REFERENCE, deleted]
+          );
+          const warn = vi.spyOn(console, 'warn').mockReturnValue(undefined);
+          const file = vault.files.get(CLAIMANT)!;
+
+          const [outcome] = await manager.importMany(
+            [{ file, stripFromSource: [] }],
+            { ...OPTIONS, makeCopy }
+          );
+
+          const rows = repo.rows('article');
+          if (atReference !== 'same id') {
+            expect(outcome).toMatchObject({
+              articleId: 'x',
+              effect: deleted ? 'restored' : 'linked',
+            });
+            expect(rows).toMatchObject([
+              { id: 'x', reference: CLAIMANT, deleted: 0 },
+            ]);
+            repo.dispose();
+            return;
+          }
+          const made = rows.find(({ id }) => id !== 'x');
+          expect(outcome).toMatchObject({
+            articleId: made?.id,
+            effect: 'created',
+          });
+          expect(rows).toHaveLength(2);
+          expect(rows.find(({ id }) => id === 'x')).toMatchObject({
+            reference: REFERENCE,
+            deleted: deleted ? 1 : 0,
+          });
+          expect(made?.reference).toBe(
+            makeCopy ? `${ARTICLES_FOLDER}/R 1.md` : CLAIMANT
+          );
+          expect(vault.frontmatterOf(made!.reference as string)).toMatchObject({
+            'ir-id': made?.id,
+          });
+          // Nothing is amiss with the id: its row is right where its note is
+          expect(warn).not.toHaveBeenCalled();
+          repo.dispose();
+        }
+      )
+    );
+  });
+
+  it('warns, as it makes a copy, of a note claiming an id no row holds', async () => {
+    const { vault, repo, manager, notify } = await wireArticles(
+      { [CLAIMANT]: { 'ir-id': 'x', tags: [ARTICLE_TAG] } },
+      null
+    );
+
+    await manager.import(
+      vault.files.get(CLAIMANT)!,
+      DEFAULT_PRIORITY,
+      null,
+      true
+    );
+
+    expect(repo.rows('article')).toMatchObject([
+      { reference: `${ARTICLES_FOLDER}/R 1.md` },
+    ]);
+    expect(notify).toHaveBeenCalledWith(expect.any(String), { persist: true });
+    repo.dispose();
+  });
+
+  it('links a note already at its live row to that row on an import as a copy, making no copy', async () => {
+    const { vault, repo, manager } = await wireArticles(
+      { [REFERENCE]: { 'ir-id': 'x', tags: [ARTICLE_TAG] } },
+      null
+    );
+    repo.mutate(
+      `INSERT INTO article (id, reference, due, interval, priority)
+       VALUES ('x', $1, 0, 1, 10)`,
+      [REFERENCE]
+    );
+    const file = vault.files.get(REFERENCE)!;
+
+    const [outcome] = await manager.importMany(
+      [{ file, stripFromSource: [] }],
+      { ...OPTIONS, makeCopy: true }
+    );
+
+    expect(outcome).toMatchObject({ articleId: 'x', effect: 'linked' });
+    expect(repo.rows('article')).toMatchObject([
+      { id: 'x', reference: REFERENCE },
+    ]);
+    expect(vault.paths()).toEqual([REFERENCE]);
+    repo.dispose();
   });
 });

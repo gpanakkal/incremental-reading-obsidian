@@ -3579,6 +3579,153 @@ describe('ReviewManager.handleExternalRename rowId branch', () => {
   });
 });
 
+describe('ReviewManager.handleExternalRename of a note claiming an id its row has elsewhere', () => {
+  beforeAll(async () => {
+    const wasmBinary = readFileSync(
+      require.resolve('sql.js/dist/sql-wasm.wasm')
+    );
+    SQL = await initSqlJs({ wasmBinary: wasmBinary as unknown as ArrayBuffer });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const KINDS = [
+    { table: 'article', tag: ARTICLE_TAG },
+    { table: 'snippet', tag: SNIPPET_TAG },
+    { table: 'srs_card', tag: CARD_TAG },
+  ] as const;
+
+  /**
+   * What is at the row's reference when a note elsewhere claiming its id is
+   * renamed: nothing, its own note, a note claiming another id, one claiming
+   * none, or a file with no frontmatter at all; or nothing, with the note
+   * renamed onto the reference.
+   */
+  type AtReference =
+    | 'nothing'
+    | 'same id'
+    | 'other id'
+    | 'no id'
+    | 'bare'
+    | 'renamed onto it';
+
+  const REFERENCE = 'IR/items/R.md';
+  const ELSEWHERE = 'notes/R 1.md';
+  const RENAMED = 'notes/N.md';
+
+  /**
+   * A row `x` of `kind` at {@link REFERENCE}, live or not, and a note claiming
+   * `x` renamed to {@link RENAMED}: from the reference itself, or from
+   * {@link ELSEWHERE} with `atReference` at the reference.
+   */
+  async function renameClaimant(
+    kind: (typeof KINDS)[number],
+    deleted: boolean,
+    from: 'reference' | 'elsewhere',
+    atReference: AtReference
+  ) {
+    const claimant = note('x', kind.tag);
+    const notes: Record<string, Record<string, unknown> | null> = {};
+    if (from === 'reference') {
+      notes[REFERENCE] = claimant;
+    } else {
+      notes[ELSEWHERE] = claimant;
+      if (atReference === 'same id') notes[REFERENCE] = note('x', kind.tag);
+      if (atReference === 'other id') notes[REFERENCE] = note('y', kind.tag);
+      if (atReference === 'no id') notes[REFERENCE] = { tags: [kind.tag] };
+      if (atReference === 'bare') notes[REFERENCE] = null;
+    }
+    const wired = wireRenames(notes);
+    wired.insert(kind.table, 'x', REFERENCE);
+    wired.repo.mutate(`UPDATE ${kind.table} SET deleted = $1`, [deleted]);
+
+    const to =
+      from === 'elsewhere' && atReference === 'renamed onto it'
+        ? REFERENCE
+        : RENAMED;
+    await wired.rename(from === 'reference' ? REFERENCE : ELSEWHERE, to);
+    await wired.drained();
+    return { wired, to };
+  }
+
+  it('takes the row only when no note at its reference still claims it', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...KINDS),
+        fc.boolean(),
+        fc.constantFrom('reference' as const, 'elsewhere' as const),
+        fc.constantFrom<AtReference>(
+          'nothing',
+          'same id',
+          'other id',
+          'no id',
+          'bare',
+          'renamed onto it'
+        ),
+        async (kind, deleted, from, atReference) => {
+          const { wired, to } = await renameClaimant(
+            kind,
+            deleted,
+            from,
+            atReference
+          );
+
+          const copy = from === 'elsewhere' && atReference === 'same id';
+          expect(wired.repo.rows(kind.table)).toStrictEqual([
+            copy
+              ? { id: 'x', reference: REFERENCE, deleted }
+              : { id: 'x', reference: to, deleted: false },
+          ]);
+        }
+      )
+    );
+  });
+
+  it("leaves the links of an article's snippets and cards on the original when its copy is renamed", async () => {
+    const wired = wireRenames({
+      [REFERENCE]: note('art', ARTICLE_TAG),
+      [ELSEWHERE]: note('art', ARTICLE_TAG),
+      'IR/snippets/s.md': note('s', SNIPPET_TAG, '[[IR/items/R|R]]'),
+      'IR/cards/c.md': note('c', CARD_TAG, '[R](IR/items/R.md)'),
+    });
+    wired.insert('article', 'art', REFERENCE);
+    wired.insert('snippet', 's', 'IR/snippets/s.md', 'art');
+    wired.insert('srs_card', 'c', 'IR/cards/c.md', 'art');
+    const retarget = vi.spyOn(wired.manager.articles, 'retargetChildSources');
+
+    await wired.rename(ELSEWHERE, RENAMED);
+    await wired.drained();
+
+    expect(parentPaths(wired.repo)).toStrictEqual([
+      ['s', REFERENCE],
+      ['c', REFERENCE],
+    ]);
+    expect(wired.sourceOf('IR/snippets/s.md')).toBe('[[IR/items/R|R]]');
+    expect(wired.sourceOf('IR/cards/c.md')).toBe('[R](IR/items/R.md)');
+    expect(retarget).not.toHaveBeenCalled();
+  });
+
+  it('follows the copy as the plain note it is, re-pointing what was taken from it', async () => {
+    const wired = wireRenames({
+      [REFERENCE]: note('art', ARTICLE_TAG),
+      [ELSEWHERE]: note('art', ARTICLE_TAG),
+      'IR/snippets/t.md': note('t', SNIPPET_TAG, '[[notes/R 1|R 1]]'),
+    });
+    wired.insert('article', 'art', REFERENCE);
+    wired.insert('snippet', 't', 'IR/snippets/t.md');
+
+    await wired.rename(ELSEWHERE, RENAMED);
+    await wired.drained();
+
+    expect(wired.sourceOf('IR/snippets/t.md')).toBe('[[notes/N|N]]');
+    expect(wired.repo.rows('article')).toStrictEqual([
+      { id: 'art', reference: REFERENCE, deleted: false },
+    ]);
+  });
+});
+
 describe('ReviewManager.getReviewItemFromFile card vs null distinction', () => {
   afterEach(() => {
     vi.restoreAllMocks();

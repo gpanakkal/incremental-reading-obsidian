@@ -26,6 +26,7 @@ import {
   type SnippetHighlight,
 } from '#/lib/SnippetOffsetTracker';
 import type {
+  DataChangeEvent,
   IArticleBase,
   ISnippetBase,
   ISnippetDisplay,
@@ -835,23 +836,113 @@ export class SnippetManager extends ItemManager {
    */
   async refreshAllHighlights() {
     for (const path of this.offsetTracker.getTrackedPaths()) {
-      const file = this.app.vault.getFileByPath(path);
-      if (!file) {
-        // The note was deleted on the other device. Drop the entry so a later
-        // note reusing the path does not inherit its highlights.
-        this.offsetTracker.invalidateCache(path);
-        continue;
-      }
-
-      // getHighlights caches what it finds, but returns early without touching
-      // the tracker for a note that no longer has highlights to look up (its
-      // article row was deleted, its source tag removed). Writing the result
-      // back covers that case, so a stale entry can never survive the refresh.
-      const highlights = await this.getHighlights(file);
-      this.#loadHighlights(path, highlights);
-
-      this.plugin.app.workspace.trigger('ir-highlights-changed', path);
+      await this.refreshHighlightsAt(path);
     }
+  }
+
+  /**
+   * Re-read the highlights of the note at `path` from the database and tell
+   * open views to redraw them. With no file there any more, the entry is
+   * dropped instead, so a later note reusing the path does not inherit its
+   * highlights.
+   */
+  async refreshHighlightsAt(path: string) {
+    const file = this.app.vault.getFileByPath(path);
+    if (!file) {
+      this.offsetTracker.invalidateCache(path);
+      return;
+    }
+
+    // getHighlights caches what it finds, but returns early without touching
+    // the tracker for a note that no longer has highlights to look up (its
+    // article row was deleted or moved away, its source tag removed). Writing
+    // the result back covers that case, so a stale entry can never survive.
+    const highlights = await this.getHighlights(file);
+    this.#loadHighlights(path, highlights);
+
+    this.plugin.app.workspace.trigger('ir-highlights-changed', path);
+  }
+
+  /**
+   * Follow every write to the article and snippet tables with
+   * {@link followParentMoves}.
+   * @returns what stops it
+   */
+  watchParentMoves(): () => void {
+    return this.repo.onDataChange((event) => {
+      void this.followParentMoves(event);
+    });
+  }
+
+  /**
+   * After the rows `event` names changed, re-read the highlights of each note
+   * a changed parent row moved away from, and of the note it moved to (see
+   * {@link refreshHighlightsAt}). The tracker holds highlights by path, which
+   * only a rename moves with the row (see `SnippetOffsetTracker.renameFile`);
+   * a row moved any other way (re-associated by its `ir-id` from another
+   * note, rebound by the startup scan, relinked) would otherwise leave its
+   * highlights painted on a note that is no longer their parent. Every such
+   * write goes through the database, so this is the one place they are seen.
+   *
+   * A path whose note is still the parent's own is left alone: with no file
+   * there, a rename moves its entry itself, and may still be on its way; a
+   * note there still carrying the parent's `ir-id`, or a PDF, known by its
+   * path alone, is about to follow its row, as when a database synced from a
+   * device the note was renamed on lands before the rename does. Dropping its
+   * entry then would leave the rename nothing to move. Nothing is read unless
+   * a changed row is the parent of highlights held, so most writes cost
+   * nothing.
+   */
+  async followParentMoves({ table, op, ids }: DataChangeEvent): Promise<void> {
+    if (op !== 'update') return;
+    if (table !== 'article' && table !== 'snippet') return;
+    const changed = new Set(ids);
+    // Where the highlights of each changed parent are held
+    const heldAt = new Map<string, Set<string>>();
+    for (const path of this.offsetTracker.getTrackedPaths()) {
+      for (const { parent } of this.offsetTracker.getHighlights(path)) {
+        if (!changed.has(parent)) continue;
+        const paths = heldAt.get(parent) ?? new Set<string>();
+        paths.add(path);
+        heldAt.set(parent, paths);
+      }
+    }
+    if (heldAt.size === 0) return;
+
+    try {
+      const parents = [...heldAt.keys()];
+      const placeholders = parents.map((_, i) => `$${i + 1}`).join(', ');
+      const rows = (await this.repo.query(
+        `SELECT id, reference FROM ${table} WHERE id IN (${placeholders})`,
+        parents
+      )) as { id: string; reference: string }[];
+      const stale = new Set<string>();
+      for (const { id, reference } of rows) {
+        const paths = heldAt.get(id) ?? new Set<string>();
+        for (const path of paths) {
+          if (path === reference) continue;
+          if (this.#stillParentsNote(path, id)) continue;
+          stale.add(path);
+          stale.add(reference);
+        }
+      }
+      for (const path of stale) await this.refreshHighlightsAt(path);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  /**
+   * Whether what is at `path` is still the note of parent row `id`, though
+   * the row names another path (see {@link followParentMoves}): nothing is
+   * there (a rename took it), or a note claiming `id` by its `ir-id`, or a
+   * file with no frontmatter, such as a PDF, whose row only its path ties it
+   * to. Any other note at `path` is no longer the parent's.
+   */
+  #stillParentsNote(path: string, id: string): boolean {
+    const file = this.app.vault.getFileByPath(path);
+    if (!file || !supportsFrontmatter(file)) return true;
+    return Obsidian.getFrontMatter(file, this.app)?.['ir-id'] === id;
   }
 
   /**
