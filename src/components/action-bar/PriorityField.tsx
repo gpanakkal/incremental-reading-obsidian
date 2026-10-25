@@ -1,19 +1,27 @@
 import IRScheduler from '#/lib/IRScheduler';
+import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'react';
 
 /**
  * Note: pass a `key` prop with the item's ID to ensure priority is updated
  * correctly when navigating to other items
+ *
+ * `leading` takes the place of the text label, e.g. an icon button. It sits
+ * outside the `<label>` so a click on it never lands on the input instead, and
+ * the input is named with `aria-label` in the text's place.
  */
 export function PriorityField({
   initialPriority,
   onBlur,
   showMultiplier = false,
+  leading,
 }: {
   initialPriority: number;
   onBlur: (priority: number) => void | Promise<void>;
   showMultiplier?: boolean;
+  leading?: ComponentChildren;
 }) {
+  const hasLeading = leading !== undefined;
   const [displayPrio, setDisplayPrio] = useState<number>(initialPriority / 10);
   const prevPriorityRef = useRef(initialPriority);
 
@@ -29,10 +37,12 @@ export function PriorityField({
 
   return (
     <div className="ir-priority-container">
+      {leading}
       <label className={'ir-priority-label'}>
-        Priority
+        {!hasLeading && 'Priority'}
         <input
           id={'ir-priority-input'}
+          aria-label={hasLeading ? 'Priority' : undefined}
           value={displayPrio}
           className={'ir-priority-input'}
           type="text"

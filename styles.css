@@ -1268,6 +1268,9 @@ body:not(.is-mobile) .ir-grade-row {
   display: flex;
   align-items: center;
   flex-shrink: 0;
+  /* On the action bar the scheduling icon stands in for the label's text, so
+     it sits just ahead of the label rather than a full label gap away. */
+  gap: var(--size-2-1);
 }
 
 /* Obsidian's own `input[type='text']` rule draws height, padding and radius

@@ -3,15 +3,25 @@ import {
   MINIMUM_FIXED_REVIEW_INTERVAL,
 } from '#/lib/constants';
 import IRScheduler from '#/lib/IRScheduler';
+import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'react';
 
+/**
+ * `leading` takes the place of the label text on both sides of the input, e.g.
+ * an icon button. It sits outside the `<label>` so a click on it never lands
+ * on the input instead, and the input is named with `aria-label` in the text's
+ * place.
+ */
 export function FixedIntervalField({
   initialInterval,
   onBlur,
+  leading,
 }: {
   initialInterval: number | null;
   onBlur: (intervalDays: number) => void | Promise<void>;
+  leading?: ComponentChildren;
 }) {
+  const hasLeading = leading !== undefined;
   const [fixedInterval, setFixedInterval] = useState<number>(
     initialInterval ?? MINIMUM_FIXED_REVIEW_INTERVAL
   );
@@ -33,10 +43,12 @@ export function FixedIntervalField({
   return (
     <>
       <div className="ir-fixed-interval-container">
+        {leading}
         <label className={'ir-fixed-interval-label'}>
-          Every
+          {!hasLeading && 'Every'}
           <input
             id={'ir-fixed-interval-input'}
+            aria-label={hasLeading ? 'Fixed interval in days' : undefined}
             value={fixedInterval}
             className={'ir-fixed-interval-input'}
             type="number"
@@ -68,7 +80,7 @@ export function FixedIntervalField({
             }}
             onFocus={(e) => e.currentTarget.select()}
           />
-          days
+          {!hasLeading && 'days'}
         </label>
       </div>
     </>
