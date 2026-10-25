@@ -110,7 +110,8 @@ export type ReviewStore = {
 /**
  * Put review on `itemId`, or with `null` on whatever the queue has due first.
  *
- * The one way code moves review to an item: Begin Review, `learn`, a queue row.
+ * The one way code moves review to an item: the begin review button, `learn`, a
+ * queue row.
  * Each goes through {@link actionsToReach}, so arriving at a different item
  * resets its per-item state the way advancing does, and `null` asks the queue
  * the way advancing does — `getDue()[0]`, skipped items and the type filter

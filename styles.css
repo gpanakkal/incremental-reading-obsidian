@@ -1377,14 +1377,35 @@ body:not(.is-mobile) .ir-grade-row {
 }
 
 /* The home screen's single action, so it reads as the call to action rather
-   than as one more control in the bar. */
+   than as one more icon in the bar: an accent fill behind the play icon. The
+   id outranks Obsidian's `.clickable-icon` hover, press and colour rules, and
+   the icon is drawn at full strength, since `.clickable-icon svg` dims it to
+   `--icon-opacity`, which would muddy it against the fill.
+
+   It is as tall as the bar's other icons, and twice as wide as one of them.
+   An icon button is `--icon-size` across inside `var(--size-2-3)` of padding
+   at each side (Obsidian's `.clickable-icon`, and
+   `.ir-review-button.clickable-icon` above), and `--icon-size` is `--icon-m`: 16px on desktop,
+   `calc(20px * var(--preferred-text-scale))` under `.is-mobile`. So the
+   button is 56px wide on desktop and 64px on a phone or tablet at the default
+   text size, and follows the text size and any theme that resizes icons.
+   `min-width`, so the play icon stays centred by `.clickable-icon`'s own
+   `justify-content: center`. The middle zone is the only one it widens, and
+   the outer zones still take equal shares of what is left, so the bar's
+   midpoint holds. */
 #begin-review-button {
+  min-width: calc((var(--icon-size) + 2 * var(--size-2-3)) * 2);
   background-color: var(--interactive-accent);
   color: var(--text-on-accent);
-  font-weight: var(--font-medium);
 }
 
-#begin-review-button:hover:not(:disabled) {
+#begin-review-button svg {
+  opacity: 1;
+}
+
+#begin-review-button:hover:not(:disabled),
+#begin-review-button:active:not(:disabled),
+#begin-review-button.mobile-tap:not(:disabled) {
   background-color: var(--interactive-accent-hover);
 }
 

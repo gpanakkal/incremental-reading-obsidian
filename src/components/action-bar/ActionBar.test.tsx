@@ -645,7 +645,9 @@ function mountGuardedBar(
 // the instance rendering here (see the react→preact aliasing TODO in
 // vitest.config.ts). The icons are incidental to this component's behavior,
 // except the two naming a text's scheduling strategy, which draw a marked
-// stand-in to tell them apart.
+// stand-in to tell them apart, and the begin review button's play icon, which
+// stands in for a label, so it renders a bare SVG for the label's placement
+// to be checked against.
 vi.mock('lucide-react', async () => {
   const { h } = await import('preact');
   return {
@@ -666,6 +668,7 @@ vi.mock('lucide-react', async () => {
     SkipForward: () => null,
     TextSelect: () => null,
     Trash2: () => null,
+    Play: () => h('svg', null),
     Undo2: () => null,
     X: () => null,
   };
@@ -782,6 +785,21 @@ describe('ActionBar', () => {
       expect(due).not.toBe('');
       expect(empty).not.toBe('');
       expect(empty).not.toBe(due);
+    });
+
+    it('is an icon whose tooltip sits on the button, not on the SVG', () => {
+      // Obsidian's tooltip handler crashes on an aria-labelled SVG, so the
+      // label belongs on the HTML button wrapping the icon.
+      wireQueue({ totalRows: 3 });
+
+      const button = beginReviewButton(mountBar());
+      const icon = button.querySelector('svg');
+
+      expect(button.classList.contains('clickable-icon')).toBe(true);
+      expect(button.textContent).toBe('');
+      expect(icon).not.toBeNull();
+      expect(icon?.hasAttribute('aria-label')).toBe(false);
+      expect(button.getAttribute('aria-label')).toBeTruthy();
     });
   });
 
