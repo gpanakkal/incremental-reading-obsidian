@@ -15,6 +15,7 @@ import type IncrementalReadingPlugin from '#/main';
 import { promptForCardAnswer } from '#/views/CardAnswerModal';
 import type ReviewView from '#/views/ReviewView';
 import {
+  type Editor,
   type FileView,
   MarkdownView,
   type PaneType,
@@ -37,6 +38,7 @@ import {
 import type { CardSelection } from './items/CardManager';
 import { NO_SNIPPET_FROM_CARD } from './items/SnippetManager';
 import { getMimeType } from './mime';
+import { computeMinimalChange } from './minimal-change';
 import type { NoticeAction } from './notices';
 import { ObsidianHelpers as Obsidian } from './ObsidianHelpers';
 import {
@@ -155,6 +157,67 @@ export type ActionStackEntry = {
 export type ImportSummary =
   | { name: string; result: ImportedArticle | null }
   | { from: string; outcomes: readonly BulkOutcome[] };
+
+/**
+ * Where in `text` the embed `embed` stands, of a card made of line
+ * `lineNumber`: of several, the one on the line nearest that, since the user
+ * may have copied it, or typed lines above it, since.
+ * @returns its start and end offsets, or `null` when `text` holds none
+ */
+function findCardEmbed(
+  text: string,
+  embed: string,
+  lineNumber: number
+): [number, number] | null {
+  let found: number | null = null;
+  let nearest = Infinity;
+  for (
+    let at = text.indexOf(embed);
+    at >= 0;
+    at = text.indexOf(embed, at + embed.length)
+  ) {
+    const distance = Math.abs(
+      text.slice(0, at).split('\n').length - 1 - lineNumber
+    );
+    if (distance < nearest) {
+      found = at;
+      nearest = distance;
+    }
+  }
+  return found === null ? null : [found, found + embed.length];
+}
+
+/**
+ * The editor holding `file`'s text in `view`, the tab a card was made in, while
+ * it still shows `file` in an editor: text there may not be saved yet, the
+ * card's embed with it. `null` once the tab shows another note, or reads this
+ * one in reading view: leaving the editor saved it.
+ */
+function editorHolding(
+  view: MarkdownView | ReviewView,
+  file: TFile
+): Editor | null {
+  if (view.file !== file) return null;
+  if (view instanceof MarkdownView) {
+    return view.getMode() === 'source' ? view.editor : null;
+  }
+  return view.activeEditor?.editor ?? null;
+}
+
+/**
+ * Make `editor`'s text `next`, replacing only what differs: a replacement of
+ * the whole document scrolls the editor to the top (see
+ * `computeMinimalChange`).
+ */
+function replaceChanged(editor: Editor, next: string) {
+  const change = computeMinimalChange(editor.getValue(), next);
+  if (!change) return;
+  editor.replaceRange(
+    change.insert,
+    editor.offsetToPos(change.from),
+    editor.offsetToPos(change.to)
+  );
+}
 
 /** What of `summary` an undo takes back: what was made or brought back. */
 function undoableImports(summary: ImportSummary): ImportedArticle[] {
@@ -718,13 +781,34 @@ export class Actions {
       : await this.plugin.reviewManager.createCard(editor, view);
 
     if (result) {
-      const { reviewCard, line, before, after } = result;
+      const { reviewCard, embed, line, lineNumber, before, after } = result;
+      /**
+       * Edit the note the card was made in with `fn`: through the editor
+       * holding it while one does, since the embed may be in its text alone
+       * until its save, or else on disk.
+       */
+      const editSource = async (fn: (data: string) => string) => {
+        const editor = editorHolding(view, sourceFile);
+        if (editor) {
+          replaceChanged(editor, fn(editor.getValue()));
+          return;
+        }
+        await this.plugin.app.vault.read(sourceFile);
+        await Obsidian.editNote(this.plugin.app, sourceFile, fn);
+      };
+      /**
+       * The card's embed as the metadata cache last read it in the note. Its
+       * text alone: its offsets are those of the note as last saved, which an
+       * editor's text may have moved on from.
+       */
+      const cachedEmbed = () =>
+        Obsidian.findEmbeds(this.plugin.app, sourceFile, reviewCard.file)
+          ?.original ?? null;
 
       this._pushUndo({
         item: result.reviewCard,
         description: `creating card "${result.reviewCard.file.basename}"`,
         undo: async () => {
-          const { app } = this.plugin;
           // Where the embed was, and what it said, once the line is back in
           // its place: to put it back if the card can't be deleted after all
           let restored: { at: number; embed: string } | null = null;
@@ -733,20 +817,21 @@ export class Actions {
           try {
             await withCompensation(async (step) => {
               // restore the original text
-              await app.vault.read(sourceFile);
               await step(
                 () =>
-                  Obsidian.editNote(app, sourceFile, (data) => {
-                    const cardEmbed = Obsidian.findEmbeds(
-                      app,
-                      sourceFile,
-                      reviewCard.file
-                    );
+                  editSource((data) => {
+                    // Found in the text itself, which the metadata cache
+                    // reads only once the note is saved and parsed again;
+                    // through what the cache says it reads now, for a link
+                    // that has changed since
+                    const cached = cachedEmbed();
+                    const cardEmbed =
+                      findCardEmbed(data, embed, lineNumber) ??
+                      (cached && findCardEmbed(data, cached, lineNumber));
                     if (!cardEmbed) return data;
 
                     // With the delimiters put around it, while they still are
-                    const embedStart = cardEmbed.position.start.offset;
-                    const embedEnd = cardEmbed.position.end.offset;
+                    const [embedStart, embedEnd] = cardEmbed;
                     const startOffset =
                       data.slice(embedStart - before.length, embedStart) ===
                       before
@@ -764,7 +849,7 @@ export class Actions {
                     );
                   }),
                 () =>
-                  Obsidian.editNote(app, sourceFile, (data) => {
+                  editSource((data) => {
                     const put = restored;
                     if (
                       !put ||

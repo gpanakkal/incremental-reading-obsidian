@@ -53,7 +53,12 @@ import { showSuccessNotices } from '#/test/success-notices';
 import * as CardAnswerModal from '#/views/CardAnswerModal';
 import type ReviewView from '#/views/ReviewView';
 import { EditorState } from '@codemirror/state';
-import type { FileView, PaneType, TFile } from 'obsidian';
+import {
+  MarkdownView,
+  type FileView,
+  type PaneType,
+  type TFile,
+} from 'obsidian';
 import {
   afterEach,
   beforeEach,
@@ -629,7 +634,7 @@ const cardNoteArb = fc
     before: fc.string(),
     after: fc.string(),
     line: fc.string(),
-    embed: fc.constantFrom('![[card|ir-hide-title]]', '![[c]]'),
+    embed: fc.constantFrom<string>('![[card|ir-hide-title]]', '![[c]]'),
   })
   .filter(({ before, after, embed }) => {
     const text = before + embed + after;
@@ -641,32 +646,117 @@ const cardNoteArb = fc
 type CardNote = typeof cardNoteArb extends fc.Arbitrary<infer T> ? T : never;
 
 /**
+ * Where the note a card was made in is when the card is undone: on disk alone
+ * (`file`), or in an editor that still holds text it hasn't saved, either a
+ * Markdown tab's (`tab`) or the review tab's (`review`).
+ */
+type CardSourceHeld = 'file' | 'tab' | 'review';
+
+/**
+ * An editor over `initial`, with just what an undo edits it through: its text,
+ * offsets and positions, and `replaceRange`.
+ */
+function makeNoteEditor(initial: string) {
+  let text = initial;
+  const posToOffset = ({ line, ch }: { line: number; ch: number }) =>
+    text
+      .split('\n')
+      .slice(0, line)
+      .reduce((sum, l) => sum + l.length + 1, 0) + ch;
+  return {
+    getValue: () => text,
+    setValue: (next: string) => {
+      text = next;
+    },
+    posToOffset,
+    offsetToPos: (offset: number) => {
+      const lines = text.slice(0, offset).split('\n');
+      return { line: lines.length - 1, ch: lines[lines.length - 1].length };
+    },
+    replaceRange: (
+      insert: string,
+      from: { line: number; ch: number },
+      to: { line: number; ch: number }
+    ) => {
+      text =
+        text.slice(0, posToOffset(from)) + insert + text.slice(posToOffset(to));
+    },
+  };
+}
+
+/**
  * A card made of `note`'s line, whose embed now stands in its place, undone
  * with a card manager whose delete answers `deleted`, after `meanwhile` has
  * edited the note. The card was made saying it put `around` the embed.
+ *
+ * @param options.held where the note's text is (see `CardSourceHeld`): held
+ *   in an editor, the embed is in its text alone, not yet saved to disk.
+ * @param options.cache `stale` for a metadata cache that has yet to read the
+ *   embed, as it hasn't until the note is saved and parsed again
+ * @param options.embed the embed the card was made saying it wrote, when not
+ *   the one in the note
+ * @param options.lineNumber the line the card was made saying it was on
+ * @param options.saved how the editor holding the note saved it before the
+ *   undo, after which it no longer holds the note's text: it went on to
+ *   another note (`left`), or the tab turned to reading view (`reading`)
+ * @param options.typed text typed at the start of the note in the editor
+ *   holding it since that editor last saved it, embed and all
  */
 async function makeCardThenUndo(
   { before, after, line, embed }: CardNote,
   deleted: boolean,
   meanwhile: (text: string) => string = (text) => text,
-  around = { before: '', after: '' }
+  around = { before: '', after: '' },
+  {
+    held = 'file',
+    cache = 'current',
+    embed: made = embed,
+    lineNumber = 0,
+    saved,
+    typed,
+  }: {
+    held?: CardSourceHeld;
+    cache?: 'current' | 'stale';
+    embed?: string;
+    lineNumber?: number;
+    saved?: 'left' | 'reading';
+    typed?: string;
+  } = {}
 ) {
   const plugin = makePlugin();
   const sourceFile = makeTFile('source');
   const cardFile = makeTFile('card');
-  let text = before + embed + after;
+  const written = before + embed + after;
+  const editor =
+    held === 'file' ? null : makeNoteEditor((typed ?? '') + written);
+  // On disk: the note as it was before the card, while an editor holds the
+  // embed unsaved, or with it, saved before what was typed since
+  let disk =
+    editor && typed === undefined
+      ? before + around.before + line + around.after + after
+      : written;
+  // Whether the editor still holds the note's latest text
+  let holds = editor !== null;
+  const live = {
+    get: () => (holds ? editor!.getValue() : disk),
+    set: (next: string) => {
+      if (holds) editor!.setValue(next);
+      else disk = next;
+    },
+  };
   const process = vi.fn(async (_file: TFile, fn: (data: string) => string) => {
-    text = fn(text);
-    return text;
+    disk = fn(disk);
+    return disk;
   });
   Object.assign(plugin.app, {
-    vault: { read: vi.fn(async () => text), process },
+    vault: { read: vi.fn(async () => disk), process },
   });
   vi.spyOn(Obsidian, 'findEmbeds').mockImplementation(() => {
-    const start = text.indexOf(embed);
+    const start = cache === 'stale' ? -1 : disk.indexOf(embed);
     return start < 0
       ? null
       : ({
+          original: embed,
           position: {
             start: { offset: start },
             end: { offset: start + embed.length },
@@ -676,25 +766,57 @@ async function makeCardThenUndo(
   vi.spyOn(Obsidian, 'notify').mockReturnValue(undefined);
   const reviewCard = { data: { id: 'card-1', parent: null }, file: cardFile };
   const deleteCard = vi.fn(async () => {
-    text = meanwhile(text);
+    live.set(meanwhile(live.get()));
     return deleted ? ('deleted' as const) : ('declined' as const);
   });
   const error = vi.spyOn(console, 'error').mockReturnValue(undefined);
   Object.assign(plugin.reviewManager, {
-    createCard: vi.fn().mockResolvedValue({ reviewCard, line, ...around }),
+    createCard: vi.fn().mockResolvedValue({
+      reviewCard,
+      line,
+      lineNumber,
+      embed: made,
+      ...around,
+    }),
     cards: { delete: deleteCard },
   });
-  Object.assign(plugin.app.workspace, {
-    activeEditor: { editor: {} },
-    getActiveViewOfType: () => ({ file: sourceFile }),
+  let mode = 'source';
+  const tab = Object.assign(new MarkdownView({} as never), {
+    file: sourceFile,
+    editor,
+    getMode: () => mode,
   });
-  Object.assign(plugin, { getActiveReviewView: () => null });
+  const review = { file: sourceFile, activeEditor: { editor } };
+  Object.assign(plugin.app.workspace, {
+    activeEditor: { editor: editor ?? {} },
+    getActiveViewOfType: () =>
+      held === 'review' ? null : held === 'tab' ? tab : { file: sourceFile },
+  });
+  Object.assign(plugin, {
+    getActiveReviewView: () => (held === 'review' ? review : null),
+  });
   const actions = new Actions(plugin);
   await actions.createCard();
+  if (editor && saved) {
+    disk = editor.getValue();
+    holds = false;
+    if (saved === 'reading') mode = 'preview';
+    else {
+      tab.file = review.file = makeTFile('other');
+      editor.setValue('another note');
+    }
+  }
 
   await actions.undo();
 
-  return { text: () => text, deleteCard, error, actions };
+  return {
+    text: () => live.get(),
+    disk: () => disk,
+    editorText: () => editor?.getValue(),
+    deleteCard,
+    error,
+    actions,
+  };
 }
 
 /**
@@ -4231,30 +4353,109 @@ describe('Actions — undo of a card made from a note', () => {
     vi.restoreAllMocks();
   });
 
-  it('puts the line back in place of the embed once the card is deleted', async () => {
+  /**
+   * Where the note is, and how far the metadata cache has read it: an undo
+   * straight after making the card finds the embed unsaved in the editor, or
+   * saved but not yet read by the cache.
+   */
+  const whereArb = fc.record({
+    held: fc.constantFrom<CardSourceHeld>('file', 'tab', 'review'),
+    cache: fc.constantFrom<'current' | 'stale'>('current', 'stale'),
+  });
+
+  it('puts the line back in place of the embed once the card is deleted, however soon after making it', async () => {
     await fc.assert(
-      fc.asyncProperty(cardNoteArb, async (note) => {
+      fc.asyncProperty(cardNoteArb, whereArb, async (note, where) => {
         vi.restoreAllMocks();
-        const { text, deleteCard } = await makeCardThenUndo(note, true);
+        const { text, deleteCard } = await makeCardThenUndo(
+          note,
+          true,
+          undefined,
+          undefined,
+          where
+        );
 
         expect(deleteCard).toHaveBeenCalledOnce();
         expect(text()).toBe(note.before + note.line + note.after);
-      })
+      }),
+      { numRuns: 60 }
+    );
+  });
+
+  it('leaves the note on disk alone while an editor holds it unsaved', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        cardNoteArb,
+        fc.constantFrom<CardSourceHeld>('tab', 'review'),
+        async (note, held) => {
+          vi.restoreAllMocks();
+          const { disk } = await makeCardThenUndo(
+            note,
+            true,
+            undefined,
+            undefined,
+            { held, cache: 'stale' }
+          );
+
+          // As the editor's own save will leave it: the embed never reached it
+          expect(disk()).toBe(note.before + note.line + note.after);
+        }
+      ),
+      { numRuns: 30 }
+    );
+  });
+
+  it('puts the line back on disk, leaving the editor alone, once the tab it was made in has saved the note and gone on to another or to reading view', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        cardNoteArb,
+        fc.constantFrom(
+          { held: 'tab', saved: 'left' } as const,
+          { held: 'review', saved: 'left' } as const,
+          { held: 'tab', saved: 'reading' } as const
+        ),
+        fc.constantFrom<'current' | 'stale'>('current', 'stale'),
+        async (note, { held, saved }, cache) => {
+          vi.restoreAllMocks();
+          const { disk, editorText } = await makeCardThenUndo(
+            note,
+            true,
+            undefined,
+            undefined,
+            { held, saved, cache }
+          );
+
+          expect(disk()).toBe(note.before + note.line + note.after);
+          expect(editorText()).toBe(
+            saved === 'left'
+              ? 'another note'
+              : note.before + note.embed + note.after
+          );
+        }
+      ),
+      { numRuns: 40 }
     );
   });
 
   it('leaves the embed where it was when the card is not deleted, keeping the undo, and says why in the console', async () => {
     await fc.assert(
-      fc.asyncProperty(cardNoteArb, async (note) => {
+      fc.asyncProperty(cardNoteArb, whereArb, async (note, where) => {
         vi.restoreAllMocks();
-        const { text, error, actions } = await makeCardThenUndo(note, false);
+        const { text, error, actions } = await makeCardThenUndo(
+          note,
+          false,
+          undefined,
+          undefined,
+          where
+        );
 
         expect(text()).toBe(note.before + note.embed + note.after);
         expect(actions.undoStack).toHaveLength(1);
         expect(String(error.mock.calls[0]?.[0])).toBe(
           'Error: Kept the card "card"'
         );
-      })
+      }),
+      { numRuns: 60 }
     );
   });
 
@@ -4264,7 +4465,8 @@ describe('Actions — undo of a card made from a note', () => {
         cardNoteArb,
         fc.record({ before: fc.string(), after: fc.string() }),
         fc.boolean(),
-        async (note, around, kept) => {
+        whereArb,
+        async (note, around, kept, where) => {
           vi.restoreAllMocks();
           const written = kept ? around : { before: '', after: '' };
           fc.pre(
@@ -4280,12 +4482,14 @@ describe('Actions — undo of a card made from a note', () => {
             },
             true,
             undefined,
-            around
+            around,
+            where
           );
 
           expect(text()).toBe(note.before + note.line + note.after);
         }
-      )
+      ),
+      { numRuns: 60 }
     );
   });
 
@@ -4294,7 +4498,8 @@ describe('Actions — undo of a card made from a note', () => {
       fc.asyncProperty(
         cardNoteArb,
         fc.record({ before: fc.string(), after: fc.string() }),
-        async (note, around) => {
+        whereArb,
+        async (note, around, where) => {
           vi.restoreAllMocks();
           const written = {
             ...note,
@@ -4305,26 +4510,117 @@ describe('Actions — undo of a card made from a note', () => {
             written,
             false,
             undefined,
-            around
+            around,
+            where
           );
 
           expect(text()).toBe(written.before + note.embed + written.after);
         }
-      )
+      ),
+      { numRuns: 60 }
     );
   });
 
   it('puts no embed over a line edited meanwhile', async () => {
     await fc.assert(
-      fc.asyncProperty(cardNoteArb, fc.string(), async (note, edited) => {
-        fc.pre(!(edited + note.after).startsWith(note.line));
+      fc.asyncProperty(
+        cardNoteArb,
+        fc.string(),
+        whereArb,
+        async (note, edited, where) => {
+          fc.pre(!(edited + note.after).startsWith(note.line));
+          vi.restoreAllMocks();
+          const changed = note.before + edited + note.after;
+
+          const { text } = await makeCardThenUndo(
+            note,
+            false,
+            () => changed,
+            undefined,
+            where
+          );
+
+          expect(text()).toBe(changed);
+        }
+      ),
+      { numRuns: 60 }
+    );
+  });
+
+  it('takes back the embed on the line the card was made of when the note holds a copy of it on another', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('![[card|ir-hide-title]]', '![[c]]'),
+        fc.integer({ min: 1, max: 4 }),
+        fc.boolean(),
+        fc.constantFrom<CardSourceHeld>('file', 'tab', 'review'),
+        async (embed, gap, first, held) => {
+          vi.restoreAllMocks();
+          // The embed on line 0, and a copy of it `gap` lines below
+          const lines = [embed, ...Array<string>(gap - 1).fill('x'), embed];
+          const madeOn = first ? 0 : gap;
+          const { text } = await makeCardThenUndo(
+            { before: '', embed: lines.join('\n'), after: '', line: 'made' },
+            true,
+            undefined,
+            undefined,
+            { held, cache: 'stale', embed, lineNumber: madeOn }
+          );
+
+          const restored = [...lines];
+          restored[madeOn] = 'made';
+          expect(text()).toBe(restored.join('\n'));
+        }
+      ),
+      { numRuns: 40 }
+    );
+  });
+
+  it('finds an embed whose link has changed since it was made through the metadata cache', async () => {
+    await fc.assert(
+      fc.asyncProperty(cardNoteArb, async (note) => {
         vi.restoreAllMocks();
-        const changed = note.before + edited + note.after;
+        const { text } = await makeCardThenUndo(
+          note,
+          true,
+          undefined,
+          undefined,
+          { embed: '![[renamed since]]' }
+        );
 
-        const { text } = await makeCardThenUndo(note, false, () => changed);
+        expect(text()).toBe(note.before + note.line + note.after);
+      }),
+      { numRuns: 30 }
+    );
+  });
 
-        expect(text()).toBe(changed);
-      })
+  it('takes back an embed whose link has changed since, from an editor holding text typed after the cache read the note, and nothing else', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        cardNoteArb,
+        fc.string({ minLength: 1 }),
+        fc.constantFrom<CardSourceHeld>('tab', 'review'),
+        async (note, typed, held) => {
+          const written = typed + note.before + note.embed + note.after;
+          fc.pre(
+            written.indexOf(note.embed) === written.lastIndexOf(note.embed)
+          );
+          vi.restoreAllMocks();
+          const { editorText, disk } = await makeCardThenUndo(
+            note,
+            true,
+            undefined,
+            undefined,
+            { held, embed: '![[renamed since]]', typed }
+          );
+
+          expect(editorText()).toBe(
+            typed + note.before + note.line + note.after
+          );
+          expect(disk()).toBe(note.before + note.embed + note.after);
+        }
+      ),
+      { numRuns: 40 }
     );
   });
 });

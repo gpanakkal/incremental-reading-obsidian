@@ -3870,7 +3870,7 @@ describe('create', () => {
             )
             .mockResolvedValue({ file: {}, data: {} });
           vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue('[[c]]');
-          vi.spyOn(Obsidian, 'transcludeLink').mockReturnValue(undefined);
+          vi.spyOn(Obsidian, 'transcludeLink').mockReturnValue('![[c]]');
           vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
             line,
             lineNumber: 0,
@@ -3917,7 +3917,7 @@ describe('create', () => {
         )
         .mockResolvedValue({ file: {}, data: {} });
       vi.spyOn(Obsidian, 'generateMarkdownLink').mockReturnValue('[[c]]');
-      vi.spyOn(Obsidian, 'transcludeLink').mockReturnValue(undefined);
+      vi.spyOn(Obsidian, 'transcludeLink').mockReturnValue('![[c]]');
       vi.spyOn(Obsidian, 'smartGetline').mockReturnValue({
         line,
         lineNumber: 0,
@@ -4061,8 +4061,12 @@ describe('createFromSelection', () => {
         );
 
         expect(editor.text).toBe(c.before + `!${LINK}` + c.after);
-        // Undo puts `line` back where the embed is.
-        expect(result).toMatchObject({ reviewCard, line: c.text });
+        // Undo puts `line` back where it finds the embed it was told of.
+        expect(result).toMatchObject({
+          reviewCard,
+          line: c.text,
+          embed: `!${LINK}`,
+        });
         vi.restoreAllMocks();
       })
     );
@@ -7060,14 +7064,16 @@ describe('create, from a selection over several lines', () => {
           const result = (await manager.create(
             editor as never,
             { file: sourceFile } as never
-          )) as { line: string; before: string; after: string } | undefined;
+          )) as
+            | { line: string; embed: string; before: string; after: string }
+            | undefined;
           if (!result) {
             expect(editor.text).toBe(doc);
             vi.restoreAllMocks();
             return;
           }
 
-          const placed = result.before + EMBED + result.after;
+          const placed = result.before + result.embed + result.after;
           const at = editor.text.indexOf(placed);
           expect(at).toBeGreaterThanOrEqual(0);
           expect(

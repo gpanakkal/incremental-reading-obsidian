@@ -401,7 +401,7 @@ export class CardManager extends ItemManager {
         line.slice(0, a) + answer + line.slice(b),
         [a, a + answer.length]
       )[0];
-      const reviewCard = await this.createAndEmbed(
+      const { reviewCard, embed } = await this.createAndEmbed(
         editor,
         currentFile,
         withDelimiters,
@@ -413,6 +413,7 @@ export class CardManager extends ItemManager {
       editor.setSelection({ line: lineNumber + 1, ch: 0 });
       return {
         reviewCard,
+        embed,
         line,
         lineNumber,
         start,
@@ -533,7 +534,7 @@ export class CardManager extends ItemManager {
       const withDelimiters = imputed?.raw
         ? delimited
         : Markdown.escapeCutUnderline(doc, from, delimited);
-      const reviewCard = await this.createAndEmbed(
+      const { reviewCard, embed } = await this.createAndEmbed(
         editor,
         currentFile,
         withDelimiters,
@@ -550,6 +551,7 @@ export class CardManager extends ItemManager {
       });
       return {
         reviewCard,
+        embed,
         line: text,
         lineNumber: start.line,
         start: start.ch,
@@ -615,6 +617,7 @@ export class CardManager extends ItemManager {
    * Make the card's note and row, and put its embed in place of `start`–`end`.
    * With `imputed`, the note gets the delimiters its text lacks, and is named
    * after its text alone, and the embed gets those its note needs around it.
+   * @returns the card, and its embed as written, without those delimiters
    */
   protected async createAndEmbed(
     editor: Editor,
@@ -641,8 +644,15 @@ export class CardManager extends ItemManager {
       this.app,
       TRANSCLUSION_HIDE_TITLE_ALIAS
     );
-    Obsidian.transcludeLink(editor, linkToCard, start, end, before, after);
-    return reviewCard;
+    const embed = Obsidian.transcludeLink(
+      editor,
+      linkToCard,
+      start,
+      end,
+      before,
+      after
+    );
+    return { reviewCard, embed };
   }
 
   /**
