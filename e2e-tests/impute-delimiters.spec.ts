@@ -293,6 +293,37 @@ test('gives a snippet cut from a cell of a table only that column, first column 
   );
 });
 
+test('takes back a card undone the moment it is made, before the note is saved, leaving the note as it was', async () => {
+  await setDefaultEditingMode(window, 'live-preview');
+  const path = 'Undone card note.md';
+  const doc = 'Intro\n\nThe sky over the bay is blue.\n\nOutro';
+  await openNewNote(window, path, doc);
+  await select(window, doc.indexOf('blue'), doc.indexOf('.\n\nOutro'));
+  await executeCommandById(window, 'incremental-reading:create-card');
+  await itemNotes(window, 'srs_card', 1);
+  const editor = window.locator(
+    '.workspace-leaf.mod-active .markdown-source-view'
+  );
+  await expect(editor.locator('.internal-embed')).toHaveCount(1);
+
+  await executeCommandById(window, 'incremental-reading:undo');
+
+  await expect(editor.locator('.internal-embed')).toHaveCount(0);
+  await expect(
+    editor.locator('.cm-line', { hasText: /^The sky over the bay is blue\.$/ })
+  ).toBeVisible();
+  // And reads so once reopened: closing the tab saves it
+  await executeCommandById(window, 'workspace:close');
+  await openNewNote(window, path, doc, 'preview');
+  const preview = window.locator(
+    '.workspace-leaf.mod-active .markdown-preview-view'
+  );
+  await expect(
+    preview.locator('p', { hasText: /^The sky over the bay is blue\.$/ })
+  ).toBeVisible();
+  await expect(preview.locator('.internal-embed')).toHaveCount(0);
+});
+
 test('makes one card of a selection from one paragraph into the next, which undoing takes back', async () => {
   await setDefaultEditingMode(window, 'live-preview');
   const path = 'Multi-block card note.md';
@@ -327,25 +358,8 @@ test('makes one card of a selection from one paragraph into the next, which undo
     })
   ).toBeVisible();
 
-  // Undo finds the embed through the metadata cache, which reads the note
-  // only once the editor saves it: undoing before then takes back the card
-  // but not the note (a race of every card's undo, not this test's to fix)
-  await expect
-    .poll(() =>
-      window.evaluate((path) => {
-        const { app } = window as unknown as {
-          app: {
-            vault: { getFileByPath(path: string): unknown };
-            metadataCache: {
-              getFileCache(file: unknown): { embeds?: unknown[] } | null;
-            };
-          };
-        };
-        const file = app.vault.getFileByPath(path);
-        return app.metadataCache.getFileCache(file)?.embeds?.length ?? 0;
-      }, path)
-    )
-    .toBe(1);
+  // Straight away: before the editor has saved the note, or the metadata
+  // cache read the embed in it
   await executeCommandById(window, 'incremental-reading:undo');
   await expect
     .poll(() =>
