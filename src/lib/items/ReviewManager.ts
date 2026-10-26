@@ -1088,8 +1088,13 @@ export default class ReviewManager {
     const type = Obsidian.typeOfTags(frontmatter.tags);
     let rowId = irIdOf(frontmatter);
     this.snippets.offsetTracker.renameFile(oldPath, file.path);
-    // A plain note may be what snippets and cards were taken from
-    if (!type) return [{ from: oldPath, file: concreteFile }];
+    if (!type) {
+      // A plain note may be what snippets and cards were taken from, and an
+      // item's note that lost its tag still names its row by its id
+      const id =
+        rowId && (await this.#followUntagged(rowId, oldPath, concreteFile));
+      return [{ from: oldPath, file: concreteFile, ...(id ? { id } : {}) }];
+    }
 
     const table = type === 'card' ? 'srs_card' : type;
 
@@ -1124,6 +1129,36 @@ export default class ReviewManager {
       rowId = row?.id;
     }
     return [{ from: oldPath, file: concreteFile, id: rowId }];
+  }
+
+  /**
+   * Move the live row `id` holds from `oldPath` to where `file`, which claims
+   * `id` with no type tag, now is: the note at a row's reference is that row's
+   * note iff it carries the row's `ir-id`, tag or no tag (0230). Only a row at
+   * `oldPath` follows, its note being the one that moved: a copy renamed from
+   * elsewhere never takes it (see `ownNoteKeepsRow`), and with no tag nothing
+   * says a note from elsewhere is the item's, as it does for a tagged one. A
+   * deleted row stays as it is: only an import brings one back to an untagged
+   * note (0228). Moves made while nothing listened are `scanForMovedNotes`'s,
+   * which goes by `ir-id` alone.
+   * @returns the id of the row moved, if any
+   */
+  async #followUntagged(
+    id: string,
+    oldPath: string,
+    file: TFile
+  ): Promise<string | undefined> {
+    if (oldPath === file.path) return undefined;
+    for (const table of ITEM_TABLES) {
+      const row = await this.#rowOf(table, id);
+      if (!row || row.deleted || row.reference !== oldPath) continue;
+      await this.#repo.mutate(
+        `UPDATE ${table} SET reference = $1 WHERE id = $2`,
+        [file.path, id]
+      );
+      return id;
+    }
+    return undefined;
   }
 
   /**
