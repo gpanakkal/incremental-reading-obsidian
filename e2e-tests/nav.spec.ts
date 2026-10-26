@@ -1270,9 +1270,21 @@ test.describe('Links followed in review', () => {
   }
 
   test('a plain click on a wikilink to a card shows the card in review', async () => {
-    // Made in a note tab: in review the bullet is out of view, and unrendered
+    // Made in a note tab: in review the bullet is out of view, and unrendered.
+    // Its answer is the part after the colon: the whole bullet selected is all
+    // answer, which would leave the card no question to show
+    const answer = 'Confidentiality, Integrity and Availability (CIA)';
+    const question = BULLET.slice(0, BULLET.indexOf(answer)).trim();
     await openNote(window, SOURCE);
-    await selectParagraph(window, BULLET);
+    await window.evaluate((answer) => {
+      const { app } = window as unknown as LinkTestWindow;
+      const editor = app.workspace.activeEditor!.editor!;
+      const from = editor.getValue().indexOf(answer);
+      editor.setSelection(
+        editor.offsetToPos(from),
+        editor.offsetToPos(from + answer.length)
+      );
+    }, answer);
     await executeCommandById(window, 'incremental-reading:create-card');
     await expect.poll(cardLinkInSource, { timeout: 10_000 }).not.toBeNull();
     const card = (await cardLinkInSource())!;
@@ -1303,7 +1315,7 @@ test.describe('Links followed in review', () => {
     const cardViewer = window.locator(
       `.workspace-leaf.mod-active [data-type="${REVIEW_VIEW_TYPE}"] .ir-card-viewer`
     );
-    await expect(cardViewer).toContainText(BULLET, LANDS_WITHIN);
+    await expect(cardViewer).toContainText(question, LANDS_WITHIN);
     await expect(cardViewer.locator('.ir-hidden-answer')).toBeVisible();
   });
 

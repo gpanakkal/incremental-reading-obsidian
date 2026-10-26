@@ -519,15 +519,12 @@ export function reviewHeader(window: Page) {
 /**
  * Set Settings -> Appearance -> "Show tab title bar", which is the
  * `showViewHeader` vault config underneath. Obsidian applies it as a class on
- * `body`, so it takes effect at once, on tabs already open too.
+ * `body`, so it takes effect at once, on tabs already open too. Saved at once
+ * for the reason {@link setNativeMenus} gives: an unsaved change was undone
+ * by a config reread on macOS CI, bringing the header back mid-test.
  */
 export async function setShowViewHeader(window: Page, show: boolean) {
-  await window.evaluate((value) => {
-    (window as unknown as TestWindow).app.vault.setConfig(
-      'showViewHeader',
-      value
-    );
-  }, show);
+  await setSavedAppearanceConfig(window, 'showViewHeader', show);
 }
 
 /**
@@ -563,32 +560,44 @@ export async function setReviewTitleBar(
  * `reloadConfig`, and `nativeMenus` living in `appearance.json`.
  */
 export async function setNativeMenus(window: Page, native: boolean) {
+  await setSavedAppearanceConfig(window, 'nativeMenus', native);
+}
+
+/**
+ * Set an `appearance.json` vault config and save it, until both the live
+ * config and the file hold it. See {@link setNativeMenus} for why it is saved.
+ */
+async function setSavedAppearanceConfig(
+  window: Page,
+  key: 'nativeMenus' | 'showViewHeader',
+  value: boolean
+) {
   await expect
     .poll(() =>
-      window.evaluate(async (value) => {
-        const { vault } = (
-          window as unknown as {
-            app: {
-              vault: {
-                configDir: string;
-                adapter: { read(path: string): Promise<string> };
-                getConfig(key: string): unknown;
-                setConfig(key: string, value: unknown): void;
-                saveConfig(): Promise<void>;
+      window.evaluate(
+        async ([key, value]) => {
+          const { vault } = (
+            window as unknown as {
+              app: {
+                vault: {
+                  configDir: string;
+                  adapter: { read(path: string): Promise<string> };
+                  getConfig(key: string): unknown;
+                  setConfig(key: string, value: unknown): void;
+                  saveConfig(): Promise<void>;
+                };
               };
-            };
-          }
-        ).app;
-        vault.setConfig('nativeMenus', value);
-        await vault.saveConfig();
-        const saved = JSON.parse(
-          await vault.adapter.read(`${vault.configDir}/appearance.json`)
-        ) as Record<string, unknown>;
-        return (
-          saved['nativeMenus'] === value &&
-          vault.getConfig('nativeMenus') === value
-        );
-      }, native)
+            }
+          ).app;
+          vault.setConfig(key, value);
+          await vault.saveConfig();
+          const saved = JSON.parse(
+            await vault.adapter.read(`${vault.configDir}/appearance.json`)
+          ) as Record<string, unknown>;
+          return saved[key] === value && vault.getConfig(key) === value;
+        },
+        [key, value] as const
+      )
     )
     .toBe(true);
 }

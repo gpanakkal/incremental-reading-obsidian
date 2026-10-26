@@ -52,7 +52,8 @@ export function createBackupFailurePrompt(app: App): BackupFailurePrompt {
   let shown: {
     notice: Notice;
     buttons: HTMLButtonElement[];
-    observer: MutationObserver | null;
+    /** Stop watching for the notice going away. */
+    release: () => void;
   } | null = null;
   let modal: ConfirmModal | null = null;
 
@@ -68,7 +69,7 @@ export function createBackupFailurePrompt(app: App): BackupFailurePrompt {
   const takeDown = () => {
     const was = shown;
     shown = null;
-    was?.observer?.disconnect();
+    was?.release();
     was?.notice.hide();
   };
 
@@ -101,20 +102,38 @@ export function createBackupFailurePrompt(app: App): BackupFailurePrompt {
       button('Retry', 'ir-backup-retry', () => choose('retry')),
       button('Proceed anyway', 'mod-warning', () => confirmProceed()),
     ];
+    // Gone with nothing answered would leave startup waiting with nothing to
+    // answer: it comes back
+    const comeBack = () => {
+      if (shown?.notice !== notice) return;
+      shown.release();
+      shown = null;
+      raise();
+    };
     // A swipe still dismisses it on a phone (undocumented: Obsidian detaches
-    // the element itself), which would leave startup waiting with nothing
-    // to answer: it comes back
+    // the element itself)
     const parent = el.parentElement;
     const observer = parent
       ? new MutationObserver(() => {
-          if (shown?.notice !== notice || el.isConnected) return;
-          shown.observer?.disconnect();
-          shown = null;
-          raise();
+          if (!el.isConnected) comeBack();
         })
       : null;
     observer?.observe(parent!, { childList: true });
-    shown = { notice, buttons, observer };
+    // Obsidian puts a notice on `activeWindow` (undocumented: `Notice`'s
+    // constructor reads it), which is the settings window while that is open
+    // (1.13+), as when the plugin is enabled or updated from there. Closing
+    // that window takes the notice with it, unseen by the observer. Deferred
+    // on this window's clock, past Obsidian's own `pagehide` handler, which
+    // hands `activeWindow` back to the main window
+    const host = el.ownerDocument.defaultView;
+    const onHostGone = () => window.setTimeout(comeBack);
+    const away = host !== null && host !== window;
+    if (away) host.addEventListener('pagehide', onHostGone);
+    const release = () => {
+      observer?.disconnect();
+      if (away) host.removeEventListener('pagehide', onHostGone);
+    };
+    shown = { notice, buttons, release };
   };
 
   const confirmProceed = () => {
