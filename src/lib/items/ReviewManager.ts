@@ -21,7 +21,11 @@ import {
   isImportable,
   supportsFrontmatter,
 } from '#/lib/mime';
-import { type ItemTable, evictedSpot } from '#/lib/moved-note-scan';
+import {
+  type ItemTable,
+  evictedSpot,
+  ITEM_TABLES,
+} from '#/lib/moved-note-scan';
 import type { PositionRow } from '#/lib/position-store';
 import { assertReady, outlastMerge } from '#/lib/readiness';
 import {
@@ -769,27 +773,29 @@ export default class ReviewManager {
 
   /**
    * Fetches a ReviewItem given a file.
-   * Returns null if the item is not found in the database.
+   * Returns null if the item is not found in the database, or its row there
+   * is deleted: the queue leaves a tombstone out, and so do review and the
+   * note bar, which go by this (0228).
    */
   async getReviewItemFromFile(file: TFile): Promise<ReviewItem | null> {
     const noteType = await this.articles.getItemType(file);
     if (noteType === 'article') {
       const row = await this.articles.findArticle(file);
-      if (!row) return null;
+      if (!row || row.deleted) return null;
       return {
         data: ArticleManager.rowToBase(row),
         file,
       } satisfies ReviewArticle;
     } else if (noteType === 'snippet') {
       const row = await this.snippets.findSnippet(file);
-      if (!row) return null;
+      if (!row || row.deleted) return null;
       return {
         data: SnippetManager.rowToBase(row),
         file,
       } satisfies ReviewSnippet;
     } else if (noteType === 'card') {
       const row = await this.cards.findCard(file);
-      if (!row) return null;
+      if (!row || row.deleted) return null;
       return { data: CardManager.rowToDisplay(row), file } satisfies ReviewCard;
     }
     return null;
@@ -1328,7 +1334,12 @@ export default class ReviewManager {
     const id = irIdOf(frontmatter);
     const type = Obsidian.typeOfTags(frontmatter.tags);
 
-    if (!id || type === null) return null;
+    if (!id) return null;
+    if (type === null) {
+      return (await this.#restoreOwnTombstone(file.path, id))
+        ? refusedAt(file.path)
+        : null;
+    }
 
     const table = type === 'card' ? 'srs_card' : type;
 
@@ -1358,6 +1369,34 @@ export default class ReviewManager {
         [id]
       )
     )[0] as { reference: string; deleted: unknown } | undefined;
+  }
+
+  /**
+   * Bring back the row `id`, deleted at `path`, now that a note claiming its
+   * id is there again, though the note lacks its type tag: a note deleted and
+   * brought back, from the trash or by an editor that saves by replacing the
+   * file, while its tag was off. The note at a row's reference is that row's
+   * note iff it carries its id, tag or no tag, and a tag added back later only
+   * changes the note, which no handler takes to restore a row: left deleted,
+   * the item stayed out of the queue for good (0228). A row anywhere else is
+   * left alone: with no tag, nothing says which item the note is if not the
+   * one at its own path. Reads first, as most notes created are no item.
+   * @returns whether a row was brought back
+   */
+  async #restoreOwnTombstone(path: string, id: string): Promise<boolean> {
+    for (const table of ITEM_TABLES) {
+      const [row] = await this.#repo.query(
+        `SELECT id FROM ${table} WHERE id = $1 AND reference = $2 AND deleted = TRUE`,
+        [id, path]
+      );
+      if (!row) continue;
+      await this.#repo.mutate(
+        `UPDATE ${table} SET deleted = FALSE WHERE id = $1 AND reference = $2`,
+        [id, path]
+      );
+      return true;
+    }
+    return false;
   }
 
   /**

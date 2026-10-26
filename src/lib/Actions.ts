@@ -163,9 +163,9 @@ function undoableImports(summary: ImportSummary): ImportedArticle[] {
       ? summary.result
         ? [summary.result]
         : []
-      : summary.outcomes.flatMap(({ articleId, effect, madeFile }) =>
+      : summary.outcomes.flatMap(({ articleId, effect, madeFile, untag }) =>
           articleId !== undefined && effect !== undefined
-            ? [{ articleId, effect, madeFile }]
+            ? [{ articleId, effect, madeFile, untag }]
             : []
         );
   return done.filter(({ effect }) => effect !== 'linked');

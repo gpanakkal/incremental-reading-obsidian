@@ -98,6 +98,14 @@ interface AutoImportWatcherOptions {
    */
   hasRow: (id: string) => Promise<boolean>;
   /**
+   * Whether `file`, whose `ir-id` `id` a row holds, is the note of the live
+   * article at its path but lacks the article tag (see
+   * `ArticleManager.lostArticleTag`): no item to review, which the import
+   * command repairs rather than refusing, so a trigger tag asks for that too.
+   * Without it, no note is.
+   */
+  needsRepair?: (id: string, file: TFile) => Promise<boolean>;
+  /**
    * Whether Obsidian Sync lets imports go ahead now (see `readSyncGate`).
    * Without it, they always may.
    */
@@ -139,8 +147,10 @@ interface AutoImportWatcherOptions {
  *
  * A note is never imported twice: importing gives it an `ir-id`, and a note
  * whose `ir-id` a row holds, deleted or not, is dropped at the flush, so a
- * deleted article stays deleted. A note whose `ir-id` no row holds is
- * imported, as the import command imports it (see `hasRow`). A note whose
+ * deleted article stays deleted; unless it is its live article's note and
+ * lost the article tag, which the import repairs, as the import command does
+ * (see `needsRepair`). A note whose `ir-id` no row holds is imported, as
+ * the import command imports it (see `hasRow`). A note whose
  * import failed is remembered until the plugin next loads, so it isn't tried
  * again on every edit.
  *
@@ -178,6 +188,7 @@ export class AutoImportWatcher {
   readonly #getConfig: () => AutoImportConfig;
   readonly #importMany: AutoImportWatcherOptions['importMany'];
   readonly #hasRow: AutoImportWatcherOptions['hasRow'];
+  readonly #needsRepair: NonNullable<AutoImportWatcherOptions['needsRepair']>;
 
   #running = false;
   /** Notes waiting to be imported, in the order they were first queued. */
@@ -245,6 +256,7 @@ export class AutoImportWatcher {
     getConfig,
     importMany,
     hasRow,
+    needsRepair = () => Promise.resolve(false),
     syncGate = () => 'open',
     watchSync = () => () => undefined,
     onSyncWait = () => undefined,
@@ -254,6 +266,7 @@ export class AutoImportWatcher {
     this.#getConfig = getConfig;
     this.#importMany = importMany;
     this.#hasRow = hasRow;
+    this.#needsRepair = needsRepair;
     this.#syncGate = syncGate;
     this.#watchSync = watchSync;
     this.#onSyncWait = onSyncWait;
@@ -862,23 +875,29 @@ export class AutoImportWatcher {
       // here, so each import costs one lookup.
       const id: unknown = cache?.frontmatter?.['ir-id'];
       if (typeof id === 'string') {
-        if (await this.#rowHolds(id)) continue;
+        const rowHeld = await this.#rowHolds(id);
+        // An article already, unless its note lost the tag that makes it one
+        if (rowHeld && !(await this.#lostTag(id, file))) continue;
         // An orphan, or a note whose row Sync is still bringing, or a merge
         // still taking in: imported only once neither can be, never despite
-        // Sync. A database that doesn't settle leaves it for its next change
+        // Sync. A repair waits too: the tag may be on its way back from
+        // another device, which would then have written it twice
         if (this.#syncGate() !== 'open') {
           held.push(file);
           continue;
         }
-        settled ??= this.#settleDatabase();
-        if (!(await settled) || (await this.#rowHolds(id))) continue;
-        // Read again as it is now: it may have changed while it waited, such
-        // as the trigger tag an un-import took off, which ends its hold
-        const now = this.#app.metadataCache.getFileCache(file);
-        if (this.#app.vault.getFileByPath(file.path) !== file) continue;
-        if (now?.frontmatter?.['ir-id'] !== id) continue;
-        matchedTags = this.#triggerTagsOf(file, now, config);
-        if (!matchedTags) continue;
+        if (!rowHeld) {
+          // A database that doesn't settle leaves it for its next change
+          settled ??= this.#settleDatabase();
+          if (!(await settled) || (await this.#rowHolds(id))) continue;
+          // Read again as it is now: it may have changed while it waited, such
+          // as the trigger tag an un-import took off, which ends its hold
+          const now = this.#app.metadataCache.getFileCache(file);
+          if (this.#app.vault.getFileByPath(file.path) !== file) continue;
+          if (now?.frontmatter?.['ir-id'] !== id) continue;
+          matchedTags = this.#triggerTagsOf(file, now, config);
+          if (!matchedTags) continue;
+        }
       }
       // Un-imported, or while the lookup ran, which may be why no row holds it
       if (this.#unimported.has(file)) continue;
@@ -927,6 +946,24 @@ export class AutoImportWatcher {
     const stored = loadAutoImportWatermark(this.#app);
     if (stored !== null && stored >= time) return;
     saveAutoImportWatermark(this.#app, time);
+  }
+
+  /**
+   * Whether `file`, whose `id` a row holds, lost the tag that makes it that
+   * article (see {@link AutoImportWatcherOptions.needsRepair}). A lookup that
+   * throws counts as no: the note is left alone this time, as by
+   * {@link #rowHolds}.
+   */
+  async #lostTag(id: string, file: TFile): Promise<boolean> {
+    try {
+      return await this.#needsRepair(id, file);
+    } catch (error) {
+      console.error(
+        `Incremental Reading - couldn't check the note with ir-id "${id}" for its article tag:`,
+        error
+      );
+      return false;
+    }
   }
 
   /**

@@ -504,27 +504,32 @@ describe('getItemType', () => {
     vi.restoreAllMocks();
   });
 
-  it('types a file without frontmatter by the row at its path, never reading the file', async () => {
+  it('types a file without frontmatter by the row at its path, none when deleted, never reading the file', async () => {
     await fc.assert(
-      fc.asyncProperty(binaryFileArb, tableArb, async (file, table) => {
-        const processFrontMatter = vi.fn();
-        const manager = new TestManager(
-          { app: { fileManager: { processFrontMatter } } } as never,
-          makeRepo().repo
-        );
-        const findItem = vi
-          .spyOn(manager, 'findItem')
-          .mockResolvedValue(table && ({ table } as never));
-        const getNoteType = vi.spyOn(Obsidian, 'getNoteType');
-        getNoteType.mockClear();
+      fc.asyncProperty(
+        binaryFileArb,
+        tableArb,
+        fc.boolean(),
+        async (file, table, deleted) => {
+          const processFrontMatter = vi.fn();
+          const manager = new TestManager(
+            { app: { fileManager: { processFrontMatter } } } as never,
+            makeRepo().repo
+          );
+          const findItem = vi
+            .spyOn(manager, 'findItem')
+            .mockResolvedValue(table && ({ table, row: { deleted } } as never));
+          const getNoteType = vi.spyOn(Obsidian, 'getNoteType');
+          getNoteType.mockClear();
 
-        const type = await manager.getItemType(file);
+          const type = await manager.getItemType(file);
 
-        expect(type).toBe(table && TABLE_TYPE[table]);
-        expect(findItem).toHaveBeenCalledExactlyOnceWith(file);
-        expect(getNoteType).not.toHaveBeenCalled();
-        expect(processFrontMatter).not.toHaveBeenCalled();
-      })
+          expect(type).toBe(table && !deleted ? TABLE_TYPE[table] : null);
+          expect(findItem).toHaveBeenCalledExactlyOnceWith(file);
+          expect(getNoteType).not.toHaveBeenCalled();
+          expect(processFrontMatter).not.toHaveBeenCalled();
+        }
+      )
     );
   });
 

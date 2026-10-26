@@ -4066,6 +4066,19 @@ describe('ReviewManager on a file without frontmatter', () => {
     );
   });
 
+  // 0228 addition: a PDF is an item by its row alone, so a deleted one is none
+  it('takes it for no item once the row at its path is deleted', async () => {
+    await fc.assert(
+      fc.asyncProperty(binaryFileArb, tableArb, async (file, table) => {
+        const { manager, row } = wireBinary(file, table);
+        (row as { deleted: unknown }).deleted = 1;
+
+        expect(await manager.articles.getItemType(file)).toBeNull();
+        expect(await manager.getReviewItemFromFile(file)).toBeNull();
+      })
+    );
+  });
+
   it('never touches its content or frontmatter when it is renamed or created', async () => {
     await fc.assert(
       fc.asyncProperty(
@@ -5234,6 +5247,73 @@ describe('ReviewManager reads the frontmatter of a renamed or created note witho
       )
     );
   });
+
+  // 0228: deleted and brought back while it lacked its tag, the note was
+  // left with a tombstone no later tag could lift, out of the queue for good
+  it('restores the row deleted at the path of a note created there with its ir-id but no type tag, never writing the note', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        tableArb,
+        fc.constantFrom('same', 'other', 'none'),
+        fc.boolean(),
+        fc.array(fc.constantFrom('other', 'ir-source', '')),
+        async (table, claim, samePath, otherTags) => {
+          const wired = wireRenames({});
+          wired.insert(table, 'row', 'IR/gone.md');
+          wired.repo.mutate(
+            `UPDATE ${table} SET deleted = TRUE WHERE id = $1`,
+            ['row']
+          );
+          const frontmatter: Record<string, unknown> = { tags: otherTags };
+          if (claim !== 'none') {
+            frontmatter['ir-id'] = claim === 'same' ? 'row' : 'another';
+          }
+
+          const path = samePath ? 'IR/gone.md' : 'IR/back.md';
+          await wired.manager.handleCreation(wired.add(path, frontmatter));
+
+          expect(wired.repo.rows(table)).toStrictEqual([
+            {
+              id: 'row',
+              reference: 'IR/gone.md',
+              deleted: !(claim === 'same' && samePath),
+            },
+          ]);
+          expect(wired.processFrontMatter).not.toHaveBeenCalled();
+        }
+      )
+    );
+  });
+
+  // 0228 addition: a tombstone kept its note in review and on the note bar
+  // while the queue hid it
+  it('finds no item to review in a note whose row at its path is deleted, tagged or not, and the live one in a note of its type', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        tableArb,
+        fc.boolean(),
+        fc.boolean(),
+        async (table, deleted, tagged) => {
+          const wired = wireRenames({});
+          wired.insert(table, 'row', 'IR/n.md');
+          if (deleted) {
+            wired.repo.mutate(
+              `UPDATE ${table} SET deleted = TRUE WHERE id = $1`,
+              ['row']
+            );
+          }
+          const file = wired.add('IR/n.md', {
+            'ir-id': 'row',
+            tags: tagged ? [TABLE_TAG[table]] : [],
+          });
+
+          const item = await wired.manager.getReviewItemFromFile(file);
+
+          expect(item?.data.id ?? null).toBe(tagged && !deleted ? 'row' : null);
+        }
+      )
+    );
+  });
 });
 
 describe('ReviewManager.isItemFileAt', () => {
@@ -5488,6 +5568,23 @@ describe('ReviewManager.handleCreation reports an item arriving where its path b
       { id: 'x', reference: arrives, deleted: false },
     ]);
     expect(refused).toBe(reported ? arrives : null);
+  });
+
+  it('reports a note brought back without its type tag where its path breaks links, and nothing for one no row there was waiting for', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.boolean(), fc.boolean(), async (breaks, waited) => {
+        const path = breaks ? 'x|y/a.md' : 'xy/a.md';
+        const wired = wireRenames({});
+        wired.insert('article', 'x', path);
+        wired.repo.mutate(`UPDATE article SET deleted = TRUE WHERE id = 'x'`);
+
+        const refused = await wired.manager.handleCreation(
+          wired.add(path, { 'ir-id': waited ? 'x' : 'another' })
+        );
+
+        expect(refused).toBe(breaks && waited ? path : null);
+      })
+    );
   });
 
   it('reports nothing for a note no row is waiting for, or one that is a copy', async () => {

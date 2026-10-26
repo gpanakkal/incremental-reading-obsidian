@@ -141,13 +141,14 @@ export class ItemManager {
   /**
    * The type of item `file` is, if any. A note is typed by its tags, as
    * `getNoteType` reads them. A file with no frontmatter, a PDF say, has none.
-   * It is known by its path alone, so it is whatever the row at its path is.
+   * It is known by its path alone, so it is whatever the row at its path is:
+   * none, when that row is deleted.
    */
   async getItemType(file: TFile): Promise<NoteType | null> {
     if (supportsFrontmatter(file)) return Obsidian.getNoteType(file, this.app);
 
     const match = await this.findItem(file);
-    if (!match) return null;
+    if (!match || match.row.deleted) return null;
     return match.table === 'srs_card' ? 'card' : match.table;
   }
 

@@ -347,6 +347,45 @@ function imported(
 }
 
 /**
+ * Put the article tag on `file`, which lacks it, keeping its other tags.
+ * @returns how to take it back: the tags put back as they were, when no one
+ *   changed them since; else only the article tag taken off, so the rest of
+ *   what changed is kept
+ */
+async function tagAsArticle(
+  file: TFile,
+  app: App
+): Promise<() => Promise<void>> {
+  let was: { value: unknown } | null = null;
+  let wrote: string | undefined;
+  await Obsidian.updateFrontMatter(
+    file,
+    (frontmatter) => {
+      was = Object.hasOwn(frontmatter, 'tags')
+        ? { value: structuredClone(frontmatter.tags) }
+        : null;
+      frontmatter.tags = Obsidian._mergeTags(frontmatter.tags, ARTICLE_TAG);
+      wrote = JSON.stringify(frontmatter.tags);
+    },
+    app
+  );
+  return async () => {
+    if (wrote === undefined) return;
+    const before = was;
+    await Obsidian.updateFrontMatter(
+      file,
+      (frontmatter) => {
+        if (JSON.stringify(frontmatter.tags) !== wrote) {
+          stripFrontmatterTags(frontmatter, [ARTICLE_TAG]);
+        } else if (before) frontmatter.tags = before.value;
+        else delete frontmatter.tags;
+      },
+      app
+    );
+  };
+}
+
+/**
  * The write that makes the article `id`, deleted or not, the live article at
  * `file`, whose identity frontmatter it now answers to as the note stands (see
  * `noteFingerprint`).
@@ -357,6 +396,16 @@ function relinkRow(file: TFile, id: string): MutationStatement {
       'UPDATE article SET reference = $1, deleted = FALSE, note_mtime = $2 WHERE id = $3',
     params: [file.path, noteFingerprint(file), id],
   };
+}
+
+/**
+ * Whether the frontmatter `frontmatter` types its note as an article, by the
+ * tags review reads a note's type from (`ObsidianHelpers.typeOfTags`). A note
+ * an article row answers to but that lacks the tag is no item to review: it
+ * can't be opened in review, and the reading-mode bar treats it as plain.
+ */
+function typedAsArticle(frontmatter: { tags?: unknown } | undefined): boolean {
+  return Obsidian.typeOfTags(frontmatter?.tags) === 'article';
 }
 
 /** How `nameForCopy` names a copy. */
@@ -860,11 +909,35 @@ export class ArticleManager extends ItemManager {
     const existingId = frontmatter?.['ir-id'];
 
     const byRef = (await this.repo.query(
-      'SELECT id FROM article WHERE reference = $1',
+      'SELECT id, deleted FROM article WHERE reference = $1',
       [file.path]
-    )) as (ArticleRow | undefined)[];
+    )) as (Pick<ArticleRow, 'id' | 'deleted'> | undefined)[];
     const refMatch = byRef[0];
 
+    // The note's own row, by its id. An article only while that row is live
+    // and the note carries the tag review types it by; short of either, the
+    // note is in no queue and can't be reviewed, and importing it repairs it
+    if (
+      refMatch &&
+      refMatch.id === existingId &&
+      (refMatch.deleted || !typedAsArticle(frontmatter))
+    ) {
+      const title = getContentSlice(
+        file.basename,
+        CONTENT_TITLE_SLICE_LENGTH,
+        true
+      );
+      return this.relinkAsArticle(
+        file,
+        refMatch.id,
+        Boolean(refMatch.deleted),
+        refMatch.deleted
+          ? `Restored "${title}" as an article`
+          : `Repaired "${title}": it's an article again`,
+        report,
+        writer
+      );
+    }
     if (refMatch && refMatch.id === existingId) {
       // Nothing left to import, but re-running it on an article is the only
       // way a user can repair snippets and cards stranded by an earlier import.
@@ -898,25 +971,14 @@ export class ArticleManager extends ItemManager {
         rows[0] &&
         !ownNoteKeepsRow(this.app, existingId, rows[0].reference, file.path)
       ) {
-        const claimed = await writer.commit(
-          relinkRow(file, existingId),
-          this.inPlaceClaim(file, existingId)
-        );
-        await this.afterImport(
-          file.basename,
-          'in place',
-          claimed,
-          undefined,
-          report
-        );
-        // A deleted row is brought back, which an undo deletes again
-        const effect = rows[0].deleted ? 'restored' : 'linked';
-        report.confirm(
+        return this.relinkAsArticle(
+          file,
+          existingId,
+          Boolean(rows[0].deleted),
           `Linked "${file.basename}" to existing article with the same ID`,
-          effect === 'restored' ? report.undo : undefined
+          report,
+          writer
         );
-        warnIfRefused(file.path, report);
-        return imported(existingId, effect);
       }
       // Orphaned id, or a copy's, + no reference match: fall through to fresh
       // import, which gives the note an id of its own
@@ -964,6 +1026,69 @@ export class ArticleManager extends ItemManager {
       report.undo
     );
     return imported(id, 'created');
+  }
+
+  /**
+   * Make the article `id`, `deleted` or not, the live article at `file`, which
+   * claims its id, adopting what was taken from it, and give the note the
+   * article tag when it lacks it, so review types it as one (see
+   * {@link typedAsArticle}). A row that can't be saved puts the tag back as it
+   * was. Says `message` once done, with an undo for a deleted row brought
+   * back, which an undo deletes again.
+   * @returns what the import did: `restored` or `linked`
+   */
+  private async relinkAsArticle(
+    file: TFile,
+    id: string,
+    deleted: boolean,
+    message: string,
+    report: ImportReport,
+    writer: RowWriter
+  ): Promise<ImportedArticle> {
+    const tagged = typedAsArticle(Obsidian.getFrontMatter(file, this.app));
+    let untag: (() => Promise<void>) | undefined;
+    const claimed = await withCompensation(async (step) => {
+      if (!tagged) {
+        untag = await step(
+          () => tagAsArticle(file, this.app),
+          (undo) => undo()
+        );
+      }
+      // Built once the tag is written, so the fingerprint is the one it left
+      return writer.commit(relinkRow(file, id), this.inPlaceClaim(file, id));
+    });
+    await this.afterImport(
+      file.basename,
+      'in place',
+      claimed,
+      undefined,
+      report
+    );
+    report.confirm(message, deleted ? report.undo : undefined);
+    warnIfRefused(file.path, report);
+    // Only a row brought back is undone, which takes the tag off with it
+    const done = imported(id, deleted ? 'restored' : 'linked');
+    return deleted && untag ? { ...done, untag } : done;
+  }
+
+  /**
+   * Whether `file`, whose `ir-id` is `id`, is the note of the live article at
+   * its path but lacks the article tag: no item to review, which an import of
+   * it where it is repairs (see {@link importInPlace}). The auto-import
+   * watcher asks this of a note whose id a row holds, so it takes for an
+   * article just what an import refuses as one. A deleted row's note is not
+   * asked for: an automatic import leaves a deleted article deleted.
+   * @throws if the article table cannot be read
+   */
+  async lostArticleTag(file: TFile, id: string): Promise<boolean> {
+    if (!supportsFrontmatter(file)) return false;
+    if (typedAsArticle(Obsidian.getFrontMatter(file, this.app))) return false;
+    const rows = await this.repo.query(
+      'SELECT 1 FROM article WHERE id = $1 AND reference = $2 AND deleted = FALSE',
+      [id, file.path],
+      { throwOnError: true }
+    );
+    return rows.length > 0;
   }
 
   /**
@@ -1424,27 +1549,16 @@ export class ArticleManager extends ItemManager {
         rows[0] !== undefined &&
         ownNoteKeepsRow(this.app, existingId, rows[0].reference, file.path);
       if (rows[0] && !copyOfLive) {
-        const claimed = await writer.commit(
-          relinkRow(file, existingId),
-          this.inPlaceClaim(file, existingId)
-        );
-        // No copy was made — the record now points at this note, so its
-        // snippets and cards are adopted in place rather than handed to a copy.
-        await this.afterImport(
-          file.basename,
-          'in place',
-          claimed,
-          undefined,
-          report
-        );
-        // A deleted row is brought back, which an undo deletes again
-        const effect = rows[0].deleted ? 'restored' : 'linked';
-        report.confirm(
+        // No copy is made: the record points at this note, so its snippets
+        // and cards are adopted in place rather than handed to a copy
+        return this.relinkAsArticle(
+          file,
+          existingId,
+          Boolean(rows[0].deleted),
           `Linked "${file.basename}" to existing article with the same ID`,
-          effect === 'restored' ? report.undo : undefined
+          report,
+          writer
         );
-        warnIfRefused(file.path, report);
-        return imported(existingId, effect);
       }
       // Orphaned ir-id: warn but proceed with creating the copy
       if (!copyOfLive) {
@@ -2212,6 +2326,7 @@ export class ArticleManager extends ItemManager {
     articleId,
     effect,
     madeFile,
+    untag,
   }: ImportedArticle): Promise<boolean> {
     if (effect === 'linked') return false;
     const reference = await this.liveReference(articleId);
@@ -2222,7 +2337,16 @@ export class ArticleManager extends ItemManager {
     // Where its row says, which follows its file on a rename
     const file = this.app.vault.getFileByPath(reference);
     if (effect === 'restored') {
+      // The row first: a live row behind a note that lost its tag is what the
+      // import repairs, and what the auto-import watcher tags again. A note
+      // left tagged on a deleted row, should its tags fail to go back, is no
+      // item anywhere (see `getReviewItemFromFile`), and imports again
       await this.markDeleted(articleId, 'article');
+      try {
+        await untag?.();
+      } catch (error) {
+        console.error(error);
+      }
       if (file) await this.refreshHighlights(file);
       return true;
     }

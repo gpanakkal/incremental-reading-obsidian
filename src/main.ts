@@ -1035,6 +1035,8 @@ export default class IncrementalReadingPlugin extends Plugin {
       importMany: (entries, { priority }) =>
         this.reviewManager.importTaggedNotes(entries, { priority }),
       hasRow: (id) => this.reviewManager.hasItemRow(id),
+      needsRepair: (id, file) =>
+        this.reviewManager.articles.lostArticleTag(file, id),
       syncGate: () =>
         readSyncGate(
           getSyncPlugin(this.app),

@@ -216,6 +216,11 @@ function makeWatcher(
   };
   const importMany = makeImport(vault);
   const hasRow = makeRowLookup(vault);
+  /** The ids whose row's note lost its article tag (see `needsRepair`). */
+  const repairable = new Set<string>();
+  const needsRepair = vi.fn((id: string, _file: TFile) =>
+    Promise.resolve(repairable.has(id))
+  );
   let gate: SyncGate = 'open';
   const onSyncWait = vi.fn((_waiting: number) => undefined);
   /** What the watcher listens to of Sync: its recheck while it does. */
@@ -239,6 +244,7 @@ function makeWatcher(
     getConfig: () => current,
     importMany,
     hasRow,
+    needsRepair,
     syncGate: () => gate,
     watchSync,
     onSyncWait,
@@ -250,6 +256,8 @@ function makeWatcher(
     watcher,
     importMany,
     hasRow,
+    needsRepair,
+    repairable,
     stop,
     /** Told how many notes wait for Sync, each time that changes. */
     onSyncWait,
@@ -568,6 +576,62 @@ describe('AutoImportWatcher.consider', () => {
     );
   });
 
+  // 0228: as the import command repairs such a note rather than refusing it
+  it('imports a note whose ir-id a row holds only when it is the note of that row and lost its article tag, asking only of those', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.record({ rowHeld: fc.boolean(), lostTag: fc.boolean() }), {
+          minLength: 1,
+          maxLength: 6,
+        }),
+        async (notes) => {
+          const { vault, change, importMany, needsRepair, repairable, stop } =
+            makeWatcher();
+          const files = notes.map(({ rowHeld, lostTag }, i) => {
+            if (rowHeld) vault.rows.add(`id-${i}`);
+            if (lostTag) repairable.add(`id-${i}`);
+            return vault.add(`note ${i}.md`, {
+              'ir-id': `id-${i}`,
+              tags: TRIGGER,
+            });
+          });
+          for (const file of files) change(file);
+
+          await settle();
+
+          expect(needsRepair.mock.calls).toEqual(
+            files.flatMap((file, i) =>
+              notes[i].rowHeld ? [[`id-${i}`, file]] : []
+            )
+          );
+          const wanted = files.filter(
+            (_, i) => !notes[i].rowHeld || notes[i].lostTag
+          );
+          expect(importedPaths(importMany)).toEqual(
+            wanted.length === 0 ? [] : [wanted.map(({ path }) => path)]
+          );
+          stop();
+        }
+      )
+    );
+  });
+
+  it('leaves a note whose row holds its ir-id alone when asking whether it lost its tag throws, saying why in the console', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { vault, change, importMany, needsRepair } = makeWatcher();
+    vault.rows.add('held');
+    needsRepair.mockRejectedValueOnce(new Error('database closed'));
+    change(vault.add('held.md', { 'ir-id': 'held', tags: TRIGGER }));
+
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining('"held"'),
+      new Error('database closed')
+    );
+  });
+
   it('imports nothing without a trigger tag', async () => {
     const { vault, change, importMany } = makeWatcher();
     change(vault.add('a.md', { tags: ['reading', 'ir-imports'] }));
@@ -630,6 +694,32 @@ describe('AutoImportWatcher.consider', () => {
 
     expect(hasRow).toHaveBeenCalledExactlyOnceWith('id-a.md');
     expect(importMany).toHaveBeenCalledOnce();
+  });
+
+  it('takes every note whose ir-id a row holds for an article when not told how to tell one that lost its tag', async () => {
+    const vault = makeVault();
+    const importMany = makeImporter(vault);
+    const watcher = new AutoImportWatcher({
+      app: vault.app,
+      getConfig: () => ({
+        enabled: true,
+        triggerTags: [TRIGGER],
+        priority: 1,
+        mode: 'inPlace',
+        ...NO_FOLDERS,
+      }),
+      importMany,
+      hasRow: makeRowLookup(vault),
+    });
+    const stop = watcher.start();
+    vault.rows.add('held');
+    const file = vault.add('a.md', { 'ir-id': 'held', tags: TRIGGER });
+
+    watcher.consider(file, vault.cacheOf(file));
+    await settle();
+
+    expect(importMany).not.toHaveBeenCalled();
+    stop();
   });
 
   it('imports nothing before it starts or after it stops', async () => {
@@ -1367,6 +1457,28 @@ describe('AutoImportWatcher and Sync', () => {
         }
       )
     );
+  });
+
+  // 0228 review: another device may be putting the tag back as Sync runs
+  it('repairs a note that lost its article tag only once Sync is open, never despite Sync, and never asks the database to settle for it', async () => {
+    const watching = makeWatcher();
+    const { vault, watcher, importMany, repairable, setGate, settleDatabase } =
+      watching;
+    vault.rows.add('held');
+    repairable.add('held');
+    setGate('stalled');
+    watching.change(vault.add('held.md', { 'ir-id': 'held', tags: TRIGGER }));
+    queueTagged(watching, 'plain.md');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_DEBOUNCE_MS);
+
+    await watcher.importDespiteSync();
+    expect(importedPaths(importMany)).toEqual([['plain.md']]);
+
+    setGate('open');
+    await vi.advanceTimersByTimeAsync(AUTO_IMPORT_SYNC_POLL_MS);
+    expect(importedPaths(importMany)).toEqual([['plain.md'], ['held.md']]);
+    expect(settleDatabase).not.toHaveBeenCalled();
+    watching.stop();
   });
 
   it('asks the database to settle once a batch, only for notes whose ir-id no row holds', async () => {
